@@ -1,0 +1,19 @@
+{
+  "version_line": "vue2_6",
+  "package": "vue-template-compiler",
+  "entry": "index",
+  "required_options": [
+    "modules",
+    "directives",
+    "warn",
+    "outputSourceRange",
+    "comments",
+    "delimiters",
+    "whitespace/preserveWhitespace",
+    "decode newlines",
+    "platform predicates",
+    "codeframe"
+  ],
+  "fixture_ids": [],
+  "status": "pending"
+}

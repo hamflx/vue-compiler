@@ -147,7 +147,13 @@ impl<'a> HtmlTokenizer<'a> {
                 break;
             }
 
-            let attr_name = self.consume_name();
+            let attr_name = self.consume_attr_name();
+            if attr_name.is_empty() {
+                if let Some(ch) = self.remaining().chars().next() {
+                    self.cursor += ch.len_utf8();
+                }
+                continue;
+            }
             self.consume_whitespace();
             let value = if self.remaining().starts_with('=') {
                 self.cursor += 1;
@@ -206,6 +212,17 @@ impl<'a> HtmlTokenizer<'a> {
             } else {
                 break;
             }
+        }
+        self.source[start..self.cursor].to_string()
+    }
+
+    fn consume_attr_name(&mut self) -> String {
+        let start = self.cursor;
+        while let Some(ch) = self.remaining().chars().next() {
+            if ch.is_whitespace() || matches!(ch, '=' | '>' | '/') {
+                break;
+            }
+            self.cursor += ch.len_utf8();
         }
         self.source[start..self.cursor].to_string()
     }
@@ -283,5 +300,18 @@ mod tests {
         let tokens = HtmlTokenizer::new("<!DOCTYPE html><![CDATA[x]]>").tokenize();
         assert!(matches!(tokens[0].kind, HtmlTokenKind::Doctype(ref s) if s == "html"));
         assert!(matches!(tokens[1].kind, HtmlTokenKind::Cdata(ref s) if s == "x"));
+    }
+
+    #[test]
+    fn tokenizes_vue_directive_attribute_names() {
+        let tokens =
+            HtmlTokenizer::new(r#"<button @click.stop="save" #[item]="slot" :[id].prop="x">"#)
+                .tokenize();
+        let HtmlTokenKind::StartTag { attributes, .. } = &tokens[0].kind else {
+            panic!("expected start tag");
+        };
+        assert_eq!(attributes[0].name, "@click.stop");
+        assert_eq!(attributes[1].name, "#[item]");
+        assert_eq!(attributes[2].name, ":[id].prop");
     }
 }

@@ -14,10 +14,15 @@ use std::{
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
-#[serde(rename_all = "snake_case")]
 pub enum VersionLine {
+    #[serde(rename = "vue2_6", alias = "vue26")]
+    #[value(name = "vue2_6", alias = "vue26")]
     Vue26,
+    #[serde(rename = "vue2_7", alias = "vue27")]
+    #[value(name = "vue2_7", alias = "vue27")]
     Vue27,
+    #[serde(rename = "vue3")]
+    #[value(name = "vue3")]
     Vue3,
 }
 
