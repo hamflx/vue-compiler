@@ -1,0 +1,13 @@
+{
+  "version_line": "vue3",
+  "package": "@vue/compiler-ssr",
+  "entry": "index",
+  "required_modes": [
+    "schema-parity",
+    "exact-js-output",
+    "diagnostic-parity",
+    "source-map-parity",
+    "runtime-parity"
+  ],
+  "status": "pending"
+}

@@ -1619,6 +1619,84 @@ fn run_alias_smoke(target: TargetSpec, root: &Path) -> Result<String> {
     Ok(stdout.trim().to_string())
 }
 
+fn run_output_contract_probe(
+    target: TargetSpec,
+    official_root: &Path,
+    rust_root: &Path,
+) -> Result<serde_json::Value> {
+    let official_root = absolute_path(official_root);
+    let rust_root = absolute_path(rust_root);
+    let request = api_require_request(target);
+    let fixture = output_contract_fixture(target);
+    let node = resolve_program("node");
+    let output = Command::new(node)
+        .arg("-e")
+        .arg(OUTPUT_CONTRACT_PROBE_SCRIPT)
+        .env("VUEC_OUTPUT_OFFICIAL_ROOT", &official_root)
+        .env("VUEC_OUTPUT_RUST_ROOT", &rust_root)
+        .env("VUEC_OUTPUT_REQUEST", &request)
+        .env("VUEC_OUTPUT_KIND", output_contract_kind(target))
+        .env("VUEC_OUTPUT_FIXTURE", fixture)
+        .output()
+        .with_context(|| format!("failed to spawn output contract probe for {request}"))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "node output contract probe failed for {} with status {:?}\nstdout:\n{}\nstderr:\n{}",
+            request,
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    serde_json::from_str(stdout.trim())
+        .with_context(|| format!("failed to parse output contract probe for {request}"))
+}
+
+fn output_contract_kind(target: TargetSpec) -> &'static str {
+    match target.kind {
+        TargetKind::Vue26Template | TargetKind::Vue27Template => "vue2-template",
+        TargetKind::Vue27Sfc | TargetKind::Vue3Sfc => "sfc",
+        TargetKind::Vue3Core => "vue3-core",
+        TargetKind::Vue3Dom => "vue3-dom",
+        TargetKind::Vue3Ssr => "vue3-ssr",
+    }
+}
+
+fn output_contract_fixture(target: TargetSpec) -> &'static str {
+    match target.kind {
+        TargetKind::Vue26Template | TargetKind::Vue27Template => {
+            "<div id=\"app\"><span>{{ msg }}</span></div>"
+        }
+        TargetKind::Vue27Sfc | TargetKind::Vue3Sfc => {
+            "<template><div class=\"a\">{{ msg }}</div></template><script>export default { props: ['msg'] }</script><style scoped>.a{ color: v-bind(color); }</style>"
+        }
+        TargetKind::Vue3Core | TargetKind::Vue3Dom | TargetKind::Vue3Ssr => {
+            "<div class=\"a\"><span>{{ msg }}</span></div>"
+        }
+    }
+}
+
+fn json_usize(value: &serde_json::Value, path: &[&str]) -> usize {
+    let mut cursor = value;
+    for key in path {
+        let Some(next) = cursor.get(*key) else {
+            return 0;
+        };
+        cursor = next;
+    }
+    cursor.as_u64().unwrap_or_default() as usize
+}
+
+fn output_contract_counts_from_items(items: &[ReportItem]) -> serde_json::Value {
+    serde_json::json!({
+        "total": items.len(),
+        "pass": items.iter().filter(|item| item.status == ReportStatus::Pass).count(),
+        "pending": items.iter().filter(|item| item.status == ReportStatus::Pending).count(),
+        "fail": items.iter().filter(|item| item.status == ReportStatus::Fail).count(),
+    })
+}
+
 fn alias_smoke_script(target: TargetSpec) -> String {
     let call = match target.kind {
         TargetKind::Vue26Template | TargetKind::Vue27Template => {
@@ -1853,6 +1931,212 @@ function namedArity(name, arity, fn) {
   Object.defineProperty(fn, 'length', { value: arity, configurable: true });
   return fn;
 }
+"#;
+
+const OUTPUT_CONTRACT_PROBE_SCRIPT: &str = r#"
+const path = require('path');
+const { createRequire } = require('module');
+
+const officialRoot = process.env.VUEC_OUTPUT_OFFICIAL_ROOT;
+const rustRoot = process.env.VUEC_OUTPUT_RUST_ROOT;
+const request = process.env.VUEC_OUTPUT_REQUEST;
+const kind = process.env.VUEC_OUTPUT_KIND;
+const fixture = process.env.VUEC_OUTPUT_FIXTURE || '';
+
+const officialRequire = createRequire(path.join(officialRoot, 'package.json'));
+const rustRequire = createRequire(path.join(rustRoot, 'package.json'));
+
+function load(rootRequire) {
+  return rootRequire(request);
+}
+
+function invoke(api) {
+  switch (kind) {
+    case 'vue2-template': {
+      const compile = api.compile(fixture, { outputSourceRange: true, comments: true });
+      const functions = api.compileToFunctions(fixture, {}, {});
+      return { compile, compileToFunctions: functions };
+    }
+    case 'sfc': {
+      const parsed = api.parse(fixture, { filename: 'contract.vue' });
+      const descriptor = parsed && parsed.descriptor ? parsed.descriptor : parsed;
+      const templateSource = descriptor && descriptor.template && descriptor.template.content ? descriptor.template.content : '';
+      const styleSource = descriptor && descriptor.styles && descriptor.styles[0] && descriptor.styles[0].content ? descriptor.styles[0].content : '';
+      const template = api.compileTemplate({
+        source: templateSource,
+        filename: 'contract.vue',
+        id: 'data-v-contract',
+        scoped: true
+      });
+      const script = api.compileScript(descriptor, { id: 'data-v-contract' });
+      const style = api.compileStyle({
+        source: styleSource,
+        filename: 'contract.vue',
+        id: 'data-v-contract',
+        scoped: true
+      });
+      return { parse: parsed, compileTemplate: template, compileScript: script, compileStyle: style };
+    }
+    case 'vue3-core':
+      return { baseCompile: api.baseCompile(fixture, { mode: 'function' }), baseParse: api.baseParse(fixture, {}) };
+    case 'vue3-dom':
+      return { compile: api.compile(fixture, { mode: 'function' }), parse: api.parse(fixture, {}) };
+    case 'vue3-ssr':
+      return { compile: api.compile(fixture, {}) };
+    default:
+      throw new Error(`unknown output contract kind ${kind}`);
+  }
+}
+
+function capture(side, fn) {
+  try {
+    return { side, ok: true, value: normalize(fn()) };
+  } catch (error) {
+    return {
+      side,
+      ok: false,
+      error: {
+        name: error && error.name ? String(error.name) : null,
+        code: error && error.code ? String(error.code) : null,
+        message: error && error.message ? normalizeMessage(error.message) : String(error)
+      }
+    };
+  }
+}
+
+function normalizeMessage(message) {
+  return String(message)
+    .replaceAll(officialRoot.replace(/\\/g, '/'), '<official-root>')
+    .replaceAll(rustRoot.replace(/\\/g, '/'), '<rust-root>')
+    .replaceAll(officialRoot, '<official-root>')
+    .replaceAll(rustRoot, '<rust-root>')
+    .replace(/\\/g, '/');
+}
+
+function normalize(value) {
+  if (value === undefined) return { __type: 'undefined' };
+  if (value === null) return null;
+  if (typeof value === 'function') {
+    return { __type: 'function', name: value.name, length: value.length };
+  }
+  if (typeof value === 'symbol') {
+    return { __type: 'symbol', description: value.description || null };
+  }
+  if (typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map(normalize);
+  const out = {};
+  for (const key of Object.keys(value).sort()) {
+    if (key === 'ast' || key === 'element_ast' || key === 'source' || key === 'source_file') continue;
+    out[key] = normalize(value[key]);
+  }
+  return out;
+}
+
+function objectShape(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
+  return Object.keys(value).sort();
+}
+
+function codeFields(value, prefix = '') {
+  const out = {};
+  collectCodeFields(value, prefix, out);
+  return out;
+}
+
+function collectCodeFields(value, prefix, out) {
+  if (!value || typeof value !== 'object') return;
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => collectCodeFields(item, `${prefix}[${index}]`, out));
+    return;
+  }
+  for (const key of Object.keys(value).sort()) {
+    const next = prefix ? `${prefix}.${key}` : key;
+    if (['code', 'render', 'ssrRender'].includes(key) && typeof value[key] === 'string') {
+      out[next] = value[key];
+    } else if (key === 'staticRenderFns' && Array.isArray(value[key])) {
+      out[next] = value[key];
+    } else {
+      collectCodeFields(value[key], next, out);
+    }
+  }
+}
+
+function diagnosticFields(value, prefix = '') {
+  const out = {};
+  collectDiagnosticFields(value, prefix, out);
+  return out;
+}
+
+function collectDiagnosticFields(value, prefix, out) {
+  if (!value || typeof value !== 'object') return;
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => collectDiagnosticFields(item, `${prefix}[${index}]`, out));
+    return;
+  }
+  for (const key of Object.keys(value).sort()) {
+    const next = prefix ? `${prefix}.${key}` : key;
+    if (['errors', 'warnings', 'tips', 'diagnostics'].includes(key) && Array.isArray(value[key])) {
+      out[next] = normalize(value[key]);
+    } else {
+      collectDiagnosticFields(value[key], next, out);
+    }
+  }
+}
+
+function sourceMapFields(value, prefix = '') {
+  const out = {};
+  collectSourceMapFields(value, prefix, out);
+  return out;
+}
+
+function collectSourceMapFields(value, prefix, out) {
+  if (!value || typeof value !== 'object') return;
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => collectSourceMapFields(item, `${prefix}[${index}]`, out));
+    return;
+  }
+  for (const key of Object.keys(value).sort()) {
+    const next = prefix ? `${prefix}.${key}` : key;
+    if ((key === 'map' || key === 'sourceMap') && value[key] != null) {
+      out[next] = normalize(value[key]);
+    } else {
+      collectSourceMapFields(value[key], next, out);
+    }
+  }
+}
+
+function compareJson(mode, official, rust, extractor) {
+  const officialValue = official.ok ? extractor(official.value) : official.error;
+  const rustValue = rust.ok ? extractor(rust.value) : rust.error;
+  const equal = JSON.stringify(officialValue) === JSON.stringify(rustValue);
+  return {
+    mode,
+    status: equal ? 'pass' : 'fail',
+    official: officialValue,
+    rust: rustValue
+  };
+}
+
+const official = capture('official', () => invoke(load(officialRequire)));
+const rust = capture('rust', () => invoke(load(rustRequire)));
+const checks = [
+  compareJson('schema-parity', official, rust, value => objectShape(value)),
+  compareJson('exact-js-output', official, rust, value => codeFields(value)),
+  compareJson('diagnostic-parity', official, rust, value => diagnosticFields(value)),
+  compareJson('source-map-parity', official, rust, value => sourceMapFields(value)),
+  {
+    mode: 'runtime-parity',
+    status: 'pending',
+    detail: 'runtime execution is not wired for this contract runner yet'
+  }
+];
+const counts = {
+  total: checks.length,
+  pass: checks.filter(check => check.status === 'pass').length,
+  fail: checks.filter(check => check.status === 'fail').length,
+  pending: checks.filter(check => check.status === 'pending').length
+};
+process.stdout.write(JSON.stringify({ request, kind, fixture, counts, checks }));
 "#;
 
 pub fn generate_option_matrix(scope: &SelectionArgs) -> JsonReport {
@@ -2095,23 +2379,154 @@ pub fn generate_output_contract(scope: &SelectionArgs) -> JsonReport {
 pub fn run_output_contract(scope: &SelectionArgs) -> JsonReport {
     let targets = select_targets(scope);
     let mut items = Vec::new();
+    let mut violations = Vec::new();
+    let lock_path = PathBuf::from("compat/official-revisions.lock");
+    let lock_hash = file_sha256(&lock_path).ok();
+    let lock = match load_official_lock(&lock_path) {
+        Ok(lock) => lock,
+        Err(err) => {
+            let mut report = JsonReport::new("run_output_contract", ReportStatus::Fail);
+            report.metadata = report.metadata.with_lock_hash(lock_hash);
+            return report
+                .with_scope(scope)
+                .with_violations(vec![format!("failed to load official lock: {err}")]);
+        }
+    };
+    let report_path = PathBuf::from("target")
+        .join("conformance")
+        .join(lock_hash.as_deref().unwrap_or("unknown-lock"))
+        .join("output-contract.json");
+    let mut target_reports = Vec::new();
+
+    if let Err(err) = generate_rust_alias_packages(&targets) {
+        violations.push(format!("failed to generate Rust alias packages: {err:#}"));
+    }
     for target in targets {
         let path = target.relative_output_contract_path();
-        items.push(ReportItem::new(
-            target.display(),
-            ReportStatus::Pending,
-            if path.exists() {
-                "output contract file available; runtime parity not yet wired"
-            } else {
-                "output contract file missing"
-            },
-            Some(path),
-        ));
+        let contract = match read_json::<OutputContractFile>(&path) {
+            Ok(contract) => contract,
+            Err(err) => {
+                violations.push(format!(
+                    "{} output contract missing/invalid: {err}",
+                    target.display()
+                ));
+                items.push(ReportItem::new(
+                    target.display(),
+                    ReportStatus::Fail,
+                    "output contract file missing or invalid",
+                    Some(path),
+                ));
+                continue;
+            }
+        };
+        let expected_modes = target
+            .output_modes()
+            .iter()
+            .map(|mode| (*mode).to_string())
+            .collect::<Vec<_>>();
+        if contract.required_modes != expected_modes {
+            violations.push(format!(
+                "{} output contract modes do not match target spec",
+                target.display()
+            ));
+            items.push(ReportItem::new(
+                target.display(),
+                ReportStatus::Fail,
+                "output contract modes do not match target spec",
+                Some(path),
+            ));
+            continue;
+        }
+        let Some(baseline) = baseline_for(&lock, target.version_line) else {
+            violations.push(format!("{} has no official baseline", target.display()));
+            items.push(ReportItem::new(
+                target.display(),
+                ReportStatus::Fail,
+                "official baseline missing",
+                Some(path),
+            ));
+            continue;
+        };
+        let official_root = match ensure_official_npm_install(target.version_line, baseline) {
+            Ok(root) => root,
+            Err(err) => {
+                violations.push(format!(
+                    "{} official npm install failed: {err:#}",
+                    target.display()
+                ));
+                items.push(ReportItem::new(
+                    target.display(),
+                    ReportStatus::Fail,
+                    "official npm install failed",
+                    Some(path),
+                ));
+                continue;
+            }
+        };
+        let rust_root = rust_alias_root(target.version_line);
+        match run_output_contract_probe(target, &official_root, &rust_root) {
+            Ok(target_report) => {
+                let failed = json_usize(&target_report, &["counts", "fail"]);
+                let pending = json_usize(&target_report, &["counts", "pending"]);
+                let passed = json_usize(&target_report, &["counts", "pass"]);
+                let total = json_usize(&target_report, &["counts", "total"]);
+                let status = if failed > 0 {
+                    ReportStatus::Fail
+                } else if pending > 0 {
+                    ReportStatus::Pending
+                } else {
+                    ReportStatus::Pass
+                };
+                if failed > 0 {
+                    violations.push(format!(
+                        "{} output contract has {failed} failing checks",
+                        target.display()
+                    ));
+                }
+                items.push(ReportItem::new(
+                    target.display(),
+                    status,
+                    format!("{passed}/{total} checks passed, {failed} failed, {pending} pending"),
+                    Some(path),
+                ));
+                target_reports.push(target_report);
+            }
+            Err(err) => {
+                violations.push(format!(
+                    "{} output contract execution failed: {err:#}",
+                    target.display()
+                ));
+                items.push(ReportItem::new(
+                    target.display(),
+                    ReportStatus::Fail,
+                    format!("output contract execution failed: {err:#}"),
+                    Some(path),
+                ));
+            }
+        }
     }
-    JsonReport::new("run_output_contract", ReportStatus::Pending)
+    let aggregate = serde_json::json!({
+        "command": "run_output_contract",
+        "lock_hash": lock_hash,
+        "targets": target_reports,
+        "counts": output_contract_counts_from_items(&items),
+    });
+    if let Some(parent) = report_path.parent() {
+        if let Err(err) = fs::create_dir_all(parent) {
+            violations.push(format!("failed to create {}: {err}", parent.display()));
+        }
+    }
+    if let Err(err) = write_json(&report_path, &aggregate) {
+        violations.push(format!("failed to write {}: {err}", report_path.display()));
+    }
+    let mut report = JsonReport::new("run_output_contract", ReportStatus::Pending);
+    report.metadata = report.metadata.with_lock_hash(lock_hash);
+    report
         .with_scope(scope)
         .with_items(items)
-        .with_note("output contract execution is scaffolded and will become pass/fail once compiler backends land")
+        .with_violations(violations)
+        .with_created(vec![report_path.display().to_string()])
+        .with_note("output contract executes official npm packages and generated Rust alias packages against representative fixtures")
 }
 
 pub fn verify_npm_alias(scope: &SelectionArgs) -> JsonReport {
