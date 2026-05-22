@@ -9,3 +9,4 @@
 - `vuec_sfc` now routes `compileTemplate` through DOM or SSR backends, routes `compileStyle` through `vuec_style`, and uses Oxc-backed `vuec_js` program summaries for script bindings/errors.
 - `xtask sync-official-tests --locked` now performs real git checkout of the official Vue 2.6 / 2.7 / 3 repositories pinned by `compat/official-revisions.lock`.
 - `xtask run-conformance --all` now discovers official test files from the synced checkouts and writes lock-hash-scoped JSON discovery reports, but execution is still pending alias-backed runners.
+- Added `vuec_vue2` crate as a compileable Vue 2 compiler skeleton with `compile`, `compileToFunctions`, and SSR entry points, but it is not yet parity-complete.

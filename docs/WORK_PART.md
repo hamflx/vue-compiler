@@ -9,6 +9,7 @@
 - [x] Vue 3 core and SFC skeletons.
 - [x] Vue 3 DOM / SSR / style early backend crates.
 - [x] Official repository sync and conformance discovery harness.
+- [x] Vue 2 compiler skeleton.
 
 ## Completed This Round
 
@@ -21,6 +22,8 @@
 - Connected `vuec_sfc::compileTemplate` to DOM/SSR backends, `compileStyle` to `vuec_style`, and `compileScript` to Oxc-backed script summaries.
 - `xtask sync-official-tests --locked` now checks out the official Vue 2.6 / 2.7 / 3 repositories at the pinned commit SHAs and writes revision metadata with lock hashes.
 - `xtask run-conformance --all` now discovers official test files for every suite, emits lock-scoped JSON discovery reports, and fails explicitly when a suite is misconfigured or not synced.
+- Added `vuec_vue2` to the workspace with `compile`, `compileToFunctions`, and `compile_ssr` entry points, plus a minimal AST and diagnostic pipeline.
+- `vuec_vue2` currently stabilizes the public return shapes and template traversal baseline; it is not yet official parity-complete and remains the next major implementation target.
 
 ## Previous Round
 

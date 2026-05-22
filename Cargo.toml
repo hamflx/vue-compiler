@@ -9,6 +9,7 @@ members = [
   "crates/vuec_diagnostics",
   "crates/vuec_sfc",
   "crates/vuec_style",
+  "crates/vuec_vue2",
   "crates/vuec_vue3_dom",
   "crates/vuec_vue3_core",
   "crates/vuec_vue3_ssr",
