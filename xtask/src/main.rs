@@ -6,8 +6,8 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use compat::{
     audit_option_matrix, diff_api, export_api, generate_option_matrix, generate_output_contract,
-    run_option_matrix, run_output_contract, summarize_compat, sync_official_tests,
-    verify_npm_alias, verify_official_lock, SelectionArgs,
+    run_conformance, run_option_matrix, run_output_contract, summarize_compat, sync_official_tests,
+    verify_npm_alias, verify_official_lock, ConformanceArgs, SelectionArgs,
 };
 use std::path::PathBuf;
 
@@ -56,6 +56,10 @@ enum Command {
         #[command(flatten)]
         scope: SelectionArgs,
     },
+    RunConformance {
+        #[command(flatten)]
+        args: ConformanceArgs,
+    },
     GenerateOutputContract {
         #[command(flatten)]
         scope: SelectionArgs,
@@ -100,6 +104,7 @@ fn main() -> Result<()> {
         }
         Command::AuditOptionMatrix { scope } => audit_option_matrix(&scope),
         Command::RunOptionMatrix { scope } => run_option_matrix(&scope),
+        Command::RunConformance { args } => run_conformance(&args),
         Command::GenerateOutputContract { scope, out_dir } => {
             let report = generate_output_contract(&scope);
             ensure_dir(&out_dir)?;

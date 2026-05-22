@@ -3,11 +3,14 @@
 use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fmt::{self, Display},
     fs,
     path::{Path, PathBuf},
+    process::Command,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
@@ -53,6 +56,33 @@ pub struct SelectionArgs {
 
     #[arg(long)]
     pub entry: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum ConformanceSuite {
+    Vue2Compiler,
+    Vue27Compiler,
+    Vue27Sfc,
+    Vue3Core,
+    Vue3Dom,
+    Vue3Sfc,
+    Vue3Ssr,
+}
+
+#[derive(Clone, Debug, Args, Serialize)]
+pub struct ConformanceArgs {
+    #[arg(long)]
+    pub suite: Option<ConformanceSuite>,
+
+    #[arg(long)]
+    pub all: bool,
+
+    #[arg(long, default_value = "compat/official-revisions.lock")]
+    pub lock: PathBuf,
+
+    #[arg(long, default_value = "vendor")]
+    pub vendor_dir: PathBuf,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,6 +158,7 @@ impl ReportItem {
 pub struct JsonReport {
     pub command: String,
     pub status: String,
+    pub metadata: ReportMetadata,
     pub scope: Option<SelectionArgsSnapshot>,
     pub summary: ReportSummary,
     pub items: Vec<ReportItem>,
@@ -141,6 +172,7 @@ impl JsonReport {
         Self {
             command: command.into(),
             status: status.as_str().to_string(),
+            metadata: ReportMetadata::capture(),
             scope: None,
             summary: ReportSummary {
                 total: 0,
@@ -182,6 +214,35 @@ impl JsonReport {
 
     pub fn with_note(mut self, note: impl Into<String>) -> Self {
         self.note = Some(note.into());
+        self
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct ReportMetadata {
+    pub lock_hash: Option<String>,
+    pub os: String,
+    pub rustc: Option<String>,
+    pub node: Option<String>,
+    pub created_unix: u64,
+}
+
+impl ReportMetadata {
+    fn capture() -> Self {
+        Self {
+            lock_hash: None,
+            os: std::env::consts::OS.to_string(),
+            rustc: command_output("rustc", &["--version"]),
+            node: command_output("node", &["--version"]),
+            created_unix: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_secs())
+                .unwrap_or_default(),
+        }
+    }
+
+    fn with_lock_hash(mut self, lock_hash: Option<String>) -> Self {
+        self.lock_hash = lock_hash;
         self
     }
 }
@@ -475,6 +536,7 @@ fn all_targets() -> &'static [TargetSpec] {
 }
 
 pub fn verify_official_lock(path: &Path) -> JsonReport {
+    let lock_hash = file_sha256(path).ok();
     match load_official_lock(path) {
         Ok(lock) => {
             let violations = validate_official_lock(&lock);
@@ -483,17 +545,24 @@ pub fn verify_official_lock(path: &Path) -> JsonReport {
             } else {
                 ReportStatus::Fail
             };
-            JsonReport::new("verify_official_lock", status)
+            let mut report = JsonReport::new("verify_official_lock", status);
+            report.metadata = report.metadata.with_lock_hash(lock_hash);
+            report
                 .with_violations(violations)
                 .with_note(format!("lock: {}", path.display()))
         }
-        Err(err) => JsonReport::new("verify_official_lock", ReportStatus::Fail)
-            .with_violations(vec![format!("failed to read/parse lock file: {err}")])
-            .with_note(format!("lock: {}", path.display())),
+        Err(err) => {
+            let mut report = JsonReport::new("verify_official_lock", ReportStatus::Fail);
+            report.metadata = report.metadata.with_lock_hash(lock_hash);
+            report
+                .with_violations(vec![format!("failed to read/parse lock file: {err}")])
+                .with_note(format!("lock: {}", path.display()))
+        }
     }
 }
 
 pub fn sync_official_tests(path: &Path, locked: bool, out_dir: &Path) -> JsonReport {
+    let lock_hash = file_sha256(path).ok();
     match load_official_lock(path) {
         Ok(lock) => {
             let mut created = Vec::new();
@@ -504,9 +573,13 @@ pub fn sync_official_tests(path: &Path, locked: bool, out_dir: &Path) -> JsonRep
                 (VersionLine::Vue3, &lock.vue3),
             ] {
                 let dir = out_dir.join(version_line.as_str());
-                if let Err(err) = fs::create_dir_all(&dir) {
+                if let Err(err) = sync_git_checkout(&baseline.repo, &baseline.rev, &dir) {
                     return JsonReport::new("sync_official_tests", ReportStatus::Fail)
-                        .with_violations(vec![format!("failed to create {}: {err}", dir.display())])
+                        .with_violations(vec![format!(
+                            "failed to sync {} into {}: {err}",
+                            baseline.repo,
+                            dir.display()
+                        )])
                         .with_note(format!("lock: {}", path.display()));
                 }
                 let metadata_path = dir.join("official-revision.json");
@@ -516,6 +589,8 @@ pub fn sync_official_tests(path: &Path, locked: bool, out_dir: &Path) -> JsonRep
                     "rev": baseline.rev,
                     "npm": baseline.npm,
                     "exports": baseline.exports,
+                    "lock_hash": lock_hash,
+                    "locked": locked,
                 });
                 if let Err(err) = write_json(&metadata_path, &metadata) {
                     return JsonReport::new("sync_official_tests", ReportStatus::Fail)
@@ -529,11 +604,13 @@ pub fn sync_official_tests(path: &Path, locked: bool, out_dir: &Path) -> JsonRep
                 items.push(ReportItem::new(
                     version_line.as_str(),
                     ReportStatus::Pass,
-                    format!("synced {}", baseline.repo),
+                    format!("synced {} at {}", baseline.repo, baseline.rev),
                     Some(metadata_path),
                 ));
             }
-            JsonReport::new("sync_official_tests", ReportStatus::Pass)
+            let mut report = JsonReport::new("sync_official_tests", ReportStatus::Pass);
+            report.metadata = report.metadata.with_lock_hash(lock_hash);
+            report
                 .with_scope(&SelectionArgs {
                     all: true,
                     official: true,
@@ -546,9 +623,13 @@ pub fn sync_official_tests(path: &Path, locked: bool, out_dir: &Path) -> JsonRep
                 .with_created(created)
                 .with_note(format!("locked={locked}, lock={}", path.display()))
         }
-        Err(err) => JsonReport::new("sync_official_tests", ReportStatus::Fail)
-            .with_violations(vec![format!("failed to read/parse lock file: {err}")])
-            .with_note(format!("lock: {}", path.display())),
+        Err(err) => {
+            let mut report = JsonReport::new("sync_official_tests", ReportStatus::Fail);
+            report.metadata = report.metadata.with_lock_hash(lock_hash);
+            report
+                .with_violations(vec![format!("failed to read/parse lock file: {err}")])
+                .with_note(format!("lock: {}", path.display()))
+        }
     }
 }
 
@@ -724,6 +805,90 @@ pub fn run_option_matrix(scope: &SelectionArgs) -> JsonReport {
         .with_scope(scope)
         .with_items(items)
         .with_note("option matrix execution is scaffolded and will become pass/fail once compiler backends land")
+}
+
+pub fn run_conformance(args: &ConformanceArgs) -> JsonReport {
+    let lock_hash = file_sha256(&args.lock).ok();
+    let requested = select_conformance_suites(args);
+    let mut items = Vec::new();
+    let mut violations = Vec::new();
+
+    for suite in requested {
+        let spec = suite_spec(suite);
+        let root = args.vendor_dir.join(spec.version_line.as_str());
+        let metadata = root.join("official-revision.json");
+        if !metadata.exists() {
+            violations.push(format!(
+                "{} is missing; run `cargo xtask sync-official-tests --locked` first",
+                metadata.display()
+            ));
+            items.push(ReportItem::new(
+                spec.name,
+                ReportStatus::Fail,
+                "official checkout metadata is missing",
+                Some(metadata),
+            ));
+            continue;
+        }
+
+        let mut discovered = Vec::new();
+        for relative_dir in spec.relative_test_dirs {
+            let dir = root.join(relative_dir);
+            if !dir.exists() {
+                violations.push(format!("{} test directory is missing", dir.display()));
+                continue;
+            }
+            discover_test_files(&dir, &mut discovered);
+        }
+        discovered.sort();
+        let report_path = PathBuf::from("target")
+            .join("conformance")
+            .join(lock_hash.as_deref().unwrap_or("unknown-lock"))
+            .join(format!("{}.json", spec.name));
+        let report_body = serde_json::json!({
+            "suite": spec.name,
+            "version_line": spec.version_line,
+            "lock_hash": lock_hash,
+            "test_files": discovered,
+            "counts": {
+                "total": discovered.len(),
+                "pass": 0,
+                "fail": 0,
+                "skip": 0,
+                "pending": discovered.len(),
+            },
+            "execution": "discovery-only",
+        });
+        if let Some(parent) = report_path.parent() {
+            if let Err(err) = fs::create_dir_all(parent) {
+                violations.push(format!("failed to create {}: {err}", parent.display()));
+            }
+        }
+        if let Err(err) = write_json(&report_path, &report_body) {
+            violations.push(format!("failed to write {}: {err}", report_path.display()));
+        }
+        let status = if discovered.is_empty() {
+            ReportStatus::Fail
+        } else {
+            ReportStatus::Pending
+        };
+        if discovered.is_empty() {
+            violations.push(format!("{} discovered no official test files", spec.name));
+        }
+        items.push(ReportItem::new(
+            spec.name,
+            status,
+            format!(
+                "{} official test files discovered; execution pending NAPI alias runner",
+                discovered.len()
+            ),
+            Some(report_path),
+        ));
+    }
+
+    let mut report = JsonReport::new("run_conformance", ReportStatus::Pending);
+    report.metadata = report.metadata.with_lock_hash(lock_hash);
+    report.with_items(items).with_violations(violations)
 }
 
 pub fn generate_output_contract(scope: &SelectionArgs) -> JsonReport {
@@ -955,6 +1120,93 @@ fn select_targets(scope: &SelectionArgs) -> Vec<TargetSpec> {
     targets
 }
 
+#[derive(Clone, Copy)]
+struct ConformanceSuiteSpec {
+    name: &'static str,
+    version_line: VersionLine,
+    relative_test_dirs: &'static [&'static str],
+}
+
+fn suite_spec(suite: ConformanceSuite) -> ConformanceSuiteSpec {
+    match suite {
+        ConformanceSuite::Vue2Compiler => ConformanceSuiteSpec {
+            name: "vue2-compiler",
+            version_line: VersionLine::Vue26,
+            relative_test_dirs: &["test/unit/modules/compiler"],
+        },
+        ConformanceSuite::Vue27Compiler => ConformanceSuiteSpec {
+            name: "vue27-compiler",
+            version_line: VersionLine::Vue27,
+            relative_test_dirs: &["test/unit/modules/compiler"],
+        },
+        ConformanceSuite::Vue27Sfc => ConformanceSuiteSpec {
+            name: "vue27-sfc",
+            version_line: VersionLine::Vue27,
+            relative_test_dirs: &["packages/compiler-sfc/test"],
+        },
+        ConformanceSuite::Vue3Core => ConformanceSuiteSpec {
+            name: "vue3-core",
+            version_line: VersionLine::Vue3,
+            relative_test_dirs: &["packages/compiler-core/__tests__"],
+        },
+        ConformanceSuite::Vue3Dom => ConformanceSuiteSpec {
+            name: "vue3-dom",
+            version_line: VersionLine::Vue3,
+            relative_test_dirs: &["packages/compiler-dom/__tests__"],
+        },
+        ConformanceSuite::Vue3Sfc => ConformanceSuiteSpec {
+            name: "vue3-sfc",
+            version_line: VersionLine::Vue3,
+            relative_test_dirs: &["packages/compiler-sfc/__tests__"],
+        },
+        ConformanceSuite::Vue3Ssr => ConformanceSuiteSpec {
+            name: "vue3-ssr",
+            version_line: VersionLine::Vue3,
+            relative_test_dirs: &["packages/compiler-ssr/__tests__"],
+        },
+    }
+}
+
+fn select_conformance_suites(args: &ConformanceArgs) -> Vec<ConformanceSuite> {
+    if args.all {
+        return vec![
+            ConformanceSuite::Vue2Compiler,
+            ConformanceSuite::Vue27Compiler,
+            ConformanceSuite::Vue27Sfc,
+            ConformanceSuite::Vue3Core,
+            ConformanceSuite::Vue3Dom,
+            ConformanceSuite::Vue3Sfc,
+            ConformanceSuite::Vue3Ssr,
+        ];
+    }
+    args.suite
+        .map(|suite| vec![suite])
+        .unwrap_or_else(|| vec![ConformanceSuite::Vue3Core])
+}
+
+fn discover_test_files(dir: &Path, out: &mut Vec<String>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            discover_test_files(&path, out);
+            continue;
+        }
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let is_test = file_name.ends_with(".spec.ts")
+            || file_name.ends_with(".spec.js")
+            || file_name.ends_with(".test.ts")
+            || file_name.ends_with(".test.js");
+        if is_test {
+            out.push(path.display().to_string());
+        }
+    }
+}
+
 fn aggregate_status(items: &[ReportItem]) -> ReportStatus {
     if items.iter().any(|item| item.status == ReportStatus::Fail) {
         ReportStatus::Fail
@@ -980,4 +1232,64 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
     let value = serde_json::from_str(&data)
         .with_context(|| format!("failed to parse {}", path.display()))?;
     Ok(value)
+}
+
+fn sync_git_checkout(repo: &str, rev: &str, dir: &Path) -> Result<()> {
+    if dir.join(".git").exists() {
+        run_git(dir, &["fetch", "--tags", "--force", "origin"])?;
+    } else {
+        if let Some(parent) = dir.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        let dir_arg = dir.display().to_string();
+        run_command("git", &["clone", repo, &dir_arg], None)
+            .with_context(|| format!("failed to clone {repo} into {}", dir.display()))?;
+    }
+    run_git(dir, &["checkout", "--detach", rev])?;
+    run_git(dir, &["submodule", "update", "--init", "--recursive"])?;
+    Ok(())
+}
+
+fn run_git(dir: &Path, args: &[&str]) -> Result<()> {
+    run_command("git", args, Some(dir))
+}
+
+fn run_command(program: &str, args: &[&str], current_dir: Option<&Path>) -> Result<()> {
+    let mut command = Command::new(program);
+    command.args(args);
+    if let Some(current_dir) = current_dir {
+        command.current_dir(current_dir);
+    }
+    let output = command
+        .output()
+        .with_context(|| format!("failed to spawn {program} {}", args.join(" ")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        anyhow::bail!(
+            "`{} {}` failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
+            program,
+            args.join(" "),
+            output.status.code(),
+            stdout.trim(),
+            stderr.trim()
+        );
+    }
+    Ok(())
+}
+
+fn command_output(program: &str, args: &[&str]) -> Option<String> {
+    let output = Command::new(program).args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn file_sha256(path: &Path) -> Result<String> {
+    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    Ok(format!("{:x}", hasher.finalize()))
 }

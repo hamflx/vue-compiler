@@ -1,5 +1,6 @@
 /target
 /node_modules
+/vendor
 /.idea
 /.vscode
 /.DS_Store

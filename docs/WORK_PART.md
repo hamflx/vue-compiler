@@ -8,6 +8,7 @@
 - [x] Official test harness and lock validation.
 - [x] Vue 3 core and SFC skeletons.
 - [x] Vue 3 DOM / SSR / style early backend crates.
+- [x] Official repository sync and conformance discovery harness.
 
 ## Completed This Round
 
@@ -18,6 +19,8 @@
 - Added SSR compile output shape with `ssrRender`, interpolation emit, scope/slotted attributes, and SSR node summaries.
 - Added style compilation primitives for scoped selector rewrite, `:deep`, `:slotted`, `:global`, CSS vars, CSS modules, and source map shape.
 - Connected `vuec_sfc::compileTemplate` to DOM/SSR backends, `compileStyle` to `vuec_style`, and `compileScript` to Oxc-backed script summaries.
+- `xtask sync-official-tests --locked` now checks out the official Vue 2.6 / 2.7 / 3 repositories at the pinned commit SHAs and writes revision metadata with lock hashes.
+- `xtask run-conformance --all` now discovers official test files for every suite, emits lock-scoped JSON discovery reports, and fails explicitly when a suite is misconfigured or not synced.
 
 ## Previous Round
 
