@@ -3,23 +3,2109 @@
   "version_line": "vue3",
   "package": "@vue/compiler-core",
   "entry": "index",
-  "package_version": null,
-  "exports": [],
-  "export_details": {},
+  "package_version": "3.5.34",
+  "exports": [
+    "BASE_TRANSITION",
+    "BindingTypes",
+    "CAMELIZE",
+    "CAPITALIZE",
+    "CREATE_BLOCK",
+    "CREATE_COMMENT",
+    "CREATE_ELEMENT_BLOCK",
+    "CREATE_ELEMENT_VNODE",
+    "CREATE_SLOTS",
+    "CREATE_STATIC",
+    "CREATE_TEXT",
+    "CREATE_VNODE",
+    "CompilerDeprecationTypes",
+    "ConstantTypes",
+    "ElementTypes",
+    "ErrorCodes",
+    "FRAGMENT",
+    "GUARD_REACTIVE_PROPS",
+    "IS_MEMO_SAME",
+    "IS_REF",
+    "KEEP_ALIVE",
+    "MERGE_PROPS",
+    "NORMALIZE_CLASS",
+    "NORMALIZE_PROPS",
+    "NORMALIZE_STYLE",
+    "Namespaces",
+    "NodeTypes",
+    "OPEN_BLOCK",
+    "POP_SCOPE_ID",
+    "PUSH_SCOPE_ID",
+    "RENDER_LIST",
+    "RENDER_SLOT",
+    "RESOLVE_COMPONENT",
+    "RESOLVE_DIRECTIVE",
+    "RESOLVE_DYNAMIC_COMPONENT",
+    "RESOLVE_FILTER",
+    "SET_BLOCK_TRACKING",
+    "SUSPENSE",
+    "TELEPORT",
+    "TO_DISPLAY_STRING",
+    "TO_HANDLERS",
+    "TO_HANDLER_KEY",
+    "TS_NODE_TYPES",
+    "UNREF",
+    "WITH_CTX",
+    "WITH_DIRECTIVES",
+    "WITH_MEMO",
+    "advancePositionWithClone",
+    "advancePositionWithMutation",
+    "assert",
+    "baseCompile",
+    "baseParse",
+    "buildDirectiveArgs",
+    "buildProps",
+    "buildSlots",
+    "checkCompatEnabled",
+    "convertToBlock",
+    "createArrayExpression",
+    "createAssignmentExpression",
+    "createBlockStatement",
+    "createCacheExpression",
+    "createCallExpression",
+    "createCompilerError",
+    "createCompoundExpression",
+    "createConditionalExpression",
+    "createForLoopParams",
+    "createFunctionExpression",
+    "createIfStatement",
+    "createInterpolation",
+    "createObjectExpression",
+    "createObjectProperty",
+    "createReturnStatement",
+    "createRoot",
+    "createSequenceExpression",
+    "createSimpleExpression",
+    "createStructuralDirectiveTransform",
+    "createTemplateLiteral",
+    "createTransformContext",
+    "createVNodeCall",
+    "errorMessages",
+    "extractIdentifiers",
+    "findDir",
+    "findProp",
+    "forAliasRE",
+    "generate",
+    "generateCodeFrame",
+    "getBaseTransformPreset",
+    "getConstantType",
+    "getMemoedVNodeCall",
+    "getVNodeBlockHelper",
+    "getVNodeHelper",
+    "hasDynamicKeyVBind",
+    "hasScopeRef",
+    "helperNameMap",
+    "injectProp",
+    "isAllWhitespace",
+    "isCommentOrWhitespace",
+    "isCoreComponent",
+    "isFnExpression",
+    "isFnExpressionBrowser",
+    "isFnExpressionNode",
+    "isFunctionType",
+    "isInDestructureAssignment",
+    "isInNewExpression",
+    "isMemberExpression",
+    "isMemberExpressionBrowser",
+    "isMemberExpressionNode",
+    "isReferencedIdentifier",
+    "isSimpleIdentifier",
+    "isSlotOutlet",
+    "isStaticArgOf",
+    "isStaticExp",
+    "isStaticProperty",
+    "isStaticPropertyKey",
+    "isTemplateNode",
+    "isText",
+    "isVPre",
+    "isVSlot",
+    "isWhitespaceText",
+    "locStub",
+    "noopDirectiveTransform",
+    "processExpression",
+    "processFor",
+    "processIf",
+    "processSlotOutlet",
+    "registerRuntimeHelpers",
+    "resolveComponentType",
+    "stringifyExpression",
+    "toValidAssetId",
+    "trackSlotScopes",
+    "trackVForSlotScopes",
+    "transform",
+    "transformBind",
+    "transformElement",
+    "transformExpression",
+    "transformModel",
+    "transformOn",
+    "transformVBindShorthand",
+    "traverseNode",
+    "unwrapTSNode",
+    "validFirstIdentCharRE",
+    "walkBlockDeclarations",
+    "walkFunctionParams",
+    "walkIdentifiers",
+    "warnDeprecation"
+  ],
+  "export_details": {
+    "BASE_TRANSITION": {
+      "kind": "symbol",
+      "tag": "[object Symbol]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": []
+    },
+    "BindingTypes": {
+      "kind": "object",
+      "tag": "[object Object]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": [
+        "DATA",
+        "LITERAL_CONST",
+        "OPTIONS",
+        "PROPS",
+        "PROPS_ALIASED",
+        "SETUP_CONST",
+        "SETUP_LET",
+        "SETUP_MAYBE_REF",
+        "SETUP_REACTIVE_CONST",
+        "SETUP_REF"
+      ]
+    },
+    "CAMELIZE": {
+      "kind": "symbol",
+      "tag": "[object Symbol]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": []
+    },
+    "CAPITALIZE": {
+      "kind": "symbol",
+      "tag": "[object Symbol]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": []
+    },
+    "CREATE_BLOCK": {
+      "kind": "symbol",
+      "tag": "[object Symbol]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": []
+    },
+    "CREATE_COMMENT": {
+      "kind": "symbol",
+      "tag": "[object Symbol]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": []
+    },
+    "CREATE_ELEMENT_BLOCK": {
+      "kind": "symbol",
+      "tag": "[object Symbol]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": []
+    },
+    "CREATE_ELEMENT_VNODE": {
+      "kind": "symbol",
+      "tag": "[object Symbol]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": []
+    },
+    "CREATE_SLOTS": {
+      "kind": "symbol",
+      "tag": "[object Symbol]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": []
+    },
+    "CREATE_STATIC": {
+      "kind": "symbol",
+      "tag": "[object Symbol]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": []
+    },
+    "CREATE_TEXT": {
+      "kind": "symbol",
+      "tag": "[object Symbol]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": []
+    },
+    "CREATE_VNODE": {
+      "kind": "symbol",
+      "tag": "[object Symbol]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": []
+    },
+    "CompilerDeprecationTypes": {
+      "kind": "object",
+      "tag": "[object Object]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": [
+        "COMPILER_FILTERS",
+        "COMPILER_INLINE_TEMPLATE",
+        "COMPILER_IS_ON_ELEMENT",
+        "COMPILER_NATIVE_TEMPLATE",
+        "COMPILER_V_BIND_OBJECT_ORDER",
+        "COMPILER_V_BIND_SYNC",
+        "COMPILER_V_IF_V_FOR_PRECEDENCE",
+        "COMPILER_V_ON_NATIVE"
+      ]
+    },
+    "ConstantTypes": {
+      "kind": "object",
+      "tag": "[object Object]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": [
+        "0",
+        "1",
+        "2",
+        "3",
+        "CAN_CACHE",
+        "CAN_SKIP_PATCH",
+        "CAN_STRINGIFY",
+        "NOT_CONSTANT"
+      ]
+    },
+    "ElementTypes": {
+      "kind": "object",
+      "tag": "[object Object]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": [
+        "0",
+        "1",
+        "2",
+        "3",
+        "COMPONENT",
+        "ELEMENT",
+        "SLOT",
+        "TEMPLATE"
+      ]
+    },
+    "ErrorCodes": {
+      "kind": "object",
+      "tag": "[object Object]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": [
+        "0",
+        "1",
+        "10",
+        "11",
+        "12",
+        "13",
+        "14",
+        "15",
+        "16",
+        "17",
+        "18",
+        "19",
+        "2",
+        "20",
+        "21",
+        "22",
+        "23",
+        "24",
+        "25",
+        "26",
+        "27",
+        "28",
+        "29",
+        "3",
+        "30",
+        "31",
+        "32",
+        "33",
+        "34",
+        "35",
+        "36",
+        "37",
+        "38",
+        "39",
+        "4",
+        "40",
+        "41",
+        "42",
+        "43",
+        "44",
+        "45",
+        "46",
+        "47",
+        "48",
+        "49",
+        "5",
+        "50",
+        "51",
+        "52",
+        "53",
+        "54",
+        "6",
+        "7",
+        "8",
+        "9",
+        "ABRUPT_CLOSING_OF_EMPTY_COMMENT",
+        "CDATA_IN_HTML_CONTENT",
+        "DUPLICATE_ATTRIBUTE",
+        "END_TAG_WITH_ATTRIBUTES",
+        "END_TAG_WITH_TRAILING_SOLIDUS",
+        "EOF_BEFORE_TAG_NAME",
+        "EOF_IN_CDATA",
+        "EOF_IN_COMMENT",
+        "EOF_IN_SCRIPT_HTML_COMMENT_LIKE_TEXT",
+        "EOF_IN_TAG",
+        "INCORRECTLY_CLOSED_COMMENT",
+        "INCORRECTLY_OPENED_COMMENT",
+        "INVALID_FIRST_CHARACTER_OF_TAG_NAME",
+        "MISSING_ATTRIBUTE_VALUE",
+        "MISSING_END_TAG_NAME",
+        "MISSING_WHITESPACE_BETWEEN_ATTRIBUTES",
+        "NESTED_COMMENT",
+        "UNEXPECTED_CHARACTER_IN_ATTRIBUTE_NAME",
+        "UNEXPECTED_CHARACTER_IN_UNQUOTED_ATTRIBUTE_VALUE",
+        "UNEXPECTED_EQUALS_SIGN_BEFORE_ATTRIBUTE_NAME",
+        "UNEXPECTED_NULL_CHARACTER",
+        "UNEXPECTED_QUESTION_MARK_INSTEAD_OF_TAG_NAME",
+        "UNEXPECTED_SOLIDUS_IN_TAG",
+        "X_CACHE_HANDLER_NOT_SUPPORTED",
+        "X_INVALID_END_TAG",
+        "X_INVALID_EXPRESSION",
+        "X_KEEP_ALIVE_INVALID_CHILDREN",
+        "X_MISSING_DIRECTIVE_NAME",
+        "X_MISSING_DYNAMIC_DIRECTIVE_ARGUMENT_END",
+        "X_MISSING_END_TAG",
+        "X_MISSING_INTERPOLATION_END",
+        "X_MODULE_MODE_NOT_SUPPORTED",
+        "X_PREFIX_ID_NOT_SUPPORTED",
+        "X_SCOPE_ID_NOT_SUPPORTED",
+        "X_VNODE_HOOKS",
+        "X_V_BIND_INVALID_SAME_NAME_ARGUMENT",
+        "X_V_BIND_NO_EXPRESSION",
+        "X_V_ELSE_NO_ADJACENT_IF",
+        "X_V_FOR_MALFORMED_EXPRESSION",
+        "X_V_FOR_NO_EXPRESSION",
+        "X_V_FOR_TEMPLATE_KEY_PLACEMENT",
+        "X_V_IF_NO_EXPRESSION",
+        "X_V_IF_SAME_KEY",
+        "X_V_MODEL_MALFORMED_EXPRESSION",
+        "X_V_MODEL_NO_EXPRESSION",
+        "X_V_MODEL_ON_CONST",
+        "X_V_MODEL_ON_PROPS",
+        "X_V_MODEL_ON_SCOPE_VARIABLE",
+        "X_V_ON_NO_EXPRESSION",
+        "X_V_SLOT_DUPLICATE_SLOT_NAMES",
+        "X_V_SLOT_EXTRANEOUS_DEFAULT_SLOT_CHILDREN",
+        "X_V_SLOT_MISPLACED",
+        "X_V_SLOT_MIXED_SLOT_USAGE",
+        "X_V_SLOT_UNEXPECTED_DIRECTIVE_ON_SLOT_OUTLET",
+        "__EXTEND_POINT__"
+      ]
+    },
+    "FRAGMENT": {
+      "kind": "symbol",
+      "tag": "[object Symbol]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": []
+    },
+    "GUARD_REACTIVE_PROPS": {
+      "kind": "symbol",
+      "tag": "[object Symbol]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": []
+    },
+    "IS_MEMO_SAME": {
+      "kind": "symbol",
+      "tag": "[object Symbol]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": []
+    },
+    "IS_REF": {
+      "kind": "symbol",
+      "tag": "[object Symbol]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": []
+    },
+    "KEEP_ALIVE": {
+      "kind": "symbol",
+      "tag": "[object Symbol]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": []
+    },
+    "MERGE_PROPS": {
+      "kind": "symbol",
+      "tag": "[object Symbol]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": []
+    },
+    "NORMALIZE_CLASS": {
+      "kind": "symbol",
+      "tag": "[object Symbol]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": []
+    },
+    "NORMALIZE_PROPS": {
+      "kind": "symbol",
+      "tag": "[object Symbol]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": []
+    },
+    "NORMALIZE_STYLE": {
+      "kind": "symbol",
+      "tag": "[object Symbol]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": []
+    },
+    "Namespaces": {
+      "kind": "object",
+      "tag": "[object Object]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": [
+        "0",
+        "1",
+        "2",
+        "HTML",
+        "MATH_ML",
+        "SVG"
+      ]
+    },
+    "NodeTypes": {
+      "kind": "object",
+      "tag": "[object Object]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": [
+        "0",
+        "1",
+        "10",
+        "11",
+        "12",
+        "13",
+        "14",
+        "15",
+        "16",
+        "17",
+        "18",
+        "19",
+        "2",
+        "20",
+        "21",
+        "22",
+        "23",
+        "24",
+        "25",
+        "26",
+        "3",
+        "4",
+        "5",
+        "6",
+        "7",
+        "8",
+        "9",
+        "ATTRIBUTE",
+        "COMMENT",
+        "COMPOUND_EXPRESSION",
+        "DIRECTIVE",
+        "ELEMENT",
+        "FOR",
+        "IF",
+        "IF_BRANCH",
+        "INTERPOLATION",
+        "JS_ARRAY_EXPRESSION",
+        "JS_ASSIGNMENT_EXPRESSION",
+        "JS_BLOCK_STATEMENT",
+        "JS_CACHE_EXPRESSION",
+        "JS_CALL_EXPRESSION",
+        "JS_CONDITIONAL_EXPRESSION",
+        "JS_FUNCTION_EXPRESSION",
+        "JS_IF_STATEMENT",
+        "JS_OBJECT_EXPRESSION",
+        "JS_PROPERTY",
+        "JS_RETURN_STATEMENT",
+        "JS_SEQUENCE_EXPRESSION",
+        "JS_TEMPLATE_LITERAL",
+        "ROOT",
+        "SIMPLE_EXPRESSION",
+        "TEXT",
+        "TEXT_CALL",
+        "VNODE_CALL"
+      ]
+    },
+    "OPEN_BLOCK": {
+      "kind": "symbol",
+      "tag": "[object Symbol]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": []
+    },
+    "POP_SCOPE_ID": {
+      "kind": "symbol",
+      "tag": "[object Symbol]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": []
+    },
+    "PUSH_SCOPE_ID": {
+      "kind": "symbol",
+      "tag": "[object Symbol]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": []
+    },
+    "RENDER_LIST": {
+      "kind": "symbol",
+      "tag": "[object Symbol]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": []
+    },
+    "RENDER_SLOT": {
+      "kind": "symbol",
+      "tag": "[object Symbol]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": []
+    },
+    "RESOLVE_COMPONENT": {
+      "kind": "symbol",
+      "tag": "[object Symbol]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": []
+    },
+    "RESOLVE_DIRECTIVE": {
+      "kind": "symbol",
+      "tag": "[object Symbol]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": []
+    },
+    "RESOLVE_DYNAMIC_COMPONENT": {
+      "kind": "symbol",
+      "tag": "[object Symbol]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": []
+    },
+    "RESOLVE_FILTER": {
+      "kind": "symbol",
+      "tag": "[object Symbol]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": []
+    },
+    "SET_BLOCK_TRACKING": {
+      "kind": "symbol",
+      "tag": "[object Symbol]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": []
+    },
+    "SUSPENSE": {
+      "kind": "symbol",
+      "tag": "[object Symbol]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": []
+    },
+    "TELEPORT": {
+      "kind": "symbol",
+      "tag": "[object Symbol]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": []
+    },
+    "TO_DISPLAY_STRING": {
+      "kind": "symbol",
+      "tag": "[object Symbol]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": []
+    },
+    "TO_HANDLERS": {
+      "kind": "symbol",
+      "tag": "[object Symbol]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": []
+    },
+    "TO_HANDLER_KEY": {
+      "kind": "symbol",
+      "tag": "[object Symbol]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": []
+    },
+    "TS_NODE_TYPES": {
+      "kind": "object",
+      "tag": "[object Array]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": [
+        "0",
+        "1",
+        "2",
+        "3",
+        "4",
+        "length"
+      ]
+    },
+    "UNREF": {
+      "kind": "symbol",
+      "tag": "[object Symbol]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": []
+    },
+    "WITH_CTX": {
+      "kind": "symbol",
+      "tag": "[object Symbol]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": []
+    },
+    "WITH_DIRECTIVES": {
+      "kind": "symbol",
+      "tag": "[object Symbol]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": []
+    },
+    "WITH_MEMO": {
+      "kind": "symbol",
+      "tag": "[object Symbol]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": []
+    },
+    "advancePositionWithClone": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "advancePositionWithClone",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "advancePositionWithMutation": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "advancePositionWithMutation",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "assert": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "assert",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "baseCompile": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "baseCompile",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "baseParse": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "baseParse",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "buildDirectiveArgs": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "buildDirectiveArgs",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "buildProps": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "buildProps",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "buildSlots": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "buildSlots",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "checkCompatEnabled": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "checkCompatEnabled",
+      "function_arity": 3,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "convertToBlock": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "convertToBlock",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "createArrayExpression": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "createArrayExpression",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "createAssignmentExpression": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "createAssignmentExpression",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "createBlockStatement": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "createBlockStatement",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "createCacheExpression": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "createCacheExpression",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "createCallExpression": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "createCallExpression",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "createCompilerError": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "createCompilerError",
+      "function_arity": 4,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "createCompoundExpression": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "createCompoundExpression",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "createConditionalExpression": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "createConditionalExpression",
+      "function_arity": 3,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "createForLoopParams": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "createForLoopParams",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "createFunctionExpression": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "createFunctionExpression",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "createIfStatement": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "createIfStatement",
+      "function_arity": 3,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "createInterpolation": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "createInterpolation",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "createObjectExpression": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "createObjectExpression",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "createObjectProperty": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "createObjectProperty",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "createReturnStatement": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "createReturnStatement",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "createRoot": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "createRoot",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "createSequenceExpression": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "createSequenceExpression",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "createSimpleExpression": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "createSimpleExpression",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "createStructuralDirectiveTransform": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "createStructuralDirectiveTransform",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "createTemplateLiteral": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "createTemplateLiteral",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "createTransformContext": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "createTransformContext",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "createVNodeCall": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "createVNodeCall",
+      "function_arity": 7,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "errorMessages": {
+      "kind": "object",
+      "tag": "[object Object]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": [
+        "0",
+        "1",
+        "10",
+        "11",
+        "12",
+        "13",
+        "14",
+        "15",
+        "16",
+        "17",
+        "18",
+        "19",
+        "2",
+        "20",
+        "21",
+        "22",
+        "23",
+        "24",
+        "25",
+        "26",
+        "27",
+        "28",
+        "29",
+        "3",
+        "30",
+        "31",
+        "32",
+        "33",
+        "34",
+        "35",
+        "36",
+        "37",
+        "38",
+        "39",
+        "4",
+        "40",
+        "41",
+        "42",
+        "43",
+        "44",
+        "45",
+        "46",
+        "47",
+        "48",
+        "49",
+        "5",
+        "50",
+        "51",
+        "52",
+        "53",
+        "54",
+        "6",
+        "7",
+        "8",
+        "9"
+      ]
+    },
+    "extractIdentifiers": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "extractIdentifiers",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "findDir": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "findDir",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "findProp": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "findProp",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "forAliasRE": {
+      "kind": "object",
+      "tag": "[object RegExp]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": [
+        "lastIndex"
+      ]
+    },
+    "generate": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "generate",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "generateCodeFrame": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "generateCodeFrame",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "getBaseTransformPreset": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "getBaseTransformPreset",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "getConstantType": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "getConstantType",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "getMemoedVNodeCall": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "getMemoedVNodeCall",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "getVNodeBlockHelper": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "getVNodeBlockHelper",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "getVNodeHelper": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "getVNodeHelper",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "hasDynamicKeyVBind": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "hasDynamicKeyVBind",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "hasScopeRef": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "hasScopeRef",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "helperNameMap": {
+      "kind": "object",
+      "tag": "[object Object]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": []
+    },
+    "injectProp": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "injectProp",
+      "function_arity": 3,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "isAllWhitespace": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "isAllWhitespace",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "isCommentOrWhitespace": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "isCommentOrWhitespace",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "isCoreComponent": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "isCoreComponent",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "isFnExpression": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "isFnExpressionNode",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name"
+      ]
+    },
+    "isFnExpressionBrowser": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "isFnExpressionBrowser",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name"
+      ]
+    },
+    "isFnExpressionNode": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "isFnExpressionNode",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name"
+      ]
+    },
+    "isFunctionType": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "isFunctionType",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name"
+      ]
+    },
+    "isInDestructureAssignment": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "isInDestructureAssignment",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "isInNewExpression": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "isInNewExpression",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "isMemberExpression": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "isMemberExpressionNode",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name"
+      ]
+    },
+    "isMemberExpressionBrowser": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "isMemberExpressionBrowser",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name"
+      ]
+    },
+    "isMemberExpressionNode": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "isMemberExpressionNode",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name"
+      ]
+    },
+    "isReferencedIdentifier": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "isReferencedIdentifier",
+      "function_arity": 3,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "isSimpleIdentifier": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "isSimpleIdentifier",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name"
+      ]
+    },
+    "isSlotOutlet": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "isSlotOutlet",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "isStaticArgOf": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "isStaticArgOf",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "isStaticExp": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "isStaticExp",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name"
+      ]
+    },
+    "isStaticProperty": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "isStaticProperty",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name"
+      ]
+    },
+    "isStaticPropertyKey": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "isStaticPropertyKey",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name"
+      ]
+    },
+    "isTemplateNode": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "isTemplateNode",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "isText": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "isText$1",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "isVPre": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "isVPre",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "isVSlot": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "isVSlot",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "isWhitespaceText": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "isWhitespaceText",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "locStub": {
+      "kind": "object",
+      "tag": "[object Object]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": [
+        "end",
+        "source",
+        "start"
+      ]
+    },
+    "noopDirectiveTransform": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "noopDirectiveTransform",
+      "function_arity": 0,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name"
+      ]
+    },
+    "processExpression": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "processExpression",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "processFor": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "processFor",
+      "function_arity": 4,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "processIf": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "processIf",
+      "function_arity": 4,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "processSlotOutlet": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "processSlotOutlet",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "registerRuntimeHelpers": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "registerRuntimeHelpers",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "resolveComponentType": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "resolveComponentType",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "stringifyExpression": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "stringifyExpression",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "toValidAssetId": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "toValidAssetId",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "trackSlotScopes": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "trackSlotScopes",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name"
+      ]
+    },
+    "trackVForSlotScopes": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "trackVForSlotScopes",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name"
+      ]
+    },
+    "transform": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "transform",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "transformBind": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "transformBind",
+      "function_arity": 3,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name"
+      ]
+    },
+    "transformElement": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "transformElement",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name"
+      ]
+    },
+    "transformExpression": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "transformExpression",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name"
+      ]
+    },
+    "transformModel": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "transformModel",
+      "function_arity": 3,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name"
+      ]
+    },
+    "transformOn": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "transformOn",
+      "function_arity": 4,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name"
+      ]
+    },
+    "transformVBindShorthand": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "transformVBindShorthand",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name"
+      ]
+    },
+    "traverseNode": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "traverseNode",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "unwrapTSNode": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "unwrapTSNode",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "validFirstIdentCharRE": {
+      "kind": "object",
+      "tag": "[object RegExp]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": [
+        "lastIndex"
+      ]
+    },
+    "walkBlockDeclarations": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "walkBlockDeclarations",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "walkFunctionParams": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "walkFunctionParams",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "walkIdentifiers": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "walkIdentifiers",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "warnDeprecation": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "warnDeprecation",
+      "function_arity": 3,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    }
+  },
   "require": {
     "request": "@vue/compiler-core",
-    "success": false,
-    "resolved": null,
-    "error_name": "Error",
-    "error_code": "MODULE_NOT_FOUND",
-    "error_message": "Cannot find module '@vue/compiler-core'\nRequire stack:\n- <probe-root>/package.json"
+    "success": true,
+    "resolved": "<probe-root>/node_modules/@vue/compiler-core/index.js",
+    "error_name": null,
+    "error_code": null,
+    "error_message": null
   },
   "types": {
-    "package_types": null,
-    "resolved": null,
-    "exists": false
+    "package_types": "dist/compiler-core.d.ts",
+    "resolved": "<probe-root>/node_modules/@vue/compiler-core/dist/compiler-core.d.ts",
+    "exists": true
   },
-  "status": "pending",
+  "status": "pass",
   "source": "rust",
   "lock_hash": "ee33465b421a58b83fac04aa850a6d250ee09ec169fa80ed8820794a0c9a2769",
   "official_revision": null

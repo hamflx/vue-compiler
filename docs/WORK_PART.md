@@ -12,8 +12,18 @@
 - [x] Vue 2 compiler skeleton.
 - [x] Vue 2 compiler main-path parser / optimizer / codegen expansion.
 - [x] Official API manifest generation and diff harness.
+- [x] Rust npm alias bridge and API manifest parity.
 
 ## Completed This Round
+
+- Added `vuec_node_bridge`, a JSON stdin/stdout bridge binary that lets generated Node alias packages call the current Rust Vue 2, Vue 3 core/dom/ssr, and SFC compiler entry points.
+- Implemented `xtask` generation for `target/compat/rust-alias/<version-line>/node_modules/...` packages matching the official package names and subpath layout, including Vue 2.7 `vue/compiler-sfc`.
+- Generated Rust alias exports from official API manifests so `Object.keys`, function arity/name/prototype shape, class-like exports, enum-like objects, symbol exports, package versions, and type declaration paths match the official manifests.
+- Replaced `verify-npm-alias` pending output with a real require-and-smoke-call check for all seven compiler targets.
+- Regenerated Rust API manifests under `compat/api/rust/`; `cargo xtask export-api --all`, `cargo xtask diff-api --all`, and `cargo xtask verify-npm-alias --all` now pass.
+- This bridge is deliberately recorded as a development bridge, not the final NAPI package required by M16. Remaining official conformance and option/output contract work must still exercise real behavior and cannot rely on export shape alone.
+
+## Previous Round
 
 - Replaced the spec-only `export-api` behavior with a real Node probe that installs exact official npm package versions from `compat/official-revisions.lock` under `target/compat/npm/<version-line>` and records `Object.keys(require(...)).sort()`, export type details, function arity, class/async flags, package version, type declaration path, require status, lock hash, and official revision.
 - Changed `cargo xtask export-api --all` to generate both official and Rust-side manifests. Official manifests pass for all seven compiler targets; Rust manifests are generated as `pending` until alias packages exist under `target/compat/rust-alias/<version-line>`.
@@ -21,7 +31,7 @@
 - Generated official and Rust API manifest files under `compat/api/` for Vue 2.6 `vue-template-compiler`, Vue 2.7 `vue-template-compiler`, Vue 2.7 `vue/compiler-sfc`, and Vue 3 `@vue/compiler-core`, `@vue/compiler-dom`, `@vue/compiler-ssr`, `@vue/compiler-sfc`.
 - Verification this round: `cargo fmt --all --check`, `cargo test -p xtask`, `cargo xtask export-api --all`, and `cargo xtask diff-api --all` as the expected failing alias gate.
 
-## Previous Round
+## Earlier Vue 2 Round
 
 - Replaced the old `vuec_vue2` skeleton with a recursive Vue 2 element AST that preserves raw attrs, processed attrs/props/directives/events, structural directive state, static flags, slot/component/model metadata, diagnostics spans, and public AST projection.
 - Implemented Vue 2 main-path parsing for `v-if` / `v-else-if` / `v-else`, `v-for`, `v-pre`, `v-once`, `v-bind`, `v-on`, `v-model`, custom directives, slots, component `is`, inline-template metadata, class/style modules, and validator-like compile option hooks.

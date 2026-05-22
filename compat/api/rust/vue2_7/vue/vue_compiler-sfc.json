@@ -3,23 +3,137 @@
   "version_line": "vue2_7",
   "package": "vue",
   "entry": "vue/compiler-sfc",
-  "package_version": null,
-  "exports": [],
-  "export_details": {},
+  "package_version": "2.7.16",
+  "exports": [
+    "compileScript",
+    "compileStyle",
+    "compileStyleAsync",
+    "compileTemplate",
+    "generateCodeFrame",
+    "parse",
+    "parseComponent",
+    "rewriteDefault"
+  ],
+  "export_details": {
+    "compileScript": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "compileScript",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "compileStyle": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "compileStyle",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "compileStyleAsync": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "compileStyleAsync",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "compileTemplate": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "compileTemplate",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "generateCodeFrame": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "generateCodeFrame",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "parse": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "parse",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "parseComponent": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "parseComponent",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "rewriteDefault": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "rewriteDefault",
+      "function_arity": 3,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    }
+  },
   "require": {
     "request": "vue/compiler-sfc",
-    "success": false,
-    "resolved": null,
-    "error_name": "Error",
-    "error_code": "MODULE_NOT_FOUND",
-    "error_message": "Cannot find module 'vue/compiler-sfc'\nRequire stack:\n- <probe-root>/package.json"
+    "success": true,
+    "resolved": "<probe-root>/node_modules/vue/compiler-sfc/index.js",
+    "error_name": null,
+    "error_code": null,
+    "error_message": null
   },
   "types": {
-    "package_types": null,
-    "resolved": null,
-    "exists": false
+    "package_types": "./compiler-sfc/index.d.ts",
+    "resolved": "<probe-root>/node_modules/vue/compiler-sfc/index.d.ts",
+    "exists": true
   },
-  "status": "pending",
+  "status": "pass",
   "source": "rust",
   "lock_hash": "ee33465b421a58b83fac04aa850a6d250ee09ec169fa80ed8820794a0c9a2769",
   "official_revision": null
