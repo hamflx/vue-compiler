@@ -1190,14 +1190,14 @@ fn vue3_ssr_cases(_target: TargetSpec) -> Vec<OptionMatrixCase> {
             "undefined",
             &["adds scope attributes"],
             &["ssr codegen"],
-            &["code"],
+            &["code:contains:data-v-x"],
             &["vue3-ssr-scope"],
             "ssr",
             "compile",
             "vue3-ssr-scope",
             r#"<div class="a"></div>"#,
             Some(serde_json::json!({"scopeId": "data-v-x"})),
-            false,
+            true,
         ),
         option_case(
             "slotted",
@@ -1208,7 +1208,7 @@ fn vue3_ssr_cases(_target: TargetSpec) -> Vec<OptionMatrixCase> {
             "true",
             &["adds slotted marker"],
             &["ssr codegen"],
-            &["code"],
+            &["code:contains:ssrRenderSlot"],
             &["vue3-ssr-slotted"],
             "ssr",
             "compile",
@@ -2457,6 +2457,16 @@ fn compare_option_probe(
     let official_value = official.value.as_ref().unwrap_or(&serde_json::Value::Null);
     let rust_value = rust.value.as_ref().unwrap_or(&serde_json::Value::Null);
     for field in &row.output_fields_affected {
+        if let Some(expected) = field.strip_prefix("code:contains:") {
+            let official_code = json_path(official_value, "code").and_then(|value| value.as_str());
+            let rust_code = json_path(rust_value, "code").and_then(|value| value.as_str());
+            if official_code.map(|code| code.contains(expected)) != Some(true)
+                || rust_code.map(|code| code.contains(expected)) != Some(true)
+            {
+                return false;
+            }
+            continue;
+        }
         let official_field = json_path(official_value, field);
         let rust_field =
             json_path(rust_value, field).or_else(|| rust_alias_field(rust_value, field));

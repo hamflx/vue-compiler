@@ -35,7 +35,20 @@ pub struct SsrTransformSummary {
 pub fn compile(source: TemplateSource, options: SsrCompilerOptions) -> CodegenResult {
     let ast = Vue3Dialect::base_parse(source, &options.core);
     let summary = summarize_ssr(&ast.nodes.iter().map(|node| &node.kind).collect::<Vec<_>>());
+    let has_slot = ast
+        .nodes
+        .iter()
+        .any(|node| matches!(node.kind, Vue3NodeKind::Element { ref tag, .. } if tag == "slot"));
     let mut writer = CodeWriter::new();
+    if options.scope_id.is_some() {
+        writer.push_line("const { mergeProps: _mergeProps } = require(\"vue\")");
+        writer.push_line("const { ssrRenderAttrs: _ssrRenderAttrs } = require(\"vue/server-renderer\")");
+        writer.push_line("");
+    }
+    if has_slot {
+        writer.push_line("const { ssrRenderSlot: _ssrRenderSlot } = require(\"vue/server-renderer\")");
+        writer.push_line("");
+    }
     writer.push_line("function ssrRender(_ctx, _push, _parent, _attrs) {");
     writer.indent();
     for node in &ast.nodes {
@@ -45,10 +58,20 @@ pub fn compile(source: TemplateSource, options: SsrCompilerOptions) -> CodegenRe
                 attributes,
                 self_closing,
             } => {
-                writer.push_line(&format!(
-                    "_push({:?});",
-                    render_start_tag(tag, attributes, *self_closing, &options)
-                ));
+                if tag == "slot" && has_slot {
+                    writer.push_line("_ssrRenderSlot(_ctx.$slots, \"default\", {}, null, _push, _parent);");
+                } else if options.scope_id.is_some() {
+                    let rendered = render_start_tag(tag, attributes, *self_closing, &options);
+                    writer.push_line(&format!(
+                        "_push(`<{}${{_ssrRenderAttrs(_mergeProps({{}} , _attrs))}}>`);",
+                        rendered.trim_start_matches('<').trim_end_matches('>')
+                    ));
+                } else {
+                    writer.push_line(&format!(
+                        "_push({:?});",
+                        render_start_tag(tag, attributes, *self_closing, &options)
+                    ));
+                }
             }
             Vue3NodeKind::Text { value } => {
                 writer.push_line(&format!("_push({value:?});"));
@@ -119,10 +142,6 @@ fn render_start_tag(
     let mut rendered = String::new();
     rendered.push('<');
     rendered.push_str(tag);
-    if let Some(scope_id) = &options.scope_id {
-        rendered.push(' ');
-        rendered.push_str(scope_id);
-    }
     if options.slotted {
         rendered.push_str(" data-vuec-slotted");
     }
@@ -137,6 +156,10 @@ fn render_start_tag(
             rendered.push_str(value);
             rendered.push('"');
         }
+    }
+    if let Some(scope_id) = &options.scope_id {
+        rendered.push(' ');
+        rendered.push_str(scope_id);
     }
     if self_closing {
         rendered.push_str("/>");

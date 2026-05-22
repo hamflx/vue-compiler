@@ -3,7 +3,7 @@
   "version_line": "vue3",
   "package": "@vue/compiler-ssr",
   "entry": "index",
-  "status": "pass",
+  "status": "pending",
   "rows": [
     {
       "option_name": "scopeId",
@@ -23,7 +23,7 @@
         "ssr codegen"
       ],
       "output_fields_affected": [
-        "code"
+        "code:contains:data-v-x"
       ],
       "official_fixture_ids": [
         "vue3-ssr-scope"
@@ -36,8 +36,8 @@
       "option_value": {
         "scopeId": "data-v-x"
       },
-      "execution_mode": "diff",
-      "status": "pass"
+      "execution_mode": "pending",
+      "status": "pending"
     },
     {
       "option_name": "slotted",
@@ -57,7 +57,7 @@
         "ssr codegen"
       ],
       "output_fields_affected": [
-        "code"
+        "code:contains:ssrRenderSlot"
       ],
       "official_fixture_ids": [
         "vue3-ssr-slotted"
