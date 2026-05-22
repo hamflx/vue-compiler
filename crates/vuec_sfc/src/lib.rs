@@ -3,6 +3,10 @@
 use serde::{Deserialize, Serialize};
 use vuec_js::JsAstStore;
 use vuec_source::{FileId, SourceMap};
+use vuec_style::{compile_style, StyleCompileOptions};
+use vuec_vue3_core::{TemplateSource, Vue3CompilerOptions};
+use vuec_vue3_dom::{compile as compile_dom, DomCompilerOptions};
+use vuec_vue3_ssr::{compile as compile_ssr, SsrCompilerOptions};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SfcBlock {
@@ -135,7 +139,10 @@ impl SfcCompiler {
 
     pub fn parse(&mut self, filename: impl Into<String>, source: &str) -> SfcDescriptor {
         let filename = filename.into();
-        let source_file = self.sources.add_file(Some(std::path::PathBuf::from(&filename)), source.to_string());
+        let source_file = self.sources.add_file(
+            Some(std::path::PathBuf::from(&filename)),
+            source.to_string(),
+        );
         let mut descriptor = SfcDescriptor {
             filename,
             source: source.to_string(),
@@ -170,23 +177,51 @@ impl SfcCompiler {
         descriptor: &SfcDescriptor,
         options: SfcTemplateCompileOptions,
     ) -> SfcTemplateCompileResult {
-        let mut code = String::new();
-        if let Some(template) = descriptor.template.as_ref() {
-            code.push_str(&template.content);
-        }
-        let mut errors = Vec::new();
-        if options.ssr {
-            code = format!("/* ssr */\n{code}");
-        }
-        if code.is_empty() {
-            errors.push("missing template block".to_string());
-        }
+        let Some(template) = descriptor.template.as_ref() else {
+            return SfcTemplateCompileResult {
+                code: String::new(),
+                map: None,
+                errors: vec!["missing template block".to_string()],
+                bindings: Vec::new(),
+                ast_summary: "missing-template".into(),
+            };
+        };
+        let core = Vue3CompilerOptions {
+            scope_id: options.scope_id.clone(),
+            slotted: options.slotted,
+            ..Vue3CompilerOptions::default()
+        };
+        let source = TemplateSource {
+            filename: descriptor.filename.clone(),
+            source: template.content.clone(),
+            file_id: descriptor.source_file,
+        };
+        let result = if options.ssr {
+            compile_ssr(
+                source,
+                SsrCompilerOptions {
+                    core,
+                    scope_id: options.scope_id.clone(),
+                    slotted: options.slotted,
+                },
+            )
+        } else {
+            compile_dom(
+                source,
+                DomCompilerOptions {
+                    core,
+                    ..DomCompilerOptions::default()
+                },
+            )
+        };
         SfcTemplateCompileResult {
-            code,
-            map: descriptor.template.as_ref().map(|_| "{}".to_string()),
-            errors,
+            code: result.code,
+            map: result
+                .map
+                .map(|map| serde_json::to_string(&map).unwrap_or_else(|_| "{}".into())),
+            errors: result.diagnostics,
             bindings: Vec::new(),
-            ast_summary: "pending".into(),
+            ast_summary: result.ast_summary,
         }
     }
 
@@ -206,33 +241,62 @@ impl SfcCompiler {
             }
             content.push_str(&script_setup.content);
         }
-        if let Some(template) = descriptor.template.as_ref() {
-            bindings.push(template.type_name.clone());
-        }
+        let source_type = script_source_type(descriptor);
+        let summary = self.js.summarize_program(&content, source_type);
+        bindings.extend(summary.bindings);
+        bindings.extend(
+            summary
+                .imports
+                .into_iter()
+                .map(|import| format!("import:{import}")),
+        );
+        bindings.extend(
+            summary
+                .exports
+                .into_iter()
+                .map(|export| format!("export:{export}")),
+        );
         SfcScriptBlock {
             content,
             bindings,
-            errors: Vec::new(),
-            loc: descriptor.script.as_ref().or(descriptor.script_setup.as_ref()).map(|block| block.loc.clone()),
+            errors: summary.errors,
+            loc: descriptor
+                .script
+                .as_ref()
+                .or(descriptor.script_setup.as_ref())
+                .map(|block| block.loc.clone()),
         }
     }
 
     pub fn compile_style(
         &self,
         descriptor: &SfcDescriptor,
-        _options: SfcStyleCompileOptions,
+        options: SfcStyleCompileOptions,
     ) -> SfcStyleCompileResult {
         let mut code = String::new();
+        let mut errors = Vec::new();
         for style in &descriptor.styles {
-            if !code.is_empty() {
+            let result = compile_style(
+                &style.content,
+                StyleCompileOptions {
+                    id: options.id.clone(),
+                    scoped: options.scoped || style.attrs.scoped,
+                    modules: style.attrs.module.is_some(),
+                    vars: options.vars.clone(),
+                    filename: Some(descriptor.filename.clone()),
+                    source_map: true,
+                },
+            );
+            if !code.is_empty() && !result.code.is_empty() {
                 code.push('\n');
             }
-            code.push_str(&style.content);
+            code.push_str(&result.code);
+            errors.extend(result.errors);
         }
         SfcStyleCompileResult {
             code,
             map: descriptor.styles.first().map(|_| "{}".to_string()),
-            errors: Vec::new(),
+            errors,
         }
     }
 
@@ -295,15 +359,29 @@ fn parse_attrs(head: &str) -> SfcBlockAttrs {
     if let Some(module_pos) = head.find("module") {
         let tail = &head[module_pos..];
         if let Some(eq_pos) = tail.find('=') {
-            let value = tail[eq_pos + 1..]
-                .trim()
-                .trim_matches(['"', '\'', '>']);
-            attrs.module = if value.is_empty() { Some(String::new()) } else { Some(value.to_string()) };
+            let value = tail[eq_pos + 1..].trim().trim_matches(['"', '\'', '>']);
+            attrs.module = if value.is_empty() {
+                Some(String::new())
+            } else {
+                Some(value.to_string())
+            };
         } else {
             attrs.module = Some(String::new());
         }
     }
     attrs
+}
+
+fn script_source_type(descriptor: &SfcDescriptor) -> oxc_span::SourceType {
+    let lang = descriptor
+        .script_setup
+        .as_ref()
+        .or(descriptor.script.as_ref())
+        .and_then(|block| block.attrs.lang.as_deref());
+    match lang {
+        Some("ts" | "tsx") => oxc_span::SourceType::ts(),
+        _ => oxc_span::SourceType::mjs(),
+    }
 }
 
 #[cfg(test)]
@@ -327,10 +405,26 @@ mod tests {
         let mut compiler = SfcCompiler::new();
         let descriptor = compiler.parse("foo.vue", r#"<template><div/></template>"#);
         let template = compiler.compile_template(&descriptor, SfcTemplateCompileOptions::default());
-        assert!(template.code.contains("<div/>"));
+        assert!(template.code.contains("render"));
+        assert!(template.ast_summary.starts_with("dom:"));
         let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
         assert_eq!(script.errors.len(), 0);
         let style = compiler.compile_style(&descriptor, SfcStyleCompileOptions::default());
         assert!(style.errors.is_empty());
+    }
+
+    #[test]
+    fn compile_template_uses_ssr_backend() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse("foo.vue", r#"<template><div>{{ msg }}</div></template>"#);
+        let template = compiler.compile_template(
+            &descriptor,
+            SfcTemplateCompileOptions {
+                ssr: true,
+                ..SfcTemplateCompileOptions::default()
+            },
+        );
+        assert!(template.code.contains("ssrRender"));
+        assert!(template.code.contains("_ssrInterpolate(msg)"));
     }
 }

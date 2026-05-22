@@ -177,7 +177,12 @@ mod tests {
     fn source_map_builder_serializes() {
         let mut builder = SourceMapBuilder::new().file("test.js");
         builder.add_name("foo");
-        builder.add_mapping(1, 0, Some(Span::new(FileId(0), 0, 3)), Some("src.vue".into()));
+        builder.add_mapping(
+            1,
+            0,
+            Some(Span::new(FileId(0), 0, 3)),
+            Some("src.vue".into()),
+        );
         let map = builder.build();
         let json = serde_json::to_string(&map).unwrap();
         assert!(json.contains("\"version\":3"));

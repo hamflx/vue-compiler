@@ -815,11 +815,17 @@ dependencies = [
 name = "vuec_sfc"
 version = "0.1.0"
 dependencies = [
+ "oxc_span",
  "serde",
+ "serde_json",
  "vuec_ast",
  "vuec_diagnostics",
  "vuec_js",
  "vuec_source",
+ "vuec_style",
+ "vuec_vue3_core",
+ "vuec_vue3_dom",
+ "vuec_vue3_ssr",
 ]
 
 [[package]]
@@ -830,6 +836,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "vuec_style"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "vuec_codegen",
+ "vuec_source",
+]
+
+[[package]]
 name = "vuec_vue3_core"
 version = "0.1.0"
 dependencies = [
@@ -837,8 +852,30 @@ dependencies = [
  "vuec_ast",
  "vuec_codegen",
  "vuec_diagnostics",
+ "vuec_html",
  "vuec_pass",
  "vuec_source",
+]
+
+[[package]]
+name = "vuec_vue3_dom"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "vuec_ast",
+ "vuec_source",
+ "vuec_vue3_core",
+]
+
+[[package]]
+name = "vuec_vue3_ssr"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "vuec_ast",
+ "vuec_codegen",
+ "vuec_source",
+ "vuec_vue3_core",
 ]
 
 [[package]]

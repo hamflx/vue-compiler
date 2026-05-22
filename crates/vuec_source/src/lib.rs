@@ -88,10 +88,18 @@ impl SourceFile {
         Some(&self.text[start.0..end.0])
     }
 
-    pub fn code_frame(&self, start: BytePos, end: BytePos, message: Option<&str>) -> Option<String> {
+    pub fn code_frame(
+        &self,
+        start: BytePos,
+        end: BytePos,
+        message: Option<&str>,
+    ) -> Option<String> {
         let start_loc = self.loc_at(start)?;
         let end_loc = self.loc_at(end).unwrap_or(start_loc);
-        let line_start = self.line_starts.get(start_loc.line.saturating_sub(1)).copied()?;
+        let line_start = self
+            .line_starts
+            .get(start_loc.line.saturating_sub(1))
+            .copied()?;
         let line_end = self
             .line_starts
             .get(start_loc.line)
@@ -100,10 +108,7 @@ impl SourceFile {
         let line = self.text[line_start..line_end]
             .trim_end_matches(['\r', '\n'])
             .to_string();
-        let caret_width = end_loc
-            .column
-            .saturating_sub(start_loc.column)
-            .max(1);
+        let caret_width = end_loc.column.saturating_sub(start_loc.column).max(1);
 
         let mut frame = String::new();
         if let Some(message) = message {
@@ -111,7 +116,11 @@ impl SourceFile {
             frame.push('\n');
         }
         frame.push_str(&format!("{:>4} | {}\n", start_loc.line, line));
-        frame.push_str(&format!("     | {}{}\n", " ".repeat(start_loc.column.saturating_sub(1)), "^".repeat(caret_width)));
+        frame.push_str(&format!(
+            "     | {}{}\n",
+            " ".repeat(start_loc.column.saturating_sub(1)),
+            "^".repeat(caret_width)
+        ));
         Some(frame)
     }
 }
@@ -195,7 +204,10 @@ mod tests {
         let file = SourceFile::new(FileId(0), None, "a😀b");
         assert_eq!(file.loc_at(BytePos(0)), Some(Loc { line: 1, column: 1 }));
         assert_eq!(file.loc_at(BytePos(1)), Some(Loc { line: 1, column: 2 }));
-        assert_eq!(file.loc_at(BytePos("a😀".len())), Some(Loc { line: 1, column: 4 }));
+        assert_eq!(
+            file.loc_at(BytePos("a😀".len())),
+            Some(Loc { line: 1, column: 4 })
+        );
     }
 
     #[test]

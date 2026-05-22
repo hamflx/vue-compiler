@@ -8,7 +8,10 @@ members = [
   "crates/vuec_pass",
   "crates/vuec_diagnostics",
   "crates/vuec_sfc",
+  "crates/vuec_style",
+  "crates/vuec_vue3_dom",
   "crates/vuec_vue3_core",
+  "crates/vuec_vue3_ssr",
   "crates/vuec_source",
   "xtask",
 ]

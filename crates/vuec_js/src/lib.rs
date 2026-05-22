@@ -1,7 +1,9 @@
 #![forbid(unsafe_code)]
 
 use oxc_allocator::Allocator;
-use oxc_ast::ast::Expression;
+use oxc_ast::ast::{
+    BindingPattern, Declaration, Expression, ImportDeclarationSpecifier, Statement,
+};
 use oxc_diagnostics::OxcDiagnostic;
 use oxc_parser::{ParseOptions, Parser, ParserReturn};
 use oxc_span::SourceType;
@@ -45,6 +47,15 @@ impl JsParseError {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JsProgramSummary {
+    pub bindings: Vec<String>,
+    pub imports: Vec<String>,
+    pub exports: Vec<String>,
+    pub errors: Vec<String>,
+    pub panicked: bool,
+}
+
 pub struct JsAstStore {
     allocator: Allocator,
 }
@@ -56,7 +67,11 @@ impl JsAstStore {
         }
     }
 
-    pub fn parse_program<'a>(&'a self, source_text: &'a str, source_type: SourceType) -> ParserReturn<'a> {
+    pub fn parse_program<'a>(
+        &'a self,
+        source_text: &'a str,
+        source_type: SourceType,
+    ) -> ParserReturn<'a> {
         Parser::new(&self.allocator, source_text, source_type)
             .with_options(ParseOptions {
                 parse_regular_expression: true,
@@ -77,7 +92,9 @@ impl JsAstStore {
             })
             .parse_expression()
             .map_err(|diagnostics: Vec<OxcDiagnostic>| {
-                JsParseError::from_diagnostics(diagnostics.into_iter().map(|d| d.to_string()).collect())
+                JsParseError::from_diagnostics(
+                    diagnostics.into_iter().map(|d| d.to_string()).collect(),
+                )
             })
     }
 
@@ -91,9 +108,9 @@ impl JsAstStore {
             JsParseMode::Expression => self
                 .parse_expression(source_text, source_type)
                 .map(JsParseResult::Expression),
-            JsParseMode::Statements | JsParseMode::ScriptModule | JsParseMode::ScriptClassic => {
-                Ok(JsParseResult::Program(self.parse_program(source_text, source_type)))
-            }
+            JsParseMode::Statements | JsParseMode::ScriptModule | JsParseMode::ScriptClassic => Ok(
+                JsParseResult::Program(self.parse_program(source_text, source_type)),
+            ),
             JsParseMode::Params => self.parse_params(source_text).map(JsParseResult::Params),
             JsParseMode::ForExpression => self
                 .parse_for_expression(source_text, source_type)
@@ -101,7 +118,10 @@ impl JsAstStore {
         }
     }
 
-    pub fn parse_params<'a>(&'a self, source_text: &'a str) -> Result<ParsedParams<'a>, JsParseError> {
+    pub fn parse_params<'a>(
+        &'a self,
+        source_text: &'a str,
+    ) -> Result<ParsedParams<'a>, JsParseError> {
         let wrapped = format!("function __vuec__({source_text}) {{}}");
         let ret = self.parse_program(&wrapped, SourceType::script());
         if ret.panicked || !ret.errors.is_empty() {
@@ -121,14 +141,39 @@ impl JsAstStore {
         source_text: &'a str,
         source_type: SourceType,
     ) -> Result<ParsedForExpression<'a>, JsParseError> {
-        let (aliases, iterable) = split_for_expression(source_text)
-            .ok_or_else(|| JsParseError { message: "missing `in`/`of` in v-for expression".into() })?;
+        let (aliases, iterable) =
+            split_for_expression(source_text).ok_or_else(|| JsParseError {
+                message: "missing `in`/`of` in v-for expression".into(),
+            })?;
         let _iterable = self.parse_expression(iterable, source_type)?;
         Ok(ParsedForExpression {
             raw: source_text,
             aliases,
             items: split_top_level(aliases, ','),
         })
+    }
+
+    pub fn summarize_program(
+        &self,
+        source_text: &str,
+        source_type: SourceType,
+    ) -> JsProgramSummary {
+        let parsed = self.parse_program(source_text, source_type);
+        let mut summary = JsProgramSummary {
+            errors: parsed.errors.iter().map(ToString::to_string).collect(),
+            panicked: parsed.panicked,
+            ..JsProgramSummary::default()
+        };
+        for statement in &parsed.program.body {
+            collect_statement_summary(statement, &mut summary);
+        }
+        summary.bindings.sort();
+        summary.bindings.dedup();
+        summary.imports.sort();
+        summary.imports.dedup();
+        summary.exports.sort();
+        summary.exports.dedup();
+        summary
     }
 }
 
@@ -196,6 +241,116 @@ fn split_top_level(source_text: &str, separator: char) -> Vec<&str> {
         items.push(tail);
     }
     items
+}
+
+fn collect_statement_summary(statement: &Statement<'_>, summary: &mut JsProgramSummary) {
+    match statement {
+        Statement::VariableDeclaration(declaration) => {
+            for declarator in &declaration.declarations {
+                collect_binding_pattern(&declarator.id, &mut summary.bindings);
+            }
+        }
+        Statement::FunctionDeclaration(function) => {
+            if let Some(id) = &function.id {
+                summary.bindings.push(id.name.to_string());
+            }
+        }
+        Statement::ClassDeclaration(class) => {
+            if let Some(id) = &class.id {
+                summary.bindings.push(id.name.to_string());
+            }
+        }
+        Statement::ImportDeclaration(declaration) => {
+            summary.imports.push(declaration.source.value.to_string());
+            if let Some(specifiers) = &declaration.specifiers {
+                for specifier in specifiers {
+                    match specifier {
+                        ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
+                            summary.bindings.push(specifier.local.name.to_string());
+                        }
+                        ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
+                            summary.bindings.push(specifier.local.name.to_string());
+                        }
+                        ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
+                            summary.bindings.push(specifier.local.name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        Statement::ExportDefaultDeclaration(_) => {
+            summary.exports.push("default".into());
+        }
+        Statement::ExportNamedDeclaration(declaration) => {
+            if let Some(declaration) = &declaration.declaration {
+                collect_declaration_summary(declaration, summary);
+            }
+            for specifier in &declaration.specifiers {
+                summary.exports.push(specifier.local.name().to_string());
+            }
+        }
+        Statement::ExportAllDeclaration(declaration) => {
+            summary
+                .exports
+                .push(format!("* from {}", declaration.source.value));
+        }
+        Statement::BlockStatement(block) => {
+            for statement in &block.body {
+                collect_statement_summary(statement, summary);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_declaration_summary(declaration: &Declaration<'_>, summary: &mut JsProgramSummary) {
+    match declaration {
+        Declaration::VariableDeclaration(declaration) => {
+            for declarator in &declaration.declarations {
+                collect_binding_pattern(&declarator.id, &mut summary.bindings);
+            }
+        }
+        Declaration::FunctionDeclaration(function) => {
+            if let Some(id) = &function.id {
+                summary.bindings.push(id.name.to_string());
+                summary.exports.push(id.name.to_string());
+            }
+        }
+        Declaration::ClassDeclaration(class) => {
+            if let Some(id) = &class.id {
+                summary.bindings.push(id.name.to_string());
+                summary.exports.push(id.name.to_string());
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_binding_pattern(pattern: &BindingPattern<'_>, bindings: &mut Vec<String>) {
+    match pattern {
+        BindingPattern::BindingIdentifier(identifier) => {
+            bindings.push(identifier.name.to_string());
+        }
+        BindingPattern::ObjectPattern(object) => {
+            for property in &object.properties {
+                collect_binding_pattern(&property.value, bindings);
+            }
+            if let Some(rest) = &object.rest {
+                collect_binding_pattern(&rest.argument, bindings);
+            }
+        }
+        BindingPattern::ArrayPattern(array) => {
+            for element in array.elements.iter().flatten() {
+                collect_binding_pattern(element, bindings);
+            }
+            if let Some(rest) = &array.rest {
+                collect_binding_pattern(&rest.argument, bindings);
+            }
+        }
+        BindingPattern::AssignmentPattern(assignment) => {
+            collect_binding_pattern(&assignment.left, bindings);
+        }
+    }
 }
 
 #[cfg(test)]

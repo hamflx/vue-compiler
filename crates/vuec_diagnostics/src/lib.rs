@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use vuec_source::{Span, SourceMap};
+use vuec_source::{SourceMap, Span};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -70,8 +70,16 @@ pub enum RenderError {
     MissingSource,
 }
 
-pub fn render_diagnostic(diagnostic: &Diagnostic, sources: &SourceMap) -> Result<String, RenderError> {
-    let mut rendered = format!("[{}] {}: {}", diagnostic.severity.as_str(), diagnostic.code, diagnostic.message);
+pub fn render_diagnostic(
+    diagnostic: &Diagnostic,
+    sources: &SourceMap,
+) -> Result<String, RenderError> {
+    let mut rendered = format!(
+        "[{}] {}: {}",
+        diagnostic.severity.as_str(),
+        diagnostic.code,
+        diagnostic.message
+    );
     if let Some(span) = diagnostic.span {
         let frame = sources
             .code_frame(span.file_id, span.start, span.end, None)

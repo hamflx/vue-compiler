@@ -82,7 +82,11 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let report = match cli.command {
         Command::VerifyOfficialLock { path } => verify_official_lock(&path),
-        Command::SyncOfficialTests { lock, locked, out_dir } => sync_official_tests(&lock, locked, &out_dir),
+        Command::SyncOfficialTests {
+            lock,
+            locked,
+            out_dir,
+        } => sync_official_tests(&lock, locked, &out_dir),
         Command::ExportApi { scope, out_dir } => {
             let report = export_api(&scope);
             ensure_dir(&out_dir)?;

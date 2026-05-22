@@ -69,21 +69,51 @@ impl<K> Default for AstDocument<K> {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Vue2NodeKind {
     Root,
-    Element { tag: String },
-    Text { value: String },
-    Interpolation { expression: String },
-    Comment { value: String },
-    Directive { name: String, expression: Option<String> },
+    Element {
+        tag: String,
+    },
+    Text {
+        value: String,
+    },
+    Interpolation {
+        expression: String,
+    },
+    Comment {
+        value: String,
+    },
+    Directive {
+        name: String,
+        expression: Option<String>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TemplateAttribute {
+    pub name: String,
+    pub value: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Vue3NodeKind {
     Root,
-    Element { tag: String },
-    Text { value: String },
-    Interpolation { expression: String },
-    Comment { value: String },
-    Directive { name: String, expression: Option<String> },
+    Element {
+        tag: String,
+        attributes: Vec<TemplateAttribute>,
+        self_closing: bool,
+    },
+    Text {
+        value: String,
+    },
+    Interpolation {
+        expression: String,
+    },
+    Comment {
+        value: String,
+    },
+    Directive {
+        name: String,
+        expression: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,10 +159,28 @@ mod tests {
     #[test]
     fn distinct_kind_spaces_exist() {
         let mut vue3 = Vue3Ast::new();
-        let id = vue3.push(Vue3NodeKind::Element { tag: "div".into() }, None);
-        assert!(matches!(vue3.node(id).unwrap().kind, Vue3NodeKind::Element { .. }));
+        let id = vue3.push(
+            Vue3NodeKind::Element {
+                tag: "div".into(),
+                attributes: vec![TemplateAttribute {
+                    name: "id".into(),
+                    value: Some("app".into()),
+                }],
+                self_closing: false,
+            },
+            None,
+        );
+        assert!(matches!(
+            vue3.node(id).unwrap().kind,
+            Vue3NodeKind::Element { .. }
+        ));
         let mut mir = MIR::new();
-        let _ = mir.push(MirNodeKind::RenderChunk { name: "main".into() }, None);
+        let _ = mir.push(
+            MirNodeKind::RenderChunk {
+                name: "main".into(),
+            },
+            None,
+        );
         assert_eq!(mir.len(), 1);
     }
 }

@@ -78,8 +78,14 @@ impl<'a> HtmlTokenizer<'a> {
         if self.remaining().starts_with("<![CDATA[") {
             return self.consume_block("<![CDATA[", "]]>", |body| HtmlTokenKind::Cdata(body));
         }
-        if self.remaining().to_ascii_uppercase().starts_with("<!DOCTYPE") {
-            return self.consume_block("<!DOCTYPE", ">", |body| HtmlTokenKind::Doctype(body.trim().to_string()));
+        if self
+            .remaining()
+            .to_ascii_uppercase()
+            .starts_with("<!DOCTYPE")
+        {
+            return self.consume_block("<!DOCTYPE", ">", |body| {
+                HtmlTokenKind::Doctype(body.trim().to_string())
+            });
         }
         if self.remaining().starts_with("</") {
             return self.consume_end_tag();
@@ -93,7 +99,11 @@ impl<'a> HtmlTokenizer<'a> {
 
     fn consume_text(&mut self) -> HtmlToken {
         let start = self.cursor;
-        let end = self.remaining().find('<').map(|offset| self.cursor + offset).unwrap_or(self.source.len());
+        let end = self
+            .remaining()
+            .find('<')
+            .map(|offset| self.cursor + offset)
+            .unwrap_or(self.source.len());
         self.cursor = end;
         HtmlToken {
             kind: HtmlTokenKind::Text(self.source[start..end].to_string()),
@@ -170,7 +180,11 @@ impl<'a> HtmlTokenizer<'a> {
         let start = self.cursor;
         self.cursor += open.len();
         let body_start = self.cursor;
-        let body_end = self.remaining().find(close).map(|offset| self.cursor + offset).unwrap_or(self.source.len());
+        let body_end = self
+            .remaining()
+            .find(close)
+            .map(|offset| self.cursor + offset)
+            .unwrap_or(self.source.len());
         let body = self.source[body_start..body_end].to_string();
         self.cursor = if body_end < self.source.len() {
             body_end + close.len()
@@ -257,7 +271,9 @@ mod tests {
     fn tokenizes_basic_html() {
         let tokens = HtmlTokenizer::new("<!--x--><div id=\"a\">hi</div>").tokenize();
         assert!(matches!(tokens[0].kind, HtmlTokenKind::Comment(ref s) if s == "x"));
-        assert!(matches!(tokens[1].kind, HtmlTokenKind::StartTag { ref name, .. } if name == "div"));
+        assert!(
+            matches!(tokens[1].kind, HtmlTokenKind::StartTag { ref name, .. } if name == "div")
+        );
         assert!(matches!(tokens[2].kind, HtmlTokenKind::Text(ref s) if s == "hi"));
         assert!(matches!(tokens[3].kind, HtmlTokenKind::EndTag { ref name } if name == "div"));
     }

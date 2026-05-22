@@ -109,7 +109,12 @@ pub struct ReportItem {
 }
 
 impl ReportItem {
-    pub fn new(target: impl Into<String>, status: ReportStatus, detail: impl Into<String>, path: Option<PathBuf>) -> Self {
+    pub fn new(
+        target: impl Into<String>,
+        status: ReportStatus,
+        detail: impl Into<String>,
+        path: Option<PathBuf>,
+    ) -> Self {
         Self {
             target: target.into(),
             status,
@@ -225,7 +230,12 @@ struct TargetSpec {
 
 impl TargetSpec {
     fn display(&self) -> String {
-        format!("{}::{}/{}", self.version_line.as_str(), self.package, self.entry)
+        format!(
+            "{}::{}/{}",
+            self.version_line.as_str(),
+            self.package,
+            self.entry
+        )
     }
 
     fn api_exports(&self) -> &'static [&'static str] {
@@ -349,7 +359,10 @@ impl TargetSpec {
                 "source-map-parity",
                 "runtime-parity",
             ],
-            TargetKind::Vue3Core | TargetKind::Vue3Dom | TargetKind::Vue3Ssr | TargetKind::Vue3Sfc => &[
+            TargetKind::Vue3Core
+            | TargetKind::Vue3Dom
+            | TargetKind::Vue3Ssr
+            | TargetKind::Vue3Sfc => &[
                 "schema-parity",
                 "exact-js-output",
                 "diagnostic-parity",
@@ -506,7 +519,10 @@ pub fn sync_official_tests(path: &Path, locked: bool, out_dir: &Path) -> JsonRep
                 });
                 if let Err(err) = write_json(&metadata_path, &metadata) {
                     return JsonReport::new("sync_official_tests", ReportStatus::Fail)
-                        .with_violations(vec![format!("failed to write {}: {err}", metadata_path.display())])
+                        .with_violations(vec![format!(
+                            "failed to write {}: {err}",
+                            metadata_path.display()
+                        )])
                         .with_note(format!("lock: {}", path.display()));
                 }
                 created.push(metadata_path.display().to_string());
@@ -546,9 +562,18 @@ pub fn export_api(scope: &SelectionArgs) -> JsonReport {
             version_line: target.version_line,
             package: target.package.to_string(),
             entry: target.entry.to_string(),
-            exports: target.api_exports().iter().map(|s| (*s).to_string()).collect(),
+            exports: target
+                .api_exports()
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
             status: "pending".into(),
-            source: if scope.rust { "rust-spec" } else { "official-spec" }.into(),
+            source: if scope.rust {
+                "rust-spec"
+            } else {
+                "official-spec"
+            }
+            .into(),
         };
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
@@ -599,7 +624,11 @@ pub fn generate_option_matrix(scope: &SelectionArgs) -> JsonReport {
             version_line: target.version_line,
             package: target.package.to_string(),
             entry: target.entry.to_string(),
-            required_options: target.option_categories().iter().map(|s| (*s).to_string()).collect(),
+            required_options: target
+                .option_categories()
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
             fixture_ids: Vec::new(),
             status: "pending".into(),
         };
@@ -626,8 +655,13 @@ pub fn audit_option_matrix(scope: &SelectionArgs) -> JsonReport {
         let path = target.relative_option_matrix_path();
         match read_json::<OptionMatrixFile>(&path) {
             Ok(matrix) => {
-                let expected: Vec<String> = target.option_categories().iter().map(|s| (*s).to_string()).collect();
-                if matrix.required_options == expected && matrix.version_line == target.version_line {
+                let expected: Vec<String> = target
+                    .option_categories()
+                    .iter()
+                    .map(|s| (*s).to_string())
+                    .collect();
+                if matrix.required_options == expected && matrix.version_line == target.version_line
+                {
                     items.push(ReportItem::new(
                         target.display(),
                         ReportStatus::Pass,
@@ -635,7 +669,10 @@ pub fn audit_option_matrix(scope: &SelectionArgs) -> JsonReport {
                         Some(path),
                     ));
                 } else {
-                    violations.push(format!("{} matrix contents do not match spec", path.display()));
+                    violations.push(format!(
+                        "{} matrix contents do not match spec",
+                        path.display()
+                    ));
                     items.push(ReportItem::new(
                         target.display(),
                         ReportStatus::Fail,
@@ -702,7 +739,11 @@ pub fn generate_output_contract(scope: &SelectionArgs) -> JsonReport {
             version_line: target.version_line,
             package: target.package.to_string(),
             entry: target.entry.to_string(),
-            required_modes: target.output_modes().iter().map(|s| (*s).to_string()).collect(),
+            required_modes: target
+                .output_modes()
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
             status: "pending".into(),
         };
         let _ = write_json(&path, &contract);
@@ -710,7 +751,10 @@ pub fn generate_output_contract(scope: &SelectionArgs) -> JsonReport {
         items.push(ReportItem::new(
             target.display(),
             ReportStatus::Pass,
-            format!("{} output contract modes seeded", contract.required_modes.len()),
+            format!(
+                "{} output contract modes seeded",
+                contract.required_modes.len()
+            ),
             Some(path),
         ));
     }
@@ -772,7 +816,12 @@ pub fn summarize_compat(_locked: bool, _path: &Path) -> JsonReport {
             option_path.exists(),
             output_path.exists()
         );
-        items.push(ReportItem::new(target.display(), ReportStatus::Pending, detail, None));
+        items.push(ReportItem::new(
+            target.display(),
+            ReportStatus::Pending,
+            detail,
+            None,
+        ));
     }
     JsonReport::new("summarize_compat", ReportStatus::Pending)
         .with_items(items)
@@ -909,7 +958,10 @@ fn select_targets(scope: &SelectionArgs) -> Vec<TargetSpec> {
 fn aggregate_status(items: &[ReportItem]) -> ReportStatus {
     if items.iter().any(|item| item.status == ReportStatus::Fail) {
         ReportStatus::Fail
-    } else if items.iter().any(|item| item.status == ReportStatus::Pending) {
+    } else if items
+        .iter()
+        .any(|item| item.status == ReportStatus::Pending)
+    {
         ReportStatus::Pending
     } else {
         ReportStatus::Pass
@@ -923,8 +975,8 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
-    let data = fs::read_to_string(path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
+    let data =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
     let value = serde_json::from_str(&data)
         .with_context(|| format!("failed to parse {}", path.display()))?;
     Ok(value)
