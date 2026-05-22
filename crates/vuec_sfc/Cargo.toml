@@ -1,0 +1,12 @@
+[package]
+name = "vuec_sfc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+vuec_ast = { path = "../vuec_ast" }
+vuec_diagnostics = { path = "../vuec_diagnostics" }
+vuec_js = { path = "../vuec_js" }
+vuec_source = { path = "../vuec_source" }

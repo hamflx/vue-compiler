@@ -1,0 +1,29 @@
+[vue2_6]
+repo = "https://github.com/vuejs/vue"
+rev = "af43c9d14dd087b9852912bd15b1eacbda0e13b0"
+
+[vue2_6.npm]
+vue = "2.6.14"
+"vue-template-compiler" = "2.6.14"
+
+[vue2_7]
+repo = "https://github.com/vuejs/vue"
+rev = "13f4e7dc03e2caed900ac70ff8b8fe58dda45663"
+
+[vue2_7.npm]
+vue = "2.7.16"
+"vue-template-compiler" = "2.7.16"
+
+[vue2_7.exports]
+"vue/compiler-sfc" = "./compiler-sfc/index.js"
+
+[vue3]
+repo = "https://github.com/vuejs/core"
+rev = "57545e958ae28ed17aa9e0ed321abcd8dc99f752"
+
+[vue3.npm]
+vue = "3.5.34"
+"@vue/compiler-core" = "3.5.34"
+"@vue/compiler-dom" = "3.5.34"
+"@vue/compiler-ssr" = "3.5.34"
+"@vue/compiler-sfc" = "3.5.34"

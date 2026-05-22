@@ -1,0 +1,13 @@
+[package]
+name = "vuec_vue3_core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+vuec_ast = { path = "../vuec_ast" }
+vuec_codegen = { path = "../vuec_codegen" }
+vuec_diagnostics = { path = "../vuec_diagnostics" }
+vuec_pass = { path = "../vuec_pass" }
+vuec_source = { path = "../vuec_source" }
