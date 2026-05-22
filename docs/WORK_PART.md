@@ -16,6 +16,15 @@
 
 ## Completed This Round
 
+- Upgraded `compat/options/*` from category-only placeholders to schema v2 option case matrices. Each row now records option path, accepted types, missing/undefined/null behavior notes, affected output fields, fixture source, input kind, method, execution mode, and status.
+- Replaced `run-option-matrix` scaffold output with a real Node probe that loads the pinned official npm package and the generated Rust alias package for the same target, runs each executable option row, compares affected fields, and writes `target/conformance/<lock-hash>/option-matrix.json`.
+- Added deterministic handling for `missing`, `undefined`, `null`, and concrete option values in the option probe input model, so future rows can test all required value states without changing runner architecture.
+- Wired Vue 2 `shouldDecodeNewlines` and `shouldDecodeNewlinesForHref` through `vuec_node_bridge` and adjusted Vue 2 attr codegen newline escaping so the executable Vue 2.6 decode rows pass.
+- Current `run-option-matrix` result: Vue 2.6 has 6 executable rows passing and 4 explicit pending rows; Vue 2.7 and Vue 3 option rows still expose real output/shape/codegen differences and remain failing rather than being hidden.
+- Verification this round: `cargo test -p vuec_vue2`, `cargo test -p vuec_node_bridge`, `cargo xtask generate-option-matrix --all`, `cargo xtask audit-option-matrix --all`, and `cargo xtask run-option-matrix --version-line vue2_6 --package vue-template-compiler`.
+
+## Previous Round
+
 - Added `vuec_node_bridge`, a JSON stdin/stdout bridge binary that lets generated Node alias packages call the current Rust Vue 2, Vue 3 core/dom/ssr, and SFC compiler entry points.
 - Implemented `xtask` generation for `target/compat/rust-alias/<version-line>/node_modules/...` packages matching the official package names and subpath layout, including Vue 2.7 `vue/compiler-sfc`.
 - Generated Rust alias exports from official API manifests so `Object.keys`, function arity/name/prototype shape, class-like exports, enum-like objects, symbol exports, package versions, and type declaration paths match the official manifests.
@@ -23,7 +32,7 @@
 - Regenerated Rust API manifests under `compat/api/rust/`; `cargo xtask export-api --all`, `cargo xtask diff-api --all`, and `cargo xtask verify-npm-alias --all` now pass.
 - This bridge is deliberately recorded as a development bridge, not the final NAPI package required by M16. Remaining official conformance and option/output contract work must still exercise real behavior and cannot rely on export shape alone.
 
-## Previous Round
+## Earlier API Round
 
 - Replaced the spec-only `export-api` behavior with a real Node probe that installs exact official npm package versions from `compat/official-revisions.lock` under `target/compat/npm/<version-line>` and records `Object.keys(require(...)).sort()`, export type details, function arity, class/async flags, package version, type declaration path, require status, lock hash, and official revision.
 - Changed `cargo xtask export-api --all` to generate both official and Rust-side manifests. Official manifests pass for all seven compiler targets; Rust manifests are generated as `pending` until alias packages exist under `target/compat/rust-alias/<version-line>`.

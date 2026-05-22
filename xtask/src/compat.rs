@@ -319,92 +319,6 @@ impl TargetSpec {
         )
     }
 
-    fn option_categories(&self) -> &'static [&'static str] {
-        match self.kind {
-            TargetKind::Vue26Template => &[
-                "modules",
-                "directives",
-                "warn",
-                "outputSourceRange",
-                "comments",
-                "delimiters",
-                "whitespace/preserveWhitespace",
-                "decode newlines",
-                "platform predicates",
-                "codeframe",
-            ],
-            TargetKind::Vue27Template => &[
-                "modules",
-                "directives",
-                "warn",
-                "outputSourceRange",
-                "comments",
-                "delimiters",
-                "whitespace/preserveWhitespace",
-                "decode newlines",
-                "platform predicates",
-                "codeframe",
-                "2.7 delta",
-            ],
-            TargetKind::Vue27Sfc => &[
-                "parse",
-                "compileTemplate",
-                "compileScript",
-                "compileStyle",
-                "source map",
-                "id/scope",
-                "TS/script setup",
-                "CSS modules/preprocess",
-            ],
-            TargetKind::Vue3Core => &[
-                "prefixIdentifiers",
-                "mode",
-                "hoistStatic",
-                "cacheHandlers",
-                "scopeId",
-                "slotted",
-                "isTS",
-                "expressionPlugins",
-                "nodeTransforms",
-                "directiveTransforms",
-                "transformAssetUrls",
-                "ssrCssVars",
-                "hmr",
-                "source map",
-                "error position",
-            ],
-            TargetKind::Vue3Dom => &[
-                "parser options",
-                "entity decode",
-                "custom element",
-                "v-model variants",
-                "event modifiers",
-                "binding modifiers",
-                "asset URL",
-            ],
-            TargetKind::Vue3Ssr => &[
-                "SSR mode",
-                "scope",
-                "slotted",
-                "teleport",
-                "suspense",
-                "SSR helpers",
-            ],
-            TargetKind::Vue3Sfc => &[
-                "parse",
-                "compileTemplate",
-                "compileScript",
-                "compileStyle",
-                "transformAssetUrls",
-                "ssrCssVars",
-                "HMR",
-                "source map",
-                "preprocess",
-                "macro/type resolve",
-            ],
-        }
-    }
-
     fn output_modes(&self) -> &'static [&'static str] {
         match self.kind {
             TargetKind::Vue26Template => &[
@@ -540,12 +454,77 @@ struct AllowedApiDiffEntry {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct OptionMatrixFile {
+    schema_version: u8,
     version_line: VersionLine,
     package: String,
     entry: String,
-    required_options: Vec<String>,
-    fixture_ids: Vec<String>,
     status: String,
+    rows: Vec<OptionMatrixRow>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct OptionMatrixRow {
+    option_name: String,
+    option_path: String,
+    entry: String,
+    version_line: VersionLine,
+    accepted_types: Vec<String>,
+    default_when_missing: String,
+    behavior_when_undefined: String,
+    behavior_when_null: String,
+    side_effects: Vec<String>,
+    diagnostics: Vec<String>,
+    output_fields_affected: Vec<String>,
+    official_fixture_ids: Vec<String>,
+    variant: String,
+    input_kind: String,
+    method: String,
+    fixture_id: String,
+    fixture_source: String,
+    option_value: Option<serde_json::Value>,
+    execution_mode: String,
+    status: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+struct OptionProbeOutput {
+    request: String,
+    fixture_id: String,
+    option_name: String,
+    option_path: String,
+    method: String,
+    side: String,
+    ok: bool,
+    value: Option<serde_json::Value>,
+    error: Option<OptionProbeError>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+struct OptionProbeError {
+    name: Option<String>,
+    code: Option<String>,
+    message: String,
+}
+
+#[derive(Clone, Debug)]
+struct OptionMatrixCase {
+    option_name: &'static str,
+    option_path: &'static str,
+    accepted_types: &'static [&'static str],
+    default_when_missing: &'static str,
+    behavior_when_undefined: &'static str,
+    behavior_when_null: &'static str,
+    side_effects: &'static [&'static str],
+    diagnostics: &'static [&'static str],
+    output_fields_affected: &'static [&'static str],
+    official_fixture_ids: &'static [&'static str],
+    variant: &'static str,
+    method: &'static str,
+    fixture_id: &'static str,
+    fixture_source: &'static str,
+    option_value: Option<serde_json::Value>,
+    execution_mode: &'static str,
+    pending: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -601,6 +580,724 @@ fn all_targets() -> &'static [TargetSpec] {
             entry: "index",
             kind: TargetKind::Vue3Sfc,
         },
+    ]
+}
+
+fn option_matrix_cases(target: TargetSpec) -> Vec<OptionMatrixCase> {
+    match target.kind {
+        TargetKind::Vue26Template => vec![
+            option_case(
+                "warn",
+                "warn",
+                &["boolean"],
+                "true",
+                "false",
+                "true",
+                &["emits diagnostics"],
+                &["warning-order"],
+                &["errors", "tips", "diagnostics"],
+                &["vue2-compiler-warning"],
+                "base",
+                "compile",
+                "vue2-compiler-warning",
+                r#"<script></script>"#,
+                Some(serde_json::json!({"warn": true})),
+                true,
+            ),
+            option_case(
+                "outputSourceRange",
+                "outputSourceRange",
+                &["boolean"],
+                "false",
+                "false",
+                "true",
+                &["adds source spans"],
+                &["codeframe"],
+                &["diagnostics"],
+                &["vue2-output-source-range"],
+                "base",
+                "compile",
+                "vue2-output-source-range",
+                r#"<div><span></div>"#,
+                Some(serde_json::json!({"outputSourceRange": true})),
+                true,
+            ),
+            option_case(
+                "comments",
+                "comments",
+                &["boolean"],
+                "false",
+                "false",
+                "true",
+                &["preserves comment nodes"],
+                &["comment-order"],
+                &["render"],
+                &["vue2-comments"],
+                "base",
+                "compile",
+                "vue2-comments",
+                r#"<div><!--x-->{{ msg }}</div>"#,
+                Some(serde_json::json!({"comments": true})),
+                false,
+            ),
+            option_case(
+                "delimiters",
+                "delimiters",
+                &["array"],
+                "default",
+                "undefined",
+                "undefined",
+                &["changes interpolation parser"],
+                &["interpolation"],
+                &["render"],
+                &["vue2-delimiters"],
+                "base",
+                "compile",
+                "vue2-delimiters",
+                r#"<div>[[ msg ]]</div>"#,
+                Some(serde_json::json!({"delimiters": ["[[", "]]"]})),
+                false,
+            ),
+            option_case(
+                "whitespace",
+                "whitespace",
+                &["string"],
+                "preserve",
+                "undefined",
+                "undefined",
+                &["condenses whitespace"],
+                &["whitespace"],
+                &["render"],
+                &["vue2-whitespace"],
+                "base",
+                "compile",
+                "vue2-whitespace",
+                r#"<div> a  b </div>"#,
+                Some(serde_json::json!({"whitespace": "condense"})),
+                false,
+            ),
+            option_case(
+                "preserveWhitespace",
+                "preserveWhitespace",
+                &["boolean"],
+                "true",
+                "false",
+                "true",
+                &["keeps whitespace text nodes"],
+                &["whitespace"],
+                &["render"],
+                &["vue2-preserve-whitespace"],
+                "base",
+                "compile",
+                "vue2-preserve-whitespace",
+                r#"<div> a </div>"#,
+                Some(serde_json::json!({"preserveWhitespace": false})),
+                false,
+            ),
+            option_case(
+                "shouldDecodeNewlines",
+                "shouldDecodeNewlines",
+                &["boolean"],
+                "false",
+                "false",
+                "true",
+                &["decodes newline entities in attributes"],
+                &["attribute decode"],
+                &["render"],
+                &["vue2-decode-newlines"],
+                "base",
+                "compile",
+                "vue2-decode-newlines",
+                r#"<a href="a&#10;b"></a>"#,
+                Some(serde_json::json!({"shouldDecodeNewlines": true})),
+                false,
+            ),
+            option_case(
+                "shouldDecodeNewlinesForHref",
+                "shouldDecodeNewlinesForHref",
+                &["boolean"],
+                "false",
+                "false",
+                "true",
+                &["decodes href newline entities"],
+                &["attribute decode"],
+                &["render"],
+                &["vue2-decode-newlines-href"],
+                "base",
+                "compile",
+                "vue2-decode-newlines-href",
+                r#"<a href="a&#10;b"></a>"#,
+                Some(serde_json::json!({"shouldDecodeNewlinesForHref": true})),
+                false,
+            ),
+            option_case(
+                "modules",
+                "modules",
+                &["array"],
+                "[]",
+                "undefined",
+                "undefined",
+                &["module hooks"],
+                &["modules"],
+                &["render"],
+                &["vue2-modules"],
+                "base",
+                "compile",
+                "vue2-modules",
+                r#"<div class="a"></div>"#,
+                Some(serde_json::json!({"modules": ["class"]})),
+                true,
+            ),
+            option_case(
+                "directives",
+                "directives",
+                &["object"],
+                "{}",
+                "undefined",
+                "undefined",
+                &["custom directives"],
+                &["directives"],
+                &["render"],
+                &["vue2-directives"],
+                "base",
+                "compile",
+                "vue2-directives",
+                r#"<div v-focus></div>"#,
+                Some(serde_json::json!({"directives": {"focus": "x"}})),
+                true,
+            ),
+        ],
+        TargetKind::Vue27Template => vue27_template_cases(target),
+        TargetKind::Vue27Sfc => vue27_sfc_cases(target),
+        TargetKind::Vue3Core => vue3_core_cases(target),
+        TargetKind::Vue3Dom => vue3_dom_cases(target),
+        TargetKind::Vue3Ssr => vue3_ssr_cases(target),
+        TargetKind::Vue3Sfc => vue3_sfc_cases(target),
+    }
+}
+
+fn option_case(
+    option_name: &'static str,
+    option_path: &'static str,
+    accepted_types: &'static [&'static str],
+    default_when_missing: &'static str,
+    behavior_when_undefined: &'static str,
+    behavior_when_null: &'static str,
+    side_effects: &'static [&'static str],
+    diagnostics: &'static [&'static str],
+    output_fields_affected: &'static [&'static str],
+    official_fixture_ids: &'static [&'static str],
+    variant: &'static str,
+    method: &'static str,
+    fixture_id: &'static str,
+    fixture_source: &'static str,
+    option_value: Option<serde_json::Value>,
+    pending: bool,
+) -> OptionMatrixCase {
+    OptionMatrixCase {
+        option_name,
+        option_path,
+        accepted_types,
+        default_when_missing,
+        behavior_when_undefined,
+        behavior_when_null,
+        side_effects,
+        diagnostics,
+        output_fields_affected,
+        official_fixture_ids,
+        variant,
+        method,
+        fixture_id,
+        fixture_source,
+        option_value,
+        execution_mode: if pending { "pending" } else { "diff" },
+        pending,
+    }
+}
+
+fn vue27_template_cases(_target: TargetSpec) -> Vec<OptionMatrixCase> {
+    vec![
+        option_case(
+            "warn",
+            "warn",
+            &["boolean"],
+            "true",
+            "false",
+            "true",
+            &["emits diagnostics"],
+            &["warning-order"],
+            &["errors", "tips", "diagnostics"],
+            &["vue27-warning"],
+            "base",
+            "compile",
+            "vue27-warning",
+            r#"<div>{{ msg }}</div>"#,
+            Some(serde_json::json!({"warn": true})),
+            false,
+        ),
+        option_case(
+            "modules",
+            "modules",
+            &["array"],
+            "[]",
+            "undefined",
+            "undefined",
+            &["module hooks"],
+            &["modules"],
+            &["render"],
+            &["vue27-modules"],
+            "base",
+            "compile",
+            "vue27-modules",
+            r#"<div class="a"></div>"#,
+            Some(serde_json::json!({"modules": ["class"]})),
+            true,
+        ),
+        option_case(
+            "directives",
+            "directives",
+            &["object"],
+            "{}",
+            "undefined",
+            "undefined",
+            &["custom directives"],
+            &["directives"],
+            &["render"],
+            &["vue27-directives"],
+            "base",
+            "compile",
+            "vue27-directives",
+            r#"<div v-focus></div>"#,
+            Some(serde_json::json!({"directives": {"focus": "x"}})),
+            true,
+        ),
+    ]
+}
+
+fn vue27_sfc_cases(_target: TargetSpec) -> Vec<OptionMatrixCase> {
+    vec![
+        option_case(
+            "parse",
+            "parse",
+            &["object"],
+            "{}",
+            "undefined",
+            "undefined",
+            &["descriptor parse"],
+            &["descriptor"],
+            &["template", "script", "styles"],
+            &["vue27-sfc-parse"],
+            "base",
+            "parse",
+            "vue27-sfc-parse",
+            r#"<template><div>{{ msg }}</div></template><script>export default {}</script><style scoped>.a{ color: v-bind(color); }</style>"#,
+            Some(serde_json::json!({"filename": "contract.vue"})),
+            false,
+        ),
+        option_case(
+            "compileTemplate",
+            "compileTemplate",
+            &["object"],
+            "{}",
+            "undefined",
+            "undefined",
+            &["template codegen"],
+            &["render"],
+            &["code", "map", "errors"],
+            &["vue27-sfc-template"],
+            "base",
+            "compileTemplate",
+            "vue27-sfc-template",
+            r#"<template><div>{{ msg }}</div></template><script>export default {}</script><style scoped>.a{ color: v-bind(color); }</style>"#,
+            Some(
+                serde_json::json!({"id": "data-v-contract", "scopeId": "data-v-contract", "ssr": false, "slotted": false}),
+            ),
+            false,
+        ),
+        option_case(
+            "compileScript",
+            "compileScript",
+            &["object"],
+            "{}",
+            "undefined",
+            "undefined",
+            &["script setup analysis"],
+            &["bindings"],
+            &["content", "bindings", "errors"],
+            &["vue27-sfc-script"],
+            "base",
+            "compileScript",
+            "vue27-sfc-script",
+            r#"<template><div>{{ msg }}</div></template><script setup lang="ts">const msg = 'x'</script>"#,
+            Some(serde_json::json!({"id": "data-v-contract"})),
+            true,
+        ),
+        option_case(
+            "compileStyle",
+            "compileStyle",
+            &["object"],
+            "{}",
+            "undefined",
+            "undefined",
+            &["style rewrite"],
+            &["source map"],
+            &["code", "map", "errors"],
+            &["vue27-sfc-style"],
+            "base",
+            "compileStyle",
+            "vue27-sfc-style",
+            r#"<style scoped>.a{ color: v-bind(color); }</style>"#,
+            Some(serde_json::json!({"id": "data-v-contract", "scoped": true, "vars": ["color"]})),
+            true,
+        ),
+    ]
+}
+
+fn vue3_core_cases(_target: TargetSpec) -> Vec<OptionMatrixCase> {
+    vec![
+        option_case(
+            "prefixIdentifiers",
+            "prefixIdentifiers",
+            &["boolean"],
+            "false",
+            "false",
+            "true",
+            &["prefixes identifiers in render code"],
+            &["codegen"],
+            &["code"],
+            &["vue3-core-prefix"],
+            "base",
+            "baseCompile",
+            "vue3-core-prefix",
+            r#"<div>{{ msg }}</div>"#,
+            Some(serde_json::json!({"prefixIdentifiers": true})),
+            false,
+        ),
+        option_case(
+            "mode",
+            "mode",
+            &["string"],
+            "module",
+            "module",
+            "module",
+            &["changes codegen wrapper"],
+            &["codegen"],
+            &["code"],
+            &["vue3-core-mode"],
+            "base",
+            "baseCompile",
+            "vue3-core-mode",
+            r#"<div>{{ msg }}</div>"#,
+            Some(serde_json::json!({"mode": "function"})),
+            false,
+        ),
+        option_case(
+            "hoistStatic",
+            "hoistStatic",
+            &["boolean"],
+            "false",
+            "false",
+            "true",
+            &["hoists static nodes"],
+            &["ast"],
+            &["ast_summary"],
+            &["vue3-core-hoist"],
+            "base",
+            "baseCompile",
+            "vue3-core-hoist",
+            r#"<div><span>static</span></div>"#,
+            Some(serde_json::json!({"hoistStatic": true})),
+            true,
+        ),
+        option_case(
+            "cacheHandlers",
+            "cacheHandlers",
+            &["boolean"],
+            "false",
+            "false",
+            "true",
+            &["caches event handlers"],
+            &["codegen"],
+            &["code"],
+            &["vue3-core-cache"],
+            "base",
+            "baseCompile",
+            "vue3-core-cache",
+            r#"<button @click="save"></button>"#,
+            Some(serde_json::json!({"cacheHandlers": true})),
+            true,
+        ),
+        option_case(
+            "scopeId",
+            "scopeId",
+            &["string"],
+            "none",
+            "undefined",
+            "undefined",
+            &["scopes generated code"],
+            &["codegen"],
+            &["code"],
+            &["vue3-core-scope"],
+            "base",
+            "baseCompile",
+            "vue3-core-scope",
+            r#"<div class="a"></div>"#,
+            Some(serde_json::json!({"scopeId": "data-v-x"})),
+            true,
+        ),
+        option_case(
+            "slotted",
+            "slotted",
+            &["boolean"],
+            "false",
+            "false",
+            "true",
+            &["marks slotted output"],
+            &["codegen"],
+            &["code"],
+            &["vue3-core-slotted"],
+            "base",
+            "baseCompile",
+            "vue3-core-slotted",
+            r#"<slot></slot>"#,
+            Some(serde_json::json!({"slotted": true})),
+            true,
+        ),
+        option_case(
+            "isTS",
+            "isTS",
+            &["boolean"],
+            "false",
+            "false",
+            "true",
+            &["parses TS expressions"],
+            &["parser"],
+            &["diagnostics"],
+            &["vue3-core-ts"],
+            "base",
+            "baseCompile",
+            "vue3-core-ts",
+            r#"<div>{{ foo as string }}</div>"#,
+            Some(serde_json::json!({"isTS": true})),
+            true,
+        ),
+        option_case(
+            "expressionPlugins",
+            "expressionPlugins",
+            &["array"],
+            "[]",
+            "undefined",
+            "undefined",
+            &["enables expression plugins"],
+            &["parser"],
+            &["diagnostics"],
+            &["vue3-core-expression-plugins"],
+            "base",
+            "baseCompile",
+            "vue3-core-expression-plugins",
+            r#"<div>{{ foo?.bar }}</div>"#,
+            Some(serde_json::json!({"expressionPlugins": ["typescript"]})),
+            true,
+        ),
+    ]
+}
+
+fn vue3_dom_cases(_target: TargetSpec) -> Vec<OptionMatrixCase> {
+    vec![
+        option_case(
+            "prefixIdentifiers",
+            "core.prefixIdentifiers",
+            &["boolean"],
+            "false",
+            "false",
+            "true",
+            &["dom codegen prefixing"],
+            &["codegen"],
+            &["code"],
+            &["vue3-dom-prefix"],
+            "dom",
+            "compile",
+            "vue3-dom-prefix",
+            r#"<div>{{ msg }}</div>"#,
+            Some(serde_json::json!({"prefixIdentifiers": true})),
+            false,
+        ),
+        option_case(
+            "transformAssetUrls",
+            "transformAssetUrls",
+            &["boolean"],
+            "true",
+            "true",
+            "false",
+            &["asset URL transform"],
+            &["asset URLs"],
+            &["code"],
+            &["vue3-dom-asset"],
+            "dom",
+            "compile",
+            "vue3-dom-asset",
+            r#"<img src="./a.png">"#,
+            Some(serde_json::json!({"transformAssetUrls": true})),
+            false,
+        ),
+        option_case(
+            "decodeEntities",
+            "decodeEntities",
+            &["boolean"],
+            "true",
+            "true",
+            "false",
+            &["decodes entities"],
+            &["entity decode"],
+            &["nodes"],
+            &["vue3-dom-entity"],
+            "dom",
+            "parse",
+            "vue3-dom-entity",
+            r#"<div>&amp;</div>"#,
+            Some(serde_json::json!({"decodeEntities": true})),
+            false,
+        ),
+        option_case(
+            "isCustomElement",
+            "isCustomElement",
+            &["array"],
+            "[]",
+            "undefined",
+            "undefined",
+            &["marks custom element"],
+            &["custom element"],
+            &["ast"],
+            &["vue3-dom-custom"],
+            "dom",
+            "parse",
+            "vue3-dom-custom",
+            r#"<custom-el></custom-el>"#,
+            Some(serde_json::json!({"isCustomElement": ["custom-el"]})),
+            true,
+        ),
+    ]
+}
+
+fn vue3_ssr_cases(_target: TargetSpec) -> Vec<OptionMatrixCase> {
+    vec![
+        option_case(
+            "scopeId",
+            "scopeId",
+            &["string"],
+            "none",
+            "undefined",
+            "undefined",
+            &["adds scope attributes"],
+            &["ssr codegen"],
+            &["code"],
+            &["vue3-ssr-scope"],
+            "ssr",
+            "compile",
+            "vue3-ssr-scope",
+            r#"<div class="a"></div>"#,
+            Some(serde_json::json!({"scopeId": "data-v-x"})),
+            false,
+        ),
+        option_case(
+            "slotted",
+            "slotted",
+            &["boolean"],
+            "false",
+            "false",
+            "true",
+            &["adds slotted marker"],
+            &["ssr codegen"],
+            &["code"],
+            &["vue3-ssr-slotted"],
+            "ssr",
+            "compile",
+            "vue3-ssr-slotted",
+            r#"<slot></slot>"#,
+            Some(serde_json::json!({"slotted": true})),
+            false,
+        ),
+    ]
+}
+
+fn vue3_sfc_cases(_target: TargetSpec) -> Vec<OptionMatrixCase> {
+    vec![
+        option_case(
+            "parse",
+            "parse",
+            &["object"],
+            "{}",
+            "undefined",
+            "undefined",
+            &["descriptor parse"],
+            &["descriptor"],
+            &["template", "script", "styles"],
+            &["vue3-sfc-parse"],
+            "base",
+            "parse",
+            "vue3-sfc-parse",
+            r#"<template><div>{{ msg }}</div></template><script setup lang="ts">const msg = 'x'</script><style scoped>.a{ color: v-bind(color); }</style>"#,
+            Some(serde_json::json!({"filename": "contract.vue"})),
+            false,
+        ),
+        option_case(
+            "compileTemplate",
+            "compileTemplate",
+            &["object"],
+            "{}",
+            "undefined",
+            "undefined",
+            &["template codegen"],
+            &["code", "map"],
+            &["code", "map", "errors"],
+            &["vue3-sfc-template"],
+            "base",
+            "compileTemplate",
+            "vue3-sfc-template",
+            r#"<template><div>{{ msg }}</div></template><script setup lang="ts">const msg = 'x'</script><style scoped>.a{ color: v-bind(color); }</style>"#,
+            Some(
+                serde_json::json!({"id": "data-v-contract", "scopeId": "data-v-contract", "ssr": false, "slotted": false}),
+            ),
+            false,
+        ),
+        option_case(
+            "compileScript",
+            "compileScript",
+            &["object"],
+            "{}",
+            "undefined",
+            "undefined",
+            &["script setup analysis"],
+            &["bindings"],
+            &["content", "bindings", "errors"],
+            &["vue3-sfc-script"],
+            "base",
+            "compileScript",
+            "vue3-sfc-script",
+            r#"<template><div>{{ msg }}</div></template><script setup lang="ts">const msg = 'x'</script>"#,
+            Some(
+                serde_json::json!({"id": "data-v-contract", "inlineTemplate": false, "refSugar": false}),
+            ),
+            true,
+        ),
+        option_case(
+            "compileStyle",
+            "compileStyle",
+            &["object"],
+            "{}",
+            "undefined",
+            "undefined",
+            &["style rewrite"],
+            &["source map"],
+            &["code", "map", "errors"],
+            &["vue3-sfc-style"],
+            "base",
+            "compileStyle",
+            "vue3-sfc-style",
+            r#"<style scoped>.a{ color: v-bind(color); }</style>"#,
+            Some(serde_json::json!({"id": "data-v-contract", "scoped": true, "vars": ["color"]})),
+            true,
+        ),
     ]
 }
 
@@ -1653,6 +2350,55 @@ fn run_output_contract_probe(
         .with_context(|| format!("failed to parse output contract probe for {request}"))
 }
 
+fn run_option_probe(
+    side: &str,
+    target: TargetSpec,
+    root: &Path,
+    request: &str,
+    method: &str,
+    fixture_source: &str,
+    fixture_id: &str,
+    option_name: &str,
+    option_path: &str,
+    input_kind: &str,
+    option_value: Option<&serde_json::Value>,
+) -> Result<OptionProbeOutput> {
+    let root = absolute_path(root);
+    let node = resolve_program("node");
+    let payload = serde_json::json!({
+        "request": request,
+        "method": method,
+        "source": fixture_source,
+        "fixture_id": fixture_id,
+        "option_name": option_name,
+        "option_path": option_path,
+        "input_kind": input_kind,
+        "option_value": option_value,
+        "target_package": target.package,
+        "target_entry": target.entry,
+    });
+    let output = Command::new(node)
+        .arg("-e")
+        .arg(OPTION_MATRIX_PROBE_SCRIPT)
+        .env("VUEC_OPTION_ROOT", &root)
+        .env("VUEC_OPTION_SIDE", side)
+        .env("VUEC_OPTION_PAYLOAD", serde_json::to_string(&payload)?)
+        .output()
+        .with_context(|| format!("failed to spawn option matrix probe for {request}"))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "node option matrix probe failed for {} with status {:?}\nstdout:\n{}\nstderr:\n{}",
+            request,
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    serde_json::from_str(stdout.trim())
+        .with_context(|| format!("failed to parse option matrix probe for {request}"))
+}
+
 fn output_contract_kind(target: TargetSpec) -> &'static str {
     match target.kind {
         TargetKind::Vue26Template | TargetKind::Vue27Template => "vue2-template",
@@ -1695,6 +2441,51 @@ fn output_contract_counts_from_items(items: &[ReportItem]) -> serde_json::Value 
         "pending": items.iter().filter(|item| item.status == ReportStatus::Pending).count(),
         "fail": items.iter().filter(|item| item.status == ReportStatus::Fail).count(),
     })
+}
+
+fn compare_option_probe(
+    row: &OptionMatrixRow,
+    official: &OptionProbeOutput,
+    rust: &OptionProbeOutput,
+) -> bool {
+    if official.ok != rust.ok {
+        return false;
+    }
+    if !official.ok {
+        return official.error == rust.error;
+    }
+    let official_value = official.value.as_ref().unwrap_or(&serde_json::Value::Null);
+    let rust_value = rust.value.as_ref().unwrap_or(&serde_json::Value::Null);
+    for field in &row.output_fields_affected {
+        let official_field = json_path(official_value, field);
+        let rust_field =
+            json_path(rust_value, field).or_else(|| rust_alias_field(rust_value, field));
+        if official_field != rust_field {
+            return false;
+        }
+    }
+    true
+}
+
+fn json_path<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
+    let mut cursor = value;
+    for segment in path.split('.') {
+        cursor = cursor.get(segment)?;
+    }
+    Some(cursor)
+}
+
+fn rust_alias_field<'a>(
+    value: &'a serde_json::Value,
+    field: &str,
+) -> Option<&'a serde_json::Value> {
+    match field {
+        "staticRenderFns" => value.get("static_render_fns"),
+        "ast" => value
+            .get("element_ast")
+            .or_else(|| value.get("ast_summary")),
+        _ => None,
+    }
 }
 
 fn alias_smoke_script(target: TargetSpec) -> String {
@@ -2139,6 +2930,136 @@ const counts = {
 process.stdout.write(JSON.stringify({ request, kind, fixture, counts, checks }));
 "#;
 
+const OPTION_MATRIX_PROBE_SCRIPT: &str = r#"
+const path = require('path');
+const { createRequire } = require('module');
+
+const root = process.env.VUEC_OPTION_ROOT;
+const side = process.env.VUEC_OPTION_SIDE;
+const payload = JSON.parse(process.env.VUEC_OPTION_PAYLOAD || '{}');
+const rootRequire = createRequire(path.join(root, 'package.json'));
+const request = payload.request;
+
+function load() {
+  return rootRequire(request);
+}
+
+function capture(fn) {
+  try {
+    return { ok: true, value: normalize(fn()) };
+  } catch (error) {
+    return {
+      ok: false,
+      error: {
+        name: error && error.name ? String(error.name) : null,
+        code: error && error.code ? String(error.code) : null,
+        message: normalizeMessage(error && error.message ? error.message : String(error))
+      }
+    };
+  }
+}
+
+function normalizeMessage(message) {
+  return String(message)
+    .replaceAll(root.replace(/\\/g, '/'), '<option-root>')
+    .replace(/\\/g, '/');
+}
+
+function normalize(value) {
+  if (value === undefined) return { __type: 'undefined' };
+  if (value === null) return null;
+  if (typeof value === 'function') return { __type: 'function', name: value.name, length: value.length };
+  if (typeof value === 'symbol') return { __type: 'symbol', description: value.description || null };
+  if (typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map(normalize);
+  const out = {};
+  for (const key of Object.keys(value).sort()) {
+    out[key] = normalize(value[key]);
+  }
+  return out;
+}
+
+function pathValue(value, optionPath) {
+  if (!optionPath) return value;
+  const segments = optionPath.split('.');
+  let cursor = value;
+  for (const segment of segments) {
+    if (cursor == null || typeof cursor !== 'object') return undefined;
+    cursor = cursor[segment];
+  }
+  return cursor;
+}
+
+function cloneOptionValue(optionValue) {
+  if (optionValue === null || optionValue === undefined) return optionValue;
+  return JSON.parse(JSON.stringify(optionValue));
+}
+
+function optionsArg() {
+  switch (payload.input_kind || 'value') {
+    case 'missing':
+      return { present: false, value: undefined };
+    case 'undefined':
+      return { present: true, value: undefined };
+    case 'null':
+      return { present: true, value: null };
+    default:
+      return { present: true, value: cloneOptionValue(payload.option_value) };
+  }
+}
+
+function optionObjectWithSource(baseSource) {
+  const arg = optionsArg();
+  const objectValue = arg.value && typeof arg.value === 'object' ? arg.value : {};
+  return Object.assign({ source: baseSource }, objectValue);
+}
+
+function invoke(api) {
+  const method = payload.method;
+  const fixture = payload.source;
+  const arg = optionsArg();
+  switch (method) {
+    case 'compile':
+      return capture(() => arg.present ? api.compile(fixture, arg.value) : api.compile(fixture));
+    case 'compileToFunctions':
+      return capture(() => arg.present ? api.compileToFunctions(fixture, arg.value, {}) : api.compileToFunctions(fixture));
+    case 'parse':
+      return capture(() => arg.present ? api.parse(fixture, arg.value) : api.parse(fixture));
+    case 'compileTemplate':
+      return capture(() => api.compileTemplate(optionObjectWithSource(fixture)));
+    case 'compileScript': {
+      return capture(() => {
+        const descriptor = api.parse(fixture, { filename: 'contract.vue' });
+        return arg.present ? api.compileScript(descriptor, arg.value) : api.compileScript(descriptor);
+      });
+    }
+    case 'compileStyle':
+      return capture(() => api.compileStyle(optionObjectWithSource(fixture)));
+    case 'baseCompile':
+      return capture(() => arg.present ? api.baseCompile(fixture, arg.value) : api.baseCompile(fixture));
+    case 'baseParse':
+      return capture(() => arg.present ? api.baseParse(fixture, arg.value) : api.baseParse(fixture));
+    default:
+      throw new Error(`unknown option matrix method ${method}`);
+  }
+}
+
+const api = load();
+const result = invoke(api);
+const normalized = {
+  side,
+  request,
+  method: payload.method,
+  fixture_id: payload.fixture_id,
+  option_name: payload.option_name,
+  option_path: payload.option_path,
+  ok: result.ok,
+  value: result.ok ? result.value : null,
+  error: result.ok ? null : result.error,
+};
+process.stdout.write(JSON.stringify(normalized));
+"#;
+
 pub fn generate_option_matrix(scope: &SelectionArgs) -> JsonReport {
     let targets = select_targets(scope);
     let mut created = Vec::new();
@@ -2148,24 +3069,69 @@ pub fn generate_option_matrix(scope: &SelectionArgs) -> JsonReport {
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
         }
+        let rows = option_matrix_cases(target)
+            .into_iter()
+            .map(|case| OptionMatrixRow {
+                option_name: case.option_name.to_string(),
+                option_path: case.option_path.to_string(),
+                entry: target.entry.to_string(),
+                version_line: target.version_line,
+                accepted_types: case
+                    .accepted_types
+                    .iter()
+                    .map(|s| (*s).to_string())
+                    .collect(),
+                default_when_missing: case.default_when_missing.to_string(),
+                behavior_when_undefined: case.behavior_when_undefined.to_string(),
+                behavior_when_null: case.behavior_when_null.to_string(),
+                side_effects: case.side_effects.iter().map(|s| (*s).to_string()).collect(),
+                diagnostics: case.diagnostics.iter().map(|s| (*s).to_string()).collect(),
+                output_fields_affected: case
+                    .output_fields_affected
+                    .iter()
+                    .map(|s| (*s).to_string())
+                    .collect(),
+                official_fixture_ids: case
+                    .official_fixture_ids
+                    .iter()
+                    .map(|s| (*s).to_string())
+                    .collect(),
+                variant: case.variant.to_string(),
+                input_kind: if case.option_value.is_some() {
+                    "value".into()
+                } else {
+                    "missing".into()
+                },
+                method: case.method.to_string(),
+                fixture_id: case.fixture_id.to_string(),
+                fixture_source: case.fixture_source.to_string(),
+                option_value: case.option_value.clone(),
+                execution_mode: case.execution_mode.to_string(),
+                status: if case.pending { "pending" } else { "pass" }.into(),
+            })
+            .collect::<Vec<_>>();
         let matrix = OptionMatrixFile {
+            schema_version: 2,
             version_line: target.version_line,
             package: target.package.to_string(),
             entry: target.entry.to_string(),
-            required_options: target
-                .option_categories()
-                .iter()
-                .map(|s| (*s).to_string())
-                .collect(),
-            fixture_ids: Vec::new(),
-            status: "pending".into(),
+            status: if rows.iter().any(|row| row.status == "pending") {
+                "pending".into()
+            } else {
+                "pass".into()
+            },
+            rows,
         };
         let _ = write_json(&path, &matrix);
         created.push(path.display().to_string());
         items.push(ReportItem::new(
             target.display(),
-            ReportStatus::Pass,
-            format!("{} option categories seeded", matrix.required_options.len()),
+            if matrix.status == "pass" {
+                ReportStatus::Pass
+            } else {
+                ReportStatus::Pending
+            },
+            format!("{} option cases seeded", matrix.rows.len()),
             Some(path),
         ));
     }
@@ -2183,13 +3149,12 @@ pub fn audit_option_matrix(scope: &SelectionArgs) -> JsonReport {
         let path = target.relative_option_matrix_path();
         match read_json::<OptionMatrixFile>(&path) {
             Ok(matrix) => {
-                let expected: Vec<String> = target
-                    .option_categories()
-                    .iter()
-                    .map(|s| (*s).to_string())
-                    .collect();
-                if matrix.required_options == expected && matrix.version_line == target.version_line
-                {
+                let expected = option_matrix_cases(target);
+                let has_expected_version = matrix.version_line == target.version_line;
+                let has_expected_entry = matrix.entry == target.entry;
+                let has_cases = matrix.rows.len() == expected.len();
+                let has_schema = matrix.schema_version >= 2;
+                if has_expected_version && has_expected_entry && has_cases && has_schema {
                     items.push(ReportItem::new(
                         target.display(),
                         ReportStatus::Pass,
@@ -2233,25 +3198,210 @@ pub fn audit_option_matrix(scope: &SelectionArgs) -> JsonReport {
 
 pub fn run_option_matrix(scope: &SelectionArgs) -> JsonReport {
     let targets = select_targets(scope);
+    let lock_path = PathBuf::from("compat/official-revisions.lock");
+    let lock_hash = file_sha256(&lock_path).ok();
+    let lock = match load_official_lock(&lock_path) {
+        Ok(lock) => lock,
+        Err(err) => {
+            let mut report = JsonReport::new("run_option_matrix", ReportStatus::Fail);
+            report.metadata = report.metadata.with_lock_hash(lock_hash);
+            return report
+                .with_scope(scope)
+                .with_violations(vec![format!("failed to load official lock: {err}")]);
+        }
+    };
     let mut items = Vec::new();
+    let mut violations = Vec::new();
+    let mut target_reports = Vec::new();
+    if let Err(err) = generate_rust_alias_packages(&targets) {
+        violations.push(format!("failed to generate Rust alias packages: {err:#}"));
+    }
     for target in targets {
         let path = target.relative_option_matrix_path();
-        let detail = if path.exists() {
-            "option matrix available; runtime execution not yet wired to final compiler backends"
+        let matrix = match read_json::<OptionMatrixFile>(&path) {
+            Ok(matrix) => matrix,
+            Err(err) => {
+                violations.push(format!(
+                    "{} option matrix missing/invalid: {err}",
+                    path.display()
+                ));
+                items.push(ReportItem::new(
+                    target.display(),
+                    ReportStatus::Fail,
+                    "option matrix missing or invalid",
+                    Some(path),
+                ));
+                continue;
+            }
+        };
+        let Some(baseline) = baseline_for(&lock, target.version_line) else {
+            violations.push(format!("{} has no official baseline", target.display()));
+            items.push(ReportItem::new(
+                target.display(),
+                ReportStatus::Fail,
+                "official baseline missing",
+                Some(path),
+            ));
+            continue;
+        };
+        let official_root = match ensure_official_npm_install(target.version_line, baseline) {
+            Ok(root) => root,
+            Err(err) => {
+                violations.push(format!(
+                    "{} official npm install failed: {err:#}",
+                    target.display()
+                ));
+                items.push(ReportItem::new(
+                    target.display(),
+                    ReportStatus::Fail,
+                    "official npm install failed",
+                    Some(path),
+                ));
+                continue;
+            }
+        };
+        let rust_root = rust_alias_root(target.version_line);
+        let mut row_reports = Vec::new();
+        for row in &matrix.rows {
+            if row.status == "pending" {
+                row_reports.push(serde_json::json!({
+                    "option_name": row.option_name,
+                    "option_path": row.option_path,
+                    "fixture_id": row.fixture_id,
+                    "method": row.method,
+                    "status": "pending",
+                    "detail": "option case is intentionally pending because the current Rust surface does not yet fully wire this option",
+                }));
+                continue;
+            }
+            let official_probe = run_option_probe(
+                "official",
+                target,
+                &official_root,
+                &api_require_request(target),
+                &row.method,
+                &row.fixture_source,
+                &row.fixture_id,
+                &row.option_name,
+                &row.option_path,
+                &row.input_kind,
+                row.option_value.as_ref(),
+            );
+            let rust_probe = run_option_probe(
+                "rust",
+                target,
+                &rust_root,
+                &api_require_request(target),
+                &row.method,
+                &row.fixture_source,
+                &row.fixture_id,
+                &row.option_name,
+                &row.option_path,
+                &row.input_kind,
+                row.option_value.as_ref(),
+            );
+            match (official_probe, rust_probe) {
+                (Ok(official), Ok(rust)) => {
+                    let equal = compare_option_probe(row, &official, &rust);
+                    let status = if equal { "pass" } else { "fail" };
+                    if !equal {
+                        violations.push(format!(
+                            "{} {}:{} option case diverged",
+                            target.display(),
+                            row.option_name,
+                            row.fixture_id
+                        ));
+                    }
+                    row_reports.push(serde_json::json!({
+                        "option_name": row.option_name,
+                        "option_path": row.option_path,
+                        "fixture_id": row.fixture_id,
+                        "method": row.method,
+                        "status": status,
+                        "official": official,
+                        "rust": rust,
+                    }));
+                }
+                (Err(err), _) | (_, Err(err)) => {
+                    violations.push(format!(
+                        "{} {}:{} option execution failed: {err:#}",
+                        target.display(),
+                        row.option_name,
+                        row.fixture_id
+                    ));
+                    row_reports.push(serde_json::json!({
+                        "option_name": row.option_name,
+                        "option_path": row.option_path,
+                        "fixture_id": row.fixture_id,
+                        "method": row.method,
+                        "status": "fail",
+                        "error": format!("{err:#}"),
+                    }));
+                }
+            }
+        }
+        let pass = row_reports
+            .iter()
+            .filter(|row| row.get("status").and_then(|s| s.as_str()) == Some("pass"))
+            .count();
+        let fail = row_reports
+            .iter()
+            .filter(|row| row.get("status").and_then(|s| s.as_str()) == Some("fail"))
+            .count();
+        let pending = row_reports
+            .iter()
+            .filter(|row| row.get("status").and_then(|s| s.as_str()) == Some("pending"))
+            .count();
+        let total = row_reports.len();
+        let status = if fail > 0 {
+            ReportStatus::Fail
+        } else if pending > 0 {
+            ReportStatus::Pending
         } else {
-            "option matrix missing"
+            ReportStatus::Pass
         };
         items.push(ReportItem::new(
             target.display(),
-            ReportStatus::Pending,
-            detail,
+            status,
+            format!("{pass}/{total} option rows passed, {fail} failed, {pending} pending"),
             Some(path),
         ));
+        target_reports.push(serde_json::json!({
+            "target": target.display(),
+            "version_line": target.version_line,
+            "package": target.package,
+            "entry": target.entry,
+            "rows": row_reports,
+        }));
     }
-    JsonReport::new("run_option_matrix", ReportStatus::Pending)
+    let report_path = PathBuf::from("target")
+        .join("conformance")
+        .join(lock_hash.as_deref().unwrap_or("unknown-lock"))
+        .join("option-matrix.json");
+    if let Some(parent) = report_path.parent() {
+        if let Err(err) = fs::create_dir_all(parent) {
+            violations.push(format!("failed to create {}: {err}", parent.display()));
+        }
+    }
+    let report_body = serde_json::json!({
+        "command": "run_option_matrix",
+        "lock_hash": lock_hash,
+        "targets": target_reports,
+        "counts": output_contract_counts_from_items(&items),
+    });
+    if let Err(err) = write_json(&report_path, &report_body) {
+        violations.push(format!("failed to write {}: {err}", report_path.display()));
+    }
+    let mut report = JsonReport::new("run_option_matrix", aggregate_status(&items));
+    report.metadata = report.metadata.with_lock_hash(lock_hash);
+    report
         .with_scope(scope)
         .with_items(items)
-        .with_note("option matrix execution is scaffolded and will become pass/fail once compiler backends land")
+        .with_violations(violations)
+        .with_created(vec![report_path.display().to_string()])
+        .with_note(
+            "option matrix now executes official vs Rust probe cases and records per-row results",
+        )
 }
 
 pub fn run_conformance(args: &ConformanceArgs) -> JsonReport {

@@ -1,0 +1,147 @@
+{
+  "schema_version": 2,
+  "version_line": "vue3",
+  "package": "@vue/compiler-dom",
+  "entry": "index",
+  "status": "pending",
+  "rows": [
+    {
+      "option_name": "prefixIdentifiers",
+      "option_path": "core.prefixIdentifiers",
+      "entry": "index",
+      "version_line": "vue3",
+      "accepted_types": [
+        "boolean"
+      ],
+      "default_when_missing": "false",
+      "behavior_when_undefined": "false",
+      "behavior_when_null": "true",
+      "side_effects": [
+        "dom codegen prefixing"
+      ],
+      "diagnostics": [
+        "codegen"
+      ],
+      "output_fields_affected": [
+        "code"
+      ],
+      "official_fixture_ids": [
+        "vue3-dom-prefix"
+      ],
+      "variant": "dom",
+      "input_kind": "value",
+      "method": "compile",
+      "fixture_id": "vue3-dom-prefix",
+      "fixture_source": "<div>{{ msg }}</div>",
+      "option_value": {
+        "prefixIdentifiers": true
+      },
+      "execution_mode": "diff",
+      "status": "pass"
+    },
+    {
+      "option_name": "transformAssetUrls",
+      "option_path": "transformAssetUrls",
+      "entry": "index",
+      "version_line": "vue3",
+      "accepted_types": [
+        "boolean"
+      ],
+      "default_when_missing": "true",
+      "behavior_when_undefined": "true",
+      "behavior_when_null": "false",
+      "side_effects": [
+        "asset URL transform"
+      ],
+      "diagnostics": [
+        "asset URLs"
+      ],
+      "output_fields_affected": [
+        "code"
+      ],
+      "official_fixture_ids": [
+        "vue3-dom-asset"
+      ],
+      "variant": "dom",
+      "input_kind": "value",
+      "method": "compile",
+      "fixture_id": "vue3-dom-asset",
+      "fixture_source": "<img src=\"./a.png\">",
+      "option_value": {
+        "transformAssetUrls": true
+      },
+      "execution_mode": "diff",
+      "status": "pass"
+    },
+    {
+      "option_name": "decodeEntities",
+      "option_path": "decodeEntities",
+      "entry": "index",
+      "version_line": "vue3",
+      "accepted_types": [
+        "boolean"
+      ],
+      "default_when_missing": "true",
+      "behavior_when_undefined": "true",
+      "behavior_when_null": "false",
+      "side_effects": [
+        "decodes entities"
+      ],
+      "diagnostics": [
+        "entity decode"
+      ],
+      "output_fields_affected": [
+        "nodes"
+      ],
+      "official_fixture_ids": [
+        "vue3-dom-entity"
+      ],
+      "variant": "dom",
+      "input_kind": "value",
+      "method": "parse",
+      "fixture_id": "vue3-dom-entity",
+      "fixture_source": "<div>&amp;</div>",
+      "option_value": {
+        "decodeEntities": true
+      },
+      "execution_mode": "diff",
+      "status": "pass"
+    },
+    {
+      "option_name": "isCustomElement",
+      "option_path": "isCustomElement",
+      "entry": "index",
+      "version_line": "vue3",
+      "accepted_types": [
+        "array"
+      ],
+      "default_when_missing": "[]",
+      "behavior_when_undefined": "undefined",
+      "behavior_when_null": "undefined",
+      "side_effects": [
+        "marks custom element"
+      ],
+      "diagnostics": [
+        "custom element"
+      ],
+      "output_fields_affected": [
+        "ast"
+      ],
+      "official_fixture_ids": [
+        "vue3-dom-custom"
+      ],
+      "variant": "dom",
+      "input_kind": "value",
+      "method": "parse",
+      "fixture_id": "vue3-dom-custom",
+      "fixture_source": "<custom-el></custom-el>",
+      "option_value": {
+        "isCustomElement": [
+          "custom-el"
+        ]
+      },
+      "execution_mode": "pending",
+      "status": "pending"
+    }
+  ]
+}

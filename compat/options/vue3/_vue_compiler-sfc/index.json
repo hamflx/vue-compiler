@@ -1,0 +1,163 @@
+{
+  "schema_version": 2,
+  "version_line": "vue3",
+  "package": "@vue/compiler-sfc",
+  "entry": "index",
+  "status": "pending",
+  "rows": [
+    {
+      "option_name": "parse",
+      "option_path": "parse",
+      "entry": "index",
+      "version_line": "vue3",
+      "accepted_types": [
+        "object"
+      ],
+      "default_when_missing": "{}",
+      "behavior_when_undefined": "undefined",
+      "behavior_when_null": "undefined",
+      "side_effects": [
+        "descriptor parse"
+      ],
+      "diagnostics": [
+        "descriptor"
+      ],
+      "output_fields_affected": [
+        "template",
+        "script",
+        "styles"
+      ],
+      "official_fixture_ids": [
+        "vue3-sfc-parse"
+      ],
+      "variant": "base",
+      "input_kind": "value",
+      "method": "parse",
+      "fixture_id": "vue3-sfc-parse",
+      "fixture_source": "<template><div>{{ msg }}</div></template><script setup lang=\"ts\">const msg = 'x'</script><style scoped>.a{ color: v-bind(color); }</style>",
+      "option_value": {
+        "filename": "contract.vue"
+      },
+      "execution_mode": "diff",
+      "status": "pass"
+    },
+    {
+      "option_name": "compileTemplate",
+      "option_path": "compileTemplate",
+      "entry": "index",
+      "version_line": "vue3",
+      "accepted_types": [
+        "object"
+      ],
+      "default_when_missing": "{}",
+      "behavior_when_undefined": "undefined",
+      "behavior_when_null": "undefined",
+      "side_effects": [
+        "template codegen"
+      ],
+      "diagnostics": [
+        "code",
+        "map"
+      ],
+      "output_fields_affected": [
+        "code",
+        "map",
+        "errors"
+      ],
+      "official_fixture_ids": [
+        "vue3-sfc-template"
+      ],
+      "variant": "base",
+      "input_kind": "value",
+      "method": "compileTemplate",
+      "fixture_id": "vue3-sfc-template",
+      "fixture_source": "<template><div>{{ msg }}</div></template><script setup lang=\"ts\">const msg = 'x'</script><style scoped>.a{ color: v-bind(color); }</style>",
+      "option_value": {
+        "id": "data-v-contract",
+        "scopeId": "data-v-contract",
+        "slotted": false,
+        "ssr": false
+      },
+      "execution_mode": "diff",
+      "status": "pass"
+    },
+    {
+      "option_name": "compileScript",
+      "option_path": "compileScript",
+      "entry": "index",
+      "version_line": "vue3",
+      "accepted_types": [
+        "object"
+      ],
+      "default_when_missing": "{}",
+      "behavior_when_undefined": "undefined",
+      "behavior_when_null": "undefined",
+      "side_effects": [
+        "script setup analysis"
+      ],
+      "diagnostics": [
+        "bindings"
+      ],
+      "output_fields_affected": [
+        "content",
+        "bindings",
+        "errors"
+      ],
+      "official_fixture_ids": [
+        "vue3-sfc-script"
+      ],
+      "variant": "base",
+      "input_kind": "value",
+      "method": "compileScript",
+      "fixture_id": "vue3-sfc-script",
+      "fixture_source": "<template><div>{{ msg }}</div></template><script setup lang=\"ts\">const msg = 'x'</script>",
+      "option_value": {
+        "id": "data-v-contract",
+        "inlineTemplate": false,
+        "refSugar": false
+      },
+      "execution_mode": "pending",
+      "status": "pending"
+    },
+    {
+      "option_name": "compileStyle",
+      "option_path": "compileStyle",
+      "entry": "index",
+      "version_line": "vue3",
+      "accepted_types": [
+        "object"
+      ],
+      "default_when_missing": "{}",
+      "behavior_when_undefined": "undefined",
+      "behavior_when_null": "undefined",
+      "side_effects": [
+        "style rewrite"
+      ],
+      "diagnostics": [
+        "source map"
+      ],
+      "output_fields_affected": [
+        "code",
+        "map",
+        "errors"
+      ],
+      "official_fixture_ids": [
+        "vue3-sfc-style"
+      ],
+      "variant": "base",
+      "input_kind": "value",
+      "method": "compileStyle",
+      "fixture_id": "vue3-sfc-style",
+      "fixture_source": "<style scoped>.a{ color: v-bind(color); }</style>",
+      "option_value": {
+        "id": "data-v-contract",
+        "scoped": true,
+        "vars": [
+          "color"
+        ]
+      },
+      "execution_mode": "pending",
+      "status": "pending"
+    }
+  ]
+}

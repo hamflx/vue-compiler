@@ -1,0 +1,283 @@
+{
+  "schema_version": 2,
+  "version_line": "vue3",
+  "package": "@vue/compiler-core",
+  "entry": "index",
+  "status": "pending",
+  "rows": [
+    {
+      "option_name": "prefixIdentifiers",
+      "option_path": "prefixIdentifiers",
+      "entry": "index",
+      "version_line": "vue3",
+      "accepted_types": [
+        "boolean"
+      ],
+      "default_when_missing": "false",
+      "behavior_when_undefined": "false",
+      "behavior_when_null": "true",
+      "side_effects": [
+        "prefixes identifiers in render code"
+      ],
+      "diagnostics": [
+        "codegen"
+      ],
+      "output_fields_affected": [
+        "code"
+      ],
+      "official_fixture_ids": [
+        "vue3-core-prefix"
+      ],
+      "variant": "base",
+      "input_kind": "value",
+      "method": "baseCompile",
+      "fixture_id": "vue3-core-prefix",
+      "fixture_source": "<div>{{ msg }}</div>",
+      "option_value": {
+        "prefixIdentifiers": true
+      },
+      "execution_mode": "diff",
+      "status": "pass"
+    },
+    {
+      "option_name": "mode",
+      "option_path": "mode",
+      "entry": "index",
+      "version_line": "vue3",
+      "accepted_types": [
+        "string"
+      ],
+      "default_when_missing": "module",
+      "behavior_when_undefined": "module",
+      "behavior_when_null": "module",
+      "side_effects": [
+        "changes codegen wrapper"
+      ],
+      "diagnostics": [
+        "codegen"
+      ],
+      "output_fields_affected": [
+        "code"
+      ],
+      "official_fixture_ids": [
+        "vue3-core-mode"
+      ],
+      "variant": "base",
+      "input_kind": "value",
+      "method": "baseCompile",
+      "fixture_id": "vue3-core-mode",
+      "fixture_source": "<div>{{ msg }}</div>",
+      "option_value": {
+        "mode": "function"
+      },
+      "execution_mode": "diff",
+      "status": "pass"
+    },
+    {
+      "option_name": "hoistStatic",
+      "option_path": "hoistStatic",
+      "entry": "index",
+      "version_line": "vue3",
+      "accepted_types": [
+        "boolean"
+      ],
+      "default_when_missing": "false",
+      "behavior_when_undefined": "false",
+      "behavior_when_null": "true",
+      "side_effects": [
+        "hoists static nodes"
+      ],
+      "diagnostics": [
+        "ast"
+      ],
+      "output_fields_affected": [
+        "ast_summary"
+      ],
+      "official_fixture_ids": [
+        "vue3-core-hoist"
+      ],
+      "variant": "base",
+      "input_kind": "value",
+      "method": "baseCompile",
+      "fixture_id": "vue3-core-hoist",
+      "fixture_source": "<div><span>static</span></div>",
+      "option_value": {
+        "hoistStatic": true
+      },
+      "execution_mode": "pending",
+      "status": "pending"
+    },
+    {
+      "option_name": "cacheHandlers",
+      "option_path": "cacheHandlers",
+      "entry": "index",
+      "version_line": "vue3",
+      "accepted_types": [
+        "boolean"
+      ],
+      "default_when_missing": "false",
+      "behavior_when_undefined": "false",
+      "behavior_when_null": "true",
+      "side_effects": [
+        "caches event handlers"
+      ],
+      "diagnostics": [
+        "codegen"
+      ],
+      "output_fields_affected": [
+        "code"
+      ],
+      "official_fixture_ids": [
+        "vue3-core-cache"
+      ],
+      "variant": "base",
+      "input_kind": "value",
+      "method": "baseCompile",
+      "fixture_id": "vue3-core-cache",
+      "fixture_source": "<button @click=\"save\"></button>",
+      "option_value": {
+        "cacheHandlers": true
+      },
+      "execution_mode": "pending",
+      "status": "pending"
+    },
+    {
+      "option_name": "scopeId",
+      "option_path": "scopeId",
+      "entry": "index",
+      "version_line": "vue3",
+      "accepted_types": [
+        "string"
+      ],
+      "default_when_missing": "none",
+      "behavior_when_undefined": "undefined",
+      "behavior_when_null": "undefined",
+      "side_effects": [
+        "scopes generated code"
+      ],
+      "diagnostics": [
+        "codegen"
+      ],
+      "output_fields_affected": [
+        "code"
+      ],
+      "official_fixture_ids": [
+        "vue3-core-scope"
+      ],
+      "variant": "base",
+      "input_kind": "value",
+      "method": "baseCompile",
+      "fixture_id": "vue3-core-scope",
+      "fixture_source": "<div class=\"a\"></div>",
+      "option_value": {
+        "scopeId": "data-v-x"
+      },
+      "execution_mode": "pending",
+      "status": "pending"
+    },
+    {
+      "option_name": "slotted",
+      "option_path": "slotted",
+      "entry": "index",
+      "version_line": "vue3",
+      "accepted_types": [
+        "boolean"
+      ],
+      "default_when_missing": "false",
+      "behavior_when_undefined": "false",
+      "behavior_when_null": "true",
+      "side_effects": [
+        "marks slotted output"
+      ],
+      "diagnostics": [
+        "codegen"
+      ],
+      "output_fields_affected": [
+        "code"
+      ],
+      "official_fixture_ids": [
+        "vue3-core-slotted"
+      ],
+      "variant": "base",
+      "input_kind": "value",
+      "method": "baseCompile",
+      "fixture_id": "vue3-core-slotted",
+      "fixture_source": "<slot></slot>",
+      "option_value": {
+        "slotted": true
+      },
+      "execution_mode": "pending",
+      "status": "pending"
+    },
+    {
+      "option_name": "isTS",
+      "option_path": "isTS",
+      "entry": "index",
+      "version_line": "vue3",
+      "accepted_types": [
+        "boolean"
+      ],
+      "default_when_missing": "false",
+      "behavior_when_undefined": "false",
+      "behavior_when_null": "true",
+      "side_effects": [
+        "parses TS expressions"
+      ],
+      "diagnostics": [
+        "parser"
+      ],
+      "output_fields_affected": [
+        "diagnostics"
+      ],
+      "official_fixture_ids": [
+        "vue3-core-ts"
+      ],
+      "variant": "base",
+      "input_kind": "value",
+      "method": "baseCompile",
+      "fixture_id": "vue3-core-ts",
+      "fixture_source": "<div>{{ foo as string }}</div>",
+      "option_value": {
+        "isTS": true
+      },
+      "execution_mode": "pending",
+      "status": "pending"
+    },
+    {
+      "option_name": "expressionPlugins",
+      "option_path": "expressionPlugins",
+      "entry": "index",
+      "version_line": "vue3",
+      "accepted_types": [
+        "array"
+      ],
+      "default_when_missing": "[]",
+      "behavior_when_undefined": "undefined",
+      "behavior_when_null": "undefined",
+      "side_effects": [
+        "enables expression plugins"
+      ],
+      "diagnostics": [
+        "parser"
+      ],
+      "output_fields_affected": [
+        "diagnostics"
+      ],
+      "official_fixture_ids": [
+        "vue3-core-expression-plugins"
+      ],
+      "variant": "base",
+      "input_kind": "value",
+      "method": "baseCompile",
+      "fixture_id": "vue3-core-expression-plugins",
+      "fixture_source": "<div>{{ foo?.bar }}</div>",
+      "option_value": {
+        "expressionPlugins": [
+          "typescript"
+        ]
+      },
+      "execution_mode": "pending",
+      "status": "pending"
+    }
+  ]
+}

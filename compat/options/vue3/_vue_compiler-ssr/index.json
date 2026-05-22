@@ -1,0 +1,77 @@
+{
+  "schema_version": 2,
+  "version_line": "vue3",
+  "package": "@vue/compiler-ssr",
+  "entry": "index",
+  "status": "pass",
+  "rows": [
+    {
+      "option_name": "scopeId",
+      "option_path": "scopeId",
+      "entry": "index",
+      "version_line": "vue3",
+      "accepted_types": [
+        "string"
+      ],
+      "default_when_missing": "none",
+      "behavior_when_undefined": "undefined",
+      "behavior_when_null": "undefined",
+      "side_effects": [
+        "adds scope attributes"
+      ],
+      "diagnostics": [
+        "ssr codegen"
+      ],
+      "output_fields_affected": [
+        "code"
+      ],
+      "official_fixture_ids": [
+        "vue3-ssr-scope"
+      ],
+      "variant": "ssr",
+      "input_kind": "value",
+      "method": "compile",
+      "fixture_id": "vue3-ssr-scope",
+      "fixture_source": "<div class=\"a\"></div>",
+      "option_value": {
+        "scopeId": "data-v-x"
+      },
+      "execution_mode": "diff",
+      "status": "pass"
+    },
+    {
+      "option_name": "slotted",
+      "option_path": "slotted",
+      "entry": "index",
+      "version_line": "vue3",
+      "accepted_types": [
+        "boolean"
+      ],
+      "default_when_missing": "false",
+      "behavior_when_undefined": "false",
+      "behavior_when_null": "true",
+      "side_effects": [
+        "adds slotted marker"
+      ],
+      "diagnostics": [
+        "ssr codegen"
+      ],
+      "output_fields_affected": [
+        "code"
+      ],
+      "official_fixture_ids": [
+        "vue3-ssr-slotted"
+      ],
+      "variant": "ssr",
+      "input_kind": "value",
+      "method": "compile",
+      "fixture_id": "vue3-ssr-slotted",
+      "fixture_source": "<slot></slot>",
+      "option_value": {
+        "slotted": true
+      },
+      "execution_mode": "diff",
+      "status": "pass"
+    }
+  ]
+}

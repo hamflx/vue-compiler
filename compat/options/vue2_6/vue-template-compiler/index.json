@@ -1,19 +1,358 @@
 {
+  "schema_version": 2,
   "version_line": "vue2_6",
   "package": "vue-template-compiler",
   "entry": "index",
-  "required_options": [
-    "modules",
-    "directives",
-    "warn",
-    "outputSourceRange",
-    "comments",
-    "delimiters",
-    "whitespace/preserveWhitespace",
-    "decode newlines",
-    "platform predicates",
-    "codeframe"
-  ],
-  "fixture_ids": [],
-  "status": "pending"
+  "status": "pending",
+  "rows": [
+    {
+      "option_name": "warn",
+      "option_path": "warn",
+      "entry": "index",
+      "version_line": "vue2_6",
+      "accepted_types": [
+        "boolean"
+      ],
+      "default_when_missing": "true",
+      "behavior_when_undefined": "false",
+      "behavior_when_null": "true",
+      "side_effects": [
+        "emits diagnostics"
+      ],
+      "diagnostics": [
+        "warning-order"
+      ],
+      "output_fields_affected": [
+        "errors",
+        "tips",
+        "diagnostics"
+      ],
+      "official_fixture_ids": [
+        "vue2-compiler-warning"
+      ],
+      "variant": "base",
+      "input_kind": "value",
+      "method": "compile",
+      "fixture_id": "vue2-compiler-warning",
+      "fixture_source": "<script></script>",
+      "option_value": {
+        "warn": true
+      },
+      "execution_mode": "pending",
+      "status": "pending"
+    },
+    {
+      "option_name": "outputSourceRange",
+      "option_path": "outputSourceRange",
+      "entry": "index",
+      "version_line": "vue2_6",
+      "accepted_types": [
+        "boolean"
+      ],
+      "default_when_missing": "false",
+      "behavior_when_undefined": "false",
+      "behavior_when_null": "true",
+      "side_effects": [
+        "adds source spans"
+      ],
+      "diagnostics": [
+        "codeframe"
+      ],
+      "output_fields_affected": [
+        "diagnostics"
+      ],
+      "official_fixture_ids": [
+        "vue2-output-source-range"
+      ],
+      "variant": "base",
+      "input_kind": "value",
+      "method": "compile",
+      "fixture_id": "vue2-output-source-range",
+      "fixture_source": "<div><span></div>",
+      "option_value": {
+        "outputSourceRange": true
+      },
+      "execution_mode": "pending",
+      "status": "pending"
+    },
+    {
+      "option_name": "comments",
+      "option_path": "comments",
+      "entry": "index",
+      "version_line": "vue2_6",
+      "accepted_types": [
+        "boolean"
+      ],
+      "default_when_missing": "false",
+      "behavior_when_undefined": "false",
+      "behavior_when_null": "true",
+      "side_effects": [
+        "preserves comment nodes"
+      ],
+      "diagnostics": [
+        "comment-order"
+      ],
+      "output_fields_affected": [
+        "render"
+      ],
+      "official_fixture_ids": [
+        "vue2-comments"
+      ],
+      "variant": "base",
+      "input_kind": "value",
+      "method": "compile",
+      "fixture_id": "vue2-comments",
+      "fixture_source": "<div><!--x-->{{ msg }}</div>",
+      "option_value": {
+        "comments": true
+      },
+      "execution_mode": "diff",
+      "status": "pass"
+    },
+    {
+      "option_name": "delimiters",
+      "option_path": "delimiters",
+      "entry": "index",
+      "version_line": "vue2_6",
+      "accepted_types": [
+        "array"
+      ],
+      "default_when_missing": "default",
+      "behavior_when_undefined": "undefined",
+      "behavior_when_null": "undefined",
+      "side_effects": [
+        "changes interpolation parser"
+      ],
+      "diagnostics": [
+        "interpolation"
+      ],
+      "output_fields_affected": [
+        "render"
+      ],
+      "official_fixture_ids": [
+        "vue2-delimiters"
+      ],
+      "variant": "base",
+      "input_kind": "value",
+      "method": "compile",
+      "fixture_id": "vue2-delimiters",
+      "fixture_source": "<div>[[ msg ]]</div>",
+      "option_value": {
+        "delimiters": [
+          "[[",
+          "]]"
+        ]
+      },
+      "execution_mode": "diff",
+      "status": "pass"
+    },
+    {
+      "option_name": "whitespace",
+      "option_path": "whitespace",
+      "entry": "index",
+      "version_line": "vue2_6",
+      "accepted_types": [
+        "string"
+      ],
+      "default_when_missing": "preserve",
+      "behavior_when_undefined": "undefined",
+      "behavior_when_null": "undefined",
+      "side_effects": [
+        "condenses whitespace"
+      ],
+      "diagnostics": [
+        "whitespace"
+      ],
+      "output_fields_affected": [
+        "render"
+      ],
+      "official_fixture_ids": [
+        "vue2-whitespace"
+      ],
+      "variant": "base",
+      "input_kind": "value",
+      "method": "compile",
+      "fixture_id": "vue2-whitespace",
+      "fixture_source": "<div> a  b </div>",
+      "option_value": {
+        "whitespace": "condense"
+      },
+      "execution_mode": "diff",
+      "status": "pass"
+    },
+    {
+      "option_name": "preserveWhitespace",
+      "option_path": "preserveWhitespace",
+      "entry": "index",
+      "version_line": "vue2_6",
+      "accepted_types": [
+        "boolean"
+      ],
+      "default_when_missing": "true",
+      "behavior_when_undefined": "false",
+      "behavior_when_null": "true",
+      "side_effects": [
+        "keeps whitespace text nodes"
+      ],
+      "diagnostics": [
+        "whitespace"
+      ],
+      "output_fields_affected": [
+        "render"
+      ],
+      "official_fixture_ids": [
+        "vue2-preserve-whitespace"
+      ],
+      "variant": "base",
+      "input_kind": "value",
+      "method": "compile",
+      "fixture_id": "vue2-preserve-whitespace",
+      "fixture_source": "<div> a </div>",
+      "option_value": {
+        "preserveWhitespace": false
+      },
+      "execution_mode": "diff",
+      "status": "pass"
+    },
+    {
+      "option_name": "shouldDecodeNewlines",
+      "option_path": "shouldDecodeNewlines",
+      "entry": "index",
+      "version_line": "vue2_6",
+      "accepted_types": [
+        "boolean"
+      ],
+      "default_when_missing": "false",
+      "behavior_when_undefined": "false",
+      "behavior_when_null": "true",
+      "side_effects": [
+        "decodes newline entities in attributes"
+      ],
+      "diagnostics": [
+        "attribute decode"
+      ],
+      "output_fields_affected": [
+        "render"
+      ],
+      "official_fixture_ids": [
+        "vue2-decode-newlines"
+      ],
+      "variant": "base",
+      "input_kind": "value",
+      "method": "compile",
+      "fixture_id": "vue2-decode-newlines",
+      "fixture_source": "<a href=\"a&#10;b\"></a>",
+      "option_value": {
+        "shouldDecodeNewlines": true
+      },
+      "execution_mode": "diff",
+      "status": "pass"
+    },
+    {
+      "option_name": "shouldDecodeNewlinesForHref",
+      "option_path": "shouldDecodeNewlinesForHref",
+      "entry": "index",
+      "version_line": "vue2_6",
+      "accepted_types": [
+        "boolean"
+      ],
+      "default_when_missing": "false",
+      "behavior_when_undefined": "false",
+      "behavior_when_null": "true",
+      "side_effects": [
+        "decodes href newline entities"
+      ],
+      "diagnostics": [
+        "attribute decode"
+      ],
+      "output_fields_affected": [
+        "render"
+      ],
+      "official_fixture_ids": [
+        "vue2-decode-newlines-href"
+      ],
+      "variant": "base",
+      "input_kind": "value",
+      "method": "compile",
+      "fixture_id": "vue2-decode-newlines-href",
+      "fixture_source": "<a href=\"a&#10;b\"></a>",
+      "option_value": {
+        "shouldDecodeNewlinesForHref": true
+      },
+      "execution_mode": "diff",
+      "status": "pass"
+    },
+    {
+      "option_name": "modules",
+      "option_path": "modules",
+      "entry": "index",
+      "version_line": "vue2_6",
+      "accepted_types": [
+        "array"
+      ],
+      "default_when_missing": "[]",
+      "behavior_when_undefined": "undefined",
+      "behavior_when_null": "undefined",
+      "side_effects": [
+        "module hooks"
+      ],
+      "diagnostics": [
+        "modules"
+      ],
+      "output_fields_affected": [
+        "render"
+      ],
+      "official_fixture_ids": [
+        "vue2-modules"
+      ],
+      "variant": "base",
+      "input_kind": "value",
+      "method": "compile",
+      "fixture_id": "vue2-modules",
+      "fixture_source": "<div class=\"a\"></div>",
+      "option_value": {
+        "modules": [
+          "class"
+        ]
+      },
+      "execution_mode": "pending",
+      "status": "pending"
+    },
+    {
+      "option_name": "directives",
+      "option_path": "directives",
+      "entry": "index",
+      "version_line": "vue2_6",
+      "accepted_types": [
+        "object"
+      ],
+      "default_when_missing": "{}",
+      "behavior_when_undefined": "undefined",
+      "behavior_when_null": "undefined",
+      "side_effects": [
+        "custom directives"
+      ],
+      "diagnostics": [
+        "directives"
+      ],
+      "output_fields_affected": [
+        "render"
+      ],
+      "official_fixture_ids": [
+        "vue2-directives"
+      ],
+      "variant": "base",
+      "input_kind": "value",
+      "method": "compile",
+      "fixture_id": "vue2-directives",
+      "fixture_source": "<div v-focus></div>",
+      "option_value": {
+        "directives": {
+          "focus": "x"
+        }
+      },
+      "execution_mode": "pending",
+      "status": "pending"
+    }
+  ]
 }

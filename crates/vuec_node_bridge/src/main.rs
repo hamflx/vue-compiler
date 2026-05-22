@@ -214,6 +214,24 @@ fn vue2_options(value: Option<&Value>) -> Vue2CompileOptions {
         "preserveWhitespace",
         bool_option(value, "preserve_whitespace", options.preserve_whitespace),
     );
+    options.should_decode_newlines = bool_option(
+        value,
+        "shouldDecodeNewlines",
+        bool_option(
+            value,
+            "should_decode_newlines",
+            options.should_decode_newlines,
+        ),
+    );
+    options.should_decode_newlines_for_href = bool_option(
+        value,
+        "shouldDecodeNewlinesForHref",
+        bool_option(
+            value,
+            "should_decode_newlines_for_href",
+            options.should_decode_newlines_for_href,
+        ),
+    );
     options.optimize = bool_option(value, "optimize", options.optimize);
     if let Some(delimiters) = value.get("delimiters").and_then(Value::as_array) {
         if delimiters.len() == 2 {

@@ -1353,10 +1353,16 @@ fn gen_data(element: &mut Vue2Element, state: &mut CodegenState<'_>) -> String {
         parts.push(format!("style:({style_binding})"));
     }
     if !element.attrs.is_empty() {
-        parts.push(format!("attrs:{}", gen_props(&element.attrs)));
+        parts.push(format!(
+            "attrs:{}",
+            gen_props(&element.attrs, state.options)
+        ));
     }
     if !element.props.is_empty() {
-        parts.push(format!("domProps:{}", gen_props(&element.props)));
+        parts.push(format!(
+            "domProps:{}",
+            gen_props(&element.props, state.options)
+        ));
     }
     if !element.events.is_empty() {
         parts.push(gen_handlers(&element.events, false));
@@ -1402,7 +1408,7 @@ fn gen_data(element: &mut Vue2Element, state: &mut CodegenState<'_>) -> String {
         data = format!(
             "_b({data},{},{} )",
             js_string(&element.tag),
-            gen_props(&element.dynamic_attrs)
+            gen_props(&element.dynamic_attrs, state.options)
         )
         .replace("} )", "})");
     }
@@ -1577,15 +1583,16 @@ fn gen_scoped_slots(element: &mut Vue2Element, state: &mut CodegenState<'_>) -> 
     format!("scopedSlots:_u([{slots}])")
 }
 
-fn gen_props(attrs: &[Vue2Attribute]) -> String {
+fn gen_props(attrs: &[Vue2Attribute], options: &Vue2CompileOptions) -> String {
     let static_props = attrs
         .iter()
         .filter(|attr| !attr.dynamic)
         .map(|attr| {
+            let value = decode_newline_entities_for_attr(&attr.name, &attr.value, options);
             format!(
                 "{}:{}",
                 js_string(&attr.name),
-                transform_special_newlines(&attr.value)
+                transform_special_newlines(&value)
             )
         })
         .collect::<Vec<_>>()
@@ -2586,8 +2593,31 @@ fn js_string_single(value: &str) -> String {
 
 fn transform_special_newlines(value: &str) -> String {
     value
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
         .replace('\u{2028}', "\\u2028")
         .replace('\u{2029}', "\\u2029")
+}
+
+fn decode_newline_entities_for_attr(
+    name: &str,
+    value: &str,
+    options: &Vue2CompileOptions,
+) -> String {
+    if (name == "href" && options.should_decode_newlines_for_href)
+        || (name != "href" && options.should_decode_newlines)
+    {
+        value
+            .replace("&#10;", "\n")
+            .replace("&#x0A;", "\n")
+            .replace("&#x0a;", "\n")
+            .replace("&#9;", "\t")
+            .replace("&#x09;", "\t")
+            .replace("&#x9;", "\t")
+    } else {
+        value.to_string()
+    }
 }
 
 fn modifiers_json(modifiers: &BTreeMap<String, bool>) -> String {
