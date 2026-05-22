@@ -287,6 +287,21 @@ enum TargetKind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ApiManifestSide {
+    Official,
+    Rust,
+}
+
+impl ApiManifestSide {
+    const fn as_str(self) -> &'static str {
+        match self {
+            ApiManifestSide::Official => "official",
+            ApiManifestSide::Rust => "rust",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct TargetSpec {
     version_line: VersionLine,
     package: &'static str,
@@ -302,18 +317,6 @@ impl TargetSpec {
             self.package,
             self.entry
         )
-    }
-
-    fn api_exports(&self) -> &'static [&'static str] {
-        match self.kind {
-            TargetKind::Vue26Template => &["compile", "compileToFunctions"],
-            TargetKind::Vue27Template => &["compile", "compileToFunctions"],
-            TargetKind::Vue27Sfc => &["parse", "compileScript", "compileTemplate", "compileStyle"],
-            TargetKind::Vue3Core => &["baseParse", "baseCompile"],
-            TargetKind::Vue3Dom => &["compile", "parse"],
-            TargetKind::Vue3Ssr => &["compile"],
-            TargetKind::Vue3Sfc => &["parse", "compileScript", "compileTemplate", "compileStyle"],
-        }
     }
 
     fn option_categories(&self) -> &'static [&'static str] {
@@ -466,12 +469,73 @@ impl TargetSpec {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ManifestFile {
+    schema_version: u8,
     version_line: VersionLine,
     package: String,
     entry: String,
+    package_version: Option<String>,
     exports: Vec<String>,
+    export_details: BTreeMap<String, ApiExportDetail>,
+    require: ApiRequireRecord,
+    types: ApiTypesRecord,
     status: String,
     source: String,
+    lock_hash: Option<String>,
+    official_revision: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+struct ApiExportDetail {
+    kind: String,
+    tag: String,
+    name: Option<String>,
+    function_arity: Option<u32>,
+    is_async_function: Option<bool>,
+    is_class_like: Option<bool>,
+    own_property_names: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+struct ApiRequireRecord {
+    request: String,
+    success: bool,
+    resolved: Option<String>,
+    error_name: Option<String>,
+    error_code: Option<String>,
+    error_message: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+struct ApiTypesRecord {
+    package_types: Option<String>,
+    resolved: Option<String>,
+    exists: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ApiProbeOutput {
+    package_version: Option<String>,
+    exports: Vec<String>,
+    #[serde(default)]
+    export_details: BTreeMap<String, ApiExportDetail>,
+    require: ApiRequireRecord,
+    #[serde(default)]
+    types: ApiTypesRecord,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct AllowedApiDiffFile {
+    #[serde(default)]
+    entries: Vec<AllowedApiDiffEntry>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct AllowedApiDiffEntry {
+    version_line: VersionLine,
+    package: String,
+    entry: String,
+    diff: String,
+    reason: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -642,60 +706,667 @@ pub fn export_api(scope: &SelectionArgs) -> JsonReport {
     let targets = select_targets(scope);
     let mut items = Vec::new();
     let mut created = Vec::new();
+    let sides = selected_api_manifest_sides(scope);
+    let lock_path = PathBuf::from("compat/official-revisions.lock");
+    let lock_hash = file_sha256(&lock_path).ok();
+    let lock = load_official_lock(&lock_path).ok();
+
     for target in targets {
-        let path = target.relative_api_manifest_path(if scope.rust { "rust" } else { "official" });
-        let manifest = ManifestFile {
-            version_line: target.version_line,
-            package: target.package.to_string(),
-            entry: target.entry.to_string(),
-            exports: target
-                .api_exports()
-                .iter()
-                .map(|s| (*s).to_string())
-                .collect(),
-            status: "pending".into(),
-            source: if scope.rust {
-                "rust-spec"
-            } else {
-                "official-spec"
+        for side in &sides {
+            let path = target.relative_api_manifest_path(side.as_str());
+            let manifest_result = match side {
+                ApiManifestSide::Official => {
+                    export_official_api_manifest(target, lock.as_ref(), lock_hash.clone())
+                }
+                ApiManifestSide::Rust => export_rust_api_manifest(target, lock_hash.clone()),
+            };
+
+            if let Some(parent) = path.parent() {
+                let _ = fs::create_dir_all(parent);
             }
-            .into(),
-        };
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
+
+            match manifest_result {
+                Ok(manifest) => {
+                    let status = manifest_status(&manifest);
+                    let detail = if manifest.require.success {
+                        format!(
+                            "{} exports captured from {}",
+                            manifest.exports.len(),
+                            manifest
+                                .require
+                                .resolved
+                                .as_deref()
+                                .unwrap_or(manifest.require.request.as_str())
+                        )
+                    } else {
+                        format!(
+                            "require failed: {}",
+                            manifest
+                                .require
+                                .error_message
+                                .as_deref()
+                                .unwrap_or("unknown error")
+                        )
+                    };
+                    if let Err(err) = write_json(&path, &manifest) {
+                        items.push(ReportItem::new(
+                            format!("{}::{}", side.as_str(), target.display()),
+                            ReportStatus::Fail,
+                            format!("failed to write manifest: {err}"),
+                            Some(path),
+                        ));
+                        continue;
+                    }
+                    created.push(path.display().to_string());
+                    items.push(ReportItem::new(
+                        format!("{}::{}", side.as_str(), target.display()),
+                        status,
+                        detail,
+                        Some(path),
+                    ));
+                }
+                Err(err) => {
+                    let manifest = failed_api_manifest(
+                        target,
+                        *side,
+                        lock_hash.clone(),
+                        lock.as_ref()
+                            .and_then(|lock| baseline_for(lock, target.version_line))
+                            .map(|baseline| baseline.rev.clone()),
+                        format!("{err:#}"),
+                    );
+                    let status = manifest_status(&manifest);
+                    let _ = write_json(&path, &manifest);
+                    created.push(path.display().to_string());
+                    items.push(ReportItem::new(
+                        format!("{}::{}", side.as_str(), target.display()),
+                        status,
+                        format!("failed to export API manifest: {err:#}"),
+                        Some(path),
+                    ));
+                }
+            }
         }
-        let _ = write_json(&path, &manifest);
-        created.push(path.display().to_string());
-        items.push(ReportItem::new(
-            target.display(),
-            ReportStatus::Pending,
-            format!("{} exports captured", target.api_exports().len()),
-            Some(path),
-        ));
     }
-    JsonReport::new("export_api", ReportStatus::Pending)
+    let mut report = JsonReport::new("export_api", ReportStatus::Pending);
+    report.metadata = report.metadata.with_lock_hash(lock_hash);
+    report
         .with_scope(scope)
         .with_items(items)
         .with_created(created)
-        .with_note("API manifest generation is wired to the compatibility spec, not the final compiler backends yet")
+        .with_note("API manifest generation now probes real packages; Rust manifests require alias packages to exist")
+}
+
+fn selected_api_manifest_sides(scope: &SelectionArgs) -> Vec<ApiManifestSide> {
+    match (scope.official, scope.rust) {
+        (true, false) => vec![ApiManifestSide::Official],
+        (false, true) => vec![ApiManifestSide::Rust],
+        _ => vec![ApiManifestSide::Official, ApiManifestSide::Rust],
+    }
 }
 
 pub fn diff_api(scope: &SelectionArgs) -> JsonReport {
     let targets = select_targets(scope);
     let mut items = Vec::new();
+    let mut violations = Vec::new();
+    let lock_hash = file_sha256(&PathBuf::from("compat/official-revisions.lock")).ok();
+    let allowed = load_allowed_api_diffs(&PathBuf::from("compat/api/allowed-diff.json"));
     for target in targets {
-        items.push(ReportItem::new(
-            target.display(),
-            ReportStatus::Pending,
-            "official and rust manifests are not yet backed by final compiler packages",
-            None,
-        ));
+        let official_path = target.relative_api_manifest_path(ApiManifestSide::Official.as_str());
+        let rust_path = target.relative_api_manifest_path(ApiManifestSide::Rust.as_str());
+        match (
+            read_json::<ManifestFile>(&official_path),
+            read_json::<ManifestFile>(&rust_path),
+        ) {
+            (Ok(official), Ok(rust)) => {
+                let mut diffs = compare_api_manifests(&official, &rust);
+                diffs.retain(|diff| !is_allowed_api_diff(&allowed, target, diff));
+                if diffs.is_empty() {
+                    items.push(ReportItem::new(
+                        target.display(),
+                        ReportStatus::Pass,
+                        "official and Rust API manifests match",
+                        Some(rust_path),
+                    ));
+                } else {
+                    violations.extend(
+                        diffs
+                            .iter()
+                            .map(|diff| format!("{}: {diff}", target.display())),
+                    );
+                    items.push(ReportItem::new(
+                        target.display(),
+                        ReportStatus::Fail,
+                        format!("{} API manifest differences", diffs.len()),
+                        Some(rust_path),
+                    ));
+                }
+            }
+            (Err(err), _) => {
+                violations.push(format!(
+                    "{} official manifest missing/invalid: {err}",
+                    target.display()
+                ));
+                items.push(ReportItem::new(
+                    target.display(),
+                    ReportStatus::Fail,
+                    "official API manifest missing or invalid",
+                    Some(official_path),
+                ));
+            }
+            (_, Err(err)) => {
+                violations.push(format!(
+                    "{} Rust manifest missing/invalid: {err}",
+                    target.display()
+                ));
+                items.push(ReportItem::new(
+                    target.display(),
+                    ReportStatus::Fail,
+                    "Rust API manifest missing or invalid",
+                    Some(rust_path),
+                ));
+            }
+        }
     }
-    JsonReport::new("diff_api", ReportStatus::Pending)
+    let mut report = JsonReport::new("diff_api", ReportStatus::Pending);
+    report.metadata = report.metadata.with_lock_hash(lock_hash);
+    report
         .with_scope(scope)
         .with_items(items)
-        .with_note("diff is scaffolded; real package parity will replace the spec-only manifests")
+        .with_violations(violations)
+        .with_note("diff compares generated official and Rust alias manifests field-by-field")
 }
+
+fn export_official_api_manifest(
+    target: TargetSpec,
+    lock: Option<&OfficialRevisionsLock>,
+    lock_hash: Option<String>,
+) -> Result<ManifestFile> {
+    let lock = lock.context("compat/official-revisions.lock is missing or invalid")?;
+    let baseline = baseline_for(lock, target.version_line)
+        .context("target version line is missing from official lock")?;
+    let install_root = ensure_official_npm_install(target.version_line, baseline)?;
+    let request = api_require_request(target);
+    let probe = probe_api_exports(&install_root, target.package, &request)?;
+    Ok(manifest_from_probe(
+        target,
+        ApiManifestSide::Official,
+        lock_hash,
+        Some(baseline.rev.clone()),
+        probe,
+    ))
+}
+
+fn export_rust_api_manifest(target: TargetSpec, lock_hash: Option<String>) -> Result<ManifestFile> {
+    let alias_root = PathBuf::from("target")
+        .join("compat")
+        .join("rust-alias")
+        .join(target.version_line.as_str());
+    let request = api_require_request(target);
+    let probe = probe_api_exports(&alias_root, target.package, &request)?;
+    Ok(manifest_from_probe(
+        target,
+        ApiManifestSide::Rust,
+        lock_hash,
+        None,
+        probe,
+    ))
+}
+
+fn manifest_from_probe(
+    target: TargetSpec,
+    side: ApiManifestSide,
+    lock_hash: Option<String>,
+    official_revision: Option<String>,
+    probe: ApiProbeOutput,
+) -> ManifestFile {
+    let status = match (side, probe.require.success) {
+        (_, true) => "pass",
+        (ApiManifestSide::Official, false) => "fail",
+        (ApiManifestSide::Rust, false) => "pending",
+    };
+    ManifestFile {
+        schema_version: 1,
+        version_line: target.version_line,
+        package: target.package.to_string(),
+        entry: target.entry.to_string(),
+        package_version: probe.package_version,
+        exports: probe.exports,
+        export_details: probe.export_details,
+        require: probe.require,
+        types: probe.types,
+        status: status.to_string(),
+        source: side.as_str().to_string(),
+        lock_hash,
+        official_revision,
+    }
+}
+
+fn failed_api_manifest(
+    target: TargetSpec,
+    side: ApiManifestSide,
+    lock_hash: Option<String>,
+    official_revision: Option<String>,
+    message: String,
+) -> ManifestFile {
+    ManifestFile {
+        schema_version: 1,
+        version_line: target.version_line,
+        package: target.package.to_string(),
+        entry: target.entry.to_string(),
+        package_version: None,
+        exports: Vec::new(),
+        export_details: BTreeMap::new(),
+        require: ApiRequireRecord {
+            request: api_require_request(target),
+            success: false,
+            resolved: None,
+            error_name: Some("XtaskError".into()),
+            error_code: None,
+            error_message: Some(message),
+        },
+        types: ApiTypesRecord::default(),
+        status: if side == ApiManifestSide::Rust {
+            "pending"
+        } else {
+            "fail"
+        }
+        .into(),
+        source: side.as_str().to_string(),
+        lock_hash,
+        official_revision,
+    }
+}
+
+fn manifest_status(manifest: &ManifestFile) -> ReportStatus {
+    match manifest.status.as_str() {
+        "pass" => ReportStatus::Pass,
+        "pending" => ReportStatus::Pending,
+        _ => ReportStatus::Fail,
+    }
+}
+
+fn compare_api_manifests(official: &ManifestFile, rust: &ManifestFile) -> Vec<String> {
+    let mut diffs = Vec::new();
+    if official.version_line != rust.version_line {
+        diffs.push(format!(
+            "version_line differs: official={} rust={}",
+            official.version_line, rust.version_line
+        ));
+    }
+    if official.package != rust.package {
+        diffs.push(format!(
+            "package differs: official={} rust={}",
+            official.package, rust.package
+        ));
+    }
+    if official.entry != rust.entry {
+        diffs.push(format!(
+            "entry differs: official={} rust={}",
+            official.entry, rust.entry
+        ));
+    }
+    if official.require.success != rust.require.success {
+        diffs.push(format!(
+            "require success differs: official={} rust={}",
+            official.require.success, rust.require.success
+        ));
+    }
+    if !official.require.success {
+        diffs.push(format!(
+            "official manifest did not load: {}",
+            official
+                .require
+                .error_message
+                .as_deref()
+                .unwrap_or("unknown error")
+        ));
+    }
+    if !rust.require.success {
+        diffs.push(format!(
+            "Rust alias manifest did not load: {}",
+            rust.require
+                .error_message
+                .as_deref()
+                .unwrap_or("unknown error")
+        ));
+    }
+    if official.package_version != rust.package_version {
+        diffs.push(format!(
+            "package_version differs: official={:?} rust={:?}",
+            official.package_version, rust.package_version
+        ));
+    }
+    if official.exports != rust.exports {
+        diffs.push(format!(
+            "exports differ: official={:?} rust={:?}",
+            official.exports, rust.exports
+        ));
+    }
+    for export_name in official
+        .exports
+        .iter()
+        .chain(rust.exports.iter())
+        .collect::<std::collections::BTreeSet<_>>()
+    {
+        let official_detail = official.export_details.get(export_name.as_str());
+        let rust_detail = rust.export_details.get(export_name.as_str());
+        if official_detail != rust_detail {
+            diffs.push(format!(
+                "export {export_name} detail differs: official={official_detail:?} rust={rust_detail:?}"
+            ));
+        }
+    }
+    if official.types.package_types != rust.types.package_types {
+        diffs.push(format!(
+            "types package path differs: official={:?} rust={:?}",
+            official.types.package_types, rust.types.package_types
+        ));
+    }
+    if official.types.exists != rust.types.exists {
+        diffs.push(format!(
+            "types existence differs: official={} rust={}",
+            official.types.exists, rust.types.exists
+        ));
+    }
+    diffs
+}
+
+fn load_allowed_api_diffs(path: &Path) -> AllowedApiDiffFile {
+    match read_json::<AllowedApiDiffFile>(path) {
+        Ok(file) => file,
+        Err(_) => AllowedApiDiffFile::default(),
+    }
+}
+
+fn is_allowed_api_diff(allowed: &AllowedApiDiffFile, target: TargetSpec, diff: &str) -> bool {
+    allowed.entries.iter().any(|entry| {
+        entry.version_line == target.version_line
+            && entry.package == target.package
+            && entry.entry == target.entry
+            && entry.diff == diff
+            && !entry.reason.trim().is_empty()
+    })
+}
+
+fn api_require_request(target: TargetSpec) -> String {
+    if target.entry == "index" {
+        target.package.to_string()
+    } else {
+        target.entry.to_string()
+    }
+}
+
+fn baseline_for(lock: &OfficialRevisionsLock, version_line: VersionLine) -> Option<&BaselineLock> {
+    match version_line {
+        VersionLine::Vue26 => Some(&lock.vue2_6),
+        VersionLine::Vue27 => Some(&lock.vue2_7),
+        VersionLine::Vue3 => Some(&lock.vue3),
+    }
+}
+
+fn ensure_official_npm_install(
+    version_line: VersionLine,
+    baseline: &BaselineLock,
+) -> Result<PathBuf> {
+    let install_root = PathBuf::from("target")
+        .join("compat")
+        .join("npm")
+        .join(version_line.as_str());
+    let node_modules = install_root.join("node_modules");
+    let specs = baseline
+        .npm
+        .iter()
+        .map(|(package, version)| format!("{package}@{version}"))
+        .collect::<Vec<_>>();
+    let marker = install_root.join("official-install.json");
+    if node_modules.exists() && official_install_marker_matches(&marker, &specs) {
+        return Ok(install_root);
+    }
+    fs::create_dir_all(&install_root)
+        .with_context(|| format!("failed to create {}", install_root.display()))?;
+    let package_json = serde_json::json!({
+        "private": true,
+        "name": format!("vuec-compat-{}", version_line.as_str()),
+        "version": "0.0.0",
+    });
+    write_json(&install_root.join("package.json"), &package_json)?;
+
+    let npm = resolve_program("npm");
+    let mut command = Command::new(npm);
+    command
+        .arg("install")
+        .arg("--ignore-scripts")
+        .arg("--no-audit")
+        .arg("--no-fund")
+        .arg("--package-lock=false")
+        .arg("--omit=dev")
+        .args(&specs)
+        .current_dir(&install_root);
+    let output = command
+        .output()
+        .with_context(|| format!("failed to spawn npm install in {}", install_root.display()))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "`npm install {}` failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
+            specs.join(" "),
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let marker_body = serde_json::json!({
+        "version_line": version_line,
+        "packages": specs,
+        "rev": baseline.rev,
+    });
+    write_json(&marker, &marker_body)?;
+    Ok(install_root)
+}
+
+fn official_install_marker_matches(marker: &Path, specs: &[String]) -> bool {
+    let Ok(value) = read_json::<serde_json::Value>(marker) else {
+        return false;
+    };
+    let Some(packages) = value.get("packages").and_then(|value| value.as_array()) else {
+        return false;
+    };
+    let actual = packages
+        .iter()
+        .filter_map(|value| value.as_str().map(ToOwned::to_owned))
+        .collect::<Vec<_>>();
+    actual == specs
+}
+
+fn probe_api_exports(root: &Path, package_name: &str, request: &str) -> Result<ApiProbeOutput> {
+    let root = absolute_path(root);
+    let node = resolve_program("node");
+    let output = Command::new(node)
+        .arg("-e")
+        .arg(API_PROBE_SCRIPT)
+        .env("VUEC_API_PROBE_ROOT", &root)
+        .env("VUEC_API_PROBE_PACKAGE", package_name)
+        .env("VUEC_API_PROBE_REQUEST", request)
+        .output()
+        .with_context(|| format!("failed to spawn node API probe for {request}"))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "node API probe failed for {} with status {:?}\nstdout:\n{}\nstderr:\n{}",
+            request,
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    serde_json::from_str(stdout.trim())
+        .with_context(|| format!("failed to parse node API probe output for {request}"))
+}
+
+fn absolute_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    std::env::current_dir()
+        .map(|cwd| cwd.join(path))
+        .unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn resolve_program(name: &str) -> String {
+    if cfg!(windows) && !name.contains('.') {
+        if let Some(path) = find_on_path(&format!("{name}.cmd")) {
+            return path;
+        }
+        if let Some(path) = find_on_path(&format!("{name}.exe")) {
+            return path;
+        }
+    }
+    name.to_string()
+}
+
+fn find_on_path(name: &str) -> Option<String> {
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(candidate.display().to_string());
+        }
+    }
+    None
+}
+
+const API_PROBE_SCRIPT: &str = r#"
+const fs = require('fs');
+const path = require('path');
+const { createRequire } = require('module');
+
+const root = process.env.VUEC_API_PROBE_ROOT;
+const packageName = process.env.VUEC_API_PROBE_PACKAGE;
+const request = process.env.VUEC_API_PROBE_REQUEST;
+const rootRequire = createRequire(path.join(root, 'package.json'));
+
+function normalizePath(file) {
+  if (!file) return null;
+  const relative = path.relative(root, file);
+  if (relative && !relative.startsWith('..') && !path.isAbsolute(relative)) {
+    return '<probe-root>/' + relative.replace(/\\/g, '/');
+  }
+  return file.replace(/\\/g, '/');
+}
+
+function normalizeMessage(message) {
+  if (!message) return null;
+  const normalizedRoot = root.replace(/\\/g, '/');
+  return String(message)
+    .replaceAll(root, '<probe-root>')
+    .replaceAll(normalizedRoot, '<probe-root>')
+    .replace(/\\/g, '/');
+}
+
+function readJson(file) {
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (_) {
+    return null;
+  }
+}
+
+function describeExport(value) {
+  const kind = typeof value;
+  const tag = Object.prototype.toString.call(value);
+  const detail = {
+    kind,
+    tag,
+    name: value && value.name ? String(value.name) : null,
+    function_arity: kind === 'function' ? value.length : null,
+    is_async_function: kind === 'function' ? value.constructor && value.constructor.name === 'AsyncFunction' : null,
+    is_class_like: kind === 'function' ? /^class\s/.test(Function.prototype.toString.call(value)) : null,
+    own_property_names: []
+  };
+  try {
+    detail.own_property_names = Object.getOwnPropertyNames(value).sort();
+  } catch (_) {
+    detail.own_property_names = [];
+  }
+  return detail;
+}
+
+function resolvePackageJson() {
+  try {
+    return rootRequire.resolve(path.join(packageName, 'package.json'));
+  } catch (_) {
+    try {
+      const resolved = rootRequire.resolve(request);
+      let current = path.dirname(resolved);
+      while (current && current !== path.dirname(current)) {
+        const candidate = path.join(current, 'package.json');
+        if (fs.existsSync(candidate)) return candidate;
+        current = path.dirname(current);
+      }
+    } catch (_) {}
+  }
+  return null;
+}
+
+function resolveTypesPath(packageJsonPath, packageJson) {
+  if (!packageJsonPath || !packageJson) return { packageTypes: null, resolved: null };
+  const packageRoot = path.dirname(packageJsonPath);
+  if (packageJson.exports && request.startsWith(packageName + '/')) {
+    const subpath = './' + request.slice(packageName.length + 1);
+    const exportRecord = packageJson.exports[subpath];
+    if (exportRecord && typeof exportRecord === 'object' && typeof exportRecord.types === 'string') {
+      const resolved = path.resolve(packageRoot, exportRecord.types);
+      return { packageTypes: exportRecord.types, resolved };
+    }
+  }
+  if (typeof packageJson.types === 'string') {
+    return {
+      packageTypes: packageJson.types,
+      resolved: path.resolve(packageRoot, packageJson.types)
+    };
+  }
+  return { packageTypes: null, resolved: null };
+}
+
+const packageJsonPath = resolvePackageJson();
+const packageJson = packageJsonPath ? readJson(packageJsonPath) : null;
+const typesInfo = resolveTypesPath(packageJsonPath, packageJson);
+const out = {
+  package_version: packageJson && packageJson.version ? String(packageJson.version) : null,
+  exports: [],
+  export_details: {},
+  require: {
+    request,
+    success: false,
+    resolved: null,
+    error_name: null,
+    error_code: null,
+    error_message: null
+  },
+  types: {
+    package_types: typesInfo.packageTypes,
+    resolved: normalizePath(typesInfo.resolved),
+    exists: typesInfo.resolved ? fs.existsSync(typesInfo.resolved) : false
+  }
+};
+
+try {
+  out.require.resolved = normalizePath(rootRequire.resolve(request));
+  const api = rootRequire(request);
+  out.require.success = true;
+  out.exports = Object.keys(api).sort();
+  for (const key of out.exports) {
+    out.export_details[key] = describeExport(api[key]);
+  }
+} catch (error) {
+  out.require.error_name = error && error.name ? String(error.name) : null;
+  out.require.error_code = error && error.code ? String(error.code) : null;
+  out.require.error_message = normalizeMessage(error && error.message ? error.message : error);
+}
+
+process.stdout.write(JSON.stringify(out));
+"#;
 
 pub fn generate_option_matrix(scope: &SelectionArgs) -> JsonReport {
     let targets = select_targets(scope);
@@ -1297,4 +1968,142 @@ fn file_sha256(path: &Path) -> Result<String> {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn api_manifest_side_selection_defaults_to_both_sides() {
+        let scope = SelectionArgs::default();
+        assert_eq!(
+            selected_api_manifest_sides(&scope),
+            vec![ApiManifestSide::Official, ApiManifestSide::Rust]
+        );
+
+        let official_only = SelectionArgs {
+            official: true,
+            ..SelectionArgs::default()
+        };
+        assert_eq!(
+            selected_api_manifest_sides(&official_only),
+            vec![ApiManifestSide::Official]
+        );
+
+        let rust_only = SelectionArgs {
+            rust: true,
+            ..SelectionArgs::default()
+        };
+        assert_eq!(
+            selected_api_manifest_sides(&rust_only),
+            vec![ApiManifestSide::Rust]
+        );
+    }
+
+    #[test]
+    fn api_diff_detects_export_and_arity_mismatch() {
+        let mut official = test_manifest(vec![("compile", 2)]);
+        let mut rust = test_manifest(vec![("compile", 1)]);
+        let diffs = compare_api_manifests(&official, &rust);
+        assert!(
+            diffs
+                .iter()
+                .any(|diff| diff.contains("export compile detail differs")),
+            "{diffs:#?}"
+        );
+
+        rust.exports.push("extra".into());
+        rust.export_details.insert(
+            "extra".into(),
+            ApiExportDetail {
+                kind: "function".into(),
+                tag: "[object Function]".into(),
+                name: Some("extra".into()),
+                function_arity: Some(0),
+                is_async_function: Some(false),
+                is_class_like: Some(false),
+                own_property_names: vec!["length".into(), "name".into(), "prototype".into()],
+            },
+        );
+        let diffs = compare_api_manifests(&official, &rust);
+        assert!(
+            diffs.iter().any(|diff| diff.contains("exports differ")),
+            "{diffs:#?}"
+        );
+
+        official.exports = rust.exports.clone();
+        official.export_details = rust.export_details.clone();
+        assert!(compare_api_manifests(&official, &rust).is_empty());
+    }
+
+    #[test]
+    fn allowed_api_diff_requires_exact_target_diff_and_reason() {
+        let target = TargetSpec {
+            version_line: VersionLine::Vue26,
+            package: "vue-template-compiler",
+            entry: "index",
+            kind: TargetKind::Vue26Template,
+        };
+        let diff = "exports differ: official=[] rust=[]";
+        let allowed = AllowedApiDiffFile {
+            entries: vec![AllowedApiDiffEntry {
+                version_line: VersionLine::Vue26,
+                package: "vue-template-compiler".into(),
+                entry: "index".into(),
+                diff: diff.into(),
+                reason: "documented compatibility exception".into(),
+            }],
+        };
+        assert!(is_allowed_api_diff(&allowed, target, diff));
+        assert!(!is_allowed_api_diff(&allowed, target, "different diff"));
+    }
+
+    fn test_manifest(exports: Vec<(&str, u32)>) -> ManifestFile {
+        let mut export_names = Vec::new();
+        let mut export_details = BTreeMap::new();
+        for (name, arity) in exports {
+            export_names.push(name.to_string());
+            export_details.insert(
+                name.to_string(),
+                ApiExportDetail {
+                    kind: "function".into(),
+                    tag: "[object Function]".into(),
+                    name: Some(name.to_string()),
+                    function_arity: Some(arity),
+                    is_async_function: Some(false),
+                    is_class_like: Some(false),
+                    own_property_names: vec!["length".into(), "name".into(), "prototype".into()],
+                },
+            );
+        }
+        ManifestFile {
+            schema_version: 1,
+            version_line: VersionLine::Vue26,
+            package: "vue-template-compiler".into(),
+            entry: "index".into(),
+            package_version: Some("2.6.14".into()),
+            exports: export_names,
+            export_details,
+            require: ApiRequireRecord {
+                request: "vue-template-compiler".into(),
+                success: true,
+                resolved: Some("<probe-root>/node_modules/vue-template-compiler/index.js".into()),
+                error_name: None,
+                error_code: None,
+                error_message: None,
+            },
+            types: ApiTypesRecord {
+                package_types: Some("types/index.d.ts".into()),
+                resolved: Some(
+                    "<probe-root>/node_modules/vue-template-compiler/types/index.d.ts".into(),
+                ),
+                exists: true,
+            },
+            status: "pass".into(),
+            source: "official".into(),
+            lock_hash: Some("lock".into()),
+            official_revision: Some("af43c9d14dd087b9852912bd15b1eacbda0e13b0".into()),
+        }
+    }
 }

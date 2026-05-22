@@ -1,0 +1,112 @@
+{
+  "schema_version": 1,
+  "version_line": "vue2_6",
+  "package": "vue-template-compiler",
+  "entry": "index",
+  "package_version": "2.6.14",
+  "exports": [
+    "compile",
+    "compileToFunctions",
+    "generateCodeFrame",
+    "parseComponent",
+    "ssrCompile",
+    "ssrCompileToFunctions"
+  ],
+  "export_details": {
+    "compile": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "compile",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "compileToFunctions": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "compileToFunctions",
+      "function_arity": 3,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "generateCodeFrame": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "generateCodeFrame",
+      "function_arity": 3,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "parseComponent": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "parseComponent",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "ssrCompile": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "compile",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "ssrCompileToFunctions": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "compileToFunctions",
+      "function_arity": 3,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    }
+  },
+  "require": {
+    "request": "vue-template-compiler",
+    "success": true,
+    "resolved": "<probe-root>/node_modules/vue-template-compiler/index.js",
+    "error_name": null,
+    "error_code": null,
+    "error_message": null
+  },
+  "types": {
+    "package_types": "types/index.d.ts",
+    "resolved": "<probe-root>/node_modules/vue-template-compiler/types/index.d.ts",
+    "exists": true
+  },
+  "status": "pass",
+  "source": "official",
+  "lock_hash": "ee33465b421a58b83fac04aa850a6d250ee09ec169fa80ed8820794a0c9a2769",
+  "official_revision": "af43c9d14dd087b9852912bd15b1eacbda0e13b0"
+}

@@ -11,8 +11,17 @@
 - [x] Official repository sync and conformance discovery harness.
 - [x] Vue 2 compiler skeleton.
 - [x] Vue 2 compiler main-path parser / optimizer / codegen expansion.
+- [x] Official API manifest generation and diff harness.
 
 ## Completed This Round
+
+- Replaced the spec-only `export-api` behavior with a real Node probe that installs exact official npm package versions from `compat/official-revisions.lock` under `target/compat/npm/<version-line>` and records `Object.keys(require(...)).sort()`, export type details, function arity, class/async flags, package version, type declaration path, require status, lock hash, and official revision.
+- Changed `cargo xtask export-api --all` to generate both official and Rust-side manifests. Official manifests pass for all seven compiler targets; Rust manifests are generated as `pending` until alias packages exist under `target/compat/rust-alias/<version-line>`.
+- Implemented `cargo xtask diff-api --all` as a real field-level manifest comparison with an explicit `compat/api/allowed-diff.json` approval file. It currently fails deterministically because the Rust alias packages are not implemented yet.
+- Generated official and Rust API manifest files under `compat/api/` for Vue 2.6 `vue-template-compiler`, Vue 2.7 `vue-template-compiler`, Vue 2.7 `vue/compiler-sfc`, and Vue 3 `@vue/compiler-core`, `@vue/compiler-dom`, `@vue/compiler-ssr`, `@vue/compiler-sfc`.
+- Verification this round: `cargo fmt --all --check`, `cargo test -p xtask`, `cargo xtask export-api --all`, and `cargo xtask diff-api --all` as the expected failing alias gate.
+
+## Previous Round
 
 - Replaced the old `vuec_vue2` skeleton with a recursive Vue 2 element AST that preserves raw attrs, processed attrs/props/directives/events, structural directive state, static flags, slot/component/model metadata, diagnostics spans, and public AST projection.
 - Implemented Vue 2 main-path parsing for `v-if` / `v-else-if` / `v-else`, `v-for`, `v-pre`, `v-once`, `v-bind`, `v-on`, `v-model`, custom directives, slots, component `is`, inline-template metadata, class/style modules, and validator-like compile option hooks.
@@ -23,7 +32,7 @@
 - Verification this round: `cargo test --workspace`, `cargo xtask verify-official-lock`, `cargo xtask run-conformance --suite vue2-compiler`, `cargo xtask generate-option-matrix --version-line vue2_6 --package vue-template-compiler`, and `cargo xtask generate-output-contract --version-line vue2_6 --package vue-template-compiler`.
 - `run-conformance --suite vue2-compiler` still reports `pending` because official execution remains discovery-only until the NAPI/alias runner is implemented.
 
-## Previous Round
+## Earlier Round
 
 - Added `vuec_vue3_dom`, `vuec_vue3_ssr`, and `vuec_style` to the workspace.
 - Extended `vuec_ast::Vue3NodeKind::Element` to keep template attributes and self-closing state.

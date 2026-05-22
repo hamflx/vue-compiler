@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "version_line": "vue3",
+  "package": "@vue/compiler-sfc",
+  "entry": "index",
+  "package_version": null,
+  "exports": [],
+  "export_details": {},
+  "require": {
+    "request": "@vue/compiler-sfc",
+    "success": false,
+    "resolved": null,
+    "error_name": "Error",
+    "error_code": "MODULE_NOT_FOUND",
+    "error_message": "Cannot find module '@vue/compiler-sfc'\nRequire stack:\n- <probe-root>/package.json"
+  },
+  "types": {
+    "package_types": null,
+    "resolved": null,
+    "exists": false
+  },
+  "status": "pending",
+  "source": "rust",
+  "lock_hash": "ee33465b421a58b83fac04aa850a6d250ee09ec169fa80ed8820794a0c9a2769",
+  "official_revision": null
+}

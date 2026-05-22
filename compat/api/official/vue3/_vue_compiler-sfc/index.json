@@ -1,0 +1,457 @@
+{
+  "schema_version": 1,
+  "version_line": "vue3",
+  "package": "@vue/compiler-sfc",
+  "entry": "index",
+  "package_version": "3.5.34",
+  "exports": [
+    "MagicString",
+    "babelParse",
+    "compileScript",
+    "compileStyle",
+    "compileStyleAsync",
+    "compileTemplate",
+    "errorMessages",
+    "extractIdentifiers",
+    "extractRuntimeEmits",
+    "extractRuntimeProps",
+    "generateCodeFrame",
+    "inferRuntimeType",
+    "invalidateTypeCache",
+    "isInDestructureAssignment",
+    "isStaticProperty",
+    "parse",
+    "parseCache",
+    "registerTS",
+    "resolveTypeElements",
+    "rewriteDefault",
+    "rewriteDefaultAST",
+    "shouldTransformRef",
+    "version",
+    "walk",
+    "walkIdentifiers"
+  ],
+  "export_details": {
+    "MagicString": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "MagicString",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": true,
+      "own_property_names": [
+        "Bundle",
+        "SourceMap",
+        "default",
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "babelParse": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "parse",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "compileScript": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "compileScript",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "compileStyle": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "compileStyle",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "compileStyleAsync": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "compileStyleAsync",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "compileTemplate": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "compileTemplate",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "errorMessages": {
+      "kind": "object",
+      "tag": "[object Object]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": [
+        "0",
+        "1",
+        "10",
+        "11",
+        "12",
+        "13",
+        "14",
+        "15",
+        "16",
+        "17",
+        "18",
+        "19",
+        "2",
+        "20",
+        "21",
+        "22",
+        "23",
+        "24",
+        "25",
+        "26",
+        "27",
+        "28",
+        "29",
+        "3",
+        "30",
+        "31",
+        "32",
+        "33",
+        "34",
+        "35",
+        "36",
+        "37",
+        "38",
+        "39",
+        "4",
+        "40",
+        "41",
+        "42",
+        "43",
+        "44",
+        "45",
+        "46",
+        "47",
+        "48",
+        "49",
+        "5",
+        "50",
+        "51",
+        "52",
+        "53",
+        "54",
+        "55",
+        "56",
+        "57",
+        "58",
+        "59",
+        "6",
+        "60",
+        "61",
+        "62",
+        "63",
+        "64",
+        "7",
+        "8",
+        "9"
+      ]
+    },
+    "extractIdentifiers": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "extractIdentifiers",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "extractRuntimeEmits": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "extractRuntimeEmits",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "extractRuntimeProps": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "extractRuntimeProps",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "generateCodeFrame": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "generateCodeFrame",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "inferRuntimeType": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "inferRuntimeType",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "invalidateTypeCache": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "invalidateTypeCache",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "isInDestructureAssignment": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "isInDestructureAssignment",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "isStaticProperty": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "isStaticProperty",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name"
+      ]
+    },
+    "parse": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "parse$1",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "parseCache": {
+      "kind": "object",
+      "tag": "[object Object]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": [
+        "allowStale",
+        "allowStaleOnFetchAbort",
+        "allowStaleOnFetchRejection",
+        "ignoreFetchAbort",
+        "maxEntrySize",
+        "noDeleteOnFetchRejection",
+        "noDeleteOnStaleGet",
+        "noDisposeOnSet",
+        "noUpdateTTL",
+        "sizeCalculation",
+        "ttl",
+        "ttlAutopurge",
+        "ttlResolution",
+        "updateAgeOnGet",
+        "updateAgeOnHas"
+      ]
+    },
+    "registerTS": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "registerTS",
+      "function_arity": 1,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "resolveTypeElements": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "resolveTypeElements",
+      "function_arity": 4,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "rewriteDefault": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "rewriteDefault",
+      "function_arity": 3,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "rewriteDefaultAST": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "rewriteDefaultAST",
+      "function_arity": 3,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "shouldTransformRef": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "shouldTransformRef",
+      "function_arity": 0,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name"
+      ]
+    },
+    "version": {
+      "kind": "string",
+      "tag": "[object String]",
+      "name": null,
+      "function_arity": null,
+      "is_async_function": null,
+      "is_class_like": null,
+      "own_property_names": [
+        "0",
+        "1",
+        "2",
+        "3",
+        "4",
+        "5",
+        "length"
+      ]
+    },
+    "walk": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "walk",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    },
+    "walkIdentifiers": {
+      "kind": "function",
+      "tag": "[object Function]",
+      "name": "walkIdentifiers",
+      "function_arity": 2,
+      "is_async_function": false,
+      "is_class_like": false,
+      "own_property_names": [
+        "length",
+        "name",
+        "prototype"
+      ]
+    }
+  },
+  "require": {
+    "request": "@vue/compiler-sfc",
+    "success": true,
+    "resolved": "<probe-root>/node_modules/@vue/compiler-sfc/dist/compiler-sfc.cjs.js",
+    "error_name": null,
+    "error_code": null,
+    "error_message": null
+  },
+  "types": {
+    "package_types": "dist/compiler-sfc.d.ts",
+    "resolved": "<probe-root>/node_modules/@vue/compiler-sfc/dist/compiler-sfc.d.ts",
+    "exists": true
+  },
+  "status": "pass",
+  "source": "official",
+  "lock_hash": "ee33465b421a58b83fac04aa850a6d250ee09ec169fa80ed8820794a0c9a2769",
+  "official_revision": "57545e958ae28ed17aa9e0ed321abcd8dc99f752"
+}
