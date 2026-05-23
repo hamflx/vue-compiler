@@ -106,6 +106,7 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
         "vue3.core.rootCodegen" => Ok(vuec_vue3_core::root_codegen_projection(
             payload.get("root").unwrap_or(&payload),
         )),
+        "vue3.core.transformModel" => Ok(vuec_vue3_core::transform_model_projection(&payload)),
         "vue3.dom.compile" => {
             let source = template_source(&payload);
             let mut core = vue3_options(payload.get("options"));

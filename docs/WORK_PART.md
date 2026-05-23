@@ -28,9 +28,17 @@
 - [x] Vue 3 compiler-core Rust-backed parser/OXC projection slice for `parse.spec.ts`.
 - [x] Vue 3 compiler-core Rust-backed `baseCompile` component slot / `scopeId.spec.ts` slice.
 - [x] Vue 3 compiler-core Rust-backed root `codegenNode` projection bridge for `transform.spec.ts`.
+- [x] Vue 3 compiler-core Rust-backed `transformModel` projection bridge for `vModel.spec.ts`.
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Implemented a Rust-backed Vue 3 `transformModel` / `v-model` projection bridge for compiler-core directive transform parity.
+- `vuec_vue3_core::transform_model_projection` now owns official `v-model` decisions for missing/malformed expression diagnostics, v-for/v-slot scope variable diagnostics, props/const binding diagnostics, model prop and update event key projection, component `modelModifiers`, update-handler cache eligibility, dynamic prop names, static argument hydration flags, and OXC-backed member-expression validation.
+- Added `vue3.core.transformModel` to `vuec_node_bridge`. Generated alias `transformModel` in `xtask/src/compat.rs` now calls the Rust projection and materializes official-shaped AST nodes from returned instructions. This `compat.rs` change is bridge/API adapter support; it does not count as JS compiler semantics. The patch flag comment name was also synced to the locked official `NEED_HYDRATION` label.
+- Focused official `compiler-core/__tests__/transforms/vModel.spec.ts` now passes `21/21` (previously `1/21`). The file remains `mixed` in coverage because traversal/element codegen still execute through alias runtime, but the v-model directive-transform decisions are Rust-backed.
+- Full Vue 3 core conformance is still intentionally failing: `431/652` official tests pass and `221` fail. Coverage reports `rust-backed 158/158`, `mixed 273/494`, and `shim-backed 0/0`. Remaining failures are concentrated in internal transform/codegen suites (`transformElement`, `vFor`, `cacheStatic`, `vSlot`, `vIf`, `vMemo`, `utils`).
+- Verification this round: `cargo fmt --all --check`, `cargo check -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_vue3_core transform_model_projection`, `cargo test -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo xtask verify-npm-alias --version-line vue3 --package @vue/compiler-core`, direct prepared Vitest `vModel.spec.ts` run (`21/21` pass), `git diff --check`, and `cargo xtask run-conformance --suite vue3-core` (expected fail with `431/652` pass, `221` fail).
 
 - Implemented a Rust-backed Vue 3 root `codegenNode` projection bridge for compiler-core transform finalization.
 - `vuec_vue3_core::root_codegen_projection` now owns the official root selection rules: empty roots produce no codegen node, a single non-slot element with codegen uses that codegen node and marks VNode calls for block conversion, slot outlets remain the slot element node, structural `IF`/`FOR` roots remain structural nodes, and multi-child roots emit a fragment projection with `64` or `64 | 2048`.

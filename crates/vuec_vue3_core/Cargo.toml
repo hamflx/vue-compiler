@@ -14,4 +14,5 @@ vuec_html = { path = "../vuec_html" }
 vuec_js = { path = "../vuec_js" }
 vuec_pass = { path = "../vuec_pass" }
 vuec_source = { path = "../vuec_source" }
+oxc_ast.workspace = true
 oxc_span.workspace = true

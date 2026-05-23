@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use oxc_ast::ast::{ChainElement, Expression};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use vuec_ast::{
@@ -673,6 +674,313 @@ fn json_node_type(value: &Value) -> Option<u64> {
 
 fn json_u64(value: &Value, key: &str) -> Option<u64> {
     value.get(key).and_then(Value::as_u64)
+}
+
+pub fn transform_model_projection(payload: &Value) -> Value {
+    let dir = payload.get("dir").unwrap_or(&Value::Null);
+    let node = payload.get("node").unwrap_or(&Value::Null);
+    let context = payload.get("context").unwrap_or(&Value::Null);
+    let Some(exp) = dir.get("exp").filter(|value| !value.is_null()) else {
+        return json!({ "errors": [41], "props": [] });
+    };
+
+    let raw_exp = exp
+        .get("loc")
+        .and_then(|loc| loc.get("source"))
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| json_str(exp, "content").unwrap_or(""))
+        .trim();
+    let exp_string = json_str(exp, "content").unwrap_or(raw_exp);
+    let binding_type = context
+        .get("bindingMetadata")
+        .and_then(|metadata| metadata.get(raw_exp))
+        .and_then(Value::as_str);
+
+    if matches!(binding_type, Some("props" | "props-aliased")) {
+        return json!({ "errors": [44], "props": [] });
+    }
+    if matches!(binding_type, Some("literal-const" | "setup-const")) {
+        return json!({ "errors": [45], "props": [] });
+    }
+
+    let maybe_ref = json_bool(context, "inline")
+        && matches!(
+            binding_type,
+            Some("setup-let" | "setup-ref" | "setup-maybe-ref")
+        );
+    if exp_string.trim().is_empty() || (!model_is_member_expression(raw_exp) && !maybe_ref) {
+        return json!({ "errors": [42], "props": [] });
+    }
+    if json_bool(context, "prefixIdentifiers")
+        && is_simple_identifier_ascii(exp_string)
+        && context_identifier_count(context, exp_string) > 0
+    {
+        return json!({ "errors": [43], "props": [] });
+    }
+
+    let arg = dir.get("arg").filter(|value| !value.is_null());
+    let event_arg = if json_bool(context, "isTS") {
+        "($event: any)"
+    } else {
+        "$event"
+    };
+    let assignment = model_assignment_projection(exp, raw_exp, event_arg, binding_type, maybe_ref);
+    let mut props = vec![
+        json!({
+            "kind": "modelValue",
+            "key": model_prop_name_projection(arg),
+            "value": { "kind": "node", "path": "dir.exp" },
+            "dynamic": true,
+        }),
+        json!({
+            "kind": "modelUpdate",
+            "key": model_event_name_projection(arg),
+            "value": assignment,
+            "cache": should_cache_model_update(exp, context),
+            "dynamic": !should_cache_model_update(exp, context),
+            "hydrate": model_update_needs_hydration_event(arg, node),
+        }),
+    ];
+
+    if dir
+        .get("modifiers")
+        .and_then(Value::as_array)
+        .is_some_and(|modifiers| !modifiers.is_empty())
+        && json_u64(node, "tagType") == Some(1)
+    {
+        props.push(json!({
+            "kind": "modelModifiers",
+            "key": model_modifiers_key_projection(arg),
+            "value": model_modifiers_expression(dir),
+            "dynamic": false,
+        }));
+    }
+
+    json!({
+        "errors": [],
+        "props": props,
+    })
+}
+
+fn model_assignment_projection(
+    exp: &Value,
+    raw_exp: &str,
+    event_arg: &str,
+    binding_type: Option<&str>,
+    maybe_ref: bool,
+) -> Value {
+    if maybe_ref {
+        if binding_type == Some("setup-ref") {
+            return json!({
+                "kind": "compound",
+                "children": [
+                    format!("{event_arg} => (("),
+                    { "kind": "simple", "content": raw_exp, "isStatic": false, "loc": exp.get("loc").cloned().unwrap_or(Value::Null) },
+                    ").value = $event)"
+                ]
+            });
+        }
+        let alt_assignment = if binding_type == Some("setup-let") {
+            format!("{raw_exp} = $event")
+        } else {
+            "null".to_string()
+        };
+        return json!({
+            "kind": "compound",
+            "children": [
+                format!("{event_arg} => (_isRef({raw_exp}) ? ("),
+                { "kind": "simple", "content": raw_exp, "isStatic": false, "loc": exp.get("loc").cloned().unwrap_or(Value::Null) },
+                format!(").value = $event : {alt_assignment})")
+            ],
+            "helpers": ["IS_REF"]
+        });
+    }
+
+    json!({
+        "kind": "compound",
+        "children": [
+            format!("{event_arg} => (("),
+            { "kind": "node", "path": "dir.exp" },
+            ") = $event)"
+        ]
+    })
+}
+
+fn model_prop_name_projection(arg: Option<&Value>) -> Value {
+    match arg {
+        Some(_) => json!({ "kind": "node", "path": "dir.arg" }),
+        None => json!({ "kind": "static", "content": "modelValue" }),
+    }
+}
+
+fn model_event_name_projection(arg: Option<&Value>) -> Value {
+    match arg {
+        Some(arg) if json_bool(arg, "isStatic") => json!({
+            "kind": "static",
+            "content": format!("onUpdate:{}", camelize(json_str(arg, "content").unwrap_or(""))),
+        }),
+        Some(_) => json!({
+            "kind": "compound",
+            "children": [
+                "\"onUpdate:\" + ",
+                { "kind": "node", "path": "dir.arg" }
+            ],
+        }),
+        None => json!({ "kind": "static", "content": "onUpdate:modelValue" }),
+    }
+}
+
+fn model_update_needs_hydration_event(arg: Option<&Value>, node: &Value) -> bool {
+    arg.is_some_and(|arg| json_bool(arg, "isStatic")) && json_u64(node, "tagType") != Some(1)
+}
+
+fn model_modifiers_key_projection(arg: Option<&Value>) -> Value {
+    match arg {
+        Some(arg) if json_bool(arg, "isStatic") => json!({
+            "kind": "static",
+            "content": format!("{}Modifiers", json_str(arg, "content").unwrap_or("")),
+        }),
+        Some(_) => json!({
+            "kind": "compound",
+            "children": [
+                { "kind": "node", "path": "dir.arg" },
+                " + \"Modifiers\""
+            ],
+        }),
+        None => json!({ "kind": "static", "content": "modelModifiers" }),
+    }
+}
+
+fn model_modifiers_expression(dir: &Value) -> Value {
+    let modifiers = dir
+        .get("modifiers")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|modifier| json_str(modifier, "content"))
+        .map(|modifier| {
+            if is_simple_identifier_ascii(modifier) {
+                format!("{modifier}: true")
+            } else {
+                format!("{}: true", quote_string(modifier))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    json!({
+        "kind": "simple",
+        "content": format!("{{ {modifiers} }}"),
+        "isStatic": false,
+        "constType": 2,
+    })
+}
+
+fn should_cache_model_update(exp: &Value, context: &Value) -> bool {
+    json_bool(context, "prefixIdentifiers")
+        && json_bool(context, "cacheHandlers")
+        && !json_bool(context, "inVOnce")
+        && !model_has_scope_ref(exp, context)
+}
+
+fn model_has_scope_ref(exp: &Value, context: &Value) -> bool {
+    let source = model_expression_source(exp);
+    context
+        .get("identifiers")
+        .and_then(Value::as_object)
+        .is_some_and(|identifiers| {
+            identifiers.iter().any(|(name, count)| {
+                count.as_i64().unwrap_or_default() > 0 && source.contains(name)
+            })
+        })
+}
+
+fn model_expression_source(exp: &Value) -> String {
+    if let Some(content) = json_str(exp, "content") {
+        return content.to_string();
+    }
+    if let Some(children) = exp.get("children").and_then(Value::as_array) {
+        return children
+            .iter()
+            .map(model_expression_child_source)
+            .collect::<String>();
+    }
+    exp.get("loc")
+        .and_then(|loc| loc.get("source"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string()
+}
+
+fn model_expression_child_source(child: &Value) -> String {
+    child
+        .as_str()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| model_expression_source(child))
+}
+
+fn model_is_member_expression(expression: &str) -> bool {
+    let store = JsAstStore::new();
+    store
+        .parse_expression(expression, oxc_span::SourceType::mjs())
+        .map(|expression| match expression {
+            Expression::Identifier(_) => true,
+            Expression::ComputedMemberExpression(_)
+            | Expression::StaticMemberExpression(_)
+            | Expression::PrivateFieldExpression(_) => true,
+            Expression::ChainExpression(chain) => model_chain_element_is_member(&chain.expression),
+            _ => false,
+        })
+        .unwrap_or(false)
+}
+
+fn model_chain_element_is_member(element: &ChainElement<'_>) -> bool {
+    matches!(
+        element,
+        ChainElement::ComputedMemberExpression(_)
+            | ChainElement::StaticMemberExpression(_)
+            | ChainElement::PrivateFieldExpression(_)
+    )
+}
+
+fn context_identifier_count<'a>(context: &'a Value, name: &str) -> i64 {
+    context
+        .get("identifiers")
+        .and_then(|identifiers| identifiers.get(name))
+        .and_then(Value::as_i64)
+        .unwrap_or_default()
+}
+
+fn camelize(value: &str) -> String {
+    let mut output = String::new();
+    let mut uppercase_next = false;
+    for ch in value.chars() {
+        if uppercase_next {
+            output.extend(ch.to_uppercase());
+            uppercase_next = false;
+        } else if ch == '-' {
+            uppercase_next = true;
+        } else {
+            output.push(ch);
+        }
+    }
+    output
+}
+
+fn is_simple_identifier_ascii(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first == '$' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric())
+}
+
+fn json_str<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
+    value.get(key).and_then(Value::as_str)
+}
+
+fn json_bool(value: &Value, key: &str) -> bool {
+    value.get(key).and_then(Value::as_bool).unwrap_or(false)
 }
 
 fn vue3_element_kind(
@@ -3978,6 +4286,195 @@ mod tests {
             root_codegen_projection(&root),
             json!({ "kind": "fragment", "patchFlag": 2112 })
         );
+    }
+
+    #[test]
+    fn transform_model_projection_emits_model_value_and_update_props() {
+        let projection = transform_model_projection(&json!({
+            "dir": {
+                "exp": {
+                    "type": 4,
+                    "content": "model",
+                    "loc": { "source": "model" }
+                },
+                "modifiers": []
+            },
+            "node": { "tagType": 0 },
+            "context": {}
+        }));
+
+        assert_eq!(
+            projection["props"][0]["key"],
+            json!({ "kind": "static", "content": "modelValue" })
+        );
+        assert_eq!(projection["props"][0]["dynamic"], json!(true));
+        assert_eq!(
+            projection["props"][1]["key"],
+            json!({ "kind": "static", "content": "onUpdate:modelValue" })
+        );
+        assert_eq!(
+            projection["props"][1]["value"]["children"][0],
+            json!("$event => ((")
+        );
+    }
+
+    #[test]
+    fn transform_model_projection_handles_dynamic_argument() {
+        let projection = transform_model_projection(&json!({
+            "dir": {
+                "exp": {
+                    "type": 4,
+                    "content": "_ctx.model",
+                    "loc": { "source": "model" }
+                },
+                "arg": {
+                    "type": 4,
+                    "content": "_ctx.value",
+                    "isStatic": false
+                },
+                "modifiers": []
+            },
+            "node": { "tagType": 0 },
+            "context": { "prefixIdentifiers": true }
+        }));
+
+        assert_eq!(
+            projection["props"][0]["key"],
+            json!({ "kind": "node", "path": "dir.arg" })
+        );
+        assert_eq!(
+            projection["props"][1]["key"],
+            json!({
+                "kind": "compound",
+                "children": ["\"onUpdate:\" + ", { "kind": "node", "path": "dir.arg" }]
+            })
+        );
+    }
+
+    #[test]
+    fn transform_model_projection_reports_invalid_expression_errors() {
+        let no_expression = transform_model_projection(&json!({
+            "dir": { "modifiers": [] },
+            "node": { "tagType": 0 },
+            "context": {}
+        }));
+        assert_eq!(no_expression["errors"], json!([41]));
+
+        let malformed = transform_model_projection(&json!({
+            "dir": {
+                "exp": {
+                    "type": 4,
+                    "content": "a + b",
+                    "loc": { "source": "a + b" }
+                },
+                "modifiers": []
+            },
+            "node": { "tagType": 0 },
+            "context": {}
+        }));
+        assert_eq!(malformed["errors"], json!([42]));
+    }
+
+    #[test]
+    fn transform_model_projection_tracks_cache_and_scope_refs() {
+        let cached = transform_model_projection(&json!({
+            "dir": {
+                "exp": {
+                    "type": 4,
+                    "content": "_ctx.foo",
+                    "loc": { "source": "foo" }
+                },
+                "modifiers": []
+            },
+            "node": { "tagType": 0 },
+            "context": {
+                "prefixIdentifiers": true,
+                "cacheHandlers": true,
+                "identifiers": {}
+            }
+        }));
+        assert_eq!(cached["props"][1]["cache"], json!(true));
+        assert_eq!(cached["props"][1]["dynamic"], json!(false));
+
+        let scoped = transform_model_projection(&json!({
+            "dir": {
+                "exp": {
+                    "type": 8,
+                    "loc": { "source": "foo[i]" },
+                    "children": [
+                        { "type": 4, "content": "_ctx.foo" },
+                        "[",
+                        { "type": 4, "content": "i" },
+                        "]"
+                    ]
+                },
+                "modifiers": []
+            },
+            "node": { "tagType": 0 },
+            "context": {
+                "prefixIdentifiers": true,
+                "cacheHandlers": true,
+                "identifiers": { "i": 1 }
+            }
+        }));
+        assert_eq!(scoped["props"][1]["cache"], json!(false));
+        assert_eq!(scoped["props"][1]["dynamic"], json!(true));
+    }
+
+    #[test]
+    fn transform_model_projection_generates_component_modifiers() {
+        let projection = transform_model_projection(&json!({
+            "dir": {
+                "exp": {
+                    "type": 4,
+                    "content": "foo",
+                    "loc": { "source": "foo" }
+                },
+                "arg": {
+                    "type": 4,
+                    "content": "bar",
+                    "isStatic": true
+                },
+                "modifiers": [
+                    { "content": "trim" },
+                    { "content": "bar-baz" }
+                ]
+            },
+            "node": { "tagType": 1 },
+            "context": {}
+        }));
+
+        assert_eq!(
+            projection["props"][2]["key"],
+            json!({ "kind": "static", "content": "barModifiers" })
+        );
+        assert_eq!(
+            projection["props"][2]["value"]["content"],
+            json!("{ trim: true, \"bar-baz\": true }")
+        );
+    }
+
+    #[test]
+    fn transform_model_projection_marks_static_argument_hydration_event() {
+        let projection = transform_model_projection(&json!({
+            "dir": {
+                "exp": {
+                    "type": 4,
+                    "content": "model",
+                    "loc": { "source": "model" }
+                },
+                "arg": {
+                    "type": 4,
+                    "content": "foo-value",
+                    "isStatic": true
+                },
+                "modifiers": []
+            },
+            "node": { "tagType": 0 },
+            "context": {}
+        }));
+
+        assert_eq!(projection["props"][1]["hydrate"], json!(true));
     }
 
     #[test]
