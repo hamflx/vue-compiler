@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use vuec_ast::{TemplateAttribute, Vue3NodeKind};
-use vuec_codegen::{CodeWriter, SourceMapBuilder};
+use vuec_codegen::CodeWriter;
 use vuec_vue3_core::{CodegenResult, TemplateSource, Vue3CompilerOptions, Vue3Dialect};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,7 +89,7 @@ pub fn compile(source: TemplateSource, options: SsrCompilerOptions) -> CodegenRe
     writer.push_line("}");
     CodegenResult {
         code: writer.finish(),
-        map: Some(SourceMapBuilder::new().file("ssr.js").build()),
+        map: None,
         ast_summary: format!(
             "ssr:elements={},interpolations={},components={},slots={},teleports={},suspenses={}",
             summary.elements,

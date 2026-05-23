@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use vuec_ast::{TemplateAttribute, Vue3Ast, Vue3NodeKind};
-use vuec_codegen::{CodeWriter, SourceMapArtifact, SourceMapBuilder};
+use vuec_codegen::{CodeWriter, SourceMapArtifact};
 use vuec_html::{HtmlTokenKind, HtmlTokenizer};
 use vuec_pass::TransformContext;
 use vuec_source::{FileId, Span};
@@ -59,18 +59,26 @@ impl Vue3Dialect {
             Some(Span::new(source.file_id, 0, source.source.len())),
         );
         ast.set_root(root);
+        let mut stack = vec![root];
         let tokens = HtmlTokenizer::new(&source.source).tokenize();
         for token in tokens {
+            let current_parent = *stack.last().unwrap_or(&root);
             match token.kind {
                 HtmlTokenKind::Text(text) => {
-                    push_text_and_interpolations(&mut ast, root, source.file_id, token.start, &text)
+                    push_text_and_interpolations(
+                        &mut ast,
+                        current_parent,
+                        source.file_id,
+                        token.start,
+                        &text,
+                    )
                 }
                 HtmlTokenKind::Comment(value) => {
                     let id = ast.push(
                         Vue3NodeKind::Comment { value },
                         Some(Span::new(source.file_id, token.start, token.end)),
                     );
-                    ast.node_mut(root).unwrap().children.push(id);
+                    ast.node_mut(current_parent).unwrap().children.push(id);
                 }
                 HtmlTokenKind::StartTag {
                     name,
@@ -91,12 +99,34 @@ impl Vue3Dialect {
                         },
                         Some(Span::new(source.file_id, token.start, token.end)),
                     );
-                    ast.node_mut(root).unwrap().children.push(id);
+                    ast.node_mut(current_parent).unwrap().children.push(id);
+                    if !self_closing {
+                        stack.push(id);
+                    }
                 }
-                HtmlTokenKind::EndTag { .. }
-                | HtmlTokenKind::Cdata(_)
-                | HtmlTokenKind::Doctype(_)
-                | HtmlTokenKind::Eof => {}
+                HtmlTokenKind::EndTag { name } => {
+                    while stack.len() > 1 {
+                        let Some(node_id) = stack.pop() else {
+                            break;
+                        };
+                        if let Some(node) = ast.node(node_id) {
+                            if matches!(&node.kind, Vue3NodeKind::Element { tag, .. } if tag == &name)
+                            {
+                                break;
+                            }
+                        }
+                    }
+                }
+                HtmlTokenKind::Cdata(text) => {
+                    push_text_and_interpolations(
+                        &mut ast,
+                        current_parent,
+                        source.file_id,
+                        token.start,
+                        &text,
+                    );
+                }
+                HtmlTokenKind::Doctype(_) | HtmlTokenKind::Eof => {}
             }
         }
         ast
@@ -104,70 +134,81 @@ impl Vue3Dialect {
 
     pub fn transform(ast: &mut Vue3Ast, ctx: &mut TransformContext) {
         if let Some(root_id) = ast.root {
-            if let Some(root) = ast.node_mut(root_id) {
-                for child_id in root.children.clone() {
-                    if let Some(child) = ast.node_mut(child_id) {
-                        match child.kind {
-                            Vue3NodeKind::Element { .. } => {
-                                ctx.add_helper("createElementVNode");
+            let mut has_element = false;
+            let mut has_nested_element = false;
+            let mut has_text = false;
+            let mut walk = vec![(root_id, true)];
+            while let Some((node_id, is_root)) = walk.pop() {
+                if let Some(node) = ast.node(node_id) {
+                    for child_id in node.children.clone() {
+                        if let Some(child) = ast.node(child_id) {
+                            match &child.kind {
+                                Vue3NodeKind::Element { .. } => {
+                                    has_element = true;
+                                    if !is_root {
+                                        has_nested_element = true;
+                                    }
+                                    walk.push((child_id, false));
+                                }
+                                Vue3NodeKind::Text { .. } | Vue3NodeKind::Interpolation { .. } => {
+                                    has_text = true;
+                                }
+                                Vue3NodeKind::Comment { .. } | Vue3NodeKind::Directive { .. } | Vue3NodeKind::Root => {}
                             }
-                            Vue3NodeKind::Text { .. } | Vue3NodeKind::Interpolation { .. } => {
-                                ctx.add_helper("toDisplayString");
-                            }
-                            _ => {}
                         }
                     }
                 }
             }
+            if has_element {
+                ctx.add_helper("openBlock");
+                ctx.add_helper("createElementBlock");
+            }
+            if has_nested_element {
+                ctx.add_helper("createElementVNode");
+            }
+            if has_text {
+                ctx.add_helper("toDisplayString");
+            }
         }
     }
 
-    pub fn generate(ast: &Vue3Ast, _options: &Vue3CompilerOptions) -> CodegenResult {
+    pub fn generate(ast: &Vue3Ast, options: &Vue3CompilerOptions, ctx: &TransformContext) -> CodegenResult {
         let mut writer = CodeWriter::new();
-        let mut map = SourceMapBuilder::new().file("generated.js");
+        let helper_order = [
+            "toDisplayString",
+            "createElementVNode",
+            "openBlock",
+            "createElementBlock",
+        ];
         if let Some(root_id) = ast.root {
             if let Some(root) = ast.node(root_id) {
-                writer.push_line("function render(_ctx, _cache) {");
-                writer.indent();
-                writer.push_line("return [");
-                writer.indent();
-                for child_id in &root.children {
-                    if let Some(child) = ast.node(*child_id) {
-                        match &child.kind {
-                            Vue3NodeKind::Element {
-                                tag,
-                                attributes,
-                                self_closing,
-                            } => {
-                                let attrs = attributes
-                                    .iter()
-                                    .map(|attr| match &attr.value {
-                                        Some(value) => format!("{}={value:?}", attr.name),
-                                        None => attr.name.clone(),
-                                    })
-                                    .collect::<Vec<_>>()
-                                    .join(" ");
-                                writer.push_line(&format!(
-                                    "/* element:{tag} attrs:{attrs} self_closing:{self_closing} */ null,"
-                                ));
-                            }
-                            Vue3NodeKind::Text { value } => {
-                                writer.push_line(&format!("{value:?},"));
-                            }
-                            Vue3NodeKind::Interpolation { expression } => {
-                                writer.push_line(&format!("_toDisplayString({expression}),"));
-                            }
-                            Vue3NodeKind::Comment { .. }
-                            | Vue3NodeKind::Directive { .. }
-                            | Vue3NodeKind::Root => {}
-                        }
-                        if let Some(span) = child.span {
-                            map.add_mapping(1, 0, Some(span), Some("source.vue".into()));
-                        }
-                    }
+                if options.mode == "function" {
+                    writer.push_line("const _Vue = Vue");
+                    writer.newline();
+                    writer.push_line("return function render(_ctx, _cache) {");
+                } else {
+                    writer.push_line("export function render(_ctx, _cache) {");
                 }
-                writer.dedent();
-                writer.push_line("];");
+                writer.indent();
+                if !options.prefix_identifiers {
+                    writer.push_line("with (_ctx) {");
+                    writer.indent();
+                }
+                let helpers = render_helpers(&helper_order, ctx);
+                if !helpers.is_empty() {
+                    writer.push_line(&format!("const {{ {} }} = _Vue", helpers.join(", ")));
+                    writer.newline();
+                }
+                let expr = if root.children.len() == 1 {
+                    render_node_expr(ast, root.children[0], options, true)
+                } else {
+                    render_children_array(ast, &root.children, options, true)
+                };
+                writer.push_line(&format!("return {};", expr));
+                if !options.prefix_identifiers {
+                    writer.dedent();
+                    writer.push_line("}");
+                }
                 writer.dedent();
                 writer.push_line("}");
             }
@@ -175,7 +216,7 @@ impl Vue3Dialect {
         let code = writer.finish();
         CodegenResult {
             code,
-            map: Some(map.build()),
+            map: None,
             ast_summary: format!("nodes={}", ast.len()),
             diagnostics: Vec::new(),
         }
@@ -185,7 +226,7 @@ impl Vue3Dialect {
         let mut ast = Self::base_parse(source.clone(), &options);
         let mut ctx = TransformContext::default();
         Self::transform(&mut ast, &mut ctx);
-        let mut result = Self::generate(&ast, &options);
+        let mut result = Self::generate(&ast, &options, &ctx);
         result.diagnostics = ctx
             .diagnostics
             .into_vec()
@@ -212,9 +253,170 @@ impl Vue3Dialect {
     }
 }
 
+fn render_helpers<'a>(order: &'a [&'a str], ctx: &TransformContext) -> Vec<&'a str> {
+    order
+        .iter()
+        .copied()
+        .filter(|helper| ctx.helpers.contains(*helper))
+        .collect()
+}
+
+fn render_children_array(
+    ast: &Vue3Ast,
+    children: &[vuec_ast::NodeId],
+    options: &Vue3CompilerOptions,
+    is_root: bool,
+) -> String {
+    let rendered = children
+        .iter()
+        .filter_map(|child_id| ast.node(*child_id))
+        .map(|child| render_node_expr(ast, child.id, options, is_root))
+        .collect::<Vec<_>>();
+    format!("[{}]", rendered.join(", "))
+}
+
+fn render_node_expr(
+    ast: &Vue3Ast,
+    node_id: vuec_ast::NodeId,
+    options: &Vue3CompilerOptions,
+    is_root: bool,
+) -> String {
+    let Some(node) = ast.node(node_id) else {
+        return "null".into();
+    };
+    match &node.kind {
+        Vue3NodeKind::Root => render_children_array(ast, &node.children, options, true),
+        Vue3NodeKind::Text { value } => quote_text(value),
+        Vue3NodeKind::Interpolation { expression } => {
+            format!("_toDisplayString({})", render_expression(expression, options))
+        }
+        Vue3NodeKind::Comment { value } => format!("/*{}*/", value),
+        Vue3NodeKind::Directive { .. } => "null".into(),
+        Vue3NodeKind::Element {
+            tag,
+            attributes,
+            self_closing: _,
+        } => {
+            let helper = if is_root {
+                "_createElementBlock"
+            } else {
+                "_createElementVNode"
+            };
+            let props = render_props(attributes, options);
+            let children = render_element_children(ast, &node.children, options, is_root);
+            let patch_flag = if has_dynamic_children(ast, &node.children) {
+                ", 1 /* TEXT */"
+            } else {
+                ""
+            };
+            let attrs = if props.is_empty() { "null".into() } else { props };
+            let children_arg = if children.is_empty() {
+                String::new()
+            } else {
+                format!(", {children}")
+            };
+            if is_root {
+                format!(
+                    "(_openBlock(), {}({}, {}{}{}))",
+                    helper,
+                    quote_string(tag),
+                    attrs,
+                    children_arg,
+                    patch_flag
+                )
+            } else {
+                format!(
+                    "{}({}, {}{}{})",
+                    helper,
+                    quote_string(tag),
+                    attrs,
+                    children_arg,
+                    patch_flag
+                )
+            }
+        }
+    }
+}
+
+fn render_element_children(
+    ast: &Vue3Ast,
+    children: &[vuec_ast::NodeId],
+    options: &Vue3CompilerOptions,
+    parent_is_root: bool,
+) -> String {
+    let rendered = children
+        .iter()
+        .filter_map(|child_id| ast.node(*child_id))
+        .filter(|child| !matches!(child.kind, Vue3NodeKind::Comment { .. }))
+        .map(|child| render_node_expr(ast, child.id, options, false))
+        .collect::<Vec<_>>();
+    if rendered.is_empty() {
+        String::new()
+    } else if rendered.len() == 1 && !parent_is_root {
+        rendered.into_iter().next().unwrap()
+    } else {
+        format!("[{}]", rendered.join(", "))
+    }
+}
+
+fn has_dynamic_children(ast: &Vue3Ast, children: &[vuec_ast::NodeId]) -> bool {
+    children.iter().any(|child_id| {
+        ast.node(*child_id).is_some_and(|child| {
+            matches!(
+                child.kind,
+                Vue3NodeKind::Text { .. } | Vue3NodeKind::Interpolation { .. }
+            ) || matches!(&child.kind, Vue3NodeKind::Element { .. } if has_dynamic_children(ast, &child.children))
+        })
+    })
+}
+
+fn render_props(attributes: &[TemplateAttribute], _options: &Vue3CompilerOptions) -> String {
+    let props = attributes
+        .iter()
+        .filter(|attr| !attr.name.starts_with("v-") && !attr.name.starts_with('@') && !attr.name.starts_with(':'))
+        .map(|attr| match &attr.value {
+            Some(value) => format!("{}: {}", json_key(&attr.name), quote_string(value)),
+            None => format!("{}: true", json_key(&attr.name)),
+        })
+        .collect::<Vec<_>>();
+    if props.is_empty() {
+        String::new()
+    } else {
+        format!("{{ {} }}", props.join(", "))
+    }
+}
+
+fn render_expression(expression: &str, options: &Vue3CompilerOptions) -> String {
+    let expression = expression.trim();
+    if !options.prefix_identifiers {
+        return expression.to_string();
+    }
+    if expression.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$' || ch == '.') {
+        format!("_ctx.{expression}")
+    } else {
+        expression.to_string()
+    }
+}
+
+fn quote_string(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".into())
+}
+
+fn json_key(key: &str) -> String {
+    if key.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$') {
+        key.to_string()
+    } else {
+        quote_string(key)
+    }
+}
+
+fn quote_text(value: &str) -> String {
+    quote_string(value)
+}
+
 fn push_text_and_interpolations(
     ast: &mut Vue3Ast,
-    root: vuec_ast::NodeId,
+    parent: vuec_ast::NodeId,
     file_id: FileId,
     token_start: usize,
     text: &str,
@@ -225,7 +427,7 @@ fn push_text_and_interpolations(
         if open > cursor {
             push_text(
                 ast,
-                root,
+                parent,
                 file_id,
                 token_start + cursor,
                 &text[cursor..open],
@@ -233,7 +435,7 @@ fn push_text_and_interpolations(
         }
         let expression_start = open + 2;
         let Some(close_offset) = text[expression_start..].find("}}") else {
-            push_text(ast, root, file_id, token_start + open, &text[open..]);
+            push_text(ast, parent, file_id, token_start + open, &text[open..]);
             return;
         };
         let close = expression_start + close_offset;
@@ -246,15 +448,15 @@ fn push_text_and_interpolations(
                 token_start + close + 2,
             )),
         );
-        ast.node_mut(root).unwrap().children.push(id);
+        ast.node_mut(parent).unwrap().children.push(id);
         cursor = close + 2;
     }
     if cursor < text.len() {
-        push_text(ast, root, file_id, token_start + cursor, &text[cursor..]);
+        push_text(ast, parent, file_id, token_start + cursor, &text[cursor..]);
     }
 }
 
-fn push_text(ast: &mut Vue3Ast, root: vuec_ast::NodeId, file_id: FileId, start: usize, text: &str) {
+fn push_text(ast: &mut Vue3Ast, parent: vuec_ast::NodeId, file_id: FileId, start: usize, text: &str) {
     if text.is_empty() {
         return;
     }
@@ -264,7 +466,7 @@ fn push_text(ast: &mut Vue3Ast, root: vuec_ast::NodeId, file_id: FileId, start: 
         },
         Some(Span::new(file_id, start, start + text.len())),
     );
-    ast.node_mut(root).unwrap().children.push(id);
+    ast.node_mut(parent).unwrap().children.push(id);
 }
 
 pub fn base_compile(source: TemplateSource, options: Vue3CompilerOptions) -> CodegenResult {

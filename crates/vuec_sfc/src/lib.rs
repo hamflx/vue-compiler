@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use vuec_js::JsAstStore;
+use vuec_codegen::SourceMapArtifact;
 use vuec_source::{FileId, SourceMap};
 use vuec_style::{compile_style, StyleCompileOptions};
 use vuec_vue3_core::{TemplateSource, Vue3CompilerOptions};
@@ -103,7 +104,7 @@ impl Default for SfcStyleCompileOptions {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SfcTemplateCompileResult {
     pub code: String,
-    pub map: Option<String>,
+    pub map: Option<SourceMapArtifact>,
     pub errors: Vec<String>,
     pub bindings: Vec<String>,
     pub ast_summary: String,
@@ -120,7 +121,7 @@ pub struct SfcScriptBlock {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SfcStyleCompileResult {
     pub code: String,
-    pub map: Option<String>,
+    pub map: Option<SourceMapArtifact>,
     pub errors: Vec<String>,
 }
 
@@ -216,13 +217,40 @@ impl SfcCompiler {
         };
         SfcTemplateCompileResult {
             code: result.code,
-            map: result
-                .map
-                .map(|map| serde_json::to_string(&map).unwrap_or_else(|_| "{}".into())),
+            map: result.map,
             errors: result.diagnostics,
             bindings: Vec::new(),
             ast_summary: result.ast_summary,
         }
+    }
+
+    pub fn compile_template_source(
+        &self,
+        filename: impl Into<String>,
+        source: &str,
+        options: SfcTemplateCompileOptions,
+    ) -> SfcTemplateCompileResult {
+        let filename = filename.into();
+        let descriptor = SfcDescriptor {
+            filename,
+            source: source.to_string(),
+            source_file: FileId(0),
+            template: Some(SfcBlock {
+                type_name: "template".into(),
+                content: source.to_string(),
+                attrs: SfcBlockAttrs::default(),
+                loc: SfcBlockLocation {
+                    start: 0,
+                    end: source.len(),
+                    source_file: FileId(0),
+                },
+            }),
+            script: None,
+            script_setup: None,
+            styles: Vec::new(),
+            custom_blocks: Vec::new(),
+        };
+        self.compile_template(&descriptor, options)
     }
 
     pub fn compile_script(
@@ -295,7 +323,20 @@ impl SfcCompiler {
         }
         SfcStyleCompileResult {
             code,
-            map: descriptor.styles.first().map(|_| "{}".to_string()),
+            map: descriptor.styles.first().and_then(|_| {
+                compile_style(
+                    "",
+                    StyleCompileOptions {
+                        id: options.id.clone(),
+                        scoped: options.scoped,
+                        modules: false,
+                        vars: Vec::new(),
+                        filename: Some(descriptor.filename.clone()),
+                        source_map: true,
+                    },
+                )
+                .map
+            }),
             errors,
         }
     }

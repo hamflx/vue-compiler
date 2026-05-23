@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 serde.workspace = true
+serde_json.workspace = true
 vuec_ast = { path = "../vuec_ast" }
 vuec_codegen = { path = "../vuec_codegen" }
 vuec_diagnostics = { path = "../vuec_diagnostics" }

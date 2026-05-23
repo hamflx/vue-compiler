@@ -1826,6 +1826,7 @@ fn alias_function_expression(
 ) -> String {
     let name = detail.name.as_deref().unwrap_or(export_name);
     let arity = detail.function_arity.unwrap_or(0);
+    let body_arity = alias_body_arity(target, export_name, arity);
     let command = bridge_command(target, export_name);
     if detail.is_class_like.unwrap_or(false) {
         let args = (0..arity)
@@ -1845,7 +1846,7 @@ fn alias_function_expression(
         expression.push_str(" return cls; })()");
         return expression;
     }
-    let args = (0..arity)
+    let args = (0..body_arity)
         .map(|index| format!("a{index}"))
         .collect::<Vec<_>>()
         .join(", ");
@@ -1853,7 +1854,7 @@ fn alias_function_expression(
         Some(command) => format!(
             "return callBridge({}, normalizeArgs({}));",
             js_string_literal(command),
-            alias_argument_object(target, export_name, arity)
+            alias_argument_object(target, export_name, body_arity)
         ),
         None => format!("return notImplemented({});", js_string_literal(export_name)),
     };
@@ -1871,6 +1872,16 @@ fn alias_function_expression(
             arity,
             expression
         )
+    }
+}
+
+fn alias_body_arity(target: TargetSpec, export_name: &str, arity: u32) -> u32 {
+    match (target.kind, export_name) {
+        (TargetKind::Vue3Core | TargetKind::Vue3Dom | TargetKind::Vue3Ssr, "baseCompile")
+        | (TargetKind::Vue3Core | TargetKind::Vue3Dom | TargetKind::Vue3Ssr, "baseParse")
+        | (TargetKind::Vue3Core | TargetKind::Vue3Dom | TargetKind::Vue3Ssr, "compile")
+        | (TargetKind::Vue27Sfc | TargetKind::Vue3Sfc, "parse") => arity.max(2),
+        _ => arity,
     }
 }
 
@@ -1920,7 +1931,7 @@ fn bridge_command(target: TargetSpec, export_name: &str) -> Option<&'static str>
     }
 }
 
-fn alias_argument_object(target: TargetSpec, export_name: &str, arity: u32) -> String {
+fn alias_argument_object(target: TargetSpec, export_name: &str, _arity: u32) -> String {
     match (target.kind, export_name) {
         (TargetKind::Vue26Template | TargetKind::Vue27Template, "generateCodeFrame") => {
             "{ source: a0, start: a1, end: a2 }".into()
@@ -1928,18 +1939,32 @@ fn alias_argument_object(target: TargetSpec, export_name: &str, arity: u32) -> S
         (TargetKind::Vue26Template | TargetKind::Vue27Template, _) => {
             "{ template: a0, options: a1 }".into()
         }
-        (TargetKind::Vue27Sfc | TargetKind::Vue3Sfc, "parse") => {
-            "{ source: a0 && a0.source ? a0.source : a0, filename: a0 && a0.filename, options: a0 }".into()
+        (TargetKind::Vue27Sfc, "parse") => "{ source: a0, filename: a1 && a1.filename, options: a1 }".into(),
+        (TargetKind::Vue27Sfc, "compileTemplate") => {
+            "{ source: a0 && a0.source ? a0.source : '', filename: a0 && a0.filename, options: a0 }".into()
         }
-        (TargetKind::Vue27Sfc | TargetKind::Vue3Sfc, _) => {
-            "{ source: (a0 && (a0.source || a0.filename && a0.source)) || '', filename: a0 && a0.filename, options: a0 }".into()
+        (TargetKind::Vue27Sfc, "compileScript") => {
+            "{ source: a0 && a0.source ? a0.source : '', filename: a0 && a0.filename, options: a0 }".into()
         }
+        (TargetKind::Vue27Sfc, "compileStyle") | (TargetKind::Vue27Sfc, "compileStyleAsync") => {
+            "{ source: a0 && a0.source ? a0.source : '', filename: a0 && a0.filename, options: a0 }".into()
+        }
+        (TargetKind::Vue27Sfc, _) => {
+            "{ source: a0 && a0.source ? a0.source : '', filename: a0 && a0.filename, options: a0 }".into()
+        }
+        (TargetKind::Vue3Sfc, "parse") => "{ source: a0, filename: a1 && a1.filename, options: a1 }".into(),
+        (TargetKind::Vue3Sfc, "compileTemplate") => {
+            "{ source: a0 && a0.source ? a0.source : '', filename: a0 && a0.filename, options: a0 }".into()
+        }
+        (TargetKind::Vue3Sfc, "compileScript") => {
+            "{ source: a0 && a0.source ? a0.source : '', filename: a0 && a0.filename, options: a0 }".into()
+        }
+        (TargetKind::Vue3Sfc, "compileStyle") | (TargetKind::Vue3Sfc, "compileStyleAsync") => {
+            "{ source: a0 && a0.source ? a0.source : '', filename: a0 && a0.filename, options: a0 }".into()
+        }
+        (TargetKind::Vue3Sfc, _) => "{ source: a0 && a0.source ? a0.source : '', filename: a0 && a0.filename, options: a0 }".into(),
         (TargetKind::Vue3Core | TargetKind::Vue3Dom | TargetKind::Vue3Ssr, _) => {
-            if arity <= 1 {
-                "{ source: a0 && a0.source ? a0.source : a0, filename: a0 && a0.filename, options: {} }".into()
-            } else {
-                "{ source: a0 && a0.source ? a0.source : a0, filename: a0 && a0.filename, options: a1 }".into()
-            }
+            "{ source: a0 && a0.source ? a0.source : a0, filename: a0 && a0.filename, options: a1 || (a0 && a0.options) || {} }".into()
         }
     }
 }
