@@ -156,13 +156,24 @@ impl Vue3Dialect {
                     if !options.comments {
                         continue;
                     }
+                    let incomplete = source.source[token.start..].starts_with("<!--")
+                        && token.end == source.source.len()
+                        && !source.source[token.start..token.end].ends_with("-->");
+                    if incomplete && value.is_empty() {
+                        continue;
+                    }
+                    let comment_end = if incomplete {
+                        token.end + "-->".len()
+                    } else {
+                        token.end
+                    };
                     let _id = ast.push_child(
                         current_parent,
                         Vue3NodeKind::comment(value),
                         Some(Span::new(
                             source.file_id,
                             source.base_offset + token.start,
-                            source.base_offset + token.end,
+                            source.base_offset + comment_end,
                         )),
                     );
                 }
@@ -225,6 +236,24 @@ impl Vue3Dialect {
                 }
                 HtmlTokenKind::EndTag { name } => {
                     if name.is_empty() {
+                        if vue3_empty_end_tag_should_be_text(&source.source, token.start, token.end)
+                        {
+                            push_text(
+                                &mut ast,
+                                current_parent,
+                                source.file_id,
+                                source.base_offset + token.start,
+                                &source.source[token.start..token.end],
+                            );
+                        }
+                        extend_open_element_spans_to(
+                            &mut ast,
+                            &stack,
+                            source.base_offset + token.end,
+                        );
+                        continue;
+                    }
+                    if current_parent_raw_text_ignores_end_tag(&ast, current_parent, &name) {
                         push_text(
                             &mut ast,
                             current_parent,
@@ -241,6 +270,14 @@ impl Vue3Dialect {
                     }
                     if malformed_start_depth > 0 {
                         malformed_start_depth -= 1;
+                        extend_open_element_spans_to(
+                            &mut ast,
+                            &stack,
+                            source.base_offset + token.end,
+                        );
+                        continue;
+                    }
+                    if !stack_has_matching_element(&ast, &stack, &name) {
                         extend_open_element_spans_to(
                             &mut ast,
                             &stack,
@@ -291,6 +328,9 @@ impl Vue3Dialect {
                             &text,
                         );
                     }
+                }
+                HtmlTokenKind::BogusQuestionTag => {
+                    extend_open_element_spans_to(&mut ast, &stack, source.base_offset + token.end);
                 }
                 HtmlTokenKind::Doctype(_) | HtmlTokenKind::Eof => {}
             }
@@ -774,11 +814,16 @@ fn parse_vue3_directive(
     } else {
         parts.map(ToOwned::to_owned).collect::<Vec<_>>()
     };
-    let (arg, is_dynamic) = if raw_arg.starts_with('[') && raw_arg.ends_with(']') {
-        (
-            Some(raw_arg[1..raw_arg.len().saturating_sub(1)].to_string()),
-            true,
-        )
+    let (arg, is_dynamic) = if raw_arg.starts_with('[') {
+        let content_end = if raw_arg.ends_with(']') {
+            raw_arg.len().saturating_sub(1)
+        } else {
+            raw_arg.len()
+        };
+        let content = raw_arg[1..content_end]
+            .trim_end_matches(|ch: char| ch.is_whitespace() || ch == '/')
+            .to_string();
+        (Some(content), true)
     } else if raw_arg.is_empty() {
         (None, false)
     } else {
@@ -795,7 +840,7 @@ fn parse_vue3_directive(
                         .unwrap_or(0)
             };
             let arg_len = if is_dynamic {
-                raw_arg.len()
+                raw_arg.len() + usize::from(!raw_arg.ends_with(']'))
             } else {
                 arg.as_deref().unwrap_or_default().len()
             };
@@ -872,6 +917,18 @@ fn vue3_start_tag_is_incomplete(source: &str, start: usize, end: usize) -> bool 
         .is_some_and(|slice| !slice.ends_with('>'))
 }
 
+fn vue3_empty_end_tag_should_be_text(source: &str, start: usize, end: usize) -> bool {
+    let Some(slice) = source.get(start..end) else {
+        return false;
+    };
+    if slice.ends_with('>') {
+        return false;
+    }
+    slice
+        .strip_prefix("</")
+        .is_some_and(|after_slash| after_slash.trim().is_empty())
+}
+
 fn stack_is_root_only(stack: &[vuec_ast::NodeId], root: vuec_ast::NodeId) -> bool {
     stack.len() == 1 && stack.first().copied() == Some(root)
 }
@@ -889,12 +946,15 @@ fn push_incomplete_start_tag_recovery_text(
     let Some(local_start) = incomplete_start_tag_recovery_text_start(slice) else {
         return;
     };
-    push_text(
-        ast,
+    let text = &slice[local_start..];
+    let _id = ast.push_child(
         parent,
-        source.file_id,
-        source.base_offset + token_start + local_start,
-        &slice[local_start..],
+        Vue3NodeKind::text(decode_html_text_entities(text)),
+        Some(Span::new(
+            source.file_id,
+            source.base_offset + token_start + local_start,
+            source.base_offset + token_start + local_start + text.len(),
+        )),
     );
 }
 
@@ -903,6 +963,33 @@ fn incomplete_start_tag_recovery_text_start(slice: &str) -> Option<usize> {
         slice
             .get(index + 1..)
             .is_some_and(|tail| tail.chars().all(char::is_whitespace))
+    })
+}
+
+fn current_parent_raw_text_ignores_end_tag(
+    ast: &Vue3Ast,
+    parent: vuec_ast::NodeId,
+    name: &str,
+) -> bool {
+    let Some(node) = ast.node(parent) else {
+        return false;
+    };
+    matches!(
+        &node.kind,
+        Vue3AstKind::Element(element)
+            if matches!(element.tag.as_str(), "textarea" | "title")
+                && !element.tag.eq_ignore_ascii_case(name)
+    )
+}
+
+fn stack_has_matching_element(ast: &Vue3Ast, stack: &[vuec_ast::NodeId], name: &str) -> bool {
+    stack.iter().copied().skip(1).any(|node_id| {
+        ast.node(node_id).is_some_and(|node| {
+            matches!(
+                &node.kind,
+                Vue3AstKind::Element(element) if element.tag.eq_ignore_ascii_case(name)
+            )
+        })
     })
 }
 
@@ -2964,9 +3051,24 @@ fn push_text(
     if text.is_empty() {
         return;
     }
+    let decoded = decode_html_text_entities(text);
+    let previous = ast
+        .node(parent)
+        .and_then(|node| node.children.last().copied());
+    if let Some(previous) = previous {
+        if let Some(node) = ast.node_mut(previous) {
+            if let Vue3AstKind::Text(existing) = &mut node.kind {
+                existing.value.push_str(&decoded);
+                if let Some(span) = node.span.source_mut() {
+                    span.end = vuec_source::BytePos(start + text.len());
+                }
+                return;
+            }
+        }
+    }
     let _id = ast.push_child(
         parent,
-        Vue3NodeKind::text(decode_html_text_entities(text)),
+        Vue3NodeKind::text(decoded),
         Some(Span::new(file_id, start, start + text.len())),
     );
 }
@@ -3399,6 +3501,46 @@ mod tests {
         let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
         let root = ast.root_node().expect("root");
         let template = ast.node(root.children[0]).expect("template");
+        assert!(template.children.is_empty());
+    }
+
+    #[test]
+    fn base_parse_keeps_non_matching_end_tag_as_text_in_textarea() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: "<textarea></div></textarea>".into(),
+            file_id: FileId(0),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let root = ast.root_node().expect("root");
+        let textarea = ast.node(root.children[0]).expect("textarea");
+        assert_eq!(textarea.span.source(), Some(Span::new(FileId(0), 0, 27)));
+        assert!(matches!(
+            &ast.node(textarea.children[0]).expect("raw end tag text").kind,
+            Vue3AstKind::Text(text) if text.value == "</div>"
+        ));
+        assert_eq!(
+            ast.node(textarea.children[0])
+                .expect("raw end tag text")
+                .span
+                .source(),
+            Some(Span::new(FileId(0), 10, 16))
+        );
+    }
+
+    #[test]
+    fn base_parse_extends_open_span_across_invalid_end_tags() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: "<template></div></template>".into(),
+            file_id: FileId(0),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let root = ast.root_node().expect("root");
+        let template = ast.node(root.children[0]).expect("template");
+        assert_eq!(template.span.source(), Some(Span::new(FileId(0), 0, 27)));
         assert!(template.children.is_empty());
     }
 }

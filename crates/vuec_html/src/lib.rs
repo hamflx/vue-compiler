@@ -37,6 +37,7 @@ pub enum HtmlTokenKind {
     Comment(String),
     Cdata(String),
     Doctype(String),
+    BogusQuestionTag,
     StartTag {
         name: String,
         attributes: Vec<HtmlAttribute>,
@@ -129,6 +130,12 @@ impl<'a> HtmlTokenizer<'a> {
                 HtmlTokenKind::Doctype(body.trim().to_string())
             });
         }
+        if self.starts_bogus_question_tag_at(self.cursor) {
+            return self.consume_bogus_question_tag();
+        }
+        if self.remaining().starts_with("</") && self.starts_invalid_space_end_tag_at(self.cursor) {
+            return self.consume_invalid_space_end_tag();
+        }
         if self.remaining().starts_with("</") {
             return self.consume_end_tag();
         }
@@ -158,6 +165,31 @@ impl<'a> HtmlTokenizer<'a> {
         self.consume_until('>');
         HtmlToken {
             kind: HtmlTokenKind::EndTag { name },
+            start,
+            end: self.cursor,
+        }
+    }
+
+    fn consume_invalid_space_end_tag(&mut self) -> HtmlToken {
+        let start = self.cursor;
+        self.cursor += 2;
+        self.consume_whitespace();
+        self.consume_until('>');
+        HtmlToken {
+            kind: HtmlTokenKind::EndTag {
+                name: String::new(),
+            },
+            start,
+            end: self.cursor,
+        }
+    }
+
+    fn consume_bogus_question_tag(&mut self) -> HtmlToken {
+        let start = self.cursor;
+        self.cursor += 2;
+        self.consume_until('>');
+        HtmlToken {
+            kind: HtmlTokenKind::BogusQuestionTag,
             start,
             end: self.cursor,
         }
@@ -281,6 +313,20 @@ impl<'a> HtmlTokenizer<'a> {
 
     fn consume_attr_name(&mut self) -> (String, usize, usize) {
         let start = self.cursor;
+        if self.remaining().starts_with('=') {
+            self.cursor += 1;
+            while let Some(ch) = self.remaining().chars().next() {
+                if ch.is_whitespace() || matches!(ch, '=' | '>' | '/') {
+                    break;
+                }
+                self.cursor += ch.len_utf8();
+            }
+            return (
+                self.source[start..self.cursor].to_string(),
+                start,
+                self.cursor,
+            );
+        }
         while let Some(ch) = self.remaining().chars().next() {
             if ch.is_whitespace() || matches!(ch, '=' | '>' | '/') {
                 break;
@@ -379,7 +425,9 @@ impl<'a> HtmlTokenizer<'a> {
                     continue;
                 }
                 return self.source.len();
-            } else if self.source[cursor..].starts_with('<') && self.starts_valid_tag_at(cursor) {
+            } else if self.source[cursor..].starts_with('<')
+                && self.starts_markup_boundary_at(cursor)
+            {
                 return cursor;
             }
 
@@ -412,6 +460,34 @@ impl<'a> HtmlTokenizer<'a> {
                 .is_some_and(|ch| ch.is_ascii_alphabetic());
         }
         false
+    }
+
+    fn starts_markup_boundary_at(&self, offset: usize) -> bool {
+        self.starts_valid_tag_at(offset)
+            || self.starts_empty_end_tag_at(offset)
+            || self.starts_invalid_space_end_tag_at(offset)
+            || self.starts_bogus_question_tag_at(offset)
+    }
+
+    fn starts_invalid_space_end_tag_at(&self, offset: usize) -> bool {
+        self.source
+            .get(offset..)
+            .and_then(|rest| rest.strip_prefix("</"))
+            .is_some_and(|after_slash| after_slash.chars().next().is_some_and(char::is_whitespace))
+    }
+
+    fn starts_empty_end_tag_at(&self, offset: usize) -> bool {
+        self.source
+            .get(offset..)
+            .and_then(|rest| rest.strip_prefix("</"))
+            .is_some_and(|after_slash| after_slash.starts_with('>'))
+    }
+
+    fn starts_bogus_question_tag_at(&self, offset: usize) -> bool {
+        self.source
+            .get(offset..)
+            .and_then(|rest| rest.strip_prefix("<?"))
+            .is_some_and(|after_question| after_question.contains('>'))
     }
 
     fn consume_whitespace(&mut self) {
@@ -503,6 +579,21 @@ mod tests {
     }
 
     #[test]
+    fn keeps_equals_as_invalid_attribute_name_prefix() {
+        let tokens = HtmlTokenizer::new("<div =foo=bar =>").tokenize();
+        let HtmlTokenKind::StartTag { attributes, .. } = &tokens[0].kind else {
+            panic!("expected start tag");
+        };
+        assert_eq!(attributes[0].name, "=foo");
+        assert_eq!(attributes[0].name_start, 5);
+        assert_eq!(attributes[0].name_end, 9);
+        assert_eq!(attributes[0].value.as_deref(), Some("bar"));
+        assert_eq!(attributes[1].name, "=");
+        assert_eq!(attributes[1].start, 14);
+        assert_eq!(attributes[1].end, 15);
+    }
+
+    #[test]
     fn keeps_invalid_lt_and_lt_inside_interpolation_in_text() {
         let tokens = HtmlTokenizer::new("a < b {{ c<d }} <span>").tokenize();
         assert!(matches!(tokens[0].kind, HtmlTokenKind::Text(ref s) if s == "a < b {{ c<d }} "));
@@ -541,5 +632,27 @@ mod tests {
         assert!(
             matches!(tokens[3].kind, HtmlTokenKind::StartTag { ref name, .. } if name == "script")
         );
+    }
+
+    #[test]
+    fn tokenizes_invalid_space_end_tag_as_markup_boundary() {
+        let tokens = HtmlTokenizer::new("<template>a </ b</template>").tokenize();
+        assert!(
+            matches!(tokens[0].kind, HtmlTokenKind::StartTag { ref name, .. } if name == "template")
+        );
+        assert!(matches!(tokens[1].kind, HtmlTokenKind::Text(ref s) if s == "a "));
+        assert!(matches!(tokens[2].kind, HtmlTokenKind::EndTag { ref name } if name.is_empty()));
+        assert_eq!(tokens[2].end, "<template>a </ b</template>".len());
+        assert!(matches!(tokens[3].kind, HtmlTokenKind::Eof));
+    }
+
+    #[test]
+    fn tokenizes_bogus_question_tag_as_markup_boundary() {
+        let tokens = HtmlTokenizer::new("<template><?xml?></template>").tokenize();
+        assert!(
+            matches!(tokens[0].kind, HtmlTokenKind::StartTag { ref name, .. } if name == "template")
+        );
+        assert!(matches!(tokens[1].kind, HtmlTokenKind::BogusQuestionTag));
+        assert!(matches!(tokens[2].kind, HtmlTokenKind::EndTag { ref name } if name == "template"));
     }
 }

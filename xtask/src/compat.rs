@@ -3166,6 +3166,14 @@ const vue3CoreRuntime = (() => {
   errorMessages[23] = 'Invalid end tag.';
   errorMessages[24] = 'Element is missing end tag.';
   errorMessages[25] = 'Interpolation end sign was not found.';
+  errorMessages[5] = 'Unexpected EOF in tag.';
+  errorMessages[7] = 'Unexpected EOF in comment.';
+  errorMessages[9] = 'Unexpected EOF in tag.';
+  errorMessages[14] = 'End tag name was expected.';
+  errorMessages[19] = "Attribute name cannot start with '='.";
+  errorMessages[21] = "'<?' is allowed only in XML context.";
+  errorMessages[22] = "Illegal '/' in tags.";
+  errorMessages[27] = 'End bracket for dynamic directive argument was not found. Note that dynamic directive argument cannot contain spaces.';
   errorMessages[46] = 'Error parsing JavaScript expression: ';
   errorMessages[50] = '"cacheHandlers" option is only supported when the "prefixIdentifiers" option is enabled.';
   errorMessages[51] = '"scopeId" option is only supported in module mode.';
@@ -5209,12 +5217,22 @@ function bridgePayloadForCall(payload) {
 }
 
 function vue3BridgePayload(source, filename, options) {
+  warnIgnoredDecodeEntities(options);
   return {
     source,
     filename,
     options,
     bridgeOptions: normalizeVue3OptionsForBridge(options, source),
   };
+}
+
+function warnIgnoredDecodeEntities(options) {
+  if (!options || typeof options !== 'object' || typeof options.decodeEntities !== 'function') return;
+  const message = '[Vue warn]: decodeEntities option is passed but will be ignored in non-browser builds.';
+  if (!globalThis.__VUEC_DECODE_ENTITIES_WARNED__) {
+    globalThis.__VUEC_DECODE_ENTITIES_WARNED__ = true;
+  }
+  console.warn(message);
 }
 
 function normalizeVue3OptionsForBridge(options, source) {
@@ -7582,6 +7600,7 @@ fn write_vue3_core_conformance_shims(prepared_root: &Path) -> Result<()> {
     fs::create_dir_all(&shared_src)
         .with_context(|| format!("failed to create {}", shared_src.display()))?;
     write_reexport_module(&shared_src.join("index.ts"), "@vue/shared")?;
+    write_vue3_core_test_setup(prepared_root)?;
 
     let config = r#"
 import path from 'node:path'
@@ -7620,12 +7639,43 @@ export default {
   test: {
     globals: true,
     pool: 'forks',
+    setupFiles: ['./vuec-vitest-setup.ts'],
     include: ['packages/compiler-core/__tests__/**/*.spec.ts'],
   },
 }
 "#;
     write_text(&prepared_root.join("vitest.config.ts"), config)?;
     Ok(())
+}
+
+fn write_vue3_core_test_setup(prepared_root: &Path) -> Result<()> {
+    write_text(
+        &prepared_root.join("vuec-vitest-setup.ts"),
+        r#"
+import { beforeEach, expect } from 'vitest'
+
+const vuecWarnings: string[] = []
+
+beforeEach(() => {
+  vuecWarnings.length = 0
+})
+
+console.warn = (...args: unknown[]) => {
+  vuecWarnings.push(args.map(arg => String(arg)).join(' '))
+}
+
+expect.extend({
+  toHaveBeenWarned(received) {
+    const expected = String(received)
+    const pass = vuecWarnings.some(warning => warning.includes(expected))
+    return {
+      pass,
+      message: () => `expected ${JSON.stringify(expected)} ${pass ? 'not ' : ''}to have been warned`,
+    }
+  },
+})
+"#,
+    )
 }
 
 fn write_reexport_module(path: &Path, request: &str) -> Result<()> {

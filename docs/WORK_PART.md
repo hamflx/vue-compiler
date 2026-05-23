@@ -129,6 +129,16 @@
 - Current Vue 3 core conformance improved from 92/652 to 134/652 official tests passing. The suite still honestly fails with 518 failures; remaining high-volume failures are transformElement/buildProps semantics, v-if/v-for codegen nodes, expression rewriting, exact codegen snapshots, v-pre/whitespace parsing, expression AST attachment, and full parser diagnostic coverage.
 - Verification this round: `cargo fmt --all --check`, `cargo check -p vuec_html -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_html -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `git diff --check`, `cargo xtask export-api --rust --version-line vue3 --package @vue/compiler-core`, `cargo xtask diff-api --version-line vue3 --package @vue/compiler-core`, `cargo xtask verify-npm-alias --version-line vue3 --package @vue/compiler-core`, `cargo xtask run-option-matrix --version-line vue3 --package @vue/compiler-core`, `cargo xtask run-output-contract --version-line vue3 --package @vue/compiler-core`, and `cargo xtask run-conformance --suite vue3-core` (expected fail with 134/652 pass, 518 fail).
 
+## Vue 3 Parser Recovery Parity Round
+
+- Completed official Vue 3 `compiler-core/__tests__/parse.spec.ts` parity through the Rust-backed parser path: `parse.spec.ts` now reports `151/151` passing in the prepared Vue 3 core conformance suite.
+- Extended `vuec_html` tokenization for parser-recovery boundaries: invalid-space end tags such as `</ b`, complete/incomplete empty end tags, bogus question tags such as `<?xml?>`, and invalid `=`-prefixed attribute names.
+- Updated `vuec_vue3_core::base_parse` to match official AST recovery for invalid end tags, raw-text end tags, bogus question tags, EOF comments, empty interpolation locs, missing dynamic directive argument brackets, and EOF start-tag trailing-solidus recovery.
+- Updated `vuec_node_bridge` diagnostics/projection to match official parser error codes, messages, locations, and public AST loc quirks for the completed parse cases.
+- `xtask/src/compat.rs` changes are limited to API/test-runner support: official parser error-message hydration and a prepared Vitest `toHaveBeenWarned` matcher. These do not count as compiler semantics.
+- Current full Vue 3 compiler-core conformance remains expected-failing at `402/652`; remaining failures are transform/codegen-oriented and should be handled in later Rust-backed transform/codegen slices.
+- Verification: `cargo fmt --all --check`; `cargo test -p vuec_html -p vuec_ast -p vuec_vue2 -p vuec_vue3_core -p vuec_node_bridge`; `cargo check -p xtask`; `cargo build -p vuec_node_bridge`; `cargo xtask verify-npm-alias --version-line vue3 --package @vue/compiler-core`; focused official-vs-Rust parser smoke comparisons; `cargo xtask run-conformance --suite vue3-core` expected fail with `402/652`, `parse.spec.ts 151/151`.
+
 ## Previous Round
 
 - Added a Vue 3 compiler-core public runtime compatibility layer to generated Rust alias packages: enum objects now carry official numeric/string values, runtime helper exports are stable symbols with `helperNameMap`, `locStub` and source-position utilities exist, and AST builder functions such as `createSimpleExpression`, `createObjectExpression`, `createCallExpression`, `createVNodeCall`, `createRoot`, and cache/conditional/function builders now return official-shaped nodes.

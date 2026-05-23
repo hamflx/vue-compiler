@@ -762,7 +762,7 @@ fn vue3_node_summary(
         Vue3AstKind::Text(text) => json!({
             "type": 2,
             "content": text.value,
-            "loc": vue3_loc_value(source, base_offset, &node.span),
+            "loc": vue3_text_loc_value(source, base_offset, &node.span),
         }),
         Vue3AstKind::Interpolation(interpolation) => json!({
             "type": 5,
@@ -808,7 +808,7 @@ fn collect_html_parse_error_diagnostics(
             5,
             vue3_source_loc_value(source, source.len(), source.len()),
         ));
-    } else if source.ends_with("</") {
+    } else if source.ends_with("</") && source.len() <= 2 {
         diagnostics.push(vue3_error_value(
             5,
             vue3_source_loc_value(source, source.len(), source.len()),
@@ -844,7 +844,27 @@ fn collect_html_parse_error_diagnostics(
                 }
             }
             HtmlTokenKind::EndTag { name } => {
-                if !name.is_empty() && tag_token_is_incomplete(source, token.start, token.end) {
+                if name.is_empty() {
+                    if token.end == source.len()
+                        && tag_token_is_incomplete(source, token.start, token.end)
+                    {
+                        let code = if source[token.start..token.end]
+                            .as_bytes()
+                            .get(2)
+                            .is_some_and(u8::is_ascii_whitespace)
+                        {
+                            9
+                        } else {
+                            5
+                        };
+                        diagnostics.push(vue3_error_value(
+                            code,
+                            vue3_source_loc_value(source, source.len(), source.len()),
+                        ));
+                    } else {
+                        pop_diagnostic_stack_until(&mut stack, &name);
+                    }
+                } else if tag_token_is_incomplete(source, token.start, token.end) {
                     diagnostics.push(vue3_error_value(
                         9,
                         vue3_source_loc_value(source, source.len(), source.len()),
@@ -883,6 +903,12 @@ fn collect_html_parse_error_diagnostics(
                         vue3_source_loc_value(source, source.len(), source.len()),
                     ));
                 }
+            }
+            HtmlTokenKind::BogusQuestionTag => {
+                diagnostics.push(vue3_error_value(
+                    21,
+                    vue3_source_loc_value(source, token.start + 1, token.start + 1),
+                ));
             }
             HtmlTokenKind::Text(_) | HtmlTokenKind::Doctype(_) | HtmlTokenKind::Eof => {}
         }
@@ -948,6 +974,13 @@ fn collect_start_tag_parse_errors(
 
     let mut seen_attrs = Vec::<String>::new();
     for attr in attributes {
+        if attr.name.starts_with('=') {
+            diagnostics.push(vue3_error_value(
+                19,
+                vue3_source_loc_value(source, attr.name_start, attr.name_start),
+            ));
+        }
+
         if seen_attrs.iter().any(|seen| seen == &attr.name) {
             diagnostics.push(vue3_error_value(
                 2,
@@ -1173,19 +1206,22 @@ fn collect_missing_interpolation_end_diagnostics(
                 }
             }
             HtmlTokenKind::EndTag { name } => {
-                while let Some(open) = stack.pop() {
-                    let was_in_v_pre = v_pre_depth > 0;
-                    if was_in_v_pre {
-                        v_pre_depth -= 1;
-                    }
-                    if open.eq_ignore_ascii_case(&name) {
-                        break;
+                if !name.is_empty() {
+                    while let Some(open) = stack.pop() {
+                        let was_in_v_pre = v_pre_depth > 0;
+                        if was_in_v_pre {
+                            v_pre_depth -= 1;
+                        }
+                        if open.eq_ignore_ascii_case(&name) {
+                            break;
+                        }
                     }
                 }
             }
             HtmlTokenKind::Cdata(_)
             | HtmlTokenKind::Text(_)
             | HtmlTokenKind::Comment(_)
+            | HtmlTokenKind::BogusQuestionTag
             | HtmlTokenKind::Doctype(_)
             | HtmlTokenKind::Eof => {}
         }
@@ -1263,7 +1299,23 @@ fn collect_invalid_end_tag_diagnostics(
                 }
             }
             HtmlTokenKind::EndTag { name } => {
-                if name.is_empty() || tag_token_is_incomplete(source, token.start, token.end) {
+                if name.is_empty() {
+                    if tag_token_is_incomplete(source, token.start, token.end) {
+                        continue;
+                    }
+                    if source[token.start..token.end]
+                        .as_bytes()
+                        .get(2)
+                        .is_some_and(u8::is_ascii_whitespace)
+                    {
+                        diagnostics.push(vue3_error_value(
+                            23,
+                            vue3_source_loc_value(source, token.start, token.start),
+                        ));
+                    }
+                    continue;
+                }
+                if tag_token_is_incomplete(source, token.start, token.end) {
                     continue;
                 }
                 if stack
@@ -1306,6 +1358,7 @@ fn collect_invalid_end_tag_diagnostics(
             HtmlTokenKind::Text(_)
             | HtmlTokenKind::Comment(_)
             | HtmlTokenKind::Cdata(_)
+            | HtmlTokenKind::BogusQuestionTag
             | HtmlTokenKind::Doctype(_)
             | HtmlTokenKind::Eof => {}
         }
@@ -1808,15 +1861,20 @@ fn vue3_expression_loc(
     let Some(span) = fallback_span.source() else {
         return vue3_loc_stub_value();
     };
-    let trimmed = expression.trim();
-    if trimmed.is_empty() {
-        return vue3_loc_value(source, base_offset, fallback_span);
-    }
     let local_span_start = span.start.0.saturating_sub(base_offset);
     let local_span_end = span.end.0.saturating_sub(base_offset).min(source.len());
     let node_source = source
         .get(local_span_start..local_span_end)
         .unwrap_or_default();
+    let trimmed = expression.trim();
+    if trimmed.is_empty() {
+        let inner_start = if node_source.starts_with("{{") {
+            local_span_start + "{{".len()
+        } else {
+            local_span_start
+        };
+        return vue3_source_loc_value(source, inner_start, inner_start);
+    }
     if let Some(local_start) = node_source.find(trimmed) {
         let start = local_span_start + local_start;
         return vue3_source_loc_value(source, start, start + trimmed.len());
@@ -1831,17 +1889,53 @@ fn vue3_loc_value(source: &str, base_offset: usize, span: &NodeSpan) -> Value {
     vue3_source_span_value(source, base_offset, span)
 }
 
+fn vue3_text_loc_value(source: &str, base_offset: usize, span: &NodeSpan) -> Value {
+    let Some(source_span) = span.source() else {
+        return vue3_loc_stub_value();
+    };
+    let start = source_span.start.0.saturating_sub(base_offset);
+    let end = source_span.end.0.saturating_sub(base_offset);
+    if end == source.len()
+        && source_span.end.0 >= source_span.start.0
+        && source
+            .get(start..end)
+            .is_some_and(|slice| slice == "/" && source.ends_with('/'))
+        && source[..start].rfind('<').is_some_and(|tag_start| {
+            source
+                .get(tag_start..)
+                .is_some_and(|slice| slice.starts_with('<') && !slice.contains('>'))
+        })
+    {
+        return vue3_source_signed_start_loc_value(source, -1, end);
+    }
+    vue3_source_span_value(source, base_offset, source_span)
+}
+
 fn vue3_source_span_value(source: &str, base_offset: usize, span: vuec_source::Span) -> Value {
     let start = span.start.0.saturating_sub(base_offset);
     let end = span.end.0.saturating_sub(base_offset);
     vue3_source_loc_value(source, start, end)
 }
 
+fn vue3_source_signed_start_loc_value(source: &str, start: isize, end: usize) -> Value {
+    let local_start = if start < 0 && end <= source.len() {
+        end.saturating_sub(1)
+    } else {
+        start.max(0) as usize
+    };
+    let local_end = end.min(source.len()).max(local_start);
+    json!({
+        "start": vue3_signed_position(source, start),
+        "end": vue3_position(source, end),
+        "source": source.get(local_start..local_end).unwrap_or_default(),
+    })
+}
+
 fn vue3_source_loc_value(source: &str, start: usize, end: usize) -> Value {
     let local_start = start.min(source.len());
-    let local_end = end.min(source.len());
-    let start_pos = vue3_position(&source, local_start);
-    let end_pos = vue3_position(&source, local_end);
+    let local_end = end.min(source.len()).max(local_start);
+    let start_pos = vue3_position(source, start);
+    let end_pos = vue3_position(source, end);
     json!({
         "start": start_pos,
         "end": end_pos,
@@ -1865,10 +1959,24 @@ fn vue3_position(source: &str, offset: usize) -> Value {
             column += 1;
         }
     }
+    if offset > index {
+        column += offset - index;
+    }
     json!({
         "offset": offset,
         "line": line,
         "column": column,
+    })
+}
+
+fn vue3_signed_position(source: &str, offset: isize) -> Value {
+    if offset >= 0 {
+        return vue3_position(source, offset as usize);
+    }
+    json!({
+        "offset": offset,
+        "line": 1,
+        "column": 1isize + offset,
     })
 }
 

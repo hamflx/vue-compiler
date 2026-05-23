@@ -444,7 +444,10 @@ fn parse_element_tree(
                     }));
                 }
             }
-            HtmlTokenKind::Comment(_) | HtmlTokenKind::Doctype(_) | HtmlTokenKind::Eof => {}
+            HtmlTokenKind::Comment(_)
+            | HtmlTokenKind::BogusQuestionTag
+            | HtmlTokenKind::Doctype(_)
+            | HtmlTokenKind::Eof => {}
         }
     }
 
