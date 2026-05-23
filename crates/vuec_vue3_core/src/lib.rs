@@ -58,8 +58,7 @@ pub struct Vue3Dialect;
 
 impl Vue3Dialect {
     pub fn base_parse(source: TemplateSource, _options: &Vue3CompilerOptions) -> Vue3Ast {
-        let mut ast = Vue3Ast::new();
-        let root = ast.push(
+        let mut ast = Vue3Ast::new(
             Vue3NodeKind::Root,
             Some(Span::new(
                 source.file_id,
@@ -67,7 +66,7 @@ impl Vue3Dialect {
                 source.base_offset + source.source.len(),
             )),
         );
-        ast.set_root(root);
+        let root = ast.root;
         let mut stack = vec![root];
         let tokens = HtmlTokenizer::new(&source.source).tokenize();
         for token in tokens {
@@ -153,51 +152,50 @@ impl Vue3Dialect {
     }
 
     pub fn transform(ast: &mut Vue3Ast, ctx: &mut TransformContext) {
-        if let Some(root_id) = ast.root {
-            let mut has_element = false;
-            let mut has_nested_element = false;
-            let mut has_interpolation = false;
-            let mut walk = vec![(root_id, true)];
-            while let Some((node_id, is_root)) = walk.pop() {
-                if let Some(node) = ast.node(node_id) {
-                    for child_id in node.children.clone() {
-                        if let Some(child) = ast.node(child_id) {
-                            match &child.kind {
-                                Vue3NodeKind::Element { .. } => {
-                                    has_element = true;
-                                    if matches!(
-                                        &child.kind,
-                                        Vue3NodeKind::Element { tag, .. } if tag == "slot"
-                                    ) {
-                                        ctx.add_helper(RuntimeHelper::Vue3RenderSlot);
-                                    }
-                                    if !is_root {
-                                        has_nested_element = true;
-                                    }
-                                    walk.push((child_id, false));
+        let root_id = ast.root;
+        let mut has_element = false;
+        let mut has_nested_element = false;
+        let mut has_interpolation = false;
+        let mut walk = vec![(root_id, true)];
+        while let Some((node_id, is_root)) = walk.pop() {
+            if let Some(node) = ast.node(node_id) {
+                for child_id in node.children.clone() {
+                    if let Some(child) = ast.node(child_id) {
+                        match &child.kind {
+                            Vue3NodeKind::Element { .. } => {
+                                has_element = true;
+                                if matches!(
+                                    &child.kind,
+                                    Vue3NodeKind::Element { tag, .. } if tag == "slot"
+                                ) {
+                                    ctx.add_helper(RuntimeHelper::Vue3RenderSlot);
                                 }
-                                Vue3NodeKind::Interpolation { .. } => {
-                                    has_interpolation = true;
+                                if !is_root {
+                                    has_nested_element = true;
                                 }
-                                Vue3NodeKind::Text { .. } => {}
-                                Vue3NodeKind::Comment { .. }
-                                | Vue3NodeKind::Directive { .. }
-                                | Vue3NodeKind::Root => {}
+                                walk.push((child_id, false));
                             }
+                            Vue3NodeKind::Interpolation { .. } => {
+                                has_interpolation = true;
+                            }
+                            Vue3NodeKind::Text { .. } => {}
+                            Vue3NodeKind::Comment { .. }
+                            | Vue3NodeKind::Directive { .. }
+                            | Vue3NodeKind::Root => {}
                         }
                     }
                 }
             }
-            if has_element {
-                ctx.add_helper(RuntimeHelper::Vue3OpenBlock);
-                ctx.add_helper(RuntimeHelper::Vue3CreateElementBlock);
-            }
-            if has_nested_element {
-                ctx.add_helper(RuntimeHelper::Vue3CreateElementVNode);
-            }
-            if has_interpolation {
-                ctx.add_helper(RuntimeHelper::Vue3ToDisplayString);
-            }
+        }
+        if has_element {
+            ctx.add_helper(RuntimeHelper::Vue3OpenBlock);
+            ctx.add_helper(RuntimeHelper::Vue3CreateElementBlock);
+        }
+        if has_nested_element {
+            ctx.add_helper(RuntimeHelper::Vue3CreateElementVNode);
+        }
+        if has_interpolation {
+            ctx.add_helper(RuntimeHelper::Vue3ToDisplayString);
         }
     }
 
@@ -214,55 +212,52 @@ impl Vue3Dialect {
             RuntimeHelper::Vue3OpenBlock,
             RuntimeHelper::Vue3CreateElementBlock,
         ];
-        if let Some(root_id) = ast.root {
-            if let Some(root) = ast.node(root_id) {
-                let helpers = render_helpers(&helper_order, ctx);
-                if options.mode == "module" {
-                    if !helpers.is_empty() {
-                        writer.push_line(&format!(
-                            "import {{ {} }} from \"vue\"",
-                            import_helper_aliases(&helpers)
-                        ));
-                        writer.newline();
-                    }
-                    writer.push_line("export function render(_ctx, _cache) {");
-                } else if options.prefix_identifiers {
-                    if !helpers.is_empty() {
-                        writer
-                            .push_line(&format!("const {{ {} }} = Vue", helper_aliases(&helpers)));
-                        writer.newline();
-                    }
-                    writer.push_line("return function render(_ctx, _cache) {");
-                } else if options.mode == "function" {
-                    writer.push_line("const _Vue = Vue");
+        let root_id = ast.root;
+        if let Some(root) = ast.node(root_id) {
+            let helpers = render_helpers(&helper_order, ctx);
+            if options.mode == "module" {
+                if !helpers.is_empty() {
+                    writer.push_line(&format!(
+                        "import {{ {} }} from \"vue\"",
+                        import_helper_aliases(&helpers)
+                    ));
                     writer.newline();
-                    writer.push_line("return function render(_ctx, _cache) {");
-                } else {
-                    writer.push_line("export function render(_ctx, _cache) {");
                 }
+                writer.push_line("export function render(_ctx, _cache) {");
+            } else if options.prefix_identifiers {
+                if !helpers.is_empty() {
+                    writer.push_line(&format!("const {{ {} }} = Vue", helper_aliases(&helpers)));
+                    writer.newline();
+                }
+                writer.push_line("return function render(_ctx, _cache) {");
+            } else if options.mode == "function" {
+                writer.push_line("const _Vue = Vue");
+                writer.newline();
+                writer.push_line("return function render(_ctx, _cache) {");
+            } else {
+                writer.push_line("export function render(_ctx, _cache) {");
+            }
+            writer.indent();
+            if !options.prefix_identifiers && options.mode != "module" {
+                writer.push_line("with (_ctx) {");
                 writer.indent();
-                if !options.prefix_identifiers && options.mode != "module" {
-                    writer.push_line("with (_ctx) {");
-                    writer.indent();
-                    if !helpers.is_empty() {
-                        writer
-                            .push_line(&format!("const {{ {} }} = _Vue", helper_aliases(&helpers)));
-                        writer.newline();
-                    }
+                if !helpers.is_empty() {
+                    writer.push_line(&format!("const {{ {} }} = _Vue", helper_aliases(&helpers)));
+                    writer.newline();
                 }
-                let expr = if root.children.len() == 1 {
-                    render_node_expr(ast, root.children[0], options, NodeRenderMode::Root)
-                } else {
-                    render_children_array(ast, &root.children, options, true)
-                };
-                writer.push_line(&format!("return {}", expr));
-                if !options.prefix_identifiers && options.mode != "module" {
-                    writer.dedent();
-                    writer.push_line("}");
-                }
+            }
+            let expr = if root.children.len() == 1 {
+                render_node_expr(ast, root.children[0], options, NodeRenderMode::Root)
+            } else {
+                render_children_array(ast, &root.children, options, true)
+            };
+            writer.push_line(&format!("return {}", expr));
+            if !options.prefix_identifiers && options.mode != "module" {
                 writer.dedent();
                 writer.push_line("}");
             }
+            writer.dedent();
+            writer.push_line("}");
         }
         let code = writer.finish().trim_end().to_string();
         CodegenResult {
@@ -363,7 +358,7 @@ fn source_map_for_render(
     ast: &Vue3Ast,
     source: &TemplateSource,
 ) -> Option<SourceMapArtifact> {
-    let root = ast.root.and_then(|root_id| ast.node(root_id))?;
+    let root = ast.node(ast.root)?;
     let source_name = if source.filename.is_empty() {
         "template.vue.html".to_string()
     } else {

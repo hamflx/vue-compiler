@@ -86,9 +86,7 @@ pub fn walk_document<K, P>(
 ) where
     P: DocumentPass<K>,
 {
-    if let Some(root) = doc.root {
-        walk_document_node(doc, pass, ctx, root);
-    }
+    walk_document_node(doc, pass, ctx, doc.root);
 }
 
 fn walk_document_node<K, P>(
@@ -160,9 +158,8 @@ mod tests {
 
     #[test]
     fn document_walk_is_depth_first() {
-        let mut doc = vuec_ast::AstDocument::new();
-        let root = doc.push(0usize, None);
-        doc.set_root(root);
+        let mut doc = vuec_ast::AstDocument::new(0usize, None);
+        let root = doc.root;
         let child = doc.push_child(root, 1usize, None);
         let _grandchild = doc.push_child(child, 2usize, None);
         let mut pass = CountDocumentPass::default();

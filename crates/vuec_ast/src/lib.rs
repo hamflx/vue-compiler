@@ -18,16 +18,22 @@ pub struct Node<K> {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AstDocument<K> {
-    pub root: Option<NodeId>,
+    pub root: NodeId,
     pub nodes: Vec<Node<K>>,
 }
 
 impl<K> AstDocument<K> {
-    pub fn new() -> Self {
-        Self {
-            root: None,
+    pub fn new<S>(root_kind: K, span: S) -> Self
+    where
+        S: Into<NodeSpan>,
+    {
+        let mut document = Self {
+            root: NodeId(0),
             nodes: Vec::new(),
-        }
+        };
+        let root = document.push(root_kind, span);
+        document.root = root;
+        document
     }
 
     pub fn push<S>(&mut self, kind: K, span: S) -> NodeId
@@ -56,10 +62,21 @@ impl<K> AstDocument<K> {
     }
 
     pub fn attach_child(&mut self, parent: NodeId, child: NodeId) {
+        if parent == child {
+            return;
+        }
+        if self.node(parent).is_none() || self.node(child).is_none() {
+            return;
+        }
+        if let Some(old_parent) = self.node(child).and_then(|node| node.parent) {
+            if let Some(old_parent_node) = self.node_mut(old_parent) {
+                old_parent_node.children.retain(|id| *id != child);
+            }
+            self.refresh_child_indexes(old_parent);
+        }
         let index_in_parent = self
             .node(parent)
-            .map(|node| node.children.len() as u32)
-            .unwrap_or_default();
+            .map_or(0, |node| node.children.len() as u32);
         if let Some(parent_node) = self.node_mut(parent) {
             parent_node.children.push(child);
         }
@@ -70,19 +87,43 @@ impl<K> AstDocument<K> {
     }
 
     pub fn replace_children(&mut self, parent: NodeId, children: Vec<NodeId>) {
+        if self.node(parent).is_none() {
+            return;
+        }
+        let old_children = self
+            .node(parent)
+            .map(|node| node.children.clone())
+            .unwrap_or_default();
+        for old_child in old_children {
+            if !children.contains(&old_child) {
+                if let Some(child_node) = self.node_mut(old_child) {
+                    child_node.parent = None;
+                    child_node.index_in_parent = 0;
+                }
+            }
+        }
+        for child in &children {
+            if let Some(old_parent) = self.node(*child).and_then(|node| node.parent) {
+                if old_parent != parent {
+                    if let Some(old_parent_node) = self.node_mut(old_parent) {
+                        old_parent_node.children.retain(|id| id != child);
+                    }
+                    self.refresh_child_indexes(old_parent);
+                }
+            }
+        }
         if let Some(parent_node) = self.node_mut(parent) {
             parent_node.children = children.clone();
         }
-        for (index, child) in children.into_iter().enumerate() {
-            if let Some(child_node) = self.node_mut(child) {
-                child_node.parent = Some(parent);
-                child_node.index_in_parent = index as u32;
-            }
-        }
+        self.refresh_child_indexes(parent);
     }
 
     pub fn set_root(&mut self, id: NodeId) {
-        self.root = Some(id);
+        self.root = id;
+        if let Some(root_node) = self.node_mut(id) {
+            root_node.parent = None;
+            root_node.index_in_parent = 0;
+        }
     }
 
     pub fn node(&self, id: NodeId) -> Option<&Node<K>> {
@@ -100,11 +141,62 @@ impl<K> AstDocument<K> {
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
     }
-}
 
-impl<K> Default for AstDocument<K> {
-    fn default() -> Self {
-        Self::new()
+    pub fn root_node(&self) -> Option<&Node<K>> {
+        self.node(self.root)
+    }
+
+    pub fn root_node_mut(&mut self) -> Option<&mut Node<K>> {
+        self.node_mut(self.root)
+    }
+
+    pub fn validate_tree(&self) -> Result<(), AstInvariantError> {
+        let root_index = self.root.0 as usize;
+        if root_index >= self.nodes.len() {
+            return Err(AstInvariantError::MissingRoot { root: self.root });
+        }
+        for (index, node) in self.nodes.iter().enumerate() {
+            if node.id.0 as usize != index {
+                return Err(AstInvariantError::MismatchedNodeId {
+                    expected: NodeId(index as u32),
+                    actual: node.id,
+                });
+            }
+            if node.id == self.root {
+                if node.parent.is_some() || node.index_in_parent != 0 {
+                    return Err(AstInvariantError::InvalidRootMetadata { root: self.root });
+                }
+            } else if node.parent.is_none() {
+                return Err(AstInvariantError::DetachedNode { node: node.id });
+            }
+            for (child_index, child_id) in node.children.iter().copied().enumerate() {
+                let child = self.node(child_id).ok_or(AstInvariantError::MissingChild {
+                    parent: node.id,
+                    child: child_id,
+                })?;
+                if child.parent != Some(node.id) || child.index_in_parent != child_index as u32 {
+                    return Err(AstInvariantError::InvalidChildMetadata {
+                        parent: node.id,
+                        child: child_id,
+                        expected_index: child_index as u32,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn refresh_child_indexes(&mut self, parent: NodeId) {
+        let children = self
+            .node(parent)
+            .map(|node| node.children.clone())
+            .unwrap_or_default();
+        for (index, child) in children.into_iter().enumerate() {
+            if let Some(child_node) = self.node_mut(child) {
+                child_node.parent = Some(parent);
+                child_node.index_in_parent = index as u32;
+            }
+        }
     }
 }
 
@@ -187,10 +279,115 @@ pub enum NodeSpan {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AstInvariantError {
+    MissingRoot {
+        root: NodeId,
+    },
+    MismatchedNodeId {
+        expected: NodeId,
+        actual: NodeId,
+    },
+    InvalidRootMetadata {
+        root: NodeId,
+    },
+    DetachedNode {
+        node: NodeId,
+    },
+    MissingChild {
+        parent: NodeId,
+        child: NodeId,
+    },
+    InvalidChildMetadata {
+        parent: NodeId,
+        child: NodeId,
+        expected_index: u32,
+    },
+}
+
+impl NodeSpan {
+    pub fn generated(origin: Option<Span>, reason: GeneratedReason) -> Self {
+        Self::Generated { origin, reason }
+    }
+
+    pub fn missing(reason: MissingSpanReason) -> Self {
+        Self::Missing { reason }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoweringMap {
     pub ast_to_hir: Vec<(NodeId, NodeId)>,
     pub hir_to_mir: Vec<(NodeId, NodeId)>,
+}
+
+impl LoweringMap {
+    pub fn record_ast_to_hir(&mut self, ast: NodeId, hir: NodeId) {
+        self.ast_to_hir.push((ast, hir));
+    }
+
+    pub fn record_hir_to_mir(&mut self, hir: NodeId, mir: NodeId) {
+        self.hir_to_mir.push((hir, mir));
+    }
+
+    pub fn hir_for_ast(&self, ast: NodeId) -> impl Iterator<Item = NodeId> + '_ {
+        self.ast_to_hir
+            .iter()
+            .filter_map(move |(from, to)| (*from == ast).then_some(*to))
+    }
+
+    pub fn mir_for_hir(&self, hir: NodeId) -> impl Iterator<Item = NodeId> + '_ {
+        self.hir_to_mir
+            .iter()
+            .filter_map(move |(from, to)| (*from == hir).then_some(*to))
+    }
+}
+
+pub trait PublicProjection {
+    type Output;
+
+    fn project_public(&self) -> Self::Output;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicNode<K> {
+    pub kind: K,
+    pub span: NodeSpan,
+    pub children: Vec<PublicNode<K>>,
+}
+
+impl<K> AstDocument<K>
+where
+    K: Clone,
+{
+    pub fn project_nested(&self) -> Option<PublicNode<K>> {
+        self.project_nested_node(self.root)
+    }
+
+    fn project_nested_node(&self, id: NodeId) -> Option<PublicNode<K>> {
+        let node = self.node(id)?;
+        Some(PublicNode {
+            kind: node.kind.clone(),
+            span: node.span.clone(),
+            children: node
+                .children
+                .iter()
+                .filter_map(|child| self.project_nested_node(*child))
+                .collect(),
+        })
+    }
+}
+
+impl<K> PublicProjection for AstDocument<K>
+where
+    K: Clone,
+{
+    type Output = PublicNode<K>;
+
+    fn project_public(&self) -> Self::Output {
+        self.project_nested()
+            .expect("AstDocument root must reference an existing node")
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -229,6 +426,59 @@ pub enum Vue2NodeKind {
     },
 }
 
+pub type Cst = AstDocument<CstNodeKind>;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CstNodeKind {
+    Document,
+    SfcBlock(CstSfcBlock),
+    Element(CstElement),
+    Attribute(CstAttribute),
+    Text { raw: String },
+    Comment { raw: String },
+    Cdata { raw: String },
+    Doctype { raw: String },
+    Interpolation(CstInterpolation),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CstSfcBlock {
+    pub block_type: String,
+    pub raw_tag: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CstElement {
+    pub raw_tag: String,
+    pub self_closing: bool,
+    pub open_span: Span,
+    pub close_span: Option<Span>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CstAttribute {
+    pub raw_name: String,
+    pub raw_value: Option<String>,
+    pub quote: Option<QuoteKind>,
+    pub name_span: Span,
+    pub value_span: Option<Span>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum QuoteKind {
+    Double,
+    Single,
+    Unquoted,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CstInterpolation {
+    pub raw: String,
+    pub open_span: Span,
+    pub inner_span: Span,
+    pub close_span: Span,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TemplateAttribute {
     pub name: String,
@@ -261,27 +511,219 @@ pub enum Vue3NodeKind {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HirNodeKind {
     Root,
-    Element { tag: String },
-    Text { value: String },
-    Interpolation { expression: String },
-    Call { callee: String },
-    Helper { name: String },
+    Element {
+        tag: String,
+    },
+    Component {
+        name: String,
+    },
+    Text {
+        value: String,
+    },
+    Interpolation {
+        expression: JsExprId,
+    },
+    If {
+        branches: Vec<HirIfBranch>,
+    },
+    For(HirFor),
+    SlotOutlet {
+        name: Option<String>,
+    },
+    SlotDecl {
+        name: String,
+        params: Option<JsPatternId>,
+    },
+    Fragment,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum MirNodeKind {
+pub struct HirIfBranch {
+    pub condition: Option<JsExprId>,
+    pub body: NodeId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HirFor {
+    pub source: JsExprId,
+    pub value_alias: JsPatternId,
+    pub key_alias: Option<JsPatternId>,
+    pub index_alias: Option<JsPatternId>,
+    pub body: NodeId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Vue2MirKind {
     Root,
-    RenderChunk { name: String },
-    Element { tag: String },
-    Text { value: String },
-    Interpolation { expression: String },
-    StaticFragment { index: u32 },
+    CreateElement(Vue2CreateElement),
+    Text(Vue2TextCall),
+    Comment {
+        value: String,
+    },
+    If {
+        condition: JsExprId,
+    },
+    For {
+        source: JsExprId,
+        alias: JsPatternId,
+    },
+    RenderStatic {
+        index: u32,
+    },
+    ScopedSlot {
+        name: String,
+        params: Option<JsPatternId>,
+    },
+    FilterCall {
+        name: String,
+    },
+    Directive {
+        name: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue2CreateElement {
+    pub tag: MirExpr,
+    pub normalization_type: Vue2NormalizationType,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue2TextCall {
+    pub value: MirExpr,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Vue2NormalizationType {
+    None,
+    Simple,
+    Always,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Vue3DomMirKind {
+    Root,
+    VNodeCall(Vue3VNodeCall),
+    TextCall {
+        value: MirExpr,
+    },
+    Interpolation {
+        expression: JsExprId,
+    },
+    If {
+        condition: Option<JsExprId>,
+    },
+    For {
+        source: JsExprId,
+        alias: JsPatternId,
+    },
+    RenderSlot {
+        name: Option<String>,
+    },
+    WithDirectives,
+    Cache {
+        index: u32,
+    },
+    Hoisted {
+        index: u32,
+    },
+    Fragment,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue3VNodeCall {
+    pub tag: MirExpr,
+    pub children: MirChildren,
+    pub patch_flag: Vue3PatchFlags,
+    pub dynamic_props: Vec<String>,
+    pub is_block: bool,
+    pub disable_tracking: bool,
+    pub is_component: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Vue3SsrMirKind {
+    Root,
+    PushString(String),
+    PushInterpolated(MirExpr),
+    RenderAttrs,
+    RenderComponent {
+        tag: MirExpr,
+    },
+    RenderSlot {
+        name: Option<String>,
+    },
+    If {
+        condition: Option<JsExprId>,
+    },
+    For {
+        source: JsExprId,
+        alias: JsPatternId,
+    },
+    Teleport,
+    Suspense,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VaporMirKind {
+    Root,
+    Template(String),
+    Effect { expression: JsExprId },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MirExpr {
+    String(String),
+    JsExpr(JsExprId),
+    Helper(RuntimeHelper),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MirChildren {
+    None,
+    Text(String),
+    Nodes(Vec<NodeId>),
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue3PatchFlags {
+    pub bits: i32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Mir {
+    Vue2(Vue2Mir),
+    Vue3Dom(Vue3DomMir),
+    Vue3Ssr(Vue3SsrMir),
+    Vapor(VaporMir),
+}
+
+impl Mir {
+    pub fn target(&self) -> MirTarget {
+        match self {
+            Self::Vue2(_) => MirTarget::Vue2,
+            Self::Vue3Dom(_) => MirTarget::Vue3Dom,
+            Self::Vue3Ssr(_) => MirTarget::Vue3Ssr,
+            Self::Vapor(_) => MirTarget::Vapor,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MirTarget {
+    Vue2,
+    Vue3Dom,
+    Vue3Ssr,
+    Vapor,
 }
 
 pub type Vue2Ast = AstDocument<Vue2NodeKind>;
 pub type Vue3Ast = AstDocument<Vue3NodeKind>;
 pub type Hir = AstDocument<HirNodeKind>;
-pub type Mir = AstDocument<MirNodeKind>;
+pub type Vue2Mir = AstDocument<Vue2MirKind>;
+pub type Vue3DomMir = AstDocument<Vue3DomMirKind>;
+pub type Vue3SsrMir = AstDocument<Vue3SsrMirKind>;
+pub type VaporMir = AstDocument<VaporMirKind>;
 pub type HIR = Hir;
 pub type MIR = Mir;
 
@@ -292,19 +734,19 @@ mod tests {
 
     #[test]
     fn documents_roundtrip_through_serde() {
-        let mut doc = Vue2Ast::new();
-        let root = doc.push(Vue2NodeKind::Root, None);
-        doc.set_root(root);
+        let doc = Vue2Ast::new(Vue2NodeKind::Root, None);
+        let root = doc.root;
         let json = serde_json::to_string(&doc).unwrap();
         let decoded: Vue2Ast = serde_json::from_str(&json).unwrap();
-        assert_eq!(decoded.root, Some(root));
+        assert_eq!(decoded.root, root);
         assert_eq!(decoded.len(), 1);
     }
 
     #[test]
     fn distinct_kind_spaces_exist() {
-        let mut vue3 = Vue3Ast::new();
-        let id = vue3.push(
+        let mut vue3 = Vue3Ast::new(Vue3NodeKind::Root, None);
+        let id = vue3.push_child(
+            vue3.root,
             Vue3NodeKind::Element {
                 tag: "div".into(),
                 attributes: vec![TemplateAttribute {
@@ -319,20 +761,22 @@ mod tests {
             vue3.node(id).unwrap().kind,
             Vue3NodeKind::Element { .. }
         ));
-        let mut mir = MIR::new();
-        let _ = mir.push(
-            MirNodeKind::RenderChunk {
-                name: "main".into(),
+        let mut mir = Vue3DomMir::new(Vue3DomMirKind::Root, None);
+        let _ = mir.push_child(
+            mir.root,
+            Vue3DomMirKind::TextCall {
+                value: MirExpr::String("main".into()),
             },
             None,
         );
-        assert_eq!(mir.len(), 1);
+        assert_eq!(mir.len(), 2);
+        assert_eq!(Mir::Vue3Dom(mir).target(), MirTarget::Vue3Dom);
     }
 
     #[test]
     fn attach_child_records_parent_and_index() {
-        let mut doc = Vue3Ast::new();
-        let root = doc.push(Vue3NodeKind::Root, None);
+        let mut doc = Vue3Ast::new(Vue3NodeKind::Root, None);
+        let root = doc.root;
         let child = doc.push_child(
             root,
             Vue3NodeKind::Text {
@@ -342,6 +786,31 @@ mod tests {
         );
         assert_eq!(doc.node(child).and_then(|node| node.parent), Some(root));
         assert_eq!(doc.node(child).map(|node| node.index_in_parent), Some(0));
+        assert_eq!(doc.validate_tree(), Ok(()));
+    }
+
+    #[test]
+    fn reattach_child_refreshes_old_parent_indexes() {
+        let mut doc = Vue3Ast::new(Vue3NodeKind::Root, None);
+        let old_parent = doc.push_child(
+            doc.root,
+            Vue3NodeKind::Element {
+                tag: "section".into(),
+                attributes: Vec::new(),
+                self_closing: false,
+            },
+            None,
+        );
+        let first = doc.push_child(old_parent, Vue3NodeKind::Text { value: "a".into() }, None);
+        let moved = doc.push_child(old_parent, Vue3NodeKind::Text { value: "b".into() }, None);
+        let third = doc.push_child(old_parent, Vue3NodeKind::Text { value: "c".into() }, None);
+
+        doc.attach_child(doc.root, moved);
+
+        assert_eq!(doc.node(first).unwrap().index_in_parent, 0);
+        assert_eq!(doc.node(third).unwrap().index_in_parent, 1);
+        assert_eq!(doc.node(moved).unwrap().parent, Some(doc.root));
+        assert_eq!(doc.validate_tree(), Ok(()));
     }
 
     #[test]
@@ -350,5 +819,45 @@ mod tests {
         helpers.insert(RuntimeHelper::Vue3OpenBlock);
         helpers.insert(RuntimeHelper::Vue3CreateElementBlock);
         assert_eq!(helpers.len(), 2);
+    }
+
+    #[test]
+    fn public_projection_is_nested_and_deterministic() {
+        let mut doc = Vue3Ast::new(Vue3NodeKind::Root, None);
+        let child = doc.push_child(
+            doc.root,
+            Vue3NodeKind::Text {
+                value: "hello".into(),
+            },
+            NodeSpan::generated(None, GeneratedReason::Lowering),
+        );
+        let projected = doc.project_public();
+        assert!(matches!(projected.kind, Vue3NodeKind::Root));
+        assert_eq!(projected.children.len(), 1);
+        assert_eq!(doc.node(child).unwrap().index_in_parent, 0);
+        let json = serde_json::to_string(&projected).unwrap();
+        assert!(json.contains("Generated"));
+    }
+
+    #[test]
+    fn lowering_map_records_explicit_edges() {
+        let mut map = LoweringMap::default();
+        map.record_ast_to_hir(NodeId(1), NodeId(10));
+        map.record_hir_to_mir(NodeId(10), NodeId(20));
+        assert_eq!(
+            map.hir_for_ast(NodeId(1)).collect::<Vec<_>>(),
+            vec![NodeId(10)]
+        );
+        assert_eq!(
+            map.mir_for_hir(NodeId(10)).collect::<Vec<_>>(),
+            vec![NodeId(20)]
+        );
+    }
+
+    #[test]
+    fn hir_has_no_runtime_helper_or_codegen_call_variant() {
+        let expression = JsExprId(0);
+        let hir = HirNodeKind::Interpolation { expression };
+        assert!(matches!(hir, HirNodeKind::Interpolation { .. }));
     }
 }

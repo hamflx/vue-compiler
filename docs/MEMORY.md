@@ -2,7 +2,7 @@
 
 - Active objective: build a Rust Vue compiler that can replace official Vue 2.6, Vue 2.7, and Vue 3 compiler flows.
 - Current focus: use the generated npm alias bridge to turn option/output contract and official conformance execution from discovery/scaffold reports into real Rust-vs-official gates.
-- `docs/3.AST_HIR_MIR_DESIGN.md` is the authoritative AST/IR contract; `vuec_ast` follows the new arena, lowering-map, runtime-helper, and JS id model, while `vuec_js` still needs the real registry/store APIs.
+- `docs/3.AST_HIR_MIR_DESIGN.md` is the authoritative AST/IR contract; `vuec_ast` now has the deterministic arena root, `NodeSpan`, `LoweringMap`, public projection scaffolding, CST structs, HIR without runtime helper/codegen call variants, target-split MIR enums, runtime-helper enum, and JS id model.
 - `vuec_js` now has the first real registry/store layer: `JsEntry`, `JsSourceType`, id allocation for expressions/statements/patterns/programs, lookup APIs, and parse-by-id APIs while preserving the old direct parse wrappers.
 - Vue 3 `@vue/compiler-core` now validates interpolation expressions through `vuec_js::JsAstStore` and Oxc, with `isTS` / `expressionPlugins: ["typescript"]` selecting TypeScript expression parsing.
 - Vue 3 `@vue/compiler-core` option matrix now has all 8 schema v2 rows passing for the current fixtures: prefixIdentifiers, mode, hoistStatic, cacheHandlers, scopeId, slotted, isTS, and expressionPlugins.
@@ -16,7 +16,8 @@
 - Vue 2.6 `vue-template-compiler` option matrix now has all 10 schema v2 rows passing, including `outputSourceRange` on the malformed tag fixture.
 - Vue 2 parser recovery now closes through a matching end tag and reports the unmatched intermediate element once, matching the current Vue 2.6 `outputSourceRange` fixture. Vue 2 compile defaults now enable static optimization like the official compiler.
 - Vue 2 public compile projection now classifies compiler warnings into official `errors`, serializes `errors` / `tips` as string arrays unless `outputSourceRange` is enabled, and hides internal `diagnostics` from the npm alias surface.
-- `vuec_ast` now carries the new base arena shape from the AST/HIR/MIR design: `NodeSpan`, parent/index tracking, `LoweringMap`, helper enums, and JS id types are in place, with `Hir`/`Mir` aliases preserved for compatibility.
+- `vuec_ast` now carries the new base arena shape from the AST/HIR/MIR design: `AstDocument.root` is a required `NodeId`, parent/index tracking is validated by `validate_tree`, `NodeSpan::Generated` / `Missing` have explicit constructors, `LoweringMap` has explicit AST->HIR and HIR->MIR edge APIs, and generic nested `PublicProjection` is available for deterministic snapshots.
+- `vuec_ast` no longer exposes the old generic `MirNodeKind` model. MIR is split into `Vue2Mir`, `Vue3DomMir`, `Vue3SsrMir`, and `VaporMir`, wrapped by `Mir` with a target discriminator so downstream codegen can be made target-specific.
 - `vuec_pass` now uses `RuntimeHelper` enums and exposes a depth-first `DocumentPass` walker over `AstDocument`, so the transform layer can align with the new IR plan.
 - Vue 3 SFC work is now past the skeleton stage: template compilation keeps raw source for official-style output and source maps, module-mode render codegen emits direct Vue imports, and side-effect `<script>/<style>` handling is AST/diagnostic-driven.
 - Remaining Vue 3 parity work is broader output-contract and official test execution coverage beyond the current option-matrix fixtures, including exact AST/codegen shape where the matrix only checks a deterministic compatibility signal.

@@ -2014,12 +2014,11 @@ fn valid_division_before(exp: &str, slash_index: usize) -> bool {
 }
 
 fn project_public_ast(template: &str, element_ast: Option<&Vue2Element>) -> Vue2Ast {
-    let mut ast = Vue2Ast::new();
-    let root = ast.push(
+    let mut ast = Vue2Ast::new(
         Vue2NodeKind::Root,
         Some(Span::new(FileId(0), 0, template.len())),
     );
-    ast.set_root(root);
+    let root = ast.root;
     if let Some(element) = element_ast {
         project_element(&mut ast, root, element);
     }
@@ -2033,7 +2032,7 @@ fn project_element(ast: &mut Vue2Ast, parent: vuec_ast::NodeId, element: &Vue2El
         },
         element.span,
     );
-    ast.node_mut(parent).unwrap().children.push(id);
+    ast.attach_child(parent, id);
     for child in &element.children {
         match child {
             Vue2Node::Element(element) => project_element(ast, id, element),
@@ -2044,7 +2043,7 @@ fn project_element(ast: &mut Vue2Ast, parent: vuec_ast::NodeId, element: &Vue2El
                     },
                     text.span,
                 );
-                ast.node_mut(id).unwrap().children.push(child_id);
+                ast.attach_child(id, child_id);
             }
             Vue2Node::Text(text) => {
                 let kind = text.expression.as_ref().map_or_else(
@@ -2056,7 +2055,7 @@ fn project_element(ast: &mut Vue2Ast, parent: vuec_ast::NodeId, element: &Vue2El
                     },
                 );
                 let child_id = ast.push(kind, text.span);
-                ast.node_mut(id).unwrap().children.push(child_id);
+                ast.attach_child(id, child_id);
             }
         }
     }
@@ -2819,7 +2818,7 @@ mod tests {
         let result = compile("<div>{{ msg }}</div>", options());
         assert!(result.render.contains("with(this)"));
         assert!(result.render.contains("_s(msg)"));
-        assert!(result.ast.root.is_some());
+        assert!(result.ast.node(result.ast.root).is_some());
         assert!(result.element_ast.is_some());
     }
 

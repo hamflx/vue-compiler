@@ -173,10 +173,7 @@ fn only_asset_summaries(summaries: &[String]) -> bool {
 }
 
 fn remove_side_effect_nodes(ast: &mut Vue3Ast, ctx: &mut TransformContext) {
-    let Some(root_id) = ast.root else {
-        return;
-    };
-    remove_side_effect_children(ast, root_id, ctx);
+    remove_side_effect_children(ast, ast.root, ctx);
 }
 
 fn remove_side_effect_children(ast: &mut Vue3Ast, parent_id: NodeId, ctx: &mut TransformContext) {

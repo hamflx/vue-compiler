@@ -641,7 +641,7 @@ fn block_content_end_from_loc(loc: &vuec_sfc::SfcBlockLocation) -> usize {
 fn vue3_parse_value(ast: &Vue3Ast) -> Value {
     json!({
         "type": 0,
-        "root": ast.root.map(|id| id.0),
+        "root": ast.root.0,
         "nodes": vue3_nodes_summary(ast),
         "children": vue3_root_children(ast),
         "helpers": {},
@@ -655,8 +655,7 @@ fn vue3_parse_value(ast: &Vue3Ast) -> Value {
 }
 
 fn vue3_root_children(ast: &Vue3Ast) -> Vec<Value> {
-    ast.root
-        .and_then(|root_id| ast.node(root_id))
+    ast.node(ast.root)
         .map(|root| {
             root.children
                 .iter()
