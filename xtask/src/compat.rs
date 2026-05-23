@@ -7887,6 +7887,7 @@ fn conformance_coverage_file_kind(
 ) -> ConformanceCoverageKind {
     if path.ends_with("packages/compiler-core/__tests__/compile.spec.ts")
         || path.ends_with("packages/compiler-core/__tests__/parse.spec.ts")
+        || path.ends_with("packages/compiler-core/__tests__/scopeId.spec.ts")
     {
         ConformanceCoverageKind::RustBacked
     } else {
@@ -8452,6 +8453,15 @@ mod tests {
                   ]
                 },
                 {
+                  "name": "F:/repo/prepared/vue3-core/packages/compiler-core/__tests__/scopeId.spec.ts",
+                  "assertionResults": [
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" }
+                  ]
+                },
+                {
                   "name": "F:/repo/prepared/vue3-core/packages/compiler-core/__tests__/transforms/vOn.spec.ts",
                   "assertionResults": [
                     { "status": "passed" },
@@ -8471,8 +8481,8 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             counts: ConformanceExecutionCounts {
-                total: 5,
-                pass: 4,
+                total: 9,
+                pass: 8,
                 fail: 1,
                 skip: 0,
                 pending: 0,
@@ -8483,8 +8493,8 @@ mod tests {
             conformance_coverage_report(suite_spec(ConformanceSuite::Vue3Core), Some(&execution));
 
         assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
-        assert_eq!(coverage.rust_backed_pass, 3);
-        assert_eq!(coverage.rust_backed_total, 3);
+        assert_eq!(coverage.rust_backed_pass, 7);
+        assert_eq!(coverage.rust_backed_total, 7);
         assert_eq!(
             coverage
                 .counts_by_source
@@ -8492,7 +8502,7 @@ mod tests {
                 .copied()
                 .unwrap_or_default()
                 .pass,
-            3
+            7
         );
         assert_eq!(
             coverage
@@ -8507,7 +8517,11 @@ mod tests {
             coverage.files[0].source,
             ConformanceCoverageKind::RustBacked
         );
-        assert_eq!(coverage.files[1].source, ConformanceCoverageKind::Mixed);
+        assert_eq!(
+            coverage.files[1].source,
+            ConformanceCoverageKind::RustBacked
+        );
+        assert_eq!(coverage.files[2].source, ConformanceCoverageKind::Mixed);
         assert!(coverage.reason.contains("xtask/src/compat.rs"));
         let _ = fs::remove_dir_all(temp);
     }
