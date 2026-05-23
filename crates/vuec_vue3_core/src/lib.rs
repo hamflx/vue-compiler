@@ -1000,7 +1000,13 @@ pub fn transform_element_props_projection(payload: &Value) -> Value {
 
     if !in_ssr {
         normalize_class = has_class_binding;
-        normalize_style = has_style_binding;
+        normalize_style = has_style_binding
+            || props.iter().any(prop_requires_normalize_style)
+            || props
+                .iter()
+                .filter(|prop| prop_output_name(prop) == Some("style"))
+                .count()
+                > 1;
         if has_dynamic_object {
             normalize_props = true;
             guard_reactive_props = true;
@@ -1018,6 +1024,20 @@ pub fn transform_element_props_projection(payload: &Value) -> Value {
         "normalizeClass": normalize_class,
         "normalizeStyle": normalize_style,
     })
+}
+
+fn prop_requires_normalize_style(prop: &Value) -> bool {
+    json_str(prop, "kind") == Some("directiveProp")
+        && json_str(prop, "name") == Some("style")
+        && (json_bool(prop, "valueStartsWithArray")
+            || prop.get("valueType").and_then(Value::as_u64) == Some(17))
+}
+
+fn prop_output_name(prop: &Value) -> Option<&str> {
+    match json_str(prop, "kind") {
+        Some("attribute") | Some("directiveProp") => json_str(prop, "name"),
+        _ => None,
+    }
 }
 
 fn prop_name_is_event_handler(name: &str) -> bool {
@@ -5916,6 +5936,37 @@ mod tests {
         assert_eq!(projection["dynamicPropNames"], json!(["foo"]));
         assert_eq!(projection["normalizeClass"], json!(true));
         assert_eq!(projection["normalizeStyle"], json!(true));
+    }
+
+    #[test]
+    fn transform_element_props_projection_normalizes_style_arrays() {
+        let array_literal = transform_element_props_projection(&json!({
+            "props": [
+                {
+                    "kind": "directiveProp",
+                    "name": "style",
+                    "valueConstant": true,
+                    "valueStartsWithArray": true
+                }
+            ],
+            "context": {},
+            "isComponent": false
+        }));
+        assert_eq!(array_literal["normalizeStyle"], json!(true));
+
+        let merged_style = transform_element_props_projection(&json!({
+            "props": [
+                { "kind": "attribute", "name": "style" },
+                {
+                    "kind": "directiveProp",
+                    "name": "style",
+                    "valueConstant": true
+                }
+            ],
+            "context": {},
+            "isComponent": false
+        }));
+        assert_eq!(merged_style["normalizeStyle"], json!(true));
     }
 
     #[test]

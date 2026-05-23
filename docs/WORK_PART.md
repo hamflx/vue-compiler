@@ -33,9 +33,18 @@
 - [x] Vue 3 compiler-core Rust-backed `transformIf` / `processIf` projection bridge for `vIf.spec.ts`.
 - [x] Vue 3 compiler-core Rust-backed `resolveComponentType` projection slice inside `transformElement.spec.ts`.
 - [x] Vue 3 compiler-core Rust-backed `transformElement` props / patch-flag projection slice.
+- [x] Vue 3 compiler-dom Rust-backed `transformStyle` projection slice and style props materialization for `transformElement.spec.ts`.
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Implemented a Rust-backed Vue 3 DOM `transformStyle` projection slice.
+- `vuec_vue3_dom::transform_style_projection` now parses static `style` attributes into deterministic official-style object expression source, including CSS comment stripping, duplicate declaration replacement, and semicolons inside function values.
+- Added `vue3.dom.transformStyle` to `vuec_node_bridge`. Generated compiler-dom `transformStyle` in `xtask/src/compat.rs` now calls Rust and materializes the selected replacements as official-shaped `v-bind:style` directives. The touched `compat.rs` code is bridge/materialization support, not standalone JavaScript compiler semantics.
+- Added `dedupeProperties` / `mergePropertyAsArray` to the alias runtime as AST materialization support for Rust-selected props decisions, matching official duplicate `class` / `style` / `onX` prop array merging before Rust props projection results are applied.
+- Tightened `vuec_vue3_core::transform_element_props_projection` so Rust owns official `normalizeStyle` decisions for style array literals and static-style + dynamic-style merge cases. The adapter only forwards value-shape facts and applies the returned helper instruction.
+- Focused official `compiler-core/__tests__/transforms/transformElement.spec.ts` now passes `77/124` (previously `72/124`). Element-transform own failures are down to `11`; remaining failures are built-in component children/slot lowering, runtime directive materialization, ref_for/v-for markers, dynamic-key block forcing, and related later slices.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p vuec_vue3_dom -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_vue3_dom` (`3/3` pass), `cargo test -p vuec_vue3_core` (`45/45` pass), `cargo xtask verify-npm-alias --version-line vue3 --package @vue/compiler-core`, `cargo xtask verify-npm-alias --version-line vue3 --package @vue/compiler-dom`, and direct prepared Vitest `transformElement.spec.ts` (`77/124` pass, expected fail).
 
 - Implemented a Rust-backed Vue 3 `transformElement` props / patch-flag projection slice.
 - `vuec_vue3_core::transform_element_props_projection` now owns core `buildProps` decisions for object `v-bind` / `v-on` full-props handling, class/style/props patch flags, ref/runtime-directive/vnode-hook need-patch decisions, hydration event flags, class/style normalization, normalizeProps / guardReactiveProps wrapping, and runtime-directive block forcing.

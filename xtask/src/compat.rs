@@ -1815,6 +1815,9 @@ fn alias_export_expression(
             return format!("vue3CoreRuntime[{}]", js_string_literal(export_name));
         }
     }
+    if target.kind == TargetKind::Vue3Dom && export_name == "transformStyle" {
+        return alias_runtime_function_expression("vue3CoreRuntime", export_name, detail);
+    }
     match detail.kind.as_str() {
         "function" => alias_function_expression(target, export_name, detail),
         "symbol" => "Symbol.for('vuec.alias')".into(),
@@ -3536,6 +3539,34 @@ const vue3CoreRuntime = (() => {
       props.properties.unshift(prop);
     }
   };
+  runtime.dedupeProperties = function dedupeProperties(properties) {
+    const known = new Map();
+    const deduped = [];
+    for (const prop of properties || []) {
+      const keyName = runtime.staticPropertyKeyName(prop);
+      if (!keyName) {
+        deduped.push(prop);
+        continue;
+      }
+      const existing = known.get(keyName);
+      if (existing) {
+        if (keyName === 'class' || keyName === 'style' || /^on[A-Z]/.test(keyName)) {
+          runtime.mergePropertyAsArray(existing, prop);
+        }
+      } else {
+        known.set(keyName, prop);
+        deduped.push(prop);
+      }
+    }
+    return deduped;
+  };
+  runtime.mergePropertyAsArray = function mergePropertyAsArray(existing, incoming) {
+    if (existing.value && existing.value.type === NodeTypes.JS_ARRAY_EXPRESSION) {
+      existing.value.elements.push(incoming.value);
+    } else {
+      existing.value = runtime.createArrayExpression([existing.value, incoming.value], existing.loc || locStub);
+    }
+  };
   runtime.staticPropertyKeyName = function staticPropertyKeyName(prop) {
     const key = prop && prop.key;
     return key && key.type === NodeTypes.SIMPLE_EXPRESSION && key.isStatic ? key.content : undefined;
@@ -4897,7 +4928,7 @@ const vue3CoreRuntime = (() => {
           pushMergeArg();
           props = mergeArgs.length > 1 ? runtime.createCallExpression(context.helper(runtime.MERGE_PROPS), mergeArgs, node.loc) : mergeArgs[0];
         } else if (objectProps.length) {
-          props = runtime.createObjectExpression(objectProps, node.loc);
+          props = runtime.createObjectExpression(runtime.dedupeProperties(objectProps), node.loc);
         }
         const propsProjection = callBridge('vue3.core.transformElementProps', {
           props: propSummaries,
@@ -5263,7 +5294,7 @@ const vue3CoreRuntime = (() => {
         directives.push(prop);
       }
     }
-    let propsExpression = objectProps.length ? runtime.createObjectExpression(objectProps, node && node.loc || locStub) : undefined;
+    let propsExpression = objectProps.length ? runtime.createObjectExpression(runtime.dedupeProperties(objectProps), node && node.loc || locStub) : undefined;
     if (propsExpression && hasDynamicKey && context && !context.inSSR) {
       propsExpression = runtime.createCallExpression(context.helper(runtime.NORMALIZE_PROPS), [propsExpression], node && node.loc || locStub);
     }
@@ -5343,6 +5374,23 @@ const vue3CoreRuntime = (() => {
   runtime.transformMemo = () => {};
   runtime.checkCompatEnabled = () => false;
   runtime.warnDeprecation = () => {};
+  runtime.transformStyle = function transformStyle(node) {
+    if (!node || node.type !== NodeTypes.ELEMENT) return;
+    const projection = callBridge('vue3.dom.transformStyle', { node });
+    for (const replacement of projection && projection.replacements || []) {
+      const original = node.props && node.props[replacement.index];
+      if (!original || original.type !== NodeTypes.ATTRIBUTE) continue;
+      node.props[replacement.index] = {
+        type: NodeTypes.DIRECTIVE,
+        name: 'bind',
+        rawName: ':style',
+        arg: runtime.createSimpleExpression('style', true, original.loc),
+        exp: runtime.createSimpleExpression(replacement.expression || '{}', false, original.loc, ConstantTypes.CAN_STRINGIFY),
+        modifiers: [],
+        loc: original.loc,
+      };
+    }
+  };
   return runtime;
 })();
 
@@ -5453,6 +5501,8 @@ function vue3ElementDirectivePropSummaries(dir, result, extra = {}) {
       kind: 'directiveProp',
       name: key && key.type === vue3CoreRuntime.NodeTypes.SIMPLE_EXPRESSION && key.isStatic ? key.content : undefined,
       dynamicKey: !(key && key.type === vue3CoreRuntime.NodeTypes.SIMPLE_EXPRESSION && key.isStatic),
+      valueStartsWithArray: !!(value && value.type === vue3CoreRuntime.NodeTypes.SIMPLE_EXPRESSION && String(value.content || '').trim().startsWith('[')),
+      valueType: value && value.type,
       valueConstant: vue3ElementPropValueIsConstant(value),
       valueCached: !!(value && value.type === vue3CoreRuntime.NodeTypes.JS_CACHE_EXPRESSION),
       propModifier: !!extra.propModifier,

@@ -1023,6 +1023,7 @@ name = "vuec_vue3_dom"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
  "vuec_ast",
  "vuec_diagnostics",
  "vuec_pass",
