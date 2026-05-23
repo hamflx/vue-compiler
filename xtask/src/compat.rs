@@ -4369,28 +4369,230 @@ pub fn verify_npm_alias(scope: &SelectionArgs) -> JsonReport {
         .with_violations(violations)
 }
 
-pub fn summarize_compat(_locked: bool, _path: &Path) -> JsonReport {
+pub fn summarize_compat(locked: bool, path: &Path) -> JsonReport {
+    let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    summarize_compat_at_root(locked, path, &root)
+}
+
+fn summarize_compat_at_root(locked: bool, path: &Path, root: &Path) -> JsonReport {
+    let lock_path = resolve_path(root, path);
+    let lock_hash = file_sha256(&lock_path).ok();
     let mut items = Vec::new();
+    let mut violations = Vec::new();
+    let lock = load_official_lock(&lock_path).ok();
+    let conformance_root = root
+        .join("target")
+        .join("conformance")
+        .join(lock_hash.as_deref().unwrap_or("unknown-lock"));
+
     for target in all_targets() {
-        let api_path = target.relative_api_manifest_path("official");
-        let option_path = target.relative_option_matrix_path();
-        let output_path = target.relative_output_contract_path();
-        let detail = format!(
-            "api={}, options={}, output={}",
-            api_path.exists(),
-            option_path.exists(),
-            output_path.exists()
-        );
+        let official_api =
+            root.join(target.relative_api_manifest_path(ApiManifestSide::Official.as_str()));
+        let rust_api = root.join(target.relative_api_manifest_path(ApiManifestSide::Rust.as_str()));
+        let option_report = conformance_root.join("option-matrix.json");
+        let output_report = conformance_root.join("output-contract.json");
+        let conformance_report = conformance_root.join(conformance_report_name(*target));
+
+        let api_status = combine_report_statuses([
+            report_file_status(&official_api),
+            report_file_status(&rust_api),
+        ]);
+        let option_status = report_file_status(&option_report);
+        let output_status = report_file_status(&output_report);
+        let conformance_status = report_file_status(&conformance_report);
+        let lock_status = if locked {
+            match &lock {
+                Some(lock) => {
+                    combine_report_statuses([if validate_official_lock(lock).is_empty() {
+                        ReportStatus::Pass
+                    } else {
+                        ReportStatus::Fail
+                    }])
+                }
+                None => ReportStatus::Fail,
+            }
+        } else {
+            ReportStatus::Pass
+        };
+
+        let target_status = combine_report_statuses([
+            api_status,
+            option_status,
+            output_status,
+            conformance_status,
+            lock_status,
+        ]);
+        if target_status == ReportStatus::Fail {
+            if api_status == ReportStatus::Fail {
+                violations.push(format!("{} missing API manifest(s)", target.display()));
+            }
+            if option_status == ReportStatus::Fail {
+                violations.push(format!("{} missing option report", target.display()));
+            }
+            if output_status == ReportStatus::Fail {
+                violations.push(format!("{} missing output report", target.display()));
+            }
+            if conformance_status == ReportStatus::Fail {
+                violations.push(format!("{} missing conformance report", target.display()));
+            }
+            if lock_status == ReportStatus::Fail {
+                violations.push(format!(
+                    "{} official lock validation failed",
+                    target.display()
+                ));
+            }
+        }
+
         items.push(ReportItem::new(
             target.display(),
-            ReportStatus::Pending,
-            detail,
-            None,
+            target_status,
+            format!(
+                "api={}, options={}, output={}, conformance={}, lock={}",
+                api_status.as_str(),
+                option_status.as_str(),
+                output_status.as_str(),
+                conformance_status.as_str(),
+                lock_status.as_str()
+            ),
+            Some(conformance_report),
         ));
     }
-    JsonReport::new("summarize_compat", ReportStatus::Pending)
+
+    let mut report = JsonReport::new("summarize_compat", aggregate_status(&items));
+    report.metadata = report.metadata.with_lock_hash(lock_hash);
+    report
         .with_items(items)
-        .with_note("summary is scaffolded; pass will follow once the compiler backends and package aliases exist")
+        .with_violations(violations)
+        .with_note(if locked {
+            "summary aggregates lock validation plus API, option, output, and conformance artifacts"
+        } else {
+            "summary aggregates API, option, output, and conformance artifacts"
+        })
+}
+
+fn report_file_status(path: &Path) -> ReportStatus {
+    let Ok(data) = fs::read_to_string(path) else {
+        return ReportStatus::Pending;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) else {
+        return ReportStatus::Fail;
+    };
+    report_value_status(&value)
+}
+
+fn report_value_status(value: &serde_json::Value) -> ReportStatus {
+    let mut seen = false;
+    let mut status = ReportStatus::Pass;
+
+    fn merge_status(seen: &mut bool, status: &mut ReportStatus, next: ReportStatus) {
+        *seen = true;
+        match (*status, next) {
+            (ReportStatus::Fail, _) => {}
+            (_, ReportStatus::Fail) => *status = ReportStatus::Fail,
+            (ReportStatus::Pending, _) => {}
+            (_, ReportStatus::Pending) => *status = ReportStatus::Pending,
+            _ => {}
+        }
+    }
+
+    if let Some(value) = value.get("status").and_then(|value| value.as_str()) {
+        merge_status(
+            &mut seen,
+            &mut status,
+            match value {
+                "pass" => ReportStatus::Pass,
+                "pending" => ReportStatus::Pending,
+                _ => ReportStatus::Fail,
+            },
+        );
+    }
+
+    if let Some(counts) = value.get("counts").and_then(|value| value.as_object()) {
+        seen = true;
+        if counts
+            .get("fail")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0)
+            > 0
+        {
+            status = ReportStatus::Fail;
+        } else if counts
+            .get("pending")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0)
+            > 0
+            && status == ReportStatus::Pass
+        {
+            status = ReportStatus::Pending;
+        }
+    }
+
+    if let Some(checks) = value.get("checks").and_then(|value| value.as_array()) {
+        for check in checks {
+            seen = true;
+            match check.get("status").and_then(|value| value.as_str()) {
+                Some("pass") => {}
+                Some("pending") => merge_status(&mut seen, &mut status, ReportStatus::Pending),
+                Some(_) | None => merge_status(&mut seen, &mut status, ReportStatus::Fail),
+            }
+        }
+    }
+
+    if let Some(rows) = value.get("rows").and_then(|value| value.as_array()) {
+        for row in rows {
+            seen = true;
+            match row.get("status").and_then(|value| value.as_str()) {
+                Some("pass") => {}
+                Some("pending") => merge_status(&mut seen, &mut status, ReportStatus::Pending),
+                Some(_) | None => merge_status(&mut seen, &mut status, ReportStatus::Fail),
+            }
+        }
+    }
+
+    if let Some(targets) = value.get("targets").and_then(|value| value.as_array()) {
+        for target in targets {
+            merge_status(&mut seen, &mut status, report_value_status(target));
+        }
+    }
+
+    if seen {
+        status
+    } else {
+        ReportStatus::Fail
+    }
+}
+
+fn combine_report_statuses<const N: usize>(statuses: [ReportStatus; N]) -> ReportStatus {
+    if statuses.iter().any(|status| *status == ReportStatus::Fail) {
+        ReportStatus::Fail
+    } else if statuses
+        .iter()
+        .any(|status| *status == ReportStatus::Pending)
+    {
+        ReportStatus::Pending
+    } else {
+        ReportStatus::Pass
+    }
+}
+
+fn conformance_report_name(target: TargetSpec) -> &'static str {
+    match target.kind {
+        TargetKind::Vue26Template => "vue2-compiler.json",
+        TargetKind::Vue27Template => "vue27-compiler.json",
+        TargetKind::Vue27Sfc => "vue27-sfc.json",
+        TargetKind::Vue3Core => "vue3-core.json",
+        TargetKind::Vue3Dom => "vue3-dom.json",
+        TargetKind::Vue3Ssr => "vue3-ssr.json",
+        TargetKind::Vue3Sfc => "vue3-sfc.json",
+    }
+}
+
+fn resolve_path(root: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    }
 }
 
 pub fn load_official_lock(path: &Path) -> Result<OfficialRevisionsLock> {
@@ -4797,6 +4999,39 @@ mod tests {
         assert!(OUTPUT_CONTRACT_PROBE_SCRIPT
             .contains("versionLine === 'vue2_7' && entry === 'vue/compiler-sfc'"));
         assert!(OUTPUT_CONTRACT_PROBE_SCRIPT.contains("api.parse({ source: fixture"));
+    }
+
+    #[test]
+    fn report_value_status_uses_counts_and_nested_rows() {
+        let passed = serde_json::json!({
+            "counts": { "total": 1, "pass": 1, "pending": 0, "fail": 0 },
+            "targets": [
+                { "rows": [{ "status": "pass" }] },
+                { "checks": [{ "status": "pass" }] }
+            ]
+        });
+        assert_eq!(report_value_status(&passed), ReportStatus::Pass);
+
+        let pending = serde_json::json!({
+            "counts": { "total": 2, "pass": 1, "pending": 1, "fail": 0 },
+            "targets": [{ "rows": [{ "status": "pending" }] }]
+        });
+        assert_eq!(report_value_status(&pending), ReportStatus::Pending);
+
+        let failed = serde_json::json!({
+            "counts": { "total": 1, "pass": 0, "pending": 0, "fail": 1 },
+            "targets": [{ "checks": [{ "status": "fail" }] }]
+        });
+        assert_eq!(report_value_status(&failed), ReportStatus::Fail);
+    }
+
+    #[test]
+    fn report_value_status_treats_discovery_only_as_pending_via_counts() {
+        let discovered = serde_json::json!({
+            "execution": "discovery-only",
+            "counts": { "total": 3, "pass": 0, "pending": 3, "fail": 0 }
+        });
+        assert_eq!(report_value_status(&discovered), ReportStatus::Pending);
     }
 
     fn test_manifest(exports: Vec<(&str, u32)>) -> ManifestFile {

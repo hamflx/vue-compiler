@@ -18,6 +18,10 @@
 
 ## Completed This Round
 
+- Replaced the scaffolded `cargo xtask summarize-compat --locked` output with a real artifact aggregator that reads official/Rust API manifests, option-matrix results, output-contract results, conformance reports, and lock validation status.
+- Added deterministic status parsing for nested conformance JSON (`counts`, target rows, output checks), including pass/pending/fail propagation and regression tests for nested rows, checks, and discovery-only reports.
+- Current summary status: `cargo xtask summarize-compat --locked` reports API, option matrix, output contract, and lock validation as `pass` for all seven compiler targets, while keeping each target `pending` because the official conformance reports are still discovery-only.
+- Verification this round: `cargo fmt --all --check`, `cargo test -p xtask`, and `cargo xtask summarize-compat --locked`.
 - Fixed the output-contract runner for Vue 2.7 `vue/compiler-sfc` so it uses the official single-object SFC parse API (`parse({ source, filename })`) while preserving Vue 3's `parse(source, options)` path.
 - Added Vue 2.7 SFC-specific template/style source extraction in the output-contract probe, matching the public 2.7 API shape already used by the option matrix runner.
 - Added an `xtask` regression test that locks the Vue 2.7 SFC output-contract version context and object-style parse call.
