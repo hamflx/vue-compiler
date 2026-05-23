@@ -5227,6 +5227,7 @@ function normalizeVue3OptionsForBridge(options, source) {
   normalized.__vuecVoidTags = collectVuePredicateHits(options.isVoidTag, tags);
   normalized.__vuecPreTags = collectVuePredicateHits(options.isPreTag, tags);
   normalized.__vuecIgnoreNewlineTags = collectVuePredicateHits(options.isIgnoreNewlineTag, tags);
+  normalized.__vuecNamespaces = collectVueNamespaceHits(options.getNamespace, tags);
   if (typeof options.isNativeTag === 'function') {
     normalized.__vuecNativeTags = collectVuePredicateHits(options.isNativeTag, tags);
   }
@@ -5260,6 +5261,18 @@ function collectVuePredicateHits(predicate, values) {
     } catch (_) {}
   }
   return hits;
+}
+
+function collectVueNamespaceHits(getNamespace, values) {
+  if (!getNamespace || typeof getNamespace !== 'function') return {};
+  const namespaces = {};
+  for (const value of values) {
+    try {
+      const namespace = getNamespace(value);
+      if (namespace !== undefined && namespace !== null) namespaces[value] = namespace;
+    } catch (_) {}
+  }
+  return namespaces;
 }
 
 function preflightAliasCall(name, payload) {

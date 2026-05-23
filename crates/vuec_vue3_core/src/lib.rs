@@ -38,6 +38,7 @@ pub struct Vue3CompilerOptions {
     pub native_tags: Option<Vec<String>>,
     pub custom_elements: Vec<String>,
     pub built_in_components: Vec<String>,
+    pub namespaces: BTreeMap<String, vuec_ast::HtmlNamespace>,
     pub whitespace: String,
     pub pre_tags: Vec<String>,
     pub ignore_newline_tags: Vec<String>,
@@ -64,6 +65,7 @@ impl Default for Vue3CompilerOptions {
             native_tags: None,
             custom_elements: Vec::new(),
             built_in_components: Vec::new(),
+            namespaces: BTreeMap::new(),
             whitespace: "condense".into(),
             pre_tags: Vec::new(),
             ignore_newline_tags: Vec::new(),
@@ -99,6 +101,7 @@ impl Vue3Dialect {
         let mut stack = vec![root];
         let mut v_pre_depth = 0usize;
         let mut malformed_start_depth = 0usize;
+        let mut namespace_stack = vec![vuec_ast::HtmlNamespace::Html];
         let mut tokenizer = if let Some([open, close]) = &options.delimiters {
             HtmlTokenizer::new(&source.source).with_interpolation_delimiters(open, close)
         } else {
@@ -115,6 +118,10 @@ impl Vue3Dialect {
             let token = tokenizer.next_token();
             let eof = matches!(token.kind, HtmlTokenKind::Eof);
             let current_parent = *stack.last().unwrap_or(&root);
+            let current_namespace = namespace_stack
+                .last()
+                .copied()
+                .unwrap_or(vuec_ast::HtmlNamespace::Html);
             match token.kind {
                 HtmlTokenKind::Text(text) => {
                     if malformed_start_depth > 0 {
@@ -186,6 +193,7 @@ impl Vue3Dialect {
                         continue;
                     }
                     let is_void = options.void_tags.iter().any(|candidate| candidate == &name);
+                    let namespace = vue3_element_namespace(&name, current_namespace, options);
                     let starts_v_pre =
                         v_pre_depth == 0 && attributes.iter().any(|attr| attr.name == "v-pre");
                     let in_v_pre = v_pre_depth > 0 || starts_v_pre;
@@ -199,6 +207,7 @@ impl Vue3Dialect {
                             source.file_id,
                             source.base_offset,
                             in_v_pre,
+                            namespace,
                         ),
                         Some(Span::new(
                             source.file_id,
@@ -208,6 +217,7 @@ impl Vue3Dialect {
                     );
                     if !self_closing && !is_void {
                         stack.push(id);
+                        namespace_stack.push(namespace);
                         if in_v_pre {
                             v_pre_depth += 1;
                         }
@@ -242,6 +252,9 @@ impl Vue3Dialect {
                         let Some(node_id) = stack.pop() else {
                             break;
                         };
+                        if namespace_stack.len() > 1 {
+                            namespace_stack.pop();
+                        }
                         if let Some(node) = ast.node(node_id) {
                             if matches!(&node.kind, Vue3AstKind::Element(element) if element.tag.eq_ignore_ascii_case(&name))
                             {
@@ -269,22 +282,13 @@ impl Vue3Dialect {
                 }
                 HtmlTokenKind::Cdata(text) => {
                     extend_open_element_spans_to(&mut ast, &stack, source.base_offset + token.end);
-                    if v_pre_depth > 0 {
+                    if current_namespace != vuec_ast::HtmlNamespace::Html {
                         push_text(
                             &mut ast,
                             current_parent,
                             source.file_id,
-                            source.base_offset + token.start,
+                            source.base_offset + token.start + "<![CDATA[".len(),
                             &text,
-                        );
-                    } else {
-                        push_text_and_interpolations(
-                            &mut ast,
-                            current_parent,
-                            source.file_id,
-                            source.base_offset + token.start,
-                            &text,
-                            options,
                         );
                     }
                 }
@@ -529,6 +533,7 @@ fn vue3_element_kind(
     file_id: FileId,
     base_offset: usize,
     in_v_pre: bool,
+    namespace: vuec_ast::HtmlNamespace,
 ) -> Vue3NodeKind {
     let props = attributes
         .into_iter()
@@ -549,12 +554,20 @@ fn vue3_element_kind(
     Vue3NodeKind::Element(Vue3Element {
         tag,
         tag_type,
-        ns: vuec_ast::HtmlNamespace::Html,
+        ns: namespace,
         props,
         self_closing,
         codegen_node: None,
         ssr_codegen_node: None,
     })
+}
+
+fn vue3_element_namespace(
+    tag: &str,
+    parent: vuec_ast::HtmlNamespace,
+    options: &Vue3CompilerOptions,
+) -> vuec_ast::HtmlNamespace {
+    options.namespaces.get(tag).copied().unwrap_or(parent)
 }
 
 fn vue3_tag_type(tag: &str, props: &[Vue3Prop], options: &Vue3CompilerOptions) -> Vue3ElementType {
@@ -3339,5 +3352,53 @@ mod tests {
             &ast.node(template.children[0]).expect("end tag text").kind,
             Vue3AstKind::Text(text) if text.value == "</"
         ));
+    }
+
+    #[test]
+    fn base_parse_uses_configured_namespace_for_cdata_text() {
+        let mut namespaces = BTreeMap::new();
+        namespaces.insert("svg".into(), vuec_ast::HtmlNamespace::Svg);
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: "<template><svg><![CDATA[cdata]]></svg></template>".into(),
+            file_id: FileId(0),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(
+            source,
+            &Vue3CompilerOptions {
+                namespaces,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+        let root = ast.root_node().expect("root");
+        let template = ast.node(root.children[0]).expect("template");
+        let svg = ast.node(template.children[0]).expect("svg");
+        assert!(matches!(
+            &svg.kind,
+            Vue3AstKind::Element(element) if element.ns == vuec_ast::HtmlNamespace::Svg
+        ));
+        assert!(matches!(
+            &ast.node(svg.children[0]).expect("cdata text").kind,
+            Vue3AstKind::Text(text) if text.value == "cdata"
+        ));
+        assert_eq!(
+            ast.node(svg.children[0]).expect("cdata text").span.source(),
+            Some(Span::new(FileId(0), 24, 29))
+        );
+    }
+
+    #[test]
+    fn base_parse_drops_cdata_children_in_html_namespace() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: "<template><![CDATA[cdata]]></template>".into(),
+            file_id: FileId(0),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let root = ast.root_node().expect("root");
+        let template = ast.node(root.children[0]).expect("template");
+        assert!(template.children.is_empty());
     }
 }

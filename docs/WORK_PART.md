@@ -30,6 +30,12 @@
 
 ## Completed This Round
 
+- Added Rust-backed Vue 3 namespace-aware CDATA parsing for official `compiler-core/__tests__/parse.spec.ts`.
+- `Vue3CompilerOptions` now carries deterministic namespace overrides, and `vuec_vue3_core::base_parse` maintains a namespace stack so configured SVG elements project `ns: SVG`, CDATA body text is emitted only in XML namespace with body-only source spans, and HTML-namespace CDATA does not become a text child.
+- `vuec_node_bridge` now parses the namespace override map and uses the same namespace stack for CDATA diagnostics. The generated Vue 3 alias only samples function-valued `getNamespace` into bridge options as API adaptation; no compiler semantics were added to the JS shim.
+- Full Vue 3 core conformance is still intentionally failing: `386/652` official tests pass and `266` fail. `parse.spec.ts` is now `135/151` passing; remaining parser failures are mostly raw-text/invalid-end-tag/error-message exactness plus the `decodeEntities` warning matcher setup gap.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_vue3_core -p vuec_node_bridge`, `git diff --check`, `cargo xtask verify-npm-alias --version-line vue3 --package @vue/compiler-core`, direct official-vs-Rust alias CDATA namespace smoke comparisons, and `cargo xtask run-conformance --suite vue3-core` (expected fail with `386/652` pass, `266` fail).
+
 - Tightened the Rust-backed Vue 3 parser EOF/error-recovery behavior for official `compiler-core/__tests__/parse.spec.ts`.
 - `vuec_vue3_core::base_parse` now extends open element spans to EOF, treats `</` as text when the end tag name is missing, suppresses EOF-interrupted child start tags from becoming real AST elements, and preserves recoverable trailing `/` text for incomplete start tags.
 - `vuec_node_bridge` now reports EOF_IN_TAG only for true EOF-at-tag cases, while incomplete start tags interrupted by a later end tag continue through the missing-end-tag diagnostic path used by the official IDE recovery case.

@@ -816,7 +816,7 @@ fn collect_html_parse_error_diagnostics(
     }
     collect_missing_end_tag_name_diagnostics(source, diagnostics);
 
-    let mut stack = Vec::<String>::new();
+    let mut stack = Vec::<OpenDiagnosticElement>::new();
     for token in HtmlTokenizer::new(source).tokenize() {
         match token.kind {
             HtmlTokenKind::StartTag {
@@ -838,7 +838,9 @@ fn collect_html_parse_error_diagnostics(
                         vue3_source_loc_value(source, source.len(), source.len()),
                     ));
                 } else if !self_closing && !vue3_is_void_tag(options, &name) {
-                    stack.push(name);
+                    let namespace =
+                        vue3_tag_namespace(options, &name, stack.last().map(|open| open.namespace));
+                    stack.push(OpenDiagnosticElement { name, namespace });
                 }
             }
             HtmlTokenKind::EndTag { name } => {
@@ -847,6 +849,8 @@ fn collect_html_parse_error_diagnostics(
                         9,
                         vue3_source_loc_value(source, source.len(), source.len()),
                     ));
+                } else {
+                    pop_diagnostic_stack_until(&mut stack, &name);
                 }
             }
             HtmlTokenKind::Comment(_) => {
@@ -861,9 +865,9 @@ fn collect_html_parse_error_diagnostics(
                 }
             }
             HtmlTokenKind::Cdata(_) => {
-                if !stack
-                    .iter()
-                    .any(|tag| matches!(tag.as_str(), "svg" | "math"))
+                if stack
+                    .last()
+                    .is_none_or(|open| open.namespace == vuec_ast::HtmlNamespace::Html)
                 {
                     diagnostics.push(vue3_error_value(
                         1,
@@ -881,6 +885,31 @@ fn collect_html_parse_error_diagnostics(
                 }
             }
             HtmlTokenKind::Text(_) | HtmlTokenKind::Doctype(_) | HtmlTokenKind::Eof => {}
+        }
+    }
+}
+
+struct OpenDiagnosticElement {
+    name: String,
+    namespace: vuec_ast::HtmlNamespace,
+}
+
+fn vue3_tag_namespace(
+    options: &Vue3CompilerOptions,
+    tag: &str,
+    parent: Option<vuec_ast::HtmlNamespace>,
+) -> vuec_ast::HtmlNamespace {
+    options
+        .namespaces
+        .get(tag)
+        .copied()
+        .unwrap_or_else(|| parent.unwrap_or(vuec_ast::HtmlNamespace::Html))
+}
+
+fn pop_diagnostic_stack_until(stack: &mut Vec<OpenDiagnosticElement>, name: &str) {
+    while let Some(open) = stack.pop() {
+        if open.name.eq_ignore_ascii_case(name) {
+            break;
         }
     }
 }
@@ -1960,6 +1989,14 @@ fn vue3_options(value: Option<&Value>) -> Vue3CompilerOptions {
     options.void_tags = string_array_option(value, "__vuecVoidTags");
     options.pre_tags = string_array_option(value, "__vuecPreTags");
     options.ignore_newline_tags = string_array_option(value, "__vuecIgnoreNewlineTags");
+    if let Some(namespaces) = value.get("__vuecNamespaces").and_then(Value::as_object) {
+        options.namespaces = namespaces
+            .iter()
+            .filter_map(|(tag, namespace)| {
+                vue3_namespace_option_value(namespace).map(|namespace| (tag.clone(), namespace))
+            })
+            .collect();
+    }
     if let Some(native_tags) = value.get("__vuecNativeTags").and_then(Value::as_array) {
         options.native_tags = Some(
             native_tags
@@ -1992,6 +2029,29 @@ fn vue3_options(value: Option<&Value>) -> Vue3CompilerOptions {
         }
     }
     options
+}
+
+fn vue3_namespace_option_value(value: &Value) -> Option<vuec_ast::HtmlNamespace> {
+    match value {
+        Value::Number(number) if number.as_u64() == Some(1) => Some(vuec_ast::HtmlNamespace::Svg),
+        Value::Number(number) if number.as_u64() == Some(2) => {
+            Some(vuec_ast::HtmlNamespace::MathMl)
+        }
+        Value::Number(number) if number.as_u64() == Some(0) => Some(vuec_ast::HtmlNamespace::Html),
+        Value::String(value) if value.eq_ignore_ascii_case("svg") => {
+            Some(vuec_ast::HtmlNamespace::Svg)
+        }
+        Value::String(value) if value.eq_ignore_ascii_case("math") => {
+            Some(vuec_ast::HtmlNamespace::MathMl)
+        }
+        Value::String(value) if value.eq_ignore_ascii_case("mathml") => {
+            Some(vuec_ast::HtmlNamespace::MathMl)
+        }
+        Value::String(value) if value.eq_ignore_ascii_case("html") => {
+            Some(vuec_ast::HtmlNamespace::Html)
+        }
+        _ => None,
+    }
 }
 
 fn vue3_parse_mode_is_sfc(value: Option<&Value>) -> bool {
