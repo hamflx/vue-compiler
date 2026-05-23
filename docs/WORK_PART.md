@@ -30,6 +30,14 @@
 
 ## Completed This Round
 
+- Extended the Rust-backed Vue 3 parser option/recovery slice for official `compiler-core/__tests__/parse.spec.ts`.
+- `vuec_node_bridge` now parses Vue 3 `whitespace`, `__vuecPreTags`, and `__vuecIgnoreNewlineTags`, and parse diagnostics now use the same compiler options as `base_parse`: configured void tags, custom interpolation delimiters, and `v-pre` raw-text state.
+- `vuec_html::HtmlTokenizer` now stops an incomplete start tag when a following end tag begins, fixing the official IDE recovery shape where `<script>` must stay root-level after `<template><Hello\n</template>`.
+- `vuec_vue3_core::base_parse` now extends unmatched element spans to the interrupting end tag, matching the official invalid-HTML AST snapshot for the missing-end-tag recovery path.
+- The generated Vue 3 alias only gained API/hydration adapters in `xtask/src/compat.rs`: `isPreTag` / `isIgnoreNewlineTag` predicate sampling and official error message hydration for code 24. This is not counted as JS-side compiler semantics.
+- Full Vue 3 core conformance is still intentionally failing: `366/652` official tests pass and `286` fail. `parse.spec.ts` is now `115/151` passing with remaining failures concentrated in official parser error recovery/snapshots plus the `decodeEntities` warning matcher setup gap.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p vuec_html -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_html -p vuec_vue3_core -p vuec_node_bridge`, `cargo build -p vuec_node_bridge`, direct alias smoke checks for void tags, `v-pre` half-open interpolation, pre/whitespace options, IDE tag termination, invalid HTML span recovery, and `cargo xtask run-conformance --suite vue3-core` (expected fail with `366/652` pass, `286` fail).
+
 - Implemented a Rust-backed Vue 3 parser/projection slice for official `compiler-core/__tests__/parse.spec.ts`.
 - `vuec_vue3_core::base_parse` now streams tokens so parser state can switch interpolation scanning off inside `v-pre`; `v-pre` strips its own marker, keeps raw directive-looking attrs as attributes, forces nested components to plain elements, and preserves half-open interpolation text across nested tags.
 - Added builtin text entity decoding for text nodes while preserving original source spans.

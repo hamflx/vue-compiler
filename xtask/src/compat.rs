@@ -3164,6 +3164,7 @@ const vue3CoreRuntime = (() => {
       .map(key => [Number(key), String(ErrorCodes[key] || '')])
   );
   errorMessages[23] = 'Invalid end tag.';
+  errorMessages[24] = 'Element is missing end tag.';
   errorMessages[25] = 'Interpolation end sign was not found.';
   errorMessages[46] = 'Error parsing JavaScript expression: ';
   errorMessages[50] = '"cacheHandlers" option is only supported when the "prefixIdentifiers" option is enabled.';
@@ -5224,6 +5225,8 @@ function normalizeVue3OptionsForBridge(options, source) {
   }
   const tags = extractVueTemplateTags(String(source || ''));
   normalized.__vuecVoidTags = collectVuePredicateHits(options.isVoidTag, tags);
+  normalized.__vuecPreTags = collectVuePredicateHits(options.isPreTag, tags);
+  normalized.__vuecIgnoreNewlineTags = collectVuePredicateHits(options.isIgnoreNewlineTag, tags);
   if (typeof options.isNativeTag === 'function') {
     normalized.__vuecNativeTags = collectVuePredicateHits(options.isNativeTag, tags);
   }

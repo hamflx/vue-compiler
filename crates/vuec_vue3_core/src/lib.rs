@@ -200,6 +200,14 @@ impl Vue3Dialect {
                                     v_pre_depth -= 1;
                                 }
                                 break;
+                            } else if let Some(node) = ast.node_mut(node_id) {
+                                if let Some(span) = node.span.source_mut() {
+                                    span.end =
+                                        vuec_source::BytePos(source.base_offset + token.start);
+                                }
+                                if v_pre_depth > 0 {
+                                    v_pre_depth -= 1;
+                                }
                             }
                         }
                     }
@@ -3108,6 +3116,58 @@ mod tests {
         assert!(matches!(
             &ast.node(second_span.children[0]).expect("second text").kind,
             Vue3AstKind::Text(text) if text.value == "}}"
+        ));
+    }
+
+    #[test]
+    fn base_parse_preserves_inter_element_whitespace_in_preserve_mode() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: "<div/> \n <div/>".into(),
+            file_id: FileId(0),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(
+            source,
+            &Vue3CompilerOptions {
+                whitespace: "preserve".into(),
+                ..Vue3CompilerOptions::default()
+            },
+        );
+        let root = ast.root_node().expect("root");
+        assert_eq!(root.children.len(), 3);
+        assert!(matches!(
+            &ast.node(root.children[1]).expect("whitespace text").kind,
+            Vue3AstKind::Text(text) if text.value == " "
+        ));
+    }
+
+    #[test]
+    fn base_parse_preserves_text_inside_configured_pre_tag() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: "<pre>\n  foo  bar  </pre><span>\n  foo   bar</span>".into(),
+            file_id: FileId(0),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(
+            source,
+            &Vue3CompilerOptions {
+                pre_tags: vec!["pre".into()],
+                ignore_newline_tags: vec!["pre".into()],
+                ..Vue3CompilerOptions::default()
+            },
+        );
+        let root = ast.root_node().expect("root");
+        let pre = ast.node(root.children[0]).expect("pre");
+        let span = ast.node(root.children[1]).expect("span");
+        assert!(matches!(
+            &ast.node(pre.children[0]).expect("pre text").kind,
+            Vue3AstKind::Text(text) if text.value == "  foo  bar  "
+        ));
+        assert!(matches!(
+            &ast.node(span.children[0]).expect("span text").kind,
+            Vue3AstKind::Text(text) if text.value == " foo bar"
         ));
     }
 }

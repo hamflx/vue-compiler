@@ -172,6 +172,9 @@ impl<'a> HtmlTokenizer<'a> {
 
         loop {
             self.consume_whitespace();
+            if self.remaining().starts_with("</") {
+                break;
+            }
             if self.remaining().starts_with("/>") {
                 self_closing = true;
                 self.cursor += 2;
@@ -521,5 +524,22 @@ mod tests {
         };
         assert!(!self_closing);
         assert_eq!(attributes[0].value.as_deref(), Some("a/"));
+    }
+
+    #[test]
+    fn terminates_start_tag_before_end_tag_for_ide_recovery() {
+        let tokens =
+            HtmlTokenizer::new("<template><Hello\n</template><script>x</script>").tokenize();
+        assert!(
+            matches!(tokens[0].kind, HtmlTokenKind::StartTag { ref name, .. } if name == "template")
+        );
+        assert!(
+            matches!(tokens[1].kind, HtmlTokenKind::StartTag { ref name, .. } if name == "Hello")
+        );
+        assert_eq!(tokens[1].end, 17);
+        assert!(matches!(tokens[2].kind, HtmlTokenKind::EndTag { ref name } if name == "template"));
+        assert!(
+            matches!(tokens[3].kind, HtmlTokenKind::StartTag { ref name, .. } if name == "script")
+        );
     }
 }
