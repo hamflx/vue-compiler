@@ -1,5 +1,6 @@
 # Memory
 
+- Current round: aligned `docs/2.DEVELOPMENT_PLAN.md` and `docs/goal.md` to the deterministic AST/HIR/MIR contract in `docs/3.AST_HIR_MIR_DESIGN.md`, emphasizing that `Vue2Ast`, `Vue3Ast`, `HIR`, `Vue2Mir`, `Vue3DomMir`, `Vue3SsrMir`, and `VaporMir` are first-class target documents with fixed public projection, lowering, and target-split rules.
 - Active objective: build a Rust Vue compiler that can replace official Vue 2.6, Vue 2.7, and Vue 3 compiler flows.
 - Current focus: use the now-real Vue 3 compiler-core official conformance runner to drive missing parser/transform/codegen compatibility while keeping implementation aligned with the deterministic AST/HIR/MIR contract.
 - `cargo xtask run-conformance --suite vue3-core` now executes the official Vue 3 `packages/compiler-core/__tests__` suite through a prepared Vitest tree and generated Rust alias shims. Current result is real failure, not pending: 652 official tests run, 134 pass, 518 fail. The dominant remaining failures are transformElement/buildProps semantics, v-if/v-for codegen, expression rewriting, exact codegen snapshots, and remaining parser edge cases around whitespace, v-pre, parse-expression ASTs, and full diagnostic coverage.
