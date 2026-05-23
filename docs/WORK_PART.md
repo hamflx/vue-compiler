@@ -17,14 +17,20 @@
 - [x] AST / HIR / MIR base arena migration and lowering pipeline alignment.
 - [ ] Vue 3 public projection exactness for directive arg/exp/modifier spans and loc content.
 - [x] Development plan and goal wording aligned with `docs/3.AST_HIR_MIR_DESIGN.md` as the single AST/HIR/MIR structure constraint.
-- [x] Vue 3 compiler-core expression transform exactness for `transformExpressions.spec.ts`.
-- [x] Vue 3 compiler-core `v-on` transform exactness for `vOn.spec.ts`.
-- [x] Vue 3 compiler-core text transform exactness for `transformText.spec.ts`.
-- [x] Vue 3 compiler-core `v-once` transform exactness for `vOnce.spec.ts`.
-- [x] Vue 3 compiler-core slot outlet transform exactness for `transformSlotOutlet.spec.ts`.
-- [x] Vue 3 compiler-core `v-bind` transform exactness for `vBind.spec.ts`.
+- [x] Vue 3 compiler-core alias-runtime expression transform slice for `transformExpressions.spec.ts`.
+- [x] Vue 3 compiler-core alias-runtime `v-on` slice for `vOn.spec.ts`.
+- [x] Vue 3 compiler-core alias-runtime text transform slice for `transformText.spec.ts`.
+- [x] Vue 3 compiler-core alias-runtime `v-once` slice for `vOnce.spec.ts`.
+- [x] Vue 3 compiler-core alias-runtime slot outlet slice for `transformSlotOutlet.spec.ts`.
+- [x] Vue 3 compiler-core alias-runtime `v-bind` slice for `vBind.spec.ts`.
+- [ ] Classify Vue 3 compiler-core conformance coverage as `rust-backed`, `shim-backed`, or `mixed` in reports.
+- [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Adjusted the project acceptance wording after reviewing recent Vue 3 core conformance progress: focused specs that pass through `xtask/src/compat.rs` JavaScript alias runtime are now treated as alias-runtime slices, not Rust compiler parity.
+- New reporting rule: Vue 3 compiler-core conformance must distinguish `rust-backed`, `shim-backed`, and `mixed` coverage before pass counts can be used as Rust implementation progress.
+- New implementation direction: stop growing `compat.rs` as a second compiler-core implementation; keep it as an import/API/hydration adapter and move `processExpression`, `transformExpression`, `transformElement`, `buildProps`, structural transforms, text transforms, slots, and codegen semantics into Rust-backed modules.
 
 - Closed the official Vue 3 `compiler-core/__tests__/transforms/vBind.spec.ts` slice. The focused spec now passes `19/19` through the prepared alias Vitest runner.
 - Reworked alias runtime `transformVBindShorthand` and `transformBind` to match official same-name shorthand expansion, empty-expression errors, dynamic argument guards, `.camel`, `.prop`, `.attr`, and prefixIdentifiers compound argument handling.

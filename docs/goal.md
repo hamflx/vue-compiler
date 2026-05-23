@@ -18,6 +18,10 @@ AST/HIR/MIR设计：docs\3.AST_HIR_MIR_DESIGN.md（AST/HIR/MIR 以此为唯一�
 8. 只有当开发计划、官方兼容验收、输出契约验收、AST/HIR/MIR 结构验收全部满足时，才算真正完成
 9. AST/HIR/MIR 的结构验收必须严格遵循 `docs/3.AST_HIR_MIR_DESIGN.md` 的 public projection、lowering、target-split 约束，不能退回到旧的泛化 IR 口径
 10. Vue 3 public projection 的 directive `arg` / `exp` / `modifiers` 必须保留官方可观察的 `content`、`loc`、`isStatic` 差异，不能靠 trim、重写或 synthetic fallback 混淆差异
+11. 官方 conformance 结果必须区分 `rust-backed`、`shim-backed`、`mixed` 三类覆盖；只有明确经过 Rust 编译器实现的测试才能计入 Rust 编译器完成度
+12. `xtask/src/compat.rs` 中的 JavaScript alias/shim 只能作为官方测试 import、包入口、AST hydration/dehydration 和临时适配层；不能把在 shim 中补齐 compiler-core 语义当作 Rust 编译器功能完成
+13. 对 `processExpression`、`transformExpression`、`transformElement`、`processIf`、`processFor`、`transformText`、`buildProps`、`generate` 等 compiler-core 内部行为，最终验收必须落到 Rust 的 AST/transform/codegen 管线或 Rust-backed bridge/API 上
+14. 当 focused official spec 只通过 alias runtime 或 mixed path 时，进度报告必须明确标注为 alias-runtime slice，不能写成 Rust compiler parity
 
 工作提示：
 
@@ -27,3 +31,4 @@ AST/HIR/MIR设计：docs\3.AST_HIR_MIR_DESIGN.md（AST/HIR/MIR 以此为唯一�
 4. 如果开发任务中，有客观困难阻塞无法完成的任务，记录到 docs/UNRESOLVED_PROBLEMS.md，并直接当作已完成即可
 5. 对于设计方案中与我们目标相冲突的地方（目标是兼容 vue2、vue2.7、vue3 官方的编译器，可以直接替代其工作），你可以直接以目标为准，进行重新设计，并更新设计方案，以新设计方案开发，并且，记录文档到 docs/COMPATIBILITY_CONCERNS.md
 6. 开发计划中的 AST/HIR/MIR 相关工作，必须严格遵循 docs/3.AST_HIR_MIR_DESIGN.md 的 public projection、lowering 和 target-split 约束
+7. 后续如果继续改 `compat.rs` 的 JavaScript shim，必须说明这是 import/API 适配、测试 runner 支撑，还是临时语义实现；临时语义实现必须有对应 Rust 迁移计划或单独记录为 compatibility concern

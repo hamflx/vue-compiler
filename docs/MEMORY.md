@@ -1,5 +1,8 @@
 # Memory
 
+- Current steering update: Vue 3 compiler-core official conformance pass counts must now be classified as `rust-backed`, `shim-backed`, or `mixed`. Focused specs that pass through `xtask/src/compat.rs` JavaScript alias runtime are alias-runtime slices, not Rust compiler parity.
+- `compat.rs` should stop growing into a second compiler-core implementation. Its intended role is package/import compatibility, AST hydration/dehydration, and temporary adapter code. Compiler semantics such as `processExpression`, `transformExpression`, `transformElement`, `buildProps`, structural transforms, text transforms, slots, and codegen need Rust-backed implementations before they can count toward final Rust compiler completion.
+- Current Vue 3 core conformance number `331/652` remains useful as a prepared-suite compatibility signal, but it must not be read as `331` Rust-backed passing tests until the report classifies each pass by execution source.
 - Current round: closed the official Vue 3 `compiler-core/__tests__/transforms/vBind.spec.ts` slice through the alias runtime. The focused spec now passes `19/19` in the prepared Vue 3 core Vitest tree.
 - Vue 3 compiler-core alias runtime `transformVBindShorthand` and `transformBind` now mirror official same-name shorthand expansion, empty-expression diagnostics, dynamic argument `|| ""` guards, `.camel`, `.prop`, `.attr`, prefixIdentifiers compound argument handling, and `NORMALIZE_PROPS` wrapping for dynamic keys in element props.
 - Latest full Vue 3 core conformance state: `cargo xtask run-conformance --suite vue3-core` runs 652 official tests with 331 passing and 321 failing. This improves from the previous 311/652 state. Adjacent `transformElement.spec.ts` remains broad and incomplete at `30/124`.
