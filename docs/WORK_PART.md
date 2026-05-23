@@ -17,8 +17,14 @@
 - [x] AST / HIR / MIR base arena migration and lowering pipeline alignment.
 - [ ] Vue 3 public projection exactness for directive arg/exp/modifier spans and loc content.
 - [x] Development plan and goal wording aligned with `docs/3.AST_HIR_MIR_DESIGN.md` as the single AST/HIR/MIR structure constraint.
+- [ ] Vue 3 compiler-core expression transform exactness.
 
 ## Completed This Round
+
+- Implemented a real Vue 3 compiler-core alias runtime expression transform in `xtask/src/compat.rs`: `processExpression` / `transformExpression` now lazily use `@babel/parser`, traverse expression ASTs, prefix identifiers through `_ctx`, `$setup`, `$props`, and `__props`, handle simple function/object/member/variable/catch local scopes, preserve compound-expression source locations, and report parser failures through compiler error 46.
+- Fixed generated alias wrapper semantics by emitting normal function bodies for non-public arity wrappers and returning bound functions from `namedArity()`, so `arguments` forwarding works while public API manifest shape remains aligned.
+- Focused conformance improved for official Vue 3 `compiler-core/__tests__/transforms/transformExpressions.spec.ts` from `6/47` to `34/47`. Full Vue 3 core conformance improved from `184/652` to `214/652`; the full suite still intentionally fails with `438` remaining failures outside this slice and in deeper expression edge cases.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p xtask -p vuec_node_bridge`, `cargo test -p xtask`, `cargo xtask diff-api --version-line vue3 --package @vue/compiler-core`, `cargo xtask verify-npm-alias --version-line vue3 --package @vue/compiler-core`, `cargo xtask run-option-matrix --version-line vue3 --package @vue/compiler-core`, `cargo xtask run-output-contract --version-line vue3 --package @vue/compiler-core`, direct prepared Vitest `transformExpressions.spec.ts` run (`34/47` pass), and `cargo xtask run-conformance --suite vue3-core` (expected fail with `214/652` pass, `438` fail).
 
 - Reworked the Vue 3 compiler-core alias runtime `generate()` implementation in `xtask/src/compat.rs` to match the official codegen contract for module/function preambles, optimized imports, helper destructuring, component/directive asset resolution, hoists, temps, VNode calls, object/array/function/conditional/cache/template literal/SSR statement nodes, and patch flag comments.
 - Closed the official Vue 3 `compiler-core/__tests__/codegen.spec.ts` file through the prepared alias Vitest runner: `34/34` tests now pass. Full Vue 3 core conformance improved from `149/652` to `184/652`; the suite still intentionally fails with `468` remaining failures outside this codegen slice.
