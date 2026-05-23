@@ -1,7 +1,10 @@
 #![forbid(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
-use vuec_ast::{RuntimeHelper, TemplateAttribute, Vue3Ast, Vue3AstKind, Vue3NodeKind};
+use vuec_ast::{
+    RuntimeHelper, TemplateAttribute, Vue3Ast, Vue3AstKind, Vue3Directive, Vue3Element,
+    Vue3ElementType, Vue3Expression, Vue3NodeKind, Vue3Prop,
+};
 use vuec_codegen::{CodeWriter, SourceMapArtifact, SourceMapSegment};
 use vuec_html::{HtmlTokenKind, HtmlTokenizer};
 use vuec_js::JsAstStore;
@@ -97,17 +100,7 @@ impl Vue3Dialect {
                 } => {
                     let id = ast.push_child(
                         current_parent,
-                        Vue3NodeKind::element(
-                            name,
-                            attributes
-                                .into_iter()
-                                .map(|attr| TemplateAttribute {
-                                    name: attr.name,
-                                    value: attr.value,
-                                })
-                                .collect(),
-                            self_closing,
-                        ),
+                        vue3_element_kind(name, attributes, self_closing),
                         Some(Span::new(
                             source.file_id,
                             source.base_offset + token.start,
@@ -307,6 +300,101 @@ impl Vue3Dialect {
         }
         result
     }
+}
+
+fn vue3_element_kind(
+    tag: String,
+    attributes: Vec<vuec_html::HtmlAttribute>,
+    self_closing: bool,
+) -> Vue3NodeKind {
+    let mut tag_type = if tag == "slot" {
+        Vue3ElementType::SlotOutlet
+    } else if tag == "template" {
+        Vue3ElementType::Template
+    } else if tag.chars().next().is_some_and(|ch| ch.is_ascii_uppercase()) {
+        Vue3ElementType::Component
+    } else {
+        Vue3ElementType::Element
+    };
+    let props = attributes
+        .into_iter()
+        .map(|attr| vue3_prop_from_attr(attr.name, attr.value))
+        .collect::<Vec<_>>();
+    if tag_type == Vue3ElementType::Element
+        && props
+            .iter()
+            .any(|prop| matches!(prop, Vue3Prop::Directive(dir) if dir.name == "is"))
+    {
+        tag_type = Vue3ElementType::Component;
+    }
+    Vue3NodeKind::Element(Vue3Element {
+        tag,
+        tag_type,
+        ns: vuec_ast::HtmlNamespace::Html,
+        props,
+        self_closing,
+        codegen_node: None,
+        ssr_codegen_node: None,
+    })
+}
+
+fn vue3_prop_from_attr(name: String, value: Option<String>) -> Vue3Prop {
+    if let Some((directive_name, arg, modifiers, is_dynamic_arg)) = parse_vue3_directive(&name) {
+        Vue3Prop::Directive(Vue3Directive {
+            name: directive_name,
+            raw_name: name,
+            arg: arg.map(Vue3Expression::Raw),
+            exp: value.map(Vue3Expression::Raw),
+            modifiers,
+            is_dynamic_arg,
+        })
+    } else {
+        Vue3Prop::Attribute(vuec_ast::Vue3Attribute { name, value })
+    }
+}
+
+fn parse_vue3_directive(raw: &str) -> Option<(String, Option<String>, Vec<String>, bool)> {
+    let mut body = raw;
+    let mut name = None;
+    if let Some(rest) = raw.strip_prefix("v-") {
+        if let Some((head, tail)) = rest.split_once(':') {
+            name = Some(head.to_string());
+            body = tail;
+        } else {
+            let mut parts = rest.split('.');
+            let directive = parts.next().unwrap_or_default();
+            return Some((
+                directive.to_string(),
+                None,
+                parts.map(ToOwned::to_owned).collect(),
+                false,
+            ));
+        }
+    } else if let Some(rest) = raw.strip_prefix(':') {
+        name = Some("bind".to_string());
+        body = rest;
+    } else if let Some(rest) = raw.strip_prefix('@') {
+        name = Some("on".to_string());
+        body = rest;
+    } else if let Some(rest) = raw.strip_prefix('#') {
+        name = Some("slot".to_string());
+        body = rest;
+    }
+    let name = name?;
+    let mut parts = body.split('.');
+    let raw_arg = parts.next().unwrap_or_default();
+    let modifiers = parts.map(ToOwned::to_owned).collect::<Vec<_>>();
+    let (arg, is_dynamic) = if raw_arg.starts_with('[') && raw_arg.ends_with(']') {
+        (
+            Some(raw_arg[1..raw_arg.len().saturating_sub(1)].to_string()),
+            true,
+        )
+    } else if raw_arg.is_empty() {
+        (None, false)
+    } else {
+        (Some(raw_arg.to_string()), false)
+    };
+    Some((name, arg, modifiers, is_dynamic))
 }
 
 fn render_helpers(order: &[RuntimeHelper], ctx: &TransformContext) -> Vec<RuntimeHelper> {

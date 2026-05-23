@@ -1734,6 +1734,9 @@ fn write_alias_index(
     source.push('\n');
     source.push_str(ALIAS_RUNTIME_JS);
     source.push('\n');
+    if target.kind == TargetKind::Vue3Core {
+        source.push_str("Object.defineProperty(exports, '__vuecRuntime', { value: vue3CoreRuntime, enumerable: false });\n");
+    }
     for export_name in &manifest.exports {
         let detail = manifest.export_details.get(export_name);
         source.push_str("exports[");
@@ -1804,6 +1807,14 @@ fn alias_export_expression(
     let Some(detail) = detail else {
         return "undefined".into();
     };
+    if target.kind == TargetKind::Vue3Core {
+        if vue3_core_runtime_export(export_name, detail).is_some() {
+            if detail.kind == "function" {
+                return alias_runtime_function_expression("vue3CoreRuntime", export_name, detail);
+            }
+            return format!("vue3CoreRuntime[{}]", js_string_literal(export_name));
+        }
+    }
     match detail.kind.as_str() {
         "function" => alias_function_expression(target, export_name, detail),
         "symbol" => "Symbol.for('vuec.alias')".into(),
@@ -1821,6 +1832,28 @@ fn alias_export_expression(
         "object" if detail.tag == "[object RegExp]" => "/(?:)/".into(),
         "object" => object_from_property_names(&detail.own_property_names),
         _ => "undefined".into(),
+    }
+}
+
+fn vue3_core_runtime_export(export_name: &str, detail: &ApiExportDetail) -> Option<()> {
+    match export_name {
+        "baseCompile" | "baseParse" => None,
+        _ if detail.kind == "function" => Some(()),
+        _ if detail.kind == "symbol" => Some(()),
+        "BindingTypes"
+        | "CompilerDeprecationTypes"
+        | "ConstantTypes"
+        | "ElementTypes"
+        | "ErrorCodes"
+        | "Namespaces"
+        | "NodeTypes"
+        | "TS_NODE_TYPES"
+        | "errorMessages"
+        | "helperNameMap"
+        | "locStub"
+        | "forAliasRE"
+        | "validFirstIdentCharRE" => Some(()),
+        _ => None,
     }
 }
 
@@ -1864,12 +1897,24 @@ fn alias_function_expression(
         String::new()
     };
     let body = match command {
-        Some(command) => format!(
-            "{argument_bindings} const __vuecPayload = normalizeArgs({}); preflightAliasCall({}, __vuecPayload); return callBridge({}, __vuecPayload);",
-            alias_argument_object(target, export_name, body_arity),
-            js_string_literal(alias_preflight_name(target, export_name)),
-            js_string_literal(command),
-        ),
+        Some(command) => {
+            let call = if matches!(
+                (target.kind, export_name),
+                (TargetKind::Vue3Core, "baseParse") | (TargetKind::Vue3Dom, "parse")
+            ) {
+                format!(
+                    "hydrateVue3Ast(callBridge({}, __vuecPayload))",
+                    js_string_literal(command)
+                )
+            } else {
+                format!("callBridge({}, __vuecPayload)", js_string_literal(command))
+            };
+            format!(
+                "{argument_bindings} const __vuecPayload = normalizeArgs({}); preflightAliasCall({}, __vuecPayload); return {call};",
+                alias_argument_object(target, export_name, body_arity),
+                js_string_literal(alias_preflight_name(target, export_name)),
+            )
+        }
         None => format!(
             "{argument_bindings} return notImplemented({});",
             js_string_literal(export_name)
@@ -1883,6 +1928,39 @@ fn alias_function_expression(
         format!("function {name}({args}) {{ {body} }}")
     } else {
         let expression = format!("({args}) => {{ {body} }}");
+        format!(
+            "namedArity({}, {}, {})",
+            js_string_literal(name),
+            arity,
+            expression
+        )
+    }
+}
+
+fn alias_runtime_function_expression(
+    runtime_object: &str,
+    export_name: &str,
+    detail: &ApiExportDetail,
+) -> String {
+    let name = detail.name.as_deref().unwrap_or(export_name);
+    let arity = detail.function_arity.unwrap_or(0);
+    let args = (0..arity)
+        .map(|index| format!("a{index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let apply_body = format!(
+        "return {}[{}].apply(this, arguments);",
+        runtime_object,
+        js_string_literal(export_name)
+    );
+    if detail
+        .own_property_names
+        .iter()
+        .any(|name| name == "prototype")
+    {
+        format!("function {name}({args}) {{ {apply_body} }}")
+    } else {
+        let expression = format!("({args}) => {{ {apply_body} }}");
         format!(
             "namedArity({}, {}, {})",
             js_string_literal(name),
@@ -2989,6 +3067,953 @@ process.stdout.write(JSON.stringify(out));
 "#;
 
 const ALIAS_RUNTIME_JS: &str = r#"
+const vue3CoreRuntime = (() => {
+  const enumObject = entries => {
+    const out = {};
+    for (const [key, value] of entries) {
+      out[key] = value;
+      out[value] = key;
+    }
+    return out;
+  };
+  const NodeTypes = enumObject([
+    ['ROOT', 0], ['ELEMENT', 1], ['TEXT', 2], ['COMMENT', 3],
+    ['SIMPLE_EXPRESSION', 4], ['INTERPOLATION', 5], ['ATTRIBUTE', 6],
+    ['DIRECTIVE', 7], ['COMPOUND_EXPRESSION', 8], ['IF', 9],
+    ['IF_BRANCH', 10], ['FOR', 11], ['TEXT_CALL', 12],
+    ['VNODE_CALL', 13], ['JS_CALL_EXPRESSION', 14],
+    ['JS_OBJECT_EXPRESSION', 15], ['JS_PROPERTY', 16],
+    ['JS_ARRAY_EXPRESSION', 17], ['JS_FUNCTION_EXPRESSION', 18],
+    ['JS_CONDITIONAL_EXPRESSION', 19], ['JS_CACHE_EXPRESSION', 20],
+    ['JS_BLOCK_STATEMENT', 21], ['JS_TEMPLATE_LITERAL', 22],
+    ['JS_IF_STATEMENT', 23], ['JS_ASSIGNMENT_EXPRESSION', 24],
+    ['JS_SEQUENCE_EXPRESSION', 25], ['JS_RETURN_STATEMENT', 26],
+  ]);
+  const ElementTypes = enumObject([
+    ['ELEMENT', 0], ['COMPONENT', 1], ['SLOT', 2], ['TEMPLATE', 3],
+  ]);
+  const ConstantTypes = enumObject([
+    ['NOT_CONSTANT', 0], ['CAN_SKIP_PATCH', 1], ['CAN_CACHE', 2], ['CAN_STRINGIFY', 3],
+  ]);
+  const Namespaces = enumObject([
+    ['HTML', 0], ['SVG', 1], ['MATH_ML', 2],
+  ]);
+  const ErrorCodes = enumObject([
+    ['ABRUPT_CLOSING_OF_EMPTY_COMMENT', 0],
+    ['CDATA_IN_HTML_CONTENT', 1],
+    ['DUPLICATE_ATTRIBUTE', 2],
+    ['END_TAG_WITH_ATTRIBUTES', 3],
+    ['END_TAG_WITH_TRAILING_SOLIDUS', 4],
+    ['EOF_BEFORE_TAG_NAME', 5],
+    ['EOF_IN_CDATA', 6],
+    ['EOF_IN_COMMENT', 7],
+    ['EOF_IN_SCRIPT_HTML_COMMENT_LIKE_TEXT', 8],
+    ['EOF_IN_TAG', 9],
+    ['INCORRECTLY_CLOSED_COMMENT', 10],
+    ['INCORRECTLY_OPENED_COMMENT', 11],
+    ['INVALID_FIRST_CHARACTER_OF_TAG_NAME', 12],
+    ['MISSING_ATTRIBUTE_VALUE', 13],
+    ['MISSING_END_TAG_NAME', 14],
+    ['MISSING_WHITESPACE_BETWEEN_ATTRIBUTES', 15],
+    ['NESTED_COMMENT', 16],
+    ['UNEXPECTED_CHARACTER_IN_ATTRIBUTE_NAME', 17],
+    ['UNEXPECTED_CHARACTER_IN_UNQUOTED_ATTRIBUTE_VALUE', 18],
+    ['UNEXPECTED_EQUALS_SIGN_BEFORE_ATTRIBUTE_NAME', 19],
+    ['UNEXPECTED_NULL_CHARACTER', 20],
+    ['UNEXPECTED_QUESTION_MARK_INSTEAD_OF_TAG_NAME', 21],
+    ['UNEXPECTED_SOLIDUS_IN_TAG', 22],
+    ['X_INVALID_END_TAG', 23],
+    ['X_MISSING_END_TAG', 24],
+    ['X_MISSING_INTERPOLATION_END', 25],
+    ['X_MISSING_DIRECTIVE_NAME', 26],
+    ['X_MISSING_DYNAMIC_DIRECTIVE_ARGUMENT_END', 27],
+    ['X_V_IF_NO_EXPRESSION', 28],
+    ['X_V_IF_SAME_KEY', 29],
+    ['X_V_ELSE_NO_ADJACENT_IF', 30],
+    ['X_V_FOR_NO_EXPRESSION', 31],
+    ['X_V_FOR_MALFORMED_EXPRESSION', 32],
+    ['X_V_FOR_TEMPLATE_KEY_PLACEMENT', 33],
+    ['X_V_BIND_NO_EXPRESSION', 34],
+    ['X_V_ON_NO_EXPRESSION', 35],
+    ['X_V_SLOT_UNEXPECTED_DIRECTIVE_ON_SLOT_OUTLET', 36],
+    ['X_V_SLOT_MIXED_SLOT_USAGE', 37],
+    ['X_V_SLOT_DUPLICATE_SLOT_NAMES', 38],
+    ['X_V_SLOT_EXTRANEOUS_DEFAULT_SLOT_CHILDREN', 39],
+    ['X_V_SLOT_MISPLACED', 40],
+    ['X_V_MODEL_NO_EXPRESSION', 41],
+    ['X_V_MODEL_MALFORMED_EXPRESSION', 42],
+    ['X_V_MODEL_ON_SCOPE_VARIABLE', 43],
+    ['X_V_MODEL_ON_PROPS', 44],
+    ['X_V_MODEL_ON_CONST', 45],
+    ['X_INVALID_EXPRESSION', 46],
+    ['X_KEEP_ALIVE_INVALID_CHILDREN', 47],
+    ['X_PREFIX_ID_NOT_SUPPORTED', 48],
+    ['X_MODULE_MODE_NOT_SUPPORTED', 49],
+    ['X_CACHE_HANDLER_NOT_SUPPORTED', 50],
+    ['X_SCOPE_ID_NOT_SUPPORTED', 51],
+    ['X_VNODE_HOOKS', 52],
+    ['X_V_BIND_INVALID_SAME_NAME_ARGUMENT', 53],
+    ['__EXTEND_POINT__', 54],
+  ]);
+  const errorMessages = Object.fromEntries(
+    Object.keys(ErrorCodes)
+      .filter(key => /^\d+$/.test(key))
+      .map(key => [Number(key), String(ErrorCodes[key] || '')])
+  );
+  errorMessages[23] = 'Invalid end tag.';
+  errorMessages[25] = 'Interpolation end sign was not found.';
+  errorMessages[50] = '"cacheHandlers" option is only supported when the "prefixIdentifiers" option is enabled.';
+  errorMessages[51] = '"scopeId" option is only supported in module mode.';
+
+  const locStub = {
+    start: { line: 1, column: 1, offset: 0 },
+    end: { line: 1, column: 1, offset: 0 },
+    source: '',
+  };
+
+  const helperNames = [
+    ['FRAGMENT', 'Fragment'],
+    ['TELEPORT', 'Teleport'],
+    ['SUSPENSE', 'Suspense'],
+    ['KEEP_ALIVE', 'KeepAlive'],
+    ['BASE_TRANSITION', 'BaseTransition'],
+    ['OPEN_BLOCK', 'openBlock'],
+    ['CREATE_BLOCK', 'createBlock'],
+    ['CREATE_ELEMENT_BLOCK', 'createElementBlock'],
+    ['CREATE_VNODE', 'createVNode'],
+    ['CREATE_ELEMENT_VNODE', 'createElementVNode'],
+    ['CREATE_COMMENT', 'createCommentVNode'],
+    ['CREATE_TEXT', 'createTextVNode'],
+    ['CREATE_STATIC', 'createStaticVNode'],
+    ['RESOLVE_COMPONENT', 'resolveComponent'],
+    ['RESOLVE_DYNAMIC_COMPONENT', 'resolveDynamicComponent'],
+    ['RESOLVE_DIRECTIVE', 'resolveDirective'],
+    ['RESOLVE_FILTER', 'resolveFilter'],
+    ['WITH_DIRECTIVES', 'withDirectives'],
+    ['RENDER_LIST', 'renderList'],
+    ['RENDER_SLOT', 'renderSlot'],
+    ['CREATE_SLOTS', 'createSlots'],
+    ['TO_DISPLAY_STRING', 'toDisplayString'],
+    ['MERGE_PROPS', 'mergeProps'],
+    ['NORMALIZE_CLASS', 'normalizeClass'],
+    ['NORMALIZE_STYLE', 'normalizeStyle'],
+    ['NORMALIZE_PROPS', 'normalizeProps'],
+    ['GUARD_REACTIVE_PROPS', 'guardReactiveProps'],
+    ['TO_HANDLERS', 'toHandlers'],
+    ['CAMELIZE', 'camelize'],
+    ['CAPITALIZE', 'capitalize'],
+    ['TO_HANDLER_KEY', 'toHandlerKey'],
+    ['SET_BLOCK_TRACKING', 'setBlockTracking'],
+    ['PUSH_SCOPE_ID', 'pushScopeId'],
+    ['POP_SCOPE_ID', 'popScopeId'],
+    ['WITH_CTX', 'withCtx'],
+    ['UNREF', 'unref'],
+    ['IS_REF', 'isRef'],
+    ['WITH_MEMO', 'withMemo'],
+    ['IS_MEMO_SAME', 'isMemoSame'],
+  ];
+  const runtime = {
+    NodeTypes,
+    ElementTypes,
+    ConstantTypes,
+    Namespaces,
+    ErrorCodes,
+    BindingTypes: {
+      DATA: 'data',
+      PROPS: 'props',
+      PROPS_ALIASED: 'props-aliased',
+      SETUP_LET: 'setup-let',
+      SETUP_CONST: 'setup-const',
+      SETUP_REACTIVE_CONST: 'setup-reactive-const',
+      SETUP_MAYBE_REF: 'setup-maybe-ref',
+      SETUP_REF: 'setup-ref',
+      OPTIONS: 'options',
+      LITERAL_CONST: 'literal-const',
+    },
+    CompilerDeprecationTypes: {
+      COMPILER_IS_ON_ELEMENT: 'COMPILER_IS_ON_ELEMENT',
+      COMPILER_V_BIND_SYNC: 'COMPILER_V_BIND_SYNC',
+      COMPILER_V_BIND_OBJECT_ORDER: 'COMPILER_V_BIND_OBJECT_ORDER',
+      COMPILER_V_ON_NATIVE: 'COMPILER_V_ON_NATIVE',
+      COMPILER_V_IF_V_FOR_PRECEDENCE: 'COMPILER_V_IF_V_FOR_PRECEDENCE',
+      COMPILER_NATIVE_TEMPLATE: 'COMPILER_NATIVE_TEMPLATE',
+      COMPILER_INLINE_TEMPLATE: 'COMPILER_INLINE_TEMPLATE',
+      COMPILER_FILTERS: 'COMPILER_FILTERS',
+    },
+    TS_NODE_TYPES: [
+      'TSAsExpression',
+      'TSTypeAssertion',
+      'TSNonNullExpression',
+      'TSInstantiationExpression',
+      'TSSatisfiesExpression',
+    ],
+    locStub,
+    errorMessages,
+    helperNameMap: {},
+    forAliasRE: /([\s\S]*?)\s+(?:in|of)\s+(\S[\s\S]*)/,
+    validFirstIdentCharRE: /[A-Za-z_$]/,
+  };
+  for (const [key, name] of helperNames) {
+    const symbol = Symbol(name);
+    runtime[key] = symbol;
+    runtime.helperNameMap[symbol] = name;
+  }
+
+  runtime.advancePositionWithClone = function advancePositionWithClone(pos, source, numberOfCharacters) {
+    return runtime.advancePositionWithMutation(
+      { offset: pos.offset, line: pos.line, column: pos.column },
+      source,
+      numberOfCharacters === undefined ? String(source).length : numberOfCharacters,
+    );
+  };
+  runtime.advancePositionWithMutation = function advancePositionWithMutation(pos, source, numberOfCharacters) {
+    source = String(source || '');
+    const count = numberOfCharacters === undefined ? source.length : numberOfCharacters;
+    let linesCount = 0;
+    let lastNewLinePos = -1;
+    for (let i = 0; i < count; i++) {
+      if (source.charCodeAt(i) === 10) {
+        linesCount++;
+        lastNewLinePos = i;
+      }
+    }
+    pos.offset += count;
+    pos.line += linesCount;
+    pos.column = lastNewLinePos === -1 ? pos.column + count : count - lastNewLinePos;
+    return pos;
+  };
+  runtime.assert = function assert(condition, msg) {
+    if (!condition) throw new Error(msg || 'unexpected compiler condition');
+  };
+  runtime.createRoot = function createRoot(children, source = '') {
+    return hydrateVue3Ast({
+      type: NodeTypes.ROOT,
+      source,
+      children,
+      helpers: [],
+      components: [],
+      directives: [],
+      hoists: [],
+      imports: [],
+      cached: [],
+      temps: 0,
+      codegenNode: null,
+      loc: locStub,
+    });
+  };
+  runtime.createSimpleExpression = function createSimpleExpression(content, isStatic = false, loc = locStub, constType = ConstantTypes.NOT_CONSTANT) {
+    return {
+      type: NodeTypes.SIMPLE_EXPRESSION,
+      loc,
+      content,
+      isStatic,
+      constType: isStatic ? ConstantTypes.CAN_STRINGIFY : constType,
+    };
+  };
+  runtime.createInterpolation = function createInterpolation(content, loc) {
+    return {
+      type: NodeTypes.INTERPOLATION,
+      loc,
+      content: typeof content === 'string' ? runtime.createSimpleExpression(content, false, loc) : content,
+    };
+  };
+  runtime.createCompoundExpression = function createCompoundExpression(children, loc = locStub) {
+    return { type: NodeTypes.COMPOUND_EXPRESSION, loc, children };
+  };
+  runtime.createArrayExpression = function createArrayExpression(elements, loc = locStub) {
+    return { type: NodeTypes.JS_ARRAY_EXPRESSION, loc, elements };
+  };
+  runtime.createObjectExpression = function createObjectExpression(properties, loc = locStub) {
+    return { type: NodeTypes.JS_OBJECT_EXPRESSION, loc, properties };
+  };
+  runtime.createObjectProperty = function createObjectProperty(key, value) {
+    return {
+      type: NodeTypes.JS_PROPERTY,
+      loc: locStub,
+      key: typeof key === 'string' ? runtime.createSimpleExpression(key, true) : key,
+      value,
+    };
+  };
+  runtime.createCallExpression = function createCallExpression(callee, args = [], loc = locStub) {
+    return { type: NodeTypes.JS_CALL_EXPRESSION, loc, callee, arguments: args };
+  };
+  runtime.createFunctionExpression = function createFunctionExpression(params, returns = undefined, newline = false, isSlot = false, loc = locStub) {
+    return { type: NodeTypes.JS_FUNCTION_EXPRESSION, params, returns, newline, isSlot, loc };
+  };
+  runtime.createConditionalExpression = function createConditionalExpression(test, consequent, alternate, newline = true) {
+    return { type: NodeTypes.JS_CONDITIONAL_EXPRESSION, test, consequent, alternate, newline, loc: locStub };
+  };
+  runtime.createCacheExpression = function createCacheExpression(index, value, needPauseTracking = false, inVOnce = false) {
+    return { type: NodeTypes.JS_CACHE_EXPRESSION, index, value, needPauseTracking, inVOnce, needArraySpread: false, loc: locStub };
+  };
+  runtime.createBlockStatement = function createBlockStatement(body) {
+    return { type: NodeTypes.JS_BLOCK_STATEMENT, body, loc: locStub };
+  };
+  runtime.createTemplateLiteral = function createTemplateLiteral(elements) {
+    return { type: NodeTypes.JS_TEMPLATE_LITERAL, elements, loc: locStub };
+  };
+  runtime.createIfStatement = function createIfStatement(test, consequent, alternate) {
+    return { type: NodeTypes.JS_IF_STATEMENT, test, consequent, alternate, loc: locStub };
+  };
+  runtime.createAssignmentExpression = function createAssignmentExpression(left, right) {
+    return { type: NodeTypes.JS_ASSIGNMENT_EXPRESSION, left, right, loc: locStub };
+  };
+  runtime.createSequenceExpression = function createSequenceExpression(expressions) {
+    return { type: NodeTypes.JS_SEQUENCE_EXPRESSION, expressions, loc: locStub };
+  };
+  runtime.createReturnStatement = function createReturnStatement(returns) {
+    return { type: NodeTypes.JS_RETURN_STATEMENT, returns, loc: locStub };
+  };
+  runtime.createVNodeCall = function createVNodeCall(context, tag, props, children, patchFlag, dynamicProps, directives, isBlock = false, disableTracking = false, isComponent = false, loc = locStub) {
+    if (context) {
+      if (isBlock) {
+        context.helper(runtime.OPEN_BLOCK);
+        context.helper(runtime.getVNodeBlockHelper(context.inSSR, isComponent));
+      } else {
+        context.helper(runtime.getVNodeHelper(context.inSSR, isComponent));
+      }
+      if (directives) context.helper(runtime.WITH_DIRECTIVES);
+    }
+    return {
+      type: NodeTypes.VNODE_CALL,
+      tag,
+      props,
+      children,
+      patchFlag,
+      dynamicProps,
+      directives,
+      isBlock,
+      disableTracking,
+      isComponent,
+      loc,
+    };
+  };
+  runtime.getVNodeHelper = function getVNodeHelper(ssr, isComponent) {
+    return ssr || isComponent ? runtime.CREATE_VNODE : runtime.CREATE_ELEMENT_VNODE;
+  };
+  runtime.getVNodeBlockHelper = function getVNodeBlockHelper(ssr, isComponent) {
+    return ssr || isComponent ? runtime.CREATE_BLOCK : runtime.CREATE_ELEMENT_BLOCK;
+  };
+  runtime.convertToBlock = function convertToBlock(node, context) {
+    if (!node.isBlock) {
+      node.isBlock = true;
+      context.removeHelper(runtime.getVNodeHelper(context.inSSR, node.isComponent));
+      context.helper(runtime.OPEN_BLOCK);
+      context.helper(runtime.getVNodeBlockHelper(context.inSSR, node.isComponent));
+    }
+  };
+  runtime.createCompilerError = function createCompilerError(code, loc, messages, additionalMessage) {
+    const error = new SyntaxError(String((messages || errorMessages)[code] || '') + (additionalMessage || ''));
+    error.code = code;
+    error.loc = loc;
+    return error;
+  };
+  runtime.registerRuntimeHelpers = function registerRuntimeHelpers(helpers) {
+    Object.getOwnPropertySymbols(helpers).forEach(symbol => {
+      runtime.helperNameMap[symbol] = helpers[symbol];
+    });
+  };
+  runtime.stringifyExpression = function stringifyExpression(exp) {
+    return typeof exp === 'string' ? exp : exp && exp.type === NodeTypes.SIMPLE_EXPRESSION ? exp.content : exp && exp.loc ? exp.loc.source : '';
+  };
+  runtime.isStaticExp = function isStaticExp(p) {
+    return !!(p && p.type === NodeTypes.SIMPLE_EXPRESSION && p.isStatic);
+  };
+  runtime.isText = function isText$1(node) {
+    return !!node && (node.type === NodeTypes.INTERPOLATION || node.type === NodeTypes.TEXT);
+  };
+  runtime.isAllWhitespace = function isAllWhitespace(str) {
+    return /^[\t\r\n\f ]*$/.test(String(str || ''));
+  };
+  runtime.isWhitespaceText = function isWhitespaceText(node) {
+    return !!node && ((node.type === NodeTypes.TEXT && runtime.isAllWhitespace(node.content)) || (node.type === NodeTypes.TEXT_CALL && runtime.isWhitespaceText(node.content)));
+  };
+  runtime.isCommentOrWhitespace = function isCommentOrWhitespace(node) {
+    return !!node && (node.type === NodeTypes.COMMENT || runtime.isWhitespaceText(node));
+  };
+  runtime.findDir = function findDir(node, name, allowEmpty = false) {
+    const matches = typeof name === 'string' ? n => n === name : n => name.test(n);
+    return node.props && node.props.find(p => p.type === NodeTypes.DIRECTIVE && (allowEmpty || p.exp) && matches(p.name));
+  };
+  runtime.findProp = function findProp(node, name, dynamicOnly = false, allowEmpty = false) {
+    if (!node.props) return undefined;
+    for (const p of node.props) {
+      if (p.type === NodeTypes.ATTRIBUTE) {
+        if (!dynamicOnly && p.name === name && (p.value || allowEmpty)) return p;
+      } else if (p.name === 'bind' && (p.exp || allowEmpty) && runtime.isStaticArgOf(p.arg, name)) {
+        return p;
+      }
+    }
+    return undefined;
+  };
+  runtime.isStaticArgOf = function isStaticArgOf(arg, name) {
+    return !!(arg && runtime.isStaticExp(arg) && arg.content === name);
+  };
+  runtime.hasDynamicKeyVBind = function hasDynamicKeyVBind(node) {
+    return !!(node.props && node.props.some(p => p.type === NodeTypes.DIRECTIVE && p.name === 'bind' && (!p.arg || p.arg.type !== NodeTypes.SIMPLE_EXPRESSION || !p.arg.isStatic)));
+  };
+  runtime.isVPre = function isVPre(p) { return !!p && p.type === NodeTypes.DIRECTIVE && p.name === 'pre'; };
+  runtime.isVSlot = function isVSlot(p) { return !!p && p.type === NodeTypes.DIRECTIVE && p.name === 'slot'; };
+  runtime.isTemplateNode = function isTemplateNode(node) { return !!node && node.type === NodeTypes.ELEMENT && node.tagType === ElementTypes.TEMPLATE; };
+  runtime.isSlotOutlet = function isSlotOutlet(node) { return !!node && node.type === NodeTypes.ELEMENT && node.tagType === ElementTypes.SLOT; };
+  runtime.toValidAssetId = function toValidAssetId(name, type) {
+    return `_${type}_${String(name).replace(/[^\w]/g, (searchValue, replaceValue) => searchValue === '-' ? '_' : String(name).charCodeAt(replaceValue).toString())}`;
+  };
+  runtime.injectProp = function injectProp(node, prop) {
+    const target = node.type === NodeTypes.VNODE_CALL ? node : { props: node.arguments && node.arguments[2] };
+    if (!target.props || typeof target.props === 'string') {
+      target.props = runtime.createObjectExpression([prop]);
+    } else if (target.props.type === NodeTypes.JS_OBJECT_EXPRESSION) {
+      target.props.properties.unshift(prop);
+    }
+    if (node.type !== NodeTypes.VNODE_CALL && node.arguments) node.arguments[2] = target.props;
+  };
+  runtime.hasScopeRef = function hasScopeRef() { return false; };
+  runtime.getMemoedVNodeCall = function getMemoedVNodeCall(node) {
+    return node && node.type === NodeTypes.JS_CALL_EXPRESSION && node.callee === runtime.WITH_MEMO ? node.arguments[1].returns : node;
+  };
+  runtime.isCoreComponent = function isCoreComponent(tag) {
+    return tag === 'Teleport' ? runtime.TELEPORT
+      : tag === 'Suspense' ? runtime.SUSPENSE
+      : tag === 'KeepAlive' ? runtime.KEEP_ALIVE
+      : tag === 'BaseTransition' ? runtime.BASE_TRANSITION
+      : undefined;
+  };
+  runtime.isSimpleIdentifier = function isSimpleIdentifier(name) {
+    return /^[A-Za-z_$][\w$]*$/.test(String(name || ''));
+  };
+  runtime.isMemberExpressionBrowser = function isMemberExpressionBrowser(path) {
+    return /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*|\[[^\]]+\])*$/.test(String(path || '').trim());
+  };
+  runtime.isMemberExpressionNode = function isMemberExpressionNode(path) {
+    return runtime.isMemberExpressionBrowser(path);
+  };
+  runtime.isMemberExpression = runtime.isMemberExpressionNode;
+  runtime.isFnExpressionBrowser = function isFnExpressionBrowser(exp) {
+    const content = typeof exp === 'string' ? exp : exp && exp.content;
+    return /^\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>/.test(String(content || '')) || /^\s*function\b/.test(String(content || ''));
+  };
+  runtime.isFnExpressionNode = function isFnExpressionNode(exp) { return runtime.isFnExpressionBrowser(exp); };
+  runtime.isFnExpression = runtime.isFnExpressionNode;
+  runtime.isFunctionType = function isFunctionType(node) { return !!node && /Function/.test(String(node.type || '')); };
+  runtime.isStaticProperty = function isStaticProperty(node) { return !!node && node.type === 'Property' && !node.computed; };
+  runtime.isStaticPropertyKey = function isStaticPropertyKey(node, parent) { return !!parent && runtime.isStaticProperty(parent) && parent.key === node; };
+  runtime.unwrapTSNode = function unwrapTSNode(node) {
+    while (node && runtime.TS_NODE_TYPES.includes(node.type)) node = node.expression;
+    return node;
+  };
+  runtime.isReferencedIdentifier = function isReferencedIdentifier() { return true; };
+  runtime.isInDestructureAssignment = function isInDestructureAssignment() { return false; };
+  runtime.isInNewExpression = function isInNewExpression() { return false; };
+  runtime.walkIdentifiers = function walkIdentifiers(root, onIdentifier) {
+    if (root && root.type === NodeTypes.SIMPLE_EXPRESSION && runtime.isSimpleIdentifier(root.content)) onIdentifier(root);
+  };
+  runtime.extractIdentifiers = function extractIdentifiers(param) {
+    if (!param) return [];
+    if (typeof param === 'string') return param.split(',').map(s => s.trim()).filter(Boolean).map(content => runtime.createSimpleExpression(content, false));
+    if (param.type === NodeTypes.SIMPLE_EXPRESSION) return [param];
+    return [];
+  };
+  runtime.walkFunctionParams = function walkFunctionParams(node, onIdent) {
+    for (const ident of runtime.extractIdentifiers(node && node.params)) onIdent(ident);
+  };
+  runtime.walkBlockDeclarations = function walkBlockDeclarations() {};
+  runtime.createTransformContext = function createTransformContext(root, options = {}) {
+    const context = {
+      filename: options.filename || '',
+      selfName: options.filename ? selfNameFromFilename(options.filename) : null,
+      prefixIdentifiers: !!options.prefixIdentifiers,
+      hoistStatic: !!options.hoistStatic,
+      hmr: !!options.hmr,
+      cacheHandlers: !!options.cacheHandlers,
+      nodeTransforms: options.nodeTransforms || [],
+      directiveTransforms: options.directiveTransforms || {},
+      transformHoist: options.transformHoist || null,
+      isBuiltInComponent: options.isBuiltInComponent || (() => false),
+      isCustomElement: options.isCustomElement || (() => false),
+      expressionPlugins: options.expressionPlugins || [],
+      scopeId: options.scopeId || null,
+      slotted: options.slotted !== undefined ? options.slotted : true,
+      ssr: !!options.ssr,
+      inSSR: !!(options.inSSR || options.ssr),
+      ssrCssVars: options.ssrCssVars || '',
+      bindingMetadata: options.bindingMetadata || {},
+      inline: !!options.inline,
+      isTS: !!options.isTS,
+      onError: options.onError || (error => { throw error; }),
+      onWarn: options.onWarn || (() => {}),
+      compatConfig: options.compatConfig,
+      root,
+      helpers: new Map(),
+      components: new Set(),
+      directives: new Set(),
+      hoists: [],
+      imports: [],
+      cached: [],
+      constantCache: new WeakMap(),
+      temps: 0,
+      identifiers: Object.create(null),
+      scopes: { vFor: 0, vSlot: 0, vPre: 0, vOnce: 0 },
+      parent: null,
+      grandParent: null,
+      currentNode: root,
+      childIndex: 0,
+      inVOnce: false,
+      helper(name) {
+        context.helpers.set(name, (context.helpers.get(name) || 0) + 1);
+        return name;
+      },
+      removeHelper(name) {
+        const count = context.helpers.get(name);
+        if (count === 1) context.helpers.delete(name);
+        else if (count) context.helpers.set(name, count - 1);
+      },
+      helperString(name) {
+        return `_${runtime.helperNameMap[context.helper(name)]}`;
+      },
+      replaceNode(node) {
+        if (!context.currentNode) throw new Error('Node being replaced is already removed.');
+        if (!context.parent) throw new Error('Cannot replace root node.');
+        context.parent.children[context.childIndex] = context.currentNode = node;
+      },
+      removeNode(node) {
+        if (!context.parent) throw new Error('Cannot remove root node.');
+        const list = context.parent.children;
+        const removalIndex = node ? list.indexOf(node) : context.currentNode ? context.childIndex : -1;
+        if (removalIndex < 0) throw new Error('node being removed is not a child of current parent');
+        if (!node || node === context.currentNode) {
+          context.currentNode = null;
+          context.onNodeRemoved();
+        } else if (context.childIndex > removalIndex) {
+          context.childIndex--;
+          context.onNodeRemoved();
+        }
+        list.splice(removalIndex, 1);
+      },
+      onNodeRemoved() {},
+      addIdentifiers() {},
+      removeIdentifiers() {},
+      hoist(exp) {
+        if (typeof exp === 'string') exp = runtime.createSimpleExpression(exp);
+        context.hoists.push(exp);
+        const identifier = runtime.createSimpleExpression(`_hoisted_${context.hoists.length}`, false, exp.loc, ConstantTypes.CAN_CACHE);
+        identifier.hoisted = exp;
+        return identifier;
+      },
+      cache(exp, isVNode = false, inVOnce = false) {
+        const cacheExp = runtime.createCacheExpression(context.cached.length, exp, isVNode, inVOnce);
+        context.cached.push(cacheExp);
+        return cacheExp;
+      },
+      filters: new Set(),
+    };
+    return context;
+  };
+  runtime.traverseNode = function traverseNode(node, context) {
+    context.currentNode = node;
+    const exitFns = [];
+    for (const transform of context.nodeTransforms || []) {
+      const onExit = transform(node, context);
+      if (Array.isArray(onExit)) exitFns.push(...onExit);
+      else if (onExit) exitFns.push(onExit);
+      if (!context.currentNode) return;
+      node = context.currentNode;
+    }
+    switch (node.type) {
+      case NodeTypes.COMMENT:
+        if (!context.ssr) context.helper(runtime.CREATE_COMMENT);
+        break;
+      case NodeTypes.INTERPOLATION:
+        if (!context.ssr) context.helper(runtime.TO_DISPLAY_STRING);
+        break;
+      case NodeTypes.IF:
+        for (const branch of node.branches || []) runtime.traverseNode(branch, context);
+        break;
+      case NodeTypes.IF_BRANCH:
+      case NodeTypes.FOR:
+      case NodeTypes.ELEMENT:
+      case NodeTypes.ROOT:
+        runtime.traverseChildren(node, context);
+        break;
+    }
+    context.currentNode = node;
+    for (let i = exitFns.length - 1; i >= 0; i--) exitFns[i]();
+  };
+  runtime.traverseChildren = function traverseChildren(parent, context) {
+    let i = 0;
+    const nodeRemoved = () => { i--; };
+    for (; i < parent.children.length; i++) {
+      const child = parent.children[i];
+      if (typeof child === 'string') continue;
+      context.grandParent = context.parent;
+      context.parent = parent;
+      context.childIndex = i;
+      context.onNodeRemoved = nodeRemoved;
+      runtime.traverseNode(child, context);
+    }
+  };
+  runtime.transform = function transform(root, options = {}) {
+    const context = runtime.createTransformContext(root, options);
+    runtime.traverseNode(root, context);
+    if (!options.ssr) createRootCodegen(root, context);
+    root.helpers = new Set([...context.helpers.keys()]);
+    root.components = [...context.components];
+    root.directives = [...context.directives];
+    root.imports = context.imports;
+    root.hoists = context.hoists;
+    root.temps = context.temps;
+    root.cached = context.cached;
+    root.transformed = true;
+    root.filters = [...context.filters];
+  };
+  runtime.generate = function generate(ast, options = {}) {
+    ast = hydrateVue3Ast(ast);
+    const mode = options.mode || 'function';
+    const prefixIdentifiers = options.prefixIdentifiers !== undefined ? options.prefixIdentifiers : mode === 'module';
+    const helpers = Array.from(ast.helpers || []);
+    const helperImports = helpers.map(symbol => `${runtime.helperNameMap[symbol]}: _${runtime.helperNameMap[symbol]}`).filter(Boolean);
+    let code = '';
+    let preamble = '';
+    const push = value => { code += value; };
+    if (mode === 'module') {
+      if (helperImports.length) {
+        preamble += `import { ${helperImports.join(', ')} } from "vue"\n`;
+      }
+      code += preamble;
+      code += `\nexport function render(_ctx, _cache) {`;
+    } else {
+      code += `const _Vue = Vue\n\nreturn function render(_ctx, _cache) {`;
+    }
+    if (!prefixIdentifiers && mode !== 'module') {
+      code += `\n  with (_ctx) {`;
+      if (helperImports.length) {
+        code += `\n    const { ${helperImports.join(', ')} } = _Vue`;
+      }
+      code += `\n    return ${genNode(ast.codegenNode || null)}`;
+      code += `\n  }`;
+    } else {
+      code += `\n  return ${genNode(ast.codegenNode || null)}`;
+    }
+    code += `\n}`;
+    return { ast, code, preamble, map: undefined };
+
+    function genNode(node) {
+      if (node == null) return 'null';
+      if (typeof node === 'string') return node;
+      if (typeof node === 'symbol') return `_${runtime.helperNameMap[node]}`;
+      switch (node.type) {
+        case NodeTypes.TEXT:
+          return JSON.stringify(node.content);
+        case NodeTypes.COMMENT:
+          return `${helper(runtime.CREATE_COMMENT)}(${JSON.stringify(node.content)})`;
+        case NodeTypes.SIMPLE_EXPRESSION:
+          return node.content;
+        case NodeTypes.INTERPOLATION:
+          return `${helper(runtime.TO_DISPLAY_STRING)}(${genNode(node.content)})`;
+        case NodeTypes.COMPOUND_EXPRESSION:
+          return node.children.map(genNode).join('');
+        case NodeTypes.TEXT_CALL:
+          return genNode(node.codegenNode);
+        case NodeTypes.VNODE_CALL:
+          return genVNodeCall(node);
+        case NodeTypes.JS_CALL_EXPRESSION:
+          return `${genNode(node.callee)}(${(node.arguments || []).map(genNode).join(', ')})`;
+        case NodeTypes.JS_OBJECT_EXPRESSION:
+          return `{ ${((node.properties || []).map(prop => `${genPropertyKey(prop.key)}: ${genNode(prop.value)}`)).join(', ')} }`;
+        case NodeTypes.JS_ARRAY_EXPRESSION:
+          return `[${(node.elements || []).map(genNode).join(', ')}]`;
+        case NodeTypes.JS_FUNCTION_EXPRESSION:
+          return `(${genParams(node.params)}) => ${Array.isArray(node.returns) ? `[${node.returns.map(genNode).join(', ')}]` : genNode(node.returns)}`;
+        case NodeTypes.JS_CONDITIONAL_EXPRESSION:
+          return `${genNode(node.test)} ? ${genNode(node.consequent)} : ${genNode(node.alternate)}`;
+        case NodeTypes.JS_CACHE_EXPRESSION:
+          return `_cache[${node.index}] || (_cache[${node.index}] = ${genNode(node.value)})`;
+        case NodeTypes.IF:
+          return node.codegenNode ? genNode(node.codegenNode) : genNode(node.branches && node.branches[0] && node.branches[0].children && node.branches[0].children[0]);
+        case NodeTypes.FOR:
+          return node.codegenNode ? genNode(node.codegenNode) : genNode(node.children && node.children[0]);
+        case NodeTypes.ELEMENT:
+          return genNode(node.codegenNode || runtime.createVNodeCall(null, JSON.stringify(node.tag), undefined, node.children, undefined, undefined, undefined, false, false, node.tagType === ElementTypes.COMPONENT, node.loc));
+        default:
+          return 'null';
+      }
+    }
+    function genVNodeCall(node) {
+      const call = node.isBlock ? helper(runtime.getVNodeBlockHelper(false, node.isComponent)) : helper(runtime.getVNodeHelper(false, node.isComponent));
+      const args = [genNode(node.tag), genNullable(node.props), genNullable(node.children), node.patchFlag, node.dynamicProps, node.directives].filter(value => value !== undefined);
+      const expr = `${call}(${args.join(', ')})`;
+      return node.isBlock ? `(${helper(runtime.OPEN_BLOCK)}(), ${expr})` : expr;
+    }
+    function genNullable(value) {
+      if (value === undefined) return undefined;
+      if (value === null) return 'null';
+      if (Array.isArray(value)) return `[${value.map(genNode).join(', ')}]`;
+      return genNode(value);
+    }
+    function genPropertyKey(key) {
+      if (!key) return 'undefined';
+      if (key.type === NodeTypes.SIMPLE_EXPRESSION && key.isStatic) return JSON.stringify(key.content);
+      return `[${genNode(key)}]`;
+    }
+    function genParams(params) {
+      if (!params) return '';
+      if (Array.isArray(params)) return params.map(genNode).join(', ');
+      return genNode(params);
+    }
+    function helper(symbol) {
+      return `_${runtime.helperNameMap[symbol]}`;
+    }
+  };
+  runtime.createStructuralDirectiveTransform = function createStructuralDirectiveTransform(name, fn) {
+    const matches = typeof name === 'string' ? n => n === name : n => name.test(n);
+    return (node, context) => {
+      if (node.type !== NodeTypes.ELEMENT) return;
+      const exitFns = [];
+      for (let i = 0; i < node.props.length; i++) {
+        const prop = node.props[i];
+        if (prop.type === NodeTypes.DIRECTIVE && matches(prop.name)) {
+          node.props.splice(i, 1);
+          i--;
+          const onExit = fn(node, prop, context);
+          if (onExit) exitFns.push(onExit);
+        }
+      }
+      return exitFns;
+    };
+  };
+  runtime.noopDirectiveTransform = () => ({ props: [] });
+  runtime.processExpression = function processExpression(node) { return node; };
+  runtime.transformExpression = () => {};
+  runtime.transformBind = function transformBind(dir) {
+    return { props: [runtime.createObjectProperty(dir.arg || runtime.createSimpleExpression('dynamic', true), dir.exp || runtime.createSimpleExpression('', true))] };
+  };
+  runtime.transformOn = function transformOn(dir) {
+    const arg = dir.arg || runtime.createSimpleExpression('on', true);
+    return { props: [runtime.createObjectProperty(arg, dir.exp || runtime.createSimpleExpression('() => {}', false))] };
+  };
+  runtime.transformModel = function transformModel(dir) {
+    return { props: [runtime.createObjectProperty('modelValue', dir.exp || runtime.createSimpleExpression('', false))] };
+  };
+  runtime.transformVBindShorthand = () => {};
+  runtime.transformElement = function transformElement(node, context) {
+    return () => {
+      node = context.currentNode;
+      if (!node || node.type !== NodeTypes.ELEMENT) return;
+      if (node.tagType !== ElementTypes.ELEMENT && node.tagType !== ElementTypes.COMPONENT) return;
+      const isComponent = node.tagType === ElementTypes.COMPONENT;
+      const tag = isComponent ? node.tag : `"${node.tag}"`;
+      let patchFlag;
+      let props;
+      const dynamicProps = [];
+      if (node.props && node.props.length) {
+        const objectProps = [];
+        const directives = [];
+        for (const prop of node.props) {
+          if (prop.type === NodeTypes.ATTRIBUTE) {
+            objectProps.push(runtime.createObjectProperty(prop.name, runtime.createSimpleExpression(prop.value ? prop.value.content : '', true)));
+          } else if (prop.name === 'bind' && prop.arg) {
+            objectProps.push(runtime.createObjectProperty(prop.arg, prop.exp || runtime.createSimpleExpression('', false)));
+            if (prop.arg.isStatic) dynamicProps.push(prop.arg.content);
+          } else if (prop.name === 'on' && prop.arg) {
+            objectProps.push(runtime.createObjectProperty(runtime.createSimpleExpression(`on${capitalize(prop.arg.content)}`, true), prop.exp || runtime.createSimpleExpression('() => {}', false)));
+          } else {
+            directives.push(prop);
+          }
+        }
+        if (objectProps.length) props = runtime.createObjectExpression(objectProps);
+        if (dynamicProps.length) patchFlag = 8;
+        if (directives.length) {
+          node.codegenNode = runtime.createVNodeCall(context, tag, props, node.children && node.children.length ? node.children : undefined, patchFlag, dynamicProps.length ? JSON.stringify(dynamicProps) : undefined, runtime.createArrayExpression(directives.map(d => runtime.createArrayExpression([d.name]))), false, false, isComponent, node.loc);
+          return;
+        }
+      }
+      const children = node.children && node.children.length === 1 ? node.children[0] : node.children && node.children.length ? node.children : undefined;
+      if (!patchFlag && children && (children.type === NodeTypes.INTERPOLATION || children.type === NodeTypes.COMPOUND_EXPRESSION)) patchFlag = 1;
+      node.codegenNode = runtime.createVNodeCall(context, tag, props, children, patchFlag, dynamicProps.length ? JSON.stringify(dynamicProps) : undefined, undefined, false, false, isComponent, node.loc);
+    };
+  };
+  runtime.processSlotOutlet = function processSlotOutlet(node) {
+    let slotName = '"default"';
+    const nameProp = runtime.findProp(node, 'name', false, true);
+    if (nameProp && nameProp.type === NodeTypes.ATTRIBUTE && nameProp.value) slotName = JSON.stringify(nameProp.value.content);
+    return { slotName, slotProps: undefined };
+  };
+  runtime.transformSlotOutlet = function transformSlotOutlet(node, context) {
+    if (node.type === NodeTypes.ELEMENT && node.tagType === ElementTypes.SLOT) {
+      return () => {
+        const { slotName, slotProps } = runtime.processSlotOutlet(node, context);
+        node.codegenNode = runtime.createCallExpression(context.helper(runtime.RENDER_SLOT), ['$slots', slotName, slotProps]);
+      };
+    }
+  };
+  runtime.transformText = function transformText(node, context) {
+    if (![NodeTypes.ROOT, NodeTypes.ELEMENT, NodeTypes.FOR, NodeTypes.IF_BRANCH].includes(node.type)) return;
+    return () => {
+      const children = node.children || [];
+      for (let i = 0; i < children.length - 1; i++) {
+        if (runtime.isText(children[i]) && runtime.isText(children[i + 1])) {
+          const compound = runtime.createCompoundExpression([children[i]], children[i].loc);
+          while (runtime.isText(children[i + 1])) {
+            compound.children.push(' + ', children[i + 1]);
+            children.splice(i + 1, 1);
+          }
+          children[i] = compound;
+        }
+      }
+      if (children.length > 1 || node.type === NodeTypes.ROOT) {
+        for (let i = 0; i < children.length; i++) {
+          const child = children[i];
+          if (runtime.isText(child) || child.type === NodeTypes.COMPOUND_EXPRESSION) {
+            const callArgs = child.type === NodeTypes.TEXT && child.content === ' ' ? [] : [child];
+            if (child.type !== NodeTypes.TEXT) callArgs.push('1 /* TEXT */');
+            children[i] = { type: NodeTypes.TEXT_CALL, content: child, loc: child.loc, codegenNode: runtime.createCallExpression(context.helper(runtime.CREATE_TEXT), callArgs) };
+          }
+        }
+      }
+    };
+  };
+  runtime.processIf = function processIf(node, dir, context, processCodegen) {
+    const branch = {
+      type: NodeTypes.IF_BRANCH,
+      loc: node.loc,
+      condition: dir.name === 'else' ? undefined : dir.exp,
+      children: [node],
+      userKey: runtime.findProp(node, 'key'),
+      isTemplateIf: node.tagType === ElementTypes.TEMPLATE,
+    };
+    const ifNode = { type: NodeTypes.IF, loc: node.loc, branches: [branch], codegenNode: undefined };
+    context.replaceNode(ifNode);
+    if (processCodegen) return processCodegen(ifNode, branch, false);
+  };
+  runtime.transformIf = runtime.createStructuralDirectiveTransform(/^(if|else|else-if)$/, runtime.processIf);
+  runtime.processFor = function processFor(node, dir, context, processCodegen) {
+    const parsed = parseForExpression(dir.exp && dir.exp.content || '');
+    const forNode = {
+      type: NodeTypes.FOR,
+      loc: node.loc,
+      source: parsed.source,
+      valueAlias: parsed.value,
+      keyAlias: parsed.key,
+      objectIndexAlias: parsed.index,
+      parseResult: parsed,
+      children: [node],
+      codegenNode: undefined,
+    };
+    context.replaceNode(forNode);
+    if (processCodegen) return processCodegen(forNode);
+  };
+  runtime.transformFor = runtime.createStructuralDirectiveTransform('for', runtime.processFor);
+  runtime.createForLoopParams = function createForLoopParams(parseResult) {
+    return [parseResult.value, parseResult.key, parseResult.index].filter(Boolean);
+  };
+  runtime.trackSlotScopes = () => {};
+  runtime.trackVForSlotScopes = () => {};
+  runtime.buildProps = function buildProps() {
+    return { props: undefined, directives: [], patchFlag: 0, dynamicPropNames: [], shouldUseBlock: false };
+  };
+  runtime.buildDirectiveArgs = function buildDirectiveArgs(dir) {
+    return runtime.createArrayExpression([dir.name, dir.exp, dir.arg].filter(Boolean));
+  };
+  runtime.buildSlots = function buildSlots() {
+    return { slots: runtime.createObjectExpression([]), hasDynamicSlots: false };
+  };
+  runtime.resolveComponentType = function resolveComponentType(node) { return node.tag; };
+  runtime.getBaseTransformPreset = function getBaseTransformPreset() {
+    return [[runtime.transformOnce, runtime.transformIf, runtime.transformMemo, runtime.transformFor, runtime.transformExpression, runtime.transformSlotOutlet, runtime.transformElement, runtime.trackSlotScopes, runtime.transformText], { on: runtime.transformOn, bind: runtime.transformBind, model: runtime.transformModel }];
+  };
+  runtime.getConstantType = function getConstantType(node) {
+    return node && node.type === NodeTypes.SIMPLE_EXPRESSION && node.isStatic ? ConstantTypes.CAN_STRINGIFY : ConstantTypes.NOT_CONSTANT;
+  };
+  runtime.transformOnce = () => {};
+  runtime.transformMemo = () => {};
+  runtime.checkCompatEnabled = () => false;
+  runtime.warnDeprecation = () => {};
+  return runtime;
+})();
+
+function capitalize(value) {
+  value = String(value || '');
+  return value ? value.charAt(0).toUpperCase() + value.slice(1) : value;
+}
+
+function selfNameFromFilename(filename) {
+  const match = String(filename).replace(/\?.*$/, '').match(/([^/\\]+)\.\w+$/);
+  if (!match) return null;
+  return match[1].replace(/(^|[-_])(\w)/g, (_, _sep, ch) => ch.toUpperCase());
+}
+
+function parseForExpression(source) {
+  const match = String(source || '').match(vue3CoreRuntime.forAliasRE);
+  const iterable = match ? match[2].trim() : '';
+  const aliases = match ? match[1].trim().replace(/^\(|\)$/g, '') : '';
+  const parts = aliases.split(',').map(part => part.trim()).filter(Boolean);
+  return {
+    source: vue3CoreRuntime.createSimpleExpression(iterable, false),
+    value: parts[0] ? vue3CoreRuntime.createSimpleExpression(parts[0], false) : undefined,
+    key: parts[1] ? vue3CoreRuntime.createSimpleExpression(parts[1], false) : undefined,
+    index: parts[2] ? vue3CoreRuntime.createSimpleExpression(parts[2], false) : undefined,
+    finalized: false,
+  };
+}
+
+function createRootCodegen(root, context) {
+  const children = root.children || [];
+  if (children.length === 1) {
+    const child = children[0];
+    if (child && child.codegenNode) {
+      const codegenNode = child.codegenNode;
+      if (codegenNode.type === vue3CoreRuntime.NodeTypes.VNODE_CALL) {
+        vue3CoreRuntime.convertToBlock(codegenNode, context);
+      }
+      root.codegenNode = codegenNode;
+    } else {
+      root.codegenNode = child;
+    }
+  } else if (children.length > 1) {
+    root.codegenNode = vue3CoreRuntime.createVNodeCall(
+      context,
+      context.helper(vue3CoreRuntime.FRAGMENT),
+      undefined,
+      children,
+      64,
+      undefined,
+      undefined,
+      true,
+      undefined,
+      false,
+    );
+  }
+}
+
+function hydrateVue3Ast(ast) {
+  hydrateVue3Node(ast);
+  return ast;
+}
+
+function hydrateVue3Node(node) {
+  if (!node || typeof node !== 'object') return node;
+  if (node.type === vue3CoreRuntime.NodeTypes.ROOT) {
+    node.helpers = new Set(node.helpers || []);
+    node.components = node.components || [];
+    node.directives = node.directives || [];
+    node.hoists = node.hoists || [];
+    node.imports = node.imports || [];
+    node.cached = node.cached || [];
+    node.temps = node.temps || 0;
+    if (node.codegenNode === null) node.codegenNode = undefined;
+  }
+  if (node.type === vue3CoreRuntime.NodeTypes.ELEMENT) {
+    if (node.codegenNode === null) node.codegenNode = undefined;
+    if (node.isSelfClosing === null) delete node.isSelfClosing;
+  }
+  if (Array.isArray(node.children)) node.children.forEach(hydrateVue3Node);
+  if (Array.isArray(node.props)) node.props.forEach(hydrateVue3Node);
+  if (node.content && typeof node.content === 'object') hydrateVue3Node(node.content);
+  if (node.exp && typeof node.exp === 'object') hydrateVue3Node(node.exp);
+  if (node.arg && typeof node.arg === 'object') hydrateVue3Node(node.arg);
+  return node;
+}
+
 function callBridge(command, payload) {
   const result = cp.spawnSync(BRIDGE_BIN, [command], {
     input: JSON.stringify(payload || {}),
@@ -5258,10 +6283,7 @@ fn write_vue3_core_conformance_shims(prepared_root: &Path) -> Result<()> {
         "vOnce",
         "vSlot",
     ] {
-        write_reexport_module(
-            &transforms.join(format!("{module}.ts")),
-            "@vue/compiler-core",
-        )?;
+        write_vue3_core_transform_shim(&transforms.join(format!("{module}.ts")), module)?;
     }
 
     let dom_transform = prepared_root
@@ -5331,6 +6353,38 @@ fn write_reexport_module(path: &Path, request: &str) -> Result<()> {
         path,
         &format!("export * from {}\n", js_string_literal(request)),
     )
+}
+
+fn write_vue3_core_transform_shim(path: &Path, module: &str) -> Result<()> {
+    let exports = match module {
+        "transformElement" => {
+            "transformElement, buildProps, buildDirectiveArgs, resolveComponentType"
+        }
+        "transformExpression" => "transformExpression, processExpression",
+        "transformSlotOutlet" => "transformSlotOutlet, processSlotOutlet",
+        "transformText" => "transformText",
+        "transformVBindShorthand" => "transformVBindShorthand",
+        "vBind" => "transformBind",
+        "vFor" => "transformFor, processFor, createForLoopParams",
+        "vIf" => "transformIf, processIf",
+        "vMemo" => "transformMemo",
+        "vModel" => "transformModel",
+        "vOn" => "transformOn",
+        "vOnce" => "transformOnce",
+        "vSlot" => "buildSlots, trackSlotScopes, trackVForSlotScopes",
+        _ => "",
+    };
+    if exports.is_empty() {
+        write_reexport_module(path, "@vue/compiler-core")
+    } else {
+        write_text(
+            path,
+            &format!(
+                "import {{ __vuecRuntime }} from {}\nconst r = __vuecRuntime\nexport const {{ {exports} }} = r\n",
+                js_string_literal("@vue/compiler-core")
+            ),
+        )
+    }
 }
 
 fn copy_dir_recursive(from: &Path, to: &Path) -> Result<()> {
@@ -5917,6 +6971,16 @@ mod tests {
         let config = fs::read_to_string(temp.join("vitest.config.ts")).unwrap();
         assert!(!config.contains("vitest/config"));
         assert!(config.contains("include: ['packages/compiler-core/__tests__/**/*.spec.ts']"));
+        let v_if = fs::read_to_string(
+            temp.join("packages")
+                .join("compiler-core")
+                .join("src")
+                .join("transforms")
+                .join("vIf.ts"),
+        )
+        .unwrap();
+        assert!(v_if.contains("__vuecRuntime"));
+        assert!(v_if.contains("transformIf"));
         let _ = fs::remove_dir_all(temp);
     }
 
