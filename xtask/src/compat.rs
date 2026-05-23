@@ -1174,7 +1174,7 @@ fn vue3_dom_cases(_target: TargetSpec) -> Vec<OptionMatrixCase> {
             "vue3-dom-custom",
             r#"<custom-el></custom-el>"#,
             Some(serde_json::json!({"isCustomElement": ["custom-el"]})),
-            true,
+            false,
         ),
     ]
 }
@@ -3167,6 +3167,21 @@ function cloneOptionValue(optionValue) {
   return JSON.parse(JSON.stringify(optionValue));
 }
 
+function normalizeOptionValue(optionValue) {
+  const value = cloneOptionValue(optionValue);
+  if (
+    side === 'official' &&
+    payload.target_package === '@vue/compiler-dom' &&
+    payload.option_name === 'isCustomElement' &&
+    value &&
+    Array.isArray(value.isCustomElement)
+  ) {
+    const customElements = new Set(value.isCustomElement);
+    value.isCustomElement = tag => customElements.has(tag);
+  }
+  return value;
+}
+
 function optionsArg() {
   switch (payload.input_kind || 'value') {
     case 'missing':
@@ -3176,7 +3191,7 @@ function optionsArg() {
     case 'null':
       return { present: true, value: null };
     default:
-      return { present: true, value: cloneOptionValue(payload.option_value) };
+      return { present: true, value: normalizeOptionValue(payload.option_value) };
   }
 }
 

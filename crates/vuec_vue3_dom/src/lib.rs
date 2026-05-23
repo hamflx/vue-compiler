@@ -224,6 +224,7 @@ fn decode_basic_entities(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vuec_source::FileId;
 
     #[test]
     fn extracts_dom_directives() {

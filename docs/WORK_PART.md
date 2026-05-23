@@ -18,6 +18,8 @@
 
 ## Completed This Round
 
+- Converted the Vue 3 `@vue/compiler-dom` `isCustomElement` option row from pending to executable diff mode and taught the option probe to convert the JSON fixture list into the official predicate callback shape; the target now reports `4/4` option rows passing with no pending rows.
+- Verification this round: `cargo xtask run-option-matrix --version-line vue3 --package @vue/compiler-dom`, `cargo xtask audit-option-matrix --version-line vue3 --package @vue/compiler-dom`, `cargo xtask diff-api --version-line vue3 --package @vue/compiler-dom`, and `cargo xtask verify-npm-alias --version-line vue3 --package @vue/compiler-dom`.
 - Converted the Vue 3 `@vue/compiler-ssr` `scopeId` option row from pending to executable diff mode; the target now reports `2/2` option rows passing with no pending rows.
 - Verification this round: `cargo xtask run-option-matrix --version-line vue3 --package @vue/compiler-ssr`, `cargo xtask audit-option-matrix --version-line vue3 --package @vue/compiler-ssr`, `cargo xtask diff-api --version-line vue3 --package @vue/compiler-ssr`, and `cargo xtask verify-npm-alias --version-line vue3 --package @vue/compiler-ssr`.
 - Added version-specific Vue 2.7 `vue/compiler-sfc` alias bridge commands so parse/template/script/style results are projected to the Vue 2.7 public API shape instead of reusing the Vue 3 SFC wrapper.

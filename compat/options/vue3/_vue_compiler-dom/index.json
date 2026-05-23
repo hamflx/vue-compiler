@@ -3,7 +3,7 @@
   "version_line": "vue3",
   "package": "@vue/compiler-dom",
   "entry": "index",
-  "status": "pending",
+  "status": "pass",
   "rows": [
     {
       "option_name": "prefixIdentifiers",
@@ -140,8 +140,8 @@
           "custom-el"
         ]
       },
-      "execution_mode": "pending",
-      "status": "pending"
+      "execution_mode": "diff",
+      "status": "pass"
     }
   ]
 }

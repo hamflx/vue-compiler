@@ -7,6 +7,7 @@
 - `vuec_sfc::compile_script` now registers normal script and script setup blocks as `JsProgramId`s and serializes official-style `type`, `setup`, `lang`, `imports`, `scriptAst`, `scriptSetupAst`, and `deps` fields.
 - Vue 3 SFC option matrix now has parse, compileTemplate, compileScript, and compileStyle executable rows passing for the current schema v2 fixtures.
 - Vue 3 `@vue/compiler-ssr` option matrix now has scopeId and slotted executable rows passing for the current schema v2 fixtures.
+- Vue 3 `@vue/compiler-dom` option matrix now has prefixIdentifiers, transformAssetUrls, decodeEntities, and isCustomElement executable rows passing for the current schema v2 fixtures.
 - Vue 2.7 `vue/compiler-sfc` now uses version-specific npm alias bridge commands and has parse, compileTemplate, compileScript, and compileStyle option rows passing for the current schema v2 fixtures.
 - `vuec_ast` now carries the new base arena shape from the AST/HIR/MIR design: `NodeSpan`, parent/index tracking, `LoweringMap`, helper enums, and JS id types are in place, with `Hir`/`Mir` aliases preserved for compatibility.
 - `vuec_pass` now uses `RuntimeHelper` enums and exposes a depth-first `DocumentPass` walker over `AstDocument`, so the transform layer can align with the new IR plan.
@@ -25,5 +26,5 @@
 - `cargo xtask export-api --all` now installs exact official npm versions from `compat/official-revisions.lock`, generates Rust npm alias packages under `target/compat/rust-alias/<version-line>`, probes both sides with Node, and writes normalized API manifests for all seven compiler targets.
 - `cargo xtask diff-api --all` now passes for all seven compiler targets at API export/arity/type-declaration shape level, using `compat/api/allowed-diff.json` for explicit approved differences.
 - `cargo xtask verify-npm-alias --all` now builds the `vuec_node_bridge` JSON bridge, generates alias packages, requires each official package name, and smoke-calls a representative Rust-backed compiler entry for each target. This is a development bridge, not the final NAPI package.
-- `cargo xtask run-option-matrix --all` now executes real official-vs-Rust npm alias probes and writes `target/conformance/<lock-hash>/option-matrix.json`; Vue 2.7 SFC, Vue 3 SFC, and Vue 3 SSR targets now pass their current matrices, while other target matrices still need closure.
+- `cargo xtask run-option-matrix --all` now executes real official-vs-Rust npm alias probes and writes `target/conformance/<lock-hash>/option-matrix.json`; Vue 2.7 SFC, Vue 3 SFC, Vue 3 DOM, and Vue 3 SSR targets now pass their current matrices, while other target matrices still need closure.
 - Vue 2 newline option handling now parses `shouldDecodeNewlines` / `shouldDecodeNewlinesForHref` through the Node bridge and emits href newline escapes compatible with the Vue 2.6 option probe.
