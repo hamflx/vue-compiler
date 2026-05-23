@@ -1231,6 +1231,7 @@ fn vue3_options(value: Option<&Value>) -> Vue3CompilerOptions {
         bool_option(value, "cache_handlers", options.cache_handlers),
     );
     options.slotted = bool_option(value, "slotted", options.slotted);
+    options.inline = bool_option(value, "inline", options.inline);
     options.is_ts = bool_option(value, "isTS", bool_option(value, "is_ts", options.is_ts));
     options.source_map = bool_option(
         value,
@@ -1274,6 +1275,26 @@ fn vue3_options(value: Option<&Value>) -> Vue3CompilerOptions {
     }
     options.custom_elements = string_array_option(value, "__vuecCustomElements");
     options.built_in_components = string_array_option(value, "__vuecBuiltInComponents");
+    if let Some(metadata) = value.get("bindingMetadata").and_then(Value::as_object) {
+        for (key, value) in metadata {
+            if key == "__propsAliases" {
+                if let Some(aliases) = value.as_object() {
+                    options.props_aliases = aliases
+                        .iter()
+                        .filter_map(|(alias, source)| {
+                            source
+                                .as_str()
+                                .map(|source| (alias.clone(), source.to_string()))
+                        })
+                        .collect();
+                }
+            } else if let Some(kind) = value.as_str() {
+                options
+                    .binding_metadata
+                    .insert(key.clone(), kind.to_string());
+            }
+        }
+    }
     options
 }
 

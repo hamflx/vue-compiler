@@ -17,9 +17,16 @@
 - [x] AST / HIR / MIR base arena migration and lowering pipeline alignment.
 - [ ] Vue 3 public projection exactness for directive arg/exp/modifier spans and loc content.
 - [x] Development plan and goal wording aligned with `docs/3.AST_HIR_MIR_DESIGN.md` as the single AST/HIR/MIR structure constraint.
-- [ ] Vue 3 compiler-core expression transform exactness.
+- [x] Vue 3 compiler-core expression transform exactness for `transformExpressions.spec.ts`.
 
 ## Completed This Round
+
+- Closed the remaining official Vue 3 `compiler-core/__tests__/transforms/transformExpressions.spec.ts` failures. The focused spec now passes `47/47` through the prepared alias Vitest runner.
+- Extended the alias JS runtime expression transform for exact AST children in object method/property cases and inline `SETUP_LET` assignment rewriting. `runtime.stringifyExpression` now joins compound expression children so recursive expression rewrites match official output.
+- Extended Rust Vue 3 core codegen to consume `bindingMetadata`, `__propsAliases`, and `inline` from the Node bridge, emit official non-inline render args, rewrite prefixed interpolation and `v-on` handler expressions, preserve loop/catch local scopes, skip text patch flags for literal const interpolations, and emit dynamic event props in official snapshot shape.
+- Added `vuec_vue3_core` regression tests for bindingMetadata-prefixed interpolations and event-handler statement-scope rewriting.
+- Focused conformance improved for official Vue 3 `compiler-core/__tests__/transforms/transformExpressions.spec.ts` from `34/47` to `47/47`. Full Vue 3 core conformance improved from `214/652` to `227/652`; the full suite still intentionally fails with `425` remaining failures outside this expression-transform slice.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo build -p vuec_node_bridge`, `git diff --check`, direct prepared Vitest `transformExpressions.spec.ts` run (`47/47` pass), `cargo xtask diff-api --version-line vue3 --package @vue/compiler-core`, `cargo xtask verify-npm-alias --version-line vue3 --package @vue/compiler-core`, `cargo xtask run-option-matrix --version-line vue3 --package @vue/compiler-core`, `cargo xtask run-output-contract --version-line vue3 --package @vue/compiler-core`, and `cargo xtask run-conformance --suite vue3-core` (expected fail with `227/652` pass, `425` fail).
 
 - Implemented a real Vue 3 compiler-core alias runtime expression transform in `xtask/src/compat.rs`: `processExpression` / `transformExpression` now lazily use `@babel/parser`, traverse expression ASTs, prefix identifiers through `_ctx`, `$setup`, `$props`, and `__props`, handle simple function/object/member/variable/catch local scopes, preserve compound-expression source locations, and report parser failures through compiler error 46.
 - Fixed generated alias wrapper semantics by emitting normal function bodies for non-public arity wrappers and returning bound functions from `namedArity()`, so `arguments` forwarding works while public API manifest shape remains aligned.

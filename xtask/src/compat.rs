@@ -3418,7 +3418,15 @@ const vue3CoreRuntime = (() => {
     });
   };
   runtime.stringifyExpression = function stringifyExpression(exp) {
-    return typeof exp === 'string' ? exp : exp && exp.type === NodeTypes.SIMPLE_EXPRESSION ? exp.content : exp && exp.loc ? exp.loc.source : '';
+    return typeof exp === 'string'
+      ? exp
+      : exp && exp.type === NodeTypes.SIMPLE_EXPRESSION
+        ? exp.content
+        : exp && Array.isArray(exp.children)
+          ? exp.children.map(runtime.stringifyExpression).join('')
+          : exp && exp.loc
+            ? exp.loc.source
+            : '';
   };
   runtime.isStaticExp = function isStaticExp(p) {
     return !!(p && p.type === NodeTypes.SIMPLE_EXPRESSION && p.isStatic);
@@ -4215,6 +4223,21 @@ const vue3CoreRuntime = (() => {
         if (type === runtime.BindingTypes.SETUP_MAYBE_REF) {
           return isAssignmentLVal || isUpdateArg ? `${raw}.value` : `${context.helperString(runtime.UNREF)}(${raw})`;
         }
+        if (type === runtime.BindingTypes.SETUP_LET) {
+          if (isAssignmentLVal && parent.right) {
+            const rExp = rawExp.slice(parent.right.start - 1, parent.right.end - 1);
+            const rExpString = runtime.stringifyExpression(runtime.processExpression(
+              runtime.createSimpleExpression(rExp, false),
+              context,
+              false,
+              false,
+              knownIds || identifiers,
+            ));
+            return `${context.helperString(runtime.IS_REF)}(${raw}) ? ${raw}.value ${parent.operator} ${rExpString} : ${raw}`;
+          }
+          if (isUpdateArg) return `${context.helperString(runtime.IS_REF)}(${raw}) ? ${raw}.value${parent.operator} : ${raw}${parent.operator}`;
+          return `${context.helperString(runtime.UNREF)}(${raw})`;
+        }
         if (type === runtime.BindingTypes.SETUP_CONST || type === runtime.BindingTypes.LITERAL_CONST || type === runtime.BindingTypes.SETUP_REACTIVE_CONST) return raw;
         if (type === runtime.BindingTypes.PROPS) return `__props.${raw}`;
         if (type === runtime.BindingTypes.PROPS_ALIASED) return `__props[${JSON.stringify((bindingMetadata.__propsAliases || {})[raw] || raw)}]`;
@@ -4259,7 +4282,7 @@ const vue3CoreRuntime = (() => {
     }
 
     const ids = [];
-    const knownIds = Object.create(identifiers || null);
+    let knownIds = Object.create(identifiers || null);
     const mark = name => {
       if (!name) return;
       knownIds[name] = (knownIds[name] || 0) + 1;
@@ -4345,7 +4368,6 @@ const vue3CoreRuntime = (() => {
         }
         case 'ObjectMethod': {
           if (n.computed) visit(n.key, n, locals);
-          else if (n.key && n.key.type === 'Identifier') addIdentifier(n.key, n.key.name, '', true);
           const childLocals = Object.create(locals || null);
           for (const param of n.params || []) {
             for (const id of extractPatternIds(param)) markKnown(childLocals, id.name);

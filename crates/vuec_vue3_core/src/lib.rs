@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use vuec_ast::{
     MissingSpanReason, NodeSpan, QuoteKind, RuntimeHelper, TemplateAttribute, Vue3Ast, Vue3AstKind,
@@ -39,6 +41,9 @@ pub struct Vue3CompilerOptions {
     pub whitespace: String,
     pub pre_tags: Vec<String>,
     pub ignore_newline_tags: Vec<String>,
+    pub binding_metadata: BTreeMap<String, String>,
+    pub props_aliases: BTreeMap<String, String>,
+    pub inline: bool,
 }
 
 impl Default for Vue3CompilerOptions {
@@ -62,6 +67,9 @@ impl Default for Vue3CompilerOptions {
             whitespace: "condense".into(),
             pre_tags: Vec::new(),
             ignore_newline_tags: Vec::new(),
+            binding_metadata: BTreeMap::new(),
+            props_aliases: BTreeMap::new(),
+            inline: false,
         }
     }
 }
@@ -241,7 +249,9 @@ impl Vue3Dialect {
         let root_id = ast.root;
         if let Some(root) = ast.node(root_id) {
             let helpers = render_helpers(&helper_order, ctx);
-            if options.mode == "module" {
+            if options.inline {
+                writer.push_line("(_ctx, _cache) => {");
+            } else if options.mode == "module" {
                 if !helpers.is_empty() {
                     writer.push_line(&format!(
                         "import {{ {} }} from \"vue\"",
@@ -255,16 +265,25 @@ impl Vue3Dialect {
                     writer.push_line(&format!("const {{ {} }} = Vue", helper_aliases(&helpers)));
                     writer.newline();
                 }
-                writer.push_line("return function render(_ctx, _cache) {");
+                writer.push_line(&format!(
+                    "return function render({}) {{",
+                    render_args(options)
+                ));
             } else if options.mode == "function" {
                 writer.push_line("const _Vue = Vue");
                 writer.newline();
-                writer.push_line("return function render(_ctx, _cache) {");
+                writer.push_line(&format!(
+                    "return function render({}) {{",
+                    render_args(options)
+                ));
             } else {
-                writer.push_line("export function render(_ctx, _cache) {");
+                writer.push_line(&format!(
+                    "export function render({}) {{",
+                    render_args(options)
+                ));
             }
             writer.indent();
-            if !options.prefix_identifiers && options.mode != "module" {
+            if !options.inline && !options.prefix_identifiers && options.mode != "module" {
                 writer.push_line("with (_ctx) {");
                 writer.indent();
                 if !helpers.is_empty() {
@@ -278,7 +297,7 @@ impl Vue3Dialect {
                 render_children_array(ast, &root.children, options, true)
             };
             writer.push_line(&format!("return {}", expr));
-            if !options.prefix_identifiers && options.mode != "module" {
+            if !options.inline && !options.prefix_identifiers && options.mode != "module" {
                 writer.dedent();
                 writer.push_line("}");
             }
@@ -834,6 +853,14 @@ fn import_helper_aliases(helpers: &[RuntimeHelper]) -> String {
         .join(", ")
 }
 
+fn render_args(options: &Vue3CompilerOptions) -> String {
+    if options.binding_metadata.is_empty() || options.inline {
+        "_ctx, _cache".into()
+    } else {
+        "_ctx, _cache, $props, $setup, $data, $options".into()
+    }
+}
+
 fn helper_name(helper: RuntimeHelper) -> &'static str {
     match helper {
         RuntimeHelper::Vue2CreateElement => "createElement",
@@ -1142,7 +1169,7 @@ fn render_node_expr(
         Vue3AstKind::Interpolation(interpolation) => {
             format!(
                 "_toDisplayString({})",
-                render_expression(&interpolation.expression.source_string(), options)
+                rewrite_expression(&interpolation.expression.source_string(), options)
             )
         }
         Vue3AstKind::Comment(comment) => format!("/*{}*/", comment.value),
@@ -1159,9 +1186,16 @@ fn render_node_expr(
             };
             let props = render_props(&attributes, options);
             let children = render_element_children(ast, &node.children, options, mode);
+            let has_dynamic_props = has_dynamic_props(&attributes);
+            let skip_text_patch = children_literal_const_only(ast, &node.children, options);
             let patch_flag = if mode == NodeRenderMode::Cached {
                 ", -1 /* CACHED */"
-            } else if tag != "template" && has_dynamic_children(ast, &node.children) {
+            } else if has_dynamic_props {
+                ", 8 /* PROPS */"
+            } else if tag != "template"
+                && !skip_text_patch
+                && has_dynamic_children(ast, &node.children)
+            {
                 ", 1 /* TEXT */"
             } else {
                 ""
@@ -1172,7 +1206,11 @@ fn render_node_expr(
                 props
             };
             let children_arg = if children.is_empty() {
-                String::new()
+                if patch_flag.is_empty() {
+                    String::new()
+                } else {
+                    ", null".into()
+                }
             } else if mode == NodeRenderMode::Root && tag == "template" && children.starts_with('[')
             {
                 format!(", {children}")
@@ -1181,21 +1219,23 @@ fn render_node_expr(
             };
             if mode == NodeRenderMode::Root {
                 format!(
-                    "(_openBlock(), {}({}, {}{}{}))",
+                    "(_openBlock(), {}({}, {}{}{}{}))",
                     helper,
                     quote_string(tag),
                     attrs,
                     children_arg,
-                    patch_flag
+                    patch_flag,
+                    dynamic_props_arg(&attributes)
                 )
             } else {
                 format!(
-                    "{}({}, {}{}{})",
+                    "{}({}, {}{}{}{})",
                     helper,
                     quote_string(tag),
                     attrs,
                     children_arg,
-                    patch_flag
+                    patch_flag,
+                    dynamic_props_arg(&attributes)
                 )
             }
         }
@@ -1242,6 +1282,18 @@ fn render_element_children(
                 rendered.join(", ")
             );
         }
+    }
+    if child_nodes.iter().all(|child| {
+        matches!(
+            child.kind,
+            Vue3AstKind::Text(_) | Vue3AstKind::Interpolation(_)
+        )
+    }) {
+        let rendered = child_nodes
+            .iter()
+            .map(|child| render_node_expr(ast, child.id, options, NodeRenderMode::Child))
+            .collect::<Vec<_>>();
+        return rendered.join(" + ");
     }
     let rendered = child_nodes
         .iter()
@@ -1294,38 +1346,457 @@ fn has_dynamic_children(ast: &Vue3Ast, children: &[vuec_ast::NodeId]) -> bool {
     })
 }
 
-fn render_props(attributes: &[TemplateAttribute], _options: &Vue3CompilerOptions) -> String {
+fn children_literal_const_only(
+    ast: &Vue3Ast,
+    children: &[vuec_ast::NodeId],
+    options: &Vue3CompilerOptions,
+) -> bool {
+    let mut has_interpolation = false;
+    for child_id in children {
+        let Some(child) = ast.node(*child_id) else {
+            continue;
+        };
+        match &child.kind {
+            Vue3AstKind::Interpolation(interpolation) => {
+                has_interpolation = true;
+                let expression = interpolation.expression.source_string();
+                if options
+                    .binding_metadata
+                    .get(expression.trim())
+                    .map(String::as_str)
+                    != Some("literal-const")
+                {
+                    return false;
+                }
+            }
+            Vue3AstKind::Text(text) if text.value.trim().is_empty() => {}
+            Vue3AstKind::Comment(_) => {}
+            _ => return false,
+        }
+    }
+    has_interpolation
+}
+
+fn render_props(attributes: &[TemplateAttribute], options: &Vue3CompilerOptions) -> String {
+    let dynamic_event = has_dynamic_props(attributes);
     let props = attributes
         .iter()
-        .filter(|attr| {
-            !attr.name.starts_with("v-")
+        .filter_map(|attr| match &attr.value {
+            Some(value) if attr.name.starts_with('@') => {
+                let event = attr.name.trim_start_matches('@');
+                Some(format!(
+                    "{}: {}",
+                    json_key(&format!("on{}", capitalize(event))),
+                    rewrite_handler_expression(value, options)
+                ))
+            }
+            Some(value) if attr.name.starts_with("v-on:") => {
+                let event = attr.name.trim_start_matches("v-on:");
+                Some(format!(
+                    "{}: {}",
+                    json_key(&format!("on{}", capitalize(event))),
+                    rewrite_handler_expression(value, options)
+                ))
+            }
+            Some(value) if !attr.name.starts_with("v-") && !attr.name.starts_with(':') => {
+                Some(format!("{}: {}", json_key(&attr.name), quote_string(value)))
+            }
+            None if !attr.name.starts_with("v-")
                 && !attr.name.starts_with('@')
-                && !attr.name.starts_with(':')
-        })
-        .map(|attr| match &attr.value {
-            Some(value) => format!("{}: {}", json_key(&attr.name), quote_string(value)),
-            None => format!("{}: true", json_key(&attr.name)),
+                && !attr.name.starts_with(':') =>
+            {
+                Some(format!("{}: true", json_key(&attr.name)))
+            }
+            _ => None,
         })
         .collect::<Vec<_>>();
     if props.is_empty() {
         String::new()
+    } else if dynamic_event {
+        format!("{{\n  {}\n}}", props.join(",\n  "))
     } else {
         format!("{{ {} }}", props.join(", "))
     }
 }
 
-fn render_expression(expression: &str, options: &Vue3CompilerOptions) -> String {
+fn has_dynamic_props(attributes: &[TemplateAttribute]) -> bool {
+    attributes.iter().any(|attr| {
+        attr.value.is_some() && (attr.name.starts_with('@') || attr.name.starts_with("v-on:"))
+    })
+}
+
+fn dynamic_props_arg(attributes: &[TemplateAttribute]) -> String {
+    let props = attributes
+        .iter()
+        .filter_map(|attr| {
+            if attr.value.is_some() && attr.name.starts_with('@') {
+                Some(format!(
+                    "on{}",
+                    capitalize(attr.name.trim_start_matches('@'))
+                ))
+            } else if attr.value.is_some() && attr.name.starts_with("v-on:") {
+                Some(format!(
+                    "on{}",
+                    capitalize(attr.name.trim_start_matches("v-on:"))
+                ))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    if props.is_empty() {
+        String::new()
+    } else {
+        format!(
+            ", [{}]",
+            props
+                .iter()
+                .map(|prop| quote_string(prop))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+}
+
+fn capitalize(value: &str) -> String {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    format!(
+        "{}{}",
+        first.to_ascii_uppercase(),
+        chars.collect::<String>()
+    )
+}
+
+fn rewrite_handler_expression(expression: &str, options: &Vue3CompilerOptions) -> String {
+    normalize_handler_indent(&rewrite_expression(expression, options))
+}
+
+fn rewrite_expression(expression: &str, options: &Vue3CompilerOptions) -> String {
     let expression = expression.trim();
     if !options.prefix_identifiers {
         return expression.to_string();
     }
-    if expression
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$' || ch == '.')
-    {
-        format!("_ctx.{expression}")
-    } else {
-        expression.to_string()
+    rewrite_js_like_expression(expression, options)
+}
+
+fn normalize_handler_indent(expression: &str) -> String {
+    let mut lines = expression.lines();
+    let Some(first) = lines.next() else {
+        return String::new();
+    };
+    let mut normalized = String::from(first);
+    for line in lines {
+        normalized.push('\n');
+        normalized.push_str(line.strip_prefix("  ").unwrap_or(line));
+    }
+    normalized
+}
+
+fn rewrite_js_like_expression(expression: &str, options: &Vue3CompilerOptions) -> String {
+    let mut output = String::new();
+    let mut scopes = vec![Scope::default()];
+    let mut previous = TokenKind::Other;
+    let mut pending_decl: Option<DeclKind> = None;
+    let mut pending_function_params = false;
+    let mut last_keyword: Option<String> = None;
+    let mut paren_depth = 0usize;
+    let mut for_pending = false;
+    let mut for_header_depth: Option<usize> = None;
+    let mut pending_for_block_locals = Vec::<String>::new();
+    let mut catch_pending = false;
+    let mut catch_param_depth: Option<usize> = None;
+    let mut pending_catch_locals = Vec::<String>::new();
+    let chars = expression.char_indices().collect::<Vec<_>>();
+    let mut index = 0usize;
+    while index < chars.len() {
+        let byte = chars[index].0;
+        let ch = chars[index].1;
+        if ch == '\'' || ch == '"' || ch == '`' {
+            let quote = ch;
+            output.push(ch);
+            index += 1;
+            while index < chars.len() {
+                let current = chars[index].1;
+                output.push(current);
+                index += 1;
+                if current == '\\' && index < chars.len() {
+                    output.push(chars[index].1);
+                    index += 1;
+                    continue;
+                }
+                if current == quote {
+                    break;
+                }
+            }
+            previous = TokenKind::Other;
+            continue;
+        }
+        if is_identifier_start(ch) {
+            let start = byte;
+            index += 1;
+            while index < chars.len() && is_identifier_continue(chars[index].1) {
+                index += 1;
+            }
+            let end = chars
+                .get(index)
+                .map_or(expression.len(), |(offset, _)| *offset);
+            let ident = &expression[start..end];
+            let next = next_non_ws(expression, end);
+            let prev = previous;
+            if is_keyword(ident) {
+                output.push_str(ident);
+                match ident {
+                    "var" => pending_decl = Some(DeclKind::Var),
+                    "let" | "const" => pending_decl = Some(DeclKind::Block),
+                    "function" => pending_function_params = true,
+                    "for" => for_pending = true,
+                    "in" | "of" => pending_decl = None,
+                    "catch" => catch_pending = true,
+                    _ => {}
+                }
+                last_keyword = Some(ident.to_string());
+                previous = TokenKind::Keyword;
+                continue;
+            }
+            if catch_param_depth.is_some() {
+                if next != Some(':') {
+                    pending_catch_locals.push(ident.to_string());
+                }
+                output.push_str(ident);
+                previous = TokenKind::Identifier;
+                continue;
+            }
+            if pending_decl.is_some()
+                && matches!(
+                    prev,
+                    TokenKind::Keyword | TokenKind::Comma | TokenKind::OpenParen
+                )
+            {
+                if pending_decl == Some(DeclKind::Var) {
+                    if let Some(scope) = scopes.first_mut() {
+                        scope.locals.push(ident.to_string());
+                    }
+                } else if for_header_depth.is_some() {
+                    pending_for_block_locals.push(ident.to_string());
+                } else if let Some(scope) = scopes.last_mut() {
+                    scope.locals.push(ident.to_string());
+                }
+                output.push_str(ident);
+                previous = TokenKind::Identifier;
+                continue;
+            }
+            let skip_property = matches!(prev, TokenKind::Dot)
+                || (next == Some(':') && last_keyword.as_deref() != Some("case"))
+                || (pending_function_params
+                    && matches!(prev, TokenKind::OpenParen | TokenKind::Comma));
+            if skip_property
+                || is_global_or_literal(ident)
+                || is_local(&scopes, ident)
+                || pending_for_block_locals.iter().any(|local| local == ident)
+            {
+                output.push_str(ident);
+            } else {
+                output.push_str(&rewrite_identifier(ident, options));
+            }
+            previous = TokenKind::Identifier;
+            continue;
+        }
+        output.push(ch);
+        match ch {
+            '{' => {
+                if !pending_for_block_locals.is_empty() {
+                    scopes.push(Scope {
+                        locals: std::mem::take(&mut pending_for_block_locals),
+                    });
+                } else if !pending_catch_locals.is_empty() {
+                    scopes.push(Scope {
+                        locals: std::mem::take(&mut pending_catch_locals),
+                    });
+                } else {
+                    scopes.push(Scope::default());
+                }
+                previous = TokenKind::Other;
+            }
+            '}' => {
+                if scopes.len() > 1 {
+                    scopes.pop();
+                }
+                previous = TokenKind::Other;
+            }
+            '(' => {
+                paren_depth += 1;
+                if for_pending {
+                    for_header_depth = Some(paren_depth);
+                    for_pending = false;
+                }
+                if catch_pending {
+                    catch_param_depth = Some(paren_depth);
+                    catch_pending = false;
+                }
+                previous = TokenKind::OpenParen;
+            }
+            ')' => {
+                if catch_param_depth == Some(paren_depth) {
+                    catch_param_depth = None;
+                }
+                if for_header_depth == Some(paren_depth) {
+                    for_header_depth = None;
+                }
+                paren_depth = paren_depth.saturating_sub(1);
+                pending_function_params = false;
+                previous = TokenKind::Other;
+            }
+            ',' => previous = TokenKind::Comma,
+            '.' => previous = TokenKind::Dot,
+            ';' => {
+                pending_decl = None;
+                previous = TokenKind::Other;
+            }
+            _ if ch.is_whitespace() => {}
+            _ => {
+                if ch != ':' {
+                    last_keyword = None;
+                }
+                previous = TokenKind::Other;
+            }
+        }
+        index += 1;
+    }
+    output
+}
+
+#[derive(Clone, Debug, Default)]
+struct Scope {
+    locals: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeclKind {
+    Var,
+    Block,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TokenKind {
+    Identifier,
+    Keyword,
+    OpenParen,
+    Comma,
+    Dot,
+    Other,
+}
+
+fn is_local(scopes: &[Scope], ident: &str) -> bool {
+    scopes
+        .iter()
+        .rev()
+        .any(|scope| scope.locals.iter().any(|local| local == ident))
+}
+
+fn next_non_ws(source: &str, offset: usize) -> Option<char> {
+    source.get(offset..)?.chars().find(|ch| !ch.is_whitespace())
+}
+
+fn is_identifier_start(ch: char) -> bool {
+    ch == '_' || ch == '$' || ch.is_ascii_alphabetic()
+}
+
+fn is_identifier_continue(ch: char) -> bool {
+    is_identifier_start(ch) || ch.is_ascii_digit()
+}
+
+fn is_keyword(value: &str) -> bool {
+    matches!(
+        value,
+        "const"
+            | "let"
+            | "var"
+            | "function"
+            | "return"
+            | "if"
+            | "else"
+            | "for"
+            | "in"
+            | "of"
+            | "try"
+            | "catch"
+            | "throw"
+            | "new"
+            | "switch"
+            | "case"
+            | "break"
+            | "continue"
+            | "async"
+            | "await"
+    )
+}
+
+fn is_global_or_literal(value: &str) -> bool {
+    matches!(
+        value,
+        "true"
+            | "false"
+            | "null"
+            | "undefined"
+            | "this"
+            | "Infinity"
+            | "NaN"
+            | "Math"
+            | "Number"
+            | "Date"
+            | "Array"
+            | "Object"
+            | "Boolean"
+            | "String"
+            | "RegExp"
+            | "Map"
+            | "Set"
+            | "WeakMap"
+            | "WeakSet"
+            | "JSON"
+            | "Intl"
+            | "BigInt"
+            | "console"
+            | "Error"
+            | "TypeError"
+            | "Symbol"
+            | "Promise"
+            | "Reflect"
+            | "globalThis"
+    )
+}
+
+fn rewrite_identifier(ident: &str, options: &Vue3CompilerOptions) -> String {
+    match options.binding_metadata.get(ident).map(String::as_str) {
+        Some("setup-ref") if options.inline => format!("{ident}.value"),
+        Some("setup-maybe-ref") if options.inline => format!("_unref({ident})"),
+        Some("setup-const" | "literal-const" | "setup-reactive-const") if options.inline => {
+            ident.to_string()
+        }
+        Some("props") if options.inline => format!("__props.{ident}"),
+        Some("props-aliased") if options.inline => {
+            let source = options
+                .props_aliases
+                .get(ident)
+                .map_or(ident, String::as_str);
+            format!("__props[{}]", quote_string(source))
+        }
+        Some("props-aliased") => {
+            let source = options
+                .props_aliases
+                .get(ident)
+                .map_or(ident, String::as_str);
+            format!("$props[{}]", quote_string(source))
+        }
+        Some("data" | "options") if options.inline => format!("_ctx.{ident}"),
+        Some(kind) if kind.starts_with("setup") || kind == "literal-const" => {
+            format!("$setup.{ident}")
+        }
+        Some(kind) => format!("${kind}.{ident}"),
+        None => format!("_ctx.{ident}"),
     }
 }
 
@@ -1508,5 +1979,54 @@ mod tests {
             interpolation.span.source(),
             Some(Span::new(FileId(7), 47, 56))
         );
+    }
+
+    #[test]
+    fn base_compile_uses_binding_metadata_for_prefixed_interpolations() {
+        let mut options = Vue3CompilerOptions {
+            prefix_identifiers: true,
+            mode: "function".into(),
+            ..Vue3CompilerOptions::default()
+        };
+        options
+            .binding_metadata
+            .insert("props".into(), "props".into());
+        options
+            .binding_metadata
+            .insert("setup".into(), "setup-maybe-ref".into());
+        options
+            .binding_metadata
+            .insert("literal".into(), "literal-const".into());
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: "<div>{{ props }} {{ setup }} {{ literal }}</div>".into(),
+            file_id: FileId(0),
+            base_offset: 0,
+        };
+        let result = base_compile(source, options);
+        assert!(result.code.contains("$props.props"));
+        assert!(result.code.contains("$setup.setup"));
+        assert!(result.code.contains("$setup.literal"));
+    }
+
+    #[test]
+    fn base_compile_rewrites_event_handler_statement_scopes() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: "<div @click=\"() => {\n        for (const x in list) {\n          log(x)\n        }\n        error(x)\n      }\"/>".into(),
+            file_id: FileId(0),
+            base_offset: 0,
+        };
+        let result = base_compile(
+            source,
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                mode: "function".into(),
+                ..Vue3CompilerOptions::default()
+            },
+        );
+        assert!(result.code.contains("for (const x in _ctx.list)"));
+        assert!(result.code.contains("_ctx.log(x)"));
+        assert!(result.code.contains("_ctx.error(_ctx.x)"));
     }
 }
