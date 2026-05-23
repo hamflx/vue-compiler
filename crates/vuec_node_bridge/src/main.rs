@@ -114,6 +114,9 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
         "vue3.core.transformElementProps" => {
             Ok(vuec_vue3_core::transform_element_props_projection(&payload))
         }
+        "vue3.core.buildDirectiveArgs" => {
+            Ok(vuec_vue3_core::build_directive_args_projection(&payload))
+        }
         "vue3.dom.transformStyle" => Ok(vuec_vue3_dom::transform_style_projection(&payload)),
         "vue3.dom.compile" => {
             let source = template_source(&payload);

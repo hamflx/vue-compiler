@@ -1041,6 +1041,38 @@ pub fn transform_element_props_projection(payload: &Value) -> Value {
     })
 }
 
+pub fn build_directive_args_projection(payload: &Value) -> Value {
+    let dir = payload.get("dir").unwrap_or(&Value::Null);
+    let need_runtime = payload.get("needRuntime").unwrap_or(&Value::Null);
+    let runtime = if let Some(helper) = need_runtime.get("helper").and_then(Value::as_str) {
+        json!({ "kind": "helper", "helper": helper })
+    } else {
+        json!({
+            "kind": "asset",
+            "name": json_str(dir, "name").unwrap_or(""),
+        })
+    };
+    let modifiers = dir
+        .get("modifiers")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(|modifier| {
+            modifier
+                .as_str()
+                .or_else(|| modifier.get("content").and_then(Value::as_str))
+                .map(|name| json!({ "name": name }))
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "runtime": runtime,
+        "includeExp": dir.get("exp").is_some_and(|exp| !exp.is_null()),
+        "includeArg": dir.get("arg").is_some_and(|arg| !arg.is_null()),
+        "modifiers": modifiers,
+    })
+}
+
 fn inline_template_ref_projections(props: &[Value], context: &Value) -> Vec<Value> {
     if !json_bool(context, "inline") {
         return Vec::new();
@@ -6132,6 +6164,34 @@ mod tests {
             "isComponent": false
         }));
         assert_eq!(outside_inline["inlineTemplateRefs"], json!([]));
+    }
+
+    #[test]
+    fn build_directive_args_projection_keeps_runtime_directive_shape() {
+        let projection = build_directive_args_projection(&json!({
+            "dir": {
+                "name": "baz",
+                "exp": { "type": 4, "content": "y" },
+                "arg": { "type": 4, "content": "arg", "isStatic": false },
+                "modifiers": ["mod", "mad"]
+            }
+        }));
+
+        assert_eq!(
+            projection,
+            json!({
+                "runtime": {
+                    "kind": "asset",
+                    "name": "baz"
+                },
+                "includeExp": true,
+                "includeArg": true,
+                "modifiers": [
+                    { "name": "mod" },
+                    { "name": "mad" }
+                ]
+            })
+        );
     }
 
     #[test]

@@ -35,9 +35,16 @@
 - [x] Vue 3 compiler-core Rust-backed `transformElement` props / patch-flag projection slice.
 - [x] Vue 3 compiler-dom Rust-backed `transformStyle` projection slice and style props materialization for `transformElement.spec.ts`.
 - [x] Vue 3 compiler-core Rust-backed `transformElement` v-for ref marker / block-forcing props projection slice.
+- [x] Vue 3 compiler-core Rust-backed `buildDirectiveArgs` projection slice inside `transformElement.spec.ts`.
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Added a Rust-backed Vue 3 `buildDirectiveArgs` projection for runtime directive argument materialization.
+- `vuec_vue3_core::build_directive_args_projection` now owns the directive runtime reference shape, `exp` / `arg` inclusion, and modifier object entry projection for runtime directives.
+- Added `vue3.core.buildDirectiveArgs` to `vuec_node_bridge`. Generated alias `buildDirectiveArgs` in `xtask/src/compat.rs` now calls Rust and materializes official-shaped JS array/object expressions from the projection. The touched `compat.rs` code is bridge/materialization support only, not standalone JavaScript compiler semantics.
+- Focused official `compiler-core/__tests__/transforms/transformElement.spec.ts` now passes `84/124` (previously `83/124`). Element-transform own failures are down to `4`: built-in component children/slot lowering for `Suspense` / `KeepAlive` / `BaseTransition`, and the `baseCompile` vnode-hook materialization path.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_vue3_core` (`49/49` pass), `cargo xtask verify-npm-alias --version-line vue3 --package @vue/compiler-core`, direct prepared Vitest `transformElement.spec.ts` (`84/124` pass, expected fail), and `git diff --check`.
 
 - Extended the Rust-backed Vue 3 `transformElement` props projection slice for v-for scoped refs and selected block-forcing behavior.
 - `vuec_vue3_core::transform_element_props_projection` now owns official decisions for `ref_for` marker insertion in `v-for`, inline script-setup template ref key projection, and block forcing for `:key` / `@vue:before-update` with children.

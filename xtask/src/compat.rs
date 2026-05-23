@@ -5371,33 +5371,11 @@ const vue3CoreRuntime = (() => {
     };
   };
   runtime.buildDirectiveArgs = function buildDirectiveArgs(dir, context) {
-    const elements = [];
-    if (dir && dir.__vuecNeedRuntime) {
-      if (typeof dir.__vuecNeedRuntime === 'symbol') {
-        elements.push(context ? context.helperString(dir.__vuecNeedRuntime) : `_${runtime.helperNameMap[dir.__vuecNeedRuntime]}`);
-      } else {
-        context.helper(runtime.RESOLVE_DIRECTIVE);
-        context.directives.add(dir.name);
-        elements.push(runtime.toValidAssetId(dir.name, 'directive'));
-      }
-    } else {
-      context.helper(runtime.RESOLVE_DIRECTIVE);
-      context.directives.add(dir.name);
-      elements.push(runtime.toValidAssetId(dir.name, 'directive'));
-    }
-    if (dir && dir.exp) elements.push(dir.exp);
-    if (dir && dir.arg) elements.push(dir.arg);
-    if (dir && dir.modifiers && dir.modifiers.length) {
-      elements.push(runtime.createSimpleExpression(
-        `{ ${dir.modifiers.map(modifier => {
-          const name = runtime.modifierName(modifier);
-          return runtime.isSimpleIdentifier(name) ? `${name}: true` : `${JSON.stringify(name)}: true`;
-        }).join(', ')} }`,
-        false,
-        dir.loc,
-        ConstantTypes.CAN_SKIP_PATCH,
-      ));
-    }
+    const projection = callBridge('vue3.core.buildDirectiveArgs', {
+      dir,
+      needRuntime: vue3DirectiveRuntimePayload(dir && dir.__vuecNeedRuntime),
+    });
+    const elements = materializeVue3DirectiveArgsProjection(projection, dir, context);
     return runtime.createArrayExpression(elements);
   };
   runtime.buildSlots = function buildSlots() {
@@ -5588,6 +5566,48 @@ function vue3ElementPropValueIsConstant(value) {
     return Number(value.constType || 0) > 0;
   }
   return false;
+}
+
+function vue3DirectiveRuntimePayload(needRuntime) {
+  if (typeof needRuntime === 'symbol') {
+    return { kind: 'helper', helper: projectionNameFromHelperSymbol(needRuntime) };
+  }
+  if (needRuntime) {
+    return { kind: 'asset' };
+  }
+  return null;
+}
+
+function projectionNameFromHelperSymbol(symbol) {
+  const entries = Object.entries(vue3CoreRuntime).filter(([, value]) => value === symbol);
+  return entries.length ? entries[0][0] : undefined;
+}
+
+function materializeVue3DirectiveArgsProjection(projection, dir, context) {
+  const elements = [];
+  const runtimeProjection = projection && projection.runtime || {};
+  if (runtimeProjection.kind === 'helper') {
+    const helper = helperSymbolFromProjection(runtimeProjection.helper);
+    elements.push(context && helper ? context.helperString(helper) : `_${vue3CoreRuntime.helperNameMap[helper]}`);
+  } else {
+    if (context) {
+      context.helper(vue3CoreRuntime.RESOLVE_DIRECTIVE);
+      context.directives.add(runtimeProjection.name || (dir && dir.name) || '');
+    }
+    elements.push(vue3CoreRuntime.toValidAssetId(runtimeProjection.name || (dir && dir.name) || '', 'directive'));
+  }
+  if (projection && projection.includeExp && dir && dir.exp) elements.push(dir.exp);
+  if (projection && projection.includeArg && dir && dir.arg) elements.push(dir.arg);
+  if (projection && projection.modifiers && projection.modifiers.length) {
+    elements.push(vue3CoreRuntime.createObjectExpression((projection.modifiers || []).map(modifier => {
+      const name = modifier && modifier.name || '';
+      return vue3CoreRuntime.createObjectProperty(
+        vue3CoreRuntime.createSimpleExpression(name, true),
+        vue3CoreRuntime.createSimpleExpression('true', false, dir && dir.loc || vue3CoreRuntime.locStub, vue3CoreRuntime.ConstantTypes.CAN_SKIP_PATCH),
+      );
+    }), dir && dir.loc || vue3CoreRuntime.locStub));
+  }
+  return elements;
 }
 
 function vue3IfSiblingPayload(siblings) {
