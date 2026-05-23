@@ -5024,11 +5024,22 @@ const vue3CoreRuntime = (() => {
         }
       }
       const onlyChild = node.children && node.children.length === 1 ? node.children[0] : undefined;
-      const children = onlyChild && [NodeTypes.TEXT, NodeTypes.INTERPOLATION, NodeTypes.COMPOUND_EXPRESSION].includes(onlyChild.type)
+      let children = onlyChild && [NodeTypes.TEXT, NodeTypes.INTERPOLATION, NodeTypes.COMPOUND_EXPRESSION].includes(onlyChild.type)
         ? onlyChild
         : node.children && node.children.length
           ? node.children
           : undefined;
+      const childrenProjection = callBridge('vue3.core.transformElementChildren', {
+        tag: projectionNameFromHelperSymbol(tag),
+        children: node.children || [],
+      });
+      if (childrenProjection && childrenProjection.kind === 'slots') {
+        children = materializeVue3ElementSlotsProjection(childrenProjection, node, context);
+        if (childrenProjection.shouldUseBlock) shouldUseBlock = true;
+      } else if (childrenProjection && childrenProjection.kind === 'children') {
+        if (childrenProjection.shouldUseBlock) shouldUseBlock = true;
+        if (childrenProjection.patchFlag) patchFlag = (patchFlag || 0) | childrenProjection.patchFlag;
+      }
       if (!patchFlag && children && (children.type === NodeTypes.INTERPOLATION || children.type === NodeTypes.COMPOUND_EXPRESSION)) patchFlag = 1;
       node.codegenNode = runtime.createVNodeCall(context, tag, props, children, patchFlag, dynamicProps.length ? stringifyDynamicPropNames(dynamicProps) : undefined, undefined, shouldUseBlock, false, isComponent, node.loc);
     };
@@ -5608,6 +5619,32 @@ function materializeVue3DirectiveArgsProjection(projection, dir, context) {
     }), dir && dir.loc || vue3CoreRuntime.locStub));
   }
   return elements;
+}
+
+function materializeVue3ElementSlotsProjection(projection, node, context) {
+  const properties = [];
+  for (const slot of projection.slots || []) {
+    const slotChildren = [];
+    for (const index of slot.indices || []) {
+      const child = node.children && node.children[index];
+      if (!child) continue;
+      if (slot.unwrapTemplate && child.type === vue3CoreRuntime.NodeTypes.ELEMENT && child.tag === 'template') {
+        slotChildren.push(...(child.children || []));
+      } else {
+        slotChildren.push(child);
+      }
+    }
+    properties.push(vue3CoreRuntime.createObjectProperty(
+      slot.name || 'default',
+      vue3CoreRuntime.createFunctionExpression([], slotChildren, false, true, node.loc),
+    ));
+  }
+  properties.push(vue3CoreRuntime.createObjectProperty(
+    '_',
+    vue3CoreRuntime.createSimpleExpression(projection.slotFlag || '1 /* STABLE */', false),
+  ));
+  if (context) context.helper(vue3CoreRuntime.WITH_CTX);
+  return vue3CoreRuntime.createObjectExpression(properties, node.loc);
 }
 
 function vue3IfSiblingPayload(siblings) {

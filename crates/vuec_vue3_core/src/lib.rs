@@ -1073,6 +1073,77 @@ pub fn build_directive_args_projection(payload: &Value) -> Value {
     })
 }
 
+pub fn transform_element_children_projection(payload: &Value) -> Value {
+    let tag = json_str(payload, "tag").unwrap_or("");
+    let children = payload
+        .get("children")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    match tag {
+        "SUSPENSE" | "BASE_TRANSITION" => {
+            let slots = component_slot_projections(children);
+            json!({
+                "kind": "slots",
+                "slots": slots,
+                "slotFlag": "1 /* STABLE */",
+                "patchFlag": null,
+                "shouldUseBlock": tag == "SUSPENSE",
+            })
+        }
+        "KEEP_ALIVE" => json!({
+            "kind": "children",
+            "patchFlag": 1024,
+            "shouldUseBlock": true,
+        }),
+        _ => json!({ "kind": "default" }),
+    }
+}
+
+fn component_slot_projections(children: &[Value]) -> Vec<Value> {
+    let mut slots = Vec::new();
+    let mut plain_indices = Vec::new();
+    for (index, child) in children.iter().enumerate() {
+        if json_str(child, "tag") == Some("template") {
+            if let Some(slot_name) = template_slot_name(child) {
+                slots.push(json!({
+                    "name": slot_name,
+                    "indices": [index],
+                    "unwrapTemplate": true,
+                }));
+                continue;
+            }
+        }
+        plain_indices.push(index);
+    }
+    if !plain_indices.is_empty() {
+        slots.insert(
+            0,
+            json!({
+                "name": "default",
+                "indices": plain_indices,
+                "unwrapTemplate": false,
+            }),
+        );
+    }
+    slots
+}
+
+fn template_slot_name(node: &Value) -> Option<&str> {
+    node.get("props")
+        .and_then(Value::as_array)?
+        .iter()
+        .find_map(|prop| {
+            if json_str(prop, "name") == Some("slot") {
+                prop.get("arg")
+                    .and_then(|arg| arg.get("content"))
+                    .and_then(Value::as_str)
+            } else {
+                None
+            }
+        })
+}
+
 fn inline_template_ref_projections(props: &[Value], context: &Value) -> Vec<Value> {
     if !json_bool(context, "inline") {
         return Vec::new();
@@ -6192,6 +6263,50 @@ mod tests {
                 ]
             })
         );
+    }
+
+    #[test]
+    fn transform_element_children_projection_lowers_builtin_component_children() {
+        let suspense = transform_element_children_projection(&json!({
+            "tag": "SUSPENSE",
+            "children": [
+                { "type": 2, "content": "foo" }
+            ]
+        }));
+        assert_eq!(suspense["kind"], json!("slots"));
+        assert_eq!(suspense["slots"][0]["name"], json!("default"));
+        assert_eq!(suspense["shouldUseBlock"], json!(true));
+
+        let suspense_templates = transform_element_children_projection(&json!({
+            "tag": "SUSPENSE",
+            "children": [
+                {
+                    "type": 1,
+                    "tag": "template",
+                    "props": [
+                        {
+                            "name": "slot",
+                            "arg": { "content": "fallback" }
+                        }
+                    ]
+                }
+            ]
+        }));
+        assert_eq!(suspense_templates["slots"][0]["name"], json!("fallback"));
+        assert_eq!(
+            suspense_templates["slots"][0]["unwrapTemplate"],
+            json!(true)
+        );
+
+        let keep_alive = transform_element_children_projection(&json!({
+            "tag": "KEEP_ALIVE",
+            "children": [
+                { "type": 1, "tag": "span" }
+            ]
+        }));
+        assert_eq!(keep_alive["kind"], json!("children"));
+        assert_eq!(keep_alive["patchFlag"], json!(1024));
+        assert_eq!(keep_alive["shouldUseBlock"], json!(true));
     }
 
     #[test]

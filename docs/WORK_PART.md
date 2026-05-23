@@ -36,9 +36,16 @@
 - [x] Vue 3 compiler-dom Rust-backed `transformStyle` projection slice and style props materialization for `transformElement.spec.ts`.
 - [x] Vue 3 compiler-core Rust-backed `transformElement` v-for ref marker / block-forcing props projection slice.
 - [x] Vue 3 compiler-core Rust-backed `buildDirectiveArgs` projection slice inside `transformElement.spec.ts`.
+- [x] Vue 3 compiler-core Rust-backed `transformElement` built-in component children projection slice.
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Added a Rust-backed Vue 3 `transformElement` children projection for built-in component lowering.
+- `vuec_vue3_core::transform_element_children_projection` now owns the official children decisions for `Suspense`, `BaseTransition`, and `KeepAlive`: stable slot object projection for `Suspense` / `BaseTransition`, template `#default` / `#fallback` slot unwrapping, and `KeepAlive` raw children with `DYNAMIC_SLOTS` / block forcing.
+- Added `vue3.core.transformElementChildren` to `vuec_node_bridge`. Generated alias `transformElement` in `xtask/src/compat.rs` now calls Rust for children lowering decisions and materializes returned slot functions, stable slot flags, and KeepAlive patch flags into official-shaped JS AST. The touched `compat.rs` code is bridge/materialization support only, not standalone JavaScript compiler semantics.
+- Focused official `compiler-core/__tests__/transforms/transformElement.spec.ts` now passes `87/124` (previously `84/124`). Element-transform own failures are down to `1`, the `baseCompile` vnode-hook materialization path.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_vue3_core` (`50/50` pass), `cargo xtask verify-npm-alias --version-line vue3 --package @vue/compiler-core`, direct prepared Vitest `transformElement.spec.ts` (`87/124` pass, expected fail), and `git diff --check`.
 
 - Added a Rust-backed Vue 3 `buildDirectiveArgs` projection for runtime directive argument materialization.
 - `vuec_vue3_core::build_directive_args_projection` now owns the directive runtime reference shape, `exp` / `arg` inclusion, and modifier object entry projection for runtime directives.
