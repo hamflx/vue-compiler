@@ -1,4 +1,4 @@
-/goal 按照设计方案、开发计划进行开发，完整落地 Vue.js 的 Rust 语言编译器，工作截止条件是：开发计划中列出的工作项已经完全开发完毕，并且 AST/HIR/MIR 以 `docs/3.AST_HIR_MIR_DESIGN.md` 为唯一结构约束。
+/goal 按照设计方案、开发计划进行开发，完整落地 Vue.js 的 Rust 语言编译器，工作截止条件是：开发计划中列出的工作项已经完全开发完毕，并且 AST/HIR/MIR 以 `docs/3.AST_HIR_MIR_DESIGN.md` 为唯一结构约束，遵循其 public projection、lowering、target-split 规则。
 
 开发计划：docs/2.DEVELOPMENT_PLAN.md
 设计方案：docs\1.RUST_VUE_COMPILER_DESIGN.md
