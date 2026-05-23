@@ -111,6 +111,9 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
         "vue3.core.resolveComponentType" => {
             Ok(vuec_vue3_core::resolve_component_type_projection(&payload))
         }
+        "vue3.core.transformElementProps" => {
+            Ok(vuec_vue3_core::transform_element_props_projection(&payload))
+        }
         "vue3.dom.compile" => {
             let source = template_source(&payload);
             let mut core = vue3_options(payload.get("options"));

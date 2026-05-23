@@ -32,9 +32,16 @@
 - [x] Vue 3 compiler-core Rust-backed `baseCompile` `v-memo` codegen slice for `vMemo.spec.ts`.
 - [x] Vue 3 compiler-core Rust-backed `transformIf` / `processIf` projection bridge for `vIf.spec.ts`.
 - [x] Vue 3 compiler-core Rust-backed `resolveComponentType` projection slice inside `transformElement.spec.ts`.
+- [x] Vue 3 compiler-core Rust-backed `transformElement` props / patch-flag projection slice.
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Implemented a Rust-backed Vue 3 `transformElement` props / patch-flag projection slice.
+- `vuec_vue3_core::transform_element_props_projection` now owns core `buildProps` decisions for object `v-bind` / `v-on` full-props handling, class/style/props patch flags, ref/runtime-directive/vnode-hook need-patch decisions, hydration event flags, class/style normalization, normalizeProps / guardReactiveProps wrapping, and runtime-directive block forcing.
+- Added `vue3.core.transformElementProps` to `vuec_node_bridge`. Generated alias `transformElement` in `xtask/src/compat.rs` still materializes directive transform AST properties, then sends a property summary to Rust and applies the returned props/flag instructions. The `compat.rs` changes in this round are bridge/materialization adapter support and do not count as standalone JavaScript compiler semantics.
+- Focused official `compiler-core/__tests__/transforms/transformElement.spec.ts` now passes `72/124` (previously `57/124` after component resolution and `40/124` before the Rust-backed transformElement migration began). The file remains `mixed` because children/slot lowering, style transform, ref_for/v-for marker handling, and some VNode materialization details are still pending.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_vue3_core` (`44/44` pass), `cargo xtask verify-npm-alias --version-line vue3 --package @vue/compiler-core`, direct prepared Vitest `transformElement.spec.ts` (`72/124` pass, expected fail), and `git diff --check`.
 
 - Implemented a Rust-backed Vue 3 `resolveComponentType` projection slice for `transformElement` component tag resolution.
 - `vuec_vue3_core::resolve_component_type_projection` now owns official component resolution decisions for core built-ins, `<component is>` and `:is`, `vue:` is-casting, script-setup setup/props binding references, namespaced binding references, and implicit self-reference component registration.

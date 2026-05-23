@@ -877,6 +877,163 @@ pub fn resolve_component_type_projection(payload: &Value) -> Value {
     })
 }
 
+pub fn transform_element_props_projection(payload: &Value) -> Value {
+    let props = payload
+        .get("props")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let context = payload.get("context").unwrap_or(&Value::Null);
+    let has_children = json_bool(payload, "hasChildren");
+    let is_component = json_bool(payload, "isComponent");
+    let is_dynamic_component = json_bool(payload, "isDynamicComponent");
+    let in_ssr = json_bool(context, "inSSR");
+    let mut patch_flag = 0u16;
+    let mut dynamic_prop_names = Vec::<String>::new();
+    let mut has_ref = false;
+    let mut has_class_binding = false;
+    let mut has_style_binding = false;
+    let mut has_hydration_event_binding = false;
+    let mut has_dynamic_keys = false;
+    let mut has_vnode_hook = false;
+    let mut should_use_block = false;
+    let mut normalize_props = false;
+    let mut guard_reactive_props = false;
+    let mut normalize_class = false;
+    let mut normalize_style = false;
+    let mut has_runtime_directives = false;
+    let mut has_dynamic_object = false;
+
+    for prop in props {
+        match json_str(prop, "kind") {
+            Some("attribute") => {
+                if json_str(prop, "name") == Some("ref") {
+                    has_ref = true;
+                }
+            }
+            Some("objectBind") => {
+                has_dynamic_keys = true;
+                has_dynamic_object = true;
+            }
+            Some("objectOn") => {
+                has_dynamic_keys = true;
+                has_dynamic_object = true;
+            }
+            Some("runtimeDirective") => {
+                has_runtime_directives = true;
+                if has_children {
+                    should_use_block = true;
+                }
+            }
+            Some("directiveProp") => {
+                if json_bool(prop, "dynamicKey") {
+                    has_dynamic_keys = true;
+                } else if let Some(name) = json_str(prop, "name") {
+                    let value_constant = json_bool(prop, "valueConstant");
+                    let value_cached = json_bool(prop, "valueCached");
+                    let is_event = prop_name_is_event_handler(name);
+                    if is_event
+                        && (!is_component || is_dynamic_component)
+                        && name.to_ascii_lowercase() != "onclick"
+                        && name != "onUpdate:modelValue"
+                        && !prop_name_is_reserved(name)
+                    {
+                        has_hydration_event_binding = true;
+                    }
+                    if is_event && prop_name_is_reserved(name) {
+                        has_vnode_hook = true;
+                    }
+                    if !value_cached && !value_constant {
+                        if name == "ref" {
+                            has_ref = true;
+                        } else if name == "class" {
+                            has_class_binding = true;
+                        } else if name == "style" {
+                            has_style_binding = true;
+                        } else if name != "key"
+                            && !dynamic_prop_names.iter().any(|existing| existing == name)
+                        {
+                            dynamic_prop_names.push(name.to_string());
+                        }
+                        if is_component
+                            && matches!(name, "class" | "style")
+                            && !dynamic_prop_names.iter().any(|existing| existing == name)
+                        {
+                            dynamic_prop_names.push(name.to_string());
+                        }
+                    }
+                }
+                if json_bool(prop, "propModifier") {
+                    patch_flag |= 32;
+                }
+                if json_bool(prop, "forceBlock") {
+                    should_use_block = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if has_dynamic_keys {
+        patch_flag |= 16;
+    } else {
+        if has_class_binding && !is_component {
+            patch_flag |= 2;
+        }
+        if has_style_binding && !is_component {
+            patch_flag |= 4;
+        }
+        if !dynamic_prop_names.is_empty() {
+            patch_flag |= 8;
+        }
+        if has_hydration_event_binding {
+            patch_flag |= 32;
+        }
+    }
+
+    if !should_use_block
+        && (patch_flag == 0 || patch_flag == 32)
+        && (has_ref || has_vnode_hook || has_runtime_directives)
+    {
+        patch_flag |= 512;
+    }
+
+    if !in_ssr {
+        normalize_class = has_class_binding;
+        normalize_style = has_style_binding;
+        if has_dynamic_object {
+            normalize_props = true;
+            guard_reactive_props = true;
+        } else if has_dynamic_keys {
+            normalize_props = true;
+        }
+    }
+
+    json!({
+        "patchFlag": patch_flag,
+        "dynamicPropNames": dynamic_prop_names,
+        "shouldUseBlock": should_use_block,
+        "normalizeProps": normalize_props,
+        "guardReactiveProps": guard_reactive_props,
+        "normalizeClass": normalize_class,
+        "normalizeStyle": normalize_style,
+    })
+}
+
+fn prop_name_is_event_handler(name: &str) -> bool {
+    name.starts_with("on")
+        && name
+            .chars()
+            .nth(2)
+            .is_some_and(|ch| !matches!(ch, 'a'..='z' | '-' | ':'))
+}
+
+fn prop_name_is_reserved(name: &str) -> bool {
+    matches!(name, "key" | "ref" | "ref_for" | "ref_key")
+        || name.starts_with("onVnode")
+        || name.starts_with("onUpdate:")
+}
+
 fn resolve_component_is_prop(node: &Value) -> Option<&Value> {
     node.get("props")
         .and_then(Value::as_array)?
@@ -5741,6 +5898,72 @@ mod tests {
         assert!(tags
             .iter()
             .all(|(_, tag_type)| *tag_type == Vue3ElementType::Component));
+    }
+
+    #[test]
+    fn transform_element_props_projection_flags_class_style_and_dynamic_props() {
+        let projection = transform_element_props_projection(&json!({
+            "props": [
+                { "kind": "directiveProp", "name": "class", "valueConstant": false },
+                { "kind": "directiveProp", "name": "style", "valueConstant": false },
+                { "kind": "directiveProp", "name": "foo", "valueConstant": false }
+            ],
+            "context": {},
+            "isComponent": false
+        }));
+
+        assert_eq!(projection["patchFlag"], json!(14));
+        assert_eq!(projection["dynamicPropNames"], json!(["foo"]));
+        assert_eq!(projection["normalizeClass"], json!(true));
+        assert_eq!(projection["normalizeStyle"], json!(true));
+    }
+
+    #[test]
+    fn transform_element_props_projection_wraps_object_bind_props() {
+        let projection = transform_element_props_projection(&json!({
+            "props": [{ "kind": "objectBind" }],
+            "context": {},
+            "isComponent": false
+        }));
+
+        assert_eq!(projection["patchFlag"], json!(16));
+        assert_eq!(projection["normalizeProps"], json!(true));
+        assert_eq!(projection["guardReactiveProps"], json!(true));
+    }
+
+    #[test]
+    fn transform_element_props_projection_marks_ref_and_runtime_directives_need_patch() {
+        let ref_projection = transform_element_props_projection(&json!({
+            "props": [{ "kind": "attribute", "name": "ref" }],
+            "context": {},
+            "isComponent": false
+        }));
+        assert_eq!(ref_projection["patchFlag"], json!(512));
+
+        let runtime_projection = transform_element_props_projection(&json!({
+            "props": [{ "kind": "runtimeDirective" }],
+            "context": {},
+            "isComponent": false
+        }));
+        assert_eq!(runtime_projection["patchFlag"], json!(512));
+    }
+
+    #[test]
+    fn transform_element_props_projection_marks_hydration_event_without_props_for_constants() {
+        let projection = transform_element_props_projection(&json!({
+            "props": [
+                {
+                    "kind": "directiveProp",
+                    "name": "onKeydown",
+                    "valueConstant": true
+                }
+            ],
+            "context": {},
+            "isComponent": false
+        }));
+
+        assert_eq!(projection["patchFlag"], json!(32));
+        assert_eq!(projection["dynamicPropNames"], json!([]));
     }
 
     #[test]

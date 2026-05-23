@@ -3540,6 +3540,17 @@ const vue3CoreRuntime = (() => {
     const key = prop && prop.key;
     return key && key.type === NodeTypes.SIMPLE_EXPRESSION && key.isStatic ? key.content : undefined;
   };
+  runtime.normalizeObjectProp = function normalizeObjectProp(props, name, helper) {
+    let target = props;
+    if (target && target.type === NodeTypes.JS_CALL_EXPRESSION && target.callee === runtime.NORMALIZE_PROPS) {
+      target = target.arguments && target.arguments[0];
+    }
+    if (!target || target.type !== NodeTypes.JS_OBJECT_EXPRESSION) return;
+    const prop = (target.properties || []).find(property => runtime.staticPropertyKeyName(property) === name);
+    if (prop && prop.value && !runtime.isStaticExp(prop.value) && !(prop.value.type === NodeTypes.JS_CALL_EXPRESSION && prop.value.callee === helper)) {
+      prop.value = runtime.createCallExpression(helper, [prop.value], prop.value.loc || prop.loc || locStub);
+    }
+  };
   runtime.hasScopeRef = function hasScopeRef(node, identifiers = {}) {
     const names = Object.keys(identifiers).filter(name => identifiers[name] > 0);
     if (!names.length) return false;
@@ -3555,6 +3566,9 @@ const vue3CoreRuntime = (() => {
       : tag === 'KeepAlive' || tag === 'keep-alive' ? runtime.KEEP_ALIVE
       : tag === 'BaseTransition' || tag === 'base-transition' ? runtime.BASE_TRANSITION
       : undefined;
+  };
+  runtime.isBuiltInDirective = function isBuiltInDirective(name) {
+    return new Set(['bind', 'cloak', 'else-if', 'else', 'for', 'html', 'if', 'model', 'on', 'once', 'pre', 'show', 'slot', 'text', 'memo']).has(String(name || ''));
   };
   runtime.isSimpleIdentifier = function isSimpleIdentifier(name) {
     return /^[A-Za-z_$][\w$]*$/.test(String(name || ''));
@@ -4795,6 +4809,7 @@ const vue3CoreRuntime = (() => {
       let hasDynamicKey = false;
       let hasHydrationEvent = false;
       const dynamicProps = [];
+      const propSummaries = [];
       let shouldUseBlock = !!(
         isDynamicComponent
         || tag === runtime.TELEPORT
@@ -4814,16 +4829,21 @@ const vue3CoreRuntime = (() => {
         for (const prop of node.props) {
           if (prop.type === NodeTypes.ATTRIBUTE) {
             objectProps.push(runtime.createObjectProperty(prop.name, runtime.createSimpleExpression(prop.value ? prop.value.content : '', true)));
+            propSummaries.push({ kind: 'attribute', name: prop.name });
           } else if (prop.name === 'bind' && prop.arg) {
             const transform = context.directiveTransforms && context.directiveTransforms.bind;
             const result = transform ? transform(prop, node, context) : runtime.transformBind(prop, node, context);
             objectProps.push(...((result && result.props) || []));
+            propSummaries.push(...vue3ElementDirectivePropSummaries(prop, result, { propModifier: runtime.hasModifier(prop, 'prop') }));
             if (result && result.props && result.props.some(p => p.key && !runtime.isStaticExp(p.key))) hasDynamicKey = true;
             else if (prop.arg.isStatic) dynamicProps.push(prop.arg.content);
           } else if (prop.name === 'on' && prop.arg) {
             const transform = context.directiveTransforms && context.directiveTransforms.on;
             const result = transform ? transform(prop, node, context) : runtime.transformOn(prop, node, context);
             objectProps.push(...((result && result.props) || []));
+            propSummaries.push(...vue3ElementDirectivePropSummaries(prop, result, {
+              forceBlock: !!(node.children && node.children.length && runtime.isStaticArgOf(prop.arg, 'vue:before-update')),
+            }));
             if (!result || !result.props || !result.props.some(p => p.value && p.value.type === NodeTypes.JS_CACHE_EXPRESSION)) {
               if (result && result.props && result.props.some(p => p.key && p.key.isHandlerKey)) dynamicProps.push(result.props[0].key.content || prop.arg.content);
             }
@@ -4831,6 +4851,7 @@ const vue3CoreRuntime = (() => {
             if (prop.exp) {
               pushMergeArg(prop.exp);
               hasDynamicKey = true;
+              propSummaries.push({ kind: 'objectBind' });
             } else {
               context.onError(runtime.createCompilerError(ErrorCodes.X_V_BIND_NO_EXPRESSION, prop.loc));
             }
@@ -4838,6 +4859,7 @@ const vue3CoreRuntime = (() => {
             if (prop.exp) {
               pushMergeArg(runtime.createCallExpression(context.helper(runtime.TO_HANDLERS), isComponent ? [prop.exp] : [prop.exp, 'true'], prop.loc));
               hasDynamicKey = true;
+              propSummaries.push({ kind: 'objectOn' });
             } else {
               context.onError(runtime.createCompilerError(ErrorCodes.X_V_ON_NO_EXPRESSION, prop.loc));
             }
@@ -4845,6 +4867,7 @@ const vue3CoreRuntime = (() => {
             const result = context.directiveTransforms.model(prop, node, context);
             const modelProps = (result && result.props) || [];
             objectProps.push(...modelProps);
+            propSummaries.push(...vue3ElementDirectivePropSummaries(prop, result));
             if (modelProps.some(p => p.key && !runtime.isStaticExp(p.key))) hasDynamicKey = true;
             for (const modelProp of modelProps) {
               if (modelProp.__vuecModel && modelProp.__vuecModel.dynamic && runtime.isStaticExp(modelProp.key)) {
@@ -4856,8 +4879,18 @@ const vue3CoreRuntime = (() => {
             }
           } else if (prop.name === 'once' || prop.name === 'memo') {
             continue;
+          } else if (context.directiveTransforms && context.directiveTransforms[prop.name]) {
+            const result = context.directiveTransforms[prop.name](prop, node, context);
+            objectProps.push(...((result && result.props) || []));
+            propSummaries.push(...vue3ElementDirectivePropSummaries(prop, result));
+            if (result && result.needRuntime) {
+              prop.__vuecNeedRuntime = result.needRuntime;
+              runtimeDirectives.push(prop);
+              propSummaries.push({ kind: 'runtimeDirective' });
+            }
           } else {
             runtimeDirectives.push(prop);
+            if (!runtime.isBuiltInDirective(prop.name)) propSummaries.push({ kind: 'runtimeDirective' });
           }
         }
         if (mergeArgs.length) {
@@ -4866,18 +4899,32 @@ const vue3CoreRuntime = (() => {
         } else if (objectProps.length) {
           props = runtime.createObjectExpression(objectProps, node.loc);
         }
-        if (props && hasDynamicKey) {
+        const propsProjection = callBridge('vue3.core.transformElementProps', {
+          props: propSummaries,
+          hasChildren: !!(node.children && node.children.length),
+          isComponent,
+          isDynamicComponent,
+          context: vue3TransformElementContextPayload(context),
+        });
+        if (props && propsProjection && propsProjection.normalizeClass) runtime.normalizeObjectProp(props, 'class', context.helper(runtime.NORMALIZE_CLASS));
+        if (props && propsProjection && propsProjection.normalizeStyle) runtime.normalizeObjectProp(props, 'style', context.helper(runtime.NORMALIZE_STYLE));
+        if (props && propsProjection && propsProjection.normalizeProps) {
           if (!(props.type === NodeTypes.JS_CALL_EXPRESSION && (props.callee === runtime.MERGE_PROPS || props.callee === runtime.TO_HANDLERS))) {
-            props = runtime.createCallExpression(context.helper(runtime.NORMALIZE_PROPS), [props]);
+            const argument = propsProjection.guardReactiveProps
+              ? runtime.createCallExpression(context.helper(runtime.GUARD_REACTIVE_PROPS), [props], node.loc)
+              : props;
+            props = runtime.createCallExpression(context.helper(runtime.NORMALIZE_PROPS), [argument], node.loc);
+          } else if (propsProjection.guardReactiveProps && props.type !== NodeTypes.JS_CALL_EXPRESSION) {
+            props = runtime.createCallExpression(context.helper(runtime.NORMALIZE_PROPS), [runtime.createCallExpression(context.helper(runtime.GUARD_REACTIVE_PROPS), [props], node.loc)], node.loc);
           }
-          patchFlag = 16;
-        } else if (dynamicProps.length) patchFlag = 8;
+        }
+        patchFlag = propsProjection && propsProjection.patchFlag || undefined;
+        dynamicProps.splice(0, dynamicProps.length, ...((propsProjection && propsProjection.dynamicPropNames) || dynamicProps));
+        if (propsProjection && propsProjection.shouldUseBlock) shouldUseBlock = true;
         if (hasHydrationEvent) patchFlag = (patchFlag || 0) | 32;
         if (runtimeDirectives.length) {
-          context.helper(runtime.RESOLVE_DIRECTIVE);
           const directiveArgs = runtimeDirectives.map(d => {
-            context.directives.add(d.name);
-            return runtime.createArrayExpression([runtime.toValidAssetId(d.name, 'directive'), d.exp, d.arg].filter(Boolean));
+            return runtime.buildDirectiveArgs(d, context);
           });
           node.codegenNode = runtime.createVNodeCall(context, tag, props, node.children && node.children.length ? node.children : undefined, patchFlag, dynamicProps.length ? stringifyDynamicPropNames(dynamicProps) : undefined, runtime.createArrayExpression(directiveArgs), shouldUseBlock, false, isComponent, node.loc);
           return;
@@ -5228,8 +5275,35 @@ const vue3CoreRuntime = (() => {
       shouldUseBlock: false,
     };
   };
-  runtime.buildDirectiveArgs = function buildDirectiveArgs(dir) {
-    return runtime.createArrayExpression([dir.name, dir.exp, dir.arg].filter(Boolean));
+  runtime.buildDirectiveArgs = function buildDirectiveArgs(dir, context) {
+    const elements = [];
+    if (dir && dir.__vuecNeedRuntime) {
+      if (typeof dir.__vuecNeedRuntime === 'symbol') {
+        elements.push(context ? context.helperString(dir.__vuecNeedRuntime) : `_${runtime.helperNameMap[dir.__vuecNeedRuntime]}`);
+      } else {
+        context.helper(runtime.RESOLVE_DIRECTIVE);
+        context.directives.add(dir.name);
+        elements.push(runtime.toValidAssetId(dir.name, 'directive'));
+      }
+    } else {
+      context.helper(runtime.RESOLVE_DIRECTIVE);
+      context.directives.add(dir.name);
+      elements.push(runtime.toValidAssetId(dir.name, 'directive'));
+    }
+    if (dir && dir.exp) elements.push(dir.exp);
+    if (dir && dir.arg) elements.push(dir.arg);
+    if (dir && dir.modifiers && dir.modifiers.length) {
+      elements.push(runtime.createSimpleExpression(
+        `{ ${dir.modifiers.map(modifier => {
+          const name = runtime.modifierName(modifier);
+          return runtime.isSimpleIdentifier(name) ? `${name}: true` : `${JSON.stringify(name)}: true`;
+        }).join(', ')} }`,
+        false,
+        dir.loc,
+        ConstantTypes.CAN_SKIP_PATCH,
+      ));
+    }
+    return runtime.createArrayExpression(elements);
   };
   runtime.buildSlots = function buildSlots() {
     return { slots: runtime.createObjectExpression([]), hasDynamicSlots: false };
@@ -5362,6 +5436,41 @@ function vue3TransformIfContextPayload(context) {
     identifiers: context.identifiers || {},
     bindingMetadata: context.bindingMetadata || {},
   };
+}
+
+function vue3TransformElementContextPayload(context) {
+  context = context || {};
+  return {
+    inSSR: !!context.inSSR,
+  };
+}
+
+function vue3ElementDirectivePropSummaries(dir, result, extra = {}) {
+  return ((result && result.props) || []).map(prop => {
+    const key = prop && prop.key;
+    const value = prop && prop.value;
+    return {
+      kind: 'directiveProp',
+      name: key && key.type === vue3CoreRuntime.NodeTypes.SIMPLE_EXPRESSION && key.isStatic ? key.content : undefined,
+      dynamicKey: !(key && key.type === vue3CoreRuntime.NodeTypes.SIMPLE_EXPRESSION && key.isStatic),
+      valueConstant: vue3ElementPropValueIsConstant(value),
+      valueCached: !!(value && value.type === vue3CoreRuntime.NodeTypes.JS_CACHE_EXPRESSION),
+      propModifier: !!extra.propModifier,
+      forceBlock: !!extra.forceBlock,
+    };
+  });
+}
+
+function vue3ElementPropValueIsConstant(value) {
+  if (!value) return false;
+  if (value.type === vue3CoreRuntime.NodeTypes.JS_CACHE_EXPRESSION) return true;
+  if (value.type === vue3CoreRuntime.NodeTypes.SIMPLE_EXPRESSION) {
+    return !!value.isStatic || Number(value.constType || 0) > 0;
+  }
+  if (value.type === vue3CoreRuntime.NodeTypes.COMPOUND_EXPRESSION) {
+    return Number(value.constType || 0) > 0;
+  }
+  return false;
 }
 
 function vue3IfSiblingPayload(siblings) {
