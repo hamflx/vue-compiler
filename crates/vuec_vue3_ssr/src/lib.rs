@@ -51,11 +51,15 @@ pub fn compile(source: TemplateSource, options: SsrCompilerOptions) -> SsrCompil
     let mut writer = CodeWriter::new();
     if options.scope_id.is_some() {
         writer.push_line("const { mergeProps: _mergeProps } = require(\"vue\")");
-        writer.push_line("const { ssrRenderAttrs: _ssrRenderAttrs } = require(\"vue/server-renderer\")");
+        writer.push_line(
+            "const { ssrRenderAttrs: _ssrRenderAttrs } = require(\"vue/server-renderer\")",
+        );
         writer.push_line("");
     }
     if has_slot {
-        writer.push_line("const { ssrRenderSlot: _ssrRenderSlot } = require(\"vue/server-renderer\")");
+        writer.push_line(
+            "const { ssrRenderSlot: _ssrRenderSlot } = require(\"vue/server-renderer\")",
+        );
         writer.push_line("");
     }
     writer.push_line("function ssrRender(_ctx, _push, _parent, _attrs) {");
@@ -68,7 +72,9 @@ pub fn compile(source: TemplateSource, options: SsrCompilerOptions) -> SsrCompil
                 self_closing,
             } => {
                 if tag == "slot" && has_slot {
-                    writer.push_line("_ssrRenderSlot(_ctx.$slots, \"default\", {}, null, _push, _parent);");
+                    writer.push_line(
+                        "_ssrRenderSlot(_ctx.$slots, \"default\", {}, null, _push, _parent);",
+                    );
                 } else if options.scope_id.is_some() {
                     let rendered = render_start_tag(tag, attributes, *self_closing, &options);
                     writer.push_line(&format!(

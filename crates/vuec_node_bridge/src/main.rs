@@ -178,11 +178,9 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
             let filename = string_field_or(&payload, "filename", "anonymous.vue");
             let compiler = SfcCompiler::new();
             let options = sfc_template_options(payload.get("options"));
-            Ok(serde_json::to_value(compiler.compile_template_source(
-                filename,
-                &source,
-                options,
-            ))?)
+            Ok(serde_json::to_value(
+                compiler.compile_template_source(filename, &source, options),
+            )?)
         }
         "sfc.compileScript" => {
             let source = string_field(&payload, "source");

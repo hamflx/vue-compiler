@@ -3,8 +3,8 @@
 use serde::{Deserialize, Serialize};
 use vuec_ast::{NodeId, TemplateAttribute, Vue3Ast, Vue3NodeKind};
 use vuec_diagnostics::{Diagnostic, Severity};
-use vuec_vue3_core::{CodegenResult, TemplateSource, Vue3CompilerOptions, Vue3Dialect};
 use vuec_pass::TransformContext;
+use vuec_vue3_core::{CodegenResult, TemplateSource, Vue3CompilerOptions, Vue3Dialect};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DomCompilerOptions {

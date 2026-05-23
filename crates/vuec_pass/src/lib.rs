@@ -31,8 +31,20 @@ pub trait TransformPass<N> {
 
 pub trait DocumentPass<K> {
     fn name(&self) -> &'static str;
-    fn enter(&mut self, _doc: &mut vuec_ast::AstDocument<K>, _node: vuec_ast::NodeId, _ctx: &mut TransformContext) {}
-    fn exit(&mut self, _doc: &mut vuec_ast::AstDocument<K>, _node: vuec_ast::NodeId, _ctx: &mut TransformContext) {}
+    fn enter(
+        &mut self,
+        _doc: &mut vuec_ast::AstDocument<K>,
+        _node: vuec_ast::NodeId,
+        _ctx: &mut TransformContext,
+    ) {
+    }
+    fn exit(
+        &mut self,
+        _doc: &mut vuec_ast::AstDocument<K>,
+        _node: vuec_ast::NodeId,
+        _ctx: &mut TransformContext,
+    ) {
+    }
 }
 
 pub struct PassScheduler<N> {
@@ -71,8 +83,7 @@ pub fn walk_document<K, P>(
     doc: &mut vuec_ast::AstDocument<K>,
     pass: &mut P,
     ctx: &mut TransformContext,
-)
-where
+) where
     P: DocumentPass<K>,
 {
     if let Some(root) = doc.root {
@@ -85,8 +96,7 @@ fn walk_document_node<K, P>(
     pass: &mut P,
     ctx: &mut TransformContext,
     node: vuec_ast::NodeId,
-)
-where
+) where
     P: DocumentPass<K>,
 {
     pass.enter(doc, node, ctx);

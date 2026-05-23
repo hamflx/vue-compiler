@@ -202,7 +202,9 @@ impl SourceMapArtifact {
             .map(|name| builder.add_name(name))
             .collect::<Vec<_>>();
         for segment in segments {
-            let name_id = segment.name_index.and_then(|index| name_ids.get(index).copied());
+            let name_id = segment
+                .name_index
+                .and_then(|index| name_ids.get(index).copied());
             builder.add_token(
                 segment.generated_line,
                 segment.generated_column,

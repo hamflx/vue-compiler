@@ -1,10 +1,10 @@
 #![forbid(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
-use vuec_js::JsAstStore;
 use serde_json::json;
 use vuec_codegen::SourceMapArtifact;
-use vuec_source::{FileId, SourceMap};
+use vuec_js::{JsAstStore, JsParseMode};
+use vuec_source::{FileId, SourceMap, Span};
 use vuec_style::{compile_style, StyleCompileOptions};
 use vuec_vue3_core::{TemplateSource, Vue3CompilerOptions};
 use vuec_vue3_dom::{compile as compile_dom, DomCompilerOptions};
@@ -137,14 +137,22 @@ pub struct SfcPosition {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SfcScriptBlock {
+    #[serde(rename = "type")]
+    pub type_name: String,
     pub content: String,
-    pub bindings: Vec<String>,
-    pub errors: Vec<String>,
     pub loc: Option<SfcBlockLocation>,
     pub attrs: SfcBlockAttrs,
+    pub setup: bool,
+    pub lang: Option<String>,
+    pub bindings: Vec<String>,
+    pub imports: Vec<String>,
+    pub errors: Vec<String>,
     pub map: Option<SourceMapArtifact>,
+    #[serde(rename = "scriptAst")]
     pub script_ast: Vec<String>,
-    pub type_name: String,
+    #[serde(rename = "scriptSetupAst")]
+    pub script_setup_ast: Vec<String>,
+    pub deps: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -370,27 +378,48 @@ impl SfcCompiler {
     }
 
     pub fn compile_script(
-        &self,
+        &mut self,
         descriptor: &SfcDescriptor,
         _options: SfcScriptCompileOptions,
     ) -> SfcScriptBlock {
         let mut content = String::new();
         let mut bindings = Vec::new();
+        let mut script_ast = Vec::new();
+        let mut script_setup_ast = Vec::new();
+        let source_type = script_source_type(descriptor);
         if let Some(script) = descriptor.script.as_ref() {
             content.push_str(&script.content);
+            let id = self.js.register_program(
+                script.content.clone(),
+                Span::new(descriptor.source_file, script.loc.start, script.loc.end),
+                script_mode(&script.attrs),
+                source_type,
+            );
+            script_ast.push(format!("JsProgramId({})", id.0));
         }
         if let Some(script_setup) = descriptor.script_setup.as_ref() {
             if !content.is_empty() {
                 content.push('\n');
             }
             content.push_str(&script_setup.content);
+            let id = self.js.register_program(
+                script_setup.content.clone(),
+                Span::new(
+                    descriptor.source_file,
+                    script_setup.loc.start,
+                    script_setup.loc.end,
+                ),
+                script_mode(&script_setup.attrs),
+                source_type,
+            );
+            script_setup_ast.push(format!("JsProgramId({})", id.0));
         }
-        let source_type = script_source_type(descriptor);
         let summary = self.js.summarize_program(&content, source_type);
         bindings.extend(summary.bindings);
+        let imports = summary.imports;
         bindings.extend(
-            summary
-                .imports
+            imports
+                .iter()
                 .into_iter()
                 .map(|import| format!("import:{import}")),
         );
@@ -400,24 +429,34 @@ impl SfcCompiler {
                 .into_iter()
                 .map(|export| format!("export:{export}")),
         );
+        let attrs = descriptor
+            .script
+            .as_ref()
+            .or(descriptor.script_setup.as_ref())
+            .map(|block| block.attrs.clone())
+            .unwrap_or_default();
         SfcScriptBlock {
+            type_name: "script".into(),
             content,
-            bindings,
-            errors: summary.errors,
             loc: descriptor
                 .script
                 .as_ref()
                 .or(descriptor.script_setup.as_ref())
                 .map(|block| block.loc.clone()),
-            attrs: descriptor
-                .script
+            attrs,
+            setup: descriptor.script_setup.is_some(),
+            lang: descriptor
+                .script_setup
                 .as_ref()
-                .or(descriptor.script_setup.as_ref())
-                .map(|block| block.attrs.clone())
-                .unwrap_or_default(),
+                .or(descriptor.script.as_ref())
+                .and_then(|block| block.attrs.lang.clone()),
+            bindings,
+            imports,
+            errors: summary.errors,
             map: None,
-            script_ast: Vec::new(),
-            type_name: "script".into(),
+            script_ast,
+            script_setup_ast,
+            deps: Vec::new(),
         }
     }
 
@@ -620,8 +659,17 @@ fn script_source_type(descriptor: &SfcDescriptor) -> oxc_span::SourceType {
         .or(descriptor.script.as_ref())
         .and_then(|block| block.attrs.lang.as_deref());
     match lang {
-        Some("ts" | "tsx") => oxc_span::SourceType::ts(),
+        Some("tsx") => oxc_span::SourceType::tsx(),
+        Some("ts") => oxc_span::SourceType::ts(),
         _ => oxc_span::SourceType::mjs(),
+    }
+}
+
+fn script_mode(attrs: &SfcBlockAttrs) -> JsParseMode {
+    if matches!(attrs.lang.as_deref(), Some("ts" | "tsx")) {
+        JsParseMode::TypeScript
+    } else {
+        JsParseMode::ScriptModule
     }
 }
 
@@ -644,12 +692,26 @@ mod tests {
     #[test]
     fn compile_wrappers_return_shapes() {
         let mut compiler = SfcCompiler::new();
-        let descriptor = compiler.parse("foo.vue", r#"<template><div/></template>"#);
+        let descriptor = compiler.parse(
+            "foo.vue",
+            r#"<template><div/></template><script>export default {}</script><script setup lang="ts">const x = 1</script>"#,
+        );
         let template = compiler.compile_template(&descriptor, SfcTemplateCompileOptions::default());
         assert!(template.code.contains("render"));
         assert!(template.ast_summary.starts_with("dom:"));
         let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
         assert_eq!(script.errors.len(), 0);
+        assert!(script.setup);
+        assert_eq!(script.lang.as_deref(), Some("ts"));
+        assert_eq!(script.script_ast, vec!["JsProgramId(0)"]);
+        assert_eq!(script.script_setup_ast, vec!["JsProgramId(1)"]);
+        let script_json = serde_json::to_value(&script).expect("script json");
+        assert!(script_json.get("scriptAst").is_some());
+        assert!(script_json.get("scriptSetupAst").is_some());
+        assert_eq!(
+            script_json.get("type").and_then(|value| value.as_str()),
+            Some("script")
+        );
         let style = compiler.compile_style(&descriptor, SfcStyleCompileOptions::default());
         assert!(style.errors.is_empty());
     }

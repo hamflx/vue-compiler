@@ -72,15 +72,13 @@ impl Vue3Dialect {
         for token in tokens {
             let current_parent = *stack.last().unwrap_or(&root);
             match token.kind {
-                HtmlTokenKind::Text(text) => {
-                    push_text_and_interpolations(
-                        &mut ast,
-                        current_parent,
-                        source.file_id,
-                        source.base_offset + token.start,
-                        &text,
-                    )
-                }
+                HtmlTokenKind::Text(text) => push_text_and_interpolations(
+                    &mut ast,
+                    current_parent,
+                    source.file_id,
+                    source.base_offset + token.start,
+                    &text,
+                ),
                 HtmlTokenKind::Comment(value) => {
                     let _id = ast.push_child(
                         current_parent,
@@ -174,7 +172,9 @@ impl Vue3Dialect {
                                 Vue3NodeKind::Text { .. } | Vue3NodeKind::Interpolation { .. } => {
                                     has_text = true;
                                 }
-                                Vue3NodeKind::Comment { .. } | Vue3NodeKind::Directive { .. } | Vue3NodeKind::Root => {}
+                                Vue3NodeKind::Comment { .. }
+                                | Vue3NodeKind::Directive { .. }
+                                | Vue3NodeKind::Root => {}
                             }
                         }
                     }
@@ -219,10 +219,8 @@ impl Vue3Dialect {
                     writer.push_line("export function render(_ctx, _cache) {");
                 } else if options.prefix_identifiers {
                     if !helpers.is_empty() {
-                        writer.push_line(&format!(
-                            "const {{ {} }} = Vue",
-                            helper_aliases(&helpers)
-                        ));
+                        writer
+                            .push_line(&format!("const {{ {} }} = Vue", helper_aliases(&helpers)));
                         writer.newline();
                     }
                     writer.push_line("return function render(_ctx, _cache) {");
@@ -238,10 +236,8 @@ impl Vue3Dialect {
                     writer.push_line("with (_ctx) {");
                     writer.indent();
                     if !helpers.is_empty() {
-                        writer.push_line(&format!(
-                            "const {{ {} }} = _Vue",
-                            helper_aliases(&helpers)
-                        ));
+                        writer
+                            .push_line(&format!("const {{ {} }} = _Vue", helper_aliases(&helpers)));
                         writer.newline();
                     }
                 }
@@ -441,7 +437,10 @@ fn collect_node_source_map(
         Vue3NodeKind::Interpolation { .. } => {
             add_interpolation_mapping(code, node, base_offset, source, names, segments, cursor);
         }
-        Vue3NodeKind::Root | Vue3NodeKind::Text { .. } | Vue3NodeKind::Comment { .. } | Vue3NodeKind::Directive { .. } => {}
+        Vue3NodeKind::Root
+        | Vue3NodeKind::Text { .. }
+        | Vue3NodeKind::Comment { .. }
+        | Vue3NodeKind::Directive { .. } => {}
     }
 }
 
@@ -622,7 +621,10 @@ fn render_node_expr(
         Vue3NodeKind::Root => render_children_array(ast, &node.children, options, true),
         Vue3NodeKind::Text { value } => quote_text(value),
         Vue3NodeKind::Interpolation { expression } => {
-            format!("_toDisplayString({})", render_expression(expression, options))
+            format!(
+                "_toDisplayString({})",
+                render_expression(expression, options)
+            )
         }
         Vue3NodeKind::Comment { value } => format!("/*{}*/", value),
         Vue3NodeKind::Directive { .. } => "null".into(),
@@ -643,7 +645,11 @@ fn render_node_expr(
             } else {
                 ""
             };
-            let attrs = if props.is_empty() { "null".into() } else { props };
+            let attrs = if props.is_empty() {
+                "null".into()
+            } else {
+                props
+            };
             let children_arg = if children.is_empty() {
                 String::new()
             } else if is_root && tag == "template" && children.starts_with('[') {
@@ -722,7 +728,11 @@ fn has_dynamic_children(ast: &Vue3Ast, children: &[vuec_ast::NodeId]) -> bool {
 fn render_props(attributes: &[TemplateAttribute], _options: &Vue3CompilerOptions) -> String {
     let props = attributes
         .iter()
-        .filter(|attr| !attr.name.starts_with("v-") && !attr.name.starts_with('@') && !attr.name.starts_with(':'))
+        .filter(|attr| {
+            !attr.name.starts_with("v-")
+                && !attr.name.starts_with('@')
+                && !attr.name.starts_with(':')
+        })
         .map(|attr| match &attr.value {
             Some(value) => format!("{}: {}", json_key(&attr.name), quote_string(value)),
             None => format!("{}: true", json_key(&attr.name)),
@@ -740,7 +750,10 @@ fn render_expression(expression: &str, options: &Vue3CompilerOptions) -> String 
     if !options.prefix_identifiers {
         return expression.to_string();
     }
-    if expression.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$' || ch == '.') {
+    if expression
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$' || ch == '.')
+    {
         format!("_ctx.{expression}")
     } else {
         expression.to_string()
@@ -752,7 +765,10 @@ fn quote_string(value: &str) -> String {
 }
 
 fn json_key(key: &str) -> String {
-    if key.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$') {
+    if key
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$')
+    {
         key.to_string()
     } else {
         quote_string(key)

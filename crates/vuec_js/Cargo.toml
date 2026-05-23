@@ -13,3 +13,5 @@ oxc_parser.workspace = true
 oxc_span.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+vuec_ast = { path = "../vuec_ast" }
+vuec_source = { path = "../vuec_source" }

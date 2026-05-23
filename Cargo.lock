@@ -920,6 +920,8 @@ dependencies = [
  "oxc_span",
  "serde",
  "thiserror",
+ "vuec_ast",
+ "vuec_source",
 ]
 
 [[package]]

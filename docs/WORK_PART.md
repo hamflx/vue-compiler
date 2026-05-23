@@ -18,6 +18,10 @@
 
 ## Completed This Round
 
+- Implemented the first `vuec_js::JsAstStore` registry layer with `JsEntry`, `JsSourceType`, `JsExprId` / `JsStmtId` / `JsPatternId` / `JsProgramId` allocation, lookup, and parse-by-id APIs, while keeping the direct Oxc parse wrappers available for existing call sites.
+- Added registry tests for expression, statement, pattern, and program ids, including stable source/span/mode/source-type metadata.
+- Updated `vuec_sfc::compile_script` to register `<script>` and `<script setup>` as JS programs and emit official-style `type`, `setup`, `lang`, `imports`, `scriptAst`, `scriptSetupAst`, and `deps` fields.
+- Verification this round: `cargo test -p vuec_js`, `cargo test -p vuec_sfc`, and `cargo check -p vuec_js -p vuec_sfc -p vuec_vue2 -p vuec_node_bridge`.
 - Updated the development plan to align with `docs/3.AST_HIR_MIR_DESIGN.md` as the authoritative AST/IR contract and tightened the deterministic acceptance language around AST projections, lowering maps, and MIR targets.
 - Upgraded `compat/options/*` from category-only placeholders to schema v2 option case matrices. Each row now records option path, accepted types, missing/undefined/null behavior notes, affected output fields, fixture source, input kind, method, execution mode, and status.
 - Replaced `run-option-matrix` scaffold output with a real Node probe that loads the pinned official npm package and the generated Rust alias package for the same target, runs each executable option row, compares affected fields, and writes `target/conformance/<lock-hash>/option-matrix.json`.
