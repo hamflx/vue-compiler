@@ -6605,6 +6605,7 @@ pub fn run_conformance(args: &ConformanceArgs) -> JsonReport {
             .as_ref()
             .map(|result| result.status.as_str())
             .unwrap_or(if ready_to_execute { "ready" } else { "blocked" });
+        let coverage = conformance_coverage_report(spec, execution_result.as_ref());
         let report_path = PathBuf::from("target")
             .join("conformance")
             .join(lock_hash.as_deref().unwrap_or("unknown-lock"))
@@ -6615,6 +6616,7 @@ pub fn run_conformance(args: &ConformanceArgs) -> JsonReport {
             "lock_hash": lock_hash,
             "test_files": discovered,
             "counts": counts,
+            "coverage": coverage,
             "execution": execution_status,
             "execution_result": execution_result,
             "readiness": readiness,
@@ -7320,6 +7322,42 @@ struct ConformanceExecutionCounts {
     pending: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum ConformanceCoverageKind {
+    RustBacked,
+    ShimBacked,
+    Mixed,
+}
+
+impl ConformanceCoverageKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            ConformanceCoverageKind::RustBacked => "rust-backed",
+            ConformanceCoverageKind::ShimBacked => "shim-backed",
+            ConformanceCoverageKind::Mixed => "mixed",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ConformanceCoverageReport {
+    source: ConformanceCoverageKind,
+    reason: String,
+    counts_by_source: BTreeMap<String, ConformanceExecutionCounts>,
+    rust_backed_pass: usize,
+    rust_backed_total: usize,
+    files: Vec<ConformanceCoverageFile>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ConformanceCoverageFile {
+    path: String,
+    source: ConformanceCoverageKind,
+    reason: String,
+    counts: ConformanceExecutionCounts,
+}
+
 fn run_conformance_smokes(spec: ConformanceSuiteSpec) -> Vec<ConformanceSmokeResult> {
     conformance_smoke_targets(spec)
         .into_iter()
@@ -7679,6 +7717,126 @@ fn read_vitest_counts(path: &Path) -> Result<ConformanceExecutionCounts> {
         skip,
         pending,
     })
+}
+
+fn conformance_coverage_report(
+    spec: ConformanceSuiteSpec,
+    execution: Option<&ConformanceExecutionResult>,
+) -> ConformanceCoverageReport {
+    let source = conformance_coverage_kind(spec);
+    let reason = conformance_coverage_reason(spec).to_string();
+    let counts = execution.map(|result| result.counts).unwrap_or_default();
+    let mut counts_by_source = BTreeMap::new();
+    counts_by_source.insert(
+        ConformanceCoverageKind::RustBacked.as_str().to_string(),
+        if source == ConformanceCoverageKind::RustBacked {
+            counts
+        } else {
+            ConformanceExecutionCounts::default()
+        },
+    );
+    counts_by_source.insert(
+        ConformanceCoverageKind::ShimBacked.as_str().to_string(),
+        if source == ConformanceCoverageKind::ShimBacked {
+            counts
+        } else {
+            ConformanceExecutionCounts::default()
+        },
+    );
+    counts_by_source.insert(
+        ConformanceCoverageKind::Mixed.as_str().to_string(),
+        if source == ConformanceCoverageKind::Mixed {
+            counts
+        } else {
+            ConformanceExecutionCounts::default()
+        },
+    );
+    let files = execution
+        .and_then(|result| conformance_coverage_files(result, source, &reason).ok())
+        .unwrap_or_default();
+    let rust_backed = counts_by_source
+        .get(ConformanceCoverageKind::RustBacked.as_str())
+        .copied()
+        .unwrap_or_default();
+    ConformanceCoverageReport {
+        source,
+        reason,
+        counts_by_source,
+        rust_backed_pass: rust_backed.pass,
+        rust_backed_total: rust_backed.total,
+        files,
+    }
+}
+
+fn conformance_coverage_kind(spec: ConformanceSuiteSpec) -> ConformanceCoverageKind {
+    match spec.name {
+        "vue3-core" => ConformanceCoverageKind::Mixed,
+        _ => ConformanceCoverageKind::RustBacked,
+    }
+}
+
+fn conformance_coverage_reason(spec: ConformanceSuiteSpec) -> &'static str {
+    match spec.name {
+        "vue3-core" => {
+            "Vue 3 compiler-core official tests run through generated import shims and the @vue/compiler-core alias runtime; public APIs call the Rust bridge, while many internal transform/codegen imports still execute JavaScript compatibility semantics in xtask/src/compat.rs."
+        }
+        _ => {
+            "Suite is routed through Rust alias package smoke/output paths; full official runner wiring may still be pending."
+        }
+    }
+}
+
+fn conformance_coverage_files(
+    execution: &ConformanceExecutionResult,
+    source: ConformanceCoverageKind,
+    reason: &str,
+) -> Result<Vec<ConformanceCoverageFile>> {
+    let output_file = PathBuf::from(&execution.output_file);
+    let value = read_json::<serde_json::Value>(&output_file)?;
+    let mut files = Vec::new();
+    if let Some(results) = value.get("testResults").and_then(|value| value.as_array()) {
+        for result in results {
+            let path = result
+                .get("name")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .replace('\\', "/");
+            let counts = vitest_test_result_counts(result);
+            files.push(ConformanceCoverageFile {
+                path,
+                source,
+                reason: reason.to_string(),
+                counts,
+            });
+        }
+    }
+    Ok(files)
+}
+
+fn vitest_test_result_counts(result: &serde_json::Value) -> ConformanceExecutionCounts {
+    let mut counts = ConformanceExecutionCounts::default();
+    if let Some(assertions) = result
+        .get("assertionResults")
+        .and_then(|value| value.as_array())
+    {
+        counts.total = assertions.len();
+        for assertion in assertions {
+            match assertion
+                .get("status")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+            {
+                "passed" => counts.pass += 1,
+                "failed" => counts.fail += 1,
+                "pending" | "todo" | "skipped" => counts.skip += 1,
+                _ => counts.pending += 1,
+            }
+        }
+    }
+    counts.pending = counts
+        .total
+        .saturating_sub(counts.pass + counts.fail + counts.skip);
+    counts
 }
 
 fn conformance_targets(suites: &[ConformanceSuite]) -> Vec<TargetSpec> {
@@ -8172,6 +8330,43 @@ mod tests {
             conformance_item_detail(20, &readiness, Some(&execution)),
             "9/618 official tests passed, 609 failed, 0 skipped, 0 pending"
         );
+    }
+
+    #[test]
+    fn vue3_core_coverage_report_marks_mixed_and_excludes_rust_backed_counts() {
+        let execution = ConformanceExecutionResult {
+            status: "failed".into(),
+            runner: "vitest".into(),
+            prepared_root: "prepared".into(),
+            output_file: "missing-report.json".into(),
+            exit_code: Some(1),
+            stdout: String::new(),
+            stderr: String::new(),
+            counts: ConformanceExecutionCounts {
+                total: 652,
+                pass: 331,
+                fail: 321,
+                skip: 0,
+                pending: 0,
+            },
+        };
+
+        let coverage =
+            conformance_coverage_report(suite_spec(ConformanceSuite::Vue3Core), Some(&execution));
+
+        assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
+        assert_eq!(coverage.rust_backed_pass, 0);
+        assert_eq!(coverage.rust_backed_total, 0);
+        assert_eq!(
+            coverage
+                .counts_by_source
+                .get("mixed")
+                .copied()
+                .unwrap_or_default()
+                .pass,
+            331
+        );
+        assert!(coverage.reason.contains("xtask/src/compat.rs"));
     }
 
     #[test]

@@ -23,10 +23,16 @@
 - [x] Vue 3 compiler-core alias-runtime `v-once` slice for `vOnce.spec.ts`.
 - [x] Vue 3 compiler-core alias-runtime slot outlet slice for `transformSlotOutlet.spec.ts`.
 - [x] Vue 3 compiler-core alias-runtime `v-bind` slice for `vBind.spec.ts`.
-- [ ] Classify Vue 3 compiler-core conformance coverage as `rust-backed`, `shim-backed`, or `mixed` in reports.
+- [x] Classify Vue 3 compiler-core conformance coverage as `rust-backed`, `shim-backed`, or `mixed` in reports.
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Implemented machine-readable coverage classification in `cargo xtask run-conformance` reports. Each suite report now includes `coverage.source`, `coverage.counts_by_source`, `rust_backed_pass`, `rust_backed_total`, and per-test-file coverage entries when the runner emits a Vitest report.
+- Classified the current Vue 3 compiler-core official suite as `mixed` because the prepared suite combines Rust-backed public bridge calls with generated import shims and JavaScript alias-runtime compiler-core semantics in `xtask/src/compat.rs`.
+- Re-ran `cargo xtask run-conformance --suite vue3-core`; the suite still intentionally fails at `331/652`, and the generated `vue3-core.json` records `mixed.pass=331`, `mixed.fail=321`, `rust-backed.pass=0`, and 20 file-level coverage entries.
+- Added an `xtask` regression test locking the `vue3-core` coverage classification so mixed conformance counts cannot be silently reported as Rust-backed progress.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p xtask`, `cargo test -p xtask`, and `cargo xtask run-conformance --suite vue3-core` (expected fail with `331/652` pass, `321` fail, coverage source `mixed`).
 
 - Adjusted the project acceptance wording after reviewing recent Vue 3 core conformance progress: focused specs that pass through `xtask/src/compat.rs` JavaScript alias runtime are now treated as alias-runtime slices, not Rust compiler parity.
 - New reporting rule: Vue 3 compiler-core conformance must distinguish `rust-backed`, `shim-backed`, and `mixed` coverage before pass counts can be used as Rust implementation progress.
