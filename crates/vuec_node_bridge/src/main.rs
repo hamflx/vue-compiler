@@ -832,7 +832,7 @@ fn collect_html_parse_error_diagnostics(
                     &attributes,
                     diagnostics,
                 );
-                if incomplete {
+                if incomplete && token.end == source.len() {
                     diagnostics.push(vue3_error_value(
                         9,
                         vue3_source_loc_value(source, source.len(), source.len()),
@@ -841,8 +841,8 @@ fn collect_html_parse_error_diagnostics(
                     stack.push(name);
                 }
             }
-            HtmlTokenKind::EndTag { .. } => {
-                if tag_token_is_incomplete(source, token.start, token.end) {
+            HtmlTokenKind::EndTag { name } => {
+                if !name.is_empty() && tag_token_is_incomplete(source, token.start, token.end) {
                     diagnostics.push(vue3_error_value(
                         9,
                         vue3_source_loc_value(source, source.len(), source.len()),
@@ -889,6 +889,10 @@ fn tag_token_is_incomplete(source: &str, start: usize, end: usize) -> bool {
     source
         .get(start..end)
         .is_some_and(|slice| !slice.ends_with('>'))
+}
+
+fn tag_token_is_incomplete_at_eof(source: &str, start: usize, end: usize) -> bool {
+    end == source.len() && tag_token_is_incomplete(source, start, end)
 }
 
 fn collect_missing_end_tag_name_diagnostics(source: &str, diagnostics: &mut Vec<Value>) {
@@ -1217,7 +1221,7 @@ fn collect_invalid_end_tag_diagnostics(
                 let in_v_pre = v_pre_depth > 0 || starts_v_pre;
                 if !self_closing
                     && !vue3_is_void_tag(options, &name)
-                    && !tag_token_is_incomplete(source, token.start, token.end)
+                    && !tag_token_is_incomplete_at_eof(source, token.start, token.end)
                 {
                     stack.push(OpenElement {
                         name,

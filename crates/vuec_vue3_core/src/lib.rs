@@ -98,6 +98,7 @@ impl Vue3Dialect {
         let root = ast.root;
         let mut stack = vec![root];
         let mut v_pre_depth = 0usize;
+        let mut malformed_start_depth = 0usize;
         let mut tokenizer = if let Some([open, close]) = &options.delimiters {
             HtmlTokenizer::new(&source.source).with_interpolation_delimiters(open, close)
         } else {
@@ -116,6 +117,14 @@ impl Vue3Dialect {
             let current_parent = *stack.last().unwrap_or(&root);
             match token.kind {
                 HtmlTokenKind::Text(text) => {
+                    if malformed_start_depth > 0 {
+                        extend_open_element_spans_to(
+                            &mut ast,
+                            &stack,
+                            source.base_offset + token.end,
+                        );
+                        continue;
+                    }
                     if v_pre_depth > 0 {
                         push_text(
                             &mut ast,
@@ -136,6 +145,7 @@ impl Vue3Dialect {
                     }
                 }
                 HtmlTokenKind::Comment(value) => {
+                    extend_open_element_spans_to(&mut ast, &stack, source.base_offset + token.end);
                     if !options.comments {
                         continue;
                     }
@@ -154,6 +164,27 @@ impl Vue3Dialect {
                     attributes,
                     self_closing,
                 } => {
+                    let incomplete =
+                        vue3_start_tag_is_incomplete(&source.source, token.start, token.end);
+                    if incomplete
+                        && token.end == source.source.len()
+                        && !stack_is_root_only(&stack, root)
+                    {
+                        malformed_start_depth += 1;
+                        push_incomplete_start_tag_recovery_text(
+                            &mut ast,
+                            current_parent,
+                            &source,
+                            token.start,
+                            token.end,
+                        );
+                        extend_open_element_spans_to(
+                            &mut ast,
+                            &stack,
+                            source.base_offset + token.end,
+                        );
+                        continue;
+                    }
                     let is_void = options.void_tags.iter().any(|candidate| candidate == &name);
                     let starts_v_pre =
                         v_pre_depth == 0 && attributes.iter().any(|attr| attr.name == "v-pre");
@@ -183,6 +214,30 @@ impl Vue3Dialect {
                     }
                 }
                 HtmlTokenKind::EndTag { name } => {
+                    if name.is_empty() {
+                        push_text(
+                            &mut ast,
+                            current_parent,
+                            source.file_id,
+                            source.base_offset + token.start,
+                            &source.source[token.start..token.end],
+                        );
+                        extend_open_element_spans_to(
+                            &mut ast,
+                            &stack,
+                            source.base_offset + token.end,
+                        );
+                        continue;
+                    }
+                    if malformed_start_depth > 0 {
+                        malformed_start_depth -= 1;
+                        extend_open_element_spans_to(
+                            &mut ast,
+                            &stack,
+                            source.base_offset + token.end,
+                        );
+                        continue;
+                    }
                     while stack.len() > 1 {
                         let Some(node_id) = stack.pop() else {
                             break;
@@ -213,6 +268,7 @@ impl Vue3Dialect {
                     }
                 }
                 HtmlTokenKind::Cdata(text) => {
+                    extend_open_element_spans_to(&mut ast, &stack, source.base_offset + token.end);
                     if v_pre_depth > 0 {
                         push_text(
                             &mut ast,
@@ -235,6 +291,11 @@ impl Vue3Dialect {
                 HtmlTokenKind::Doctype(_) | HtmlTokenKind::Eof => {}
             }
             if eof {
+                extend_open_element_spans_to(
+                    &mut ast,
+                    &stack,
+                    source.base_offset + source.source.len(),
+                );
                 break;
             }
         }
@@ -790,6 +851,62 @@ fn directive_modifier_spans(
         }
     }
     spans
+}
+
+fn vue3_start_tag_is_incomplete(source: &str, start: usize, end: usize) -> bool {
+    source
+        .get(start..end)
+        .is_some_and(|slice| !slice.ends_with('>'))
+}
+
+fn stack_is_root_only(stack: &[vuec_ast::NodeId], root: vuec_ast::NodeId) -> bool {
+    stack.len() == 1 && stack.first().copied() == Some(root)
+}
+
+fn push_incomplete_start_tag_recovery_text(
+    ast: &mut Vue3Ast,
+    parent: vuec_ast::NodeId,
+    source: &TemplateSource,
+    token_start: usize,
+    token_end: usize,
+) {
+    let Some(slice) = source.source.get(token_start..token_end) else {
+        return;
+    };
+    let Some(local_start) = incomplete_start_tag_recovery_text_start(slice) else {
+        return;
+    };
+    push_text(
+        ast,
+        parent,
+        source.file_id,
+        source.base_offset + token_start + local_start,
+        &slice[local_start..],
+    );
+}
+
+fn incomplete_start_tag_recovery_text_start(slice: &str) -> Option<usize> {
+    slice.rfind('/').filter(|index| {
+        slice
+            .get(index + 1..)
+            .is_some_and(|tail| tail.chars().all(char::is_whitespace))
+    })
+}
+
+fn extend_open_element_spans_to(ast: &mut Vue3Ast, stack: &[vuec_ast::NodeId], end: usize) {
+    for node_id in stack.iter().copied().skip(1) {
+        let Some(node) = ast.node_mut(node_id) else {
+            continue;
+        };
+        if !matches!(node.kind, Vue3AstKind::Element(_)) {
+            continue;
+        }
+        if let Some(span) = node.span.source_mut() {
+            if span.end.0 < end {
+                span.end = vuec_source::BytePos(end);
+            }
+        }
+    }
 }
 
 fn normalize_vue3_parse_text(ast: &mut Vue3Ast, options: &Vue3CompilerOptions) {
@@ -3168,6 +3285,59 @@ mod tests {
         assert!(matches!(
             &ast.node(span.children[0]).expect("span text").kind,
             Vue3AstKind::Text(text) if text.value == " foo bar"
+        ));
+    }
+
+    #[test]
+    fn base_parse_extends_open_element_spans_to_eof() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: "<template><div>".into(),
+            file_id: FileId(0),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let root = ast.root_node().expect("root");
+        let template = ast.node(root.children[0]).expect("template");
+        let div = ast.node(template.children[0]).expect("div");
+        assert_eq!(template.span.source(), Some(Span::new(FileId(0), 0, 15)));
+        assert_eq!(div.span.source(), Some(Span::new(FileId(0), 10, 15)));
+    }
+
+    #[test]
+    fn base_parse_recovers_from_incomplete_child_start_tag_at_eof() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: "<template><div id=abc /".into(),
+            file_id: FileId(0),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let root = ast.root_node().expect("root");
+        let template = ast.node(root.children[0]).expect("template");
+        assert_eq!(template.span.source(), Some(Span::new(FileId(0), 0, 23)));
+        assert_eq!(template.children.len(), 1);
+        assert!(matches!(
+            &ast.node(template.children[0]).expect("recovered text").kind,
+            Vue3AstKind::Text(text) if text.value == "/"
+        ));
+    }
+
+    #[test]
+    fn base_parse_treats_empty_incomplete_end_tag_as_text() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: "<template></".into(),
+            file_id: FileId(0),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let root = ast.root_node().expect("root");
+        let template = ast.node(root.children[0]).expect("template");
+        assert_eq!(template.span.source(), Some(Span::new(FileId(0), 0, 12)));
+        assert!(matches!(
+            &ast.node(template.children[0]).expect("end tag text").kind,
+            Vue3AstKind::Text(text) if text.value == "</"
         ));
     }
 }

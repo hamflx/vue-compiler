@@ -30,6 +30,12 @@
 
 ## Completed This Round
 
+- Tightened the Rust-backed Vue 3 parser EOF/error-recovery behavior for official `compiler-core/__tests__/parse.spec.ts`.
+- `vuec_vue3_core::base_parse` now extends open element spans to EOF, treats `</` as text when the end tag name is missing, suppresses EOF-interrupted child start tags from becoming real AST elements, and preserves recoverable trailing `/` text for incomplete start tags.
+- `vuec_node_bridge` now reports EOF_IN_TAG only for true EOF-at-tag cases, while incomplete start tags interrupted by a later end tag continue through the missing-end-tag diagnostic path used by the official IDE recovery case.
+- Full Vue 3 core conformance is still intentionally failing: `380/652` official tests pass and `272` fail. `parse.spec.ts` is now `129/151` passing; remaining parser failures are concentrated in CDATA/raw-text/error-snapshot exactness plus the `decodeEntities` warning matcher setup gap.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_vue3_core -p vuec_html -p vuec_node_bridge`, `git diff --check`, direct official-vs-Rust alias smoke comparisons for EOF and IDE recovery inputs, and `cargo xtask run-conformance --suite vue3-core` (expected fail with `380/652` pass, `272` fail).
+
 - Extended the Rust-backed Vue 3 parser option/recovery slice for official `compiler-core/__tests__/parse.spec.ts`.
 - `vuec_node_bridge` now parses Vue 3 `whitespace`, `__vuecPreTags`, and `__vuecIgnoreNewlineTags`, and parse diagnostics now use the same compiler options as `base_parse`: configured void tags, custom interpolation delimiters, and `v-pre` raw-text state.
 - `vuec_html::HtmlTokenizer` now stops an incomplete start tag when a following end tag begins, fixing the official IDE recovery shape where `<script>` must stay root-level after `<template><Hello\n</template>`.
