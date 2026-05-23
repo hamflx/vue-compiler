@@ -762,7 +762,7 @@ fn normalize_text_children(
                 .and_then(|idx| child_kinds.get(*idx))
                 .and_then(Option::as_ref);
             let next = child_kinds.get(index + 1).and_then(Option::as_ref);
-            let keep = should_keep_whitespace_between(prev, next, options);
+            let keep = should_keep_whitespace_between(prev, next, &text.value, options);
             keep_flags[index] = keep;
             if keep {
                 updated_texts[index] = Some(" ".into());
@@ -799,6 +799,7 @@ fn normalize_text_children(
 fn should_keep_whitespace_between(
     prev: Option<&Vue3AstKind>,
     next: Option<&Vue3AstKind>,
+    value: &str,
     options: &Vue3CompilerOptions,
 ) -> bool {
     let (Some(prev), Some(next)) = (prev, next) else {
@@ -809,7 +810,15 @@ fn should_keep_whitespace_between(
     if options.whitespace == "preserve" {
         return true;
     }
-    !(prev_is_element || next_is_element)
+    let prev_is_comment = matches!(prev, Vue3AstKind::Comment(_));
+    let next_is_comment = matches!(next, Vue3AstKind::Comment(_));
+    if prev_is_comment && (next_is_comment || next_is_element) {
+        return false;
+    }
+    if prev_is_element && (next_is_comment || (next_is_element && value.contains('\n'))) {
+        return false;
+    }
+    true
 }
 
 fn condense_whitespace(value: &str) -> String {

@@ -3402,8 +3402,11 @@ const vue3CoreRuntime = (() => {
     if (!node.isBlock) {
       node.isBlock = true;
       context.removeHelper(runtime.getVNodeHelper(context.inSSR, node.isComponent));
+      const withDirectivesCount = context.helpers.get(runtime.WITH_DIRECTIVES);
+      if (withDirectivesCount) context.helpers.delete(runtime.WITH_DIRECTIVES);
       context.helper(runtime.OPEN_BLOCK);
       context.helper(runtime.getVNodeBlockHelper(context.inSSR, node.isComponent));
+      if (withDirectivesCount) context.helpers.set(runtime.WITH_DIRECTIVES, withDirectivesCount);
     }
   };
   runtime.createCompilerError = function createCompilerError(code, loc, messages, additionalMessage) {
@@ -3476,9 +3479,16 @@ const vue3CoreRuntime = (() => {
     if (!target.props || typeof target.props === 'string') {
       target.props = runtime.createObjectExpression([prop]);
     } else if (target.props.type === NodeTypes.JS_OBJECT_EXPRESSION) {
-      target.props.properties.unshift(prop);
+      const keyName = runtime.staticPropertyKeyName(prop);
+      if (!keyName || !(target.props.properties || []).some(existing => runtime.staticPropertyKeyName(existing) === keyName)) {
+        target.props.properties.unshift(prop);
+      }
     }
     if (node.type !== NodeTypes.VNODE_CALL && node.arguments) node.arguments[2] = target.props;
+  };
+  runtime.staticPropertyKeyName = function staticPropertyKeyName(prop) {
+    const key = prop && prop.key;
+    return key && key.type === NodeTypes.SIMPLE_EXPRESSION && key.isStatic ? key.content : undefined;
   };
   runtime.hasScopeRef = function hasScopeRef(node, identifiers = {}) {
     const names = Object.keys(identifiers).filter(name => identifiers[name] > 0);
@@ -3860,7 +3870,7 @@ const vue3CoreRuntime = (() => {
         case NodeTypes.IF:
         case NodeTypes.FOR:
           if (node.codegenNode) genNode(node.codegenNode);
-          else push('null');
+          else genForExpression(node);
           break;
         case NodeTypes.TEXT:
           push(JSON.stringify(node.content));
@@ -4106,6 +4116,33 @@ const vue3CoreRuntime = (() => {
       }
       push(`)`);
       if (node.needArraySpread) push(`)]`);
+    }
+
+    function genForExpression(node) {
+      push(`(${helper(runtime.OPEN_BLOCK)}(true), ${helper(runtime.CREATE_ELEMENT_BLOCK)}(${helper(runtime.FRAGMENT)}, null, ${helper(runtime.RENDER_LIST)}(`);
+      genNode(node.source);
+      push(`, (`);
+      genNodeList(runtime.createForLoopParams(node.parseResult || node), false, true);
+      push(`) => {`);
+      indent();
+      push(`return `);
+      const children = node.children || [];
+      const child = children.length === 1 ? children[0] : children;
+      if (Array.isArray(child)) {
+        push(`(${helper(runtime.OPEN_BLOCK)}(), ${helper(runtime.CREATE_ELEMENT_BLOCK)}(${helper(runtime.FRAGMENT)}, null, `);
+        genNodeListAsArray(child);
+        push(`, 64 /* STABLE_FRAGMENT */))`);
+      } else if (child && child.type === NodeTypes.TEXT_CALL) {
+        push(`(${helper(runtime.OPEN_BLOCK)}(), ${helper(runtime.CREATE_ELEMENT_BLOCK)}(${helper(runtime.FRAGMENT)}, null, [`);
+        indent();
+        genNode(child);
+        deindent();
+        push(`], 64 /* STABLE_FRAGMENT */))`);
+      } else {
+        genNode(child);
+      }
+      deindent();
+      push(`}), 256 /* UNKEYED_FRAGMENT */))`);
     }
 
     function genTemplateLiteral(node) {
@@ -4591,7 +4628,7 @@ const vue3CoreRuntime = (() => {
       if (!node || node.type !== NodeTypes.ELEMENT) return;
       if (node.tagType !== ElementTypes.ELEMENT && node.tagType !== ElementTypes.COMPONENT) return;
       const isComponent = node.tagType === ElementTypes.COMPONENT;
-      const tag = isComponent ? node.tag : `"${node.tag}"`;
+      const tag = isComponent ? runtime.resolveComponentType(node, context) : `"${node.tag}"`;
       let patchFlag;
       let props;
       const dynamicProps = [];
@@ -4613,6 +4650,8 @@ const vue3CoreRuntime = (() => {
             if (!result || !result.props || !result.props.some(p => p.value && p.value.type === NodeTypes.JS_CACHE_EXPRESSION)) {
               if (result && result.props && result.props.some(p => p.key && p.key.isHandlerKey)) dynamicProps.push(result.props[0].key.content || prop.arg.content);
             }
+          } else if (prop.name === 'once' || prop.name === 'memo') {
+            continue;
           } else {
             directives.push(prop);
           }
@@ -4620,11 +4659,21 @@ const vue3CoreRuntime = (() => {
         if (objectProps.length) props = runtime.createObjectExpression(objectProps);
         if (dynamicProps.length) patchFlag = 8;
         if (directives.length) {
-          node.codegenNode = runtime.createVNodeCall(context, tag, props, node.children && node.children.length ? node.children : undefined, patchFlag, dynamicProps.length ? JSON.stringify(dynamicProps) : undefined, runtime.createArrayExpression(directives.map(d => runtime.createArrayExpression([d.name]))), false, false, isComponent, node.loc);
+          context.helper(runtime.RESOLVE_DIRECTIVE);
+          const directiveArgs = directives.map(d => {
+            context.directives.add(d.name);
+            return runtime.createArrayExpression([runtime.toValidAssetId(d.name, 'directive'), d.exp, d.arg].filter(Boolean));
+          });
+          node.codegenNode = runtime.createVNodeCall(context, tag, props, node.children && node.children.length ? node.children : undefined, patchFlag, dynamicProps.length ? JSON.stringify(dynamicProps) : undefined, runtime.createArrayExpression(directiveArgs), false, false, isComponent, node.loc);
           return;
         }
       }
-      const children = node.children && node.children.length === 1 ? node.children[0] : node.children && node.children.length ? node.children : undefined;
+      const onlyChild = node.children && node.children.length === 1 ? node.children[0] : undefined;
+      const children = onlyChild && [NodeTypes.TEXT, NodeTypes.INTERPOLATION, NodeTypes.COMPOUND_EXPRESSION].includes(onlyChild.type)
+        ? onlyChild
+        : node.children && node.children.length
+          ? node.children
+          : undefined;
       if (!patchFlag && children && (children.type === NodeTypes.INTERPOLATION || children.type === NodeTypes.COMPOUND_EXPRESSION)) patchFlag = 1;
       node.codegenNode = runtime.createVNodeCall(context, tag, props, children, patchFlag, dynamicProps.length ? JSON.stringify(dynamicProps) : undefined, undefined, false, false, isComponent, node.loc);
     };
@@ -4639,7 +4688,9 @@ const vue3CoreRuntime = (() => {
     if (node.type === NodeTypes.ELEMENT && node.tagType === ElementTypes.SLOT) {
       return () => {
         const { slotName, slotProps } = runtime.processSlotOutlet(node, context);
-        node.codegenNode = runtime.createCallExpression(context.helper(runtime.RENDER_SLOT), ['$slots', slotName, slotProps]);
+        const args = ['$slots', slotName];
+        if (slotProps) args.push(slotProps);
+        node.codegenNode = runtime.createCallExpression(context.helper(runtime.RENDER_SLOT), args);
       };
     }
   };
@@ -4647,27 +4698,43 @@ const vue3CoreRuntime = (() => {
     if (![NodeTypes.ROOT, NodeTypes.ELEMENT, NodeTypes.FOR, NodeTypes.IF_BRANCH].includes(node.type)) return;
     return () => {
       const children = node.children || [];
+      let hasText = false;
+      let currentContainer;
       for (let i = 0; i < children.length - 1; i++) {
-        if (runtime.isText(children[i]) && runtime.isText(children[i + 1])) {
-          const compound = runtime.createCompoundExpression([children[i]], children[i].loc);
-          while (runtime.isText(children[i + 1])) {
-            compound.children.push(' + ', children[i + 1]);
-            children.splice(i + 1, 1);
+        if (runtime.isText(children[i])) {
+          hasText = true;
+          for (let j = i + 1; j < children.length; j++) {
+            if (runtime.isText(children[j])) {
+              if (!currentContainer) currentContainer = children[i] = runtime.createCompoundExpression([children[i]], children[i].loc);
+              currentContainer.children.push(' + ', children[j]);
+              children.splice(j, 1);
+              j--;
+            } else {
+              currentContainer = undefined;
+              break;
+            }
           }
-          children[i] = compound;
         }
       }
-      if (children.length > 1 || node.type === NodeTypes.ROOT) {
-        for (let i = 0; i < children.length; i++) {
-          const child = children[i];
-          if (runtime.isText(child) || child.type === NodeTypes.COMPOUND_EXPRESSION) {
-            const callArgs = child.type === NodeTypes.TEXT && child.content === ' ' ? [] : [child];
-            if (child.type !== NodeTypes.TEXT) callArgs.push('1 /* TEXT */');
-            children[i] = { type: NodeTypes.TEXT_CALL, content: child, loc: child.loc, codegenNode: runtime.createCallExpression(context.helper(runtime.CREATE_TEXT), callArgs) };
-          }
+      if (children.length && runtime.isText(children[children.length - 1])) hasText = true;
+      const isPlainElementWithSingleText = children.length === 1
+        && node.type === NodeTypes.ELEMENT
+        && node.tagType === ElementTypes.ELEMENT
+        && !runtime.findUntransformedCustomDirective(node, context)
+        && node.tag !== 'template';
+      if (!hasText || children.length === 1 && (node.type === NodeTypes.ROOT || isPlainElementWithSingleText)) return;
+      for (let i = 0; i < children.length; i++) {
+        const child = children[i];
+        if (runtime.isText(child) || child.type === NodeTypes.COMPOUND_EXPRESSION) {
+          const callArgs = child.type === NodeTypes.TEXT && child.content === ' ' ? [] : [child];
+          if (runtime.getConstantType(child, context) === ConstantTypes.NOT_CONSTANT) callArgs.push('1 /* TEXT */');
+          children[i] = { type: NodeTypes.TEXT_CALL, content: child, loc: child.loc, codegenNode: runtime.createCallExpression(context.helper(runtime.CREATE_TEXT), callArgs) };
         }
       }
     };
+  };
+  runtime.findUntransformedCustomDirective = function findUntransformedCustomDirective(node, context) {
+    return (node.props || []).find(prop => prop.type === NodeTypes.DIRECTIVE && !(context.directiveTransforms || {})[prop.name]);
   };
   runtime.processIf = function processIf(node, dir, context, processCodegen) {
     const branch = {
@@ -4678,9 +4745,64 @@ const vue3CoreRuntime = (() => {
       userKey: runtime.findProp(node, 'key'),
       isTemplateIf: node.tagType === ElementTypes.TEMPLATE,
     };
+    if (dir.name !== 'if') {
+      const siblings = context.parent && context.parent.children || [];
+      let i = siblings.indexOf(node);
+      while (i-- > 0) {
+        const sibling = siblings[i];
+        if (runtime.isCommentOrWhitespace(sibling)) {
+          context.removeNode(sibling);
+          continue;
+        }
+        if (sibling && sibling.type === NodeTypes.IF) {
+          context.removeNode();
+          sibling.branches.push(branch);
+          runtime.traverseNode(branch, context);
+          runtime.refreshIfCodegen(sibling, context);
+          context.currentNode = null;
+        }
+        return;
+      }
+    }
     const ifNode = { type: NodeTypes.IF, loc: node.loc, branches: [branch], codegenNode: undefined };
     context.replaceNode(ifNode);
-    if (processCodegen) return processCodegen(ifNode, branch, false);
+    const onExit = processCodegen ? processCodegen(ifNode, branch, true) : undefined;
+    return () => {
+      if (onExit) onExit();
+      runtime.refreshIfCodegen(ifNode, context);
+    };
+  };
+  runtime.refreshIfCodegen = function refreshIfCodegen(ifNode, context) {
+    let alternate = runtime.createCallExpression(context.helper(runtime.CREATE_COMMENT), ['"v-if"', 'true']);
+    for (let i = ifNode.branches.length - 1; i >= 0; i--) {
+      const branch = ifNode.branches[i];
+      const childCodegen = runtime.createIfBranchCodegen(branch, i, context);
+      if (branch.condition) {
+        alternate = runtime.createConditionalExpression(branch.condition, childCodegen, alternate);
+      } else {
+        alternate = childCodegen;
+      }
+    }
+    if (ifNode.codegenNode && ifNode.codegenNode.type === NodeTypes.JS_CACHE_EXPRESSION) {
+      ifNode.codegenNode.value = alternate;
+    } else {
+      ifNode.codegenNode = alternate;
+    }
+  };
+  runtime.createIfBranchCodegen = function createIfBranchCodegen(branch, keyIndex, context) {
+    const keyProperty = runtime.createObjectProperty('key', runtime.createSimpleExpression(String(keyIndex), false, locStub, ConstantTypes.CAN_CACHE));
+    const children = branch.children || [];
+    const firstChild = children[0];
+    if (children.length !== 1 || !firstChild || firstChild.type !== NodeTypes.ELEMENT) {
+      return runtime.createVNodeCall(context, context.helper(runtime.FRAGMENT), runtime.createObjectExpression([keyProperty]), children, 64, undefined, undefined, true, false, false, branch.loc);
+    }
+    const ret = firstChild.codegenNode;
+    const vnodeCall = runtime.getMemoedVNodeCall(ret);
+    if (vnodeCall && vnodeCall.type === NodeTypes.VNODE_CALL) {
+      runtime.convertToBlock(vnodeCall, context);
+      runtime.injectProp(vnodeCall, keyProperty);
+    }
+    return ret;
   };
   runtime.transformIf = runtime.createStructuralDirectiveTransform(/^(if|else|else-if)$/, runtime.processIf);
   runtime.processFor = function processFor(node, dir, context, processCodegen) {
@@ -4690,6 +4812,7 @@ const vue3CoreRuntime = (() => {
       .map(exp => exp.content)
       .filter(Boolean);
     aliases.forEach(alias => context.addIdentifiers(alias));
+    const children = node.tagType === ElementTypes.TEMPLATE ? node.children || [] : [node];
     const forNode = {
       type: NodeTypes.FOR,
       loc: node.loc,
@@ -4698,19 +4821,39 @@ const vue3CoreRuntime = (() => {
       keyAlias: parsed.key,
       objectIndexAlias: parsed.index,
       parseResult: parsed,
-      children: [node],
+      children,
       codegenNode: undefined,
     };
+    const renderExp = runtime.createCallExpression(context.helper(runtime.RENDER_LIST), [forNode.source]);
+    forNode.codegenNode = runtime.createVNodeCall(context, context.helper(runtime.FRAGMENT), undefined, renderExp, 256, undefined, undefined, true, true, false, node.loc);
     context.replaceNode(forNode);
     const onExit = processCodegen ? processCodegen(forNode) : undefined;
     return () => {
       if (onExit) onExit();
+      runtime.finalizeForCodegen(forNode, renderExp, context);
       aliases.forEach(alias => context.removeIdentifiers(alias));
     };
   };
   runtime.transformFor = runtime.createStructuralDirectiveTransform('for', runtime.processFor);
   runtime.createForLoopParams = function createForLoopParams(parseResult) {
     return [parseResult.value, parseResult.key, parseResult.index].filter(Boolean);
+  };
+  runtime.finalizeForCodegen = function finalizeForCodegen(forNode, renderExp, context) {
+    if (!renderExp || renderExp.arguments.length > 1) return;
+    const children = forNode.children || [];
+    let childBlock;
+    if (children.length === 1 && children[0].type === NodeTypes.ELEMENT) {
+      childBlock = children[0].codegenNode;
+      if (childBlock && childBlock.type === NodeTypes.VNODE_CALL && !childBlock.isBlock) {
+        context.removeHelper(runtime.getVNodeHelper(context.inSSR, childBlock.isComponent));
+        childBlock.isBlock = true;
+        context.helper(runtime.OPEN_BLOCK);
+        context.helper(runtime.getVNodeBlockHelper(context.inSSR, childBlock.isComponent));
+      }
+    } else {
+      childBlock = runtime.createVNodeCall(context, context.helper(runtime.FRAGMENT), undefined, children, 64, undefined, undefined, true, undefined, false, forNode.loc);
+    }
+    renderExp.arguments.push(runtime.createFunctionExpression(runtime.createForLoopParams(forNode.parseResult), childBlock, true));
   };
   runtime.trackSlotScopes = () => {};
   runtime.trackVForSlotScopes = () => {};
@@ -4723,14 +4866,37 @@ const vue3CoreRuntime = (() => {
   runtime.buildSlots = function buildSlots() {
     return { slots: runtime.createObjectExpression([]), hasDynamicSlots: false };
   };
-  runtime.resolveComponentType = function resolveComponentType(node) { return node.tag; };
+  runtime.resolveComponentType = function resolveComponentType(node, context) {
+    const builtIn = runtime.isCoreComponent(node.tag);
+    if (builtIn) return context.helper(builtIn);
+    context.helper(runtime.RESOLVE_COMPONENT);
+    context.components.add(node.tag);
+    return runtime.toValidAssetId(node.tag, 'component');
+  };
   runtime.getBaseTransformPreset = function getBaseTransformPreset() {
     return [[runtime.transformOnce, runtime.transformIf, runtime.transformMemo, runtime.transformFor, runtime.transformExpression, runtime.transformSlotOutlet, runtime.transformElement, runtime.trackSlotScopes, runtime.transformText], { on: runtime.transformOn, bind: runtime.transformBind, model: runtime.transformModel }];
   };
   runtime.getConstantType = function getConstantType(node) {
-    return node && node.type === NodeTypes.SIMPLE_EXPRESSION && node.isStatic ? ConstantTypes.CAN_STRINGIFY : ConstantTypes.NOT_CONSTANT;
+    if (!node) return ConstantTypes.NOT_CONSTANT;
+    if (node.type === NodeTypes.TEXT) return ConstantTypes.CAN_STRINGIFY;
+    if (node.type === NodeTypes.SIMPLE_EXPRESSION && node.isStatic) return ConstantTypes.CAN_STRINGIFY;
+    return ConstantTypes.NOT_CONSTANT;
   };
-  runtime.transformOnce = () => {};
+  const onceSeen = new WeakSet();
+  runtime.transformOnce = function transformOnce(node, context) {
+    if (node.type !== NodeTypes.ELEMENT || !runtime.findDir(node, 'once', true)) return;
+    if (onceSeen.has(node) || context.inVOnce || context.inSSR) return;
+    onceSeen.add(node);
+    context.inVOnce = true;
+    context.helper(runtime.SET_BLOCK_TRACKING);
+    return () => {
+      context.inVOnce = false;
+      const current = context.currentNode || node;
+      if (current && current.codegenNode) {
+        current.codegenNode = context.cache(current.codegenNode, true, true);
+      }
+    };
+  };
   runtime.transformMemo = () => {};
   runtime.checkCompatEnabled = () => false;
   runtime.warnDeprecation = () => {};

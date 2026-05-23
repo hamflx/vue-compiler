@@ -19,8 +19,16 @@
 - [x] Development plan and goal wording aligned with `docs/3.AST_HIR_MIR_DESIGN.md` as the single AST/HIR/MIR structure constraint.
 - [x] Vue 3 compiler-core expression transform exactness for `transformExpressions.spec.ts`.
 - [x] Vue 3 compiler-core `v-on` transform exactness for `vOn.spec.ts`.
+- [x] Vue 3 compiler-core text transform exactness for `transformText.spec.ts`.
+- [x] Vue 3 compiler-core `v-once` transform exactness for `vOnce.spec.ts`.
 
 ## Completed This Round
+
+- Closed the official Vue 3 `compiler-core/__tests__/transforms/transformText.spec.ts` and `compiler-core/__tests__/transforms/vOnce.spec.ts` slices. The focused specs now pass `9/9` and `8/8` through the prepared alias Vitest runner.
+- Reworked the alias runtime text transform to match official adjacent text merging, plain-element single-text fast path, custom-directive text conversion, static text patch-flag suppression, and `<template v-for>` text-child conversion.
+- Added the alias runtime `v-once` cache path with `setBlockTracking`, skipped `v-once` / `v-memo` as runtime directives in element build props, preserved vnode-child arrays, resolved component assets through `_component_*`, and added baseline `FOR` / `IF` codegen support needed by text and once transforms.
+- Full Vue 3 core conformance improved from `257/652` to `298/652`; the full suite still intentionally fails with `354` remaining failures. Adjacent `vFor.spec.ts` / `vIf.spec.ts` focused status is `25/84` passing and still incomplete.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p vuec_vue3_core -p xtask`, `cargo test -p xtask`, `git diff --check`, `cargo xtask verify-npm-alias --version-line vue3 --package @vue/compiler-core`, direct prepared Vitest `transformText.spec.ts` run (`9/9` pass), direct prepared Vitest `vOnce.spec.ts` run (`8/8` pass), adjacent prepared Vitest `vFor.spec.ts` + `vIf.spec.ts` run (`25/84` pass, expected fail), `cargo xtask diff-api --version-line vue3 --package @vue/compiler-core`, `cargo xtask run-option-matrix --version-line vue3 --package @vue/compiler-core`, `cargo xtask run-output-contract --version-line vue3 --package @vue/compiler-core`, and `cargo xtask run-conformance --suite vue3-core` (expected fail with `298/652` pass, `354` fail).
 
 - Closed the official Vue 3 `compiler-core/__tests__/transforms/vOn.spec.ts` slice. The focused spec now passes `33/33` through the prepared alias Vitest runner.
 - Reworked the alias runtime `transformOn` path in `xtask/src/compat.rs` to align with official handler-key normalization, dynamic handler expressions, `vue:` vnode events, vnode hook diagnostics, inline statement wrapping, member-expression wrapping, `prefixIdentifiers`, handler caching, and v-for alias cache bailouts.
