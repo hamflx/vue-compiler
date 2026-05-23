@@ -8,7 +8,7 @@ use vuec_html::{HtmlAttribute, HtmlTokenKind, HtmlTokenizer};
 use vuec_js::JsAstStore;
 use vuec_source::{FileId, Span};
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue2CompileOptions {
     pub modules: Vec<String>,
     pub directives: Vec<String>,
@@ -21,6 +21,24 @@ pub struct Vue2CompileOptions {
     pub should_decode_newlines: bool,
     pub should_decode_newlines_for_href: bool,
     pub optimize: bool,
+}
+
+impl Default for Vue2CompileOptions {
+    fn default() -> Self {
+        Self {
+            modules: Vec::new(),
+            directives: Vec::new(),
+            warn: true,
+            output_source_range: false,
+            comments: false,
+            delimiters: None,
+            whitespace: None,
+            preserve_whitespace: true,
+            should_decode_newlines: false,
+            should_decode_newlines_for_href: false,
+            optimize: true,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -386,21 +404,8 @@ fn parse_element_tree(
                 }
             }
             HtmlTokenKind::EndTag { name } => {
-                let Some(element) = stack.pop() else {
-                    continue;
-                };
-                if element.tag != name {
-                    diagnostics.push(vue2_error(
-                        "E_VUE2_MISMATCHED_TAG",
-                        format!("tag <{}> has no matching end tag.", element.tag),
-                        element.span,
-                    ));
-                }
-                if element.pre {
-                    in_v_pre = false;
-                }
-                close_element(
-                    element,
+                close_until_matching_end_tag(
+                    &name,
                     &mut stack,
                     &mut root,
                     diagnostics,
@@ -460,6 +465,41 @@ fn parse_element_tree(
     }
 
     root
+}
+
+fn close_until_matching_end_tag(
+    name: &str,
+    stack: &mut Vec<Vue2Element>,
+    root: &mut Option<Vue2Element>,
+    diagnostics: &mut DiagnosticSink,
+    options: &Vue2CompileOptions,
+    in_v_pre: &mut bool,
+) {
+    let Some(mut index) = stack.iter().rposition(|element| element.tag == name) else {
+        return;
+    };
+    while stack.len() > index + 1 {
+        let Some(element) = stack.pop() else {
+            return;
+        };
+        diagnostics.push(vue2_error(
+            "E_VUE2_UNCLOSED_TAG",
+            format!("tag <{}> has no matching end tag.", element.tag),
+            element.span,
+        ));
+        if element.pre {
+            *in_v_pre = false;
+        }
+        close_element(element, stack, root, diagnostics, options, in_v_pre);
+        index = index.min(stack.len());
+    }
+    let Some(element) = stack.pop() else {
+        return;
+    };
+    if element.pre {
+        *in_v_pre = false;
+    }
+    close_element(element, stack, root, diagnostics, options, in_v_pre);
 }
 
 fn create_element(

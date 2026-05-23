@@ -3,7 +3,7 @@
   "version_line": "vue2_6",
   "package": "vue-template-compiler",
   "entry": "index",
-  "status": "pending",
+  "status": "pass",
   "rows": [
     {
       "option_name": "warn",
@@ -59,7 +59,9 @@
         "codeframe"
       ],
       "output_fields_affected": [
-        "diagnostics"
+        "errors",
+        "render",
+        "staticRenderFns"
       ],
       "official_fixture_ids": [
         "vue2-output-source-range"
@@ -72,8 +74,8 @@
       "option_value": {
         "outputSourceRange": true
       },
-      "execution_mode": "pending",
-      "status": "pending"
+      "execution_mode": "diff",
+      "status": "pass"
     },
     {
       "option_name": "comments",

@@ -613,14 +613,14 @@ fn option_matrix_cases(target: TargetSpec) -> Vec<OptionMatrixCase> {
                 "true",
                 &["adds source spans"],
                 &["codeframe"],
-                &["diagnostics"],
+                &["errors", "render", "staticRenderFns"],
                 &["vue2-output-source-range"],
                 "base",
                 "compile",
                 "vue2-output-source-range",
                 r#"<div><span></div>"#,
                 Some(serde_json::json!({"outputSourceRange": true})),
-                true,
+                false,
             ),
             option_case(
                 "comments",
@@ -3161,21 +3161,23 @@ function normalizeMessage(message) {
     .replace(/\\/g, '/');
 }
 
-function normalize(value) {
+function normalize(value, seen = new WeakSet()) {
   if (value === undefined) return { __type: 'undefined' };
   if (value === null) return null;
   if (typeof value === 'symbol') return { __type: 'symbol', description: value.description || null };
   if (typeof value === 'function') return { __type: 'function', name: value.name, length: value.length };
   if (value instanceof Set) {
     return Array.from(value)
-      .map(normalize)
+      .map(item => normalize(item, seen))
       .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
   }
   if (typeof value !== 'object') return value;
-  if (Array.isArray(value)) return value.map(normalize);
+  if (seen.has(value)) return { __type: 'cycle' };
+  seen.add(value);
+  if (Array.isArray(value)) return value.map(item => normalize(item, seen));
   const out = {};
   for (const key of Object.keys(value).sort()) {
-    out[key] = normalize(value[key]);
+    out[key] = normalize(value[key], seen);
   }
   return out;
 }
