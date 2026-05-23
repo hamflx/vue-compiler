@@ -3673,98 +3673,486 @@ const vue3CoreRuntime = (() => {
     ast = hydrateVue3Ast(ast);
     const mode = options.mode || 'function';
     const prefixIdentifiers = options.prefixIdentifiers !== undefined ? options.prefixIdentifiers : mode === 'module';
+    const ssr = !!options.ssr;
     const helpers = Array.from(ast.helpers || []);
-    const helperImports = helpers.map(symbol => `${runtime.helperNameMap[symbol]}: _${runtime.helperNameMap[symbol]}`).filter(Boolean);
+    const useWithBlock = !prefixIdentifiers && mode !== 'module';
+    const runtimeModuleName = options.runtimeModuleName || 'vue';
+    const runtimeGlobalName = options.runtimeGlobalName || 'Vue';
+    const ssrRuntimeModuleName = options.ssrRuntimeModuleName || 'vue/server-renderer';
     let code = '';
+    let indentLevel = 0;
     let preamble = '';
-    const push = value => { code += value; };
+    const push = value => { code += String(value); };
+    const currentIndent = () => '  '.repeat(indentLevel);
+    const newline = () => { code += `\n${currentIndent()}`; };
+    const indent = () => { indentLevel++; newline(); };
+    const deindent = (withoutNewline = false) => {
+      indentLevel = Math.max(0, indentLevel - 1);
+      if (!withoutNewline) newline();
+    };
+    const helperAlias = (symbol, asImport = false) => {
+      const name = helperName(symbol);
+      return asImport ? `${name} as _${name}` : `${name}: _${name}`;
+    };
+
     if (mode === 'module') {
-      if (helperImports.length) {
-        preamble += `import { ${helperImports.join(', ')} } from "vue"\n`;
+      if (helpers.length) {
+        if (options.optimizeImports) {
+          push(`import { ${helpers.map(helperName).join(', ')} } from ${JSON.stringify(runtimeModuleName)}`);
+          newline();
+          newline();
+          push(`// Binding optimization for webpack code-split`);
+          newline();
+          push(`const ${helpers.map(s => `_${helperName(s)} = ${helperName(s)}`).join(', ')}`);
+          newline();
+        } else {
+          push(`import { ${helpers.map(s => helperAlias(s, true)).join(', ')} } from ${JSON.stringify(runtimeModuleName)}`);
+          newline();
+        }
       }
-      code += preamble;
-      code += `\nexport function render(_ctx, _cache) {`;
-    } else {
-      code += `const _Vue = Vue\n\nreturn function render(_ctx, _cache) {`;
-    }
-    if (!prefixIdentifiers && mode !== 'module') {
-      code += `\n  with (_ctx) {`;
-      if (helperImports.length) {
-        code += `\n    const { ${helperImports.join(', ')} } = _Vue`;
+      if (ast.ssrHelpers && ast.ssrHelpers.length) {
+        push(`import { ${ast.ssrHelpers.map(s => helperAlias(s, true)).join(', ')} } from ${JSON.stringify(ssrRuntimeModuleName)}`);
+        newline();
       }
-      code += `\n    return ${genNode(ast.codegenNode || null)}`;
-      code += `\n  }`;
+      genHoists(ast.hoists || []);
+      if (!code) push(`\n`);
+      else {
+        if (!code.endsWith('\n')) newline();
+        if (!code.endsWith('\n\n')) newline();
+      }
+      push(`export `);
     } else {
-      code += `\n  return ${genNode(ast.codegenNode || null)}`;
+      const vueBinding = ssr ? `require(${JSON.stringify(runtimeModuleName)})` : runtimeGlobalName;
+      if (helpers.length) {
+        if (prefixIdentifiers) {
+          push(`const { ${helpers.map(s => helperAlias(s)).join(', ')} } = ${vueBinding}`);
+          newline();
+        } else {
+          push(`const _Vue = ${vueBinding}`);
+          newline();
+          if ((ast.hoists || []).length) {
+            const staticHelpers = [runtime.CREATE_VNODE, runtime.CREATE_ELEMENT_VNODE, runtime.CREATE_COMMENT, runtime.CREATE_TEXT, runtime.CREATE_STATIC]
+              .filter(symbol => helpers.includes(symbol))
+              .map(s => helperAlias(s))
+              .join(', ');
+            if (staticHelpers) {
+              push(`const { ${staticHelpers} } = _Vue`);
+              newline();
+            }
+          }
+        }
+      }
+      if (ast.ssrHelpers && ast.ssrHelpers.length) {
+        push(`const { ${ast.ssrHelpers.map(s => helperAlias(s)).join(', ')} } = require(${JSON.stringify(ssrRuntimeModuleName)})`);
+        newline();
+      }
+      if (!code && (ast.hoists || []).length) push(`\n`);
+      genHoists(ast.hoists || []);
+      if (!code) push(`\n`);
+      else newline();
+      push(`return `);
     }
-    code += `\n}`;
+
+    const functionName = ssr ? 'ssrRender' : 'render';
+    const args = ssr ? ['_ctx', '_push', '_parent', '_attrs'] : ['_ctx', '_cache'];
+    if (options.bindingMetadata && !options.inline) args.push('$props', '$setup', '$data', '$options');
+    push(`function ${functionName}(${args.join(', ')}) {`);
+    indent();
+
+    if (useWithBlock) {
+      push(`with (_ctx) {`);
+      indent();
+      if (helpers.length) {
+        push(`const { ${helpers.map(s => helperAlias(s)).join(', ')} } = _Vue`);
+        push(`\n\n${currentIndent()}`);
+      }
+    }
+
+    genAssets(ast.components || [], 'component');
+    if ((ast.components || []).length && ((ast.directives || []).length || ast.temps > 0)) {
+      newline();
+    }
+    genAssets(ast.directives || [], 'directive');
+    if ((ast.directives || []).length && ast.temps > 0) {
+      newline();
+    }
+    if (ast.temps > 0) {
+      push(`let ${Array.from({ length: ast.temps }, (_, i) => `_temp${i}`).join(', ')}`);
+    }
+    if ((ast.components || []).length || (ast.directives || []).length || ast.temps > 0) {
+      push(`\n\n${currentIndent()}`);
+    }
+
+    if (!ssr) push(`return `);
+    genNode(ast.codegenNode || null);
+
+    if (useWithBlock) {
+      deindent();
+      push(`}`);
+    }
+    deindent();
+    push(`}`);
     return { ast, code, preamble, map: undefined };
 
     function genNode(node) {
-      if (node == null) return 'null';
-      if (typeof node === 'string') return node;
-      if (typeof node === 'symbol') return `_${runtime.helperNameMap[node]}`;
+      if (node == null) {
+        push('null');
+        return;
+      }
+      if (typeof node === 'string') {
+        push(node);
+        return;
+      }
+      if (typeof node === 'symbol') {
+        push(helper(node));
+        return;
+      }
+      if (Array.isArray(node)) {
+        genNodeListAsArray(node);
+        return;
+      }
       switch (node.type) {
-        case NodeTypes.TEXT:
-          return JSON.stringify(node.content);
-        case NodeTypes.COMMENT:
-          return `${helper(runtime.CREATE_COMMENT)}(${JSON.stringify(node.content)})`;
-        case NodeTypes.SIMPLE_EXPRESSION:
-          return node.content;
-        case NodeTypes.INTERPOLATION:
-          return `${helper(runtime.TO_DISPLAY_STRING)}(${genNode(node.content)})`;
-        case NodeTypes.COMPOUND_EXPRESSION:
-          return node.children.map(genNode).join('');
-        case NodeTypes.TEXT_CALL:
-          return genNode(node.codegenNode);
-        case NodeTypes.VNODE_CALL:
-          return genVNodeCall(node);
-        case NodeTypes.JS_CALL_EXPRESSION:
-          return `${genNode(node.callee)}(${(node.arguments || []).map(genNode).join(', ')})`;
-        case NodeTypes.JS_OBJECT_EXPRESSION:
-          return `{ ${((node.properties || []).map(prop => `${genPropertyKey(prop.key)}: ${genNode(prop.value)}`)).join(', ')} }`;
-        case NodeTypes.JS_ARRAY_EXPRESSION:
-          return `[${(node.elements || []).map(genNode).join(', ')}]`;
-        case NodeTypes.JS_FUNCTION_EXPRESSION:
-          return `(${genParams(node.params)}) => ${Array.isArray(node.returns) ? `[${node.returns.map(genNode).join(', ')}]` : genNode(node.returns)}`;
-        case NodeTypes.JS_CONDITIONAL_EXPRESSION:
-          return `${genNode(node.test)} ? ${genNode(node.consequent)} : ${genNode(node.alternate)}`;
-        case NodeTypes.JS_CACHE_EXPRESSION:
-          return `_cache[${node.index}] || (_cache[${node.index}] = ${genNode(node.value)})`;
-        case NodeTypes.IF:
-          return node.codegenNode ? genNode(node.codegenNode) : genNode(node.branches && node.branches[0] && node.branches[0].children && node.branches[0].children[0]);
-        case NodeTypes.FOR:
-          return node.codegenNode ? genNode(node.codegenNode) : genNode(node.children && node.children[0]);
         case NodeTypes.ELEMENT:
-          return genNode(node.codegenNode || runtime.createVNodeCall(null, JSON.stringify(node.tag), undefined, node.children, undefined, undefined, undefined, false, false, node.tagType === ElementTypes.COMPONENT, node.loc));
+        case NodeTypes.IF:
+        case NodeTypes.FOR:
+          if (node.codegenNode) genNode(node.codegenNode);
+          else push('null');
+          break;
+        case NodeTypes.TEXT:
+          push(JSON.stringify(node.content));
+          break;
+        case NodeTypes.COMMENT:
+          push(`${helper(runtime.CREATE_COMMENT)}(${JSON.stringify(node.content)})`);
+          break;
+        case NodeTypes.SIMPLE_EXPRESSION:
+          push(node.isStatic ? JSON.stringify(node.content) : node.content);
+          break;
+        case NodeTypes.INTERPOLATION:
+          push(`${helper(runtime.TO_DISPLAY_STRING)}(`);
+          genNode(node.content);
+          push(`)`);
+          break;
+        case NodeTypes.COMPOUND_EXPRESSION:
+          for (const child of node.children || []) genNode(child);
+          break;
+        case NodeTypes.TEXT_CALL:
+          genNode(node.codegenNode);
+          break;
+        case NodeTypes.VNODE_CALL:
+          genVNodeCall(node);
+          break;
+        case NodeTypes.JS_CALL_EXPRESSION:
+          genCallExpression(node);
+          break;
+        case NodeTypes.JS_OBJECT_EXPRESSION:
+          genObjectExpression(node);
+          break;
+        case NodeTypes.JS_ARRAY_EXPRESSION:
+          genArrayExpression(node);
+          break;
+        case NodeTypes.JS_FUNCTION_EXPRESSION:
+          genFunctionExpression(node);
+          break;
+        case NodeTypes.JS_CONDITIONAL_EXPRESSION:
+          genConditionalExpression(node);
+          break;
+        case NodeTypes.JS_CACHE_EXPRESSION:
+          genCacheExpression(node);
+          break;
+        case NodeTypes.JS_BLOCK_STATEMENT:
+          genNodeList(node.body || [], true, false);
+          break;
+        case NodeTypes.JS_TEMPLATE_LITERAL:
+          genTemplateLiteral(node);
+          break;
+        case NodeTypes.JS_IF_STATEMENT:
+          genIfStatement(node);
+          break;
+        case NodeTypes.JS_ASSIGNMENT_EXPRESSION:
+          genNode(node.left);
+          push(` = `);
+          genNode(node.right);
+          break;
+        case NodeTypes.JS_SEQUENCE_EXPRESSION:
+          push(`(`);
+          genNodeList(node.expressions || [], false, true);
+          push(`)`);
+          break;
+        case NodeTypes.JS_RETURN_STATEMENT:
+          push(`return `);
+          Array.isArray(node.returns) ? genNodeListAsArray(node.returns) : genNode(node.returns);
+          break;
         default:
-          return 'null';
+          push('null');
       }
     }
+
+    function genNodeToString(node) {
+      const previous = code;
+      code = '';
+      genNode(node);
+      const out = code;
+      code = previous;
+      return out;
+    }
+
+    function genNodeList(nodes, multilines = false, comma = true) {
+      nodes = nodes || [];
+      for (let i = 0; i < nodes.length; i++) {
+        genNode(nodes[i]);
+        if (i < nodes.length - 1) {
+          if (multilines) {
+            if (comma) push(',');
+            newline();
+          } else if (comma) {
+            push(', ');
+          }
+        }
+      }
+    }
+
+    function genNodeListAsArray(nodes) {
+      nodes = nodes || [];
+      const multilines = nodes.length > 3 || nodes.some(n => Array.isArray(n) || !isTextLike(n));
+      push(`[`);
+      if (multilines) indent();
+      genNodeList(nodes, multilines, true);
+      if (multilines) deindent();
+      push(`]`);
+    }
+
     function genVNodeCall(node) {
       const call = node.isBlock ? helper(runtime.getVNodeBlockHelper(false, node.isComponent)) : helper(runtime.getVNodeHelper(false, node.isComponent));
-      const args = [genNode(node.tag), genNullable(node.props), genNullable(node.children), node.patchFlag, node.dynamicProps, node.directives].filter(value => value !== undefined);
-      const expr = `${call}(${args.join(', ')})`;
-      return node.isBlock ? `(${helper(runtime.OPEN_BLOCK)}(), ${expr})` : expr;
+      const args = genNullableArgs([node.tag, node.props, node.children, patchFlagText(node.patchFlag), node.dynamicProps]);
+      if (node.directives) push(`${helper(runtime.WITH_DIRECTIVES)}(`);
+      if (node.isBlock) push(`(${helper(runtime.OPEN_BLOCK)}(${node.disableTracking ? 'true' : ''}), `);
+      push(`${call}(`);
+      genNodeList(args, false, true);
+      push(`)`);
+      if (node.isBlock) push(`)`);
+      if (node.directives) {
+        push(`, `);
+        genNode(node.directives);
+        push(`)`);
+      }
     }
-    function genNullable(value) {
-      if (value === undefined) return undefined;
-      if (value === null) return 'null';
-      if (Array.isArray(value)) return `[${value.map(genNode).join(', ')}]`;
-      return genNode(value);
+
+    function genNullableArgs(args) {
+      let i = args.length;
+      while (i--) {
+        if (args[i] != null) break;
+      }
+      return args.slice(0, i + 1).map(arg => arg || 'null');
     }
+
+    function genCallExpression(node) {
+      const callee = typeof node.callee === 'symbol' ? helper(node.callee) : String(node.callee);
+      push(`${callee}(`);
+      genNodeList(node.arguments || [], false, true);
+      push(`)`);
+    }
+
+    function genObjectExpression(node) {
+      const properties = node.properties || [];
+      if (!properties.length) {
+        push(`{}`);
+        return;
+      }
+      const multilines = properties.length > 1 || properties.some(prop => prop.value && prop.value.type !== NodeTypes.SIMPLE_EXPRESSION);
+      push(multilines ? `{` : `{ `);
+      if (multilines) indent();
+      for (let i = 0; i < properties.length; i++) {
+        genPropertyKey(properties[i].key);
+        push(`: `);
+        genNode(properties[i].value);
+        if (i < properties.length - 1) {
+          push(`,`);
+          newline();
+        }
+      }
+      if (multilines) deindent();
+      push(multilines ? `}` : ` }`);
+    }
+
     function genPropertyKey(key) {
-      if (!key) return 'undefined';
-      if (key.type === NodeTypes.SIMPLE_EXPRESSION && key.isStatic) return JSON.stringify(key.content);
-      return `[${genNode(key)}]`;
+      if (!key) {
+        push('undefined');
+      } else if (key.type === NodeTypes.COMPOUND_EXPRESSION) {
+        push(`[`);
+        genNode(key);
+        push(`]`);
+      } else if (key.type === NodeTypes.SIMPLE_EXPRESSION && key.isStatic) {
+        push(runtime.isSimpleIdentifier(key.content) ? key.content : JSON.stringify(key.content));
+      } else if (key.type === NodeTypes.SIMPLE_EXPRESSION) {
+        push(`[${key.content}]`);
+      } else {
+        push(`[`);
+        genNode(key);
+        push(`]`);
+      }
     }
-    function genParams(params) {
-      if (!params) return '';
-      if (Array.isArray(params)) return params.map(genNode).join(', ');
-      return genNode(params);
+
+    function genArrayExpression(node) {
+      genNodeListAsArray(node.elements || []);
     }
+
+    function genFunctionExpression(node) {
+      if (node.isSlot) push(`${helper(runtime.WITH_CTX)}(`);
+      push(`(`);
+      if (Array.isArray(node.params)) genNodeList(node.params, false, true);
+      else if (node.params) genNode(node.params);
+      push(`) => `);
+      if (node.newline || node.body) {
+        push(`{`);
+        indent();
+      }
+      if (node.returns) {
+        if (node.newline) push(`return `);
+        Array.isArray(node.returns) ? genNodeListAsArray(node.returns) : genNode(node.returns);
+      } else if (node.body) {
+        genNode(node.body);
+      }
+      if (node.newline || node.body) {
+        deindent();
+        push(`}`);
+      }
+      if (node.isSlot) push(`)`);
+    }
+
+    function genConditionalExpression(node) {
+      const nested = node.alternate && node.alternate.type === NodeTypes.JS_CONDITIONAL_EXPRESSION;
+      genNode(node.test);
+      if (node.newline === false) {
+        push(` ? `);
+        genNode(node.consequent);
+        push(` : `);
+        genNode(node.alternate);
+        return;
+      }
+      indentLevel++;
+      newline();
+      push(`? `);
+      genNode(node.consequent);
+      newline();
+      push(`: `);
+      if (!nested) indentLevel++;
+      genNode(node.alternate);
+      if (!nested) indentLevel--;
+      indentLevel--;
+    }
+
+    function genCacheExpression(node) {
+      if (node.needArraySpread) push(`[...(`);
+      push(`_cache[${node.index}] || (`);
+      if (node.needPauseTracking) {
+        indent();
+        push(`${helper(runtime.SET_BLOCK_TRACKING)}(-1${node.inVOnce ? ', true' : ''}),`);
+        newline();
+        push(`(_cache[${node.index}] = `);
+        genNode(node.value);
+        push(`).cacheIndex = ${node.index},`);
+        newline();
+        push(`${helper(runtime.SET_BLOCK_TRACKING)}(1),`);
+        newline();
+        push(`_cache[${node.index}]`);
+        deindent();
+      } else {
+        push(`_cache[${node.index}] = `);
+        genNode(node.value);
+      }
+      push(`)`);
+      if (node.needArraySpread) push(`)]`);
+    }
+
+    function genTemplateLiteral(node) {
+      push('`');
+      for (const element of node.elements || []) {
+        if (typeof element === 'string') {
+          push(element.replace(/(`|\$|\\)/g, '\\$1'));
+        } else {
+          push('${');
+          genNode(element);
+          push('}');
+        }
+      }
+      push('`');
+    }
+
+    function genIfStatement(node) {
+      push(`if (`);
+      genNode(node.test);
+      push(`) {`);
+      indent();
+      genNode(node.consequent);
+      deindent();
+      push(`}`);
+      if (node.alternate) {
+        push(` else `);
+        if (node.alternate.type === NodeTypes.JS_IF_STATEMENT) {
+          genIfStatement(node.alternate);
+        } else {
+          push(`{`);
+          indent();
+          genNode(node.alternate);
+          deindent();
+          push(`}`);
+        }
+      }
+    }
+
+    function genAssets(assets, type) {
+      if (!assets.length) return;
+      const resolver = helper(type === 'component' ? runtime.RESOLVE_COMPONENT : runtime.RESOLVE_DIRECTIVE);
+      for (let i = 0; i < assets.length; i++) {
+        let id = assets[i];
+        const maybeSelfReference = String(id).endsWith('__self');
+        if (maybeSelfReference) id = id.slice(0, -6);
+        push(`const ${runtime.toValidAssetId(id, type)} = ${resolver}(${JSON.stringify(id)}${maybeSelfReference ? ', true' : ''})`);
+        if (i < assets.length - 1) newline();
+      }
+    }
+
+    function genHoists(hoists) {
+      if (!hoists.length) return;
+      for (let i = 0; i < hoists.length; i++) {
+        const exp = hoists[i];
+        if (!exp) continue;
+        push(`const _hoisted_${i + 1} = `);
+        genNode(exp);
+        newline();
+      }
+    }
+
+    function patchFlagText(flag) {
+      if (flag == null) return flag;
+      if (typeof flag === 'string' && /\/\*/.test(flag)) return flag;
+      const value = Number(flag);
+      if (!Number.isFinite(value) || value === 0) return flag;
+      const names = {
+        1: 'TEXT', 2: 'CLASS', 4: 'STYLE', 8: 'PROPS', 16: 'FULL_PROPS',
+        32: 'HYDRATE_EVENTS', 64: 'STABLE_FRAGMENT', 128: 'KEYED_FRAGMENT',
+        256: 'UNKEYED_FRAGMENT', 512: 'NEED_PATCH', 1024: 'DYNAMIC_SLOTS',
+        2048: 'DEV_ROOT_FRAGMENT', [-1]: 'HOISTED', [-2]: 'BAIL',
+      };
+      const text = value < 0 ? names[value] : Object.keys(names)
+        .map(Number)
+        .filter(n => n > 0 && (value & n))
+        .map(n => names[n])
+        .join(', ');
+      return text ? `${value} /* ${text} */` : String(flag);
+    }
+
+    function isTextLike(node) {
+      return typeof node === 'string'
+        || (node && [NodeTypes.SIMPLE_EXPRESSION, NodeTypes.TEXT, NodeTypes.INTERPOLATION, NodeTypes.COMPOUND_EXPRESSION].includes(node.type));
+    }
+
     function helper(symbol) {
-      return `_${runtime.helperNameMap[symbol]}`;
+      return `_${helperName(symbol)}`;
+    }
+
+    function helperName(symbol) {
+      return runtime.helperNameMap[symbol] || String(symbol || '').replace(/^_/, '');
     }
   };
   runtime.createStructuralDirectiveTransform = function createStructuralDirectiveTransform(name, fn) {
