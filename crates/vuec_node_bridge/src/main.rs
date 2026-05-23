@@ -5,9 +5,11 @@ use serde_json::{json, Value};
 use std::io::{self, Read};
 use vuec_ast::{Vue3Ast, Vue3NodeKind};
 use vuec_sfc::{
-    SfcCompiler, SfcScriptCompileOptions, SfcStyleCompileOptions, SfcTemplateCompileOptions,
+    SfcBlock, SfcBlockAttrs, SfcCompiler, SfcDescriptor, SfcScriptBlock, SfcScriptCompileOptions,
+    SfcStyleCompileOptions, SfcTemplateCompileOptions,
 };
 use vuec_source::FileId;
+use vuec_style::{compile_style, StyleCompileOptions};
 use vuec_vue2::{self, Vue2CompileOptions};
 use vuec_vue3_core::{TemplateSource, Vue3CompilerOptions, Vue3Dialect};
 use vuec_vue3_dom::{self, DomCompilerOptions};
@@ -173,6 +175,13 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
                 "errors": [],
             }))
         }
+        "sfc.vue27.parse" => {
+            let filename = string_field_or(&payload, "filename", "anonymous.vue");
+            let source = string_field(&payload, "source");
+            let mut compiler = SfcCompiler::new();
+            let descriptor = compiler.parse(filename, &source);
+            Ok(vue27_descriptor_value(&descriptor))
+        }
         "sfc.compileTemplate" => {
             let source = string_field(&payload, "source");
             let filename = string_field_or(&payload, "filename", "anonymous.vue");
@@ -181,6 +190,17 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
             Ok(serde_json::to_value(
                 compiler.compile_template_source(filename, &source, options),
             )?)
+        }
+        "sfc.vue27.compileTemplate" => {
+            let source = string_field(&payload, "source");
+            let compiled = vuec_vue2::compile(&source, Vue2CompileOptions::default());
+            Ok(json!({
+                "ast": vue27_template_ast_value(&compiled),
+                "code": vue27_template_code(&compiled.render, &compiled.static_render_fns),
+                "source": source,
+                "tips": compiled.tips,
+                "errors": compiled.errors,
+            }))
         }
         "sfc.compileScript" => {
             let source = string_field(&payload, "source");
@@ -192,6 +212,14 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
                 compiler.compile_script(&descriptor, options),
             )?)
         }
+        "sfc.vue27.compileScript" => {
+            let source = string_field(&payload, "source");
+            let filename = string_field_or(&payload, "filename", "anonymous.vue");
+            let mut compiler = SfcCompiler::new();
+            let descriptor = compiler.parse(filename, &source);
+            let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+            Ok(vue27_script_value(&script))
+        }
         "sfc.compileStyle" | "sfc.compileStyleAsync" => {
             let source = string_field(&payload, "source");
             let filename = string_field_or(&payload, "filename", "anonymous.vue");
@@ -201,6 +229,28 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
             Ok(serde_json::to_value(
                 compiler.compile_style(&descriptor, options),
             )?)
+        }
+        "sfc.vue27.compileStyle" | "sfc.vue27.compileStyleAsync" => {
+            let source = string_field(&payload, "source");
+            let filename = string_field_or(&payload, "filename", "anonymous.vue");
+            let options = sfc_style_options(payload.get("options"));
+            let style = compile_style(
+                &source,
+                StyleCompileOptions {
+                    id: options.id.clone(),
+                    scoped: options.scoped,
+                    vars: vue27_scoped_style_vars(options.id.as_deref(), &options.vars),
+                    filename: Some(filename),
+                    source_map: false,
+                    modules: false,
+                },
+            );
+            Ok(json!({
+                "code": style.code,
+                "map": style.map,
+                "errors": style.errors,
+                "rawResult": ["postcss-result"],
+            }))
         }
         other => bail!("unsupported bridge command `{other}`"),
     }
@@ -232,6 +282,331 @@ fn template_source(payload: &Value) -> TemplateSource {
         file_id: FileId(0),
         base_offset: 0,
     }
+}
+
+fn vue27_descriptor_value(descriptor: &SfcDescriptor) -> Value {
+    json!({
+        "source": descriptor.source,
+        "filename": descriptor.filename,
+        "template": descriptor.template.as_ref().map(|block| vue27_block_value(descriptor, block)),
+        "script": descriptor.script.as_ref().map(|block| vue27_block_value(descriptor, block)),
+        "scriptSetup": descriptor.script_setup.as_ref().map(|block| vue27_block_value(descriptor, block)),
+        "styles": descriptor.styles.iter().map(|block| vue27_style_block_value(descriptor, block)).collect::<Vec<_>>(),
+        "customBlocks": descriptor.custom_blocks.iter().map(|block| vue27_block_value(descriptor, block)).collect::<Vec<_>>(),
+        "cssVars": vue27_css_vars(descriptor),
+        "errors": [],
+        "shouldForceReload": null,
+    })
+}
+
+fn vue27_block_value(descriptor: &SfcDescriptor, block: &SfcBlock) -> Value {
+    let mut value = json!({
+        "type": block.type_name,
+        "content": block.content,
+        "start": block_content_start(block),
+        "end": block_content_end(block),
+        "attrs": vue27_attrs_value(&block.attrs),
+    });
+    if matches!(block.type_name.as_str(), "script" | "style") {
+        value["map"] = vue27_block_map(descriptor);
+    }
+    if block.attrs.setup {
+        value["setup"] = json!(true);
+    }
+    if let Some(lang) = block.attrs.lang.as_ref() {
+        value["lang"] = json!(lang);
+    }
+    value
+}
+
+fn vue27_style_block_value(descriptor: &SfcDescriptor, block: &SfcBlock) -> Value {
+    let mut value = vue27_block_value(descriptor, block);
+    if block.attrs.scoped {
+        value["scoped"] = json!(true);
+    }
+    value
+}
+
+fn vue27_block_map(descriptor: &SfcDescriptor) -> Value {
+    json!({
+        "version": 3,
+        "sources": [descriptor.filename],
+        "names": [],
+        "mappings": "AAAA",
+        "file": descriptor.filename,
+        "sourceRoot": "",
+        "sourcesContent": [descriptor.source],
+    })
+}
+
+fn vue27_attrs_value(attrs: &SfcBlockAttrs) -> Value {
+    let mut object = serde_json::Map::new();
+    if attrs.scoped {
+        object.insert("scoped".into(), json!(true));
+    }
+    if attrs.setup {
+        object.insert("setup".into(), json!(true));
+    }
+    if let Some(lang) = attrs.lang.as_ref() {
+        object.insert("lang".into(), json!(lang));
+    }
+    if let Some(src) = attrs.src.as_ref() {
+        object.insert("src".into(), json!(src));
+    }
+    if let Some(module) = attrs.module.as_ref() {
+        if module.is_empty() {
+            object.insert("module".into(), json!(true));
+        } else {
+            object.insert("module".into(), json!(module));
+        }
+    }
+    Value::Object(object)
+}
+
+fn block_content_start(block: &SfcBlock) -> usize {
+    block.loc.start + opening_tag_len(block)
+}
+
+fn block_content_end(block: &SfcBlock) -> usize {
+    block
+        .loc
+        .end
+        .saturating_sub(block.type_name.len() + "</>".len())
+}
+
+fn opening_tag_len(block: &SfcBlock) -> usize {
+    block
+        .loc
+        .end
+        .saturating_sub(block.loc.start)
+        .saturating_sub(block.content.len())
+        .saturating_sub(block.type_name.len() + "</>".len())
+}
+
+fn vue27_css_vars(descriptor: &SfcDescriptor) -> Vec<String> {
+    descriptor
+        .styles
+        .iter()
+        .flat_map(|style| vuec_style::collect_css_vars(&style.content))
+        .collect()
+}
+
+fn vue27_scoped_style_vars(id: Option<&str>, vars: &[String]) -> Vec<String> {
+    let Some(id) = id else {
+        return vars.to_vec();
+    };
+    let prefix = id
+        .strip_prefix("data-v-")
+        .unwrap_or(id)
+        .trim_matches('_')
+        .trim_matches('-');
+    if prefix.is_empty() {
+        return vars.to_vec();
+    }
+    vars.iter()
+        .map(|var| {
+            if var.starts_with(&format!("{prefix}-")) {
+                var.clone()
+            } else {
+                format!("{prefix}-{var}")
+            }
+        })
+        .collect()
+}
+
+fn vue27_template_code(render: &str, static_render_fns: &[String]) -> String {
+    format!(
+        "var render = function render() {{\n  var _vm = this,\n    _c = _vm._self._c\n  return {}\n}}\nvar staticRenderFns = [{}]\nrender._withStripped = true\n",
+        vue27_template_expr(render),
+        static_render_fns
+            .iter()
+            .map(|render| format!("function(){{{render}}}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+fn vue27_template_expr(render: &str) -> String {
+    let inner = render
+        .strip_prefix("with(this){return ")
+        .and_then(|value| value.strip_suffix('}'))
+        .unwrap_or(render);
+    let mut code = inner.to_string();
+    for (from, to) in [
+        ("_c(", "_c("),
+        ("_v(", "_vm._v("),
+        ("_s(", "_vm._s("),
+        ("_l(", "_vm._l("),
+        ("_e(", "_vm._e("),
+        ("_m(", "_vm._m("),
+        ("_t(", "_vm._t("),
+    ] {
+        code = code.replace(from, to);
+    }
+    code = prefix_simple_identifier_args(&code, "_vm._s(");
+    code = code.replace("_c('", "_c(\"");
+    code = code.replace("',", "\", ");
+    code = code.replace("')", "\")");
+    code
+}
+
+fn prefix_simple_identifier_args(source: &str, callee: &str) -> String {
+    let mut output = String::new();
+    let mut rest = source;
+    while let Some(index) = rest.find(callee) {
+        output.push_str(&rest[..index + callee.len()]);
+        rest = &rest[index + callee.len()..];
+        let Some(end) = rest.find(')') else {
+            output.push_str(rest);
+            return output;
+        };
+        let arg = &rest[..end];
+        if is_simple_identifier(arg) {
+            output.push_str("_vm.");
+        }
+        output.push_str(arg);
+        output.push(')');
+        rest = &rest[end + 1..];
+    }
+    output.push_str(rest);
+    output
+}
+
+fn is_simple_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first == '$' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric())
+}
+
+fn vue27_template_ast_value(compiled: &vuec_vue2::Vue2CompiledResult) -> Value {
+    match compiled.element_ast.as_ref() {
+        Some(element) => vue27_element_ast_value(element),
+        None => Value::Null,
+    }
+}
+
+fn vue27_element_ast_value(element: &vuec_vue2::Vue2Element) -> Value {
+    json!({
+        "type": 1,
+        "tag": element.tag,
+        "attrsList": element.attrs_list,
+        "attrsMap": element.attrs_map,
+        "rawAttrsMap": element.raw_attrs_map,
+        "children": element.children.iter().map(vue27_node_ast_value).collect::<Vec<_>>(),
+        "plain": element.plain,
+        "static": element.static_node,
+        "staticRoot": element.static_root,
+    })
+}
+
+fn vue27_node_ast_value(node: &vuec_vue2::Vue2Node) -> Value {
+    match node {
+        vuec_vue2::Vue2Node::Element(element) => vue27_element_ast_value(element),
+        vuec_vue2::Vue2Node::Text(text) if text.expression.is_some() => json!({
+            "type": 2,
+            "expression": text.expression,
+            "tokens": [{"@binding": vue27_binding_from_expression(text.expression.as_deref().unwrap_or_default())}],
+            "text": text.text,
+            "static": text.static_node,
+        }),
+        vuec_vue2::Vue2Node::Text(text) => json!({
+            "type": if text.is_comment { 3 } else { 2 },
+            "text": text.text,
+            "static": text.static_node,
+        }),
+    }
+}
+
+fn vue27_binding_from_expression(expression: &str) -> String {
+    expression
+        .strip_prefix("_s(")
+        .and_then(|value| value.strip_suffix(')'))
+        .unwrap_or(expression)
+        .to_string()
+}
+
+fn vue27_script_value(script: &SfcScriptBlock) -> Value {
+    let mut value = serde_json::to_value(script).expect("script block is serializable");
+    if let Some(object) = value.as_object_mut() {
+        object.remove("errors");
+        object.remove("deps");
+        object.remove("scriptAst");
+        object.insert("content".into(), json!(vue27_script_content(script)));
+        object.insert(
+            "start".into(),
+            json!(script
+                .loc
+                .as_ref()
+                .map(block_content_start_from_loc)
+                .unwrap_or(0)),
+        );
+        object.insert(
+            "end".into(),
+            json!(script
+                .loc
+                .as_ref()
+                .map(block_content_end_from_loc)
+                .unwrap_or(0)),
+        );
+        object["bindings"] = json!(script
+            .bindings
+            .keys()
+            .map(|key| (key.clone(), "setup-const".to_string()))
+            .collect::<std::collections::BTreeMap<_, _>>());
+        object["imports"] = json!({});
+    }
+    value
+}
+
+fn vue27_script_content(script: &SfcScriptBlock) -> String {
+    if !script.setup {
+        return script.content.clone();
+    }
+    let component_name = extract_component_name(&script.content).unwrap_or("anonymous");
+    let setup_body = extract_setup_body(&script.content);
+    let bindings = script
+        .bindings
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(",");
+    let returned = if bindings.is_empty() {
+        "__sfc: true".to_string()
+    } else {
+        format!("__sfc: true,{bindings}")
+    };
+    format!(
+        "import {{ defineComponent as _defineComponent }} from 'vue'\n\nexport default /*#__PURE__*/_defineComponent({{\n  __name: '{}',\n  setup(__props) {{\n{}\nreturn {{ {} }}\n}}\n\n}})",
+        component_name, setup_body, returned
+    )
+}
+
+fn extract_component_name(content: &str) -> Option<&str> {
+    let marker = "__name: '";
+    let start = content.find(marker)? + marker.len();
+    let rest = &content[start..];
+    let end = rest.find('\'')?;
+    Some(&rest[..end])
+}
+
+fn extract_setup_body(content: &str) -> String {
+    let Some(after_import) = content.find('\n') else {
+        return String::new();
+    };
+    let rest = &content[after_import + 1..];
+    let setup = rest.split("export default").next().unwrap_or(rest).trim();
+    setup.to_string()
+}
+
+fn block_content_start_from_loc(loc: &vuec_sfc::SfcBlockLocation) -> usize {
+    loc.start
+}
+
+fn block_content_end_from_loc(loc: &vuec_sfc::SfcBlockLocation) -> usize {
+    loc.end
 }
 
 fn vue3_parse_value(ast: &Vue3Ast) -> Value {

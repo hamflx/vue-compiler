@@ -934,6 +934,7 @@ dependencies = [
  "vuec_ast",
  "vuec_sfc",
  "vuec_source",
+ "vuec_style",
  "vuec_vue2",
  "vuec_vue3_core",
  "vuec_vue3_dom",

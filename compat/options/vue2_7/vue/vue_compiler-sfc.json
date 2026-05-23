@@ -3,7 +3,7 @@
   "version_line": "vue2_7",
   "package": "vue",
   "entry": "vue/compiler-sfc",
-  "status": "pending",
+  "status": "pass",
   "rows": [
     {
       "option_name": "parse",
@@ -113,8 +113,8 @@
       "option_value": {
         "id": "data-v-contract"
       },
-      "execution_mode": "pending",
-      "status": "pending"
+      "execution_mode": "diff",
+      "status": "pass"
     },
     {
       "option_name": "compileStyle",
@@ -153,8 +153,8 @@
           "color"
         ]
       },
-      "execution_mode": "pending",
-      "status": "pending"
+      "execution_mode": "diff",
+      "status": "pass"
     }
   ]
 }

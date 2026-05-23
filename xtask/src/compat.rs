@@ -930,7 +930,7 @@ fn vue27_sfc_cases(_target: TargetSpec) -> Vec<OptionMatrixCase> {
             "vue27-sfc-script",
             r#"<template><div>{{ msg }}</div></template><script setup lang="ts">const msg = 'x'</script>"#,
             Some(serde_json::json!({"id": "data-v-contract"})),
-            true,
+            false,
         ),
         option_case(
             "compileStyle",
@@ -948,7 +948,7 @@ fn vue27_sfc_cases(_target: TargetSpec) -> Vec<OptionMatrixCase> {
             "vue27-sfc-style",
             r#"<style scoped>.a{ color: v-bind(color); }</style>"#,
             Some(serde_json::json!({"id": "data-v-contract", "scoped": true, "vars": ["color"]})),
-            true,
+            false,
         ),
     ]
 }
@@ -1851,17 +1851,28 @@ fn alias_function_expression(
         expression.push_str(" return cls; })()");
         return expression;
     }
-    let args = (0..body_arity)
+    let args = (0..arity)
         .map(|index| format!("a{index}"))
         .collect::<Vec<_>>()
         .join(", ");
+    let argument_bindings = if body_arity > arity {
+        (arity..body_arity)
+            .map(|index| format!("const a{index} = arguments[{index}];"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    } else {
+        String::new()
+    };
     let body = match command {
         Some(command) => format!(
-            "return callBridge({}, normalizeArgs({}));",
+            "{argument_bindings} return callBridge({}, normalizeArgs({}));",
             js_string_literal(command),
             alias_argument_object(target, export_name, body_arity)
         ),
-        None => format!("return notImplemented({});", js_string_literal(export_name)),
+        None => format!(
+            "{argument_bindings} return notImplemented({});",
+            js_string_literal(export_name)
+        ),
     };
     if detail
         .own_property_names
@@ -1886,7 +1897,8 @@ fn alias_body_arity(target: TargetSpec, export_name: &str, arity: u32) -> u32 {
         | (TargetKind::Vue3Core | TargetKind::Vue3Dom | TargetKind::Vue3Ssr, "baseParse")
         | (TargetKind::Vue3Dom, "parse")
         | (TargetKind::Vue3Core | TargetKind::Vue3Dom | TargetKind::Vue3Ssr, "compile")
-        | (TargetKind::Vue27Sfc | TargetKind::Vue3Sfc, "parse") => arity.max(2),
+        | (TargetKind::Vue3Sfc, "parse")
+        | (TargetKind::Vue27Sfc | TargetKind::Vue3Sfc, "compileScript") => arity.max(2),
         _ => arity,
     }
 }
@@ -1919,15 +1931,16 @@ fn bridge_command(target: TargetSpec, export_name: &str) -> Option<&'static str>
         (TargetKind::Vue26Template | TargetKind::Vue27Template, "generateCodeFrame") => {
             Some("vue2.generateCodeFrame")
         }
-        (TargetKind::Vue27Sfc | TargetKind::Vue3Sfc, "parse") => Some("sfc.parse"),
-        (TargetKind::Vue27Sfc | TargetKind::Vue3Sfc, "compileTemplate") => {
-            Some("sfc.compileTemplate")
-        }
-        (TargetKind::Vue27Sfc | TargetKind::Vue3Sfc, "compileScript") => Some("sfc.compileScript"),
-        (TargetKind::Vue27Sfc | TargetKind::Vue3Sfc, "compileStyle") => Some("sfc.compileStyle"),
-        (TargetKind::Vue27Sfc | TargetKind::Vue3Sfc, "compileStyleAsync") => {
-            Some("sfc.compileStyleAsync")
-        }
+        (TargetKind::Vue27Sfc, "parse") => Some("sfc.vue27.parse"),
+        (TargetKind::Vue3Sfc, "parse") => Some("sfc.parse"),
+        (TargetKind::Vue27Sfc, "compileTemplate") => Some("sfc.vue27.compileTemplate"),
+        (TargetKind::Vue3Sfc, "compileTemplate") => Some("sfc.compileTemplate"),
+        (TargetKind::Vue27Sfc, "compileScript") => Some("sfc.vue27.compileScript"),
+        (TargetKind::Vue3Sfc, "compileScript") => Some("sfc.compileScript"),
+        (TargetKind::Vue27Sfc, "compileStyle") => Some("sfc.vue27.compileStyle"),
+        (TargetKind::Vue27Sfc, "compileStyleAsync") => Some("sfc.vue27.compileStyleAsync"),
+        (TargetKind::Vue3Sfc, "compileStyle") => Some("sfc.compileStyle"),
+        (TargetKind::Vue3Sfc, "compileStyleAsync") => Some("sfc.compileStyleAsync"),
         (TargetKind::Vue3Core, "baseCompile") => Some("vue3.core.baseCompile"),
         (TargetKind::Vue3Core, "baseParse") => Some("vue3.core.baseParse"),
         (TargetKind::Vue3Dom, "compile") => Some("vue3.dom.compile"),
@@ -1946,7 +1959,7 @@ fn alias_argument_object(target: TargetSpec, export_name: &str, _arity: u32) -> 
             "{ template: a0, options: a1 }".into()
         }
         (TargetKind::Vue27Sfc, "parse") => {
-            "{ source: a0, filename: a1 && a1.filename, options: a1 }".into()
+            "{ source: a0 && a0.source ? a0.source : '', filename: a0 && a0.filename, options: a0 }".into()
         }
         (TargetKind::Vue27Sfc, "compileTemplate") => {
             "{ source: a0 && a0.source ? a0.source : '', filename: a0 && (a0.filename || a0.id || 'template.vue.html'), options: a0 }"
@@ -1957,7 +1970,7 @@ fn alias_argument_object(target: TargetSpec, export_name: &str, _arity: u32) -> 
                 .into()
         }
         (TargetKind::Vue27Sfc, "compileStyle") | (TargetKind::Vue27Sfc, "compileStyleAsync") => {
-            "{ source: a0 && a0.source ? a0.source : '', filename: a0 && a0.filename, options: a0 }"
+            "{ source: extractStyleSource(a0 && a0.source ? a0.source : ''), filename: a0 && a0.filename, options: a0 }"
                 .into()
         }
         (TargetKind::Vue27Sfc, _) => {
@@ -2424,6 +2437,7 @@ fn run_option_probe(
         "option_path": option_path,
         "input_kind": input_kind,
         "option_value": option_value,
+        "target_version_line": target.version_line.as_str(),
         "target_package": target.package,
         "target_entry": target.entry,
     });
@@ -2570,8 +2584,11 @@ fn alias_smoke_script(target: TargetSpec) -> String {
         TargetKind::Vue26Template | TargetKind::Vue27Template => {
             "const result = api.compile('<div>{{ msg }}</div>', { optimize: true }); assert(result && typeof result.render === 'string', 'compile render missing');"
         }
-        TargetKind::Vue27Sfc | TargetKind::Vue3Sfc => {
-            "const result = api.parse('<template><div/></template><script>export default {}</script>'); assert(result && result.template, 'parse descriptor missing template');"
+        TargetKind::Vue27Sfc => {
+            "const result = api.parse({ source: '<template><div/></template><script>export default {}</script>', filename: 'smoke.vue' }); assert(result && result.template, 'parse descriptor missing template');"
+        }
+        TargetKind::Vue3Sfc => {
+            "const result = api.parse('<template><div/></template><script>export default {}</script>'); assert(result && result.descriptor && result.descriptor.template, 'parse descriptor missing template');"
         }
         TargetKind::Vue3Core => {
             "const result = api.baseCompile('<div>{{ msg }}</div>', {}); assert(result && typeof result.code === 'string', 'baseCompile code missing');"
@@ -2786,6 +2803,11 @@ function callBridge(command, payload) {
 
 function normalizeArgs(payload) {
   return payload || {};
+}
+
+function extractStyleSource(source) {
+  const match = String(source || '').match(/<style[^>]*>([\s\S]*?)<\/style>/i);
+  return match ? match[1] : String(source || '');
 }
 
 function notImplemented(name) {
@@ -3169,6 +3191,15 @@ function extractStyleSource(fixture) {
   return match ? match[1] : fixture;
 }
 
+function extractTemplateSource(fixture) {
+  const match = String(fixture).match(/<template[^>]*>([\s\S]*?)<\/template>/i);
+  return match ? match[1] : fixture;
+}
+
+function isVue27Sfc() {
+  return payload.target_version_line === 'vue2_7' && payload.target_entry === 'vue/compiler-sfc';
+}
+
 function normalizeSfcStyleResult(result) {
   if (!result || typeof result !== 'object') return result;
   const out = Object.assign({}, result);
@@ -3194,12 +3225,21 @@ function invoke(api) {
     case 'compileToFunctions':
       return capture(() => arg.present ? api.compileToFunctions(fixture, arg.value, {}) : api.compileToFunctions(fixture));
     case 'parse':
+      if (isVue27Sfc()) {
+        const value = Object.assign({ source: fixture }, arg.value && typeof arg.value === 'object' ? arg.value : {});
+        return capture(() => arg.present ? api.parse(value) : api.parse({ source: fixture }));
+      }
       return capture(() => arg.present ? api.parse(fixture, arg.value) : api.parse(fixture));
     case 'compileTemplate':
+      if (isVue27Sfc()) {
+        return capture(() => api.compileTemplate(Object.assign(optionObjectWithSource(extractTemplateSource(fixture)), arg.value && typeof arg.value === 'object' ? arg.value : {})));
+      }
       return capture(() => api.compileTemplate(optionObjectWithSource(fixture)));
     case 'compileScript': {
       return capture(() => {
-        const parsed = api.parse(fixture, { filename: 'contract.vue' });
+        const parsed = isVue27Sfc()
+          ? api.parse({ source: fixture, filename: 'contract.vue' })
+          : api.parse(fixture, { filename: 'contract.vue' });
         const descriptor = parsed && parsed.descriptor ? parsed.descriptor : parsed;
         return arg.present ? api.compileScript(descriptor, arg.value) : api.compileScript(descriptor);
       });

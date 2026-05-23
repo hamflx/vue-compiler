@@ -18,6 +18,10 @@
 
 ## Completed This Round
 
+- Added version-specific Vue 2.7 `vue/compiler-sfc` alias bridge commands so parse/template/script/style results are projected to the Vue 2.7 public API shape instead of reusing the Vue 3 SFC wrapper.
+- Fixed the option probe and npm alias smoke paths for Vue 2.7's single-object SFC API, including template/style block source extraction for executable diff rows.
+- Converted Vue 2.7 `compileScript` and `compileStyle` rows from pending to executable diff mode; `cargo xtask run-option-matrix --version-line vue2_7 --package vue --entry vue/compiler-sfc` now reports `4/4` rows passing with no pending rows.
+- Verification this round: `cargo check -p vuec_node_bridge -p xtask`, `cargo xtask verify-npm-alias --version-line vue2_7 --package vue --entry vue/compiler-sfc`, `cargo xtask diff-api --version-line vue2_7 --package vue --entry vue/compiler-sfc`, `cargo xtask run-option-matrix --version-line vue2_7 --package vue --entry vue/compiler-sfc`, `cargo xtask audit-option-matrix --version-line vue2_7 --package vue --entry vue/compiler-sfc`, plus Vue 3 SFC matrix/audit regression checks.
 - Converted the Vue 3 `@vue/compiler-sfc` `compileScript` option row from pending to executable diff mode; the target now reports `4/4` option rows passing with no pending rows.
 - Added a minimal official-style script setup codegen path for simple const bindings, including `defineComponent` wrapping and object-form binding metadata for the option probe.
 - Fixed the option probe to pass `parse(...).descriptor` into official `compileScript`, matching the public API contract.
