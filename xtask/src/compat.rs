@@ -4326,6 +4326,34 @@ pub fn run_conformance(args: &ConformanceArgs) -> JsonReport {
             .count();
         let ready_to_execute =
             !discovered.is_empty() && readiness.alias_ready && readiness.runner_ready;
+        let execution_result = if ready_to_execute {
+            match run_conformance_execution(spec, &root, &discovered, lock_hash.as_deref()) {
+                Ok(result) => Some(result),
+                Err(err) => {
+                    violations.push(format!(
+                        "{} official conformance execution failed to start: {err:#}",
+                        spec.name
+                    ));
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let counts = execution_result
+            .as_ref()
+            .map(|result| result.counts)
+            .unwrap_or(ConformanceExecutionCounts {
+                total: discovered.len(),
+                pass: 0,
+                fail: 0,
+                skip: 0,
+                pending: discovered.len(),
+            });
+        let execution_status = execution_result
+            .as_ref()
+            .map(|result| result.status.as_str())
+            .unwrap_or(if ready_to_execute { "ready" } else { "blocked" });
         let report_path = PathBuf::from("target")
             .join("conformance")
             .join(lock_hash.as_deref().unwrap_or("unknown-lock"))
@@ -4335,14 +4363,9 @@ pub fn run_conformance(args: &ConformanceArgs) -> JsonReport {
             "version_line": spec.version_line,
             "lock_hash": lock_hash,
             "test_files": discovered,
-            "counts": {
-                "total": discovered.len(),
-                "pass": 0,
-                "fail": 0,
-                "skip": 0,
-                "pending": discovered.len(),
-            },
-            "execution": if ready_to_execute { "ready" } else { "blocked" },
+            "counts": counts,
+            "execution": execution_status,
+            "execution_result": execution_result,
             "readiness": readiness,
             "smoke": smoke_results,
         });
@@ -4356,10 +4379,16 @@ pub fn run_conformance(args: &ConformanceArgs) -> JsonReport {
         } else {
             created.push(report_path.display().to_string());
         }
-        let status = if discovered.is_empty() || smoke_failures > 0 {
+        let status = if discovered.is_empty()
+            || smoke_failures > 0
+            || counts.fail > 0
+            || (ready_to_execute && counts.total == 0)
+        {
             ReportStatus::Fail
-        } else {
+        } else if counts.pending > 0 {
             ReportStatus::Pending
+        } else {
+            ReportStatus::Pass
         };
         if discovered.is_empty() {
             violations.push(format!("{} discovered no official test files", spec.name));
@@ -4370,10 +4399,22 @@ pub fn run_conformance(args: &ConformanceArgs) -> JsonReport {
                 spec.name
             ));
         }
+        if counts.fail > 0 {
+            violations.push(format!(
+                "{} official conformance has {} failing tests",
+                spec.name, counts.fail
+            ));
+        }
+        if ready_to_execute && counts.total == 0 {
+            violations.push(format!(
+                "{} official conformance runner executed zero tests",
+                spec.name
+            ));
+        }
         items.push(ReportItem::new(
             spec.name,
             status,
-            conformance_item_detail(discovered.len(), &readiness),
+            conformance_item_detail(discovered.len(), &readiness, execution_result.as_ref()),
             Some(report_path),
         ));
     }
@@ -4677,7 +4718,11 @@ fn summarize_compat_at_root(locked: bool, path: &Path, root: &Path) -> JsonRepor
                 violations.push(format!("{} missing output report", target.display()));
             }
             if conformance_status == ReportStatus::Fail {
-                violations.push(format!("{} missing conformance report", target.display()));
+                if conformance_report.exists() {
+                    violations.push(format!("{} conformance failed", target.display()));
+                } else {
+                    violations.push(format!("{} missing conformance report", target.display()));
+                }
             }
             if lock_status == ReportStatus::Fail {
                 violations.push(format!(
@@ -5003,6 +5048,27 @@ struct ConformanceSmokeResult {
     detail: String,
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct ConformanceExecutionResult {
+    status: String,
+    runner: String,
+    prepared_root: String,
+    output_file: String,
+    exit_code: Option<i32>,
+    stdout: String,
+    stderr: String,
+    counts: ConformanceExecutionCounts,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+struct ConformanceExecutionCounts {
+    total: usize,
+    pass: usize,
+    fail: usize,
+    skip: usize,
+    pending: usize,
+}
+
 fn run_conformance_smokes(spec: ConformanceSuiteSpec) -> Vec<ConformanceSmokeResult> {
     conformance_smoke_targets(spec)
         .into_iter()
@@ -5036,6 +5102,303 @@ fn conformance_smoke_targets(spec: ConformanceSuiteSpec) -> Vec<TargetSpec> {
                     .any(|request| api_require_request(*target) == *request)
         })
         .collect()
+}
+
+fn run_conformance_execution(
+    spec: ConformanceSuiteSpec,
+    official_root: &Path,
+    discovered: &[String],
+    lock_hash: Option<&str>,
+) -> Result<ConformanceExecutionResult> {
+    match spec.name {
+        "vue3-core" => run_vue3_core_conformance(spec, official_root, discovered, lock_hash),
+        _ => Ok(ConformanceExecutionResult {
+            status: "pending".into(),
+            runner: "not-wired".into(),
+            prepared_root: String::new(),
+            output_file: String::new(),
+            exit_code: None,
+            stdout: String::new(),
+            stderr: format!("{} official execution is not wired yet", spec.name),
+            counts: ConformanceExecutionCounts {
+                total: discovered.len(),
+                pending: discovered.len(),
+                ..ConformanceExecutionCounts::default()
+            },
+        }),
+    }
+}
+
+fn run_vue3_core_conformance(
+    spec: ConformanceSuiteSpec,
+    official_root: &Path,
+    discovered: &[String],
+    lock_hash: Option<&str>,
+) -> Result<ConformanceExecutionResult> {
+    let prepared_root = prepare_vue3_core_conformance_suite(spec, official_root, lock_hash)?;
+    let output_file = prepared_root.join("vitest-report.json");
+    let npm_root = PathBuf::from("target")
+        .join("compat")
+        .join("npm")
+        .join(spec.version_line.as_str());
+    let alias_root = rust_alias_root(spec.version_line);
+    let absolute_npm_root = absolute_path(&npm_root);
+    let absolute_alias_root = absolute_path(&alias_root);
+    let absolute_prepared_root = absolute_path(&prepared_root);
+    let absolute_output_file = absolute_path(&output_file);
+    let node_modules = absolute_npm_root.join("node_modules");
+    let vitest_bin = node_modules
+        .join("vitest")
+        .join("vitest.mjs")
+        .display()
+        .to_string();
+    let node = resolve_program("node");
+    let output = Command::new(node)
+        .arg(vitest_bin)
+        .arg("run")
+        .arg("--globals")
+        .arg("--reporter=json")
+        .arg(format!("--outputFile={}", absolute_output_file.display()))
+        .env("VUEC_RUST_ALIAS_ROOT", &absolute_alias_root)
+        .env("VUEC_OFFICIAL_NPM_ROOT", &absolute_npm_root)
+        .env(
+            "NODE_PATH",
+            conformance_node_path(&absolute_alias_root, &absolute_npm_root),
+        )
+        .current_dir(&absolute_prepared_root)
+        .output()
+        .with_context(|| format!("failed to spawn Vitest for {}", spec.name))?;
+    let stdout = normalize_conformance_output(&String::from_utf8_lossy(&output.stdout));
+    let stderr = normalize_conformance_output(&String::from_utf8_lossy(&output.stderr));
+    let counts = read_vitest_counts(&output_file)
+        .or_else(|_| read_vitest_counts(&absolute_output_file))
+        .unwrap_or_else(|_| ConformanceExecutionCounts {
+            total: discovered.len(),
+            pending: discovered.len(),
+            ..ConformanceExecutionCounts::default()
+        });
+    let status = if counts.fail > 0 || !output.status.success() {
+        "failed"
+    } else {
+        "executed"
+    };
+    Ok(ConformanceExecutionResult {
+        status: status.into(),
+        runner: "vitest".into(),
+        prepared_root: prepared_root.display().to_string(),
+        output_file: output_file.display().to_string(),
+        exit_code: output.status.code(),
+        stdout,
+        stderr,
+        counts,
+    })
+}
+
+fn prepare_vue3_core_conformance_suite(
+    spec: ConformanceSuiteSpec,
+    official_root: &Path,
+    lock_hash: Option<&str>,
+) -> Result<PathBuf> {
+    let prepared_root = PathBuf::from("target")
+        .join("conformance")
+        .join(lock_hash.unwrap_or("unknown-lock"))
+        .join("prepared")
+        .join(spec.name);
+    if prepared_root.exists() {
+        fs::remove_dir_all(&prepared_root)
+            .with_context(|| format!("failed to remove {}", prepared_root.display()))?;
+    }
+    let official_tests = official_root
+        .join("packages")
+        .join("compiler-core")
+        .join("__tests__");
+    let prepared_tests = prepared_root
+        .join("packages")
+        .join("compiler-core")
+        .join("__tests__");
+    copy_dir_recursive(&official_tests, &prepared_tests)?;
+    write_vue3_core_conformance_shims(&prepared_root)?;
+    Ok(prepared_root)
+}
+
+fn write_vue3_core_conformance_shims(prepared_root: &Path) -> Result<()> {
+    let core_src = prepared_root
+        .join("packages")
+        .join("compiler-core")
+        .join("src");
+    let transforms = core_src.join("transforms");
+    fs::create_dir_all(&transforms)
+        .with_context(|| format!("failed to create {}", transforms.display()))?;
+    for module in [
+        "index",
+        "ast",
+        "codegen",
+        "compile",
+        "errors",
+        "options",
+        "parser",
+        "runtimeHelpers",
+        "transform",
+        "utils",
+    ] {
+        write_reexport_module(&core_src.join(format!("{module}.ts")), "@vue/compiler-core")?;
+    }
+    for module in [
+        "transformElement",
+        "transformExpression",
+        "transformSlotOutlet",
+        "transformText",
+        "transformVBindShorthand",
+        "vBind",
+        "vFor",
+        "vIf",
+        "vMemo",
+        "vModel",
+        "vOn",
+        "vOnce",
+        "vSlot",
+    ] {
+        write_reexport_module(
+            &transforms.join(format!("{module}.ts")),
+            "@vue/compiler-core",
+        )?;
+    }
+
+    let dom_transform = prepared_root
+        .join("packages")
+        .join("compiler-dom")
+        .join("src")
+        .join("transforms");
+    fs::create_dir_all(&dom_transform)
+        .with_context(|| format!("failed to create {}", dom_transform.display()))?;
+    write_reexport_module(
+        &dom_transform.join("transformStyle.ts"),
+        "@vue/compiler-dom",
+    )?;
+
+    let shared_src = prepared_root.join("packages").join("shared").join("src");
+    fs::create_dir_all(&shared_src)
+        .with_context(|| format!("failed to create {}", shared_src.display()))?;
+    write_reexport_module(&shared_src.join("index.ts"), "@vue/shared")?;
+
+    let config = r#"
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const root = path.dirname(fileURLToPath(import.meta.url))
+const aliasRoot = process.env.VUEC_RUST_ALIAS_ROOT
+const npmRoot = process.env.VUEC_OFFICIAL_NPM_ROOT
+
+export default {
+  define: {
+    __DEV__: true,
+    __TEST__: true,
+    __VERSION__: '"test"',
+    __BROWSER__: false,
+    __GLOBAL__: false,
+    __ESM_BUNDLER__: true,
+    __ESM_BROWSER__: false,
+    __CJS__: true,
+    __SSR__: true,
+    __FEATURE_OPTIONS_API__: true,
+    __FEATURE_SUSPENSE__: true,
+    __FEATURE_PROD_DEVTOOLS__: false,
+    __FEATURE_PROD_HYDRATION_MISMATCH_DETAILS__: false,
+    __COMPAT__: true,
+  },
+  resolve: {
+    alias: {
+      '@vue/compiler-core': path.resolve(aliasRoot, 'node_modules/@vue/compiler-core/index.js'),
+      '@vue/compiler-dom': path.resolve(aliasRoot, 'node_modules/@vue/compiler-dom/index.js'),
+      '@vue/compiler-sfc': path.resolve(aliasRoot, 'node_modules/@vue/compiler-sfc/dist/compiler-sfc.cjs.js'),
+      '@vue/shared': path.resolve(npmRoot, 'node_modules/@vue/shared/index.js'),
+      'source-map-js': path.resolve(npmRoot, 'node_modules/source-map-js/source-map.js'),
+    },
+  },
+  test: {
+    globals: true,
+    pool: 'forks',
+    include: ['packages/compiler-core/__tests__/**/*.spec.ts'],
+  },
+}
+"#;
+    write_text(&prepared_root.join("vitest.config.ts"), config)?;
+    Ok(())
+}
+
+fn write_reexport_module(path: &Path, request: &str) -> Result<()> {
+    write_text(
+        path,
+        &format!("export * from {}\n", js_string_literal(request)),
+    )
+}
+
+fn copy_dir_recursive(from: &Path, to: &Path) -> Result<()> {
+    fs::create_dir_all(to).with_context(|| format!("failed to create {}", to.display()))?;
+    for entry in fs::read_dir(from).with_context(|| format!("failed to read {}", from.display()))? {
+        let entry = entry?;
+        let source = entry.path();
+        let target = to.join(entry.file_name());
+        if source.is_dir() {
+            copy_dir_recursive(&source, &target)?;
+        } else {
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create {}", parent.display()))?;
+            }
+            fs::copy(&source, &target).with_context(|| {
+                format!(
+                    "failed to copy {} to {}",
+                    source.display(),
+                    target.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn conformance_node_path(alias_root: &Path, npm_root: &Path) -> String {
+    std::env::join_paths([
+        alias_root.join("node_modules"),
+        npm_root.join("node_modules"),
+    ])
+    .map(|value| value.to_string_lossy().to_string())
+    .unwrap_or_else(|_| {
+        format!(
+            "{}{}{}",
+            alias_root.join("node_modules").display(),
+            if cfg!(windows) { ";" } else { ":" },
+            npm_root.join("node_modules").display()
+        )
+    })
+}
+
+fn normalize_conformance_output(output: &str) -> String {
+    output
+        .replace('\\', "/")
+        .lines()
+        .take(200)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn read_vitest_counts(path: &Path) -> Result<ConformanceExecutionCounts> {
+    let value = read_json::<serde_json::Value>(path)?;
+    let total = json_usize(&value, &["numTotalTests"]);
+    let failed_suites = json_usize(&value, &["numFailedTestSuites"]);
+    let fail =
+        json_usize(&value, &["numFailedTests"]).max(if total == 0 { failed_suites } else { 0 });
+    let skip = json_usize(&value, &["numPendingTests"]) + json_usize(&value, &["numTodoTests"]);
+    let pass = json_usize(&value, &["numPassedTests"]);
+    let pending = total.saturating_sub(pass + fail + skip);
+    Ok(ConformanceExecutionCounts {
+        total,
+        pass,
+        fail,
+        skip,
+        pending,
+    })
 }
 
 fn conformance_targets(suites: &[ConformanceSuite]) -> Vec<TargetSpec> {
@@ -5109,7 +5472,21 @@ fn node_dependency_available(node_modules: &Path, request: &str) -> bool {
     package_dir.join("package.json").is_file() || package_dir.join("index.js").is_file()
 }
 
-fn conformance_item_detail(test_count: usize, readiness: &ConformanceReadiness) -> String {
+fn conformance_item_detail(
+    test_count: usize,
+    readiness: &ConformanceReadiness,
+    execution: Option<&ConformanceExecutionResult>,
+) -> String {
+    if let Some(execution) = execution {
+        return format!(
+            "{}/{} official tests passed, {} failed, {} skipped, {} pending",
+            execution.counts.pass,
+            execution.counts.total,
+            execution.counts.fail,
+            execution.counts.skip,
+            execution.counts.pending
+        );
+    }
     if readiness.alias_ready && readiness.runner_ready {
         return format!("{test_count} official test files discovered; runner is ready to execute");
     }
@@ -5458,6 +5835,89 @@ mod tests {
             "smoke": [{ "status": "fail", "request": "@vue/compiler-core" }]
         });
         assert_eq!(report_value_status(&value), ReportStatus::Fail);
+    }
+
+    #[test]
+    fn vitest_counts_treat_failed_suite_without_tests_as_failure() {
+        let temp = std::env::temp_dir().join(format!(
+            "vuec-xtask-vitest-counts-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp).unwrap();
+        let report = temp.join("vitest-report.json");
+        fs::write(
+            &report,
+            r#"{
+              "numTotalTestSuites": 0,
+              "numFailedTestSuites": 1,
+              "numTotalTests": 0,
+              "numPassedTests": 0,
+              "numFailedTests": 0,
+              "numPendingTests": 0,
+              "numTodoTests": 0
+            }"#,
+        )
+        .unwrap();
+
+        let counts = read_vitest_counts(&report).unwrap();
+        assert_eq!(counts.total, 0);
+        assert_eq!(counts.fail, 1);
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn conformance_item_detail_uses_execution_counts() {
+        let readiness = conformance_readiness(suite_spec(ConformanceSuite::Vue3Core));
+        let execution = ConformanceExecutionResult {
+            status: "failed".into(),
+            runner: "vitest".into(),
+            prepared_root: "prepared".into(),
+            output_file: "report.json".into(),
+            exit_code: Some(1),
+            stdout: String::new(),
+            stderr: String::new(),
+            counts: ConformanceExecutionCounts {
+                total: 618,
+                pass: 9,
+                fail: 609,
+                skip: 0,
+                pending: 0,
+            },
+        };
+
+        assert_eq!(
+            conformance_item_detail(20, &readiness, Some(&execution)),
+            "9/618 official tests passed, 609 failed, 0 skipped, 0 pending"
+        );
+    }
+
+    #[test]
+    fn vue3_core_conformance_shims_use_relative_vitest_glob() {
+        let temp = std::env::temp_dir().join(format!(
+            "vuec-xtask-vue3-core-shims-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        write_vue3_core_conformance_shims(&temp).unwrap();
+
+        let parser = fs::read_to_string(
+            temp.join("packages")
+                .join("compiler-core")
+                .join("src")
+                .join("parser.ts"),
+        )
+        .unwrap();
+        assert!(parser.contains("export * from \"@vue/compiler-core\""));
+
+        let config = fs::read_to_string(temp.join("vitest.config.ts")).unwrap();
+        assert!(!config.contains("vitest/config"));
+        assert!(config.contains("include: ['packages/compiler-core/__tests__/**/*.spec.ts']"));
+        let _ = fs::remove_dir_all(temp);
     }
 
     #[test]

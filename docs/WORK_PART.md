@@ -18,6 +18,11 @@
 
 ## Completed This Round
 
+- Added the first real official spec execution path to `cargo xtask run-conformance`: Vue 3 `compiler-core` tests are copied into a lock-scoped prepared suite, source-relative imports are satisfied by generated Rust alias shims, and Vitest is launched from the pinned official npm runner install.
+- Vue 3 core conformance reports now include `execution_result`, Vitest stdout/stderr, prepared root, output JSON path, exit code, and real test counts. Zero-test Vitest runs are explicitly treated as failures.
+- Current Vue 3 core conformance status is a real failure surface instead of pending: `cargo xtask run-conformance --suite vue3-core` runs 618 official tests, with 9 passing and 609 failing. The visible failures are expected at this stage and come from missing Rust alias implementations such as `transform`, `createSimpleExpression`, and exact codegen snapshot mismatches.
+- Added xtask regression coverage for Vitest count parsing, conformance detail formatting, and Vue 3 core shim/config generation.
+- Verification this round: `cargo fmt --all --check`, `cargo test -p xtask`, and `cargo xtask run-conformance --suite vue3-core` (expected fail with 9/618 pass, 609 fail).
 - Added deterministic official test runner dependency provisioning to `cargo xtask run-conformance`: runner packages are resolved from the synced official lock/manifests and installed into the lock-scoped official npm probe roots before readiness is evaluated.
 - Corrected Vue 2.7 conformance runner classification from the old Vue 2.6 Jasmine/Babel path to the actual Vue 2.7 Vitest/esbuild/TypeScript test setup.
 - Fixed yarn lock dependency lookup to match exact package names, preventing `eslint-plugin-jasmine` from being mistaken for `jasmine`; added regression coverage for pnpm and yarn runner dependency resolution.
