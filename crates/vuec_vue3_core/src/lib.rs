@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
-use vuec_ast::{RuntimeHelper, TemplateAttribute, Vue3Ast, Vue3NodeKind};
+use vuec_ast::{RuntimeHelper, TemplateAttribute, Vue3Ast, Vue3AstKind, Vue3NodeKind};
 use vuec_codegen::{CodeWriter, SourceMapArtifact, SourceMapSegment};
 use vuec_html::{HtmlTokenKind, HtmlTokenizer};
 use vuec_js::JsAstStore;
@@ -59,7 +59,7 @@ pub struct Vue3Dialect;
 impl Vue3Dialect {
     pub fn base_parse(source: TemplateSource, _options: &Vue3CompilerOptions) -> Vue3Ast {
         let mut ast = Vue3Ast::new(
-            Vue3NodeKind::Root,
+            Vue3NodeKind::root(),
             Some(Span::new(
                 source.file_id,
                 source.base_offset,
@@ -82,7 +82,7 @@ impl Vue3Dialect {
                 HtmlTokenKind::Comment(value) => {
                     let _id = ast.push_child(
                         current_parent,
-                        Vue3NodeKind::Comment { value },
+                        Vue3NodeKind::comment(value),
                         Some(Span::new(
                             source.file_id,
                             source.base_offset + token.start,
@@ -97,9 +97,9 @@ impl Vue3Dialect {
                 } => {
                     let id = ast.push_child(
                         current_parent,
-                        Vue3NodeKind::Element {
-                            tag: name,
-                            attributes: attributes
+                        Vue3NodeKind::element(
+                            name,
+                            attributes
                                 .into_iter()
                                 .map(|attr| TemplateAttribute {
                                     name: attr.name,
@@ -107,7 +107,7 @@ impl Vue3Dialect {
                                 })
                                 .collect(),
                             self_closing,
-                        },
+                        ),
                         Some(Span::new(
                             source.file_id,
                             source.base_offset + token.start,
@@ -124,11 +124,12 @@ impl Vue3Dialect {
                             break;
                         };
                         if let Some(node) = ast.node(node_id) {
-                            if matches!(&node.kind, Vue3NodeKind::Element { tag, .. } if tag == &name)
+                            if matches!(&node.kind, Vue3AstKind::Element(element) if element.tag == name)
                             {
                                 if let Some(node) = ast.node_mut(node_id) {
                                     if let Some(span) = node.span.source_mut() {
-                                        span.end = vuec_source::BytePos(token.end);
+                                        span.end =
+                                            vuec_source::BytePos(source.base_offset + token.end);
                                     }
                                 }
                                 break;
@@ -162,12 +163,9 @@ impl Vue3Dialect {
                 for child_id in node.children.clone() {
                     if let Some(child) = ast.node(child_id) {
                         match &child.kind {
-                            Vue3NodeKind::Element { .. } => {
+                            Vue3AstKind::Element(element) => {
                                 has_element = true;
-                                if matches!(
-                                    &child.kind,
-                                    Vue3NodeKind::Element { tag, .. } if tag == "slot"
-                                ) {
+                                if element.tag == "slot" {
                                     ctx.add_helper(RuntimeHelper::Vue3RenderSlot);
                                 }
                                 if !is_root {
@@ -175,13 +173,11 @@ impl Vue3Dialect {
                                 }
                                 walk.push((child_id, false));
                             }
-                            Vue3NodeKind::Interpolation { .. } => {
+                            Vue3AstKind::Interpolation(_) => {
                                 has_interpolation = true;
                             }
-                            Vue3NodeKind::Text { .. } => {}
-                            Vue3NodeKind::Comment { .. }
-                            | Vue3NodeKind::Directive { .. }
-                            | Vue3NodeKind::Root => {}
+                            Vue3AstKind::Text(_) => {}
+                            _ => {}
                         }
                     }
                 }
@@ -425,7 +421,7 @@ fn collect_node_source_map(
         return;
     };
     match &node.kind {
-        Vue3NodeKind::Element { .. } => {
+        Vue3AstKind::Element(_) => {
             add_vnode_mapping(code, node, base_offset, source, segments, cursor);
             for child_id in &node.children {
                 collect_node_source_map(
@@ -440,13 +436,10 @@ fn collect_node_source_map(
                 );
             }
         }
-        Vue3NodeKind::Interpolation { .. } => {
+        Vue3AstKind::Interpolation(_) => {
             add_interpolation_mapping(code, node, base_offset, source, names, segments, cursor);
         }
-        Vue3NodeKind::Root
-        | Vue3NodeKind::Text { .. }
-        | Vue3NodeKind::Comment { .. }
-        | Vue3NodeKind::Directive { .. } => {}
+        _ => {}
     }
 }
 
@@ -470,7 +463,7 @@ fn add_vnode_mapping(
         return;
     };
     let tag = match &node.kind {
-        Vue3NodeKind::Element { tag, .. } => tag,
+        Vue3AstKind::Element(element) => &element.tag,
         _ => return,
     };
     let block_needle = format!("_createElementBlock(\"{tag}\"");
@@ -518,12 +511,13 @@ fn add_interpolation_mapping(
     segments: &mut Vec<SourceMapSegment>,
     cursor: &mut usize,
 ) {
-    let Vue3NodeKind::Interpolation { expression } = &node.kind else {
+    let Vue3AstKind::Interpolation(interpolation) = &node.kind else {
         return;
     };
     let Some(span) = node.span.source() else {
         return;
     };
+    let expression = interpolation.expression.source_string();
     let name = expression.trim().to_string();
     let name_index = if let Some(index) = names.iter().position(|existing| existing == &name) {
         index
@@ -642,30 +636,27 @@ fn render_node_expr(
         return "null".into();
     };
     match &node.kind {
-        Vue3NodeKind::Root => render_children_array(ast, &node.children, options, true),
-        Vue3NodeKind::Text { value } => quote_text(value),
-        Vue3NodeKind::Interpolation { expression } => {
+        Vue3AstKind::Root(_) => render_children_array(ast, &node.children, options, true),
+        Vue3AstKind::Text(text) => quote_text(&text.value),
+        Vue3AstKind::Interpolation(interpolation) => {
             format!(
                 "_toDisplayString({})",
-                render_expression(expression, options)
+                render_expression(&interpolation.expression.source_string(), options)
             )
         }
-        Vue3NodeKind::Comment { value } => format!("/*{}*/", value),
-        Vue3NodeKind::Directive { .. } => "null".into(),
-        Vue3NodeKind::Element {
-            tag,
-            attributes,
-            self_closing: _,
-        } => {
+        Vue3AstKind::Comment(comment) => format!("/*{}*/", comment.value),
+        Vue3AstKind::Element(element) => {
+            let tag = &element.tag;
+            let attributes = element.template_attributes();
             if tag == "slot" {
-                return render_slot_outlet(attributes, options);
+                return render_slot_outlet(&attributes, options);
             }
             let helper = if mode == NodeRenderMode::Root {
                 "_createElementBlock"
             } else {
                 "_createElementVNode"
             };
-            let props = render_props(attributes, options);
+            let props = render_props(&attributes, options);
             let children = render_element_children(ast, &node.children, options, mode);
             let patch_flag = if mode == NodeRenderMode::Cached {
                 ", -1 /* CACHED */"
@@ -707,6 +698,7 @@ fn render_node_expr(
                 )
             }
         }
+        _ => "null".into(),
     }
 }
 
@@ -733,7 +725,7 @@ fn render_element_children(
     let child_nodes = children
         .iter()
         .filter_map(|child_id| ast.node(*child_id))
-        .filter(|child| !matches!(child.kind, Vue3NodeKind::Comment { .. }))
+        .filter(|child| !matches!(child.kind, Vue3AstKind::Comment(_)))
         .collect::<Vec<_>>();
     if options.hoist_static
         && parent_mode == NodeRenderMode::Root
@@ -760,7 +752,7 @@ fn render_element_children(
         && (parent_mode != NodeRenderMode::Root
             || matches!(
                 child_nodes[0].kind,
-                Vue3NodeKind::Text { .. } | Vue3NodeKind::Interpolation { .. }
+                Vue3AstKind::Text(_) | Vue3AstKind::Interpolation(_)
             ))
     {
         rendered.into_iter().next().unwrap()
@@ -783,12 +775,8 @@ fn should_cache_children(children: &[&vuec_ast::Node<Vue3NodeKind>]) -> bool {
 fn is_static_element_for_cache(node: &vuec_ast::Node<Vue3NodeKind>) -> bool {
     matches!(
         &node.kind,
-        Vue3NodeKind::Element {
-            tag,
-            attributes,
-            ..
-        } if tag != "slot"
-            && attributes.iter().all(|attr| {
+        Vue3AstKind::Element(element) if element.tag != "slot"
+            && element.template_attributes().iter().all(|attr| {
                 !attr.name.starts_with("v-")
                     && !attr.name.starts_with('@')
                     && !attr.name.starts_with(':')
@@ -799,8 +787,8 @@ fn is_static_element_for_cache(node: &vuec_ast::Node<Vue3NodeKind>) -> bool {
 fn has_dynamic_children(ast: &Vue3Ast, children: &[vuec_ast::NodeId]) -> bool {
     children.iter().any(|child_id| {
         ast.node(*child_id).is_some_and(|child| {
-            matches!(child.kind, Vue3NodeKind::Interpolation { .. })
-                || matches!(&child.kind, Vue3NodeKind::Element { .. } if has_dynamic_children(ast, &child.children))
+            matches!(child.kind, Vue3AstKind::Interpolation(_))
+                || matches!(&child.kind, Vue3AstKind::Element(_) if has_dynamic_children(ast, &child.children))
         })
     })
 }
@@ -846,7 +834,9 @@ fn expression_diagnostics(ast: &Vue3Ast, options: &Vue3CompilerOptions) -> Vec<S
     ast.nodes
         .iter()
         .filter_map(|node| match &node.kind {
-            Vue3NodeKind::Interpolation { expression } => Some(expression.as_str()),
+            Vue3AstKind::Interpolation(interpolation) => {
+                Some(interpolation.expression.source_string())
+            }
             _ => None,
         })
         .filter_map(|expression| {
@@ -918,7 +908,7 @@ fn push_text_and_interpolations(
         let expression = text[expression_start..close].trim().to_string();
         let _id = ast.push_child(
             parent,
-            Vue3NodeKind::Interpolation { expression },
+            Vue3NodeKind::interpolation(expression),
             Some(Span::new(
                 file_id,
                 token_start + open,
@@ -944,9 +934,7 @@ fn push_text(
     }
     let _id = ast.push_child(
         parent,
-        Vue3NodeKind::Text {
-            value: text.to_string(),
-        },
+        Vue3NodeKind::text(text),
         Some(Span::new(file_id, start, start + text.len())),
     );
 }
@@ -990,5 +978,25 @@ mod tests {
         };
         let result = compile_ssr(source, Vue3CompilerOptions::default());
         assert!(result.code.starts_with("/* ssr */"));
+    }
+
+    #[test]
+    fn template_base_offset_maps_nodes_to_original_file_spans() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: "<div>{{ msg }}</div>".into(),
+            file_id: FileId(7),
+            base_offset: 42,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let root = ast.root_node().expect("root");
+        assert_eq!(root.span.source(), Some(Span::new(FileId(7), 42, 62)));
+        let element = ast.node(root.children[0]).expect("element");
+        assert_eq!(element.span.source(), Some(Span::new(FileId(7), 42, 62)));
+        let interpolation = ast.node(element.children[0]).expect("interpolation child");
+        assert_eq!(
+            interpolation.span.source(),
+            Some(Span::new(FileId(7), 47, 56))
+        );
     }
 }

@@ -3,7 +3,7 @@
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use std::io::{self, Read};
-use vuec_ast::{Vue3Ast, Vue3NodeKind};
+use vuec_ast::{Vue3Ast, Vue3AstKind};
 use vuec_sfc::{
     SfcBlock, SfcBlockAttrs, SfcCompiler, SfcDescriptor, SfcScriptBlock, SfcScriptCompileOptions,
     SfcStyleCompileOptions, SfcTemplateCompileOptions,
@@ -678,37 +678,33 @@ fn vue3_node_summary(ast: &Vue3Ast, node_id: vuec_ast::NodeId) -> Value {
         return Value::Null;
     };
     match &node.kind {
-        Vue3NodeKind::Root => json!({
+        Vue3AstKind::Root(_) => json!({
             "type": 0,
             "children": node.children.iter().filter_map(|child_id| ast.node(*child_id)).map(|child| vue3_node_summary(ast, child.id)).collect::<Vec<_>>(),
         }),
-        Vue3NodeKind::Element {
-            tag,
-            attributes,
-            self_closing,
-        } => json!({
+        Vue3AstKind::Element(element) => json!({
             "type": 1,
-            "tag": tag,
-            "props": attributes,
-            "selfClosing": self_closing,
+            "tag": element.tag,
+            "props": element.template_attributes(),
+            "selfClosing": element.self_closing,
             "children": node.children.iter().filter_map(|child_id| ast.node(*child_id)).map(|child| vue3_node_summary(ast, child.id)).collect::<Vec<_>>(),
         }),
-        Vue3NodeKind::Text { value } => json!({
+        Vue3AstKind::Text(text) => json!({
             "type": 2,
-            "content": value,
+            "content": text.value,
         }),
-        Vue3NodeKind::Interpolation { expression } => json!({
+        Vue3AstKind::Interpolation(interpolation) => json!({
             "type": 5,
-            "content": expression,
+            "content": interpolation.expression.source_string(),
         }),
-        Vue3NodeKind::Comment { value } => json!({
+        Vue3AstKind::Comment(comment) => json!({
             "type": 3,
-            "content": value,
+            "content": comment.value,
         }),
-        Vue3NodeKind::Directive { name, expression } => json!({
+        _ => json!({
             "type": 7,
-            "name": name,
-            "exp": expression,
+            "name": "unsupported",
+            "exp": null,
         }),
     }
 }

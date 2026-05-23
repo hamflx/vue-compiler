@@ -18,6 +18,12 @@
 
 ## Completed This Round
 
+- Expanded `vuec_ast` from the earlier enum placeholders into first-class deterministic AST/HIR schema structs matching `docs/3.AST_HIR_MIR_DESIGN.md`: Vue 2 root/element/text/expression/comment/filter/model/directive/event structures, Vue 3 root/element/text/comment/interpolation/compound/if/for/text-call structures, and shared HIR semantic structures.
+- Migrated `vuec_vue3_core`, `vuec_vue3_dom`, `vuec_vue3_ssr`, `vuec_vue2`, and `vuec_node_bridge` to the new tuple-variant AST schema while preserving the current compatibility harness behavior through compatibility constructors and `TemplateAttribute` projection.
+- Fixed a real `TemplateSource.base_offset` span bug in Vue 3 parsing: closing-tag-updated element spans now keep absolute offsets into the original `.vue` file instead of mixing absolute starts with template-local ends.
+- Tightened `docs/2.DEVELOPMENT_PLAN.md` so AST/HIR/MIR development and acceptance refer directly to the concrete schemas from `docs/3.AST_HIR_MIR_DESIGN.md`, including Vue2Ast/Vue3Ast field semantics and target-split MIR.
+- Verification this round: `cargo fmt --all --check`, `cargo test --workspace`, `git diff --check`, `cargo xtask diff-api --all`, `cargo xtask run-option-matrix --all`, `cargo xtask run-output-contract --all`, `cargo xtask run-conformance --all`, and `cargo xtask summarize-compat --locked`.
+- Current compatibility status remains honest: API, options, output contract, and lock validation pass for all seven targets; full official conformance is still `pending` because runner dependencies are not yet provisioned for the official test suites.
 - Upgraded `cargo xtask run-conformance --all` from pure discovery reports to discovery plus execution-readiness reports: each suite now records required Rust alias package requests, required official test runner dependencies, missing runner dependencies, and a `blocked` / `ready` execution state.
 - Added per-suite conformance alias smoke execution using the generated Rust alias packages and existing Node bridge, so every suite now has a real compiler entry smoke result in `target/conformance/<lock-hash>/<suite>.json`.
 - Current conformance status: all seven suites discover official test files and pass alias smoke execution, but remain `pending` because the current pinned npm probe installs do not include the full official test runner dependencies (`vitest`, `esbuild`, `typescript`, `@babel/register`, `jasmine`).

@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
-use vuec_ast::{TemplateAttribute, Vue3NodeKind};
+use vuec_ast::{TemplateAttribute, Vue3AstKind, Vue3NodeKind};
 use vuec_codegen::CodeWriter;
 use vuec_vue3_core::{TemplateSource, Vue3CompilerOptions, Vue3Dialect};
 
@@ -44,10 +44,9 @@ pub struct SsrCompileResult {
 pub fn compile(source: TemplateSource, options: SsrCompilerOptions) -> SsrCompileResult {
     let ast = Vue3Dialect::base_parse(source, &options.core);
     let summary = summarize_ssr(&ast.nodes.iter().map(|node| &node.kind).collect::<Vec<_>>());
-    let has_slot = ast
-        .nodes
-        .iter()
-        .any(|node| matches!(node.kind, Vue3NodeKind::Element { ref tag, .. } if tag == "slot"));
+    let has_slot = ast.nodes.iter().any(
+        |node| matches!(node.kind, Vue3AstKind::Element(ref element) if element.tag == "slot"),
+    );
     let mut writer = CodeWriter::new();
     if options.scope_id.is_some() {
         writer.push_line("const { mergeProps: _mergeProps } = require(\"vue\")");
@@ -97,19 +96,19 @@ pub fn summarize_ssr(nodes: &[&Vue3NodeKind]) -> SsrTransformSummary {
     };
     for node in nodes {
         match node {
-            Vue3NodeKind::Element { tag, .. } => {
+            Vue3AstKind::Element(element) => {
                 summary.elements += 1;
-                if is_component(tag) {
+                if is_component(&element.tag) {
                     summary.components += 1;
                 }
-                match tag.as_str() {
+                match element.tag.as_str() {
                     "slot" => summary.slots += 1,
                     "teleport" | "Teleport" => summary.teleports += 1,
                     "suspense" | "Suspense" => summary.suspenses += 1,
                     _ => {}
                 }
             }
-            Vue3NodeKind::Interpolation { .. } => summary.interpolations += 1,
+            Vue3AstKind::Interpolation(_) => summary.interpolations += 1,
             _ => {}
         }
     }
@@ -175,36 +174,39 @@ fn render_ssr_node(
         return;
     };
     match &node.kind {
-        Vue3NodeKind::Element {
-            tag,
-            attributes,
-            self_closing,
-        } => {
+        Vue3AstKind::Element(element) => {
+            let tag = &element.tag;
+            let attributes = element.template_attributes();
             if tag == "slot" && has_slot {
                 writer.push_line(
                     "_ssrRenderSlot(_ctx.$slots, \"default\", {}, null, _push, _parent);",
                 );
                 return;
             }
-            let rendered = render_start_tag(tag, attributes, *self_closing, options);
+            let rendered = render_start_tag(tag, &attributes, element.self_closing, options);
             writer.push_line(&format!("_push({rendered:?});"));
-            if !self_closing {
+            if !element.self_closing {
                 render_ssr_children(ast, &node.children, has_slot, options, writer);
                 writer.push_line(&format!("_push({:?});", format!("</{tag}>")));
             }
         }
-        Vue3NodeKind::Text { value } => {
-            writer.push_line(&format!("_push({value:?});"));
+        Vue3AstKind::Text(text) => {
+            writer.push_line(&format!("_push({:?});", text.value));
         }
-        Vue3NodeKind::Interpolation { expression } => {
+        Vue3AstKind::Interpolation(interpolation) => {
+            let expression = interpolation.expression.source_string();
             writer.push_line(&format!("_push(_ssrInterpolate({expression}));"));
         }
-        Vue3NodeKind::Comment { value } => {
-            writer.push_line(&format!("_push({:?});", format!("<!--{value}-->")));
+        Vue3AstKind::Comment(comment) => {
+            writer.push_line(&format!(
+                "_push({:?});",
+                format!("<!--{}-->", comment.value)
+            ));
         }
-        Vue3NodeKind::Directive { .. } | Vue3NodeKind::Root => {
+        Vue3AstKind::Root(_) => {
             render_ssr_children(ast, &node.children, has_slot, options, writer);
         }
+        _ => {}
     }
 }
 

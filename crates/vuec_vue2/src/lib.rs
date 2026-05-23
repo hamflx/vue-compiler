@@ -2015,7 +2015,7 @@ fn valid_division_before(exp: &str, slash_index: usize) -> bool {
 
 fn project_public_ast(template: &str, element_ast: Option<&Vue2Element>) -> Vue2Ast {
     let mut ast = Vue2Ast::new(
-        Vue2NodeKind::Root,
+        Vue2NodeKind::root(),
         Some(Span::new(FileId(0), 0, template.len())),
     );
     let root = ast.root;
@@ -2026,33 +2026,19 @@ fn project_public_ast(template: &str, element_ast: Option<&Vue2Element>) -> Vue2
 }
 
 fn project_element(ast: &mut Vue2Ast, parent: vuec_ast::NodeId, element: &Vue2Element) {
-    let id = ast.push(
-        Vue2NodeKind::Element {
-            tag: element.tag.clone(),
-        },
-        element.span,
-    );
+    let id = ast.push(Vue2NodeKind::element(element.tag.clone()), element.span);
     ast.attach_child(parent, id);
     for child in &element.children {
         match child {
             Vue2Node::Element(element) => project_element(ast, id, element),
             Vue2Node::Text(text) if text.is_comment => {
-                let child_id = ast.push(
-                    Vue2NodeKind::Comment {
-                        value: text.text.clone(),
-                    },
-                    text.span,
-                );
+                let child_id = ast.push(Vue2NodeKind::comment(text.text.clone()), text.span);
                 ast.attach_child(id, child_id);
             }
             Vue2Node::Text(text) => {
                 let kind = text.expression.as_ref().map_or_else(
-                    || Vue2NodeKind::Text {
-                        value: text.text.clone(),
-                    },
-                    |expression| Vue2NodeKind::Interpolation {
-                        expression: expression.clone(),
-                    },
+                    || Vue2NodeKind::text(text.text.clone()),
+                    |expression| Vue2NodeKind::expression_text(expression.clone()),
                 );
                 let child_id = ast.push(kind, text.span);
                 ast.attach_child(id, child_id);

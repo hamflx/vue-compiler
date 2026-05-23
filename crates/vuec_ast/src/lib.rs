@@ -1,7 +1,8 @@
 #![forbid(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
-use vuec_source::Span;
+use std::collections::{BTreeMap, BTreeSet};
+use vuec_source::{FileId, Span};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct NodeId(pub u32);
@@ -405,27 +406,6 @@ pub enum RuntimeHelper {
     Vue3RenderSlot,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Vue2NodeKind {
-    Root,
-    Element {
-        tag: String,
-    },
-    Text {
-        value: String,
-    },
-    Interpolation {
-        expression: String,
-    },
-    Comment {
-        value: String,
-    },
-    Directive {
-        name: String,
-        expression: Option<String>,
-    },
-}
-
 pub type Cst = AstDocument<CstNodeKind>;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -486,55 +466,620 @@ pub struct TemplateAttribute {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Vue3NodeKind {
-    Root,
-    Element {
-        tag: String,
-        attributes: Vec<TemplateAttribute>,
-        self_closing: bool,
-    },
-    Text {
-        value: String,
-    },
-    Interpolation {
-        expression: String,
-    },
-    Comment {
-        value: String,
-    },
-    Directive {
-        name: String,
-        expression: Option<String>,
+pub enum Vue2AstKind {
+    Root(Vue2Root),
+    Element(Vue2Element),
+    Text(Vue2Text),
+    ExpressionText(Vue2ExpressionText),
+    Comment(Vue2Comment),
+}
+
+impl Vue2AstKind {
+    pub fn root() -> Self {
+        Self::Root(Vue2Root::default())
+    }
+
+    pub fn element(tag: impl Into<String>) -> Self {
+        Self::Element(Vue2Element::new(tag))
+    }
+
+    pub fn text(value: impl Into<String>) -> Self {
+        Self::Text(Vue2Text {
+            value: value.into(),
+            static_node: false,
+        })
+    }
+
+    pub fn expression_text(raw: impl Into<String>) -> Self {
+        Self::ExpressionText(Vue2ExpressionText {
+            raw: raw.into(),
+            expr: None,
+            filter_expr: None,
+        })
+    }
+
+    pub fn comment(value: impl Into<String>) -> Self {
+        Self::Comment(Vue2Comment {
+            value: value.into(),
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue2Root {
+    pub source_id: Option<FileId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue2Element {
+    pub tag: String,
+    pub attrs_list: Vec<Vue2Attribute>,
+    pub attrs_map: BTreeMap<String, String>,
+    pub raw_attrs_map: BTreeMap<String, Vue2Attribute>,
+    pub attrs: Vec<Vue2Attribute>,
+    pub props: Vec<Vue2Attribute>,
+    pub dynamic_attrs: Vec<Vue2Attribute>,
+    pub directives: Vec<Vue2Directive>,
+    pub events: BTreeMap<String, Vec<Vue2EventHandler>>,
+    pub native_events: BTreeMap<String, Vec<Vue2EventHandler>>,
+    pub ns: Option<String>,
+    pub plain: bool,
+    pub forbidden: bool,
+    pub pre: bool,
+    pub once: bool,
+    pub has_bindings: bool,
+    pub if_exp: Option<JsExprId>,
+    pub elseif: Option<JsExprId>,
+    pub else_branch: bool,
+    pub if_conditions: Vec<Vue2IfCondition>,
+    pub for_exp: Option<JsExprId>,
+    pub alias: Option<JsPatternId>,
+    pub iterator1: Option<JsPatternId>,
+    pub iterator2: Option<JsPatternId>,
+    pub key: Option<JsExprId>,
+    pub ref_name: Option<String>,
+    pub ref_in_for: bool,
+    pub slot_name: Option<String>,
+    pub slot_target: Option<String>,
+    pub slot_target_dynamic: bool,
+    pub slot_scope: Option<JsPatternId>,
+    pub scoped_slots: BTreeMap<String, NodeId>,
+    pub component: Option<String>,
+    pub inline_template: bool,
+    pub static_class: Option<String>,
+    pub class_binding: Option<JsExprId>,
+    pub static_style: Option<String>,
+    pub style_binding: Option<JsExprId>,
+    pub model: Option<Vue2ComponentModel>,
+    pub wrap_data: Option<Vue2DataWrap>,
+    pub wrap_listeners: Option<String>,
+    pub static_node: bool,
+    pub static_root: bool,
+    pub static_in_for: bool,
+}
+
+impl Vue2Element {
+    pub fn new(tag: impl Into<String>) -> Self {
+        Self {
+            tag: tag.into(),
+            attrs_list: Vec::new(),
+            attrs_map: BTreeMap::new(),
+            raw_attrs_map: BTreeMap::new(),
+            attrs: Vec::new(),
+            props: Vec::new(),
+            dynamic_attrs: Vec::new(),
+            directives: Vec::new(),
+            events: BTreeMap::new(),
+            native_events: BTreeMap::new(),
+            ns: None,
+            plain: false,
+            forbidden: false,
+            pre: false,
+            once: false,
+            has_bindings: false,
+            if_exp: None,
+            elseif: None,
+            else_branch: false,
+            if_conditions: Vec::new(),
+            for_exp: None,
+            alias: None,
+            iterator1: None,
+            iterator2: None,
+            key: None,
+            ref_name: None,
+            ref_in_for: false,
+            slot_name: None,
+            slot_target: None,
+            slot_target_dynamic: false,
+            slot_scope: None,
+            scoped_slots: BTreeMap::new(),
+            component: None,
+            inline_template: false,
+            static_class: None,
+            class_binding: None,
+            static_style: None,
+            style_binding: None,
+            model: None,
+            wrap_data: None,
+            wrap_listeners: None,
+            static_node: false,
+            static_root: false,
+            static_in_for: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue2Text {
+    pub value: String,
+    pub static_node: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue2ExpressionText {
+    pub raw: String,
+    pub expr: Option<JsExprId>,
+    pub filter_expr: Option<Vue2FilterExpr>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue2Comment {
+    pub value: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue2Attribute {
+    pub name: String,
+    pub value: String,
+    pub dynamic: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue2Directive {
+    pub name: String,
+    pub raw_name: String,
+    pub value: Option<JsExprId>,
+    pub arg: Option<String>,
+    pub is_dynamic_arg: bool,
+    pub modifiers: BTreeMap<String, bool>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue2EventHandler {
+    pub value: JsStmtId,
+    pub modifiers: BTreeMap<String, bool>,
+    pub dynamic: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue2IfCondition {
+    pub exp: Option<JsExprId>,
+    pub block: NodeId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue2ComponentModel {
+    pub value: JsExprId,
+    pub callback: JsStmtId,
+    pub expression: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Vue2DataWrap {
+    Bind {
+        value: JsExprId,
+        prop: bool,
+        sync: bool,
     },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue2FilterExpr {
+    pub raw: String,
+    pub base: JsExprId,
+    pub filters: Vec<Vue2FilterCall>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue2FilterCall {
+    pub name: String,
+    pub args: Vec<JsExprId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Vue3AstKind {
+    Root(Vue3Root),
+    Element(Vue3Element),
+    Text(Vue3Text),
+    Comment(Vue3Comment),
+    Interpolation(Vue3Interpolation),
+    CompoundExpression(Vue3CompoundExpression),
+    If(Vue3If),
+    IfBranch(Vue3IfBranch),
+    For(Vue3For),
+    TextCall(Vue3TextCall),
+}
+
+impl Vue3AstKind {
+    pub fn root() -> Self {
+        Self::Root(Vue3Root::default())
+    }
+
+    pub fn element(
+        tag: impl Into<String>,
+        attributes: Vec<TemplateAttribute>,
+        self_closing: bool,
+    ) -> Self {
+        Self::Element(Vue3Element {
+            tag: tag.into(),
+            tag_type: Vue3ElementType::Element,
+            ns: HtmlNamespace::Html,
+            props: attributes
+                .into_iter()
+                .map(Vue3Prop::compat_attribute)
+                .collect(),
+            self_closing,
+            codegen_node: None,
+            ssr_codegen_node: None,
+        })
+    }
+
+    pub fn text(value: impl Into<String>) -> Self {
+        Self::Text(Vue3Text {
+            value: value.into(),
+        })
+    }
+
+    pub fn interpolation(expression: impl Into<String>) -> Self {
+        Self::Interpolation(Vue3Interpolation {
+            expression: Vue3Expression::Raw(expression.into()),
+        })
+    }
+
+    pub fn comment(value: impl Into<String>) -> Self {
+        Self::Comment(Vue3Comment {
+            value: value.into(),
+        })
+    }
+
+    pub fn directive(name: impl Into<String>, expression: Option<String>) -> Self {
+        let name = name.into();
+        Self::Element(Vue3Element {
+            tag: "template".into(),
+            tag_type: Vue3ElementType::Template,
+            ns: HtmlNamespace::Html,
+            props: vec![Vue3Prop::Directive(Vue3Directive {
+                name: name.clone(),
+                raw_name: format!("v-{name}"),
+                arg: None,
+                exp: expression.map(Vue3Expression::Raw),
+                modifiers: Vec::new(),
+                is_dynamic_arg: false,
+            })],
+            self_closing: true,
+            codegen_node: None,
+            ssr_codegen_node: None,
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue3Root {
+    pub source_id: Option<FileId>,
+    pub helpers: BTreeSet<RuntimeHelper>,
+    pub components: BTreeSet<String>,
+    pub directives: BTreeSet<String>,
+    pub hoists: Vec<Vue3HoistSlot>,
+    pub temps: u32,
+    pub cached: u32,
+    pub codegen_node: Option<Vue3CodegenRef>,
+}
+
+impl Default for Vue3Root {
+    fn default() -> Self {
+        Self {
+            source_id: None,
+            helpers: BTreeSet::new(),
+            components: BTreeSet::new(),
+            directives: BTreeSet::new(),
+            hoists: Vec::new(),
+            temps: 0,
+            cached: 0,
+            codegen_node: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue3Element {
+    pub tag: String,
+    pub tag_type: Vue3ElementType,
+    pub ns: HtmlNamespace,
+    pub props: Vec<Vue3Prop>,
+    pub self_closing: bool,
+    pub codegen_node: Option<Vue3CodegenRef>,
+    pub ssr_codegen_node: Option<Vue3SsrCodegenRef>,
+}
+
+impl Vue3Element {
+    pub fn template_attributes(&self) -> Vec<TemplateAttribute> {
+        self.props
+            .iter()
+            .filter_map(|prop| match prop {
+                Vue3Prop::Attribute(attr) => Some(TemplateAttribute {
+                    name: attr.name.clone(),
+                    value: attr.value.clone(),
+                }),
+                Vue3Prop::Directive(directive) => Some(TemplateAttribute {
+                    name: directive.raw_name.clone(),
+                    value: directive.exp.as_ref().map(Vue3Expression::source_string),
+                }),
+            })
+            .collect()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HtmlNamespace {
+    Html,
+    Svg,
+    MathMl,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Vue3ElementType {
+    Element,
+    Component,
+    SlotOutlet,
+    Template,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Vue3Prop {
+    Attribute(Vue3Attribute),
+    Directive(Vue3Directive),
+}
+
+impl Vue3Prop {
+    fn compat_attribute(attribute: TemplateAttribute) -> Self {
+        Self::Attribute(Vue3Attribute {
+            name: attribute.name,
+            value: attribute.value,
+        })
+    }
+}
+
+impl From<TemplateAttribute> for Vue3Prop {
+    fn from(attribute: TemplateAttribute) -> Self {
+        Self::compat_attribute(attribute)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue3Attribute {
+    pub name: String,
+    pub value: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue3Directive {
+    pub name: String,
+    pub raw_name: String,
+    pub arg: Option<Vue3Expression>,
+    pub exp: Option<Vue3Expression>,
+    pub modifiers: Vec<String>,
+    pub is_dynamic_arg: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Vue3Expression {
+    Raw(String),
+    JsExpr(JsExprId),
+}
+
+impl Vue3Expression {
+    pub fn source_string(&self) -> String {
+        match self {
+            Self::Raw(value) => value.clone(),
+            Self::JsExpr(id) => format!("#expr{}", id.0),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue3Text {
+    pub value: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue3Comment {
+    pub value: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue3Interpolation {
+    pub expression: Vue3Expression,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue3CompoundExpression {
+    pub children: Vec<Vue3Expression>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue3If {
+    pub branches: Vec<NodeId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue3IfBranch {
+    pub condition: Option<Vue3Expression>,
+    pub is_template_if: bool,
+    pub user_key: Option<Vue3Expression>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue3For {
+    pub source: Vue3Expression,
+    pub value_alias: Option<JsPatternId>,
+    pub key_alias: Option<JsPatternId>,
+    pub object_index_alias: Option<JsPatternId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue3TextCall {
+    pub content: NodeId,
+    pub codegen_node: Option<Vue3CodegenRef>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue3HoistSlot {
+    pub node: NodeId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue3CodegenRef {
+    pub node: NodeId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue3SsrCodegenRef {
+    pub node: NodeId,
+}
+
+pub type Vue2NodeKind = Vue2AstKind;
+pub type Vue3NodeKind = Vue3AstKind;
+
+pub fn vue2_root_kind() -> Vue2NodeKind {
+    Vue2AstKind::root()
+}
+
+pub fn vue3_root_kind() -> Vue3NodeKind {
+    Vue3AstKind::root()
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HirNodeKind {
-    Root,
-    Element {
-        tag: String,
-    },
-    Component {
-        name: String,
-    },
-    Text {
-        value: String,
-    },
-    Interpolation {
-        expression: JsExprId,
-    },
-    If {
-        branches: Vec<HirIfBranch>,
-    },
+    Root(HirRoot),
+    Element(HirElement),
+    Component(HirComponent),
+    Text(HirText),
+    Interpolation(HirInterpolation),
+    If(HirIf),
     For(HirFor),
-    SlotOutlet {
-        name: Option<String>,
-    },
-    SlotDecl {
-        name: String,
-        params: Option<JsPatternId>,
-    },
-    Fragment,
+    SlotOutlet(HirSlotOutlet),
+    SlotDecl(HirSlotDecl),
+    Fragment(HirFragment),
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HirRoot;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HirElement {
+    pub tag: HirTag,
+    pub namespace: HtmlNamespace,
+    pub props: HirProps,
+    pub directives: Vec<HirDirectiveUse>,
+    pub constness: HirConstness,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HirComponent {
+    pub name: String,
+    pub props: HirProps,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HirText {
+    pub value: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HirInterpolation {
+    pub expression: HirExpr,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HirIf {
+    pub branches: Vec<HirIfBranch>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HirSlotOutlet {
+    pub name: Option<String>,
+    pub props: HirProps,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HirSlotDecl {
+    pub name: String,
+    pub params: Option<JsPatternId>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HirFragment;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HirTag {
+    Native(String),
+    Dynamic(JsExprId),
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HirProps {
+    pub static_attrs: Vec<HirStaticAttr>,
+    pub dynamic_bindings: Vec<HirBinding>,
+    pub events: Vec<HirEvent>,
+    pub key: Option<JsExprId>,
+    pub ref_name: Option<HirRef>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HirStaticAttr {
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HirBinding {
+    pub name: String,
+    pub value: JsExprId,
+    pub dynamic_arg: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HirEvent {
+    pub name: String,
+    pub handler: JsStmtId,
+    pub modifiers: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HirRef {
+    pub name: String,
+    pub in_for: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HirDirectiveUse {
+    pub name: String,
+    pub argument: Option<String>,
+    pub expression: Option<JsExprId>,
+    pub modifiers: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HirConstness {
+    Dynamic,
+    Static,
+    Constant,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HirExpr {
+    Js(JsExprId),
+    Vue2Filter(Vue2FilterExpr),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -734,7 +1279,7 @@ mod tests {
 
     #[test]
     fn documents_roundtrip_through_serde() {
-        let doc = Vue2Ast::new(Vue2NodeKind::Root, None);
+        let doc = Vue2Ast::new(Vue2NodeKind::root(), None);
         let root = doc.root;
         let json = serde_json::to_string(&doc).unwrap();
         let decoded: Vue2Ast = serde_json::from_str(&json).unwrap();
@@ -744,22 +1289,22 @@ mod tests {
 
     #[test]
     fn distinct_kind_spaces_exist() {
-        let mut vue3 = Vue3Ast::new(Vue3NodeKind::Root, None);
+        let mut vue3 = Vue3Ast::new(Vue3NodeKind::root(), None);
         let id = vue3.push_child(
             vue3.root,
-            Vue3NodeKind::Element {
-                tag: "div".into(),
-                attributes: vec![TemplateAttribute {
+            Vue3NodeKind::element(
+                "div",
+                vec![TemplateAttribute {
                     name: "id".into(),
                     value: Some("app".into()),
                 }],
-                self_closing: false,
-            },
+                false,
+            ),
             None,
         );
         assert!(matches!(
             vue3.node(id).unwrap().kind,
-            Vue3NodeKind::Element { .. }
+            Vue3NodeKind::Element(_)
         ));
         let mut mir = Vue3DomMir::new(Vue3DomMirKind::Root, None);
         let _ = mir.push_child(
@@ -775,15 +1320,9 @@ mod tests {
 
     #[test]
     fn attach_child_records_parent_and_index() {
-        let mut doc = Vue3Ast::new(Vue3NodeKind::Root, None);
+        let mut doc = Vue3Ast::new(Vue3NodeKind::root(), None);
         let root = doc.root;
-        let child = doc.push_child(
-            root,
-            Vue3NodeKind::Text {
-                value: "hello".into(),
-            },
-            None,
-        );
+        let child = doc.push_child(root, Vue3NodeKind::text("hello"), None);
         assert_eq!(doc.node(child).and_then(|node| node.parent), Some(root));
         assert_eq!(doc.node(child).map(|node| node.index_in_parent), Some(0));
         assert_eq!(doc.validate_tree(), Ok(()));
@@ -791,19 +1330,15 @@ mod tests {
 
     #[test]
     fn reattach_child_refreshes_old_parent_indexes() {
-        let mut doc = Vue3Ast::new(Vue3NodeKind::Root, None);
+        let mut doc = Vue3Ast::new(Vue3NodeKind::root(), None);
         let old_parent = doc.push_child(
             doc.root,
-            Vue3NodeKind::Element {
-                tag: "section".into(),
-                attributes: Vec::new(),
-                self_closing: false,
-            },
+            Vue3NodeKind::element("section", Vec::new(), false),
             None,
         );
-        let first = doc.push_child(old_parent, Vue3NodeKind::Text { value: "a".into() }, None);
-        let moved = doc.push_child(old_parent, Vue3NodeKind::Text { value: "b".into() }, None);
-        let third = doc.push_child(old_parent, Vue3NodeKind::Text { value: "c".into() }, None);
+        let first = doc.push_child(old_parent, Vue3NodeKind::text("a"), None);
+        let moved = doc.push_child(old_parent, Vue3NodeKind::text("b"), None);
+        let third = doc.push_child(old_parent, Vue3NodeKind::text("c"), None);
 
         doc.attach_child(doc.root, moved);
 
@@ -823,16 +1358,14 @@ mod tests {
 
     #[test]
     fn public_projection_is_nested_and_deterministic() {
-        let mut doc = Vue3Ast::new(Vue3NodeKind::Root, None);
+        let mut doc = Vue3Ast::new(Vue3NodeKind::root(), None);
         let child = doc.push_child(
             doc.root,
-            Vue3NodeKind::Text {
-                value: "hello".into(),
-            },
+            Vue3NodeKind::text("hello"),
             NodeSpan::generated(None, GeneratedReason::Lowering),
         );
         let projected = doc.project_public();
-        assert!(matches!(projected.kind, Vue3NodeKind::Root));
+        assert!(matches!(projected.kind, Vue3NodeKind::Root(_)));
         assert_eq!(projected.children.len(), 1);
         assert_eq!(doc.node(child).unwrap().index_in_parent, 0);
         let json = serde_json::to_string(&projected).unwrap();
@@ -857,7 +1390,9 @@ mod tests {
     #[test]
     fn hir_has_no_runtime_helper_or_codegen_call_variant() {
         let expression = JsExprId(0);
-        let hir = HirNodeKind::Interpolation { expression };
-        assert!(matches!(hir, HirNodeKind::Interpolation { .. }));
+        let hir = HirNodeKind::Interpolation(HirInterpolation {
+            expression: HirExpr::Js(expression),
+        });
+        assert!(matches!(hir, HirNodeKind::Interpolation(_)));
     }
 }

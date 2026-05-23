@@ -1,8 +1,11 @@
 # Memory
 
 - Active objective: build a Rust Vue compiler that can replace official Vue 2.6, Vue 2.7, and Vue 3 compiler flows.
-- Current focus: use the generated npm alias bridge to turn official conformance execution from discovery/scaffold reports into real Rust-vs-official gates.
-- `docs/3.AST_HIR_MIR_DESIGN.md` is the authoritative AST/IR contract; `vuec_ast` now has the deterministic arena root, `NodeSpan`, `LoweringMap`, public projection scaffolding, CST structs, HIR without runtime helper/codegen call variants, target-split MIR enums, runtime-helper enum, and JS id model.
+- Current focus: keep moving from compatibility harness readiness into real official conformance execution while aligning implementation with the deterministic AST/HIR/MIR contract.
+- `docs/3.AST_HIR_MIR_DESIGN.md` is the authoritative AST/IR contract; `vuec_ast` now has the deterministic arena root, `NodeSpan`, `LoweringMap`, public projection scaffolding, CST structs, first-class Vue2Ast/Vue3Ast/HIR schema structs, HIR without runtime helper/codegen call variants, target-split MIR enums, runtime-helper enum, and JS id model.
+- `vuec_ast` now exposes concrete Vue 2 AST structs (`Vue2Root`, `Vue2Element`, `Vue2Text`, `Vue2ExpressionText`, `Vue2Comment`, Vue 2 filter/model/directive/event structs) and concrete Vue 3 AST structs (`Vue3Root`, `Vue3Element`, `Vue3Text`, `Vue3Comment`, `Vue3Interpolation`, `Vue3CompoundExpression`, `Vue3If`, `Vue3IfBranch`, `Vue3For`, `Vue3TextCall`) while keeping compatibility constructors for existing call sites.
+- `vuec_vue3_core`, `vuec_vue3_dom`, `vuec_vue3_ssr`, `vuec_vue2`, and `vuec_node_bridge` have been migrated to the new tuple-variant AST schema without changing current public compiler behavior.
+- Vue 3 `TemplateSource.base_offset` now correctly maps closing-tag-updated element spans back to absolute original-file offsets; a regression test covers a template block starting at offset 42.
 - `vuec_js` now has the first real registry/store layer: `JsEntry`, `JsSourceType`, id allocation for expressions/statements/patterns/programs, lookup APIs, and parse-by-id APIs while preserving the old direct parse wrappers.
 - Vue 3 `@vue/compiler-core` now validates interpolation expressions through `vuec_js::JsAstStore` and Oxc, with `isTS` / `expressionPlugins: ["typescript"]` selecting TypeScript expression parsing.
 - Vue 3 `@vue/compiler-core` option matrix now has all 8 schema v2 rows passing for the current fixtures: prefixIdentifiers, mode, hoistStatic, cacheHandlers, scopeId, slotted, isTS, and expressionPlugins.

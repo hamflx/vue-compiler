@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
-use vuec_ast::{NodeId, TemplateAttribute, Vue3Ast, Vue3NodeKind};
+use vuec_ast::{NodeId, TemplateAttribute, Vue3Ast, Vue3AstKind, Vue3Prop};
 use vuec_diagnostics::{Diagnostic, Severity};
 use vuec_pass::TransformContext;
 use vuec_vue3_core::{CodegenResult, TemplateSource, Vue3CompilerOptions, Vue3Dialect};
@@ -44,27 +44,27 @@ pub fn compile(source: TemplateSource, options: DomCompilerOptions) -> CodegenRe
     let mut ctx = TransformContext::default();
     remove_side_effect_nodes(&mut ast, &mut ctx);
     for node in &mut ast.nodes {
-        if let Vue3NodeKind::Element {
-            tag, attributes, ..
-        } = &mut node.kind
-        {
-            let directives = extract_directives(attributes);
+        if let Vue3AstKind::Element(element) = &mut node.kind {
+            let tag = element.tag.clone();
+            let mut attributes = element.template_attributes();
+            let directives = extract_directives(&attributes);
             let mut summaries = Vec::new();
             for directive in directives {
                 match directive.name.as_str() {
                     "html" => summaries.push("v-html".to_string()),
                     "text" => summaries.push("v-text".to_string()),
                     "show" => summaries.push("v-show".to_string()),
-                    "model" => {
-                        summaries.push(format!("v-model:{}", model_runtime_helper(tag, &directive)))
-                    }
+                    "model" => summaries.push(format!(
+                        "v-model:{}",
+                        model_runtime_helper(&tag, &directive)
+                    )),
                     "on" => summaries.push(format!("v-on:{}", directive.modifiers.join("."))),
                     "bind" => summaries.push(format!("v-bind:{}", directive.modifiers.join("."))),
                     _ => summaries.push(format!("v-{}", directive.name)),
                 }
             }
             if options.transform_asset_urls {
-                summaries.extend(asset_url_attributes(tag, attributes));
+                summaries.extend(asset_url_attributes(&tag, &attributes));
             }
             if !summaries.is_empty() && !only_asset_summaries(&summaries) {
                 attributes.push(TemplateAttribute {
@@ -72,6 +72,7 @@ pub fn compile(source: TemplateSource, options: DomCompilerOptions) -> CodegenRe
                     value: Some(summaries.join(",")),
                 });
             }
+            element.props = attributes.into_iter().map(Vue3Prop::from).collect();
         }
     }
     Vue3Dialect::transform(&mut ast, &mut ctx);
@@ -83,17 +84,21 @@ pub fn compile(source: TemplateSource, options: DomCompilerOptions) -> CodegenRe
 pub fn normalize_dom_ast(ast: &mut Vue3Ast, options: &DomCompilerOptions) {
     for node in &mut ast.nodes {
         match &mut node.kind {
-            Vue3NodeKind::Text { value } if options.decode_entities => {
-                *value = decode_basic_entities(value);
+            Vue3AstKind::Text(text) if options.decode_entities => {
+                text.value = decode_basic_entities(&text.value);
             }
-            Vue3NodeKind::Element {
-                tag, attributes, ..
-            } => {
-                if options.is_custom_element.iter().any(|custom| custom == tag) {
+            Vue3AstKind::Element(element) => {
+                if options
+                    .is_custom_element
+                    .iter()
+                    .any(|custom| custom == &element.tag)
+                {
+                    let mut attributes = element.template_attributes();
                     attributes.push(TemplateAttribute {
                         name: "data-vuec-custom-element".into(),
                         value: None,
                     });
+                    element.props = attributes.into_iter().map(Vue3Prop::from).collect();
                 }
             }
             _ => {}
@@ -186,7 +191,7 @@ fn remove_side_effect_children(ast: &mut Vue3Ast, parent_id: NodeId, ctx: &mut T
         let remove = ast.node(child_id).is_some_and(|child| {
             matches!(
                 child.kind,
-                Vue3NodeKind::Element { ref tag, .. } if tag == "script" || tag == "style"
+                Vue3AstKind::Element(ref element) if element.tag == "script" || element.tag == "style"
             )
         });
         if remove {
