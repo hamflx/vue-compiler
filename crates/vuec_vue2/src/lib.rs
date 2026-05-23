@@ -2718,12 +2718,12 @@ fn split_compilation_issues(diagnostics: &DiagnosticSink) -> (Vec<Vue2Error>, Ve
     let mut tips = Vec::new();
     for diagnostic in diagnostics.as_slice() {
         match diagnostic.severity {
-            Severity::Error => errors.push(Vue2Error {
+            Severity::Error | Severity::Warning => errors.push(Vue2Error {
                 msg: diagnostic.message.clone(),
                 start: diagnostic.span.map(|span| span.start.0),
                 end: diagnostic.span.map(|span| span.end.0),
             }),
-            Severity::Warning | Severity::Tip | Severity::Note => tips.push(Vue2Warning {
+            Severity::Tip | Severity::Note => tips.push(Vue2Warning {
                 msg: diagnostic.message.clone(),
                 start: diagnostic.span.map(|span| span.start.0),
                 end: diagnostic.span.map(|span| span.end.0),

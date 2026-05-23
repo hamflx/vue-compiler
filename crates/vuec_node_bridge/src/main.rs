@@ -10,7 +10,7 @@ use vuec_sfc::{
 };
 use vuec_source::FileId;
 use vuec_style::{compile_style, StyleCompileOptions};
-use vuec_vue2::{self, Vue2CompileOptions};
+use vuec_vue2::{self, Vue2CompileOptions, Vue2CompiledResult, Vue2Error, Vue2Warning};
 use vuec_vue3_core::{TemplateSource, Vue3CompilerOptions, Vue3Dialect};
 use vuec_vue3_dom::{self, DomCompilerOptions};
 use vuec_vue3_ssr::{self, SsrCompilerOptions};
@@ -45,9 +45,8 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
         "vue2.compile" => {
             let template = string_field(&payload, "template");
             let options = vue2_options(payload.get("options"));
-            Ok(serde_json::to_value(vuec_vue2::compile(
-                &template, options,
-            ))?)
+            let compiled = vuec_vue2::compile(&template, options.clone());
+            Ok(vue2_compile_value(&compiled, &options))
         }
         "vue2.compileToFunctions" => {
             let template = string_field(&payload, "template");
@@ -281,6 +280,36 @@ fn template_source(payload: &Value) -> TemplateSource {
         source: string_field(payload, "source"),
         file_id: FileId(0),
         base_offset: 0,
+    }
+}
+
+fn vue2_compile_value(compiled: &Vue2CompiledResult, options: &Vue2CompileOptions) -> Value {
+    json!({
+        "ast": compiled.ast,
+        "element_ast": compiled.element_ast,
+        "render": compiled.render,
+        "static_render_fns": compiled.static_render_fns,
+        "errors": vue2_errors_value(&compiled.errors, options.output_source_range),
+        "tips": vue2_tips_value(&compiled.tips, options.output_source_range),
+    })
+}
+
+fn vue2_errors_value(errors: &[Vue2Error], output_source_range: bool) -> Value {
+    if output_source_range {
+        json!(errors)
+    } else {
+        json!(errors
+            .iter()
+            .map(|error| error.msg.clone())
+            .collect::<Vec<_>>())
+    }
+}
+
+fn vue2_tips_value(tips: &[Vue2Warning], output_source_range: bool) -> Value {
+    if output_source_range {
+        json!(tips)
+    } else {
+        json!(tips.iter().map(|tip| tip.msg.clone()).collect::<Vec<_>>())
     }
 }
 

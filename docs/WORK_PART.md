@@ -18,6 +18,11 @@
 
 ## Completed This Round
 
+- Closed the Vue 2.7 `vue-template-compiler` option matrix by converting `warn`, `modules`, and `directives` to executable diff rows; the target now reports `3/3` rows passing.
+- Advanced the Vue 2.6 `vue-template-compiler` option matrix to `9/10` rows passing by enabling executable `warn`, `modules`, and `directives` rows; only `outputSourceRange` remains pending.
+- Added Vue 2 npm alias public projection for `compile`, including official-style warning classification into `errors`, string-array `errors` / `tips` when `outputSourceRange` is false, ranged objects when enabled, and no public `diagnostics` field.
+- Updated the option probe so JSON directive fixtures can be converted into official callable Vue 2 directive transforms, allowing the same deterministic directive row to exercise official and Rust outputs.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p vuec_vue2 -p vuec_node_bridge -p xtask`, `cargo test -p vuec_vue2 -p vuec_node_bridge -p xtask`, `cargo xtask generate-option-matrix --version-line vue2_7 --package vue-template-compiler`, `cargo xtask run-option-matrix --version-line vue2_7 --package vue-template-compiler`, `cargo xtask audit-option-matrix --version-line vue2_7 --package vue-template-compiler`, `cargo xtask generate-option-matrix --version-line vue2_6 --package vue-template-compiler`, `cargo xtask run-option-matrix --version-line vue2_6 --package vue-template-compiler`, `cargo xtask audit-option-matrix --version-line vue2_6 --package vue-template-compiler`, `cargo xtask run-option-matrix --all`, `cargo xtask diff-api --version-line vue2_7 --package vue-template-compiler`, and `cargo xtask verify-npm-alias --version-line vue2_7 --package vue-template-compiler`.
 - Wired Vue 3 `@vue/compiler-core` interpolation expression validation through `vuec_js::JsAstStore`, selecting Oxc TypeScript source mode when `isTS` is enabled or `expressionPlugins` contains `typescript`.
 - Added Vue 3 core alias preflight parity for official `cacheHandlers` and `scopeId` invalid option-combination `SyntaxError`s, including official error codes 50 and 51.
 - Added the current Vue 3 core slot outlet and static child cache codegen paths used by the option fixtures: `<slot>` lowers to `_renderSlot(...)`, and `hoistStatic` emits `_cache[0]` cached static children.

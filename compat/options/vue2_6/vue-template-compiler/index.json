@@ -38,8 +38,8 @@
       "option_value": {
         "warn": true
       },
-      "execution_mode": "pending",
-      "status": "pending"
+      "execution_mode": "diff",
+      "status": "pass"
     },
     {
       "option_name": "outputSourceRange",
@@ -315,8 +315,8 @@
           "class"
         ]
       },
-      "execution_mode": "pending",
-      "status": "pending"
+      "execution_mode": "diff",
+      "status": "pass"
     },
     {
       "option_name": "directives",
@@ -348,11 +348,11 @@
       "fixture_source": "<div v-focus></div>",
       "option_value": {
         "directives": {
-          "focus": "x"
+          "focus": true
         }
       },
-      "execution_mode": "pending",
-      "status": "pending"
+      "execution_mode": "diff",
+      "status": "pass"
     }
   ]
 }

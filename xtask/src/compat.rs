@@ -602,7 +602,7 @@ fn option_matrix_cases(target: TargetSpec) -> Vec<OptionMatrixCase> {
                 "vue2-compiler-warning",
                 r#"<script></script>"#,
                 Some(serde_json::json!({"warn": true})),
-                true,
+                false,
             ),
             option_case(
                 "outputSourceRange",
@@ -746,7 +746,7 @@ fn option_matrix_cases(target: TargetSpec) -> Vec<OptionMatrixCase> {
                 "vue2-modules",
                 r#"<div class="a"></div>"#,
                 Some(serde_json::json!({"modules": ["class"]})),
-                true,
+                false,
             ),
             option_case(
                 "directives",
@@ -763,8 +763,8 @@ fn option_matrix_cases(target: TargetSpec) -> Vec<OptionMatrixCase> {
                 "compile",
                 "vue2-directives",
                 r#"<div v-focus></div>"#,
-                Some(serde_json::json!({"directives": {"focus": "x"}})),
-                true,
+                Some(serde_json::json!({"directives": {"focus": true}})),
+                false,
             ),
         ],
         TargetKind::Vue27Template => vue27_template_cases(target),
@@ -831,7 +831,7 @@ fn vue27_template_cases(_target: TargetSpec) -> Vec<OptionMatrixCase> {
             "base",
             "compile",
             "vue27-warning",
-            r#"<div>{{ msg }}</div>"#,
+            r#"<script></script>"#,
             Some(serde_json::json!({"warn": true})),
             false,
         ),
@@ -851,7 +851,7 @@ fn vue27_template_cases(_target: TargetSpec) -> Vec<OptionMatrixCase> {
             "vue27-modules",
             r#"<div class="a"></div>"#,
             Some(serde_json::json!({"modules": ["class"]})),
-            true,
+            false,
         ),
         option_case(
             "directives",
@@ -868,8 +868,8 @@ fn vue27_template_cases(_target: TargetSpec) -> Vec<OptionMatrixCase> {
             "compile",
             "vue27-directives",
             r#"<div v-focus></div>"#,
-            Some(serde_json::json!({"directives": {"focus": "x"}})),
-            true,
+            Some(serde_json::json!({"directives": {"focus": true}})),
+            false,
         ),
     ]
 }
@@ -3207,6 +3207,20 @@ function normalizeOptionValue(optionValue) {
   ) {
     const customElements = new Set(value.isCustomElement);
     value.isCustomElement = tag => customElements.has(tag);
+  }
+  if (
+    side === 'official' &&
+    payload.target_package === 'vue-template-compiler' &&
+    payload.option_name === 'directives' &&
+    value &&
+    value.directives &&
+    typeof value.directives === 'object'
+  ) {
+    for (const key of Object.keys(value.directives)) {
+      if (value.directives[key] === true) {
+        value.directives[key] = () => true;
+      }
+    }
   }
   return value;
 }
