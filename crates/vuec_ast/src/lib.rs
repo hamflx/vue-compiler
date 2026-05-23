@@ -408,6 +408,11 @@ pub enum RuntimeHelper {
     Vue3RenderList,
     Vue3RenderSlot,
     Vue3NormalizeClass,
+    Vue3ResolveComponent,
+    Vue3WithCtx,
+    Vue3CreateBlock,
+    Vue3CreateVNode,
+    Vue3CreateSlots,
 }
 
 pub type Cst = AstDocument<CstNodeKind>;

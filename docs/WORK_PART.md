@@ -26,9 +26,17 @@
 - [x] Classify Vue 3 compiler-core conformance coverage as `rust-backed`, `shim-backed`, or `mixed` in reports.
 - [x] Vue 3 compiler-core Rust-backed `baseCompile` integration slice for `compile.spec.ts`.
 - [x] Vue 3 compiler-core Rust-backed parser/OXC projection slice for `parse.spec.ts`.
+- [x] Vue 3 compiler-core Rust-backed `baseCompile` component slot / `scopeId.spec.ts` slice.
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Implemented a Rust-backed Vue 3 `baseCompile` component slot / scopeId slice in `vuec_vue3_core`.
+- Rust codegen now resolves component assets with `_resolveComponent`, emits component root blocks with `_createBlock`, lowers default and named component children into `_withCtx` slot functions, and supports dynamic slots from `v-if` / `v-for` slot templates through `_createSlots`, `_renderList`, and `1024 /* DYNAMIC_SLOTS */`.
+- Extended `RuntimeHelper` with Vue 3 component/slot helpers and kept existing non-component `compile.spec.ts` helper ordering stable so the previous Rust-backed public compile integration slice remains intact.
+- No `xtask/src/compat.rs` compiler semantics were changed in this round; `scopeId.spec.ts` is passing through the public `baseCompile` bridge into the Rust parser/transform/codegen path.
+- Full Vue 3 core conformance is still intentionally failing: `405/652` official tests pass and `247` fail. `scopeId.spec.ts` is now `4/4` passing; remaining high-volume failures are concentrated in internal transform/codegen suites (`transformElement`, `vFor`, `vSlot`, `vIf`, `vModel`, `cacheStatic`).
+- Verification this round: `cargo fmt --all --check`, `cargo test -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge`, `cargo xtask verify-npm-alias --version-line vue3 --package @vue/compiler-core`, direct prepared Vitest `scopeId.spec.ts` run (`4/4` pass), direct prepared Vitest `compile.spec.ts` + `codegen.spec.ts` run (`3/3` and `34/34` pass), `git diff --check`, and `cargo xtask run-conformance --suite vue3-core` (expected fail with `405/652` pass, `247` fail).
 
 - Added Rust-backed Vue 3 namespace-aware CDATA parsing for official `compiler-core/__tests__/parse.spec.ts`.
 - `Vue3CompilerOptions` now carries deterministic namespace overrides, and `vuec_vue3_core::base_parse` maintains a namespace stack so configured SVG elements project `ns: SVG`, CDATA body text is emitted only in XML namespace with body-only source spans, and HTML-namespace CDATA does not become a text child.

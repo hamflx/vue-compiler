@@ -356,6 +356,9 @@ impl Vue3Dialect {
         let mut has_fragment = false;
         let mut has_render_list = false;
         let mut has_normalize_class = false;
+        let mut has_component = false;
+        let mut has_component_slots = false;
+        let mut has_dynamic_component_slots = false;
         let mut walk = vec![(root_id, true)];
         while let Some((node_id, is_root)) = walk.pop() {
             if let Some(node) = ast.node(node_id) {
@@ -369,6 +372,16 @@ impl Vue3Dialect {
                                 has_element = true;
                                 if element.tag == "slot" {
                                     ctx.add_helper(RuntimeHelper::Vue3RenderSlot);
+                                }
+                                if element.tag_type == Vue3ElementType::Component {
+                                    has_component = true;
+                                    let slot_analysis = analyze_component_slots(ast, child_id);
+                                    if slot_analysis.has_slots {
+                                        has_component_slots = true;
+                                    }
+                                    if slot_analysis.has_dynamic_slots {
+                                        has_dynamic_component_slots = true;
+                                    }
                                 }
                                 if !is_root {
                                     has_nested_element = true;
@@ -430,6 +443,17 @@ impl Vue3Dialect {
         if has_normalize_class {
             ctx.add_helper(RuntimeHelper::Vue3NormalizeClass);
         }
+        if has_component {
+            ctx.add_helper(RuntimeHelper::Vue3ResolveComponent);
+            ctx.add_helper(RuntimeHelper::Vue3OpenBlock);
+            ctx.add_helper(RuntimeHelper::Vue3CreateBlock);
+        }
+        if has_component_slots {
+            ctx.add_helper(RuntimeHelper::Vue3WithCtx);
+        }
+        if has_dynamic_component_slots {
+            ctx.add_helper(RuntimeHelper::Vue3CreateSlots);
+        }
         if has_interpolation {
             ctx.add_helper(RuntimeHelper::Vue3ToDisplayString);
         }
@@ -441,21 +465,30 @@ impl Vue3Dialect {
         ctx: &TransformContext,
     ) -> CodegenResult {
         let mut writer = CodeWriter::new();
-        let helper_order = [
-            RuntimeHelper::Vue3ToDisplayString,
-            RuntimeHelper::Vue3OpenBlock,
-            RuntimeHelper::Vue3CreateElementBlock,
-            RuntimeHelper::Vue3CreateCommentVNode,
-            RuntimeHelper::Vue3CreateTextVNode,
-            RuntimeHelper::Vue3Fragment,
-            RuntimeHelper::Vue3RenderList,
-            RuntimeHelper::Vue3CreateElementVNode,
-            RuntimeHelper::Vue3RenderSlot,
-            RuntimeHelper::Vue3NormalizeClass,
-        ];
         let root_id = ast.root;
         if let Some(root) = ast.node(root_id) {
-            let helpers = render_helpers(&helper_order, ctx);
+            let components = collect_component_tags(ast);
+            let component_declarations = components
+                .iter()
+                .map(|component| {
+                    format!(
+                        "const {} = _resolveComponent({})",
+                        component_asset_id(component),
+                        quote_string(component)
+                    )
+                })
+                .collect::<Vec<_>>();
+            let expr = if root.children.len() == 1 {
+                render_node_expr(ast, root.children[0], options, NodeRenderMode::Root)
+            } else {
+                render_children_array(ast, &root.children, options, true)
+            };
+            let helper_probe = format!("{}\n{}", component_declarations.join("\n"), expr);
+            let helpers = if components.is_empty() {
+                render_helpers(vue3_helper_order(false), ctx)
+            } else {
+                render_helpers_from_code(vue3_helper_order(true), &helper_probe)
+            };
             if options.inline {
                 writer.push_line("(_ctx, _cache) => {");
             } else if options.mode == "module" {
@@ -498,11 +531,12 @@ impl Vue3Dialect {
                     writer.newline();
                 }
             }
-            let expr = if root.children.len() == 1 {
-                render_node_expr(ast, root.children[0], options, NodeRenderMode::Root)
-            } else {
-                render_children_array(ast, &root.children, options, true)
-            };
+            for declaration in &component_declarations {
+                writer.push_line(declaration);
+            }
+            if !component_declarations.is_empty() {
+                writer.newline();
+            }
             writer.push_line(&format!("return {}", expr));
             if !options.inline && !options.prefix_identifiers && options.mode != "module" {
                 writer.dedent();
@@ -1195,12 +1229,64 @@ fn condense_whitespace(value: &str) -> String {
     out
 }
 
+fn render_helpers_from_code(order: &[RuntimeHelper], code: &str) -> Vec<RuntimeHelper> {
+    order
+        .iter()
+        .copied()
+        .filter(|helper| code.contains(&helper_reference(*helper)))
+        .collect()
+}
+
 fn render_helpers(order: &[RuntimeHelper], ctx: &TransformContext) -> Vec<RuntimeHelper> {
     order
         .iter()
         .copied()
         .filter(|helper| ctx.helpers.contains(helper))
         .collect()
+}
+
+fn vue3_helper_order(components_first: bool) -> &'static [RuntimeHelper] {
+    if components_first {
+        &[
+            RuntimeHelper::Vue3ToDisplayString,
+            RuntimeHelper::Vue3CreateTextVNode,
+            RuntimeHelper::Vue3CreateElementVNode,
+            RuntimeHelper::Vue3ResolveComponent,
+            RuntimeHelper::Vue3WithCtx,
+            RuntimeHelper::Vue3RenderList,
+            RuntimeHelper::Vue3CreateSlots,
+            RuntimeHelper::Vue3OpenBlock,
+            RuntimeHelper::Vue3CreateBlock,
+            RuntimeHelper::Vue3CreateVNode,
+            RuntimeHelper::Vue3CreateCommentVNode,
+            RuntimeHelper::Vue3Fragment,
+            RuntimeHelper::Vue3CreateElementBlock,
+            RuntimeHelper::Vue3RenderSlot,
+            RuntimeHelper::Vue3NormalizeClass,
+        ]
+    } else {
+        &[
+            RuntimeHelper::Vue3ToDisplayString,
+            RuntimeHelper::Vue3OpenBlock,
+            RuntimeHelper::Vue3CreateElementBlock,
+            RuntimeHelper::Vue3CreateCommentVNode,
+            RuntimeHelper::Vue3CreateTextVNode,
+            RuntimeHelper::Vue3Fragment,
+            RuntimeHelper::Vue3RenderList,
+            RuntimeHelper::Vue3CreateElementVNode,
+            RuntimeHelper::Vue3RenderSlot,
+            RuntimeHelper::Vue3NormalizeClass,
+            RuntimeHelper::Vue3ResolveComponent,
+            RuntimeHelper::Vue3WithCtx,
+            RuntimeHelper::Vue3CreateBlock,
+            RuntimeHelper::Vue3CreateVNode,
+            RuntimeHelper::Vue3CreateSlots,
+        ]
+    }
+}
+
+fn helper_reference(helper: RuntimeHelper) -> String {
+    format!("_{}", helper_name(helper))
 }
 
 fn helper_aliases(helpers: &[RuntimeHelper]) -> String {
@@ -1244,6 +1330,11 @@ fn helper_name(helper: RuntimeHelper) -> &'static str {
         RuntimeHelper::Vue3RenderList => "renderList",
         RuntimeHelper::Vue3RenderSlot => "renderSlot",
         RuntimeHelper::Vue3NormalizeClass => "normalizeClass",
+        RuntimeHelper::Vue3ResolveComponent => "resolveComponent",
+        RuntimeHelper::Vue3WithCtx => "withCtx",
+        RuntimeHelper::Vue3CreateBlock => "createBlock",
+        RuntimeHelper::Vue3CreateVNode => "createVNode",
+        RuntimeHelper::Vue3CreateSlots => "createSlots",
     }
 }
 
@@ -1833,6 +1924,9 @@ fn render_plain_element(
     if tag == "slot" {
         return render_slot_outlet(element, options, scope);
     }
+    if element.tag_type == Vue3ElementType::Component {
+        return render_component_element(ast, node_id, element, options, mode, scope, branch_key);
+    }
     let helper = if mode == NodeRenderMode::Root {
         "_createElementBlock"
     } else {
@@ -1844,41 +1938,453 @@ fn render_plain_element(
         .map(|node| render_element_children(ast, &node.children, options, mode, scope))
         .unwrap_or_default();
     let patch_flag = render_patch_flag(ast, node_id, element, options, mode);
+    let attrs = if props.is_empty() { None } else { Some(props) };
+    let args = render_call_args(
+        quote_string(tag),
+        attrs.as_deref(),
+        (!children.is_empty()).then_some(children.as_str()),
+        patch_flag.as_str(),
+        dynamic_props_arg(element).as_str(),
+    );
+    if mode == NodeRenderMode::Root {
+        format!("(_openBlock(), {}({}))", helper, args)
+    } else {
+        format!("{}({})", helper, args)
+    }
+}
+
+fn render_call_args(
+    tag: String,
+    props: Option<&str>,
+    children: Option<&str>,
+    patch_flag: &str,
+    dynamic_props: &str,
+) -> String {
+    let mut args = vec![tag];
+    if let Some(props) = props {
+        args.push(props.to_string());
+    } else if children.is_some() || !patch_flag.is_empty() || !dynamic_props.is_empty() {
+        args.push("null".into());
+    }
+    if let Some(children) = children {
+        args.push(children.to_string());
+    } else if !patch_flag.is_empty() || !dynamic_props.is_empty() {
+        args.push("null".into());
+    }
+    if !patch_flag.is_empty() {
+        args.push(patch_flag.trim_start_matches(", ").to_string());
+    }
+    if !dynamic_props.is_empty() {
+        args.push(dynamic_props.trim_start_matches(", ").to_string());
+    }
+    args.join(", ")
+}
+
+fn render_component_element(
+    ast: &Vue3Ast,
+    node_id: vuec_ast::NodeId,
+    element: &Vue3Element,
+    options: &Vue3CompilerOptions,
+    mode: NodeRenderMode,
+    scope: &RenderScope,
+    branch_key: Option<usize>,
+) -> String {
+    let tag = component_asset_id(&element.tag);
+    let props = render_props(element, options, scope, branch_key);
     let attrs = if props.is_empty() {
         "null".into()
     } else {
         props
     };
-    let children_arg = if children.is_empty() {
-        if patch_flag.is_empty() {
-            String::new()
-        } else {
-            ", null".into()
-        }
+    let children = render_component_slots(ast, node_id, options, scope);
+    let patch_flag = component_patch_flag(ast, node_id);
+    let helper = if mode == NodeRenderMode::Root {
+        "_createBlock"
     } else {
-        format!(", {children}")
+        "_createVNode"
     };
+    let children_arg = children.map_or_else(String::new, |children| format!(", {children}"));
     if mode == NodeRenderMode::Root {
         format!(
-            "(_openBlock(), {}({}, {}{}{}{}))",
-            helper,
-            quote_string(tag),
-            attrs,
-            children_arg,
-            patch_flag,
-            dynamic_props_arg(element)
+            "(_openBlock(), {}({}, {}{}{}))",
+            helper, tag, attrs, children_arg, patch_flag
         )
     } else {
         format!(
-            "{}({}, {}{}{}{})",
-            helper,
-            quote_string(tag),
-            attrs,
-            children_arg,
-            patch_flag,
-            dynamic_props_arg(element)
+            "{}({}, {}{}{})",
+            helper, tag, attrs, children_arg, patch_flag
         )
     }
+}
+
+#[derive(Clone, Debug, Default)]
+struct ComponentSlotAnalysis {
+    has_slots: bool,
+    has_dynamic_slots: bool,
+}
+
+fn analyze_component_slots(ast: &Vue3Ast, node_id: vuec_ast::NodeId) -> ComponentSlotAnalysis {
+    let Some(node) = ast.node(node_id) else {
+        return ComponentSlotAnalysis::default();
+    };
+    let visible = visible_children(ast, &node.children);
+    if visible.is_empty() {
+        return ComponentSlotAnalysis::default();
+    }
+    let mut analysis = ComponentSlotAnalysis {
+        has_slots: true,
+        has_dynamic_slots: false,
+    };
+    for child in visible {
+        if let Vue3AstKind::Element(element) = &child.kind {
+            if directive_by_name(element, "slot").is_some()
+                && (directive_by_name(element, "if").is_some()
+                    || directive_by_name(element, "for").is_some()
+                    || directive_by_name(element, "else").is_some()
+                    || directive_by_name(element, "else-if").is_some()
+                    || directive_by_name(element, "slot").is_some_and(|slot| slot.is_dynamic_arg))
+            {
+                analysis.has_dynamic_slots = true;
+            }
+        }
+    }
+    analysis
+}
+
+fn render_component_slots(
+    ast: &Vue3Ast,
+    node_id: vuec_ast::NodeId,
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+) -> Option<String> {
+    let node = ast.node(node_id)?;
+    let visible = visible_children(ast, &node.children);
+    if visible.is_empty() {
+        return None;
+    }
+    let dynamic_slots = visible.iter().any(|child| {
+        matches!(
+            &child.kind,
+            Vue3AstKind::Element(element)
+                if directive_by_name(element, "slot").is_some()
+                    && (directive_by_name(element, "if").is_some()
+                        || directive_by_name(element, "for").is_some()
+                        || directive_by_name(element, "else").is_some()
+                        || directive_by_name(element, "else-if").is_some())
+        )
+    });
+    if dynamic_slots {
+        Some(render_dynamic_component_slots(
+            ast, &visible, options, scope,
+        ))
+    } else {
+        Some(render_stable_component_slots(ast, &visible, options, scope))
+    }
+}
+
+fn render_stable_component_slots(
+    ast: &Vue3Ast,
+    children: &[&vuec_ast::Node<Vue3NodeKind>],
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+) -> String {
+    let mut slots = Vec::new();
+    let mut default_children = Vec::new();
+    for child in children {
+        if let Vue3AstKind::Element(element) = &child.kind {
+            if let Some(slot) = directive_by_name(element, "slot") {
+                slots.push(render_static_slot_property(
+                    ast, child.id, element, slot, options, scope,
+                ));
+                continue;
+            }
+        }
+        default_children.push(child.id);
+    }
+    if !default_children.is_empty() {
+        slots.push(render_slot_property(
+            "default",
+            "()",
+            render_slot_children(ast, &default_children, options, scope),
+        ));
+    }
+    slots.push("_: 1 /* STABLE */".into());
+    render_object(&slots)
+}
+
+fn render_dynamic_component_slots(
+    ast: &Vue3Ast,
+    children: &[&vuec_ast::Node<Vue3NodeKind>],
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+) -> String {
+    let mut dynamic_entries = Vec::new();
+    for (index, child) in children.iter().enumerate() {
+        let Vue3AstKind::Element(element) = &child.kind else {
+            continue;
+        };
+        let Some(slot) = directive_by_name(element, "slot") else {
+            continue;
+        };
+        if let Some(if_dir) = directive_by_name(element, "if") {
+            dynamic_entries.push(render_conditional_dynamic_slot(
+                ast, child.id, element, slot, if_dir, options, scope, index,
+            ));
+        } else if let Some(for_dir) = directive_by_name(element, "for") {
+            dynamic_entries.push(render_for_dynamic_slot(
+                ast, child.id, element, slot, for_dir, options, scope,
+            ));
+        } else {
+            dynamic_entries.push(render_dynamic_slot_object(
+                ast, child.id, element, slot, options, scope, None,
+            ));
+        }
+    }
+    format!(
+        "_createSlots({{ _: 2 /* DYNAMIC */ }}, {})",
+        render_array(&dynamic_entries)
+    )
+}
+
+fn render_static_slot_property(
+    ast: &Vue3Ast,
+    node_id: vuec_ast::NodeId,
+    _element: &Vue3Element,
+    slot: &Vue3Directive,
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+) -> String {
+    let name = slot
+        .arg
+        .as_ref()
+        .map(Vue3Expression::source_string)
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "default".into());
+    let params = slot
+        .exp
+        .as_ref()
+        .map(Vue3Expression::source_string)
+        .filter(|params| !params.trim().is_empty())
+        .map(|params| format!("({})", params.trim()))
+        .unwrap_or_else(|| "()".into());
+    let slot_scope = slot_function_scope(scope, &params);
+    let children = ast
+        .node(node_id)
+        .map(|node| render_slot_children(ast, &node.children, options, &slot_scope))
+        .unwrap_or_else(|| "[]".into());
+    render_slot_property(&name, &params, children)
+}
+
+fn render_slot_property(name: &str, params: &str, children: String) -> String {
+    format!("{}: _withCtx({params} => {children})", json_key(name))
+}
+
+fn render_conditional_dynamic_slot(
+    ast: &Vue3Ast,
+    node_id: vuec_ast::NodeId,
+    element: &Vue3Element,
+    slot: &Vue3Directive,
+    if_dir: &Vue3Directive,
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+    index: usize,
+) -> String {
+    let condition = if_dir
+        .exp
+        .as_ref()
+        .map(Vue3Expression::source_string)
+        .unwrap_or_default();
+    let condition = render_condition(
+        &rewrite_expression_with_scope(&condition, options, scope),
+        options,
+    );
+    let slot = render_dynamic_slot_object(ast, node_id, element, slot, options, scope, Some(index));
+    format!(
+        "{condition}\n  ? {}\n  : undefined",
+        indent_after_first_line(&slot, 4)
+    )
+}
+
+fn render_for_dynamic_slot(
+    ast: &Vue3Ast,
+    node_id: vuec_ast::NodeId,
+    element: &Vue3Element,
+    slot: &Vue3Directive,
+    for_dir: &Vue3Directive,
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+) -> String {
+    let expression = for_dir
+        .exp
+        .as_ref()
+        .map(Vue3Expression::source_string)
+        .unwrap_or_default();
+    let Some((source, aliases)) = parse_v_for_expression(&expression) else {
+        return render_dynamic_slot_object(ast, node_id, element, slot, options, scope, None);
+    };
+    let source = rewrite_expression_with_scope(&source, options, scope);
+    let scoped = scope.with_locals(aliases.clone());
+    let params = aliases.join(", ");
+    let body = render_dynamic_slot_object(ast, node_id, element, slot, options, &scoped, None);
+    format!(
+        "_renderList({source}, ({params}) => {{\n  return {}\n}})",
+        indent_after_first_line(&body, 2)
+    )
+}
+
+fn render_dynamic_slot_object(
+    ast: &Vue3Ast,
+    node_id: vuec_ast::NodeId,
+    _element: &Vue3Element,
+    slot: &Vue3Directive,
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+    key: Option<usize>,
+) -> String {
+    let name = slot_name_expression(slot, options, scope);
+    let params = slot
+        .exp
+        .as_ref()
+        .map(Vue3Expression::source_string)
+        .filter(|params| !params.trim().is_empty())
+        .map(|params| format!("({})", params.trim()))
+        .unwrap_or_else(|| "()".into());
+    let slot_scope = slot_function_scope(scope, &params);
+    let children = ast
+        .node(node_id)
+        .map(|node| render_slot_children(ast, &node.children, options, &slot_scope))
+        .unwrap_or_else(|| "[]".into());
+    let mut properties = vec![
+        format!("name: {name}"),
+        format!("fn: _withCtx({params} => {children})"),
+    ];
+    if let Some(key) = key {
+        properties.push(format!("key: {}", quote_string(&key.to_string())));
+    }
+    render_object(&properties)
+}
+
+fn slot_name_expression(
+    slot: &Vue3Directive,
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+) -> String {
+    let Some(arg) = slot.arg.as_ref() else {
+        return quote_string("default");
+    };
+    let name = arg.source_string();
+    if slot.is_dynamic_arg {
+        rewrite_expression_with_scope(&name, options, scope)
+    } else {
+        quote_string(&name)
+    }
+}
+
+fn render_slot_children(
+    ast: &Vue3Ast,
+    children: &[vuec_ast::NodeId],
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+) -> String {
+    let rendered = render_child_sequence(ast, children, options, NodeRenderMode::Child, scope);
+    render_array(&rendered)
+}
+
+fn slot_function_scope(scope: &RenderScope, params: &str) -> RenderScope {
+    scope.with_locals(extract_slot_params(params))
+}
+
+fn extract_slot_params(params: &str) -> Vec<String> {
+    let params = params
+        .trim()
+        .trim_start_matches('(')
+        .trim_end_matches(')')
+        .trim();
+    let mut output = Vec::new();
+    let mut ident = String::new();
+    for ch in params.chars() {
+        if is_identifier_continue(ch) {
+            ident.push(ch);
+        } else if !ident.is_empty() {
+            output.push(std::mem::take(&mut ident));
+        }
+    }
+    if !ident.is_empty() {
+        output.push(ident);
+    }
+    output
+}
+
+fn component_patch_flag(ast: &Vue3Ast, node_id: vuec_ast::NodeId) -> String {
+    let Some(node) = ast.node(node_id) else {
+        return String::new();
+    };
+    let visible = visible_children(ast, &node.children);
+    if visible.iter().any(|child| {
+        matches!(
+            &child.kind,
+            Vue3AstKind::Element(element)
+                if directive_by_name(element, "slot").is_some()
+                    && (directive_by_name(element, "if").is_some()
+                        || directive_by_name(element, "for").is_some()
+                        || directive_by_name(element, "else").is_some()
+                        || directive_by_name(element, "else-if").is_some())
+        )
+    }) {
+        ", 1024 /* DYNAMIC_SLOTS */".into()
+    } else {
+        String::new()
+    }
+}
+
+fn visible_children<'a>(
+    ast: &'a Vue3Ast,
+    children: &[vuec_ast::NodeId],
+) -> Vec<&'a vuec_ast::Node<Vue3NodeKind>> {
+    children
+        .iter()
+        .filter_map(|child_id| ast.node(*child_id))
+        .filter(|child| match &child.kind {
+            Vue3AstKind::Comment(_) => false,
+            Vue3AstKind::Text(text) => !text.value.trim().is_empty(),
+            _ => true,
+        })
+        .collect()
+}
+
+fn collect_component_tags(ast: &Vue3Ast) -> Vec<String> {
+    let mut tags = Vec::new();
+    for node in &ast.nodes {
+        if let Vue3AstKind::Element(element) = &node.kind {
+            if element.tag_type == Vue3ElementType::Component
+                && !tags.iter().any(|tag| tag == &element.tag)
+            {
+                tags.push(element.tag.clone());
+            }
+        }
+    }
+    tags
+}
+
+fn component_asset_id(tag: &str) -> String {
+    format!("_component_{}", to_valid_asset_part(tag))
+}
+
+fn to_valid_asset_part(value: &str) -> String {
+    let mut output = String::new();
+    for (index, ch) in value.chars().enumerate() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            output.push(ch);
+        } else if ch == '-' {
+            output.push('_');
+        } else {
+            output.push_str(&(ch as u32).to_string());
+        }
+        if index == 0 && ch.is_ascii_digit() {
+            output.insert(0, '_');
+        }
+    }
+    output
 }
 
 fn render_slot_outlet(
@@ -3258,6 +3764,86 @@ mod tests {
             .contains("_renderList(_ctx.list, (value, index) =>"));
         assert!(result.code.contains("_toDisplayString(value + index)"));
         assert!(!result.code.contains("_ctx.value + _ctx.index"));
+    }
+
+    #[test]
+    fn base_compile_wraps_component_default_slot_with_ctx() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: "<Child><div/></Child>".into(),
+            file_id: FileId(0),
+            base_offset: 0,
+        };
+        let result = base_compile(
+            source,
+            Vue3CompilerOptions {
+                mode: "module".into(),
+                scope_id: Some("test".into()),
+                ..Vue3CompilerOptions::default()
+            },
+        );
+        assert!(result
+            .code
+            .contains("const _component_Child = _resolveComponent(\"Child\")"));
+        assert!(result.code.contains("default: _withCtx(() => ["));
+        assert!(result.code.contains("_createElementVNode(\"div\")"));
+    }
+
+    #[test]
+    fn base_compile_wraps_named_component_slots_with_ctx() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<Child>
+        <template #foo="{ msg }">{{ msg }}</template>
+        <template #bar><div/></template>
+      </Child>"#
+                .into(),
+            file_id: FileId(0),
+            base_offset: 0,
+        };
+        let result = base_compile(
+            source,
+            Vue3CompilerOptions {
+                mode: "module".into(),
+                scope_id: Some("test".into()),
+                ..Vue3CompilerOptions::default()
+            },
+        );
+        assert!(result.code.contains("foo: _withCtx(({ msg }) => ["));
+        assert!(result
+            .code
+            .contains("_createTextVNode(_toDisplayString(msg), 1 /* TEXT */)"));
+        assert!(result.code.contains("bar: _withCtx(() => ["));
+        assert!(result.code.contains("_: 1 /* STABLE */"));
+    }
+
+    #[test]
+    fn base_compile_wraps_dynamic_component_slots_with_create_slots() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<Child>
+        <template #foo v-if="ok"><div/></template>
+        <template v-for="i in list" #[i]><div/></template>
+      </Child>"#
+                .into(),
+            file_id: FileId(0),
+            base_offset: 0,
+        };
+        let result = base_compile(
+            source,
+            Vue3CompilerOptions {
+                mode: "module".into(),
+                scope_id: Some("test".into()),
+                ..Vue3CompilerOptions::default()
+            },
+        );
+        assert!(result
+            .code
+            .contains("_createSlots({ _: 2 /* DYNAMIC */ }, ["));
+        assert!(result.code.contains("name: \"foo\""));
+        assert!(result.code.contains("fn: _withCtx(() => ["));
+        assert!(result.code.contains("name: i"));
+        assert!(result.code.contains(", 1024 /* DYNAMIC_SLOTS */"));
     }
 
     #[test]
