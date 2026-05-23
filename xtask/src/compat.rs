@@ -3480,7 +3480,12 @@ const vue3CoreRuntime = (() => {
     }
     if (node.type !== NodeTypes.VNODE_CALL && node.arguments) node.arguments[2] = target.props;
   };
-  runtime.hasScopeRef = function hasScopeRef() { return false; };
+  runtime.hasScopeRef = function hasScopeRef(node, identifiers = {}) {
+    const names = Object.keys(identifiers).filter(name => identifiers[name] > 0);
+    if (!names.length) return false;
+    const source = runtime.stringifyExpression(node);
+    return names.some(name => source.includes(name));
+  };
   runtime.getMemoedVNodeCall = function getMemoedVNodeCall(node) {
     return node && node.type === NodeTypes.JS_CALL_EXPRESSION && node.callee === runtime.WITH_MEMO ? node.arguments[1].returns : node;
   };
@@ -3519,7 +3524,9 @@ const vue3CoreRuntime = (() => {
     return runtime._babelParser;
   };
   runtime.isMemberExpressionBrowser = function isMemberExpressionBrowser(path) {
-    return /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*|\[[^\]]+\])*$/.test(String(path || '').trim());
+    path = typeof path === 'string' ? path : path && path.content;
+    return /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*|\[[^\]]+\])*$/.test(String(path || '').trim())
+      || /^[A-Za-z_$][\w$]*\[[\s\S]+\]$/.test(String(path || '').trim());
   };
   runtime.isMemberExpressionNode = function isMemberExpressionNode(path) {
     return runtime.isMemberExpressionBrowser(path);
@@ -3527,7 +3534,7 @@ const vue3CoreRuntime = (() => {
   runtime.isMemberExpression = runtime.isMemberExpressionNode;
   runtime.isFnExpressionBrowser = function isFnExpressionBrowser(exp) {
     const content = typeof exp === 'string' ? exp : exp && exp.content;
-    return /^\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>/.test(String(content || '')) || /^\s*function\b/.test(String(content || ''));
+    return /^\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)[\s\S]*=>/.test(String(content || '')) || /^\s*(?:async\s+)?function\b/.test(String(content || ''));
   };
   runtime.isFnExpressionNode = function isFnExpressionNode(exp) { return runtime.isFnExpressionBrowser(exp); };
   runtime.isFnExpression = runtime.isFnExpressionNode;
@@ -3627,8 +3634,12 @@ const vue3CoreRuntime = (() => {
         list.splice(removalIndex, 1);
       },
       onNodeRemoved() {},
-      addIdentifiers() {},
-      removeIdentifiers() {},
+      addIdentifiers(name) { if (name) context.identifiers[name] = (context.identifiers[name] || 0) + 1; },
+      removeIdentifiers(name) {
+        if (!name || !context.identifiers[name]) return;
+        context.identifiers[name]--;
+        if (context.identifiers[name] <= 0) delete context.identifiers[name];
+      },
       hoist(exp) {
         if (typeof exp === 'string') exp = runtime.createSimpleExpression(exp);
         context.hoists.push(exp);
@@ -4269,10 +4280,17 @@ const vue3CoreRuntime = (() => {
     let ast;
     const source = asRawStatements ? ` ${rawExp} ` : `(${rawExp})${asParams ? `=>{}` : ``}`;
     try {
-      ast = parser.parseExpression(source, {
-        sourceType: 'module',
-        plugins: context.expressionPlugins || [],
-      });
+      if (asRawStatements) {
+        ast = parser.parse(source, {
+          sourceType: 'module',
+          plugins: context.expressionPlugins || [],
+        });
+      } else {
+        ast = parser.parseExpression(source, {
+          sourceType: 'module',
+          plugins: context.expressionPlugins || [],
+        });
+      }
       if (!asRawStatements && ast && ast.type === 'AssignmentExpression' && ast.left && ast.left.type === 'ObjectPattern') {
         ast.left.type = 'ObjectExpression';
       }
@@ -4497,9 +4515,71 @@ const vue3CoreRuntime = (() => {
   runtime.transformBind = function transformBind(dir) {
     return { props: [runtime.createObjectProperty(dir.arg || runtime.createSimpleExpression('dynamic', true), dir.exp || runtime.createSimpleExpression('', true))] };
   };
-  runtime.transformOn = function transformOn(dir) {
+  runtime.transformOn = function transformOn(dir, node, context) {
     const arg = dir.arg || runtime.createSimpleExpression('on', true);
-    return { props: [runtime.createObjectProperty(arg, dir.exp || runtime.createSimpleExpression('() => {}', false))] };
+    if (!dir.exp && !(dir.modifiers || []).length) {
+      context.onError(runtime.createCompilerError(ErrorCodes.X_V_ON_NO_EXPRESSION, dir.loc));
+    }
+    let eventName;
+    if (arg.type === NodeTypes.SIMPLE_EXPRESSION) {
+      if (arg.isStatic) {
+        let rawName = arg.content || '';
+        if (rawName.startsWith('vnode')) {
+          context.onError(runtime.createCompilerError(ErrorCodes.X_VNODE_HOOKS, arg.loc));
+        }
+        if (rawName.startsWith('vue:')) rawName = `vnode-${rawName.slice(4)}`;
+        const eventString = node && (node.tagType !== ElementTypes.ELEMENT || rawName.startsWith('vnode') || !/[A-Z]/.test(rawName))
+          ? toHandlerKey(camelize(rawName))
+          : `on:${rawName}`;
+        eventName = runtime.createSimpleExpression(eventString, true, arg.loc);
+      } else {
+        eventName = runtime.createCompoundExpression([`${context.helperString(runtime.TO_HANDLER_KEY)}(`, arg, `)`]);
+      }
+    } else {
+      eventName = arg;
+      eventName.children = [`${context.helperString(runtime.TO_HANDLER_KEY)}(`, ...(eventName.children || []), `)`];
+    }
+
+    let exp = dir.exp;
+    if (exp && !String(exp.content || '').trim()) exp = undefined;
+    let shouldCache = !!(context.cacheHandlers && !exp && !context.inVOnce);
+    if (exp) {
+      const raw = String(exp.content || '');
+      const isMemberExp = runtime.isMemberExpression(exp, context);
+      const isFnExp = runtime.isFnExpression(exp, context);
+      const isInlineStatement = !(isMemberExp || isFnExp);
+      const hasMultipleStatements = raw.includes(';');
+      if (context.prefixIdentifiers) {
+        if (isInlineStatement) context.addIdentifiers('$event');
+        exp = dir.exp = runtime.processExpression(exp, context, false, hasMultipleStatements);
+        if (isInlineStatement) context.removeIdentifiers('$event');
+        shouldCache = !!(
+          context.cacheHandlers
+          && !context.inVOnce
+          && !(exp.type === NodeTypes.SIMPLE_EXPRESSION && exp.constType > 0)
+          && !(isMemberExp && node && node.tagType === ElementTypes.COMPONENT)
+          && !runtime.hasScopeRef(exp, context.identifiers)
+        );
+        if (shouldCache && isMemberExp) {
+          if (exp.type === NodeTypes.SIMPLE_EXPRESSION) {
+            exp.content = `${exp.content} && ${exp.content}(...args)`;
+          } else {
+            exp.children = [...(exp.children || []), ` && `, ...(exp.children || []), `(...args)`];
+          }
+        }
+      }
+      if (isInlineStatement || (shouldCache && isMemberExp)) {
+        exp = runtime.createCompoundExpression([
+          `${isInlineStatement ? '$event' : '(...args)'} => ${hasMultipleStatements ? '{' : '('}`,
+          exp,
+          hasMultipleStatements ? '}' : ')',
+        ]);
+      }
+    }
+    const ret = { props: [runtime.createObjectProperty(eventName, exp || runtime.createSimpleExpression('() => {}', false, dir.loc))] };
+    if (shouldCache) ret.props[0].value = context.cache(ret.props[0].value);
+    ret.props.forEach(prop => { if (prop && prop.key) prop.key.isHandlerKey = true; });
+    return ret;
   };
   runtime.transformModel = function transformModel(dir) {
     return { props: [runtime.createObjectProperty('modelValue', dir.exp || runtime.createSimpleExpression('', false))] };
@@ -4522,10 +4602,17 @@ const vue3CoreRuntime = (() => {
           if (prop.type === NodeTypes.ATTRIBUTE) {
             objectProps.push(runtime.createObjectProperty(prop.name, runtime.createSimpleExpression(prop.value ? prop.value.content : '', true)));
           } else if (prop.name === 'bind' && prop.arg) {
-            objectProps.push(runtime.createObjectProperty(prop.arg, prop.exp || runtime.createSimpleExpression('', false)));
+            const transform = context.directiveTransforms && context.directiveTransforms.bind;
+            if (transform) objectProps.push(...((transform(prop, node, context).props) || []));
+            else objectProps.push(runtime.createObjectProperty(prop.arg, prop.exp || runtime.createSimpleExpression('', false)));
             if (prop.arg.isStatic) dynamicProps.push(prop.arg.content);
           } else if (prop.name === 'on' && prop.arg) {
-            objectProps.push(runtime.createObjectProperty(runtime.createSimpleExpression(`on${capitalize(prop.arg.content)}`, true), prop.exp || runtime.createSimpleExpression('() => {}', false)));
+            const transform = context.directiveTransforms && context.directiveTransforms.on;
+            const result = transform ? transform(prop, node, context) : runtime.transformOn(prop, node, context);
+            objectProps.push(...((result && result.props) || []));
+            if (!result || !result.props || !result.props.some(p => p.value && p.value.type === NodeTypes.JS_CACHE_EXPRESSION)) {
+              if (result && result.props && result.props.some(p => p.key && p.key.isHandlerKey)) dynamicProps.push(result.props[0].key.content || prop.arg.content);
+            }
           } else {
             directives.push(prop);
           }
@@ -4598,6 +4685,11 @@ const vue3CoreRuntime = (() => {
   runtime.transformIf = runtime.createStructuralDirectiveTransform(/^(if|else|else-if)$/, runtime.processIf);
   runtime.processFor = function processFor(node, dir, context, processCodegen) {
     const parsed = parseForExpression(dir.exp && dir.exp.content || '');
+    const aliases = [parsed.value, parsed.key, parsed.index]
+      .filter(Boolean)
+      .map(exp => exp.content)
+      .filter(Boolean);
+    aliases.forEach(alias => context.addIdentifiers(alias));
     const forNode = {
       type: NodeTypes.FOR,
       loc: node.loc,
@@ -4610,7 +4702,11 @@ const vue3CoreRuntime = (() => {
       codegenNode: undefined,
     };
     context.replaceNode(forNode);
-    if (processCodegen) return processCodegen(forNode);
+    const onExit = processCodegen ? processCodegen(forNode) : undefined;
+    return () => {
+      if (onExit) onExit();
+      aliases.forEach(alias => context.removeIdentifiers(alias));
+    };
   };
   runtime.transformFor = runtime.createStructuralDirectiveTransform('for', runtime.processFor);
   runtime.createForLoopParams = function createForLoopParams(parseResult) {
@@ -4644,6 +4740,15 @@ const vue3CoreRuntime = (() => {
 function capitalize(value) {
   value = String(value || '');
   return value ? value.charAt(0).toUpperCase() + value.slice(1) : value;
+}
+
+function camelize(value) {
+  return String(value || '').replace(/-(\w)/g, (_, c) => c ? c.toUpperCase() : '');
+}
+
+function toHandlerKey(value) {
+  value = String(value || '');
+  return value ? `on${capitalize(value)}` : '';
 }
 
 function selfNameFromFilename(filename) {

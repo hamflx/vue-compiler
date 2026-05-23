@@ -18,8 +18,15 @@
 - [ ] Vue 3 public projection exactness for directive arg/exp/modifier spans and loc content.
 - [x] Development plan and goal wording aligned with `docs/3.AST_HIR_MIR_DESIGN.md` as the single AST/HIR/MIR structure constraint.
 - [x] Vue 3 compiler-core expression transform exactness for `transformExpressions.spec.ts`.
+- [x] Vue 3 compiler-core `v-on` transform exactness for `vOn.spec.ts`.
 
 ## Completed This Round
+
+- Closed the official Vue 3 `compiler-core/__tests__/transforms/vOn.spec.ts` slice. The focused spec now passes `33/33` through the prepared alias Vitest runner.
+- Reworked the alias runtime `transformOn` path in `xtask/src/compat.rs` to align with official handler-key normalization, dynamic handler expressions, `vue:` vnode events, vnode hook diagnostics, inline statement wrapping, member-expression wrapping, `prefixIdentifiers`, handler caching, and v-for alias cache bailouts.
+- Connected `transformElement` to directive transform results for `v-on` and `v-bind`, added transform-context identifier tracking, improved browser-style member/function expression checks, and scoped `v-for` aliases during structural directive traversal.
+- Full Vue 3 core conformance improved from `227/652` to `257/652`; the full suite still intentionally fails with `395` remaining failures outside this `v-on` slice.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p xtask`, `cargo test -p xtask`, `git diff --check`, `cargo xtask verify-npm-alias --version-line vue3 --package @vue/compiler-core`, direct prepared Vitest `vOn.spec.ts` run (`33/33` pass), `cargo xtask diff-api --version-line vue3 --package @vue/compiler-core`, `cargo xtask run-option-matrix --version-line vue3 --package @vue/compiler-core`, `cargo xtask run-output-contract --version-line vue3 --package @vue/compiler-core`, and `cargo xtask run-conformance --suite vue3-core` (expected fail with `257/652` pass, `395` fail).
 
 - Closed the remaining official Vue 3 `compiler-core/__tests__/transforms/transformExpressions.spec.ts` failures. The focused spec now passes `47/47` through the prepared alias Vitest runner.
 - Extended the alias JS runtime expression transform for exact AST children in object method/property cases and inline `SETUP_LET` assignment rewriting. `runtime.stringifyExpression` now joins compound expression children so recursive expression rewrites match official output.
