@@ -193,7 +193,7 @@ fn remove_side_effect_children(ast: &mut Vue3Ast, parent_id: NodeId, ctx: &mut T
             )
         });
         if remove {
-            if let Some(span) = ast.node(child_id).and_then(|node| node.span) {
+            if let Some(span) = ast.node(child_id).and_then(|node| node.span.source()) {
                 ctx.report(Diagnostic {
                     code: "64".into(),
                     severity: Severity::Error,
@@ -250,6 +250,7 @@ mod tests {
                 filename: "x.vue".into(),
                 source: r#"<img src="./a.png"><input v-model="value">"#.into(),
                 file_id: FileId(0),
+                base_offset: 0,
             },
             DomCompilerOptions::default(),
         );

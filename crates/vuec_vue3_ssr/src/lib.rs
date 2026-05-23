@@ -195,6 +195,7 @@ mod tests {
                 filename: "x.vue".into(),
                 source: "<div>{{ msg }}</div><Teleport/>".into(),
                 file_id: FileId(0),
+                base_offset: 0,
             },
             SsrCompilerOptions::default(),
         );
@@ -210,6 +211,7 @@ mod tests {
                 filename: "x.vue".into(),
                 source: "<div class=\"a\"/>".into(),
                 file_id: FileId(0),
+                base_offset: 0,
             },
             SsrCompilerOptions {
                 scope_id: Some("data-v-x".into()),

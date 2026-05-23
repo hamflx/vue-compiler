@@ -943,6 +943,7 @@ name = "vuec_pass"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "vuec_ast",
  "vuec_diagnostics",
 ]
 

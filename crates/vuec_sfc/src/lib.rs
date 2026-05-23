@@ -249,6 +249,7 @@ impl SfcCompiler {
             filename: descriptor.filename.clone(),
             source: template.content.clone(),
             file_id: descriptor.source_file,
+            base_offset: template.loc.start,
         };
         if options.ssr {
             let result = compile_ssr(
@@ -315,6 +316,7 @@ impl SfcCompiler {
             filename: filename.clone(),
             source: raw_source.clone(),
             file_id: FileId(0),
+            base_offset: 0,
         };
         if options.ssr {
             let result = compile_ssr(

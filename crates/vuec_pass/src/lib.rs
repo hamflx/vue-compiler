@@ -2,11 +2,12 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use vuec_ast::RuntimeHelper;
 use vuec_diagnostics::{Diagnostic, DiagnosticSink};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransformContext {
-    pub helpers: BTreeSet<String>,
+    pub helpers: BTreeSet<RuntimeHelper>,
     pub scope_depth: usize,
     #[serde(skip)]
     pub diagnostics: DiagnosticSink,
@@ -17,8 +18,8 @@ impl TransformContext {
         self.diagnostics.push(diagnostic);
     }
 
-    pub fn add_helper(&mut self, helper: impl Into<String>) -> bool {
-        self.helpers.insert(helper.into())
+    pub fn add_helper(&mut self, helper: RuntimeHelper) -> bool {
+        self.helpers.insert(helper)
     }
 }
 
@@ -26,6 +27,12 @@ pub trait TransformPass<N> {
     fn name(&self) -> &'static str;
     fn enter(&mut self, _node: &mut N, _ctx: &mut TransformContext) {}
     fn exit(&mut self, _node: &mut N, _ctx: &mut TransformContext) {}
+}
+
+pub trait DocumentPass<K> {
+    fn name(&self) -> &'static str;
+    fn enter(&mut self, _doc: &mut vuec_ast::AstDocument<K>, _node: vuec_ast::NodeId, _ctx: &mut TransformContext) {}
+    fn exit(&mut self, _doc: &mut vuec_ast::AstDocument<K>, _node: vuec_ast::NodeId, _ctx: &mut TransformContext) {}
 }
 
 pub struct PassScheduler<N> {
@@ -60,6 +67,39 @@ impl<N> Default for PassScheduler<N> {
     }
 }
 
+pub fn walk_document<K, P>(
+    doc: &mut vuec_ast::AstDocument<K>,
+    pass: &mut P,
+    ctx: &mut TransformContext,
+)
+where
+    P: DocumentPass<K>,
+{
+    if let Some(root) = doc.root {
+        walk_document_node(doc, pass, ctx, root);
+    }
+}
+
+fn walk_document_node<K, P>(
+    doc: &mut vuec_ast::AstDocument<K>,
+    pass: &mut P,
+    ctx: &mut TransformContext,
+    node: vuec_ast::NodeId,
+)
+where
+    P: DocumentPass<K>,
+{
+    pass.enter(doc, node, ctx);
+    let children = doc
+        .node(node)
+        .map(|node| node.children.clone())
+        .unwrap_or_default();
+    for child in children {
+        walk_document_node(doc, pass, ctx, child);
+    }
+    pass.exit(doc, node, ctx);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -74,7 +114,8 @@ mod tests {
 
         fn enter(&mut self, node: &mut usize, ctx: &mut TransformContext) {
             self.0 += 1;
-            ctx.add_helper(format!("node-{node}"));
+            let _ = node;
+            ctx.add_helper(RuntimeHelper::Vue3OpenBlock);
         }
     }
 
@@ -85,6 +126,38 @@ mod tests {
         let mut nodes = vec![1, 2, 3];
         let mut ctx = TransformContext::default();
         scheduler.run(&mut nodes, &mut ctx);
-        assert_eq!(ctx.helpers.len(), 3);
+        assert_eq!(ctx.helpers.len(), 1);
+        assert!(ctx.helpers.contains(&RuntimeHelper::Vue3OpenBlock));
+    }
+
+    #[derive(Default)]
+    struct CountDocumentPass(usize);
+
+    impl DocumentPass<usize> for CountDocumentPass {
+        fn name(&self) -> &'static str {
+            "count_document"
+        }
+
+        fn enter(
+            &mut self,
+            _doc: &mut vuec_ast::AstDocument<usize>,
+            _node: vuec_ast::NodeId,
+            _ctx: &mut TransformContext,
+        ) {
+            self.0 += 1;
+        }
+    }
+
+    #[test]
+    fn document_walk_is_depth_first() {
+        let mut doc = vuec_ast::AstDocument::new();
+        let root = doc.push(0usize, None);
+        doc.set_root(root);
+        let child = doc.push_child(root, 1usize, None);
+        let _grandchild = doc.push_child(child, 2usize, None);
+        let mut pass = CountDocumentPass::default();
+        let mut ctx = TransformContext::default();
+        walk_document(&mut doc, &mut pass, &mut ctx);
+        assert_eq!(pass.0, 3);
     }
 }

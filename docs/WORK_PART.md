@@ -14,6 +14,7 @@
 - [x] Official API manifest generation and diff harness.
 - [x] Rust npm alias bridge and API manifest parity.
 - [ ] Vue 3 SFC official output-contract parity and option-matrix closure.
+- [ ] AST / HIR / MIR base arena migration and lowering pipeline alignment.
 
 ## Completed This Round
 
@@ -25,6 +26,8 @@
 - Verification this round: `cargo test -p vuec_vue2`, `cargo test -p vuec_node_bridge`, `cargo xtask generate-option-matrix --all`, `cargo xtask audit-option-matrix --all`, and `cargo xtask run-option-matrix --version-line vue2_6 --package vue-template-compiler`.
 - Vue 3 SFC template compilation now preserves the raw source through codegen, emits module-mode imports directly from the render backend, and attaches source maps from the render output instead of rebuilding strings after the fact.
 - Vue 3 side-effect `<script>/<style>` handling is now AST/diagnostic-driven rather than string-pruned, and the remaining work is closing the official compileScript/compileStyle shape gap.
+- `vuec_ast` has been expanded to the new arena contract with `NodeSpan`, parent/index tracking, `LoweringMap`, helper enums, JS id aliases, and compatibility `Hir` / `Mir` aliases.
+- `vuec_pass` now has enum-based helpers and a depth-first document walker, which is the first step in moving transforms onto the new AST/HIR/MIR path.
 
 ## Previous Round
 

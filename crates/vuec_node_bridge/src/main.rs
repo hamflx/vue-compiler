@@ -232,6 +232,7 @@ fn template_source(payload: &Value) -> TemplateSource {
         filename: string_field_or(payload, "filename", "anonymous.vue"),
         source: string_field(payload, "source"),
         file_id: FileId(0),
+        base_offset: 0,
     }
 }
 

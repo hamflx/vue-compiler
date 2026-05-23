@@ -5,5 +5,6 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+vuec_ast = { path = "../vuec_ast" }
 serde.workspace = true
 vuec_diagnostics = { path = "../vuec_diagnostics" }

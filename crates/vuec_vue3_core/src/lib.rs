@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
-use vuec_ast::{TemplateAttribute, Vue3Ast, Vue3NodeKind};
+use vuec_ast::{RuntimeHelper, TemplateAttribute, Vue3Ast, Vue3NodeKind};
 use vuec_codegen::{CodeWriter, SourceMapArtifact, SourceMapSegment};
 use vuec_html::{HtmlTokenKind, HtmlTokenizer};
 use vuec_pass::TransformContext;
@@ -12,6 +12,7 @@ pub struct TemplateSource {
     pub filename: String,
     pub source: String,
     pub file_id: FileId,
+    pub base_offset: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,7 +60,11 @@ impl Vue3Dialect {
         let mut ast = Vue3Ast::new();
         let root = ast.push(
             Vue3NodeKind::Root,
-            Some(Span::new(source.file_id, 0, source.source.len())),
+            Some(Span::new(
+                source.file_id,
+                source.base_offset,
+                source.base_offset + source.source.len(),
+            )),
         );
         ast.set_root(root);
         let mut stack = vec![root];
@@ -72,23 +77,28 @@ impl Vue3Dialect {
                         &mut ast,
                         current_parent,
                         source.file_id,
-                        token.start,
+                        source.base_offset + token.start,
                         &text,
                     )
                 }
                 HtmlTokenKind::Comment(value) => {
-                    let id = ast.push(
+                    let _id = ast.push_child(
+                        current_parent,
                         Vue3NodeKind::Comment { value },
-                        Some(Span::new(source.file_id, token.start, token.end)),
+                        Some(Span::new(
+                            source.file_id,
+                            source.base_offset + token.start,
+                            source.base_offset + token.end,
+                        )),
                     );
-                    ast.node_mut(current_parent).unwrap().children.push(id);
                 }
                 HtmlTokenKind::StartTag {
                     name,
                     attributes,
                     self_closing,
                 } => {
-                    let id = ast.push(
+                    let id = ast.push_child(
+                        current_parent,
                         Vue3NodeKind::Element {
                             tag: name,
                             attributes: attributes
@@ -100,9 +110,12 @@ impl Vue3Dialect {
                                 .collect(),
                             self_closing,
                         },
-                        Some(Span::new(source.file_id, token.start, token.end)),
+                        Some(Span::new(
+                            source.file_id,
+                            source.base_offset + token.start,
+                            source.base_offset + token.end,
+                        )),
                     );
-                    ast.node_mut(current_parent).unwrap().children.push(id);
                     if !self_closing {
                         stack.push(id);
                     }
@@ -116,7 +129,7 @@ impl Vue3Dialect {
                             if matches!(&node.kind, Vue3NodeKind::Element { tag, .. } if tag == &name)
                             {
                                 if let Some(node) = ast.node_mut(node_id) {
-                                    if let Some(span) = node.span.as_mut() {
+                                    if let Some(span) = node.span.source_mut() {
                                         span.end = vuec_source::BytePos(token.end);
                                     }
                                 }
@@ -130,7 +143,7 @@ impl Vue3Dialect {
                         &mut ast,
                         current_parent,
                         source.file_id,
-                        token.start,
+                        source.base_offset + token.start,
                         &text,
                     );
                 }
@@ -168,14 +181,14 @@ impl Vue3Dialect {
                 }
             }
             if has_element {
-                ctx.add_helper("openBlock");
-                ctx.add_helper("createElementBlock");
+                ctx.add_helper(RuntimeHelper::Vue3OpenBlock);
+                ctx.add_helper(RuntimeHelper::Vue3CreateElementBlock);
             }
             if has_nested_element {
-                ctx.add_helper("createElementVNode");
+                ctx.add_helper(RuntimeHelper::Vue3CreateElementVNode);
             }
             if has_text {
-                ctx.add_helper("toDisplayString");
+                ctx.add_helper(RuntimeHelper::Vue3ToDisplayString);
             }
         }
     }
@@ -187,10 +200,10 @@ impl Vue3Dialect {
     ) -> CodegenResult {
         let mut writer = CodeWriter::new();
         let helper_order = [
-            "toDisplayString",
-            "createElementVNode",
-            "openBlock",
-            "createElementBlock",
+            RuntimeHelper::Vue3ToDisplayString,
+            RuntimeHelper::Vue3CreateElementVNode,
+            RuntimeHelper::Vue3OpenBlock,
+            RuntimeHelper::Vue3CreateElementBlock,
         ];
         if let Some(root_id) = ast.root {
             if let Some(root) = ast.node(root_id) {
@@ -299,28 +312,43 @@ impl Vue3Dialect {
     }
 }
 
-fn render_helpers<'a>(order: &'a [&'a str], ctx: &TransformContext) -> Vec<&'a str> {
+fn render_helpers(order: &[RuntimeHelper], ctx: &TransformContext) -> Vec<RuntimeHelper> {
     order
         .iter()
         .copied()
-        .filter(|helper| ctx.helpers.contains(*helper))
+        .filter(|helper| ctx.helpers.contains(helper))
         .collect()
 }
 
-fn helper_aliases(helpers: &[&str]) -> String {
+fn helper_aliases(helpers: &[RuntimeHelper]) -> String {
     helpers
         .iter()
-        .map(|helper| format!("{helper}: _{helper}"))
+        .map(|helper| format!("{}: _{}", helper_name(*helper), helper_name(*helper)))
         .collect::<Vec<_>>()
         .join(", ")
 }
 
-fn import_helper_aliases(helpers: &[&str]) -> String {
+fn import_helper_aliases(helpers: &[RuntimeHelper]) -> String {
     helpers
         .iter()
-        .map(|helper| format!("{helper} as _{helper}"))
+        .map(|helper| format!("{} as _{}", helper_name(*helper), helper_name(*helper)))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn helper_name(helper: RuntimeHelper) -> &'static str {
+    match helper {
+        RuntimeHelper::Vue2CreateElement => "createElement",
+        RuntimeHelper::Vue2CreateTextVNode => "createTextVNode",
+        RuntimeHelper::Vue2ToString => "toString",
+        RuntimeHelper::Vue2RenderList => "renderList",
+        RuntimeHelper::Vue2ResolveFilter => "resolveFilter",
+        RuntimeHelper::Vue3OpenBlock => "openBlock",
+        RuntimeHelper::Vue3CreateElementVNode => "createElementVNode",
+        RuntimeHelper::Vue3CreateElementBlock => "createElementBlock",
+        RuntimeHelper::Vue3ToDisplayString => "toDisplayString",
+        RuntimeHelper::Vue3RenderList => "renderList",
+    }
 }
 
 fn source_map_for_render(
@@ -340,6 +368,7 @@ fn source_map_for_render(
         code,
         ast,
         &root.children,
+        source.base_offset,
         &source.source,
         &mut names,
         &mut segments,
@@ -360,13 +389,23 @@ fn collect_source_map_segments(
     code: &str,
     ast: &Vue3Ast,
     children: &[vuec_ast::NodeId],
+    base_offset: usize,
     source: &str,
     names: &mut Vec<String>,
     segments: &mut Vec<SourceMapSegment>,
 ) {
     let mut cursor = 0usize;
     for child_id in children {
-        collect_node_source_map(code, ast, *child_id, source, names, segments, &mut cursor);
+        collect_node_source_map(
+            code,
+            ast,
+            *child_id,
+            base_offset,
+            source,
+            names,
+            segments,
+            &mut cursor,
+        );
     }
 }
 
@@ -374,6 +413,7 @@ fn collect_node_source_map(
     code: &str,
     ast: &Vue3Ast,
     node_id: vuec_ast::NodeId,
+    base_offset: usize,
     source: &str,
     names: &mut Vec<String>,
     segments: &mut Vec<SourceMapSegment>,
@@ -384,13 +424,22 @@ fn collect_node_source_map(
     };
     match &node.kind {
         Vue3NodeKind::Element { .. } => {
-            add_vnode_mapping(code, node, source, segments, cursor);
+            add_vnode_mapping(code, node, base_offset, source, segments, cursor);
             for child_id in &node.children {
-                collect_node_source_map(code, ast, *child_id, source, names, segments, cursor);
+                collect_node_source_map(
+                    code,
+                    ast,
+                    *child_id,
+                    base_offset,
+                    source,
+                    names,
+                    segments,
+                    cursor,
+                );
             }
         }
         Vue3NodeKind::Interpolation { .. } => {
-            add_interpolation_mapping(code, node, source, names, segments, cursor);
+            add_interpolation_mapping(code, node, base_offset, source, names, segments, cursor);
         }
         Vue3NodeKind::Root | Vue3NodeKind::Text { .. } | Vue3NodeKind::Comment { .. } | Vue3NodeKind::Directive { .. } => {}
     }
@@ -399,17 +448,20 @@ fn collect_node_source_map(
 fn add_vnode_mapping(
     code: &str,
     node: &vuec_ast::Node<Vue3NodeKind>,
+    base_offset: usize,
     source: &str,
     segments: &mut Vec<SourceMapSegment>,
     cursor: &mut usize,
 ) {
-    let Some(span) = node.span else {
+    let Some(span) = node.span.source() else {
         return;
     };
-    let Some(start) = loc_for_offset(source, span.start.0) else {
+    let local_start = span.start.0.saturating_sub(base_offset);
+    let local_end = span.end.0.saturating_sub(base_offset);
+    let Some(start) = loc_for_offset(source, local_start) else {
         return;
     };
-    let Some(end) = loc_for_offset(source, span.end.0) else {
+    let Some(end) = loc_for_offset(source, local_end) else {
         return;
     };
     let tag = match &node.kind {
@@ -455,6 +507,7 @@ fn add_vnode_mapping(
 fn add_interpolation_mapping(
     code: &str,
     node: &vuec_ast::Node<Vue3NodeKind>,
+    base_offset: usize,
     source: &str,
     names: &mut Vec<String>,
     segments: &mut Vec<SourceMapSegment>,
@@ -463,7 +516,7 @@ fn add_interpolation_mapping(
     let Vue3NodeKind::Interpolation { expression } = &node.kind else {
         return;
     };
-    let Some(span) = node.span else {
+    let Some(span) = node.span.source() else {
         return;
     };
     let name = expression.trim().to_string();
@@ -473,9 +526,11 @@ fn add_interpolation_mapping(
         names.push(name.clone());
         names.len() - 1
     };
-    let Some(original_start) = source[span.start.0..span.end.0]
+    let local_start = span.start.0.saturating_sub(base_offset);
+    let local_end = span.end.0.saturating_sub(base_offset);
+    let Some(original_start) = source[local_start..local_end]
         .find(expression.trim())
-        .map(|offset| span.start.0 + offset)
+        .map(|offset| local_start + offset)
     else {
         return;
     };
@@ -734,7 +789,8 @@ fn push_text_and_interpolations(
         };
         let close = expression_start + close_offset;
         let expression = text[expression_start..close].trim().to_string();
-        let id = ast.push(
+        let _id = ast.push_child(
+            parent,
             Vue3NodeKind::Interpolation { expression },
             Some(Span::new(
                 file_id,
@@ -742,7 +798,6 @@ fn push_text_and_interpolations(
                 token_start + close + 2,
             )),
         );
-        ast.node_mut(parent).unwrap().children.push(id);
         cursor = close + 2;
     }
     if cursor < text.len() {
@@ -750,17 +805,23 @@ fn push_text_and_interpolations(
     }
 }
 
-fn push_text(ast: &mut Vue3Ast, parent: vuec_ast::NodeId, file_id: FileId, start: usize, text: &str) {
+fn push_text(
+    ast: &mut Vue3Ast,
+    parent: vuec_ast::NodeId,
+    file_id: FileId,
+    start: usize,
+    text: &str,
+) {
     if text.is_empty() {
         return;
     }
-    let id = ast.push(
+    let _id = ast.push_child(
+        parent,
         Vue3NodeKind::Text {
             value: text.to_string(),
         },
         Some(Span::new(file_id, start, start + text.len())),
     );
-    ast.node_mut(parent).unwrap().children.push(id);
 }
 
 pub fn base_compile(source: TemplateSource, options: Vue3CompilerOptions) -> CodegenResult {
@@ -785,6 +846,7 @@ mod tests {
             filename: "foo.vue".into(),
             source: "<div>hello</div>".into(),
             file_id: FileId(0),
+            base_offset: 0,
         };
         let result = base_compile(source, Vue3CompilerOptions::default());
         assert!(result.code.contains("render"));
@@ -797,6 +859,7 @@ mod tests {
             filename: "foo.vue".into(),
             source: "<div/>".into(),
             file_id: FileId(0),
+            base_offset: 0,
         };
         let result = compile_ssr(source, Vue3CompilerOptions::default());
         assert!(result.code.starts_with("/* ssr */"));
