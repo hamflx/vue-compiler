@@ -30,9 +30,17 @@
 - [x] Vue 3 compiler-core Rust-backed root `codegenNode` projection bridge for `transform.spec.ts`.
 - [x] Vue 3 compiler-core Rust-backed `transformModel` projection bridge for `vModel.spec.ts`.
 - [x] Vue 3 compiler-core Rust-backed `baseCompile` `v-memo` codegen slice for `vMemo.spec.ts`.
+- [x] Vue 3 compiler-core Rust-backed `transformIf` / `processIf` projection bridge for `vIf.spec.ts`.
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Implemented a Rust-backed Vue 3 `transformIf` / `processIf` projection bridge for compiler-core structural directive parity.
+- `vuec_vue3_core::transform_if_projection` now owns branch creation decisions, template branch child selection, missing-expression and condition-prefix decisions, adjacent `v-else` / `v-else-if` scanning, comment carry-over, duplicate user-key diagnostics, branch key-base calculation, and branch codegen wrapper decisions.
+- Added `vue3.core.transformIf` to `vuec_node_bridge`. Generated alias `processIf` in `xtask/src/compat.rs` now calls the Rust projection and materializes official-shaped IF/branch/codegen AST nodes from returned instructions. The `compat.rs` changes in this round are bridge/API/test-runner adapter and AST materialization support; they are not counted as standalone JavaScript compiler semantics.
+- Focused official `compiler-core/__tests__/transforms/vIf.spec.ts` now passes `31/31` (previously `8/31`). The file remains `mixed` in coverage because transform traversal, element transform, and codegen materialization still run through the alias harness, but `processIf` structural decisions are Rust-backed through `vue3.core.transformIf`.
+- Full Vue 3 core conformance is still intentionally failing: `467/652` official tests pass and `185` fail. Coverage reports `rust-backed 158/158`, `mixed 309/494`, and `shim-backed 0/0`. Remaining failures are concentrated in `transformElement`, `vFor`, `cacheStatic`, `vSlot`, `utils`, and `transformText`.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_vue3_core` (`34/34` pass), `cargo xtask verify-npm-alias --version-line vue3 --package @vue/compiler-core`, direct prepared Vitest `vIf.spec.ts` (`31/31` pass), and `cargo xtask run-conformance --suite vue3-core` (expected fail with `467/652` pass, `185` fail).
 
 - Implemented Rust-backed Vue 3 `v-memo` codegen in the public `baseCompile` path.
 - `vuec_vue3_core` now wraps memoized plain/component elements with `_withMemo`, converts memoized plain elements to block calls, assigns deterministic memo cache indexes across v-if branches, and emits v-for memo cache guards using `_isMemoSame`, `_cached`, `_memo`, and `_item.memo`.
