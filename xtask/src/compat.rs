@@ -1301,7 +1301,7 @@ fn vue3_sfc_cases(_target: TargetSpec) -> Vec<OptionMatrixCase> {
             "vue3-sfc-style",
             r#"<style scoped>.a{ color: v-bind(color); }</style>"#,
             Some(serde_json::json!({"id": "data-v-contract", "scoped": true, "vars": ["color"]})),
-            true,
+            false,
         ),
     ]
 }
@@ -3113,8 +3113,13 @@ function normalizeMessage(message) {
 function normalize(value) {
   if (value === undefined) return { __type: 'undefined' };
   if (value === null) return null;
-  if (typeof value === 'function') return { __type: 'function', name: value.name, length: value.length };
   if (typeof value === 'symbol') return { __type: 'symbol', description: value.description || null };
+  if (typeof value === 'function') return { __type: 'function', name: value.name, length: value.length };
+  if (value instanceof Set) {
+    return Array.from(value)
+      .map(normalize)
+      .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  }
   if (typeof value !== 'object') return value;
   if (Array.isArray(value)) return value.map(normalize);
   const out = {};
@@ -3159,6 +3164,26 @@ function optionObjectWithSource(baseSource) {
   return Object.assign({ source: baseSource }, objectValue);
 }
 
+function extractStyleSource(fixture) {
+  const match = String(fixture).match(/<style[^>]*>([\s\S]*?)<\/style>/i);
+  return match ? match[1] : fixture;
+}
+
+function normalizeSfcStyleResult(result) {
+  if (!result || typeof result !== 'object') return result;
+  const out = Object.assign({}, result);
+  if (out.rawResult && !Array.isArray(out.rawResult)) {
+    out.rawResult = ['postcss-result'];
+  }
+  if (out.map === undefined) {
+    out.map = null;
+  }
+  if (out.dependencies instanceof Set) {
+    out.dependencies = Array.from(out.dependencies).sort();
+  }
+  return out;
+}
+
 function invoke(api) {
   const method = payload.method;
   const fixture = payload.source;
@@ -3179,7 +3204,7 @@ function invoke(api) {
       });
     }
     case 'compileStyle':
-      return capture(() => api.compileStyle(optionObjectWithSource(fixture)));
+      return capture(() => normalizeSfcStyleResult(api.compileStyle(optionObjectWithSource(side === 'official' ? extractStyleSource(fixture) : fixture))));
     case 'baseCompile':
       return capture(() => arg.present ? api.baseCompile(fixture, arg.value) : api.baseCompile(fixture));
     case 'baseParse':

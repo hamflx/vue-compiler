@@ -18,6 +18,11 @@
 
 ## Completed This Round
 
+- Converted the Vue 3 `@vue/compiler-sfc` `compileStyle` option row from pending to executable diff mode and got the target to `3/4` rows passing with only `compileScript` still pending.
+- Aligned SFC style result serialization with official field names, including `rawResult`, deterministic dependencies, and source-map/null behavior for the executable option row.
+- Updated style CSS var rewriting and scoped output formatting to match the official Vue 3 `compileStyle` option probe for the current fixture.
+- Updated the option probe normalizer so Sets containing Symbols and PostCSS `rawResult` objects serialize deterministically instead of throwing or expanding unstable internals.
+- Verification this round: `cargo test -p vuec_style -p vuec_sfc -p xtask`, `cargo check -p vuec_sfc -p vuec_node_bridge`, `cargo xtask run-option-matrix --version-line vue3 --package @vue/compiler-sfc`, and `cargo xtask audit-option-matrix --version-line vue3 --package @vue/compiler-sfc`.
 - Implemented the first `vuec_js::JsAstStore` registry layer with `JsEntry`, `JsSourceType`, `JsExprId` / `JsStmtId` / `JsPatternId` / `JsProgramId` allocation, lookup, and parse-by-id APIs, while keeping the direct Oxc parse wrappers available for existing call sites.
 - Added registry tests for expression, statement, pattern, and program ids, including stable source/span/mode/source-type metadata.
 - Updated `vuec_sfc::compile_script` to register `<script>` and `<script setup>` as JS programs and emit official-style `type`, `setup`, `lang`, `imports`, `scriptAst`, `scriptSetupAst`, and `deps` fields.

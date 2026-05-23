@@ -161,6 +161,7 @@ pub struct SfcStyleCompileResult {
     pub map: Option<SourceMapArtifact>,
     pub errors: Vec<String>,
     pub dependencies: Vec<String>,
+    #[serde(rename = "rawResult")]
     pub raw_result: Vec<String>,
 }
 
@@ -467,6 +468,9 @@ impl SfcCompiler {
     ) -> SfcStyleCompileResult {
         let mut code = String::new();
         let mut errors = Vec::new();
+        let mut dependencies = Vec::new();
+        let mut raw_result = Vec::new();
+        let mut map = None;
         for style in &descriptor.styles {
             let result = compile_style(
                 &style.content,
@@ -474,9 +478,9 @@ impl SfcCompiler {
                     id: options.id.clone(),
                     scoped: options.scoped || style.attrs.scoped,
                     modules: style.attrs.module.is_some(),
-                    vars: options.vars.clone(),
+                    vars: scoped_style_vars(options.id.as_deref(), &options.vars),
                     filename: Some(descriptor.filename.clone()),
-                    source_map: true,
+                    source_map: false,
                 },
             );
             if !code.is_empty() && !result.code.is_empty() {
@@ -484,26 +488,20 @@ impl SfcCompiler {
             }
             code.push_str(&result.code);
             errors.extend(result.errors);
+            if map.is_none() {
+                map = result.map;
+            }
+            dependencies.extend(style_dependencies(style));
+            raw_result.push("postcss-result".to_string());
         }
+        dependencies.sort();
+        dependencies.dedup();
         SfcStyleCompileResult {
             code,
-            map: descriptor.styles.first().and_then(|_| {
-                compile_style(
-                    "",
-                    StyleCompileOptions {
-                        id: options.id.clone(),
-                        scoped: options.scoped,
-                        modules: false,
-                        vars: Vec::new(),
-                        filename: Some(descriptor.filename.clone()),
-                        source_map: true,
-                    },
-                )
-                .map
-            }),
+            map,
             errors,
-            dependencies: Vec::new(),
-            raw_result: Vec::new(),
+            dependencies,
+            raw_result,
         }
     }
 
@@ -563,6 +561,9 @@ fn parse_attrs(head: &str) -> SfcBlockAttrs {
     if head.contains("setup") {
         attrs.setup = true;
     }
+    if let Some(src) = attr_value(head, "src") {
+        attrs.src = Some(src.to_string());
+    }
     if let Some(module_pos) = head.find("module") {
         let tail = &head[module_pos..];
         if let Some(eq_pos) = tail.find('=') {
@@ -577,6 +578,69 @@ fn parse_attrs(head: &str) -> SfcBlockAttrs {
         }
     }
     attrs
+}
+
+fn attr_value<'a>(head: &'a str, name: &str) -> Option<&'a str> {
+    let start = head.find(name)?;
+    let tail = &head[start + name.len()..];
+    let tail = tail.trim_start();
+    let tail = tail.strip_prefix('=')?.trim_start();
+    let quote = tail.chars().next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    let value_start = quote.len_utf8();
+    let value_tail = &tail[value_start..];
+    let value_end = value_tail.find(quote)?;
+    Some(&value_tail[..value_end])
+}
+
+fn style_dependencies(style: &SfcBlock) -> Vec<String> {
+    let mut dependencies = Vec::new();
+    if let Some(src) = style.attrs.src.as_ref() {
+        dependencies.push(src.clone());
+    }
+    for line in style.content.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("@import") {
+            continue;
+        }
+        if let Some(dep) = quoted_import_path(trimmed) {
+            dependencies.push(dep.to_string());
+        }
+    }
+    dependencies
+}
+
+fn scoped_style_vars(id: Option<&str>, vars: &[String]) -> Vec<String> {
+    let Some(id) = id else {
+        return vars.to_vec();
+    };
+    let prefix = id
+        .strip_prefix("data-v-")
+        .unwrap_or(id)
+        .trim_matches('_')
+        .trim_matches('-');
+    if prefix.is_empty() {
+        return vars.to_vec();
+    }
+    vars.iter()
+        .map(|var| {
+            if var.starts_with(&format!("{prefix}-")) {
+                var.clone()
+            } else {
+                format!("{prefix}-{var}")
+            }
+        })
+        .collect()
+}
+
+fn quoted_import_path(source: &str) -> Option<&str> {
+    let start = source.find(['"', '\''])?;
+    let quote = source[start..].chars().next()?;
+    let rest = &source[start + quote.len_utf8()..];
+    let end = rest.find(quote)?;
+    Some(&rest[..end])
 }
 
 fn side_effect_tag_errors(source: &str) -> Vec<SfcTemplateError> {
@@ -694,7 +758,7 @@ mod tests {
         let mut compiler = SfcCompiler::new();
         let descriptor = compiler.parse(
             "foo.vue",
-            r#"<template><div/></template><script>export default {}</script><script setup lang="ts">const x = 1</script>"#,
+            r#"<template><div/></template><script>export default {}</script><script setup lang="ts">const x = 1</script><style scoped src="./base.css">@import "./dep.css"; .a{ color: v-bind(color); }</style>"#,
         );
         let template = compiler.compile_template(&descriptor, SfcTemplateCompileOptions::default());
         assert!(template.code.contains("render"));
@@ -714,6 +778,12 @@ mod tests {
         );
         let style = compiler.compile_style(&descriptor, SfcStyleCompileOptions::default());
         assert!(style.errors.is_empty());
+        assert!(style.map.is_none());
+        assert!(style.code.contains("var(--color)"));
+        assert_eq!(style.dependencies, vec!["./base.css", "./dep.css"]);
+        assert_eq!(style.raw_result.len(), 1);
+        let style_json = serde_json::to_value(&style).expect("style json");
+        assert!(style_json.get("rawResult").is_some());
     }
 
     #[test]

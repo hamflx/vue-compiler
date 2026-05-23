@@ -157,8 +157,8 @@
           "color"
         ]
       },
-      "execution_mode": "pending",
-      "status": "pending"
+      "execution_mode": "diff",
+      "status": "pass"
     }
   ]
 }

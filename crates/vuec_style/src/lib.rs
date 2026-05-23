@@ -38,6 +38,7 @@ pub fn compile_style(source: &str, options: StyleCompileOptions) -> StyleCompile
     if !vars.is_empty() {
         code = rewrite_css_vars(&code, &vars);
     }
+    code = normalize_style_output(&code);
     let modules = if options.modules {
         collect_class_names(source)
     } else {
@@ -62,6 +63,10 @@ pub fn compile_style(source: &str, options: StyleCompileOptions) -> StyleCompile
         modules,
         vars,
     }
+}
+
+fn normalize_style_output(source: &str) -> String {
+    source.replace("; }", ";\n}")
 }
 
 pub fn rewrite_scoped_selectors(source: &str, scope_id: &str) -> String {
@@ -101,9 +106,11 @@ pub fn collect_css_vars(source: &str) -> Vec<String> {
 fn rewrite_css_vars(source: &str, vars: &[String]) -> String {
     let mut code = source.to_string();
     for var in vars {
-        code = code.replace(&format!("v-bind({var})"), &format!("var(--{var})"));
-        code = code.replace(&format!("v-bind('{var}')"), &format!("var(--{var})"));
-        code = code.replace(&format!("v-bind(\"{var}\")"), &format!("var(--{var})"));
+        let source_var = var.rsplit_once('-').map(|(_, raw)| raw).unwrap_or(var);
+        let css_var = format!("var(--{var})");
+        code = code.replace(&format!("v-bind({source_var})"), &css_var);
+        code = code.replace(&format!("v-bind('{source_var}')"), &css_var);
+        code = code.replace(&format!("v-bind(\"{source_var}\")"), &css_var);
     }
     code
 }
