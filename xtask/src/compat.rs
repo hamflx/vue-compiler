@@ -3539,6 +3539,52 @@ const vue3CoreRuntime = (() => {
       props.properties.unshift(prop);
     }
   };
+  runtime.prependPropsExpressionProp = function prependPropsExpressionProp(props, prop, loc = locStub) {
+    if (!props || typeof props === 'string') return runtime.createObjectExpression([prop], loc);
+    if (props.type === NodeTypes.JS_OBJECT_EXPRESSION) {
+      runtime.prependPropOnce(props, prop);
+      return props;
+    }
+    const objectArg = runtime.createObjectExpression([prop], loc);
+    if (props.type === NodeTypes.JS_CALL_EXPRESSION && props.callee === runtime.MERGE_PROPS) {
+      const first = props.arguments && props.arguments[0];
+      if (first && typeof first !== 'string' && first.type === NodeTypes.JS_OBJECT_EXPRESSION) {
+        runtime.prependPropOnce(first, prop);
+      } else {
+        props.arguments.unshift(objectArg);
+      }
+      return props;
+    }
+    return runtime.createCallExpression(runtime.MERGE_PROPS, [objectArg, props], loc);
+  };
+  runtime.applyInlineTemplateRefProjection = function applyInlineTemplateRefProjection(props, refs, loc = locStub) {
+    for (const ref of refs || []) {
+      const content = ref && ref.content;
+      if (!content) continue;
+      props = runtime.prependPropsExpressionProp(
+        props,
+        runtime.createObjectProperty('ref_key', runtime.createSimpleExpression(content, true, loc)),
+        loc,
+      );
+      for (const object of runtime.propsExpressionObjects(props)) {
+        for (const prop of object.properties || []) {
+          if (runtime.staticPropertyKeyName(prop) === 'ref' && prop.value && prop.value.type === NodeTypes.SIMPLE_EXPRESSION && prop.value.content === content) {
+            prop.value.isStatic = false;
+            prop.value.constType = ConstantTypes.NOT_CONSTANT;
+          }
+        }
+      }
+    }
+    return props;
+  };
+  runtime.propsExpressionObjects = function propsExpressionObjects(props) {
+    if (!props || typeof props === 'string') return [];
+    if (props.type === NodeTypes.JS_OBJECT_EXPRESSION) return [props];
+    if (props.type === NodeTypes.JS_CALL_EXPRESSION) {
+      return (props.arguments || []).flatMap(arg => runtime.propsExpressionObjects(arg));
+    }
+    return [];
+  };
   runtime.dedupeProperties = function dedupeProperties(properties) {
     const known = new Map();
     const deduped = [];
@@ -4860,18 +4906,24 @@ const vue3CoreRuntime = (() => {
         for (const prop of node.props) {
           if (prop.type === NodeTypes.ATTRIBUTE) {
             objectProps.push(runtime.createObjectProperty(prop.name, runtime.createSimpleExpression(prop.value ? prop.value.content : '', true)));
-            propSummaries.push({ kind: 'attribute', name: prop.name });
+            propSummaries.push({ kind: 'attribute', name: prop.name, value: prop.value && prop.value.content });
           } else if (prop.name === 'bind' && prop.arg) {
             const transform = context.directiveTransforms && context.directiveTransforms.bind;
             const result = transform ? transform(prop, node, context) : runtime.transformBind(prop, node, context);
             objectProps.push(...((result && result.props) || []));
-            propSummaries.push(...vue3ElementDirectivePropSummaries(prop, result, { propModifier: runtime.hasModifier(prop, 'prop') }));
+            propSummaries.push(...vue3ElementDirectivePropSummaries(prop, result, {
+              forceBlock: runtime.isStaticArgOf(prop.arg, 'key'),
+              propModifier: runtime.hasModifier(prop, 'prop'),
+            }));
             if (result && result.props && result.props.some(p => p.key && !runtime.isStaticExp(p.key))) hasDynamicKey = true;
             else if (prop.arg.isStatic) dynamicProps.push(prop.arg.content);
           } else if (prop.name === 'on' && prop.arg) {
             const transform = context.directiveTransforms && context.directiveTransforms.on;
-            const result = transform ? transform(prop, node, context) : runtime.transformOn(prop, node, context);
+            const result = transform ? transform(prop, node, context) : undefined;
             objectProps.push(...((result && result.props) || []));
+            if (!result && node.children && node.children.length && runtime.isStaticArgOf(prop.arg, 'vue:before-update')) {
+              propSummaries.push({ kind: 'directiveProp', forceBlock: true });
+            }
             propSummaries.push(...vue3ElementDirectivePropSummaries(prop, result, {
               forceBlock: !!(node.children && node.children.length && runtime.isStaticArgOf(prop.arg, 'vue:before-update')),
             }));
@@ -4937,6 +4989,16 @@ const vue3CoreRuntime = (() => {
           isDynamicComponent,
           context: vue3TransformElementContextPayload(context),
         });
+        if (propsProjection && propsProjection.refForMarker) {
+          props = runtime.prependPropsExpressionProp(
+            props,
+            runtime.createObjectProperty('ref_for', runtime.createSimpleExpression('true')),
+            node.loc,
+          );
+        }
+        if (props && propsProjection && propsProjection.inlineTemplateRefs) {
+          props = runtime.applyInlineTemplateRefProjection(props, propsProjection.inlineTemplateRefs, node.loc);
+        }
         if (props && propsProjection && propsProjection.normalizeClass) runtime.normalizeObjectProp(props, 'class', context.helper(runtime.NORMALIZE_CLASS));
         if (props && propsProjection && propsProjection.normalizeStyle) runtime.normalizeObjectProp(props, 'style', context.helper(runtime.NORMALIZE_STYLE));
         if (props && propsProjection && propsProjection.normalizeProps) {
@@ -5229,10 +5291,12 @@ const vue3CoreRuntime = (() => {
     const renderExp = runtime.createCallExpression(context.helper(runtime.RENDER_LIST), [forNode.source]);
     forNode.codegenNode = runtime.createVNodeCall(context, context.helper(runtime.FRAGMENT), undefined, renderExp, 256, undefined, undefined, true, true, false, node.loc);
     context.replaceNode(forNode);
+    context.scopes.vFor++;
     const onExit = processCodegen ? processCodegen(forNode) : undefined;
     return () => {
       if (onExit) onExit();
       runtime.finalizeForCodegen(forNode, renderExp, context);
+      context.scopes.vFor--;
       aliases.forEach(alias => context.removeIdentifiers(alias));
     };
   };
@@ -5490,6 +5554,9 @@ function vue3TransformElementContextPayload(context) {
   context = context || {};
   return {
     inSSR: !!context.inSSR,
+    inline: !!context.inline,
+    bindingMetadata: context.bindingMetadata || {},
+    vForDepth: context.scopes && context.scopes.vFor || 0,
   };
 }
 

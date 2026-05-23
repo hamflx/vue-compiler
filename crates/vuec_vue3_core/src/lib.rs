@@ -888,6 +888,11 @@ pub fn transform_element_props_projection(payload: &Value) -> Value {
     let is_component = json_bool(payload, "isComponent");
     let is_dynamic_component = json_bool(payload, "isDynamicComponent");
     let in_ssr = json_bool(context, "inSSR");
+    let in_v_for = context
+        .get("vForDepth")
+        .and_then(Value::as_u64)
+        .is_some_and(|depth| depth > 0);
+    let inline_template_refs = inline_template_ref_projections(props, context);
     let mut patch_flag = 0u16;
     let mut dynamic_prop_names = Vec::<String>::new();
     let mut has_ref = false;
@@ -903,6 +908,14 @@ pub fn transform_element_props_projection(payload: &Value) -> Value {
     let mut normalize_style = false;
     let mut has_runtime_directives = false;
     let mut has_dynamic_object = false;
+    let ref_for_marker = in_v_for
+        && props.iter().any(|prop| {
+            (matches!(
+                json_str(prop, "kind"),
+                Some("attribute") | Some("directiveProp")
+            ) && json_str(prop, "name") == Some("ref"))
+                || json_str(prop, "kind") == Some("objectBind")
+        });
 
     for prop in props {
         match json_str(prop, "kind") {
@@ -1023,7 +1036,34 @@ pub fn transform_element_props_projection(payload: &Value) -> Value {
         "guardReactiveProps": guard_reactive_props,
         "normalizeClass": normalize_class,
         "normalizeStyle": normalize_style,
+        "refForMarker": ref_for_marker,
+        "inlineTemplateRefs": inline_template_refs,
     })
+}
+
+fn inline_template_ref_projections(props: &[Value], context: &Value) -> Vec<Value> {
+    if !json_bool(context, "inline") {
+        return Vec::new();
+    }
+    let Some(binding_metadata) = context.get("bindingMetadata").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    props
+        .iter()
+        .filter_map(|prop| {
+            if json_str(prop, "kind") != Some("attribute") || json_str(prop, "name") != Some("ref")
+            {
+                return None;
+            }
+            let content = json_str(prop, "value")?;
+            let binding = binding_metadata.get(content).and_then(Value::as_str)?;
+            if matches!(binding, "setup-let" | "setup-ref" | "setup-maybe-ref") {
+                Some(json!({ "content": content }))
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 fn prop_requires_normalize_style(prop: &Value) -> bool {
@@ -5997,6 +6037,101 @@ mod tests {
             "isComponent": false
         }));
         assert_eq!(runtime_projection["patchFlag"], json!(512));
+    }
+
+    #[test]
+    fn transform_element_props_projection_marks_ref_for_in_v_for_scope() {
+        let static_ref = transform_element_props_projection(&json!({
+            "props": [{ "kind": "attribute", "name": "ref" }],
+            "context": { "vForDepth": 1 },
+            "isComponent": false
+        }));
+        assert_eq!(static_ref["refForMarker"], json!(true));
+
+        let dynamic_ref = transform_element_props_projection(&json!({
+            "props": [
+                {
+                    "kind": "directiveProp",
+                    "name": "ref",
+                    "valueConstant": false
+                }
+            ],
+            "context": { "vForDepth": 1 },
+            "isComponent": false
+        }));
+        assert_eq!(dynamic_ref["refForMarker"], json!(true));
+
+        let object_bind = transform_element_props_projection(&json!({
+            "props": [{ "kind": "objectBind" }],
+            "context": { "vForDepth": 1 },
+            "isComponent": false
+        }));
+        assert_eq!(object_bind["refForMarker"], json!(true));
+
+        let outside_for = transform_element_props_projection(&json!({
+            "props": [{ "kind": "attribute", "name": "ref" }],
+            "context": {},
+            "isComponent": false
+        }));
+        assert_eq!(outside_for["refForMarker"], json!(false));
+    }
+
+    #[test]
+    fn transform_element_props_projection_forces_blocks_for_selected_props() {
+        let key_projection = transform_element_props_projection(&json!({
+            "props": [
+                {
+                    "kind": "directiveProp",
+                    "name": "key",
+                    "forceBlock": true
+                }
+            ],
+            "context": {},
+            "isComponent": false
+        }));
+        assert_eq!(key_projection["shouldUseBlock"], json!(true));
+
+        let vnode_hook_projection = transform_element_props_projection(&json!({
+            "props": [
+                {
+                    "kind": "directiveProp",
+                    "forceBlock": true
+                }
+            ],
+            "context": {},
+            "isComponent": false
+        }));
+        assert_eq!(vnode_hook_projection["shouldUseBlock"], json!(true));
+    }
+
+    #[test]
+    fn transform_element_props_projection_projects_inline_template_ref_keys() {
+        let projection = transform_element_props_projection(&json!({
+            "props": [{ "kind": "attribute", "name": "ref", "value": "input" }],
+            "context": {
+                "inline": true,
+                "bindingMetadata": {
+                    "input": "setup-ref"
+                }
+            },
+            "isComponent": false
+        }));
+
+        assert_eq!(
+            projection["inlineTemplateRefs"],
+            json!([{ "content": "input" }])
+        );
+
+        let outside_inline = transform_element_props_projection(&json!({
+            "props": [{ "kind": "attribute", "name": "ref", "value": "input" }],
+            "context": {
+                "bindingMetadata": {
+                    "input": "setup-ref"
+                }
+            },
+            "isComponent": false
+        }));
+        assert_eq!(outside_inline["inlineTemplateRefs"], json!([]));
     }
 
     #[test]

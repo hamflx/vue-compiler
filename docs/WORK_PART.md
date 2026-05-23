@@ -34,9 +34,16 @@
 - [x] Vue 3 compiler-core Rust-backed `resolveComponentType` projection slice inside `transformElement.spec.ts`.
 - [x] Vue 3 compiler-core Rust-backed `transformElement` props / patch-flag projection slice.
 - [x] Vue 3 compiler-dom Rust-backed `transformStyle` projection slice and style props materialization for `transformElement.spec.ts`.
+- [x] Vue 3 compiler-core Rust-backed `transformElement` v-for ref marker / block-forcing props projection slice.
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Extended the Rust-backed Vue 3 `transformElement` props projection slice for v-for scoped refs and selected block-forcing behavior.
+- `vuec_vue3_core::transform_element_props_projection` now owns official decisions for `ref_for` marker insertion in `v-for`, inline script-setup template ref key projection, and block forcing for `:key` / `@vue:before-update` with children.
+- Generated alias code in `xtask/src/compat.rs` changed only as bridge/traversal/materialization support: it maintains `context.scopes.vFor`, forwards context facts to Rust, materializes Rust-selected `ref_for` / `ref_key` props, and avoids invoking the default `transformOn` when no `on` directive transform was configured. This is adapter support for Rust decisions, not standalone JavaScript compiler semantics.
+- Focused official `compiler-core/__tests__/transforms/transformElement.spec.ts` now passes `83/124` (previously `77/124`). Element-transform own failures are down to `5`: built-in component children/slot lowering for `Suspense` / `KeepAlive` / `BaseTransition`, runtime directive materialization exactness, and the `baseCompile` vnode-hook materialization path.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_vue3_core` (`48/48` pass), `cargo xtask verify-npm-alias --version-line vue3 --package @vue/compiler-core`, direct prepared Vitest `transformElement.spec.ts` (`83/124` pass, expected fail), and `git diff --check`.
 
 - Implemented a Rust-backed Vue 3 DOM `transformStyle` projection slice.
 - `vuec_vue3_dom::transform_style_projection` now parses static `style` attributes into deterministic official-style object expression source, including CSS comment stripping, duplicate declaration replacement, and semicolons inside function values.
