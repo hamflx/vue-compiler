@@ -29,9 +29,18 @@
 - [x] Vue 3 compiler-core Rust-backed `baseCompile` component slot / `scopeId.spec.ts` slice.
 - [x] Vue 3 compiler-core Rust-backed root `codegenNode` projection bridge for `transform.spec.ts`.
 - [x] Vue 3 compiler-core Rust-backed `transformModel` projection bridge for `vModel.spec.ts`.
+- [x] Vue 3 compiler-core Rust-backed `baseCompile` `v-memo` codegen slice for `vMemo.spec.ts`.
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Implemented Rust-backed Vue 3 `v-memo` codegen in the public `baseCompile` path.
+- `vuec_vue3_core` now wraps memoized plain/component elements with `_withMemo`, converts memoized plain elements to block calls, assigns deterministic memo cache indexes across v-if branches, and emits v-for memo cache guards using `_isMemoSame`, `_cached`, `_memo`, and `_item.memo`.
+- Extended `RuntimeHelper` with Vue 3 `withMemo` and `isMemoSame`, and tightened helper import collection/order so memo, v-if, v-for, component, compile integration, and scopeId snapshots remain aligned without unused dynamic-slot helpers.
+- No `xtask/src/compat.rs` compiler semantics were changed in this round. The slice is Rust-backed through `vuec_node_bridge` public `baseCompile`; current report classification still labels `vMemo.spec.ts` as `mixed` because it is a transform test file under the generated alias test harness.
+- Focused official `compiler-core/__tests__/transforms/vMemo.spec.ts` now passes `7/7` (previously `0/7`). Focused `compile.spec.ts` remains `3/3` and `scopeId.spec.ts` remains `4/4`.
+- Full Vue 3 core conformance is still intentionally failing: `438/652` official tests pass and `214` fail. Coverage reports `rust-backed 158/158`, `mixed 280/494`, and `shim-backed 0/0`. Remaining failures are concentrated in `transformElement`, `vFor`, `cacheStatic`, `vSlot`, `vIf`, and `utils`.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_vue3_core` (`34/34` pass), `cargo build -p vuec_node_bridge`, `cargo xtask verify-npm-alias --version-line vue3 --package @vue/compiler-core`, direct prepared Vitest `vMemo.spec.ts` (`7/7` pass), direct prepared Vitest `compile.spec.ts` (`3/3` pass), direct prepared Vitest `scopeId.spec.ts` (`4/4` pass), `git diff --check`, and `cargo xtask run-conformance --suite vue3-core` (expected fail with `438/652` pass, `214` fail).
 
 - Implemented a Rust-backed Vue 3 `transformModel` / `v-model` projection bridge for compiler-core directive transform parity.
 - `vuec_vue3_core::transform_model_projection` now owns official `v-model` decisions for missing/malformed expression diagnostics, v-for/v-slot scope variable diagnostics, props/const binding diagnostics, model prop and update event key projection, component `modelModifiers`, update-handler cache eligibility, dynamic prop names, static argument hydration flags, and OXC-backed member-expression validation.

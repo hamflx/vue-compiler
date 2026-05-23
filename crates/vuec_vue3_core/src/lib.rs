@@ -361,6 +361,8 @@ impl Vue3Dialect {
         let mut has_component = false;
         let mut has_component_slots = false;
         let mut has_dynamic_component_slots = false;
+        let mut has_memo = false;
+        let mut has_for_memo = false;
         let mut walk = vec![(root_id, true)];
         while let Some((node_id, is_root)) = walk.pop() {
             if let Some(node) = ast.node(node_id) {
@@ -390,6 +392,12 @@ impl Vue3Dialect {
                                 }
                                 for prop in &element.props {
                                     if let Vue3Prop::Directive(dir) = prop {
+                                        if dir.name == "memo" {
+                                            has_memo = true;
+                                            if directive_by_name(element, "for").is_some() {
+                                                has_for_memo = true;
+                                            }
+                                        }
                                         match dir.name.as_str() {
                                             "for" => {
                                                 has_fragment = true;
@@ -459,6 +467,12 @@ impl Vue3Dialect {
         if has_interpolation {
             ctx.add_helper(RuntimeHelper::Vue3ToDisplayString);
         }
+        if has_for_memo {
+            ctx.add_helper(RuntimeHelper::Vue3IsMemoSame);
+        }
+        if has_memo {
+            ctx.add_helper(RuntimeHelper::Vue3WithMemo);
+        }
     }
 
     pub fn generate(
@@ -486,11 +500,21 @@ impl Vue3Dialect {
                 render_children_array(ast, &root.children, options, true)
             };
             let helper_probe = format!("{}\n{}", component_declarations.join("\n"), expr);
-            let helpers = if components.is_empty() {
-                render_helpers(vue3_helper_order(false), ctx)
-            } else {
-                render_helpers_from_code(vue3_helper_order(true), &helper_probe)
-            };
+            let mut helpers =
+                render_helpers_from_code(vue3_helper_order(!components.is_empty()), &helper_probe);
+            let needs_comment_helper = helper_probe.contains("_createCommentVNode(")
+                || helper_probe.contains("? (_openBlock()")
+                || helper_probe.contains("? _withMemo(");
+            if needs_comment_helper && !helpers.contains(&RuntimeHelper::Vue3CreateCommentVNode) {
+                helpers.push(RuntimeHelper::Vue3CreateCommentVNode);
+            }
+            if ctx.helpers.contains(&RuntimeHelper::Vue3WithMemo)
+                && !helpers.contains(&RuntimeHelper::Vue3WithMemo)
+            {
+                helpers.push(RuntimeHelper::Vue3WithMemo);
+            }
+            sort_helpers_by_order(&mut helpers, vue3_helper_order(!components.is_empty()));
+            apply_vue3_memo_helper_order(&mut helpers);
             if options.inline {
                 writer.push_line("(_ctx, _cache) => {");
             } else if options.mode == "module" {
@@ -1614,19 +1638,139 @@ fn condense_whitespace(value: &str) -> String {
 }
 
 fn render_helpers_from_code(order: &[RuntimeHelper], code: &str) -> Vec<RuntimeHelper> {
-    order
+    let mut helpers = order
         .iter()
         .copied()
         .filter(|helper| code.contains(&helper_reference(*helper)))
-        .collect()
+        .collect::<Vec<_>>();
+    apply_vue3_memo_helper_order(&mut helpers);
+    helpers
 }
 
-fn render_helpers(order: &[RuntimeHelper], ctx: &TransformContext) -> Vec<RuntimeHelper> {
-    order
-        .iter()
-        .copied()
-        .filter(|helper| ctx.helpers.contains(helper))
-        .collect()
+fn apply_vue3_memo_helper_order(helpers: &mut Vec<RuntimeHelper>) {
+    if !helpers.contains(&RuntimeHelper::Vue3WithMemo) {
+        return;
+    }
+    if helpers.contains(&RuntimeHelper::Vue3IsMemoSame) {
+        move_helper_to_start(helpers, RuntimeHelper::Vue3RenderList);
+        move_helper_after(
+            helpers,
+            RuntimeHelper::Vue3Fragment,
+            RuntimeHelper::Vue3RenderList,
+        );
+        move_helper_after(
+            helpers,
+            RuntimeHelper::Vue3IsMemoSame,
+            RuntimeHelper::Vue3CreateElementVNode,
+        );
+        move_helper_after(
+            helpers,
+            RuntimeHelper::Vue3WithMemo,
+            RuntimeHelper::Vue3IsMemoSame,
+        );
+    } else if helpers.contains(&RuntimeHelper::Vue3ResolveComponent) {
+        if helpers.contains(&RuntimeHelper::Vue3CreateVNode) {
+            move_helper_before(
+                helpers,
+                RuntimeHelper::Vue3ResolveComponent,
+                RuntimeHelper::Vue3OpenBlock,
+            );
+            move_helper_after(
+                helpers,
+                RuntimeHelper::Vue3CreateVNode,
+                RuntimeHelper::Vue3ResolveComponent,
+            );
+            move_helper_after(
+                helpers,
+                RuntimeHelper::Vue3WithMemo,
+                RuntimeHelper::Vue3CreateVNode,
+            );
+        } else {
+            reorder_helpers_by_preference(
+                helpers,
+                &[
+                    RuntimeHelper::Vue3CreateElementVNode,
+                    RuntimeHelper::Vue3CreateTextVNode,
+                    RuntimeHelper::Vue3OpenBlock,
+                    RuntimeHelper::Vue3CreateElementBlock,
+                    RuntimeHelper::Vue3WithMemo,
+                    RuntimeHelper::Vue3CreateCommentVNode,
+                    RuntimeHelper::Vue3ResolveComponent,
+                    RuntimeHelper::Vue3CreateBlock,
+                ],
+            );
+        }
+    } else {
+        move_helper_after(
+            helpers,
+            RuntimeHelper::Vue3WithMemo,
+            RuntimeHelper::Vue3CreateElementBlock,
+        );
+    }
+}
+
+fn sort_helpers_by_order(helpers: &mut Vec<RuntimeHelper>, order: &[RuntimeHelper]) {
+    helpers.sort_by_key(|helper| {
+        order
+            .iter()
+            .position(|candidate| candidate == helper)
+            .unwrap_or(order.len())
+    });
+}
+
+fn reorder_helpers_by_preference(helpers: &mut Vec<RuntimeHelper>, preferred: &[RuntimeHelper]) {
+    let mut reordered = Vec::with_capacity(helpers.len());
+    for helper in preferred {
+        if helpers.contains(helper) {
+            reordered.push(*helper);
+        }
+    }
+    for helper in helpers.iter().copied() {
+        if !reordered.contains(&helper) {
+            reordered.push(helper);
+        }
+    }
+    *helpers = reordered;
+}
+
+fn move_helper_to_start(helpers: &mut Vec<RuntimeHelper>, helper: RuntimeHelper) {
+    let Some(index) = helpers.iter().position(|candidate| *candidate == helper) else {
+        return;
+    };
+    let helper = helpers.remove(index);
+    helpers.insert(0, helper);
+}
+
+fn move_helper_after(
+    helpers: &mut Vec<RuntimeHelper>,
+    helper: RuntimeHelper,
+    after: RuntimeHelper,
+) {
+    let Some(index) = helpers.iter().position(|candidate| *candidate == helper) else {
+        return;
+    };
+    let helper = helpers.remove(index);
+    if let Some(after_index) = helpers.iter().position(|candidate| *candidate == after) {
+        helpers.insert(after_index + 1, helper);
+    } else {
+        helpers.push(helper);
+    }
+}
+
+fn move_helper_before(
+    helpers: &mut Vec<RuntimeHelper>,
+    helper: RuntimeHelper,
+    before: RuntimeHelper,
+) {
+    let Some(index) = helpers.iter().position(|candidate| *candidate == helper) else {
+        return;
+    };
+    let helper = helpers.remove(index);
+    if let Some(before_index) = helpers.iter().position(|candidate| *candidate == before) {
+        helpers.insert(before_index, helper);
+    } else {
+        helpers.push(helper);
+    }
 }
 
 fn vue3_helper_order(components_first: bool) -> &'static [RuntimeHelper] {
@@ -1647,6 +1791,8 @@ fn vue3_helper_order(components_first: bool) -> &'static [RuntimeHelper] {
             RuntimeHelper::Vue3CreateElementBlock,
             RuntimeHelper::Vue3RenderSlot,
             RuntimeHelper::Vue3NormalizeClass,
+            RuntimeHelper::Vue3IsMemoSame,
+            RuntimeHelper::Vue3WithMemo,
         ]
     } else {
         &[
@@ -1665,6 +1811,8 @@ fn vue3_helper_order(components_first: bool) -> &'static [RuntimeHelper] {
             RuntimeHelper::Vue3CreateBlock,
             RuntimeHelper::Vue3CreateVNode,
             RuntimeHelper::Vue3CreateSlots,
+            RuntimeHelper::Vue3IsMemoSame,
+            RuntimeHelper::Vue3WithMemo,
         ]
     }
 }
@@ -1719,6 +1867,8 @@ fn helper_name(helper: RuntimeHelper) -> &'static str {
         RuntimeHelper::Vue3CreateBlock => "createBlock",
         RuntimeHelper::Vue3CreateVNode => "createVNode",
         RuntimeHelper::Vue3CreateSlots => "createSlots",
+        RuntimeHelper::Vue3IsMemoSame => "isMemoSame",
+        RuntimeHelper::Vue3WithMemo => "withMemo",
     }
 }
 
@@ -2214,6 +2364,7 @@ fn render_children_array(
             NodeRenderMode::Child
         },
         &scope,
+        &mut MemoIndex::default(),
     );
     render_array(&rendered)
 }
@@ -2242,13 +2393,33 @@ impl RenderScope {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+struct MemoIndex {
+    next: usize,
+}
+
+impl MemoIndex {
+    fn alloc(&mut self) -> usize {
+        let index = self.next;
+        self.next += 1;
+        index
+    }
+}
+
 fn render_node_expr(
     ast: &Vue3Ast,
     node_id: vuec_ast::NodeId,
     options: &Vue3CompilerOptions,
     mode: NodeRenderMode,
 ) -> String {
-    render_node_expr_scoped(ast, node_id, options, mode, &RenderScope::default())
+    render_node_expr_scoped(
+        ast,
+        node_id,
+        options,
+        mode,
+        &RenderScope::default(),
+        &mut MemoIndex::default(),
+    )
 }
 
 fn render_node_expr_scoped(
@@ -2257,14 +2428,21 @@ fn render_node_expr_scoped(
     options: &Vue3CompilerOptions,
     mode: NodeRenderMode,
     scope: &RenderScope,
+    memo_index: &mut MemoIndex,
 ) -> String {
     let Some(node) = ast.node(node_id) else {
         return "null".into();
     };
     match &node.kind {
         Vue3AstKind::Root(_) => {
-            let rendered =
-                render_child_sequence(ast, &node.children, options, NodeRenderMode::Root, scope);
+            let rendered = render_child_sequence(
+                ast,
+                &node.children,
+                options,
+                NodeRenderMode::Root,
+                scope,
+                memo_index,
+            );
             format!("[{}]", rendered.join(", "))
         }
         Vue3AstKind::Text(text) => quote_text(&text.value),
@@ -2281,15 +2459,19 @@ fn render_node_expr_scoped(
         Vue3AstKind::Comment(comment) => format!("/*{}*/", comment.value),
         Vue3AstKind::Element(element) => {
             if let Some(for_dir) = directive_by_name(element, "for") {
-                return render_for_node(ast, node_id, element, for_dir, options, mode, scope);
+                return render_for_node(
+                    ast, node_id, element, for_dir, options, mode, scope, memo_index,
+                );
             }
             if directive_by_name(element, "if").is_some() {
-                return render_if_chain(ast, &[node_id], options, mode, scope);
+                return render_if_chain(ast, &[node_id], options, mode, scope, memo_index);
             }
             if is_else_branch(element) {
                 return "null".into();
             }
-            render_plain_element(ast, node_id, element, options, mode, scope, None)
+            render_maybe_memo_element(
+                ast, node_id, element, options, mode, scope, None, memo_index,
+            )
         }
         _ => "null".into(),
     }
@@ -2335,6 +2517,45 @@ fn render_plain_element(
     } else {
         format!("{}({})", helper, args)
     }
+}
+
+fn render_maybe_memo_element(
+    ast: &Vue3Ast,
+    node_id: vuec_ast::NodeId,
+    element: &Vue3Element,
+    options: &Vue3CompilerOptions,
+    mode: NodeRenderMode,
+    scope: &RenderScope,
+    branch_key: Option<usize>,
+    memo_index: &mut MemoIndex,
+) -> String {
+    let Some(memo) = directive_by_name(element, "memo") else {
+        return render_plain_element(ast, node_id, element, options, mode, scope, branch_key);
+    };
+    let memo_mode = if element.tag_type == Vue3ElementType::Component {
+        mode
+    } else {
+        NodeRenderMode::Root
+    };
+    let rendered =
+        render_plain_element(ast, node_id, element, options, memo_mode, scope, branch_key);
+    render_with_memo(memo, rendered, options, scope, memo_index.alloc())
+}
+
+fn render_with_memo(
+    memo: &Vue3Directive,
+    rendered: String,
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+    index: usize,
+) -> String {
+    let expression = memo
+        .exp
+        .as_ref()
+        .map(Vue3Expression::source_string)
+        .unwrap_or_default();
+    let expression = rewrite_expression_with_scope(&expression, options, scope);
+    format!("_withMemo({expression}, () => {rendered}, _cache, {index})")
 }
 
 fn render_call_args(
@@ -2393,6 +2614,8 @@ fn render_component_element(
             "(_openBlock(), {}({}, {}{}{}))",
             helper, tag, attrs, children_arg, patch_flag
         )
+    } else if attrs == "null" && children_arg.is_empty() && patch_flag.is_empty() {
+        format!("{}({})", helper, tag)
     } else {
         format!(
             "{}({}, {}{}{})",
@@ -2607,7 +2830,7 @@ fn render_for_dynamic_slot(
         return render_dynamic_slot_object(ast, node_id, element, slot, options, scope, None);
     };
     let source = rewrite_expression_with_scope(&source, options, scope);
-    let scoped = scope.with_locals(aliases.clone());
+    let scoped = scope.with_locals(normalize_v_for_aliases(&aliases));
     let params = aliases.join(", ");
     let body = render_dynamic_slot_object(ast, node_id, element, slot, options, &scoped, None);
     format!(
@@ -2670,7 +2893,14 @@ fn render_slot_children(
     options: &Vue3CompilerOptions,
     scope: &RenderScope,
 ) -> String {
-    let rendered = render_child_sequence(ast, children, options, NodeRenderMode::Child, scope);
+    let rendered = render_child_sequence(
+        ast,
+        children,
+        options,
+        NodeRenderMode::Child,
+        scope,
+        &mut MemoIndex::default(),
+    );
     render_array(&rendered)
 }
 
@@ -2827,7 +3057,14 @@ fn render_element_children(
         let rendered = child_nodes
             .iter()
             .map(|child| {
-                render_node_expr_scoped(ast, child.id, options, NodeRenderMode::Cached, scope)
+                render_node_expr_scoped(
+                    ast,
+                    child.id,
+                    options,
+                    NodeRenderMode::Cached,
+                    scope,
+                    &mut MemoIndex::default(),
+                )
             })
             .collect::<Vec<_>>();
         if !rendered.is_empty() {
@@ -2845,7 +3082,14 @@ fn render_element_children(
     }) {
         return render_text_sequence_expr(ast, children, options, scope);
     }
-    let rendered = render_child_sequence(ast, children, options, NodeRenderMode::Child, scope);
+    let rendered = render_child_sequence(
+        ast,
+        children,
+        options,
+        NodeRenderMode::Child,
+        scope,
+        &mut MemoIndex::default(),
+    );
     if rendered.is_empty() {
         String::new()
     } else if rendered.len() == 1
@@ -2864,6 +3108,7 @@ fn render_child_sequence(
     options: &Vue3CompilerOptions,
     mode: NodeRenderMode,
     scope: &RenderScope,
+    memo_index: &mut MemoIndex,
 ) -> Vec<String> {
     let mut rendered = Vec::new();
     let mut index = 0usize;
@@ -2917,7 +3162,14 @@ fn render_child_sequence(
                     }
                     break;
                 }
-                rendered.push(render_if_chain(ast, &branch_ids, options, mode, scope));
+                rendered.push(render_if_chain(
+                    ast,
+                    &branch_ids,
+                    options,
+                    mode,
+                    scope,
+                    memo_index,
+                ));
                 continue;
             }
             if is_else_branch(element) {
@@ -2925,7 +3177,9 @@ fn render_child_sequence(
                 continue;
             }
         }
-        rendered.push(render_node_expr_scoped(ast, child_id, options, mode, scope));
+        rendered.push(render_node_expr_scoped(
+            ast, child_id, options, mode, scope, memo_index,
+        ));
         index += 1;
     }
     rendered
@@ -2987,6 +3241,7 @@ fn render_if_chain(
     options: &Vue3CompilerOptions,
     mode: NodeRenderMode,
     scope: &RenderScope,
+    memo_index: &mut MemoIndex,
 ) -> String {
     fn render_branch(
         ast: &Vue3Ast,
@@ -2995,6 +3250,7 @@ fn render_if_chain(
         options: &Vue3CompilerOptions,
         mode: NodeRenderMode,
         scope: &RenderScope,
+        memo_index: &mut MemoIndex,
     ) -> String {
         let Some(branch_id) = branch_ids.get(index).copied() else {
             return "_createCommentVNode(\"v-if\", true)".into();
@@ -3006,10 +3262,11 @@ fn render_if_chain(
             Vue3AstKind::Element(element) => Some(element),
             _ => None,
         }) else {
-            return render_node_expr_scoped(ast, branch_id, options, mode, scope);
+            return render_node_expr_scoped(ast, branch_id, options, mode, scope, memo_index);
         };
-        let branch_expr =
-            render_if_branch_expr(ast, branch_id, element, options, mode, scope, index);
+        let branch_expr = render_if_branch_expr(
+            ast, branch_id, element, options, mode, scope, index, memo_index,
+        );
         let condition = if index == 0 {
             directive_by_name(element, "if")
         } else {
@@ -3020,7 +3277,8 @@ fn render_if_chain(
                 &rewrite_expression_with_scope(&condition.source_string(), options, scope),
                 options,
             );
-            let alternate = render_branch(ast, branch_ids, index + 1, options, mode, scope);
+            let alternate =
+                render_branch(ast, branch_ids, index + 1, options, mode, scope, memo_index);
             format!(
                 "{condition}\n  ? {}\n  : {}",
                 indent_after_first_line(&branch_expr, 4),
@@ -3030,7 +3288,7 @@ fn render_if_chain(
             branch_expr
         }
     }
-    render_branch(ast, branch_ids, 0, options, mode, scope)
+    render_branch(ast, branch_ids, 0, options, mode, scope, memo_index)
 }
 
 fn render_if_branch_expr(
@@ -3041,6 +3299,7 @@ fn render_if_branch_expr(
     _mode: NodeRenderMode,
     scope: &RenderScope,
     branch_key: usize,
+    memo_index: &mut MemoIndex,
 ) -> String {
     if element.tag == "template" {
         let children = ast
@@ -3051,7 +3310,7 @@ fn render_if_branch_expr(
             "(_openBlock(), _createElementBlock(_Fragment, {{ key: {branch_key} }}, {children}, 64 /* STABLE_FRAGMENT */))"
         );
     }
-    render_plain_element(
+    render_maybe_memo_element(
         ast,
         node_id,
         element,
@@ -3059,6 +3318,7 @@ fn render_if_branch_expr(
         NodeRenderMode::Root,
         scope,
         Some(branch_key),
+        memo_index,
     )
 }
 
@@ -3068,7 +3328,14 @@ fn render_fragment_children(
     options: &Vue3CompilerOptions,
     scope: &RenderScope,
 ) -> String {
-    let rendered = render_child_sequence(ast, children, options, NodeRenderMode::Child, scope);
+    let rendered = render_child_sequence(
+        ast,
+        children,
+        options,
+        NodeRenderMode::Child,
+        scope,
+        &mut MemoIndex::default(),
+    );
     render_array(&rendered)
 }
 
@@ -3080,6 +3347,7 @@ fn render_for_node(
     options: &Vue3CompilerOptions,
     _mode: NodeRenderMode,
     scope: &RenderScope,
+    _memo_index: &mut MemoIndex,
 ) -> String {
     let Some(expression) = directive.exp.as_ref().map(Vue3Expression::source_string) else {
         return render_plain_element(
@@ -3105,21 +3373,212 @@ fn render_for_node(
         );
     };
     let source = rewrite_expression_with_scope(&source, options, scope);
-    let scoped = scope.with_locals(aliases.clone());
+    let scoped = scope.with_locals(normalize_v_for_aliases(&aliases));
     let params = aliases.join(", ");
-    let body = render_plain_element(
+    let body = render_v_for_body(ast, node_id, element, options, &scoped);
+    let Some(memo) = directive_by_name(element, "memo") else {
+        let fragment_flag = v_for_fragment_patch_flag(element);
+        let body = indent_after_first_line(&body, 2);
+        return format!(
+            "(_openBlock(true), _createElementBlock(_Fragment, null, _renderList({source}, ({params}) => {{\n  return {body}\n}}), {fragment_flag}))"
+        );
+    };
+    let params = format!("{params}, __, ___, _cached");
+    let memo_expression = memo
+        .exp
+        .as_ref()
+        .map(Vue3Expression::source_string)
+        .unwrap_or_default();
+    let memo_expression = rewrite_expression_with_scope(&memo_expression, options, &scoped);
+    let key = v_for_key_expression(element, options, &scoped);
+    let guard = key.map_or_else(
+        || format!("_cached && _cached.el && _isMemoSame(_cached, _memo)"),
+        |key| {
+            format!("_cached && _cached.el && _cached.key === {key} && _isMemoSame(_cached, _memo)")
+        },
+    );
+    let body = indent_after_first_line(&body, 2);
+    format!(
+        "(_openBlock(true), _createElementBlock(_Fragment, null, _renderList({source}, ({params}) => {{\n  const _memo = ({memo_expression})\n  if ({guard}) return _cached\n  const _item = {body}\n  _item.memo = _memo\n  return _item\n}}, _cache, 0), 128 /* KEYED_FRAGMENT */))"
+    )
+}
+
+fn render_v_for_body(
+    ast: &Vue3Ast,
+    node_id: vuec_ast::NodeId,
+    element: &Vue3Element,
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+) -> String {
+    if element.tag == "template" {
+        let Some(node) = ast.node(node_id) else {
+            return "null".into();
+        };
+        let visible = visible_children(ast, &node.children);
+        if visible.len() == 1 {
+            if let Some(child) = visible.first() {
+                if let Vue3AstKind::Element(child_element) = &child.kind {
+                    let key = v_for_key_expression(element, options, scope);
+                    let body = render_plain_element(
+                        ast,
+                        child.id,
+                        child_element,
+                        options,
+                        NodeRenderMode::Root,
+                        scope,
+                        None,
+                    );
+                    return inject_key_into_vnode_call(&body, key.as_deref());
+                }
+            }
+        }
+        let key = v_for_key_expression(element, options, scope);
+        let children = render_fragment_children(ast, &node.children, options, scope);
+        let props = key
+            .map(|key| format!("{{ key: {key} }}"))
+            .unwrap_or_else(|| "null".into());
+        return format!(
+            "(_openBlock(), _createElementBlock(_Fragment, {props}, {children}, 64 /* STABLE_FRAGMENT */))"
+        );
+    }
+    render_plain_element(
         ast,
         node_id,
         element,
         options,
         NodeRenderMode::Root,
-        &scoped,
+        scope,
         None,
-    );
-    let body = indent_after_first_line(&body, 2);
-    format!(
-        "(_openBlock(true), _createElementBlock(_Fragment, null, _renderList({source}, ({params}) => {{\n  return {body}\n}}), 256 /* UNKEYED_FRAGMENT */))"
     )
+}
+
+fn v_for_fragment_patch_flag(element: &Vue3Element) -> &'static str {
+    if v_for_key_expression(
+        element,
+        &Vue3CompilerOptions::default(),
+        &RenderScope::default(),
+    )
+    .is_some()
+    {
+        "128 /* KEYED_FRAGMENT */"
+    } else {
+        "256 /* UNKEYED_FRAGMENT */"
+    }
+}
+
+fn v_for_key_expression(
+    element: &Vue3Element,
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+) -> Option<String> {
+    element.props.iter().find_map(|prop| match prop {
+        Vue3Prop::Directive(dir)
+            if dir.name == "bind"
+                && dir
+                    .arg
+                    .as_ref()
+                    .is_some_and(|arg| arg.source_string() == "key") =>
+        {
+            dir.exp
+                .as_ref()
+                .map(Vue3Expression::source_string)
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| rewrite_expression_with_scope(&value, options, scope))
+        }
+        Vue3Prop::Attribute(attr) if attr.name == "key" => {
+            attr.value.as_ref().map(|value| quote_string(value))
+        }
+        _ => None,
+    })
+}
+
+fn inject_key_into_vnode_call(body: &str, key: Option<&str>) -> String {
+    let Some(key) = key else {
+        return body.to_string();
+    };
+    if body.contains(" key: ") || body.contains("{ key:") {
+        return body.to_string();
+    }
+    let Some(start) = body.find("_createElementBlock(") else {
+        return body.to_string();
+    };
+    let args_start = start + "_createElementBlock(".len();
+    let Some(first_comma) = find_top_level_comma(body, args_start) else {
+        return body.to_string();
+    };
+    let Some(close) = find_matching_call_close(body, args_start) else {
+        return body.to_string();
+    };
+    if body[first_comma + 1..close].trim().is_empty() {
+        let mut output = body.to_string();
+        output.insert_str(first_comma, &format!(", {{ key: {key} }}"));
+        return output;
+    }
+    let second_arg_start = first_comma + 1;
+    let second_arg_end = find_top_level_comma(body, second_arg_start).unwrap_or(close);
+    let second_arg = body[second_arg_start..second_arg_end].trim();
+    if second_arg == "null" {
+        let mut output = body.to_string();
+        output.replace_range(
+            second_arg_start..second_arg_end,
+            &format!(" {{ key: {key} }}"),
+        );
+        return output;
+    }
+    body.to_string()
+}
+
+fn find_top_level_comma(value: &str, start: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut quote = None;
+    let chars = value.char_indices().skip_while(|(index, _)| *index < start);
+    for (index, ch) in chars {
+        if let Some(active_quote) = quote {
+            if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' | '`' => quote = Some(ch),
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => {
+                if depth == 0 {
+                    return None;
+                }
+                depth -= 1;
+            }
+            ',' if depth == 0 => return Some(index),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn find_matching_call_close(value: &str, start: usize) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut quote = None;
+    let chars = value.char_indices().skip_while(|(index, _)| *index < start);
+    for (index, ch) in chars {
+        if let Some(active_quote) = quote {
+            if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' | '`' => quote = Some(ch),
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn render_array(items: &[String]) -> String {
@@ -3248,7 +3707,7 @@ fn render_patch_flag(
         ", -1 /* CACHED */".into()
     } else if has_class_binding(element) {
         ", 2 /* CLASS */".into()
-    } else if has_dynamic_props(element) {
+    } else if has_dynamic_non_key_props(element) {
         ", 8 /* PROPS */".into()
     } else if element.tag != "template"
         && !children_literal_const_only(ast, children, options)
@@ -3266,7 +3725,7 @@ fn render_props(
     scope: &RenderScope,
     branch_key: Option<usize>,
 ) -> String {
-    let dynamic_event = has_dynamic_props(element);
+    let dynamic_event = has_dynamic_non_key_props(element);
     let mut props = Vec::new();
     if let Some(key) = branch_key {
         props.push(format!("key: {key}"));
@@ -3328,6 +3787,12 @@ fn render_props(
         format!("{{\n  {}\n}}", props.join(",\n  "))
     } else if props.len() > 1 || has_class_binding(element) {
         render_object(&props)
+    } else if props.len() == 1
+        && props
+            .first()
+            .is_some_and(|prop| prop.starts_with("key: ") && prop.contains('('))
+    {
+        render_object(&props)
     } else {
         format!("{{ {} }}", props.join(", "))
     }
@@ -3362,7 +3827,7 @@ fn has_class_binding(element: &Vue3Element) -> bool {
     })
 }
 
-fn has_dynamic_props(element: &Vue3Element) -> bool {
+fn has_dynamic_non_key_props(element: &Vue3Element) -> bool {
     element.props.iter().any(|prop| {
         matches!(
             prop,
@@ -3372,7 +3837,7 @@ fn has_dynamic_props(element: &Vue3Element) -> bool {
                         && dir
                             .arg
                             .as_ref()
-                            .is_none_or(|arg| arg.source_string() != "class"))
+                            .is_none_or(|arg| arg.source_string() != "class" && arg.source_string() != "key"))
         )
     })
 }
@@ -3390,7 +3855,9 @@ fn dynamic_props_arg(element: &Vue3Element) -> String {
                     .unwrap_or_default();
                 Some(format!("on{}", capitalize(&event)))
             }
-            Vue3Prop::Directive(dir) if dir.name == "bind" && !has_class_bind_dir(dir) => {
+            Vue3Prop::Directive(dir)
+                if dir.name == "bind" && !has_class_bind_dir(dir) && !has_key_bind_dir(dir) =>
+            {
                 dir.arg.as_ref().map(Vue3Expression::source_string)
             }
             _ => None,
@@ -3416,6 +3883,12 @@ fn has_class_bind_dir(dir: &Vue3Directive) -> bool {
         .is_some_and(|arg| arg.source_string() == "class")
 }
 
+fn has_key_bind_dir(dir: &Vue3Directive) -> bool {
+    dir.arg
+        .as_ref()
+        .is_some_and(|arg| arg.source_string() == "key")
+}
+
 fn directive_by_name<'a>(element: &'a Vue3Element, name: &str) -> Option<&'a Vue3Directive> {
     element.props.iter().find_map(|prop| match prop {
         Vue3Prop::Directive(dir) if dir.name == name => Some(dir),
@@ -3432,21 +3905,88 @@ fn parse_v_for_expression(expression: &str) -> Option<(String, Vec<String>)> {
     let (raw_aliases, source) = expression
         .split_once(" in ")
         .or_else(|| expression.split_once(" of "))?;
-    let aliases = raw_aliases
+    let raw_aliases = raw_aliases
         .trim()
         .trim_start_matches('(')
-        .trim_end_matches(')')
-        .split(',')
-        .filter_map(|alias| {
-            let alias = alias.trim();
-            (!alias.is_empty()).then(|| alias.to_string())
-        })
+        .trim_end_matches(')');
+    let aliases = split_top_level_like(raw_aliases, ',')
+        .into_iter()
+        .map(ToString::to_string)
         .collect::<Vec<_>>();
     if aliases.is_empty() {
         None
     } else {
         Some((source.trim().to_string(), aliases))
     }
+}
+
+fn normalize_v_for_aliases(aliases: &[String]) -> Vec<String> {
+    aliases
+        .iter()
+        .flat_map(|alias| extract_v_for_alias_locals(alias))
+        .collect()
+}
+
+fn extract_v_for_alias_locals(alias: &str) -> Vec<String> {
+    let alias = alias.trim();
+    if alias.starts_with('{') || alias.starts_with('[') {
+        return extract_destructure_alias_locals(alias);
+    }
+    if alias
+        .chars()
+        .next()
+        .is_some_and(|ch| is_identifier_start(ch))
+    {
+        vec![alias.to_string()]
+    } else {
+        Vec::new()
+    }
+}
+
+fn extract_destructure_alias_locals(alias: &str) -> Vec<String> {
+    let trimmed = alias
+        .trim()
+        .trim_start_matches('{')
+        .trim_start_matches('[')
+        .trim_end_matches('}')
+        .trim_end_matches(']');
+    split_top_level_like(trimmed, ',')
+        .into_iter()
+        .flat_map(|part| extract_slot_params(part))
+        .collect()
+}
+
+fn split_top_level_like(source: &str, separator: char) -> Vec<&str> {
+    let mut items = Vec::new();
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut start = 0usize;
+    for (index, ch) in source.char_indices() {
+        if let Some(active_quote) = quote {
+            if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' | '`' => quote = Some(ch),
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            _ if ch == separator && depth == 0 => {
+                let item = source[start..index].trim();
+                if !item.is_empty() {
+                    items.push(item);
+                }
+                start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    let item = source[start..].trim();
+    if !item.is_empty() {
+        items.push(item);
+    }
+    items
 }
 
 fn capitalize(value: &str) -> String {
@@ -4148,6 +4688,56 @@ mod tests {
             .contains("_renderList(_ctx.list, (value, index) =>"));
         assert!(result.code.contains("_toDisplayString(value + index)"));
         assert!(!result.code.contains("_ctx.value + _ctx.index"));
+    }
+
+    #[test]
+    fn base_compile_wraps_v_memo_nodes_with_runtime_helper() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div><div v-memo="[x]"></div></div>"#.into(),
+            file_id: FileId(0),
+            base_offset: 0,
+        };
+        let result = base_compile(
+            source,
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                mode: "module".into(),
+                ..Vue3CompilerOptions::default()
+            },
+        );
+        assert!(result.code.contains("withMemo as _withMemo"));
+        assert!(result.code.contains(
+            r#"_withMemo([_ctx.x], () => (_openBlock(), _createElementBlock("div")), _cache, 0)"#
+        ));
+    }
+
+    #[test]
+    fn base_compile_generates_v_for_memo_cache_path() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div><div v-for="{ x, y } in list" :key="x" v-memo="[x, y === z]"><span>foobar</span></div></div>"#.into(),
+            file_id: FileId(0),
+            base_offset: 0,
+        };
+        let result = base_compile(
+            source,
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                mode: "module".into(),
+                ..Vue3CompilerOptions::default()
+            },
+        );
+        assert!(result.code.contains("isMemoSame as _isMemoSame"));
+        assert!(result
+            .code
+            .contains("_renderList(_ctx.list, ({ x, y }, __, ___, _cached) =>"));
+        assert!(result.code.contains("const _memo = ([x, y === _ctx.z])"));
+        assert!(result
+            .code
+            .contains("_cached.key === x && _isMemoSame(_cached, _memo)"));
+        assert!(result.code.contains("_item.memo = _memo"));
+        assert!(!result.code.contains("_ctx.x, _ctx.y"));
     }
 
     #[test]

@@ -413,6 +413,8 @@ pub enum RuntimeHelper {
     Vue3CreateBlock,
     Vue3CreateVNode,
     Vue3CreateSlots,
+    Vue3IsMemoSame,
+    Vue3WithMemo,
 }
 
 pub type Cst = AstDocument<CstNodeKind>;
