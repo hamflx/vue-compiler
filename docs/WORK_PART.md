@@ -18,6 +18,11 @@
 
 ## Completed This Round
 
+- Added deterministic official test runner dependency provisioning to `cargo xtask run-conformance`: runner packages are resolved from the synced official lock/manifests and installed into the lock-scoped official npm probe roots before readiness is evaluated.
+- Corrected Vue 2.7 conformance runner classification from the old Vue 2.6 Jasmine/Babel path to the actual Vue 2.7 Vitest/esbuild/TypeScript test setup.
+- Fixed yarn lock dependency lookup to match exact package names, preventing `eslint-plugin-jasmine` from being mistaken for `jasmine`; added regression coverage for pnpm and yarn runner dependency resolution.
+- Current conformance status: all seven suites discover official test files, pass alias smoke, and report `runner is ready to execute`; they still remain `pending` because full official spec execution has not yet been wired to the runner.
+- Verification this round: `cargo fmt --all --check`, `cargo test --workspace`, `cargo xtask run-conformance --all`, `cargo xtask summarize-compat --locked`, `cargo xtask diff-api --all`, `cargo xtask run-option-matrix --all`, and `cargo xtask run-output-contract --all`.
 - Expanded `vuec_ast` from the earlier enum placeholders into first-class deterministic AST/HIR schema structs matching `docs/3.AST_HIR_MIR_DESIGN.md`: Vue 2 root/element/text/expression/comment/filter/model/directive/event structures, Vue 3 root/element/text/comment/interpolation/compound/if/for/text-call structures, and shared HIR semantic structures.
 - Migrated `vuec_vue3_core`, `vuec_vue3_dom`, `vuec_vue3_ssr`, `vuec_vue2`, and `vuec_node_bridge` to the new tuple-variant AST schema while preserving the current compatibility harness behavior through compatibility constructors and `TemplateAttribute` projection.
 - Fixed a real `TemplateSource.base_offset` span bug in Vue 3 parsing: closing-tag-updated element spans now keep absolute offsets into the original `.vue` file instead of mixing absolute starts with template-local ends.

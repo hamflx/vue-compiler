@@ -2337,6 +2337,200 @@ fn official_install_marker_matches(marker: &Path, specs: &[String]) -> bool {
     actual == specs
 }
 
+fn ensure_official_runner_dependencies(
+    spec: ConformanceSuiteSpec,
+    baseline: &BaselineLock,
+    vendor_dir: &Path,
+) -> Result<PathBuf> {
+    let install_root = ensure_official_npm_install(spec.version_line, baseline)?;
+    let node_modules = install_root.join("node_modules");
+    let runner_specs = runner_dependency_specs(spec, vendor_dir)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "{} has runner dependencies but no deterministic versions could be resolved",
+            spec.name
+        )
+    })?;
+    if runner_specs.is_empty() {
+        return Ok(install_root);
+    }
+    let marker = install_root.join(format!("runner-install-{}.json", spec.name));
+    if node_modules.exists() && official_install_marker_matches(&marker, &runner_specs) {
+        return Ok(install_root);
+    }
+
+    let npm = resolve_program("npm");
+    let mut command = Command::new(npm);
+    command
+        .arg("install")
+        .arg("--ignore-scripts")
+        .arg("--no-audit")
+        .arg("--no-fund")
+        .arg("--package-lock=false")
+        .arg("--omit=dev")
+        .args(&runner_specs)
+        .current_dir(&install_root);
+    let output = command.output().with_context(|| {
+        format!(
+            "failed to spawn npm runner dependency install in {}",
+            install_root.display()
+        )
+    })?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "`npm install {}` failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
+            runner_specs.join(" "),
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let marker_body = serde_json::json!({
+        "version_line": spec.version_line,
+        "suite": spec.name,
+        "packages": runner_specs,
+        "rev": baseline.rev,
+    });
+    write_json(&marker, &marker_body)?;
+    Ok(install_root)
+}
+
+fn runner_dependency_specs(
+    spec: ConformanceSuiteSpec,
+    vendor_dir: &Path,
+) -> Result<Option<Vec<String>>> {
+    if spec.runner_dependencies.is_empty() {
+        return Ok(Some(Vec::new()));
+    }
+    let root = vendor_dir.join(spec.version_line.as_str());
+    let package_json = root.join("package.json");
+    if !package_json.is_file() {
+        return Ok(None);
+    }
+    let manifest = read_json::<serde_json::Value>(&package_json)?;
+    let mut specs = Vec::new();
+    for dependency in spec.runner_dependencies {
+        let version = locked_runner_dependency_version(&root, dependency)
+            .or_else(|| manifest_dependency_version(&manifest, dependency));
+        let Some(version) = version else {
+            return Ok(None);
+        };
+        if is_unpublished_dependency_spec(&version) {
+            return Ok(None);
+        }
+        specs.push(format!("{dependency}@{version}"));
+    }
+    specs.sort();
+    specs.dedup();
+    Ok(Some(specs))
+}
+
+fn locked_runner_dependency_version(root: &Path, dependency: &str) -> Option<String> {
+    let pnpm_lock = root.join("pnpm-lock.yaml");
+    if pnpm_lock.is_file() {
+        let lock = fs::read_to_string(pnpm_lock).ok()?;
+        if let Some(version) = locked_pnpm_dependency_version(&lock, dependency) {
+            return Some(version);
+        }
+    }
+    let yarn_lock = root.join("yarn.lock");
+    if yarn_lock.is_file() {
+        let lock = fs::read_to_string(yarn_lock).ok()?;
+        if let Some(version) = locked_yarn_dependency_version(&lock, dependency) {
+            return Some(version);
+        }
+    }
+    None
+}
+
+fn locked_pnpm_dependency_version(lock: &str, dependency: &str) -> Option<String> {
+    for line in lock.lines() {
+        let trimmed = line.trim_start();
+        let candidate = trimmed
+            .strip_prefix(&format!("{dependency}@"))
+            .or_else(|| trimmed.strip_prefix(&format!("/{dependency}@")));
+        let Some(candidate) = candidate else {
+            continue;
+        };
+        let version_end = candidate.find(['(', ':']).unwrap_or(candidate.len());
+        let version = candidate[..version_end].trim();
+        if is_publishable_version(version) {
+            return Some(version.to_string());
+        }
+    }
+    None
+}
+
+fn locked_yarn_dependency_version(lock: &str, dependency: &str) -> Option<String> {
+    let mut lines = lock.lines().peekable();
+    while let Some(line) = lines.next() {
+        if line.starts_with(char::is_whitespace)
+            || !yarn_lock_key_matches_dependency(line, dependency)
+        {
+            continue;
+        }
+        while let Some(next) = lines.peek().copied() {
+            if !next.starts_with("  ") {
+                break;
+            }
+            let value = next.trim();
+            if let Some(version) = value.strip_prefix("version ") {
+                let version = version.trim_matches('"');
+                if is_publishable_version(version) {
+                    return Some(version.to_string());
+                }
+            }
+            lines.next();
+        }
+    }
+    None
+}
+
+fn yarn_lock_key_matches_dependency(line: &str, dependency: &str) -> bool {
+    let key = line.trim().trim_end_matches(':');
+    key.split(',').any(|part| {
+        let part = part.trim().trim_matches('"');
+        yarn_lock_package_name(part).is_some_and(|name| name == dependency)
+    })
+}
+
+fn yarn_lock_package_name(spec: &str) -> Option<&str> {
+    if spec.starts_with('@') {
+        let slash = spec.find('/')?;
+        let after_scope = &spec[slash + 1..];
+        let at = after_scope.find('@')?;
+        return Some(&spec[..slash + 1 + at]);
+    }
+    let at = spec.find('@')?;
+    Some(&spec[..at])
+}
+
+fn manifest_dependency_version(manifest: &serde_json::Value, dependency: &str) -> Option<String> {
+    ["dependencies", "devDependencies", "peerDependencies"]
+        .into_iter()
+        .find_map(|section| {
+            manifest
+                .get(section)
+                .and_then(|value| value.get(dependency))
+                .and_then(|value| value.as_str())
+                .map(ToOwned::to_owned)
+        })
+}
+
+fn is_unpublished_dependency_spec(version: &str) -> bool {
+    let version = version.trim();
+    version.is_empty()
+        || version == "catalog:"
+        || version.starts_with("workspace:")
+        || version == "link:"
+        || version.starts_with("file:")
+}
+
+fn is_publishable_version(version: &str) -> bool {
+    let first = version.chars().next();
+    first.is_some_and(|ch| ch.is_ascii_digit())
+}
+
 fn probe_api_exports(root: &Path, package_name: &str, request: &str) -> Result<ApiProbeOutput> {
     let root = absolute_path(root);
     let node = resolve_program("node");
@@ -4060,6 +4254,7 @@ pub fn run_option_matrix(scope: &SelectionArgs) -> JsonReport {
 
 pub fn run_conformance(args: &ConformanceArgs) -> JsonReport {
     let lock_hash = file_sha256(&args.lock).ok();
+    let lock = load_official_lock(&args.lock).ok();
     let requested = select_conformance_suites(args);
     let mut items = Vec::new();
     let mut violations = Vec::new();
@@ -4087,6 +4282,30 @@ pub fn run_conformance(args: &ConformanceArgs) -> JsonReport {
                 Some(metadata),
             ));
             continue;
+        }
+
+        if let Some(lock) = lock.as_ref() {
+            if let Some(baseline) = baseline_for(lock, spec.version_line) {
+                if let Err(err) =
+                    ensure_official_runner_dependencies(spec, baseline, &args.vendor_dir)
+                {
+                    violations.push(format!(
+                        "{} official runner dependency install failed: {err:#}",
+                        spec.name
+                    ));
+                }
+            } else {
+                violations.push(format!(
+                    "{} has no baseline lock entry for {}",
+                    spec.name,
+                    spec.version_line.as_str()
+                ));
+            }
+        } else {
+            violations.push(format!(
+                "failed to read {}; runner dependencies cannot be provisioned",
+                args.lock.display()
+            ));
         }
 
         let mut discovered = Vec::new();
@@ -4927,14 +5146,14 @@ fn suite_spec(suite: ConformanceSuite) -> ConformanceSuiteSpec {
             version_line: VersionLine::Vue27,
             relative_test_dirs: &["test/unit/modules/compiler"],
             package_requests: &["vue-template-compiler"],
-            runner_dependencies: &["@babel/register", "jasmine"],
+            runner_dependencies: &["vitest", "esbuild", "typescript"],
         },
         ConformanceSuite::Vue27Sfc => ConformanceSuiteSpec {
             name: "vue27-sfc",
             version_line: VersionLine::Vue27,
             relative_test_dirs: &["packages/compiler-sfc/test"],
             package_requests: &["vue/compiler-sfc"],
-            runner_dependencies: &["typescript", "jasmine"],
+            runner_dependencies: &["vitest", "esbuild", "typescript"],
         },
         ConformanceSuite::Vue3Core => ConformanceSuiteSpec {
             name: "vue3-core",
@@ -5287,6 +5506,104 @@ mod tests {
             .map(api_require_request)
             .collect::<Vec<_>>();
         assert_eq!(requests, vec!["@vue/compiler-core", "@vue/compiler-dom"]);
+    }
+
+    #[test]
+    fn runner_dependency_specs_use_locked_versions() {
+        let temp = std::env::temp_dir().join(format!(
+            "vuec-xtask-runner-deps-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let root = temp.join("vue3");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("package.json"),
+            r#"{
+              "devDependencies": {
+                "vitest": "^4.1.5",
+                "esbuild": "^0.28.0",
+                "typescript": "~5.6.2",
+                "source-map-js": "catalog:"
+              }
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("pnpm-lock.yaml"),
+            r#"
+packages:
+  .
+snapshots:
+  esbuild@0.28.0: {}
+  source-map-js@1.2.1: {}
+  typescript@5.6.3: {}
+  vitest@4.1.5(@types/node@24.12.2): {}
+"#,
+        )
+        .unwrap();
+
+        let specs = runner_dependency_specs(suite_spec(ConformanceSuite::Vue3Core), &temp)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            specs,
+            vec!["esbuild@0.28.0", "source-map-js@1.2.1", "vitest@4.1.5"]
+        );
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn runner_dependency_specs_fall_back_to_manifest_specs() {
+        let temp = std::env::temp_dir().join(format!(
+            "vuec-xtask-runner-deps-manifest-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let root = temp.join("vue2_6");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("package.json"),
+            r#"{
+              "devDependencies": {
+                "@babel/register": "^7.0.0",
+                "jasmine": "^2.99.0"
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let specs = runner_dependency_specs(suite_spec(ConformanceSuite::Vue2Compiler), &temp)
+            .unwrap()
+            .unwrap();
+        assert_eq!(specs, vec!["@babel/register@^7.0.0", "jasmine@^2.99.0"]);
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn yarn_lock_dependency_lookup_matches_exact_package_name() {
+        let lock = r#"
+"@babel/register@^7.0.0":
+  version "7.0.0"
+
+eslint-plugin-jasmine@^2.8.4:
+  version "2.10.1"
+
+jasmine@^2.99.0:
+  version "2.99.0"
+"#;
+        assert_eq!(
+            locked_yarn_dependency_version(lock, "@babel/register"),
+            Some("7.0.0".into())
+        );
+        assert_eq!(
+            locked_yarn_dependency_version(lock, "jasmine"),
+            Some("2.99.0".into())
+        );
     }
 
     fn test_manifest(exports: Vec<(&str, u32)>) -> ManifestFile {
