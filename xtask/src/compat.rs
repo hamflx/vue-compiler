@@ -4678,18 +4678,61 @@ const vue3CoreRuntime = (() => {
       node.codegenNode = runtime.createVNodeCall(context, tag, props, children, patchFlag, dynamicProps.length ? JSON.stringify(dynamicProps) : undefined, undefined, false, false, isComponent, node.loc);
     };
   };
-  runtime.processSlotOutlet = function processSlotOutlet(node) {
+  runtime.processSlotOutlet = function processSlotOutlet(node, context) {
     let slotName = '"default"';
-    const nameProp = runtime.findProp(node, 'name', false, true);
-    if (nameProp && nameProp.type === NodeTypes.ATTRIBUTE && nameProp.value) slotName = JSON.stringify(nameProp.value.content);
-    return { slotName, slotProps: undefined };
+    let slotProps;
+    const nonNameProps = [];
+    for (const prop of node.props || []) {
+      if (prop.type === NodeTypes.ATTRIBUTE) {
+        if (!prop.value) continue;
+        if (prop.name === 'name') {
+          slotName = JSON.stringify(prop.value.content);
+        } else {
+          prop.name = camelize(prop.name);
+          nonNameProps.push(prop);
+        }
+      } else if (prop.name === 'bind' && runtime.isStaticArgOf(prop.arg, 'name')) {
+        if (prop.exp) {
+          slotName = prop.exp;
+        } else if (prop.arg && prop.arg.type === NodeTypes.SIMPLE_EXPRESSION) {
+          const name = camelize(prop.arg.content);
+          slotName = prop.exp = runtime.createSimpleExpression(name, false, prop.arg.loc);
+          if (context && context.prefixIdentifiers) {
+            slotName = prop.exp = runtime.processExpression(prop.exp, context);
+          }
+        }
+      } else {
+        if (prop.name === 'bind' && prop.arg && runtime.isStaticExp(prop.arg)) {
+          prop.arg.content = camelize(prop.arg.content);
+        }
+        nonNameProps.push(prop);
+      }
+    }
+    if (nonNameProps.length) {
+      const built = runtime.buildProps(node, context, nonNameProps, false, false);
+      slotProps = built.props;
+      if (built.directives && built.directives.length) {
+        context.onError(runtime.createCompilerError(ErrorCodes.X_V_SLOT_UNEXPECTED_DIRECTIVE_ON_SLOT_OUTLET, built.directives[0].loc));
+      }
+    }
+    return { slotName, slotProps };
   };
   runtime.transformSlotOutlet = function transformSlotOutlet(node, context) {
     if (node.type === NodeTypes.ELEMENT && node.tagType === ElementTypes.SLOT) {
       return () => {
         const { slotName, slotProps } = runtime.processSlotOutlet(node, context);
-        const args = ['$slots', slotName];
-        if (slotProps) args.push(slotProps);
+        const args = [context.prefixIdentifiers ? '_ctx.$slots' : '$slots', slotName, '{}', 'undefined', 'true'];
+        let expectedLen = 2;
+        if (slotProps) {
+          args[2] = slotProps;
+          expectedLen = 3;
+        }
+        if (node.children && node.children.length) {
+          args[3] = runtime.createFunctionExpression([], node.children, false, false, node.loc);
+          expectedLen = 4;
+        }
+        if (context.scopeId && !context.slotted) expectedLen = 5;
+        args.splice(expectedLen);
         node.codegenNode = runtime.createCallExpression(context.helper(runtime.RENDER_SLOT), args);
       };
     }
@@ -4857,8 +4900,39 @@ const vue3CoreRuntime = (() => {
   };
   runtime.trackSlotScopes = () => {};
   runtime.trackVForSlotScopes = () => {};
-  runtime.buildProps = function buildProps() {
-    return { props: undefined, directives: [], patchFlag: 0, dynamicPropNames: [], shouldUseBlock: false };
+  runtime.buildProps = function buildProps(node, context, props = node && node.props || []) {
+    const objectProps = [];
+    const directives = [];
+    for (const prop of props || []) {
+      if (prop.type === NodeTypes.ATTRIBUTE) {
+        objectProps.push(runtime.createObjectProperty(
+          runtime.createSimpleExpression(prop.name, true, prop.nameLoc || prop.loc),
+          runtime.createSimpleExpression(prop.value ? prop.value.content : '', true, prop.value ? prop.value.loc : prop.loc),
+        ));
+        continue;
+      }
+      if (prop.name === 'bind' && prop.arg) {
+        const transform = context && context.directiveTransforms && context.directiveTransforms.bind;
+        const result = transform ? transform(prop, node, context) : runtime.transformBind(prop, node, context);
+        objectProps.push(...((result && result.props) || []));
+      } else if (prop.name === 'on' && prop.arg) {
+        const transform = context && context.directiveTransforms && context.directiveTransforms.on;
+        const result = transform ? transform(prop, node, context) : runtime.transformOn(prop, node, context);
+        objectProps.push(...((result && result.props) || []));
+      } else if (prop.name === 'model' && context && context.directiveTransforms && context.directiveTransforms.model) {
+        const result = context.directiveTransforms.model(prop, node, context);
+        objectProps.push(...((result && result.props) || []));
+      } else if (prop.name !== 'once' && prop.name !== 'memo' && prop.name !== 'slot') {
+        directives.push(prop);
+      }
+    }
+    return {
+      props: objectProps.length ? runtime.createObjectExpression(objectProps, node && node.loc || locStub) : undefined,
+      directives,
+      patchFlag: 0,
+      dynamicPropNames: [],
+      shouldUseBlock: false,
+    };
   };
   runtime.buildDirectiveArgs = function buildDirectiveArgs(dir) {
     return runtime.createArrayExpression([dir.name, dir.exp, dir.arg].filter(Boolean));

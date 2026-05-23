@@ -21,8 +21,15 @@
 - [x] Vue 3 compiler-core `v-on` transform exactness for `vOn.spec.ts`.
 - [x] Vue 3 compiler-core text transform exactness for `transformText.spec.ts`.
 - [x] Vue 3 compiler-core `v-once` transform exactness for `vOnce.spec.ts`.
+- [x] Vue 3 compiler-core slot outlet transform exactness for `transformSlotOutlet.spec.ts`.
 
 ## Completed This Round
+
+- Closed the official Vue 3 `compiler-core/__tests__/transforms/transformSlotOutlet.spec.ts` slice. The focused spec now passes `14/14` through the prepared alias Vitest runner.
+- Reworked the alias runtime `<slot>` transform to match official `renderSlot` call construction for default/static/dynamic names, `prefixIdentifiers`, slot props, fallback functions, `scopeId` with `slotted: false`, and unexpected custom directive diagnostics.
+- Added a lightweight alias runtime `buildProps` path used by slot outlet prop processing, reusing existing directive transforms for `v-bind`, `v-on`, and `v-model` while reporting custom directives as runtime directives.
+- Full Vue 3 core conformance improved from `298/652` to `311/652`; the full suite still intentionally fails with `341` remaining failures. Adjacent `vBind.spec.ts` status remains `1/19` passing and is still incomplete outside this slot outlet slice.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p xtask`, `cargo test -p xtask`, `git diff --check`, `cargo xtask verify-npm-alias --version-line vue3 --package @vue/compiler-core`, direct prepared Vitest `transformSlotOutlet.spec.ts` run (`14/14` pass), adjacent prepared Vitest `vBind.spec.ts` run (`1/19` pass, expected fail), `cargo xtask diff-api --version-line vue3 --package @vue/compiler-core`, `cargo xtask run-option-matrix --version-line vue3 --package @vue/compiler-core`, `cargo xtask run-output-contract --version-line vue3 --package @vue/compiler-core`, and `cargo xtask run-conformance --suite vue3-core` (expected fail with `311/652` pass, `341` fail).
 
 - Closed the official Vue 3 `compiler-core/__tests__/transforms/transformText.spec.ts` and `compiler-core/__tests__/transforms/vOnce.spec.ts` slices. The focused specs now pass `9/9` and `8/8` through the prepared alias Vitest runner.
 - Reworked the alias runtime text transform to match official adjacent text merging, plain-element single-text fast path, custom-directive text conversion, static text patch-flag suppression, and `<template v-for>` text-child conversion.
