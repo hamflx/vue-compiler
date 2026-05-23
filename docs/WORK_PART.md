@@ -31,9 +31,17 @@
 - [x] Vue 3 compiler-core Rust-backed `transformModel` projection bridge for `vModel.spec.ts`.
 - [x] Vue 3 compiler-core Rust-backed `baseCompile` `v-memo` codegen slice for `vMemo.spec.ts`.
 - [x] Vue 3 compiler-core Rust-backed `transformIf` / `processIf` projection bridge for `vIf.spec.ts`.
+- [x] Vue 3 compiler-core Rust-backed `resolveComponentType` projection slice inside `transformElement.spec.ts`.
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Implemented a Rust-backed Vue 3 `resolveComponentType` projection slice for `transformElement` component tag resolution.
+- `vuec_vue3_core::resolve_component_type_projection` now owns official component resolution decisions for core built-ins, `<component is>` and `:is`, `vue:` is-casting, script-setup setup/props binding references, namespaced binding references, and implicit self-reference component registration.
+- Updated Rust Vue 3 tag classification so lowercase core built-ins and `<component>` / `<Component>` parse as component elements and actually enter the component-resolution transform path.
+- Added `vue3.core.resolveComponentType` to `vuec_node_bridge`. Generated alias `resolveComponentType` in `xtask/src/compat.rs` now calls Rust and materializes official-shaped helper usage, component registration, expression tags, and `resolveDynamicComponent(...)` calls. The touched `compat.rs` code is bridge/materialization adapter support; it is not counted as standalone JavaScript compiler semantics.
+- Focused official `compiler-core/__tests__/transforms/transformElement.spec.ts` now passes `57/124` (previously `40/124`). The file remains `mixed` because props analysis, slot building, patch-flag decisions, children lowering, and VNode materialization still run through the alias harness, but `resolveComponentType` decisions are Rust-backed.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_vue3_core` (`40/40` pass), `cargo xtask verify-npm-alias --version-line vue3 --package @vue/compiler-core`, direct prepared Vitest `transformElement.spec.ts` (`57/124` pass, expected fail), and `git diff --check`.
 
 - Implemented a Rust-backed Vue 3 `transformIf` / `processIf` projection bridge for compiler-core structural directive parity.
 - `vuec_vue3_core::transform_if_projection` now owns branch creation decisions, template branch child selection, missing-expression and condition-prefix decisions, adjacent `v-else` / `v-else-if` scanning, comment carry-over, duplicate user-key diagnostics, branch key-base calculation, and branch codegen wrapper decisions.

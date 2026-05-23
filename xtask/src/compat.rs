@@ -3550,10 +3550,10 @@ const vue3CoreRuntime = (() => {
     return node && node.type === NodeTypes.JS_CALL_EXPRESSION && node.callee === runtime.WITH_MEMO ? node.arguments[1].returns : node;
   };
   runtime.isCoreComponent = function isCoreComponent(tag) {
-    return tag === 'Teleport' ? runtime.TELEPORT
-      : tag === 'Suspense' ? runtime.SUSPENSE
-      : tag === 'KeepAlive' ? runtime.KEEP_ALIVE
-      : tag === 'BaseTransition' ? runtime.BASE_TRANSITION
+    return tag === 'Teleport' || tag === 'teleport' ? runtime.TELEPORT
+      : tag === 'Suspense' || tag === 'suspense' ? runtime.SUSPENSE
+      : tag === 'KeepAlive' || tag === 'keep-alive' ? runtime.KEEP_ALIVE
+      : tag === 'BaseTransition' || tag === 'base-transition' ? runtime.BASE_TRANSITION
       : undefined;
   };
   runtime.isSimpleIdentifier = function isSimpleIdentifier(name) {
@@ -4789,11 +4789,18 @@ const vue3CoreRuntime = (() => {
       if (node.tagType !== ElementTypes.ELEMENT && node.tagType !== ElementTypes.COMPONENT) return;
       const isComponent = node.tagType === ElementTypes.COMPONENT;
       const tag = isComponent ? runtime.resolveComponentType(node, context) : `"${node.tag}"`;
+      const isDynamicComponent = isComponent && tag && typeof tag === 'object' && tag.type === NodeTypes.JS_CALL_EXPRESSION && tag.callee === runtime.RESOLVE_DYNAMIC_COMPONENT;
       let patchFlag;
       let props;
       let hasDynamicKey = false;
       let hasHydrationEvent = false;
       const dynamicProps = [];
+      let shouldUseBlock = !!(
+        isDynamicComponent
+        || tag === runtime.TELEPORT
+        || tag === runtime.SUSPENSE
+        || (!isComponent && (node.tag === 'svg' || node.tag === 'foreignObject' || node.tag === 'math'))
+      );
       if (node.props && node.props.length) {
         const objectProps = [];
         const mergeArgs = [];
@@ -4872,7 +4879,7 @@ const vue3CoreRuntime = (() => {
             context.directives.add(d.name);
             return runtime.createArrayExpression([runtime.toValidAssetId(d.name, 'directive'), d.exp, d.arg].filter(Boolean));
           });
-          node.codegenNode = runtime.createVNodeCall(context, tag, props, node.children && node.children.length ? node.children : undefined, patchFlag, dynamicProps.length ? stringifyDynamicPropNames(dynamicProps) : undefined, runtime.createArrayExpression(directiveArgs), false, false, isComponent, node.loc);
+          node.codegenNode = runtime.createVNodeCall(context, tag, props, node.children && node.children.length ? node.children : undefined, patchFlag, dynamicProps.length ? stringifyDynamicPropNames(dynamicProps) : undefined, runtime.createArrayExpression(directiveArgs), shouldUseBlock, false, isComponent, node.loc);
           return;
         }
       }
@@ -4883,7 +4890,7 @@ const vue3CoreRuntime = (() => {
           ? node.children
           : undefined;
       if (!patchFlag && children && (children.type === NodeTypes.INTERPOLATION || children.type === NodeTypes.COMPOUND_EXPRESSION)) patchFlag = 1;
-      node.codegenNode = runtime.createVNodeCall(context, tag, props, children, patchFlag, dynamicProps.length ? stringifyDynamicPropNames(dynamicProps) : undefined, undefined, false, false, isComponent, node.loc);
+      node.codegenNode = runtime.createVNodeCall(context, tag, props, children, patchFlag, dynamicProps.length ? stringifyDynamicPropNames(dynamicProps) : undefined, undefined, shouldUseBlock, false, isComponent, node.loc);
     };
   };
   runtime.processSlotOutlet = function processSlotOutlet(node, context) {
@@ -5228,11 +5235,12 @@ const vue3CoreRuntime = (() => {
     return { slots: runtime.createObjectExpression([]), hasDynamicSlots: false };
   };
   runtime.resolveComponentType = function resolveComponentType(node, context) {
-    const builtIn = runtime.isCoreComponent(node.tag);
-    if (builtIn) return context.helper(builtIn);
-    context.helper(runtime.RESOLVE_COMPONENT);
-    context.components.add(node.tag);
-    return runtime.toValidAssetId(node.tag, 'component');
+    const projection = callBridge('vue3.core.resolveComponentType', {
+      node,
+      context: vue3ResolveComponentContextPayload(context),
+      ssr: !!(context && context.inSSR),
+    });
+    return materializeVue3ComponentTypeProjection(projection, node, context);
   };
   runtime.getBaseTransformPreset = function getBaseTransformPreset() {
     return [[runtime.transformOnce, runtime.transformIf, runtime.transformMemo, runtime.transformFor, runtime.transformExpression, runtime.transformSlotOutlet, runtime.transformElement, runtime.trackSlotScopes, runtime.transformText], { on: runtime.transformOn, bind: runtime.transformBind, model: runtime.transformModel }];
@@ -5426,6 +5434,75 @@ function materializeVue3IfProjection(projection, node, dir) {
     default:
       throw new Error(`Unsupported Rust v-if projection: ${projection.kind}`);
   }
+}
+
+function vue3ResolveComponentContextPayload(context) {
+  context = context || {};
+  return {
+    prefixIdentifiers: !!context.prefixIdentifiers,
+    inline: !!context.inline,
+    selfName: context.selfName || null,
+    bindingMetadata: context.bindingMetadata || {},
+    isScriptSetup: context.bindingMetadata && Object.prototype.hasOwnProperty.call(context.bindingMetadata, '__isScriptSetup')
+      ? context.bindingMetadata.__isScriptSetup
+      : undefined,
+    compatIsOnElement: false,
+    builtInComponents: [],
+  };
+}
+
+function materializeVue3ComponentTypeProjection(projection, node, context) {
+  if (!projection) return vue3CoreRuntime.toValidAssetId(node && node.tag || '', 'component');
+  const helper = helperSymbolFromProjection(projection.helper);
+  switch (projection.kind) {
+    case 'dynamic':
+      if (helper) context.helper(helper);
+      return vue3CoreRuntime.createCallExpression(
+        helper || vue3CoreRuntime.RESOLVE_DYNAMIC_COMPONENT,
+        [materializeVue3ComponentProjectionNode(projection.argument, node, context)],
+      );
+    case 'helper':
+      if (helper && projection.registerHelper !== false) context.helper(helper);
+      return helper || projection.helper;
+    case 'expression':
+      for (const name of projection.helpers || []) {
+        const symbol = helperSymbolFromProjection(name);
+        if (symbol) context.helper(symbol);
+      }
+      return projection.content || '';
+    case 'asset':
+      if (helper) context.helper(helper);
+      if (projection.component) context.components.add(projection.component);
+      return projection.assetId || vue3CoreRuntime.toValidAssetId(node && node.tag || '', 'component');
+    default:
+      throw new Error(`Unsupported Rust component projection: ${projection.kind}`);
+  }
+}
+
+function materializeVue3ComponentProjectionNode(projection, node, context) {
+  if (!projection || projection.kind === 'undefined') return undefined;
+  if (projection.type) return projection;
+  switch (projection.kind) {
+    case 'simple':
+      return vue3CoreRuntime.createSimpleExpression(
+        projection.content || '',
+        !!projection.isStatic,
+        projection.loc || (node && node.loc) || locStub,
+        projection.constType || 0,
+      );
+    case 'expression':
+      for (const name of projection.helpers || []) {
+        const symbol = helperSymbolFromProjection(name);
+        if (symbol && context) context.helper(symbol);
+      }
+      return projection.content || '';
+    default:
+      return projection;
+  }
+}
+
+function helperSymbolFromProjection(name) {
+  return name && vue3CoreRuntime[name] || undefined;
 }
 
 function createRootCodegen(root, context) {

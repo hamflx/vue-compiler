@@ -793,6 +793,228 @@ pub fn transform_if_projection(payload: &Value) -> Value {
     transform_if_process_projection(payload)
 }
 
+pub fn resolve_component_type_projection(payload: &Value) -> Value {
+    let node = payload.get("node").unwrap_or(&Value::Null);
+    let context = payload.get("context").unwrap_or(&Value::Null);
+    let ssr = json_bool(payload, "ssr");
+    let mut tag = json_str(node, "tag").unwrap_or("").to_string();
+    let is_explicit_dynamic = matches!(tag.as_str(), "component" | "Component");
+    let is_prop = resolve_component_is_prop(node);
+
+    if let Some(is_prop) = is_prop {
+        if is_explicit_dynamic || json_bool(context, "compatIsOnElement") {
+            if let Some(exp) = resolve_component_is_prop_expression(is_prop, context) {
+                return json!({
+                    "kind": "dynamic",
+                    "helper": "RESOLVE_DYNAMIC_COMPONENT",
+                    "argument": exp,
+                });
+            }
+        } else if json_node_type(is_prop) == Some(6)
+            && is_prop
+                .get("value")
+                .and_then(|value| json_str(value, "content"))
+                .is_some_and(|value| value.starts_with("vue:"))
+        {
+            tag = is_prop
+                .get("value")
+                .and_then(|value| json_str(value, "content"))
+                .map(|value| value[4..].to_string())
+                .unwrap_or(tag);
+        }
+    }
+
+    if let Some(helper) = vue3_core_component_helper(&tag) {
+        return json!({
+            "kind": "helper",
+            "helper": helper,
+            "registerHelper": !ssr,
+        });
+    }
+    if context
+        .get("builtInComponents")
+        .and_then(Value::as_array)
+        .is_some_and(|components| {
+            components
+                .iter()
+                .any(|component| component.as_str() == Some(&tag))
+        })
+    {
+        return json!({
+            "kind": "helper",
+            "helper": tag,
+            "registerHelper": !ssr,
+        });
+    }
+
+    if let Some(from_setup) = resolve_setup_reference(&tag, context) {
+        return from_setup;
+    }
+    if let Some(dot_index) = tag.find('.') {
+        if dot_index > 0 {
+            if let Some(mut namespace) = resolve_setup_reference(&tag[..dot_index], context) {
+                if let Some(content) = json_str(&namespace, "content") {
+                    let resolved = format!("{}{}", content, &tag[dot_index..]);
+                    namespace["content"] = json!(resolved);
+                    return namespace;
+                }
+            }
+        }
+    }
+
+    let self_name = json_str(context, "selfName");
+    let component_name =
+        if self_name.is_some_and(|self_name| capitalize(&camelize(&tag)) == self_name) {
+            format!("{tag}__self")
+        } else {
+            tag.clone()
+        };
+    json!({
+        "kind": "asset",
+        "helper": "RESOLVE_COMPONENT",
+        "component": component_name,
+        "assetId": component_asset_id(&tag),
+    })
+}
+
+fn resolve_component_is_prop(node: &Value) -> Option<&Value> {
+    node.get("props")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|prop| {
+            if json_node_type(prop) == Some(6) {
+                json_str(prop, "name") == Some("is")
+            } else {
+                json_str(prop, "name") == Some("bind")
+                    && prop.get("arg").is_some_and(|arg| {
+                        json_bool(arg, "isStatic") && json_str(arg, "content") == Some("is")
+                    })
+            }
+        })
+}
+
+fn resolve_component_is_prop_expression(prop: &Value, context: &Value) -> Option<Value> {
+    if json_node_type(prop) == Some(6) {
+        return prop
+            .get("value")
+            .and_then(|value| json_str(value, "content").map(|content| (value, content)))
+            .map(|(value, content)| {
+                json!({
+                    "kind": "simple",
+                    "content": content,
+                    "isStatic": true,
+                    "constType": 3,
+                    "loc": value.get("loc").cloned().unwrap_or(Value::Null),
+                })
+            });
+    }
+
+    if let Some(exp) = prop.get("exp").filter(|value| !value.is_null()) {
+        return Some(exp.clone());
+    }
+
+    let content = if json_bool(context, "prefixIdentifiers") {
+        rewrite_js_like_expression("is", &vue3_options_from_transform_context(context))
+    } else {
+        "is".to_string()
+    };
+    Some(json!({
+        "kind": "simple",
+        "content": content,
+        "isStatic": false,
+        "constType": 0,
+        "loc": prop
+            .get("arg")
+            .and_then(|arg| arg.get("loc"))
+            .cloned()
+            .unwrap_or(Value::Null),
+    }))
+}
+
+fn vue3_core_component_helper(tag: &str) -> Option<&'static str> {
+    match tag {
+        "Teleport" | "teleport" => Some("TELEPORT"),
+        "Suspense" | "suspense" => Some("SUSPENSE"),
+        "KeepAlive" | "keep-alive" => Some("KEEP_ALIVE"),
+        "BaseTransition" | "base-transition" => Some("BASE_TRANSITION"),
+        _ => None,
+    }
+}
+
+fn resolve_setup_reference(name: &str, context: &Value) -> Option<Value> {
+    let bindings = context.get("bindingMetadata")?;
+    if context.get("isScriptSetup").and_then(Value::as_bool) == Some(false) {
+        return None;
+    }
+
+    let camel_name = camelize(name);
+    let pascal_name = capitalize(&camel_name);
+    let from_const = binding_with_type(
+        bindings,
+        &[name, &camel_name, &pascal_name],
+        &["setup-const", "setup-reactive-const", "literal-const"],
+    );
+    if let Some(name) = from_const {
+        return Some(json!({
+            "kind": "expression",
+            "content": if json_bool(context, "inline") {
+                name.to_string()
+            } else {
+                format!("$setup[{}]", quote_string(name))
+            },
+        }));
+    }
+
+    let from_maybe_ref = binding_with_type(
+        bindings,
+        &[name, &camel_name, &pascal_name],
+        &["setup-let", "setup-ref", "setup-maybe-ref"],
+    );
+    if let Some(name) = from_maybe_ref {
+        return Some(json!({
+            "kind": "expression",
+            "content": if json_bool(context, "inline") {
+                format!("_unref({name})")
+            } else {
+                format!("$setup[{}]", quote_string(name))
+            },
+            "helpers": if json_bool(context, "inline") {
+                json!(["UNREF"])
+            } else {
+                json!([])
+            },
+        }));
+    }
+
+    let from_props = binding_with_type(bindings, &[name, &camel_name, &pascal_name], &["props"]);
+    if let Some(name) = from_props {
+        return Some(json!({
+            "kind": "expression",
+            "content": format!(
+                "_unref({}[{}])",
+                if json_bool(context, "inline") { "__props" } else { "$props" },
+                quote_string(name),
+            ),
+            "helpers": ["UNREF"],
+        }));
+    }
+
+    None
+}
+
+fn binding_with_type<'a>(
+    bindings: &'a Value,
+    names: &[&'a str],
+    types: &[&str],
+) -> Option<&'a str> {
+    names.iter().copied().find(|name| {
+        bindings
+            .get(*name)
+            .and_then(Value::as_str)
+            .is_some_and(|binding_type| types.contains(&binding_type))
+    })
+}
+
 fn transform_if_process_projection(payload: &Value) -> Value {
     let dir = payload.get("dir").unwrap_or(&Value::Null);
     let node = payload.get("node").unwrap_or(&Value::Null);
@@ -1412,6 +1634,9 @@ fn vue3_tag_type(tag: &str, props: &[Vue3Prop], options: &Vue3CompilerOptions) -
         .iter()
         .any(|candidate| candidate == tag)
     {
+        return Vue3ElementType::Component;
+    }
+    if vue3_core_component_helper(tag).is_some() || matches!(tag, "component" | "Component") {
         return Vue3ElementType::Component;
     }
     if props.iter().any(|prop| {
@@ -5400,6 +5625,122 @@ mod tests {
         }));
 
         assert_eq!(projection["props"][1]["hydrate"], json!(true));
+    }
+
+    #[test]
+    fn resolve_component_type_projection_uses_setup_bindings() {
+        let projection = resolve_component_type_projection(&json!({
+            "node": { "type": 1, "tag": "Example", "tagType": 1, "props": [] },
+            "context": {
+                "bindingMetadata": { "Example": "setup-maybe-ref" },
+                "inline": true
+            }
+        }));
+
+        assert_eq!(projection["kind"], json!("expression"));
+        assert_eq!(projection["content"], json!("_unref(Example)"));
+        assert_eq!(projection["helpers"], json!(["UNREF"]));
+    }
+
+    #[test]
+    fn resolve_component_type_projection_handles_namespaced_props_binding() {
+        let projection = resolve_component_type_projection(&json!({
+            "node": { "type": 1, "tag": "Foo.Example", "tagType": 1, "props": [] },
+            "context": {
+                "bindingMetadata": { "Foo": "props" },
+                "inline": false
+            }
+        }));
+
+        assert_eq!(projection["kind"], json!("expression"));
+        assert_eq!(
+            projection["content"],
+            json!("_unref($props[\"Foo\"]).Example")
+        );
+    }
+
+    #[test]
+    fn resolve_component_type_projection_marks_self_reference_asset() {
+        let projection = resolve_component_type_projection(&json!({
+            "node": { "type": 1, "tag": "Example", "tagType": 1, "props": [] },
+            "context": { "selfName": "Example" }
+        }));
+
+        assert_eq!(projection["kind"], json!("asset"));
+        assert_eq!(projection["component"], json!("Example__self"));
+        assert_eq!(projection["assetId"], json!("_component_Example"));
+    }
+
+    #[test]
+    fn resolve_component_type_projection_handles_dynamic_component_is() {
+        let projection = resolve_component_type_projection(&json!({
+            "node": {
+                "type": 1,
+                "tag": "component",
+                "tagType": 1,
+                "props": [
+                    {
+                        "type": 7,
+                        "name": "bind",
+                        "arg": { "type": 4, "content": "is", "isStatic": true },
+                        "exp": { "type": 4, "content": "foo", "isStatic": false }
+                    }
+                ]
+            },
+            "context": {}
+        }));
+
+        assert_eq!(projection["kind"], json!("dynamic"));
+        assert_eq!(projection["helper"], json!("RESOLVE_DYNAMIC_COMPONENT"));
+        assert_eq!(projection["argument"]["content"], json!("foo"));
+    }
+
+    #[test]
+    fn resolve_component_type_projection_casts_vue_is_attribute() {
+        let projection = resolve_component_type_projection(&json!({
+            "node": {
+                "type": 1,
+                "tag": "div",
+                "tagType": 1,
+                "props": [
+                    {
+                        "type": 6,
+                        "name": "is",
+                        "value": { "content": "vue:foo" }
+                    }
+                ]
+            },
+            "context": {}
+        }));
+
+        assert_eq!(projection["kind"], json!("asset"));
+        assert_eq!(projection["component"], json!("foo"));
+        assert_eq!(projection["assetId"], json!("_component_foo"));
+    }
+
+    #[test]
+    fn base_parse_classifies_lowercase_builtins_and_dynamic_component_as_components() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: "<teleport/><suspense/><keep-alive/><base-transition/><component/>".into(),
+            file_id: FileId(0),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let root = ast.root_node().expect("root");
+        let tags = root
+            .children
+            .iter()
+            .map(|id| ast.node(*id).expect("element"))
+            .map(|node| match &node.kind {
+                Vue3AstKind::Element(element) => (&element.tag, element.tag_type),
+                _ => panic!("expected element"),
+            })
+            .collect::<Vec<_>>();
+
+        assert!(tags
+            .iter()
+            .all(|(_, tag_type)| *tag_type == Vue3ElementType::Component));
     }
 
     #[test]
