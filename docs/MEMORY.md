@@ -1,7 +1,7 @@
 # Memory
 
 - Active objective: build a Rust Vue compiler that can replace official Vue 2.6, Vue 2.7, and Vue 3 compiler flows.
-- Current focus: use the generated npm alias bridge to turn option/output contract and official conformance execution from discovery/scaffold reports into real Rust-vs-official gates.
+- Current focus: use the generated npm alias bridge to turn official conformance execution from discovery/scaffold reports into real Rust-vs-official gates.
 - `docs/3.AST_HIR_MIR_DESIGN.md` is the authoritative AST/IR contract; `vuec_ast` now has the deterministic arena root, `NodeSpan`, `LoweringMap`, public projection scaffolding, CST structs, HIR without runtime helper/codegen call variants, target-split MIR enums, runtime-helper enum, and JS id model.
 - `vuec_js` now has the first real registry/store layer: `JsEntry`, `JsSourceType`, id allocation for expressions/statements/patterns/programs, lookup APIs, and parse-by-id APIs while preserving the old direct parse wrappers.
 - Vue 3 `@vue/compiler-core` now validates interpolation expressions through `vuec_js::JsAstStore` and Oxc, with `isTS` / `expressionPlugins: ["typescript"]` selecting TypeScript expression parsing.
@@ -12,6 +12,7 @@
 - Vue 3 `@vue/compiler-ssr` option matrix now has scopeId and slotted executable rows passing for the current schema v2 fixtures.
 - Vue 3 `@vue/compiler-dom` option matrix now has prefixIdentifiers, transformAssetUrls, decodeEntities, and isCustomElement executable rows passing for the current schema v2 fixtures.
 - Vue 2.7 `vue/compiler-sfc` now uses version-specific npm alias bridge commands and has parse, compileTemplate, compileScript, and compileStyle option rows passing for the current schema v2 fixtures.
+- Vue 2.7 `vue/compiler-sfc` output-contract probing now uses the official 2.7 single-object `parse({ source, filename })` API instead of the Vue 3 `parse(source, options)` call shape; `cargo xtask run-output-contract --all` has no failing checks and all seven targets are now `5/5`, with runtime parity executed directly in the probe.
 - Vue 2.7 `vue-template-compiler` option matrix now has warn, modules, and directives executable rows passing for the current schema v2 fixtures.
 - Vue 2.6 `vue-template-compiler` option matrix now has all 10 schema v2 rows passing, including `outputSourceRange` on the malformed tag fixture.
 - Vue 2 parser recovery now closes through a matching end tag and reports the unmatched intermediate element once, matching the current Vue 2.6 `outputSourceRange` fixture. Vue 2 compile defaults now enable static optimization like the official compiler.
@@ -35,4 +36,5 @@
 - `cargo xtask diff-api --all` now passes for all seven compiler targets at API export/arity/type-declaration shape level, using `compat/api/allowed-diff.json` for explicit approved differences.
 - `cargo xtask verify-npm-alias --all` now builds the `vuec_node_bridge` JSON bridge, generates alias packages, requires each official package name, and smoke-calls a representative Rust-backed compiler entry for each target. This is a development bridge, not the final NAPI package.
 - `cargo xtask run-option-matrix --all` now executes real official-vs-Rust npm alias probes and writes `target/conformance/<lock-hash>/option-matrix.json`; all seven current option-matrix targets pass with no pending or failing rows.
+- `cargo xtask run-output-contract --all` now executes real official-vs-Rust npm alias probes and writes `target/conformance/<lock-hash>/output-contract.json`; schema, exact JS output, diagnostics, source-map, and runtime parity checks have no failing rows across all seven targets.
 - Vue 2 newline option handling now parses `shouldDecodeNewlines` / `shouldDecodeNewlinesForHref` through the Node bridge and emits href newline escapes compatible with the Vue 2.6 option probe.

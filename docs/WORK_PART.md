@@ -13,16 +13,21 @@
 - [x] Vue 2 compiler main-path parser / optimizer / codegen expansion.
 - [x] Official API manifest generation and diff harness.
 - [x] Rust npm alias bridge and API manifest parity.
-- [ ] Vue 3 SFC official output-contract parity and option-matrix closure.
-- [ ] AST / HIR / MIR base arena migration and lowering pipeline alignment.
+- [x] Vue 3 SFC official output-contract parity and option-matrix closure.
+- [x] AST / HIR / MIR base arena migration and lowering pipeline alignment.
 
 ## Completed This Round
 
+- Fixed the output-contract runner for Vue 2.7 `vue/compiler-sfc` so it uses the official single-object SFC parse API (`parse({ source, filename })`) while preserving Vue 3's `parse(source, options)` path.
+- Added Vue 2.7 SFC-specific template/style source extraction in the output-contract probe, matching the public 2.7 API shape already used by the option matrix runner.
+- Added an `xtask` regression test that locks the Vue 2.7 SFC output-contract version context and object-style parse call.
+- Current output-contract status: `cargo xtask run-output-contract --all` has no failing checks; all seven targets report `5/5` checks passed.
+- Verification this round: `cargo fmt --all --check`, `cargo test -p xtask`, `cargo xtask run-output-contract --version-line vue2_7 --package vue --entry vue/compiler-sfc`, `cargo xtask run-output-contract --all`, and `cargo xtask run-option-matrix --all`.
 - Updated `vuec_ast` toward the deterministic AST/HIR/MIR design: `AstDocument.root` is now a required `NodeId`, tree edges can be validated with `validate_tree`, child attachment now maintains parent/index metadata, and root construction always creates an explicit root node.
 - Added AST/IR contract scaffolding for CST nodes, `PublicProjection`, nested public snapshots, explicit `LoweringMap` edge recording/lookups, `NodeSpan::generated` / `NodeSpan::missing`, HIR without runtime-helper/codegen-call variants, and target-split `Vue2Mir` / `Vue3DomMir` / `Vue3SsrMir` / `VaporMir`.
 - Updated Vue 2 public AST projection, Vue 3 core AST construction/generation, DOM side-effect traversal, pass walking, and Node bridge parse projection to use the deterministic root and proper `attach_child` parent/index maintenance.
 - Added `vuec_ast` tests for deterministic public projection, tree invariants, lowering map lookup, target-split MIR, and the absence of helper/call variants in HIR.
-- Verification this round: `cargo fmt --all --check`, `cargo check -p vuec_ast -p vuec_pass -p vuec_js -p vuec_vue3_core -p vuec_vue3_dom -p vuec_vue3_ssr -p vuec_vue2 -p vuec_node_bridge`, `cargo test -p vuec_ast -p vuec_pass -p vuec_js`, `cargo test -p vuec_vue3_core -p vuec_vue3_dom -p vuec_vue3_ssr`, `cargo test -p vuec_vue2 -p vuec_node_bridge`, `cargo xtask run-option-matrix --all`, `cargo xtask diff-api --all`, `cargo xtask verify-npm-alias --all`, and `cargo xtask run-output-contract --version-line vue3 --package @vue/compiler-core` (`4/5` checks passed with only the pre-existing runtime parity placeholder pending).
+- Verification this round: `cargo fmt --all --check`, `cargo check -p vuec_ast -p vuec_pass -p vuec_js -p vuec_vue3_core -p vuec_vue3_dom -p vuec_vue3_ssr -p vuec_vue2 -p vuec_node_bridge`, `cargo test -p vuec_ast -p vuec_pass -p vuec_js`, `cargo test -p vuec_vue3_core -p vuec_vue3_dom -p vuec_vue3_ssr`, `cargo test -p vuec_vue2 -p vuec_node_bridge`, `cargo xtask run-option-matrix --all`, `cargo xtask diff-api --all`, `cargo xtask verify-npm-alias --all`, and `cargo xtask run-output-contract --version-line vue3 --package @vue/compiler-core` (`5/5` checks passed).
 - Closed the Vue 2.7 `vue-template-compiler` option matrix by converting `warn`, `modules`, and `directives` to executable diff rows; the target now reports `3/3` rows passing.
 - Closed the Vue 2.6 `vue-template-compiler` option matrix by enabling executable `warn`, `outputSourceRange`, `modules`, and `directives` rows; the target now reports `10/10` rows passing.
 - Aligned Vue 2 malformed-tag recovery and default static optimization for the `outputSourceRange` fixture: `</div>` now closes through unmatched `<span>` and reports the intermediate tag once, and default compile options now run static optimization like the official compiler.

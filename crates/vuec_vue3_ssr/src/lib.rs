@@ -64,41 +64,8 @@ pub fn compile(source: TemplateSource, options: SsrCompilerOptions) -> SsrCompil
     }
     writer.push_line("function ssrRender(_ctx, _push, _parent, _attrs) {");
     writer.indent();
-    for node in &ast.nodes {
-        match &node.kind {
-            Vue3NodeKind::Element {
-                tag,
-                attributes,
-                self_closing,
-            } => {
-                if tag == "slot" && has_slot {
-                    writer.push_line(
-                        "_ssrRenderSlot(_ctx.$slots, \"default\", {}, null, _push, _parent);",
-                    );
-                } else if options.scope_id.is_some() {
-                    let rendered = render_start_tag(tag, attributes, *self_closing, &options);
-                    writer.push_line(&format!(
-                        "_push(`<{}${{_ssrRenderAttrs(_mergeProps({{}} , _attrs))}}>`);",
-                        rendered.trim_start_matches('<').trim_end_matches('>')
-                    ));
-                } else {
-                    writer.push_line(&format!(
-                        "_push({:?});",
-                        render_start_tag(tag, attributes, *self_closing, &options)
-                    ));
-                }
-            }
-            Vue3NodeKind::Text { value } => {
-                writer.push_line(&format!("_push({value:?});"));
-            }
-            Vue3NodeKind::Interpolation { expression } => {
-                writer.push_line(&format!("_push(_ssrInterpolate({expression}));"));
-            }
-            Vue3NodeKind::Comment { value } => {
-                writer.push_line(&format!("_push({:?});", format!("<!--{value}-->")));
-            }
-            Vue3NodeKind::Directive { .. } | Vue3NodeKind::Root => {}
-        }
+    if let Some(root) = ast.root_node() {
+        render_ssr_children(&ast, &root.children, has_slot, &options, &mut writer);
     }
     writer.dedent();
     writer.push_line("}");
@@ -183,6 +150,62 @@ fn render_start_tag(
         rendered.push('>');
     }
     rendered
+}
+
+fn render_ssr_children(
+    ast: &vuec_ast::AstDocument<Vue3NodeKind>,
+    children: &[vuec_ast::NodeId],
+    has_slot: bool,
+    options: &SsrCompilerOptions,
+    writer: &mut CodeWriter,
+) {
+    for child_id in children {
+        render_ssr_node(ast, *child_id, has_slot, options, writer);
+    }
+}
+
+fn render_ssr_node(
+    ast: &vuec_ast::AstDocument<Vue3NodeKind>,
+    node_id: vuec_ast::NodeId,
+    has_slot: bool,
+    options: &SsrCompilerOptions,
+    writer: &mut CodeWriter,
+) {
+    let Some(node) = ast.node(node_id) else {
+        return;
+    };
+    match &node.kind {
+        Vue3NodeKind::Element {
+            tag,
+            attributes,
+            self_closing,
+        } => {
+            if tag == "slot" && has_slot {
+                writer.push_line(
+                    "_ssrRenderSlot(_ctx.$slots, \"default\", {}, null, _push, _parent);",
+                );
+                return;
+            }
+            let rendered = render_start_tag(tag, attributes, *self_closing, options);
+            writer.push_line(&format!("_push({rendered:?});"));
+            if !self_closing {
+                render_ssr_children(ast, &node.children, has_slot, options, writer);
+                writer.push_line(&format!("_push({:?});", format!("</{tag}>")));
+            }
+        }
+        Vue3NodeKind::Text { value } => {
+            writer.push_line(&format!("_push({value:?});"));
+        }
+        Vue3NodeKind::Interpolation { expression } => {
+            writer.push_line(&format!("_push(_ssrInterpolate({expression}));"));
+        }
+        Vue3NodeKind::Comment { value } => {
+            writer.push_line(&format!("_push({:?});", format!("<!--{value}-->")));
+        }
+        Vue3NodeKind::Directive { .. } | Vue3NodeKind::Root => {
+            render_ssr_children(ast, &node.children, has_slot, options, writer);
+        }
+    }
 }
 
 fn is_component(tag: &str) -> bool {

@@ -2404,6 +2404,8 @@ fn run_output_contract_probe(
         .env("VUEC_OUTPUT_RUST_ROOT", &rust_root)
         .env("VUEC_OUTPUT_REQUEST", &request)
         .env("VUEC_OUTPUT_KIND", output_contract_kind(target))
+        .env("VUEC_OUTPUT_VERSION_LINE", target.version_line.as_str())
+        .env("VUEC_OUTPUT_ENTRY", target.entry)
         .env("VUEC_OUTPUT_FIXTURE", fixture)
         .output()
         .with_context(|| format!("failed to spawn output contract probe for {request}"))?;
@@ -2861,12 +2863,34 @@ const rustRoot = process.env.VUEC_OUTPUT_RUST_ROOT;
 const request = process.env.VUEC_OUTPUT_REQUEST;
 const kind = process.env.VUEC_OUTPUT_KIND;
 const fixture = process.env.VUEC_OUTPUT_FIXTURE || '';
+const versionLine = process.env.VUEC_OUTPUT_VERSION_LINE || '';
+const entry = process.env.VUEC_OUTPUT_ENTRY || '';
 
 const officialRequire = createRequire(path.join(officialRoot, 'package.json'));
 const rustRequire = createRequire(path.join(rustRoot, 'package.json'));
 
 function load(rootRequire) {
   return rootRequire(request);
+}
+
+function isVue27Sfc() {
+  return versionLine === 'vue2_7' && entry === 'vue/compiler-sfc';
+}
+
+function extractStyleSource(source) {
+  const match = String(source).match(/<style[^>]*>([\s\S]*?)<\/style>/i);
+  return match ? match[1] : source;
+}
+
+function extractTemplateSource(source) {
+  const match = String(source).match(/<template[^>]*>([\s\S]*?)<\/template>/i);
+  return match ? match[1] : source;
+}
+
+function parseSfc(api) {
+  return isVue27Sfc()
+    ? api.parse({ source: fixture, filename: 'contract.vue' })
+    : api.parse(fixture, { filename: 'contract.vue' });
 }
 
 function invoke(api) {
@@ -2877,19 +2901,19 @@ function invoke(api) {
       return { compile, compileToFunctions: functions };
     }
     case 'sfc': {
-      const parsed = api.parse(fixture, { filename: 'contract.vue' });
+      const parsed = parseSfc(api);
       const descriptor = parsed && parsed.descriptor ? parsed.descriptor : parsed;
       const templateSource = descriptor && descriptor.template && descriptor.template.content ? descriptor.template.content : '';
       const styleSource = descriptor && descriptor.styles && descriptor.styles[0] && descriptor.styles[0].content ? descriptor.styles[0].content : '';
       const template = api.compileTemplate({
-        source: templateSource,
+        source: isVue27Sfc() ? extractTemplateSource(fixture) : templateSource,
         filename: 'contract.vue',
         id: 'data-v-contract',
         scoped: true
       });
       const script = api.compileScript(descriptor, { id: 'data-v-contract' });
       const style = api.compileStyle({
-        source: styleSource,
+        source: isVue27Sfc() ? extractStyleSource(fixture) : styleSource,
         filename: 'contract.vue',
         id: 'data-v-contract',
         scoped: true
@@ -3096,6 +3120,369 @@ function topLevelSourceMap(value) {
   return out;
 }
 
+function topLevelRuntime(value) {
+  const out = {};
+  if (!value || typeof value !== 'object') return out;
+  out.runtime = normalize(executeRuntime(value));
+  return out;
+}
+
+function executeRuntime(value) {
+  if (kind === 'vue2-template') {
+    return executeVue2Runtime(value.compile || value);
+  }
+  if (kind === 'sfc' && isVue27Sfc()) {
+    return executeVue2Runtime(value.compileTemplate || value);
+  }
+  if (kind === 'vue3-ssr') {
+    return executeVue3SsrRuntime(value.compile || value);
+  }
+  if (kind === 'vue3-core') {
+    return executeVue3Runtime(value.baseCompile || value);
+  }
+  if (kind === 'vue3-dom') {
+    return executeVue3Runtime(value.compile || value);
+  }
+  if (kind === 'sfc') {
+    return executeVue3Runtime(value.compileTemplate || value);
+  }
+  throw new Error(`unsupported runtime kind ${kind}`);
+}
+
+function pickCodeSource(entry, keys) {
+  if (!entry || typeof entry !== 'object') {
+    return null;
+  }
+  for (const key of keys) {
+    const value = entry[key];
+    if (typeof value === 'string' && value.trim()) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function runtimeFixtureContext() {
+  return {
+    msg: 'hello',
+    a: 'alpha',
+    b: 'beta',
+    c: 'gamma',
+    d: 'delta',
+    color: 'rebeccapurple',
+    checked: true,
+    value: 'value',
+    item: { id: 1, name: 'one', uid: 1, ok: true },
+    items: [
+      { id: 1, name: 'one', uid: 1, ok: true },
+      { id: 2, name: 'two', uid: 2, ok: false },
+    ],
+    list: [
+      { id: 1, name: 'one', uid: 1, ok: true },
+      { id: 2, name: 'two', uid: 2, ok: true },
+    ],
+    save: () => 'saved',
+    $slots: {},
+    _ssrInterpolate: (value) => ssrInterpolate(value),
+    _ssrRenderAttrs: (value) => ssrRenderAttrs(value),
+    _mergeProps: (...args) => Object.assign({}, ...args),
+  };
+}
+
+function executeVue2Runtime(entry) {
+  if (entry && typeof entry.render === 'function') {
+    return executeVue2Render(entry.render, entry.staticRenderFns || []);
+  }
+  const source = pickCodeSource(entry, ['code', 'render']);
+  return executeVue2RenderSource(source);
+}
+
+function executeVue2RenderSource(source) {
+  if (!source) throw new Error('missing Vue 2 render source');
+  const compiled = new Function(`var render = function render() { ${source} };\nreturn { render, staticRenderFns: [] };`)();
+  return executeVue2Render(compiled.render, compiled.staticRenderFns || []);
+}
+
+function executeVue2Render(render, staticRenderFns) {
+  if (typeof render !== 'function') {
+    throw new Error('Vue 2 render did not evaluate to a function');
+  }
+  const context = createVue2RuntimeContext(staticRenderFns);
+  return render.call(context);
+}
+
+function createVue2RuntimeContext(staticRenderFns) {
+  const context = runtimeFixtureContext();
+  context._self = context;
+  context.$options = {
+    staticRenderFns,
+    filters: {},
+  };
+  context.$slots = {};
+  context.$scopedSlots = {};
+  context._c = function(tag, data, children) {
+    return {
+      kind: 'vue2-element',
+      tag,
+      data: normalize(data),
+      children: normalize(children),
+    };
+  };
+  context._v = function(text) {
+    return {
+      kind: 'vue2-text',
+      text: String(text),
+    };
+  };
+  context._s = function(value) {
+    if (value == null) return '';
+    if (typeof value === 'object') return JSON.stringify(normalize(value));
+    return String(value);
+  };
+  context._l = function(list, fn) {
+    const source = Array.isArray(list) ? list : list == null ? [] : [list];
+    return source.map((item, index) => normalize(fn.call(context, item, index)));
+  };
+  context._e = function() {
+    return {
+      kind: 'vue2-comment',
+      text: '',
+    };
+  };
+  context._m = function(index) {
+    const renderFn = staticRenderFns[index];
+    return typeof renderFn === 'function' ? normalize(renderFn.call(context)) : null;
+  };
+  context._f = function(name) {
+    return context.$options.filters[name] || ((value) => value);
+  };
+  context._o = function(value) {
+    return value;
+  };
+  context._n = function(value) {
+    return value;
+  };
+  context._t = function(name, fallback) {
+    return typeof fallback === 'function' ? fallback() : fallback;
+  };
+  context._u = function(value) {
+    return value;
+  };
+  context._g = function(data, value) {
+    return Object.assign({}, data, value);
+  };
+  context._d = function(list, value) {
+    return value;
+  };
+  context._b = function(data, tag, value) {
+    return Object.assign({}, data, value);
+  };
+  context._k = function() {
+    return false;
+  };
+  return context;
+}
+
+function executeVue3Runtime(entry) {
+  if (entry && typeof entry.render === 'function') {
+    return entry.render(runtimeFixtureContext(), []);
+  }
+  const source = pickCodeSource(entry, ['code', 'render']);
+  return instantiateVue3Render(source)(runtimeFixtureContext(), []);
+}
+
+function instantiateVue3Render(source) {
+  if (!source) throw new Error('missing Vue 3 render source');
+  const transformed = transformVue3ModuleSource(source);
+  const factory = new Function(
+    'Vue',
+    'require',
+    '__ctx',
+    `with (__ctx) { ${transformed}\nreturn typeof render === 'function' ? render : undefined; }`
+  );
+  const render = factory(createVue3Runtime(), createVue3SsrRequire(), runtimeFixtureContext());
+  if (typeof render !== 'function') {
+    throw new Error('Vue 3 render did not evaluate to a function');
+  }
+  return render;
+}
+
+function createVue3Runtime() {
+  return {
+    mergeProps: (...args) => Object.assign({}, ...args),
+    openBlock: () => null,
+    createElementVNode: (type, props, children) => ({
+      kind: 'vue3-node',
+      type,
+      props: normalize(props),
+      children: normalize(children),
+    }),
+    createElementBlock: (type, props, children) => ({
+      kind: 'vue3-node',
+      type,
+      props: normalize(props),
+      children: normalize(children),
+    }),
+    createVNode: (type, props, children) => ({
+      kind: 'vue3-node',
+      type,
+      props: normalize(props),
+      children: normalize(children),
+    }),
+    createBlock: (type, props, children) => ({
+      kind: 'vue3-node',
+      type,
+      props: normalize(props),
+      children: normalize(children),
+    }),
+    createTextVNode: (text) => ({
+      kind: 'vue3-text',
+      text: String(text),
+    }),
+    createCommentVNode: (text) => ({
+      kind: 'vue3-comment',
+      text: String(text),
+    }),
+    toDisplayString: (value) => (value == null ? '' : String(value)),
+    renderSlot: (slots, name, props, fallback) => {
+      const slot = slots && slots[name];
+      if (typeof slot === 'function') {
+        return slot(props || {});
+      }
+      if (typeof fallback === 'function') {
+        return fallback();
+      }
+      return {
+        kind: 'vue3-slot',
+        name,
+        props: normalize(props),
+      };
+    },
+    resolveComponent: (name) => name,
+    withCtx: (fn) => fn,
+    Fragment: 'Fragment',
+    Text: 'Text',
+    Comment: 'Comment',
+  };
+}
+
+function instantiateVue3SsrRender(source) {
+  if (!source) throw new Error('missing Vue 3 SSR source');
+  const transformed = transformVue3ModuleSource(source);
+  const factory = new Function(
+    'require',
+    '__ctx',
+    `with (__ctx) { ${transformed}\nreturn typeof ssrRender === 'function' ? ssrRender : undefined; }`
+  );
+  const ssrRender = factory(createVue3SsrRequire(), runtimeFixtureContext());
+  if (typeof ssrRender !== 'function') {
+    throw new Error('Vue 3 SSR render did not evaluate to a function');
+  }
+  return ssrRender;
+}
+
+function executeVue3SsrRuntime(entry) {
+  const ssrRender = entry && typeof entry.ssrRender === 'function'
+    ? entry.ssrRender
+    : instantiateVue3SsrRender(pickCodeSource(entry, ['code', 'ssrRender']));
+  const chunks = [];
+  const push = (chunk) => {
+    if (chunk == null) return;
+    chunks.push(String(chunk));
+  };
+  ssrRender(runtimeFixtureContext(), push, null, {});
+  return chunks.join('');
+}
+
+function createVue3SsrRequire() {
+  const serverRenderer = {
+    ssrRenderAttrs: (props) => ssrRenderAttrs(props),
+    ssrInterpolate: (value) => ssrInterpolate(value),
+    ssrRenderInterpolate: (value) => ssrInterpolate(value),
+    ssrRenderSlot: (slots, name, props, fallbackRenderFn, push) => {
+      const slot = slots && slots[name];
+      if (typeof slot === 'function') {
+        const result = slot(props || {});
+        if (Array.isArray(result)) {
+          for (const item of result) {
+            push(String(item));
+          }
+        } else if (result != null) {
+          push(String(result));
+        }
+      } else if (typeof fallbackRenderFn === 'function') {
+        fallbackRenderFn();
+      }
+    },
+    ssrRenderList: (source, renderItem) => {
+      const list = Array.isArray(source) ? source : source == null ? [] : [source];
+      return list.map((item, index) => renderItem(item, index));
+    },
+    ssrRenderComponent: () => '',
+    ssrRenderTeleport: () => {},
+    ssrRenderSuspense: (push, slots) => {
+      if (slots && typeof slots.default === 'function') {
+        slots.default();
+      }
+      return Promise.resolve();
+    },
+    ssrRenderDynamicModel: () => '',
+    ssrRenderAttr: (key, value) => ssrRenderAttrs({ [key]: value }),
+    ssrRenderClass: (raw) => (raw == null ? '' : ssrEscape(String(raw))),
+    ssrRenderStyle: (raw) => (raw == null ? '' : ssrEscape(String(raw))),
+  };
+  return (id) => {
+    if (id === 'vue') {
+      return {
+        mergeProps: (...args) => Object.assign({}, ...args),
+      };
+    }
+    if (id === 'vue/server-renderer') {
+      return serverRenderer;
+    }
+    throw new Error(`unsupported runtime require ${id}`);
+  };
+}
+
+function transformVue3ModuleSource(source) {
+  return String(source)
+    .replace(/import\s+\{([\s\S]*?)\}\s+from\s+["']vue["'];?\s*/g, (_, specifiers) => {
+      return `const { ${specifiers.replace(/\s+as\s+/g, ': ')} } = Vue;\n`;
+    })
+    .replace(/import\s+\{([\s\S]*?)\}\s+from\s+["']vue\/server-renderer["'];?\s*/g, (_, specifiers) => {
+      return `const { ${specifiers.replace(/\s+as\s+/g, ': ')} } = require("vue/server-renderer");\n`;
+    })
+    .replace(/export\s+function\s+(render|ssrRender)/g, 'function $1');
+}
+
+function ssrRenderAttrs(props) {
+  if (!props || typeof props !== 'object') return '';
+  const attrs = [];
+  for (const key of Object.keys(props).sort()) {
+    const value = props[key];
+    if (value == null || value === false) continue;
+    if (value === true) {
+      attrs.push(` ${key}`);
+    } else {
+      attrs.push(` ${key}="${ssrEscape(String(value))}"`);
+    }
+  }
+  return attrs.join('');
+}
+
+function ssrInterpolate(value) {
+  return ssrEscape(value == null ? '' : String(value));
+}
+
+function ssrEscape(value) {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 function topLevelDiagnostics(value) {
   const out = {};
   if (!value || typeof value !== 'object') return out;
@@ -3111,11 +3498,7 @@ const checks = [
   compareJson('exact-js-output', official, rust, value => topLevelCodeFields(value)),
   compareJson('diagnostic-parity', official, rust, value => topLevelDiagnostics(value)),
   compareJson('source-map-parity', official, rust, value => topLevelSourceMap(value)),
-  {
-    mode: 'runtime-parity',
-    status: 'pending',
-    detail: 'runtime execution is not wired for this contract runner yet'
-  }
+  compareJson('runtime-parity', official, rust, value => topLevelRuntime(value))
 ];
 const counts = {
   total: checks.length,
@@ -4398,6 +4781,22 @@ mod tests {
         };
         assert!(is_allowed_api_diff(&allowed, target, diff));
         assert!(!is_allowed_api_diff(&allowed, target, "different diff"));
+    }
+
+    #[test]
+    fn vue27_sfc_output_contract_exports_version_context() {
+        let target = TargetSpec {
+            version_line: VersionLine::Vue27,
+            package: "vue",
+            entry: "vue/compiler-sfc",
+            kind: TargetKind::Vue27Sfc,
+        };
+
+        assert_eq!(output_contract_kind(target), "sfc");
+        assert_eq!(api_require_request(target), "vue/compiler-sfc");
+        assert!(OUTPUT_CONTRACT_PROBE_SCRIPT
+            .contains("versionLine === 'vue2_7' && entry === 'vue/compiler-sfc'"));
+        assert!(OUTPUT_CONTRACT_PROBE_SCRIPT.contains("api.parse({ source: fixture"));
     }
 
     fn test_manifest(exports: Vec<(&str, u32)>) -> ManifestFile {
