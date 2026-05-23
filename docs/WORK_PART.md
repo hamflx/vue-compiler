@@ -15,8 +15,13 @@
 - [x] Rust npm alias bridge and API manifest parity.
 - [x] Vue 3 SFC official output-contract parity and option-matrix closure.
 - [x] AST / HIR / MIR base arena migration and lowering pipeline alignment.
+- [ ] Vue 3 public projection exactness for directive arg/exp/modifier spans and loc content.
 
 ## Completed This Round
+
+- Tightened the Vue 3 public AST projection contract to keep directive `arg` / `exp` / `modifiers` observable fields aligned with official parser behavior: directive `arg.loc` now preserves raw bracket spans for dynamic arguments, directive `exp.content` preserves whitespace, and the `.prop` synthetic modifier is projected with the official empty `loc` / non-static `prop` shape.
+- Updated the AST/HIR/MIR design-adjacent acceptance language in `docs/goal.md` so Vue 3 directive projection must preserve official `content`, `loc`, and `isStatic` differences instead of normalizing them away.
+- Current targeted verification: `cargo fmt --all --check`, `cargo check -p vuec_vue3_core -p vuec_node_bridge`, `cargo test -p vuec_vue3_core -p vuec_node_bridge`, `cargo build -p vuec_node_bridge`, and direct bridge smoke checks for `<div :foo=" bar "/>`, `<div v-on:[event]/>`, and `<div .a=b />`.
 
 - Implemented the first span-aware Vue 3 parser/CST compatibility slice aligned with `docs/3.AST_HIR_MIR_DESIGN.md`: `vuec_html::HtmlTokenizer` now records attribute name/value spans, quote kind, quoted value bounds, custom interpolation delimiters, lonely `<` text handling, and unquoted slash handling.
 - Extended Vue 3 AST attribute/directive structs with source spans and quote metadata, and updated the Vue 3 bridge projection to emit deterministic official-style `loc`, `nameLoc`, quoted `value.loc.source`, directive `arg` / `exp` / modifier locations, and `undefined` hydration for absent public fields.

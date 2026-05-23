@@ -884,7 +884,7 @@ pub struct Vue3Directive {
     pub span: Option<Span>,
     pub arg_span: Option<Span>,
     pub exp_span: Option<Span>,
-    pub modifier_spans: Vec<Span>,
+    pub modifier_spans: Vec<NodeSpan>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

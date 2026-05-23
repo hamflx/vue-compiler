@@ -17,6 +17,7 @@ AST/HIR/MIR设计：docs\3.AST_HIR_MIR_DESIGN.md（AST/HIR/MIR 以此为唯一�
 7. 如果你在修复问题，修复 2 次都没能修复，不要再盲目修复，你需要补充完整日志，根据日志分析出根因，然后再修复
 8. 只有当开发计划、官方兼容验收、输出契约验收、AST/HIR/MIR 结构验收全部满足时，才算真正完成
 9. AST/HIR/MIR 的结构验收必须严格遵循 `docs/3.AST_HIR_MIR_DESIGN.md` 的 public projection、lowering、target-split 约束，不能退回到旧的泛化 IR 口径
+10. Vue 3 public projection 的 directive `arg` / `exp` / `modifiers` 必须保留官方可观察的 `content`、`loc`、`isStatic` 差异，不能靠 trim、重写或 synthetic fallback 混淆差异
 
 工作提示：
 

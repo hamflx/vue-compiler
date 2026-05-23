@@ -91,7 +91,13 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
             let source = template_source(&payload);
             let options = vue3_options(payload.get("options"));
             let ast = Vue3Dialect::base_parse(source.clone(), &options);
-            Ok(vue3_parse_value(&ast, &source.source, source.base_offset))
+            let include_sfc_inner_loc = vue3_parse_mode_is_sfc(payload.get("options"));
+            Ok(vue3_parse_value(
+                &ast,
+                &source.source,
+                source.base_offset,
+                include_sfc_inner_loc,
+            ))
         }
         "vue3.dom.compile" => {
             let source = template_source(&payload);
@@ -144,7 +150,13 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
                 ),
             };
             let ast = vuec_vue3_dom::parse(source.clone(), &options);
-            Ok(vue3_parse_value(&ast, &source.source, source.base_offset))
+            let include_sfc_inner_loc = vue3_parse_mode_is_sfc(payload.get("options"));
+            Ok(vue3_parse_value(
+                &ast,
+                &source.source,
+                source.base_offset,
+                include_sfc_inner_loc,
+            ))
         }
         "vue3.ssr.compile" => {
             let source = template_source(&payload);
@@ -639,11 +651,16 @@ fn block_content_end_from_loc(loc: &vuec_sfc::SfcBlockLocation) -> usize {
     loc.end
 }
 
-fn vue3_parse_value(ast: &Vue3Ast, source: &str, base_offset: usize) -> Value {
+fn vue3_parse_value(
+    ast: &Vue3Ast,
+    source: &str,
+    base_offset: usize,
+    include_sfc_inner_loc: bool,
+) -> Value {
     json!({
         "type": 0,
         "source": source,
-        "children": vue3_root_children(ast, source, base_offset),
+        "children": vue3_root_children(ast, source, base_offset, include_sfc_inner_loc),
         "helpers": [],
         "components": [],
         "directives": [],
@@ -657,13 +674,20 @@ fn vue3_parse_value(ast: &Vue3Ast, source: &str, base_offset: usize) -> Value {
     })
 }
 
-fn vue3_root_children(ast: &Vue3Ast, source: &str, base_offset: usize) -> Vec<Value> {
+fn vue3_root_children(
+    ast: &Vue3Ast,
+    source: &str,
+    base_offset: usize,
+    include_sfc_inner_loc: bool,
+) -> Vec<Value> {
     ast.node(ast.root)
         .map(|root| {
             root.children
                 .iter()
                 .filter_map(|child_id| ast.node(*child_id))
-                .map(|node| vue3_node_summary(ast, source, base_offset, node.id))
+                .map(|node| {
+                    vue3_node_summary(ast, source, base_offset, node.id, include_sfc_inner_loc)
+                })
                 .collect()
         })
         .unwrap_or_default()
@@ -674,6 +698,7 @@ fn vue3_node_summary(
     source: &str,
     base_offset: usize,
     node_id: vuec_ast::NodeId,
+    include_sfc_inner_loc: bool,
 ) -> Value {
     let Some(node) = ast.node(node_id) else {
         return Value::Null;
@@ -682,7 +707,7 @@ fn vue3_node_summary(
         Vue3AstKind::Root(_) => json!({
             "type": 0,
             "source": source,
-            "children": node.children.iter().filter_map(|child_id| ast.node(*child_id)).map(|child| vue3_node_summary(ast, source, base_offset, child.id)).collect::<Vec<_>>(),
+            "children": node.children.iter().filter_map(|child_id| ast.node(*child_id)).map(|child| vue3_node_summary(ast, source, base_offset, child.id, include_sfc_inner_loc)).collect::<Vec<_>>(),
             "helpers": [],
             "components": [],
             "directives": [],
@@ -693,17 +718,23 @@ fn vue3_node_summary(
             "codegenNode": Value::Null,
             "loc": vue3_loc_value(source, base_offset, &node.span),
         }),
-        Vue3AstKind::Element(element) => json!({
-            "type": 1,
-            "tag": element.tag,
-            "ns": vue3_namespace_value(element.ns),
-            "tagType": vue3_element_type_value(element.tag_type),
-            "props": element.props.iter().map(|prop| vue3_prop_value(source, base_offset, prop)).collect::<Vec<_>>(),
-            "children": node.children.iter().filter_map(|child_id| ast.node(*child_id)).map(|child| vue3_node_summary(ast, source, base_offset, child.id)).collect::<Vec<_>>(),
-            "loc": vue3_loc_value(source, base_offset, &node.span),
-            "codegenNode": Value::Null,
-            "isSelfClosing": if element.self_closing { json!(true) } else { json!(null) },
-        }),
+        Vue3AstKind::Element(element) => {
+            let mut value = json!({
+                "type": 1,
+                "tag": element.tag,
+                "ns": vue3_namespace_value(element.ns),
+                "tagType": vue3_element_type_value(element.tag_type),
+                "props": element.props.iter().map(|prop| vue3_prop_value(source, base_offset, prop)).collect::<Vec<_>>(),
+                "children": node.children.iter().filter_map(|child_id| ast.node(*child_id)).map(|child| vue3_node_summary(ast, source, base_offset, child.id, include_sfc_inner_loc)).collect::<Vec<_>>(),
+                "loc": vue3_loc_value(source, base_offset, &node.span),
+                "codegenNode": Value::Null,
+                "isSelfClosing": if element.self_closing { json!(true) } else { json!(null) },
+            });
+            if include_sfc_inner_loc {
+                value["innerLoc"] = vue3_inner_loc_value(ast, source, base_offset, node_id);
+            }
+            value
+        }
         Vue3AstKind::Text(text) => json!({
             "type": 2,
             "content": text.value,
@@ -905,17 +936,17 @@ fn vue3_prop_value(source: &str, base_offset: usize, prop: &Vue3Prop) -> Value {
             "type": 7,
             "name": dir.name,
             "rawName": dir.raw_name,
-            "exp": dir.exp.as_ref().map(|exp| vue3_expression_value(source, base_offset, exp, &span_to_node_span(dir.exp_span), false)),
-            "arg": dir.arg.as_ref().map(|arg| vue3_expression_value(source, base_offset, arg, &span_to_node_span(dir.arg_span), !dir.is_dynamic_arg)),
+            "exp": dir.exp.as_ref().map(|exp| vue3_expression_value_with_mode(source, base_offset, exp, &span_to_node_span(dir.exp_span), false, Vue3ExpressionProjectionMode::Exact)),
+            "arg": dir.arg.as_ref().map(|arg| vue3_expression_value_with_mode(source, base_offset, arg, &span_to_node_span(dir.arg_span), !dir.is_dynamic_arg, Vue3ExpressionProjectionMode::ExactLocTrimContent)),
             "modifiers": dir.modifiers.iter().enumerate().map(|(index, modifier)| {
                 let loc = dir
                     .modifier_spans
                     .get(index)
-                    .map(|span| vue3_source_span_value(source, base_offset, *span))
+                    .map(|span| vue3_loc_value(source, base_offset, span))
                     .unwrap_or_else(vue3_loc_stub_value);
                 vue3_simple_expression_value(
                     modifier,
-                    true,
+                    !matches!(dir.modifier_spans.get(index), Some(NodeSpan::Missing { .. })),
                     loc,
                 )
             }).collect::<Vec<_>>(),
@@ -938,6 +969,51 @@ fn vue3_attribute_value(source: &str, base_offset: usize, attr: &vuec_ast::Vue3A
     })
 }
 
+fn vue3_inner_loc_value(
+    ast: &Vue3Ast,
+    source: &str,
+    base_offset: usize,
+    node_id: vuec_ast::NodeId,
+) -> Value {
+    let Some(node) = ast.node(node_id) else {
+        return vue3_loc_stub_value();
+    };
+    let Some(span) = node.span.source() else {
+        return vue3_loc_stub_value();
+    };
+    let element_start = span.start.0.saturating_sub(base_offset);
+    let element_end = span.end.0.saturating_sub(base_offset).min(source.len());
+    let open_end = vue3_open_tag_end(source, element_start, element_end).unwrap_or(element_start);
+    let inner_end = node
+        .children
+        .last()
+        .and_then(|child_id| ast.node(*child_id))
+        .and_then(|child| child.span.source())
+        .map(|child_span| {
+            child_span
+                .end
+                .0
+                .saturating_sub(base_offset)
+                .min(source.len())
+        })
+        .unwrap_or(open_end);
+    vue3_source_loc_value(source, open_end, inner_end)
+}
+
+fn vue3_open_tag_end(source: &str, start: usize, end: usize) -> Option<usize> {
+    let mut quote = None;
+    for (offset, ch) in source.get(start..end)?.char_indices() {
+        match (quote, ch) {
+            (Some(active), current) if current == active => quote = None,
+            (Some(_), _) => {}
+            (None, '"' | '\'') => quote = Some(ch),
+            (None, '>') => return Some(start + offset + 1),
+            (None, _) => {}
+        }
+    }
+    None
+}
+
 fn span_to_node_span(span: Option<vuec_source::Span>) -> NodeSpan {
     span.map(NodeSpan::from)
         .unwrap_or_else(|| NodeSpan::missing(vuec_ast::MissingSpanReason::Synthetic))
@@ -950,16 +1026,54 @@ fn vue3_expression_value(
     fallback_span: &NodeSpan,
     is_static: bool,
 ) -> Value {
+    vue3_expression_value_with_mode(
+        source_text,
+        base_offset,
+        expression,
+        fallback_span,
+        is_static,
+        Vue3ExpressionProjectionMode::Trim,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum Vue3ExpressionProjectionMode {
+    Trim,
+    ExactLocTrimContent,
+    Exact,
+}
+
+fn vue3_expression_value_with_mode(
+    source_text: &str,
+    base_offset: usize,
+    expression: &Vue3Expression,
+    fallback_span: &NodeSpan,
+    is_static: bool,
+    mode: Vue3ExpressionProjectionMode,
+) -> Value {
     let source = expression.source_string();
-    let loc = vue3_expression_loc(source_text, base_offset, fallback_span, &source);
-    vue3_simple_expression_value(&source, is_static, loc)
+    let loc = match mode {
+        Vue3ExpressionProjectionMode::Trim => {
+            vue3_expression_loc(source_text, base_offset, fallback_span, &source)
+        }
+        Vue3ExpressionProjectionMode::ExactLocTrimContent | Vue3ExpressionProjectionMode::Exact => {
+            vue3_loc_value(source_text, base_offset, fallback_span)
+        }
+    };
+    let content = match mode {
+        Vue3ExpressionProjectionMode::Exact => source,
+        Vue3ExpressionProjectionMode::Trim | Vue3ExpressionProjectionMode::ExactLocTrimContent => {
+            source.trim().to_string()
+        }
+    };
+    vue3_simple_expression_value(&content, is_static, loc)
 }
 
 fn vue3_simple_expression_value(source: &str, is_static: bool, loc: Value) -> Value {
     json!({
         "type": 4,
         "loc": loc,
-        "content": source.trim(),
+        "content": source,
         "isStatic": is_static,
         "constType": if is_static { 3 } else { 0 },
     })
@@ -1161,6 +1275,13 @@ fn vue3_options(value: Option<&Value>) -> Vue3CompilerOptions {
     options.custom_elements = string_array_option(value, "__vuecCustomElements");
     options.built_in_components = string_array_option(value, "__vuecBuiltInComponents");
     options
+}
+
+fn vue3_parse_mode_is_sfc(value: Option<&Value>) -> bool {
+    value
+        .and_then(|value| value.get("parseMode"))
+        .and_then(Value::as_str)
+        == Some("sfc")
 }
 
 fn string_array_option(value: &Value, name: &str) -> Vec<String> {

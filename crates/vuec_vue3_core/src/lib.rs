@@ -2,8 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 use vuec_ast::{
-    QuoteKind, RuntimeHelper, TemplateAttribute, Vue3Ast, Vue3AstKind, Vue3Directive, Vue3Element,
-    Vue3ElementType, Vue3Expression, Vue3NodeKind, Vue3Prop,
+    MissingSpanReason, NodeSpan, QuoteKind, RuntimeHelper, TemplateAttribute, Vue3Ast, Vue3AstKind,
+    Vue3Directive, Vue3Element, Vue3ElementType, Vue3Expression, Vue3NodeKind, Vue3Prop,
 };
 use vuec_codegen::{CodeWriter, SourceMapArtifact, SourceMapSegment};
 use vuec_html::{HtmlTokenKind, HtmlTokenizer};
@@ -483,7 +483,7 @@ fn parse_vue3_directive(
     Vec<String>,
     bool,
     Option<Span>,
-    Vec<Span>,
+    Vec<NodeSpan>,
 )> {
     let mut body = raw;
     let mut name = None;
@@ -531,7 +531,7 @@ fn parse_vue3_directive(
     if name.is_empty() {
         return None;
     }
-    let preserve_arg_dots = name == "slot" && raw.starts_with("v-slot:");
+    let preserve_arg_dots = name == "slot";
     let mut parts = split_directive_parts(body, preserve_arg_dots);
     let raw_arg = parts.next().unwrap_or_default();
     let modifiers = if raw.starts_with('.') {
@@ -553,17 +553,35 @@ fn parse_vue3_directive(
     };
     let arg_span = arg.as_ref().and_then(|_| {
         name_span.map(|span| {
+            let arg_start = if is_dynamic && raw_arg.starts_with('[') {
+                arg_offset
+            } else {
+                arg_offset
+                    + raw_arg
+                        .find(arg.as_deref().unwrap_or_default())
+                        .unwrap_or(0)
+            };
+            let arg_len = if is_dynamic {
+                raw_arg.len()
+            } else {
+                arg.as_deref().unwrap_or_default().len()
+            };
             Span::new(
                 span.file_id,
-                span.start.0 + arg_offset,
-                span.start.0 + arg_offset + raw_arg.len(),
+                span.start.0 + arg_start,
+                span.start.0 + arg_start + arg_len,
             )
         })
     });
     let modifier_spans = if raw.starts_with('.') {
-        name_span
-            .map(|span| vec![Span::new(span.file_id, span.start.0, span.start.0)])
-            .unwrap_or_default()
+        let mut spans = vec![NodeSpan::missing(MissingSpanReason::Synthetic)];
+        let modifier_refs = modifiers
+            .iter()
+            .skip(1)
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        spans.extend(directive_modifier_spans(raw, &modifier_refs, name_span));
+        spans
     } else {
         let modifier_refs = modifiers.iter().map(String::as_str).collect::<Vec<_>>();
         directive_modifier_spans(raw, &modifier_refs, name_span)
@@ -590,7 +608,11 @@ fn split_directive_parts(source: &str, preserve_dots: bool) -> impl Iterator<Ite
     parts.into_iter()
 }
 
-fn directive_modifier_spans(raw: &str, modifiers: &[&str], name_span: Option<Span>) -> Vec<Span> {
+fn directive_modifier_spans(
+    raw: &str,
+    modifiers: &[&str],
+    name_span: Option<Span>,
+) -> Vec<NodeSpan> {
     let Some(name_span) = name_span else {
         return Vec::new();
     };
@@ -600,11 +622,11 @@ fn directive_modifier_spans(raw: &str, modifiers: &[&str], name_span: Option<Spa
         let needle = format!(".{modifier}");
         if let Some(offset) = raw[search_start..].find(&needle) {
             let start = search_start + offset + 1;
-            spans.push(Span::new(
+            spans.push(NodeSpan::from(Span::new(
                 name_span.file_id,
                 name_span.start.0 + start,
                 name_span.start.0 + start + modifier.len(),
-            ));
+            )));
             search_start = start + modifier.len();
         }
     }
@@ -635,7 +657,10 @@ fn normalize_class_attribute_values(ast: &mut Vue3Ast) {
     }
 }
 
-fn remove_initial_newline_after_ignore_newline_tags(ast: &mut Vue3Ast, options: &Vue3CompilerOptions) {
+fn remove_initial_newline_after_ignore_newline_tags(
+    ast: &mut Vue3Ast,
+    options: &Vue3CompilerOptions,
+) {
     let element_ids = ast
         .nodes
         .iter()
@@ -717,9 +742,7 @@ fn normalize_text_children(
                 .last()
                 .and_then(|idx| child_kinds.get(*idx))
                 .and_then(Option::as_ref);
-            let next = child_kinds
-                .get(index + 1)
-                .and_then(Option::as_ref);
+            let next = child_kinds.get(index + 1).and_then(Option::as_ref);
             let keep = should_keep_whitespace_between(prev, next, options);
             keep_flags[index] = keep;
             if keep {
