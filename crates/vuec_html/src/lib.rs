@@ -83,6 +83,15 @@ impl<'a> HtmlTokenizer<'a> {
         self
     }
 
+    pub fn set_interpolation_delimiters(
+        &mut self,
+        open: impl Into<String>,
+        close: impl Into<String>,
+    ) {
+        self.interpolation_open = open.into();
+        self.interpolation_close = close.into();
+    }
+
     pub fn tokenize(mut self) -> Vec<HtmlToken> {
         let mut tokens = Vec::new();
         loop {

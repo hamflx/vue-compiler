@@ -97,23 +97,44 @@ impl Vue3Dialect {
         );
         let root = ast.root;
         let mut stack = vec![root];
-        let tokenizer = if let Some([open, close]) = &options.delimiters {
+        let mut v_pre_depth = 0usize;
+        let mut tokenizer = if let Some([open, close]) = &options.delimiters {
             HtmlTokenizer::new(&source.source).with_interpolation_delimiters(open, close)
         } else {
             HtmlTokenizer::new(&source.source)
         };
-        let tokens = tokenizer.tokenize();
-        for token in tokens {
+        loop {
+            if v_pre_depth > 0 {
+                tokenizer.set_interpolation_delimiters("", "");
+            } else if let Some([open, close]) = &options.delimiters {
+                tokenizer.set_interpolation_delimiters(open, close);
+            } else {
+                tokenizer.set_interpolation_delimiters("{{", "}}");
+            }
+            let token = tokenizer.next_token();
+            let eof = matches!(token.kind, HtmlTokenKind::Eof);
             let current_parent = *stack.last().unwrap_or(&root);
             match token.kind {
-                HtmlTokenKind::Text(text) => push_text_and_interpolations(
-                    &mut ast,
-                    current_parent,
-                    source.file_id,
-                    source.base_offset + token.start,
-                    &text,
-                    options,
-                ),
+                HtmlTokenKind::Text(text) => {
+                    if v_pre_depth > 0 {
+                        push_text(
+                            &mut ast,
+                            current_parent,
+                            source.file_id,
+                            source.base_offset + token.start,
+                            &text,
+                        );
+                    } else {
+                        push_text_and_interpolations(
+                            &mut ast,
+                            current_parent,
+                            source.file_id,
+                            source.base_offset + token.start,
+                            &text,
+                            options,
+                        );
+                    }
+                }
                 HtmlTokenKind::Comment(value) => {
                     if !options.comments {
                         continue;
@@ -134,6 +155,9 @@ impl Vue3Dialect {
                     self_closing,
                 } => {
                     let is_void = options.void_tags.iter().any(|candidate| candidate == &name);
+                    let starts_v_pre =
+                        v_pre_depth == 0 && attributes.iter().any(|attr| attr.name == "v-pre");
+                    let in_v_pre = v_pre_depth > 0 || starts_v_pre;
                     let id = ast.push_child(
                         current_parent,
                         vue3_element_kind(
@@ -143,6 +167,7 @@ impl Vue3Dialect {
                             options,
                             source.file_id,
                             source.base_offset,
+                            in_v_pre,
                         ),
                         Some(Span::new(
                             source.file_id,
@@ -152,6 +177,9 @@ impl Vue3Dialect {
                     );
                     if !self_closing && !is_void {
                         stack.push(id);
+                        if in_v_pre {
+                            v_pre_depth += 1;
+                        }
                     }
                 }
                 HtmlTokenKind::EndTag { name } => {
@@ -168,22 +196,38 @@ impl Vue3Dialect {
                                             vuec_source::BytePos(source.base_offset + token.end);
                                     }
                                 }
+                                if v_pre_depth > 0 {
+                                    v_pre_depth -= 1;
+                                }
                                 break;
                             }
                         }
                     }
                 }
                 HtmlTokenKind::Cdata(text) => {
-                    push_text_and_interpolations(
-                        &mut ast,
-                        current_parent,
-                        source.file_id,
-                        source.base_offset + token.start,
-                        &text,
-                        options,
-                    );
+                    if v_pre_depth > 0 {
+                        push_text(
+                            &mut ast,
+                            current_parent,
+                            source.file_id,
+                            source.base_offset + token.start,
+                            &text,
+                        );
+                    } else {
+                        push_text_and_interpolations(
+                            &mut ast,
+                            current_parent,
+                            source.file_id,
+                            source.base_offset + token.start,
+                            &text,
+                            options,
+                        );
+                    }
                 }
                 HtmlTokenKind::Doctype(_) | HtmlTokenKind::Eof => {}
+            }
+            if eof {
+                break;
             }
         }
         normalize_vue3_parse_text(&mut ast, options);
@@ -415,12 +459,24 @@ fn vue3_element_kind(
     options: &Vue3CompilerOptions,
     file_id: FileId,
     base_offset: usize,
+    in_v_pre: bool,
 ) -> Vue3NodeKind {
     let props = attributes
         .into_iter()
-        .map(|attr| vue3_prop_from_attr(attr, file_id, base_offset))
+        .filter(|attr| !(in_v_pre && attr.name == "v-pre"))
+        .map(|attr| {
+            if in_v_pre {
+                vue3_attribute_from_attr(attr, file_id, base_offset)
+            } else {
+                vue3_prop_from_attr(attr, file_id, base_offset)
+            }
+        })
         .collect::<Vec<_>>();
-    let tag_type = vue3_tag_type(&tag, &props, options);
+    let tag_type = if in_v_pre {
+        Vue3ElementType::Element
+    } else {
+        vue3_tag_type(&tag, &props, options)
+    };
     Vue3NodeKind::Element(Vue3Element {
         tag,
         tag_type,
@@ -494,6 +550,45 @@ fn vue3_prop_from_attr(
     file_id: FileId,
     base_offset: usize,
 ) -> Vue3Prop {
+    let parsed_attr = vue3_attr_from_html(attr, file_id, base_offset);
+    let attr = parsed_attr.attr;
+    if let Some(parsed) = parse_vue3_directive(&attr.name, attr.name_span) {
+        let (directive_name, arg, modifiers, is_dynamic_arg, arg_span, modifier_spans) = parsed;
+        Vue3Prop::Directive(Vue3Directive {
+            name: directive_name,
+            raw_name: attr.name,
+            arg: arg.map(Vue3Expression::Raw),
+            exp: attr.value.map(Vue3Expression::Raw),
+            modifiers,
+            is_dynamic_arg,
+            span: attr.span,
+            arg_span,
+            exp_span: parsed_attr.value_content_span.or(attr.value_span),
+            modifier_spans,
+        })
+    } else {
+        Vue3Prop::Attribute(attr)
+    }
+}
+
+fn vue3_attribute_from_attr(
+    attr: vuec_html::HtmlAttribute,
+    file_id: FileId,
+    base_offset: usize,
+) -> Vue3Prop {
+    Vue3Prop::Attribute(vue3_attr_from_html(attr, file_id, base_offset).attr)
+}
+
+struct ParsedVue3Attribute {
+    attr: vuec_ast::Vue3Attribute,
+    value_content_span: Option<Span>,
+}
+
+fn vue3_attr_from_html(
+    attr: vuec_html::HtmlAttribute,
+    file_id: FileId,
+    base_offset: usize,
+) -> ParsedVue3Attribute {
     let span = Some(Span::new(
         file_id,
         base_offset + attr.start,
@@ -517,29 +612,16 @@ fn vue3_prop_from_attr(
         vuec_html::HtmlQuoteKind::Single => QuoteKind::Single,
         vuec_html::HtmlQuoteKind::Unquoted => QuoteKind::Unquoted,
     });
-    if let Some(parsed) = parse_vue3_directive(&attr.name, name_span) {
-        let (directive_name, arg, modifiers, is_dynamic_arg, arg_span, modifier_spans) = parsed;
-        Vue3Prop::Directive(Vue3Directive {
-            name: directive_name,
-            raw_name: attr.name,
-            arg: arg.map(Vue3Expression::Raw),
-            exp: attr.value.map(Vue3Expression::Raw),
-            modifiers,
-            is_dynamic_arg,
-            span,
-            arg_span,
-            exp_span: value_content_span.or(value_span),
-            modifier_spans,
-        })
-    } else {
-        Vue3Prop::Attribute(vuec_ast::Vue3Attribute {
+    ParsedVue3Attribute {
+        attr: vuec_ast::Vue3Attribute {
             name: attr.name,
             value: attr.value,
             span,
             name_span,
             value_span,
             quote,
-        })
+        },
+        value_content_span,
     }
 }
 
@@ -2746,9 +2828,20 @@ fn push_text(
     }
     let _id = ast.push_child(
         parent,
-        Vue3NodeKind::text(text),
+        Vue3NodeKind::text(decode_html_text_entities(text)),
         Some(Span::new(file_id, start, start + text.len())),
     );
+}
+
+fn decode_html_text_entities(text: &str) -> String {
+    if !text.contains('&') {
+        return text.to_string();
+    }
+    text.replace("&gt;", ">")
+        .replace("&lt;", "<")
+        .replace("&amp;", "&")
+        .replace("&apos;", "'")
+        .replace("&quot;", "\"")
 }
 
 pub fn base_compile(source: TemplateSource, options: Vue3CompilerOptions) -> CodegenResult {
@@ -2925,5 +3018,96 @@ mod tests {
             .contains("_renderList(_ctx.list, (value, index) =>"));
         assert!(result.code.contains("_toDisplayString(value + index)"));
         assert!(!result.code.contains("_ctx.value + _ctx.index"));
+    }
+
+    #[test]
+    fn base_parse_decodes_builtin_text_entities() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: "&gt;&lt;&amp;&apos;&quot;&foo;".into(),
+            file_id: FileId(0),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let root = ast.root_node().expect("root");
+        let text = ast.node(root.children[0]).expect("text");
+        assert!(matches!(
+            &text.kind,
+            Vue3AstKind::Text(value) if value.value == "><&'\"&foo;"
+        ));
+        assert_eq!(text.span.source(), Some(Span::new(FileId(0), 0, 30)));
+    }
+
+    #[test]
+    fn base_parse_preserves_raw_content_inside_v_pre() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div v-pre :id="foo"><Comp/>{{ bar }}</div><div :id="foo"><Comp/>{{ bar }}</div>"#.into(),
+            file_id: FileId(0),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let root = ast.root_node().expect("root");
+        let with_pre = ast.node(root.children[0]).expect("v-pre div");
+        let Vue3AstKind::Element(with_pre_element) = &with_pre.kind else {
+            panic!("expected element");
+        };
+        assert_eq!(with_pre_element.props.len(), 1);
+        assert!(matches!(
+            &with_pre_element.props[0],
+            Vue3Prop::Attribute(attr) if attr.name == ":id" && attr.value.as_deref() == Some("foo")
+        ));
+        let raw_component = ast.node(with_pre.children[0]).expect("raw component");
+        assert!(matches!(
+            &raw_component.kind,
+            Vue3AstKind::Element(element)
+                if element.tag == "Comp" && element.tag_type == Vue3ElementType::Element
+        ));
+        let raw_text = ast.node(with_pre.children[1]).expect("raw interpolation");
+        assert!(matches!(
+            &raw_text.kind,
+            Vue3AstKind::Text(text) if text.value == "{{ bar }}"
+        ));
+
+        let without_pre = ast.node(root.children[1]).expect("normal div");
+        let Vue3AstKind::Element(without_pre_element) = &without_pre.kind else {
+            panic!("expected element");
+        };
+        assert!(matches!(
+            &without_pre_element.props[0],
+            Vue3Prop::Directive(dir) if dir.name == "bind"
+        ));
+        let component = ast.node(without_pre.children[0]).expect("component");
+        assert!(matches!(
+            &component.kind,
+            Vue3AstKind::Element(element)
+                if element.tag == "Comp" && element.tag_type == Vue3ElementType::Component
+        ));
+        let interpolation = ast.node(without_pre.children[1]).expect("interpolation");
+        assert!(matches!(interpolation.kind, Vue3AstKind::Interpolation(_)));
+    }
+
+    #[test]
+    fn base_parse_splits_half_open_interpolations_inside_v_pre() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: "<div v-pre><span>{{ number </span><span>}}</span></div>".into(),
+            file_id: FileId(0),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let root = ast.root_node().expect("root");
+        let div = ast.node(root.children[0]).expect("div");
+        let first_span = ast.node(div.children[0]).expect("first span");
+        let second_span = ast.node(div.children[1]).expect("second span");
+
+        assert!(matches!(
+            &ast.node(first_span.children[0]).expect("first text").kind,
+            Vue3AstKind::Text(text) if text.value == "{{ number "
+        ));
+        assert!(matches!(
+            &ast.node(second_span.children[0]).expect("second text").kind,
+            Vue3AstKind::Text(text) if text.value == "}}"
+        ));
     }
 }

@@ -25,9 +25,18 @@
 - [x] Vue 3 compiler-core alias-runtime `v-bind` slice for `vBind.spec.ts`.
 - [x] Classify Vue 3 compiler-core conformance coverage as `rust-backed`, `shim-backed`, or `mixed` in reports.
 - [x] Vue 3 compiler-core Rust-backed `baseCompile` integration slice for `compile.spec.ts`.
+- [x] Vue 3 compiler-core Rust-backed parser/OXC projection slice for `parse.spec.ts`.
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Implemented a Rust-backed Vue 3 parser/projection slice for official `compiler-core/__tests__/parse.spec.ts`.
+- `vuec_vue3_core::base_parse` now streams tokens so parser state can switch interpolation scanning off inside `v-pre`; `v-pre` strips its own marker, keeps raw directive-looking attrs as attributes, forces nested components to plain elements, and preserves half-open interpolation text across nested tags.
+- Added builtin text entity decoding for text nodes while preserving original source spans.
+- Extended `vuec_node_bridge` public AST projection with Rust/OXC-backed expression AST summaries under `prefixIdentifiers`, including interpolation, dynamic `v-bind`, multi-statement `v-on`, `v-slot` params, and `v-for.forParseResult`.
+- Added a broader Rust bridge parse diagnostic subset for official parser error codes around CDATA, duplicate attributes, EOF, missing values/names, invalid attribute characters, invalid/missing end tags, missing interpolation end, and missing dynamic directive argument ends.
+- Full Vue 3 core conformance is still intentionally failing: `356/652` official tests pass and `296` fail. The latest report records `rust-backed.pass=108`, `rust-backed.total=154`, `mixed.pass=248`, and `mixed.total=498`; `parse.spec.ts` is `105/151` passing.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p vuec_ast -p vuec_html -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_html -p vuec_vue3_core -p vuec_node_bridge`, `cargo build -p vuec_node_bridge`, direct alias smoke checks for parse-expression AST fields, and `cargo xtask run-conformance --suite vue3-core` (expected fail with `356/652` pass, `296` fail).
 
 - Implemented the first Rust-backed Vue 3 compiler-core `baseCompile` integration slice in `vuec_vue3_core`.
 - Rust codegen now handles the official integration fixture path for static props, `:class` normalization, `v-if` + `v-else`, basic `v-for` render-list output, text vnode wrapping, helper collection/order, and `prefixIdentifiers` local scoping for v-for aliases.

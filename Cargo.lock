@@ -929,10 +929,13 @@ name = "vuec_node_bridge"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "oxc_ast",
+ "oxc_span",
  "serde",
  "serde_json",
  "vuec_ast",
  "vuec_html",
+ "vuec_js",
  "vuec_sfc",
  "vuec_source",
  "vuec_style",

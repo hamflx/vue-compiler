@@ -1,10 +1,13 @@
 #![forbid(unsafe_code)]
 
 use anyhow::{bail, Context, Result};
+use oxc_ast::ast::{Expression, Statement};
+use oxc_span::SourceType;
 use serde_json::{json, Value};
 use std::io::{self, Read};
 use vuec_ast::{NodeSpan, Vue3Ast, Vue3AstKind, Vue3Expression, Vue3Prop};
 use vuec_html::{HtmlTokenKind, HtmlTokenizer};
+use vuec_js::JsAstStore;
 use vuec_sfc::{
     SfcBlock, SfcBlockAttrs, SfcCompiler, SfcDescriptor, SfcScriptBlock, SfcScriptCompileOptions,
     SfcStyleCompileOptions, SfcTemplateCompileOptions,
@@ -97,6 +100,7 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
                 &source.source,
                 source.base_offset,
                 include_sfc_inner_loc,
+                &options,
             ))
         }
         "vue3.dom.compile" => {
@@ -156,6 +160,7 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
                 &source.source,
                 source.base_offset,
                 include_sfc_inner_loc,
+                &options.core,
             ))
         }
         "vue3.ssr.compile" => {
@@ -665,11 +670,12 @@ fn vue3_parse_value(
     source: &str,
     base_offset: usize,
     include_sfc_inner_loc: bool,
+    options: &Vue3CompilerOptions,
 ) -> Value {
     json!({
         "type": 0,
         "source": source,
-        "children": vue3_root_children(ast, source, base_offset, include_sfc_inner_loc),
+        "children": vue3_root_children(ast, source, base_offset, include_sfc_inner_loc, options),
         "helpers": [],
         "components": [],
         "directives": [],
@@ -688,6 +694,7 @@ fn vue3_root_children(
     source: &str,
     base_offset: usize,
     include_sfc_inner_loc: bool,
+    options: &Vue3CompilerOptions,
 ) -> Vec<Value> {
     ast.node(ast.root)
         .map(|root| {
@@ -695,7 +702,14 @@ fn vue3_root_children(
                 .iter()
                 .filter_map(|child_id| ast.node(*child_id))
                 .map(|node| {
-                    vue3_node_summary(ast, source, base_offset, node.id, include_sfc_inner_loc)
+                    vue3_node_summary(
+                        ast,
+                        source,
+                        base_offset,
+                        node.id,
+                        include_sfc_inner_loc,
+                        options,
+                    )
                 })
                 .collect()
         })
@@ -708,6 +722,7 @@ fn vue3_node_summary(
     base_offset: usize,
     node_id: vuec_ast::NodeId,
     include_sfc_inner_loc: bool,
+    options: &Vue3CompilerOptions,
 ) -> Value {
     let Some(node) = ast.node(node_id) else {
         return Value::Null;
@@ -716,7 +731,7 @@ fn vue3_node_summary(
         Vue3AstKind::Root(_) => json!({
             "type": 0,
             "source": source,
-            "children": node.children.iter().filter_map(|child_id| ast.node(*child_id)).map(|child| vue3_node_summary(ast, source, base_offset, child.id, include_sfc_inner_loc)).collect::<Vec<_>>(),
+            "children": node.children.iter().filter_map(|child_id| ast.node(*child_id)).map(|child| vue3_node_summary(ast, source, base_offset, child.id, include_sfc_inner_loc, options)).collect::<Vec<_>>(),
             "helpers": [],
             "components": [],
             "directives": [],
@@ -733,8 +748,8 @@ fn vue3_node_summary(
                 "tag": element.tag,
                 "ns": vue3_namespace_value(element.ns),
                 "tagType": vue3_element_type_value(element.tag_type),
-                "props": element.props.iter().map(|prop| vue3_prop_value(source, base_offset, prop)).collect::<Vec<_>>(),
-                "children": node.children.iter().filter_map(|child_id| ast.node(*child_id)).map(|child| vue3_node_summary(ast, source, base_offset, child.id, include_sfc_inner_loc)).collect::<Vec<_>>(),
+                "props": element.props.iter().map(|prop| vue3_prop_value(source, base_offset, prop, options)).collect::<Vec<_>>(),
+                "children": node.children.iter().filter_map(|child_id| ast.node(*child_id)).map(|child| vue3_node_summary(ast, source, base_offset, child.id, include_sfc_inner_loc, options)).collect::<Vec<_>>(),
                 "loc": vue3_loc_value(source, base_offset, &node.span),
                 "codegenNode": Value::Null,
                 "isSelfClosing": if element.self_closing { json!(true) } else { json!(null) },
@@ -751,7 +766,7 @@ fn vue3_node_summary(
         }),
         Vue3AstKind::Interpolation(interpolation) => json!({
             "type": 5,
-            "content": vue3_expression_value(source, base_offset, &interpolation.expression, &node.span, false),
+            "content": vue3_expression_value(source, base_offset, &interpolation.expression, &node.span, false, options, Vue3ExpressionAstMode::Expression),
             "loc": vue3_loc_value(source, base_offset, &node.span),
         }),
         Vue3AstKind::Comment(comment) => json!({
@@ -770,11 +785,250 @@ fn vue3_node_summary(
 
 fn vue3_parse_diagnostics(ast: &Vue3Ast, source: &str, base_offset: usize) -> Vec<Value> {
     let mut diagnostics = Vec::new();
+    collect_html_parse_error_diagnostics(source, &mut diagnostics);
     collect_invalid_lt_diagnostics(source, &mut diagnostics);
     collect_missing_interpolation_end_diagnostics(source, &mut diagnostics);
     collect_invalid_end_tag_diagnostics(ast, source, base_offset, &mut diagnostics);
     collect_missing_directive_name_diagnostics(ast, source, base_offset, &mut diagnostics);
     diagnostics
+}
+
+fn collect_html_parse_error_diagnostics(source: &str, diagnostics: &mut Vec<Value>) {
+    if source.ends_with('<') {
+        diagnostics.push(vue3_error_value(
+            5,
+            vue3_source_loc_value(source, source.len(), source.len()),
+        ));
+    } else if source.ends_with("</") {
+        diagnostics.push(vue3_error_value(
+            5,
+            vue3_source_loc_value(source, source.len(), source.len()),
+        ));
+    }
+    collect_missing_end_tag_name_diagnostics(source, diagnostics);
+
+    let mut stack = Vec::<String>::new();
+    for token in HtmlTokenizer::new(source).tokenize() {
+        match token.kind {
+            HtmlTokenKind::StartTag {
+                name,
+                attributes,
+                self_closing,
+            } => {
+                let incomplete = tag_token_is_incomplete(source, token.start, token.end);
+                collect_start_tag_parse_errors(
+                    source,
+                    token.start,
+                    token.end,
+                    &attributes,
+                    diagnostics,
+                );
+                if incomplete {
+                    diagnostics.push(vue3_error_value(
+                        9,
+                        vue3_source_loc_value(source, source.len(), source.len()),
+                    ));
+                } else if !self_closing {
+                    stack.push(name);
+                }
+            }
+            HtmlTokenKind::EndTag { .. } => {
+                if tag_token_is_incomplete(source, token.start, token.end) {
+                    diagnostics.push(vue3_error_value(
+                        9,
+                        vue3_source_loc_value(source, source.len(), source.len()),
+                    ));
+                }
+            }
+            HtmlTokenKind::Comment(_) => {
+                if source[token.start..].starts_with("<!--")
+                    && token.end == source.len()
+                    && !source[token.start..token.end].ends_with("-->")
+                {
+                    diagnostics.push(vue3_error_value(
+                        7,
+                        vue3_source_loc_value(source, source.len(), source.len()),
+                    ));
+                }
+            }
+            HtmlTokenKind::Cdata(_) => {
+                if !stack
+                    .iter()
+                    .any(|tag| matches!(tag.as_str(), "svg" | "math"))
+                {
+                    diagnostics.push(vue3_error_value(
+                        1,
+                        vue3_source_loc_value(source, token.start, token.start),
+                    ));
+                }
+                if source[token.start..].starts_with("<![CDATA[")
+                    && token.end == source.len()
+                    && !source[token.start..token.end].ends_with("]]>")
+                {
+                    diagnostics.push(vue3_error_value(
+                        6,
+                        vue3_source_loc_value(source, source.len(), source.len()),
+                    ));
+                }
+            }
+            HtmlTokenKind::Text(_) | HtmlTokenKind::Doctype(_) | HtmlTokenKind::Eof => {}
+        }
+    }
+}
+
+fn tag_token_is_incomplete(source: &str, start: usize, end: usize) -> bool {
+    source
+        .get(start..end)
+        .is_some_and(|slice| !slice.ends_with('>'))
+}
+
+fn collect_missing_end_tag_name_diagnostics(source: &str, diagnostics: &mut Vec<Value>) {
+    let mut cursor = 0usize;
+    while let Some(offset) = source[cursor..].find("</>") {
+        let start = cursor + offset;
+        diagnostics.push(vue3_error_value(
+            14,
+            vue3_source_loc_value(source, start + 2, start + 2),
+        ));
+        cursor = start + 3;
+    }
+}
+
+fn collect_start_tag_parse_errors(
+    source: &str,
+    start: usize,
+    end: usize,
+    attributes: &[vuec_html::HtmlAttribute],
+    diagnostics: &mut Vec<Value>,
+) {
+    collect_unexpected_equals_before_attribute_name(source, start, end, attributes, diagnostics);
+    collect_unexpected_solidus_in_tag(source, start, end, attributes, diagnostics);
+
+    let mut seen_attrs = Vec::<String>::new();
+    for attr in attributes {
+        if seen_attrs.iter().any(|seen| seen == &attr.name) {
+            diagnostics.push(vue3_error_value(
+                2,
+                vue3_source_loc_value(source, attr.name_start, attr.name_start),
+            ));
+        } else {
+            seen_attrs.push(attr.name.clone());
+        }
+
+        if let Some(offset) = attr
+            .name
+            .char_indices()
+            .find_map(|(index, ch)| matches!(ch, '"' | '\'' | '<').then_some(index))
+        {
+            let absolute = attr.name_start + offset;
+            diagnostics.push(vue3_error_value(
+                17,
+                vue3_source_loc_value(source, absolute, absolute),
+            ));
+        }
+
+        if attr.name.contains('[') && !attr.name.contains(']') {
+            diagnostics.push(vue3_error_value(
+                27,
+                vue3_source_loc_value(source, attr.name_end, attr.name_end),
+            ));
+        }
+
+        if attr.value.as_deref() == Some("")
+            && matches!(attr.quote, Some(vuec_html::HtmlQuoteKind::Unquoted))
+            && attr
+                .value_start
+                .and_then(|value_start| source.as_bytes().get(value_start).copied())
+                == Some(b'>')
+        {
+            let offset = attr.value_start.unwrap_or(attr.end);
+            diagnostics.push(vue3_error_value(
+                13,
+                vue3_source_loc_value(source, offset, offset),
+            ));
+        }
+
+        if matches!(attr.quote, Some(vuec_html::HtmlQuoteKind::Unquoted)) {
+            if let (Some(value_start), Some(value_end)) =
+                (attr.value_content_start, attr.value_content_end)
+            {
+                if let Some(offset) =
+                    first_unexpected_unquoted_attribute_value_char(source, value_start, value_end)
+                {
+                    diagnostics.push(vue3_error_value(
+                        18,
+                        vue3_source_loc_value(source, offset, offset),
+                    ));
+                }
+            }
+        }
+    }
+}
+
+fn collect_unexpected_equals_before_attribute_name(
+    source: &str,
+    start: usize,
+    end: usize,
+    attributes: &[vuec_html::HtmlAttribute],
+    diagnostics: &mut Vec<Value>,
+) {
+    for offset in start..end {
+        if source.as_bytes().get(offset) != Some(&b'=') {
+            continue;
+        }
+        if attributes
+            .iter()
+            .any(|attr| offset >= attr.start && offset < attr.end)
+        {
+            continue;
+        }
+        diagnostics.push(vue3_error_value(
+            19,
+            vue3_source_loc_value(source, offset, offset),
+        ));
+    }
+}
+
+fn collect_unexpected_solidus_in_tag(
+    source: &str,
+    start: usize,
+    end: usize,
+    attributes: &[vuec_html::HtmlAttribute],
+    diagnostics: &mut Vec<Value>,
+) {
+    for offset in start..end {
+        if source.as_bytes().get(offset) != Some(&b'/') {
+            continue;
+        }
+        if offset == start + 1 {
+            continue;
+        }
+        if attributes.iter().any(|attr| {
+            attr.value_content_start
+                .zip(attr.value_content_end)
+                .is_some_and(|(value_start, value_end)| offset >= value_start && offset < value_end)
+        }) {
+            continue;
+        }
+        if source.as_bytes().get(offset + 1) == Some(&b'>') {
+            continue;
+        }
+        diagnostics.push(vue3_error_value(
+            22,
+            vue3_source_loc_value(source, offset, offset),
+        ));
+    }
+}
+
+fn first_unexpected_unquoted_attribute_value_char(
+    source: &str,
+    start: usize,
+    end: usize,
+) -> Option<usize> {
+    source
+        .get(start..end)?
+        .char_indices()
+        .find_map(|(index, ch)| matches!(ch, '"' | '\'' | '<' | '=' | '`').then_some(start + index))
 }
 
 fn collect_invalid_lt_diagnostics(source: &str, diagnostics: &mut Vec<Value>) {
@@ -794,15 +1048,29 @@ fn collect_invalid_lt_diagnostics(source: &str, diagnostics: &mut Vec<Value>) {
                 continue;
             }
             let global_index = token.start + local_index;
-            if source
-                .as_bytes()
-                .get(global_index + 1)
-                .is_some_and(|next| !matches!(*next, b'/' | b'!' | b'A'..=b'Z' | b'a'..=b'z'))
-            {
-                diagnostics.push(vue3_error_value(
-                    12,
-                    vue3_source_loc_value(source, global_index, global_index),
-                ));
+            match source.as_bytes().get(global_index + 1).copied() {
+                Some(b'?') => diagnostics.push(vue3_error_value(
+                    21,
+                    vue3_source_loc_value(source, global_index + 1, global_index + 1),
+                )),
+                Some(b'/')
+                    if source
+                        .as_bytes()
+                        .get(global_index + 2)
+                        .is_some_and(u8::is_ascii_whitespace) =>
+                {
+                    diagnostics.push(vue3_error_value(
+                        23,
+                        vue3_source_loc_value(source, global_index, global_index),
+                    ));
+                }
+                Some(next) if !matches!(next, b'/' | b'!' | b'A'..=b'Z' | b'a'..=b'z') => {
+                    diagnostics.push(vue3_error_value(
+                        12,
+                        vue3_source_loc_value(source, global_index, global_index),
+                    ));
+                }
+                _ => {}
             }
         }
     }
@@ -825,16 +1093,76 @@ fn default_interpolation_ranges(text: &str) -> Vec<(usize, usize)> {
 }
 
 fn collect_missing_interpolation_end_diagnostics(source: &str, diagnostics: &mut Vec<Value>) {
+    let mut stack = Vec::<String>::new();
+    let mut v_pre_depth = 0usize;
+    let mut tokenizer = HtmlTokenizer::new(source);
+    loop {
+        if v_pre_depth > 0 {
+            tokenizer.set_interpolation_delimiters("", "");
+        } else {
+            tokenizer.set_interpolation_delimiters("{{", "}}");
+        }
+        let token = tokenizer.next_token();
+        let eof = matches!(token.kind, HtmlTokenKind::Eof);
+        match token.kind {
+            HtmlTokenKind::Text(text) if v_pre_depth == 0 => {
+                collect_missing_interpolation_end_in_text(source, token.start, &text, diagnostics);
+            }
+            HtmlTokenKind::StartTag {
+                name,
+                attributes,
+                self_closing,
+            } => {
+                let starts_v_pre =
+                    v_pre_depth == 0 && attributes.iter().any(|attr| attr.name == "v-pre");
+                let in_v_pre = v_pre_depth > 0 || starts_v_pre;
+                if !self_closing {
+                    stack.push(name);
+                    if in_v_pre {
+                        v_pre_depth += 1;
+                    }
+                }
+            }
+            HtmlTokenKind::EndTag { name } => {
+                while let Some(open) = stack.pop() {
+                    let was_in_v_pre = v_pre_depth > 0;
+                    if was_in_v_pre {
+                        v_pre_depth -= 1;
+                    }
+                    if open.eq_ignore_ascii_case(&name) {
+                        break;
+                    }
+                }
+            }
+            HtmlTokenKind::Cdata(_)
+            | HtmlTokenKind::Text(_)
+            | HtmlTokenKind::Comment(_)
+            | HtmlTokenKind::Doctype(_)
+            | HtmlTokenKind::Eof => {}
+        }
+        if eof {
+            break;
+        }
+    }
+}
+
+fn collect_missing_interpolation_end_in_text(
+    source: &str,
+    token_start: usize,
+    text: &str,
+    diagnostics: &mut Vec<Value>,
+) {
     let mut cursor = 0usize;
-    while let Some(open_offset) = source[cursor..].find("{{") {
+    while let Some(open_offset) = text[cursor..].find("{{") {
         let open = cursor + open_offset;
         let inner_start = open + 2;
-        if let Some(close_offset) = source[inner_start..].find("}}") {
+        if let Some(close_offset) = text[inner_start..].find("}}") {
             cursor = inner_start + close_offset + 2;
         } else {
+            let global_open = token_start + open;
             diagnostics.push(vue3_error_value(
                 25,
-                vue3_source_loc_value(source, source.len(), source.len()),
+                vue3_source_loc_value(source, global_open, global_open),
             ));
             break;
         }
@@ -847,37 +1175,50 @@ fn collect_invalid_end_tag_diagnostics(
     _base_offset: usize,
     diagnostics: &mut Vec<Value>,
 ) {
-    let mut stack = Vec::<String>::new();
+    let _ = ast;
+    let mut stack = Vec::<OpenElement>::new();
     for token in HtmlTokenizer::new(source).tokenize() {
         match token.kind {
             HtmlTokenKind::StartTag {
                 name, self_closing, ..
             } => {
-                if !self_closing
-                    && ast.nodes.iter().any(|node| {
-                        matches!(&node.kind, Vue3AstKind::Element(element) if element.tag.eq_ignore_ascii_case(&name))
-                    })
-                {
-                    stack.push(name);
+                if !self_closing && !tag_token_is_incomplete(source, token.start, token.end) {
+                    stack.push(OpenElement {
+                        name,
+                        start: token.start,
+                    });
                 }
             }
             HtmlTokenKind::EndTag { name } => {
+                if name.is_empty() || tag_token_is_incomplete(source, token.start, token.end) {
+                    continue;
+                }
                 if stack
                     .last()
-                    .is_some_and(|open| open.eq_ignore_ascii_case(&name))
+                    .is_some_and(|open| open.name.eq_ignore_ascii_case(&name))
                 {
                     stack.pop();
-                } else if !stack.iter().any(|open| open.eq_ignore_ascii_case(&name)) {
+                } else if let Some(matching_index) = stack
+                    .iter()
+                    .rposition(|open| open.name.eq_ignore_ascii_case(&name))
+                {
+                    while stack.len() > matching_index + 1 {
+                        if let Some(open) = stack.pop() {
+                            diagnostics.push(vue3_error_value(
+                                24,
+                                vue3_source_loc_value(source, open.start, open.start),
+                            ));
+                        }
+                    }
+                    stack.pop();
+                } else if !stack
+                    .last()
+                    .is_some_and(|open| raw_text_tag_ignores_end_tag(&open.name, &name))
+                {
                     diagnostics.push(vue3_error_value(
                         23,
                         vue3_source_loc_value(source, token.start, token.start),
                     ));
-                } else {
-                    while let Some(open) = stack.pop() {
-                        if open.eq_ignore_ascii_case(&name) {
-                            break;
-                        }
-                    }
                 }
             }
             HtmlTokenKind::Text(_)
@@ -887,6 +1228,21 @@ fn collect_invalid_end_tag_diagnostics(
             | HtmlTokenKind::Eof => {}
         }
     }
+    while let Some(open) = stack.pop() {
+        diagnostics.push(vue3_error_value(
+            24,
+            vue3_source_loc_value(source, open.start, open.start),
+        ));
+    }
+}
+
+struct OpenElement {
+    name: String,
+    start: usize,
+}
+
+fn raw_text_tag_ignores_end_tag(open: &str, close: &str) -> bool {
+    matches!(open, "textarea" | "title") && !open.eq_ignore_ascii_case(close)
 }
 
 fn collect_missing_directive_name_diagnostics(
@@ -938,29 +1294,46 @@ fn vue3_element_type_value(tag_type: vuec_ast::Vue3ElementType) -> u8 {
     }
 }
 
-fn vue3_prop_value(source: &str, base_offset: usize, prop: &Vue3Prop) -> Value {
+fn vue3_prop_value(
+    source: &str,
+    base_offset: usize,
+    prop: &Vue3Prop,
+    options: &Vue3CompilerOptions,
+) -> Value {
     match prop {
         Vue3Prop::Attribute(attr) => vue3_attribute_value(source, base_offset, attr),
-        Vue3Prop::Directive(dir) => json!({
-            "type": 7,
-            "name": dir.name,
-            "rawName": dir.raw_name,
-            "exp": dir.exp.as_ref().map(|exp| vue3_expression_value_with_mode(source, base_offset, exp, &span_to_node_span(dir.exp_span), false, Vue3ExpressionProjectionMode::Exact)),
-            "arg": dir.arg.as_ref().map(|arg| vue3_expression_value_with_mode(source, base_offset, arg, &span_to_node_span(dir.arg_span), !dir.is_dynamic_arg, Vue3ExpressionProjectionMode::ExactLocTrimContent)),
-            "modifiers": dir.modifiers.iter().enumerate().map(|(index, modifier)| {
-                let loc = dir
-                    .modifier_spans
-                    .get(index)
-                    .map(|span| vue3_loc_value(source, base_offset, span))
-                    .unwrap_or_else(vue3_loc_stub_value);
-                vue3_simple_expression_value(
-                    modifier,
-                    !matches!(dir.modifier_spans.get(index), Some(NodeSpan::Missing { .. })),
-                    loc,
-                )
-            }).collect::<Vec<_>>(),
-            "loc": dir.span.map(|span| vue3_source_span_value(source, base_offset, span)).unwrap_or_else(vue3_loc_stub_value),
-        }),
+        Vue3Prop::Directive(dir) => {
+            let exp_mode = match dir.name.as_str() {
+                "on" => Vue3ExpressionAstMode::Statements,
+                "slot" => Vue3ExpressionAstMode::Params,
+                _ => Vue3ExpressionAstMode::Expression,
+            };
+            let mut value = json!({
+                "type": 7,
+                "name": dir.name,
+                "rawName": dir.raw_name,
+                "exp": dir.exp.as_ref().map(|exp| vue3_expression_value_with_mode(source, base_offset, exp, &span_to_node_span(dir.exp_span), false, Vue3ExpressionProjectionMode::Exact, options, exp_mode)),
+                "arg": dir.arg.as_ref().map(|arg| vue3_expression_value_with_mode(source, base_offset, arg, &span_to_node_span(dir.arg_span), !dir.is_dynamic_arg, Vue3ExpressionProjectionMode::ExactLocTrimContent, options, Vue3ExpressionAstMode::Expression)),
+                "modifiers": dir.modifiers.iter().enumerate().map(|(index, modifier)| {
+                    let loc = dir
+                        .modifier_spans
+                        .get(index)
+                        .map(|span| vue3_loc_value(source, base_offset, span))
+                        .unwrap_or_else(vue3_loc_stub_value);
+                    vue3_simple_expression_value(
+                        modifier,
+                        !matches!(dir.modifier_spans.get(index), Some(NodeSpan::Missing { .. })),
+                        loc,
+                    )
+                }).collect::<Vec<_>>(),
+                "loc": dir.span.map(|span| vue3_source_span_value(source, base_offset, span)).unwrap_or_else(vue3_loc_stub_value),
+            });
+            if dir.name == "for" {
+                value["forParseResult"] =
+                    vue3_for_parse_result_value(source, base_offset, dir, options);
+            }
+            value
+        }
     }
 }
 
@@ -1034,6 +1407,8 @@ fn vue3_expression_value(
     expression: &Vue3Expression,
     fallback_span: &NodeSpan,
     is_static: bool,
+    options: &Vue3CompilerOptions,
+    ast_mode: Vue3ExpressionAstMode,
 ) -> Value {
     vue3_expression_value_with_mode(
         source_text,
@@ -1042,6 +1417,8 @@ fn vue3_expression_value(
         fallback_span,
         is_static,
         Vue3ExpressionProjectionMode::Trim,
+        options,
+        ast_mode,
     )
 }
 
@@ -1052,6 +1429,13 @@ enum Vue3ExpressionProjectionMode {
     Exact,
 }
 
+#[derive(Clone, Copy)]
+enum Vue3ExpressionAstMode {
+    Expression,
+    Params,
+    Statements,
+}
+
 fn vue3_expression_value_with_mode(
     source_text: &str,
     base_offset: usize,
@@ -1059,6 +1443,8 @@ fn vue3_expression_value_with_mode(
     fallback_span: &NodeSpan,
     is_static: bool,
     mode: Vue3ExpressionProjectionMode,
+    options: &Vue3CompilerOptions,
+    ast_mode: Vue3ExpressionAstMode,
 ) -> Value {
     let source = expression.source_string();
     let loc = match mode {
@@ -1075,7 +1461,11 @@ fn vue3_expression_value_with_mode(
             source.trim().to_string()
         }
     };
-    vue3_simple_expression_value(&content, is_static, loc)
+    let mut value = vue3_simple_expression_value(&content, is_static, loc);
+    if let Some(ast_value) = vue3_expression_ast_value(&content, is_static, options, ast_mode) {
+        value["ast"] = ast_value;
+    }
+    value
 }
 
 fn vue3_simple_expression_value(source: &str, is_static: bool, loc: Value) -> Value {
@@ -1086,6 +1476,232 @@ fn vue3_simple_expression_value(source: &str, is_static: bool, loc: Value) -> Va
         "isStatic": is_static,
         "constType": if is_static { 3 } else { 0 },
     })
+}
+
+fn vue3_expression_ast_value(
+    source: &str,
+    is_static: bool,
+    options: &Vue3CompilerOptions,
+    mode: Vue3ExpressionAstMode,
+) -> Option<Value> {
+    if is_static || !options.prefix_identifiers || source.trim().is_empty() {
+        return None;
+    }
+    let trimmed = source.trim();
+    if is_simple_identifier(trimmed) {
+        return Some(Value::Null);
+    }
+    let store = JsAstStore::new();
+    let source_type = vue3_expression_source_type(options);
+    match mode {
+        Vue3ExpressionAstMode::Expression => {
+            let expression_source = format!("({trimmed})");
+            store
+                .parse_expression(&expression_source, source_type)
+                .ok()
+                .map(|expression| json!({ "type": expression_type_name(&expression) }))
+        }
+        Vue3ExpressionAstMode::Params => {
+            let expression_source = format!("({trimmed})=>{{}}");
+            store
+                .parse_expression(&expression_source, source_type)
+                .ok()
+                .map(|expression| json!({ "type": expression_type_name(&expression) }))
+        }
+        Vue3ExpressionAstMode::Statements => {
+            let program_source = format!(" {trimmed} ");
+            let program = store.parse_program(&program_source, source_type);
+            Some(json!({
+                "type": "Program",
+                "body": program.program.body.iter().map(statement_ast_value).collect::<Vec<_>>(),
+            }))
+        }
+    }
+}
+
+fn vue3_for_parse_result_value(
+    source: &str,
+    base_offset: usize,
+    dir: &vuec_ast::Vue3Directive,
+    options: &Vue3CompilerOptions,
+) -> Value {
+    let expression = dir
+        .exp
+        .as_ref()
+        .map(Vue3Expression::source_string)
+        .unwrap_or_default();
+    let Some((aliases, iterable)) = split_v_for_expression(&expression) else {
+        return Value::Null;
+    };
+    let source_loc = dir
+        .exp_span
+        .and_then(|span| {
+            let local_start = span.start.0.saturating_sub(base_offset);
+            let local_end = span.end.0.saturating_sub(base_offset).min(source.len());
+            source
+                .get(local_start..local_end)
+                .and_then(|slice| slice.find(iterable).map(|offset| local_start + offset))
+                .map(|start| vue3_source_loc_value(source, start, start + iterable.len()))
+        })
+        .unwrap_or_else(vue3_loc_stub_value);
+    let parts = split_v_for_aliases(aliases);
+    json!({
+        "source": vue3_simple_expression_with_ast_value(iterable, false, source_loc, options, Vue3ExpressionAstMode::Expression),
+        "value": parts.first().map(|value| {
+            vue3_simple_expression_with_ast_value(value, false, vue3_loc_stub_value(), options, Vue3ExpressionAstMode::Params)
+        }),
+        "key": parts.get(1).map(|value| {
+            vue3_simple_expression_with_ast_value(value, false, vue3_loc_stub_value(), options, Vue3ExpressionAstMode::Expression)
+        }),
+        "index": parts.get(2).map(|value| {
+            vue3_simple_expression_with_ast_value(value, false, vue3_loc_stub_value(), options, Vue3ExpressionAstMode::Expression)
+        }),
+        "finalized": false,
+    })
+}
+
+fn vue3_simple_expression_with_ast_value(
+    source: &str,
+    is_static: bool,
+    loc: Value,
+    options: &Vue3CompilerOptions,
+    ast_mode: Vue3ExpressionAstMode,
+) -> Value {
+    let mut value = vue3_simple_expression_value(source, is_static, loc);
+    if let Some(ast_value) = vue3_expression_ast_value(source, is_static, options, ast_mode) {
+        value["ast"] = ast_value;
+    }
+    value
+}
+
+fn vue3_expression_source_type(options: &Vue3CompilerOptions) -> SourceType {
+    if options.is_ts
+        || options
+            .expression_plugins
+            .iter()
+            .any(|plugin| plugin == "typescript")
+    {
+        SourceType::ts()
+    } else {
+        SourceType::mjs()
+    }
+}
+
+fn expression_type_name(expression: &Expression<'_>) -> &'static str {
+    match expression {
+        Expression::ArrayExpression(_) => "ArrayExpression",
+        Expression::ArrowFunctionExpression(_) => "ArrowFunctionExpression",
+        Expression::AssignmentExpression(_) => "AssignmentExpression",
+        Expression::AwaitExpression(_) => "AwaitExpression",
+        Expression::BinaryExpression(_) => "BinaryExpression",
+        Expression::CallExpression(_) => "CallExpression",
+        Expression::ChainExpression(_) => "ChainExpression",
+        Expression::ConditionalExpression(_) => "ConditionalExpression",
+        Expression::FunctionExpression(_) => "FunctionExpression",
+        Expression::Identifier(_) => "Identifier",
+        Expression::LogicalExpression(_) => "LogicalExpression",
+        Expression::ComputedMemberExpression(_)
+        | Expression::StaticMemberExpression(_)
+        | Expression::PrivateFieldExpression(_) => "MemberExpression",
+        Expression::ObjectExpression(_) => "ObjectExpression",
+        Expression::ParenthesizedExpression(parenthesized) => {
+            expression_type_name(&parenthesized.expression)
+        }
+        Expression::SequenceExpression(_) => "SequenceExpression",
+        Expression::TemplateLiteral(_) => "TemplateLiteral",
+        Expression::ThisExpression(_) => "ThisExpression",
+        Expression::UnaryExpression(_) => "UnaryExpression",
+        Expression::UpdateExpression(_) => "UpdateExpression",
+        _ => "Expression",
+    }
+}
+
+fn statement_ast_value(statement: &Statement<'_>) -> Value {
+    json!({ "type": statement_type_name(statement) })
+}
+
+fn statement_type_name(statement: &Statement<'_>) -> &'static str {
+    match statement {
+        Statement::BlockStatement(_) => "BlockStatement",
+        Statement::BreakStatement(_) => "BreakStatement",
+        Statement::ContinueStatement(_) => "ContinueStatement",
+        Statement::DebuggerStatement(_) => "DebuggerStatement",
+        Statement::DoWhileStatement(_) => "DoWhileStatement",
+        Statement::EmptyStatement(_) => "EmptyStatement",
+        Statement::ExpressionStatement(_) => "ExpressionStatement",
+        Statement::ForInStatement(_) => "ForInStatement",
+        Statement::ForOfStatement(_) => "ForOfStatement",
+        Statement::ForStatement(_) => "ForStatement",
+        Statement::IfStatement(_) => "IfStatement",
+        Statement::ReturnStatement(_) => "ReturnStatement",
+        Statement::SwitchStatement(_) => "SwitchStatement",
+        Statement::ThrowStatement(_) => "ThrowStatement",
+        Statement::TryStatement(_) => "TryStatement",
+        Statement::VariableDeclaration(_) => "VariableDeclaration",
+        Statement::WhileStatement(_) => "WhileStatement",
+        _ => "Statement",
+    }
+}
+
+fn split_v_for_expression(source: &str) -> Option<(&str, &str)> {
+    let mut depth = 0usize;
+    let mut index = 0usize;
+    while index < source.len() {
+        let ch = source[index..].chars().next()?;
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            ' ' if depth == 0 => {
+                let rest = &source[index..];
+                if rest.starts_with(" in ") {
+                    return Some((source[..index].trim(), source[index + 4..].trim()));
+                }
+                if rest.starts_with(" of ") {
+                    return Some((source[..index].trim(), source[index + 4..].trim()));
+                }
+            }
+            _ => {}
+        }
+        index += ch.len_utf8();
+    }
+    None
+}
+
+fn split_v_for_aliases(source: &str) -> Vec<String> {
+    let aliases = source
+        .trim()
+        .strip_prefix('(')
+        .and_then(|value| value.strip_suffix(')'))
+        .unwrap_or_else(|| source.trim());
+    split_top_level_csv(aliases)
+        .into_iter()
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn split_top_level_csv(source: &str) -> Vec<&str> {
+    let mut items = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    for (index, ch) in source.char_indices() {
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                let item = source[start..index].trim();
+                if !item.is_empty() {
+                    items.push(item);
+                }
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    let tail = source[start..].trim();
+    if !tail.is_empty() {
+        items.push(tail);
+    }
+    items
 }
 
 fn vue3_expression_loc(
