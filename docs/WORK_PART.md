@@ -22,8 +22,15 @@
 - [x] Vue 3 compiler-core text transform exactness for `transformText.spec.ts`.
 - [x] Vue 3 compiler-core `v-once` transform exactness for `vOnce.spec.ts`.
 - [x] Vue 3 compiler-core slot outlet transform exactness for `transformSlotOutlet.spec.ts`.
+- [x] Vue 3 compiler-core `v-bind` transform exactness for `vBind.spec.ts`.
 
 ## Completed This Round
+
+- Closed the official Vue 3 `compiler-core/__tests__/transforms/vBind.spec.ts` slice. The focused spec now passes `19/19` through the prepared alias Vitest runner.
+- Reworked alias runtime `transformVBindShorthand` and `transformBind` to match official same-name shorthand expansion, empty-expression errors, dynamic argument guards, `.camel`, `.prop`, `.attr`, and prefixIdentifiers compound argument handling.
+- Updated alias runtime element prop construction so dynamic `v-bind` keys are wrapped with `normalizeProps(...)` and keep the official `FULL_PROPS` patch flag shape.
+- Full Vue 3 core conformance improved from `311/652` to `331/652`; the full suite still intentionally fails with `321` remaining failures. Adjacent `transformElement.spec.ts` status is `30/124` passing and still incomplete outside this `v-bind` slice.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p xtask`, `cargo test -p xtask`, `git diff --check`, `cargo xtask verify-npm-alias --version-line vue3 --package @vue/compiler-core`, direct prepared Vitest `vBind.spec.ts` run (`19/19` pass), direct prepared Vitest `transformSlotOutlet.spec.ts` run (`14/14` pass), adjacent prepared Vitest `transformElement.spec.ts` run (`30/124` pass, expected fail), `cargo xtask diff-api --version-line vue3 --package @vue/compiler-core`, `cargo xtask run-option-matrix --version-line vue3 --package @vue/compiler-core`, `cargo xtask run-output-contract --version-line vue3 --package @vue/compiler-core`, and `cargo xtask run-conformance --suite vue3-core` (expected fail with `331/652` pass, `321` fail).
 
 - Closed the official Vue 3 `compiler-core/__tests__/transforms/transformSlotOutlet.spec.ts` slice. The focused spec now passes `14/14` through the prepared alias Vitest runner.
 - Reworked the alias runtime `<slot>` transform to match official `renderSlot` call construction for default/static/dynamic names, `prefixIdentifiers`, slot props, fallback functions, `scopeId` with `slotted: false`, and unexpected custom directive diagnostics.

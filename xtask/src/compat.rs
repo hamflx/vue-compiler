@@ -4549,8 +4549,58 @@ const vue3CoreRuntime = (() => {
       }
     }
   };
-  runtime.transformBind = function transformBind(dir) {
-    return { props: [runtime.createObjectProperty(dir.arg || runtime.createSimpleExpression('dynamic', true), dir.exp || runtime.createSimpleExpression('', true))] };
+  runtime.isBrowserBuild = function isBrowserBuild() {
+    return typeof __BROWSER__ !== 'undefined' && !!__BROWSER__;
+  };
+  runtime.modifierName = function modifierName(modifier) {
+    return typeof modifier === 'string' ? modifier : modifier && modifier.content;
+  };
+  runtime.hasModifier = function hasModifier(dir, name) {
+    return (dir.modifiers || []).some(modifier => runtime.modifierName(modifier) === name);
+  };
+  runtime.injectBindPrefix = function injectBindPrefix(arg, prefix) {
+    if (arg.type === NodeTypes.SIMPLE_EXPRESSION) {
+      if (arg.isStatic) {
+        arg.content = prefix + arg.content;
+      } else {
+        arg.content = `\`${prefix}\${${arg.content}}\``;
+      }
+    } else {
+      arg.children.unshift(`'${prefix}' + (`);
+      arg.children.push(`)`);
+    }
+  };
+  runtime.transformBind = function transformBind(dir, _node, context) {
+    context = context || { helperString: name => `_${runtime.helperNameMap[name] || name}`, inSSR: false, onError: error => { throw error; } };
+    const arg = dir.arg || runtime.createSimpleExpression('', true, dir.loc);
+    let exp = dir.exp;
+    if (exp && exp.type === NodeTypes.SIMPLE_EXPRESSION && !String(exp.content || '').trim()) {
+      if (!runtime.isBrowserBuild()) {
+        context.onError(runtime.createCompilerError(ErrorCodes.X_V_BIND_NO_EXPRESSION, dir.loc));
+        return { props: [runtime.createObjectProperty(arg, runtime.createSimpleExpression('', true, dir.loc))] };
+      }
+      exp = undefined;
+    }
+    if (arg.type !== NodeTypes.SIMPLE_EXPRESSION) {
+      arg.children.unshift(`(`);
+      arg.children.push(`) || ""`);
+    } else if (!arg.isStatic) {
+      arg.content = arg.content ? `${arg.content} || ""` : `""`;
+    }
+    if (runtime.hasModifier(dir, 'camel')) {
+      if (arg.type === NodeTypes.SIMPLE_EXPRESSION) {
+        if (arg.isStatic) arg.content = camelize(arg.content);
+        else arg.content = `${context.helperString(runtime.CAMELIZE)}(${arg.content})`;
+      } else {
+        arg.children.unshift(`${context.helperString(runtime.CAMELIZE)}(`);
+        arg.children.push(`)`);
+      }
+    }
+    if (!context.inSSR) {
+      if (runtime.hasModifier(dir, 'prop')) runtime.injectBindPrefix(arg, '.');
+      if (runtime.hasModifier(dir, 'attr')) runtime.injectBindPrefix(arg, '^');
+    }
+    return { props: [runtime.createObjectProperty(arg, exp)] };
   };
   runtime.transformOn = function transformOn(dir, node, context) {
     const arg = dir.arg || runtime.createSimpleExpression('on', true);
@@ -4621,7 +4671,28 @@ const vue3CoreRuntime = (() => {
   runtime.transformModel = function transformModel(dir) {
     return { props: [runtime.createObjectProperty('modelValue', dir.exp || runtime.createSimpleExpression('', false))] };
   };
-  runtime.transformVBindShorthand = () => {};
+  runtime.transformVBindShorthand = function transformVBindShorthand(node, context) {
+    if (!node || node.type !== NodeTypes.ELEMENT) return;
+    for (const prop of node.props || []) {
+      if (
+        prop.type === NodeTypes.DIRECTIVE
+        && prop.name === 'bind'
+        && (!prop.exp || (runtime.isBrowserBuild() && prop.exp.type === NodeTypes.SIMPLE_EXPRESSION && !String(prop.exp.content || '').trim()))
+        && prop.arg
+      ) {
+        const arg = prop.arg;
+        if (arg.type !== NodeTypes.SIMPLE_EXPRESSION || !arg.isStatic) {
+          context.onError(runtime.createCompilerError(ErrorCodes.X_V_BIND_INVALID_SAME_NAME_ARGUMENT, arg.loc));
+          prop.exp = runtime.createSimpleExpression('', true, arg.loc);
+        } else {
+          const propName = camelize(arg.content);
+          if (/^[A-Za-z_$]/.test(propName[0] || '') || propName[0] === '-') {
+            prop.exp = runtime.createSimpleExpression(propName, false, arg.loc);
+          }
+        }
+      }
+    }
+  };
   runtime.transformElement = function transformElement(node, context) {
     return () => {
       node = context.currentNode;
@@ -4631,6 +4702,7 @@ const vue3CoreRuntime = (() => {
       const tag = isComponent ? runtime.resolveComponentType(node, context) : `"${node.tag}"`;
       let patchFlag;
       let props;
+      let hasDynamicKey = false;
       const dynamicProps = [];
       if (node.props && node.props.length) {
         const objectProps = [];
@@ -4640,9 +4712,10 @@ const vue3CoreRuntime = (() => {
             objectProps.push(runtime.createObjectProperty(prop.name, runtime.createSimpleExpression(prop.value ? prop.value.content : '', true)));
           } else if (prop.name === 'bind' && prop.arg) {
             const transform = context.directiveTransforms && context.directiveTransforms.bind;
-            if (transform) objectProps.push(...((transform(prop, node, context).props) || []));
-            else objectProps.push(runtime.createObjectProperty(prop.arg, prop.exp || runtime.createSimpleExpression('', false)));
-            if (prop.arg.isStatic) dynamicProps.push(prop.arg.content);
+            const result = transform ? transform(prop, node, context) : runtime.transformBind(prop, node, context);
+            objectProps.push(...((result && result.props) || []));
+            if (result && result.props && result.props.some(p => p.key && !runtime.isStaticExp(p.key))) hasDynamicKey = true;
+            else if (prop.arg.isStatic) dynamicProps.push(prop.arg.content);
           } else if (prop.name === 'on' && prop.arg) {
             const transform = context.directiveTransforms && context.directiveTransforms.on;
             const result = transform ? transform(prop, node, context) : runtime.transformOn(prop, node, context);
@@ -4657,7 +4730,10 @@ const vue3CoreRuntime = (() => {
           }
         }
         if (objectProps.length) props = runtime.createObjectExpression(objectProps);
-        if (dynamicProps.length) patchFlag = 8;
+        if (props && hasDynamicKey) {
+          props = runtime.createCallExpression(context.helper(runtime.NORMALIZE_PROPS), [props]);
+          patchFlag = 16;
+        } else if (dynamicProps.length) patchFlag = 8;
         if (directives.length) {
           context.helper(runtime.RESOLVE_DIRECTIVE);
           const directiveArgs = directives.map(d => {
@@ -4903,6 +4979,7 @@ const vue3CoreRuntime = (() => {
   runtime.buildProps = function buildProps(node, context, props = node && node.props || []) {
     const objectProps = [];
     const directives = [];
+    let hasDynamicKey = false;
     for (const prop of props || []) {
       if (prop.type === NodeTypes.ATTRIBUTE) {
         objectProps.push(runtime.createObjectProperty(
@@ -4915,6 +4992,7 @@ const vue3CoreRuntime = (() => {
         const transform = context && context.directiveTransforms && context.directiveTransforms.bind;
         const result = transform ? transform(prop, node, context) : runtime.transformBind(prop, node, context);
         objectProps.push(...((result && result.props) || []));
+        if (result && result.props && result.props.some(p => p.key && !runtime.isStaticExp(p.key))) hasDynamicKey = true;
       } else if (prop.name === 'on' && prop.arg) {
         const transform = context && context.directiveTransforms && context.directiveTransforms.on;
         const result = transform ? transform(prop, node, context) : runtime.transformOn(prop, node, context);
@@ -4926,8 +5004,12 @@ const vue3CoreRuntime = (() => {
         directives.push(prop);
       }
     }
+    let propsExpression = objectProps.length ? runtime.createObjectExpression(objectProps, node && node.loc || locStub) : undefined;
+    if (propsExpression && hasDynamicKey && context && !context.inSSR) {
+      propsExpression = runtime.createCallExpression(context.helper(runtime.NORMALIZE_PROPS), [propsExpression], node && node.loc || locStub);
+    }
     return {
-      props: objectProps.length ? runtime.createObjectExpression(objectProps, node && node.loc || locStub) : undefined,
+      props: propsExpression,
       directives,
       patchFlag: 0,
       dynamicPropNames: [],
