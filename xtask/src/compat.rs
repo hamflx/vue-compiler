@@ -4063,6 +4063,13 @@ pub fn run_conformance(args: &ConformanceArgs) -> JsonReport {
     let requested = select_conformance_suites(args);
     let mut items = Vec::new();
     let mut violations = Vec::new();
+    let mut created = Vec::new();
+    let conformance_targets = conformance_targets(&requested);
+    if let Err(err) = generate_rust_alias_packages(&conformance_targets) {
+        violations.push(format!(
+            "failed to generate Rust alias packages for conformance: {err:#}"
+        ));
+    }
 
     for suite in requested {
         let spec = suite_spec(suite);
@@ -4092,6 +4099,14 @@ pub fn run_conformance(args: &ConformanceArgs) -> JsonReport {
             discover_test_files(&dir, &mut discovered);
         }
         discovered.sort();
+        let readiness = conformance_readiness(spec);
+        let smoke_results = run_conformance_smokes(spec);
+        let smoke_failures = smoke_results
+            .iter()
+            .filter(|result| result.status == "fail")
+            .count();
+        let ready_to_execute =
+            !discovered.is_empty() && readiness.alias_ready && readiness.runner_ready;
         let report_path = PathBuf::from("target")
             .join("conformance")
             .join(lock_hash.as_deref().unwrap_or("unknown-lock"))
@@ -4108,7 +4123,9 @@ pub fn run_conformance(args: &ConformanceArgs) -> JsonReport {
                 "skip": 0,
                 "pending": discovered.len(),
             },
-            "execution": "discovery-only",
+            "execution": if ready_to_execute { "ready" } else { "blocked" },
+            "readiness": readiness,
+            "smoke": smoke_results,
         });
         if let Some(parent) = report_path.parent() {
             if let Err(err) = fs::create_dir_all(parent) {
@@ -4117,8 +4134,10 @@ pub fn run_conformance(args: &ConformanceArgs) -> JsonReport {
         }
         if let Err(err) = write_json(&report_path, &report_body) {
             violations.push(format!("failed to write {}: {err}", report_path.display()));
+        } else {
+            created.push(report_path.display().to_string());
         }
-        let status = if discovered.is_empty() {
+        let status = if discovered.is_empty() || smoke_failures > 0 {
             ReportStatus::Fail
         } else {
             ReportStatus::Pending
@@ -4126,20 +4145,26 @@ pub fn run_conformance(args: &ConformanceArgs) -> JsonReport {
         if discovered.is_empty() {
             violations.push(format!("{} discovered no official test files", spec.name));
         }
+        if smoke_failures > 0 {
+            violations.push(format!(
+                "{} conformance smoke failed for {smoke_failures} alias package(s)",
+                spec.name
+            ));
+        }
         items.push(ReportItem::new(
             spec.name,
             status,
-            format!(
-                "{} official test files discovered; execution pending NAPI alias runner",
-                discovered.len()
-            ),
+            conformance_item_detail(discovered.len(), &readiness),
             Some(report_path),
         ));
     }
 
     let mut report = JsonReport::new("run_conformance", ReportStatus::Pending);
     report.metadata = report.metadata.with_lock_hash(lock_hash);
-    report.with_items(items).with_violations(violations)
+    report
+        .with_items(items)
+        .with_violations(violations)
+        .with_created(created)
 }
 
 pub fn generate_output_contract(scope: &SelectionArgs) -> JsonReport {
@@ -4549,6 +4574,17 @@ fn report_value_status(value: &serde_json::Value) -> ReportStatus {
         }
     }
 
+    if let Some(smokes) = value.get("smoke").and_then(|value| value.as_array()) {
+        for smoke in smokes {
+            seen = true;
+            match smoke.get("status").and_then(|value| value.as_str()) {
+                Some("pass") => {}
+                Some("pending") => merge_status(&mut seen, &mut status, ReportStatus::Pending),
+                Some(_) | None => merge_status(&mut seen, &mut status, ReportStatus::Fail),
+            }
+        }
+    }
+
     if let Some(targets) = value.get("targets").and_then(|value| value.as_array()) {
         for target in targets {
             merge_status(&mut seen, &mut status, report_value_status(target));
@@ -4727,6 +4763,154 @@ struct ConformanceSuiteSpec {
     name: &'static str,
     version_line: VersionLine,
     relative_test_dirs: &'static [&'static str],
+    package_requests: &'static [&'static str],
+    runner_dependencies: &'static [&'static str],
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ConformanceReadiness {
+    alias_ready: bool,
+    runner_ready: bool,
+    package_requests: Vec<String>,
+    runner_dependencies: Vec<String>,
+    missing_alias_packages: Vec<String>,
+    missing_runner_dependencies: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ConformanceSmokeResult {
+    request: String,
+    status: String,
+    detail: String,
+}
+
+fn run_conformance_smokes(spec: ConformanceSuiteSpec) -> Vec<ConformanceSmokeResult> {
+    conformance_smoke_targets(spec)
+        .into_iter()
+        .map(|target| {
+            let request = api_require_request(target);
+            match run_alias_smoke(target, &rust_alias_root(target.version_line)) {
+                Ok(detail) => ConformanceSmokeResult {
+                    request,
+                    status: "pass".into(),
+                    detail,
+                },
+                Err(err) => ConformanceSmokeResult {
+                    request,
+                    status: "fail".into(),
+                    detail: format!("{err:#}"),
+                },
+            }
+        })
+        .collect()
+}
+
+fn conformance_smoke_targets(spec: ConformanceSuiteSpec) -> Vec<TargetSpec> {
+    all_targets()
+        .iter()
+        .copied()
+        .filter(|target| {
+            target.version_line == spec.version_line
+                && spec
+                    .package_requests
+                    .iter()
+                    .any(|request| api_require_request(*target) == *request)
+        })
+        .collect()
+}
+
+fn conformance_targets(suites: &[ConformanceSuite]) -> Vec<TargetSpec> {
+    let mut targets = Vec::new();
+    for suite in suites {
+        for target in conformance_smoke_targets(suite_spec(*suite)) {
+            if !targets.contains(&target) {
+                targets.push(target);
+            }
+        }
+    }
+    targets
+}
+
+fn conformance_readiness(spec: ConformanceSuiteSpec) -> ConformanceReadiness {
+    let alias_root = rust_alias_root(spec.version_line);
+    let npm_root = PathBuf::from("target")
+        .join("compat")
+        .join("npm")
+        .join(spec.version_line.as_str())
+        .join("node_modules");
+    let missing_alias_packages = spec
+        .package_requests
+        .iter()
+        .filter(|request| !alias_package_available(&alias_root, request))
+        .map(|request| (*request).to_string())
+        .collect::<Vec<_>>();
+    let missing_runner_dependencies = spec
+        .runner_dependencies
+        .iter()
+        .filter(|dependency| !node_dependency_available(&npm_root, dependency))
+        .map(|dependency| (*dependency).to_string())
+        .collect::<Vec<_>>();
+    ConformanceReadiness {
+        alias_ready: missing_alias_packages.is_empty(),
+        runner_ready: missing_runner_dependencies.is_empty(),
+        package_requests: spec
+            .package_requests
+            .iter()
+            .map(|request| (*request).to_string())
+            .collect(),
+        runner_dependencies: spec
+            .runner_dependencies
+            .iter()
+            .map(|dependency| (*dependency).to_string())
+            .collect(),
+        missing_alias_packages,
+        missing_runner_dependencies,
+    }
+}
+
+fn alias_package_available(alias_root: &Path, request: &str) -> bool {
+    if request == "vue/compiler-sfc" {
+        return alias_root
+            .join("node_modules")
+            .join("vue")
+            .join("compiler-sfc")
+            .join("index.js")
+            .is_file();
+    }
+    node_dependency_available(&alias_root.join("node_modules"), request)
+}
+
+fn node_dependency_available(node_modules: &Path, request: &str) -> bool {
+    let segments = request.split('/').collect::<Vec<_>>();
+    let package_dir = if request.starts_with('@') && segments.len() >= 2 {
+        node_modules.join(segments[0]).join(segments[1])
+    } else {
+        node_modules.join(segments[0])
+    };
+    package_dir.join("package.json").is_file() || package_dir.join("index.js").is_file()
+}
+
+fn conformance_item_detail(test_count: usize, readiness: &ConformanceReadiness) -> String {
+    if readiness.alias_ready && readiness.runner_ready {
+        return format!("{test_count} official test files discovered; runner is ready to execute");
+    }
+    let mut missing = Vec::new();
+    if !readiness.alias_ready {
+        missing.push(format!(
+            "missing alias packages: {}",
+            readiness.missing_alias_packages.join(", ")
+        ));
+    }
+    if !readiness.runner_ready {
+        missing.push(format!(
+            "missing runner dependencies: {}",
+            readiness.missing_runner_dependencies.join(", ")
+        ));
+    }
+    format!(
+        "{test_count} official test files discovered; execution blocked by {}",
+        missing.join("; ")
+    )
 }
 
 fn suite_spec(suite: ConformanceSuite) -> ConformanceSuiteSpec {
@@ -4735,36 +4919,50 @@ fn suite_spec(suite: ConformanceSuite) -> ConformanceSuiteSpec {
             name: "vue2-compiler",
             version_line: VersionLine::Vue26,
             relative_test_dirs: &["test/unit/modules/compiler"],
+            package_requests: &["vue-template-compiler"],
+            runner_dependencies: &["@babel/register", "jasmine"],
         },
         ConformanceSuite::Vue27Compiler => ConformanceSuiteSpec {
             name: "vue27-compiler",
             version_line: VersionLine::Vue27,
             relative_test_dirs: &["test/unit/modules/compiler"],
+            package_requests: &["vue-template-compiler"],
+            runner_dependencies: &["@babel/register", "jasmine"],
         },
         ConformanceSuite::Vue27Sfc => ConformanceSuiteSpec {
             name: "vue27-sfc",
             version_line: VersionLine::Vue27,
             relative_test_dirs: &["packages/compiler-sfc/test"],
+            package_requests: &["vue/compiler-sfc"],
+            runner_dependencies: &["typescript", "jasmine"],
         },
         ConformanceSuite::Vue3Core => ConformanceSuiteSpec {
             name: "vue3-core",
             version_line: VersionLine::Vue3,
             relative_test_dirs: &["packages/compiler-core/__tests__"],
+            package_requests: &["@vue/compiler-core"],
+            runner_dependencies: &["vitest", "esbuild", "source-map-js"],
         },
         ConformanceSuite::Vue3Dom => ConformanceSuiteSpec {
             name: "vue3-dom",
             version_line: VersionLine::Vue3,
             relative_test_dirs: &["packages/compiler-dom/__tests__"],
+            package_requests: &["@vue/compiler-dom", "@vue/compiler-core"],
+            runner_dependencies: &["vitest", "esbuild", "source-map-js"],
         },
         ConformanceSuite::Vue3Sfc => ConformanceSuiteSpec {
             name: "vue3-sfc",
             version_line: VersionLine::Vue3,
             relative_test_dirs: &["packages/compiler-sfc/__tests__"],
+            package_requests: &["@vue/compiler-sfc"],
+            runner_dependencies: &["vitest", "esbuild", "typescript"],
         },
         ConformanceSuite::Vue3Ssr => ConformanceSuiteSpec {
             name: "vue3-ssr",
             version_line: VersionLine::Vue3,
             relative_test_dirs: &["packages/compiler-ssr/__tests__"],
+            package_requests: &["@vue/compiler-ssr", "@vue/compiler-core"],
+            runner_dependencies: &["vitest", "esbuild"],
         },
     }
 }
@@ -5032,6 +5230,63 @@ mod tests {
             "counts": { "total": 3, "pass": 0, "pending": 3, "fail": 0 }
         });
         assert_eq!(report_value_status(&discovered), ReportStatus::Pending);
+    }
+
+    #[test]
+    fn report_value_status_fails_on_failed_conformance_smoke() {
+        let value = serde_json::json!({
+            "counts": { "total": 1, "pass": 0, "pending": 1, "fail": 0 },
+            "smoke": [{ "status": "fail", "request": "@vue/compiler-core" }]
+        });
+        assert_eq!(report_value_status(&value), ReportStatus::Fail);
+    }
+
+    #[test]
+    fn node_dependency_available_handles_scoped_packages_and_subpaths() {
+        let temp = std::env::temp_dir().join(format!(
+            "vuec-xtask-node-dep-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let node_modules = temp.join("node_modules");
+        fs::create_dir_all(node_modules.join("@vue").join("compiler-core")).unwrap();
+        fs::write(
+            node_modules
+                .join("@vue")
+                .join("compiler-core")
+                .join("package.json"),
+            "{}",
+        )
+        .unwrap();
+        fs::create_dir_all(node_modules.join("vue").join("compiler-sfc")).unwrap();
+        fs::write(
+            node_modules
+                .join("vue")
+                .join("compiler-sfc")
+                .join("index.js"),
+            "",
+        )
+        .unwrap();
+
+        assert!(node_dependency_available(
+            &node_modules,
+            "@vue/compiler-core"
+        ));
+        assert!(alias_package_available(&temp, "vue/compiler-sfc"));
+        assert!(!node_dependency_available(&node_modules, "vitest"));
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn conformance_targets_include_suite_package_requests() {
+        let targets = conformance_targets(&[ConformanceSuite::Vue3Dom]);
+        let requests = targets
+            .into_iter()
+            .map(api_require_request)
+            .collect::<Vec<_>>();
+        assert_eq!(requests, vec!["@vue/compiler-core", "@vue/compiler-dom"]);
     }
 
     fn test_manifest(exports: Vec<(&str, u32)>) -> ManifestFile {

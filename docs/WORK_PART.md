@@ -18,9 +18,13 @@
 
 ## Completed This Round
 
+- Upgraded `cargo xtask run-conformance --all` from pure discovery reports to discovery plus execution-readiness reports: each suite now records required Rust alias package requests, required official test runner dependencies, missing runner dependencies, and a `blocked` / `ready` execution state.
+- Added per-suite conformance alias smoke execution using the generated Rust alias packages and existing Node bridge, so every suite now has a real compiler entry smoke result in `target/conformance/<lock-hash>/<suite>.json`.
+- Current conformance status: all seven suites discover official test files and pass alias smoke execution, but remain `pending` because the current pinned npm probe installs do not include the full official test runner dependencies (`vitest`, `esbuild`, `typescript`, `@babel/register`, `jasmine`).
+- Verification this round: `cargo fmt --all --check`, `cargo test -p xtask`, `cargo xtask run-conformance --all`, and `cargo xtask summarize-compat --locked`.
 - Replaced the scaffolded `cargo xtask summarize-compat --locked` output with a real artifact aggregator that reads official/Rust API manifests, option-matrix results, output-contract results, conformance reports, and lock validation status.
 - Added deterministic status parsing for nested conformance JSON (`counts`, target rows, output checks), including pass/pending/fail propagation and regression tests for nested rows, checks, and discovery-only reports.
-- Current summary status: `cargo xtask summarize-compat --locked` reports API, option matrix, output contract, and lock validation as `pass` for all seven compiler targets, while keeping each target `pending` because the official conformance reports are still discovery-only.
+- Current summary status: `cargo xtask summarize-compat --locked` reports API, option matrix, output contract, lock validation, and conformance alias smoke as `pass` for all seven compiler targets, while keeping each target `pending` because full official spec execution is still blocked on runner dependencies.
 - Verification this round: `cargo fmt --all --check`, `cargo test -p xtask`, and `cargo xtask summarize-compat --locked`.
 - Fixed the output-contract runner for Vue 2.7 `vue/compiler-sfc` so it uses the official single-object SFC parse API (`parse({ source, filename })`) while preserving Vue 3's `parse(source, options)` path.
 - Added Vue 2.7 SFC-specific template/style source extraction in the output-contract probe, matching the public 2.7 API shape already used by the option matrix runner.
@@ -102,7 +106,7 @@
 - Updated `xtask` version-line parsing so the deterministic plan commands accept `vue2_6`, `vue2_7`, and `vue3` directly, while preserving `vue26` / `vue27` compatibility.
 - Generated the initial Vue 2.6 `vue-template-compiler` option matrix and output contract files under `compat/`.
 - Verification this round: `cargo test --workspace`, `cargo xtask verify-official-lock`, `cargo xtask run-conformance --suite vue2-compiler`, `cargo xtask generate-option-matrix --version-line vue2_6 --package vue-template-compiler`, and `cargo xtask generate-output-contract --version-line vue2_6 --package vue-template-compiler`.
-- `run-conformance --suite vue2-compiler` still reports `pending` because official execution remains discovery-only until the NAPI/alias runner is implemented.
+- `run-conformance --suite vue2-compiler` now reports discovered official tests plus alias smoke/readiness status; it remains `pending` until the full official test runner dependencies are installed and executed.
 
 ## Earlier Round
 
