@@ -23,9 +23,10 @@
         "descriptor"
       ],
       "output_fields_affected": [
-        "template",
-        "script",
-        "styles"
+        "descriptor.template.content",
+        "descriptor.scriptSetup.content",
+        "descriptor.styles.0.content",
+        "descriptor.styles.0.scoped"
       ],
       "official_fixture_ids": [
         "vue3-sfc-parse"

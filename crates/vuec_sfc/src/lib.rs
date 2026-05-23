@@ -108,6 +108,10 @@ pub struct SfcTemplateCompileResult {
     pub errors: Vec<String>,
     pub bindings: Vec<String>,
     pub ast_summary: String,
+    pub ast: String,
+    pub preamble: String,
+    pub source: String,
+    pub tips: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,6 +120,10 @@ pub struct SfcScriptBlock {
     pub bindings: Vec<String>,
     pub errors: Vec<String>,
     pub loc: Option<SfcBlockLocation>,
+    pub attrs: SfcBlockAttrs,
+    pub map: Option<SourceMapArtifact>,
+    pub script_ast: Vec<String>,
+    pub type_name: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,6 +131,8 @@ pub struct SfcStyleCompileResult {
     pub code: String,
     pub map: Option<SourceMapArtifact>,
     pub errors: Vec<String>,
+    pub dependencies: Vec<String>,
+    pub raw_result: Vec<String>,
 }
 
 pub struct SfcCompiler {
@@ -185,6 +195,10 @@ impl SfcCompiler {
                 errors: vec!["missing template block".to_string()],
                 bindings: Vec::new(),
                 ast_summary: "missing-template".into(),
+                ast: String::new(),
+                preamble: String::new(),
+                source: String::new(),
+                tips: Vec::new(),
             };
         };
         let core = Vue3CompilerOptions {
@@ -197,30 +211,47 @@ impl SfcCompiler {
             source: template.content.clone(),
             file_id: descriptor.source_file,
         };
-        let result = if options.ssr {
-            compile_ssr(
+        if options.ssr {
+            let result = compile_ssr(
                 source,
                 SsrCompilerOptions {
                     core,
                     scope_id: options.scope_id.clone(),
                     slotted: options.slotted,
                 },
-            )
+            );
+            let ast_summary = result.ast_summary;
+            return SfcTemplateCompileResult {
+                code: result.code,
+                map: result.map,
+                errors: result.diagnostics,
+                bindings: Vec::new(),
+                ast_summary: ast_summary.clone(),
+                ast: format!("ast:{ast_summary}"),
+                preamble: result.preamble,
+                source: template.content.clone(),
+                tips: Vec::new(),
+            };
         } else {
-            compile_dom(
+            let result = compile_dom(
                 source,
                 DomCompilerOptions {
                     core,
                     ..DomCompilerOptions::default()
                 },
-            )
-        };
-        SfcTemplateCompileResult {
-            code: result.code,
-            map: result.map,
-            errors: result.diagnostics,
-            bindings: Vec::new(),
-            ast_summary: result.ast_summary,
+            );
+            let ast_summary = result.ast_summary;
+            return SfcTemplateCompileResult {
+                code: result.code,
+                map: result.map,
+                errors: result.diagnostics,
+                bindings: Vec::new(),
+                ast_summary: ast_summary.clone(),
+                ast: format!("ast:{ast_summary}"),
+                preamble: result.preamble,
+                source: template.content.clone(),
+                tips: Vec::new(),
+            };
         }
     }
 
@@ -293,6 +324,15 @@ impl SfcCompiler {
                 .as_ref()
                 .or(descriptor.script_setup.as_ref())
                 .map(|block| block.loc.clone()),
+            attrs: descriptor
+                .script
+                .as_ref()
+                .or(descriptor.script_setup.as_ref())
+                .map(|block| block.attrs.clone())
+                .unwrap_or_default(),
+            map: None,
+            script_ast: Vec::new(),
+            type_name: "script".into(),
         }
     }
 
@@ -338,6 +378,8 @@ impl SfcCompiler {
                 .map
             }),
             errors,
+            dependencies: Vec::new(),
+            raw_result: Vec::new(),
         }
     }
 

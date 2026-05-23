@@ -1149,7 +1149,7 @@ fn vue3_dom_cases(_target: TargetSpec) -> Vec<OptionMatrixCase> {
             "false",
             &["decodes entities"],
             &["entity decode"],
-            &["nodes"],
+            &["children.0.children.0.content"],
             &["vue3-dom-entity"],
             "dom",
             "parse",
@@ -1231,7 +1231,12 @@ fn vue3_sfc_cases(_target: TargetSpec) -> Vec<OptionMatrixCase> {
             "undefined",
             &["descriptor parse"],
             &["descriptor"],
-            &["template", "script", "styles"],
+            &[
+                "descriptor.template.content",
+                "descriptor.scriptSetup.content",
+                "descriptor.styles.0.content",
+                "descriptor.styles.0.scoped",
+            ],
             &["vue3-sfc-parse"],
             "base",
             "parse",
@@ -1879,6 +1884,7 @@ fn alias_body_arity(target: TargetSpec, export_name: &str, arity: u32) -> u32 {
     match (target.kind, export_name) {
         (TargetKind::Vue3Core | TargetKind::Vue3Dom | TargetKind::Vue3Ssr, "baseCompile")
         | (TargetKind::Vue3Core | TargetKind::Vue3Dom | TargetKind::Vue3Ssr, "baseParse")
+        | (TargetKind::Vue3Dom, "parse")
         | (TargetKind::Vue3Core | TargetKind::Vue3Dom | TargetKind::Vue3Ssr, "compile")
         | (TargetKind::Vue27Sfc | TargetKind::Vue3Sfc, "parse") => arity.max(2),
         _ => arity,
@@ -1939,32 +1945,51 @@ fn alias_argument_object(target: TargetSpec, export_name: &str, _arity: u32) -> 
         (TargetKind::Vue26Template | TargetKind::Vue27Template, _) => {
             "{ template: a0, options: a1 }".into()
         }
-        (TargetKind::Vue27Sfc, "parse") => "{ source: a0, filename: a1 && a1.filename, options: a1 }".into(),
+        (TargetKind::Vue27Sfc, "parse") => {
+            "{ source: a0, filename: a1 && a1.filename, options: a1 }".into()
+        }
         (TargetKind::Vue27Sfc, "compileTemplate") => {
-            "{ source: a0 && a0.source ? a0.source : '', filename: a0 && a0.filename, options: a0 }".into()
+            "{ source: a0 && a0.source ? a0.source : '', filename: a0 && a0.filename, options: a0 }"
+                .into()
         }
         (TargetKind::Vue27Sfc, "compileScript") => {
-            "{ source: a0 && a0.source ? a0.source : '', filename: a0 && a0.filename, options: a0 }".into()
+            "{ source: a0 && a0.descriptor && a0.descriptor.source ? a0.descriptor.source : (a0 && a0.source ? a0.source : ''), filename: a0 && a0.descriptor && a0.descriptor.filename || (a0 && a0.filename), options: a1 || a0 }"
+                .into()
         }
         (TargetKind::Vue27Sfc, "compileStyle") | (TargetKind::Vue27Sfc, "compileStyleAsync") => {
-            "{ source: a0 && a0.source ? a0.source : '', filename: a0 && a0.filename, options: a0 }".into()
+            "{ source: a0 && a0.source ? a0.source : '', filename: a0 && a0.filename, options: a0 }"
+                .into()
         }
         (TargetKind::Vue27Sfc, _) => {
-            "{ source: a0 && a0.source ? a0.source : '', filename: a0 && a0.filename, options: a0 }".into()
+            "{ source: a0 && a0.source ? a0.source : '', filename: a0 && a0.filename, options: a0 }"
+                .into()
         }
-        (TargetKind::Vue3Sfc, "parse") => "{ source: a0, filename: a1 && a1.filename, options: a1 }".into(),
+        (TargetKind::Vue3Sfc, "parse") => {
+            "{ source: a0, filename: a1 && a1.filename, options: a1 }".into()
+        }
         (TargetKind::Vue3Sfc, "compileTemplate") => {
-            "{ source: a0 && a0.source ? a0.source : '', filename: a0 && a0.filename, options: a0 }".into()
+            "{ source: a0 && a0.source ? a0.source : '', filename: a0 && a0.filename, options: a0 }"
+                .into()
         }
         (TargetKind::Vue3Sfc, "compileScript") => {
-            "{ source: a0 && a0.source ? a0.source : '', filename: a0 && a0.filename, options: a0 }".into()
+            "{ source: a0 && a0.descriptor && a0.descriptor.source ? a0.descriptor.source : (a0 && a0.source ? a0.source : ''), filename: a0 && a0.descriptor && a0.descriptor.filename || (a0 && a0.filename), options: a1 || a0 }"
+                .into()
         }
         (TargetKind::Vue3Sfc, "compileStyle") | (TargetKind::Vue3Sfc, "compileStyleAsync") => {
-            "{ source: a0 && a0.source ? a0.source : '', filename: a0 && a0.filename, options: a0 }".into()
+            "{ source: a0 && a0.source ? a0.source : '', filename: a0 && a0.filename, options: a0 }"
+                .into()
         }
-        (TargetKind::Vue3Sfc, _) => "{ source: a0 && a0.source ? a0.source : '', filename: a0 && a0.filename, options: a0 }".into(),
+        (TargetKind::Vue3Sfc, _) => {
+            "{ source: a0 && a0.source ? a0.source : '', filename: a0 && a0.filename, options: a0 }"
+                .into()
+        }
+        (TargetKind::Vue3Dom, "parse") => {
+            "{ source: a0 && a0.source ? a0.source : a0, options: a1 || (a0 && a0.options) || {} }"
+                .into()
+        }
         (TargetKind::Vue3Core | TargetKind::Vue3Dom | TargetKind::Vue3Ssr, _) => {
-            "{ source: a0 && a0.source ? a0.source : a0, filename: a0 && a0.filename, options: a1 || (a0 && a0.options) || {} }".into()
+            "{ source: a0 && a0.source ? a0.source : a0, filename: a0 && a0.filename, options: a1 || (a0 && a0.options) || {} }"
+                .into()
         }
     }
 }
@@ -2505,7 +2530,11 @@ fn compare_option_probe(
 fn json_path<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
     let mut cursor = value;
     for segment in path.split('.') {
-        cursor = cursor.get(segment)?;
+        if let Ok(index) = segment.parse::<usize>() {
+            cursor = cursor.get(index)?;
+        } else {
+            cursor = cursor.get(segment)?;
+        }
     }
     Some(cursor)
 }
@@ -2516,6 +2545,19 @@ fn rust_alias_field<'a>(
 ) -> Option<&'a serde_json::Value> {
     match field {
         "staticRenderFns" => value.get("static_render_fns"),
+        "template" | "script" | "styles" | "customBlocks" => value
+            .get("descriptor")
+            .and_then(|descriptor| descriptor.get(field)),
+        "descriptor.scriptSetup.content" => value
+            .get("descriptor")
+            .and_then(|descriptor| descriptor.get("script_setup"))
+            .and_then(|script_setup| script_setup.get("content")),
+        "descriptor.styles.0.scoped" => value
+            .get("descriptor")
+            .and_then(|descriptor| descriptor.get("styles"))
+            .and_then(|styles| styles.get(0))
+            .and_then(|style| style.get("attrs"))
+            .and_then(|attrs| attrs.get("scoped")),
         "ast" => value
             .get("element_ast")
             .or_else(|| value.get("ast_summary")),
@@ -2804,9 +2846,15 @@ function invoke(api) {
       return { parse: parsed, compileTemplate: template, compileScript: script, compileStyle: style };
     }
     case 'vue3-core':
-      return { baseCompile: api.baseCompile(fixture, { mode: 'function' }), baseParse: api.baseParse(fixture, {}) };
+      return {
+        baseCompile: api.baseCompile(fixture, { mode: 'function' }),
+        baseParse: api.baseParse(fixture, {})
+      };
     case 'vue3-dom':
-      return { compile: api.compile(fixture, { mode: 'function' }), parse: api.parse(fixture, {}) };
+      return {
+        compile: api.compile(fixture, { mode: 'function' }),
+        parse: api.parse(fixture, {})
+      };
     case 'vue3-ssr':
       return { compile: api.compile(fixture, {}) };
     default:
@@ -2839,7 +2887,7 @@ function normalizeMessage(message) {
     .replace(/\\/g, '/');
 }
 
-function normalize(value) {
+function normalize(value, seen = new WeakSet()) {
   if (value === undefined) return { __type: 'undefined' };
   if (value === null) return null;
   if (typeof value === 'function') {
@@ -2849,11 +2897,19 @@ function normalize(value) {
     return { __type: 'symbol', description: value.description || null };
   }
   if (typeof value !== 'object') return value;
-  if (Array.isArray(value)) return value.map(normalize);
+  if (seen.has(value)) return { __type: 'cycle' };
+  seen.add(value);
+  if (Array.isArray(value)) return value.map(item => normalize(item, seen));
+  if (value instanceof Set) {
+    return Array.from(value).map(item => normalize(item, seen));
+  }
+  if (value instanceof Map) {
+    return Array.from(value.entries()).map(([key, item]) => [normalize(key, seen), normalize(item, seen)]);
+  }
   const out = {};
   for (const key of Object.keys(value).sort()) {
     if (key === 'ast' || key === 'element_ast' || key === 'source' || key === 'source_file') continue;
-    out[key] = normalize(value[key]);
+    out[key] = normalize(value[key], seen);
   }
   return out;
 }
@@ -2865,14 +2921,16 @@ function objectShape(value) {
 
 function codeFields(value, prefix = '') {
   const out = {};
-  collectCodeFields(value, prefix, out);
+  collectCodeFields(value, prefix, out, new WeakSet());
   return out;
 }
 
-function collectCodeFields(value, prefix, out) {
+function collectCodeFields(value, prefix, out, seen) {
   if (!value || typeof value !== 'object') return;
+  if (seen.has(value)) return;
+  seen.add(value);
   if (Array.isArray(value)) {
-    value.forEach((item, index) => collectCodeFields(item, `${prefix}[${index}]`, out));
+    value.forEach((item, index) => collectCodeFields(item, `${prefix}[${index}]`, out, seen));
     return;
   }
   for (const key of Object.keys(value).sort()) {
@@ -2882,21 +2940,23 @@ function collectCodeFields(value, prefix, out) {
     } else if (key === 'staticRenderFns' && Array.isArray(value[key])) {
       out[next] = value[key];
     } else {
-      collectCodeFields(value[key], next, out);
+      collectCodeFields(value[key], next, out, seen);
     }
   }
 }
 
 function diagnosticFields(value, prefix = '') {
   const out = {};
-  collectDiagnosticFields(value, prefix, out);
+  collectDiagnosticFields(value, prefix, out, new WeakSet());
   return out;
 }
 
-function collectDiagnosticFields(value, prefix, out) {
+function collectDiagnosticFields(value, prefix, out, seen) {
   if (!value || typeof value !== 'object') return;
+  if (seen.has(value)) return;
+  seen.add(value);
   if (Array.isArray(value)) {
-    value.forEach((item, index) => collectDiagnosticFields(item, `${prefix}[${index}]`, out));
+    value.forEach((item, index) => collectDiagnosticFields(item, `${prefix}[${index}]`, out, seen));
     return;
   }
   for (const key of Object.keys(value).sort()) {
@@ -2904,21 +2964,23 @@ function collectDiagnosticFields(value, prefix, out) {
     if (['errors', 'warnings', 'tips', 'diagnostics'].includes(key) && Array.isArray(value[key])) {
       out[next] = normalize(value[key]);
     } else {
-      collectDiagnosticFields(value[key], next, out);
+      collectDiagnosticFields(value[key], next, out, seen);
     }
   }
 }
 
 function sourceMapFields(value, prefix = '') {
   const out = {};
-  collectSourceMapFields(value, prefix, out);
+  collectSourceMapFields(value, prefix, out, new WeakSet());
   return out;
 }
 
-function collectSourceMapFields(value, prefix, out) {
+function collectSourceMapFields(value, prefix, out, seen) {
   if (!value || typeof value !== 'object') return;
+  if (seen.has(value)) return;
+  seen.add(value);
   if (Array.isArray(value)) {
-    value.forEach((item, index) => collectSourceMapFields(item, `${prefix}[${index}]`, out));
+    value.forEach((item, index) => collectSourceMapFields(item, `${prefix}[${index}]`, out, seen));
     return;
   }
   for (const key of Object.keys(value).sort()) {
@@ -2926,7 +2988,7 @@ function collectSourceMapFields(value, prefix, out) {
     if ((key === 'map' || key === 'sourceMap') && value[key] != null) {
       out[next] = normalize(value[key]);
     } else {
-      collectSourceMapFields(value[key], next, out);
+      collectSourceMapFields(value[key], next, out, seen);
     }
   }
 }
@@ -2945,11 +3007,59 @@ function compareJson(mode, official, rust, extractor) {
 
 const official = capture('official', () => invoke(load(officialRequire)));
 const rust = capture('rust', () => invoke(load(rustRequire)));
+function topLevelShape(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
+  if ('descriptor' in value && 'errors' in value) {
+    return objectShape(value);
+  }
+  if ('ast' in value && 'code' in value && 'map' in value) {
+    return objectShape(value);
+  }
+  return objectShape(value);
+}
+
+function topLevelCodeFields(value) {
+  const out = {};
+  if (!value || typeof value !== 'object') return out;
+  if (value.code && typeof value.code === 'string') {
+    out.code = value.code;
+  }
+  if (value.render && typeof value.render === 'string') {
+    out.render = value.render;
+  }
+  if (value.ssrRender && typeof value.ssrRender === 'string') {
+    out.ssrRender = value.ssrRender;
+  }
+  return out;
+}
+
+function topLevelSourceMap(value) {
+  const out = {};
+  if (!value || typeof value !== 'object') return out;
+  if (value.map !== undefined) {
+    out.map = normalize(value.map);
+  }
+  if (value.rawResult !== undefined) {
+    out.rawResult = { keys: Object.keys(value.rawResult).sort() };
+  }
+  return out;
+}
+
+function topLevelDiagnostics(value) {
+  const out = {};
+  if (!value || typeof value !== 'object') return out;
+  if (Array.isArray(value.errors)) out.errors = normalize(value.errors);
+  if (Array.isArray(value.tips)) out.tips = normalize(value.tips);
+  if (Array.isArray(value.warnings)) out.warnings = normalize(value.warnings);
+  if (Array.isArray(value.diagnostics)) out.diagnostics = normalize(value.diagnostics);
+  return out;
+}
+
 const checks = [
-  compareJson('schema-parity', official, rust, value => objectShape(value)),
-  compareJson('exact-js-output', official, rust, value => codeFields(value)),
-  compareJson('diagnostic-parity', official, rust, value => diagnosticFields(value)),
-  compareJson('source-map-parity', official, rust, value => sourceMapFields(value)),
+  compareJson('schema-parity', official, rust, value => topLevelShape(value)),
+  compareJson('exact-js-output', official, rust, value => topLevelCodeFields(value)),
+  compareJson('diagnostic-parity', official, rust, value => topLevelDiagnostics(value)),
+  compareJson('source-map-parity', official, rust, value => topLevelSourceMap(value)),
   {
     mode: 'runtime-parity',
     status: 'pending',

@@ -8,6 +8,7 @@ license.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+vuec_ast = { path = "../vuec_ast" }
 vuec_sfc = { path = "../vuec_sfc" }
 vuec_source = { path = "../vuec_source" }
 vuec_vue2 = { path = "../vuec_vue2" }

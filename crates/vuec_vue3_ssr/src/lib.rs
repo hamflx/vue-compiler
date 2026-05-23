@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use vuec_ast::{TemplateAttribute, Vue3NodeKind};
 use vuec_codegen::CodeWriter;
-use vuec_vue3_core::{CodegenResult, TemplateSource, Vue3CompilerOptions, Vue3Dialect};
+use vuec_vue3_core::{TemplateSource, Vue3CompilerOptions, Vue3Dialect};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SsrCompilerOptions {
@@ -32,7 +32,16 @@ pub struct SsrTransformSummary {
     pub suspenses: usize,
 }
 
-pub fn compile(source: TemplateSource, options: SsrCompilerOptions) -> CodegenResult {
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SsrCompileResult {
+    pub code: String,
+    pub map: Option<vuec_codegen::SourceMapArtifact>,
+    pub ast_summary: String,
+    pub diagnostics: Vec<String>,
+    pub preamble: String,
+}
+
+pub fn compile(source: TemplateSource, options: SsrCompilerOptions) -> SsrCompileResult {
     let ast = Vue3Dialect::base_parse(source, &options.core);
     let summary = summarize_ssr(&ast.nodes.iter().map(|node| &node.kind).collect::<Vec<_>>());
     let has_slot = ast
@@ -87,7 +96,7 @@ pub fn compile(source: TemplateSource, options: SsrCompilerOptions) -> CodegenRe
     }
     writer.dedent();
     writer.push_line("}");
-    CodegenResult {
+    SsrCompileResult {
         code: writer.finish(),
         map: None,
         ast_summary: format!(
@@ -100,6 +109,7 @@ pub fn compile(source: TemplateSource, options: SsrCompilerOptions) -> CodegenRe
             summary.suspenses
         ),
         diagnostics: Vec::new(),
+        preamble: String::new(),
     }
 }
 

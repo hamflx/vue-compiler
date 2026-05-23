@@ -47,6 +47,7 @@ pub struct CodegenResult {
     pub map: Option<SourceMapArtifact>,
     pub ast_summary: String,
     pub diagnostics: Vec<String>,
+    pub preamble: String,
 }
 
 pub struct Vue3Dialect;
@@ -172,7 +173,11 @@ impl Vue3Dialect {
         }
     }
 
-    pub fn generate(ast: &Vue3Ast, options: &Vue3CompilerOptions, ctx: &TransformContext) -> CodegenResult {
+    pub fn generate(
+        ast: &Vue3Ast,
+        options: &Vue3CompilerOptions,
+        ctx: &TransformContext,
+    ) -> CodegenResult {
         let mut writer = CodeWriter::new();
         let helper_order = [
             "toDisplayString",
@@ -182,7 +187,17 @@ impl Vue3Dialect {
         ];
         if let Some(root_id) = ast.root {
             if let Some(root) = ast.node(root_id) {
-                if options.mode == "function" {
+                let helpers = render_helpers(&helper_order, ctx);
+                if options.prefix_identifiers {
+                    if !helpers.is_empty() {
+                        writer.push_line(&format!(
+                            "const {{ {} }} = Vue",
+                            helper_aliases(&helpers)
+                        ));
+                        writer.newline();
+                    }
+                    writer.push_line("return function render(_ctx, _cache) {");
+                } else if options.mode == "function" {
                     writer.push_line("const _Vue = Vue");
                     writer.newline();
                     writer.push_line("return function render(_ctx, _cache) {");
@@ -193,18 +208,20 @@ impl Vue3Dialect {
                 if !options.prefix_identifiers {
                     writer.push_line("with (_ctx) {");
                     writer.indent();
-                }
-                let helpers = render_helpers(&helper_order, ctx);
-                if !helpers.is_empty() {
-                    writer.push_line(&format!("const {{ {} }} = _Vue", helpers.join(", ")));
-                    writer.newline();
+                    if !helpers.is_empty() {
+                        writer.push_line(&format!(
+                            "const {{ {} }} = _Vue",
+                            helper_aliases(&helpers)
+                        ));
+                        writer.newline();
+                    }
                 }
                 let expr = if root.children.len() == 1 {
                     render_node_expr(ast, root.children[0], options, true)
                 } else {
                     render_children_array(ast, &root.children, options, true)
                 };
-                writer.push_line(&format!("return {};", expr));
+                writer.push_line(&format!("return {}", expr));
                 if !options.prefix_identifiers {
                     writer.dedent();
                     writer.push_line("}");
@@ -213,12 +230,13 @@ impl Vue3Dialect {
                 writer.push_line("}");
             }
         }
-        let code = writer.finish();
+        let code = writer.finish().trim_end().to_string();
         CodegenResult {
             code,
             map: None,
             ast_summary: format!("nodes={}", ast.len()),
             diagnostics: Vec::new(),
+            preamble: String::new(),
         }
     }
 
@@ -259,6 +277,14 @@ fn render_helpers<'a>(order: &'a [&'a str], ctx: &TransformContext) -> Vec<&'a s
         .copied()
         .filter(|helper| ctx.helpers.contains(*helper))
         .collect()
+}
+
+fn helper_aliases(helpers: &[&str]) -> String {
+    helpers
+        .iter()
+        .map(|helper| format!("{helper}: _{helper}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn render_children_array(
@@ -344,15 +370,24 @@ fn render_element_children(
     options: &Vue3CompilerOptions,
     parent_is_root: bool,
 ) -> String {
-    let rendered = children
+    let child_nodes = children
         .iter()
         .filter_map(|child_id| ast.node(*child_id))
         .filter(|child| !matches!(child.kind, Vue3NodeKind::Comment { .. }))
+        .collect::<Vec<_>>();
+    let rendered = child_nodes
+        .iter()
         .map(|child| render_node_expr(ast, child.id, options, false))
         .collect::<Vec<_>>();
     if rendered.is_empty() {
         String::new()
-    } else if rendered.len() == 1 && !parent_is_root {
+    } else if rendered.len() == 1
+        && (!parent_is_root
+            || matches!(
+                child_nodes[0].kind,
+                Vue3NodeKind::Text { .. } | Vue3NodeKind::Interpolation { .. }
+            ))
+    {
         rendered.into_iter().next().unwrap()
     } else {
         format!("[{}]", rendered.join(", "))

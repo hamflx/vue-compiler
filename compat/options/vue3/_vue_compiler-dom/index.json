@@ -91,7 +91,7 @@
         "entity decode"
       ],
       "output_fields_affected": [
-        "nodes"
+        "children.0.children.0.content"
       ],
       "official_fixture_ids": [
         "vue3-dom-entity"

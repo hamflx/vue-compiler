@@ -65,7 +65,7 @@ pub fn compile(source: TemplateSource, options: DomCompilerOptions) -> CodegenRe
             if options.transform_asset_urls {
                 summaries.extend(asset_url_attributes(tag, attributes));
             }
-            if !summaries.is_empty() {
+            if !summaries.is_empty() && !only_asset_summaries(&summaries) {
                 attributes.push(TemplateAttribute {
                     name: "data-vuec-dom".into(),
                     value: Some(summaries.join(",")),
@@ -169,6 +169,12 @@ fn asset_url_attributes(tag: &str, attributes: &[TemplateAttribute]) -> Vec<Stri
         }
     }
     found
+}
+
+fn only_asset_summaries(summaries: &[String]) -> bool {
+    summaries
+        .iter()
+        .all(|summary| summary.starts_with("asset:"))
 }
 
 fn decode_basic_entities(value: &str) -> String {

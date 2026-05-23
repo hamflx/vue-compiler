@@ -3,6 +3,7 @@
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use std::io::{self, Read};
+use vuec_ast::{Vue3Ast, Vue3NodeKind};
 use vuec_sfc::{
     SfcCompiler, SfcScriptCompileOptions, SfcStyleCompileOptions, SfcTemplateCompileOptions,
 };
@@ -87,15 +88,35 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
         "vue3.core.baseParse" => {
             let source = template_source(&payload);
             let options = vue3_options(payload.get("options"));
-            Ok(serde_json::to_value(Vue3Dialect::base_parse(
-                source, &options,
-            ))?)
+            let ast = Vue3Dialect::base_parse(source, &options);
+            Ok(vue3_parse_value(&ast))
         }
         "vue3.dom.compile" => {
             let source = template_source(&payload);
+            let mut core = vue3_options(payload.get("options"));
+            if payload
+                .get("options")
+                .and_then(|options| options.get("mode"))
+                .is_none()
+            {
+                core.mode = "function".to_string();
+            }
             let options = DomCompilerOptions {
-                core: vue3_options(payload.get("options")),
-                ..DomCompilerOptions::default()
+                core,
+                transform_asset_urls: bool_option(
+                    payload.get("options").unwrap_or(&Value::Null),
+                    "transformAssetUrls",
+                    DomCompilerOptions::default().transform_asset_urls,
+                ),
+                decode_entities: bool_option(
+                    payload.get("options").unwrap_or(&Value::Null),
+                    "decodeEntities",
+                    DomCompilerOptions::default().decode_entities,
+                ),
+                is_custom_element: string_array_option(
+                    payload.get("options").unwrap_or(&Value::Null),
+                    "isCustomElement",
+                ),
             };
             Ok(serde_json::to_value(vuec_vue3_dom::compile(
                 source, options,
@@ -105,11 +126,23 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
             let source = template_source(&payload);
             let options = DomCompilerOptions {
                 core: vue3_options(payload.get("options")),
-                ..DomCompilerOptions::default()
+                transform_asset_urls: bool_option(
+                    payload.get("options").unwrap_or(&Value::Null),
+                    "transformAssetUrls",
+                    DomCompilerOptions::default().transform_asset_urls,
+                ),
+                decode_entities: bool_option(
+                    payload.get("options").unwrap_or(&Value::Null),
+                    "decodeEntities",
+                    DomCompilerOptions::default().decode_entities,
+                ),
+                is_custom_element: string_array_option(
+                    payload.get("options").unwrap_or(&Value::Null),
+                    "isCustomElement",
+                ),
             };
-            Ok(serde_json::to_value(vuec_vue3_dom::parse(
-                source, &options,
-            ))?)
+            let ast = vuec_vue3_dom::parse(source, &options);
+            Ok(vue3_parse_value(&ast))
         }
         "vue3.ssr.compile" => {
             let source = template_source(&payload);
@@ -134,7 +167,11 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
             let filename = string_field_or(&payload, "filename", "anonymous.vue");
             let source = string_field(&payload, "source");
             let mut compiler = SfcCompiler::new();
-            Ok(serde_json::to_value(compiler.parse(filename, &source))?)
+            let descriptor = compiler.parse(filename, &source);
+            Ok(json!({
+                "descriptor": descriptor,
+                "errors": [],
+            }))
         }
         "sfc.compileTemplate" => {
             let source = string_field(&payload, "source");
@@ -195,6 +232,82 @@ fn template_source(payload: &Value) -> TemplateSource {
         filename: string_field_or(payload, "filename", "anonymous.vue"),
         source: string_field(payload, "source"),
         file_id: FileId(0),
+    }
+}
+
+fn vue3_parse_value(ast: &Vue3Ast) -> Value {
+    json!({
+        "type": 0,
+        "root": ast.root.map(|id| id.0),
+        "nodes": vue3_nodes_summary(ast),
+        "children": vue3_root_children(ast),
+        "helpers": {},
+        "components": [],
+        "directives": [],
+        "hoists": [],
+        "imports": [],
+        "cached": [],
+        "temps": 0,
+    })
+}
+
+fn vue3_root_children(ast: &Vue3Ast) -> Vec<Value> {
+    ast.root
+        .and_then(|root_id| ast.node(root_id))
+        .map(|root| {
+            root.children
+                .iter()
+                .filter_map(|child_id| ast.node(*child_id))
+                .map(|node| vue3_node_summary(ast, node.id))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn vue3_nodes_summary(ast: &Vue3Ast) -> Vec<Value> {
+    ast.nodes
+        .iter()
+        .map(|node| vue3_node_summary(ast, node.id))
+        .collect()
+}
+
+fn vue3_node_summary(ast: &Vue3Ast, node_id: vuec_ast::NodeId) -> Value {
+    let Some(node) = ast.node(node_id) else {
+        return Value::Null;
+    };
+    match &node.kind {
+        Vue3NodeKind::Root => json!({
+            "type": 0,
+            "children": node.children.iter().filter_map(|child_id| ast.node(*child_id)).map(|child| vue3_node_summary(ast, child.id)).collect::<Vec<_>>(),
+        }),
+        Vue3NodeKind::Element {
+            tag,
+            attributes,
+            self_closing,
+        } => json!({
+            "type": 1,
+            "tag": tag,
+            "props": attributes,
+            "selfClosing": self_closing,
+            "children": node.children.iter().filter_map(|child_id| ast.node(*child_id)).map(|child| vue3_node_summary(ast, child.id)).collect::<Vec<_>>(),
+        }),
+        Vue3NodeKind::Text { value } => json!({
+            "type": 2,
+            "content": value,
+        }),
+        Vue3NodeKind::Interpolation { expression } => json!({
+            "type": 5,
+            "content": expression,
+        }),
+        Vue3NodeKind::Comment { value } => json!({
+            "type": 3,
+            "content": value,
+        }),
+        Vue3NodeKind::Directive { name, expression } => json!({
+            "type": 7,
+            "name": name,
+            "exp": expression,
+        }),
     }
 }
 
@@ -272,6 +385,8 @@ fn vue3_options(value: Option<&Value>) -> Vue3CompilerOptions {
     options.is_ts = bool_option(value, "isTS", bool_option(value, "is_ts", options.is_ts));
     if let Some(mode) = value.get("mode").and_then(Value::as_str) {
         options.mode = mode.to_string();
+    } else if value.get("prefixIdentifiers").and_then(Value::as_bool) == Some(true) {
+        options.mode = "function".to_string();
     }
     options.scope_id = value
         .get("scopeId")
@@ -286,6 +401,20 @@ fn vue3_options(value: Option<&Value>) -> Vue3CompilerOptions {
             .collect();
     }
     options
+}
+
+fn string_array_option(value: &Value, name: &str) -> Vec<String> {
+    value
+        .get(name)
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn sfc_template_options(value: Option<&Value>) -> SfcTemplateCompileOptions {
