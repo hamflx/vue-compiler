@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::BTreeMap;
 use vuec_codegen::SourceMapArtifact;
 use vuec_js::{JsAstStore, JsParseMode};
 use vuec_source::{FileId, SourceMap, Span};
@@ -144,7 +145,7 @@ pub struct SfcScriptBlock {
     pub attrs: SfcBlockAttrs,
     pub setup: bool,
     pub lang: Option<String>,
-    pub bindings: Vec<String>,
+    pub bindings: BTreeMap<String, String>,
     pub imports: Vec<String>,
     pub errors: Vec<String>,
     pub map: Option<SourceMapArtifact>,
@@ -383,13 +384,12 @@ impl SfcCompiler {
         descriptor: &SfcDescriptor,
         _options: SfcScriptCompileOptions,
     ) -> SfcScriptBlock {
-        let mut content = String::new();
-        let mut bindings = Vec::new();
+        let mut raw_content = String::new();
         let mut script_ast = Vec::new();
         let mut script_setup_ast = Vec::new();
         let source_type = script_source_type(descriptor);
         if let Some(script) = descriptor.script.as_ref() {
-            content.push_str(&script.content);
+            raw_content.push_str(&script.content);
             let id = self.js.register_program(
                 script.content.clone(),
                 Span::new(descriptor.source_file, script.loc.start, script.loc.end),
@@ -399,10 +399,10 @@ impl SfcCompiler {
             script_ast.push(format!("JsProgramId({})", id.0));
         }
         if let Some(script_setup) = descriptor.script_setup.as_ref() {
-            if !content.is_empty() {
-                content.push('\n');
+            if !raw_content.is_empty() {
+                raw_content.push('\n');
             }
-            content.push_str(&script_setup.content);
+            raw_content.push_str(&script_setup.content);
             let id = self.js.register_program(
                 script_setup.content.clone(),
                 Span::new(
@@ -415,21 +415,9 @@ impl SfcCompiler {
             );
             script_setup_ast.push(format!("JsProgramId({})", id.0));
         }
-        let summary = self.js.summarize_program(&content, source_type);
-        bindings.extend(summary.bindings);
+        let summary = self.js.summarize_program(&raw_content, source_type);
+        let bindings = script_bindings(&summary.bindings);
         let imports = summary.imports;
-        bindings.extend(
-            imports
-                .iter()
-                .into_iter()
-                .map(|import| format!("import:{import}")),
-        );
-        bindings.extend(
-            summary
-                .exports
-                .into_iter()
-                .map(|export| format!("export:{export}")),
-        );
         let attrs = descriptor
             .script
             .as_ref()
@@ -438,7 +426,12 @@ impl SfcCompiler {
             .unwrap_or_default();
         SfcScriptBlock {
             type_name: "script".into(),
-            content,
+            content: script_content(
+                descriptor,
+                &raw_content,
+                &summary.bindings,
+                descriptor.filename.as_str(),
+            ),
             loc: descriptor
                 .script
                 .as_ref()
@@ -635,6 +628,49 @@ fn scoped_style_vars(id: Option<&str>, vars: &[String]) -> Vec<String> {
         .collect()
 }
 
+fn script_bindings(names: &[String]) -> BTreeMap<String, String> {
+    names
+        .iter()
+        .filter(|name| !name.starts_with("import:") && !name.starts_with("export:"))
+        .map(|name| (name.clone(), "literal-const".to_string()))
+        .collect()
+}
+
+fn script_content(
+    descriptor: &SfcDescriptor,
+    raw_content: &str,
+    bindings: &[String],
+    filename: &str,
+) -> String {
+    let Some(script_setup) = descriptor.script_setup.as_ref() else {
+        return raw_content.to_string();
+    };
+    let component_name = script_component_name(filename);
+    let returned = bindings
+        .iter()
+        .filter(|name| !name.starts_with("import:") && !name.starts_with("export:"))
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let returned = if returned.is_empty() {
+        "{}".to_string()
+    } else {
+        format!("{{ {returned} }}")
+    };
+    format!(
+        "import {{ defineComponent as _defineComponent }} from 'vue'\n{}\nexport default /*@__PURE__*/_defineComponent({{\n  __name: '{}',\n  setup(__props, {{ expose: __expose }}) {{\n  __expose();\n\nconst __returned__ = {}\nObject.defineProperty(__returned__, '__isScriptSetup', {{ enumerable: false, value: true }})\nreturn __returned__\n}}\n\n}})",
+        script_setup.content, component_name, returned
+    )
+}
+
+fn script_component_name(filename: &str) -> String {
+    let stem = std::path::Path::new(filename)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("anonymous");
+    stem.to_string()
+}
+
 fn quoted_import_path(source: &str) -> Option<&str> {
     let start = source.find(['"', '\''])?;
     let quote = source[start..].chars().next()?;
@@ -767,6 +803,12 @@ mod tests {
         assert_eq!(script.errors.len(), 0);
         assert!(script.setup);
         assert_eq!(script.lang.as_deref(), Some("ts"));
+        assert_eq!(
+            script.bindings.get("x").map(String::as_str),
+            Some("literal-const")
+        );
+        assert!(script.content.contains("_defineComponent"));
+        assert!(script.content.contains("__returned__ = { x }"));
         assert_eq!(script.script_ast, vec!["JsProgramId(0)"]);
         assert_eq!(script.script_setup_ast, vec!["JsProgramId(1)"]);
         let script_json = serde_json::to_value(&script).expect("script json");

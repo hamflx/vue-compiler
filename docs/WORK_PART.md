@@ -18,6 +18,10 @@
 
 ## Completed This Round
 
+- Converted the Vue 3 `@vue/compiler-sfc` `compileScript` option row from pending to executable diff mode; the target now reports `4/4` option rows passing with no pending rows.
+- Added a minimal official-style script setup codegen path for simple const bindings, including `defineComponent` wrapping and object-form binding metadata for the option probe.
+- Fixed the option probe to pass `parse(...).descriptor` into official `compileScript`, matching the public API contract.
+- Verification this round: `cargo test -p vuec_sfc -p xtask`, `cargo check -p vuec_sfc -p vuec_node_bridge`, `cargo xtask run-option-matrix --version-line vue3 --package @vue/compiler-sfc`, and `cargo xtask audit-option-matrix --version-line vue3 --package @vue/compiler-sfc`.
 - Converted the Vue 3 `@vue/compiler-sfc` `compileStyle` option row from pending to executable diff mode and got the target to `3/4` rows passing with only `compileScript` still pending.
 - Aligned SFC style result serialization with official field names, including `rawResult`, deterministic dependencies, and source-map/null behavior for the executable option row.
 - Updated style CSS var rewriting and scoped output formatting to match the official Vue 3 `compileStyle` option probe for the current fixture.

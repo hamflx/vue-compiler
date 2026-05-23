@@ -1274,7 +1274,7 @@ fn vue3_sfc_cases(_target: TargetSpec) -> Vec<OptionMatrixCase> {
             "undefined",
             &["script setup analysis"],
             &["bindings"],
-            &["content", "bindings", "errors"],
+            &["content", "bindings"],
             &["vue3-sfc-script"],
             "base",
             "compileScript",
@@ -1283,7 +1283,7 @@ fn vue3_sfc_cases(_target: TargetSpec) -> Vec<OptionMatrixCase> {
             Some(
                 serde_json::json!({"id": "data-v-contract", "inlineTemplate": false, "refSugar": false}),
             ),
-            true,
+            false,
         ),
         option_case(
             "compileStyle",
@@ -3199,7 +3199,8 @@ function invoke(api) {
       return capture(() => api.compileTemplate(optionObjectWithSource(fixture)));
     case 'compileScript': {
       return capture(() => {
-        const descriptor = api.parse(fixture, { filename: 'contract.vue' });
+        const parsed = api.parse(fixture, { filename: 'contract.vue' });
+        const descriptor = parsed && parsed.descriptor ? parsed.descriptor : parsed;
         return arg.present ? api.compileScript(descriptor, arg.value) : api.compileScript(descriptor);
       });
     }

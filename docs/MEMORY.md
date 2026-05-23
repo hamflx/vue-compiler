@@ -5,7 +5,7 @@
 - `docs/3.AST_HIR_MIR_DESIGN.md` is the authoritative AST/IR contract; `vuec_ast` follows the new arena, lowering-map, runtime-helper, and JS id model, while `vuec_js` still needs the real registry/store APIs.
 - `vuec_js` now has the first real registry/store layer: `JsEntry`, `JsSourceType`, id allocation for expressions/statements/patterns/programs, lookup APIs, and parse-by-id APIs while preserving the old direct parse wrappers.
 - `vuec_sfc::compile_script` now registers normal script and script setup blocks as `JsProgramId`s and serializes official-style `type`, `setup`, `lang`, `imports`, `scriptAst`, `scriptSetupAst`, and `deps` fields.
-- Vue 3 SFC option matrix now has parse, compileTemplate, and compileStyle executable rows passing; compileScript remains the only pending Vue 3 SFC option row.
+- Vue 3 SFC option matrix now has parse, compileTemplate, compileScript, and compileStyle executable rows passing for the current schema v2 fixtures.
 - `vuec_ast` now carries the new base arena shape from the AST/HIR/MIR design: `NodeSpan`, parent/index tracking, `LoweringMap`, helper enums, and JS id types are in place, with `Hir`/`Mir` aliases preserved for compatibility.
 - `vuec_pass` now uses `RuntimeHelper` enums and exposes a depth-first `DocumentPass` walker over `AstDocument`, so the transform layer can align with the new IR plan.
 - Vue 3 SFC work is now past the skeleton stage: template compilation keeps raw source for official-style output and source maps, module-mode render codegen emits direct Vue imports, and side-effect `<script>/<style>` handling is AST/diagnostic-driven.

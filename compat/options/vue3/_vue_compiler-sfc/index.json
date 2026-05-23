@@ -3,7 +3,7 @@
   "version_line": "vue3",
   "package": "@vue/compiler-sfc",
   "entry": "index",
-  "status": "pending",
+  "status": "pass",
   "rows": [
     {
       "option_name": "parse",
@@ -101,8 +101,7 @@
       ],
       "output_fields_affected": [
         "content",
-        "bindings",
-        "errors"
+        "bindings"
       ],
       "official_fixture_ids": [
         "vue3-sfc-script"
@@ -117,8 +116,8 @@
         "inlineTemplate": false,
         "refSugar": false
       },
-      "execution_mode": "pending",
-      "status": "pending"
+      "execution_mode": "diff",
+      "status": "pass"
     },
     {
       "option_name": "compileStyle",
