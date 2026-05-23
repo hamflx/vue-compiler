@@ -2,6 +2,7 @@
 
 - Active objective: build a Rust Vue compiler that can replace official Vue 2.6, Vue 2.7, and Vue 3 compiler flows.
 - Current focus: use the generated npm alias bridge to turn option/output contract and official conformance execution from discovery/scaffold reports into real Rust-vs-official gates.
+- `docs/3.AST_HIR_MIR_DESIGN.md` is the authoritative AST/IR contract; `vuec_ast` follows the new arena, lowering-map, runtime-helper, and JS id model, while `vuec_js` still needs the real registry/store APIs.
 - `vuec_ast` now carries the new base arena shape from the AST/HIR/MIR design: `NodeSpan`, parent/index tracking, `LoweringMap`, helper enums, and JS id types are in place, with `Hir`/`Mir` aliases preserved for compatibility.
 - `vuec_pass` now uses `RuntimeHelper` enums and exposes a depth-first `DocumentPass` walker over `AstDocument`, so the transform layer can align with the new IR plan.
 - Vue 3 SFC work is now past the skeleton stage: template compilation keeps raw source for official-style output and source maps, module-mode render codegen emits direct Vue imports, and side-effect `<script>/<style>` handling is AST/diagnostic-driven.

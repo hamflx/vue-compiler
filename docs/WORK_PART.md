@@ -18,6 +18,7 @@
 
 ## Completed This Round
 
+- Updated the development plan to align with `docs/3.AST_HIR_MIR_DESIGN.md` as the authoritative AST/IR contract and tightened the deterministic acceptance language around AST projections, lowering maps, and MIR targets.
 - Upgraded `compat/options/*` from category-only placeholders to schema v2 option case matrices. Each row now records option path, accepted types, missing/undefined/null behavior notes, affected output fields, fixture source, input kind, method, execution mode, and status.
 - Replaced `run-option-matrix` scaffold output with a real Node probe that loads the pinned official npm package and the generated Rust alias package for the same target, runs each executable option row, compares affected fields, and writes `target/conformance/<lock-hash>/option-matrix.json`.
 - Added deterministic handling for `missing`, `undefined`, `null`, and concrete option values in the option probe input model, so future rows can test all required value states without changing runner architecture.

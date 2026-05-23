@@ -2,7 +2,7 @@
 
 开发计划：docs/2.DEVELOPMENT_PLAN.md
 设计方案：docs\1.RUST_VUE_COMPILER_DESIGN.md
-AST/IR设计：docs\3.AST_HIR_MIR_DESIGN.md
+AST/IR设计：docs\3.AST_HIR_MIR_DESIGN.md（AST/HIR/MIR 以此为唯一结构约束）
 调研文档：docs\0.RESEARCH.md
 你可以参考的一些开源项目：C:\Users\fuyon\Documents\Playground\rust-vue-compiler-research
 
