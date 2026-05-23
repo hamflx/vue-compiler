@@ -18,6 +18,8 @@
 
 ## Completed This Round
 
+- Converted the Vue 3 `@vue/compiler-ssr` `scopeId` option row from pending to executable diff mode; the target now reports `2/2` option rows passing with no pending rows.
+- Verification this round: `cargo xtask run-option-matrix --version-line vue3 --package @vue/compiler-ssr`, `cargo xtask audit-option-matrix --version-line vue3 --package @vue/compiler-ssr`, `cargo xtask diff-api --version-line vue3 --package @vue/compiler-ssr`, and `cargo xtask verify-npm-alias --version-line vue3 --package @vue/compiler-ssr`.
 - Added version-specific Vue 2.7 `vue/compiler-sfc` alias bridge commands so parse/template/script/style results are projected to the Vue 2.7 public API shape instead of reusing the Vue 3 SFC wrapper.
 - Fixed the option probe and npm alias smoke paths for Vue 2.7's single-object SFC API, including template/style block source extraction for executable diff rows.
 - Converted Vue 2.7 `compileScript` and `compileStyle` rows from pending to executable diff mode; `cargo xtask run-option-matrix --version-line vue2_7 --package vue --entry vue/compiler-sfc` now reports `4/4` rows passing with no pending rows.

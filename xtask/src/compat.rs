@@ -1197,7 +1197,7 @@ fn vue3_ssr_cases(_target: TargetSpec) -> Vec<OptionMatrixCase> {
             "vue3-ssr-scope",
             r#"<div class="a"></div>"#,
             Some(serde_json::json!({"scopeId": "data-v-x"})),
-            true,
+            false,
         ),
         option_case(
             "slotted",
