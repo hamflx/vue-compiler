@@ -5103,32 +5103,37 @@ function parseForExpression(source) {
 }
 
 function createRootCodegen(root, context) {
-  const children = root.children || [];
-  if (children.length === 1) {
-    const child = children[0];
-    if (child && child.codegenNode) {
-      const codegenNode = child.codegenNode;
-      if (codegenNode.type === vue3CoreRuntime.NodeTypes.VNODE_CALL) {
-        vue3CoreRuntime.convertToBlock(codegenNode, context);
-      }
-      root.codegenNode = codegenNode;
-    } else {
-      root.codegenNode = child;
+  const projection = callBridge('vue3.core.rootCodegen', { root });
+  if (!projection || projection.kind === 'none') return;
+  if (projection.kind === 'child') {
+    root.codegenNode = (root.children || [])[projection.index || 0];
+    return;
+  }
+  if (projection.kind === 'childCodegen') {
+    const child = (root.children || [])[projection.index || 0];
+    const codegenNode = child && child.codegenNode;
+    if (codegenNode && projection.asBlock) {
+      vue3CoreRuntime.convertToBlock(codegenNode, context);
     }
-  } else if (children.length > 1) {
+    root.codegenNode = codegenNode;
+    return;
+  }
+  if (projection.kind === 'fragment') {
     root.codegenNode = vue3CoreRuntime.createVNodeCall(
       context,
       context.helper(vue3CoreRuntime.FRAGMENT),
       undefined,
-      children,
-      64,
+      root.children || [],
+      projection.patchFlag,
       undefined,
       undefined,
       true,
       undefined,
       false,
     );
+    return;
   }
+  throw new Error(`Unsupported Rust root codegen projection: ${projection.kind}`);
 }
 
 function hydrateVue3Ast(ast, options) {

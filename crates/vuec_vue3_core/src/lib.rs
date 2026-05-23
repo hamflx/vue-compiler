@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use vuec_ast::{
     MissingSpanReason, NodeSpan, QuoteKind, RuntimeHelper, Vue3Ast, Vue3AstKind, Vue3Directive,
     Vue3Element, Vue3ElementType, Vue3Expression, Vue3NodeKind, Vue3Prop,
@@ -597,6 +598,81 @@ impl Vue3Dialect {
         }
         result
     }
+}
+
+pub fn root_codegen_projection(root: &Value) -> Value {
+    let children = root
+        .get("children")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    match children {
+        [] => json!({ "kind": "none" }),
+        [_] => root_single_child_codegen_projection(children),
+        _ => json!({
+            "kind": "fragment",
+            "patchFlag": root_fragment_patch_flag(children),
+        }),
+    }
+}
+
+fn root_single_child_codegen_projection(children: &[Value]) -> Value {
+    if let Some((index, child)) = single_element_root(children) {
+        if child
+            .get("codegenNode")
+            .is_some_and(|value| !value.is_null())
+        {
+            return json!({
+                "kind": "childCodegen",
+                "index": index,
+                "asBlock": child
+                    .get("codegenNode")
+                    .and_then(json_node_type)
+                    == Some(13),
+            });
+        }
+    }
+    json!({ "kind": "child", "index": 0 })
+}
+
+fn single_element_root(children: &[Value]) -> Option<(usize, &Value)> {
+    let mut element = None;
+    for (index, child) in children.iter().enumerate() {
+        if json_node_type(child) == Some(3) {
+            continue;
+        }
+        if json_node_type(child) != Some(1) || json_u64(child, "tagType") == Some(2) {
+            return None;
+        }
+        if element.replace((index, child)).is_some() {
+            return None;
+        }
+    }
+    element
+}
+
+fn root_fragment_patch_flag(children: &[Value]) -> u16 {
+    let visible = children
+        .iter()
+        .filter(|child| json_node_type(child) != Some(3))
+        .count();
+    if visible == 1
+        && children
+            .iter()
+            .any(|child| json_node_type(child) == Some(3))
+    {
+        64 | 2048
+    } else {
+        64
+    }
+}
+
+fn json_node_type(value: &Value) -> Option<u64> {
+    json_u64(value, "type")
+}
+
+fn json_u64(value: &Value, key: &str) -> Option<u64> {
+    value.get(key).and_then(Value::as_u64)
 }
 
 fn vue3_element_kind(
@@ -3844,6 +3920,64 @@ mod tests {
         assert!(result.code.contains("fn: _withCtx(() => ["));
         assert!(result.code.contains("name: i"));
         assert!(result.code.contains(", 1024 /* DYNAMIC_SLOTS */"));
+    }
+
+    #[test]
+    fn root_codegen_projection_uses_child_for_slot_outlet() {
+        let root = json!({
+            "children": [{
+                "type": 1,
+                "tagType": 2,
+                "codegenNode": { "type": 14 }
+            }]
+        });
+
+        assert_eq!(
+            root_codegen_projection(&root),
+            json!({ "kind": "child", "index": 0 })
+        );
+    }
+
+    #[test]
+    fn root_codegen_projection_uses_single_element_codegen_as_block() {
+        let root = json!({
+            "children": [{
+                "type": 1,
+                "tagType": 0,
+                "codegenNode": { "type": 13 }
+            }]
+        });
+
+        assert_eq!(
+            root_codegen_projection(&root),
+            json!({ "kind": "childCodegen", "index": 0, "asBlock": true })
+        );
+    }
+
+    #[test]
+    fn root_codegen_projection_preserves_non_element_child() {
+        let root = json!({ "children": [{ "type": 11, "codegenNode": { "type": 13 } }] });
+
+        assert_eq!(
+            root_codegen_projection(&root),
+            json!({ "kind": "child", "index": 0 })
+        );
+    }
+
+    #[test]
+    fn root_codegen_projection_marks_single_visible_root_fragment() {
+        let root = json!({
+            "children": [
+                { "type": 3 },
+                { "type": 1, "tagType": 0 },
+                { "type": 3 }
+            ]
+        });
+
+        assert_eq!(
+            root_codegen_projection(&root),
+            json!({ "kind": "fragment", "patchFlag": 2112 })
+        );
     }
 
     #[test]

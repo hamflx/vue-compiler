@@ -27,9 +27,17 @@
 - [x] Vue 3 compiler-core Rust-backed `baseCompile` integration slice for `compile.spec.ts`.
 - [x] Vue 3 compiler-core Rust-backed parser/OXC projection slice for `parse.spec.ts`.
 - [x] Vue 3 compiler-core Rust-backed `baseCompile` component slot / `scopeId.spec.ts` slice.
+- [x] Vue 3 compiler-core Rust-backed root `codegenNode` projection bridge for `transform.spec.ts`.
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Implemented a Rust-backed Vue 3 root `codegenNode` projection bridge for compiler-core transform finalization.
+- `vuec_vue3_core::root_codegen_projection` now owns the official root selection rules: empty roots produce no codegen node, a single non-slot element with codegen uses that codegen node and marks VNode calls for block conversion, slot outlets remain the slot element node, structural `IF`/`FOR` roots remain structural nodes, and multi-child roots emit a fragment projection with `64` or `64 | 2048`.
+- Added `vue3.core.rootCodegen` to `vuec_node_bridge` and changed generated alias `createRootCodegen` to call the Rust projection and apply the returned instruction to the hydrated AST. This `xtask/src/compat.rs` change is bridge/API adapter support only, not compiler semantics implemented in JavaScript.
+- Focused official `compiler-core/__tests__/transform.spec.ts` now passes `21/21`; the previous four root-codegen failures are closed. The file remains `mixed` in coverage because its transform walker/internal transforms still execute through the alias runtime.
+- Full Vue 3 core conformance is still intentionally failing: `409/652` official tests pass and `243` fail. Coverage reports `rust-backed 158/158`, `mixed 251/494`, and `shim-backed 0/0`. Remaining failures are concentrated in internal transform/codegen suites (`transformElement`, `vFor`, `cacheStatic`, `vSlot`, `vIf`, `vModel`, `vMemo`, `utils`).
+- Verification this round: `cargo fmt --all --check`, `cargo check -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_vue3_core root_codegen_projection`, `cargo test -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo xtask verify-npm-alias --version-line vue3 --package @vue/compiler-core`, direct prepared Vitest `transform.spec.ts` run (`21/21` pass), and `cargo xtask run-conformance --suite vue3-core` (expected fail with `409/652` pass, `243` fail).
 
 - Implemented a Rust-backed Vue 3 `baseCompile` component slot / scopeId slice in `vuec_vue3_core`.
 - Rust codegen now resolves component assets with `_resolveComponent`, emits component root blocks with `_createBlock`, lowers default and named component children into `_withCtx` slot functions, and supports dynamic slots from `v-if` / `v-for` slot templates through `_createSlots`, `_renderList`, and `1024 /* DYNAMIC_SLOTS */`.
