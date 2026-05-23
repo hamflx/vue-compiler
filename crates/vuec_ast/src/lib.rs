@@ -205,6 +205,7 @@ pub enum RuntimeHelper {
     Vue3CreateElementBlock,
     Vue3ToDisplayString,
     Vue3RenderList,
+    Vue3RenderSlot,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

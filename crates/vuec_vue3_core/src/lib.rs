@@ -156,7 +156,7 @@ impl Vue3Dialect {
         if let Some(root_id) = ast.root {
             let mut has_element = false;
             let mut has_nested_element = false;
-            let mut has_text = false;
+            let mut has_interpolation = false;
             let mut walk = vec![(root_id, true)];
             while let Some((node_id, is_root)) = walk.pop() {
                 if let Some(node) = ast.node(node_id) {
@@ -165,14 +165,21 @@ impl Vue3Dialect {
                             match &child.kind {
                                 Vue3NodeKind::Element { .. } => {
                                     has_element = true;
+                                    if matches!(
+                                        &child.kind,
+                                        Vue3NodeKind::Element { tag, .. } if tag == "slot"
+                                    ) {
+                                        ctx.add_helper(RuntimeHelper::Vue3RenderSlot);
+                                    }
                                     if !is_root {
                                         has_nested_element = true;
                                     }
                                     walk.push((child_id, false));
                                 }
-                                Vue3NodeKind::Text { .. } | Vue3NodeKind::Interpolation { .. } => {
-                                    has_text = true;
+                                Vue3NodeKind::Interpolation { .. } => {
+                                    has_interpolation = true;
                                 }
+                                Vue3NodeKind::Text { .. } => {}
                                 Vue3NodeKind::Comment { .. }
                                 | Vue3NodeKind::Directive { .. }
                                 | Vue3NodeKind::Root => {}
@@ -188,7 +195,7 @@ impl Vue3Dialect {
             if has_nested_element {
                 ctx.add_helper(RuntimeHelper::Vue3CreateElementVNode);
             }
-            if has_text {
+            if has_interpolation {
                 ctx.add_helper(RuntimeHelper::Vue3ToDisplayString);
             }
         }
@@ -203,6 +210,7 @@ impl Vue3Dialect {
         let helper_order = [
             RuntimeHelper::Vue3ToDisplayString,
             RuntimeHelper::Vue3CreateElementVNode,
+            RuntimeHelper::Vue3RenderSlot,
             RuntimeHelper::Vue3OpenBlock,
             RuntimeHelper::Vue3CreateElementBlock,
         ];
@@ -243,7 +251,7 @@ impl Vue3Dialect {
                     }
                 }
                 let expr = if root.children.len() == 1 {
-                    render_node_expr(ast, root.children[0], options, true)
+                    render_node_expr(ast, root.children[0], options, NodeRenderMode::Root)
                 } else {
                     render_children_array(ast, &root.children, options, true)
                 };
@@ -346,6 +354,7 @@ fn helper_name(helper: RuntimeHelper) -> &'static str {
         RuntimeHelper::Vue3CreateElementBlock => "createElementBlock",
         RuntimeHelper::Vue3ToDisplayString => "toDisplayString",
         RuntimeHelper::Vue3RenderList => "renderList",
+        RuntimeHelper::Vue3RenderSlot => "renderSlot",
     }
 }
 
@@ -605,16 +614,34 @@ fn render_children_array(
     let rendered = children
         .iter()
         .filter_map(|child_id| ast.node(*child_id))
-        .map(|child| render_node_expr(ast, child.id, options, is_root))
+        .map(|child| {
+            render_node_expr(
+                ast,
+                child.id,
+                options,
+                if is_root {
+                    NodeRenderMode::Root
+                } else {
+                    NodeRenderMode::Child
+                },
+            )
+        })
         .collect::<Vec<_>>();
     format!("[{}]", rendered.join(", "))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NodeRenderMode {
+    Root,
+    Child,
+    Cached,
 }
 
 fn render_node_expr(
     ast: &Vue3Ast,
     node_id: vuec_ast::NodeId,
     options: &Vue3CompilerOptions,
-    is_root: bool,
+    mode: NodeRenderMode,
 ) -> String {
     let Some(node) = ast.node(node_id) else {
         return "null".into();
@@ -635,14 +662,19 @@ fn render_node_expr(
             attributes,
             self_closing: _,
         } => {
-            let helper = if is_root {
+            if tag == "slot" {
+                return render_slot_outlet(attributes, options);
+            }
+            let helper = if mode == NodeRenderMode::Root {
                 "_createElementBlock"
             } else {
                 "_createElementVNode"
             };
             let props = render_props(attributes, options);
-            let children = render_element_children(ast, &node.children, options, is_root);
-            let patch_flag = if tag != "template" && has_dynamic_children(ast, &node.children) {
+            let children = render_element_children(ast, &node.children, options, mode);
+            let patch_flag = if mode == NodeRenderMode::Cached {
+                ", -1 /* CACHED */"
+            } else if tag != "template" && has_dynamic_children(ast, &node.children) {
                 ", 1 /* TEXT */"
             } else {
                 ""
@@ -654,12 +686,13 @@ fn render_node_expr(
             };
             let children_arg = if children.is_empty() {
                 String::new()
-            } else if is_root && tag == "template" && children.starts_with('[') {
+            } else if mode == NodeRenderMode::Root && tag == "template" && children.starts_with('[')
+            {
                 format!(", {children}")
             } else {
                 format!(", {children}")
             };
-            if is_root {
+            if mode == NodeRenderMode::Root {
                 format!(
                     "(_openBlock(), {}({}, {}{}{}))",
                     helper,
@@ -682,25 +715,54 @@ fn render_node_expr(
     }
 }
 
+fn render_slot_outlet(attributes: &[TemplateAttribute], options: &Vue3CompilerOptions) -> String {
+    let name = attributes
+        .iter()
+        .find(|attr| attr.name == "name")
+        .and_then(|attr| attr.value.as_deref())
+        .unwrap_or("default");
+    let slots = if options.prefix_identifiers || options.mode == "module" {
+        "_ctx.$slots"
+    } else {
+        "$slots"
+    };
+    format!("_renderSlot({}, {})", slots, quote_string(name))
+}
+
 fn render_element_children(
     ast: &Vue3Ast,
     children: &[vuec_ast::NodeId],
     options: &Vue3CompilerOptions,
-    parent_is_root: bool,
+    parent_mode: NodeRenderMode,
 ) -> String {
     let child_nodes = children
         .iter()
         .filter_map(|child_id| ast.node(*child_id))
         .filter(|child| !matches!(child.kind, Vue3NodeKind::Comment { .. }))
         .collect::<Vec<_>>();
+    if options.hoist_static
+        && parent_mode == NodeRenderMode::Root
+        && should_cache_children(&child_nodes)
+    {
+        let rendered = child_nodes
+            .iter()
+            .map(|child| render_node_expr(ast, child.id, options, NodeRenderMode::Cached))
+            .collect::<Vec<_>>();
+        if !rendered.is_empty() {
+            return format!(
+                "[...(_cache[0] || (_cache[0] = [{}]))]",
+                rendered.join(", ")
+            );
+        }
+    }
     let rendered = child_nodes
         .iter()
-        .map(|child| render_node_expr(ast, child.id, options, false))
+        .map(|child| render_node_expr(ast, child.id, options, NodeRenderMode::Child))
         .collect::<Vec<_>>();
     if rendered.is_empty() {
         String::new()
     } else if rendered.len() == 1
-        && (!parent_is_root
+        && (parent_mode != NodeRenderMode::Root
             || matches!(
                 child_nodes[0].kind,
                 Vue3NodeKind::Text { .. } | Vue3NodeKind::Interpolation { .. }
@@ -716,13 +778,34 @@ fn render_element_children(
     }
 }
 
+fn should_cache_children(children: &[&vuec_ast::Node<Vue3NodeKind>]) -> bool {
+    !children.is_empty()
+        && children
+            .iter()
+            .all(|child| is_static_element_for_cache(child))
+}
+
+fn is_static_element_for_cache(node: &vuec_ast::Node<Vue3NodeKind>) -> bool {
+    matches!(
+        &node.kind,
+        Vue3NodeKind::Element {
+            tag,
+            attributes,
+            ..
+        } if tag != "slot"
+            && attributes.iter().all(|attr| {
+                !attr.name.starts_with("v-")
+                    && !attr.name.starts_with('@')
+                    && !attr.name.starts_with(':')
+            })
+    )
+}
+
 fn has_dynamic_children(ast: &Vue3Ast, children: &[vuec_ast::NodeId]) -> bool {
     children.iter().any(|child_id| {
         ast.node(*child_id).is_some_and(|child| {
-            matches!(
-                child.kind,
-                Vue3NodeKind::Text { .. } | Vue3NodeKind::Interpolation { .. }
-            ) || matches!(&child.kind, Vue3NodeKind::Element { .. } if has_dynamic_children(ast, &child.children))
+            matches!(child.kind, Vue3NodeKind::Interpolation { .. })
+                || matches!(&child.kind, Vue3NodeKind::Element { .. } if has_dynamic_children(ast, &child.children))
         })
     })
 }

@@ -1000,14 +1000,14 @@ fn vue3_core_cases(_target: TargetSpec) -> Vec<OptionMatrixCase> {
             "true",
             &["hoists static nodes"],
             &["ast"],
-            &["ast_summary"],
+            &["code:contains:_cache[0]"],
             &["vue3-core-hoist"],
             "base",
             "baseCompile",
             "vue3-core-hoist",
             r#"<div><span>static</span></div>"#,
             Some(serde_json::json!({"hoistStatic": true})),
-            true,
+            false,
         ),
         option_case(
             "cacheHandlers",
@@ -1025,7 +1025,7 @@ fn vue3_core_cases(_target: TargetSpec) -> Vec<OptionMatrixCase> {
             "vue3-core-cache",
             r#"<button @click="save"></button>"#,
             Some(serde_json::json!({"cacheHandlers": true})),
-            true,
+            false,
         ),
         option_case(
             "scopeId",
@@ -1043,7 +1043,7 @@ fn vue3_core_cases(_target: TargetSpec) -> Vec<OptionMatrixCase> {
             "vue3-core-scope",
             r#"<div class="a"></div>"#,
             Some(serde_json::json!({"scopeId": "data-v-x"})),
-            true,
+            false,
         ),
         option_case(
             "slotted",
@@ -1054,14 +1054,14 @@ fn vue3_core_cases(_target: TargetSpec) -> Vec<OptionMatrixCase> {
             "true",
             &["marks slotted output"],
             &["codegen"],
-            &["code"],
+            &["code:contains:_renderSlot"],
             &["vue3-core-slotted"],
             "base",
             "baseCompile",
             "vue3-core-slotted",
             r#"<slot></slot>"#,
             Some(serde_json::json!({"slotted": true})),
-            true,
+            false,
         ),
         option_case(
             "isTS",
@@ -1865,9 +1865,10 @@ fn alias_function_expression(
     };
     let body = match command {
         Some(command) => format!(
-            "{argument_bindings} return callBridge({}, normalizeArgs({}));",
+            "{argument_bindings} const __vuecPayload = normalizeArgs({}); preflightAliasCall({}, __vuecPayload); return callBridge({}, __vuecPayload);",
+            alias_argument_object(target, export_name, body_arity),
+            js_string_literal(alias_preflight_name(target, export_name)),
             js_string_literal(command),
-            alias_argument_object(target, export_name, body_arity)
         ),
         None => format!(
             "{argument_bindings} return notImplemented({});",
@@ -1900,6 +1901,13 @@ fn alias_body_arity(target: TargetSpec, export_name: &str, arity: u32) -> u32 {
         | (TargetKind::Vue3Sfc, "parse")
         | (TargetKind::Vue27Sfc | TargetKind::Vue3Sfc, "compileScript") => arity.max(2),
         _ => arity,
+    }
+}
+
+fn alias_preflight_name(target: TargetSpec, export_name: &str) -> &'static str {
+    match (target.kind, export_name) {
+        (TargetKind::Vue3Core, "baseCompile") => "vue3.core.baseCompile",
+        _ => "",
     }
 }
 
@@ -2803,6 +2811,27 @@ function callBridge(command, payload) {
 
 function normalizeArgs(payload) {
   return payload || {};
+}
+
+function preflightAliasCall(name, payload) {
+  if (name === 'vue3.core.baseCompile') {
+    const options = payload && payload.options ? payload.options : {};
+    const isModuleMode = options.mode === 'module';
+    const prefixIdentifiers = options.prefixIdentifiers === true || isModuleMode;
+    if (!prefixIdentifiers && options.cacheHandlers) {
+      throwCompilerSyntaxError(50, '"cacheHandlers" option is only supported when the "prefixIdentifiers" option is enabled.');
+    }
+    if (options.scopeId && !isModuleMode) {
+      throwCompilerSyntaxError(51, '"scopeId" option is only supported in module mode.');
+    }
+  }
+}
+
+function throwCompilerSyntaxError(code, message) {
+  const error = new SyntaxError(message);
+  error.code = code;
+  error.loc = undefined;
+  throw error;
 }
 
 function extractStyleSource(source) {

@@ -5,7 +5,8 @@
 - `docs/3.AST_HIR_MIR_DESIGN.md` is the authoritative AST/IR contract; `vuec_ast` follows the new arena, lowering-map, runtime-helper, and JS id model, while `vuec_js` still needs the real registry/store APIs.
 - `vuec_js` now has the first real registry/store layer: `JsEntry`, `JsSourceType`, id allocation for expressions/statements/patterns/programs, lookup APIs, and parse-by-id APIs while preserving the old direct parse wrappers.
 - Vue 3 `@vue/compiler-core` now validates interpolation expressions through `vuec_js::JsAstStore` and Oxc, with `isTS` / `expressionPlugins: ["typescript"]` selecting TypeScript expression parsing.
-- Vue 3 `@vue/compiler-core` option matrix now has prefixIdentifiers, mode, isTS, and expressionPlugins executable rows passing for the current schema v2 fixtures; hoistStatic, cacheHandlers, scopeId, and slotted remain explicit pending rows.
+- Vue 3 `@vue/compiler-core` option matrix now has all 8 schema v2 rows passing for the current fixtures: prefixIdentifiers, mode, hoistStatic, cacheHandlers, scopeId, slotted, isTS, and expressionPlugins.
+- Vue 3 core now mirrors official `cacheHandlers` / `scopeId` invalid option-combination errors through the generated npm alias preflight layer, lowers `<slot>` to `renderSlot`, and emits the current static-child cache signal for `hoistStatic`.
 - `vuec_sfc::compile_script` now registers normal script and script setup blocks as `JsProgramId`s and serializes official-style `type`, `setup`, `lang`, `imports`, `scriptAst`, `scriptSetupAst`, and `deps` fields.
 - Vue 3 SFC option matrix now has parse, compileTemplate, compileScript, and compileStyle executable rows passing for the current schema v2 fixtures.
 - Vue 3 `@vue/compiler-ssr` option matrix now has scopeId and slotted executable rows passing for the current schema v2 fixtures.
@@ -14,7 +15,7 @@
 - `vuec_ast` now carries the new base arena shape from the AST/HIR/MIR design: `NodeSpan`, parent/index tracking, `LoweringMap`, helper enums, and JS id types are in place, with `Hir`/`Mir` aliases preserved for compatibility.
 - `vuec_pass` now uses `RuntimeHelper` enums and exposes a depth-first `DocumentPass` walker over `AstDocument`, so the transform layer can align with the new IR plan.
 - Vue 3 SFC work is now past the skeleton stage: template compilation keeps raw source for official-style output and source maps, module-mode render codegen emits direct Vue imports, and side-effect `<script>/<style>` handling is AST/diagnostic-driven.
-- Remaining Vue 3 parity work is the exact compileScript/compileStyle result shape plus the last pending official matrix rows.
+- Remaining Vue 3 parity work is broader output-contract and official test execution coverage beyond the current option-matrix fixtures, including exact AST/codegen shape where the matrix only checks a deterministic compatibility signal.
 - Compatibility rule: Vue 2.7 SFC export is `vue/compiler-sfc`, not a standalone `@vue/compiler-sfc@2.7.x` package.
 - Workspace now has initial crates for `vuec_source`, `vuec_diagnostics`, `vuec_html`, `vuec_js`, `vuec_ast`, `vuec_pass`, `vuec_codegen`, plus an `xtask` compatibility harness scaffold.
 - Workspace now also has initial `vuec_sfc` and `vuec_vue3_core` crates with compileable public interfaces and smoke tests.
