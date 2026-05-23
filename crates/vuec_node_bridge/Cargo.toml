@@ -15,6 +15,7 @@ vuec_html = { path = "../vuec_html" }
 vuec_js = { path = "../vuec_js" }
 vuec_sfc = { path = "../vuec_sfc" }
 vuec_source = { path = "../vuec_source" }
+vuec_pass = { path = "../vuec_pass" }
 vuec_style = { path = "../vuec_style" }
 vuec_vue2 = { path = "../vuec_vue2" }
 vuec_vue3_core = { path = "../vuec_vue3_core" }

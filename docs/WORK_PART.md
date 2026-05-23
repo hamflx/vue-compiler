@@ -37,9 +37,16 @@
 - [x] Vue 3 compiler-core Rust-backed `transformElement` v-for ref marker / block-forcing props projection slice.
 - [x] Vue 3 compiler-core Rust-backed `buildDirectiveArgs` projection slice inside `transformElement.spec.ts`.
 - [x] Vue 3 compiler-core Rust-backed `transformElement` built-in component children projection slice.
+- [x] Vue 3 compiler-core Rust-backed public `baseCompile` vnode-hook / `NEED_PATCH` AST codegen slice.
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Added Rust-backed Vue 3 public `baseCompile` vnode-hook codegen compatibility.
+- `vuec_vue3_core` now maps static `@vue:*` events to official `onVnode*` prop names, keeps vnode hooks out of dynamic prop lists, and emits `512 /* NEED_PATCH */` only when no stronger patch flag is selected.
+- `vuec_node_bridge` now assembles an official-shaped public `baseCompile` result with `ast`, `code`, `map`, and `preamble`; the returned AST includes Rust-projected element `codegenNode.patchFlag` for this path. No `xtask/src/compat.rs` JavaScript shim semantics changed in this round.
+- Focused official `compiler-core/__tests__/transforms/transformElement.spec.ts` now passes `88/124` (previously `87/124`). Element-transform own failures are now `0`; the remaining `36` failures are existing `v-for` suite failures outside this slice.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_vue3_core` (`51/51` pass), `cargo build -p vuec_node_bridge`, `cargo xtask verify-npm-alias --version-line vue3 --package @vue/compiler-core`, `cargo xtask diff-api --version-line vue3 --package @vue/compiler-core`, `cargo xtask run-option-matrix --version-line vue3 --package @vue/compiler-core`, `cargo xtask run-output-contract --version-line vue3 --package @vue/compiler-core`, direct prepared Vitest `transformElement.spec.ts` (`88/124` pass, expected fail from `v-for`, element failures `0`), and `git diff --check`.
 
 - Added a Rust-backed Vue 3 `transformElement` children projection for built-in component lowering.
 - `vuec_vue3_core::transform_element_children_projection` now owns the official children decisions for `Suspense`, `BaseTransition`, and `KeepAlive`: stable slot object projection for `Suspense` / `BaseTransition`, template `#default` / `#fallback` slot unwrapping, and `KeepAlive` raw children with `DYNAMIC_SLOTS` / block forcing.

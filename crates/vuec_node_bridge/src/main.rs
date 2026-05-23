@@ -86,9 +86,7 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
         "vue3.core.baseCompile" => {
             let source = template_source(&payload);
             let options = vue3_options(payload.get("options"));
-            Ok(serde_json::to_value(Vue3Dialect::base_compile(
-                source, options,
-            ))?)
+            Ok(vue3_base_compile_value(source, options))
         }
         "vue3.core.baseParse" => {
             let source = template_source(&payload);
@@ -101,6 +99,7 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
                 source.base_offset,
                 include_sfc_inner_loc,
                 &options,
+                false,
             ))
         }
         "vue3.core.rootCodegen" => Ok(vuec_vue3_core::root_codegen_projection(
@@ -179,6 +178,7 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
                 source.base_offset,
                 include_sfc_inner_loc,
                 &options.core,
+                false,
             ))
         }
         "vue3.ssr.compile" => {
@@ -683,17 +683,39 @@ fn block_content_end_from_loc(loc: &vuec_sfc::SfcBlockLocation) -> usize {
     loc.end
 }
 
+fn vue3_base_compile_value(source: TemplateSource, options: Vue3CompilerOptions) -> Value {
+    let mut ast = Vue3Dialect::base_parse(source.clone(), &options);
+    let mut ctx = vuec_pass::TransformContext::default();
+    Vue3Dialect::transform(&mut ast, &mut ctx);
+    let result = Vue3Dialect::finish_compile(ast.clone(), source.clone(), options.clone(), ctx);
+    let ast_value = vue3_parse_value(
+        &ast,
+        &source.source,
+        source.base_offset,
+        false,
+        &options,
+        true,
+    );
+    json!({
+        "ast": ast_value,
+        "code": result.code,
+        "preamble": result.preamble,
+        "map": result.map,
+    })
+}
+
 fn vue3_parse_value(
     ast: &Vue3Ast,
     source: &str,
     base_offset: usize,
     include_sfc_inner_loc: bool,
     options: &Vue3CompilerOptions,
+    include_codegen: bool,
 ) -> Value {
     json!({
         "type": 0,
         "source": source,
-        "children": vue3_root_children(ast, source, base_offset, include_sfc_inner_loc, options),
+        "children": vue3_root_children(ast, source, base_offset, include_sfc_inner_loc, options, include_codegen),
         "helpers": [],
         "components": [],
         "directives": [],
@@ -713,6 +735,7 @@ fn vue3_root_children(
     base_offset: usize,
     include_sfc_inner_loc: bool,
     options: &Vue3CompilerOptions,
+    include_codegen: bool,
 ) -> Vec<Value> {
     ast.node(ast.root)
         .map(|root| {
@@ -727,6 +750,7 @@ fn vue3_root_children(
                         node.id,
                         include_sfc_inner_loc,
                         options,
+                        include_codegen,
                     )
                 })
                 .collect()
@@ -741,6 +765,7 @@ fn vue3_node_summary(
     node_id: vuec_ast::NodeId,
     include_sfc_inner_loc: bool,
     options: &Vue3CompilerOptions,
+    include_codegen: bool,
 ) -> Value {
     let Some(node) = ast.node(node_id) else {
         return Value::Null;
@@ -749,7 +774,7 @@ fn vue3_node_summary(
         Vue3AstKind::Root(_) => json!({
             "type": 0,
             "source": source,
-            "children": node.children.iter().filter_map(|child_id| ast.node(*child_id)).map(|child| vue3_node_summary(ast, source, base_offset, child.id, include_sfc_inner_loc, options)).collect::<Vec<_>>(),
+            "children": node.children.iter().filter_map(|child_id| ast.node(*child_id)).map(|child| vue3_node_summary(ast, source, base_offset, child.id, include_sfc_inner_loc, options, include_codegen)).collect::<Vec<_>>(),
             "helpers": [],
             "components": [],
             "directives": [],
@@ -767,11 +792,15 @@ fn vue3_node_summary(
                 "ns": vue3_namespace_value(element.ns),
                 "tagType": vue3_element_type_value(element.tag_type),
                 "props": element.props.iter().map(|prop| vue3_prop_value(source, base_offset, prop, options)).collect::<Vec<_>>(),
-                "children": node.children.iter().filter_map(|child_id| ast.node(*child_id)).map(|child| vue3_node_summary(ast, source, base_offset, child.id, include_sfc_inner_loc, options)).collect::<Vec<_>>(),
+                "children": node.children.iter().filter_map(|child_id| ast.node(*child_id)).map(|child| vue3_node_summary(ast, source, base_offset, child.id, include_sfc_inner_loc, options, include_codegen)).collect::<Vec<_>>(),
                 "loc": vue3_loc_value(source, base_offset, &node.span),
                 "codegenNode": Value::Null,
                 "isSelfClosing": if element.self_closing { json!(true) } else { json!(null) },
             });
+            if include_codegen {
+                value["codegenNode"] =
+                    vue3_element_codegen_value(ast, node_id, source, base_offset, element, options);
+            }
             if include_sfc_inner_loc {
                 value["innerLoc"] = vue3_inner_loc_value(ast, source, base_offset, node_id);
             }
@@ -814,6 +843,35 @@ fn vue3_parse_diagnostics(
     collect_invalid_end_tag_diagnostics(ast, source, base_offset, options, &mut diagnostics);
     collect_missing_directive_name_diagnostics(ast, source, base_offset, &mut diagnostics);
     diagnostics
+}
+
+fn vue3_element_codegen_value(
+    ast: &Vue3Ast,
+    node_id: vuec_ast::NodeId,
+    source: &str,
+    base_offset: usize,
+    element: &vuec_ast::Vue3Element,
+    options: &Vue3CompilerOptions,
+) -> Value {
+    if element.tag_type != vuec_ast::Vue3ElementType::Element {
+        return Value::Null;
+    }
+    let is_root = ast.node(node_id).and_then(|node| node.parent) == Some(ast.root);
+    let patch_flag =
+        vuec_vue3_core::vue3_element_codegen_patch_flag(ast, node_id, options, is_root);
+    json!({
+        "type": 13,
+        "tag": format!("\"{}\"", element.tag),
+        "props": Value::Null,
+        "children": Value::Null,
+        "patchFlag": patch_flag,
+        "dynamicProps": Value::Null,
+        "directives": Value::Null,
+        "isBlock": is_root,
+        "disableTracking": false,
+        "isComponent": false,
+        "loc": ast.node(node_id).map(|node| vue3_loc_value(source, base_offset, &node.span)).unwrap_or_else(vue3_loc_stub_value),
+    })
 }
 
 fn collect_html_parse_error_diagnostics(

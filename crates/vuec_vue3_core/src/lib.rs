@@ -3383,7 +3383,8 @@ fn render_plain_element(
         .node(node_id)
         .map(|node| render_element_children(ast, &node.children, options, mode, scope))
         .unwrap_or_default();
-    let patch_flag = render_patch_flag(ast, node_id, element, options, mode);
+    let patch_flag =
+        render_patch_flag_text(render_patch_flag_kind(ast, node_id, element, options, mode));
     let attrs = if props.is_empty() { None } else { Some(props) };
     let args = render_call_args(
         quote_string(tag),
@@ -4572,31 +4573,65 @@ fn children_literal_const_only(
     has_interpolation
 }
 
-fn render_patch_flag(
+fn render_patch_flag_kind(
     ast: &Vue3Ast,
     node_id: vuec_ast::NodeId,
     element: &Vue3Element,
     options: &Vue3CompilerOptions,
     mode: NodeRenderMode,
-) -> String {
+) -> Option<i32> {
     let children = ast
         .node(node_id)
         .map(|node| node.children.as_slice())
         .unwrap_or(&[]);
     if mode == NodeRenderMode::Cached {
-        ", -1 /* CACHED */".into()
+        Some(-1)
     } else if has_class_binding(element) {
-        ", 2 /* CLASS */".into()
+        Some(2)
     } else if has_dynamic_non_key_props(element) {
-        ", 8 /* PROPS */".into()
+        Some(8)
     } else if element.tag != "template"
         && !children_literal_const_only(ast, children, options)
         && has_dynamic_text_child(ast, children)
     {
-        ", 1 /* TEXT */".into()
+        Some(1)
+    } else if has_vnode_hook(element) {
+        Some(512)
     } else {
-        String::new()
+        None
     }
+}
+
+fn render_patch_flag_text(flag: Option<i32>) -> String {
+    match flag {
+        Some(-1) => ", -1 /* CACHED */".into(),
+        Some(1) => ", 1 /* TEXT */".into(),
+        Some(2) => ", 2 /* CLASS */".into(),
+        Some(8) => ", 8 /* PROPS */".into(),
+        Some(512) => ", 512 /* NEED_PATCH */".into(),
+        Some(flag) => format!(", {flag}"),
+        None => String::new(),
+    }
+}
+
+pub fn vue3_element_codegen_patch_flag(
+    ast: &Vue3Ast,
+    node_id: vuec_ast::NodeId,
+    options: &Vue3CompilerOptions,
+    is_root: bool,
+) -> Option<i32> {
+    let Some(node) = ast.node(node_id) else {
+        return None;
+    };
+    let Vue3AstKind::Element(element) = &node.kind else {
+        return None;
+    };
+    let mode = if is_root {
+        NodeRenderMode::Root
+    } else {
+        NodeRenderMode::Child
+    };
+    render_patch_flag_kind(ast, node_id, element, options, mode)
 }
 
 fn render_props(
@@ -4628,7 +4663,7 @@ fn render_props(
                 .unwrap_or_default();
             Some(format!(
                 "{}: {}",
-                json_key(&format!("on{}", capitalize(&event))),
+                json_key(&event_handler_prop_name(element, &event)),
                 rewrite_handler_expression_with_scope(&value, options, scope)
             ))
         }
@@ -4712,7 +4747,7 @@ fn has_dynamic_non_key_props(element: &Vue3Element) -> bool {
         matches!(
             prop,
             Vue3Prop::Directive(dir)
-                if dir.name == "on"
+                if (dir.name == "on" && !event_directive_is_vnode_hook(dir))
                     || (dir.name == "bind"
                         && dir
                             .arg
@@ -4722,18 +4757,27 @@ fn has_dynamic_non_key_props(element: &Vue3Element) -> bool {
     })
 }
 
+fn has_vnode_hook(element: &Vue3Element) -> bool {
+    element.props.iter().any(|prop| {
+        matches!(
+            prop,
+            Vue3Prop::Directive(dir) if dir.name == "on" && event_directive_is_vnode_hook(dir)
+        )
+    })
+}
+
 fn dynamic_props_arg(element: &Vue3Element) -> String {
     let props = element
         .props
         .iter()
         .filter_map(|prop| match prop {
-            Vue3Prop::Directive(dir) if dir.name == "on" => {
+            Vue3Prop::Directive(dir) if dir.name == "on" && !event_directive_is_vnode_hook(dir) => {
                 let event = dir
                     .arg
                     .as_ref()
                     .map(Vue3Expression::source_string)
                     .unwrap_or_default();
-                Some(format!("on{}", capitalize(&event)))
+                Some(event_handler_prop_name(element, &event))
             }
             Vue3Prop::Directive(dir)
                 if dir.name == "bind" && !has_class_bind_dir(dir) && !has_key_bind_dir(dir) =>
@@ -4754,6 +4798,28 @@ fn dynamic_props_arg(element: &Vue3Element) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         )
+    }
+}
+
+fn event_directive_is_vnode_hook(dir: &Vue3Directive) -> bool {
+    dir.arg
+        .as_ref()
+        .is_some_and(|arg| arg.source_string().starts_with("vue:"))
+}
+
+fn event_handler_prop_name(element: &Vue3Element, event: &str) -> String {
+    let raw_name = if let Some(hook) = event.strip_prefix("vue:") {
+        format!("vnode-{hook}")
+    } else {
+        event.to_string()
+    };
+    if element.tag_type != Vue3ElementType::Element
+        || raw_name.starts_with("vnode")
+        || !raw_name.chars().any(|ch| ch.is_ascii_uppercase())
+    {
+        format!("on{}", capitalize(&camelize(&raw_name)))
+    } else {
+        format!("on:{raw_name}")
     }
 }
 
@@ -5502,6 +5568,29 @@ mod tests {
         assert!(result.code.contains("for (const x in _ctx.list)"));
         assert!(result.code.contains("_ctx.log(x)"));
         assert!(result.code.contains("_ctx.error(_ctx.x)"));
+    }
+
+    #[test]
+    fn base_compile_marks_vnode_hook_need_patch() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div @vue:updated="foo" />"#.into(),
+            file_id: FileId(0),
+            base_offset: 0,
+        };
+        let result = base_compile(
+            source,
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                cache_handlers: true,
+                mode: "function".into(),
+                ..Vue3CompilerOptions::default()
+            },
+        );
+        assert!(result.code.contains("onVnodeUpdated: _ctx.foo"));
+        assert!(result.code.contains("512 /* NEED_PATCH */"));
+        assert!(!result.code.contains("onVue:updated"));
+        assert!(!result.code.contains(r#"["onVnodeUpdated"]"#));
     }
 
     #[test]
