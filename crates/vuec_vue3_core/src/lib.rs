@@ -36,6 +36,9 @@ pub struct Vue3CompilerOptions {
     pub native_tags: Option<Vec<String>>,
     pub custom_elements: Vec<String>,
     pub built_in_components: Vec<String>,
+    pub whitespace: String,
+    pub pre_tags: Vec<String>,
+    pub ignore_newline_tags: Vec<String>,
 }
 
 impl Default for Vue3CompilerOptions {
@@ -56,6 +59,9 @@ impl Default for Vue3CompilerOptions {
             native_tags: None,
             custom_elements: Vec::new(),
             built_in_components: Vec::new(),
+            whitespace: "condense".into(),
+            pre_tags: Vec::new(),
+            ignore_newline_tags: Vec::new(),
         }
     }
 }
@@ -146,7 +152,7 @@ impl Vue3Dialect {
                             break;
                         };
                         if let Some(node) = ast.node(node_id) {
-                            if matches!(&node.kind, Vue3AstKind::Element(element) if element.tag == name)
+                            if matches!(&node.kind, Vue3AstKind::Element(element) if element.tag.eq_ignore_ascii_case(&name))
                             {
                                 if let Some(node) = ast.node_mut(node_id) {
                                     if let Some(span) = node.span.source_mut() {
@@ -172,6 +178,7 @@ impl Vue3Dialect {
                 HtmlTokenKind::Doctype(_) | HtmlTokenKind::Eof => {}
             }
         }
+        normalize_vue3_parse_text(&mut ast, options);
         ast
     }
 
@@ -487,7 +494,7 @@ fn parse_vue3_directive(
             body = tail;
             arg_offset = 2 + head.len() + 1;
         } else {
-            let mut parts = split_directive_parts(rest);
+            let mut parts = split_directive_parts(rest, false);
             let directive = parts.next().unwrap_or_default();
             if directive.is_empty() {
                 return None;
@@ -524,7 +531,8 @@ fn parse_vue3_directive(
     if name.is_empty() {
         return None;
     }
-    let mut parts = split_directive_parts(body);
+    let preserve_arg_dots = name == "slot" && raw.starts_with("v-slot:");
+    let mut parts = split_directive_parts(body, preserve_arg_dots);
     let raw_arg = parts.next().unwrap_or_default();
     let modifiers = if raw.starts_with('.') {
         let mut values = vec!["prop".to_string()];
@@ -563,7 +571,7 @@ fn parse_vue3_directive(
     Some((name, arg, modifiers, is_dynamic, arg_span, modifier_spans))
 }
 
-fn split_directive_parts(source: &str) -> impl Iterator<Item = &str> {
+fn split_directive_parts(source: &str, preserve_dots: bool) -> impl Iterator<Item = &str> {
     let mut parts = Vec::new();
     let mut start = 0usize;
     let mut bracket_depth = 0usize;
@@ -571,7 +579,7 @@ fn split_directive_parts(source: &str) -> impl Iterator<Item = &str> {
         match ch {
             '[' => bracket_depth += 1,
             ']' if bracket_depth > 0 => bracket_depth -= 1,
-            '.' if bracket_depth == 0 => {
+            '.' if bracket_depth == 0 && !preserve_dots => {
                 parts.push(&source[start..index]);
                 start = index + 1;
             }
@@ -601,6 +609,182 @@ fn directive_modifier_spans(raw: &str, modifiers: &[&str], name_span: Option<Spa
         }
     }
     spans
+}
+
+fn normalize_vue3_parse_text(ast: &mut Vue3Ast, options: &Vue3CompilerOptions) {
+    normalize_class_attribute_values(ast);
+    remove_initial_newline_after_ignore_newline_tags(ast, options);
+    normalize_text_children(ast, ast.root, options, false);
+}
+
+fn normalize_class_attribute_values(ast: &mut Vue3Ast) {
+    for node in &mut ast.nodes {
+        let Vue3AstKind::Element(element) = &mut node.kind else {
+            continue;
+        };
+        for prop in &mut element.props {
+            let Vue3Prop::Attribute(attr) = prop else {
+                continue;
+            };
+            if attr.name == "class" {
+                if let Some(value) = &mut attr.value {
+                    *value = value.split_whitespace().collect::<Vec<_>>().join(" ");
+                }
+            }
+        }
+    }
+}
+
+fn remove_initial_newline_after_ignore_newline_tags(ast: &mut Vue3Ast, options: &Vue3CompilerOptions) {
+    let element_ids = ast
+        .nodes
+        .iter()
+        .filter_map(|node| matches!(node.kind, Vue3AstKind::Element(_)).then_some(node.id))
+        .collect::<Vec<_>>();
+    for node_id in element_ids {
+        let should_ignore = ast.node(node_id).is_some_and(|node| {
+            matches!(
+                &node.kind,
+                Vue3AstKind::Element(element)
+                    if options.ignore_newline_tags.iter().any(|tag| tag == &element.tag)
+            )
+        });
+        if !should_ignore {
+            continue;
+        }
+        let Some(first_child) = ast
+            .node(node_id)
+            .and_then(|node| node.children.first().copied())
+        else {
+            continue;
+        };
+        if let Some(child) = ast.node_mut(first_child) {
+            if let Vue3AstKind::Text(text) = &mut child.kind {
+                if text.value.starts_with('\n') {
+                    text.value.remove(0);
+                    if let Some(span) = child.span.source_mut() {
+                        span.start.0 += 1;
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn normalize_text_children(
+    ast: &mut Vue3Ast,
+    parent_id: vuec_ast::NodeId,
+    options: &Vue3CompilerOptions,
+    in_pre: bool,
+) {
+    let Some(parent) = ast.node(parent_id) else {
+        return;
+    };
+    let parent_tag = match &parent.kind {
+        Vue3AstKind::Element(element) => Some(element.tag.clone()),
+        _ => None,
+    };
+    let parent_is_pre = parent_tag
+        .as_ref()
+        .is_some_and(|tag| options.pre_tags.iter().any(|pre| pre == tag));
+    let preserve_text = in_pre || parent_is_pre || parent_tag.as_deref() == Some("textarea");
+    let original_children = parent.children.clone();
+    for child_id in &original_children {
+        if matches!(
+            ast.node(*child_id).map(|node| &node.kind),
+            Some(Vue3AstKind::Element(_)) | Some(Vue3AstKind::Root(_))
+        ) {
+            normalize_text_children(ast, *child_id, options, preserve_text);
+        }
+    }
+    if preserve_text {
+        return;
+    }
+    let child_kinds = original_children
+        .iter()
+        .map(|child_id| ast.node(*child_id).map(|node| node.kind.clone()))
+        .collect::<Vec<_>>();
+    let mut keep_flags = vec![true; original_children.len()];
+    let mut updated_texts = vec![None; original_children.len()];
+    let mut retained_indices = Vec::new();
+    for (index, child_kind) in child_kinds.iter().enumerate() {
+        let Some(Vue3AstKind::Text(text)) = child_kind.as_ref() else {
+            retained_indices.push(index);
+            continue;
+        };
+        if text.value.chars().all(char::is_whitespace) {
+            let prev = retained_indices
+                .last()
+                .and_then(|idx| child_kinds.get(*idx))
+                .and_then(Option::as_ref);
+            let next = child_kinds
+                .get(index + 1)
+                .and_then(Option::as_ref);
+            let keep = should_keep_whitespace_between(prev, next, options);
+            keep_flags[index] = keep;
+            if keep {
+                updated_texts[index] = Some(" ".into());
+                retained_indices.push(index);
+            }
+        } else {
+            if options.whitespace == "condense" {
+                updated_texts[index] = Some(condense_whitespace(&text.value));
+            }
+            retained_indices.push(index);
+        }
+    }
+    for (index, child_id) in original_children.iter().copied().enumerate() {
+        if let Some(node) = ast.node_mut(child_id) {
+            if let Some(new_value) = updated_texts[index].take() {
+                if let Vue3AstKind::Text(text) = &mut node.kind {
+                    text.value = new_value;
+                }
+            }
+            if !keep_flags[index] {
+                node.parent = None;
+                node.index_in_parent = 0;
+            }
+        }
+    }
+    let retained = original_children
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, child_id)| keep_flags[index].then_some(child_id))
+        .collect::<Vec<_>>();
+    ast.replace_children(parent_id, retained);
+}
+
+fn should_keep_whitespace_between(
+    prev: Option<&Vue3AstKind>,
+    next: Option<&Vue3AstKind>,
+    options: &Vue3CompilerOptions,
+) -> bool {
+    let (Some(prev), Some(next)) = (prev, next) else {
+        return false;
+    };
+    let prev_is_element = matches!(prev, Vue3AstKind::Element(_));
+    let next_is_element = matches!(next, Vue3AstKind::Element(_));
+    if options.whitespace == "preserve" {
+        return true;
+    }
+    !(prev_is_element || next_is_element)
+}
+
+fn condense_whitespace(value: &str) -> String {
+    let mut out = String::new();
+    let mut previous_ws = false;
+    for ch in value.chars() {
+        if ch.is_whitespace() {
+            if !previous_ws {
+                out.push(' ');
+            }
+            previous_ws = true;
+        } else {
+            out.push(ch);
+            previous_ws = false;
+        }
+    }
+    out
 }
 
 fn render_helpers(order: &[RuntimeHelper], ctx: &TransformContext) -> Vec<RuntimeHelper> {
