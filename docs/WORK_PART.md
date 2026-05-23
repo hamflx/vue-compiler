@@ -24,9 +24,19 @@
 - [x] Vue 3 compiler-core alias-runtime slot outlet slice for `transformSlotOutlet.spec.ts`.
 - [x] Vue 3 compiler-core alias-runtime `v-bind` slice for `vBind.spec.ts`.
 - [x] Classify Vue 3 compiler-core conformance coverage as `rust-backed`, `shim-backed`, or `mixed` in reports.
+- [x] Vue 3 compiler-core Rust-backed `baseCompile` integration slice for `compile.spec.ts`.
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Implemented the first Rust-backed Vue 3 compiler-core `baseCompile` integration slice in `vuec_vue3_core`.
+- Rust codegen now handles the official integration fixture path for static props, `:class` normalization, `v-if` + `v-else`, basic `v-for` render-list output, text vnode wrapping, helper collection/order, and `prefixIdentifiers` local scoping for v-for aliases.
+- Extended Rust source-map generation for the public `baseCompile` path so `compile.spec.ts` validates `filename`, `sourcesContent`, static prop mappings, class binding mappings, condition/source/alias mappings, and interpolation expression mappings.
+- Updated `vuec_node_bridge` so `options.filename` feeds `TemplateSource.filename`, matching the public `baseCompile` source-map contract.
+- Refined `cargo xtask run-conformance` coverage aggregation to classify Vue 3 compiler-core public API files (`compile.spec.ts`, `parse.spec.ts`) as `rust-backed` while keeping internal transform/codegen shim files as `mixed`.
+- Focused official `compiler-core/__tests__/compile.spec.ts` now passes `3/3` through the prepared Vitest runner. Focused `transformExpressions.spec.ts` + `compile.spec.ts` now passes `50/50`.
+- Full Vue 3 core conformance is still intentionally failing: `334/652` official tests pass and `318` fail. The latest report records `rust-backed.pass=86`, `rust-backed.total=154`, `mixed.pass=248`, and `mixed.total=498`.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge`, `cargo test -p xtask`, `git diff --check`, direct prepared Vitest `compile.spec.ts` run (`3/3` pass), direct prepared Vitest `transformExpressions.spec.ts` + `compile.spec.ts` run (`50/50` pass), and `cargo xtask run-conformance --suite vue3-core` (expected fail with `334/652` pass, `318` fail).
 
 - Implemented machine-readable coverage classification in `cargo xtask run-conformance` reports. Each suite report now includes `coverage.source`, `coverage.counts_by_source`, `rust_backed_pass`, `rust_backed_total`, and per-test-file coverage entries when the runner emits a Vitest report.
 - Classified the current Vue 3 compiler-core official suite as `mixed` because the prepared suite combines Rust-backed public bridge calls with generated import shims and JavaScript alias-runtime compiler-core semantics in `xtask/src/compat.rs`.

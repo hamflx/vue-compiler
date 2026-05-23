@@ -401,9 +401,13 @@ pub enum RuntimeHelper {
     Vue3OpenBlock,
     Vue3CreateElementVNode,
     Vue3CreateElementBlock,
+    Vue3CreateCommentVNode,
+    Vue3CreateTextVNode,
+    Vue3Fragment,
     Vue3ToDisplayString,
     Vue3RenderList,
     Vue3RenderSlot,
+    Vue3NormalizeClass,
 }
 
 pub type Cst = AstDocument<CstNodeKind>;

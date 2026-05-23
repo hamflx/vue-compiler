@@ -7726,34 +7726,35 @@ fn conformance_coverage_report(
     let source = conformance_coverage_kind(spec);
     let reason = conformance_coverage_reason(spec).to_string();
     let counts = execution.map(|result| result.counts).unwrap_or_default();
-    let mut counts_by_source = BTreeMap::new();
-    counts_by_source.insert(
-        ConformanceCoverageKind::RustBacked.as_str().to_string(),
-        if source == ConformanceCoverageKind::RustBacked {
-            counts
-        } else {
-            ConformanceExecutionCounts::default()
-        },
-    );
-    counts_by_source.insert(
-        ConformanceCoverageKind::ShimBacked.as_str().to_string(),
-        if source == ConformanceCoverageKind::ShimBacked {
-            counts
-        } else {
-            ConformanceExecutionCounts::default()
-        },
-    );
-    counts_by_source.insert(
-        ConformanceCoverageKind::Mixed.as_str().to_string(),
-        if source == ConformanceCoverageKind::Mixed {
-            counts
-        } else {
-            ConformanceExecutionCounts::default()
-        },
-    );
     let files = execution
         .and_then(|result| conformance_coverage_files(result, source, &reason).ok())
         .unwrap_or_default();
+    let mut counts_by_source = BTreeMap::new();
+    for kind in [
+        ConformanceCoverageKind::RustBacked,
+        ConformanceCoverageKind::ShimBacked,
+        ConformanceCoverageKind::Mixed,
+    ] {
+        counts_by_source.insert(
+            kind.as_str().to_string(),
+            ConformanceExecutionCounts::default(),
+        );
+    }
+    if files.is_empty() {
+        if let Some(bucket) = counts_by_source.get_mut(source.as_str()) {
+            *bucket = counts;
+        }
+    } else {
+        for file in &files {
+            if let Some(bucket) = counts_by_source.get_mut(file.source.as_str()) {
+                bucket.total += file.counts.total;
+                bucket.pass += file.counts.pass;
+                bucket.fail += file.counts.fail;
+                bucket.skip += file.counts.skip;
+                bucket.pending += file.counts.pending;
+            }
+        }
+    }
     let rust_backed = counts_by_source
         .get(ConformanceCoverageKind::RustBacked.as_str())
         .copied()
@@ -7802,15 +7803,44 @@ fn conformance_coverage_files(
                 .unwrap_or_default()
                 .replace('\\', "/");
             let counts = vitest_test_result_counts(result);
+            let file_source = conformance_coverage_file_kind(&path, source);
             files.push(ConformanceCoverageFile {
                 path,
-                source,
-                reason: reason.to_string(),
+                source: file_source,
+                reason: conformance_coverage_file_reason(file_source, reason),
                 counts,
             });
         }
     }
     Ok(files)
+}
+
+fn conformance_coverage_file_kind(
+    path: &str,
+    default: ConformanceCoverageKind,
+) -> ConformanceCoverageKind {
+    if path.ends_with("packages/compiler-core/__tests__/compile.spec.ts")
+        || path.ends_with("packages/compiler-core/__tests__/parse.spec.ts")
+    {
+        ConformanceCoverageKind::RustBacked
+    } else {
+        default
+    }
+}
+
+fn conformance_coverage_file_reason(
+    source: ConformanceCoverageKind,
+    default_reason: &str,
+) -> String {
+    match source {
+        ConformanceCoverageKind::RustBacked => {
+            "Official file exercises public compiler API exports routed through vuec_node_bridge into Rust parser/transform/codegen implementation; generated import shims only preserve official import paths."
+                .to_string()
+        }
+        ConformanceCoverageKind::ShimBacked | ConformanceCoverageKind::Mixed => {
+            default_reason.to_string()
+        }
+    }
 }
 
 fn vitest_test_result_counts(result: &serde_json::Value) -> ConformanceExecutionCounts {
@@ -8334,18 +8364,50 @@ mod tests {
 
     #[test]
     fn vue3_core_coverage_report_marks_mixed_and_excludes_rust_backed_counts() {
+        let temp = std::env::temp_dir().join(format!(
+            "vuec-xtask-vue3-core-coverage-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp).unwrap();
+        let report = temp.join("vitest-report.json");
+        fs::write(
+            &report,
+            r#"{
+              "testResults": [
+                {
+                  "name": "F:/repo/prepared/vue3-core/packages/compiler-core/__tests__/compile.spec.ts",
+                  "assertionResults": [
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" }
+                  ]
+                },
+                {
+                  "name": "F:/repo/prepared/vue3-core/packages/compiler-core/__tests__/transforms/vOn.spec.ts",
+                  "assertionResults": [
+                    { "status": "passed" },
+                    { "status": "failed" }
+                  ]
+                }
+              ]
+            }"#,
+        )
+        .unwrap();
         let execution = ConformanceExecutionResult {
             status: "failed".into(),
             runner: "vitest".into(),
             prepared_root: "prepared".into(),
-            output_file: "missing-report.json".into(),
+            output_file: report.display().to_string(),
             exit_code: Some(1),
             stdout: String::new(),
             stderr: String::new(),
             counts: ConformanceExecutionCounts {
-                total: 652,
-                pass: 331,
-                fail: 321,
+                total: 5,
+                pass: 4,
+                fail: 1,
                 skip: 0,
                 pending: 0,
             },
@@ -8355,8 +8417,17 @@ mod tests {
             conformance_coverage_report(suite_spec(ConformanceSuite::Vue3Core), Some(&execution));
 
         assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
-        assert_eq!(coverage.rust_backed_pass, 0);
-        assert_eq!(coverage.rust_backed_total, 0);
+        assert_eq!(coverage.rust_backed_pass, 3);
+        assert_eq!(coverage.rust_backed_total, 3);
+        assert_eq!(
+            coverage
+                .counts_by_source
+                .get("rust-backed")
+                .copied()
+                .unwrap_or_default()
+                .pass,
+            3
+        );
         assert_eq!(
             coverage
                 .counts_by_source
@@ -8364,9 +8435,15 @@ mod tests {
                 .copied()
                 .unwrap_or_default()
                 .pass,
-            331
+            1
         );
+        assert_eq!(
+            coverage.files[0].source,
+            ConformanceCoverageKind::RustBacked
+        );
+        assert_eq!(coverage.files[1].source, ConformanceCoverageKind::Mixed);
         assert!(coverage.reason.contains("xtask/src/compat.rs"));
+        let _ = fs::remove_dir_all(temp);
     }
 
     #[test]

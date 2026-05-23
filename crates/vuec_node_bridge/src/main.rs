@@ -289,7 +289,16 @@ fn usize_field(payload: &Value, name: &str) -> usize {
 
 fn template_source(payload: &Value) -> TemplateSource {
     TemplateSource {
-        filename: string_field_or(payload, "filename", "anonymous.vue"),
+        filename: payload
+            .get("filename")
+            .or_else(|| {
+                payload
+                    .get("options")
+                    .and_then(|options| options.get("filename"))
+            })
+            .and_then(Value::as_str)
+            .unwrap_or("anonymous.vue")
+            .to_string(),
         source: string_field(payload, "source"),
         file_id: FileId(0),
         base_offset: 0,
