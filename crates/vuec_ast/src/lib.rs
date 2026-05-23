@@ -755,6 +755,10 @@ impl Vue3AstKind {
                 exp: expression.map(Vue3Expression::Raw),
                 modifiers: Vec::new(),
                 is_dynamic_arg: false,
+                span: None,
+                arg_span: None,
+                exp_span: None,
+                modifier_spans: Vec::new(),
             })],
             self_closing: true,
             codegen_node: None,
@@ -845,6 +849,10 @@ impl Vue3Prop {
         Self::Attribute(Vue3Attribute {
             name: attribute.name,
             value: attribute.value,
+            span: None,
+            name_span: None,
+            value_span: None,
+            quote: None,
         })
     }
 }
@@ -859,6 +867,10 @@ impl From<TemplateAttribute> for Vue3Prop {
 pub struct Vue3Attribute {
     pub name: String,
     pub value: Option<String>,
+    pub span: Option<Span>,
+    pub name_span: Option<Span>,
+    pub value_span: Option<Span>,
+    pub quote: Option<QuoteKind>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -869,6 +881,10 @@ pub struct Vue3Directive {
     pub exp: Option<Vue3Expression>,
     pub modifiers: Vec<String>,
     pub is_dynamic_arg: bool,
+    pub span: Option<Span>,
+    pub arg_span: Option<Span>,
+    pub exp_span: Option<Span>,
+    pub modifier_spans: Vec<Span>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

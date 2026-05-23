@@ -10,9 +10,25 @@ pub enum HtmlNamespace {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HtmlQuoteKind {
+    Double,
+    Single,
+    Unquoted,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HtmlAttribute {
     pub name: String,
     pub value: Option<String>,
+    pub quote: Option<HtmlQuoteKind>,
+    pub start: usize,
+    pub end: usize,
+    pub name_start: usize,
+    pub name_end: usize,
+    pub value_start: Option<usize>,
+    pub value_end: Option<usize>,
+    pub value_content_start: Option<usize>,
+    pub value_content_end: Option<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,11 +59,28 @@ pub struct HtmlToken {
 pub struct HtmlTokenizer<'a> {
     source: &'a str,
     cursor: usize,
+    interpolation_open: String,
+    interpolation_close: String,
 }
 
 impl<'a> HtmlTokenizer<'a> {
     pub fn new(source: &'a str) -> Self {
-        Self { source, cursor: 0 }
+        Self {
+            source,
+            cursor: 0,
+            interpolation_open: "{{".into(),
+            interpolation_close: "}}".into(),
+        }
+    }
+
+    pub fn with_interpolation_delimiters(
+        mut self,
+        open: impl Into<String>,
+        close: impl Into<String>,
+    ) -> Self {
+        self.interpolation_open = open.into();
+        self.interpolation_close = close.into();
+        self
     }
 
     pub fn tokenize(mut self) -> Vec<HtmlToken> {
@@ -90,7 +123,7 @@ impl<'a> HtmlTokenizer<'a> {
         if self.remaining().starts_with("</") {
             return self.consume_end_tag();
         }
-        if self.remaining().starts_with('<') {
+        if self.remaining().starts_with('<') && self.starts_valid_tag_at(self.cursor) {
             return self.consume_start_tag();
         }
 
@@ -99,11 +132,7 @@ impl<'a> HtmlTokenizer<'a> {
 
     fn consume_text(&mut self) -> HtmlToken {
         let start = self.cursor;
-        let end = self
-            .remaining()
-            .find('<')
-            .map(|offset| self.cursor + offset)
-            .unwrap_or(self.source.len());
+        let end = self.next_text_end();
         self.cursor = end;
         HtmlToken {
             kind: HtmlTokenKind::Text(self.source[start..end].to_string()),
@@ -147,7 +176,8 @@ impl<'a> HtmlTokenizer<'a> {
                 break;
             }
 
-            let attr_name = self.consume_attr_name();
+            let attr_start = self.cursor;
+            let (attr_name, name_start, name_end) = self.consume_attr_name();
             if attr_name.is_empty() {
                 if let Some(ch) = self.remaining().chars().next() {
                     self.cursor += ch.len_utf8();
@@ -155,16 +185,37 @@ impl<'a> HtmlTokenizer<'a> {
                 continue;
             }
             self.consume_whitespace();
+            let mut value_start = None;
+            let mut value_end = None;
+            let mut value_content_start = None;
+            let mut value_content_end = None;
+            let mut quote = None;
             let value = if self.remaining().starts_with('=') {
                 self.cursor += 1;
                 self.consume_whitespace();
-                Some(self.consume_attr_value())
+                let consumed = self.consume_attr_value();
+                value_start = Some(consumed.start);
+                value_end = Some(consumed.end);
+                value_content_start = Some(consumed.content_start);
+                value_content_end = Some(consumed.content_end);
+                quote = Some(consumed.quote);
+                Some(consumed.value)
             } else {
                 None
             };
+            let attr_end = value_end.unwrap_or(name_end);
             attributes.push(HtmlAttribute {
                 name: attr_name,
                 value,
+                quote,
+                start: attr_start,
+                end: attr_end,
+                name_start,
+                name_end,
+                value_start,
+                value_end,
+                value_content_start,
+                value_content_end,
             });
         }
 
@@ -216,7 +267,7 @@ impl<'a> HtmlTokenizer<'a> {
         self.source[start..self.cursor].to_string()
     }
 
-    fn consume_attr_name(&mut self) -> String {
+    fn consume_attr_name(&mut self) -> (String, usize, usize) {
         let start = self.cursor;
         while let Some(ch) = self.remaining().chars().next() {
             if ch.is_whitespace() || matches!(ch, '=' | '>' | '/') {
@@ -224,36 +275,131 @@ impl<'a> HtmlTokenizer<'a> {
             }
             self.cursor += ch.len_utf8();
         }
-        self.source[start..self.cursor].to_string()
+        (
+            self.source[start..self.cursor].to_string(),
+            start,
+            self.cursor,
+        )
     }
 
-    fn consume_attr_value(&mut self) -> String {
+    fn consume_attr_value(&mut self) -> ConsumedAttrValue {
         match self.remaining().chars().next() {
             Some('"') | Some('\'') => {
                 let quote = self.remaining().chars().next().unwrap();
+                let start = self.cursor;
                 self.cursor += quote.len_utf8();
                 let value_start = self.cursor;
                 while let Some(ch) = self.remaining().chars().next() {
                     if ch == quote {
                         let value = self.source[value_start..self.cursor].to_string();
                         self.cursor += quote.len_utf8();
-                        return value;
+                        return ConsumedAttrValue {
+                            value,
+                            quote: if quote == '"' {
+                                HtmlQuoteKind::Double
+                            } else {
+                                HtmlQuoteKind::Single
+                            },
+                            start,
+                            end: self.cursor,
+                            content_start: value_start,
+                            content_end: self.cursor - quote.len_utf8(),
+                        };
                     }
                     self.cursor += ch.len_utf8();
                 }
-                self.source[value_start..self.cursor].to_string()
+                ConsumedAttrValue {
+                    value: self.source[value_start..self.cursor].to_string(),
+                    quote: if quote == '"' {
+                        HtmlQuoteKind::Double
+                    } else {
+                        HtmlQuoteKind::Single
+                    },
+                    start,
+                    end: self.cursor,
+                    content_start: value_start,
+                    content_end: self.cursor,
+                }
             }
             _ => {
                 let start = self.cursor;
                 while let Some(ch) = self.remaining().chars().next() {
-                    if ch.is_whitespace() || ch == '>' || ch == '/' {
+                    if ch.is_whitespace() || ch == '>' {
                         break;
                     }
                     self.cursor += ch.len_utf8();
                 }
-                self.source[start..self.cursor].to_string()
+                ConsumedAttrValue {
+                    value: self.source[start..self.cursor].to_string(),
+                    quote: HtmlQuoteKind::Unquoted,
+                    start,
+                    end: self.cursor,
+                    content_start: start,
+                    content_end: self.cursor,
+                }
             }
         }
+    }
+
+    fn next_text_end(&self) -> usize {
+        let mut cursor = self.cursor;
+        let mut interpolation_close_at = None;
+        while cursor < self.source.len() {
+            if let Some(close_at) = interpolation_close_at {
+                if self.source[cursor..].starts_with(&self.interpolation_close) {
+                    cursor += self.interpolation_close.len();
+                    interpolation_close_at = None;
+                    continue;
+                }
+                if cursor >= close_at {
+                    interpolation_close_at = None;
+                    continue;
+                }
+            } else if !self.interpolation_open.is_empty()
+                && self.source[cursor..].starts_with(&self.interpolation_open)
+            {
+                let close_at = self.source[cursor + self.interpolation_open.len()..]
+                    .find(&self.interpolation_close)
+                    .map(|offset| cursor + self.interpolation_open.len() + offset);
+                if let Some(close_at) = close_at {
+                    interpolation_close_at = Some(close_at);
+                    cursor += self.interpolation_open.len();
+                    continue;
+                }
+                return self.source.len();
+            } else if self.source[cursor..].starts_with('<') && self.starts_valid_tag_at(cursor) {
+                return cursor;
+            }
+
+            let Some(ch) = self.source[cursor..].chars().next() else {
+                break;
+            };
+            cursor += ch.len_utf8();
+        }
+        self.source.len()
+    }
+
+    fn starts_valid_tag_at(&self, offset: usize) -> bool {
+        let rest = &self.source[offset..];
+        if rest.starts_with("<!--")
+            || rest.starts_with("<![CDATA[")
+            || rest.to_ascii_uppercase().starts_with("<!DOCTYPE")
+        {
+            return true;
+        }
+        if let Some(after_slash) = rest.strip_prefix("</") {
+            return after_slash
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_alphabetic());
+        }
+        if let Some(after_lt) = rest.strip_prefix('<') {
+            return after_lt
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_alphabetic());
+        }
+        false
     }
 
     fn consume_whitespace(&mut self) {
@@ -278,6 +424,16 @@ impl<'a> HtmlTokenizer<'a> {
     fn remaining(&self) -> &'a str {
         &self.source[self.cursor..]
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ConsumedAttrValue {
+    value: String,
+    quote: HtmlQuoteKind,
+    start: usize,
+    end: usize,
+    content_start: usize,
+    content_end: usize,
 }
 
 #[cfg(test)]
@@ -313,5 +469,48 @@ mod tests {
         assert_eq!(attributes[0].name, "@click.stop");
         assert_eq!(attributes[1].name, "#[item]");
         assert_eq!(attributes[2].name, ":[id].prop");
+    }
+
+    #[test]
+    fn records_attribute_spans_and_quotes() {
+        let tokens = HtmlTokenizer::new(r#"<div id=a class="c" inert style=''>"#).tokenize();
+        let HtmlTokenKind::StartTag { attributes, .. } = &tokens[0].kind else {
+            panic!("expected start tag");
+        };
+        assert_eq!(attributes[0].start, 5);
+        assert_eq!(attributes[0].end, 9);
+        assert_eq!(attributes[0].value_start, Some(8));
+        assert_eq!(attributes[0].value_end, Some(9));
+        assert_eq!(attributes[0].quote, Some(HtmlQuoteKind::Unquoted));
+        assert_eq!(attributes[1].value_start, Some(16));
+        assert_eq!(attributes[1].value_end, Some(19));
+        assert_eq!(attributes[1].quote, Some(HtmlQuoteKind::Double));
+        assert_eq!(attributes[3].value_start, Some(32));
+        assert_eq!(attributes[3].value_end, Some(34));
+        assert_eq!(attributes[3].quote, Some(HtmlQuoteKind::Single));
+    }
+
+    #[test]
+    fn keeps_invalid_lt_and_lt_inside_interpolation_in_text() {
+        let tokens = HtmlTokenizer::new("a < b {{ c<d }} <span>").tokenize();
+        assert!(matches!(tokens[0].kind, HtmlTokenKind::Text(ref s) if s == "a < b {{ c<d }} "));
+        assert!(
+            matches!(tokens[1].kind, HtmlTokenKind::StartTag { ref name, .. } if name == "span")
+        );
+    }
+
+    #[test]
+    fn treats_slash_as_unquoted_attribute_value_until_whitespace_or_gt() {
+        let tokens = HtmlTokenizer::new("<div id=a/></div>").tokenize();
+        let HtmlTokenKind::StartTag {
+            attributes,
+            self_closing,
+            ..
+        } = &tokens[0].kind
+        else {
+            panic!("expected start tag");
+        };
+        assert!(!self_closing);
+        assert_eq!(attributes[0].value.as_deref(), Some("a/"));
     }
 }

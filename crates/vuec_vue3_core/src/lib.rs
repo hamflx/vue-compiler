@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use vuec_ast::{
-    RuntimeHelper, TemplateAttribute, Vue3Ast, Vue3AstKind, Vue3Directive, Vue3Element,
+    QuoteKind, RuntimeHelper, TemplateAttribute, Vue3Ast, Vue3AstKind, Vue3Directive, Vue3Element,
     Vue3ElementType, Vue3Expression, Vue3NodeKind, Vue3Prop,
 };
 use vuec_codegen::{CodeWriter, SourceMapArtifact, SourceMapSegment};
@@ -30,6 +30,12 @@ pub struct Vue3CompilerOptions {
     pub is_ts: bool,
     pub expression_plugins: Vec<String>,
     pub source_map: bool,
+    pub comments: bool,
+    pub delimiters: Option<[String; 2]>,
+    pub void_tags: Vec<String>,
+    pub native_tags: Option<Vec<String>>,
+    pub custom_elements: Vec<String>,
+    pub built_in_components: Vec<String>,
 }
 
 impl Default for Vue3CompilerOptions {
@@ -44,6 +50,12 @@ impl Default for Vue3CompilerOptions {
             is_ts: false,
             expression_plugins: Vec::new(),
             source_map: false,
+            comments: true,
+            delimiters: None,
+            void_tags: Vec::new(),
+            native_tags: None,
+            custom_elements: Vec::new(),
+            built_in_components: Vec::new(),
         }
     }
 }
@@ -60,7 +72,7 @@ pub struct CodegenResult {
 pub struct Vue3Dialect;
 
 impl Vue3Dialect {
-    pub fn base_parse(source: TemplateSource, _options: &Vue3CompilerOptions) -> Vue3Ast {
+    pub fn base_parse(source: TemplateSource, options: &Vue3CompilerOptions) -> Vue3Ast {
         let mut ast = Vue3Ast::new(
             Vue3NodeKind::root(),
             Some(Span::new(
@@ -71,7 +83,12 @@ impl Vue3Dialect {
         );
         let root = ast.root;
         let mut stack = vec![root];
-        let tokens = HtmlTokenizer::new(&source.source).tokenize();
+        let tokenizer = if let Some([open, close]) = &options.delimiters {
+            HtmlTokenizer::new(&source.source).with_interpolation_delimiters(open, close)
+        } else {
+            HtmlTokenizer::new(&source.source)
+        };
+        let tokens = tokenizer.tokenize();
         for token in tokens {
             let current_parent = *stack.last().unwrap_or(&root);
             match token.kind {
@@ -81,8 +98,12 @@ impl Vue3Dialect {
                     source.file_id,
                     source.base_offset + token.start,
                     &text,
+                    options,
                 ),
                 HtmlTokenKind::Comment(value) => {
+                    if !options.comments {
+                        continue;
+                    }
                     let _id = ast.push_child(
                         current_parent,
                         Vue3NodeKind::comment(value),
@@ -98,16 +119,24 @@ impl Vue3Dialect {
                     attributes,
                     self_closing,
                 } => {
+                    let is_void = options.void_tags.iter().any(|candidate| candidate == &name);
                     let id = ast.push_child(
                         current_parent,
-                        vue3_element_kind(name, attributes, self_closing),
+                        vue3_element_kind(
+                            name,
+                            attributes,
+                            self_closing,
+                            options,
+                            source.file_id,
+                            source.base_offset,
+                        ),
                         Some(Span::new(
                             source.file_id,
                             source.base_offset + token.start,
                             source.base_offset + token.end,
                         )),
                     );
-                    if !self_closing {
+                    if !self_closing && !is_void {
                         stack.push(id);
                     }
                 }
@@ -137,6 +166,7 @@ impl Vue3Dialect {
                         source.file_id,
                         source.base_offset + token.start,
                         &text,
+                        options,
                     );
                 }
                 HtmlTokenKind::Doctype(_) | HtmlTokenKind::Eof => {}
@@ -306,27 +336,15 @@ fn vue3_element_kind(
     tag: String,
     attributes: Vec<vuec_html::HtmlAttribute>,
     self_closing: bool,
+    options: &Vue3CompilerOptions,
+    file_id: FileId,
+    base_offset: usize,
 ) -> Vue3NodeKind {
-    let mut tag_type = if tag == "slot" {
-        Vue3ElementType::SlotOutlet
-    } else if tag == "template" {
-        Vue3ElementType::Template
-    } else if tag.chars().next().is_some_and(|ch| ch.is_ascii_uppercase()) {
-        Vue3ElementType::Component
-    } else {
-        Vue3ElementType::Element
-    };
     let props = attributes
         .into_iter()
-        .map(|attr| vue3_prop_from_attr(attr.name, attr.value))
+        .map(|attr| vue3_prop_from_attr(attr, file_id, base_offset))
         .collect::<Vec<_>>();
-    if tag_type == Vue3ElementType::Element
-        && props
-            .iter()
-            .any(|prop| matches!(prop, Vue3Prop::Directive(dir) if dir.name == "is"))
-    {
-        tag_type = Vue3ElementType::Component;
-    }
+    let tag_type = vue3_tag_type(&tag, &props, options);
     Vue3NodeKind::Element(Vue3Element {
         tag,
         tag_type,
@@ -338,52 +356,183 @@ fn vue3_element_kind(
     })
 }
 
-fn vue3_prop_from_attr(name: String, value: Option<String>) -> Vue3Prop {
-    if let Some((directive_name, arg, modifiers, is_dynamic_arg)) = parse_vue3_directive(&name) {
+fn vue3_tag_type(tag: &str, props: &[Vue3Prop], options: &Vue3CompilerOptions) -> Vue3ElementType {
+    if options
+        .custom_elements
+        .iter()
+        .any(|candidate| candidate == tag)
+    {
+        return Vue3ElementType::Element;
+    }
+    if tag == "slot" {
+        return Vue3ElementType::SlotOutlet;
+    }
+    if tag == "template" {
+        return if props.iter().any(
+            |prop| matches!(prop, Vue3Prop::Directive(dir) if is_template_directive(&dir.name)),
+        ) {
+            Vue3ElementType::Template
+        } else {
+            Vue3ElementType::Element
+        };
+    }
+    if options
+        .built_in_components
+        .iter()
+        .any(|candidate| candidate == tag)
+    {
+        return Vue3ElementType::Component;
+    }
+    if props.iter().any(|prop| {
+        matches!(
+            prop,
+            Vue3Prop::Attribute(attr)
+                if attr.name == "is"
+                    && attr
+                        .value
+                        .as_deref()
+                        .is_some_and(|value| value.starts_with("vue:"))
+        )
+    }) {
+        return Vue3ElementType::Component;
+    }
+    if options
+        .native_tags
+        .as_ref()
+        .is_some_and(|native_tags| !native_tags.iter().any(|candidate| candidate == tag))
+    {
+        return Vue3ElementType::Component;
+    }
+    if tag.chars().next().is_some_and(|ch| ch.is_ascii_uppercase()) {
+        return Vue3ElementType::Component;
+    }
+    Vue3ElementType::Element
+}
+
+fn is_template_directive(name: &str) -> bool {
+    matches!(name, "if" | "else" | "else-if" | "for" | "slot")
+}
+
+fn vue3_prop_from_attr(
+    attr: vuec_html::HtmlAttribute,
+    file_id: FileId,
+    base_offset: usize,
+) -> Vue3Prop {
+    let span = Some(Span::new(
+        file_id,
+        base_offset + attr.start,
+        base_offset + attr.end,
+    ));
+    let name_span = Some(Span::new(
+        file_id,
+        base_offset + attr.name_start,
+        base_offset + attr.name_end,
+    ));
+    let value_span = attr
+        .value_start
+        .zip(attr.value_end)
+        .map(|(start, end)| Span::new(file_id, base_offset + start, base_offset + end));
+    let value_content_span = attr
+        .value_content_start
+        .zip(attr.value_content_end)
+        .map(|(start, end)| Span::new(file_id, base_offset + start, base_offset + end));
+    let quote = attr.quote.map(|quote| match quote {
+        vuec_html::HtmlQuoteKind::Double => QuoteKind::Double,
+        vuec_html::HtmlQuoteKind::Single => QuoteKind::Single,
+        vuec_html::HtmlQuoteKind::Unquoted => QuoteKind::Unquoted,
+    });
+    if let Some(parsed) = parse_vue3_directive(&attr.name, name_span) {
+        let (directive_name, arg, modifiers, is_dynamic_arg, arg_span, modifier_spans) = parsed;
         Vue3Prop::Directive(Vue3Directive {
             name: directive_name,
-            raw_name: name,
+            raw_name: attr.name,
             arg: arg.map(Vue3Expression::Raw),
-            exp: value.map(Vue3Expression::Raw),
+            exp: attr.value.map(Vue3Expression::Raw),
             modifiers,
             is_dynamic_arg,
+            span,
+            arg_span,
+            exp_span: value_content_span.or(value_span),
+            modifier_spans,
         })
     } else {
-        Vue3Prop::Attribute(vuec_ast::Vue3Attribute { name, value })
+        Vue3Prop::Attribute(vuec_ast::Vue3Attribute {
+            name: attr.name,
+            value: attr.value,
+            span,
+            name_span,
+            value_span,
+            quote,
+        })
     }
 }
 
-fn parse_vue3_directive(raw: &str) -> Option<(String, Option<String>, Vec<String>, bool)> {
+fn parse_vue3_directive(
+    raw: &str,
+    name_span: Option<Span>,
+) -> Option<(
+    String,
+    Option<String>,
+    Vec<String>,
+    bool,
+    Option<Span>,
+    Vec<Span>,
+)> {
     let mut body = raw;
     let mut name = None;
+    let mut arg_offset = 0usize;
     if let Some(rest) = raw.strip_prefix("v-") {
         if let Some((head, tail)) = rest.split_once(':') {
             name = Some(head.to_string());
             body = tail;
+            arg_offset = 2 + head.len() + 1;
         } else {
-            let mut parts = rest.split('.');
+            let mut parts = split_directive_parts(rest);
             let directive = parts.next().unwrap_or_default();
+            if directive.is_empty() {
+                return None;
+            }
+            let modifiers = parts.collect::<Vec<_>>();
+            let modifier_spans = directive_modifier_spans(raw, &modifiers, name_span);
             return Some((
                 directive.to_string(),
                 None,
-                parts.map(ToOwned::to_owned).collect(),
+                modifiers.into_iter().map(ToOwned::to_owned).collect(),
                 false,
+                None,
+                modifier_spans,
             ));
         }
     } else if let Some(rest) = raw.strip_prefix(':') {
         name = Some("bind".to_string());
         body = rest;
+        arg_offset = 1;
     } else if let Some(rest) = raw.strip_prefix('@') {
         name = Some("on".to_string());
         body = rest;
+        arg_offset = 1;
     } else if let Some(rest) = raw.strip_prefix('#') {
         name = Some("slot".to_string());
         body = rest;
+        arg_offset = 1;
+    } else if let Some(rest) = raw.strip_prefix('.') {
+        name = Some("bind".to_string());
+        body = rest;
+        arg_offset = 1;
     }
     let name = name?;
-    let mut parts = body.split('.');
+    if name.is_empty() {
+        return None;
+    }
+    let mut parts = split_directive_parts(body);
     let raw_arg = parts.next().unwrap_or_default();
-    let modifiers = parts.map(ToOwned::to_owned).collect::<Vec<_>>();
+    let modifiers = if raw.starts_with('.') {
+        let mut values = vec!["prop".to_string()];
+        values.extend(parts.map(ToOwned::to_owned));
+        values
+    } else {
+        parts.map(ToOwned::to_owned).collect::<Vec<_>>()
+    };
     let (arg, is_dynamic) = if raw_arg.starts_with('[') && raw_arg.ends_with(']') {
         (
             Some(raw_arg[1..raw_arg.len().saturating_sub(1)].to_string()),
@@ -394,7 +543,64 @@ fn parse_vue3_directive(raw: &str) -> Option<(String, Option<String>, Vec<String
     } else {
         (Some(raw_arg.to_string()), false)
     };
-    Some((name, arg, modifiers, is_dynamic))
+    let arg_span = arg.as_ref().and_then(|_| {
+        name_span.map(|span| {
+            Span::new(
+                span.file_id,
+                span.start.0 + arg_offset,
+                span.start.0 + arg_offset + raw_arg.len(),
+            )
+        })
+    });
+    let modifier_spans = if raw.starts_with('.') {
+        name_span
+            .map(|span| vec![Span::new(span.file_id, span.start.0, span.start.0)])
+            .unwrap_or_default()
+    } else {
+        let modifier_refs = modifiers.iter().map(String::as_str).collect::<Vec<_>>();
+        directive_modifier_spans(raw, &modifier_refs, name_span)
+    };
+    Some((name, arg, modifiers, is_dynamic, arg_span, modifier_spans))
+}
+
+fn split_directive_parts(source: &str) -> impl Iterator<Item = &str> {
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut bracket_depth = 0usize;
+    for (index, ch) in source.char_indices() {
+        match ch {
+            '[' => bracket_depth += 1,
+            ']' if bracket_depth > 0 => bracket_depth -= 1,
+            '.' if bracket_depth == 0 => {
+                parts.push(&source[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&source[start..]);
+    parts.into_iter()
+}
+
+fn directive_modifier_spans(raw: &str, modifiers: &[&str], name_span: Option<Span>) -> Vec<Span> {
+    let Some(name_span) = name_span else {
+        return Vec::new();
+    };
+    let mut spans = Vec::new();
+    let mut search_start = 0usize;
+    for modifier in modifiers {
+        let needle = format!(".{modifier}");
+        if let Some(offset) = raw[search_start..].find(&needle) {
+            let start = search_start + offset + 1;
+            spans.push(Span::new(
+                name_span.file_id,
+                name_span.start.0 + start,
+                name_span.start.0 + start + modifier.len(),
+            ));
+            search_start = start + modifier.len();
+        }
+    }
+    spans
 }
 
 fn render_helpers(order: &[RuntimeHelper], ctx: &TransformContext) -> Vec<RuntimeHelper> {
@@ -974,10 +1180,24 @@ fn push_text_and_interpolations(
     file_id: FileId,
     token_start: usize,
     text: &str,
+    options: &Vue3CompilerOptions,
 ) {
+    let (open_delimiter, close_delimiter) = options
+        .delimiters
+        .as_ref()
+        .map_or(("{{", "}}"), |items| (items[0].as_str(), items[1].as_str()));
+    if open_delimiter.is_empty() || close_delimiter.is_empty() {
+        push_text(ast, parent, file_id, token_start, text);
+        return;
+    }
     let mut cursor = 0usize;
-    while let Some(open) = text[cursor..].find("{{") {
+    while let Some(open) = text[cursor..].find(open_delimiter) {
         let open = cursor + open;
+        let expression_start = open + open_delimiter.len();
+        let Some(close_offset) = text[expression_start..].find(close_delimiter) else {
+            push_text(ast, parent, file_id, token_start + cursor, &text[cursor..]);
+            return;
+        };
         if open > cursor {
             push_text(
                 ast,
@@ -987,11 +1207,6 @@ fn push_text_and_interpolations(
                 &text[cursor..open],
             );
         }
-        let expression_start = open + 2;
-        let Some(close_offset) = text[expression_start..].find("}}") else {
-            push_text(ast, parent, file_id, token_start + open, &text[open..]);
-            return;
-        };
         let close = expression_start + close_offset;
         let expression = text[expression_start..close].trim().to_string();
         let _id = ast.push_child(
@@ -1000,10 +1215,10 @@ fn push_text_and_interpolations(
             Some(Span::new(
                 file_id,
                 token_start + open,
-                token_start + close + 2,
+                token_start + close + close_delimiter.len(),
             )),
         );
-        cursor = close + 2;
+        cursor = close + close_delimiter.len();
     }
     if cursor < text.len() {
         push_text(ast, parent, file_id, token_start + cursor, &text[cursor..]);

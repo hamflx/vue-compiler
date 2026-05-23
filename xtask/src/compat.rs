@@ -1903,11 +1903,14 @@ fn alias_function_expression(
                 (TargetKind::Vue3Core, "baseParse") | (TargetKind::Vue3Dom, "parse")
             ) {
                 format!(
-                    "hydrateVue3Ast(callBridge({}, __vuecPayload))",
+                    "hydrateVue3Ast(callBridge({}, bridgePayloadForCall(__vuecPayload)), __vuecPayload.options)",
                     js_string_literal(command)
                 )
             } else {
-                format!("callBridge({}, __vuecPayload)", js_string_literal(command))
+                format!(
+                    "callBridge({}, bridgePayloadForCall(__vuecPayload))",
+                    js_string_literal(command)
+                )
             };
             format!(
                 "{argument_bindings} const __vuecPayload = normalizeArgs({}); preflightAliasCall({}, __vuecPayload); return {call};",
@@ -2083,11 +2086,11 @@ fn alias_argument_object(target: TargetSpec, export_name: &str, _arity: u32) -> 
                 .into()
         }
         (TargetKind::Vue3Dom, "parse") => {
-            "{ source: a0 && a0.source ? a0.source : a0, options: a1 || (a0 && a0.options) || {} }"
+            "vue3BridgePayload(a0 && a0.source ? a0.source : a0, undefined, a1 || (a0 && a0.options) || {})"
                 .into()
         }
         (TargetKind::Vue3Core | TargetKind::Vue3Dom | TargetKind::Vue3Ssr, _) => {
-            "{ source: a0 && a0.source ? a0.source : a0, filename: a0 && a0.filename, options: a1 || (a0 && a0.options) || {} }"
+            "vue3BridgePayload(a0 && a0.source ? a0.source : a0, a0 && a0.filename, a1 || (a0 && a0.options) || {})"
                 .into()
         }
     }
@@ -3985,9 +3988,24 @@ function createRootCodegen(root, context) {
   }
 }
 
-function hydrateVue3Ast(ast) {
+function hydrateVue3Ast(ast, options) {
+  emitVue3ParseDiagnostics(ast, options);
   hydrateVue3Node(ast);
   return ast;
+}
+
+function emitVue3ParseDiagnostics(ast, options) {
+  if (!ast || !Array.isArray(ast.__vuecDiagnostics)) return;
+  const onError = options && typeof options.onError === 'function'
+    ? options.onError
+    : error => { throw error; };
+  for (const diagnostic of ast.__vuecDiagnostics) {
+    const error = new SyntaxError(vue3CoreRuntime.errorMessages[diagnostic.code] || 'Vue compiler parse error');
+    error.code = diagnostic.code;
+    error.loc = diagnostic.loc;
+    onError(error);
+  }
+  delete ast.__vuecDiagnostics;
 }
 
 function hydrateVue3Node(node) {
@@ -4006,8 +4024,16 @@ function hydrateVue3Node(node) {
     if (node.codegenNode === null) node.codegenNode = undefined;
     if (node.isSelfClosing === null) delete node.isSelfClosing;
   }
+  if (node.type === vue3CoreRuntime.NodeTypes.ATTRIBUTE) {
+    if (node.value === null) node.value = undefined;
+  }
+  if (node.type === vue3CoreRuntime.NodeTypes.DIRECTIVE) {
+    if (node.exp === null) node.exp = undefined;
+    if (node.arg === null) node.arg = undefined;
+  }
   if (Array.isArray(node.children)) node.children.forEach(hydrateVue3Node);
   if (Array.isArray(node.props)) node.props.forEach(hydrateVue3Node);
+  if (Array.isArray(node.modifiers)) node.modifiers.forEach(hydrateVue3Node);
   if (node.content && typeof node.content === 'object') hydrateVue3Node(node.content);
   if (node.exp && typeof node.exp === 'object') hydrateVue3Node(node.exp);
   if (node.arg && typeof node.arg === 'object') hydrateVue3Node(node.arg);
@@ -4032,6 +4058,71 @@ function callBridge(command, payload) {
 
 function normalizeArgs(payload) {
   return payload || {};
+}
+
+function bridgePayloadForCall(payload) {
+  if (!payload || !Object.prototype.hasOwnProperty.call(payload, 'bridgeOptions')) return payload || {};
+  const bridgePayload = {};
+  for (const key of Object.keys(payload)) {
+    if (key === 'options') {
+      bridgePayload.options = payload.bridgeOptions;
+    } else if (key !== 'bridgeOptions') {
+      bridgePayload[key] = payload[key];
+    }
+  }
+  return bridgePayload;
+}
+
+function vue3BridgePayload(source, filename, options) {
+  return {
+    source,
+    filename,
+    options,
+    bridgeOptions: normalizeVue3OptionsForBridge(options, source),
+  };
+}
+
+function normalizeVue3OptionsForBridge(options, source) {
+  if (!options || typeof options !== 'object') return {};
+  const normalized = {};
+  for (const key of Object.keys(options)) {
+    if (typeof options[key] !== 'function') normalized[key] = options[key];
+  }
+  const tags = extractVueTemplateTags(String(source || ''));
+  normalized.__vuecVoidTags = collectVuePredicateHits(options.isVoidTag, tags);
+  if (typeof options.isNativeTag === 'function') {
+    normalized.__vuecNativeTags = collectVuePredicateHits(options.isNativeTag, tags);
+  }
+  normalized.__vuecCustomElements = collectVuePredicateHits(options.isCustomElement, tags);
+  normalized.__vuecBuiltInComponents = collectVuePredicateHits(options.isBuiltInComponent, tags);
+  return normalized;
+}
+
+function extractVueTemplateTags(source) {
+  const tags = [];
+  const seen = new Set();
+  const pattern = /<\/?\s*([A-Za-z][A-Za-z0-9._:-]*)/g;
+  let match;
+  while ((match = pattern.exec(source))) {
+    const tag = match[1];
+    if (!seen.has(tag)) {
+      seen.add(tag);
+      tags.push(tag);
+    }
+  }
+  return tags;
+}
+
+function collectVuePredicateHits(predicate, values) {
+  if (Array.isArray(predicate)) return predicate.map(String);
+  if (typeof predicate !== 'function') return [];
+  const hits = [];
+  for (const value of values) {
+    try {
+      if (predicate(value)) hits.push(value);
+    } catch (_) {}
+  }
+  return hits;
 }
 
 function preflightAliasCall(name, payload) {

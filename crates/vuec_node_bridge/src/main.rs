@@ -3,7 +3,8 @@
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use std::io::{self, Read};
-use vuec_ast::{NodeSpan, TemplateAttribute, Vue3Ast, Vue3AstKind, Vue3Expression, Vue3Prop};
+use vuec_ast::{NodeSpan, Vue3Ast, Vue3AstKind, Vue3Expression, Vue3Prop};
+use vuec_html::{HtmlTokenKind, HtmlTokenizer};
 use vuec_sfc::{
     SfcBlock, SfcBlockAttrs, SfcCompiler, SfcDescriptor, SfcScriptBlock, SfcScriptCompileOptions,
     SfcStyleCompileOptions, SfcTemplateCompileOptions,
@@ -652,6 +653,7 @@ fn vue3_parse_value(ast: &Vue3Ast, source: &str, base_offset: usize) -> Value {
         "temps": 0,
         "codegenNode": Value::Null,
         "loc": ast.root_node().map(|node| vue3_loc_value(source, base_offset, &node.span)).unwrap_or_else(vue3_loc_stub_value),
+        "__vuecDiagnostics": vue3_parse_diagnostics(ast, source, base_offset),
     })
 }
 
@@ -726,6 +728,159 @@ fn vue3_node_summary(
     }
 }
 
+fn vue3_parse_diagnostics(ast: &Vue3Ast, source: &str, base_offset: usize) -> Vec<Value> {
+    let mut diagnostics = Vec::new();
+    collect_invalid_lt_diagnostics(source, &mut diagnostics);
+    collect_missing_interpolation_end_diagnostics(source, &mut diagnostics);
+    collect_invalid_end_tag_diagnostics(ast, source, base_offset, &mut diagnostics);
+    collect_missing_directive_name_diagnostics(ast, source, base_offset, &mut diagnostics);
+    diagnostics
+}
+
+fn collect_invalid_lt_diagnostics(source: &str, diagnostics: &mut Vec<Value>) {
+    for token in HtmlTokenizer::new(source).tokenize() {
+        let HtmlTokenKind::Text(text) = token.kind else {
+            continue;
+        };
+        let interpolation_ranges = default_interpolation_ranges(&text);
+        let mut cursor = 0usize;
+        while let Some(offset) = text[cursor..].find('<') {
+            let local_index = cursor + offset;
+            cursor = local_index + 1;
+            if interpolation_ranges
+                .iter()
+                .any(|(start, end)| local_index >= *start && local_index < *end)
+            {
+                continue;
+            }
+            let global_index = token.start + local_index;
+            if source
+                .as_bytes()
+                .get(global_index + 1)
+                .is_some_and(|next| !matches!(*next, b'/' | b'!' | b'A'..=b'Z' | b'a'..=b'z'))
+            {
+                diagnostics.push(vue3_error_value(
+                    12,
+                    vue3_source_loc_value(source, global_index, global_index),
+                ));
+            }
+        }
+    }
+}
+
+fn default_interpolation_ranges(text: &str) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(open_offset) = text[cursor..].find("{{") {
+        let open = cursor + open_offset;
+        let inner_start = open + 2;
+        let Some(close_offset) = text[inner_start..].find("}}") else {
+            break;
+        };
+        let close = inner_start + close_offset + 2;
+        ranges.push((open, close));
+        cursor = close;
+    }
+    ranges
+}
+
+fn collect_missing_interpolation_end_diagnostics(source: &str, diagnostics: &mut Vec<Value>) {
+    let mut cursor = 0usize;
+    while let Some(open_offset) = source[cursor..].find("{{") {
+        let open = cursor + open_offset;
+        let inner_start = open + 2;
+        if let Some(close_offset) = source[inner_start..].find("}}") {
+            cursor = inner_start + close_offset + 2;
+        } else {
+            diagnostics.push(vue3_error_value(
+                25,
+                vue3_source_loc_value(source, source.len(), source.len()),
+            ));
+            break;
+        }
+    }
+}
+
+fn collect_invalid_end_tag_diagnostics(
+    ast: &Vue3Ast,
+    source: &str,
+    _base_offset: usize,
+    diagnostics: &mut Vec<Value>,
+) {
+    let mut stack = Vec::<String>::new();
+    for token in HtmlTokenizer::new(source).tokenize() {
+        match token.kind {
+            HtmlTokenKind::StartTag {
+                name, self_closing, ..
+            } => {
+                if !self_closing
+                    && ast.nodes.iter().any(|node| {
+                        matches!(&node.kind, Vue3AstKind::Element(element) if element.tag.eq_ignore_ascii_case(&name))
+                    })
+                {
+                    stack.push(name);
+                }
+            }
+            HtmlTokenKind::EndTag { name } => {
+                if stack
+                    .last()
+                    .is_some_and(|open| open.eq_ignore_ascii_case(&name))
+                {
+                    stack.pop();
+                } else if !stack.iter().any(|open| open.eq_ignore_ascii_case(&name)) {
+                    diagnostics.push(vue3_error_value(
+                        23,
+                        vue3_source_loc_value(source, token.start, token.start),
+                    ));
+                } else {
+                    while let Some(open) = stack.pop() {
+                        if open.eq_ignore_ascii_case(&name) {
+                            break;
+                        }
+                    }
+                }
+            }
+            HtmlTokenKind::Text(_)
+            | HtmlTokenKind::Comment(_)
+            | HtmlTokenKind::Cdata(_)
+            | HtmlTokenKind::Doctype(_)
+            | HtmlTokenKind::Eof => {}
+        }
+    }
+}
+
+fn collect_missing_directive_name_diagnostics(
+    ast: &Vue3Ast,
+    source: &str,
+    base_offset: usize,
+    diagnostics: &mut Vec<Value>,
+) {
+    for node in &ast.nodes {
+        let Vue3AstKind::Element(element) = &node.kind else {
+            continue;
+        };
+        for prop in &element.props {
+            let Vue3Prop::Attribute(attr) = prop else {
+                continue;
+            };
+            if attr.name == "v-" {
+                let loc = attr
+                    .span
+                    .map(|span| vue3_source_span_value(source, base_offset, span))
+                    .unwrap_or_else(vue3_loc_stub_value);
+                diagnostics.push(vue3_error_value(26, loc));
+            }
+        }
+    }
+}
+
+fn vue3_error_value(code: u8, loc: Value) -> Value {
+    json!({
+        "code": code,
+        "loc": loc,
+    })
+}
+
 fn vue3_namespace_value(namespace: vuec_ast::HtmlNamespace) -> u8 {
     match namespace {
         vuec_ast::HtmlNamespace::Html => 0,
@@ -750,30 +905,42 @@ fn vue3_prop_value(source: &str, base_offset: usize, prop: &Vue3Prop) -> Value {
             "type": 7,
             "name": dir.name,
             "rawName": dir.raw_name,
-            "exp": dir.exp.as_ref().map(|exp| vue3_expression_value(source, base_offset, exp, &NodeSpan::missing(vuec_ast::MissingSpanReason::Synthetic), false)),
-            "arg": dir.arg.as_ref().map(|arg| vue3_expression_value(source, base_offset, arg, &NodeSpan::missing(vuec_ast::MissingSpanReason::Synthetic), !dir.is_dynamic_arg)),
-            "modifiers": dir.modifiers.iter().map(|modifier| vue3_simple_expression_value(modifier, true, vue3_loc_stub_value())).collect::<Vec<_>>(),
-            "loc": vue3_loc_stub_value(),
+            "exp": dir.exp.as_ref().map(|exp| vue3_expression_value(source, base_offset, exp, &span_to_node_span(dir.exp_span), false)),
+            "arg": dir.arg.as_ref().map(|arg| vue3_expression_value(source, base_offset, arg, &span_to_node_span(dir.arg_span), !dir.is_dynamic_arg)),
+            "modifiers": dir.modifiers.iter().enumerate().map(|(index, modifier)| {
+                let loc = dir
+                    .modifier_spans
+                    .get(index)
+                    .map(|span| vue3_source_span_value(source, base_offset, *span))
+                    .unwrap_or_else(vue3_loc_stub_value);
+                vue3_simple_expression_value(
+                    modifier,
+                    true,
+                    loc,
+                )
+            }).collect::<Vec<_>>(),
+            "loc": dir.span.map(|span| vue3_source_span_value(source, base_offset, span)).unwrap_or_else(vue3_loc_stub_value),
         }),
     }
 }
 
 fn vue3_attribute_value(source: &str, base_offset: usize, attr: &vuec_ast::Vue3Attribute) -> Value {
-    let name_loc = vue3_loc_for_source_fragment(source, base_offset, &attr.name);
     json!({
         "type": 6,
         "name": attr.name,
-        "nameLoc": name_loc,
+        "nameLoc": attr.name_span.map(|span| vue3_source_span_value(source, base_offset, span)).unwrap_or_else(vue3_loc_stub_value),
         "value": attr.value.as_ref().map(|value| json!({
             "type": 2,
             "content": value,
-            "loc": vue3_loc_for_source_fragment(source, base_offset, value),
+            "loc": attr.value_span.map(|span| vue3_source_span_value(source, base_offset, span)).unwrap_or_else(vue3_loc_stub_value),
         })),
-        "loc": vue3_loc_for_attribute(source, base_offset, &TemplateAttribute {
-            name: attr.name.clone(),
-            value: attr.value.clone(),
-        }),
+        "loc": attr.span.map(|span| vue3_source_span_value(source, base_offset, span)).unwrap_or_else(vue3_loc_stub_value),
     })
+}
+
+fn span_to_node_span(span: Option<vuec_source::Span>) -> NodeSpan {
+    span.map(NodeSpan::from)
+        .unwrap_or_else(|| NodeSpan::missing(vuec_ast::MissingSpanReason::Synthetic))
 }
 
 fn vue3_expression_value(
@@ -823,25 +990,14 @@ fn vue3_expression_loc(
     vue3_loc_value(source, base_offset, fallback_span)
 }
 
-fn vue3_loc_for_source_fragment(source: &str, _base_offset: usize, fragment: &str) -> Value {
-    source
-        .find(fragment)
-        .map(|start| vue3_source_loc_value(source, start, start + fragment.len()))
-        .unwrap_or_else(vue3_loc_stub_value)
-}
-
-fn vue3_loc_for_attribute(source: &str, base_offset: usize, attr: &TemplateAttribute) -> Value {
-    let needle = match attr.value.as_ref() {
-        Some(value) => format!("{}=\"{}\"", attr.name, value),
-        None => attr.name.clone(),
-    };
-    vue3_loc_for_source_fragment(source, base_offset, &needle)
-}
-
 fn vue3_loc_value(source: &str, base_offset: usize, span: &NodeSpan) -> Value {
     let Some(span) = span.source() else {
         return vue3_loc_stub_value();
     };
+    vue3_source_span_value(source, base_offset, span)
+}
+
+fn vue3_source_span_value(source: &str, base_offset: usize, span: vuec_source::Span) -> Value {
     let start = span.start.0.saturating_sub(base_offset);
     let end = span.end.0.saturating_sub(base_offset);
     vue3_source_loc_value(source, start, end)
@@ -967,6 +1123,7 @@ fn vue3_options(value: Option<&Value>) -> Vue3CompilerOptions {
         "sourceMap",
         bool_option(value, "source_map", options.source_map),
     );
+    options.comments = bool_option(value, "comments", options.comments);
     if let Some(mode) = value.get("mode").and_then(Value::as_str) {
         options.mode = mode.to_string();
     } else if value.get("prefixIdentifiers").and_then(Value::as_bool) == Some(true) {
@@ -984,6 +1141,25 @@ fn vue3_options(value: Option<&Value>) -> Vue3CompilerOptions {
             .map(ToOwned::to_owned)
             .collect();
     }
+    if let Some(delimiters) = value.get("delimiters").and_then(Value::as_array) {
+        if delimiters.len() == 2 {
+            if let (Some(open), Some(close)) = (delimiters[0].as_str(), delimiters[1].as_str()) {
+                options.delimiters = Some([open.to_string(), close.to_string()]);
+            }
+        }
+    }
+    options.void_tags = string_array_option(value, "__vuecVoidTags");
+    if let Some(native_tags) = value.get("__vuecNativeTags").and_then(Value::as_array) {
+        options.native_tags = Some(
+            native_tags
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect(),
+        );
+    }
+    options.custom_elements = string_array_option(value, "__vuecCustomElements");
+    options.built_in_components = string_array_option(value, "__vuecBuiltInComponents");
     options
 }
 
