@@ -4,6 +4,8 @@
 - Current focus: use the generated npm alias bridge to turn option/output contract and official conformance execution from discovery/scaffold reports into real Rust-vs-official gates.
 - `docs/3.AST_HIR_MIR_DESIGN.md` is the authoritative AST/IR contract; `vuec_ast` follows the new arena, lowering-map, runtime-helper, and JS id model, while `vuec_js` still needs the real registry/store APIs.
 - `vuec_js` now has the first real registry/store layer: `JsEntry`, `JsSourceType`, id allocation for expressions/statements/patterns/programs, lookup APIs, and parse-by-id APIs while preserving the old direct parse wrappers.
+- Vue 3 `@vue/compiler-core` now validates interpolation expressions through `vuec_js::JsAstStore` and Oxc, with `isTS` / `expressionPlugins: ["typescript"]` selecting TypeScript expression parsing.
+- Vue 3 `@vue/compiler-core` option matrix now has prefixIdentifiers, mode, isTS, and expressionPlugins executable rows passing for the current schema v2 fixtures; hoistStatic, cacheHandlers, scopeId, and slotted remain explicit pending rows.
 - `vuec_sfc::compile_script` now registers normal script and script setup blocks as `JsProgramId`s and serializes official-style `type`, `setup`, `lang`, `imports`, `scriptAst`, `scriptSetupAst`, and `deps` fields.
 - Vue 3 SFC option matrix now has parse, compileTemplate, compileScript, and compileStyle executable rows passing for the current schema v2 fixtures.
 - Vue 3 `@vue/compiler-ssr` option matrix now has scopeId and slotted executable rows passing for the current schema v2 fixtures.

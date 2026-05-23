@@ -1001,12 +1001,14 @@ dependencies = [
 name = "vuec_vue3_core"
 version = "0.1.0"
 dependencies = [
+ "oxc_span",
  "serde",
  "serde_json",
  "vuec_ast",
  "vuec_codegen",
  "vuec_diagnostics",
  "vuec_html",
+ "vuec_js",
  "vuec_pass",
  "vuec_source",
 ]

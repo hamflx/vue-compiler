@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use vuec_ast::{RuntimeHelper, TemplateAttribute, Vue3Ast, Vue3NodeKind};
 use vuec_codegen::{CodeWriter, SourceMapArtifact, SourceMapSegment};
 use vuec_html::{HtmlTokenKind, HtmlTokenizer};
+use vuec_js::JsAstStore;
 use vuec_pass::TransformContext;
 use vuec_source::{FileId, Span};
 
@@ -282,12 +283,13 @@ impl Vue3Dialect {
         if options.source_map {
             result.map = source_map_for_render(&result.code, &ast, &source);
         }
-        result.diagnostics = ctx
-            .diagnostics
-            .into_vec()
-            .into_iter()
-            .map(|diagnostic| diagnostic.message)
-            .collect();
+        result.diagnostics = expression_diagnostics(&ast, &options);
+        result.diagnostics.extend(
+            ctx.diagnostics
+                .into_vec()
+                .into_iter()
+                .map(|diagnostic| diagnostic.message),
+        );
         result
     }
 
@@ -757,6 +759,37 @@ fn render_expression(expression: &str, options: &Vue3CompilerOptions) -> String 
         format!("_ctx.{expression}")
     } else {
         expression.to_string()
+    }
+}
+
+fn expression_diagnostics(ast: &Vue3Ast, options: &Vue3CompilerOptions) -> Vec<String> {
+    let store = JsAstStore::new();
+    let source_type = expression_source_type(options);
+    ast.nodes
+        .iter()
+        .filter_map(|node| match &node.kind {
+            Vue3NodeKind::Interpolation { expression } => Some(expression.as_str()),
+            _ => None,
+        })
+        .filter_map(|expression| {
+            store
+                .parse_expression(expression.trim(), source_type)
+                .err()
+                .map(|err| err.message().to_string())
+        })
+        .collect()
+}
+
+fn expression_source_type(options: &Vue3CompilerOptions) -> oxc_span::SourceType {
+    if options.is_ts
+        || options
+            .expression_plugins
+            .iter()
+            .any(|plugin| plugin == "typescript")
+    {
+        oxc_span::SourceType::ts()
+    } else {
+        oxc_span::SourceType::mjs()
     }
 }
 

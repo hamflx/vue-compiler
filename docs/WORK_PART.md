@@ -18,6 +18,9 @@
 
 ## Completed This Round
 
+- Wired Vue 3 `@vue/compiler-core` interpolation expression validation through `vuec_js::JsAstStore`, selecting Oxc TypeScript source mode when `isTS` is enabled or `expressionPlugins` contains `typescript`.
+- Converted the Vue 3 core `isTS` and `expressionPlugins` option rows from pending to executable diff mode with deterministic code-output probes; the target now reports `4/8` option rows passing, `0` failing, and `4` explicitly pending.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_vue3_core -p xtask`, `cargo xtask generate-option-matrix --version-line vue3 --package @vue/compiler-core`, `cargo xtask run-option-matrix --version-line vue3 --package @vue/compiler-core`, `cargo xtask audit-option-matrix --version-line vue3 --package @vue/compiler-core`, `cargo xtask diff-api --version-line vue3 --package @vue/compiler-core`, and `cargo xtask verify-npm-alias --version-line vue3 --package @vue/compiler-core`.
 - Converted the Vue 3 `@vue/compiler-dom` `isCustomElement` option row from pending to executable diff mode and taught the option probe to convert the JSON fixture list into the official predicate callback shape; the target now reports `4/4` option rows passing with no pending rows.
 - Verification this round: `cargo xtask run-option-matrix --version-line vue3 --package @vue/compiler-dom`, `cargo xtask audit-option-matrix --version-line vue3 --package @vue/compiler-dom`, `cargo xtask diff-api --version-line vue3 --package @vue/compiler-dom`, and `cargo xtask verify-npm-alias --version-line vue3 --package @vue/compiler-dom`.
 - Converted the Vue 3 `@vue/compiler-ssr` `scopeId` option row from pending to executable diff mode; the target now reports `2/2` option rows passing with no pending rows.

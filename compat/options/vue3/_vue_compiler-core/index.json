@@ -227,7 +227,7 @@
         "parser"
       ],
       "output_fields_affected": [
-        "diagnostics"
+        "code:contains:foo as string"
       ],
       "official_fixture_ids": [
         "vue3-core-ts"
@@ -240,8 +240,8 @@
       "option_value": {
         "isTS": true
       },
-      "execution_mode": "pending",
-      "status": "pending"
+      "execution_mode": "diff",
+      "status": "pass"
     },
     {
       "option_name": "expressionPlugins",
@@ -261,7 +261,7 @@
         "parser"
       ],
       "output_fields_affected": [
-        "diagnostics"
+        "code:contains:foo?.bar"
       ],
       "official_fixture_ids": [
         "vue3-core-expression-plugins"
@@ -276,8 +276,8 @@
           "typescript"
         ]
       },
-      "execution_mode": "pending",
-      "status": "pending"
+      "execution_mode": "diff",
+      "status": "pass"
     }
   ]
 }
