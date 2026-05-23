@@ -1949,7 +1949,7 @@ fn alias_argument_object(target: TargetSpec, export_name: &str, _arity: u32) -> 
             "{ source: a0, filename: a1 && a1.filename, options: a1 }".into()
         }
         (TargetKind::Vue27Sfc, "compileTemplate") => {
-            "{ source: a0 && a0.source ? a0.source : '', filename: a0 && a0.filename, options: a0 }"
+            "{ source: a0 && a0.source ? a0.source : '', filename: a0 && (a0.filename || a0.id || 'template.vue.html'), options: a0 }"
                 .into()
         }
         (TargetKind::Vue27Sfc, "compileScript") => {
@@ -1968,7 +1968,7 @@ fn alias_argument_object(target: TargetSpec, export_name: &str, _arity: u32) -> 
             "{ source: a0, filename: a1 && a1.filename, options: a1 }".into()
         }
         (TargetKind::Vue3Sfc, "compileTemplate") => {
-            "{ source: a0 && a0.source ? a0.source : '', filename: a0 && a0.filename, options: a0 }"
+            "{ source: a0 && a0.source ? a0.source : '', filename: a0 && (a0.filename || 'template.vue.html'), options: a0 }"
                 .into()
         }
         (TargetKind::Vue3Sfc, "compileScript") => {

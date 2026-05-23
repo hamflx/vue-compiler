@@ -65,12 +65,16 @@ pub struct SourceMapMapping {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SourceMapArtifact {
     pub version: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
     pub sources: Vec<String>,
     pub names: Vec<String>,
-    pub mappings: Vec<SourceMapMapping>,
+    pub mappings: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sources_content: Option<Vec<Option<String>>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -131,14 +135,102 @@ impl SourceMapBuilder {
     }
 
     pub fn build(self) -> SourceMapArtifact {
+        let mut encoded = oxc_sourcemap::SourceMapBuilder::default();
+        if let Some(file) = self.file.as_deref() {
+            encoded.set_file(file);
+        }
+        let source_ids = self
+            .sources
+            .iter()
+            .map(|source| encoded.add_source_and_content(source, ""))
+            .collect::<Vec<_>>();
+        let name_ids = self
+            .names
+            .iter()
+            .map(|name| encoded.add_name(name))
+            .collect::<Vec<_>>();
+        for mapping in &self.mappings {
+            let source_id = mapping
+                .source_name
+                .as_ref()
+                .and_then(|name| self.sources.iter().position(|source| source == name))
+                .and_then(|index| source_ids.get(index).copied());
+            let name_id = mapping
+                .source_name
+                .as_ref()
+                .and_then(|name| self.names.iter().position(|existing| existing == name))
+                .and_then(|index| name_ids.get(index).copied());
+            encoded.add_token(
+                mapping.generated_line.saturating_sub(1) as u32,
+                mapping.generated_column as u32,
+                mapping
+                    .original
+                    .map(|span| span.start.0)
+                    .unwrap_or_default() as u32,
+                0,
+                source_id,
+                name_id,
+            );
+        }
+        let json = encoded.into_sourcemap().to_json();
         SourceMapArtifact {
             version: 3,
             file: self.file,
             sources: self.sources,
             names: self.names,
-            mappings: self.mappings,
+            mappings: json.mappings,
+            sources_content: json.sources_content,
         }
     }
+}
+
+impl SourceMapArtifact {
+    pub fn from_segments(
+        file: Option<String>,
+        source: String,
+        source_content: String,
+        names: Vec<String>,
+        segments: Vec<SourceMapSegment>,
+    ) -> Self {
+        let mut builder = oxc_sourcemap::SourceMapBuilder::default();
+        if let Some(file) = file.as_deref() {
+            builder.set_file(file);
+        }
+        let source_id = builder.set_source_and_content(&source, &source_content);
+        let name_ids = names
+            .iter()
+            .map(|name| builder.add_name(name))
+            .collect::<Vec<_>>();
+        for segment in segments {
+            let name_id = segment.name_index.and_then(|index| name_ids.get(index).copied());
+            builder.add_token(
+                segment.generated_line,
+                segment.generated_column,
+                segment.original_line,
+                segment.original_column,
+                Some(source_id),
+                name_id,
+            );
+        }
+        let json = builder.into_sourcemap().to_json();
+        SourceMapArtifact {
+            version: 3,
+            file,
+            sources: vec![source],
+            names,
+            mappings: json.mappings,
+            sources_content: Some(vec![Some(source_content)]),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SourceMapSegment {
+    pub generated_line: u32,
+    pub generated_column: u32,
+    pub original_line: u32,
+    pub original_column: u32,
+    pub name_index: Option<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

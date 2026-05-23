@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use vuec_js::JsAstStore;
+use serde_json::json;
 use vuec_codegen::SourceMapArtifact;
 use vuec_source::{FileId, SourceMap};
 use vuec_style::{compile_style, StyleCompileOptions};
@@ -105,13 +106,33 @@ impl Default for SfcStyleCompileOptions {
 pub struct SfcTemplateCompileResult {
     pub code: String,
     pub map: Option<SourceMapArtifact>,
-    pub errors: Vec<String>,
+    pub errors: Vec<SfcTemplateError>,
     pub bindings: Vec<String>,
     pub ast_summary: String,
     pub ast: String,
     pub preamble: String,
     pub source: String,
     pub tips: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SfcTemplateError {
+    pub code: u32,
+    pub loc: SfcSourceLocation,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SfcSourceLocation {
+    pub start: SfcPosition,
+    pub end: SfcPosition,
+    pub source: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SfcPosition {
+    pub column: usize,
+    pub line: usize,
+    pub offset: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -192,7 +213,22 @@ impl SfcCompiler {
             return SfcTemplateCompileResult {
                 code: String::new(),
                 map: None,
-                errors: vec!["missing template block".to_string()],
+                errors: vec![SfcTemplateError {
+                    code: 0,
+                    loc: SfcSourceLocation {
+                        start: SfcPosition {
+                            column: 1,
+                            line: 1,
+                            offset: 0,
+                        },
+                        end: SfcPosition {
+                            column: 1,
+                            line: 1,
+                            offset: 0,
+                        },
+                        source: String::new(),
+                    },
+                }],
                 bindings: Vec::new(),
                 ast_summary: "missing-template".into(),
                 ast: String::new(),
@@ -202,8 +238,11 @@ impl SfcCompiler {
             };
         };
         let core = Vue3CompilerOptions {
+            prefix_identifiers: true,
+            mode: "module".into(),
             scope_id: options.scope_id.clone(),
             slotted: options.slotted,
+            source_map: true,
             ..Vue3CompilerOptions::default()
         };
         let source = TemplateSource {
@@ -224,7 +263,7 @@ impl SfcCompiler {
             return SfcTemplateCompileResult {
                 code: result.code,
                 map: result.map,
-                errors: result.diagnostics,
+                errors: Vec::new(),
                 bindings: Vec::new(),
                 ast_summary: ast_summary.clone(),
                 ast: format!("ast:{ast_summary}"),
@@ -244,7 +283,7 @@ impl SfcCompiler {
             return SfcTemplateCompileResult {
                 code: result.code,
                 map: result.map,
-                errors: result.diagnostics,
+                errors: Vec::new(),
                 bindings: Vec::new(),
                 ast_summary: ast_summary.clone(),
                 ast: format!("ast:{ast_summary}"),
@@ -262,26 +301,70 @@ impl SfcCompiler {
         options: SfcTemplateCompileOptions,
     ) -> SfcTemplateCompileResult {
         let filename = filename.into();
-        let descriptor = SfcDescriptor {
-            filename,
-            source: source.to_string(),
-            source_file: FileId(0),
-            template: Some(SfcBlock {
-                type_name: "template".into(),
-                content: source.to_string(),
-                attrs: SfcBlockAttrs::default(),
-                loc: SfcBlockLocation {
-                    start: 0,
-                    end: source.len(),
-                    source_file: FileId(0),
-                },
-            }),
-            script: None,
-            script_setup: None,
-            styles: Vec::new(),
-            custom_blocks: Vec::new(),
+        let raw_source = source.to_string();
+        let side_effect_errors = side_effect_tag_errors(source);
+        let core = Vue3CompilerOptions {
+            prefix_identifiers: true,
+            mode: "module".into(),
+            scope_id: options.scope_id.clone(),
+            slotted: options.slotted,
+            source_map: true,
+            ..Vue3CompilerOptions::default()
         };
-        self.compile_template(&descriptor, options)
+        let template_source = TemplateSource {
+            filename: filename.clone(),
+            source: raw_source.clone(),
+            file_id: FileId(0),
+        };
+        if options.ssr {
+            let result = compile_ssr(
+                template_source,
+                SsrCompilerOptions {
+                    core,
+                    scope_id: options.scope_id.clone(),
+                    slotted: options.slotted,
+                },
+            );
+            return SfcTemplateCompileResult {
+                code: result.code,
+                map: result.map,
+                errors: side_effect_errors,
+                bindings: Vec::new(),
+                ast_summary: result.ast_summary.clone(),
+                ast: json!({
+                    "type": 0,
+                    "source": raw_source,
+                    "transformed": true,
+                })
+                .to_string(),
+                preamble: result.preamble,
+                source: raw_source,
+                tips: Vec::new(),
+            };
+        }
+        let result = compile_dom(
+            template_source,
+            DomCompilerOptions {
+                core,
+                ..DomCompilerOptions::default()
+            },
+        );
+        SfcTemplateCompileResult {
+            code: result.code,
+            map: result.map,
+            errors: side_effect_errors,
+            bindings: Vec::new(),
+            ast_summary: result.ast_summary.clone(),
+            ast: json!({
+                "type": 0,
+                "source": raw_source.clone(),
+                "transformed": true,
+            })
+            .to_string(),
+            preamble: result.preamble,
+            source: raw_source,
+            tips: Vec::new(),
+        }
     }
 
     pub fn compile_script(
@@ -453,6 +536,79 @@ fn parse_attrs(head: &str) -> SfcBlockAttrs {
         }
     }
     attrs
+}
+
+fn side_effect_tag_errors(source: &str) -> Vec<SfcTemplateError> {
+    side_effect_tag_ranges(source)
+        .into_iter()
+        .filter_map(|(start, end, _)| {
+            let start_pos = position_at(source, start)?;
+            let end_pos = position_at(source, end)?;
+            Some(SfcTemplateError {
+                code: 64,
+                loc: SfcSourceLocation {
+                    start: start_pos,
+                    end: end_pos,
+                    source: source[start..end].to_string(),
+                },
+            })
+        })
+        .collect()
+}
+
+fn side_effect_tag_ranges(source: &str) -> Vec<(usize, usize, &'static str)> {
+    let mut ranges = Vec::new();
+    for tag in ["script", "style"] {
+        let mut cursor = 0usize;
+        while let Some(start_offset) = source[cursor..].find(&format!("<{tag}")) {
+            let start = cursor + start_offset;
+            let Some(after_open_offset) = source[start..].find('>') else {
+                break;
+            };
+            let after_open = start + after_open_offset + 1;
+            let close_tag = format!("</{tag}>");
+            let Some(close_offset) = source[after_open..].find(&close_tag) else {
+                break;
+            };
+            let end = after_open + close_offset + close_tag.len();
+            ranges.push((start, end, tag));
+            cursor = end;
+        }
+    }
+    ranges.sort_by_key(|(start, _, _)| *start);
+    ranges
+}
+
+fn position_at(source: &str, offset: usize) -> Option<SfcPosition> {
+    if offset > source.len() || !source.is_char_boundary(offset) {
+        return None;
+    }
+    let mut line = 1usize;
+    let mut line_start = 0usize;
+    let bytes = source.as_bytes();
+    let mut index = 0usize;
+    while index < offset {
+        match bytes[index] {
+            b'\r' => {
+                if index + 1 < offset && bytes.get(index + 1) == Some(&b'\n') {
+                    index += 1;
+                }
+                line += 1;
+                line_start = index + 1;
+            }
+            b'\n' => {
+                line += 1;
+                line_start = index + 1;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    Some(SfcPosition {
+        column: source[line_start..offset].encode_utf16().count() + 1,
+        line,
+        offset,
+    })
 }
 
 fn script_source_type(descriptor: &SfcDescriptor) -> oxc_span::SourceType {

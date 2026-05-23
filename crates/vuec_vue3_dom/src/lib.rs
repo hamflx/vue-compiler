@@ -1,11 +1,10 @@
 #![forbid(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
-use vuec_ast::{TemplateAttribute, Vue3Ast, Vue3NodeKind};
-use vuec_source::FileId;
-use vuec_vue3_core::{
-    base_compile, CodegenResult, TemplateSource, Vue3CompilerOptions, Vue3Dialect,
-};
+use vuec_ast::{NodeId, TemplateAttribute, Vue3Ast, Vue3NodeKind};
+use vuec_diagnostics::{Diagnostic, Severity};
+use vuec_vue3_core::{CodegenResult, TemplateSource, Vue3CompilerOptions, Vue3Dialect};
+use vuec_pass::TransformContext;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DomCompilerOptions {
@@ -41,7 +40,9 @@ pub fn parse(source: TemplateSource, options: &DomCompilerOptions) -> Vue3Ast {
 }
 
 pub fn compile(source: TemplateSource, options: DomCompilerOptions) -> CodegenResult {
-    let mut ast = parse(source, &options);
+    let mut ast = parse(source.clone(), &options);
+    let mut ctx = TransformContext::default();
+    remove_side_effect_nodes(&mut ast, &mut ctx);
     for node in &mut ast.nodes {
         if let Vue3NodeKind::Element {
             tag, attributes, ..
@@ -73,14 +74,8 @@ pub fn compile(source: TemplateSource, options: DomCompilerOptions) -> CodegenRe
             }
         }
     }
-    let mut result = base_compile(
-        TemplateSource {
-            filename: "dom.vue".into(),
-            source: dom_summary_source(&ast),
-            file_id: FileId(0),
-        },
-        options.core,
-    );
+    Vue3Dialect::transform(&mut ast, &mut ctx);
+    let mut result = Vue3Dialect::finish_compile(ast, source, options.core, ctx);
     result.ast_summary = format!("dom:{}", result.ast_summary);
     result
 }
@@ -177,6 +172,46 @@ fn only_asset_summaries(summaries: &[String]) -> bool {
         .all(|summary| summary.starts_with("asset:"))
 }
 
+fn remove_side_effect_nodes(ast: &mut Vue3Ast, ctx: &mut TransformContext) {
+    let Some(root_id) = ast.root else {
+        return;
+    };
+    remove_side_effect_children(ast, root_id, ctx);
+}
+
+fn remove_side_effect_children(ast: &mut Vue3Ast, parent_id: NodeId, ctx: &mut TransformContext) {
+    let child_ids = ast
+        .node(parent_id)
+        .map(|node| node.children.clone())
+        .unwrap_or_default();
+    let mut retained = Vec::new();
+    for child_id in child_ids {
+        let remove = ast.node(child_id).is_some_and(|child| {
+            matches!(
+                child.kind,
+                Vue3NodeKind::Element { ref tag, .. } if tag == "script" || tag == "style"
+            )
+        });
+        if remove {
+            if let Some(span) = ast.node(child_id).and_then(|node| node.span) {
+                ctx.report(Diagnostic {
+                    code: "64".into(),
+                    severity: Severity::Error,
+                    message: "Tags with side effect (<script> and <style>) are ignored in client component templates.".into(),
+                    span: Some(span),
+                    notes: Vec::new(),
+                });
+            }
+        } else {
+            remove_side_effect_children(ast, child_id, ctx);
+            retained.push(child_id);
+        }
+    }
+    if let Some(parent) = ast.node_mut(parent_id) {
+        parent.children = retained;
+    }
+}
+
 fn decode_basic_entities(value: &str) -> String {
     value
         .replace("&lt;", "<")
@@ -184,49 +219,6 @@ fn decode_basic_entities(value: &str) -> String {
         .replace("&amp;", "&")
         .replace("&quot;", "\"")
         .replace("&#39;", "'")
-}
-
-fn dom_summary_source(ast: &Vue3Ast) -> String {
-    let mut source = String::new();
-    for node in &ast.nodes {
-        match &node.kind {
-            Vue3NodeKind::Element {
-                tag,
-                attributes,
-                self_closing,
-            } => {
-                source.push('<');
-                source.push_str(tag);
-                for attr in attributes {
-                    source.push(' ');
-                    source.push_str(&attr.name);
-                    if let Some(value) = &attr.value {
-                        source.push_str("=\"");
-                        source.push_str(value);
-                        source.push('"');
-                    }
-                }
-                if *self_closing {
-                    source.push_str("/>");
-                } else {
-                    source.push('>');
-                }
-            }
-            Vue3NodeKind::Text { value } => source.push_str(value),
-            Vue3NodeKind::Interpolation { expression } => {
-                source.push_str("{{");
-                source.push_str(expression);
-                source.push_str("}}");
-            }
-            Vue3NodeKind::Comment { value } => {
-                source.push_str("<!--");
-                source.push_str(value);
-                source.push_str("-->");
-            }
-            Vue3NodeKind::Directive { .. } | Vue3NodeKind::Root => {}
-        }
-    }
-    source
 }
 
 #[cfg(test)]

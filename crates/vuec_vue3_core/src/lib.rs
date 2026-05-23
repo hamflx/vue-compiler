@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use vuec_ast::{TemplateAttribute, Vue3Ast, Vue3NodeKind};
-use vuec_codegen::{CodeWriter, SourceMapArtifact};
+use vuec_codegen::{CodeWriter, SourceMapArtifact, SourceMapSegment};
 use vuec_html::{HtmlTokenKind, HtmlTokenizer};
 use vuec_pass::TransformContext;
 use vuec_source::{FileId, Span};
@@ -24,6 +24,7 @@ pub struct Vue3CompilerOptions {
     pub slotted: bool,
     pub is_ts: bool,
     pub expression_plugins: Vec<String>,
+    pub source_map: bool,
 }
 
 impl Default for Vue3CompilerOptions {
@@ -37,6 +38,7 @@ impl Default for Vue3CompilerOptions {
             slotted: false,
             is_ts: false,
             expression_plugins: Vec::new(),
+            source_map: false,
         }
     }
 }
@@ -113,6 +115,11 @@ impl Vue3Dialect {
                         if let Some(node) = ast.node(node_id) {
                             if matches!(&node.kind, Vue3NodeKind::Element { tag, .. } if tag == &name)
                             {
+                                if let Some(node) = ast.node_mut(node_id) {
+                                    if let Some(span) = node.span.as_mut() {
+                                        span.end = vuec_source::BytePos(token.end);
+                                    }
+                                }
                                 break;
                             }
                         }
@@ -188,7 +195,16 @@ impl Vue3Dialect {
         if let Some(root_id) = ast.root {
             if let Some(root) = ast.node(root_id) {
                 let helpers = render_helpers(&helper_order, ctx);
-                if options.prefix_identifiers {
+                if options.mode == "module" {
+                    if !helpers.is_empty() {
+                        writer.push_line(&format!(
+                            "import {{ {} }} from \"vue\"",
+                            import_helper_aliases(&helpers)
+                        ));
+                        writer.newline();
+                    }
+                    writer.push_line("export function render(_ctx, _cache) {");
+                } else if options.prefix_identifiers {
                     if !helpers.is_empty() {
                         writer.push_line(&format!(
                             "const {{ {} }} = Vue",
@@ -205,7 +221,7 @@ impl Vue3Dialect {
                     writer.push_line("export function render(_ctx, _cache) {");
                 }
                 writer.indent();
-                if !options.prefix_identifiers {
+                if !options.prefix_identifiers && options.mode != "module" {
                     writer.push_line("with (_ctx) {");
                     writer.indent();
                     if !helpers.is_empty() {
@@ -222,7 +238,7 @@ impl Vue3Dialect {
                     render_children_array(ast, &root.children, options, true)
                 };
                 writer.push_line(&format!("return {}", expr));
-                if !options.prefix_identifiers {
+                if !options.prefix_identifiers && options.mode != "module" {
                     writer.dedent();
                     writer.push_line("}");
                 }
@@ -244,7 +260,19 @@ impl Vue3Dialect {
         let mut ast = Self::base_parse(source.clone(), &options);
         let mut ctx = TransformContext::default();
         Self::transform(&mut ast, &mut ctx);
+        Self::finish_compile(ast, source, options, ctx)
+    }
+
+    pub fn finish_compile(
+        ast: Vue3Ast,
+        source: TemplateSource,
+        options: Vue3CompilerOptions,
+        ctx: TransformContext,
+    ) -> CodegenResult {
         let mut result = Self::generate(&ast, &options, &ctx);
+        if options.source_map {
+            result.map = source_map_for_render(&result.code, &ast, &source);
+        }
         result.diagnostics = ctx
             .diagnostics
             .into_vec()
@@ -285,6 +313,231 @@ fn helper_aliases(helpers: &[&str]) -> String {
         .map(|helper| format!("{helper}: _{helper}"))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn import_helper_aliases(helpers: &[&str]) -> String {
+    helpers
+        .iter()
+        .map(|helper| format!("{helper} as _{helper}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn source_map_for_render(
+    code: &str,
+    ast: &Vue3Ast,
+    source: &TemplateSource,
+) -> Option<SourceMapArtifact> {
+    let root = ast.root.and_then(|root_id| ast.node(root_id))?;
+    let source_name = if source.filename.is_empty() {
+        "template.vue.html".to_string()
+    } else {
+        source.filename.clone()
+    };
+    let mut names = Vec::new();
+    let mut segments = Vec::new();
+    collect_source_map_segments(
+        code,
+        ast,
+        &root.children,
+        &source.source,
+        &mut names,
+        &mut segments,
+    );
+    if segments.is_empty() {
+        return None;
+    }
+    Some(SourceMapArtifact::from_segments(
+        None,
+        source_name,
+        source.source.clone(),
+        names,
+        segments,
+    ))
+}
+
+fn collect_source_map_segments(
+    code: &str,
+    ast: &Vue3Ast,
+    children: &[vuec_ast::NodeId],
+    source: &str,
+    names: &mut Vec<String>,
+    segments: &mut Vec<SourceMapSegment>,
+) {
+    let mut cursor = 0usize;
+    for child_id in children {
+        collect_node_source_map(code, ast, *child_id, source, names, segments, &mut cursor);
+    }
+}
+
+fn collect_node_source_map(
+    code: &str,
+    ast: &Vue3Ast,
+    node_id: vuec_ast::NodeId,
+    source: &str,
+    names: &mut Vec<String>,
+    segments: &mut Vec<SourceMapSegment>,
+    cursor: &mut usize,
+) {
+    let Some(node) = ast.node(node_id) else {
+        return;
+    };
+    match &node.kind {
+        Vue3NodeKind::Element { .. } => {
+            add_vnode_mapping(code, node, source, segments, cursor);
+            for child_id in &node.children {
+                collect_node_source_map(code, ast, *child_id, source, names, segments, cursor);
+            }
+        }
+        Vue3NodeKind::Interpolation { .. } => {
+            add_interpolation_mapping(code, node, source, names, segments, cursor);
+        }
+        Vue3NodeKind::Root | Vue3NodeKind::Text { .. } | Vue3NodeKind::Comment { .. } | Vue3NodeKind::Directive { .. } => {}
+    }
+}
+
+fn add_vnode_mapping(
+    code: &str,
+    node: &vuec_ast::Node<Vue3NodeKind>,
+    source: &str,
+    segments: &mut Vec<SourceMapSegment>,
+    cursor: &mut usize,
+) {
+    let Some(span) = node.span else {
+        return;
+    };
+    let Some(start) = loc_for_offset(source, span.start.0) else {
+        return;
+    };
+    let Some(end) = loc_for_offset(source, span.end.0) else {
+        return;
+    };
+    let tag = match &node.kind {
+        Vue3NodeKind::Element { tag, .. } => tag,
+        _ => return,
+    };
+    let block_needle = format!("_createElementBlock(\"{tag}\"");
+    let vnode_needle = format!("_createElementVNode(\"{tag}\"");
+    let block_offset = find_code_offset(code, &block_needle, *cursor);
+    let vnode_offset = find_code_offset(code, &vnode_needle, *cursor);
+    let helper_offset = match (block_offset, vnode_offset) {
+        (Some(block), Some(vnode)) => block.min(vnode),
+        (Some(block), None) => block,
+        (None, Some(vnode)) => vnode,
+        (None, None) => return,
+    };
+    if let Some((line, column)) = loc_for_offset(code, helper_offset) {
+        segments.push(SourceMapSegment {
+            generated_line: line,
+            generated_column: column,
+            original_line: start.0,
+            original_column: start.1,
+            name_index: None,
+        });
+        let tag_needle = format!("\"{tag}\"");
+        if let Some(tag_offset) = find_code_offset(code, &tag_needle, helper_offset) {
+            if let Some((end_line, end_column)) = loc_for_offset(code, tag_offset) {
+                segments.push(SourceMapSegment {
+                    generated_line: end_line,
+                    generated_column: end_column,
+                    original_line: end.0,
+                    original_column: end.1,
+                    name_index: None,
+                });
+                *cursor = tag_offset + tag_needle.len();
+            }
+        } else {
+            *cursor = helper_offset + block_needle.len().min(vnode_needle.len());
+        }
+    }
+}
+
+fn add_interpolation_mapping(
+    code: &str,
+    node: &vuec_ast::Node<Vue3NodeKind>,
+    source: &str,
+    names: &mut Vec<String>,
+    segments: &mut Vec<SourceMapSegment>,
+    cursor: &mut usize,
+) {
+    let Vue3NodeKind::Interpolation { expression } = &node.kind else {
+        return;
+    };
+    let Some(span) = node.span else {
+        return;
+    };
+    let name = expression.trim().to_string();
+    let name_index = if let Some(index) = names.iter().position(|existing| existing == &name) {
+        index
+    } else {
+        names.push(name.clone());
+        names.len() - 1
+    };
+    let Some(original_start) = source[span.start.0..span.end.0]
+        .find(expression.trim())
+        .map(|offset| span.start.0 + offset)
+    else {
+        return;
+    };
+    let Some(start) = loc_for_offset(source, original_start) else {
+        return;
+    };
+    let Some(end) = loc_for_offset(source, original_start + expression.trim().len()) else {
+        return;
+    };
+    let needle = format!("_ctx.{name}");
+    if let Some(offset) = find_code_offset(code, &needle, *cursor) {
+        if let Some((line, column)) = loc_for_offset(code, offset) {
+            segments.push(SourceMapSegment {
+                generated_line: line,
+                generated_column: column,
+                original_line: start.0,
+                original_column: start.1,
+                name_index: Some(name_index),
+            });
+            segments.push(SourceMapSegment {
+                generated_line: line,
+                generated_column: column + needle.encode_utf16().count() as u32,
+                original_line: end.0,
+                original_column: end.1,
+                name_index: None,
+            });
+            *cursor = offset + needle.len();
+        }
+    }
+}
+
+fn loc_for_offset(source: &str, offset: usize) -> Option<(u32, u32)> {
+    if offset > source.len() || !source.is_char_boundary(offset) {
+        return None;
+    }
+    let mut line = 0u32;
+    let mut line_start = 0usize;
+    let bytes = source.as_bytes();
+    let mut index = 0usize;
+    while index < offset {
+        match bytes[index] {
+            b'\r' => {
+                if index + 1 < offset && bytes.get(index + 1) == Some(&b'\n') {
+                    index += 1;
+                }
+                line += 1;
+                line_start = index + 1;
+            }
+            b'\n' => {
+                line += 1;
+                line_start = index + 1;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    let column = source[line_start..offset].encode_utf16().count() as u32;
+    Some((line, column))
+}
+
+fn find_code_offset(code: &str, needle: &str, from: usize) -> Option<usize> {
+    code.get(from..)?.find(needle).map(|offset| from + offset)
 }
 
 fn render_children_array(
@@ -330,7 +583,7 @@ fn render_node_expr(
             };
             let props = render_props(attributes, options);
             let children = render_element_children(ast, &node.children, options, is_root);
-            let patch_flag = if has_dynamic_children(ast, &node.children) {
+            let patch_flag = if tag != "template" && has_dynamic_children(ast, &node.children) {
                 ", 1 /* TEXT */"
             } else {
                 ""
@@ -338,6 +591,8 @@ fn render_node_expr(
             let attrs = if props.is_empty() { "null".into() } else { props };
             let children_arg = if children.is_empty() {
                 String::new()
+            } else if is_root && tag == "template" && children.starts_with('[') {
+                format!(", {children}")
             } else {
                 format!(", {children}")
             };
@@ -390,7 +645,11 @@ fn render_element_children(
     {
         rendered.into_iter().next().unwrap()
     } else {
-        format!("[{}]", rendered.join(", "))
+        if rendered.len() == 1 {
+            format!("[\n  {}\n]", rendered[0])
+        } else {
+            format!("[{}]", rendered.join(", "))
+        }
     }
 }
 

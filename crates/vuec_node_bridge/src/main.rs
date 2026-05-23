@@ -383,6 +383,11 @@ fn vue3_options(value: Option<&Value>) -> Vue3CompilerOptions {
     );
     options.slotted = bool_option(value, "slotted", options.slotted);
     options.is_ts = bool_option(value, "isTS", bool_option(value, "is_ts", options.is_ts));
+    options.source_map = bool_option(
+        value,
+        "sourceMap",
+        bool_option(value, "source_map", options.source_map),
+    );
     if let Some(mode) = value.get("mode").and_then(Value::as_str) {
         options.mode = mode.to_string();
     } else if value.get("prefixIdentifiers").and_then(Value::as_bool) == Some(true) {

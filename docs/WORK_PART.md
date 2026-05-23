@@ -13,6 +13,7 @@
 - [x] Vue 2 compiler main-path parser / optimizer / codegen expansion.
 - [x] Official API manifest generation and diff harness.
 - [x] Rust npm alias bridge and API manifest parity.
+- [ ] Vue 3 SFC official output-contract parity and option-matrix closure.
 
 ## Completed This Round
 
@@ -22,6 +23,8 @@
 - Wired Vue 2 `shouldDecodeNewlines` and `shouldDecodeNewlinesForHref` through `vuec_node_bridge` and adjusted Vue 2 attr codegen newline escaping so the executable Vue 2.6 decode rows pass.
 - Current `run-option-matrix` result: Vue 2.6 has 6 executable rows passing and 4 explicit pending rows; Vue 2.7 and Vue 3 option rows still expose real output/shape/codegen differences and remain failing rather than being hidden.
 - Verification this round: `cargo test -p vuec_vue2`, `cargo test -p vuec_node_bridge`, `cargo xtask generate-option-matrix --all`, `cargo xtask audit-option-matrix --all`, and `cargo xtask run-option-matrix --version-line vue2_6 --package vue-template-compiler`.
+- Vue 3 SFC template compilation now preserves the raw source through codegen, emits module-mode imports directly from the render backend, and attaches source maps from the render output instead of rebuilding strings after the fact.
+- Vue 3 side-effect `<script>/<style>` handling is now AST/diagnostic-driven rather than string-pruned, and the remaining work is closing the official compileScript/compileStyle shape gap.
 
 ## Previous Round
 
