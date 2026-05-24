@@ -1,5 +1,10 @@
 # Memory
 
+- Current round: moved Vue 3 root helper / component / directive collection onto the Rust `Vue3Ast` transform state.
+- `Vue3Dialect::transform` now populates `Vue3Root.helpers`, `Vue3Root.components`, and `Vue3Root.directives` in addition to keeping `TransformContext.helpers` synchronized. The collection distinguishes component assets from built-in component helpers and dynamic component resolution, keeps structural directives out of runtime directive assets, maps `v-show` to the `Vue3VShow` helper, and records custom runtime directives with `Vue3ResolveDirective` / `Vue3WithDirectives`.
+- Focused tests now verify the collected root fields through `AstDocument::project_public()`, so the collection is visible at the AST contract boundary rather than only through legacy emitter scans. Exact MIR/codegen consumption of these root fields remains a later compiler-pipeline step.
+- Verification for this root collection slice: `cargo fmt --all --check`, `cargo check -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_vue3_core -p vuec_node_bridge -p xtask`, and `git diff --check`.
+
 - Current round: extended structural Vue 3 DOM MIR lowering with target-level static hoist and `v-once` cache wrappers.
 - `vuec_vue3_core::lower_vue3_ast_to_dom_mir` now emits `Vue3DomMirKind::Hoisted { index }` wrappers for conservative all-static native subtrees when `hoist_static` is enabled, skips hoisting the single root element, records HIR -> MIR edges to the hoist wrapper, and keeps nested static nodes inside the same hoist instead of creating nested hoists.
 - DOM MIR lowering also emits `Vue3DomMirKind::Cache { index }` wrappers for top-level `v-once` nodes, suppresses nested `v-once` cache wrappers while lowering inside an existing once cache, and keeps expression ownership in `JsAstStore`. This is structural target projection only; exact hoist codegen, cacheHandlers event caching, `v-memo` MIR cache shape, and official output parity remain open.

@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use oxc_ast::ast::{BindingPattern, ChainElement, Expression};
 use serde::{Deserialize, Serialize};
@@ -434,6 +434,9 @@ impl Vue3Dialect {
 
     pub fn transform(ast: &mut Vue3Ast, ctx: &mut TransformContext) {
         let root_id = ast.root;
+        let mut helpers = BTreeSet::new();
+        let mut components = BTreeSet::new();
+        let mut directives = BTreeSet::new();
         let mut has_element = false;
         let mut has_nested_element = false;
         let mut has_interpolation = false;
@@ -458,10 +461,15 @@ impl Vue3Dialect {
                             Vue3AstKind::Element(element) => {
                                 has_element = true;
                                 if element.tag == "slot" {
-                                    ctx.add_helper(RuntimeHelper::Vue3RenderSlot);
+                                    helpers.insert(RuntimeHelper::Vue3RenderSlot);
                                 }
                                 if element.tag_type == Vue3ElementType::Component {
                                     has_component = true;
+                                    collect_vue3_component_asset(
+                                        element,
+                                        &mut components,
+                                        &mut helpers,
+                                    );
                                     let slot_analysis = analyze_component_slots(ast, child_id);
                                     if slot_analysis.has_slots {
                                         has_component_slots = true;
@@ -475,6 +483,11 @@ impl Vue3Dialect {
                                 }
                                 for prop in &element.props {
                                     if let Vue3Prop::Directive(dir) = prop {
+                                        collect_vue3_runtime_directive_asset(
+                                            dir,
+                                            &mut directives,
+                                            &mut helpers,
+                                        );
                                         if dir.name == "memo" {
                                             has_memo = true;
                                             if directive_by_name(element, "for").is_some() {
@@ -490,9 +503,8 @@ impl Vue3Dialect {
                                                 has_fragment = true;
                                             }
                                             "if" => {
-                                                ctx.add_helper(
-                                                    RuntimeHelper::Vue3CreateCommentVNode,
-                                                );
+                                                helpers
+                                                    .insert(RuntimeHelper::Vue3CreateCommentVNode);
                                             }
                                             "bind"
                                                 if dir.arg.as_ref().is_some_and(|arg| {
@@ -518,43 +530,55 @@ impl Vue3Dialect {
             }
         }
         if has_element {
-            ctx.add_helper(RuntimeHelper::Vue3OpenBlock);
-            ctx.add_helper(RuntimeHelper::Vue3CreateElementBlock);
+            helpers.insert(RuntimeHelper::Vue3OpenBlock);
+            helpers.insert(RuntimeHelper::Vue3CreateElementBlock);
         }
         if has_nested_element {
-            ctx.add_helper(RuntimeHelper::Vue3CreateElementVNode);
+            helpers.insert(RuntimeHelper::Vue3CreateElementVNode);
         }
         if has_text_call {
-            ctx.add_helper(RuntimeHelper::Vue3CreateTextVNode);
+            helpers.insert(RuntimeHelper::Vue3CreateTextVNode);
         }
         if has_fragment {
-            ctx.add_helper(RuntimeHelper::Vue3Fragment);
+            helpers.insert(RuntimeHelper::Vue3Fragment);
         }
         if has_render_list {
-            ctx.add_helper(RuntimeHelper::Vue3RenderList);
+            helpers.insert(RuntimeHelper::Vue3RenderList);
         }
         if has_normalize_class {
-            ctx.add_helper(RuntimeHelper::Vue3NormalizeClass);
+            helpers.insert(RuntimeHelper::Vue3NormalizeClass);
         }
         if has_component {
-            ctx.add_helper(RuntimeHelper::Vue3ResolveComponent);
-            ctx.add_helper(RuntimeHelper::Vue3OpenBlock);
-            ctx.add_helper(RuntimeHelper::Vue3CreateBlock);
+            helpers.insert(RuntimeHelper::Vue3OpenBlock);
+            helpers.insert(RuntimeHelper::Vue3CreateBlock);
+        }
+        if !components.is_empty() {
+            helpers.insert(RuntimeHelper::Vue3ResolveComponent);
         }
         if has_component_slots {
-            ctx.add_helper(RuntimeHelper::Vue3WithCtx);
+            helpers.insert(RuntimeHelper::Vue3WithCtx);
         }
         if has_dynamic_component_slots {
-            ctx.add_helper(RuntimeHelper::Vue3CreateSlots);
+            helpers.insert(RuntimeHelper::Vue3CreateSlots);
         }
         if has_interpolation {
-            ctx.add_helper(RuntimeHelper::Vue3ToDisplayString);
+            helpers.insert(RuntimeHelper::Vue3ToDisplayString);
         }
         if has_for_memo {
-            ctx.add_helper(RuntimeHelper::Vue3IsMemoSame);
+            helpers.insert(RuntimeHelper::Vue3IsMemoSame);
         }
         if has_memo {
-            ctx.add_helper(RuntimeHelper::Vue3WithMemo);
+            helpers.insert(RuntimeHelper::Vue3WithMemo);
+        }
+        if let Some(root) = ast.root_node_mut() {
+            if let Vue3AstKind::Root(root) = &mut root.kind {
+                root.helpers = helpers.clone();
+                root.components = components;
+                root.directives = directives;
+            }
+        }
+        for helper in helpers {
+            ctx.add_helper(helper);
         }
     }
 
@@ -9773,6 +9797,87 @@ fn collect_component_tags(ast: &Vue3Ast) -> Vec<String> {
     tags
 }
 
+fn collect_vue3_component_asset(
+    element: &Vue3Element,
+    components: &mut BTreeSet<String>,
+    helpers: &mut BTreeSet<RuntimeHelper>,
+) {
+    if let Some(helper) = vue3_core_component_runtime_helper(&element.tag) {
+        helpers.insert(helper);
+    } else if !matches!(element.tag.as_str(), "component" | "Component") {
+        components.insert(element.tag.clone());
+    }
+    if matches!(element.tag.as_str(), "component" | "Component")
+        || vue3_dynamic_component_is_expression(element).is_some()
+    {
+        helpers.insert(RuntimeHelper::Vue3ResolveDynamicComponent);
+    }
+}
+
+fn collect_vue3_runtime_directive_asset(
+    directive: &Vue3Directive,
+    directives: &mut BTreeSet<String>,
+    helpers: &mut BTreeSet<RuntimeHelper>,
+) {
+    if !vue3_directive_needs_runtime_asset(&directive.name) {
+        return;
+    }
+    if directive.name == "show" {
+        helpers.insert(RuntimeHelper::Vue3VShow);
+    } else {
+        directives.insert(directive.name.clone());
+        helpers.insert(RuntimeHelper::Vue3ResolveDirective);
+    }
+    helpers.insert(RuntimeHelper::Vue3WithDirectives);
+}
+
+fn vue3_core_component_runtime_helper(tag: &str) -> Option<RuntimeHelper> {
+    match tag {
+        "Teleport" | "teleport" => Some(RuntimeHelper::Vue3Teleport),
+        "Suspense" | "suspense" => Some(RuntimeHelper::Vue3Suspense),
+        "KeepAlive" | "keep-alive" => Some(RuntimeHelper::Vue3KeepAlive),
+        "BaseTransition" | "base-transition" => Some(RuntimeHelper::Vue3BaseTransition),
+        "Transition" | "transition" => Some(RuntimeHelper::Vue3Transition),
+        "TransitionGroup" | "transition-group" => Some(RuntimeHelper::Vue3TransitionGroup),
+        _ => None,
+    }
+}
+
+fn vue3_dynamic_component_is_expression(element: &Vue3Element) -> Option<&Vue3Expression> {
+    element.props.iter().find_map(|prop| match prop {
+        Vue3Prop::Directive(dir)
+            if dir.name == "bind"
+                && dir
+                    .arg
+                    .as_ref()
+                    .is_some_and(|arg| arg.source_string() == "is") =>
+        {
+            dir.exp.as_ref()
+        }
+        _ => None,
+    })
+}
+
+fn vue3_directive_needs_runtime_asset(name: &str) -> bool {
+    !matches!(
+        name,
+        "bind"
+            | "cloak"
+            | "else"
+            | "else-if"
+            | "for"
+            | "html"
+            | "if"
+            | "memo"
+            | "model"
+            | "on"
+            | "once"
+            | "pre"
+            | "slot"
+            | "text"
+    )
+}
+
 fn component_asset_id(tag: &str) -> String {
     format!("_component_{}", to_valid_asset_part(tag))
 }
@@ -12643,6 +12748,7 @@ fn is_simple_identifier(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vuec_ast::PublicProjection;
 
     #[test]
     fn parse_transform_generate_roundtrip() {
@@ -13245,6 +13351,104 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["ok", "maybe"]
         );
+    }
+
+    #[test]
+    fn transform_collects_root_helpers_components_and_directives() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<Child v-focus><slot/><Transition/><component :is="view"/><div v-show="ok" :class="klass">{{ msg }}</div></Child>"#.into(),
+            file_id: FileId(20),
+            base_offset: 0,
+        };
+        let mut ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let mut ctx = TransformContext::default();
+        Vue3Dialect::transform(&mut ast, &mut ctx);
+
+        let root = ast
+            .root_node()
+            .and_then(|node| match &node.kind {
+                Vue3AstKind::Root(root) => Some(root),
+                _ => None,
+            })
+            .expect("Vue3 root");
+
+        assert!(root.components.contains("Child"));
+        assert_eq!(root.directives.iter().collect::<Vec<_>>(), vec!["focus"]);
+        for helper in [
+            RuntimeHelper::Vue3OpenBlock,
+            RuntimeHelper::Vue3CreateElementBlock,
+            RuntimeHelper::Vue3CreateElementVNode,
+            RuntimeHelper::Vue3RenderSlot,
+            RuntimeHelper::Vue3ResolveComponent,
+            RuntimeHelper::Vue3ResolveDynamicComponent,
+            RuntimeHelper::Vue3Transition,
+            RuntimeHelper::Vue3WithDirectives,
+            RuntimeHelper::Vue3ResolveDirective,
+            RuntimeHelper::Vue3VShow,
+            RuntimeHelper::Vue3NormalizeClass,
+            RuntimeHelper::Vue3ToDisplayString,
+        ] {
+            assert!(
+                root.helpers.contains(&helper),
+                "missing root helper {helper:?}"
+            );
+            assert!(
+                ctx.helpers.contains(&helper),
+                "missing ctx helper {helper:?}"
+            );
+        }
+
+        let projected = ast.project_public();
+        let projected_root = match &projected.kind {
+            Vue3AstKind::Root(root) => root,
+            _ => panic!("projected root"),
+        };
+        assert_eq!(projected_root.components, root.components);
+        assert_eq!(projected_root.directives, root.directives);
+        assert_eq!(projected_root.helpers, root.helpers);
+    }
+
+    #[test]
+    fn transform_root_collection_keeps_structural_directives_out_of_runtime_assets() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<ul><li v-for="item in list" v-if="item.ok" v-once v-memo="[item.id]">{{ item.name }}</li></ul>"#.into(),
+            file_id: FileId(21),
+            base_offset: 0,
+        };
+        let mut ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let mut ctx = TransformContext::default();
+        Vue3Dialect::transform(&mut ast, &mut ctx);
+
+        let root = ast
+            .root_node()
+            .and_then(|node| match &node.kind {
+                Vue3AstKind::Root(root) => Some(root),
+                _ => None,
+            })
+            .expect("Vue3 root");
+
+        assert!(root.components.is_empty());
+        assert!(root.directives.is_empty());
+        for helper in [
+            RuntimeHelper::Vue3Fragment,
+            RuntimeHelper::Vue3RenderList,
+            RuntimeHelper::Vue3CreateCommentVNode,
+            RuntimeHelper::Vue3WithMemo,
+            RuntimeHelper::Vue3IsMemoSame,
+        ] {
+            assert!(
+                root.helpers.contains(&helper),
+                "missing root helper {helper:?}"
+            );
+            assert!(
+                ctx.helpers.contains(&helper),
+                "missing ctx helper {helper:?}"
+            );
+        }
+        assert!(!root.helpers.contains(&RuntimeHelper::Vue3ResolveDirective));
+        assert!(!root.helpers.contains(&RuntimeHelper::Vue3WithDirectives));
     }
 
     fn process_expression_test_projection(content: &str, context: Value) -> Value {

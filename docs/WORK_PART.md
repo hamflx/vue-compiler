@@ -73,9 +73,15 @@
 - [x] Vue 3 structural `Vue3DomMir` patch-flag projection foundation for class/style/text/props/hydration/full-props/vnode-hook bits and target `dynamic_props` names.
 - [x] Vue 3 structural DOM/SSR lowering contract entry for adjacent `v-if` / `v-else-if` / `v-else` branch chains as one `HirIf` with multiple branches.
 - [x] Vue 3 structural `Vue3DomMir` hoist/cache target projection foundation for conservative static subtree hoist wrappers and top-level `v-once` cache wrappers.
+- [x] Vue 3 AST root helper / component / directive collection in Rust `Vue3Dialect::transform`, visible through public projection.
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Moved Vue 3 root asset/helper collection into Rust AST transform state. `Vue3Dialect::transform` now writes `Vue3Root.helpers`, `Vue3Root.components`, and `Vue3Root.directives` while preserving existing `TransformContext.helpers` behavior for the current emitter path.
+- The collection records component assets, built-in component helpers, dynamic component resolution helpers, custom runtime directives, `v-show` runtime helper usage, and structural helper needs such as fragments, render lists, memo, comments, slots, text, and class normalization. Structural directives such as `v-if`, `v-for`, `v-once`, and `v-memo` are not reported as runtime directive assets.
+- Added focused AST contract tests that verify these root fields through `project_public()`. Exact MIR/codegen consumption of `Vue3Root` asset/helper fields remains a later pipeline migration step.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_vue3_core -p vuec_node_bridge -p xtask`, and `git diff --check`.
 
 - Extended `vuec_vue3_core::lower_vue3_ast_to_dom_mir` so DOM MIR can project target-level static hoist and `v-once` cache wrappers without leaking hoist/cache indices into HIR.
 - Static hoist projection is deliberately conservative: it only wraps all-static native subtrees when `hoist_static` is enabled, skips the single root element, and avoids nested hoist wrappers inside an already hoisted subtree. `v-once` cache projection wraps top-level once nodes with sequential `Vue3DomMirKind::Cache` slots and suppresses nested once wrappers while lowering inside an existing cache.
