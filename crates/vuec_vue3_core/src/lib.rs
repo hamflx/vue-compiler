@@ -793,6 +793,43 @@ pub fn transform_model_projection(payload: &Value) -> Value {
     })
 }
 
+pub fn transform_on_projection(payload: &Value) -> Value {
+    let dir = payload.get("dir").unwrap_or(&Value::Null);
+    let node = payload.get("node").unwrap_or(&Value::Null);
+    let context = payload.get("context").unwrap_or(&Value::Null);
+    let arg = dir.get("arg").filter(|value| !value.is_null());
+    let mut errors = Vec::<Value>::new();
+
+    if dir.get("exp").is_none_or(Value::is_null)
+        && dir
+            .get("modifiers")
+            .and_then(Value::as_array)
+            .is_none_or(Vec::is_empty)
+    {
+        errors.push(json!({ "code": 35, "loc": "dir" }));
+    }
+
+    let event_name = transform_on_event_name_projection(arg, node, &mut errors);
+    let handler = transform_on_handler_projection(dir, node, context);
+    let cache = json_bool(&handler, "cache");
+    let value = handler
+        .get("value")
+        .cloned()
+        .unwrap_or_else(|| transform_on_empty_handler_projection(dir));
+
+    json!({
+        "errors": errors,
+        "props": [{
+            "key": event_name,
+            "value": value,
+            "cache": cache,
+            "handlerKey": true,
+            "dynamicKey": arg.is_some_and(|arg| !json_bool(arg, "isStatic")),
+            "ignoreDynamicKeyForNormalize": true,
+        }],
+    })
+}
+
 pub fn transform_if_projection(payload: &Value) -> Value {
     if json_str(payload, "phase") == Some("branchCodegen") {
         return transform_if_branch_codegen_projection(payload);
@@ -2284,6 +2321,7 @@ pub fn transform_element_props_projection(payload: &Value) -> Value {
     let mut normalize_style = false;
     let mut has_runtime_directives = false;
     let mut has_dynamic_object = false;
+    let mut has_normalize_dynamic_keys = false;
     let ref_for_marker = in_v_for
         && props.iter().any(|prop| {
             (matches!(
@@ -2302,10 +2340,12 @@ pub fn transform_element_props_projection(payload: &Value) -> Value {
             }
             Some("objectBind") => {
                 has_dynamic_keys = true;
+                has_normalize_dynamic_keys = true;
                 has_dynamic_object = true;
             }
             Some("objectOn") => {
                 has_dynamic_keys = true;
+                has_normalize_dynamic_keys = true;
                 has_dynamic_object = true;
             }
             Some("runtimeDirective") => {
@@ -2317,6 +2357,9 @@ pub fn transform_element_props_projection(payload: &Value) -> Value {
             Some("directiveProp") => {
                 if json_bool(prop, "dynamicKey") {
                     has_dynamic_keys = true;
+                    if !json_bool(prop, "ignoreDynamicKeyForNormalize") {
+                        has_normalize_dynamic_keys = true;
+                    }
                 } else if let Some(name) = json_str(prop, "name") {
                     let value_constant = json_bool(prop, "valueConstant");
                     let value_cached = json_bool(prop, "valueCached");
@@ -2399,7 +2442,7 @@ pub fn transform_element_props_projection(payload: &Value) -> Value {
         if has_dynamic_object {
             normalize_props = true;
             guard_reactive_props = true;
-        } else if has_dynamic_keys {
+        } else if has_normalize_dynamic_keys {
             normalize_props = true;
         }
     }
@@ -3195,6 +3238,518 @@ fn model_expression_child_source(child: &Value) -> String {
         .unwrap_or_else(|| model_expression_source(child))
 }
 
+fn transform_on_event_name_projection(
+    arg: Option<&Value>,
+    node: &Value,
+    errors: &mut Vec<Value>,
+) -> Value {
+    let Some(arg) = arg else {
+        return json!({ "kind": "static", "content": "on" });
+    };
+    if json_node_type(arg) == Some(4) {
+        if json_bool(arg, "isStatic") {
+            let mut raw_name = json_str(arg, "content").unwrap_or("").to_string();
+            if raw_name.starts_with("vnode") {
+                errors.push(json!({ "code": 52, "loc": "arg" }));
+            }
+            if let Some(rest) = raw_name.strip_prefix("vue:") {
+                raw_name = format!("vnode-{rest}");
+            }
+            let event_string = if json_u64(node, "tagType") != Some(0)
+                || raw_name.starts_with("vnode")
+                || !raw_name.chars().any(|ch| ch.is_ascii_uppercase())
+            {
+                to_handler_key(&camelize(&raw_name))
+            } else {
+                format!("on:{raw_name}")
+            };
+            return json!({
+                "kind": "simple",
+                "content": event_string,
+                "isStatic": true,
+                "loc": arg.get("loc").cloned().unwrap_or(Value::Null),
+            });
+        }
+        return json!({
+            "kind": "compound",
+            "children": [
+                { "kind": "helperString", "helper": "TO_HANDLER_KEY" },
+                { "kind": "node", "path": "dir.arg" },
+                ")",
+            ],
+        });
+    }
+    json!({
+        "kind": "compound",
+        "children": [
+            { "kind": "helperString", "helper": "TO_HANDLER_KEY" },
+            { "kind": "node", "path": "dir.arg.children" },
+            ")",
+        ],
+        "loc": arg.get("loc").cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn transform_on_handler_projection(dir: &Value, node: &Value, context: &Value) -> Value {
+    let Some(exp) = dir.get("exp").filter(|value| !value.is_null()) else {
+        return json!({ "cache": json_bool(context, "cacheHandlers") && !json_bool(context, "inVOnce") });
+    };
+    let raw = transform_on_expression_source(exp);
+    if raw.trim().is_empty() {
+        return json!({ "cache": json_bool(context, "cacheHandlers") && !json_bool(context, "inVOnce") });
+    }
+
+    let is_member = transform_on_is_member_expression(&raw, context);
+    let is_fn = transform_on_is_fn_expression(&raw, context);
+    let is_inline = !is_member && !is_fn;
+    let has_multiple_statements = raw.contains(';');
+    let mut processed = json!({ "kind": "node", "path": "dir.exp" });
+    let mut should_cache = false;
+
+    if json_bool(context, "prefixIdentifiers") {
+        let options = vue3_options_from_transform_context(context);
+        let mut locals = transform_context_locals(context);
+        if is_inline {
+            locals.push("$event".to_string());
+        }
+        processed = transform_on_rewrite_expression_node(
+            &raw,
+            exp,
+            &options,
+            &locals,
+            has_multiple_statements,
+        );
+        should_cache = json_bool(context, "cacheHandlers")
+            && !json_bool(context, "inVOnce")
+            && transform_on_projection_const_type(&processed) == 0
+            && !(is_member && json_u64(node, "tagType") == Some(1))
+            && !transform_on_has_scope_ref(&processed, context);
+        if should_cache && is_member {
+            processed = transform_on_member_invocation_projection(processed);
+        }
+    }
+
+    if is_inline || (should_cache && is_member) {
+        processed = transform_on_wrap_handler_projection(
+            processed,
+            is_inline,
+            has_multiple_statements,
+            json_bool(context, "isTS"),
+        );
+    }
+
+    json!({
+        "value": processed,
+        "cache": should_cache,
+        "isInlineStatement": is_inline,
+        "isMemberExpression": is_member,
+        "isFunctionExpression": is_fn,
+    })
+}
+
+fn transform_on_empty_handler_projection(dir: &Value) -> Value {
+    json!({
+        "kind": "simple",
+        "content": "() => {}",
+        "isStatic": false,
+        "loc": dir.get("loc").cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn transform_on_rewrite_expression_node(
+    raw: &str,
+    exp: &Value,
+    options: &Vue3CompilerOptions,
+    locals: &[String],
+    as_raw_statements: bool,
+) -> Value {
+    let trimmed = raw.trim();
+    let loc = exp.get("loc").cloned().unwrap_or(Value::Null);
+    let mut effective_locals = locals.to_vec();
+    effective_locals.extend(transform_on_root_function_locals(raw));
+    effective_locals.sort();
+    effective_locals.dedup();
+    let rewritten = if effective_locals.is_empty() {
+        rewrite_js_like_expression(raw, options)
+    } else {
+        rewrite_js_like_expression_with_locals(raw, options, &effective_locals)
+    };
+    let children = vue3_for_compound_children(
+        raw,
+        options,
+        &effective_locals,
+        Vue3ForAstMode::Expression,
+        &loc,
+    );
+    let const_type = transform_on_const_type(trimmed, rewritten.trim(), options);
+    if is_simple_identifier_ascii(trimmed) || (children.is_empty() && !as_raw_statements) {
+        return transform_on_simple_projection(rewritten.trim(), exp, const_type);
+    }
+    let helpers = vue3_for_helpers_for_content(&rewritten);
+    let mut value = json!({
+        "kind": "compound",
+        "children": children,
+        "loc": loc,
+        "constType": const_type,
+    });
+    if !helpers.is_empty() {
+        value["helpers"] = json!(helpers);
+    }
+    value
+}
+
+fn transform_on_simple_projection(content: &str, exp: &Value, const_type: u8) -> Value {
+    let mut value = json!({
+        "kind": "simple",
+        "content": content,
+        "isStatic": false,
+        "constType": const_type,
+        "loc": exp.get("loc").cloned().unwrap_or(Value::Null),
+    });
+    let helpers = vue3_for_helpers_for_content(content);
+    if !helpers.is_empty() {
+        value["helpers"] = json!(helpers);
+    }
+    value
+}
+
+fn transform_on_const_type(raw: &str, rewritten: &str, options: &Vue3CompilerOptions) -> u8 {
+    if is_simple_identifier_ascii(raw)
+        && matches!(
+            options.binding_metadata.get(raw).map(String::as_str),
+            Some("setup-const" | "literal-const")
+        )
+    {
+        return 1;
+    }
+    vue3_for_const_type(rewritten)
+}
+
+fn transform_on_member_invocation_projection(processed: Value) -> Value {
+    match json_str(&processed, "kind") {
+        Some("simple") => {
+            let content = json_str(&processed, "content").unwrap_or("").to_string();
+            let mut next = processed;
+            next["content"] = json!(format!("{content} && {content}(...args)"));
+            next
+        }
+        Some("compound") => {
+            let children = processed
+                .get("children")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let mut next_children = children.clone();
+            next_children.push(json!(" && "));
+            next_children.extend(children);
+            next_children.push(json!("(...args)"));
+            let mut next = processed;
+            next["children"] = json!(next_children);
+            next
+        }
+        _ => processed,
+    }
+}
+
+fn transform_on_wrap_handler_projection(
+    processed: Value,
+    is_inline: bool,
+    has_multiple_statements: bool,
+    is_ts: bool,
+) -> Value {
+    let param = if is_inline {
+        if is_ts {
+            "($event: any)"
+        } else {
+            "$event"
+        }
+    } else if is_ts {
+        "\n//@ts-ignore\n(...args)"
+    } else {
+        "(...args)"
+    };
+    json!({
+        "kind": "compound",
+        "children": [
+            format!("{param} => {}", if has_multiple_statements { "{" } else { "(" }),
+            processed,
+            if has_multiple_statements { "}" } else { ")" },
+        ],
+    })
+}
+
+fn transform_on_expression_source(exp: &Value) -> String {
+    if let Some(content) = json_str(exp, "content") {
+        return content.to_string();
+    }
+    exp.get("loc")
+        .and_then(|loc| json_str(loc, "source"))
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| model_expression_source(exp))
+}
+
+fn transform_on_projection_const_type(projection: &Value) -> u64 {
+    projection
+        .get("constType")
+        .and_then(Value::as_u64)
+        .unwrap_or_default()
+}
+
+fn transform_on_has_scope_ref(exp: &Value, context: &Value) -> bool {
+    let source = model_expression_source(exp);
+    context
+        .get("identifiers")
+        .and_then(Value::as_object)
+        .is_some_and(|identifiers| {
+            identifiers.iter().any(|(name, count)| {
+                count.as_i64().unwrap_or_default() > 0 && source_contains_identifier(&source, name)
+            })
+        })
+}
+
+fn transform_on_is_member_expression(expression: &str, context: &Value) -> bool {
+    let store = JsAstStore::new();
+    store
+        .parse_expression(expression.trim(), transform_on_source_type(context))
+        .map(|expression| transform_on_expression_is_member(&expression))
+        .unwrap_or_else(|_| transform_on_is_member_expression_lexer(expression))
+}
+
+fn transform_on_expression_is_member(expression: &Expression<'_>) -> bool {
+    match expression {
+        Expression::Identifier(identifier) => identifier.name != "undefined",
+        Expression::ComputedMemberExpression(_)
+        | Expression::StaticMemberExpression(_)
+        | Expression::PrivateFieldExpression(_) => true,
+        Expression::ChainExpression(chain) => {
+            transform_on_chain_element_is_member(&chain.expression)
+        }
+        Expression::TSAsExpression(expression) => {
+            transform_on_expression_is_member(&expression.expression)
+        }
+        Expression::TSSatisfiesExpression(expression) => {
+            transform_on_expression_is_member(&expression.expression)
+        }
+        Expression::TSTypeAssertion(expression) => {
+            transform_on_expression_is_member(&expression.expression)
+        }
+        Expression::TSNonNullExpression(expression) => {
+            transform_on_expression_is_member(&expression.expression)
+        }
+        Expression::TSInstantiationExpression(expression) => {
+            transform_on_expression_is_member(&expression.expression)
+        }
+        _ => false,
+    }
+}
+
+fn transform_on_chain_element_is_member(element: &ChainElement<'_>) -> bool {
+    matches!(
+        element,
+        ChainElement::ComputedMemberExpression(_)
+            | ChainElement::StaticMemberExpression(_)
+            | ChainElement::PrivateFieldExpression(_)
+            | ChainElement::TSNonNullExpression(_)
+    )
+}
+
+fn transform_on_is_fn_expression(expression: &str, context: &Value) -> bool {
+    let trimmed = expression.trim_start();
+    if transform_on_is_fn_expression_lexer(trimmed) {
+        return true;
+    }
+    let store = JsAstStore::new();
+    store
+        .parse_expression(expression.trim(), transform_on_source_type(context))
+        .map(|expression| transform_on_expression_is_fn(&expression))
+        .unwrap_or(false)
+}
+
+fn transform_on_expression_is_fn(expression: &Expression<'_>) -> bool {
+    match expression {
+        Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_) => true,
+        Expression::TSAsExpression(expression) => {
+            transform_on_expression_is_fn(&expression.expression)
+        }
+        Expression::TSSatisfiesExpression(expression) => {
+            transform_on_expression_is_fn(&expression.expression)
+        }
+        Expression::TSTypeAssertion(expression) => {
+            transform_on_expression_is_fn(&expression.expression)
+        }
+        Expression::TSNonNullExpression(expression) => {
+            transform_on_expression_is_fn(&expression.expression)
+        }
+        Expression::TSInstantiationExpression(expression) => {
+            transform_on_expression_is_fn(&expression.expression)
+        }
+        _ => false,
+    }
+}
+
+fn transform_on_is_fn_expression_lexer(expression: &str) -> bool {
+    expression.starts_with("function")
+        || expression.starts_with("async function")
+        || expression
+            .find("=>")
+            .is_some_and(|index| transform_on_arrow_prefix_is_fn_like(&expression[..index]))
+}
+
+fn transform_on_arrow_prefix_is_fn_like(prefix: &str) -> bool {
+    let prefix = prefix.trim();
+    let prefix = prefix.strip_prefix("async").unwrap_or(prefix).trim();
+    if prefix.starts_with('(') {
+        return prefix.ends_with(')');
+    }
+    is_simple_identifier_ascii(prefix)
+}
+
+fn transform_on_root_function_locals(expression: &str) -> Vec<String> {
+    let store = JsAstStore::new();
+    store
+        .parse_expression(expression.trim(), oxc_span::SourceType::ts())
+        .map(|expression| {
+            let mut locals = Vec::new();
+            transform_on_collect_root_function_locals(&expression, &mut locals);
+            locals.sort();
+            locals.dedup();
+            locals
+        })
+        .unwrap_or_else(|_| transform_on_root_function_locals_lexer(expression))
+}
+
+fn transform_on_collect_root_function_locals(
+    expression: &Expression<'_>,
+    locals: &mut Vec<String>,
+) {
+    match expression {
+        Expression::ArrowFunctionExpression(function) => {
+            for param in &function.params.items {
+                collect_vue3_for_binding_pattern(&param.pattern, locals);
+            }
+            if let Some(rest) = &function.params.rest {
+                collect_vue3_for_binding_pattern(&rest.rest.argument, locals);
+            }
+        }
+        Expression::FunctionExpression(function) => {
+            for param in &function.params.items {
+                collect_vue3_for_binding_pattern(&param.pattern, locals);
+            }
+            if let Some(rest) = &function.params.rest {
+                collect_vue3_for_binding_pattern(&rest.rest.argument, locals);
+            }
+        }
+        Expression::TSAsExpression(expression) => {
+            transform_on_collect_root_function_locals(&expression.expression, locals)
+        }
+        Expression::TSSatisfiesExpression(expression) => {
+            transform_on_collect_root_function_locals(&expression.expression, locals)
+        }
+        Expression::TSTypeAssertion(expression) => {
+            transform_on_collect_root_function_locals(&expression.expression, locals)
+        }
+        Expression::TSNonNullExpression(expression) => {
+            transform_on_collect_root_function_locals(&expression.expression, locals)
+        }
+        Expression::TSInstantiationExpression(expression) => {
+            transform_on_collect_root_function_locals(&expression.expression, locals)
+        }
+        _ => {}
+    }
+}
+
+fn transform_on_root_function_locals_lexer(expression: &str) -> Vec<String> {
+    let trimmed = expression.trim_start();
+    let Some(arrow_index) = trimmed.find("=>") else {
+        return Vec::new();
+    };
+    let mut params = trimmed[..arrow_index].trim();
+    params = params.strip_prefix("async").unwrap_or(params).trim();
+    if params.starts_with('(') && params.ends_with(')') {
+        params = &params[1..params.len() - 1];
+    }
+    split_top_level_like(params, ',')
+        .into_iter()
+        .flat_map(extract_slot_params)
+        .collect()
+}
+
+fn transform_on_source_type(context: &Value) -> oxc_span::SourceType {
+    let _ = context;
+    oxc_span::SourceType::ts()
+}
+
+fn transform_on_is_member_expression_lexer(expression: &str) -> bool {
+    let path = normalize_member_expression_whitespace(expression.trim());
+    if path.is_empty() {
+        return false;
+    }
+    let mut depth_square = 0usize;
+    let mut depth_paren = 0usize;
+    let mut quote = None::<char>;
+    let mut escaped = false;
+    let mut chars = path.char_indices().peekable();
+    while let Some((index, ch)) = chars.next() {
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' | '`' => quote = Some(ch),
+            '[' => depth_square += 1,
+            ']' => depth_square = depth_square.saturating_sub(1),
+            '(' => depth_paren += 1,
+            ')' => {
+                if chars.peek().is_none() {
+                    return false;
+                }
+                depth_paren = depth_paren.saturating_sub(1);
+            }
+            _ if depth_square == 0 && depth_paren == 0 => {
+                let valid = if index == 0 {
+                    is_identifier_start(ch)
+                } else {
+                    is_identifier_continue(ch) || matches!(ch, '.' | '?')
+                };
+                if !valid {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    depth_square == 0 && depth_paren == 0 && quote.is_none()
+}
+
+fn normalize_member_expression_whitespace(expression: &str) -> String {
+    let mut output = String::new();
+    let chars = expression.chars().collect::<Vec<_>>();
+    for (index, ch) in chars.iter().copied().enumerate() {
+        if ch.is_whitespace() {
+            let prev = chars[..index]
+                .iter()
+                .rev()
+                .find(|candidate| !candidate.is_whitespace())
+                .copied();
+            let next = chars[index + 1..]
+                .iter()
+                .find(|candidate| !candidate.is_whitespace())
+                .copied();
+            if matches!(prev, Some('.' | '[')) || matches!(next, Some('.' | '[')) {
+                continue;
+            }
+        }
+        output.push(ch);
+    }
+    output
+}
+
 fn model_is_member_expression(expression: &str) -> bool {
     let store = JsAstStore::new();
     store
@@ -3241,6 +3796,14 @@ fn camelize(value: &str) -> String {
         }
     }
     output
+}
+
+fn to_handler_key(value: &str) -> String {
+    if value.is_empty() {
+        String::new()
+    } else {
+        format!("on{}", capitalize(value))
+    }
 }
 
 fn is_simple_identifier_ascii(value: &str) -> bool {
@@ -7479,6 +8042,142 @@ mod tests {
             for_projection["dynamicSlots"][0]["slot"]["name"]["content"],
             json!("name")
         );
+    }
+
+    #[test]
+    fn transform_on_projection_projects_dynamic_event_key_and_prefixes_handler() {
+        let projection = transform_on_projection(&json!({
+            "dir": {
+                "arg": { "type": 4, "content": "_ctx.event", "isStatic": false },
+                "exp": { "type": 4, "content": "handler", "loc": { "source": "handler" } },
+                "modifiers": []
+            },
+            "node": { "tagType": 0 },
+            "context": {
+                "prefixIdentifiers": true,
+                "identifiers": {},
+                "bindingMetadata": {}
+            }
+        }));
+
+        assert_eq!(
+            projection["props"][0]["key"],
+            json!({
+                "kind": "compound",
+                "children": [
+                    { "kind": "helperString", "helper": "TO_HANDLER_KEY" },
+                    { "kind": "node", "path": "dir.arg" },
+                    ")"
+                ]
+            })
+        );
+        assert_eq!(
+            projection["props"][0]["value"]["content"],
+            json!("_ctx.handler")
+        );
+        assert_eq!(projection["props"][0]["dynamicKey"], json!(true));
+        assert_eq!(
+            projection["props"][0]["ignoreDynamicKeyForNormalize"],
+            json!(true)
+        );
+    }
+
+    #[test]
+    fn transform_on_projection_wraps_inline_statements_and_caches_members() {
+        let inline = transform_on_projection(&json!({
+            "dir": {
+                "arg": { "type": 4, "content": "click", "isStatic": true },
+                "exp": { "type": 4, "content": "foo($event)", "loc": { "source": "foo($event)" } },
+                "modifiers": []
+            },
+            "node": { "tagType": 0 },
+            "context": {
+                "prefixIdentifiers": true,
+                "cacheHandlers": true,
+                "identifiers": {},
+                "bindingMetadata": {}
+            }
+        }));
+        assert_eq!(inline["props"][0]["cache"], json!(true));
+        assert_eq!(
+            inline["props"][0]["value"]["children"][0],
+            json!("$event => (")
+        );
+
+        let member = transform_on_projection(&json!({
+            "dir": {
+                "arg": { "type": 4, "content": "click", "isStatic": true },
+                "exp": { "type": 4, "content": "foo", "loc": { "source": "foo" } },
+                "modifiers": []
+            },
+            "node": { "tagType": 0 },
+            "context": {
+                "prefixIdentifiers": true,
+                "cacheHandlers": true,
+                "identifiers": {},
+                "bindingMetadata": {}
+            }
+        }));
+        assert_eq!(member["props"][0]["cache"], json!(true));
+        assert_eq!(
+            member["props"][0]["value"]["children"][1]["content"],
+            json!("_ctx.foo && _ctx.foo(...args)")
+        );
+
+        let component_member = transform_on_projection(&json!({
+            "dir": {
+                "arg": { "type": 4, "content": "click", "isStatic": true },
+                "exp": { "type": 4, "content": "foo", "loc": { "source": "foo" } },
+                "modifiers": []
+            },
+            "node": { "tagType": 1 },
+            "context": {
+                "prefixIdentifiers": true,
+                "cacheHandlers": true,
+                "identifiers": {},
+                "bindingMetadata": {}
+            }
+        }));
+        assert_eq!(component_member["props"][0]["cache"], json!(false));
+    }
+
+    #[test]
+    fn transform_element_props_projection_keeps_dynamic_handlers_unwrapped_for_normalize() {
+        let projection = transform_element_props_projection(&json!({
+            "props": [{
+                "kind": "directiveProp",
+                "dynamicKey": true,
+                "ignoreDynamicKeyForNormalize": true,
+                "valueConstant": false
+            }],
+            "context": {},
+            "isComponent": false
+        }));
+
+        assert_eq!(projection["patchFlag"], json!(16));
+        assert_eq!(projection["normalizeProps"], json!(false));
+    }
+
+    #[test]
+    fn transform_on_projection_marks_setup_const_handlers_constant() {
+        let projection = transform_on_projection(&json!({
+            "dir": {
+                "arg": { "type": 4, "content": "keydown", "isStatic": true },
+                "exp": { "type": 4, "content": "foo", "loc": { "source": "foo" } },
+                "modifiers": []
+            },
+            "node": { "tagType": 0 },
+            "context": {
+                "prefixIdentifiers": true,
+                "bindingMetadata": { "foo": "setup-const" }
+            }
+        }));
+
+        assert_eq!(
+            projection["props"][0]["value"]["content"],
+            json!("$setup.foo")
+        );
+        assert_eq!(projection["props"][0]["value"]["constType"], json!(1));
     }
 
     #[test]

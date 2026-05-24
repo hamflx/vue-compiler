@@ -4770,70 +4770,29 @@ const vue3CoreRuntime = (() => {
     return { props: [runtime.createObjectProperty(arg, exp)] };
   };
   runtime.transformOn = function transformOn(dir, node, context) {
-    const arg = dir.arg || runtime.createSimpleExpression('on', true);
-    if (!dir.exp && !(dir.modifiers || []).length) {
-      context.onError(runtime.createCompilerError(ErrorCodes.X_V_ON_NO_EXPRESSION, dir.loc));
-    }
-    let eventName;
-    if (arg.type === NodeTypes.SIMPLE_EXPRESSION) {
-      if (arg.isStatic) {
-        let rawName = arg.content || '';
-        if (rawName.startsWith('vnode')) {
-          context.onError(runtime.createCompilerError(ErrorCodes.X_VNODE_HOOKS, arg.loc));
-        }
-        if (rawName.startsWith('vue:')) rawName = `vnode-${rawName.slice(4)}`;
-        const eventString = node && (node.tagType !== ElementTypes.ELEMENT || rawName.startsWith('vnode') || !/[A-Z]/.test(rawName))
-          ? toHandlerKey(camelize(rawName))
-          : `on:${rawName}`;
-        eventName = runtime.createSimpleExpression(eventString, true, arg.loc);
-      } else {
-        eventName = runtime.createCompoundExpression([`${context.helperString(runtime.TO_HANDLER_KEY)}(`, arg, `)`]);
-      }
-    } else {
-      eventName = arg;
-      eventName.children = [`${context.helperString(runtime.TO_HANDLER_KEY)}(`, ...(eventName.children || []), `)`];
-    }
-
-    let exp = dir.exp;
-    if (exp && !String(exp.content || '').trim()) exp = undefined;
-    let shouldCache = !!(context.cacheHandlers && !exp && !context.inVOnce);
-    if (exp) {
-      const raw = String(exp.content || '');
-      const isMemberExp = runtime.isMemberExpression(exp, context);
-      const isFnExp = runtime.isFnExpression(exp, context);
-      const isInlineStatement = !(isMemberExp || isFnExp);
-      const hasMultipleStatements = raw.includes(';');
-      if (context.prefixIdentifiers) {
-        if (isInlineStatement) context.addIdentifiers('$event');
-        exp = dir.exp = runtime.processExpression(exp, context, false, hasMultipleStatements);
-        if (isInlineStatement) context.removeIdentifiers('$event');
-        shouldCache = !!(
-          context.cacheHandlers
-          && !context.inVOnce
-          && !(exp.type === NodeTypes.SIMPLE_EXPRESSION && exp.constType > 0)
-          && !(isMemberExp && node && node.tagType === ElementTypes.COMPONENT)
-          && !runtime.hasScopeRef(exp, context.identifiers)
-        );
-        if (shouldCache && isMemberExp) {
-          if (exp.type === NodeTypes.SIMPLE_EXPRESSION) {
-            exp.content = `${exp.content} && ${exp.content}(...args)`;
-          } else {
-            exp.children = [...(exp.children || []), ` && `, ...(exp.children || []), `(...args)`];
-          }
-        }
-      }
-      if (isInlineStatement || (shouldCache && isMemberExp)) {
-        exp = runtime.createCompoundExpression([
-          `${isInlineStatement ? '$event' : '(...args)'} => ${hasMultipleStatements ? '{' : '('}`,
-          exp,
-          hasMultipleStatements ? '}' : ')',
-        ]);
-      }
-    }
-    const ret = { props: [runtime.createObjectProperty(eventName, exp || runtime.createSimpleExpression('() => {}', false, dir.loc))] };
-    if (shouldCache) ret.props[0].value = context.cache(ret.props[0].value);
-    ret.props.forEach(prop => { if (prop && prop.key) prop.key.isHandlerKey = true; });
-    return ret;
+    context = context || { helperString: name => `_${runtime.helperNameMap[name] || name}`, helper: name => name, cache: value => value, onError: error => { throw error; } };
+    const projection = callBridge('vue3.core.transformOn', {
+      dir,
+      node,
+      context: vue3TransformOnContextPayload(context),
+    });
+    materializeVue3OnErrors(projection, dir, context);
+    return {
+      props: (projection.props || []).map(prop => {
+        const key = materializeVue3OnProjection(prop.key, dir, context);
+        const value = materializeVue3OnProjection(prop.value, dir, context) || runtime.createSimpleExpression('() => {}', false, dir.loc);
+        const objectProp = runtime.createObjectProperty(key, value);
+        objectProp.__vuecOn = {
+          cache: !!prop.cache,
+          handlerKey: !!prop.handlerKey,
+          dynamicKey: !!prop.dynamicKey,
+          ignoreDynamicKeyForNormalize: !!prop.ignoreDynamicKeyForNormalize,
+        };
+        if (objectProp.key && prop.handlerKey) objectProp.key.isHandlerKey = true;
+        if (prop.cache && context && context.cache) objectProp.value = context.cache(objectProp.value);
+        return objectProp;
+      }),
+    };
   };
   runtime.transformModel = function transformModel(dir) {
     const projection = callBridge('vue3.core.transformModel', {
@@ -5592,6 +5551,75 @@ function vue3TransformModelContextPayload(context) {
   };
 }
 
+function vue3TransformOnContextPayload(context) {
+  context = context || {};
+  return {
+    prefixIdentifiers: !!context.prefixIdentifiers,
+    cacheHandlers: !!context.cacheHandlers,
+    inVOnce: !!context.inVOnce,
+    inline: !!context.inline,
+    isTS: !!context.isTS,
+    identifiers: context.identifiers || {},
+    bindingMetadata: context.bindingMetadata || {},
+  };
+}
+
+function materializeVue3OnErrors(projection, dir, context) {
+  if (!projection || !Array.isArray(projection.errors) || !context || !context.onError) return;
+  for (const error of projection.errors) {
+    const loc = error.loc === 'arg'
+      ? dir && dir.arg && dir.arg.loc || dir && dir.loc
+      : dir && dir.loc || locStub;
+    context.onError(vue3CoreRuntime.createCompilerError(error.code, loc));
+  }
+}
+
+function materializeVue3OnProjection(projection, dir, context) {
+  if (!projection || projection.kind === 'undefined') return undefined;
+  if (typeof projection === 'string') return projection;
+  if (projection.type) return projection;
+  switch (projection.kind) {
+    case 'node':
+      if (projection.path === 'dir.arg') return dir && dir.arg;
+      if (projection.path === 'dir.exp') return dir && dir.exp;
+      if (projection.path === 'dir.arg.children') return (dir && dir.arg && dir.arg.children) || [];
+      return undefined;
+    case 'helperString': {
+      const helper = helperSymbolFromProjection(projection.helper);
+      return `${context && helper ? context.helperString(helper) : `_${vue3CoreRuntime.helperNameMap[helper]}`}(`;
+    }
+    case 'simple':
+      for (const name of projection.helpers || []) {
+        const symbol = helperSymbolFromProjection(name);
+        if (symbol && context) context.helper(symbol);
+      }
+      return vue3CoreRuntime.createSimpleExpression(
+        projection.content || '',
+        !!projection.isStatic,
+        projection.loc || (dir && dir.exp && dir.exp.loc) || (dir && dir.loc) || locStub,
+        projection.constType || 0,
+      );
+    case 'compound': {
+      for (const name of projection.helpers || []) {
+        const symbol = helperSymbolFromProjection(name);
+        if (symbol && context) context.helper(symbol);
+      }
+      const children = [];
+      for (const child of projection.children || []) {
+        const materialized = materializeVue3OnProjection(child, dir, context);
+        if (Array.isArray(materialized)) children.push(...materialized);
+        else children.push(materialized);
+      }
+      return vue3CoreRuntime.createCompoundExpression(
+        children,
+        projection.loc || (dir && dir.arg && dir.arg.loc) || (dir && dir.exp && dir.exp.loc) || locStub,
+      );
+    }
+    default:
+      throw new Error(`Unsupported Rust v-on projection: ${projection.kind}`);
+  }
+}
+
 function materializeVue3ModelProjection(projection, dir, context) {
   if (!projection || projection.kind === 'undefined') return undefined;
   if (typeof projection === 'string') return projection;
@@ -5676,6 +5704,7 @@ function vue3ElementDirectivePropSummaries(dir, result, extra = {}) {
       kind: 'directiveProp',
       name: key && key.type === vue3CoreRuntime.NodeTypes.SIMPLE_EXPRESSION && key.isStatic ? key.content : undefined,
       dynamicKey: !(key && key.type === vue3CoreRuntime.NodeTypes.SIMPLE_EXPRESSION && key.isStatic),
+      ignoreDynamicKeyForNormalize: !!(prop && prop.__vuecOn && prop.__vuecOn.ignoreDynamicKeyForNormalize),
       valueStartsWithArray: !!(value && value.type === vue3CoreRuntime.NodeTypes.SIMPLE_EXPRESSION && String(value.content || '').trim().startsWith('[')),
       valueType: value && value.type,
       valueConstant: vue3ElementPropValueIsConstant(value),
@@ -5686,9 +5715,10 @@ function vue3ElementDirectivePropSummaries(dir, result, extra = {}) {
   });
 }
 
-function vue3ElementPropValueIsConstant(value) {
-  if (!value) return false;
-  if (value.type === vue3CoreRuntime.NodeTypes.JS_CACHE_EXPRESSION) return true;
+  function vue3ElementPropValueIsConstant(value) {
+    if (!value) return false;
+    if (value.__vuecOn && value.__vuecOn.cache) return true;
+    if (value.type === vue3CoreRuntime.NodeTypes.JS_CACHE_EXPRESSION) return true;
   if (value.type === vue3CoreRuntime.NodeTypes.SIMPLE_EXPRESSION) {
     return !!value.isStatic || Number(value.constType || 0) > 0;
   }

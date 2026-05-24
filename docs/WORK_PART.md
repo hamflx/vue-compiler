@@ -40,9 +40,16 @@
 - [x] Vue 3 compiler-core Rust-backed public `baseCompile` vnode-hook / `NEED_PATCH` AST codegen slice.
 - [x] Vue 3 compiler-core Rust-backed `processFor` / `transformFor` projection bridge for `vFor.spec.ts`.
 - [x] Vue 3 compiler-core Rust-backed `buildSlots` / slot-scope projection bridge for `vSlot.spec.ts`.
+- [x] Vue 3 compiler-core Rust-backed `transformOn` projection bridge for `vOn.spec.ts`.
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Added a Rust-backed Vue 3 `transformOn` / `v-on` projection bridge.
+- `vuec_vue3_core::transform_on_projection` now owns official `v-on` decisions for static/dynamic event names, `vue:` vnode hook normalization and diagnostics, handler expression classification, prefixIdentifiers rewriting with function parameter locals, inline statement wrapping, cacheHandlers behavior, setup-const handler constness, and dynamic handler-key patch-flag vs `normalizeProps` behavior.
+- `vuec_node_bridge` now exposes `vue3.core.transformOn`. Generated alias code in `xtask/src/compat.rs` changed as bridge/materialization/props-summary support: it calls Rust projections, forwards Rust diagnostics, materializes official-shaped event key/value AST nodes, applies Rust-selected handler caching through the transform context, and passes Rust-selected handler metadata into `transformElement` props analysis. The touched alias code is adapter/materialization support, not standalone compiler semantics.
+- Focused official `compiler-core/__tests__/transforms/vOn.spec.ts` now passes `33/33` (previously `30/33`). Adjacent focused `vOn.spec.ts` + `vIf.spec.ts` + `vFor.spec.ts` + `vSlot.spec.ts` + `transformElement.spec.ts` reports `271/272`; the only remaining adjacent failure is the pre-existing `vIf` key-injection case. Full Vue 3 core conformance is still expected-failing but improved to `623/652`; remaining failures are `cacheStatic` (`25`), `utils` (`3`), and `vIf` (`1`).
+- Verification this round: `cargo fmt --all --check`, `cargo check -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_vue3_core` (`63/63` pass), `cargo xtask verify-npm-alias --version-line vue3 --package @vue/compiler-core`, direct prepared Vitest `vOn.spec.ts` (`33/33` pass), adjacent prepared Vitest `vOn.spec.ts` + `vIf.spec.ts` + `vFor.spec.ts` + `vSlot.spec.ts` + `transformElement.spec.ts` (`271/272`, expected existing `vIf` fail), `git diff --check`, and `cargo xtask run-conformance --suite vue3-core` as an expected fail with `623/652` passing.
 
 - Added a Rust-backed Vue 3 `buildSlots` / slot-scope projection bridge.
 - `vuec_vue3_core::build_slots_projection` now owns official slot decisions for on-component slots, template named/default slots, dynamic slot names, dynamic `v-if` / `v-else(-if)` / `v-for` slots, duplicate/mixed/extraneous/misplaced slot diagnostics, slot flags, forwarded slot detection, prefixIdentifiers slot locals, and scope-ref based dynamic-slot forcing.
