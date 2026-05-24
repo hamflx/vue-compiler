@@ -1,5 +1,9 @@
 # Memory
 
+- Current round: added structural Vue 3 DOM MIR forwarded slot flag projection. Stable component slots now carry `Vue3SlotFlag::Forwarded` when slot bodies forward a `<slot>` outlet, keeping the slot flag as MIR target data.
+- `generate_vue3_dom_mir` now reaches forwarded slot output through MIR lowering and emits `_: 3` together with child `_renderSlot(...)` nodes. This does not touch `xtask/src/compat.rs`; it is Rust structural AST/HIR/MIR target-codegen work.
+- Verification for this forwarded-slot MIR slice: focused `cargo test -p vuec_vue3_core lower_vue3_ast_to_dom_mir_projects_forwarded_component_slot_flag`, focused `cargo test -p vuec_vue3_core generate_vue3_dom_mir_emits_forwarded_component_slot_flag`, `cargo fmt --all --check`, `cargo check -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, and `cargo xtask run-conformance --suite vue3-core` (`652/652`; report distinguishes `rust-backed`, `mixed`, and `shim-backed`).
+
 - Current round: added structural Vue 3 DOM MIR cacheHandlers event-cache payload. `vuec_ast::Vue3DomEvent` now carries optional `Vue3DomEventCache`, keeping cache slot indexes in the DOM target instead of HIR.
 - `vuec_vue3_core` DOM lowering now assigns cacheHandlers slots during HIR props -> `Vue3DomMir` projection, skipping component handlers, dynamic event names, and `v-once` bodies. `generate_vue3_dom_mir` consumes the MIR payload to emit `_cache[n] || (_cache[n] = handler)`.
 - This is structural target-codegen work. Standalone DOM MIR codegen still renders registered JS store expressions as raw source, and the exact AST emitter remains the official Vue 3 conformance path until complete MIR-driven exact codegen migration.

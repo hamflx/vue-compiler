@@ -1267,14 +1267,15 @@ fn lower_vue3_component_slots_to_dom_mir(
     if slots.is_empty() && dynamic_slots.is_empty() {
         None
     } else {
+        let flag = if slots_are_stable {
+            vue3_dom_stable_slot_flag(ast, &visible)
+        } else {
+            Vue3SlotFlag::Dynamic
+        };
         Some(vuec_ast::Vue3DomSlots {
             slots,
             dynamic_slots,
-            flag: if slots_are_stable {
-                Vue3SlotFlag::Stable
-            } else {
-                Vue3SlotFlag::Dynamic
-            },
+            flag,
         })
     }
 }
@@ -1596,6 +1597,29 @@ fn component_children_are_stable_slots(ast: &Vue3Ast, children: &[NodeId]) -> bo
             && directive_by_name(element, "else").is_none()
             && directive_by_name(element, "else-if").is_none()
             && directive_by_name(element, "for").is_none()
+    })
+}
+
+fn vue3_dom_stable_slot_flag(ast: &Vue3Ast, children: &[NodeId]) -> Vue3SlotFlag {
+    if vue3_dom_slot_children_forward_slots(ast, children) {
+        Vue3SlotFlag::Forwarded
+    } else {
+        Vue3SlotFlag::Stable
+    }
+}
+
+fn vue3_dom_slot_children_forward_slots(ast: &Vue3Ast, children: &[NodeId]) -> bool {
+    children.iter().any(|child_id| {
+        let Some(child) = ast.node(*child_id) else {
+            return false;
+        };
+        match &child.kind {
+            Vue3AstKind::Element(element) => {
+                element.tag_type == Vue3ElementType::SlotOutlet
+                    || vue3_dom_slot_children_forward_slots(ast, &child.children)
+            }
+            _ => false,
+        }
     })
 }
 
@@ -15150,6 +15174,47 @@ mod tests {
     }
 
     #[test]
+    fn lower_vue3_ast_to_dom_mir_projects_forwarded_component_slot_flag() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<Comp><template #default><slot /></template><template #footer><span>footer</span></template></Comp>"#.into(),
+            file_id: FileId(36),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+
+        let component = result
+            .mir
+            .nodes
+            .iter()
+            .find_map(|node| match &node.kind {
+                Vue3DomMirKind::VNodeCall(call)
+                    if call.tag == Vue3DomTag::ComponentAsset("Comp".into()) =>
+                {
+                    Some(call)
+                }
+                _ => None,
+            })
+            .expect("component");
+        let MirChildren::Slots(slots) = &component.children else {
+            panic!("component slots");
+        };
+        assert_eq!(slots.flag, Vue3SlotFlag::Forwarded);
+        assert!(slots.dynamic_slots.is_empty());
+        assert_eq!(slots.slots.len(), 2);
+        assert!(slots
+            .slots
+            .iter()
+            .any(|slot| slot.name == "default" && !slot.children.is_empty()));
+        assert!(result
+            .mir
+            .nodes
+            .iter()
+            .any(|node| matches!(node.kind, Vue3DomMirKind::RenderSlot { .. })));
+    }
+
+    #[test]
     fn lower_vue3_ast_to_dom_mir_projects_dynamic_component_slots() {
         let source = TemplateSource {
             filename: "foo.vue".into(),
@@ -15966,6 +16031,33 @@ mod tests {
             .contains("_renderList(list, (item, index) => {"));
         assert!(generated.code.contains("name: \"item\""));
         assert!(generated.code.contains("_toDisplayString(item)"));
+    }
+
+    #[test]
+    fn generate_vue3_dom_mir_emits_forwarded_component_slot_flag() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<Comp><template #default><slot /></template></Comp>"#.into(),
+            file_id: FileId(38),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+        let generated = generate_vue3_dom_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated.code.contains("renderSlot as _renderSlot"));
+        assert!(generated
+            .code
+            .contains("_renderSlot(_ctx.$slots, \"default\")"));
+        assert!(generated.code.contains("_: 3"));
     }
 
     #[test]
