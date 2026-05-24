@@ -1395,14 +1395,18 @@ pub struct Vue3SsrAttrs {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue3SsrComponent {
+    pub tag: MirExpr,
+    pub props: Vue3DomProps,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Vue3SsrMirKind {
     Root,
     PushString(String),
     PushInterpolated(MirExpr),
     RenderAttrs(Vue3SsrAttrs),
-    RenderComponent {
-        tag: MirExpr,
-    },
+    RenderComponent(Vue3SsrComponent),
     RenderSlot(Vue3SsrSlot),
     If {
         condition: Option<JsExprId>,

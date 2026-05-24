@@ -15,7 +15,8 @@ use vuec_ast::{
     Vue3DomMirKind, Vue3DomObjectBinding, Vue3DomObjectListeners, Vue3DomPropSegment, Vue3DomProps,
     Vue3DomPropsNormalize, Vue3DomSlotName, Vue3DomStaticAttr, Vue3DomTag, Vue3Element,
     Vue3ElementType, Vue3Expression, Vue3ForMemo, Vue3ForMir, Vue3NodeKind, Vue3PatchFlags,
-    Vue3Prop, Vue3Root, Vue3SlotFlag, Vue3SsrAttrs, Vue3SsrMir, Vue3SsrMirKind, Vue3VNodeCall,
+    Vue3Prop, Vue3Root, Vue3SlotFlag, Vue3SsrAttrs, Vue3SsrComponent, Vue3SsrMir, Vue3SsrMirKind,
+    Vue3VNodeCall,
 };
 use vuec_codegen::{CodeWriter, SourceMapArtifact, SourceMapSegment};
 use vuec_html::{HtmlTokenKind, HtmlTokenizer};
@@ -2641,11 +2642,18 @@ fn lower_vue3_plain_element_to_ssr_mir(
 
     match element.tag_type {
         Vue3ElementType::Component => {
+            let props = match state.hir.node(hir_id).map(|node| &node.kind) {
+                Some(HirNodeKind::Component(component)) => {
+                    lower_hir_props_to_dom_mir_without_event_cache(&component.props)
+                }
+                _ => Vue3DomProps::default(),
+            };
             let mir_id = state.mir.push_child(
                 mir_parent,
-                Vue3SsrMirKind::RenderComponent {
+                Vue3SsrMirKind::RenderComponent(Vue3SsrComponent {
                     tag: MirExpr::String(element.tag.clone()),
-                },
+                    props,
+                }),
                 ast_node.span.clone(),
             );
             state.map.record_hir_to_mir(hir_id, mir_id);
@@ -10853,8 +10861,14 @@ impl<'a> Vue3SsrMirCodegen<'a> {
     fn vue_helpers(&self) -> Vec<RuntimeHelper> {
         let mut helpers = Vec::new();
         for node in &self.mir.nodes {
-            if let Vue3SsrMirKind::RenderSlot(slot) = &node.kind {
-                self.push_prop_helpers(&slot.props, &mut helpers);
+            match &node.kind {
+                Vue3SsrMirKind::RenderComponent(component) => {
+                    self.push_prop_helpers(&component.props, &mut helpers);
+                }
+                Vue3SsrMirKind::RenderSlot(slot) => {
+                    self.push_prop_helpers(&slot.props, &mut helpers);
+                }
+                _ => {}
             }
         }
         sort_helpers_by_order(&mut helpers, vue3_helper_order(false));
@@ -10872,7 +10886,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                 Vue3SsrMirKind::RenderAttrs(attrs) => {
                     self.push_ssr_attr_helpers(&attrs.props, &mut helpers);
                 }
-                Vue3SsrMirKind::RenderComponent { .. } => {
+                Vue3SsrMirKind::RenderComponent(_) => {
                     push_unique_helper(&mut helpers, RuntimeHelper::Vue3SsrRenderComponent);
                 }
                 Vue3SsrMirKind::RenderSlot(_) => {
@@ -11004,8 +11018,8 @@ impl<'a> Vue3SsrMirCodegen<'a> {
             Vue3SsrMirKind::RenderAttrs(attrs) => {
                 self.render_attrs(&attrs.props, scope, writer);
             }
-            Vue3SsrMirKind::RenderComponent { tag } => {
-                self.render_component(node_id, tag, scope, writer);
+            Vue3SsrMirKind::RenderComponent(component) => {
+                self.render_component(node_id, component, scope, writer);
             }
             Vue3SsrMirKind::RenderSlot(slot) => {
                 self.render_slot(slot, scope, writer);
@@ -11040,13 +11054,15 @@ impl<'a> Vue3SsrMirCodegen<'a> {
     fn render_component(
         &self,
         node_id: NodeId,
-        tag: &MirExpr,
+        component: &Vue3SsrComponent,
         scope: &RenderScope,
         writer: &mut CodeWriter,
     ) {
+        let props = self.render_component_props(&component.props, scope);
         writer.push_line(&format!(
-            "_push(_ssrRenderComponent({}, null, {{",
-            self.render_mir_expr(tag, scope)
+            "_push(_ssrRenderComponent({}, {}, {{",
+            self.render_mir_expr(&component.tag, scope),
+            props
         ));
         writer.indent();
         writer.push_line("default: () => {");
@@ -11056,6 +11072,12 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         writer.push_line("}");
         writer.dedent();
         writer.push_line("}, _parent));");
+    }
+
+    fn render_component_props(&self, props: &Vue3DomProps, scope: &RenderScope) -> String {
+        self.render_ordered_props(props, scope)
+            .map(|rendered| self.render_normalized_props(props, rendered))
+            .unwrap_or_else(|| "null".into())
     }
 
     fn render_slot(
@@ -17881,7 +17903,7 @@ mod tests {
             .mir
             .nodes
             .iter()
-            .all(|node| !matches!(node.kind, Vue3SsrMirKind::RenderComponent { .. })));
+            .all(|node| !matches!(node.kind, Vue3SsrMirKind::RenderComponent(_))));
     }
 
     #[test]
@@ -17906,10 +17928,10 @@ mod tests {
             .iter()
             .any(|node| matches!(node.kind, HirNodeKind::SlotOutlet(_))));
         assert!(result.mir.nodes.iter().any(|node| matches!(
-            node.kind,
-            Vue3SsrMirKind::RenderComponent {
-                tag: MirExpr::String(_)
-            }
+            &node.kind,
+            Vue3SsrMirKind::RenderComponent(component)
+                if matches!(component.tag, MirExpr::String(_))
+                    && component.props.static_attrs.is_empty()
         )));
         assert!(result.mir.nodes.iter().any(|node| matches!(
             &node.kind,
@@ -18243,12 +18265,26 @@ mod tests {
     fn generate_vue3_ssr_mir_emits_control_flow_and_components_from_mir() {
         let source = TemplateSource {
             filename: "foo.vue".into(),
-            source: r#"<Comp><p v-if="ok">yes</p><p v-else-if="maybe">maybe</p><p v-else>no</p><li v-for="item in list">{{ item.name }}</li></Comp>"#.into(),
+            source: r#"<Comp foo="bar" :baz="baz" v-bind="extra"><p v-if="ok">yes</p><p v-else-if="maybe">maybe</p><p v-else>no</p><li v-for="item in list">{{ item.name }}</li></Comp>"#.into(),
             file_id: FileId(45),
             base_offset: 0,
         };
         let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
         let result = lower_vue3_ast_to_ssr_mir(&ast, &Vue3CompilerOptions::default());
+        let component = result
+            .mir
+            .nodes
+            .iter()
+            .find_map(|node| match &node.kind {
+                Vue3SsrMirKind::RenderComponent(component) => Some(component),
+                _ => None,
+            })
+            .expect("ssr component");
+        assert_eq!(component.props.static_attrs.len(), 1);
+        assert_eq!(component.props.static_attrs[0].name, "foo");
+        assert_eq!(component.props.dynamic_bindings.len(), 1);
+        assert_eq!(component.props.dynamic_bindings[0].name, "baz");
+        assert_eq!(component.props.object_bindings.len(), 1);
         let generated = generate_vue3_ssr_mir(
             &result.mir,
             &result.js,
@@ -18262,10 +18298,15 @@ mod tests {
         assert!(generated
             .code
             .contains("ssrRenderComponent as _ssrRenderComponent"));
+        assert!(generated.code.contains("mergeProps as _mergeProps"));
         assert!(generated.code.contains("ssrRenderList as _ssrRenderList"));
         assert!(generated
             .code
-            .contains("_push(_ssrRenderComponent(\"Comp\", null, {"));
+            .contains("_push(_ssrRenderComponent(\"Comp\", _mergeProps("));
+        assert!(generated.code.contains("_mergeProps({"));
+        assert!(generated.code.contains("foo: \"bar\""));
+        assert!(generated.code.contains("baz: _ctx.baz"));
+        assert!(generated.code.contains("_ctx.extra"));
         assert!(generated.code.contains("if ((_ctx.ok)) {"));
         assert!(generated.code.contains("} else {"));
         assert!(generated.code.contains("if ((_ctx.maybe)) {"));
