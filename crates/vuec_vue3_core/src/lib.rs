@@ -11,7 +11,7 @@ use vuec_ast::{
     HirSlotOutlet, HirStaticAttr, HirTag, JsExprId, JsPatternId, LoweringMap, MirChildren, MirExpr,
     MissingSpanReason, NodeId, NodeSpan, QuoteKind, RuntimeHelper, Vue3Ast, Vue3AstKind,
     Vue3Directive, Vue3DomMir, Vue3DomMirKind, Vue3Element, Vue3ElementType, Vue3Expression,
-    Vue3NodeKind, Vue3PatchFlags, Vue3Prop, Vue3SsrMir, Vue3SsrMirKind, Vue3VNodeCall,
+    Vue3NodeKind, Vue3PatchFlags, Vue3Prop, Vue3Root, Vue3SsrMir, Vue3SsrMirKind, Vue3VNodeCall,
 };
 use vuec_codegen::{CodeWriter, SourceMapArtifact, SourceMapSegment};
 use vuec_html::{HtmlTokenKind, HtmlTokenizer};
@@ -590,38 +590,22 @@ impl Vue3Dialect {
         let mut writer = CodeWriter::new();
         let root_id = ast.root;
         if let Some(root) = ast.node(root_id) {
-            let components = collect_component_tags(ast);
-            let component_declarations = components
-                .iter()
-                .map(|component| {
-                    format!(
-                        "const {} = _resolveComponent({})",
-                        component_asset_id(component),
-                        quote_string(component)
-                    )
-                })
-                .collect::<Vec<_>>();
+            let components = vue3_codegen_components(ast);
+            let component_declarations = render_component_declarations(&components);
+            let directives = vue3_codegen_directives(ast);
+            let directive_declarations = render_directive_declarations(&directives);
             let expr = if root.children.len() == 1 {
                 render_node_expr(ast, root.children[0], options, NodeRenderMode::Root)
             } else {
                 render_children_array(ast, &root.children, options, true)
             };
-            let helper_probe = format!("{}\n{}", component_declarations.join("\n"), expr);
-            let mut helpers =
-                render_helpers_from_code(vue3_helper_order(!components.is_empty()), &helper_probe);
-            let needs_comment_helper = helper_probe.contains("_createCommentVNode(")
-                || helper_probe.contains("? (_openBlock()")
-                || helper_probe.contains("? _withMemo(");
-            if needs_comment_helper && !helpers.contains(&RuntimeHelper::Vue3CreateCommentVNode) {
-                helpers.push(RuntimeHelper::Vue3CreateCommentVNode);
-            }
-            if ctx.helpers.contains(&RuntimeHelper::Vue3WithMemo)
-                && !helpers.contains(&RuntimeHelper::Vue3WithMemo)
-            {
-                helpers.push(RuntimeHelper::Vue3WithMemo);
-            }
-            sort_helpers_by_order(&mut helpers, vue3_helper_order(!components.is_empty()));
-            apply_vue3_memo_helper_order(&mut helpers);
+            let declarations = component_declarations
+                .iter()
+                .chain(directive_declarations.iter())
+                .cloned()
+                .collect::<Vec<_>>();
+            let helpers =
+                vue3_codegen_helpers(ast, ctx, &declarations, &expr, !components.is_empty());
             if options.inline {
                 writer.push_line("(_ctx, _cache) => {");
             } else if options.mode == "module" {
@@ -667,7 +651,10 @@ impl Vue3Dialect {
             for declaration in &component_declarations {
                 writer.push_line(declaration);
             }
-            if !component_declarations.is_empty() {
+            for declaration in &directive_declarations {
+                writer.push_line(declaration);
+            }
+            if !component_declarations.is_empty() || !directive_declarations.is_empty() {
                 writer.newline();
             }
             writer.push_line(&format!("return {}", expr));
@@ -8413,6 +8400,92 @@ fn render_helpers_from_code(order: &[RuntimeHelper], code: &str) -> Vec<RuntimeH
     helpers
 }
 
+fn vue3_codegen_root(ast: &Vue3Ast) -> Option<&Vue3Root> {
+    ast.root_node().and_then(|node| match &node.kind {
+        Vue3AstKind::Root(root) => Some(root),
+        _ => None,
+    })
+}
+
+fn vue3_root_has_codegen_state(root: &Vue3Root) -> bool {
+    !root.helpers.is_empty() || !root.components.is_empty() || !root.directives.is_empty()
+}
+
+fn vue3_codegen_components(ast: &Vue3Ast) -> Vec<String> {
+    if let Some(root) = vue3_codegen_root(ast).filter(|root| vue3_root_has_codegen_state(root)) {
+        root.components.iter().cloned().collect()
+    } else {
+        collect_component_tags(ast)
+    }
+}
+
+fn render_component_declarations(components: &[String]) -> Vec<String> {
+    components
+        .iter()
+        .map(|component| {
+            format!(
+                "const {} = _resolveComponent({})",
+                component_asset_id(component),
+                quote_string(component)
+            )
+        })
+        .collect()
+}
+
+fn vue3_codegen_directives(ast: &Vue3Ast) -> Vec<String> {
+    if let Some(root) = vue3_codegen_root(ast).filter(|root| vue3_root_has_codegen_state(root)) {
+        root.directives.iter().cloned().collect()
+    } else {
+        collect_runtime_directive_names(ast)
+    }
+}
+
+fn render_directive_declarations(directives: &[String]) -> Vec<String> {
+    directives
+        .iter()
+        .map(|directive| {
+            format!(
+                "const {} = _resolveDirective({})",
+                directive_asset_id(directive),
+                quote_string(directive)
+            )
+        })
+        .collect()
+}
+
+fn vue3_codegen_helpers(
+    ast: &Vue3Ast,
+    ctx: &TransformContext,
+    declarations: &[String],
+    expr: &str,
+    has_components: bool,
+) -> Vec<RuntimeHelper> {
+    let mut helpers =
+        if let Some(root) = vue3_codegen_root(ast).filter(|root| !root.helpers.is_empty()) {
+            root.helpers.iter().copied().collect()
+        } else if !ctx.helpers.is_empty() {
+            ctx.helpers.iter().copied().collect()
+        } else {
+            let helper_probe = format!("{}\n{}", declarations.join("\n"), expr);
+            let mut helpers =
+                render_helpers_from_code(vue3_helper_order(has_components), &helper_probe);
+            let needs_comment_helper = helper_probe.contains("_createCommentVNode(")
+                || helper_probe.contains("? (_openBlock()")
+                || helper_probe.contains("? _withMemo(");
+            if needs_comment_helper && !helpers.contains(&RuntimeHelper::Vue3CreateCommentVNode) {
+                helpers.push(RuntimeHelper::Vue3CreateCommentVNode);
+            }
+            helpers
+        };
+    if has_components && !helpers.contains(&RuntimeHelper::Vue3ResolveComponent) {
+        helpers.push(RuntimeHelper::Vue3ResolveComponent);
+    }
+    helpers.dedup();
+    sort_helpers_by_order(&mut helpers, vue3_helper_order(has_components));
+    apply_vue3_memo_helper_order(&mut helpers);
+    helpers
+}
+
 fn apply_vue3_memo_helper_order(helpers: &mut Vec<RuntimeHelper>) {
     if !helpers.contains(&RuntimeHelper::Vue3WithMemo) {
         return;
@@ -8546,6 +8619,13 @@ fn vue3_helper_order(components_first: bool) -> &'static [RuntimeHelper] {
             RuntimeHelper::Vue3CreateTextVNode,
             RuntimeHelper::Vue3CreateElementVNode,
             RuntimeHelper::Vue3ResolveComponent,
+            RuntimeHelper::Vue3ResolveDynamicComponent,
+            RuntimeHelper::Vue3BaseTransition,
+            RuntimeHelper::Vue3Transition,
+            RuntimeHelper::Vue3TransitionGroup,
+            RuntimeHelper::Vue3Teleport,
+            RuntimeHelper::Vue3Suspense,
+            RuntimeHelper::Vue3KeepAlive,
             RuntimeHelper::Vue3WithCtx,
             RuntimeHelper::Vue3RenderList,
             RuntimeHelper::Vue3CreateSlots,
@@ -8557,6 +8637,9 @@ fn vue3_helper_order(components_first: bool) -> &'static [RuntimeHelper] {
             RuntimeHelper::Vue3CreateElementBlock,
             RuntimeHelper::Vue3RenderSlot,
             RuntimeHelper::Vue3NormalizeClass,
+            RuntimeHelper::Vue3ResolveDirective,
+            RuntimeHelper::Vue3WithDirectives,
+            RuntimeHelper::Vue3VShow,
             RuntimeHelper::Vue3IsMemoSame,
             RuntimeHelper::Vue3WithMemo,
         ]
@@ -8573,10 +8656,20 @@ fn vue3_helper_order(components_first: bool) -> &'static [RuntimeHelper] {
             RuntimeHelper::Vue3RenderSlot,
             RuntimeHelper::Vue3NormalizeClass,
             RuntimeHelper::Vue3ResolveComponent,
+            RuntimeHelper::Vue3ResolveDynamicComponent,
+            RuntimeHelper::Vue3BaseTransition,
+            RuntimeHelper::Vue3Transition,
+            RuntimeHelper::Vue3TransitionGroup,
+            RuntimeHelper::Vue3Teleport,
+            RuntimeHelper::Vue3Suspense,
+            RuntimeHelper::Vue3KeepAlive,
             RuntimeHelper::Vue3WithCtx,
             RuntimeHelper::Vue3CreateBlock,
             RuntimeHelper::Vue3CreateVNode,
             RuntimeHelper::Vue3CreateSlots,
+            RuntimeHelper::Vue3ResolveDirective,
+            RuntimeHelper::Vue3WithDirectives,
+            RuntimeHelper::Vue3VShow,
             RuntimeHelper::Vue3IsMemoSame,
             RuntimeHelper::Vue3WithMemo,
         ]
@@ -9329,11 +9422,12 @@ fn render_plain_element(
         patch_flag.as_str(),
         dynamic_props_arg(element).as_str(),
     );
-    if mode == NodeRenderMode::Root {
+    let rendered = if mode == NodeRenderMode::Root {
         format!("(_openBlock(), {}({}))", helper, args)
     } else {
         format!("{}({})", helper, args)
-    }
+    };
+    render_with_runtime_directives(rendered, element, options, scope)
 }
 
 fn render_maybe_memo_element(
@@ -9411,7 +9505,7 @@ fn render_component_element(
     scope: &RenderScope,
     branch_key: Option<usize>,
 ) -> String {
-    let tag = component_asset_id(&element.tag);
+    let tag = render_component_tag_expr(element, options, scope);
     let props = render_props(element, options, scope, branch_key);
     let attrs = if props.is_empty() {
         "null".into()
@@ -9426,7 +9520,7 @@ fn render_component_element(
         "_createVNode"
     };
     let children_arg = children.map_or_else(String::new, |children| format!(", {children}"));
-    if mode == NodeRenderMode::Root {
+    let rendered = if mode == NodeRenderMode::Root {
         format!(
             "(_openBlock(), {}({}, {}{}{}))",
             helper, tag, attrs, children_arg, patch_flag
@@ -9438,7 +9532,89 @@ fn render_component_element(
             "{}({}, {}{}{})",
             helper, tag, attrs, children_arg, patch_flag
         )
+    };
+    render_with_runtime_directives(rendered, element, options, scope)
+}
+
+fn render_component_tag_expr(
+    element: &Vue3Element,
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+) -> String {
+    if let Some(expression) = vue3_dynamic_component_is_expression(element) {
+        return format!(
+            "_resolveDynamicComponent({})",
+            rewrite_expression_with_scope(&expression.source_string(), options, scope)
+        );
     }
+    if let Some(helper) = vue3_core_component_runtime_helper(&element.tag) {
+        return helper_reference(helper);
+    }
+    component_asset_id(&element.tag)
+}
+
+fn render_with_runtime_directives(
+    vnode: String,
+    element: &Vue3Element,
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+) -> String {
+    let directives = element
+        .props
+        .iter()
+        .filter_map(|prop| match prop {
+            Vue3Prop::Directive(dir) if vue3_directive_needs_runtime_asset(&dir.name) => {
+                Some(render_runtime_directive_arg(dir, options, scope))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if directives.is_empty() {
+        vnode
+    } else {
+        format!("_withDirectives({vnode}, {})", render_array(&directives))
+    }
+}
+
+fn render_runtime_directive_arg(
+    dir: &Vue3Directive,
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+) -> String {
+    let runtime = if dir.name == "show" {
+        "_vShow".to_string()
+    } else {
+        directive_asset_id(&dir.name)
+    };
+    let mut args = vec![runtime];
+    if let Some(exp) = dir.exp.as_ref() {
+        args.push(rewrite_expression_with_scope(
+            &exp.source_string(),
+            options,
+            scope,
+        ));
+    } else if dir.arg.is_some() || !dir.modifiers.is_empty() {
+        args.push("void 0".into());
+    }
+    if let Some(arg) = dir.arg.as_ref() {
+        let arg = if dir.is_dynamic_arg {
+            rewrite_expression_with_scope(&arg.source_string(), options, scope)
+        } else {
+            quote_string(&arg.source_string())
+        };
+        args.push(arg);
+    } else if !dir.modifiers.is_empty() {
+        args.push("void 0".into());
+    }
+    if !dir.modifiers.is_empty() {
+        let modifiers = dir
+            .modifiers
+            .iter()
+            .map(|modifier| format!("{}: true", json_key(modifier)))
+            .collect::<Vec<_>>();
+        args.push(render_object(&modifiers));
+    }
+    format!("[{}]", args.join(", "))
 }
 
 #[derive(Clone, Debug, Default)]
@@ -9795,6 +9971,26 @@ fn collect_component_tags(ast: &Vue3Ast) -> Vec<String> {
         }
     }
     tags
+}
+
+fn collect_runtime_directive_names(ast: &Vue3Ast) -> Vec<String> {
+    let mut directives = Vec::new();
+    for node in &ast.nodes {
+        if let Vue3AstKind::Element(element) = &node.kind {
+            for prop in &element.props {
+                let Vue3Prop::Directive(dir) = prop else {
+                    continue;
+                };
+                if dir.name != "show"
+                    && vue3_directive_needs_runtime_asset(&dir.name)
+                    && !directives.iter().any(|existing| existing == &dir.name)
+                {
+                    directives.push(dir.name.clone());
+                }
+            }
+        }
+    }
+    directives
 }
 
 fn collect_vue3_component_asset(
@@ -10662,7 +10858,7 @@ fn render_patch_flag_kind(
         && has_dynamic_text_child(ast, children)
     {
         Some(1)
-    } else if has_vnode_hook(element) {
+    } else if has_vnode_hook(element) || has_runtime_directive(element) {
         Some(512)
     } else {
         None
@@ -10829,6 +11025,15 @@ fn has_vnode_hook(element: &Vue3Element) -> bool {
         matches!(
             prop,
             Vue3Prop::Directive(dir) if dir.name == "on" && event_directive_is_vnode_hook(dir)
+        )
+    })
+}
+
+fn has_runtime_directive(element: &Vue3Element) -> bool {
+    element.props.iter().any(|prop| {
+        matches!(
+            prop,
+            Vue3Prop::Directive(dir) if vue3_directive_needs_runtime_asset(&dir.name)
         )
     })
 }
@@ -13449,6 +13654,143 @@ mod tests {
         }
         assert!(!root.helpers.contains(&RuntimeHelper::Vue3ResolveDirective));
         assert!(!root.helpers.contains(&RuntimeHelper::Vue3WithDirectives));
+    }
+
+    #[test]
+    fn generate_consumes_transformed_root_component_state() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div><Child/><Transition/><component :is="view"/></div>"#.into(),
+            file_id: FileId(22),
+            base_offset: 0,
+        };
+        let mut ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let mut ctx = TransformContext::default();
+        Vue3Dialect::transform(&mut ast, &mut ctx);
+
+        let result = Vue3Dialect::generate(
+            &ast,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+            &TransformContext::default(),
+        );
+
+        assert!(result
+            .code
+            .contains("resolveComponent as _resolveComponent"));
+        assert!(result
+            .code
+            .contains("resolveDynamicComponent as _resolveDynamicComponent"));
+        assert!(result.code.contains("Transition as _Transition"));
+        assert!(result
+            .code
+            .contains("const _component_Child = _resolveComponent(\"Child\")"));
+        assert!(!result.code.contains("_component_Transition"));
+        assert!(result.code.contains("_createVNode(_Transition"));
+        assert!(result
+            .code
+            .contains("_createVNode(_resolveDynamicComponent(_ctx.view)"));
+    }
+
+    #[test]
+    fn generate_preserves_raw_ast_component_scan_fallback() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: "<Child/>".into(),
+            file_id: FileId(23),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = Vue3Dialect::generate(
+            &ast,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+            &TransformContext::default(),
+        );
+
+        assert!(result
+            .code
+            .contains("resolveComponent as _resolveComponent"));
+        assert!(result
+            .code
+            .contains("const _component_Child = _resolveComponent(\"Child\")"));
+        assert!(result.code.contains("_createBlock(_component_Child"));
+    }
+
+    #[test]
+    fn generate_preserves_raw_ast_runtime_directive_scan_fallback() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div v-focus:foo.bar="value"/>"#.into(),
+            file_id: FileId(24),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = Vue3Dialect::generate(
+            &ast,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+            &TransformContext::default(),
+        );
+
+        assert!(result.code.contains("withDirectives as _withDirectives"));
+        assert!(result
+            .code
+            .contains("resolveDirective as _resolveDirective"));
+        assert!(result
+            .code
+            .contains("const _directive_focus = _resolveDirective(\"focus\")"));
+        assert!(result
+            .code
+            .contains("[_directive_focus, _ctx.value, \"foo\", {"));
+        assert!(result.code.contains("512 /* NEED_PATCH */"));
+    }
+
+    #[test]
+    fn generate_consumes_transformed_root_runtime_directive_state() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div v-focus:foo.bar="value"><span v-show="ok"/></div>"#.into(),
+            file_id: FileId(25),
+            base_offset: 0,
+        };
+        let mut ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let mut ctx = TransformContext::default();
+        Vue3Dialect::transform(&mut ast, &mut ctx);
+
+        let result = Vue3Dialect::generate(
+            &ast,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+            &TransformContext::default(),
+        );
+
+        assert!(result.code.contains("withDirectives as _withDirectives"));
+        assert!(result
+            .code
+            .contains("resolveDirective as _resolveDirective"));
+        assert!(result.code.contains("vShow as _vShow"));
+        assert!(result
+            .code
+            .contains("const _directive_focus = _resolveDirective(\"focus\")"));
+        assert!(result
+            .code
+            .contains("[_directive_focus, _ctx.value, \"foo\", {"));
+        assert!(result.code.contains("bar: true"));
+        assert!(result.code.contains("[_vShow, _ctx.ok]"));
+        assert!(result.code.contains("512 /* NEED_PATCH */"));
     }
 
     fn process_expression_test_projection(content: &str, context: Value) -> Value {

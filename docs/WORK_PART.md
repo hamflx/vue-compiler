@@ -74,9 +74,15 @@
 - [x] Vue 3 structural DOM/SSR lowering contract entry for adjacent `v-if` / `v-else-if` / `v-else` branch chains as one `HirIf` with multiple branches.
 - [x] Vue 3 structural `Vue3DomMir` hoist/cache target projection foundation for conservative static subtree hoist wrappers and top-level `v-once` cache wrappers.
 - [x] Vue 3 AST root helper / component / directive collection in Rust `Vue3Dialect::transform`, visible through public projection.
+- [x] Vue 3 exact render emitter consumes transformed root helper / component / directive state for asset declarations, helper imports, built-in/dynamic component tags, and runtime directive wrappers, with raw-AST public `generate` fallback.
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Migrated Vue 3 exact render codegen state selection from legacy AST/code-string probing toward transformed `Vue3Root` fields. `Vue3Dialect::generate` now prefers `Vue3Root.helpers`, `Vue3Root.components`, and `Vue3Root.directives` for helper imports/destructuring and asset declarations, while keeping raw-AST fallback scans for direct `generate(ast, options)` callers that have not run `transform`.
+- Component codegen now aligns with root asset collection: built-in components render as runtime helpers, dynamic `<component :is>` renders through `_resolveDynamicComponent(...)`, and only collected component assets receive `_resolveComponent(...)` declarations. Runtime directive codegen now wraps current exact-emitter VNodes with `_withDirectives(...)`, emits custom directive / `v-show` runtime references from root or fallback state, and applies `NEED_PATCH` when runtime directives are present.
+- This is exact emitter/root-state migration work, not full DOM MIR codegen completion. `Vue3DomMir` codegen, full official patch-flag parity, and broader compiler-core internal transform/codegen migration remain open.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p vuec_vue3_core -p vuec_node_bridge -p xtask`, focused `cargo test -p vuec_vue3_core generate_`, focused `cargo test -p vuec_vue3_core base_compile_marks_vnode_hook_need_patch`, `cargo test -p vuec_vue3_core -p vuec_node_bridge -p xtask`, and `git diff --check`.
 
 - Moved Vue 3 root asset/helper collection into Rust AST transform state. `Vue3Dialect::transform` now writes `Vue3Root.helpers`, `Vue3Root.components`, and `Vue3Root.directives` while preserving existing `TransformContext.helpers` behavior for the current emitter path.
 - The collection records component assets, built-in component helpers, dynamic component resolution helpers, custom runtime directives, `v-show` runtime helper usage, and structural helper needs such as fragments, render lists, memo, comments, slots, text, and class normalization. Structural directives such as `v-if`, `v-for`, `v-once`, and `v-memo` are not reported as runtime directive assets.
