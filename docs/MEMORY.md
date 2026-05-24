@@ -1,5 +1,12 @@
 # Memory
 
+- Current round: added a stable component slots payload to structural Vue 3 DOM MIR.
+- `MirChildren` now has a `Slots(Vue3DomSlots)` variant with stable slot entries, optional slot params stored as `JsPatternId`, and child MIR node IDs. DOM lowering projects default component children, static named `#slot` template children, and static on-component `v-slot` params into this payload, while leaving dynamic / conditional / loop slots for a later slice.
+- Stable slots now also create `HirNodeKind::SlotDecl` nodes before lowering slot bodies, preserving the documented AST -> HIR -> Vue3DomMir slot boundary instead of making slots a DOM-only reconstruction.
+- `generate_vue3_dom_mir` now emits stable component slot objects from MIR with `_withCtx(...)` slot functions and `_: 1`, and collects the `withCtx` helper from MIR children instead of the source AST. The slot child VNodes still reuse the same target-split MIR document and `JsAstStore`.
+- This is structural DOM MIR codegen progress only. Dynamic slot objects, `_createSlots`, slot `v-if` / `v-for`, forwarded slot flags, and complete exact component codegen parity remain open.
+- Verification for this stable-slot MIR slice: `cargo fmt --all`, focused `cargo test -p vuec_vue3_core lower_vue3_ast_to_dom_mir_projects_stable_component_slots`, focused `cargo test -p vuec_vue3_core lower_vue3_ast_to_dom_mir_projects_on_component_stable_slot_params`, focused `cargo test -p vuec_vue3_core generate_vue3_dom_mir_emits_stable_component_slots_from_mir`, `cargo fmt --all --check`, `cargo check -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, and `git diff --check`.
+
 - Current round: structured Vue 3 DOM MIR component tags instead of encoding component targets as plain string tags.
 - `vuec_ast::Vue3VNodeCall.tag` is now `Vue3DomTag`, distinguishing native tags, component assets, dynamic components, and runtime-helper built-ins. DOM lowering projects `<Child>`, `<Transition>`, and `<component :is="view">` into those target variants while reusing the existing `JsAstStore` expression for dynamic `is`.
 - `generate_vue3_dom_mir` now derives `_resolveComponent` declarations, `_resolveDynamicComponent` calls, and built-in component helper imports from MIR tag variants. Dynamic component `is` bindings are consumed by the tag renderer and no longer emitted again as props in this structural emitter.

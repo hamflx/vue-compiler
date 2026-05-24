@@ -1407,6 +1407,27 @@ pub enum MirChildren {
     None,
     Text(String),
     Nodes(Vec<NodeId>),
+    Slots(Vue3DomSlots),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue3DomSlots {
+    pub slots: Vec<Vue3DomSlot>,
+    pub flag: Vue3SlotFlag,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue3DomSlot {
+    pub name: String,
+    pub params: Option<JsPatternId>,
+    pub children: Vec<NodeId>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Vue3SlotFlag {
+    Stable,
+    Dynamic,
+    Forwarded,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

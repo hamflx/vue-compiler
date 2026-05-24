@@ -79,9 +79,16 @@
 - [x] Vue 3 structural `Vue3DomMir` VNode props/directive payload foundation, so current MIR codegen can emit attrs, bindings, events, class normalization, and runtime directive wrappers without AST fallback.
 - [x] Vue 3 structural HIR / `Vue3DomMir` ordered props segment payload for object `v-bind`, object `v-on`, dynamic arg props, merge props, normalize props, guard reactive props, toHandlers, and toHandlerKey emission from MIR.
 - [x] Vue 3 structural `Vue3DomMir` component tag payload for native tags, component assets, dynamic components, and runtime-helper built-ins, with MIR-driven component declarations/imports in standalone DOM MIR codegen.
+- [x] Vue 3 structural `Vue3DomMir` stable component slots payload for default and static named slots, with MIR-driven `_withCtx` slot object emission in standalone DOM MIR codegen.
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Added `MirChildren::Slots(Vue3DomSlots)` with stable slot entries, optional `JsPatternId` params, and child MIR node IDs. This keeps slot functions in DOM MIR target data rather than reconstructing component children from `Vue3Ast`.
+- DOM lowering now projects stable component slots for default children, static named `#slot` template children, and static on-component `v-slot` params. It also emits `HirNodeKind::SlotDecl` nodes before lowering slot bodies so the slot boundary stays visible in the AST -> HIR -> Vue3DomMir contract. Dynamic names, slot `v-if` / `v-for`, forwarded slots, and `_createSlots` remain intentionally outside this slice.
+- `generate_vue3_dom_mir` now emits stable slot objects from MIR with `_withCtx(...)` slot functions and `_: 1`, and derives the `withCtx` helper from `MirChildren::Slots`.
+- This remains structural target-codegen work. Dynamic slot object lowering and complete exact component codegen parity remain open.
+- Verification this round: `cargo fmt --all`, focused `cargo test -p vuec_vue3_core lower_vue3_ast_to_dom_mir_projects_stable_component_slots`, focused `cargo test -p vuec_vue3_core lower_vue3_ast_to_dom_mir_projects_on_component_stable_slot_params`, focused `cargo test -p vuec_vue3_core generate_vue3_dom_mir_emits_stable_component_slots_from_mir`, `cargo fmt --all --check`, `cargo check -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, and `git diff --check`.
 
 - Replaced `Vue3VNodeCall.tag: MirExpr` with `Vue3DomTag`, a DOM-target tag payload that distinguishes native tags, component assets, dynamic components, and runtime helper built-ins.
 - DOM lowering now projects component tags structurally: normal component assets such as `<Child>`, built-ins such as `<Transition>`, and dynamic `<component :is="view">` no longer enter MIR as string tags. Dynamic component tags reuse the registered `JsAstStore` expression from the `is` binding.
