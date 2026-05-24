@@ -5003,7 +5003,11 @@ const vue3CoreRuntime = (() => {
             propSummaries.push({ kind: 'attribute', name: prop.name, value: prop.value && prop.value.content });
           } else if (prop.name === 'bind' && prop.arg) {
             const transform = context.directiveTransforms && context.directiveTransforms.bind;
-            const result = transform ? transform(prop, node, context) : runtime.transformBind(prop, node, context);
+            if (!transform) {
+              if (runtime.isStaticArgOf(prop.arg, 'key')) propSummaries.push({ kind: 'directiveProp', forceBlock: true });
+              continue;
+            }
+            const result = transform(prop, node, context);
             objectProps.push(...((result && result.props) || []));
             propSummaries.push(...vue3ElementDirectivePropSummaries(prop, result, {
               forceBlock: runtime.isStaticArgOf(prop.arg, 'key'),
@@ -5053,6 +5057,11 @@ const vue3CoreRuntime = (() => {
               if (modelProp.__vuecModel && modelProp.__vuecModel.hydrate) {
                 hasHydrationEvent = true;
               }
+            }
+            if (result && result.needRuntime) {
+              prop.__vuecNeedRuntime = result.needRuntime;
+              runtimeDirectives.push(prop);
+              propSummaries.push({ kind: 'runtimeDirective' });
             }
           } else if (prop.name === 'once' || prop.name === 'memo') {
             continue;
@@ -6053,6 +6062,10 @@ function materializeVue3DirectiveArgsProjection(projection, dir, context) {
   if (projection && projection.includeExp && dir && dir.exp) elements.push(dir.exp);
   if (projection && projection.includeArg && dir && dir.arg) elements.push(dir.arg);
   if (projection && projection.modifiers && projection.modifiers.length) {
+    if (!(projection && projection.includeArg)) {
+      if (!(projection && projection.includeExp)) elements.push('void 0');
+      elements.push('void 0');
+    }
     elements.push(vue3CoreRuntime.createObjectExpression((projection.modifiers || []).map(modifier => {
       const name = modifier && modifier.name || '';
       return vue3CoreRuntime.createObjectProperty(

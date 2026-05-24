@@ -49,9 +49,18 @@
 - [x] Vue 3 compiler-dom Rust-backed dynamic runtime directive helper projection for `vShow.spec.ts` (`2/2`; full DOM suite currently `88/133`, `mixed` coverage).
 - [x] Vue 3 compiler-dom Rust-backed dynamic built-in component helper projection for `Transition.spec.ts` (`14/14`; full DOM suite currently `91/133`, `mixed` coverage).
 - [x] Vue 3 compiler-dom mixed Rust projection plus alias-runtime augmentor slice for `vOn.spec.ts` (`12/12`; full DOM suite currently `102/133`, `mixed` coverage).
+- [x] Vue 3 compiler-dom mixed alias-runtime runtime-directive materialization slice for `vModel.spec.ts` (`18/18`; full DOM suite currently `115/133`, `mixed` coverage).
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Closed the Vue 3 compiler-dom `vModel.spec.ts` remaining compatibility failures.
+- The alias runtime `transformElement` now consumes `needRuntime` from official DOM `transformModel`, registers the directive as runtime-backed, and emits `withDirectives(...)` with the selected DOM model helper (`vModelText`, `vModelRadio`, `vModelCheckbox`, `vModelSelect`, or `vModelDynamic`).
+- Directive argument materialization now inserts the official `void 0` placeholder before modifier objects when a runtime directive has modifiers but no argument, fixing `.number`, `.trim`, and `.lazy` snapshots.
+- The `v-bind` path was narrowed for custom transform callers: when no `bind` transform is provided it no longer synthesizes props, but still records the official `:key` block-forcing signal needed by compiler-core conformance.
+- Full Vue 3 DOM conformance remains expected-failing but improves from `102/133` to `115/133`; `vModel.spec.ts` is no longer failing. Remaining failures are only `stringifyStatic`.
+- Vue 3 compiler-core conformance was rechecked after the adapter change and remains `652/652`.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p xtask`, `cargo test -p xtask` (`18/18` pass), `cargo xtask run-conformance --suite vue3-core` (`652/652`), and `cargo xtask run-conformance --suite vue3-dom` (expected fail with `115/133`).
 
 - Closed the Vue 3 compiler-dom `vOn.spec.ts` remaining compatibility failures.
 - `vuec_vue3_core::transform_on_projection` now emits `valueConstant` metadata for handler values, so setup-const handlers remain observable as constant values after DOM modifier transforms.
