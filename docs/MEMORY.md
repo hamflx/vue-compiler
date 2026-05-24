@@ -1,5 +1,10 @@
 # Memory
 
+- Current round: added `<slot>` outlet name / props / fallback payloads to structural Vue 3 SSR MIR.
+- `Vue3SsrMirKind::RenderSlot` now carries `Vue3SsrSlot`, including static or dynamic `Vue3DomSlotName`, non-name `Vue3DomProps`, and fallback child node IDs in the same `Vue3SsrMir` document. SSR lowering filters the `name` prop out of outlet props and keeps fallback children as SSR MIR children.
+- This is structural target-lowering work and does not derive SSR from DOM MIR or touch `xtask/src/compat.rs`. Exact SSR codegen remains separate from this target-split MIR payload slice.
+- Verification for this SSR MIR slot-outlet payload slice: focused `cargo test -p vuec_vue3_core lower_vue3_ast_to_ssr_mir_projects_slot_outlet_payload`, focused `cargo test -p vuec_vue3_core lower_vue3_ast_to_ssr_mir_keeps_component_and_slot_target_split`, focused `cargo test -p vuec_vue3_core lower_vue3_ast_to_ssr_mir`, `cargo fmt --all --check`, `cargo check -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo xtask run-conformance --suite vue3-core` (`652/652`; `rust-backed 192/192`, `mixed 460/460`, `shim-backed 0/0`), and `git diff --check`.
+
 - Current round: added `<slot>` outlet name / props / fallback payloads to structural Vue 3 DOM MIR.
 - `Vue3DomMirKind::RenderSlot` now carries `Vue3RenderSlot`, including static or dynamic `Vue3DomSlotName`, non-name `Vue3DomProps`, and fallback child node IDs in the same `Vue3DomMir` document. DOM lowering filters the `name` prop out of outlet props after using it as the render-slot target.
 - `generate_vue3_dom_mir` now emits `_renderSlot(...)` name, props, and fallback function from MIR plus `JsAstStore`, including dynamic slot names and prefixed fallback interpolation expressions, without reading `Vue3Ast`.

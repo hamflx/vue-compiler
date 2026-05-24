@@ -2639,14 +2639,31 @@ fn lower_vue3_plain_element_to_ssr_mir(
             lower_vue3_ssr_child_sequence(&ast_node.children, ast, hir_id, mir_id, state);
         }
         Vue3ElementType::SlotOutlet => {
-            let name = element.props.iter().find_map(vue3_static_slot_outlet_name);
+            let Some(HirNodeKind::SlotOutlet(slot)) = state.hir.node(hir_id).map(|node| &node.kind)
+            else {
+                return Some(hir_id);
+            };
             let mir_id = state.mir.push_child(
                 mir_parent,
-                Vue3SsrMirKind::RenderSlot { name },
+                Vue3SsrMirKind::RenderSlot(vuec_ast::Vue3SsrSlot {
+                    name: lower_hir_slot_outlet_name_to_dom_mir(slot),
+                    props: lower_vue3_slot_outlet_props_to_ssr_mir(&slot.props),
+                    fallback: Vec::new(),
+                }),
                 ast_node.span.clone(),
             );
             state.map.record_hir_to_mir(hir_id, mir_id);
             lower_vue3_ssr_child_sequence(&ast_node.children, ast, hir_id, mir_id, state);
+            let fallback = state
+                .mir
+                .node(mir_id)
+                .map(|node| node.children.clone())
+                .unwrap_or_default();
+            if let Some(node) = state.mir.node_mut(mir_id) {
+                if let Vue3SsrMirKind::RenderSlot(slot) = &mut node.kind {
+                    slot.fallback = fallback;
+                }
+            }
         }
         Vue3ElementType::Element | Vue3ElementType::Template => {
             lower_vue3_native_element_to_ssr_mir(element, ast_node, ast, hir_id, mir_parent, state);
@@ -2654,6 +2671,122 @@ fn lower_vue3_plain_element_to_ssr_mir(
     }
 
     Some(hir_id)
+}
+
+fn lower_vue3_slot_outlet_props_to_ssr_mir(props: &HirProps) -> Vue3DomProps {
+    let filtered = filter_vue3_slot_outlet_name_props(props);
+    lower_hir_props_to_dom_mir_without_event_cache(&filtered)
+}
+
+fn lower_hir_props_to_dom_mir_without_event_cache(props: &HirProps) -> Vue3DomProps {
+    if !props.segments.is_empty() {
+        let mut lowered = Vue3DomProps {
+            normalize: Vue3DomPropsNormalize {
+                normalize_props: props.object_bindings.len() > 1
+                    || !props.object_listeners.is_empty()
+                    || props
+                        .dynamic_bindings
+                        .iter()
+                        .any(|binding| binding.dynamic_arg),
+                guard_reactive_props: !props.object_bindings.is_empty(),
+            },
+            ..Vue3DomProps::default()
+        };
+        for segment in &props.segments {
+            match segment {
+                HirPropSegment::StaticAttr(attr) => {
+                    let attr = lower_hir_static_attr_to_dom_mir(attr);
+                    lowered.static_attrs.push(attr.clone());
+                    lowered.segments.push(Vue3DomPropSegment::StaticAttr(attr));
+                }
+                HirPropSegment::DynamicBinding(binding) => {
+                    let binding = lower_hir_binding_to_dom_mir(binding);
+                    lowered.dynamic_bindings.push(binding.clone());
+                    lowered
+                        .segments
+                        .push(Vue3DomPropSegment::DynamicBinding(binding));
+                }
+                HirPropSegment::Event(event) => {
+                    let event = lower_hir_event_to_dom_mir_without_cache(event);
+                    lowered.events.push(event.clone());
+                    lowered.segments.push(Vue3DomPropSegment::Event(event));
+                }
+                HirPropSegment::ObjectBinding(binding) => {
+                    let binding = Vue3DomObjectBinding {
+                        value: binding.value,
+                    };
+                    lowered.object_bindings.push(binding.clone());
+                    lowered
+                        .segments
+                        .push(Vue3DomPropSegment::ObjectBinding(binding));
+                }
+                HirPropSegment::ObjectListeners(listeners) => {
+                    let listeners = Vue3DomObjectListeners {
+                        value: listeners.value,
+                        preserve_case: true,
+                    };
+                    lowered.object_listeners.push(listeners.clone());
+                    lowered
+                        .segments
+                        .push(Vue3DomPropSegment::ObjectListeners(listeners));
+                }
+            }
+        }
+        return lowered;
+    }
+
+    Vue3DomProps {
+        static_attrs: props
+            .static_attrs
+            .iter()
+            .map(lower_hir_static_attr_to_dom_mir)
+            .collect(),
+        dynamic_bindings: props
+            .dynamic_bindings
+            .iter()
+            .map(lower_hir_binding_to_dom_mir)
+            .collect(),
+        events: props
+            .events
+            .iter()
+            .map(lower_hir_event_to_dom_mir_without_cache)
+            .collect(),
+        object_bindings: props
+            .object_bindings
+            .iter()
+            .map(|binding| Vue3DomObjectBinding {
+                value: binding.value,
+            })
+            .collect(),
+        object_listeners: props
+            .object_listeners
+            .iter()
+            .map(|listeners| Vue3DomObjectListeners {
+                value: listeners.value,
+                preserve_case: true,
+            })
+            .collect(),
+        segments: Vec::new(),
+        normalize: Vue3DomPropsNormalize {
+            normalize_props: props.object_bindings.len() > 1
+                || !props.object_listeners.is_empty()
+                || props
+                    .dynamic_bindings
+                    .iter()
+                    .any(|binding| binding.dynamic_arg),
+            guard_reactive_props: !props.object_bindings.is_empty(),
+        },
+    }
+}
+
+fn lower_hir_event_to_dom_mir_without_cache(event: &HirEvent) -> Vue3DomEvent {
+    Vue3DomEvent {
+        name: event.name.clone(),
+        dynamic_name: event.dynamic_name,
+        handler: event.handler,
+        dynamic_arg: event.dynamic_arg,
+        cache: None,
+    }
 }
 
 fn lower_vue3_element_control_flow_to_ssr_mir(
@@ -17072,15 +17205,56 @@ mod tests {
         )));
         assert!(result.mir.nodes.iter().any(|node| matches!(
             &node.kind,
-            Vue3SsrMirKind::RenderSlot {
-                name: Some(name)
-            } if name == "header"
+            Vue3SsrMirKind::RenderSlot(slot)
+                if matches!(slot.name, Vue3DomSlotName::Static(ref name) if name == "header")
+                    && slot.fallback.len() == 1
         )));
         assert!(result
             .mir
             .nodes
             .iter()
             .all(|node| !matches!(node.kind, Vue3SsrMirKind::PushInterpolated(_))));
+    }
+
+    #[test]
+    fn lower_vue3_ast_to_ssr_mir_projects_slot_outlet_payload() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<slot :name="active" foo="bar" :baz="baz">fallback {{ msg }}</slot>"#.into(),
+            file_id: FileId(42),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = Vue3Dialect::lower_to_ssr_mir(&ast, &Vue3CompilerOptions::default());
+
+        assert_eq!(result.hir.validate_tree(), Ok(()));
+        assert_eq!(result.mir.validate_tree(), Ok(()));
+        let slot = result
+            .mir
+            .nodes
+            .iter()
+            .find_map(|node| match &node.kind {
+                Vue3SsrMirKind::RenderSlot(slot) => Some(slot),
+                _ => None,
+            })
+            .expect("ssr render slot");
+        assert!(matches!(slot.name, Vue3DomSlotName::Dynamic(JsExprId(0))));
+        assert_eq!(slot.props.static_attrs.len(), 1);
+        assert_eq!(slot.props.static_attrs[0].name, "foo");
+        assert_eq!(slot.props.static_attrs[0].value, "bar");
+        assert_eq!(slot.props.dynamic_bindings.len(), 1);
+        assert_eq!(slot.props.dynamic_bindings[0].name, "baz");
+        assert_eq!(slot.props.dynamic_bindings[0].value, JsExprId(1));
+        assert_eq!(slot.fallback.len(), 2);
+        assert_eq!(
+            result
+                .js
+                .expressions()
+                .iter()
+                .map(|entry| entry.source.as_str())
+                .collect::<Vec<_>>(),
+            vec!["active", "baz", "msg"]
+        );
     }
 
     #[test]

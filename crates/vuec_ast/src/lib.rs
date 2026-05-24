@@ -1383,6 +1383,13 @@ pub struct Vue3RenderSlot {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue3SsrSlot {
+    pub name: Vue3DomSlotName,
+    pub props: Vue3DomProps,
+    pub fallback: Vec<NodeId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Vue3SsrMirKind {
     Root,
     PushString(String),
@@ -1391,9 +1398,7 @@ pub enum Vue3SsrMirKind {
     RenderComponent {
         tag: MirExpr,
     },
-    RenderSlot {
-        name: Option<String>,
-    },
+    RenderSlot(Vue3SsrSlot),
     If {
         condition: Option<JsExprId>,
     },
