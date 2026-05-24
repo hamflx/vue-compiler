@@ -1392,6 +1392,7 @@ pub struct Vue3SsrSlot {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3SsrAttrs {
     pub props: Vue3DomProps,
+    pub v_show: Option<JsExprId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

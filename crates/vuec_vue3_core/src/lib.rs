@@ -3338,14 +3338,15 @@ fn lower_vue3_native_element_to_ssr_mir(
 ) {
     let generated_span =
         NodeSpan::generated(ast_node.span.source(), vuec_ast::GeneratedReason::Lowering);
+    let v_show = lower_vue3_ssr_v_show(hir_id, state);
     let open_id = state.mir.push_child(
         mir_parent,
-        Vue3SsrMirKind::PushString(vue3_ssr_open_tag_start(element)),
+        Vue3SsrMirKind::PushString(vue3_ssr_open_tag_start(element, v_show.is_some())),
         generated_span.clone(),
     );
     state.map.record_hir_to_mir(hir_id, open_id);
 
-    if let Some(attrs) = lower_vue3_ssr_attrs(hir_id, state) {
+    if let Some(attrs) = lower_vue3_ssr_attrs(hir_id, v_show, state) {
         let attrs_id = state.mir.push_child(
             mir_parent,
             Vue3SsrMirKind::RenderAttrs(attrs),
@@ -3490,12 +3491,26 @@ fn vue3_sub_span_or_fallback(base: Option<Span>, start: usize, end: usize) -> Sp
     }
 }
 
-fn vue3_ssr_open_tag_start(element: &Vue3Element) -> String {
+fn lower_vue3_ssr_v_show(hir_id: NodeId, state: &Vue3SsrLoweringState) -> Option<JsExprId> {
+    match state.hir.node(hir_id).map(|node| &node.kind) {
+        Some(HirNodeKind::Element(element)) => element
+            .directives
+            .iter()
+            .find(|directive| directive.name == "show")
+            .and_then(|directive| directive.expression),
+        _ => None,
+    }
+}
+
+fn vue3_ssr_open_tag_start(element: &Vue3Element, omit_static_style: bool) -> String {
     let mut rendered = String::new();
     rendered.push('<');
     rendered.push_str(&element.tag);
     for prop in &element.props {
         if let Vue3Prop::Attribute(attr) = prop {
+            if omit_static_style && attr.name == "style" {
+                continue;
+            }
             rendered.push(' ');
             rendered.push_str(&attr.name);
             if let Some(value) = &attr.value {
@@ -3508,26 +3523,43 @@ fn vue3_ssr_open_tag_start(element: &Vue3Element) -> String {
     rendered
 }
 
-fn lower_vue3_ssr_attrs(hir_id: NodeId, state: &Vue3SsrLoweringState) -> Option<Vue3SsrAttrs> {
+fn lower_vue3_ssr_attrs(
+    hir_id: NodeId,
+    v_show: Option<JsExprId>,
+    state: &Vue3SsrLoweringState,
+) -> Option<Vue3SsrAttrs> {
     let props = match state.hir.node(hir_id).map(|node| &node.kind) {
-        Some(HirNodeKind::Element(element)) => filter_vue3_ssr_attr_props(&element.props),
+        Some(HirNodeKind::Element(element)) => filter_vue3_ssr_attr_props(&element.props, v_show),
         _ => HirProps::default(),
     };
     if props.segments.is_empty()
         && props.dynamic_bindings.is_empty()
         && props.object_bindings.is_empty()
+        && v_show.is_none()
     {
         return None;
     }
     Some(Vue3SsrAttrs {
         props: lower_hir_props_to_dom_mir_without_event_cache(&props),
+        v_show,
     })
 }
 
-fn filter_vue3_ssr_attr_props(props: &HirProps) -> HirProps {
+fn filter_vue3_ssr_attr_props(
+    props: &HirProps,
+    include_static_style: Option<JsExprId>,
+) -> HirProps {
     let mut filtered = HirProps::default();
     for segment in &props.segments {
         match segment {
+            HirPropSegment::StaticAttr(attr)
+                if include_static_style.is_some() && attr.name == "style" =>
+            {
+                filtered.static_attrs.push(attr.clone());
+                filtered
+                    .segments
+                    .push(HirPropSegment::StaticAttr(attr.clone()));
+            }
             HirPropSegment::DynamicBinding(binding) => {
                 filtered.dynamic_bindings.push(binding.clone());
                 filtered
@@ -3557,6 +3589,82 @@ fn vue3_ssr_escape_attr(value: &str) -> String {
         .replace('&', "&amp;")
         .replace('"', "&quot;")
         .replace('<', "&lt;")
+}
+
+fn vue3_static_style_object_expr(value: &str) -> String {
+    let properties = vue3_parse_static_style(value)
+        .iter()
+        .map(|(name, value)| {
+            format!(
+                "{}:{}",
+                serde_json::to_string(name).unwrap_or_else(|_| "\"\"".into()),
+                serde_json::to_string(value).unwrap_or_else(|_| "\"\"".into())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("{{{properties}}}")
+}
+
+fn vue3_parse_static_style(value: &str) -> Vec<(String, String)> {
+    let mut style = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0usize;
+    for ch in vue3_strip_css_comments(value).chars() {
+        match ch {
+            '(' => {
+                depth += 1;
+                current.push(ch);
+            }
+            ')' => {
+                depth = depth.saturating_sub(1);
+                current.push(ch);
+            }
+            ';' if depth == 0 => {
+                vue3_push_static_style_decl(&mut style, &current);
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    vue3_push_static_style_decl(&mut style, &current);
+    style
+}
+
+fn vue3_strip_css_comments(value: &str) -> String {
+    let mut output = String::new();
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            let mut previous = '\0';
+            for next in chars.by_ref() {
+                if previous == '*' && next == '/' {
+                    break;
+                }
+                previous = next;
+            }
+        } else {
+            output.push(ch);
+        }
+    }
+    output
+}
+
+fn vue3_push_static_style_decl(style: &mut Vec<(String, String)>, item: &str) {
+    let Some((name, value)) = item.split_once(':') else {
+        return;
+    };
+    let name = name.trim();
+    let value = value.trim();
+    if name.is_empty() || value.is_empty() {
+        return;
+    }
+    if let Some((_, existing)) = style.iter_mut().find(|(existing, _)| existing == name) {
+        *existing = value.to_string();
+    } else {
+        style.push((name.to_string(), value.to_string()));
+    }
 }
 
 fn lower_vue3_props_to_hir(
@@ -11182,6 +11290,11 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                 Vue3SsrMirKind::RenderSlot(slot) => {
                     self.push_prop_helpers(&slot.props, &mut helpers);
                 }
+                Vue3SsrMirKind::RenderAttrs(attrs)
+                    if attrs.v_show.is_some() && ssr_attrs_has_object_binding(&attrs.props) =>
+                {
+                    push_unique_helper(&mut helpers, RuntimeHelper::Vue3MergeProps);
+                }
                 _ => {}
             }
         }
@@ -11198,7 +11311,10 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                     push_unique_helper(&mut helpers, RuntimeHelper::Vue3SsrInterpolate);
                 }
                 Vue3SsrMirKind::RenderAttrs(attrs) => {
-                    self.push_ssr_attr_helpers(&attrs.props, &mut helpers);
+                    self.push_ssr_attr_helpers(attrs, &mut helpers);
+                    if attrs.v_show.is_some() && !ssr_attrs_has_object_binding(&attrs.props) {
+                        push_unique_helper(&mut helpers, RuntimeHelper::Vue3SsrRenderStyle);
+                    }
                 }
                 Vue3SsrMirKind::RenderComponent(_) => {
                     push_unique_helper(&mut helpers, RuntimeHelper::Vue3SsrRenderComponent);
@@ -11222,9 +11338,16 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         helpers
     }
 
-    fn push_ssr_attr_helpers(&self, props: &Vue3DomProps, helpers: &mut Vec<RuntimeHelper>) {
+    fn push_ssr_attr_helpers(&self, attrs: &Vue3SsrAttrs, helpers: &mut Vec<RuntimeHelper>) {
+        let props = &attrs.props;
+        if attrs.v_show.is_some() && ssr_attrs_has_object_binding(props) {
+            push_unique_helper(helpers, RuntimeHelper::Vue3SsrRenderAttrs);
+            return;
+        }
         for binding in &props.dynamic_bindings {
-            self.push_ssr_binding_helper(binding, helpers);
+            if attrs.v_show.is_none() || binding.name != "style" {
+                self.push_ssr_binding_helper(binding, helpers);
+            }
         }
         for binding in &props.object_bindings {
             let _ = binding;
@@ -11233,7 +11356,9 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         for segment in &props.segments {
             match segment {
                 Vue3DomPropSegment::DynamicBinding(binding) => {
-                    self.push_ssr_binding_helper(binding, helpers);
+                    if attrs.v_show.is_none() || binding.name != "style" {
+                        self.push_ssr_binding_helper(binding, helpers);
+                    }
                 }
                 Vue3DomPropSegment::ObjectBinding(_) => {
                     push_unique_helper(helpers, RuntimeHelper::Vue3SsrRenderAttrs);
@@ -11330,7 +11455,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                 ));
             }
             Vue3SsrMirKind::RenderAttrs(attrs) => {
-                self.render_attrs(&attrs.props, scope, writer);
+                self.render_attrs(attrs, scope, writer);
             }
             Vue3SsrMirKind::RenderComponent(component) => {
                 self.render_component(node_id, component, scope, writer);
@@ -11463,7 +11588,12 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         ));
     }
 
-    fn render_attrs(&self, props: &Vue3DomProps, scope: &RenderScope, writer: &mut CodeWriter) {
+    fn render_attrs(&self, attrs: &Vue3SsrAttrs, scope: &RenderScope, writer: &mut CodeWriter) {
+        if attrs.v_show.is_some() {
+            self.render_attrs_with_v_show(attrs, scope, writer);
+            return;
+        }
+        let props = &attrs.props;
         if props.segments.is_empty() {
             for binding in &props.dynamic_bindings {
                 writer.push_line(&format!(
@@ -11499,6 +11629,150 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                 | Vue3DomPropSegment::ObjectListeners(_) => {}
             }
         }
+    }
+
+    fn render_attrs_with_v_show(
+        &self,
+        attrs: &Vue3SsrAttrs,
+        scope: &RenderScope,
+        writer: &mut CodeWriter,
+    ) {
+        let style = self.render_v_show_style(&attrs.props, attrs.v_show.expect("v-show"), scope);
+        if ssr_attrs_has_object_binding(&attrs.props) {
+            let attrs_expr = self.render_v_show_merged_attrs(&attrs.props, &style, scope);
+            writer.push_line(&format!("_push(_ssrRenderAttrs({attrs_expr}));"));
+            return;
+        }
+
+        if attrs.props.segments.is_empty() {
+            for binding in &attrs.props.dynamic_bindings {
+                if binding.name != "style" {
+                    writer.push_line(&format!(
+                        "_push({});",
+                        self.render_ssr_binding(binding, scope)
+                    ));
+                }
+            }
+        } else {
+            for segment in &attrs.props.segments {
+                if let Vue3DomPropSegment::DynamicBinding(binding) = segment {
+                    if binding.name != "style" {
+                        writer.push_line(&format!(
+                            "_push({});",
+                            self.render_ssr_binding(binding, scope)
+                        ));
+                    }
+                }
+            }
+        }
+        writer.push_line(&format!("_push({});", self.render_ssr_style_attr(&style)));
+    }
+
+    fn render_v_show_merged_attrs(
+        &self,
+        props: &Vue3DomProps,
+        style: &str,
+        scope: &RenderScope,
+    ) -> String {
+        let mut merge_args = Vec::new();
+        let mut object_entries = Vec::new();
+        if props.segments.is_empty() {
+            for binding in &props.dynamic_bindings {
+                if binding.name != "style" {
+                    object_entries.push(self.render_ssr_object_binding(binding, scope));
+                }
+            }
+            self.push_merge_object_arg(&mut merge_args, &mut object_entries);
+            for binding in &props.object_bindings {
+                merge_args.push(self.render_js_expr(binding.value, scope));
+            }
+        } else {
+            for segment in &props.segments {
+                match segment {
+                    Vue3DomPropSegment::DynamicBinding(binding) if binding.name != "style" => {
+                        object_entries.push(self.render_ssr_object_binding(binding, scope));
+                    }
+                    Vue3DomPropSegment::ObjectBinding(binding) => {
+                        self.push_merge_object_arg(&mut merge_args, &mut object_entries);
+                        merge_args.push(self.render_js_expr(binding.value, scope));
+                    }
+                    Vue3DomPropSegment::StaticAttr(_)
+                    | Vue3DomPropSegment::DynamicBinding(_)
+                    | Vue3DomPropSegment::Event(_)
+                    | Vue3DomPropSegment::ObjectListeners(_) => {}
+                }
+            }
+            self.push_merge_object_arg(&mut merge_args, &mut object_entries);
+        }
+        merge_args.push(format!("{{ style: {style} }}"));
+        if merge_args.len() == 1 {
+            merge_args.pop().unwrap_or_else(|| "{}".into())
+        } else {
+            format!("_mergeProps({})", merge_args.join(", "))
+        }
+    }
+
+    fn render_ssr_object_binding(&self, binding: &Vue3DomBinding, scope: &RenderScope) -> String {
+        let value = self.render_js_expr(binding.value, scope);
+        if binding.dynamic_arg {
+            let name = binding
+                .dynamic_name
+                .map(|id| self.render_js_expr(id, scope))
+                .unwrap_or_else(|| binding.name.clone());
+            format!("[{}]: {}", render_dynamic_prop_key(&name), value)
+        } else {
+            format!("{}: {}", json_key(&binding.name), value)
+        }
+    }
+
+    fn render_v_show_style(
+        &self,
+        props: &Vue3DomProps,
+        v_show: JsExprId,
+        scope: &RenderScope,
+    ) -> String {
+        let mut parts = Vec::new();
+        if props.segments.is_empty() {
+            for attr in &props.static_attrs {
+                if attr.name == "style" {
+                    parts.push(vue3_static_style_object_expr(&attr.value));
+                }
+            }
+            for binding in &props.dynamic_bindings {
+                if binding.name == "style" {
+                    parts.push(self.render_js_expr(binding.value, scope));
+                }
+            }
+        } else {
+            for segment in &props.segments {
+                match segment {
+                    Vue3DomPropSegment::StaticAttr(attr) if attr.name == "style" => {
+                        parts.push(vue3_static_style_object_expr(&attr.value));
+                    }
+                    Vue3DomPropSegment::DynamicBinding(binding) if binding.name == "style" => {
+                        parts.push(self.render_js_expr(binding.value, scope));
+                    }
+                    Vue3DomPropSegment::StaticAttr(_)
+                    | Vue3DomPropSegment::DynamicBinding(_)
+                    | Vue3DomPropSegment::Event(_)
+                    | Vue3DomPropSegment::ObjectBinding(_)
+                    | Vue3DomPropSegment::ObjectListeners(_) => {}
+                }
+            }
+        }
+        parts.push(format!(
+            "({}) ? null : {{ display: \"none\" }}",
+            self.render_js_expr(v_show, scope)
+        ));
+        if parts.len() == 1 {
+            parts.pop().unwrap_or_else(|| "null".into())
+        } else {
+            format!("[{}]", parts.join(", "))
+        }
+    }
+
+    fn render_ssr_style_attr(&self, style: &str) -> String {
+        format!("` style=\"${{_ssrRenderStyle({style})}}\"`")
     }
 
     fn render_ssr_binding(&self, binding: &Vue3DomBinding, scope: &RenderScope) -> String {
@@ -11841,6 +12115,17 @@ fn props_requires_merge_call(props: &Vue3DomProps) -> bool {
         args += 1;
     }
     args > 1
+}
+
+fn ssr_attrs_has_object_binding(props: &Vue3DomProps) -> bool {
+    if props.segments.is_empty() {
+        !props.object_bindings.is_empty()
+    } else {
+        props
+            .segments
+            .iter()
+            .any(|segment| matches!(segment, Vue3DomPropSegment::ObjectBinding(_)))
+    }
 }
 
 fn vue3_slot_flag_value(flag: Vue3SlotFlag) -> u8 {
@@ -18701,6 +18986,117 @@ mod tests {
             .contains("_push(_ssrRenderAttrs(_ctx.extra));"));
         assert!(generated.code.contains("_push(\"Hi\");"));
         assert!(generated.code.contains("_push(\"</div>\");"));
+    }
+
+    #[test]
+    fn lower_vue3_ast_to_ssr_mir_projects_v_show_style_payload() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div id="app" style="color:red" :style="style" v-show="ok">Hi</div>"#.into(),
+            file_id: FileId(47),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_ssr_mir(&ast, &Vue3CompilerOptions::default());
+
+        assert_eq!(result.hir.validate_tree(), Ok(()));
+        assert_eq!(result.mir.validate_tree(), Ok(()));
+        let attrs = result
+            .mir
+            .nodes
+            .iter()
+            .find_map(|node| match &node.kind {
+                Vue3SsrMirKind::RenderAttrs(attrs) => Some(attrs),
+                _ => None,
+            })
+            .expect("ssr attrs");
+        assert_eq!(attrs.v_show, Some(JsExprId(1)));
+        assert_eq!(attrs.props.static_attrs.len(), 1);
+        assert_eq!(attrs.props.static_attrs[0].name, "style");
+        assert_eq!(attrs.props.static_attrs[0].value, "color:red");
+        assert_eq!(attrs.props.dynamic_bindings.len(), 1);
+        assert_eq!(attrs.props.dynamic_bindings[0].name, "style");
+        assert_eq!(
+            result
+                .js
+                .expressions()
+                .iter()
+                .map(|entry| entry.source.as_str())
+                .collect::<Vec<_>>(),
+            vec!["style", "ok"]
+        );
+        let pushes = result
+            .mir
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.kind {
+                Vue3SsrMirKind::PushString(value) => Some(value.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(pushes, vec!["<div id=\"app\"", ">", "Hi", "</div>"]);
+    }
+
+    #[test]
+    fn generate_vue3_ssr_mir_emits_v_show_style_payload_from_mir() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div><span style="color:red" :style="style" v-show="ok"/></div>"#.into(),
+            file_id: FileId(48),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_ssr_mir(&ast, &Vue3CompilerOptions::default());
+        let generated = generate_vue3_ssr_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated.code.contains("ssrRenderStyle as _ssrRenderStyle"));
+        assert!(!generated.code.contains("mergeProps as _mergeProps"));
+        assert!(!generated.code.contains("style=\\\"color:red\\\""));
+        assert!(!generated.code.contains("ssrRenderAttrs as _ssrRenderAttrs"));
+        assert!(generated.code.contains("_push(\"<span\");"));
+        assert!(generated.code.contains(
+            r#"_push(` style="${_ssrRenderStyle([{"color":"red"}, _ctx.style, (_ctx.ok) ? null : { display: "none" }])}"`);"#
+        ));
+    }
+
+    #[test]
+    fn generate_vue3_ssr_mir_merges_v_show_style_after_object_bindings() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source:
+                r#"<div><span v-bind="extra" :title="title" style="display:flex" :style="style" v-show="ok"/></div>"#
+                    .into(),
+            file_id: FileId(49),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_ssr_mir(&ast, &Vue3CompilerOptions::default());
+        let generated = generate_vue3_ssr_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated.code.contains("mergeProps as _mergeProps"));
+        assert!(generated.code.contains("ssrRenderAttrs as _ssrRenderAttrs"));
+        assert!(!generated.code.contains("ssrRenderStyle as _ssrRenderStyle"));
+        assert!(!generated.code.contains("ssrRenderAttr as _ssrRenderAttr"));
+        assert!(!generated.code.contains("style=\\\"display:flex\\\""));
+        assert!(generated.code.contains(
+            r#"_push(_ssrRenderAttrs(_mergeProps(_ctx.extra, { title: _ctx.title }, { style: [{"display":"flex"}, _ctx.style, (_ctx.ok) ? null : { display: "none" }] })));"#
+        ));
     }
 
     #[test]

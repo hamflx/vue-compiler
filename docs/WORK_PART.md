@@ -76,6 +76,7 @@
 - [x] Vue 3 structural `Vue3SsrMir` adjacent `v-if` / `v-else-if` / `v-else` alternate-chain nesting and standalone SSR MIR codegen ordering.
 - [x] Vue 3 structural `Vue3SsrMir` `v-for` source/value/key/index alias payload, with standalone SSR MIR `_ssrRenderList` codegen consuming the payload and preserving all loop aliases as locals.
 - [x] Vue 3 structural `Vue3SsrMir` Teleport/Suspense built-in component payloads, with `_ssrRenderTeleport` target/disabled and `_ssrRenderSuspense` slot object emitted from MIR instead of normal component fallback.
+- [x] Vue 3 structural `Vue3SsrMir` `v-show` style payload, with standalone SSR MIR codegen merging static style, dynamic style, and SSR-only display fallback from attrs payload instead of AST or DOM MIR fallback.
 - [x] Vue 3 structural DOM/SSR lowering contract entry for directive-backed `v-for` / `v-if` control-flow wrappers, including `HirFor`, `HirIf`, target-specific MIR nodes, `LoweringMap`, and `JsAstStore` source/alias/condition registrations.
 - [x] Vue 3 structural `Vue3DomMir` patch-flag projection foundation for class/style/text/props/hydration/full-props/vnode-hook bits and target `dynamic_props` names.
 - [x] Vue 3 structural DOM/SSR lowering contract entry for adjacent `v-if` / `v-else-if` / `v-else` branch chains as one `HirIf` with multiple branches.
@@ -102,6 +103,11 @@
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Added SSR-target `v-show` style payload to structural `Vue3SsrMir`. `Vue3SsrAttrs` now stores `v_show: Option<JsExprId>` and keeps static `style` in attrs payload, rather than in the opening tag, when `v-show` must merge with static/dynamic style.
+- `generate_vue3_ssr_mir` now consumes that payload directly: normal attrs emit `_ssrRenderStyle([staticStyle, dynamicStyle, condition ? null : { display: "none" }])`, while object `v-bind` paths emit `_ssrRenderAttrs(_mergeProps(object, { style: [...] }))` so object attrs keep official overwrite behavior.
+- This is structural `Vue3SsrMir` target lowering/codegen work only. It does not touch `xtask/src/compat.rs`, does not change the legacy official `compile_ssr` path, and does not count the previous alias-runtime `ssrVShow.spec.ts` support as compiler completion.
+- Verification this round: focused `cargo test -p vuec_vue3_core lower_vue3_ast_to_ssr_mir_projects_v_show_style_payload`, focused `cargo test -p vuec_vue3_core generate_vue3_ssr_mir_emits_v_show_style_payload_from_mir`, focused `cargo test -p vuec_vue3_core generate_vue3_ssr_mir_merges_v_show_style_after_object_bindings`, focused `cargo test -p vuec_vue3_core lower_vue3_ast_to_ssr_mir`, focused `cargo test -p vuec_vue3_core generate_vue3_ssr_mir`, `cargo fmt --all --check`, `git diff --check`, `cargo check -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo xtask run-conformance --suite vue3-core` (`652/652`), and `cargo xtask run-conformance --suite vue3-ssr` (`129/129`, existing mixed official path; this run is regression evidence, not standalone MIR completion by itself).
 
 - Added mode-aware preamble/render shell generation to standalone `generate_vue3_dom_mir`. Module mode keeps helper imports plus `export function render(...)`; prefix function mode now emits top-level Vue helper destructuring plus `return function render(...)`; non-prefix function mode now emits `_Vue`, wraps render body in `with (_ctx)`, and declares helpers inside the with block.
 - Hoist declarations remain render-external target data from `Vue3DomMir`; in non-prefix function mode static hoist helpers are destructured before hoist declarations so hoisted VNodes can render without relying on AST fallback scans.
