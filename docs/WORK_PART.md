@@ -15,7 +15,7 @@
 - [x] Rust npm alias bridge and API manifest parity.
 - [x] Vue 3 SFC official output-contract parity and option-matrix closure.
 - [x] AST / HIR / MIR base arena migration and lowering pipeline alignment.
-- [ ] Vue 3 public projection exactness for directive arg/exp/modifier spans and loc content.
+- [x] Vue 3 public projection exactness for directive arg/exp/modifier spans and loc content.
 - [x] Development plan and goal wording aligned with `docs/3.AST_HIR_MIR_DESIGN.md` as the single AST/HIR/MIR structure constraint.
 - [x] Vue 3 compiler-core alias-runtime expression transform slice for `transformExpressions.spec.ts`.
 - [x] Vue 3 compiler-core alias-runtime `v-on` slice for `vOn.spec.ts`.
@@ -92,6 +92,11 @@
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Closed the Vue 3 public projection exactness stage item for directive `arg` / `exp` / `modifiers`. Existing Rust parser/projection support already preserves dynamic directive arg raw bracket locs, exact directive expression content / loc, normal modifier locs, and `.prop` shorthand's synthetic non-static empty-loc modifier shape through the Node bridge public AST JSON.
+- Added bridge-level Rust regression coverage for the public projection contract: `v-bind:[foo].camel="  bar  "` must expose `arg.content = "foo"`, `arg.loc.source = "[foo]"`, `arg.isStatic = false`, exact `exp.content` / `exp.loc.source = "  bar  "`, and static `camel` modifier loc; `.foo="bar"` must expose static arg `foo` plus non-static synthetic `prop` modifier with empty loc.
+- This is Rust bridge public projection validation and documentation closure, not alias-runtime compiler semantics. `xtask/src/compat.rs` was not touched.
+- Verification this round: focused `cargo test -p vuec_node_bridge vue3_directive_projection`, `cargo fmt --all --check`, `cargo check -p vuec_node_bridge -p vuec_vue3_core -p xtask`, `cargo test -p vuec_node_bridge -p vuec_vue3_core`, `cargo xtask run-conformance --suite vue3-core` (`652/652`; coverage report keeps `rust-backed` / `mixed` / `shim-backed` split), and `git diff --check`.
 
 - Added runtime directive dynamic argument payloads to HIR and `Vue3DomMir`. Static directive args remain string payloads, while dynamic args such as `v-focus:[arg]` are registered once in `JsAstStore` and referenced by `JsExprId`.
 - `generate_vue3_dom_mir` now renders runtime directive dynamic args through the same scoped JS expression renderer used for directive expressions, so prefix/module mode emits `_ctx.arg` instead of `"arg"` while preserving static args as quoted strings.

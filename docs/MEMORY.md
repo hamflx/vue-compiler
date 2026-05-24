@@ -1,5 +1,10 @@
 # Memory
 
+- Current round: closed the Vue 3 public projection exactness stage item for directive `arg` / `exp` / `modifiers`.
+- Added Rust bridge public-projection regression tests that parse `v-bind:[foo].camel="  bar  "` and `.foo="bar"` through `vue3_parse_value`, then assert the public JSON preserves dynamic arg raw bracket loc (`[foo]`) while keeping `arg.content = "foo"` / `isStatic = false`, exact directive expression content and loc including spaces, normal modifier loc/staticness, and `.prop` shorthand's synthetic non-static empty-loc modifier shape.
+- This is validation of the Rust parser / Node bridge public projection contract, not alias-runtime compiler semantics. `xtask/src/compat.rs` was not touched.
+- Verification for this directive public-projection exactness closure: focused `cargo test -p vuec_node_bridge vue3_directive_projection`, `cargo fmt --all --check`, `cargo check -p vuec_node_bridge -p vuec_vue3_core -p xtask`, `cargo test -p vuec_node_bridge -p vuec_vue3_core`, `cargo xtask run-conformance --suite vue3-core` (`652/652`; report distinguishes `rust-backed`, `mixed`, and `shim-backed`), and `git diff --check`.
+
 - Current round: added runtime directive dynamic argument payloads to Vue 3 HIR and DOM MIR.
 - `HirDirectiveUse` and `Vue3DomDirective` now distinguish static `argument: Option<String>` from dynamic `dynamic_argument: Option<JsExprId>`. DOM lowering registers `v-focus:[arg]` style arguments once in `JsAstStore`, carries the expression id through HIR -> `Vue3DomMir`, and keeps static args as quoted string payloads.
 - `generate_vue3_dom_mir` now renders dynamic runtime directive args with the scoped JS expression renderer, so prefix/module mode emits `[_directive_focus, _ctx.value, _ctx.arg, ...]` instead of quoting `"arg"`. This is structural target-codegen work and does not touch `xtask/src/compat.rs`; exact MIR-driven DOM codegen migration remains open.

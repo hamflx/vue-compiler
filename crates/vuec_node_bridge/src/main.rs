@@ -2539,3 +2539,59 @@ fn sfc_style_options(value: Option<&Value>) -> SfcStyleCompileOptions {
 fn bool_option(value: &Value, name: &str, fallback: bool) -> bool {
     value.get(name).and_then(Value::as_bool).unwrap_or(fallback)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn first_projected_prop(source_text: &str) -> Value {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: source_text.into(),
+            file_id: FileId(0),
+            base_offset: 0,
+        };
+        let options = Vue3CompilerOptions::default();
+        let ast = Vue3Dialect::base_parse(source.clone(), &options);
+        let projected = vue3_parse_value(
+            &ast,
+            &source.source,
+            source.base_offset,
+            false,
+            &options,
+            false,
+        );
+        projected["children"][0]["props"][0].clone()
+    }
+
+    #[test]
+    fn vue3_directive_projection_preserves_dynamic_arg_exp_and_modifier_exactness() {
+        let directive = first_projected_prop(r#"<div v-bind:[foo].camel="  bar  "/>"#);
+
+        assert_eq!(directive["name"], json!("bind"));
+        assert_eq!(directive["rawName"], json!("v-bind:[foo].camel"));
+        assert_eq!(directive["arg"]["content"], json!("foo"));
+        assert_eq!(directive["arg"]["isStatic"], json!(false));
+        assert_eq!(directive["arg"]["loc"]["source"], json!("[foo]"));
+        assert_eq!(directive["exp"]["content"], json!("  bar  "));
+        assert_eq!(directive["exp"]["loc"]["source"], json!("  bar  "));
+        assert_eq!(directive["modifiers"][0]["content"], json!("camel"));
+        assert_eq!(directive["modifiers"][0]["isStatic"], json!(true));
+        assert_eq!(directive["modifiers"][0]["loc"]["source"], json!("camel"));
+    }
+
+    #[test]
+    fn vue3_directive_projection_preserves_prop_shorthand_synthetic_modifier_shape() {
+        let directive = first_projected_prop(r#"<div .foo="bar"/>"#);
+
+        assert_eq!(directive["name"], json!("bind"));
+        assert_eq!(directive["rawName"], json!(".foo"));
+        assert_eq!(directive["arg"]["content"], json!("foo"));
+        assert_eq!(directive["arg"]["isStatic"], json!(true));
+        assert_eq!(directive["arg"]["loc"]["source"], json!("foo"));
+        assert_eq!(directive["exp"]["content"], json!("bar"));
+        assert_eq!(directive["modifiers"][0]["content"], json!("prop"));
+        assert_eq!(directive["modifiers"][0]["isStatic"], json!(false));
+        assert_eq!(directive["modifiers"][0]["loc"]["source"], json!(""));
+    }
+}
