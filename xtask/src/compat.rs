@@ -5285,40 +5285,11 @@ const vue3CoreRuntime = (() => {
   runtime.transformText = function transformText(node, context) {
     if (![NodeTypes.ROOT, NodeTypes.ELEMENT, NodeTypes.FOR, NodeTypes.IF_BRANCH].includes(node.type)) return;
     return () => {
-      const children = node.children || [];
-      let hasText = false;
-      let currentContainer;
-      for (let i = 0; i < children.length - 1; i++) {
-        if (runtime.isText(children[i])) {
-          hasText = true;
-          for (let j = i + 1; j < children.length; j++) {
-            if (runtime.isText(children[j])) {
-              if (!currentContainer) currentContainer = children[i] = runtime.createCompoundExpression([children[i]], children[i].loc);
-              currentContainer.children.push(' + ', children[j]);
-              children.splice(j, 1);
-              j--;
-            } else {
-              currentContainer = undefined;
-              break;
-            }
-          }
-        }
-      }
-      if (children.length && runtime.isText(children[children.length - 1])) hasText = true;
-      const isPlainElementWithSingleText = children.length === 1
-        && node.type === NodeTypes.ELEMENT
-        && node.tagType === ElementTypes.ELEMENT
-        && !runtime.findUntransformedCustomDirective(node, context)
-        && node.tag !== 'template';
-      if (!hasText || children.length === 1 && (node.type === NodeTypes.ROOT || isPlainElementWithSingleText)) return;
-      for (let i = 0; i < children.length; i++) {
-        const child = children[i];
-        if (runtime.isText(child) || child.type === NodeTypes.COMPOUND_EXPRESSION) {
-          const callArgs = child.type === NodeTypes.TEXT && child.content === ' ' ? [] : [child];
-          if (runtime.getConstantType(child, context) === ConstantTypes.NOT_CONSTANT) callArgs.push('1 /* TEXT */');
-          children[i] = { type: NodeTypes.TEXT_CALL, content: child, loc: child.loc, codegenNode: runtime.createCallExpression(context.helper(runtime.CREATE_TEXT), callArgs) };
-        }
-      }
+      const projection = callBridge('vue3.core.transformText', {
+        node: runtime.dehydrateForBridge(node),
+        context: vue3TransformTextContextPayload(context),
+      });
+      materializeVue3TransformTextProjection(projection, node, context);
     };
   };
   runtime.findUntransformedCustomDirective = function findUntransformedCustomDirective(node, context) {
@@ -5963,6 +5934,18 @@ function vue3TransformSlotContextPayload(context) {
   };
 }
 
+function vue3TransformTextContextPayload(context) {
+  context = context || {};
+  return {
+    compat: typeof __COMPAT__ !== 'undefined' && !!__COMPAT__,
+    ssr: !!context.ssr,
+    inSSR: !!context.inSSR,
+    directiveTransforms: Object.keys(context.directiveTransforms || {}),
+    identifiers: context.identifiers || {},
+    bindingMetadata: context.bindingMetadata || {},
+  };
+}
+
 function vue3CacheStaticContextPayload(context) {
   context = context || {};
   return {
@@ -5981,6 +5964,43 @@ function vue3ExpressionUtilityContextPayload(context) {
     isTS: !!context.isTS,
     allowLexerFallback: false,
   };
+}
+
+function materializeVue3TransformTextProjection(projection, node, context) {
+  if (!projection || !Array.isArray(projection.operations) || !node || !Array.isArray(node.children)) return;
+  const children = node.children;
+  for (const operation of projection.operations) {
+    if (!operation || !operation.kind) continue;
+    if (operation.kind === 'mergeText') {
+      const start = Number(operation.start || 0);
+      const end = Number(operation.end || start);
+      if (start < 0 || end < start || end >= children.length) continue;
+      const mergedChildren = [];
+      for (let i = start; i <= end; i++) {
+        if (i > start) mergedChildren.push(' + ');
+        mergedChildren.push(children[i]);
+      }
+      children.splice(start, end - start + 1, vue3CoreRuntime.createCompoundExpression(mergedChildren, children[start] && children[start].loc || vue3CoreRuntime.locStub));
+    } else if (operation.kind === 'wrapTextCall') {
+      const index = Number(operation.index || 0);
+      const child = children[index];
+      if (!child) continue;
+      const callArgs = [];
+      if (operation.includeContent !== false) callArgs.push(child);
+      if (operation.patchFlag) callArgs.push(operation.patchFlag);
+      children[index] = {
+        type: vue3CoreRuntime.NodeTypes.TEXT_CALL,
+        content: child,
+        loc: child.loc,
+        codegenNode: vue3CoreRuntime.createCallExpression(
+          context.helper(vue3CoreRuntime.CREATE_TEXT),
+          callArgs,
+        ),
+      };
+    } else {
+      throw new Error(`Unsupported Rust transformText projection: ${operation.kind}`);
+    }
+  }
 }
 
 function materializeVue3CacheStaticOperation(operation, root, context) {
@@ -9866,7 +9886,7 @@ fn conformance_coverage_file_reason(
 ) -> String {
     match source {
         ConformanceCoverageKind::RustBacked => {
-            "Official file exercises public compiler API exports routed through vuec_node_bridge into Rust parser/transform/codegen implementation; generated import shims only preserve official import paths."
+            "Official file exercises compiler behavior routed through vuec_node_bridge into Rust parser/transform/codegen or Rust-backed projection implementation; generated import shims only preserve official import paths and materialize Rust projection results."
                 .to_string()
         }
         ConformanceCoverageKind::ShimBacked | ConformanceCoverageKind::Mixed => {

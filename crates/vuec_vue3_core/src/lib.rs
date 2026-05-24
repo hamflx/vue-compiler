@@ -3177,6 +3177,118 @@ pub fn transform_element_children_projection(payload: &Value) -> Value {
     }
 }
 
+pub fn transform_text_projection(payload: &Value) -> Value {
+    let node = payload.get("node").unwrap_or(&Value::Null);
+    let context = payload.get("context").unwrap_or(&Value::Null);
+    if !matches!(json_node_type(node), Some(0 | 1 | 10 | 11)) {
+        return json!({ "operations": [] });
+    }
+    let Some(source_children) = node.get("children").and_then(Value::as_array) else {
+        return json!({ "operations": [] });
+    };
+    let mut children = source_children.clone();
+    let mut operations = Vec::new();
+    let mut has_text = false;
+    let mut index = 0usize;
+    while index < children.len() {
+        if !vue3_is_text_node(&children[index]) {
+            index += 1;
+            continue;
+        }
+        has_text = true;
+        let start = index;
+        let mut end = index;
+        while end + 1 < children.len() && vue3_is_text_node(&children[end + 1]) {
+            end += 1;
+        }
+        if end > start {
+            let compound = vue3_text_compound(&children[start..=end]);
+            operations.push(json!({
+                "kind": "mergeText",
+                "start": start,
+                "end": end,
+            }));
+            children.splice(start..=end, std::iter::once(compound));
+            index = start + 1;
+        } else {
+            index += 1;
+        }
+    }
+
+    if !has_text {
+        return json!({ "operations": operations });
+    }
+
+    let single_plain_element_text = children.len() == 1
+        && json_node_type(node) == Some(1)
+        && json_u64(node, "tagType") == Some(0)
+        && !vue3_text_has_untransformed_custom_directive(node, context)
+        && !(json_bool(context, "compat") && json_str(node, "tag") == Some("template"));
+    if children.len() == 1 && (json_node_type(node) == Some(0) || single_plain_element_text) {
+        return json!({ "operations": operations });
+    }
+
+    let ssr = json_bool(context, "ssr");
+    for (index, child) in children.iter().enumerate() {
+        if !(vue3_is_text_node(child) || json_node_type(child) == Some(8)) {
+            continue;
+        }
+        let patch_flag = (!ssr && vue3_constant_type(child, context) == VUE3_CONSTANT_NOT)
+            .then_some("1 /* TEXT */");
+        operations.push(json!({
+            "kind": "wrapTextCall",
+            "index": index,
+            "includeContent": !(json_node_type(child) == Some(2)
+                && json_str(child, "content") == Some(" ")),
+            "patchFlag": patch_flag,
+        }));
+    }
+
+    json!({ "operations": operations })
+}
+
+fn vue3_is_text_node(node: &Value) -> bool {
+    matches!(json_node_type(node), Some(2 | 5))
+}
+
+fn vue3_text_compound(children: &[Value]) -> Value {
+    let mut compound_children = Vec::new();
+    for (index, child) in children.iter().enumerate() {
+        if index > 0 {
+            compound_children.push(json!(" + "));
+        }
+        compound_children.push(child.clone());
+    }
+    json!({
+        "type": 8,
+        "children": compound_children,
+        "loc": children
+            .first()
+            .and_then(|child| child.get("loc"))
+            .cloned()
+            .unwrap_or(Value::Null),
+    })
+}
+
+fn vue3_text_has_untransformed_custom_directive(node: &Value, context: &Value) -> bool {
+    let transformed = context
+        .get("directiveTransforms")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    node.get("props")
+        .and_then(Value::as_array)
+        .is_some_and(|props| {
+            props.iter().any(|prop| {
+                json_node_type(prop) == Some(7)
+                    && json_str(prop, "name")
+                        .is_some_and(|name| !transformed.iter().any(|known| *known == name))
+            })
+        })
+}
+
 fn component_slot_projections(children: &[Value]) -> Vec<Value> {
     let mut slots = Vec::new();
     let mut plain_indices = Vec::new();
@@ -11096,6 +11208,108 @@ mod tests {
         assert_eq!(keep_alive["kind"], json!("children"));
         assert_eq!(keep_alive["patchFlag"], json!(1024));
         assert_eq!(keep_alive["shouldUseBlock"], json!(true));
+    }
+
+    #[test]
+    fn transform_text_projection_merges_and_wraps_text_children() {
+        let loc = json!({
+            "start": { "offset": 0, "line": 1, "column": 1 },
+            "end": { "offset": 0, "line": 1, "column": 1 },
+            "source": ""
+        });
+        let projection = transform_text_projection(&json!({
+            "node": {
+                "type": 0,
+                "children": [
+                    { "type": 5, "content": { "type": 4, "content": "foo", "constType": 0 }, "loc": loc },
+                    { "type": 2, "content": " bar ", "loc": loc },
+                    { "type": 5, "content": { "type": 4, "content": "baz", "constType": 0 }, "loc": loc }
+                ]
+            },
+            "context": {}
+        }));
+
+        assert_eq!(projection["operations"][0]["kind"], json!("mergeText"));
+        assert_eq!(projection["operations"][0]["start"], json!(0));
+        assert_eq!(projection["operations"][0]["end"], json!(2));
+        assert_eq!(projection["operations"].as_array().unwrap().len(), 1);
+
+        let wrapped = transform_text_projection(&json!({
+            "node": {
+                "type": 0,
+                "children": [
+                    { "type": 1, "tag": "div" },
+                    { "type": 2, "content": "hello", "loc": loc },
+                    { "type": 1, "tag": "div" }
+                ]
+            },
+            "context": {}
+        }));
+        assert_eq!(wrapped["operations"][0]["kind"], json!("wrapTextCall"));
+        assert_eq!(wrapped["operations"][0]["index"], json!(1));
+        assert_eq!(wrapped["operations"][0]["includeContent"], json!(true));
+    }
+
+    #[test]
+    fn transform_text_projection_honors_compat_and_ssr_boundaries() {
+        let loc = json!({
+            "start": { "offset": 0, "line": 1, "column": 1 },
+            "end": { "offset": 0, "line": 1, "column": 1 },
+            "source": ""
+        });
+        let template = json!({
+            "type": 1,
+            "tag": "template",
+            "tagType": 0,
+            "props": [],
+            "children": [{ "type": 2, "content": "hello", "loc": loc }]
+        });
+
+        assert_eq!(
+            transform_text_projection(&json!({ "node": template, "context": { "compat": false } }))
+                ["operations"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+        let compat_projection =
+            transform_text_projection(&json!({ "node": template, "context": { "compat": true } }));
+        assert_eq!(
+            compat_projection["operations"][0]["kind"],
+            json!("wrapTextCall")
+        );
+
+        let in_ssr_projection = transform_text_projection(&json!({
+            "node": {
+                "type": 0,
+                "children": [
+                    { "type": 1, "tag": "div" },
+                    { "type": 5, "content": { "type": 4, "content": "foo", "constType": 0 }, "loc": loc },
+                    { "type": 1, "tag": "div" }
+                ]
+            },
+            "context": { "inSSR": true }
+        }));
+        assert_eq!(
+            in_ssr_projection["operations"][0]["patchFlag"],
+            json!("1 /* TEXT */")
+        );
+
+        let ssr_projection = transform_text_projection(&json!({
+            "node": {
+                "type": 0,
+                "children": [
+                    { "type": 1, "tag": "div" },
+                    { "type": 5, "content": { "type": 4, "content": "foo", "constType": 0 }, "loc": loc },
+                    { "type": 1, "tag": "div" }
+                ]
+            },
+            "context": { "ssr": true, "inSSR": true }
+        }));
+        assert!(ssr_projection["operations"][0]
+            .get("patchFlag")
+            .is_none_or(Value::is_null));
     }
 
     #[test]
