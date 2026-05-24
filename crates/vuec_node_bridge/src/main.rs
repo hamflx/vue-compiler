@@ -102,6 +102,13 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
                 false,
             ))
         }
+        "vue3.core.generate" => {
+            let options = vue3_options(payload.get("options"));
+            Ok(serde_json::to_value(vuec_vue3_core::generate_public_ast(
+                payload.get("ast").unwrap_or(&Value::Null),
+                &options,
+            ))?)
+        }
         "vue3.core.rootCodegen" => Ok(vuec_vue3_core::root_codegen_projection(
             payload.get("root").unwrap_or(&payload),
         )),
@@ -2333,6 +2340,8 @@ fn vue3_options(value: Option<&Value>) -> Vue3CompilerOptions {
     );
     options.slotted = bool_option(value, "slotted", options.slotted);
     options.inline = bool_option(value, "inline", options.inline);
+    options.ssr = bool_option(value, "ssr", options.ssr);
+    options.optimize_imports = bool_option(value, "optimizeImports", options.optimize_imports);
     options.is_ts = bool_option(value, "isTS", bool_option(value, "is_ts", options.is_ts));
     options.source_map = bool_option(
         value,

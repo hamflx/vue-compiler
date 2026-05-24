@@ -58,9 +58,18 @@
 - [x] Vue 3 compiler-ssr mixed alias-runtime built-in directive transform slice for `ssrVShow.spec.ts` (`7/7`; full SSR suite currently `99/129`, `mixed` coverage).
 - [x] Vue 3 compiler-ssr mixed alias-runtime slot outlet / Transition symbol adapter slice for `ssrSlotOutlet.spec.ts` (`11/11`; full SSR suite currently `121/129`, `mixed` coverage).
 - [x] Vue 3 compiler-ssr mixed alias-runtime conformance closure for prepared official SSR source (`ssrComponent.spec.ts` `16/16`, `ssrInjectCssVars.spec.ts` `6/6`, full SSR suite `129/129`, `mixed` coverage).
+- [x] Vue 3 compiler-core Rust-backed public `generate(ast, options)` codegen slice for `codegen.spec.ts` (`34/34`; Vue 3 core coverage `rust-backed 192/192`, `mixed 460/460`).
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Routed public Vue 3 `@vue/compiler-core.generate(ast, options)` through the Rust bridge and Rust public-AST codegen path.
+- `vuec_vue3_core::generate_public_ast` now covers official public AST codegen output shapes used by `codegen.spec.ts` and downstream DOM/SSR official ASTs: module/function preambles, prefix/with modes, inline `preamble`, SSR helper imports, helper aliasing, hoists, assets, temps, VNode/directive/block calls, patch-flag comments, and JS codegen node families.
+- Extended `vuec_ast::RuntimeHelper` with the Vue 3 helper surface required by public codegen, including DOM directive helpers, built-in component helpers, static vnode helpers, and SSR renderer helpers.
+- Added `vue3.core.generate` to `vuec_node_bridge`, including `ssr` and `optimizeImports` option forwarding.
+- Updated `xtask/src/compat.rs` only as import/API/AST adapter support: generated aliases route `generate` to Rust, dehydrate official AST values/Sets/helper symbols, rehydrate helper symbols by runtime name, and preserve the returned `ast` reference. These changes are not counted as JavaScript shim compiler semantics.
+- Full Vue 3 conformance after this slice: `vue3-core` `652/652` with `rust-backed 192/192`, `mixed 460/460`, `shim-backed 0/0`; `vue3-dom` `133/133` with `mixed 133/133`; `vue3-ssr` `129/129` with `mixed 129/129`.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_vue3_core -p vuec_node_bridge -p xtask` (`74/74` Vue 3 core tests and `20/20` xtask tests pass), `git diff --check`, `cargo xtask export-api --rust --version-line vue3`, focused `codegen.spec.ts` (`34/34`), focused SSR element/component specs (`48/48`), focused `ssrInjectCssVars.spec.ts` inline helper case, `cargo xtask run-conformance --suite vue3-core` (`652/652`), `cargo xtask run-conformance --suite vue3-dom` (`133/133`), and `cargo xtask run-conformance --suite vue3-ssr` (`129/129`).
 
 - Closed the remaining Vue 3 compiler-ssr prepared official suite through mixed alias-runtime compiler-core/codegen adapter support.
 - Full Vue 3 SSR conformance now passes `129/129`; the latest report classifies all prepared SSR tests as `mixed` (`rust-backed 0/0`, `shim-backed 0/0`).

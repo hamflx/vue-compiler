@@ -1844,7 +1844,7 @@ fn alias_export_expression(
 
 fn vue3_core_runtime_export(export_name: &str, detail: &ApiExportDetail) -> Option<()> {
     match export_name {
-        "baseCompile" | "baseParse" => None,
+        "baseCompile" | "baseParse" | "generate" => None,
         _ if detail.kind == "function" => Some(()),
         _ if detail.kind == "symbol" => Some(()),
         "BindingTypes"
@@ -1922,17 +1922,30 @@ fn alias_function_expression(
                 (TargetKind::Vue3Core, "baseParse") | (TargetKind::Vue3Dom, "parse")
             ) {
                 format!(
-                    "hydrateVue3Ast(callBridge({}, bridgePayloadForCall(__vuecPayload)), __vuecPayload.options)",
+                    "hydrateVue3Ast(callBridge({}, bridgePayloadForCall(__vuecBridgePayload)), __vuecPayload.options)",
                     js_string_literal(command)
                 )
             } else {
                 format!(
-                    "callBridge({}, bridgePayloadForCall(__vuecPayload))",
+                    "callBridge({}, bridgePayloadForCall(__vuecBridgePayload))",
                     js_string_literal(command)
                 )
             };
+            let is_vue3_generate = target.kind == TargetKind::Vue3Core && export_name == "generate";
+            let payload = if is_vue3_generate {
+                "Object.assign({}, __vuecPayload, { ast: vue3CoreRuntime.dehydrateForBridge(a0), source: '' })"
+            } else {
+                "__vuecPayload"
+            };
+            let return_expr = if is_vue3_generate {
+                format!(
+                    "(() => {{ const __vuecGenerateResult = {call}; __vuecGenerateResult.ast = a0; return __vuecGenerateResult; }})()"
+                )
+            } else {
+                call
+            };
             format!(
-                "{argument_bindings} const __vuecPayload = normalizeArgs({}); preflightAliasCall({}, __vuecPayload); return {call};",
+                "{argument_bindings} const __vuecPayload = normalizeArgs({}); preflightAliasCall({}, __vuecPayload); const __vuecBridgePayload = {payload}; return {return_expr};",
                 alias_argument_object(target, export_name, body_arity),
                 js_string_literal(alias_preflight_name(target, export_name)),
             )
@@ -1996,6 +2009,7 @@ fn alias_body_arity(target: TargetSpec, export_name: &str, arity: u32) -> u32 {
     match (target.kind, export_name) {
         (TargetKind::Vue3Core | TargetKind::Vue3Dom | TargetKind::Vue3Ssr, "baseCompile")
         | (TargetKind::Vue3Core | TargetKind::Vue3Dom | TargetKind::Vue3Ssr, "baseParse")
+        | (TargetKind::Vue3Core, "generate")
         | (TargetKind::Vue3Dom, "parse")
         | (TargetKind::Vue3Core | TargetKind::Vue3Dom | TargetKind::Vue3Ssr, "compile")
         | (TargetKind::Vue3Sfc, "parse")
@@ -2051,6 +2065,7 @@ fn bridge_command(target: TargetSpec, export_name: &str) -> Option<&'static str>
         (TargetKind::Vue3Sfc, "compileStyleAsync") => Some("sfc.compileStyleAsync"),
         (TargetKind::Vue3Core, "baseCompile") => Some("vue3.core.baseCompile"),
         (TargetKind::Vue3Core, "baseParse") => Some("vue3.core.baseParse"),
+        (TargetKind::Vue3Core, "generate") => Some("vue3.core.generate"),
         (TargetKind::Vue3Dom, "compile") => Some("vue3.dom.compile"),
         (TargetKind::Vue3Dom, "parse") => Some("vue3.dom.parse"),
         (TargetKind::Vue3Ssr, "compile") => Some("vue3.ssr.compile"),
@@ -3447,6 +3462,8 @@ const vue3CoreRuntime = (() => {
   runtime.registerRuntimeHelpers = function registerRuntimeHelpers(helpers) {
     Object.getOwnPropertySymbols(helpers).forEach(symbol => {
       runtime.helperNameMap[symbol] = helpers[symbol];
+      const name = Object.getOwnPropertyDescriptor(symbol, 'description') && symbol.description;
+      if (name && !runtime[name]) runtime[name] = symbol;
     });
   };
   runtime.stringifyExpression = function stringifyExpression(exp) {
@@ -3468,6 +3485,11 @@ const vue3CoreRuntime = (() => {
     if (typeof value === 'symbol') return projectionNameFromHelperSymbol(value);
     if (seen.has(value)) return undefined;
     seen.add(value);
+    if (value instanceof Set) {
+      const out = Array.from(value, item => runtime.dehydrateForBridge(item, seen));
+      seen.delete(value);
+      return out;
+    }
     if (Array.isArray(value)) {
       const out = value.map(item => runtime.dehydrateForBridge(item, seen));
       seen.delete(value);
@@ -3475,7 +3497,7 @@ const vue3CoreRuntime = (() => {
     }
     const out = {};
     for (const key of Object.keys(value)) {
-      if (key === 'loc' || key === 'type' || key === 'tag' || key === 'tagType' || key === 'content' || key === 'isStatic' || key === 'constType' || key === 'props' || key === 'children' || key === 'codegenNode' || key === 'patchFlag' || key === 'dynamicProps' || key === 'directives' || key === 'isBlock' || key === 'isComponent' || key === 'branches' || key === 'returns' || key === 'properties' || key === 'key' || key === 'value' || key === 'arguments' || key === 'callee' || key === 'name' || key === 'arg' || key === 'exp' || key === 'modifiers') {
+      if (key === 'loc' || key === 'type' || key === 'tag' || key === 'tagType' || key === 'content' || key === 'isStatic' || key === 'constType' || key === 'props' || key === 'children' || key === 'codegenNode' || key === 'patchFlag' || key === 'dynamicProps' || key === 'directives' || key === 'isBlock' || key === 'isComponent' || key === 'disableTracking' || key === 'branches' || key === 'source' || key === 'parseResult' || key === 'valueAlias' || key === 'keyAlias' || key === 'objectIndexAlias' || key === 'returns' || key === 'body' || key === 'params' || key === 'newline' || key === 'isSlot' || key === 'isNonScopedSlot' || key === 'needPauseTracking' || key === 'inVOnce' || key === 'needArraySpread' || key === 'index' || key === 'elements' || key === 'test' || key === 'consequent' || key === 'alternate' || key === 'left' || key === 'right' || key === 'expressions' || key === 'helpers' || key === 'ssrHelpers' || key === 'components' || key === 'directives' || key === 'imports' || key === 'hoists' || key === 'cached' || key === 'temps' || key === 'properties' || key === 'key' || key === 'value' || key === 'arguments' || key === 'callee' || key === 'name' || key === 'arg' || key === 'exp' || key === 'modifiers') {
         out[key] = runtime.dehydrateForBridge(value[key], seen);
       }
     }
@@ -6192,6 +6214,8 @@ function vue3DirectiveRuntimePayload(needRuntime) {
 }
 
 function projectionNameFromHelperSymbol(symbol) {
+  const helperName = vue3CoreRuntime.helperNameMap[symbol];
+  if (helperName) return helperName;
   const entries = Object.entries(vue3CoreRuntime).filter(([, value]) => value === symbol);
   return entries.length ? entries[0][0] : undefined;
 }
@@ -6738,7 +6762,9 @@ function materializeVue3ComponentProjectionNode(projection, node, context) {
 }
 
 function helperSymbolFromProjection(name) {
-  return name && vue3CoreRuntime[name] || undefined;
+  if (!name) return undefined;
+  if (vue3CoreRuntime[name]) return vue3CoreRuntime[name];
+  return helperSymbolFromHelperName(name);
 }
 
 function helperSymbolFromHelperName(name) {
@@ -9824,6 +9850,7 @@ fn conformance_coverage_file_kind(
     default: ConformanceCoverageKind,
 ) -> ConformanceCoverageKind {
     if path.ends_with("packages/compiler-core/__tests__/compile.spec.ts")
+        || path.ends_with("packages/compiler-core/__tests__/codegen.spec.ts")
         || path.ends_with("packages/compiler-core/__tests__/parse.spec.ts")
         || path.ends_with("packages/compiler-core/__tests__/scopeId.spec.ts")
     {
