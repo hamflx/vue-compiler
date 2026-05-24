@@ -1251,34 +1251,32 @@ pub enum Vue2NormalizationType {
 pub enum Vue3DomMirKind {
     Root,
     VNodeCall(Vue3VNodeCall),
-    TextCall {
-        value: MirExpr,
-    },
-    Interpolation {
-        expression: JsExprId,
-    },
-    If {
-        condition: Option<JsExprId>,
-    },
-    For {
-        source: JsExprId,
-        alias: JsPatternId,
-    },
-    RenderSlot {
-        name: Option<String>,
-    },
+    TextCall { value: MirExpr },
+    Interpolation { expression: JsExprId },
+    If { condition: Option<JsExprId> },
+    For(Vue3ForMir),
+    RenderSlot { name: Option<String> },
     WithDirectives,
-    Cache {
-        index: u32,
-    },
-    Memo {
-        expression: JsExprId,
-        index: u32,
-    },
-    Hoisted {
-        index: u32,
-    },
+    Cache { index: u32 },
+    Memo { expression: JsExprId, index: u32 },
+    Hoisted { index: u32 },
     Fragment,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue3ForMir {
+    pub source: JsExprId,
+    pub value_alias: JsPatternId,
+    pub key_alias: Option<JsPatternId>,
+    pub index_alias: Option<JsPatternId>,
+    pub key: Option<MirExpr>,
+    pub memo: Option<Vue3ForMemo>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue3ForMemo {
+    pub expression: JsExprId,
+    pub index: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

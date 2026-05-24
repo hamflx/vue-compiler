@@ -14,8 +14,8 @@ use vuec_ast::{
     Vue3Directive, Vue3DomBinding, Vue3DomDirective, Vue3DomEvent, Vue3DomMir, Vue3DomMirKind,
     Vue3DomObjectBinding, Vue3DomObjectListeners, Vue3DomPropSegment, Vue3DomProps,
     Vue3DomPropsNormalize, Vue3DomSlotName, Vue3DomStaticAttr, Vue3DomTag, Vue3Element,
-    Vue3ElementType, Vue3Expression, Vue3NodeKind, Vue3PatchFlags, Vue3Prop, Vue3Root,
-    Vue3SlotFlag, Vue3SsrMir, Vue3SsrMirKind, Vue3VNodeCall,
+    Vue3ElementType, Vue3Expression, Vue3ForMemo, Vue3ForMir, Vue3NodeKind, Vue3PatchFlags,
+    Vue3Prop, Vue3Root, Vue3SlotFlag, Vue3SsrMir, Vue3SsrMirKind, Vue3VNodeCall,
 };
 use vuec_codegen::{CodeWriter, SourceMapArtifact, SourceMapSegment};
 use vuec_html::{HtmlTokenKind, HtmlTokenizer};
@@ -2094,10 +2094,14 @@ fn lower_vue3_for_directive_to_dom_mir(
     );
     let mir_id = state.mir.push_child(
         mir_parent,
-        Vue3DomMirKind::For {
+        Vue3DomMirKind::For(Vue3ForMir {
             source: parsed.source,
-            alias: parsed.value_alias,
-        },
+            value_alias: parsed.value_alias,
+            key_alias: parsed.key_alias,
+            index_alias: parsed.index_alias,
+            key: None,
+            memo: None,
+        }),
         ast_node.span.clone(),
     );
     state.map.record_ast_to_hir(ast_id, hir_id);
@@ -2120,7 +2124,65 @@ fn lower_vue3_for_directive_to_dom_mir(
             }
         }
     }
+    let key = vue3_for_key_mir_expr(element, ast_node, &mut state.js, state.source_type);
+    let memo = vue3_for_memo_mir(element, ast_node, state);
+    if let Some(node) = state.mir.node_mut(mir_id) {
+        if let Vue3DomMirKind::For(for_mir) = &mut node.kind {
+            for_mir.key = key;
+            for_mir.memo = memo;
+        }
+    }
     Some((hir_id, mir_id))
+}
+
+fn vue3_for_key_mir_expr(
+    element: &Vue3Element,
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    js: &mut JsAstStore,
+    source_type: oxc_span::SourceType,
+) -> Option<MirExpr> {
+    element.props.iter().find_map(|prop| match prop {
+        Vue3Prop::Directive(dir)
+            if dir.name == "bind"
+                && dir
+                    .arg
+                    .as_ref()
+                    .is_some_and(|arg| arg.source_string() == "key") =>
+        {
+            dir.exp
+                .as_ref()
+                .filter(|exp| !exp.source_string().trim().is_empty())
+                .map(|exp| {
+                    MirExpr::JsExpr(register_or_reuse_vue3_expression_with_span(
+                        js,
+                        exp,
+                        dir.exp_span.or_else(|| ast_node.span.source()),
+                        source_type,
+                    ))
+                })
+        }
+        Vue3Prop::Attribute(attr) if attr.name == "key" => attr.value.clone().map(MirExpr::String),
+        _ => None,
+    })
+}
+
+fn vue3_for_memo_mir(
+    element: &Vue3Element,
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    state: &mut Vue3DomLoweringState,
+) -> Option<Vue3ForMemo> {
+    let memo = directive_by_name(element, "memo")?;
+    let expression = register_vue3_expression_with_span(
+        &mut state.js,
+        memo.exp
+            .as_ref()
+            .unwrap_or(&Vue3Expression::Raw(String::new())),
+        memo.exp_span.or_else(|| ast_node.span.source()),
+        state.source_type,
+    );
+    let index = state.next_cache_index;
+    state.next_cache_index += 1;
+    Some(Vue3ForMemo { expression, index })
 }
 
 fn lower_vue3_if_directive_to_dom_mir(
@@ -2934,6 +2996,29 @@ fn register_vue3_expression_with_span(
             span.unwrap_or_else(|| Span::new(FileId(0), 0, source.len())),
             source_type,
         ),
+        Vue3Expression::JsExpr(id) => *id,
+    }
+}
+
+fn register_or_reuse_vue3_expression_with_span(
+    store: &mut JsAstStore,
+    expression: &Vue3Expression,
+    span: Option<Span>,
+    source_type: oxc_span::SourceType,
+) -> vuec_ast::JsExprId {
+    match expression {
+        Vue3Expression::Raw(source) => {
+            let span = span.unwrap_or_else(|| Span::new(FileId(0), 0, source.len()));
+            if let Some((index, _)) = store
+                .expressions()
+                .iter()
+                .enumerate()
+                .find(|(_, entry)| entry.source == *source && entry.span == span)
+            {
+                return JsExprId(index as u32);
+            }
+            store.register_expr(source.clone(), span, source_type)
+        }
         Vue3Expression::JsExpr(id) => *id,
     }
 }
@@ -9290,11 +9375,14 @@ impl<'a> Vue3DomMirCodegen<'a> {
                         push_unique_helper(&mut helpers, RuntimeHelper::Vue3CreateCommentVNode);
                     }
                 }
-                Vue3DomMirKind::For { .. } => {
+                Vue3DomMirKind::For(for_mir) => {
                     push_unique_helper(&mut helpers, RuntimeHelper::Vue3OpenBlock);
                     push_unique_helper(&mut helpers, RuntimeHelper::Vue3CreateElementBlock);
                     push_unique_helper(&mut helpers, RuntimeHelper::Vue3Fragment);
                     push_unique_helper(&mut helpers, RuntimeHelper::Vue3RenderList);
+                    if for_mir.memo.is_some() {
+                        push_unique_helper(&mut helpers, RuntimeHelper::Vue3IsMemoSame);
+                    }
                 }
                 Vue3DomMirKind::RenderSlot { .. } => {
                     push_unique_helper(&mut helpers, RuntimeHelper::Vue3RenderSlot);
@@ -9426,9 +9514,7 @@ impl<'a> Vue3DomMirCodegen<'a> {
                 self.render_js_expr(*expression)
             )),
             Vue3DomMirKind::If { condition } => Some(self.render_if(node_id, *condition)),
-            Vue3DomMirKind::For { source, alias } => {
-                Some(self.render_for(node_id, *source, *alias))
-            }
+            Vue3DomMirKind::For(for_mir) => Some(self.render_for(node_id, for_mir)),
             Vue3DomMirKind::RenderSlot { name } => Some(format!(
                 "_renderSlot({}, {})",
                 if uses_prefixed_identifiers(self.options) {
@@ -9848,18 +9934,63 @@ impl<'a> Vue3DomMirCodegen<'a> {
         )
     }
 
-    fn render_for(&self, node_id: NodeId, source: JsExprId, alias: JsPatternId) -> String {
-        let source = self.render_js_expr(source);
-        let alias = self.render_js_pattern(alias);
+    fn render_for(&self, node_id: NodeId, for_mir: &Vue3ForMir) -> String {
+        let source = self.render_js_expr(for_mir.source);
         let children = self.render_children(node_id, Vue3DomMirRenderMode::Root);
         let body = match children.as_slice() {
             [] => "null".into(),
             [single] => single.clone(),
             _ => render_array(&children),
         };
+        let params = self.render_for_params(for_mir);
+        if let Some(memo) = &for_mir.memo {
+            return self.render_memo_for(&source, &params, for_mir.key.as_ref(), memo, &body);
+        }
+        let fragment_flag = if for_mir.key.is_some() {
+            "128 /* KEYED_FRAGMENT */"
+        } else {
+            "256 /* UNKEYED_FRAGMENT */"
+        };
         format!(
-            "(_openBlock(true), _createElementBlock(_Fragment, null, _renderList({source}, ({alias}) => {{\n  return {}\n}}), 256 /* UNKEYED_FRAGMENT */))",
+            "(_openBlock(true), _createElementBlock(_Fragment, null, _renderList({source}, ({params}) => {{\n  return {}\n}}), {fragment_flag}))",
             indent_after_first_line(&body, 2)
+        )
+    }
+
+    fn render_for_params(&self, for_mir: &Vue3ForMir) -> String {
+        let mut params = vec![self.render_js_pattern(for_mir.value_alias)];
+        if let Some(key) = for_mir.key_alias {
+            params.push(self.render_js_pattern(key));
+        }
+        if let Some(index) = for_mir.index_alias {
+            params.push(self.render_js_pattern(index));
+        }
+        params.join(", ")
+    }
+
+    fn render_memo_for(
+        &self,
+        source: &str,
+        params: &str,
+        key: Option<&MirExpr>,
+        memo: &Vue3ForMemo,
+        body: &str,
+    ) -> String {
+        let params = format!("{params}, __, ___, _cached");
+        let memo_expression = self.render_js_expr(memo.expression);
+        let guard = key.map_or_else(
+            || "_cached && _cached.el && _isMemoSame(_cached, _memo)".into(),
+            |key| {
+                format!(
+                    "_cached && _cached.el && _cached.key === {} && _isMemoSame(_cached, _memo)",
+                    self.render_mir_expr(key)
+                )
+            },
+        );
+        format!(
+            "(_openBlock(true), _createElementBlock(_Fragment, null, _renderList({source}, ({params}) => {{\n  const _memo = ({memo_expression})\n  if ({guard}) return _cached\n  const _item = {}\n  _item.memo = _memo\n  return _item\n}}, _cache, {}), 128 /* KEYED_FRAGMENT */))",
+            indent_after_first_line(body, 2),
+            memo.index
         )
     }
 
@@ -10007,13 +10138,21 @@ fn vue3_codegen_helpers(
     expr: &str,
     has_components: bool,
 ) -> Vec<RuntimeHelper> {
+    let helper_probe = format!("{}\n{}", declarations.join("\n"), expr);
     let mut helpers =
         if let Some(root) = vue3_codegen_root(ast).filter(|root| !root.helpers.is_empty()) {
-            root.helpers.iter().copied().collect()
+            prune_helpers_to_rendered_code(
+                root.helpers.iter().copied().collect(),
+                &helper_probe,
+                has_components,
+            )
         } else if !ctx.helpers.is_empty() {
-            ctx.helpers.iter().copied().collect()
+            prune_helpers_to_rendered_code(
+                ctx.helpers.iter().copied().collect(),
+                &helper_probe,
+                has_components,
+            )
         } else {
-            let helper_probe = format!("{}\n{}", declarations.join("\n"), expr);
             let mut helpers =
                 render_helpers_from_code(vue3_helper_order(has_components), &helper_probe);
             let needs_comment_helper = helper_probe.contains("_createCommentVNode(")
@@ -10031,6 +10170,34 @@ fn vue3_codegen_helpers(
     sort_helpers_by_order(&mut helpers, vue3_helper_order(has_components));
     apply_vue3_memo_helper_order(&mut helpers);
     helpers
+}
+
+fn prune_helpers_to_rendered_code(
+    helpers: Vec<RuntimeHelper>,
+    helper_probe: &str,
+    has_components: bool,
+) -> Vec<RuntimeHelper> {
+    let mut pruned = render_helpers_from_code(vue3_helper_order(has_components), helper_probe);
+    let needs_comment_helper = helper_probe.contains("_createCommentVNode(")
+        || helper_probe.contains("? (_openBlock()")
+        || helper_probe.contains("? _withMemo(");
+    for helper in helpers {
+        if pruned.contains(&helper) {
+            continue;
+        }
+        match helper {
+            RuntimeHelper::Vue3CreateCommentVNode if needs_comment_helper => {
+                pruned.push(helper);
+            }
+            RuntimeHelper::Vue3WithMemo
+                if helper_probe.contains(&helper_reference(RuntimeHelper::Vue3IsMemoSame)) =>
+            {
+                pruned.push(helper);
+            }
+            _ => {}
+        }
+    }
+    pruned
 }
 
 fn apply_vue3_memo_helper_order(helpers: &mut Vec<RuntimeHelper>) {
@@ -15008,7 +15175,7 @@ mod tests {
             .mir
             .nodes
             .iter()
-            .any(|node| matches!(node.kind, Vue3DomMirKind::For { .. })));
+            .any(|node| matches!(node.kind, Vue3DomMirKind::For(_))));
         assert!(result
             .mir
             .nodes
@@ -15033,6 +15200,61 @@ mod tests {
             .expect("li vnode");
         assert_eq!(li_mir.patch_flag.bits, 1);
         assert!(li_mir.dynamic_props.is_empty());
+    }
+
+    #[test]
+    fn lower_vue3_ast_to_dom_mir_projects_v_for_memo_cache_target() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div v-for="{ x, y } in list" :key="x" v-memo="[x, y === z]"><span>foobar</span></div>"#.into(),
+            file_id: FileId(14),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+
+        assert_eq!(result.hir.validate_tree(), Ok(()));
+        assert_eq!(result.mir.validate_tree(), Ok(()));
+        assert_eq!(
+            result
+                .js
+                .expressions()
+                .iter()
+                .map(|entry| entry.source.as_str())
+                .collect::<Vec<_>>(),
+            vec!["list", "x", "[x, y === z]"]
+        );
+        assert_eq!(
+            result
+                .js
+                .patterns()
+                .iter()
+                .map(|entry| entry.source.as_str())
+                .collect::<Vec<_>>(),
+            vec!["{ x, y }"]
+        );
+
+        let for_mir = result
+            .mir
+            .nodes
+            .iter()
+            .find_map(|node| match &node.kind {
+                Vue3DomMirKind::For(for_mir) => Some(for_mir),
+                _ => None,
+            })
+            .expect("DOM MIR for");
+        assert_eq!(for_mir.source, JsExprId(0));
+        assert_eq!(for_mir.value_alias, JsPatternId(0));
+        assert!(for_mir.key_alias.is_none());
+        assert!(for_mir.index_alias.is_none());
+        assert_eq!(for_mir.key, Some(MirExpr::JsExpr(JsExprId(1))));
+        assert_eq!(
+            for_mir.memo,
+            Some(Vue3ForMemo {
+                expression: JsExprId(2),
+                index: 0,
+            })
+        );
     }
 
     #[test]
@@ -15242,7 +15464,7 @@ mod tests {
             .mir
             .nodes
             .iter()
-            .any(|node| matches!(node.kind, Vue3DomMirKind::For { .. })));
+            .any(|node| matches!(node.kind, Vue3DomMirKind::For(_))));
         assert_eq!(
             result
                 .js
@@ -15250,7 +15472,7 @@ mod tests {
                 .iter()
                 .map(|entry| entry.source.as_str())
                 .collect::<Vec<_>>(),
-            vec!["[msg]", "msg", "list", "item.name"]
+            vec!["[msg]", "msg", "list", "item.name", "[item.id]"]
         );
     }
 
@@ -15371,6 +15593,43 @@ mod tests {
             .contains("_withMemo([msg], () => (_openBlock(), _createElementBlock(\"p\""));
         assert!(generated.code.contains("_cache, 0)"));
         assert!(generated.code.contains("_toDisplayString(msg)"));
+    }
+
+    #[test]
+    fn generate_vue3_dom_mir_emits_v_for_memo_cache_target() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div v-for="{ x, y } in list" :key="x" v-memo="[x, y === z]"><span>foobar</span></div>"#.into(),
+            file_id: FileId(31),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+        let generated = generate_vue3_dom_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated.code.contains("isMemoSame as _isMemoSame"));
+        assert!(generated
+            .code
+            .contains("_renderList(list, ({ x, y }, __, ___, _cached) =>"));
+        assert!(generated.code.contains("const _memo = ([x, y === z])"));
+        assert!(generated
+            .code
+            .contains("_cached.key === x && _isMemoSame(_cached, _memo)"));
+        assert!(generated
+            .code
+            .contains("const _item = (_openBlock(), _createElementBlock(\"div\""));
+        assert!(generated.code.contains("_item.memo = _memo"));
+        assert!(generated
+            .code
+            .contains("}, _cache, 0), 128 /* KEYED_FRAGMENT */)"));
     }
 
     #[test]

@@ -82,9 +82,16 @@
 - [x] Vue 3 structural `Vue3DomMir` stable component slots payload for default and static named slots, with MIR-driven `_withCtx` slot object emission in standalone DOM MIR codegen.
 - [x] Vue 3 structural `Vue3DomMir` dynamic component slots payload for dynamic slot names, slot `v-if`, and slot `v-for`, with MIR-driven `_createSlots`, `_renderList`, and `DYNAMIC_SLOTS` patch flag emission.
 - [x] Vue 3 structural `Vue3DomMir` non-`v-for` `v-memo` wrapper payload, with MIR-driven `_withMemo` emission in standalone DOM MIR codegen.
+- [x] Vue 3 structural `Vue3DomMir` `v-for` memo cache target payload, with MIR-driven alias params, key guard, `_isMemoSame`, `_cached`, `_item.memo`, and `_cache` render-list emission.
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Added `Vue3ForMir` / `Vue3ForMemo` as the DOM-target `v-for` payload. DOM MIR now preserves value/key/index aliases, explicit `:key` / static `key`, and `v-for`-scoped memo expressions/cache slots instead of reducing loops to source plus value alias.
+- DOM lowering fills the new payload after the loop body is lowered, so existing element prop lowering remains the owner for `:key` expression registration and `v-memo` is only recorded once for the target cache path.
+- `generate_vue3_dom_mir` now emits full memoized render-list cache code from MIR: extra `__, ___, _cached` params, `const _memo`, optional key guard, `_isMemoSame`, `const _item`, `_item.memo`, `_cache` argument, and `128 /* KEYED_FRAGMENT */`.
+- This remains structural target-codegen work. Standalone DOM MIR codegen still does not perform exact identifier prefix rewriting inside JS store expressions, and the exact AST emitter remains the official parity path for current Vue 3 conformance.
+- Verification this round: focused `cargo test -p vuec_vue3_core lower_vue3_ast_to_dom_mir_projects_v_for_memo_cache_target`, focused `cargo test -p vuec_vue3_core generate_vue3_dom_mir_emits_v_for_memo_cache_target`, `cargo fmt --all --check`, `cargo check -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, focused official `scopeId.spec.ts` + `vMemo.spec.ts` (`11/11`), `cargo xtask run-conformance --suite vue3-core` (`652/652`; coverage report keeps `rust-backed` / `mixed` / `shim-backed` split), and `git diff --check`.
 
 - Added `Vue3DomMirKind::Memo { expression, index }` as the DOM-target payload for non-`v-for` `v-memo`, keeping the memo expression in `JsAstStore` and the cache slot in MIR.
 - DOM lowering now wraps non-`v-for` memoized elements in `Memo` before lowering their VNode body. Structural directives such as `memo`, `once`, `slot`, `pre`, `html`, and `text` are no longer lowered as runtime HIR directives.

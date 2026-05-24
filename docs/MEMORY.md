@@ -1,5 +1,11 @@
 # Memory
 
+- Current round: added `v-for` memo cache target payloads to structural Vue 3 DOM MIR.
+- `Vue3DomMirKind::For` now carries `Vue3ForMir`, including source, value/key/index aliases, explicit key expression/string, and optional `Vue3ForMemo { expression, index }`. DOM lowering records the key/memo target payload after lowering the loop body, keeping `JsAstStore` ownership stable for existing element props.
+- `generate_vue3_dom_mir` now emits memoized render-list cache code from MIR: `__, ___, _cached` params, `const _memo`, optional key guard, `_isMemoSame`, `const _item`, `_item.memo`, `_cache` argument, and keyed fragment flag.
+- This is structural DOM MIR codegen progress only. The standalone MIR emitter still renders JS store expressions as registered source and does not claim exact prefix-identifier parity; the exact AST emitter remains the official Vue 3 conformance path until full migration.
+- Verification for this v-for memo MIR slice: focused `cargo test -p vuec_vue3_core lower_vue3_ast_to_dom_mir_projects_v_for_memo_cache_target`, focused `cargo test -p vuec_vue3_core generate_vue3_dom_mir_emits_v_for_memo_cache_target`, `cargo fmt --all --check`, `cargo check -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, focused official `scopeId.spec.ts` + `vMemo.spec.ts` (`11/11`), `cargo xtask run-conformance --suite vue3-core` (`652/652`; report distinguishes `rust-backed`, `mixed`, and `shim-backed`), and `git diff --check`.
+
 - Current round: added non-`v-for` `v-memo` wrappers to structural Vue 3 DOM MIR.
 - `Vue3DomMirKind::Memo { expression, index }` now stores the memo expression as a `JsExprId` and the target cache slot. DOM lowering wraps non-`v-for` memoized elements before lowering their VNode body; `v-for` memo cache guards remain out of scope for this slice.
 - `generate_vue3_dom_mir` now imports `_withMemo` and emits `_withMemo(expression, () => vnode, _cache, index)` from MIR. Structural directives such as `memo`, `once`, `slot`, `pre`, `html`, and `text` are excluded from runtime HIR directives.
