@@ -850,7 +850,7 @@ fn vue3_parse_diagnostics(
 ) -> Vec<Value> {
     let mut diagnostics = Vec::new();
     collect_html_parse_error_diagnostics(source, options, &mut diagnostics);
-    collect_invalid_lt_diagnostics(source, &mut diagnostics);
+    collect_invalid_lt_diagnostics(ast, source, base_offset, &mut diagnostics);
     collect_missing_interpolation_end_diagnostics(source, options, &mut diagnostics);
     collect_invalid_end_tag_diagnostics(ast, source, base_offset, options, &mut diagnostics);
     collect_missing_directive_name_diagnostics(ast, source, base_offset, &mut diagnostics);
@@ -905,7 +905,18 @@ fn collect_html_parse_error_diagnostics(
     collect_missing_end_tag_name_diagnostics(source, diagnostics);
 
     let mut stack = Vec::<OpenDiagnosticElement>::new();
-    for token in HtmlTokenizer::new(source).tokenize() {
+    let mut v_pre_depth = 0usize;
+    let mut tokenizer = HtmlTokenizer::new(source);
+    loop {
+        if v_pre_depth > 0 {
+            tokenizer.set_interpolation_delimiters("", "");
+        } else if let Some([open, close]) = &options.delimiters {
+            tokenizer.set_interpolation_delimiters(open, close);
+        } else {
+            tokenizer.set_interpolation_delimiters("{{", "}}");
+        }
+        let token = tokenizer.next_token();
+        let eof = matches!(token.kind, HtmlTokenKind::Eof);
         match token.kind {
             HtmlTokenKind::StartTag {
                 name,
@@ -926,9 +937,36 @@ fn collect_html_parse_error_diagnostics(
                         vue3_source_loc_value(source, source.len(), source.len()),
                     ));
                 } else if !self_closing && !vue3_is_void_tag(options, &name) {
+                    let starts_v_pre =
+                        v_pre_depth == 0 && attributes.iter().any(|attr| attr.name == "v-pre");
+                    let in_v_pre = v_pre_depth > 0 || starts_v_pre;
                     let namespace =
-                        vue3_tag_namespace(options, &name, stack.last().map(|open| open.namespace));
-                    stack.push(OpenDiagnosticElement { name, namespace });
+                        vue3_diagnostic_tag_namespace(options, &name, &attributes, stack.last());
+                    let raw_text_kind =
+                        vuec_vue3_core::vue3_raw_text_kind(&name, namespace, in_v_pre);
+                    let raw_tag = name.clone();
+                    stack.push(OpenDiagnosticElement {
+                        name,
+                        start: token.start,
+                        namespace,
+                        attributes,
+                        in_v_pre,
+                    });
+                    if in_v_pre {
+                        v_pre_depth += 1;
+                    }
+                    if raw_text_kind.is_some() {
+                        if let Some((_text_end, end_tag_end)) =
+                            vuec_vue3_core::find_matching_raw_text_end(source, token.end, &raw_tag)
+                        {
+                            tokenizer.set_cursor(end_tag_end);
+                            if let Some(open) = stack.pop() {
+                                if open.in_v_pre && v_pre_depth > 0 {
+                                    v_pre_depth -= 1;
+                                }
+                            }
+                        }
+                    }
                 }
             }
             HtmlTokenKind::EndTag { name } => {
@@ -950,7 +988,7 @@ fn collect_html_parse_error_diagnostics(
                             vue3_source_loc_value(source, source.len(), source.len()),
                         ));
                     } else {
-                        pop_diagnostic_stack_until(&mut stack, &name);
+                        pop_diagnostic_stack_until(&mut stack, &name, &mut v_pre_depth);
                     }
                 } else if tag_token_is_incomplete(source, token.start, token.end) {
                     diagnostics.push(vue3_error_value(
@@ -958,7 +996,7 @@ fn collect_html_parse_error_diagnostics(
                         vue3_source_loc_value(source, source.len(), source.len()),
                     ));
                 } else {
-                    pop_diagnostic_stack_until(&mut stack, &name);
+                    pop_diagnostic_stack_until(&mut stack, &name, &mut v_pre_depth);
                 }
             }
             HtmlTokenKind::Comment(_) => {
@@ -1000,28 +1038,98 @@ fn collect_html_parse_error_diagnostics(
             }
             HtmlTokenKind::Text(_) | HtmlTokenKind::Doctype(_) | HtmlTokenKind::Eof => {}
         }
+        if eof {
+            break;
+        }
     }
 }
 
 struct OpenDiagnosticElement {
     name: String,
+    start: usize,
     namespace: vuec_ast::HtmlNamespace,
+    attributes: Vec<vuec_html::HtmlAttribute>,
+    in_v_pre: bool,
 }
 
-fn vue3_tag_namespace(
+fn vue3_diagnostic_tag_namespace(
     options: &Vue3CompilerOptions,
     tag: &str,
-    parent: Option<vuec_ast::HtmlNamespace>,
+    attributes: &[vuec_html::HtmlAttribute],
+    parent: Option<&OpenDiagnosticElement>,
 ) -> vuec_ast::HtmlNamespace {
-    options
-        .namespaces
-        .get(tag)
-        .copied()
-        .unwrap_or_else(|| parent.unwrap_or(vuec_ast::HtmlNamespace::Html))
+    if let Some(namespace) = options.namespaces.get(tag).copied() {
+        return namespace;
+    }
+    let mut namespace = parent
+        .map(|open| open.namespace)
+        .unwrap_or(options.root_namespace);
+    if options.dom_namespaces {
+        if let Some(parent) = parent {
+            if namespace == vuec_ast::HtmlNamespace::MathMl {
+                if parent.name == "annotation-xml" {
+                    if tag == "svg" {
+                        return vuec_ast::HtmlNamespace::Svg;
+                    }
+                    if diagnostic_attrs_have_value(
+                        &parent.attributes,
+                        "encoding",
+                        &["text/html", "application/xhtml+xml"],
+                    ) {
+                        namespace = vuec_ast::HtmlNamespace::Html;
+                    }
+                } else if vue3_mathml_text_integration_point(&parent.name)
+                    && tag != "mglyph"
+                    && tag != "malignmark"
+                {
+                    namespace = vuec_ast::HtmlNamespace::Html;
+                }
+            } else if namespace == vuec_ast::HtmlNamespace::Svg
+                && matches!(parent.name.as_str(), "foreignObject" | "desc" | "title")
+            {
+                namespace = vuec_ast::HtmlNamespace::Html;
+            }
+        }
+        if namespace == vuec_ast::HtmlNamespace::Html {
+            if tag == "svg" {
+                return vuec_ast::HtmlNamespace::Svg;
+            }
+            if tag == "math" {
+                return vuec_ast::HtmlNamespace::MathMl;
+            }
+        }
+    }
+    let _ = attributes;
+    namespace
 }
 
-fn pop_diagnostic_stack_until(stack: &mut Vec<OpenDiagnosticElement>, name: &str) {
+fn vue3_mathml_text_integration_point(tag: &str) -> bool {
+    matches!(tag, "mi" | "mo" | "mn" | "ms" | "mtext")
+}
+
+fn diagnostic_attrs_have_value(
+    attributes: &[vuec_html::HtmlAttribute],
+    name: &str,
+    values: &[&str],
+) -> bool {
+    attributes.iter().any(|attr| {
+        attr.name == name
+            && attr
+                .value
+                .as_deref()
+                .is_some_and(|value| values.iter().any(|candidate| *candidate == value))
+    })
+}
+
+fn pop_diagnostic_stack_until(
+    stack: &mut Vec<OpenDiagnosticElement>,
+    name: &str,
+    v_pre_depth: &mut usize,
+) {
     while let Some(open) = stack.pop() {
+        if open.in_v_pre && *v_pre_depth > 0 {
+            *v_pre_depth -= 1;
+        }
         if open.name.eq_ignore_ascii_case(name) {
             break;
         }
@@ -1194,23 +1302,32 @@ fn first_unexpected_unquoted_attribute_value_char(
         .find_map(|(index, ch)| matches!(ch, '"' | '\'' | '<' | '=' | '`').then_some(start + index))
 }
 
-fn collect_invalid_lt_diagnostics(source: &str, diagnostics: &mut Vec<Value>) {
-    for token in HtmlTokenizer::new(source).tokenize() {
-        let HtmlTokenKind::Text(text) = token.kind else {
+fn collect_invalid_lt_diagnostics(
+    ast: &Vue3Ast,
+    source: &str,
+    base_offset: usize,
+    diagnostics: &mut Vec<Value>,
+) {
+    for node in &ast.nodes {
+        let Vue3AstKind::Text(_) = &node.kind else {
             continue;
         };
-        let interpolation_ranges = default_interpolation_ranges(&text);
+        if text_has_raw_text_parent(ast, node.id) {
+            continue;
+        }
+        let Some(span) = node.span.source() else {
+            continue;
+        };
+        let start = span.start.0.saturating_sub(base_offset);
+        let end = span.end.0.saturating_sub(base_offset).min(source.len());
+        let Some(slice) = source.get(start..end) else {
+            continue;
+        };
         let mut cursor = 0usize;
-        while let Some(offset) = text[cursor..].find('<') {
+        while let Some(offset) = slice[cursor..].find('<') {
             let local_index = cursor + offset;
             cursor = local_index + 1;
-            if interpolation_ranges
-                .iter()
-                .any(|(start, end)| local_index >= *start && local_index < *end)
-            {
-                continue;
-            }
-            let global_index = token.start + local_index;
+            let global_index = start + local_index;
             match source.as_bytes().get(global_index + 1).copied() {
                 Some(b'?') => diagnostics.push(vue3_error_value(
                     21,
@@ -1239,20 +1356,18 @@ fn collect_invalid_lt_diagnostics(source: &str, diagnostics: &mut Vec<Value>) {
     }
 }
 
-fn default_interpolation_ranges(text: &str) -> Vec<(usize, usize)> {
-    let mut ranges = Vec::new();
-    let mut cursor = 0usize;
-    while let Some(open_offset) = text[cursor..].find("{{") {
-        let open = cursor + open_offset;
-        let inner_start = open + 2;
-        let Some(close_offset) = text[inner_start..].find("}}") else {
-            break;
-        };
-        let close = inner_start + close_offset + 2;
-        ranges.push((open, close));
-        cursor = close;
-    }
-    ranges
+fn text_has_raw_text_parent(ast: &Vue3Ast, node_id: vuec_ast::NodeId) -> bool {
+    let Some(parent_id) = ast.node(node_id).and_then(|node| node.parent) else {
+        return false;
+    };
+    ast.node(parent_id).is_some_and(|node| {
+        matches!(
+            &node.kind,
+            Vue3AstKind::Element(element)
+                if element.ns == vuec_ast::HtmlNamespace::Html
+                    && matches!(element.tag.as_str(), "textarea" | "title" | "style" | "script")
+        )
+    })
 }
 
 fn collect_missing_interpolation_end_diagnostics(
@@ -1260,7 +1375,7 @@ fn collect_missing_interpolation_end_diagnostics(
     options: &Vue3CompilerOptions,
     diagnostics: &mut Vec<Value>,
 ) {
-    let mut stack = Vec::<String>::new();
+    let mut stack = Vec::<OpenDiagnosticElement>::new();
     let mut v_pre_depth = 0usize;
     let mut tokenizer = HtmlTokenizer::new(source);
     loop {
@@ -1282,25 +1397,46 @@ fn collect_missing_interpolation_end_diagnostics(
                 attributes,
                 self_closing,
             } => {
-                let is_void = vue3_is_void_tag(options, &name);
                 let starts_v_pre =
                     v_pre_depth == 0 && attributes.iter().any(|attr| attr.name == "v-pre");
                 let in_v_pre = v_pre_depth > 0 || starts_v_pre;
+                let is_void = vue3_is_void_tag(options, &name);
+                let namespace =
+                    vue3_diagnostic_tag_namespace(options, &name, &attributes, stack.last());
+                let raw_text_kind = vuec_vue3_core::vue3_raw_text_kind(&name, namespace, in_v_pre);
                 if !self_closing && !is_void {
-                    stack.push(name);
+                    let raw_tag = name.clone();
+                    stack.push(OpenDiagnosticElement {
+                        name,
+                        start: token.start,
+                        namespace,
+                        attributes,
+                        in_v_pre,
+                    });
                     if in_v_pre {
                         v_pre_depth += 1;
+                    }
+                    if raw_text_kind.is_some() {
+                        if let Some((_text_end, end_tag_end)) =
+                            vuec_vue3_core::find_matching_raw_text_end(source, token.end, &raw_tag)
+                        {
+                            tokenizer.set_cursor(end_tag_end);
+                            if let Some(open) = stack.pop() {
+                                if open.in_v_pre && v_pre_depth > 0 {
+                                    v_pre_depth -= 1;
+                                }
+                            }
+                        }
                     }
                 }
             }
             HtmlTokenKind::EndTag { name } => {
                 if !name.is_empty() {
                     while let Some(open) = stack.pop() {
-                        let was_in_v_pre = v_pre_depth > 0;
-                        if was_in_v_pre {
+                        if open.in_v_pre && v_pre_depth > 0 {
                             v_pre_depth -= 1;
                         }
-                        if open.eq_ignore_ascii_case(&name) {
+                        if open.name.eq_ignore_ascii_case(&name) {
                             break;
                         }
                     }
@@ -1350,7 +1486,7 @@ fn collect_invalid_end_tag_diagnostics(
     diagnostics: &mut Vec<Value>,
 ) {
     let _ = ast;
-    let mut stack = Vec::<OpenElement>::new();
+    let mut stack = Vec::<OpenDiagnosticElement>::new();
     let mut v_pre_depth = 0usize;
     let mut tokenizer = HtmlTokenizer::new(source);
     loop {
@@ -1372,17 +1508,35 @@ fn collect_invalid_end_tag_diagnostics(
                 let starts_v_pre =
                     v_pre_depth == 0 && attributes.iter().any(|attr| attr.name == "v-pre");
                 let in_v_pre = v_pre_depth > 0 || starts_v_pre;
+                let namespace =
+                    vue3_diagnostic_tag_namespace(options, &name, &attributes, stack.last());
+                let raw_text_kind = vuec_vue3_core::vue3_raw_text_kind(&name, namespace, in_v_pre);
                 if !self_closing
                     && !vue3_is_void_tag(options, &name)
                     && !tag_token_is_incomplete_at_eof(source, token.start, token.end)
                 {
-                    stack.push(OpenElement {
+                    let raw_tag = name.clone();
+                    stack.push(OpenDiagnosticElement {
                         name,
                         start: token.start,
+                        namespace,
+                        attributes,
                         in_v_pre,
                     });
                     if in_v_pre {
                         v_pre_depth += 1;
+                    }
+                    if raw_text_kind.is_some() {
+                        if let Some((_text_end, end_tag_end)) =
+                            vuec_vue3_core::find_matching_raw_text_end(source, token.end, &raw_tag)
+                        {
+                            tokenizer.set_cursor(end_tag_end);
+                            if let Some(open) = stack.pop() {
+                                if open.in_v_pre && v_pre_depth > 0 {
+                                    v_pre_depth -= 1;
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1462,12 +1616,6 @@ fn collect_invalid_end_tag_diagnostics(
             ));
         }
     }
-}
-
-struct OpenElement {
-    name: String,
-    start: usize,
-    in_v_pre: bool,
 }
 
 fn raw_text_tag_ignores_end_tag(open: &str, close: &str) -> bool {
@@ -1954,6 +2102,11 @@ fn vue3_expression_loc(
     let node_source = source
         .get(local_span_start..local_span_end)
         .unwrap_or_default();
+    if let Some((inner_start, inner_end)) =
+        default_interpolation_inner_trimmed_span(source, local_span_start, local_span_end)
+    {
+        return vue3_source_loc_value(source, inner_start, inner_end);
+    }
     let trimmed = expression.trim();
     if trimmed.is_empty() {
         let inner_start = if node_source.starts_with("{{") {
@@ -1968,6 +2121,38 @@ fn vue3_expression_loc(
         return vue3_source_loc_value(source, start, start + trimmed.len());
     }
     vue3_loc_value(source, base_offset, fallback_span)
+}
+
+fn default_interpolation_inner_trimmed_span(
+    source: &str,
+    start: usize,
+    end: usize,
+) -> Option<(usize, usize)> {
+    let slice = source.get(start..end)?;
+    if !slice.starts_with("{{") || !slice.ends_with("}}") {
+        return None;
+    }
+    let mut inner_start = start + "{{".len();
+    let mut inner_end = end.saturating_sub("}}".len());
+    while inner_start < inner_end
+        && source
+            .get(inner_start..inner_end)
+            .and_then(|value| value.chars().next())
+            .is_some_and(char::is_whitespace)
+    {
+        let ch = source[inner_start..inner_end].chars().next()?;
+        inner_start += ch.len_utf8();
+    }
+    while inner_end > inner_start
+        && source
+            .get(inner_start..inner_end)
+            .and_then(|value| value.chars().next_back())
+            .is_some_and(char::is_whitespace)
+    {
+        let ch = source[inner_start..inner_end].chars().next_back()?;
+        inner_end -= ch.len_utf8();
+    }
+    Some((inner_start, inner_end))
 }
 
 fn vue3_loc_value(source: &str, base_offset: usize, span: &NodeSpan) -> Value {
@@ -2193,6 +2378,14 @@ fn vue3_options(value: Option<&Value>) -> Vue3CompilerOptions {
             })
             .collect();
     }
+    if let Some(namespace) = value
+        .get("__vuecRootNamespace")
+        .or_else(|| value.get("ns"))
+        .and_then(vue3_namespace_option_value)
+    {
+        options.root_namespace = namespace;
+    }
+    options.dom_namespaces = bool_option(value, "__vuecDomNamespaces", options.dom_namespaces);
     if let Some(native_tags) = value.get("__vuecNativeTags").and_then(Value::as_array) {
         options.native_tags = Some(
             native_tags

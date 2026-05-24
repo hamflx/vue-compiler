@@ -6594,6 +6594,10 @@ function normalizeVue3OptionsForBridge(options, source) {
   normalized.__vuecPreTags = collectVuePredicateHits(options.isPreTag, tags);
   normalized.__vuecIgnoreNewlineTags = collectVuePredicateHits(options.isIgnoreNewlineTag, tags);
   normalized.__vuecNamespaces = collectVueNamespaceHits(options.getNamespace, tags);
+  normalized.__vuecDomNamespaces = typeof options.getNamespace === 'function';
+  if (Object.prototype.hasOwnProperty.call(options, 'ns')) {
+    normalized.__vuecRootNamespace = options.ns;
+  }
   if (typeof options.isNativeTag === 'function') {
     normalized.__vuecNativeTags = collectVuePredicateHits(options.isNativeTag, tags);
   }

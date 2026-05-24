@@ -44,9 +44,19 @@
 - [x] Vue 3 compiler-core Rust-backed `cacheStatic` / `getConstantType` projection bridge for `cacheStatic.spec.ts`.
 - [x] Vue 3 compiler-core official conformance closure (`652/652`) with Rust-backed `isMemberExpression` utility projection.
 - [x] Vue 3 compiler-dom official conformance execution wiring (real Vitest run; currently `45/133`, `mixed` coverage).
+- [x] Vue 3 compiler-dom Rust-backed parser compatibility slice for `parse.spec.ts` (`33/33`; full DOM suite currently `69/133`, `mixed` coverage).
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Closed the Rust-backed Vue 3 compiler-dom parser compatibility slice.
+- `vuec_vue3_core` now implements DOM parser raw text and RCDATA handling in Rust: HTML `<textarea>` / `<title>` keep interpolation and entity decoding, HTML `<script>` / `<style>` stay raw and do not decode entities, strict raw-text end-tag matching preserves malformed textarea text, and leading-newline removal for `textarea` / `pre` preserves the original source span.
+- `vuec_vue3_core` now implements DOM namespace behavior from official `parserOptions`: root `ns`, HTML `svg` / `math` switches, MathML `annotation-xml` encoding integration, MathML text integration points, and SVG `foreignObject` / `desc` / `title` HTML integration.
+- Text, attribute, numeric, and interpolation entity compatibility now covers the official DOM parser cases, including `&ampersand;`, attribute-only `&amp!`, C1 control replacement for `&#x86;`, and decoded interpolation content with original encoded expression loc.
+- `vuec_node_bridge` now forwards deterministic DOM parser metadata and uses the same Rust raw-text / namespace rules in parse diagnostics, avoiding false CDATA, invalid end-tag, missing end-tag, and missing interpolation diagnostics during alias hydration.
+- `xtask/src/compat.rs` changed only as metadata adapter support for the Rust bridge (`__vuecDomNamespaces`, root `ns`); parser semantics are implemented in Rust.
+- Focused official Vue 3 DOM `packages/compiler-dom/__tests__/parse.spec.ts` now passes `33/33`. Full Vue 3 DOM conformance remains expected-failing but improves from `45/133` to `69/133`; remaining failures are transform/codegen work outside this parser slice.
+- Verification this round: `cargo check -p vuec_vue3_core`, `cargo check -p vuec_node_bridge`, `cargo check -p xtask`, `cargo build -p vuec_node_bridge`, `cargo test -p vuec_vue3_core` (`73/73` pass), `git diff --check`, and `cargo xtask run-conformance --suite vue3-dom` (expected fail with `69/133`, `parse.spec.ts` `33/33`).
 
 - Wired Vue 3 compiler-dom official conformance to a real Vitest runner instead of the previous `not-wired` pending result.
 - The prepared DOM suite now copies official `compiler-dom/__tests__`, official `compiler-dom/src`, compiler-core `testUtils.ts`, and generated compiler-core source shims. The prepared `transformStyle.ts` is intentionally routed through the existing Rust-backed `@vue/compiler-dom` alias export so that the already-implemented Rust DOM transformStyle projection remains exercised.

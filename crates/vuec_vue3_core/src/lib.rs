@@ -41,6 +41,8 @@ pub struct Vue3CompilerOptions {
     pub custom_elements: Vec<String>,
     pub built_in_components: Vec<String>,
     pub namespaces: BTreeMap<String, vuec_ast::HtmlNamespace>,
+    pub root_namespace: vuec_ast::HtmlNamespace,
+    pub dom_namespaces: bool,
     pub whitespace: String,
     pub pre_tags: Vec<String>,
     pub ignore_newline_tags: Vec<String>,
@@ -68,6 +70,8 @@ impl Default for Vue3CompilerOptions {
             custom_elements: Vec::new(),
             built_in_components: Vec::new(),
             namespaces: BTreeMap::new(),
+            root_namespace: vuec_ast::HtmlNamespace::Html,
+            dom_namespaces: false,
             whitespace: "condense".into(),
             pre_tags: Vec::new(),
             ignore_newline_tags: Vec::new(),
@@ -87,6 +91,12 @@ pub struct CodegenResult {
     pub preamble: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Vue3RawTextKind {
+    RcData,
+    RawText,
+}
+
 pub struct Vue3Dialect;
 
 impl Vue3Dialect {
@@ -103,7 +113,7 @@ impl Vue3Dialect {
         let mut stack = vec![root];
         let mut v_pre_depth = 0usize;
         let mut malformed_start_depth = 0usize;
-        let mut namespace_stack = vec![vuec_ast::HtmlNamespace::Html];
+        let mut namespace_stack = vec![options.root_namespace];
         let mut tokenizer = if let Some([open, close]) = &options.delimiters {
             HtmlTokenizer::new(&source.source).with_interpolation_delimiters(open, close)
         } else {
@@ -206,14 +216,21 @@ impl Vue3Dialect {
                         continue;
                     }
                     let is_void = options.void_tags.iter().any(|candidate| candidate == &name);
-                    let namespace = vue3_element_namespace(&name, current_namespace, options);
+                    let namespace = vue3_element_namespace(
+                        &ast,
+                        current_parent,
+                        &name,
+                        current_namespace,
+                        options,
+                    );
                     let starts_v_pre =
                         v_pre_depth == 0 && attributes.iter().any(|attr| attr.name == "v-pre");
                     let in_v_pre = v_pre_depth > 0 || starts_v_pre;
+                    let raw_text_kind = vue3_raw_text_kind(&name, namespace, in_v_pre);
                     let id = ast.push_child(
                         current_parent,
                         vue3_element_kind(
-                            name,
+                            name.clone(),
                             attributes,
                             self_closing,
                             options,
@@ -233,6 +250,42 @@ impl Vue3Dialect {
                         namespace_stack.push(namespace);
                         if in_v_pre {
                             v_pre_depth += 1;
+                        }
+                        if let Some(kind) = raw_text_kind {
+                            if let Some((text_end, end_tag_end)) =
+                                find_matching_raw_text_end(&source.source, token.end, &name)
+                            {
+                                let text = &source.source[token.end..text_end];
+                                match kind {
+                                    Vue3RawTextKind::RcData => push_text_and_interpolations(
+                                        &mut ast,
+                                        id,
+                                        source.file_id,
+                                        source.base_offset + token.end,
+                                        text,
+                                        options,
+                                    ),
+                                    Vue3RawTextKind::RawText => push_raw_text(
+                                        &mut ast,
+                                        id,
+                                        source.file_id,
+                                        source.base_offset + token.end,
+                                        text,
+                                    ),
+                                }
+                                if let Some(node) = ast.node_mut(id) {
+                                    if let Some(span) = node.span.source_mut() {
+                                        span.end =
+                                            vuec_source::BytePos(source.base_offset + end_tag_end);
+                                    }
+                                }
+                                tokenizer.set_cursor(end_tag_end);
+                                stack.pop();
+                                namespace_stack.pop();
+                                if in_v_pre && v_pre_depth > 0 {
+                                    v_pre_depth -= 1;
+                                }
+                            }
                         }
                     }
                 }
@@ -4466,11 +4519,80 @@ fn vue3_element_kind(
 }
 
 fn vue3_element_namespace(
+    ast: &Vue3Ast,
+    parent_id: vuec_ast::NodeId,
     tag: &str,
     parent: vuec_ast::HtmlNamespace,
     options: &Vue3CompilerOptions,
 ) -> vuec_ast::HtmlNamespace {
-    options.namespaces.get(tag).copied().unwrap_or(parent)
+    if let Some(namespace) = options.namespaces.get(tag).copied() {
+        return namespace;
+    }
+    let mut namespace = parent;
+    if options.dom_namespaces {
+        if let Some(parent_element) = ast.node(parent_id).and_then(|node| match &node.kind {
+            Vue3AstKind::Element(element) => Some(element),
+            _ => None,
+        }) {
+            if namespace == vuec_ast::HtmlNamespace::MathMl {
+                if parent_element.tag == "annotation-xml" {
+                    if tag == "svg" {
+                        return vuec_ast::HtmlNamespace::Svg;
+                    }
+                    if vue3_element_has_attr_value(
+                        parent_element,
+                        "encoding",
+                        &["text/html", "application/xhtml+xml"],
+                    ) {
+                        namespace = vuec_ast::HtmlNamespace::Html;
+                    }
+                } else if vue3_mathml_text_integration_point(&parent_element.tag)
+                    && tag != "mglyph"
+                    && tag != "malignmark"
+                {
+                    namespace = vuec_ast::HtmlNamespace::Html;
+                }
+            } else if namespace == vuec_ast::HtmlNamespace::Svg
+                && matches!(
+                    parent_element.tag.as_str(),
+                    "foreignObject" | "desc" | "title"
+                )
+            {
+                namespace = vuec_ast::HtmlNamespace::Html;
+            }
+        }
+        if namespace == vuec_ast::HtmlNamespace::Html {
+            if tag == "svg" {
+                return vuec_ast::HtmlNamespace::Svg;
+            }
+            if tag == "math" {
+                return vuec_ast::HtmlNamespace::MathMl;
+            }
+        }
+    }
+    namespace
+}
+
+fn vue3_mathml_text_integration_point(tag: &str) -> bool {
+    matches!(tag, "mi" | "mo" | "mn" | "ms" | "mtext")
+}
+
+fn vue3_element_has_attr_value(
+    element: &vuec_ast::Vue3Element,
+    name: &str,
+    values: &[&str],
+) -> bool {
+    element.props.iter().any(|prop| {
+        matches!(
+            prop,
+            Vue3Prop::Attribute(attr)
+                if attr.name == name
+                    && attr
+                        .value
+                        .as_deref()
+                        .is_some_and(|value| values.iter().any(|candidate| *candidate == value))
+        )
+    })
 }
 
 fn vue3_tag_type(tag: &str, props: &[Vue3Prop], options: &Vue3CompilerOptions) -> Vue3ElementType {
@@ -4832,6 +4954,60 @@ fn incomplete_start_tag_recovery_text_start(slice: &str) -> Option<usize> {
     })
 }
 
+pub fn vue3_raw_text_kind(
+    tag: &str,
+    namespace: vuec_ast::HtmlNamespace,
+    in_v_pre: bool,
+) -> Option<Vue3RawTextKind> {
+    if in_v_pre || namespace != vuec_ast::HtmlNamespace::Html {
+        return None;
+    }
+    match tag {
+        "textarea" | "title" => Some(Vue3RawTextKind::RcData),
+        "script" | "style" => Some(Vue3RawTextKind::RawText),
+        _ => None,
+    }
+}
+
+pub fn find_matching_raw_text_end(
+    source: &str,
+    content_start: usize,
+    tag: &str,
+) -> Option<(usize, usize)> {
+    let mut cursor = content_start;
+    while cursor < source.len() {
+        let offset = source.get(cursor..)?.find("</")?;
+        let candidate = cursor + offset;
+        if let Some(end_tag_end) = matching_raw_text_end_tag_end(source, candidate, tag) {
+            return Some((candidate, end_tag_end));
+        }
+        cursor = candidate + "</".len();
+    }
+    None
+}
+
+fn matching_raw_text_end_tag_end(source: &str, start: usize, tag: &str) -> Option<usize> {
+    let after_slash = start.checked_add("</".len())?;
+    let tag_end = after_slash.checked_add(tag.len())?;
+    let raw_tag = source.get(after_slash..tag_end)?;
+    if !raw_tag.eq_ignore_ascii_case(tag) {
+        return None;
+    }
+    let mut cursor = tag_end;
+    loop {
+        let Some(ch) = source.get(cursor..).and_then(|rest| rest.chars().next()) else {
+            return None;
+        };
+        if ch == '>' {
+            return Some(cursor + ch.len_utf8());
+        }
+        if !ch.is_whitespace() {
+            return None;
+        }
+        cursor += ch.len_utf8();
+    }
+}
+
 fn current_parent_raw_text_ignores_end_tag(
     ast: &Vue3Ast,
     parent: vuec_ast::NodeId,
@@ -4894,6 +5070,8 @@ fn normalize_class_attribute_values(ast: &mut Vue3Ast) {
                 if let Some(value) = &mut attr.value {
                     *value = value.split_whitespace().collect::<Vec<_>>().join(" ");
                 }
+            } else if let Some(value) = &mut attr.value {
+                *value = decode_html_attr_entities(value);
             }
         }
     }
@@ -4927,11 +5105,10 @@ fn remove_initial_newline_after_ignore_newline_tags(
         };
         if let Some(child) = ast.node_mut(first_child) {
             if let Vue3AstKind::Text(text) = &mut child.kind {
-                if text.value.starts_with('\n') {
+                if text.value.starts_with("\r\n") {
+                    text.value.drain(..2);
+                } else if text.value.starts_with('\n') {
                     text.value.remove(0);
-                    if let Some(span) = child.span.source_mut() {
-                        span.start.0 += 1;
-                    }
                 }
             }
         }
@@ -7948,7 +8125,7 @@ fn push_text_and_interpolations(
             );
         }
         let close = expression_start + close_offset;
-        let expression = text[expression_start..close].trim().to_string();
+        let expression = decode_html_text_entities(text[expression_start..close].trim());
         let _id = ast.push_child(
             parent,
             Vue3NodeKind::interpolation(expression),
@@ -7997,16 +8174,174 @@ fn push_text(
     );
 }
 
+fn push_raw_text(
+    ast: &mut Vue3Ast,
+    parent: vuec_ast::NodeId,
+    file_id: FileId,
+    start: usize,
+    text: &str,
+) {
+    if text.is_empty() {
+        return;
+    }
+    let previous = ast
+        .node(parent)
+        .and_then(|node| node.children.last().copied());
+    if let Some(previous) = previous {
+        if let Some(node) = ast.node_mut(previous) {
+            if let Vue3AstKind::Text(existing) = &mut node.kind {
+                existing.value.push_str(text);
+                if let Some(span) = node.span.source_mut() {
+                    span.end = vuec_source::BytePos(start + text.len());
+                }
+                return;
+            }
+        }
+    }
+    let _id = ast.push_child(
+        parent,
+        Vue3NodeKind::text(text),
+        Some(Span::new(file_id, start, start + text.len())),
+    );
+}
+
 fn decode_html_text_entities(text: &str) -> String {
     if !text.contains('&') {
         return text.to_string();
     }
-    text.replace("&gt;", ">")
-        .replace("&lt;", "<")
-        .replace("&nbsp;", "\u{00a0}")
-        .replace("&amp;", "&")
-        .replace("&apos;", "'")
-        .replace("&quot;", "\"")
+    decode_html_entities(text, HtmlEntityDecodeMode::Text)
+}
+
+fn decode_html_attr_entities(text: &str) -> String {
+    if !text.contains('&') {
+        return text.to_string();
+    }
+    decode_html_entities(text, HtmlEntityDecodeMode::Attribute)
+}
+
+#[derive(Clone, Copy)]
+enum HtmlEntityDecodeMode {
+    Text,
+    Attribute,
+}
+
+fn decode_html_entities(text: &str, mode: HtmlEntityDecodeMode) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut cursor = 0usize;
+    while cursor < text.len() {
+        let Some(offset) = text[cursor..].find('&') else {
+            output.push_str(&text[cursor..]);
+            break;
+        };
+        let amp = cursor + offset;
+        output.push_str(&text[cursor..amp]);
+        if let Some((decoded, consumed)) = decode_html_entity_at(&text[amp..], mode) {
+            output.push(decoded);
+            cursor = amp + consumed;
+        } else {
+            output.push('&');
+            cursor = amp + 1;
+        }
+    }
+    output
+}
+
+fn decode_html_entity_at(value: &str, mode: HtmlEntityDecodeMode) -> Option<(char, usize)> {
+    if let Some(decoded) = decode_numeric_html_entity_at(value) {
+        return Some(decoded);
+    }
+    const NAMED: [(&str, char); 7] = [
+        ("amp", '&'),
+        ("lt", '<'),
+        ("gt", '>'),
+        ("nbsp", '\u{00a0}'),
+        ("apos", '\''),
+        ("quot", '"'),
+        ("Eacute", '\u{00c9}'),
+    ];
+    for (name, decoded) in NAMED {
+        let prefix = format!("&{name}");
+        if !value.starts_with(&prefix) {
+            continue;
+        }
+        let after_name = prefix.len();
+        if value.as_bytes().get(after_name) == Some(&b';') {
+            return Some((decoded, after_name + 1));
+        }
+        if matches!(mode, HtmlEntityDecodeMode::Text) && matches!(name, "amp" | "lt" | "gt") {
+            return Some((decoded, after_name));
+        }
+        if matches!(mode, HtmlEntityDecodeMode::Attribute)
+            && name == "amp"
+            && value
+                .as_bytes()
+                .get(after_name)
+                .is_some_and(|byte| !byte.is_ascii_alphanumeric() && *byte != b'=')
+        {
+            return Some((decoded, after_name));
+        }
+    }
+    None
+}
+
+fn decode_numeric_html_entity_at(value: &str) -> Option<(char, usize)> {
+    let rest = value.strip_prefix("&#")?;
+    let (radix, digits_start) = match rest.as_bytes().first().copied() {
+        Some(b'x' | b'X') => (16, "&#x".len()),
+        _ => (10, "&#".len()),
+    };
+    let mut digits_end = digits_start;
+    while let Some(byte) = value.as_bytes().get(digits_end).copied() {
+        let is_digit = if radix == 16 {
+            byte.is_ascii_hexdigit()
+        } else {
+            byte.is_ascii_digit()
+        };
+        if !is_digit {
+            break;
+        }
+        digits_end += 1;
+    }
+    if digits_end == digits_start {
+        return None;
+    }
+    let raw = u32::from_str_radix(&value[digits_start..digits_end], radix).ok()?;
+    let consumed = digits_end + usize::from(value.as_bytes().get(digits_end) == Some(&b';'));
+    Some((html_numeric_entity_char(raw), consumed))
+}
+
+fn html_numeric_entity_char(value: u32) -> char {
+    match value {
+        0x00 => '\u{fffd}',
+        0x80 => '\u{20ac}',
+        0x82 => '\u{201a}',
+        0x83 => '\u{0192}',
+        0x84 => '\u{201e}',
+        0x85 => '\u{2026}',
+        0x86 => '\u{2020}',
+        0x87 => '\u{2021}',
+        0x88 => '\u{02c6}',
+        0x89 => '\u{2030}',
+        0x8a => '\u{0160}',
+        0x8b => '\u{2039}',
+        0x8c => '\u{0152}',
+        0x8e => '\u{017d}',
+        0x91 => '\u{2018}',
+        0x92 => '\u{2019}',
+        0x93 => '\u{201c}',
+        0x94 => '\u{201d}',
+        0x95 => '\u{2022}',
+        0x96 => '\u{2013}',
+        0x97 => '\u{2014}',
+        0x98 => '\u{02dc}',
+        0x99 => '\u{2122}',
+        0x9a => '\u{0161}',
+        0x9b => '\u{203a}',
+        0x9c => '\u{0153}',
+        0x9e => '\u{017e}',
+        0x9f => '\u{0178}',
+        value => char::from_u32(value).unwrap_or('\u{fffd}'),
+    }
 }
 
 pub fn base_compile(source: TemplateSource, options: Vue3CompilerOptions) -> CodegenResult {
@@ -9969,5 +10304,191 @@ mod tests {
         let template = ast.node(root.children[0]).expect("template");
         assert_eq!(template.span.source(), Some(Span::new(FileId(0), 0, 27)));
         assert!(template.children.is_empty());
+    }
+
+    #[test]
+    fn base_parse_treats_html_textarea_and_style_as_special_text_modes() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: "<textarea>some<div>text</div>and<!--comment--></textarea><style>&amp;</style>"
+                .into(),
+            file_id: FileId(0),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let root = ast.root_node().expect("root");
+        let textarea = ast.node(root.children[0]).expect("textarea");
+        let style = ast.node(root.children[1]).expect("style");
+
+        assert_eq!(textarea.children.len(), 1);
+        assert!(matches!(
+            &ast.node(textarea.children[0]).expect("textarea text").kind,
+            Vue3AstKind::Text(text) if text.value == "some<div>text</div>and<!--comment-->"
+        ));
+        assert_eq!(style.children.len(), 1);
+        assert!(matches!(
+            &ast.node(style.children[0]).expect("style text").kind,
+            Vue3AstKind::Text(text) if text.value == "&amp;"
+        ));
+    }
+
+    #[test]
+    fn base_parse_textarea_decodes_entities_and_supports_interpolation() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: "<textarea>\n<div>{{ a &lt; b }}</textarea>".into(),
+            file_id: FileId(0),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(
+            source,
+            &Vue3CompilerOptions {
+                ignore_newline_tags: vec!["textarea".into()],
+                ..Vue3CompilerOptions::default()
+            },
+        );
+        let root = ast.root_node().expect("root");
+        let textarea = ast.node(root.children[0]).expect("textarea");
+
+        assert_eq!(textarea.children.len(), 2);
+        assert!(matches!(
+            &ast.node(textarea.children[0]).expect("textarea text").kind,
+            Vue3AstKind::Text(text) if text.value == "<div>"
+        ));
+        assert_eq!(
+            ast.node(textarea.children[0])
+                .expect("textarea text")
+                .span
+                .source(),
+            Some(Span::new(FileId(0), 10, 16))
+        );
+        assert!(matches!(
+            &ast.node(textarea.children[1]).expect("interpolation").kind,
+            Vue3AstKind::Interpolation(interpolation)
+                if interpolation.expression.source_string() == "a < b"
+        ));
+    }
+
+    #[test]
+    fn base_parse_decodes_dom_text_and_attribute_entity_compatibility() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div a="&ampersand;" b="&amp;ersand;" c="&amp!">&ampersand;&#x86;</div>"#
+                .into(),
+            file_id: FileId(0),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let root = ast.root_node().expect("root");
+        let div = ast.node(root.children[0]).expect("div");
+        let Vue3AstKind::Element(element) = &div.kind else {
+            panic!("expected element");
+        };
+
+        assert!(matches!(
+            &element.props[0],
+            Vue3Prop::Attribute(attr) if attr.value.as_deref() == Some("&ampersand;")
+        ));
+        assert!(matches!(
+            &element.props[1],
+            Vue3Prop::Attribute(attr) if attr.value.as_deref() == Some("&ersand;")
+        ));
+        assert!(matches!(
+            &element.props[2],
+            Vue3Prop::Attribute(attr) if attr.value.as_deref() == Some("&!")
+        ));
+        assert!(matches!(
+            &ast.node(div.children[0]).expect("text").kind,
+            Vue3AstKind::Text(text) if text.value == "&ersand;\u{2020}"
+        ));
+    }
+
+    #[test]
+    fn base_parse_applies_dom_namespace_rules_without_static_namespace_map() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: concat!(
+                "<svg><foreignObject><test/></foreignObject></svg>",
+                "<math><mtext><test/></mtext><mtext><malignmark/></mtext></math>",
+            )
+            .into(),
+            file_id: FileId(0),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(
+            source,
+            &Vue3CompilerOptions {
+                dom_namespaces: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+        let root = ast.root_node().expect("root");
+        let svg = ast.node(root.children[0]).expect("svg");
+        let math = ast.node(root.children[1]).expect("math");
+        let foreign_object = ast.node(svg.children[0]).expect("foreignObject");
+        let svg_test = ast.node(foreign_object.children[0]).expect("svg test");
+        let mtext_html = ast.node(math.children[0]).expect("mtext html");
+        let mtext_math = ast.node(math.children[1]).expect("mtext math");
+        let math_test = ast.node(mtext_html.children[0]).expect("math test");
+        let malignmark = ast.node(mtext_math.children[0]).expect("malignmark");
+
+        assert!(matches!(
+            &svg.kind,
+            Vue3AstKind::Element(element) if element.ns == vuec_ast::HtmlNamespace::Svg
+        ));
+        assert!(matches!(
+            &svg_test.kind,
+            Vue3AstKind::Element(element) if element.ns == vuec_ast::HtmlNamespace::Html
+        ));
+        assert!(matches!(
+            &math.kind,
+            Vue3AstKind::Element(element) if element.ns == vuec_ast::HtmlNamespace::MathMl
+        ));
+        assert!(matches!(
+            &math_test.kind,
+            Vue3AstKind::Element(element) if element.ns == vuec_ast::HtmlNamespace::Html
+        ));
+        assert!(matches!(
+            &malignmark.kind,
+            Vue3AstKind::Element(element) if element.ns == vuec_ast::HtmlNamespace::MathMl
+        ));
+    }
+
+    #[test]
+    fn base_parse_uses_root_namespace_for_dom_integration_rules() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: "<foreignObject><test/></foreignObject><script><g/><g/></script>".into(),
+            file_id: FileId(0),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(
+            source,
+            &Vue3CompilerOptions {
+                root_namespace: vuec_ast::HtmlNamespace::Svg,
+                dom_namespaces: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+        let root = ast.root_node().expect("root");
+        let foreign_object = ast.node(root.children[0]).expect("foreignObject");
+        let script = ast.node(root.children[1]).expect("script");
+        let test = ast.node(foreign_object.children[0]).expect("test");
+
+        assert!(matches!(
+            &foreign_object.kind,
+            Vue3AstKind::Element(element) if element.ns == vuec_ast::HtmlNamespace::Svg
+        ));
+        assert!(matches!(
+            &test.kind,
+            Vue3AstKind::Element(element) if element.ns == vuec_ast::HtmlNamespace::Html
+        ));
+        assert_eq!(script.children.len(), 2);
+        assert!(script.children.iter().all(|child| {
+            matches!(
+                ast.node(*child).map(|node| &node.kind),
+                Some(Vue3AstKind::Element(_))
+            )
+        }));
     }
 }
