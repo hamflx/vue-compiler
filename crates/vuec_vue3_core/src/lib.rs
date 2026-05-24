@@ -1460,6 +1460,7 @@ pub fn transform_on_projection(payload: &Value) -> Value {
             "key": event_name,
             "value": value,
             "cache": cache,
+            "valueConstant": transform_on_projection_const_type(&value) > 0,
             "handlerKey": true,
             "dynamicKey": arg.is_some_and(|arg| !json_bool(arg, "isStatic")),
             "ignoreDynamicKeyForNormalize": true,
@@ -9436,6 +9437,7 @@ mod tests {
             json!("$setup.foo")
         );
         assert_eq!(projection["props"][0]["value"]["constType"], json!(1));
+        assert_eq!(projection["props"][0]["valueConstant"], json!(true));
     }
 
     #[test]

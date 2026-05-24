@@ -4887,7 +4887,7 @@ const vue3CoreRuntime = (() => {
     }
     return { props: [runtime.createObjectProperty(arg, exp)] };
   };
-  runtime.transformOn = function transformOn(dir, node, context) {
+  runtime.transformOn = function transformOn(dir, node, context, augmentor) {
     context = context || { helperString: name => `_${runtime.helperNameMap[name] || name}`, helper: name => name, cache: value => value, onError: error => { throw error; } };
     const projection = callBridge('vue3.core.transformOn', {
       dir,
@@ -4895,22 +4895,28 @@ const vue3CoreRuntime = (() => {
       context: vue3TransformOnContextPayload(context),
     });
     materializeVue3OnErrors(projection, dir, context);
-    return {
+    const onMeta = (projection.props || []).map(prop => ({
+      cache: !!prop.cache,
+      valueConstant: !!prop.valueConstant,
+      handlerKey: !!prop.handlerKey,
+      dynamicKey: !!prop.dynamicKey,
+      ignoreDynamicKeyForNormalize: !!prop.ignoreDynamicKeyForNormalize,
+    }));
+    let result = {
       props: (projection.props || []).map(prop => {
         const key = materializeVue3OnProjection(prop.key, dir, context);
         const value = materializeVue3OnProjection(prop.value, dir, context) || runtime.createSimpleExpression('() => {}', false, dir.loc);
-        const objectProp = runtime.createObjectProperty(key, value);
-        objectProp.__vuecOn = {
-          cache: !!prop.cache,
-          handlerKey: !!prop.handlerKey,
-          dynamicKey: !!prop.dynamicKey,
-          ignoreDynamicKeyForNormalize: !!prop.ignoreDynamicKeyForNormalize,
-        };
-        if (objectProp.key && prop.handlerKey) objectProp.key.isHandlerKey = true;
-        if (prop.cache && context && context.cache) objectProp.value = context.cache(objectProp.value);
-        return objectProp;
+        return runtime.createObjectProperty(key, value);
       }),
     };
+    if (typeof augmentor === 'function') result = augmentor(result) || result;
+    for (const [index, prop] of (result.props || []).entries()) {
+      const meta = onMeta[index] || onMeta[0] || {};
+      if (prop.key && meta.handlerKey) prop.key.isHandlerKey = true;
+      if (meta.cache && context && context.cache) prop.value = context.cache(prop.value);
+      prop.__vuecOn = meta;
+    }
+    return result;
   };
   runtime.transformModel = function transformModel(dir) {
     const projection = callBridge('vue3.core.transformModel', {
@@ -5994,7 +6000,7 @@ function vue3ElementDirectivePropSummaries(dir, result, extra = {}) {
       valueStartsWithArray: !!(value && value.type === vue3CoreRuntime.NodeTypes.SIMPLE_EXPRESSION && String(value.content || '').trim().startsWith('[')),
       valueStatic: !!(value && value.type === vue3CoreRuntime.NodeTypes.SIMPLE_EXPRESSION && value.isStatic),
       valueType: value && value.type,
-      valueConstant: vue3ElementPropValueIsConstant(value),
+      valueConstant: vue3ElementPropValueIsConstant(value) || !!(prop && prop.__vuecOn && prop.__vuecOn.valueConstant),
       valueCached: !!(value && value.type === vue3CoreRuntime.NodeTypes.JS_CACHE_EXPRESSION),
       propModifier: !!extra.propModifier,
       forceBlock: !!extra.forceBlock,

@@ -48,9 +48,17 @@
 - [x] Vue 3 compiler-dom mixed alias-runtime transform execution slice for official DOM `baseCompile` callers (`ignoreSideEffectTags` closed; full DOM suite currently `87/133`, `mixed` coverage).
 - [x] Vue 3 compiler-dom Rust-backed dynamic runtime directive helper projection for `vShow.spec.ts` (`2/2`; full DOM suite currently `88/133`, `mixed` coverage).
 - [x] Vue 3 compiler-dom Rust-backed dynamic built-in component helper projection for `Transition.spec.ts` (`14/14`; full DOM suite currently `91/133`, `mixed` coverage).
+- [x] Vue 3 compiler-dom mixed Rust projection plus alias-runtime augmentor slice for `vOn.spec.ts` (`12/12`; full DOM suite currently `102/133`, `mixed` coverage).
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Closed the Vue 3 compiler-dom `vOn.spec.ts` remaining compatibility failures.
+- `vuec_vue3_core::transform_on_projection` now emits `valueConstant` metadata for handler values, so setup-const handlers remain observable as constant values after DOM modifier transforms.
+- The alias runtime `transformOn` now supports the official compiler-core augmentor contract used by DOM `vOn`: it materializes Rust-selected event props, applies the DOM augmentor, then reapplies Rust-selected cache, handler-key, and constness metadata to the final property. This is mixed Rust projection plus alias-runtime adapter support, not pure Rust DOM transform semantics.
+- Full Vue 3 DOM conformance remains expected-failing but improves from `91/133` to `102/133`; `vOn.spec.ts` is no longer failing. Remaining failures are `stringifyStatic` and DOM `vModel`.
+- Vue 3 compiler-core conformance was rechecked after the `v-on` metadata change and remains `652/652`.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p xtask`, `cargo check -p vuec_vue3_core`, `cargo test -p xtask` (`18/18` pass), `cargo test -p vuec_vue3_core` (`73/73` pass), `cargo xtask run-conformance --suite vue3-core` (`652/652`), and `cargo xtask run-conformance --suite vue3-dom` (expected fail with `102/133`).
 
 - Closed the Vue 3 compiler-dom `Transition.spec.ts` remaining snapshot failures.
 - `vuec_vue3_core::resolve_component_type_projection` now accepts dynamic built-in component metadata from the alias runtime. DOM parserOptions built-ins such as `Transition` / `transition` and `TransitionGroup` / `transition-group` now resolve to runtime helper projections instead of `_resolveComponent(...)` assets.
