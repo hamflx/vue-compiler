@@ -1,5 +1,10 @@
 # Memory
 
+- Current round: expanded `Vue3DomMir` VNode payloads so structural DOM MIR codegen can recover current props and runtime directive data without reaching back into `Vue3Ast`.
+- `vuec_ast::Vue3VNodeCall` now carries `Vue3DomProps` and `Vue3DomDirective` target data. DOM lowering derives this payload from HIR props/directive uses, preserving existing `JsAstStore` ownership without double-registering expressions. The standalone MIR emitter now emits static attrs, dynamic bindings, event props, class normalization, runtime directive wrappers, directive asset declarations, and directive/runtime helpers from MIR.
+- This closes the first missing MIR-payload gap for the structural emitter, but exact parity still needs richer prop semantics such as merge props, dynamic arg helper lowering, component asset resolution, directive arg dynamism, cacheHandlers, full hoist output, and official patch-flag parity.
+- Verification for this DOM MIR payload slice: `cargo fmt --all --check`, `cargo check -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, focused `cargo test -p vuec_vue3_core lower_vue3_ast_to_dom_mir_records_hir_mir_edges_and_js_store`, focused `cargo test -p vuec_vue3_core generate_vue3_dom_mir`, `cargo test -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, and `git diff --check`.
+
 - Current round: added a standalone structural Vue 3 DOM MIR codegen entry.
 - `vuec_vue3_core::generate_vue3_dom_mir` now emits render code from `Vue3DomMir` plus `JsAstStore` without reading the original AST. The initial emitter covers the current structural MIR subset: root children, VNode calls, text/interpolation text VNodes, slot outlets, `v-if` comment fallbacks, `v-for` render-list wrappers, fragments, `v-once` cache wrappers, conservative hoist references, patch flags, dynamic prop names, and module-mode helper imports derived from MIR node kinds.
 - This is target-split codegen foundation only. It does not replace the existing exact AST emitter, does not yet recover full props/directive payloads missing from current MIR, and does not complete official DOM/compiler-core codegen parity.

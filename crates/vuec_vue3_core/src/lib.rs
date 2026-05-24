@@ -10,8 +10,9 @@ use vuec_ast::{
     HirFragment, HirIf, HirIfBranch, HirInterpolation, HirNodeKind, HirProps, HirRoot,
     HirSlotOutlet, HirStaticAttr, HirTag, JsExprId, JsPatternId, LoweringMap, MirChildren, MirExpr,
     MissingSpanReason, NodeId, NodeSpan, QuoteKind, RuntimeHelper, Vue3Ast, Vue3AstKind,
-    Vue3Directive, Vue3DomMir, Vue3DomMirKind, Vue3Element, Vue3ElementType, Vue3Expression,
-    Vue3NodeKind, Vue3PatchFlags, Vue3Prop, Vue3Root, Vue3SsrMir, Vue3SsrMirKind, Vue3VNodeCall,
+    Vue3Directive, Vue3DomBinding, Vue3DomDirective, Vue3DomEvent, Vue3DomMir, Vue3DomMirKind,
+    Vue3DomProps, Vue3DomStaticAttr, Vue3Element, Vue3ElementType, Vue3Expression, Vue3NodeKind,
+    Vue3PatchFlags, Vue3Prop, Vue3Root, Vue3SsrMir, Vue3SsrMirKind, Vue3VNodeCall,
 };
 use vuec_codegen::{CodeWriter, SourceMapArtifact, SourceMapSegment};
 use vuec_html::{HtmlTokenKind, HtmlTokenizer};
@@ -1047,7 +1048,7 @@ fn lower_vue3_plain_element_to_dom_mir(
     let hir_kind =
         lower_vue3_element_to_hir_kind(element, ast_node, &mut state.js, state.source_type);
     let mir_kind =
-        lower_vue3_element_to_dom_mir_kind(element, ast, ast_id, ast_node, &state.options);
+        lower_vue3_element_to_dom_mir_kind(element, ast, ast_id, ast_node, &hir_kind, state);
     let hir_id = state
         .hir
         .push_child(hir_parent, hir_kind, ast_node.span.clone());
@@ -1150,7 +1151,8 @@ fn lower_vue3_element_to_dom_mir_kind(
     ast: &Vue3Ast,
     ast_id: NodeId,
     ast_node: &vuec_ast::Node<Vue3NodeKind>,
-    options: &Vue3CompilerOptions,
+    hir_kind: &HirNodeKind,
+    state: &mut Vue3DomLoweringState,
 ) -> Vue3DomMirKind {
     if element.tag_type == Vue3ElementType::SlotOutlet {
         let name = element.props.iter().find_map(vue3_static_slot_outlet_name);
@@ -1158,15 +1160,18 @@ fn lower_vue3_element_to_dom_mir_kind(
     }
 
     let is_component = element.tag_type == Vue3ElementType::Component;
+    let (props, directives) = lower_vue3_hir_payload_to_dom_mir(hir_kind);
     Vue3DomMirKind::VNodeCall(Vue3VNodeCall {
         tag: MirExpr::String(element.tag.clone()),
+        props,
+        directives,
         children: if ast_node.children.is_empty() {
             MirChildren::None
         } else {
             MirChildren::Nodes(Vec::new())
         },
         patch_flag: Vue3PatchFlags {
-            bits: vue3_dom_mir_patch_flag(ast, ast_id, element, options),
+            bits: vue3_dom_mir_patch_flag(ast, ast_id, element, &state.options),
         },
         dynamic_props: vue3_dom_mir_dynamic_props(element),
         is_block: false,
@@ -1212,6 +1217,74 @@ fn vue3_dom_mir_patch_flag(
         bits |= 512;
     }
     bits
+}
+
+fn lower_vue3_hir_payload_to_dom_mir(
+    hir_kind: &HirNodeKind,
+) -> (Vue3DomProps, Vec<Vue3DomDirective>) {
+    match hir_kind {
+        HirNodeKind::Element(element) => (
+            lower_hir_props_to_dom_mir(&element.props, false),
+            element
+                .directives
+                .iter()
+                .filter(|directive| vue3_directive_needs_runtime_asset(&directive.name))
+                .map(lower_hir_directive_to_dom_mir)
+                .collect(),
+        ),
+        HirNodeKind::Component(component) => (
+            lower_hir_props_to_dom_mir(&component.props, true),
+            Vec::new(),
+        ),
+        HirNodeKind::SlotOutlet(slot) => {
+            (lower_hir_props_to_dom_mir(&slot.props, false), Vec::new())
+        }
+        _ => (Vue3DomProps::default(), Vec::new()),
+    }
+}
+
+fn lower_hir_props_to_dom_mir(props: &HirProps, is_component: bool) -> Vue3DomProps {
+    Vue3DomProps {
+        static_attrs: props
+            .static_attrs
+            .iter()
+            .map(|attr| Vue3DomStaticAttr {
+                name: attr.name.clone(),
+                value: attr.value.clone(),
+            })
+            .collect(),
+        dynamic_bindings: props
+            .dynamic_bindings
+            .iter()
+            .map(|binding| Vue3DomBinding {
+                name: binding.name.clone(),
+                value: binding.value,
+                dynamic_arg: binding.dynamic_arg,
+            })
+            .collect(),
+        events: props
+            .events
+            .iter()
+            .map(|event| Vue3DomEvent {
+                name: if is_component {
+                    event_handler_prop_name_for_component(&event.name)
+                } else {
+                    event_handler_prop_name_for_element(&event.name)
+                },
+                handler: event.handler,
+                dynamic_arg: false,
+            })
+            .collect(),
+    }
+}
+
+fn lower_hir_directive_to_dom_mir(directive: &HirDirectiveUse) -> Vue3DomDirective {
+    Vue3DomDirective {
+        name: directive.name.clone(),
+        argument: directive.argument.clone(),
+        expression: directive.expression,
+        modifiers: directive.modifiers.clone(),
+    }
 }
 
 fn vue3_dom_mir_dynamic_props(element: &Vue3Element) -> Vec<String> {
@@ -8439,6 +8512,13 @@ impl<'a> Vue3DomMirCodegen<'a> {
             render_args(self.options)
         ));
         writer.indent();
+        let directive_declarations = self.directive_declarations();
+        for declaration in &directive_declarations {
+            writer.push_line(declaration);
+        }
+        if !directive_declarations.is_empty() {
+            writer.newline();
+        }
         writer.push_line(&format!(
             "return {}",
             self.render_root_children(self.mir.root)
@@ -8462,6 +8542,24 @@ impl<'a> Vue3DomMirCodegen<'a> {
                 | Vue3DomMirKind::WithDirectives
                 | Vue3DomMirKind::Fragment => {}
                 Vue3DomMirKind::VNodeCall(call) => {
+                    if call
+                        .props
+                        .dynamic_bindings
+                        .iter()
+                        .any(|binding| !binding.dynamic_arg && binding.name == "class")
+                    {
+                        push_unique_helper(&mut helpers, RuntimeHelper::Vue3NormalizeClass);
+                    }
+                    if !call.directives.is_empty() {
+                        push_unique_helper(&mut helpers, RuntimeHelper::Vue3WithDirectives);
+                    }
+                    for directive in &call.directives {
+                        if directive.name == "show" {
+                            push_unique_helper(&mut helpers, RuntimeHelper::Vue3VShow);
+                        } else {
+                            push_unique_helper(&mut helpers, RuntimeHelper::Vue3ResolveDirective);
+                        }
+                    }
                     let is_root_call = node.parent == Some(self.mir.root) || call.is_block;
                     if is_root_call {
                         push_unique_helper(&mut helpers, RuntimeHelper::Vue3OpenBlock);
@@ -8510,6 +8608,32 @@ impl<'a> Vue3DomMirCodegen<'a> {
         }
         sort_helpers_by_order(&mut helpers, vue3_helper_order(false));
         helpers
+    }
+
+    fn directive_declarations(&self) -> Vec<String> {
+        let mut directives = Vec::new();
+        for node in &self.mir.nodes {
+            let Vue3DomMirKind::VNodeCall(call) = &node.kind else {
+                continue;
+            };
+            for directive in &call.directives {
+                if directive.name != "show"
+                    && !directives.iter().any(|name| name == &directive.name)
+                {
+                    directives.push(directive.name.clone());
+                }
+            }
+        }
+        directives
+            .iter()
+            .map(|directive| {
+                format!(
+                    "const {} = _resolveDirective({})",
+                    directive_asset_id(directive),
+                    quote_string(directive)
+                )
+            })
+            .collect()
     }
 
     fn render_root_children(&self, parent: NodeId) -> String {
@@ -8608,12 +8732,12 @@ impl<'a> Vue3DomMirCodegen<'a> {
         };
         let args = render_call_args(
             self.render_mir_expr(&call.tag),
-            None,
+            self.render_props(&call.props).as_deref(),
             children.as_deref(),
             patch_flag.as_str(),
             dynamic_props.as_str(),
         );
-        if mode == Vue3DomMirRenderMode::Root || call.is_block {
+        let rendered = if mode == Vue3DomMirRenderMode::Root || call.is_block {
             format!(
                 "(_openBlock({}), {}({}))",
                 if call.disable_tracking { "true" } else { "" },
@@ -8628,7 +8752,84 @@ impl<'a> Vue3DomMirCodegen<'a> {
             format!("{}({})", helper, args)
         } else {
             format!("{}({})", helper, args)
+        };
+        self.render_with_directives(rendered, call)
+    }
+
+    fn render_props(&self, props: &Vue3DomProps) -> Option<String> {
+        let mut rendered = Vec::new();
+        for attr in &props.static_attrs {
+            rendered.push(format!(
+                "{}: {}",
+                json_key(&attr.name),
+                quote_string(&attr.value)
+            ));
         }
+        for binding in &props.dynamic_bindings {
+            let value = self.render_js_expr(binding.value);
+            if binding.dynamic_arg {
+                rendered.push(format!("[{}]: {}", binding.name, value));
+            } else if binding.name == "class" {
+                rendered.push(format!("class: _normalizeClass({value})"));
+            } else {
+                rendered.push(format!("{}: {}", json_key(&binding.name), value));
+            }
+        }
+        for event in &props.events {
+            let handler = self.render_js_stmt(event.handler);
+            if event.dynamic_arg {
+                rendered.push(format!("[{}]: {}", event.name, handler));
+            } else {
+                rendered.push(format!("{}: {}", json_key(&event.name), handler));
+            }
+        }
+        if rendered.is_empty() {
+            None
+        } else if rendered.len() == 1 {
+            Some(format!("{{ {} }}", rendered.join(", ")))
+        } else {
+            Some(render_object(&rendered))
+        }
+    }
+
+    fn render_with_directives(&self, vnode: String, call: &Vue3VNodeCall) -> String {
+        if call.directives.is_empty() {
+            return vnode;
+        }
+        let directives = call
+            .directives
+            .iter()
+            .map(|directive| self.render_directive_arg(directive))
+            .collect::<Vec<_>>();
+        format!("_withDirectives({vnode}, {})", render_array(&directives))
+    }
+
+    fn render_directive_arg(&self, directive: &Vue3DomDirective) -> String {
+        let runtime = if directive.name == "show" {
+            "_vShow".to_string()
+        } else {
+            directive_asset_id(&directive.name)
+        };
+        let mut args = vec![runtime];
+        if let Some(expression) = directive.expression {
+            args.push(self.render_js_expr(expression));
+        } else if directive.argument.is_some() || !directive.modifiers.is_empty() {
+            args.push("void 0".into());
+        }
+        if let Some(argument) = &directive.argument {
+            args.push(quote_string(argument));
+        } else if !directive.modifiers.is_empty() {
+            args.push("void 0".into());
+        }
+        if !directive.modifiers.is_empty() {
+            let modifiers = directive
+                .modifiers
+                .iter()
+                .map(|modifier| format!("{}: true", json_key(modifier)))
+                .collect::<Vec<_>>();
+            args.push(render_object(&modifiers));
+        }
+        format!("[{}]", args.join(", "))
     }
 
     fn render_vnode_children(&self, call: &Vue3VNodeCall) -> Option<String> {
@@ -8690,6 +8891,14 @@ impl<'a> Vue3DomMirCodegen<'a> {
     fn render_js_expr(&self, id: JsExprId) -> String {
         self.js
             .expressions()
+            .get(id.0 as usize)
+            .map(|entry| entry.source.clone())
+            .unwrap_or_else(|| "undefined".into())
+    }
+
+    fn render_js_stmt(&self, id: vuec_ast::JsStmtId) -> String {
+        self.js
+            .statements()
             .get(id.0 as usize)
             .map(|entry| entry.source.clone())
             .unwrap_or_else(|| "undefined".into())
@@ -11411,6 +11620,26 @@ fn event_handler_prop_name(element: &Vue3Element, event: &str) -> String {
     }
 }
 
+fn event_handler_prop_name_for_component(event: &str) -> String {
+    let raw_name = event
+        .strip_prefix("vue:")
+        .map(|hook| format!("vnode-{hook}"))
+        .unwrap_or_else(|| event.to_string());
+    format!("on{}", capitalize(&camelize(&raw_name)))
+}
+
+fn event_handler_prop_name_for_element(event: &str) -> String {
+    let raw_name = event
+        .strip_prefix("vue:")
+        .map(|hook| format!("vnode-{hook}"))
+        .unwrap_or_else(|| event.to_string());
+    if raw_name.starts_with("vnode") || !raw_name.chars().any(|ch| ch.is_ascii_uppercase()) {
+        format!("on{}", capitalize(&camelize(&raw_name)))
+    } else {
+        format!("on:{raw_name}")
+    }
+}
+
 fn has_class_bind_dir(dir: &Vue3Directive) -> bool {
     dir.arg
         .as_ref()
@@ -13379,6 +13608,9 @@ mod tests {
             })
             .expect("DOM MIR vnode");
         assert_eq!(div_mir.tag, MirExpr::String("div".into()));
+        assert_eq!(div_mir.props.static_attrs[0].name, "id");
+        assert_eq!(div_mir.props.dynamic_bindings[0].name, "class");
+        assert_eq!(div_mir.props.events[0].name, "onClick");
         assert_eq!(div_mir.dynamic_props, vec!["class", "onClick"]);
         assert_eq!(div_mir.patch_flag.bits, 11);
         assert!(matches!(div_mir.children, MirChildren::Nodes(_)));
@@ -13695,6 +13927,7 @@ mod tests {
         assert_eq!(generated.ast_summary, "vue3-dom-mir-nodes=3");
         assert!(generated.code.starts_with("export function render("));
         assert!(generated.code.contains("_createElementBlock(\"div\""));
+        assert!(generated.code.contains("class: _normalizeClass(foo)"));
         assert!(generated
             .code
             .contains("_createTextVNode(_toDisplayString(msg), 1 /* TEXT */)"));
@@ -13760,6 +13993,41 @@ mod tests {
         assert!(generated.code.contains("_hoisted_1"));
         assert!(generated.code.contains("_cache[0] || (_cache[0] ="));
         assert!(generated.code.contains("_toDisplayString(msg)"));
+    }
+
+    #[test]
+    fn generate_vue3_dom_mir_emits_runtime_directives_from_mir() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div v-focus:foo.bar="value"><span v-show="ok"/></div>"#.into(),
+            file_id: FileId(29),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+        let generated = generate_vue3_dom_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated.code.contains("withDirectives as _withDirectives"));
+        assert!(generated
+            .code
+            .contains("resolveDirective as _resolveDirective"));
+        assert!(generated.code.contains("vShow as _vShow"));
+        assert!(generated
+            .code
+            .contains("const _directive_focus = _resolveDirective(\"focus\")"));
+        assert!(generated
+            .code
+            .contains("[_directive_focus, value, \"foo\", {"));
+        assert!(generated.code.contains("bar: true"));
+        assert!(generated.code.contains("[_vShow, ok]"));
     }
 
     #[test]

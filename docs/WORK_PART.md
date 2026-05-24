@@ -76,9 +76,15 @@
 - [x] Vue 3 AST root helper / component / directive collection in Rust `Vue3Dialect::transform`, visible through public projection.
 - [x] Vue 3 exact render emitter consumes transformed root helper / component / directive state for asset declarations, helper imports, built-in/dynamic component tags, and runtime directive wrappers, with raw-AST public `generate` fallback.
 - [x] Vue 3 structural `Vue3DomMir` standalone codegen entry for current target-split MIR subset, consuming MIR + `JsAstStore` without AST fallback.
+- [x] Vue 3 structural `Vue3DomMir` VNode props/directive payload foundation, so current MIR codegen can emit attrs, bindings, events, class normalization, and runtime directive wrappers without AST fallback.
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Expanded `vuec_ast::Vue3VNodeCall` with target-specific `Vue3DomProps` and `Vue3DomDirective` payloads. DOM lowering derives these from HIR props/directive uses, so `JsAstStore` expression ownership stays single-source and MIR codegen no longer needs to read `Vue3Ast` to recover current prop/directive data.
+- `generate_vue3_dom_mir` now emits static attrs, dynamic bindings, event props, class normalization, runtime directive wrappers, custom directive declarations, `v-show` helper usage, and the related helper imports from MIR.
+- This is still structural target-codegen work. Exact Vue 3 DOM parity needs richer MIR fields for merge props, dynamic arg helper lowering, component asset references, directive arg dynamism, cacheHandlers, full hoist output, and official patch-flag behavior.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, focused `cargo test -p vuec_vue3_core lower_vue3_ast_to_dom_mir_records_hir_mir_edges_and_js_store`, focused `cargo test -p vuec_vue3_core generate_vue3_dom_mir`, `cargo test -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, and `git diff --check`.
 
 - Added `vuec_vue3_core::generate_vue3_dom_mir` as a standalone target-split codegen entry for structural DOM MIR. It emits render code from `Vue3DomMir` plus `JsAstStore` without reading the original AST, and derives module-mode helper imports from MIR node kinds.
 - The initial MIR emitter covers the current structural subset: VNode calls, text/interpolation text VNodes, slot outlets, `v-if` comment fallbacks, `v-for` render-list wrappers, fragment arrays, top-level `v-once` cache wrappers, conservative hoist references, patch flags, and dynamic prop names.

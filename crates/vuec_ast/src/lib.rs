@@ -1255,12 +1255,49 @@ pub enum Vue3DomMirKind {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3VNodeCall {
     pub tag: MirExpr,
+    pub props: Vue3DomProps,
+    pub directives: Vec<Vue3DomDirective>,
     pub children: MirChildren,
     pub patch_flag: Vue3PatchFlags,
     pub dynamic_props: Vec<String>,
     pub is_block: bool,
     pub disable_tracking: bool,
     pub is_component: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue3DomProps {
+    pub static_attrs: Vec<Vue3DomStaticAttr>,
+    pub dynamic_bindings: Vec<Vue3DomBinding>,
+    pub events: Vec<Vue3DomEvent>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue3DomStaticAttr {
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue3DomBinding {
+    pub name: String,
+    pub value: JsExprId,
+    pub dynamic_arg: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue3DomEvent {
+    pub name: String,
+    pub handler: JsStmtId,
+    pub dynamic_arg: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue3DomDirective {
+    pub name: String,
+    pub argument: Option<String>,
+    pub expression: Option<JsExprId>,
+    pub modifiers: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
