@@ -707,6 +707,575 @@ fn json_usize(value: &Value, key: &str) -> Option<usize> {
         .map(|value| value as usize)
 }
 
+const VUE3_CONSTANT_NOT: u8 = 0;
+const VUE3_CONSTANT_CAN_SKIP_PATCH: u8 = 1;
+const VUE3_CONSTANT_CAN_CACHE: u8 = 2;
+const VUE3_CONSTANT_CAN_STRINGIFY: u8 = 3;
+
+pub fn get_constant_type_projection(payload: &Value) -> Value {
+    let node = payload.get("node").unwrap_or(&Value::Null);
+    let context = payload.get("context").unwrap_or(&Value::Null);
+    json!({
+        "constantType": vue3_constant_type(node, context),
+    })
+}
+
+pub fn cache_static_projection(payload: &Value) -> Value {
+    let root = payload.get("root").unwrap_or(&Value::Null);
+    let context = payload.get("context").unwrap_or(&Value::Null);
+    let children = root
+        .get("children")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let do_not_hoist_root = vue3_single_element_root(children).is_some();
+    let mut state = Vue3CacheStaticState::default();
+    vue3_cache_static_walk(
+        children,
+        vec!["children".to_string()],
+        None,
+        root,
+        context,
+        do_not_hoist_root,
+        &mut state,
+    );
+    json!({
+        "operations": state.operations,
+    })
+}
+
+#[derive(Default)]
+struct Vue3CacheStaticState {
+    operations: Vec<Value>,
+}
+
+fn vue3_cache_static_walk(
+    children: &[Value],
+    children_path: Vec<String>,
+    parent_path: Option<Vec<String>>,
+    parent: &Value,
+    context: &Value,
+    do_not_hoist_node: bool,
+    state: &mut Vue3CacheStaticState,
+) {
+    let mut to_cache = Vec::<usize>::new();
+
+    for (index, child) in children.iter().enumerate() {
+        let child_path = vue3_path_child(&children_path, index);
+        if json_node_type(child) == Some(1) && json_u64(child, "tagType") == Some(0) {
+            let constant_type = if do_not_hoist_node {
+                VUE3_CONSTANT_NOT
+            } else {
+                vue3_constant_type(child, context)
+            };
+            if constant_type > VUE3_CONSTANT_NOT {
+                if constant_type >= VUE3_CONSTANT_CAN_CACHE {
+                    if vue3_should_downgrade_static_block(child) {
+                        state.operations.push(json!({
+                            "kind": "setBlock",
+                            "path": vue3_codegen_path(&child_path),
+                            "isBlock": false,
+                        }));
+                    }
+                    state.operations.push(json!({
+                        "kind": "setPatchFlag",
+                        "path": vue3_codegen_path(&child_path),
+                        "patchFlag": -1,
+                    }));
+                    to_cache.push(index);
+                    continue;
+                }
+            } else {
+                vue3_project_prop_hoists(child, &child_path, context, state);
+            }
+        } else if json_node_type(child) == Some(12) {
+            let constant_type = if do_not_hoist_node {
+                VUE3_CONSTANT_NOT
+            } else {
+                vue3_constant_type(child, context)
+            };
+            if constant_type >= VUE3_CONSTANT_CAN_CACHE {
+                state.operations.push(json!({
+                    "kind": "appendTextCallPatchFlag",
+                    "path": vue3_codegen_path(&child_path),
+                    "patchFlag": "-1 /* CACHED */",
+                }));
+                to_cache.push(index);
+                continue;
+            }
+        }
+
+        match json_node_type(child) {
+            Some(1) => {
+                let child_children = child
+                    .get("children")
+                    .and_then(Value::as_array)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                vue3_cache_static_walk(
+                    child_children,
+                    vue3_path_push(&child_path, "children"),
+                    Some(child_path.clone()),
+                    child,
+                    context,
+                    false,
+                    state,
+                );
+            }
+            Some(11) => {
+                let for_children = child
+                    .get("children")
+                    .and_then(Value::as_array)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                vue3_cache_static_walk(
+                    for_children,
+                    vue3_path_push(&child_path, "children"),
+                    Some(child_path.clone()),
+                    child,
+                    context,
+                    for_children.len() == 1,
+                    state,
+                );
+            }
+            Some(9) => {
+                if let Some(branches) = child.get("branches").and_then(Value::as_array) {
+                    for (branch_index, branch) in branches.iter().enumerate() {
+                        let branch_children = branch
+                            .get("children")
+                            .and_then(Value::as_array)
+                            .map(Vec::as_slice)
+                            .unwrap_or(&[]);
+                        vue3_cache_static_walk(
+                            branch_children,
+                            vue3_path_push(
+                                &vue3_path_child(
+                                    &vue3_path_push(&child_path, "branches"),
+                                    branch_index,
+                                ),
+                                "children",
+                            ),
+                            Some(vue3_path_child(
+                                &vue3_path_push(&child_path, "branches"),
+                                branch_index,
+                            )),
+                            branch,
+                            context,
+                            branch_children.len() == 1,
+                            state,
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if vue3_can_cache_children_array(&to_cache, children, parent) {
+        let target = if json_u64(parent, "tagType") == Some(0) {
+            Some(json!({
+                "kind": "cacheChildrenArray",
+                "path": vue3_path_push(
+                    &vue3_codegen_path(parent_path.as_deref().unwrap_or(&[])),
+                    "children"
+                ),
+                "childrenPath": children_path,
+                "needArraySpread": true,
+            }))
+        } else if json_u64(parent, "tagType") == Some(1) {
+            Some(json!({
+                "kind": "cacheSlotReturns",
+                "ownerPath": parent_path,
+                "slot": { "kind": "static", "name": "default" },
+                "needArraySpread": true,
+            }))
+        } else if json_u64(parent, "tagType") == Some(3) {
+            parent_path.as_ref().and_then(|template_path| {
+                let slot = vue3_template_slot_projection(parent)?;
+                Some(json!({
+                    "kind": "cacheSlotReturns",
+                    "ownerPath": vue3_parent_path(template_path),
+                    "slot": slot,
+                    "needArraySpread": true,
+                }))
+            })
+        } else {
+            None
+        };
+        if let Some(operation) = target {
+            state.operations.push(operation);
+            return;
+        }
+    }
+
+    for index in to_cache {
+        state.operations.push(json!({
+            "kind": "cacheCodegen",
+            "path": vue3_codegen_path(&vue3_path_child(&children_path, index)),
+        }));
+    }
+}
+
+fn vue3_project_prop_hoists(
+    node: &Value,
+    child_path: &[String],
+    context: &Value,
+    state: &mut Vue3CacheStaticState,
+) {
+    let Some(codegen_node) = node.get("codegenNode") else {
+        return;
+    };
+    if json_node_type(codegen_node) != Some(13) {
+        return;
+    }
+    let flag = codegen_node.get("patchFlag");
+    let patch_flag_allows_props = flag.is_none_or(Value::is_null)
+        || flag.and_then(Value::as_i64) == Some(512)
+        || flag.and_then(Value::as_i64) == Some(1);
+    if patch_flag_allows_props
+        && vue3_generated_props_constant_type(node, context) >= VUE3_CONSTANT_CAN_CACHE
+        && !codegen_node.get("props").is_none_or(Value::is_null)
+    {
+        state.operations.push(json!({
+            "kind": "hoistProps",
+            "path": vue3_path_push(&vue3_codegen_path(child_path), "props"),
+        }));
+    }
+    if !codegen_node.get("dynamicProps").is_none_or(Value::is_null) {
+        state.operations.push(json!({
+            "kind": "hoistDynamicProps",
+            "path": vue3_path_push(&vue3_codegen_path(child_path), "dynamicProps"),
+        }));
+    }
+}
+
+fn vue3_can_cache_children_array(to_cache: &[usize], children: &[Value], parent: &Value) -> bool {
+    if to_cache.len() != children.len() || children.is_empty() || json_node_type(parent) != Some(1)
+    {
+        return false;
+    }
+    match json_u64(parent, "tagType") {
+        Some(0) => {
+            let Some(codegen_node) = parent.get("codegenNode") else {
+                return false;
+            };
+            json_node_type(codegen_node) == Some(13)
+                && codegen_node
+                    .get("children")
+                    .and_then(Value::as_array)
+                    .is_some()
+        }
+        Some(1) => parent.get("codegenNode").is_some_and(|codegen_node| {
+            json_node_type(codegen_node) == Some(13)
+                && vue3_codegen_has_object_slots(codegen_node)
+                && vue3_slot_returns_len(
+                    codegen_node,
+                    &json!({ "kind": "static", "name": "default" }),
+                ) == Some(children.len())
+        }),
+        Some(3) => true,
+        _ => false,
+    }
+}
+
+fn vue3_constant_type(node: &Value, context: &Value) -> u8 {
+    match json_node_type(node) {
+        Some(1) => vue3_element_constant_type(node, context),
+        Some(2) | Some(3) => VUE3_CONSTANT_CAN_STRINGIFY,
+        Some(9) | Some(10) | Some(11) => VUE3_CONSTANT_NOT,
+        Some(5) | Some(12) => node
+            .get("content")
+            .map(|content| vue3_constant_type(content, context))
+            .unwrap_or(VUE3_CONSTANT_NOT),
+        Some(4) => json_u64(node, "constType")
+            .map(|value| value as u8)
+            .unwrap_or_else(|| {
+                if json_bool(node, "isStatic") {
+                    VUE3_CONSTANT_CAN_STRINGIFY
+                } else {
+                    VUE3_CONSTANT_NOT
+                }
+            }),
+        Some(8) => vue3_compound_constant_type(node, context),
+        Some(20) => VUE3_CONSTANT_CAN_CACHE,
+        _ => VUE3_CONSTANT_NOT,
+    }
+}
+
+fn vue3_element_constant_type(node: &Value, context: &Value) -> u8 {
+    if json_u64(node, "tagType") != Some(0) {
+        return VUE3_CONSTANT_NOT;
+    }
+    let Some(codegen_node) = node.get("codegenNode") else {
+        return VUE3_CONSTANT_NOT;
+    };
+    if json_node_type(codegen_node) != Some(13) {
+        return VUE3_CONSTANT_NOT;
+    }
+    if json_bool(codegen_node, "isBlock")
+        && !matches!(
+            json_str(node, "tag"),
+            Some("svg" | "foreignObject" | "math")
+        )
+    {
+        return VUE3_CONSTANT_NOT;
+    }
+    if !codegen_node.get("patchFlag").is_none_or(Value::is_null) {
+        return VUE3_CONSTANT_NOT;
+    }
+
+    let mut return_type = VUE3_CONSTANT_CAN_STRINGIFY;
+    let generated_props_type = vue3_generated_props_constant_type(node, context);
+    if generated_props_type == VUE3_CONSTANT_NOT {
+        return VUE3_CONSTANT_NOT;
+    }
+    return_type = return_type.min(generated_props_type);
+
+    for child in node
+        .get("children")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+    {
+        let child_type = vue3_constant_type(child, context);
+        if child_type == VUE3_CONSTANT_NOT {
+            return VUE3_CONSTANT_NOT;
+        }
+        return_type = return_type.min(child_type);
+    }
+
+    if return_type > VUE3_CONSTANT_CAN_SKIP_PATCH {
+        for prop in node
+            .get("props")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+        {
+            if json_node_type(prop) == Some(7)
+                && json_str(prop, "name") == Some("bind")
+                && prop.get("exp").is_some_and(|exp| !exp.is_null())
+            {
+                let exp_type = vue3_constant_type(prop.get("exp").unwrap_or(&Value::Null), context);
+                if exp_type == VUE3_CONSTANT_NOT {
+                    return VUE3_CONSTANT_NOT;
+                }
+                return_type = return_type.min(exp_type);
+            }
+        }
+    }
+
+    if json_bool(codegen_node, "isBlock")
+        && node
+            .get("props")
+            .and_then(Value::as_array)
+            .is_some_and(|props| props.iter().any(|prop| json_node_type(prop) == Some(7)))
+    {
+        return VUE3_CONSTANT_NOT;
+    }
+
+    return_type
+}
+
+fn vue3_compound_constant_type(node: &Value, context: &Value) -> u8 {
+    let mut return_type = VUE3_CONSTANT_CAN_STRINGIFY;
+    for child in node
+        .get("children")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+    {
+        if child.is_string() {
+            continue;
+        }
+        let child_type = vue3_constant_type(child, context);
+        if child_type == VUE3_CONSTANT_NOT {
+            return VUE3_CONSTANT_NOT;
+        }
+        return_type = return_type.min(child_type);
+    }
+    return_type
+}
+
+fn vue3_generated_props_constant_type(node: &Value, context: &Value) -> u8 {
+    let Some(props) = node
+        .get("codegenNode")
+        .and_then(|codegen| codegen.get("props"))
+    else {
+        return VUE3_CONSTANT_CAN_STRINGIFY;
+    };
+    if json_node_type(props) != Some(15) {
+        return VUE3_CONSTANT_NOT;
+    }
+    let mut return_type = VUE3_CONSTANT_CAN_STRINGIFY;
+    for prop in props
+        .get("properties")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+    {
+        let key_type = prop
+            .get("key")
+            .map(|key| vue3_constant_type(key, context))
+            .unwrap_or(VUE3_CONSTANT_NOT);
+        if key_type == VUE3_CONSTANT_NOT {
+            return VUE3_CONSTANT_NOT;
+        }
+        return_type = return_type.min(key_type);
+
+        let value = prop.get("value").unwrap_or(&Value::Null);
+        let value_type = if json_node_type(value) == Some(4) {
+            vue3_constant_type(value, context)
+        } else if json_node_type(value) == Some(14) {
+            vue3_helper_call_constant_type(value, context)
+        } else {
+            VUE3_CONSTANT_NOT
+        };
+        if value_type == VUE3_CONSTANT_NOT {
+            return VUE3_CONSTANT_NOT;
+        }
+        return_type = return_type.min(value_type);
+    }
+    return_type
+}
+
+fn vue3_helper_call_constant_type(value: &Value, context: &Value) -> u8 {
+    if json_node_type(value) != Some(14) || !vue3_allow_hoisted_helper_call(value) {
+        return VUE3_CONSTANT_NOT;
+    }
+    let Some(arg) = value
+        .get("arguments")
+        .and_then(Value::as_array)
+        .and_then(|arguments| arguments.first())
+    else {
+        return VUE3_CONSTANT_NOT;
+    };
+    if json_node_type(arg) == Some(4) {
+        vue3_constant_type(arg, context)
+    } else if json_node_type(arg) == Some(14) {
+        vue3_helper_call_constant_type(arg, context)
+    } else {
+        VUE3_CONSTANT_NOT
+    }
+}
+
+fn vue3_allow_hoisted_helper_call(value: &Value) -> bool {
+    value
+        .get("callee")
+        .and_then(Value::as_str)
+        .is_some_and(|callee| {
+            matches!(
+                callee,
+                "NORMALIZE_CLASS" | "NORMALIZE_STYLE" | "NORMALIZE_PROPS" | "GUARD_REACTIVE_PROPS"
+            )
+        })
+}
+
+fn vue3_should_downgrade_static_block(node: &Value) -> bool {
+    let Some(codegen_node) = node.get("codegenNode") else {
+        return false;
+    };
+    json_bool(codegen_node, "isBlock")
+        && matches!(
+            json_str(node, "tag"),
+            Some("svg" | "foreignObject" | "math")
+        )
+        && !node
+            .get("props")
+            .and_then(Value::as_array)
+            .is_some_and(|props| props.iter().any(|prop| json_node_type(prop) == Some(7)))
+}
+
+fn vue3_single_element_root(children: &[Value]) -> Option<&Value> {
+    let non_comments = children
+        .iter()
+        .filter(|child| json_node_type(child) != Some(3))
+        .collect::<Vec<_>>();
+    match non_comments.as_slice() {
+        [node] if json_node_type(node) == Some(1) && json_u64(node, "tagType") != Some(2) => {
+            Some(*node)
+        }
+        _ => None,
+    }
+}
+
+fn vue3_path_child(path: &[String], index: usize) -> Vec<String> {
+    let mut out = path.to_vec();
+    out.push(index.to_string());
+    out
+}
+
+fn vue3_path_push(path: &[String], key: &str) -> Vec<String> {
+    let mut out = path.to_vec();
+    out.push(key.to_string());
+    out
+}
+
+fn vue3_parent_path(path: &[String]) -> Vec<String> {
+    let mut out = path.to_vec();
+    out.pop();
+    out.pop();
+    out
+}
+
+fn vue3_codegen_path(path: &[String]) -> Vec<String> {
+    vue3_path_push(path, "codegenNode")
+}
+
+fn vue3_template_slot_projection(node: &Value) -> Option<Value> {
+    let dir = node
+        .get("props")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|prop| json_str(prop, "name") == Some("slot"))?;
+    let arg = dir.get("arg")?;
+    if json_bool(arg, "isStatic") {
+        Some(json!({
+            "kind": "static",
+            "name": json_str(arg, "content").unwrap_or("default"),
+        }))
+    } else {
+        Some(json!({
+            "kind": "dynamic",
+            "node": arg,
+        }))
+    }
+}
+
+fn vue3_codegen_has_object_slots(codegen_node: &Value) -> bool {
+    codegen_node
+        .get("children")
+        .is_some_and(|children| json_node_type(children) == Some(15))
+}
+
+fn vue3_slot_returns_len(codegen_node: &Value, slot: &Value) -> Option<usize> {
+    let properties = codegen_node
+        .get("children")?
+        .get("properties")?
+        .as_array()?;
+    let property = properties
+        .iter()
+        .find(|property| vue3_slot_property_matches(property, slot))?;
+    property
+        .get("value")?
+        .get("returns")?
+        .as_array()
+        .map(Vec::len)
+}
+
+fn vue3_slot_property_matches(property: &Value, slot: &Value) -> bool {
+    let Some(key) = property.get("key") else {
+        return false;
+    };
+    if json_str(slot, "kind") == Some("static") {
+        let name = json_str(slot, "name").unwrap_or("default");
+        return json_str(key, "content") == Some(name);
+    }
+    if json_str(slot, "kind") == Some("dynamic") {
+        return property.get("key") == slot.get("node");
+    }
+    false
+}
+
 pub fn transform_model_projection(payload: &Value) -> Value {
     let dir = payload.get("dir").unwrap_or(&Value::Null);
     let node = payload.get("node").unwrap_or(&Value::Null);
@@ -2431,7 +3000,7 @@ pub fn transform_element_props_projection(payload: &Value) -> Value {
     }
 
     if !in_ssr {
-        normalize_class = has_class_binding;
+        normalize_class = has_class_binding || props.iter().any(prop_requires_normalize_class);
         normalize_style = has_style_binding
             || props.iter().any(prop_requires_normalize_style)
             || props
@@ -2593,6 +3162,12 @@ fn prop_requires_normalize_style(prop: &Value) -> bool {
         && json_str(prop, "name") == Some("style")
         && (json_bool(prop, "valueStartsWithArray")
             || prop.get("valueType").and_then(Value::as_u64) == Some(17))
+}
+
+fn prop_requires_normalize_class(prop: &Value) -> bool {
+    json_str(prop, "kind") == Some("directiveProp")
+        && json_str(prop, "name") == Some("class")
+        && !json_bool(prop, "valueStatic")
 }
 
 fn prop_output_name(prop: &Value) -> Option<&str> {
@@ -7788,6 +8363,312 @@ mod tests {
         assert_eq!(
             root_codegen_projection(&root),
             json!({ "kind": "fragment", "patchFlag": 2112 })
+        );
+    }
+
+    #[test]
+    fn get_constant_type_projection_handles_static_interpolation_and_props() {
+        let interpolation = get_constant_type_projection(&json!({
+            "node": {
+                "type": 5,
+                "content": { "type": 4, "content": "1", "constType": 3 }
+            },
+            "context": {}
+        }));
+        assert_eq!(interpolation["constantType"], json!(3));
+
+        let static_props = get_constant_type_projection(&json!({
+            "node": {
+                "type": 1,
+                "tag": "div",
+                "tagType": 0,
+                "props": [],
+                "children": [],
+                "codegenNode": {
+                    "type": 13,
+                    "isBlock": false,
+                    "props": {
+                        "type": 15,
+                        "properties": [{
+                            "type": 16,
+                            "key": { "type": 4, "content": "id", "isStatic": true },
+                            "value": { "type": 4, "content": "foo", "isStatic": true }
+                        }]
+                    }
+                }
+            },
+            "context": {}
+        }));
+        assert_eq!(static_props["constantType"], json!(3));
+    }
+
+    #[test]
+    fn cache_static_projection_caches_static_child_arrays() {
+        let projection = cache_static_projection(&json!({
+            "root": {
+                "children": [{
+                    "type": 1,
+                    "tag": "div",
+                    "tagType": 0,
+                    "props": [],
+                    "children": [
+                        {
+                            "type": 1,
+                            "tag": "span",
+                            "tagType": 0,
+                            "props": [],
+                            "children": [],
+                            "codegenNode": { "type": 13, "isBlock": false }
+                        },
+                        {
+                            "type": 1,
+                            "tag": "i",
+                            "tagType": 0,
+                            "props": [],
+                            "children": [],
+                            "codegenNode": { "type": 13, "isBlock": false }
+                        }
+                    ],
+                    "codegenNode": {
+                        "type": 13,
+                        "isBlock": true,
+                        "children": [{ "type": 1 }, { "type": 1 }]
+                    }
+                }]
+            },
+            "context": {}
+        }));
+
+        assert_eq!(
+            projection["operations"],
+            json!([
+                {
+                    "kind": "setPatchFlag",
+                    "path": ["children", "0", "children", "0", "codegenNode"],
+                    "patchFlag": -1
+                },
+                {
+                    "kind": "setPatchFlag",
+                    "path": ["children", "0", "children", "1", "codegenNode"],
+                    "patchFlag": -1
+                },
+                {
+                    "kind": "cacheChildrenArray",
+                    "path": ["children", "0", "codegenNode", "children"],
+                    "childrenPath": ["children", "0", "children"],
+                    "needArraySpread": true
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn cache_static_projection_hoists_props_and_dynamic_props() {
+        let projection = cache_static_projection(&json!({
+            "root": {
+                "children": [{
+                    "type": 1,
+                    "tag": "div",
+                    "tagType": 0,
+                    "props": [],
+                    "children": [
+                        {
+                            "type": 1,
+                            "tag": "span",
+                            "tagType": 0,
+                            "props": [],
+                            "children": [],
+                            "codegenNode": {
+                                "type": 13,
+                                "patchFlag": 512,
+                                "props": {
+                                    "type": 15,
+                                    "properties": [{
+                                        "type": 16,
+                                        "key": { "type": 4, "content": "id", "isStatic": true },
+                                        "value": { "type": 4, "content": "foo", "isStatic": true }
+                                    }]
+                                }
+                            }
+                        },
+                        {
+                            "type": 1,
+                            "tag": "p",
+                            "tagType": 0,
+                            "props": [],
+                            "children": [],
+                            "codegenNode": {
+                                "type": 13,
+                                "patchFlag": 8,
+                                "dynamicProps": "[\"foo\"]"
+                            }
+                        }
+                    ],
+                    "codegenNode": { "type": 13, "isBlock": true }
+                }]
+            },
+            "context": {}
+        }));
+
+        assert_eq!(
+            projection["operations"],
+            json!([
+                {
+                    "kind": "hoistProps",
+                    "path": ["children", "0", "children", "0", "codegenNode", "props"]
+                },
+                {
+                    "kind": "hoistDynamicProps",
+                    "path": ["children", "0", "children", "1", "codegenNode", "dynamicProps"]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn cache_static_projection_caches_dynamic_template_slot_returns() {
+        let dynamic_slot = json!({
+            "type": 8,
+            "children": ["foo + ", { "type": 4, "content": "bar", "constType": 0 }]
+        });
+        let projection = cache_static_projection(&json!({
+            "root": {
+                "children": [{
+                    "type": 1,
+                    "tag": "Comp",
+                    "tagType": 1,
+                    "props": [],
+                    "children": [{
+                        "type": 1,
+                        "tag": "template",
+                        "tagType": 3,
+                        "props": [{
+                            "type": 7,
+                            "name": "slot",
+                            "arg": dynamic_slot
+                        }],
+                        "children": [{
+                            "type": 1,
+                            "tag": "span",
+                            "tagType": 0,
+                            "props": [],
+                            "children": [],
+                            "codegenNode": { "type": 13, "isBlock": false }
+                        }]
+                    }],
+                    "codegenNode": {
+                        "type": 13,
+                        "children": {
+                            "type": 15,
+                            "properties": [{
+                                "key": dynamic_slot,
+                                "value": {
+                                    "type": 18,
+                                    "returns": [{ "type": 1 }]
+                                }
+                            }]
+                        }
+                    }
+                }]
+            },
+            "context": {}
+        }));
+
+        assert_eq!(projection["operations"][0]["kind"], json!("setPatchFlag"));
+        assert_eq!(
+            projection["operations"][1],
+            json!({
+                "kind": "cacheSlotReturns",
+                "ownerPath": ["children", "0"],
+                "slot": {
+                    "kind": "dynamic",
+                    "node": dynamic_slot
+                },
+                "needArraySpread": true
+            })
+        );
+    }
+
+    #[test]
+    fn cache_static_projection_downgrades_static_svg_blocks_except_with_directives() {
+        let static_svg = cache_static_projection(&json!({
+            "root": {
+                "children": [{
+                    "type": 1,
+                    "tag": "div",
+                    "tagType": 0,
+                    "props": [],
+                    "children": [{
+                        "type": 1,
+                        "tag": "svg",
+                        "tagType": 0,
+                        "props": [],
+                        "children": [],
+                        "codegenNode": { "type": 13, "isBlock": true }
+                    }],
+                    "codegenNode": {
+                        "type": 13,
+                        "isBlock": true,
+                        "children": [{ "type": 1 }]
+                    }
+                }]
+            },
+            "context": {}
+        }));
+        assert_eq!(
+            static_svg["operations"][0],
+            json!({
+                "kind": "setBlock",
+                "path": ["children", "0", "children", "0", "codegenNode"],
+                "isBlock": false
+            })
+        );
+
+        let svg_with_directive = cache_static_projection(&json!({
+            "root": {
+                "children": [{
+                    "type": 1,
+                    "tag": "div",
+                    "tagType": 0,
+                    "props": [],
+                    "children": [{
+                        "type": 1,
+                        "tag": "svg",
+                        "tagType": 0,
+                        "props": [{ "type": 7, "name": "foo" }],
+                        "children": [{
+                            "type": 1,
+                            "tag": "path",
+                            "tagType": 0,
+                            "props": [],
+                            "children": [],
+                            "codegenNode": { "type": 13, "isBlock": false }
+                        }],
+                        "codegenNode": {
+                            "type": 13,
+                            "isBlock": true,
+                            "children": [{ "type": 1 }]
+                        }
+                    }],
+                    "codegenNode": { "type": 13, "isBlock": true }
+                }]
+            },
+            "context": {}
+        }));
+        let svg_codegen_path = json!(["children", "0", "children", "0", "codegenNode"]);
+        assert!(svg_with_directive["operations"]
+            .as_array()
+            .expect("operations")
+            .iter()
+            .all(|operation| operation["path"] != svg_codegen_path));
+        assert_eq!(
+            svg_with_directive["operations"][1],
+            json!({
+                "kind": "cacheChildrenArray",
+                "path": ["children", "0", "children", "0", "codegenNode", "children"],
+                "childrenPath": ["children", "0", "children", "0", "children"],
+                "needArraySpread": true
+            })
         );
     }
 

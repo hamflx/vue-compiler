@@ -41,9 +41,16 @@
 - [x] Vue 3 compiler-core Rust-backed `processFor` / `transformFor` projection bridge for `vFor.spec.ts`.
 - [x] Vue 3 compiler-core Rust-backed `buildSlots` / slot-scope projection bridge for `vSlot.spec.ts`.
 - [x] Vue 3 compiler-core Rust-backed `transformOn` projection bridge for `vOn.spec.ts`.
+- [x] Vue 3 compiler-core Rust-backed `cacheStatic` / `getConstantType` projection bridge for `cacheStatic.spec.ts`.
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Added a Rust-backed Vue 3 `cacheStatic` / `getConstantType` projection bridge.
+- `vuec_vue3_core::cache_static_projection` now owns official static-cache walk decisions for static node/text caching, cached children arrays, default/named/dynamic slot-return caching, props and dynamic-props hoisting, `CACHED` patch flags, and SVG/math/foreignObject block downgrade with custom-directive exclusion. `vuec_vue3_core::get_constant_type_projection` now owns constant-type decisions for static expressions, interpolation/text calls, compound expressions, generated props, and allowed hoisted helper calls.
+- `vuec_node_bridge` now exposes `vue3.core.cacheStatic` and `vue3.core.getConstantType`. Generated alias code in `xtask/src/compat.rs` changed as dehydration/materialization/codegen support: it forwards official-shaped AST summaries to Rust, applies Rust-returned cache/hoist/block operations through the transform context, resolves slot-return targets, and aligns snapshot-only codegen details such as `CACHED` patch-flag labels and pure annotations. The touched alias code is adapter/materialization support, not standalone compiler semantics.
+- Focused official `compiler-core/__tests__/transforms/cacheStatic.spec.ts` now passes `34/34` (previously `9/34` at the start of the slice). Adjacent focused `cacheStatic.spec.ts` + `utils.spec.ts` + `vIf.spec.ts` + `transformElement.spec.ts` reports `192/196`; remaining failures are the existing `utils` member/reference helper cases (`3`) and `vIf` key-injection case (`1`). Full Vue 3 core conformance is still expected-failing but improved to `648/652`; coverage reports `rust-backed 158/158`, `mixed 490/494`, and `shim-backed 0/0`.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_vue3_core` (`68/68` pass), `cargo xtask verify-npm-alias --version-line vue3 --package @vue/compiler-core`, direct prepared Vitest `cacheStatic.spec.ts` (`34/34` pass), adjacent prepared Vitest `cacheStatic.spec.ts` + `utils.spec.ts` + `vIf.spec.ts` + `transformElement.spec.ts` (`192/196`, expected existing failures), and `cargo xtask run-conformance --suite vue3-core` as an expected fail with `648/652` passing.
 
 - Added a Rust-backed Vue 3 `transformOn` / `v-on` projection bridge.
 - `vuec_vue3_core::transform_on_projection` now owns official `v-on` decisions for static/dynamic event names, `vue:` vnode hook normalization and diagnostics, handler expression classification, prefixIdentifiers rewriting with function parameter locals, inline statement wrapping, cacheHandlers behavior, setup-const handler constness, and dynamic handler-key patch-flag vs `normalizeProps` behavior.
