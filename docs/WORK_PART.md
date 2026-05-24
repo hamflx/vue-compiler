@@ -62,9 +62,19 @@
 - [x] Vue 3 compiler-core Rust-backed `transformText` projection bridge for text merge / `TEXT_CALL` decisions (`transformText.spec.ts` `9/9`; file remains `mixed` because it still exercises alias-runtime harness dependencies).
 - [x] Vue 3 compiler-core Rust-backed `processExpression` projection bridge for expression prefixing / const classification decisions (`transformExpressions.spec.ts` `47/47`; file remains `mixed` because it still exercises alias-runtime traversal and transform harness dependencies).
 - [x] Vue 3 compiler-core Rust-backed `transformExpression` projection bridge for interpolation/directive dispatch decisions (`transformExpressions.spec.ts` `47/47`; file remains `mixed` because it still exercises alias-runtime traversal and transform harness dependencies).
+- [x] Vue 3 compiler-core Rust-backed `transformOnce` projection bridge for `v-once` eligibility / cache intent decisions (`vOnce.spec.ts` `8/8`; file remains `mixed` because it still exercises alias-runtime traversal and cache materialization).
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Moved Vue 3 compiler-core `transformOnce` decisions into Rust via `vuec_vue3_core::transform_once_projection`.
+- The Rust projection now owns official `v-once` eligibility checks: element-only, directive presence, already-seen skip, nested `context.inVOnce` skip, SSR skip, helper requirement, enter `inVOnce`, and exit-time codegen cache intent.
+- Added `vue3.core.transformOnce` to `vuec_node_bridge`.
+- Updated `xtask/src/compat.rs` only as bridge/materialization support: the alias runtime sends node/context plus adapter-local seen state to Rust, marks the JS node as seen, toggles `context.inVOnce`, registers `SET_BLOCK_TRACKING`, and applies `context.cache(...)` on exit from Rust-returned operations. This is not counted as JavaScript shim compiler semantics.
+- Kept `compiler-core/__tests__/transforms/vOnce.spec.ts` classified as `mixed`, even though `transformOnce` decisions are Rust-backed, because the file still executes through alias-runtime traversal and cache materialization dependencies.
+- Focused official checks this round: `vOnce.spec.ts` `8/8`; adjacent `cacheStatic.spec.ts`, `transformText.spec.ts`, and `vMemo.spec.ts` `50/50`.
+- Full Vue 3 conformance after this slice: `vue3-core` `652/652` with `rust-backed 192/192`, `mixed 460/460`, `shim-backed 0/0`; `vue3-dom` `133/133` with `mixed 133/133`; `vue3-ssr` `129/129` with `mixed 129/129`.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_vue3_core -p vuec_node_bridge -p xtask` (`87/87` Vue 3 core tests and `20/20` xtask tests pass), `git diff --check`, `cargo xtask export-api --rust --version-line vue3`, focused specs listed above, `cargo xtask run-conformance --suite vue3-core` (`652/652`), `cargo xtask run-conformance --suite vue3-dom` (`133/133`), and `cargo xtask run-conformance --suite vue3-ssr` (`129/129`).
 
 - Moved Vue 3 compiler-core `transformExpression` node/directive dispatch decisions into Rust via `vuec_vue3_core::transform_expression_projection`.
 - The Rust projection now owns the official interpolation vs element branching, directive filtering, `v-for` skip, `v-on:arg` exp skip, `v-slot` params handling, dynamic arg processing, and `v-memo` key skip decisions, while reusing Rust `process_expression_projection` for expression rewriting.

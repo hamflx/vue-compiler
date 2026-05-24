@@ -5437,18 +5437,29 @@ const vue3CoreRuntime = (() => {
       vue3ApplyTransformHoist(root, context);
     }
   };
-  const onceSeen = new WeakSet();
   runtime.transformOnce = function transformOnce(node, context) {
-    if (node.type !== NodeTypes.ELEMENT || !runtime.findDir(node, 'once', true)) return;
-    if (onceSeen.has(node) || context.inVOnce || context.inSSR) return;
-    onceSeen.add(node);
-    context.inVOnce = true;
-    context.helper(runtime.SET_BLOCK_TRACKING);
+    const projection = callBridge('vue3.core.transformOnce', {
+      node: runtime.dehydrateForBridge(node),
+      context: vue3TransformOnceContextPayload(context),
+      seen: !!(node && node.__vuecOnceSeen),
+    });
+    if (!projection || projection.kind !== 'enter') return;
+    if (projection.markSeen) {
+      Object.defineProperty(node, '__vuecOnceSeen', { value: true, configurable: true });
+    }
+    if (projection.enterInVOnce) context.inVOnce = true;
+    if (projection.helper === 'SET_BLOCK_TRACKING') context.helper(runtime.SET_BLOCK_TRACKING);
     return () => {
-      context.inVOnce = false;
+      if (projection.exit && Object.prototype.hasOwnProperty.call(projection.exit, 'restoreInVOnce')) {
+        context.inVOnce = !!projection.exit.restoreInVOnce;
+      }
       const current = context.currentNode || node;
-      if (current && current.codegenNode) {
-        current.codegenNode = context.cache(current.codegenNode, true, true);
+      if (projection.exit && projection.exit.cacheCodegen && current && current.codegenNode) {
+        current.codegenNode = context.cache(
+          current.codegenNode,
+          projection.exit.isVNode !== false,
+          projection.exit.inVOnce !== false,
+        );
       }
     };
   };
@@ -5522,6 +5533,14 @@ function vue3TransformOnContextPayload(context) {
     isTS: !!context.isTS,
     identifiers: context.identifiers || {},
     bindingMetadata: context.bindingMetadata || {},
+  };
+}
+
+function vue3TransformOnceContextPayload(context) {
+  context = context || {};
+  return {
+    inVOnce: !!context.inVOnce,
+    inSSR: !!context.inSSR,
   };
 }
 

@@ -984,6 +984,31 @@ pub fn transform_expression_projection(payload: &Value) -> Value {
     json!({ "operations": operations })
 }
 
+pub fn transform_once_projection(payload: &Value) -> Value {
+    let node = payload.get("node").unwrap_or(&Value::Null);
+    let context = payload.get("context").unwrap_or(&Value::Null);
+    if json_node_type(node) != Some(1)
+        || vue3_directive(node, "once", true).is_none()
+        || json_bool(payload, "seen")
+        || json_bool(context, "inVOnce")
+        || json_bool(context, "inSSR")
+    {
+        return json!({ "kind": "noop" });
+    }
+    json!({
+        "kind": "enter",
+        "helper": "SET_BLOCK_TRACKING",
+        "markSeen": true,
+        "enterInVOnce": true,
+        "exit": {
+            "restoreInVOnce": false,
+            "cacheCodegen": true,
+            "isVNode": true,
+            "inVOnce": true,
+        }
+    })
+}
+
 pub fn cache_static_projection(payload: &Value) -> Value {
     let root = payload.get("root").unwrap_or(&Value::Null);
     let context = payload.get("context").unwrap_or(&Value::Null);
@@ -10846,6 +10871,46 @@ mod tests {
         }));
 
         assert_eq!(projection["operations"], json!([]));
+    }
+
+    #[test]
+    fn transform_once_projection_enters_once_node() {
+        let projection = transform_once_projection(&json!({
+            "node": {
+                "type": 1,
+                "props": [{ "type": 7, "name": "once" }]
+            },
+            "context": {}
+        }));
+
+        assert_eq!(projection["kind"], json!("enter"));
+        assert_eq!(projection["helper"], json!("SET_BLOCK_TRACKING"));
+        assert_eq!(projection["exit"]["cacheCodegen"], json!(true));
+        assert_eq!(projection["exit"]["inVOnce"], json!(true));
+    }
+
+    #[test]
+    fn transform_once_projection_skips_seen_nested_and_ssr_nodes() {
+        let node = json!({
+            "type": 1,
+            "props": [{ "type": 7, "name": "once" }]
+        });
+
+        assert_eq!(
+            transform_once_projection(&json!({ "node": node, "context": {}, "seen": true }))
+                ["kind"],
+            json!("noop")
+        );
+        assert_eq!(
+            transform_once_projection(&json!({ "node": node, "context": { "inVOnce": true } }))
+                ["kind"],
+            json!("noop")
+        );
+        assert_eq!(
+            transform_once_projection(&json!({ "node": node, "context": { "inSSR": true } }))
+                ["kind"],
+            json!("noop")
+        );
     }
 
     #[test]

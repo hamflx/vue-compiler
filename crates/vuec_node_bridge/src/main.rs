@@ -124,6 +124,7 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
             Ok(vuec_vue3_core::transform_expression_projection(&payload))
         }
         "vue3.core.transformOn" => Ok(vuec_vue3_core::transform_on_projection(&payload)),
+        "vue3.core.transformOnce" => Ok(vuec_vue3_core::transform_once_projection(&payload)),
         "vue3.core.transformModel" => Ok(vuec_vue3_core::transform_model_projection(&payload)),
         "vue3.core.transformIf" => Ok(vuec_vue3_core::transform_if_projection(&payload)),
         "vue3.core.transformFor" => Ok(vuec_vue3_core::transform_for_projection(&payload)),
