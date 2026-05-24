@@ -1,5 +1,11 @@
 # Memory
 
+- Current round: added Vue 3 SSR MIR `v-for` alias payload and standalone codegen consumption.
+- `Vue3SsrMirKind::For` now carries `Vue3SsrFor { source, value_alias, key_alias, index_alias }`, mirroring the HIR `v-for` alias projection for SSR target data without DOM MIR or AST fallback.
+- `generate_vue3_ssr_mir` now emits `_ssrRenderList(source, (value, key, index) => ...)` from SSR MIR and treats all alias patterns as loop-local scope when prefixing expressions, so `key`, `index`, and destructured aliases are not rewritten as `_ctx.*`.
+- This is structural SSR MIR lowering/codegen work only. It does not touch `xtask/src/compat.rs` and does not change the legacy official `compile_ssr` path.
+- Verification for this SSR MIR `v-for` alias payload slice: focused `cargo test -p vuec_vue3_core lower_vue3_ast_to_ssr_mir_projects_v_for_alias_payload`, focused `cargo test -p vuec_vue3_core generate_vue3_ssr_mir_emits_v_for_alias_payload_from_mir`, focused `cargo test -p vuec_vue3_core lower_vue3_ast_to_ssr_mir`, focused `cargo test -p vuec_vue3_core generate_vue3_ssr_mir`, `cargo fmt --all --check`, `git diff --check`, `cargo check -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, and `cargo xtask run-conformance --suite vue3-core` (`652/652`; coverage `rust-backed 192/192`, `mixed 460/460`, `shim-backed 0/0`).
+
 - Current round: fixed Vue 3 SSR MIR adjacent `v-if` / `v-else-if` / `v-else` alternate-chain lowering/codegen.
 - SSR branch-chain lowering now attaches each alternate branch under the previous branch MIR node instead of attaching every alternate directly under the first `If`. The standalone SSR MIR emitter's primary-branch + alternate-child logic now emits `if/else if/else` bodies in source order without rendering later branch bodies inside the first branch.
 - This is structural SSR MIR lowering/codegen work only. It does not touch `xtask/src/compat.rs` and does not change the legacy official `compile_ssr` path.

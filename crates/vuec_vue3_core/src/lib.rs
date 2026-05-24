@@ -15,8 +15,8 @@ use vuec_ast::{
     Vue3DomMirKind, Vue3DomObjectBinding, Vue3DomObjectListeners, Vue3DomPropSegment, Vue3DomProps,
     Vue3DomPropsNormalize, Vue3DomSlotName, Vue3DomStaticAttr, Vue3DomTag, Vue3Element,
     Vue3ElementType, Vue3Expression, Vue3ForMemo, Vue3ForMir, Vue3NodeKind, Vue3PatchFlags,
-    Vue3Prop, Vue3Root, Vue3SlotFlag, Vue3SsrAttrs, Vue3SsrComponent, Vue3SsrMir, Vue3SsrMirKind,
-    Vue3VNodeCall,
+    Vue3Prop, Vue3Root, Vue3SlotFlag, Vue3SsrAttrs, Vue3SsrComponent, Vue3SsrFor, Vue3SsrMir,
+    Vue3SsrMirKind, Vue3VNodeCall,
 };
 use vuec_codegen::{CodeWriter, SourceMapArtifact, SourceMapSegment};
 use vuec_html::{HtmlTokenKind, HtmlTokenizer};
@@ -2947,10 +2947,12 @@ fn lower_vue3_for_directive_to_ssr_mir(
     );
     let mir_id = state.mir.push_child(
         mir_parent,
-        Vue3SsrMirKind::For {
+        Vue3SsrMirKind::For(Vue3SsrFor {
             source: parsed.source,
-            alias: parsed.value_alias,
-        },
+            value_alias: parsed.value_alias,
+            key_alias: parsed.key_alias,
+            index_alias: parsed.index_alias,
+        }),
         ast_node.span.clone(),
     );
     state.map.record_ast_to_hir(ast_id, hir_id);
@@ -10895,7 +10897,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                     push_unique_helper(&mut helpers, RuntimeHelper::Vue3SsrRenderSlot);
                 }
                 Vue3SsrMirKind::If { .. } => {}
-                Vue3SsrMirKind::For { .. } => {
+                Vue3SsrMirKind::For(_) => {
                     push_unique_helper(&mut helpers, RuntimeHelper::Vue3SsrRenderList);
                 }
                 Vue3SsrMirKind::Teleport => {
@@ -11029,8 +11031,8 @@ impl<'a> Vue3SsrMirCodegen<'a> {
             Vue3SsrMirKind::If { condition } => {
                 self.render_if(node_id, *condition, scope, writer);
             }
-            Vue3SsrMirKind::For { source, alias } => {
-                self.render_for(node_id, *source, *alias, scope, writer);
+            Vue3SsrMirKind::For(for_mir) => {
+                self.render_for(node_id, for_mir, scope, writer);
             }
             Vue3SsrMirKind::Teleport => {
                 writer.push_line("_ssrRenderTeleport(_push, () => {");
@@ -11221,19 +11223,29 @@ impl<'a> Vue3SsrMirCodegen<'a> {
     fn render_for(
         &self,
         node_id: NodeId,
-        source: JsExprId,
-        alias: JsPatternId,
+        for_mir: &Vue3SsrFor,
         scope: &RenderScope,
         writer: &mut CodeWriter,
     ) {
-        let source = self.render_js_expr(source, scope);
-        let params = self.render_js_pattern(alias);
-        let child_scope = self.scope_with_pattern(scope, alias);
+        let source = self.render_js_expr(for_mir.source, scope);
+        let params = self.render_for_params(for_mir);
+        let child_scope = self.scope_with_for_mir(scope, for_mir);
         writer.push_line(&format!("_ssrRenderList({source}, ({params}) => {{"));
         writer.indent();
         self.render_children(node_id, &child_scope, writer);
         writer.dedent();
         writer.push_line("});");
+    }
+
+    fn render_for_params(&self, for_mir: &Vue3SsrFor) -> String {
+        let mut params = vec![self.render_js_pattern(for_mir.value_alias)];
+        if let Some(key) = for_mir.key_alias {
+            params.push(self.render_js_pattern(key));
+        }
+        if let Some(index) = for_mir.index_alias {
+            params.push(self.render_js_pattern(index));
+        }
+        params.join(", ")
     }
 
     fn render_slot_name(&self, name: &Vue3DomSlotName, scope: &RenderScope) -> String {
@@ -11408,8 +11420,15 @@ impl<'a> Vue3SsrMirCodegen<'a> {
             .unwrap_or_else(|| "_item".into())
     }
 
-    fn scope_with_pattern(&self, scope: &RenderScope, pattern: JsPatternId) -> RenderScope {
-        scope.with_locals(extract_v_for_alias_locals(&self.render_js_pattern(pattern)))
+    fn scope_with_for_mir(&self, scope: &RenderScope, for_mir: &Vue3SsrFor) -> RenderScope {
+        let mut locals = extract_v_for_alias_locals(&self.render_js_pattern(for_mir.value_alias));
+        if let Some(key) = for_mir.key_alias {
+            locals.extend(extract_v_for_alias_locals(&self.render_js_pattern(key)));
+        }
+        if let Some(index) = for_mir.index_alias {
+            locals.extend(extract_v_for_alias_locals(&self.render_js_pattern(index)));
+        }
+        scope.with_locals(locals)
     }
 }
 
@@ -18031,11 +18050,19 @@ mod tests {
             .nodes
             .iter()
             .any(|node| matches!(node.kind, HirNodeKind::If(_))));
-        assert!(result
+        let for_mir = result
             .mir
             .nodes
             .iter()
-            .any(|node| matches!(node.kind, Vue3SsrMirKind::For { .. })));
+            .find_map(|node| match &node.kind {
+                Vue3SsrMirKind::For(for_mir) => Some(for_mir),
+                _ => None,
+            })
+            .expect("SSR MIR for");
+        assert_eq!(for_mir.source, JsExprId(0));
+        assert_eq!(for_mir.value_alias, JsPatternId(0));
+        assert!(for_mir.key_alias.is_none());
+        assert!(for_mir.index_alias.is_none());
         assert!(result
             .mir
             .nodes
@@ -18046,6 +18073,53 @@ mod tests {
             .nodes
             .iter()
             .any(|node| matches!(node.kind, Vue3SsrMirKind::PushInterpolated(_))));
+    }
+
+    #[test]
+    fn lower_vue3_ast_to_ssr_mir_projects_v_for_alias_payload() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<li v-for="(item, key, index) in list">{{ key }}:{{ index }}:{{ item.name }}</li>"#.into(),
+            file_id: FileId(18),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_ssr_mir(&ast, &Vue3CompilerOptions::default());
+
+        assert_eq!(result.hir.validate_tree(), Ok(()));
+        assert_eq!(result.mir.validate_tree(), Ok(()));
+        assert_eq!(
+            result
+                .js
+                .expressions()
+                .iter()
+                .map(|entry| entry.source.as_str())
+                .collect::<Vec<_>>(),
+            vec!["list", "key", "index", "item.name"]
+        );
+        assert_eq!(
+            result
+                .js
+                .patterns()
+                .iter()
+                .map(|entry| entry.source.as_str())
+                .collect::<Vec<_>>(),
+            vec!["item", "key", "index"]
+        );
+
+        let for_mir = result
+            .mir
+            .nodes
+            .iter()
+            .find_map(|node| match &node.kind {
+                Vue3SsrMirKind::For(for_mir) => Some(for_mir),
+                _ => None,
+            })
+            .expect("SSR MIR for");
+        assert_eq!(for_mir.source, JsExprId(0));
+        assert_eq!(for_mir.value_alias, JsPatternId(0));
+        assert_eq!(for_mir.key_alias, Some(JsPatternId(1)));
+        assert_eq!(for_mir.index_alias, Some(JsPatternId(2)));
     }
 
     #[test]
@@ -18347,6 +18421,40 @@ mod tests {
         assert!(generated
             .code
             .contains("_push(_ssrInterpolate(item.name));"));
+        assert!(!generated.code.contains("_ctx.item"));
+    }
+
+    #[test]
+    fn generate_vue3_ssr_mir_emits_v_for_alias_payload_from_mir() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<li v-for="(item, key, index) in list">{{ key }}:{{ index }}:{{ item.name }}</li>"#.into(),
+            file_id: FileId(48),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_ssr_mir(&ast, &Vue3CompilerOptions::default());
+        let generated = generate_vue3_ssr_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated.code.contains("ssrRenderList as _ssrRenderList"));
+        assert!(generated
+            .code
+            .contains("_ssrRenderList(_ctx.list, (item, key, index) => {"));
+        assert!(generated.code.contains("_push(_ssrInterpolate(key));"));
+        assert!(generated.code.contains("_push(_ssrInterpolate(index));"));
+        assert!(generated
+            .code
+            .contains("_push(_ssrInterpolate(item.name));"));
+        assert!(!generated.code.contains("_ctx.key"));
+        assert!(!generated.code.contains("_ctx.index"));
         assert!(!generated.code.contains("_ctx.item"));
     }
 

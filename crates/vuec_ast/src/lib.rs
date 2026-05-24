@@ -1401,6 +1401,14 @@ pub struct Vue3SsrComponent {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue3SsrFor {
+    pub source: JsExprId,
+    pub value_alias: JsPatternId,
+    pub key_alias: Option<JsPatternId>,
+    pub index_alias: Option<JsPatternId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Vue3SsrMirKind {
     Root,
     PushString(String),
@@ -1408,13 +1416,8 @@ pub enum Vue3SsrMirKind {
     RenderAttrs(Vue3SsrAttrs),
     RenderComponent(Vue3SsrComponent),
     RenderSlot(Vue3SsrSlot),
-    If {
-        condition: Option<JsExprId>,
-    },
-    For {
-        source: JsExprId,
-        alias: JsPatternId,
-    },
+    If { condition: Option<JsExprId> },
+    For(Vue3SsrFor),
     Teleport,
     Suspense,
 }
