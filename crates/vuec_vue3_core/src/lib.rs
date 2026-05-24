@@ -9402,24 +9402,18 @@ impl<'a> Vue3DomMirCodegen<'a> {
             declarations.join("\n"),
             body
         ));
-        if self.options.mode == "module" && !helpers.is_empty() {
-            writer.push_line(&format!(
-                "import {{ {} }} from \"vue\"",
-                import_helper_aliases(&helpers)
-            ));
-            writer.newline();
-        }
-        for hoist in &hoists {
-            writer.push_line(hoist);
-        }
-        if !hoists.is_empty() {
-            writer.newline();
-        }
-        writer.push_line(&format!(
-            "export function render({}) {{",
-            render_args(self.options)
-        ));
+        self.render_preamble(&mut writer, &helpers, &hoists);
+        self.render_render_start(&mut writer);
         writer.indent();
+        let use_with = self.use_with_block();
+        if use_with {
+            writer.push_line("with (_ctx) {");
+            writer.indent();
+            if !helpers.is_empty() {
+                writer.push_line(&format!("const {{ {} }} = _Vue", helper_aliases(&helpers)));
+                writer.newline();
+            }
+        }
         for declaration in &declarations {
             writer.push_line(declaration);
         }
@@ -9427,6 +9421,10 @@ impl<'a> Vue3DomMirCodegen<'a> {
             writer.newline();
         }
         writer.push_line(&format!("return {body}"));
+        if use_with {
+            writer.dedent();
+            writer.push_line("}");
+        }
         writer.dedent();
         writer.push_line("}");
         CodegenResult {
@@ -9436,6 +9434,69 @@ impl<'a> Vue3DomMirCodegen<'a> {
             diagnostics: Vec::new(),
             preamble: String::new(),
         }
+    }
+
+    fn render_preamble(
+        &self,
+        writer: &mut CodeWriter,
+        helpers: &[RuntimeHelper],
+        hoists: &[String],
+    ) {
+        if self.options.mode == "module" {
+            if !helpers.is_empty() {
+                writer.push_line(&format!(
+                    "import {{ {} }} from \"vue\"",
+                    import_helper_aliases(helpers)
+                ));
+                writer.newline();
+            }
+        } else if self.options.prefix_identifiers {
+            if !helpers.is_empty() {
+                writer.push_line(&format!("const {{ {} }} = Vue", helper_aliases(helpers)));
+                writer.newline();
+            }
+        } else if !helpers.is_empty() {
+            writer.push_line("const _Vue = Vue");
+            if !hoists.is_empty() {
+                let static_helpers = hoist_static_helpers(helpers);
+                if !static_helpers.is_empty() {
+                    writer.push_line(&format!(
+                        "const {{ {} }} = _Vue",
+                        helper_aliases(&static_helpers)
+                    ));
+                }
+            }
+            writer.newline();
+        }
+        for hoist in hoists {
+            writer.push_line(hoist);
+        }
+        if !hoists.is_empty() {
+            writer.newline();
+        }
+    }
+
+    fn render_render_start(&self, writer: &mut CodeWriter) {
+        if self.options.mode == "module" {
+            writer.push_line(&format!(
+                "export function render({}) {{",
+                render_args(self.options)
+            ));
+        } else if self.options.prefix_identifiers {
+            writer.push_line(&format!(
+                "return function render({}) {{",
+                render_args(self.options)
+            ));
+        } else {
+            writer.push_line(&format!(
+                "return function render({}) {{",
+                render_args(self.options)
+            ));
+        }
+    }
+
+    fn use_with_block(&self) -> bool {
+        !self.options.prefix_identifiers && self.options.mode != "module"
     }
 
     fn hoist_declarations(&self, scope: &RenderScope) -> Vec<String> {
@@ -15955,7 +16016,12 @@ mod tests {
         );
 
         assert_eq!(generated.ast_summary, "vue3-dom-mir-nodes=3");
-        assert!(generated.code.starts_with("export function render("));
+        assert!(generated
+            .code
+            .starts_with("const { toDisplayString: _toDisplayString"));
+        assert!(generated
+            .code
+            .contains("return function render(_ctx, _cache)"));
         assert!(generated.code.contains("_createElementBlock(\"div\""));
         assert!(generated.code.contains("class: _normalizeClass(_ctx.foo)"));
         assert!(generated
@@ -15963,6 +16029,36 @@ mod tests {
             .contains("_createTextVNode(_toDisplayString(_ctx.msg), 1 /* TEXT */)"));
         assert!(generated.code.contains("3"));
         assert!(generated.code.contains("[\"class\"]"));
+    }
+
+    #[test]
+    fn generate_vue3_dom_mir_uses_function_mode_preamble_without_prefix() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div :class="foo">{{ msg }}</div>"#.into(),
+            file_id: FileId(26),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+
+        let generated =
+            generate_vue3_dom_mir(&result.mir, &result.js, &Vue3CompilerOptions::default());
+
+        assert!(generated.code.starts_with("const _Vue = Vue"));
+        assert!(generated
+            .code
+            .contains("return function render(_ctx, _cache)"));
+        assert!(generated.code.contains("with (_ctx) {"));
+        assert!(generated
+            .code
+            .contains("const { toDisplayString: _toDisplayString"));
+        assert!(generated.code.contains("class: _normalizeClass(foo)"));
+        assert!(generated
+            .code
+            .contains("_createTextVNode(_toDisplayString(msg), 1 /* TEXT */)"));
+        assert!(!generated.code.contains("export function render"));
+        assert!(!generated.code.contains("_ctx.foo"));
     }
 
     #[test]
@@ -16029,7 +16125,7 @@ mod tests {
             .contains("const _hoisted_1 = _createElementVNode(\"span\""));
         assert!(generated
             .code
-            .contains("export function render(_ctx, _cache)"));
+            .contains("return function render(_ctx, _cache)"));
         assert!(generated.code.contains("_cache[0] || (_cache[0] ="));
         assert!(generated.code.contains("_toDisplayString(_ctx.msg)"));
     }
