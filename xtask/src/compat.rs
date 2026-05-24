@@ -8783,6 +8783,7 @@ fn run_conformance_execution(
 ) -> Result<ConformanceExecutionResult> {
     match spec.name {
         "vue3-core" => run_vue3_core_conformance(spec, official_root, discovered, lock_hash),
+        "vue3-dom" => run_vue3_dom_conformance(spec, official_root, discovered, lock_hash),
         _ => Ok(ConformanceExecutionResult {
             status: "pending".into(),
             runner: "not-wired".into(),
@@ -8807,6 +8808,24 @@ fn run_vue3_core_conformance(
     lock_hash: Option<&str>,
 ) -> Result<ConformanceExecutionResult> {
     let prepared_root = prepare_vue3_core_conformance_suite(spec, official_root, lock_hash)?;
+    run_vitest_conformance(spec, prepared_root, discovered)
+}
+
+fn run_vue3_dom_conformance(
+    spec: ConformanceSuiteSpec,
+    official_root: &Path,
+    discovered: &[String],
+    lock_hash: Option<&str>,
+) -> Result<ConformanceExecutionResult> {
+    let prepared_root = prepare_vue3_dom_conformance_suite(spec, official_root, lock_hash)?;
+    run_vitest_conformance(spec, prepared_root, discovered)
+}
+
+fn run_vitest_conformance(
+    spec: ConformanceSuiteSpec,
+    prepared_root: PathBuf,
+    discovered: &[String],
+) -> Result<ConformanceExecutionResult> {
     let output_file = prepared_root.join("vitest-report.json");
     let npm_root = PathBuf::from("target")
         .join("compat")
@@ -8893,6 +8912,56 @@ fn prepare_vue3_core_conformance_suite(
 }
 
 fn write_vue3_core_conformance_shims(prepared_root: &Path) -> Result<()> {
+    write_vue3_core_source_shims(prepared_root)?;
+    write_vue3_core_test_setup(prepared_root)?;
+
+    let config = r#"
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const root = path.dirname(fileURLToPath(import.meta.url))
+const aliasRoot = process.env.VUEC_RUST_ALIAS_ROOT
+const npmRoot = process.env.VUEC_OFFICIAL_NPM_ROOT
+
+export default {
+  define: {
+    __DEV__: true,
+    __TEST__: true,
+    __VERSION__: '"test"',
+    __BROWSER__: false,
+    __GLOBAL__: false,
+    __ESM_BUNDLER__: true,
+    __ESM_BROWSER__: false,
+    __CJS__: true,
+    __SSR__: true,
+    __FEATURE_OPTIONS_API__: true,
+    __FEATURE_SUSPENSE__: true,
+    __FEATURE_PROD_DEVTOOLS__: false,
+    __FEATURE_PROD_HYDRATION_MISMATCH_DETAILS__: false,
+    __COMPAT__: true,
+  },
+  resolve: {
+    alias: {
+      '@vue/compiler-core': path.resolve(aliasRoot, 'node_modules/@vue/compiler-core/index.js'),
+      '@vue/compiler-dom': path.resolve(aliasRoot, 'node_modules/@vue/compiler-dom/index.js'),
+      '@vue/compiler-sfc': path.resolve(aliasRoot, 'node_modules/@vue/compiler-sfc/dist/compiler-sfc.cjs.js'),
+      '@vue/shared': path.resolve(npmRoot, 'node_modules/@vue/shared/index.js'),
+      'source-map-js': path.resolve(npmRoot, 'node_modules/source-map-js/source-map.js'),
+    },
+  },
+  test: {
+    globals: true,
+    pool: 'forks',
+    setupFiles: ['./vuec-vitest-setup.ts'],
+    include: ['packages/compiler-core/__tests__/**/*.spec.ts'],
+  },
+}
+"#;
+    write_text(&prepared_root.join("vitest.config.ts"), config)?;
+    Ok(())
+}
+
+fn write_vue3_core_source_shims(prepared_root: &Path) -> Result<()> {
     let core_src = prepared_root
         .join("packages")
         .join("compiler-core")
@@ -8948,6 +9017,79 @@ fn write_vue3_core_conformance_shims(prepared_root: &Path) -> Result<()> {
     fs::create_dir_all(&shared_src)
         .with_context(|| format!("failed to create {}", shared_src.display()))?;
     write_reexport_module(&shared_src.join("index.ts"), "@vue/shared")?;
+    Ok(())
+}
+
+fn prepare_vue3_dom_conformance_suite(
+    spec: ConformanceSuiteSpec,
+    official_root: &Path,
+    lock_hash: Option<&str>,
+) -> Result<PathBuf> {
+    let prepared_root = PathBuf::from("target")
+        .join("conformance")
+        .join(lock_hash.unwrap_or("unknown-lock"))
+        .join("prepared")
+        .join(spec.name);
+    if prepared_root.exists() {
+        fs::remove_dir_all(&prepared_root)
+            .with_context(|| format!("failed to remove {}", prepared_root.display()))?;
+    }
+    let official_tests = official_root
+        .join("packages")
+        .join("compiler-dom")
+        .join("__tests__");
+    let prepared_tests = prepared_root
+        .join("packages")
+        .join("compiler-dom")
+        .join("__tests__");
+    copy_dir_recursive(&official_tests, &prepared_tests)?;
+    let official_src = official_root
+        .join("packages")
+        .join("compiler-dom")
+        .join("src");
+    let prepared_src = prepared_root
+        .join("packages")
+        .join("compiler-dom")
+        .join("src");
+    copy_dir_recursive(&official_src, &prepared_src)?;
+
+    let core_test_utils = official_root
+        .join("packages")
+        .join("compiler-core")
+        .join("__tests__")
+        .join("testUtils.ts");
+    let prepared_core_tests = prepared_root
+        .join("packages")
+        .join("compiler-core")
+        .join("__tests__");
+    fs::create_dir_all(&prepared_core_tests)
+        .with_context(|| format!("failed to create {}", prepared_core_tests.display()))?;
+    fs::copy(&core_test_utils, prepared_core_tests.join("testUtils.ts")).with_context(|| {
+        format!(
+            "failed to copy {} into {}",
+            core_test_utils.display(),
+            prepared_core_tests.display()
+        )
+    })?;
+
+    write_vue3_core_source_shims(&prepared_root)?;
+    write_vue3_dom_conformance_shims(&prepared_root)?;
+    Ok(prepared_root)
+}
+
+fn write_vue3_dom_conformance_shims(prepared_root: &Path) -> Result<()> {
+    let dom_src = prepared_root
+        .join("packages")
+        .join("compiler-dom")
+        .join("src");
+    let transforms = dom_src.join("transforms");
+    fs::create_dir_all(&transforms)
+        .with_context(|| format!("failed to create {}", transforms.display()))?;
+
+    write_text(
+        &transforms.join("transformStyle.ts"),
+        "export { transformStyle } from '@vue/compiler-dom'\n",
+    )?;
     write_vue3_core_test_setup(prepared_root)?;
 
     let config = r#"
@@ -8988,7 +9130,7 @@ export default {
     globals: true,
     pool: 'forks',
     setupFiles: ['./vuec-vitest-setup.ts'],
-    include: ['packages/compiler-core/__tests__/**/*.spec.ts'],
+    include: ['packages/compiler-dom/__tests__/**/*.spec.ts'],
   },
 }
 "#;
@@ -9185,7 +9327,7 @@ fn conformance_coverage_report(
 
 fn conformance_coverage_kind(spec: ConformanceSuiteSpec) -> ConformanceCoverageKind {
     match spec.name {
-        "vue3-core" => ConformanceCoverageKind::Mixed,
+        "vue3-core" | "vue3-dom" => ConformanceCoverageKind::Mixed,
         _ => ConformanceCoverageKind::RustBacked,
     }
 }
@@ -9194,6 +9336,9 @@ fn conformance_coverage_reason(spec: ConformanceSuiteSpec) -> &'static str {
     match spec.name {
         "vue3-core" => {
             "Vue 3 compiler-core official tests run through generated import shims and the @vue/compiler-core alias runtime; public APIs call the Rust bridge, while many internal transform/codegen imports still execute JavaScript compatibility semantics in xtask/src/compat.rs."
+        }
+        "vue3-dom" => {
+            "Vue 3 compiler-dom official tests run through a prepared Vitest suite with official DOM source imports, generated compiler-core import shims, and the @vue/compiler-dom alias runtime. Public compile/parse exports call the Rust bridge, but internal DOM transform imports mostly execute official TypeScript source or compatibility adapter code; only explicitly bridged projections count as Rust-backed."
         }
         _ => {
             "Suite is routed through Rust alias package smoke/output paths; full official runner wiring may still be pending."
@@ -9427,7 +9572,7 @@ fn suite_spec(suite: ConformanceSuite) -> ConformanceSuiteSpec {
             version_line: VersionLine::Vue3,
             relative_test_dirs: &["packages/compiler-dom/__tests__"],
             package_requests: &["@vue/compiler-dom", "@vue/compiler-core"],
-            runner_dependencies: &["vitest", "esbuild", "source-map-js"],
+            runner_dependencies: &["vitest", "esbuild", "source-map-js", "jsdom"],
         },
         ConformanceSuite::Vue3Sfc => ConformanceSuiteSpec {
             name: "vue3-sfc",
@@ -9911,6 +10056,52 @@ mod tests {
     }
 
     #[test]
+    fn vue3_dom_conformance_shims_use_dom_vitest_glob() {
+        let temp = std::env::temp_dir().join(format!(
+            "vuec-xtask-vue3-dom-shims-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        write_vue3_core_source_shims(&temp).unwrap();
+        write_vue3_dom_conformance_shims(&temp).unwrap();
+
+        let config = fs::read_to_string(temp.join("vitest.config.ts")).unwrap();
+        assert!(!config.contains("vitest/config"));
+        assert!(config.contains("include: ['packages/compiler-dom/__tests__/**/*.spec.ts']"));
+
+        let transform_style = fs::read_to_string(
+            temp.join("packages")
+                .join("compiler-dom")
+                .join("src")
+                .join("transforms")
+                .join("transformStyle.ts"),
+        )
+        .unwrap();
+        assert!(transform_style.contains("export { transformStyle } from '@vue/compiler-dom'"));
+
+        let v_model = fs::read_to_string(
+            temp.join("packages")
+                .join("compiler-core")
+                .join("src")
+                .join("transforms")
+                .join("vModel.ts"),
+        )
+        .unwrap();
+        assert!(v_model.contains("__vuecRuntime"));
+        assert!(v_model.contains("transformModel"));
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn vue3_dom_conformance_coverage_is_mixed() {
+        let coverage = conformance_coverage_report(suite_spec(ConformanceSuite::Vue3Dom), None);
+        assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
+        assert!(coverage.reason.contains("official DOM source imports"));
+    }
+
+    #[test]
     fn node_dependency_available_handles_scoped_packages_and_subpaths() {
         let temp = std::env::temp_dir().join(format!(
             "vuec-xtask-node-dep-{}",
@@ -9975,6 +10166,7 @@ mod tests {
               "devDependencies": {
                 "vitest": "^4.1.5",
                 "esbuild": "^0.28.0",
+                "jsdom": "^29.1.1",
                 "typescript": "~5.6.2",
                 "source-map-js": "catalog:"
               }
@@ -9988,6 +10180,7 @@ packages:
   .
 snapshots:
   esbuild@0.28.0: {}
+  jsdom@29.1.1: {}
   source-map-js@1.2.1: {}
   typescript@5.6.3: {}
   vitest@4.1.5(@types/node@24.12.2): {}
@@ -10001,6 +10194,18 @@ snapshots:
         assert_eq!(
             specs,
             vec!["esbuild@0.28.0", "source-map-js@1.2.1", "vitest@4.1.5"]
+        );
+        let dom_specs = runner_dependency_specs(suite_spec(ConformanceSuite::Vue3Dom), &temp)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            dom_specs,
+            vec![
+                "esbuild@0.28.0",
+                "jsdom@29.1.1",
+                "source-map-js@1.2.1",
+                "vitest@4.1.5"
+            ]
         );
         let _ = fs::remove_dir_all(temp);
     }

@@ -43,9 +43,17 @@
 - [x] Vue 3 compiler-core Rust-backed `transformOn` projection bridge for `vOn.spec.ts`.
 - [x] Vue 3 compiler-core Rust-backed `cacheStatic` / `getConstantType` projection bridge for `cacheStatic.spec.ts`.
 - [x] Vue 3 compiler-core official conformance closure (`652/652`) with Rust-backed `isMemberExpression` utility projection.
+- [x] Vue 3 compiler-dom official conformance execution wiring (real Vitest run; currently `45/133`, `mixed` coverage).
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Wired Vue 3 compiler-dom official conformance to a real Vitest runner instead of the previous `not-wired` pending result.
+- The prepared DOM suite now copies official `compiler-dom/__tests__`, official `compiler-dom/src`, compiler-core `testUtils.ts`, and generated compiler-core source shims. The prepared `transformStyle.ts` is intentionally routed through the existing Rust-backed `@vue/compiler-dom` alias export so that the already-implemented Rust DOM transformStyle projection remains exercised.
+- Added `jsdom` as a deterministic Vue 3 DOM runner dependency for `decoderHtmlBrowser.spec.ts`.
+- Coverage for `vue3-dom` is now explicitly `mixed`: public compile/parse alias exports call the Rust bridge, but most internal DOM transform imports still execute official TypeScript source plus generated import shims. These runner/import changes are not counted as Rust compiler semantics.
+- Real Vue 3 DOM conformance now reports `45/133` official tests passing and `88` failing. The failures are no longer hidden behind pending status and are concentrated in Rust DOM parser behavior, DOM compile/codegen snapshots, `vModel`, `vOn`, `Transition`, `validateHtmlNesting`, `ignoreSideEffectTags`, and `stringifyStatic`.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p xtask`, `cargo test -p xtask` (`18/18` pass), `git diff --check`, and `cargo xtask run-conformance --suite vue3-dom` (expected fail with real result `45/133`, not pending/not-wired).
 
 - Closed the remaining Vue 3 compiler-core official conformance failures.
 - `vuec_vue3_core::is_member_expression_projection` now owns the public utility decision for `isMemberExpressionBrowser` / `isMemberExpressionNode`, using the official browser lexer rules and Rust/OXC TypeScript-aware expression parsing for node mode.
