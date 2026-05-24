@@ -77,9 +77,16 @@
 - [x] Vue 3 exact render emitter consumes transformed root helper / component / directive state for asset declarations, helper imports, built-in/dynamic component tags, and runtime directive wrappers, with raw-AST public `generate` fallback.
 - [x] Vue 3 structural `Vue3DomMir` standalone codegen entry for current target-split MIR subset, consuming MIR + `JsAstStore` without AST fallback.
 - [x] Vue 3 structural `Vue3DomMir` VNode props/directive payload foundation, so current MIR codegen can emit attrs, bindings, events, class normalization, and runtime directive wrappers without AST fallback.
+- [x] Vue 3 structural HIR / `Vue3DomMir` ordered props segment payload for object `v-bind`, object `v-on`, dynamic arg props, merge props, normalize props, guard reactive props, toHandlers, and toHandlerKey emission from MIR.
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Extended HIR and Vue 3 DOM MIR props with ordered segment payloads. `HirProps` and `Vue3DomProps` now preserve static attrs, dynamic bindings, events, object `v-bind`, and object `v-on` in source order, while keeping the existing flat views as derived convenience data.
+- DOM lowering now registers dynamic argument expressions and object spread expressions in `JsAstStore` once, projects object spreads / dynamic args to `FULL_PROPS`, and keeps `dynamic_props` limited to static patch-name lists. `Vue3DomProps` carries normalize intent so target codegen no longer infers `_normalizeProps` / `_guardReactiveProps` from the source AST.
+- `generate_vue3_dom_mir` now emits `_mergeProps`, `_normalizeProps`, `_guardReactiveProps`, `_toHandlers`, `_toHandlerKey`, dynamic `v-bind` key fallback, object-listener preserve-case mode, and `16 /* FULL_PROPS */` from MIR only.
+- This remains structural target-codegen work. Exact Vue 3 DOM/compiler-core parity still needs component asset references in MIR, directive argument dynamism, cacheHandlers event caching, full hoist output, and migration of the exact emitter to complete `Vue3DomMir` consumption.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p vuec_ast -p vuec_vue3_core`, focused `cargo test -p vuec_vue3_core lower_vue3_ast_to_dom_mir_keeps_ordered_prop_segments_and_object_spreads`, focused `cargo test -p vuec_vue3_core generate_vue3_dom_mir_emits_merge_and_dynamic_props_from_mir`, `cargo test -p vuec_vue3_core`, and `cargo test -p vuec_ast`.
 
 - Expanded `vuec_ast::Vue3VNodeCall` with target-specific `Vue3DomProps` and `Vue3DomDirective` payloads. DOM lowering derives these from HIR props/directive uses, so `JsAstStore` expression ownership stays single-source and MIR codegen no longer needs to read `Vue3Ast` to recover current prop/directive data.
 - `generate_vue3_dom_mir` now emits static attrs, dynamic bindings, event props, class normalization, runtime directive wrappers, custom directive declarations, `v-show` helper usage, and the related helper imports from MIR.

@@ -7,12 +7,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use vuec_ast::{
     Hir, HirBinding, HirConstness, HirDirectiveUse, HirElement, HirEvent, HirExpr, HirFor,
-    HirFragment, HirIf, HirIfBranch, HirInterpolation, HirNodeKind, HirProps, HirRoot,
-    HirSlotOutlet, HirStaticAttr, HirTag, JsExprId, JsPatternId, LoweringMap, MirChildren, MirExpr,
-    MissingSpanReason, NodeId, NodeSpan, QuoteKind, RuntimeHelper, Vue3Ast, Vue3AstKind,
-    Vue3Directive, Vue3DomBinding, Vue3DomDirective, Vue3DomEvent, Vue3DomMir, Vue3DomMirKind,
-    Vue3DomProps, Vue3DomStaticAttr, Vue3Element, Vue3ElementType, Vue3Expression, Vue3NodeKind,
-    Vue3PatchFlags, Vue3Prop, Vue3Root, Vue3SsrMir, Vue3SsrMirKind, Vue3VNodeCall,
+    HirFragment, HirIf, HirIfBranch, HirInterpolation, HirNodeKind, HirObjectBinding,
+    HirObjectListeners, HirPropSegment, HirProps, HirRoot, HirSlotOutlet, HirStaticAttr, HirTag,
+    JsExprId, JsPatternId, LoweringMap, MirChildren, MirExpr, MissingSpanReason, NodeId, NodeSpan,
+    QuoteKind, RuntimeHelper, Vue3Ast, Vue3AstKind, Vue3Directive, Vue3DomBinding,
+    Vue3DomDirective, Vue3DomEvent, Vue3DomMir, Vue3DomMirKind, Vue3DomObjectBinding,
+    Vue3DomObjectListeners, Vue3DomPropSegment, Vue3DomProps, Vue3DomPropsNormalize,
+    Vue3DomStaticAttr, Vue3Element, Vue3ElementType, Vue3Expression, Vue3NodeKind, Vue3PatchFlags,
+    Vue3Prop, Vue3Root, Vue3SsrMir, Vue3SsrMirKind, Vue3VNodeCall,
 };
 use vuec_codegen::{CodeWriter, SourceMapArtifact, SourceMapSegment};
 use vuec_html::{HtmlTokenKind, HtmlTokenizer};
@@ -1244,37 +1246,112 @@ fn lower_vue3_hir_payload_to_dom_mir(
 }
 
 fn lower_hir_props_to_dom_mir(props: &HirProps, is_component: bool) -> Vue3DomProps {
+    let segments = props
+        .segments
+        .iter()
+        .map(|segment| lower_hir_prop_segment_to_dom_mir(segment, is_component))
+        .collect::<Vec<_>>();
     Vue3DomProps {
         static_attrs: props
             .static_attrs
             .iter()
-            .map(|attr| Vue3DomStaticAttr {
-                name: attr.name.clone(),
-                value: attr.value.clone(),
-            })
+            .map(lower_hir_static_attr_to_dom_mir)
             .collect(),
         dynamic_bindings: props
             .dynamic_bindings
             .iter()
-            .map(|binding| Vue3DomBinding {
-                name: binding.name.clone(),
-                value: binding.value,
-                dynamic_arg: binding.dynamic_arg,
-            })
+            .map(lower_hir_binding_to_dom_mir)
             .collect(),
         events: props
             .events
             .iter()
-            .map(|event| Vue3DomEvent {
-                name: if is_component {
-                    event_handler_prop_name_for_component(&event.name)
-                } else {
-                    event_handler_prop_name_for_element(&event.name)
-                },
-                handler: event.handler,
-                dynamic_arg: false,
+            .map(|event| lower_hir_event_to_dom_mir(event, is_component))
+            .collect(),
+        object_bindings: props
+            .object_bindings
+            .iter()
+            .map(|binding| Vue3DomObjectBinding {
+                value: binding.value,
             })
             .collect(),
+        object_listeners: props
+            .object_listeners
+            .iter()
+            .map(|listeners| Vue3DomObjectListeners {
+                value: listeners.value,
+                preserve_case: !is_component,
+            })
+            .collect(),
+        normalize: Vue3DomPropsNormalize {
+            normalize_props: props
+                .segments
+                .iter()
+                .any(|segment| matches!(segment, HirPropSegment::ObjectBinding(_))),
+            guard_reactive_props: props
+                .segments
+                .iter()
+                .any(|segment| matches!(segment, HirPropSegment::ObjectBinding(_))),
+        },
+        segments,
+    }
+}
+
+fn lower_hir_prop_segment_to_dom_mir(
+    segment: &HirPropSegment,
+    is_component: bool,
+) -> Vue3DomPropSegment {
+    match segment {
+        HirPropSegment::StaticAttr(attr) => {
+            Vue3DomPropSegment::StaticAttr(lower_hir_static_attr_to_dom_mir(attr))
+        }
+        HirPropSegment::DynamicBinding(binding) => {
+            Vue3DomPropSegment::DynamicBinding(lower_hir_binding_to_dom_mir(binding))
+        }
+        HirPropSegment::Event(event) => {
+            Vue3DomPropSegment::Event(lower_hir_event_to_dom_mir(event, is_component))
+        }
+        HirPropSegment::ObjectBinding(binding) => {
+            Vue3DomPropSegment::ObjectBinding(Vue3DomObjectBinding {
+                value: binding.value,
+            })
+        }
+        HirPropSegment::ObjectListeners(listeners) => {
+            Vue3DomPropSegment::ObjectListeners(Vue3DomObjectListeners {
+                value: listeners.value,
+                preserve_case: !is_component,
+            })
+        }
+    }
+}
+
+fn lower_hir_static_attr_to_dom_mir(attr: &HirStaticAttr) -> Vue3DomStaticAttr {
+    Vue3DomStaticAttr {
+        name: attr.name.clone(),
+        value: attr.value.clone(),
+    }
+}
+
+fn lower_hir_binding_to_dom_mir(binding: &HirBinding) -> Vue3DomBinding {
+    Vue3DomBinding {
+        name: binding.name.clone(),
+        dynamic_name: binding.dynamic_name,
+        value: binding.value,
+        dynamic_arg: binding.dynamic_arg,
+    }
+}
+
+fn lower_hir_event_to_dom_mir(event: &HirEvent, is_component: bool) -> Vue3DomEvent {
+    Vue3DomEvent {
+        name: if event.dynamic_arg {
+            event.name.clone()
+        } else if is_component {
+            event_handler_prop_name_for_component(&event.name)
+        } else {
+            event_handler_prop_name_for_element(&event.name)
+        },
+        dynamic_name: event.dynamic_name,
+        handler: event.handler,
+        dynamic_arg: event.dynamic_arg,
     }
 }
 
@@ -1293,6 +1370,9 @@ fn vue3_dom_mir_dynamic_props(element: &Vue3Element) -> Vec<String> {
         .iter()
         .filter_map(|prop| match prop {
             Vue3Prop::Directive(dir) if dir.name == "on" && !event_directive_is_vnode_hook(dir) => {
+                if dir.is_dynamic_arg || dir.arg.is_none() {
+                    return None;
+                }
                 let event = dir
                     .arg
                     .as_ref()
@@ -1301,6 +1381,9 @@ fn vue3_dom_mir_dynamic_props(element: &Vue3Element) -> Vec<String> {
                 Some(event_handler_prop_name(element, &event))
             }
             Vue3Prop::Directive(dir) if dir.name == "bind" && !has_key_bind_dir(dir) => {
+                if dir.is_dynamic_arg {
+                    return None;
+                }
                 dir.arg.as_ref().map(Vue3Expression::source_string)
             }
             _ => None,
@@ -1314,6 +1397,9 @@ fn vue3_dom_mir_props_patch_names(element: &Vue3Element) -> Vec<String> {
         .iter()
         .filter_map(|prop| match prop {
             Vue3Prop::Directive(dir) if dir.name == "on" && !event_directive_is_vnode_hook(dir) => {
+                if dir.is_dynamic_arg || dir.arg.is_none() {
+                    return None;
+                }
                 let event = dir
                     .arg
                     .as_ref()
@@ -1327,6 +1413,9 @@ fn vue3_dom_mir_props_patch_names(element: &Vue3Element) -> Vec<String> {
                     && !has_style_bind_dir(dir)
                     && !has_key_bind_dir(dir) =>
             {
+                if dir.is_dynamic_arg {
+                    return None;
+                }
                 dir.arg.as_ref().map(Vue3Expression::source_string)
             }
             _ => None,
@@ -1358,7 +1447,9 @@ fn has_dynamic_arg_binding(element: &Vue3Element) -> bool {
     element.props.iter().any(|prop| {
         matches!(
             prop,
-            Vue3Prop::Directive(dir) if matches!(dir.name.as_str(), "bind" | "on") && dir.is_dynamic_arg
+            Vue3Prop::Directive(dir)
+                if matches!(dir.name.as_str(), "bind" | "on")
+                    && (dir.is_dynamic_arg || dir.arg.is_none())
         )
     })
 }
@@ -2173,13 +2264,39 @@ fn lower_vue3_props_to_hir(
     let mut hir = HirProps::default();
     for prop in props {
         match prop {
-            Vue3Prop::Attribute(attr) => hir.static_attrs.push(HirStaticAttr {
-                name: attr.name.clone(),
-                value: attr.value.clone().unwrap_or_default(),
-            }),
+            Vue3Prop::Attribute(attr) => {
+                let lowered = HirStaticAttr {
+                    name: attr.name.clone(),
+                    value: attr.value.clone().unwrap_or_default(),
+                };
+                hir.segments
+                    .push(HirPropSegment::StaticAttr(lowered.clone()));
+                hir.static_attrs.push(lowered);
+            }
             Vue3Prop::Directive(dir) if dir.name == "bind" => {
-                if let (Some(arg), Some(exp)) = (&dir.arg, &dir.exp) {
+                if let Some(exp) = &dir.exp {
+                    let Some(arg) = &dir.arg else {
+                        let value = register_vue3_expression_with_span(
+                            js,
+                            exp,
+                            dir.exp_span.or_else(|| ast_node.span.source()),
+                            source_type,
+                        );
+                        let lowered = HirObjectBinding { value };
+                        hir.segments
+                            .push(HirPropSegment::ObjectBinding(lowered.clone()));
+                        hir.object_bindings.push(lowered);
+                        continue;
+                    };
                     let name = arg.source_string();
+                    let dynamic_name = dir.is_dynamic_arg.then(|| {
+                        register_vue3_expression_with_span(
+                            js,
+                            arg,
+                            dir.arg_span.or_else(|| ast_node.span.source()),
+                            source_type,
+                        )
+                    });
                     let value = register_vue3_expression_with_span(
                         js,
                         exp,
@@ -2194,25 +2311,55 @@ fn lower_vue3_props_to_hir(
                             in_for: false,
                         });
                     }
-                    hir.dynamic_bindings.push(HirBinding {
+                    let lowered = HirBinding {
                         name,
+                        dynamic_name,
                         value,
                         dynamic_arg: dir.is_dynamic_arg,
-                    });
+                    };
+                    hir.segments
+                        .push(HirPropSegment::DynamicBinding(lowered.clone()));
+                    hir.dynamic_bindings.push(lowered);
                 }
             }
             Vue3Prop::Directive(dir) if dir.name == "on" => {
-                if let (Some(arg), Some(exp)) = (&dir.arg, &dir.exp) {
-                    hir.events.push(HirEvent {
-                        name: arg.source_string(),
-                        handler: register_vue3_statement_with_span(
-                            js,
-                            exp,
-                            dir.exp_span.or_else(|| ast_node.span.source()),
-                            source_type,
-                        ),
-                        modifiers: dir.modifiers.clone(),
-                    });
+                if let Some(exp) = &dir.exp {
+                    if let Some(arg) = &dir.arg {
+                        let dynamic_name = dir.is_dynamic_arg.then(|| {
+                            register_vue3_expression_with_span(
+                                js,
+                                arg,
+                                dir.arg_span.or_else(|| ast_node.span.source()),
+                                source_type,
+                            )
+                        });
+                        let lowered = HirEvent {
+                            name: arg.source_string(),
+                            dynamic_name,
+                            handler: register_vue3_statement_with_span(
+                                js,
+                                exp,
+                                dir.exp_span.or_else(|| ast_node.span.source()),
+                                source_type,
+                            ),
+                            dynamic_arg: dir.is_dynamic_arg,
+                            modifiers: dir.modifiers.clone(),
+                        };
+                        hir.segments.push(HirPropSegment::Event(lowered.clone()));
+                        hir.events.push(lowered);
+                    } else {
+                        let lowered = HirObjectListeners {
+                            value: register_vue3_expression_with_span(
+                                js,
+                                exp,
+                                dir.exp_span.or_else(|| ast_node.span.source()),
+                                source_type,
+                            ),
+                        };
+                        hir.segments
+                            .push(HirPropSegment::ObjectListeners(lowered.clone()));
+                        hir.object_listeners.push(lowered);
+                    }
                 }
             }
             Vue3Prop::Directive(_) => {}
@@ -8542,14 +8689,7 @@ impl<'a> Vue3DomMirCodegen<'a> {
                 | Vue3DomMirKind::WithDirectives
                 | Vue3DomMirKind::Fragment => {}
                 Vue3DomMirKind::VNodeCall(call) => {
-                    if call
-                        .props
-                        .dynamic_bindings
-                        .iter()
-                        .any(|binding| !binding.dynamic_arg && binding.name == "class")
-                    {
-                        push_unique_helper(&mut helpers, RuntimeHelper::Vue3NormalizeClass);
-                    }
+                    self.push_prop_helpers(&call.props, &mut helpers);
                     if !call.directives.is_empty() {
                         push_unique_helper(&mut helpers, RuntimeHelper::Vue3WithDirectives);
                     }
@@ -8608,6 +8748,39 @@ impl<'a> Vue3DomMirCodegen<'a> {
         }
         sort_helpers_by_order(&mut helpers, vue3_helper_order(false));
         helpers
+    }
+
+    fn push_prop_helpers(&self, props: &Vue3DomProps, helpers: &mut Vec<RuntimeHelper>) {
+        for segment in &props.segments {
+            match segment {
+                Vue3DomPropSegment::DynamicBinding(binding) => {
+                    if binding.dynamic_arg {
+                        continue;
+                    }
+                    if binding.name == "class" {
+                        push_unique_helper(helpers, RuntimeHelper::Vue3NormalizeClass);
+                    }
+                }
+                Vue3DomPropSegment::Event(event) if event.dynamic_arg => {
+                    push_unique_helper(helpers, RuntimeHelper::Vue3ToHandlerKey);
+                }
+                Vue3DomPropSegment::ObjectListeners(_) => {
+                    push_unique_helper(helpers, RuntimeHelper::Vue3ToHandlers);
+                }
+                Vue3DomPropSegment::StaticAttr(_)
+                | Vue3DomPropSegment::Event(_)
+                | Vue3DomPropSegment::ObjectBinding(_) => {}
+            }
+        }
+        if props_requires_merge_call(props) {
+            push_unique_helper(helpers, RuntimeHelper::Vue3MergeProps);
+        }
+        if props.normalize.guard_reactive_props {
+            push_unique_helper(helpers, RuntimeHelper::Vue3GuardReactiveProps);
+        }
+        if props.normalize.normalize_props {
+            push_unique_helper(helpers, RuntimeHelper::Vue3NormalizeProps);
+        }
     }
 
     fn directive_declarations(&self) -> Vec<String> {
@@ -8757,39 +8930,130 @@ impl<'a> Vue3DomMirCodegen<'a> {
     }
 
     fn render_props(&self, props: &Vue3DomProps) -> Option<String> {
-        let mut rendered = Vec::new();
-        for attr in &props.static_attrs {
-            rendered.push(format!(
-                "{}: {}",
-                json_key(&attr.name),
-                quote_string(&attr.value)
-            ));
+        let rendered = self.render_ordered_props(props)?;
+        Some(self.render_normalized_props(props, rendered))
+    }
+
+    fn render_ordered_props(&self, props: &Vue3DomProps) -> Option<String> {
+        if props.segments.is_empty() {
+            let mut entries = Vec::new();
+            for attr in &props.static_attrs {
+                entries.push(self.render_static_attr(attr));
+            }
+            for binding in &props.dynamic_bindings {
+                entries.push(self.render_dynamic_binding(binding));
+            }
+            for event in &props.events {
+                entries.push(self.render_event(event));
+            }
+            return self.render_plain_props(&entries);
         }
-        for binding in &props.dynamic_bindings {
-            let value = self.render_js_expr(binding.value);
-            if binding.dynamic_arg {
-                rendered.push(format!("[{}]: {}", binding.name, value));
-            } else if binding.name == "class" {
-                rendered.push(format!("class: _normalizeClass({value})"));
-            } else {
-                rendered.push(format!("{}: {}", json_key(&binding.name), value));
+
+        let mut merge_args = Vec::new();
+        let mut object_entries = Vec::new();
+        for segment in &props.segments {
+            match segment {
+                Vue3DomPropSegment::StaticAttr(attr) => {
+                    object_entries.push(self.render_static_attr(attr));
+                }
+                Vue3DomPropSegment::DynamicBinding(binding) => {
+                    object_entries.push(self.render_dynamic_binding(binding));
+                }
+                Vue3DomPropSegment::Event(event) => {
+                    object_entries.push(self.render_event(event));
+                }
+                Vue3DomPropSegment::ObjectBinding(binding) => {
+                    self.push_merge_object_arg(&mut merge_args, &mut object_entries);
+                    merge_args.push(self.render_js_expr(binding.value));
+                }
+                Vue3DomPropSegment::ObjectListeners(listeners) => {
+                    self.push_merge_object_arg(&mut merge_args, &mut object_entries);
+                    merge_args.push(self.render_object_listeners(listeners));
+                }
             }
         }
-        for event in &props.events {
-            let handler = self.render_js_stmt(event.handler);
-            if event.dynamic_arg {
-                rendered.push(format!("[{}]: {}", event.name, handler));
-            } else {
-                rendered.push(format!("{}: {}", json_key(&event.name), handler));
-            }
-        }
-        if rendered.is_empty() {
+        self.push_merge_object_arg(&mut merge_args, &mut object_entries);
+        if merge_args.is_empty() {
             None
-        } else if rendered.len() == 1 {
-            Some(format!("{{ {} }}", rendered.join(", ")))
+        } else if merge_args.len() == 1 {
+            merge_args.into_iter().next()
         } else {
-            Some(render_object(&rendered))
+            Some(format!("_mergeProps({})", merge_args.join(", ")))
         }
+    }
+
+    fn render_static_attr(&self, attr: &Vue3DomStaticAttr) -> String {
+        format!("{}: {}", json_key(&attr.name), quote_string(&attr.value))
+    }
+
+    fn render_dynamic_binding(&self, binding: &Vue3DomBinding) -> String {
+        let value = self.render_js_expr(binding.value);
+        if binding.dynamic_arg {
+            let name = binding
+                .dynamic_name
+                .map(|id| self.render_js_expr(id))
+                .unwrap_or_else(|| binding.name.clone());
+            format!("[{}]: {}", render_dynamic_prop_key(&name), value)
+        } else if binding.name == "class" {
+            format!("class: _normalizeClass({value})")
+        } else {
+            format!("{}: {}", json_key(&binding.name), value)
+        }
+    }
+
+    fn render_event(&self, event: &Vue3DomEvent) -> String {
+        let handler = self.render_js_stmt(event.handler);
+        if event.dynamic_arg {
+            let name = event
+                .dynamic_name
+                .map(|id| self.render_js_expr(id))
+                .unwrap_or_else(|| event.name.clone());
+            format!("[_toHandlerKey({})]: {}", name.trim(), handler)
+        } else {
+            format!("{}: {}", json_key(&event.name), handler)
+        }
+    }
+
+    fn render_object_listeners(&self, listeners: &Vue3DomObjectListeners) -> String {
+        let handlers = self.render_js_expr(listeners.value);
+        if listeners.preserve_case {
+            format!("_toHandlers({handlers}, true)")
+        } else {
+            format!("_toHandlers({handlers})")
+        }
+    }
+
+    fn push_merge_object_arg(
+        &self,
+        merge_args: &mut Vec<String>,
+        object_entries: &mut Vec<String>,
+    ) {
+        if let Some(object) = self.render_plain_props(object_entries) {
+            merge_args.push(object);
+            object_entries.clear();
+        }
+    }
+
+    fn render_plain_props(&self, entries: &[String]) -> Option<String> {
+        if entries.is_empty() {
+            None
+        } else if entries.len() == 1 {
+            Some(format!("{{ {} }}", entries.join(", ")))
+        } else {
+            Some(render_object(entries))
+        }
+    }
+
+    fn render_normalized_props(&self, props: &Vue3DomProps, rendered: String) -> String {
+        if !props.normalize.normalize_props {
+            return rendered;
+        }
+        let argument = if props.normalize.guard_reactive_props {
+            format!("_guardReactiveProps({rendered})")
+        } else {
+            rendered
+        };
+        format!("_normalizeProps({argument})")
     }
 
     fn render_with_directives(&self, vnode: String, call: &Vue3VNodeCall) -> String {
@@ -8923,6 +9187,33 @@ fn push_unique_helper(helpers: &mut Vec<RuntimeHelper>, helper: RuntimeHelper) {
     if !helpers.contains(&helper) {
         helpers.push(helper);
     }
+}
+
+fn render_dynamic_prop_key(key: &str) -> String {
+    format!("{} || \"\"", key.trim())
+}
+
+fn props_requires_merge_call(props: &Vue3DomProps) -> bool {
+    let mut args = 0usize;
+    let mut pending_object_entries = false;
+    for segment in &props.segments {
+        match segment {
+            Vue3DomPropSegment::StaticAttr(_)
+            | Vue3DomPropSegment::DynamicBinding(_)
+            | Vue3DomPropSegment::Event(_) => pending_object_entries = true,
+            Vue3DomPropSegment::ObjectBinding(_) | Vue3DomPropSegment::ObjectListeners(_) => {
+                if pending_object_entries {
+                    args += 1;
+                    pending_object_entries = false;
+                }
+                args += 1;
+            }
+        }
+    }
+    if pending_object_entries {
+        args += 1;
+    }
+    args > 1
 }
 
 fn vue3_codegen_root(ast: &Vue3Ast) -> Option<&Vue3Root> {
@@ -11396,6 +11687,7 @@ fn render_patch_flag_text(flag: Option<i32>) -> String {
         Some(1) => ", 1 /* TEXT */".into(),
         Some(2) => ", 2 /* CLASS */".into(),
         Some(8) => ", 8 /* PROPS */".into(),
+        Some(16) => ", 16 /* FULL_PROPS */".into(),
         Some(512) => ", 512 /* NEED_PATCH */".into(),
         Some(flag) => format!(", {flag}"),
         None => String::new(),
@@ -13617,6 +13909,87 @@ mod tests {
     }
 
     #[test]
+    fn lower_vue3_ast_to_dom_mir_keeps_ordered_prop_segments_and_object_spreads() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<button id="save" v-bind="base" :[name]="value" v-on="listeners" @[event]="run">Save</button>"#.into(),
+            file_id: FileId(30),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+
+        assert_eq!(
+            result
+                .js
+                .expressions()
+                .iter()
+                .map(|entry| entry.source.as_str())
+                .collect::<Vec<_>>(),
+            vec!["base", "name", "value", "listeners", "event"]
+        );
+        assert_eq!(
+            result
+                .js
+                .statements()
+                .iter()
+                .map(|entry| entry.source.as_str())
+                .collect::<Vec<_>>(),
+            vec!["run"]
+        );
+
+        let button_hir = result
+            .hir
+            .nodes
+            .iter()
+            .find_map(|node| match &node.kind {
+                HirNodeKind::Element(element) => Some(element),
+                _ => None,
+            })
+            .expect("HIR element");
+        assert!(matches!(
+            button_hir.props.segments.as_slice(),
+            [
+                HirPropSegment::StaticAttr(_),
+                HirPropSegment::ObjectBinding(_),
+                HirPropSegment::DynamicBinding(_),
+                HirPropSegment::ObjectListeners(_),
+                HirPropSegment::Event(_)
+            ]
+        ));
+        assert_eq!(button_hir.props.object_bindings.len(), 1);
+        assert_eq!(button_hir.props.object_listeners.len(), 1);
+        assert!(button_hir.props.dynamic_bindings[0].dynamic_arg);
+        assert!(button_hir.props.dynamic_bindings[0].dynamic_name.is_some());
+        assert!(button_hir.props.events[0].dynamic_arg);
+        assert!(button_hir.props.events[0].dynamic_name.is_some());
+
+        let button_mir = result
+            .mir
+            .nodes
+            .iter()
+            .find_map(|node| match &node.kind {
+                Vue3DomMirKind::VNodeCall(call) => Some(call),
+                _ => None,
+            })
+            .expect("DOM MIR vnode");
+        assert!(matches!(
+            button_mir.props.segments.as_slice(),
+            [
+                Vue3DomPropSegment::StaticAttr(_),
+                Vue3DomPropSegment::ObjectBinding(_),
+                Vue3DomPropSegment::DynamicBinding(_),
+                Vue3DomPropSegment::ObjectListeners(_),
+                Vue3DomPropSegment::Event(_)
+            ]
+        ));
+        assert!(button_mir.props.normalize.normalize_props);
+        assert!(button_mir.props.normalize.guard_reactive_props);
+        assert_eq!(button_mir.patch_flag.bits, 16);
+        assert!(button_mir.dynamic_props.is_empty());
+    }
+
+    #[test]
     fn lower_vue3_ast_to_dom_mir_keeps_slot_outlet_target_split() {
         let source = TemplateSource {
             filename: "foo.vue".into(),
@@ -14028,6 +14401,45 @@ mod tests {
             .contains("[_directive_focus, value, \"foo\", {"));
         assert!(generated.code.contains("bar: true"));
         assert!(generated.code.contains("[_vShow, ok]"));
+    }
+
+    #[test]
+    fn generate_vue3_dom_mir_emits_merge_and_dynamic_props_from_mir() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<button id="save" v-bind="base" :[name]="value" v-on="listeners" @[event]="run">Save</button>"#.into(),
+            file_id: FileId(31),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+        let generated = generate_vue3_dom_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated.code.contains("mergeProps as _mergeProps"));
+        assert!(generated.code.contains("normalizeProps as _normalizeProps"));
+        assert!(generated
+            .code
+            .contains("guardReactiveProps as _guardReactiveProps"));
+        assert!(generated.code.contains("toHandlers as _toHandlers"));
+        assert!(generated.code.contains("toHandlerKey as _toHandlerKey"));
+        assert!(generated
+            .code
+            .contains("_normalizeProps(_guardReactiveProps(_mergeProps("));
+        assert!(generated.code.contains("id: \"save\""));
+        assert!(generated.code.contains("base"));
+        assert!(generated.code.contains("[name || \"\"]: value"));
+        assert!(generated.code.contains("_toHandlers(listeners, true)"));
+        assert!(generated.code.contains("[_toHandlerKey(event)]: run"));
+        assert!(generated.code.contains("16 /* FULL_PROPS */"));
+        assert!(!generated.code.contains("[\"name\"]"));
     }
 
     #[test]

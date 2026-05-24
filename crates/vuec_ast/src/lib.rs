@@ -1105,11 +1105,23 @@ pub enum HirTag {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HirProps {
+    pub segments: Vec<HirPropSegment>,
     pub static_attrs: Vec<HirStaticAttr>,
     pub dynamic_bindings: Vec<HirBinding>,
     pub events: Vec<HirEvent>,
+    pub object_bindings: Vec<HirObjectBinding>,
+    pub object_listeners: Vec<HirObjectListeners>,
     pub key: Option<JsExprId>,
     pub ref_name: Option<HirRef>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HirPropSegment {
+    StaticAttr(HirStaticAttr),
+    DynamicBinding(HirBinding),
+    Event(HirEvent),
+    ObjectBinding(HirObjectBinding),
+    ObjectListeners(HirObjectListeners),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1121,6 +1133,7 @@ pub struct HirStaticAttr {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HirBinding {
     pub name: String,
+    pub dynamic_name: Option<JsExprId>,
     pub value: JsExprId,
     pub dynamic_arg: bool,
 }
@@ -1128,8 +1141,20 @@ pub struct HirBinding {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HirEvent {
     pub name: String,
+    pub dynamic_name: Option<JsExprId>,
     pub handler: JsStmtId,
+    pub dynamic_arg: bool,
     pub modifiers: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HirObjectBinding {
+    pub value: JsExprId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HirObjectListeners {
+    pub value: JsExprId,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1267,9 +1292,22 @@ pub struct Vue3VNodeCall {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3DomProps {
+    pub segments: Vec<Vue3DomPropSegment>,
     pub static_attrs: Vec<Vue3DomStaticAttr>,
     pub dynamic_bindings: Vec<Vue3DomBinding>,
     pub events: Vec<Vue3DomEvent>,
+    pub object_bindings: Vec<Vue3DomObjectBinding>,
+    pub object_listeners: Vec<Vue3DomObjectListeners>,
+    pub normalize: Vue3DomPropsNormalize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Vue3DomPropSegment {
+    StaticAttr(Vue3DomStaticAttr),
+    DynamicBinding(Vue3DomBinding),
+    Event(Vue3DomEvent),
+    ObjectBinding(Vue3DomObjectBinding),
+    ObjectListeners(Vue3DomObjectListeners),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1281,6 +1319,7 @@ pub struct Vue3DomStaticAttr {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3DomBinding {
     pub name: String,
+    pub dynamic_name: Option<JsExprId>,
     pub value: JsExprId,
     pub dynamic_arg: bool,
 }
@@ -1288,8 +1327,26 @@ pub struct Vue3DomBinding {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3DomEvent {
     pub name: String,
+    pub dynamic_name: Option<JsExprId>,
     pub handler: JsStmtId,
     pub dynamic_arg: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue3DomObjectBinding {
+    pub value: JsExprId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue3DomObjectListeners {
+    pub value: JsExprId,
+    pub preserve_case: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue3DomPropsNormalize {
+    pub normalize_props: bool,
+    pub guard_reactive_props: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
