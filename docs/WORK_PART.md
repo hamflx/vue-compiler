@@ -46,9 +46,17 @@
 - [x] Vue 3 compiler-dom official conformance execution wiring (real Vitest run; currently `45/133`, `mixed` coverage).
 - [x] Vue 3 compiler-dom Rust-backed parser compatibility slice for `parse.spec.ts` (`33/33`; full DOM suite currently `69/133`, `mixed` coverage).
 - [x] Vue 3 compiler-dom mixed alias-runtime transform execution slice for official DOM `baseCompile` callers (`ignoreSideEffectTags` closed; full DOM suite currently `87/133`, `mixed` coverage).
+- [x] Vue 3 compiler-dom Rust-backed dynamic runtime directive helper projection for `vShow.spec.ts` (`2/2`; full DOM suite currently `88/133`, `mixed` coverage).
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Closed the Vue 3 compiler-dom `vShow.spec.ts` compatibility gap.
+- `vuec_vue3_core::build_directive_args_projection` now preserves dynamically registered runtime helper names, so DOM helpers registered by official `compiler-dom/src/runtimeHelpers.ts` (for example `V_SHOW -> vShow`) stay helper directives instead of being treated as custom directive assets.
+- Generated alias materialization now carries `helperName` for unknown-but-registered helper symbols and emits `_vShow` directive arguments when Rust returns a helper-name projection.
+- Focused `v-show` output now matches the official snapshot shape: `_withDirectives((_openBlock(), _createElementBlock("div", null, null, 512 /* NEED_PATCH */)), [[_vShow, a]])`, without `_resolveDirective("show")`.
+- Full Vue 3 DOM conformance remains expected-failing but improves from `87/133` to `88/133`; `vShow.spec.ts` is no longer failing. Remaining failures are `stringifyStatic`, `vModel`, `vOn`, and `Transition`.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_vue3_core` (`73/73` pass), direct alias `v-show` codegen reproduction, and `cargo xtask run-conformance --suite vue3-dom` (expected fail with `88/133`).
 
 - Opened the Vue 3 compiler-dom official source transform path for prepared DOM conformance.
 - Generated `@vue/compiler-core` alias `baseCompile` now keeps the Rust bridge fast path for pure core calls, but falls back to the existing alias runtime transform/generate pipeline when the caller passes real JS `nodeTransforms`, `directiveTransforms`, or `transformHoist`. This is necessary for official `compiler-dom/src/index.ts` to execute DOM transforms through prepared source imports.

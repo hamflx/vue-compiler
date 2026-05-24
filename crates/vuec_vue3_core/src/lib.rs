@@ -3102,6 +3102,8 @@ pub fn build_directive_args_projection(payload: &Value) -> Value {
     let need_runtime = payload.get("needRuntime").unwrap_or(&Value::Null);
     let runtime = if let Some(helper) = need_runtime.get("helper").and_then(Value::as_str) {
         json!({ "kind": "helper", "helper": helper })
+    } else if let Some(helper_name) = need_runtime.get("helperName").and_then(Value::as_str) {
+        json!({ "kind": "helper", "helperName": helper_name })
     } else {
         json!({
             "kind": "asset",

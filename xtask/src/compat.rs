@@ -6015,7 +6015,7 @@ function vue3ElementDirectivePropSummaries(dir, result, extra = {}) {
 
 function vue3DirectiveRuntimePayload(needRuntime) {
   if (typeof needRuntime === 'symbol') {
-    return { kind: 'helper', helper: projectionNameFromHelperSymbol(needRuntime) };
+    return { kind: 'helper', helper: projectionNameFromHelperSymbol(needRuntime), helperName: vue3CoreRuntime.helperNameMap[needRuntime] };
   }
   if (needRuntime) {
     return { kind: 'asset' };
@@ -6033,7 +6033,8 @@ function materializeVue3DirectiveArgsProjection(projection, dir, context) {
   const runtimeProjection = projection && projection.runtime || {};
   if (runtimeProjection.kind === 'helper') {
     const helper = helperSymbolFromProjection(runtimeProjection.helper);
-    elements.push(context && helper ? context.helperString(helper) : `_${vue3CoreRuntime.helperNameMap[helper]}`);
+    const helperName = runtimeProjection.helperName || (helper && vue3CoreRuntime.helperNameMap[helper]);
+    elements.push(context && helper ? context.helperString(helper) : `_${helperName || runtimeProjection.helper || ''}`);
   } else {
     if (context) {
       context.helper(vue3CoreRuntime.RESOLVE_DIRECTIVE);
