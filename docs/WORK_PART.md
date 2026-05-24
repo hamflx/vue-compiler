@@ -45,9 +45,18 @@
 - [x] Vue 3 compiler-core official conformance closure (`652/652`) with Rust-backed `isMemberExpression` utility projection.
 - [x] Vue 3 compiler-dom official conformance execution wiring (real Vitest run; currently `45/133`, `mixed` coverage).
 - [x] Vue 3 compiler-dom Rust-backed parser compatibility slice for `parse.spec.ts` (`33/33`; full DOM suite currently `69/133`, `mixed` coverage).
+- [x] Vue 3 compiler-dom mixed alias-runtime transform execution slice for official DOM `baseCompile` callers (`ignoreSideEffectTags` closed; full DOM suite currently `87/133`, `mixed` coverage).
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Opened the Vue 3 compiler-dom official source transform path for prepared DOM conformance.
+- Generated `@vue/compiler-core` alias `baseCompile` now keeps the Rust bridge fast path for pure core calls, but falls back to the existing alias runtime transform/generate pipeline when the caller passes real JS `nodeTransforms`, `directiveTransforms`, or `transformHoist`. This is necessary for official `compiler-dom/src/index.ts` to execute DOM transforms through prepared source imports.
+- Public `@vue/compiler-dom.compile` still calls the Rust `vue3.dom.compile` bridge; the alias now forwards Rust `diagnostics` into `options.onError`, so the Rust-backed `<script>` / `<style>` side-effect warning is observable through the public API.
+- `ignoreSideEffectTags.spec.ts` is now closed in the full DOM conformance run. The prepared official DOM source path removes `<script>` / `<style>` via `context.removeNode()`, and the public bridge path removes them in Rust and emits the side-effect diagnostic.
+- Full Vue 3 DOM conformance remains expected-failing but improves from `69/133` to `87/133`; remaining failures are now concentrated in `stringifyStatic`, `vModel`, `vOn`, `Transition`, and `vShow`.
+- Coverage classification remains `mixed`: this slice enables official DOM source transforms to run through the alias runtime and does not count as Rust-backed compiler semantics. Vue 3 compiler-core conformance was rechecked and remains `652/652`, confirming the core Rust bridge fast path was not regressed.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p xtask`, `cargo test -p xtask` (`18/18` pass), `cargo check -p vuec_vue3_dom -p vuec_vue3_core -p vuec_node_bridge`, `cargo test -p vuec_vue3_dom`, direct alias checks for `<script>` / `<style>` removal plus `onError`, `cargo xtask run-conformance --suite vue3-core` (`652/652`), and `cargo xtask run-conformance --suite vue3-dom` (expected fail with `87/133`).
 
 - Closed the Rust-backed Vue 3 compiler-dom parser compatibility slice.
 - `vuec_vue3_core` now implements DOM parser raw text and RCDATA handling in Rust: HTML `<textarea>` / `<title>` keep interpolation and entity decoding, HTML `<script>` / `<style>` stay raw and do not decode entities, strict raw-text end-tag matching preserves malformed textarea text, and leading-newline removal for `textarea` / `pre` preserves the original source span.

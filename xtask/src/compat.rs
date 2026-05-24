@@ -1904,6 +1904,18 @@ fn alias_function_expression(
         String::new()
     };
     let body = match command {
+        Some("vue3.core.baseCompile") => format!(
+            "{argument_bindings} const __vuecPayload = normalizeArgs({}); preflightAliasCall({}, __vuecPayload); if (usesAliasRuntimeCompile(__vuecPayload.options)) return vue3CoreRuntime.baseCompile(__vuecPayload.source, __vuecPayload.options || {{}}); return callBridge({}, bridgePayloadForCall(__vuecPayload));",
+            alias_argument_object(target, export_name, body_arity),
+            js_string_literal(alias_preflight_name(target, export_name)),
+            js_string_literal("vue3.core.baseCompile"),
+        ),
+        Some("vue3.dom.compile") => format!(
+            "{argument_bindings} const __vuecPayload = normalizeArgs({}); preflightAliasCall({}, __vuecPayload); const __vuecResult = callBridge({}, bridgePayloadForCall(__vuecPayload)); emitVue3CompileDiagnostics(__vuecResult, __vuecPayload.options); return __vuecResult;",
+            alias_argument_object(target, export_name, body_arity),
+            js_string_literal(alias_preflight_name(target, export_name)),
+            js_string_literal("vue3.dom.compile"),
+        ),
         Some(command) => {
             let call = if matches!(
                 (target.kind, export_name),
@@ -3947,6 +3959,34 @@ const vue3CoreRuntime = (() => {
     root.cached = context.cached;
     root.transformed = true;
     root.filters = [...context.filters];
+  };
+  runtime.baseCompile = function baseCompile(source, options = {}) {
+    const onError = options.onError || (error => { throw error; });
+    const isModuleMode = options.mode === 'module';
+    const prefixIdentifiers = !runtime.isBrowserBuild() && (options.prefixIdentifiers === true || isModuleMode);
+    if (!prefixIdentifiers && options.cacheHandlers) {
+      onError(runtime.createCompilerError(ErrorCodes.X_CACHE_HANDLER_NOT_SUPPORTED));
+    }
+    if (options.scopeId && !isModuleMode) {
+      onError(runtime.createCompilerError(ErrorCodes.X_SCOPE_ID_NOT_SUPPORTED));
+    }
+    const resolvedOptions = Object.assign({}, options, { prefixIdentifiers });
+    const ast = typeof source === 'string'
+      ? hydrateVue3Ast(callBridge('vue3.core.baseParse', bridgePayloadForCall(vue3BridgePayload(source, resolvedOptions.filename, resolvedOptions))), resolvedOptions)
+      : hydrateVue3Ast(source, resolvedOptions);
+    const [nodeTransforms, directiveTransforms] = runtime.getBaseTransformPreset(prefixIdentifiers);
+    runtime.transform(ast, Object.assign({}, resolvedOptions, {
+      nodeTransforms: [
+        ...nodeTransforms,
+        ...(options.nodeTransforms || []),
+      ],
+      directiveTransforms: Object.assign(
+        {},
+        directiveTransforms,
+        options.directiveTransforms || {},
+      ),
+    }));
+    return runtime.generate(ast, resolvedOptions);
   };
   runtime.generate = function generate(ast, options = {}) {
     ast = hydrateVue3Ast(ast);
@@ -6643,6 +6683,31 @@ function collectVueNamespaceHits(getNamespace, values) {
     } catch (_) {}
   }
   return namespaces;
+}
+
+function usesAliasRuntimeCompile(options) {
+  if (!options || typeof options !== 'object') return false;
+  if (Array.isArray(options.nodeTransforms) && options.nodeTransforms.some(transform => typeof transform === 'function')) {
+    return true;
+  }
+  if (options.directiveTransforms && typeof options.directiveTransforms === 'object') {
+    return Object.values(options.directiveTransforms).some(transform => typeof transform === 'function');
+  }
+  return typeof options.transformHoist === 'function';
+}
+
+function emitVue3CompileDiagnostics(result, options) {
+  if (!result || !Array.isArray(result.diagnostics) || !result.diagnostics.length) return;
+  const onError = options && typeof options.onError === 'function'
+    ? options.onError
+    : error => { throw error; };
+  for (const diagnostic of result.diagnostics) {
+    const message = typeof diagnostic === 'string' ? diagnostic : diagnostic && diagnostic.message;
+    const error = new SyntaxError(message || 'Vue compiler error');
+    error.code = 64;
+    error.loc = undefined;
+    onError(error);
+  }
 }
 
 function preflightAliasCall(name, payload) {
