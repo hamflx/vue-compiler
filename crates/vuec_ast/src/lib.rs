@@ -1390,11 +1390,16 @@ pub struct Vue3SsrSlot {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue3SsrAttrs {
+    pub props: Vue3DomProps,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Vue3SsrMirKind {
     Root,
     PushString(String),
     PushInterpolated(MirExpr),
-    RenderAttrs,
+    RenderAttrs(Vue3SsrAttrs),
     RenderComponent {
         tag: MirExpr,
     },

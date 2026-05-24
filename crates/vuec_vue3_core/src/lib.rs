@@ -15,7 +15,7 @@ use vuec_ast::{
     Vue3DomMirKind, Vue3DomObjectBinding, Vue3DomObjectListeners, Vue3DomPropSegment, Vue3DomProps,
     Vue3DomPropsNormalize, Vue3DomSlotName, Vue3DomStaticAttr, Vue3DomTag, Vue3Element,
     Vue3ElementType, Vue3Expression, Vue3ForMemo, Vue3ForMir, Vue3NodeKind, Vue3PatchFlags,
-    Vue3Prop, Vue3Root, Vue3SlotFlag, Vue3SsrMir, Vue3SsrMirKind, Vue3VNodeCall,
+    Vue3Prop, Vue3Root, Vue3SlotFlag, Vue3SsrAttrs, Vue3SsrMir, Vue3SsrMirKind, Vue3VNodeCall,
 };
 use vuec_codegen::{CodeWriter, SourceMapArtifact, SourceMapSegment};
 use vuec_html::{HtmlTokenKind, HtmlTokenizer};
@@ -3024,10 +3024,10 @@ fn lower_vue3_native_element_to_ssr_mir(
     );
     state.map.record_hir_to_mir(hir_id, open_id);
 
-    if vue3_element_has_dynamic_ssr_attrs(element) {
+    if let Some(attrs) = lower_vue3_ssr_attrs(hir_id, state) {
         let attrs_id = state.mir.push_child(
             mir_parent,
-            Vue3SsrMirKind::RenderAttrs,
+            Vue3SsrMirKind::RenderAttrs(attrs),
             generated_span.clone(),
         );
         state.map.record_hir_to_mir(hir_id, attrs_id);
@@ -3187,13 +3187,48 @@ fn vue3_ssr_open_tag_start(element: &Vue3Element) -> String {
     rendered
 }
 
-fn vue3_element_has_dynamic_ssr_attrs(element: &Vue3Element) -> bool {
-    element.props.iter().any(|prop| {
-        matches!(
-            prop,
-            Vue3Prop::Directive(dir) if dir.name == "bind" && dir.exp.is_some()
-        )
+fn lower_vue3_ssr_attrs(hir_id: NodeId, state: &Vue3SsrLoweringState) -> Option<Vue3SsrAttrs> {
+    let props = match state.hir.node(hir_id).map(|node| &node.kind) {
+        Some(HirNodeKind::Element(element)) => filter_vue3_ssr_attr_props(&element.props),
+        _ => HirProps::default(),
+    };
+    if props.segments.is_empty()
+        && props.dynamic_bindings.is_empty()
+        && props.object_bindings.is_empty()
+    {
+        return None;
+    }
+    Some(Vue3SsrAttrs {
+        props: lower_hir_props_to_dom_mir_without_event_cache(&props),
     })
+}
+
+fn filter_vue3_ssr_attr_props(props: &HirProps) -> HirProps {
+    let mut filtered = HirProps::default();
+    for segment in &props.segments {
+        match segment {
+            HirPropSegment::DynamicBinding(binding) => {
+                filtered.dynamic_bindings.push(binding.clone());
+                filtered
+                    .segments
+                    .push(HirPropSegment::DynamicBinding(binding.clone()));
+            }
+            HirPropSegment::ObjectBinding(binding) => {
+                filtered.object_bindings.push(binding.clone());
+                filtered
+                    .segments
+                    .push(HirPropSegment::ObjectBinding(binding.clone()));
+            }
+            HirPropSegment::StaticAttr(_)
+            | HirPropSegment::Event(_)
+            | HirPropSegment::ObjectListeners(_) => {}
+        }
+    }
+    if filtered.segments.is_empty() {
+        filtered.dynamic_bindings = props.dynamic_bindings.clone();
+        filtered.object_bindings = props.object_bindings.clone();
+    }
+    filtered
 }
 
 fn vue3_ssr_escape_attr(value: &str) -> String {
@@ -10834,7 +10869,9 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                 Vue3SsrMirKind::PushInterpolated(_) => {
                     push_unique_helper(&mut helpers, RuntimeHelper::Vue3SsrInterpolate);
                 }
-                Vue3SsrMirKind::RenderAttrs => {}
+                Vue3SsrMirKind::RenderAttrs(attrs) => {
+                    self.push_ssr_attr_helpers(&attrs.props, &mut helpers);
+                }
                 Vue3SsrMirKind::RenderComponent { .. } => {
                     push_unique_helper(&mut helpers, RuntimeHelper::Vue3SsrRenderComponent);
                 }
@@ -10855,6 +10892,41 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         }
         sort_helpers_by_order(&mut helpers, vue3_ssr_helper_order());
         helpers
+    }
+
+    fn push_ssr_attr_helpers(&self, props: &Vue3DomProps, helpers: &mut Vec<RuntimeHelper>) {
+        for binding in &props.dynamic_bindings {
+            self.push_ssr_binding_helper(binding, helpers);
+        }
+        for binding in &props.object_bindings {
+            let _ = binding;
+            push_unique_helper(helpers, RuntimeHelper::Vue3SsrRenderAttrs);
+        }
+        for segment in &props.segments {
+            match segment {
+                Vue3DomPropSegment::DynamicBinding(binding) => {
+                    self.push_ssr_binding_helper(binding, helpers);
+                }
+                Vue3DomPropSegment::ObjectBinding(_) => {
+                    push_unique_helper(helpers, RuntimeHelper::Vue3SsrRenderAttrs);
+                }
+                Vue3DomPropSegment::StaticAttr(_)
+                | Vue3DomPropSegment::Event(_)
+                | Vue3DomPropSegment::ObjectListeners(_) => {}
+            }
+        }
+    }
+
+    fn push_ssr_binding_helper(&self, binding: &Vue3DomBinding, helpers: &mut Vec<RuntimeHelper>) {
+        if binding.dynamic_arg {
+            push_unique_helper(helpers, RuntimeHelper::Vue3SsrRenderDynamicAttr);
+        } else if binding.name == "class" {
+            push_unique_helper(helpers, RuntimeHelper::Vue3SsrRenderClass);
+        } else if binding.name == "style" {
+            push_unique_helper(helpers, RuntimeHelper::Vue3SsrRenderStyle);
+        } else {
+            push_unique_helper(helpers, RuntimeHelper::Vue3SsrRenderAttr);
+        }
     }
 
     fn push_prop_helpers(&self, props: &Vue3DomProps, helpers: &mut Vec<RuntimeHelper>) {
@@ -10929,7 +11001,9 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                     self.render_mir_expr(expr, scope)
                 ));
             }
-            Vue3SsrMirKind::RenderAttrs => {}
+            Vue3SsrMirKind::RenderAttrs(attrs) => {
+                self.render_attrs(&attrs.props, scope, writer);
+            }
             Vue3SsrMirKind::RenderComponent { tag } => {
                 self.render_component(node_id, tag, scope, writer);
             }
@@ -11010,6 +11084,61 @@ impl<'a> Vue3SsrMirCodegen<'a> {
             props,
             fallback
         ));
+    }
+
+    fn render_attrs(&self, props: &Vue3DomProps, scope: &RenderScope, writer: &mut CodeWriter) {
+        if props.segments.is_empty() {
+            for binding in &props.dynamic_bindings {
+                writer.push_line(&format!(
+                    "_push({});",
+                    self.render_ssr_binding(binding, scope)
+                ));
+            }
+            for binding in &props.object_bindings {
+                writer.push_line(&format!(
+                    "_push(_ssrRenderAttrs({}));",
+                    self.render_js_expr(binding.value, scope)
+                ));
+            }
+            return;
+        }
+
+        for segment in &props.segments {
+            match segment {
+                Vue3DomPropSegment::DynamicBinding(binding) => {
+                    writer.push_line(&format!(
+                        "_push({});",
+                        self.render_ssr_binding(binding, scope)
+                    ));
+                }
+                Vue3DomPropSegment::ObjectBinding(binding) => {
+                    writer.push_line(&format!(
+                        "_push(_ssrRenderAttrs({}));",
+                        self.render_js_expr(binding.value, scope)
+                    ));
+                }
+                Vue3DomPropSegment::StaticAttr(_)
+                | Vue3DomPropSegment::Event(_)
+                | Vue3DomPropSegment::ObjectListeners(_) => {}
+            }
+        }
+    }
+
+    fn render_ssr_binding(&self, binding: &Vue3DomBinding, scope: &RenderScope) -> String {
+        let value = self.render_js_expr(binding.value, scope);
+        if binding.dynamic_arg {
+            let name = binding
+                .dynamic_name
+                .map(|id| self.render_js_expr(id, scope))
+                .unwrap_or_else(|| binding.name.clone());
+            format!("_ssrRenderDynamicAttr({name}, {value})")
+        } else if binding.name == "class" {
+            format!("` class=\"${{_ssrRenderClass({value})}}\"`")
+        } else if binding.name == "style" {
+            format!("` style=\"${{_ssrRenderStyle({value})}}\"`")
+        } else {
+            format!("_ssrRenderAttr({}, {value})", quote_string(&binding.name))
+        }
     }
 
     fn render_if(
@@ -11263,7 +11392,11 @@ impl<'a> Vue3SsrMirCodegen<'a> {
 fn vue3_ssr_helper_order() -> &'static [RuntimeHelper] {
     &[
         RuntimeHelper::Vue3SsrInterpolate,
+        RuntimeHelper::Vue3SsrRenderClass,
+        RuntimeHelper::Vue3SsrRenderStyle,
         RuntimeHelper::Vue3SsrRenderAttrs,
+        RuntimeHelper::Vue3SsrRenderAttr,
+        RuntimeHelper::Vue3SsrRenderDynamicAttr,
         RuntimeHelper::Vue3SsrRenderComponent,
         RuntimeHelper::Vue3SsrRenderSlot,
         RuntimeHelper::Vue3SsrRenderList,
@@ -17733,11 +17866,13 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(pushes, vec!["<div id=\"app\"", ">", "</div>"]);
-        assert!(result
-            .mir
-            .nodes
-            .iter()
-            .any(|node| matches!(node.kind, Vue3SsrMirKind::RenderAttrs)));
+        assert!(result.mir.nodes.iter().any(|node| matches!(
+            &node.kind,
+            Vue3SsrMirKind::RenderAttrs(attrs)
+                if attrs.props.dynamic_bindings.len() == 1
+                    && attrs.props.dynamic_bindings[0].name == "class"
+                    && attrs.props.dynamic_bindings[0].value == JsExprId(0)
+        )));
         assert!(result.mir.nodes.iter().any(|node| matches!(
             node.kind,
             Vue3SsrMirKind::PushInterpolated(MirExpr::JsExpr(_))
@@ -17970,20 +18105,35 @@ mod tests {
     }
 
     #[test]
-    fn generate_vue3_ssr_mir_keeps_render_attrs_marker_noop_until_payload_exists() {
+    fn generate_vue3_ssr_mir_emits_attrs_payload_from_mir() {
         let source = TemplateSource {
             filename: "foo.vue".into(),
-            source: r#"<div :class="klass">Hi</div>"#.into(),
+            source: r#"<div id="app" :class="klass" :style="style" :title="title" :[name]="value" v-bind="extra">Hi</div>"#.into(),
             file_id: FileId(46),
             base_offset: 0,
         };
         let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
         let result = lower_vue3_ast_to_ssr_mir(&ast, &Vue3CompilerOptions::default());
-        assert!(result
+        let attrs = result
             .mir
             .nodes
             .iter()
-            .any(|node| matches!(node.kind, Vue3SsrMirKind::RenderAttrs)));
+            .find_map(|node| match &node.kind {
+                Vue3SsrMirKind::RenderAttrs(attrs) => Some(attrs),
+                _ => None,
+            })
+            .expect("ssr attrs");
+        assert_eq!(attrs.props.dynamic_bindings.len(), 4);
+        assert_eq!(attrs.props.object_bindings.len(), 1);
+        assert_eq!(
+            result
+                .js
+                .expressions()
+                .iter()
+                .map(|entry| entry.source.as_str())
+                .collect::<Vec<_>>(),
+            vec!["klass", "style", "title", "name", "value", "extra"]
+        );
         let generated = generate_vue3_ssr_mir(
             &result.mir,
             &result.js,
@@ -17994,9 +18144,30 @@ mod tests {
             },
         );
 
+        assert!(generated.code.contains("ssrRenderClass as _ssrRenderClass"));
+        assert!(generated.code.contains("ssrRenderStyle as _ssrRenderStyle"));
+        assert!(generated.code.contains("ssrRenderAttr as _ssrRenderAttr"));
+        assert!(generated
+            .code
+            .contains("ssrRenderDynamicAttr as _ssrRenderDynamicAttr"));
+        assert!(generated.code.contains("ssrRenderAttrs as _ssrRenderAttrs"));
         assert!(!generated.code.contains("_ssrRenderAttrs(_attrs)"));
-        assert!(!generated.code.contains("ssrRenderAttrs as _ssrRenderAttrs"));
-        assert!(generated.code.contains("_push(\"<div\");"));
+        assert!(generated.code.contains("_push(\"<div id=\\\"app\\\"\");"));
+        assert!(generated
+            .code
+            .contains("_push(` class=\"${_ssrRenderClass(_ctx.klass)}\"`);"));
+        assert!(generated
+            .code
+            .contains("_push(` style=\"${_ssrRenderStyle(_ctx.style)}\"`);"));
+        assert!(generated
+            .code
+            .contains("_push(_ssrRenderAttr(\"title\", _ctx.title));"));
+        assert!(generated
+            .code
+            .contains("_push(_ssrRenderDynamicAttr(_ctx.name, _ctx.value));"));
+        assert!(generated
+            .code
+            .contains("_push(_ssrRenderAttrs(_ctx.extra));"));
         assert!(generated.code.contains("_push(\"Hi\");"));
         assert!(generated.code.contains("_push(\"</div>\");"));
     }
