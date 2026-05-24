@@ -1,5 +1,12 @@
 # Memory
 
+- Current round: closed the Vue 3 compiler-ssr `ssrElement.spec.ts` focused slice through mixed alias-runtime compiler-core support. The official SSR element spec now passes `32/32`, and full Vue 3 SSR conformance improves from `68/129` to `75/129`.
+- The generated compiler-core alias `buildProps` now matches the SSR element contract for the remaining basic cases: object `v-on` is ignored in SSR element attrs, built-in directives such as `v-text` are not treated as custom directive runtime props, and SSR conditional expressions around helper calls keep the official snapshot parentheses.
+- This also improves adjacent SSR `v-model` coverage from `4/7` to `6/7` because the same built-in directive filtering and boolean-attr formatting are shared by official SSR transforms.
+- Coverage remains `mixed`: this is alias materialization/codegen support used by official SSR source execution, not Rust-backed SSR compiler semantic parity.
+- Vue 3 compiler-core and compiler-dom conformance were rechecked after the alias runtime changes and remain `652/652` and `133/133` respectively. Latest Vue 3 SSR state is a real expected failure with `75/129` passing and `54` failing.
+- Verification for this SSR element slice: `cargo fmt --all --check`, `cargo check -p xtask`, `cargo test -p xtask` (`20/20` pass), `cargo xtask run-conformance --suite vue3-core` (`652/652`), `cargo xtask run-conformance --suite vue3-dom` (`133/133`), and `cargo xtask run-conformance --suite vue3-ssr` (expected fail with `75/129`, `ssrElement.spec.ts` `32/32`).
+
 - Current round: closed the Vue 3 compiler-ssr `ssrText.spec.ts` focused slice through mixed alias-runtime support. The official SSR text spec now passes `8/8`, and full Vue 3 SSR conformance improves from `12/129` to `68/129`.
 - The generated compiler-core alias `buildProps` now treats argument-less `v-bind="obj"` as a props / merge-props expression instead of a runtime directive. This lets official SSR `ssrTransformElement` produce `_ssrRenderAttrs(_attrs)` for the test wrapper and fixes a broad class of SSR element / v-model / v-show snapshot failures.
 - The generated alias codegen now formats SSR template literals with multiple dynamic parts using official-style multiline `${ ... }` interpolation blocks while preserving single-expression literals as one line. This closes the remaining `ssrText` nested interpolation snapshot mismatch.

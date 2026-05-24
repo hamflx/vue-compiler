@@ -4347,7 +4347,11 @@ const vue3CoreRuntime = (() => {
 
     function genConditionalExpression(node) {
       const nested = node.alternate && node.alternate.type === NodeTypes.JS_CONDITIONAL_EXPRESSION;
-      if (node.test && node.test.type === NodeTypes.SIMPLE_EXPRESSION && !node.test.isStatic && !runtime.isSimpleIdentifier(node.test.content)) {
+      if (ssr && node.test && node.test.type !== NodeTypes.SIMPLE_EXPRESSION) {
+        push(`(`);
+        genNode(node.test);
+        push(`)`);
+      } else if (node.test && node.test.type === NodeTypes.SIMPLE_EXPRESSION && !node.test.isStatic && !runtime.isSimpleIdentifier(node.test.content)) {
         push(`(`);
         genNode(node.test);
         push(`)`);
@@ -5571,6 +5575,8 @@ const vue3CoreRuntime = (() => {
         const transform = context && context.directiveTransforms && context.directiveTransforms.on;
         const result = transform ? transform(prop, node, context) : runtime.transformOn(prop, node, context);
         objectProps.push(...((result && result.props) || []));
+      } else if (prop.name === 'on' && !prop.arg && context && context.inSSR) {
+        continue;
       } else if (prop.name === 'model' && context && context.directiveTransforms && context.directiveTransforms.model) {
         const result = context.directiveTransforms.model(prop, node, context);
         const modelProps = (result && result.props) || [];
@@ -5581,7 +5587,7 @@ const vue3CoreRuntime = (() => {
             dynamicPropNames.push(modelProp.key.content);
           }
         }
-      } else if (prop.name !== 'once' && prop.name !== 'memo' && prop.name !== 'slot') {
+      } else if (!runtime.isBuiltInDirective(prop.name)) {
         directives.push(prop);
       }
     }
