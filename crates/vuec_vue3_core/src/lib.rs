@@ -9369,9 +9369,10 @@ impl<'a> Vue3DomMirCodegen<'a> {
         if !declarations.is_empty() {
             writer.newline();
         }
+        let scope = RenderScope::default();
         writer.push_line(&format!(
             "return {}",
-            self.render_root_children(self.mir.root)
+            self.render_root_children(self.mir.root, &scope)
         ));
         writer.dedent();
         writer.push_line("}");
@@ -9570,8 +9571,8 @@ impl<'a> Vue3DomMirCodegen<'a> {
             .collect()
     }
 
-    fn render_root_children(&self, parent: NodeId) -> String {
-        let rendered = self.render_children(parent, Vue3DomMirRenderMode::Root);
+    fn render_root_children(&self, parent: NodeId, scope: &RenderScope) -> String {
+        let rendered = self.render_children(parent, Vue3DomMirRenderMode::Root, scope);
         match rendered.as_slice() {
             [] => "null".into(),
             [single] => single.clone(),
@@ -9579,32 +9580,45 @@ impl<'a> Vue3DomMirCodegen<'a> {
         }
     }
 
-    fn render_children(&self, parent: NodeId, mode: Vue3DomMirRenderMode) -> Vec<String> {
+    fn render_children(
+        &self,
+        parent: NodeId,
+        mode: Vue3DomMirRenderMode,
+        scope: &RenderScope,
+    ) -> Vec<String> {
         self.mir
             .node(parent)
             .map(|node| {
                 node.children
                     .iter()
-                    .filter_map(|child_id| self.render_node(*child_id, mode))
+                    .filter_map(|child_id| self.render_node(*child_id, mode, scope))
                     .collect()
             })
             .unwrap_or_default()
     }
 
-    fn render_node(&self, node_id: NodeId, mode: Vue3DomMirRenderMode) -> Option<String> {
+    fn render_node(
+        &self,
+        node_id: NodeId,
+        mode: Vue3DomMirRenderMode,
+        scope: &RenderScope,
+    ) -> Option<String> {
         let node = self.mir.node(node_id)?;
         match &node.kind {
-            Vue3DomMirKind::Root => Some(self.render_root_children(node_id)),
-            Vue3DomMirKind::VNodeCall(call) => Some(self.render_vnode_call(node_id, call, mode)),
-            Vue3DomMirKind::TextCall { value } => {
-                Some(format!("_createTextVNode({})", self.render_mir_expr(value)))
+            Vue3DomMirKind::Root => Some(self.render_root_children(node_id, scope)),
+            Vue3DomMirKind::VNodeCall(call) => {
+                Some(self.render_vnode_call(node_id, call, mode, scope))
             }
+            Vue3DomMirKind::TextCall { value } => Some(format!(
+                "_createTextVNode({})",
+                self.render_mir_expr(value, scope)
+            )),
             Vue3DomMirKind::Interpolation { expression } => Some(format!(
                 "_createTextVNode(_toDisplayString({}), 1 /* TEXT */)",
-                self.render_js_expr(*expression)
+                self.render_js_expr(*expression, scope)
             )),
-            Vue3DomMirKind::If { condition } => Some(self.render_if(node_id, *condition)),
-            Vue3DomMirKind::For(for_mir) => Some(self.render_for(node_id, for_mir)),
+            Vue3DomMirKind::If { condition } => Some(self.render_if(node_id, *condition, scope)),
+            Vue3DomMirKind::For(for_mir) => Some(self.render_for(node_id, for_mir, scope)),
             Vue3DomMirKind::RenderSlot { name } => Some(format!(
                 "_renderSlot({}, {})",
                 if uses_prefixed_identifiers(self.options) {
@@ -9615,24 +9629,24 @@ impl<'a> Vue3DomMirCodegen<'a> {
                 quote_string(name.as_deref().unwrap_or("default"))
             )),
             Vue3DomMirKind::WithDirectives => {
-                let children = self.render_children(node_id, Vue3DomMirRenderMode::Child);
+                let children = self.render_children(node_id, Vue3DomMirRenderMode::Child, scope);
                 children.first().cloned()
             }
             Vue3DomMirKind::Cache { index } => {
-                let rendered = self.render_root_children(node_id);
+                let rendered = self.render_root_children(node_id, scope);
                 Some(format!("_cache[{index}] || (_cache[{index}] = {rendered})"))
             }
             Vue3DomMirKind::Memo { expression, index } => {
-                let rendered = self.render_root_children(node_id);
+                let rendered = self.render_root_children(node_id, scope);
                 Some(format!(
                     "_withMemo({}, () => {}, _cache, {index})",
-                    self.render_js_expr(*expression),
+                    self.render_js_expr(*expression, scope),
                     rendered
                 ))
             }
             Vue3DomMirKind::Hoisted { index } => Some(format!("_hoisted_{index}")),
             Vue3DomMirKind::Fragment => {
-                let children = self.render_children(node_id, Vue3DomMirRenderMode::Child);
+                let children = self.render_children(node_id, Vue3DomMirRenderMode::Child, scope);
                 Some(render_array(&children))
             }
         }
@@ -9643,8 +9657,9 @@ impl<'a> Vue3DomMirCodegen<'a> {
         node_id: NodeId,
         call: &Vue3VNodeCall,
         mode: Vue3DomMirRenderMode,
+        scope: &RenderScope,
     ) -> String {
-        let children = self.render_vnode_children(call);
+        let children = self.render_vnode_children(call, scope);
         let patch_flag =
             render_patch_flag_text((call.patch_flag.bits != 0).then_some(call.patch_flag.bits));
         let dynamic_props = if call.dynamic_props.is_empty() {
@@ -9671,8 +9686,8 @@ impl<'a> Vue3DomMirCodegen<'a> {
             "_createElementVNode"
         };
         let args = render_call_args(
-            self.render_dom_tag(&call.tag),
-            self.render_props(call).as_deref(),
+            self.render_dom_tag(&call.tag, scope),
+            self.render_props(call, scope).as_deref(),
             children.as_deref(),
             patch_flag.as_str(),
             dynamic_props.as_str(),
@@ -9693,29 +9708,34 @@ impl<'a> Vue3DomMirCodegen<'a> {
         } else {
             format!("{}({})", helper, args)
         };
-        self.render_with_directives(rendered, call)
+        self.render_with_directives(rendered, call, scope)
     }
 
-    fn render_dom_tag(&self, tag: &Vue3DomTag) -> String {
+    fn render_dom_tag(&self, tag: &Vue3DomTag, scope: &RenderScope) -> String {
         match tag {
             Vue3DomTag::Native(name) => quote_string(name),
             Vue3DomTag::ComponentAsset(name) => component_asset_id(name),
             Vue3DomTag::DynamicComponent(expression) => {
                 format!(
                     "_resolveDynamicComponent({})",
-                    self.render_js_expr(*expression)
+                    self.render_js_expr(*expression, scope)
                 )
             }
             Vue3DomTag::RuntimeHelper(helper) => helper_reference(*helper),
         }
     }
 
-    fn render_props(&self, call: &Vue3VNodeCall) -> Option<String> {
-        let rendered = self.render_ordered_props(&call.props, &call.tag)?;
+    fn render_props(&self, call: &Vue3VNodeCall, scope: &RenderScope) -> Option<String> {
+        let rendered = self.render_ordered_props(&call.props, &call.tag, scope)?;
         Some(self.render_normalized_props(&call.props, rendered))
     }
 
-    fn render_ordered_props(&self, props: &Vue3DomProps, tag: &Vue3DomTag) -> Option<String> {
+    fn render_ordered_props(
+        &self,
+        props: &Vue3DomProps,
+        tag: &Vue3DomTag,
+        scope: &RenderScope,
+    ) -> Option<String> {
         if props.segments.is_empty() {
             let mut entries = Vec::new();
             for attr in &props.static_attrs {
@@ -9725,10 +9745,10 @@ impl<'a> Vue3DomMirCodegen<'a> {
                 if dom_tag_consumes_binding(tag, binding) {
                     continue;
                 }
-                entries.push(self.render_dynamic_binding(binding));
+                entries.push(self.render_dynamic_binding(binding, scope));
             }
             for event in &props.events {
-                entries.push(self.render_event(event));
+                entries.push(self.render_event(event, scope));
             }
             return self.render_plain_props(&entries);
         }
@@ -9744,18 +9764,18 @@ impl<'a> Vue3DomMirCodegen<'a> {
                     if dom_tag_consumes_binding(tag, binding) {
                         continue;
                     }
-                    object_entries.push(self.render_dynamic_binding(binding));
+                    object_entries.push(self.render_dynamic_binding(binding, scope));
                 }
                 Vue3DomPropSegment::Event(event) => {
-                    object_entries.push(self.render_event(event));
+                    object_entries.push(self.render_event(event, scope));
                 }
                 Vue3DomPropSegment::ObjectBinding(binding) => {
                     self.push_merge_object_arg(&mut merge_args, &mut object_entries);
-                    merge_args.push(self.render_js_expr(binding.value));
+                    merge_args.push(self.render_js_expr(binding.value, scope));
                 }
                 Vue3DomPropSegment::ObjectListeners(listeners) => {
                     self.push_merge_object_arg(&mut merge_args, &mut object_entries);
-                    merge_args.push(self.render_object_listeners(listeners));
+                    merge_args.push(self.render_object_listeners(listeners, scope));
                 }
             }
         }
@@ -9773,12 +9793,12 @@ impl<'a> Vue3DomMirCodegen<'a> {
         format!("{}: {}", json_key(&attr.name), quote_string(&attr.value))
     }
 
-    fn render_dynamic_binding(&self, binding: &Vue3DomBinding) -> String {
-        let value = self.render_js_expr(binding.value);
+    fn render_dynamic_binding(&self, binding: &Vue3DomBinding, scope: &RenderScope) -> String {
+        let value = self.render_js_expr(binding.value, scope);
         if binding.dynamic_arg {
             let name = binding
                 .dynamic_name
-                .map(|id| self.render_js_expr(id))
+                .map(|id| self.render_js_expr(id, scope))
                 .unwrap_or_else(|| binding.name.clone());
             format!("[{}]: {}", render_dynamic_prop_key(&name), value)
         } else if binding.name == "class" {
@@ -9788,12 +9808,12 @@ impl<'a> Vue3DomMirCodegen<'a> {
         }
     }
 
-    fn render_event(&self, event: &Vue3DomEvent) -> String {
-        let handler = self.render_cached_event_handler(event);
+    fn render_event(&self, event: &Vue3DomEvent, scope: &RenderScope) -> String {
+        let handler = self.render_cached_event_handler(event, scope);
         if event.dynamic_arg {
             let name = event
                 .dynamic_name
-                .map(|id| self.render_js_expr(id))
+                .map(|id| self.render_js_expr(id, scope))
                 .unwrap_or_else(|| event.name.clone());
             format!("[_toHandlerKey({})]: {}", name.trim(), handler)
         } else {
@@ -9801,8 +9821,8 @@ impl<'a> Vue3DomMirCodegen<'a> {
         }
     }
 
-    fn render_cached_event_handler(&self, event: &Vue3DomEvent) -> String {
-        let handler = self.render_js_stmt(event.handler);
+    fn render_cached_event_handler(&self, event: &Vue3DomEvent, scope: &RenderScope) -> String {
+        let handler = self.render_js_stmt(event.handler, scope);
         let Some(cache) = &event.cache else {
             return handler;
         };
@@ -9812,8 +9832,12 @@ impl<'a> Vue3DomMirCodegen<'a> {
         )
     }
 
-    fn render_object_listeners(&self, listeners: &Vue3DomObjectListeners) -> String {
-        let handlers = self.render_js_expr(listeners.value);
+    fn render_object_listeners(
+        &self,
+        listeners: &Vue3DomObjectListeners,
+        scope: &RenderScope,
+    ) -> String {
+        let handlers = self.render_js_expr(listeners.value, scope);
         if listeners.preserve_case {
             format!("_toHandlers({handlers}, true)")
         } else {
@@ -9854,19 +9878,24 @@ impl<'a> Vue3DomMirCodegen<'a> {
         format!("_normalizeProps({argument})")
     }
 
-    fn render_with_directives(&self, vnode: String, call: &Vue3VNodeCall) -> String {
+    fn render_with_directives(
+        &self,
+        vnode: String,
+        call: &Vue3VNodeCall,
+        scope: &RenderScope,
+    ) -> String {
         if call.directives.is_empty() {
             return vnode;
         }
         let directives = call
             .directives
             .iter()
-            .map(|directive| self.render_directive_arg(directive))
+            .map(|directive| self.render_directive_arg(directive, scope))
             .collect::<Vec<_>>();
         format!("_withDirectives({vnode}, {})", render_array(&directives))
     }
 
-    fn render_directive_arg(&self, directive: &Vue3DomDirective) -> String {
+    fn render_directive_arg(&self, directive: &Vue3DomDirective, scope: &RenderScope) -> String {
         let runtime = if directive.name == "show" {
             "_vShow".to_string()
         } else {
@@ -9874,7 +9903,7 @@ impl<'a> Vue3DomMirCodegen<'a> {
         };
         let mut args = vec![runtime];
         if let Some(expression) = directive.expression {
-            args.push(self.render_js_expr(expression));
+            args.push(self.render_js_expr(expression, scope));
         } else if directive.argument.is_some() || !directive.modifiers.is_empty() {
             args.push("void 0".into());
         }
@@ -9894,15 +9923,17 @@ impl<'a> Vue3DomMirCodegen<'a> {
         format!("[{}]", args.join(", "))
     }
 
-    fn render_vnode_children(&self, call: &Vue3VNodeCall) -> Option<String> {
+    fn render_vnode_children(&self, call: &Vue3VNodeCall, scope: &RenderScope) -> Option<String> {
         match &call.children {
             MirChildren::None => None,
             MirChildren::Text(value) => Some(quote_string(value)),
-            MirChildren::Slots(slots) => Some(self.render_slots(slots)),
+            MirChildren::Slots(slots) => Some(self.render_slots(slots, scope)),
             MirChildren::Nodes(children) => {
                 let rendered = children
                     .iter()
-                    .filter_map(|child_id| self.render_node(*child_id, Vue3DomMirRenderMode::Child))
+                    .filter_map(|child_id| {
+                        self.render_node(*child_id, Vue3DomMirRenderMode::Child, scope)
+                    })
                     .collect::<Vec<_>>();
                 if rendered.is_empty() {
                     None
@@ -9915,68 +9946,84 @@ impl<'a> Vue3DomMirCodegen<'a> {
         }
     }
 
-    fn render_slots(&self, slots: &vuec_ast::Vue3DomSlots) -> String {
+    fn render_slots(&self, slots: &vuec_ast::Vue3DomSlots, scope: &RenderScope) -> String {
         let mut properties = slots
             .slots
             .iter()
-            .map(|slot| self.render_slot(slot))
+            .map(|slot| self.render_slot(slot, scope))
             .collect::<Vec<_>>();
         properties.push(format!("_: {}", vue3_slot_flag_value(slots.flag)));
         let base = render_object(&properties);
         if slots.dynamic_slots.is_empty() {
             base
         } else {
-            format!("_createSlots({base}, {})", self.render_dynamic_slots(slots))
+            format!(
+                "_createSlots({base}, {})",
+                self.render_dynamic_slots(slots, scope)
+            )
         }
     }
 
-    fn render_slot(&self, slot: &vuec_ast::Vue3DomSlot) -> String {
+    fn render_slot(&self, slot: &vuec_ast::Vue3DomSlot, scope: &RenderScope) -> String {
         let params = slot
             .params
             .map(|params| format!("({})", self.render_js_pattern(params)))
             .unwrap_or_else(|| "()".into());
+        let child_scope = slot
+            .params
+            .map(|params| self.scope_with_pattern(scope, params))
+            .unwrap_or_else(|| scope.clone());
         let rendered = slot
             .children
             .iter()
-            .filter_map(|child_id| self.render_node(*child_id, Vue3DomMirRenderMode::Child))
+            .filter_map(|child_id| {
+                self.render_node(*child_id, Vue3DomMirRenderMode::Child, &child_scope)
+            })
             .collect::<Vec<_>>();
         let body = render_array(&rendered);
         format!("{}: _withCtx({params} => {body})", json_key(&slot.name))
     }
 
-    fn render_dynamic_slots(&self, slots: &vuec_ast::Vue3DomSlots) -> String {
+    fn render_dynamic_slots(&self, slots: &vuec_ast::Vue3DomSlots, scope: &RenderScope) -> String {
         let rendered = slots
             .dynamic_slots
             .iter()
-            .map(|slot| self.render_dynamic_slot(slot))
+            .map(|slot| self.render_dynamic_slot(slot, scope))
             .collect::<Vec<_>>();
         render_array(&rendered)
     }
 
-    fn render_dynamic_slot(&self, slot: &vuec_ast::Vue3DomDynamicSlot) -> String {
+    fn render_dynamic_slot(
+        &self,
+        slot: &vuec_ast::Vue3DomDynamicSlot,
+        scope: &RenderScope,
+    ) -> String {
         match slot {
-            vuec_ast::Vue3DomDynamicSlot::Slot(slot) => self.render_dynamic_slot_object(slot),
+            vuec_ast::Vue3DomDynamicSlot::Slot(slot) => {
+                self.render_dynamic_slot_object(slot, scope)
+            }
             vuec_ast::Vue3DomDynamicSlot::Conditional(slot) => {
                 let condition = slot
                     .condition
                     .map(|condition| {
-                        render_condition(&self.render_js_expr(condition), self.options)
+                        render_condition(&self.render_js_expr(condition, scope), self.options)
                     })
                     .unwrap_or_else(|| "true".into());
-                let slot = self.render_dynamic_slot_object(&slot.slot);
+                let slot = self.render_dynamic_slot_object(&slot.slot, scope);
                 format!(
                     "{condition}\n  ? {}\n  : undefined",
                     indent_after_first_line(&slot, 4)
                 )
             }
-            vuec_ast::Vue3DomDynamicSlot::For(slot) => self.render_for_slot(slot),
+            vuec_ast::Vue3DomDynamicSlot::For(slot) => self.render_for_slot(slot, scope),
         }
     }
 
-    fn render_for_slot(&self, slot: &vuec_ast::Vue3DomForSlot) -> String {
-        let source = self.render_js_expr(slot.source);
+    fn render_for_slot(&self, slot: &vuec_ast::Vue3DomForSlot, scope: &RenderScope) -> String {
+        let source = self.render_js_expr(slot.source, scope);
         let params = self.render_for_slot_params(slot);
-        let body = self.render_dynamic_slot_object(&slot.slot);
+        let child_scope = self.scope_with_for_slot(scope, slot);
+        let body = self.render_dynamic_slot_object(&slot.slot, &child_scope);
         format!(
             "_renderList({source}, ({params}) => {{\n  return {}\n}})",
             indent_after_first_line(&body, 2)
@@ -9994,19 +10041,29 @@ impl<'a> Vue3DomMirCodegen<'a> {
         params.join(", ")
     }
 
-    fn render_dynamic_slot_object(&self, slot: &vuec_ast::Vue3DomDynamicSlotObject) -> String {
+    fn render_dynamic_slot_object(
+        &self,
+        slot: &vuec_ast::Vue3DomDynamicSlotObject,
+        scope: &RenderScope,
+    ) -> String {
         let params = slot
             .params
             .map(|params| format!("({})", self.render_js_pattern(params)))
             .unwrap_or_else(|| "()".into());
+        let child_scope = slot
+            .params
+            .map(|params| self.scope_with_pattern(scope, params))
+            .unwrap_or_else(|| scope.clone());
         let children = slot
             .children
             .iter()
-            .filter_map(|child_id| self.render_node(*child_id, Vue3DomMirRenderMode::Child))
+            .filter_map(|child_id| {
+                self.render_node(*child_id, Vue3DomMirRenderMode::Child, &child_scope)
+            })
             .collect::<Vec<_>>();
         let body = render_array(&children);
         let mut properties = vec![
-            format!("name: {}", self.render_slot_name(&slot.name)),
+            format!("name: {}", self.render_slot_name(&slot.name, scope)),
             format!("fn: _withCtx({params} => {body})"),
         ];
         if let Some(key) = &slot.key {
@@ -10015,19 +10072,24 @@ impl<'a> Vue3DomMirCodegen<'a> {
         render_object(&properties)
     }
 
-    fn render_slot_name(&self, name: &Vue3DomSlotName) -> String {
+    fn render_slot_name(&self, name: &Vue3DomSlotName, scope: &RenderScope) -> String {
         match name {
             Vue3DomSlotName::Static(name) => quote_string(name),
-            Vue3DomSlotName::Dynamic(name) => self.render_js_expr(*name),
+            Vue3DomSlotName::Dynamic(name) => self.render_js_expr(*name, scope),
         }
     }
 
-    fn render_if(&self, node_id: NodeId, condition: Option<JsExprId>) -> String {
-        let branch = self.render_root_children(node_id);
+    fn render_if(
+        &self,
+        node_id: NodeId,
+        condition: Option<JsExprId>,
+        scope: &RenderScope,
+    ) -> String {
+        let branch = self.render_root_children(node_id, scope);
         let Some(condition) = condition else {
             return branch;
         };
-        let condition = self.render_js_expr(condition);
+        let condition = self.render_js_expr(condition, scope);
         format!(
             "{}\n  ? {}\n  : _createCommentVNode(\"v-if\", true)",
             render_condition(&condition, self.options),
@@ -10035,9 +10097,10 @@ impl<'a> Vue3DomMirCodegen<'a> {
         )
     }
 
-    fn render_for(&self, node_id: NodeId, for_mir: &Vue3ForMir) -> String {
-        let source = self.render_js_expr(for_mir.source);
-        let children = self.render_children(node_id, Vue3DomMirRenderMode::Root);
+    fn render_for(&self, node_id: NodeId, for_mir: &Vue3ForMir, scope: &RenderScope) -> String {
+        let source = self.render_js_expr(for_mir.source, scope);
+        let child_scope = self.scope_with_for_mir(scope, for_mir);
+        let children = self.render_children(node_id, Vue3DomMirRenderMode::Root, &child_scope);
         let body = match children.as_slice() {
             [] => "null".into(),
             [single] => single.clone(),
@@ -10045,7 +10108,14 @@ impl<'a> Vue3DomMirCodegen<'a> {
         };
         let params = self.render_for_params(for_mir);
         if let Some(memo) = &for_mir.memo {
-            return self.render_memo_for(&source, &params, for_mir.key.as_ref(), memo, &body);
+            return self.render_memo_for(
+                &source,
+                &params,
+                for_mir.key.as_ref(),
+                memo,
+                &body,
+                &child_scope,
+            );
         }
         let fragment_flag = if for_mir.key.is_some() {
             "128 /* KEYED_FRAGMENT */"
@@ -10076,15 +10146,16 @@ impl<'a> Vue3DomMirCodegen<'a> {
         key: Option<&MirExpr>,
         memo: &Vue3ForMemo,
         body: &str,
+        scope: &RenderScope,
     ) -> String {
         let params = format!("{params}, __, ___, _cached");
-        let memo_expression = self.render_js_expr(memo.expression);
+        let memo_expression = self.render_js_expr(memo.expression, scope);
         let guard = key.map_or_else(
             || "_cached && _cached.el && _isMemoSame(_cached, _memo)".into(),
             |key| {
                 format!(
                     "_cached && _cached.el && _cached.key === {} && _isMemoSame(_cached, _memo)",
-                    self.render_mir_expr(key)
+                    self.render_mir_expr(key, scope)
                 )
             },
         );
@@ -10095,27 +10166,27 @@ impl<'a> Vue3DomMirCodegen<'a> {
         )
     }
 
-    fn render_mir_expr(&self, expr: &MirExpr) -> String {
+    fn render_mir_expr(&self, expr: &MirExpr, scope: &RenderScope) -> String {
         match expr {
             MirExpr::String(value) => quote_string(value),
-            MirExpr::JsExpr(expr) => self.render_js_expr(*expr),
+            MirExpr::JsExpr(expr) => self.render_js_expr(*expr, scope),
             MirExpr::Helper(helper) => helper_reference(*helper),
         }
     }
 
-    fn render_js_expr(&self, id: JsExprId) -> String {
+    fn render_js_expr(&self, id: JsExprId, scope: &RenderScope) -> String {
         self.js
             .expressions()
             .get(id.0 as usize)
-            .map(|entry| entry.source.clone())
+            .map(|entry| rewrite_expression_with_scope(&entry.source, self.options, scope))
             .unwrap_or_else(|| "undefined".into())
     }
 
-    fn render_js_stmt(&self, id: vuec_ast::JsStmtId) -> String {
+    fn render_js_stmt(&self, id: vuec_ast::JsStmtId, scope: &RenderScope) -> String {
         self.js
             .statements()
             .get(id.0 as usize)
-            .map(|entry| entry.source.clone())
+            .map(|entry| rewrite_handler_expression_with_scope(&entry.source, self.options, scope))
             .unwrap_or_else(|| "undefined".into())
     }
 
@@ -10125,6 +10196,40 @@ impl<'a> Vue3DomMirCodegen<'a> {
             .get(id.0 as usize)
             .map(|entry| entry.source.clone())
             .unwrap_or_else(|| "_item".into())
+    }
+
+    fn scope_with_for_mir(&self, scope: &RenderScope, for_mir: &Vue3ForMir) -> RenderScope {
+        let mut locals = self.pattern_locals(for_mir.value_alias);
+        if let Some(key) = for_mir.key_alias {
+            locals.extend(self.pattern_locals(key));
+        }
+        if let Some(index) = for_mir.index_alias {
+            locals.extend(self.pattern_locals(index));
+        }
+        scope.with_locals(locals)
+    }
+
+    fn scope_with_for_slot(
+        &self,
+        scope: &RenderScope,
+        slot: &vuec_ast::Vue3DomForSlot,
+    ) -> RenderScope {
+        let mut locals = self.pattern_locals(slot.value_alias);
+        if let Some(key) = slot.key_alias {
+            locals.extend(self.pattern_locals(key));
+        }
+        if let Some(index) = slot.index_alias {
+            locals.extend(self.pattern_locals(index));
+        }
+        scope.with_locals(locals)
+    }
+
+    fn scope_with_pattern(&self, scope: &RenderScope, pattern: JsPatternId) -> RenderScope {
+        scope.with_locals(self.pattern_locals(pattern))
+    }
+
+    fn pattern_locals(&self, pattern: JsPatternId) -> Vec<String> {
+        extract_v_for_alias_locals(&self.render_js_pattern(pattern))
     }
 }
 
@@ -13054,7 +13159,8 @@ fn rewrite_handler_expression_with_scope(
     options: &Vue3CompilerOptions,
     scope: &RenderScope,
 ) -> String {
-    normalize_handler_indent(&rewrite_expression_with_scope(expression, options, scope))
+    let scope = scope.with_locals(vec!["$event".into()]);
+    normalize_handler_indent(&rewrite_expression_with_scope(expression, options, &scope))
 }
 
 fn rewrite_expression_with_scope(
@@ -13127,6 +13233,7 @@ fn rewrite_js_like_expression_into(
     let mut catch_param_depth: Option<usize> = None;
     let mut pending_catch_locals = Vec::<String>::new();
     let chars = expression.char_indices().collect::<Vec<_>>();
+    let arrow_bindings = process_expression_arrow_bindings(expression);
     let mut index = 0usize;
     while index < chars.len() {
         let byte = chars[index].0;
@@ -13161,6 +13268,8 @@ fn rewrite_js_like_expression_into(
                 .get(index)
                 .map_or(expression.len(), |(offset, _)| *offset);
             let ident = &expression[start..end];
+            let arrow_param = process_expression_is_arrow_param(&arrow_bindings, ident, start, end);
+            let arrow_local = process_expression_is_arrow_local(&arrow_bindings, ident, start, end);
             let next = next_non_ws(expression, end);
             let prev = previous;
             if is_keyword(ident) {
@@ -13212,6 +13321,8 @@ fn rewrite_js_like_expression_into(
             if skip_property
                 || is_global_or_literal(ident)
                 || is_local(&scopes, ident)
+                || arrow_param
+                || arrow_local
                 || pending_for_block_locals.iter().any(|local| local == ident)
             {
                 output.push_str(ident);
@@ -15684,10 +15795,10 @@ mod tests {
         assert_eq!(generated.ast_summary, "vue3-dom-mir-nodes=3");
         assert!(generated.code.starts_with("export function render("));
         assert!(generated.code.contains("_createElementBlock(\"div\""));
-        assert!(generated.code.contains("class: _normalizeClass(foo)"));
+        assert!(generated.code.contains("class: _normalizeClass(_ctx.foo)"));
         assert!(generated
             .code
-            .contains("_createTextVNode(_toDisplayString(msg), 1 /* TEXT */)"));
+            .contains("_createTextVNode(_toDisplayString(_ctx.msg), 1 /* TEXT */)"));
         assert!(generated.code.contains("3"));
         assert!(generated.code.contains("[\"class\"]"));
     }
@@ -15711,10 +15822,13 @@ mod tests {
             },
         );
 
-        assert!(generated.code.contains("_renderList(list, (item) => {"));
+        assert!(generated
+            .code
+            .contains("_renderList(_ctx.list, (item) => {"));
         assert!(generated.code.contains("item.ok"));
         assert!(generated.code.contains("? (_openBlock()"));
         assert!(generated.code.contains("_toDisplayString(item.name)"));
+        assert!(!generated.code.contains("_ctx.item"));
         assert!(generated
             .code
             .contains("_createCommentVNode(\"v-if\", true)"));
@@ -15749,7 +15863,7 @@ mod tests {
 
         assert!(generated.code.contains("_hoisted_1"));
         assert!(generated.code.contains("_cache[0] || (_cache[0] ="));
-        assert!(generated.code.contains("_toDisplayString(msg)"));
+        assert!(generated.code.contains("_toDisplayString(_ctx.msg)"));
     }
 
     #[test]
@@ -15775,9 +15889,9 @@ mod tests {
         assert!(generated.code.contains("withMemo as _withMemo"));
         assert!(generated
             .code
-            .contains("_withMemo([msg], () => (_openBlock(), _createElementBlock(\"p\""));
+            .contains("_withMemo([_ctx.msg], () => (_openBlock(), _createElementBlock(\"p\""));
         assert!(generated.code.contains("_cache, 0)"));
-        assert!(generated.code.contains("_toDisplayString(msg)"));
+        assert!(generated.code.contains("_toDisplayString(_ctx.msg)"));
     }
 
     #[test]
@@ -15803,8 +15917,8 @@ mod tests {
         assert!(generated.code.contains("isMemoSame as _isMemoSame"));
         assert!(generated
             .code
-            .contains("_renderList(list, ({ x, y }, __, ___, _cached) =>"));
-        assert!(generated.code.contains("const _memo = ([x, y === z])"));
+            .contains("_renderList(_ctx.list, ({ x, y }, __, ___, _cached) =>"));
+        assert!(generated.code.contains("const _memo = ([x, y === _ctx.z])"));
         assert!(generated
             .code
             .contains("_cached.key === x && _isMemoSame(_cached, _memo)"));
@@ -15815,6 +15929,8 @@ mod tests {
         assert!(generated
             .code
             .contains("}, _cache, 0), 128 /* KEYED_FRAGMENT */)"));
+        assert!(!generated.code.contains("_ctx.x"));
+        assert!(!generated.code.contains("_ctx.y"));
     }
 
     #[test]
@@ -15847,9 +15963,9 @@ mod tests {
             .contains("const _directive_focus = _resolveDirective(\"focus\")"));
         assert!(generated
             .code
-            .contains("[_directive_focus, value, \"foo\", {"));
+            .contains("[_directive_focus, _ctx.value, \"foo\", {"));
         assert!(generated.code.contains("bar: true"));
-        assert!(generated.code.contains("[_vShow, ok]"));
+        assert!(generated.code.contains("[_vShow, _ctx.ok]"));
     }
 
     #[test]
@@ -15883,10 +15999,12 @@ mod tests {
             .code
             .contains("_normalizeProps(_guardReactiveProps(_mergeProps("));
         assert!(generated.code.contains("id: \"save\""));
-        assert!(generated.code.contains("base"));
-        assert!(generated.code.contains("[name || \"\"]: value"));
-        assert!(generated.code.contains("_toHandlers(listeners, true)"));
-        assert!(generated.code.contains("[_toHandlerKey(event)]: run"));
+        assert!(generated.code.contains("_ctx.base"));
+        assert!(generated.code.contains("[_ctx.name || \"\"]: _ctx.value"));
+        assert!(generated.code.contains("_toHandlers(_ctx.listeners, true)"));
+        assert!(generated
+            .code
+            .contains("[_toHandlerKey(_ctx.event)]: _ctx.run"));
         assert!(generated.code.contains("16 /* FULL_PROPS */"));
         assert!(!generated.code.contains("[\"name\"]"));
     }
@@ -15920,7 +16038,59 @@ mod tests {
 
         assert!(generated
             .code
-            .contains("onClick: _cache[0] || (_cache[0] = go)"));
+            .contains("onClick: _cache[0] || (_cache[0] = _ctx.go)"));
+    }
+
+    #[test]
+    fn generate_vue3_dom_mir_rewrites_event_handlers_with_event_local() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<button @click="go($event, item)">Save</button>"#.into(),
+            file_id: FileId(32),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+        let generated = generate_vue3_dom_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated
+            .code
+            .contains("onClick: _ctx.go($event, _ctx.item)"));
+        assert!(!generated.code.contains("_ctx.$event"));
+    }
+
+    #[test]
+    fn generate_vue3_dom_mir_rewrites_arrow_event_handler_scopes() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<button @click="event => go(event, item)">Save</button>"#.into(),
+            file_id: FileId(32),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+        let generated = generate_vue3_dom_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated
+            .code
+            .contains("onClick: event => _ctx.go(event, _ctx.item)"));
+        assert!(!generated.code.contains("_ctx.event"));
     }
 
     #[test]
@@ -15957,9 +16127,9 @@ mod tests {
         assert!(generated.code.contains("_createVNode(_Transition"));
         assert!(generated
             .code
-            .contains("_createVNode(_resolveDynamicComponent(view)"));
+            .contains("_createVNode(_resolveDynamicComponent(_ctx.view)"));
         assert!(!generated.code.contains("_component_Transition"));
-        assert!(!generated.code.contains("is: view"));
+        assert!(!generated.code.contains("is: _ctx.view"));
     }
 
     #[test]
@@ -15989,7 +16159,8 @@ mod tests {
         assert!(generated.code.contains("header: _withCtx(({ item }) => ["));
         assert!(generated.code.contains("_toDisplayString(item.name)"));
         assert!(generated.code.contains("default: _withCtx(() => ["));
-        assert!(generated.code.contains("_toDisplayString(msg)"));
+        assert!(generated.code.contains("_toDisplayString(_ctx.msg)"));
+        assert!(!generated.code.contains("_ctx.item"));
         assert!(generated.code.contains("_: 1"));
     }
 
@@ -16019,18 +16190,21 @@ mod tests {
         assert!(generated.code.contains("_createSlots({"));
         assert!(generated.code.contains("_: 2"));
         assert!(generated.code.contains("1024 /* DYNAMIC_SLOTS */"));
-        assert!(generated.code.contains("name: name"));
+        assert!(generated.code.contains("name: _ctx.name"));
         assert!(generated.code.contains("fn: _withCtx((slotProps) => ["));
         assert!(generated.code.contains("_toDisplayString(slotProps.label)"));
-        assert!(generated.code.contains("ok"));
+        assert!(generated.code.contains("_ctx.ok"));
         assert!(generated.code.contains(": undefined"));
         assert!(generated.code.contains("name: \"fallback\""));
         assert!(generated.code.contains("key: \"1\""));
         assert!(generated
             .code
-            .contains("_renderList(list, (item, index) => {"));
+            .contains("_renderList(_ctx.list, (item, index) => {"));
         assert!(generated.code.contains("name: \"item\""));
         assert!(generated.code.contains("_toDisplayString(item)"));
+        assert!(!generated.code.contains("_ctx.slotProps"));
+        assert!(!generated.code.contains("_ctx.item"));
+        assert!(!generated.code.contains("_ctx.index"));
     }
 
     #[test]

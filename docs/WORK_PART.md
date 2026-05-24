@@ -85,9 +85,15 @@
 - [x] Vue 3 structural `Vue3DomMir` non-`v-for` `v-memo` wrapper payload, with MIR-driven `_withMemo` emission in standalone DOM MIR codegen.
 - [x] Vue 3 structural `Vue3DomMir` `v-for` memo cache target payload, with MIR-driven alias params, key guard, `_isMemoSame`, `_cached`, `_item.memo`, and `_cache` render-list emission.
 - [x] Vue 3 structural `Vue3DomMir` cacheHandlers event cache payload, with MIR-driven `_cache[n] || (_cache[n] = handler)` emission for standalone DOM MIR codegen.
+- [x] Vue 3 structural standalone `Vue3DomMir` codegen prefix-identifier rewriting for the current JS-store expression subset, with scoped `v-for` aliases, slot params, `$event`, and arrow handler params preserved as locals.
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Added prefix-identifier rewriting to standalone structural `generate_vue3_dom_mir`. The emitter now rewrites JS-store expressions/statements with the existing Rust prefix helpers when `prefixIdentifiers` or module mode is active, instead of rendering raw registered source for the current MIR subset.
+- `Vue3DomMirCodegen` now threads `RenderScope` through recursive node, prop, slot, dynamic-slot, `v-for`, memo, directive, dynamic-component, and event rendering. It preserves local aliases from `v-for`, destructuring, stable/dynamic slot params, dynamic slot loops, `$event`, and arrow handler params while prefixing external reads such as `_ctx.msg`, `_ctx.list`, dynamic slot names, directive values, object listeners, and cached handlers.
+- This remains structural target-codegen work. It does not touch `xtask/src/compat.rs`, does not replace the exact AST emitter, and does not complete full MIR-driven exact codegen parity.
+- Verification this round: focused `cargo test -p vuec_vue3_core generate_vue3_dom_mir`, focused `cargo test -p vuec_vue3_core process_expression_projection_keeps_arrow_params_scoped_to_arrow_body`, focused `cargo test -p vuec_vue3_core base_compile_rewrites_event_handler_statement_scopes`, `cargo fmt --all --check`, `cargo check -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo xtask run-conformance --suite vue3-core` (`652/652`; coverage report keeps `rust-backed` / `mixed` / `shim-backed` split), and `git diff --check`.
 
 - Added forwarded slot flag projection to structural `Vue3DomMir`. Stable component slot payloads now record `Vue3SlotFlag::Forwarded` when their slot bodies forward a `<slot>` outlet, so slot flag state is target data instead of a codegen-time AST scan.
 - `generate_vue3_dom_mir` already consumed `Vue3DomSlots.flag`; with the new lowering path it now emits forwarded slot objects as `_: 3` from MIR while preserving `_renderSlot(...)` helper emission from child `RenderSlot` nodes.
