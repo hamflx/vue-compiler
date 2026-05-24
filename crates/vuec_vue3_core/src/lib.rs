@@ -13,8 +13,8 @@ use vuec_ast::{
     QuoteKind, RuntimeHelper, Vue3Ast, Vue3AstKind, Vue3Directive, Vue3DomBinding,
     Vue3DomDirective, Vue3DomEvent, Vue3DomMir, Vue3DomMirKind, Vue3DomObjectBinding,
     Vue3DomObjectListeners, Vue3DomPropSegment, Vue3DomProps, Vue3DomPropsNormalize,
-    Vue3DomStaticAttr, Vue3Element, Vue3ElementType, Vue3Expression, Vue3NodeKind, Vue3PatchFlags,
-    Vue3Prop, Vue3Root, Vue3SsrMir, Vue3SsrMirKind, Vue3VNodeCall,
+    Vue3DomStaticAttr, Vue3DomTag, Vue3Element, Vue3ElementType, Vue3Expression, Vue3NodeKind,
+    Vue3PatchFlags, Vue3Prop, Vue3Root, Vue3SsrMir, Vue3SsrMirKind, Vue3VNodeCall,
 };
 use vuec_codegen::{CodeWriter, SourceMapArtifact, SourceMapSegment};
 use vuec_html::{HtmlTokenKind, HtmlTokenizer};
@@ -1163,8 +1163,9 @@ fn lower_vue3_element_to_dom_mir_kind(
 
     let is_component = element.tag_type == Vue3ElementType::Component;
     let (props, directives) = lower_vue3_hir_payload_to_dom_mir(hir_kind);
+    let tag = lower_vue3_element_tag_to_dom_mir(element, &props);
     Vue3DomMirKind::VNodeCall(Vue3VNodeCall {
-        tag: MirExpr::String(element.tag.clone()),
+        tag,
         props,
         directives,
         children: if ast_node.children.is_empty() {
@@ -1180,6 +1181,24 @@ fn lower_vue3_element_to_dom_mir_kind(
         disable_tracking: false,
         is_component,
     })
+}
+
+fn lower_vue3_element_tag_to_dom_mir(element: &Vue3Element, props: &Vue3DomProps) -> Vue3DomTag {
+    if element.tag_type != Vue3ElementType::Component {
+        return Vue3DomTag::Native(element.tag.clone());
+    }
+    if let Some(expression) = props
+        .dynamic_bindings
+        .iter()
+        .find(|binding| !binding.dynamic_arg && binding.name == "is")
+        .map(|binding| binding.value)
+    {
+        return Vue3DomTag::DynamicComponent(expression);
+    }
+    if let Some(helper) = vue3_core_component_runtime_helper(&element.tag) {
+        return Vue3DomTag::RuntimeHelper(helper);
+    }
+    Vue3DomTag::ComponentAsset(element.tag.clone())
 }
 
 fn vue3_dom_mir_patch_flag(
@@ -8659,11 +8678,15 @@ impl<'a> Vue3DomMirCodegen<'a> {
             render_args(self.options)
         ));
         writer.indent();
-        let directive_declarations = self.directive_declarations();
-        for declaration in &directive_declarations {
+        let declarations = self
+            .component_declarations()
+            .into_iter()
+            .chain(self.directive_declarations())
+            .collect::<Vec<_>>();
+        for declaration in &declarations {
             writer.push_line(declaration);
         }
-        if !directive_declarations.is_empty() {
+        if !declarations.is_empty() {
             writer.newline();
         }
         writer.push_line(&format!(
@@ -8689,6 +8712,21 @@ impl<'a> Vue3DomMirCodegen<'a> {
                 | Vue3DomMirKind::WithDirectives
                 | Vue3DomMirKind::Fragment => {}
                 Vue3DomMirKind::VNodeCall(call) => {
+                    match &call.tag {
+                        Vue3DomTag::Native(_) => {}
+                        Vue3DomTag::ComponentAsset(_) => {
+                            push_unique_helper(&mut helpers, RuntimeHelper::Vue3ResolveComponent);
+                        }
+                        Vue3DomTag::DynamicComponent(_) => {
+                            push_unique_helper(
+                                &mut helpers,
+                                RuntimeHelper::Vue3ResolveDynamicComponent,
+                            );
+                        }
+                        Vue3DomTag::RuntimeHelper(helper) => {
+                            push_unique_helper(&mut helpers, *helper);
+                        }
+                    }
                     self.push_prop_helpers(&call.props, &mut helpers);
                     if !call.directives.is_empty() {
                         push_unique_helper(&mut helpers, RuntimeHelper::Vue3WithDirectives);
@@ -8809,6 +8847,30 @@ impl<'a> Vue3DomMirCodegen<'a> {
             .collect()
     }
 
+    fn component_declarations(&self) -> Vec<String> {
+        let mut components = Vec::new();
+        for node in &self.mir.nodes {
+            let Vue3DomMirKind::VNodeCall(call) = &node.kind else {
+                continue;
+            };
+            if let Vue3DomTag::ComponentAsset(component) = &call.tag {
+                if !components.iter().any(|name| name == component) {
+                    components.push(component.clone());
+                }
+            }
+        }
+        components
+            .iter()
+            .map(|component| {
+                format!(
+                    "const {} = _resolveComponent({})",
+                    component_asset_id(component),
+                    quote_string(component)
+                )
+            })
+            .collect()
+    }
+
     fn render_root_children(&self, parent: NodeId) -> String {
         let rendered = self.render_children(parent, Vue3DomMirRenderMode::Root);
         match rendered.as_slice() {
@@ -8904,8 +8966,8 @@ impl<'a> Vue3DomMirCodegen<'a> {
             "_createElementVNode"
         };
         let args = render_call_args(
-            self.render_mir_expr(&call.tag),
-            self.render_props(&call.props).as_deref(),
+            self.render_dom_tag(&call.tag),
+            self.render_props(call).as_deref(),
             children.as_deref(),
             patch_flag.as_str(),
             dynamic_props.as_str(),
@@ -8929,18 +8991,35 @@ impl<'a> Vue3DomMirCodegen<'a> {
         self.render_with_directives(rendered, call)
     }
 
-    fn render_props(&self, props: &Vue3DomProps) -> Option<String> {
-        let rendered = self.render_ordered_props(props)?;
-        Some(self.render_normalized_props(props, rendered))
+    fn render_dom_tag(&self, tag: &Vue3DomTag) -> String {
+        match tag {
+            Vue3DomTag::Native(name) => quote_string(name),
+            Vue3DomTag::ComponentAsset(name) => component_asset_id(name),
+            Vue3DomTag::DynamicComponent(expression) => {
+                format!(
+                    "_resolveDynamicComponent({})",
+                    self.render_js_expr(*expression)
+                )
+            }
+            Vue3DomTag::RuntimeHelper(helper) => helper_reference(*helper),
+        }
     }
 
-    fn render_ordered_props(&self, props: &Vue3DomProps) -> Option<String> {
+    fn render_props(&self, call: &Vue3VNodeCall) -> Option<String> {
+        let rendered = self.render_ordered_props(&call.props, &call.tag)?;
+        Some(self.render_normalized_props(&call.props, rendered))
+    }
+
+    fn render_ordered_props(&self, props: &Vue3DomProps, tag: &Vue3DomTag) -> Option<String> {
         if props.segments.is_empty() {
             let mut entries = Vec::new();
             for attr in &props.static_attrs {
                 entries.push(self.render_static_attr(attr));
             }
             for binding in &props.dynamic_bindings {
+                if dom_tag_consumes_binding(tag, binding) {
+                    continue;
+                }
                 entries.push(self.render_dynamic_binding(binding));
             }
             for event in &props.events {
@@ -8957,6 +9036,9 @@ impl<'a> Vue3DomMirCodegen<'a> {
                     object_entries.push(self.render_static_attr(attr));
                 }
                 Vue3DomPropSegment::DynamicBinding(binding) => {
+                    if dom_tag_consumes_binding(tag, binding) {
+                        continue;
+                    }
                     object_entries.push(self.render_dynamic_binding(binding));
                 }
                 Vue3DomPropSegment::Event(event) => {
@@ -9214,6 +9296,10 @@ fn props_requires_merge_call(props: &Vue3DomProps) -> bool {
         args += 1;
     }
     args > 1
+}
+
+fn dom_tag_consumes_binding(tag: &Vue3DomTag, binding: &Vue3DomBinding) -> bool {
+    matches!(tag, Vue3DomTag::DynamicComponent(_)) && !binding.dynamic_arg && binding.name == "is"
 }
 
 fn vue3_codegen_root(ast: &Vue3Ast) -> Option<&Vue3Root> {
@@ -13899,7 +13985,7 @@ mod tests {
                 _ => None,
             })
             .expect("DOM MIR vnode");
-        assert_eq!(div_mir.tag, MirExpr::String("div".into()));
+        assert_eq!(div_mir.tag, Vue3DomTag::Native("div".into()));
         assert_eq!(div_mir.props.static_attrs[0].name, "id");
         assert_eq!(div_mir.props.dynamic_bindings[0].name, "class");
         assert_eq!(div_mir.props.events[0].name, "onClick");
@@ -13987,6 +14073,55 @@ mod tests {
         assert!(button_mir.props.normalize.guard_reactive_props);
         assert_eq!(button_mir.patch_flag.bits, 16);
         assert!(button_mir.dynamic_props.is_empty());
+    }
+
+    #[test]
+    fn lower_vue3_ast_to_dom_mir_projects_component_tags_structurally() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<Child/><Transition/><component :is="view"/>"#.into(),
+            file_id: FileId(32),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+
+        assert_eq!(
+            result
+                .js
+                .expressions()
+                .iter()
+                .map(|entry| entry.source.as_str())
+                .collect::<Vec<_>>(),
+            vec!["view"]
+        );
+        let tags = result
+            .mir
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.kind {
+                Vue3DomMirKind::VNodeCall(call) => Some(call.tag.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(tags.contains(&Vue3DomTag::ComponentAsset("Child".into())));
+        assert!(tags.contains(&Vue3DomTag::RuntimeHelper(RuntimeHelper::Vue3Transition)));
+        assert!(tags.contains(&Vue3DomTag::DynamicComponent(JsExprId(0))));
+
+        let dynamic_component = result
+            .mir
+            .nodes
+            .iter()
+            .find_map(|node| match &node.kind {
+                Vue3DomMirKind::VNodeCall(call)
+                    if matches!(call.tag, Vue3DomTag::DynamicComponent(_)) =>
+                {
+                    Some(call)
+                }
+                _ => None,
+            })
+            .expect("dynamic component");
+        assert_eq!(dynamic_component.props.dynamic_bindings[0].name, "is");
     }
 
     #[test]
@@ -14093,7 +14228,7 @@ mod tests {
             .nodes
             .iter()
             .find_map(|node| match &node.kind {
-                Vue3DomMirKind::VNodeCall(call) if call.tag == MirExpr::String("li".into()) => {
+                Vue3DomMirKind::VNodeCall(call) if call.tag == Vue3DomTag::Native("li".into()) => {
                     Some(call)
                 }
                 _ => None,
@@ -14440,6 +14575,45 @@ mod tests {
         assert!(generated.code.contains("[_toHandlerKey(event)]: run"));
         assert!(generated.code.contains("16 /* FULL_PROPS */"));
         assert!(!generated.code.contains("[\"name\"]"));
+    }
+
+    #[test]
+    fn generate_vue3_dom_mir_emits_component_tags_from_mir() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div><Child/><Transition/><component :is="view"/></div>"#.into(),
+            file_id: FileId(33),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+        let generated = generate_vue3_dom_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated
+            .code
+            .contains("resolveComponent as _resolveComponent"));
+        assert!(generated
+            .code
+            .contains("resolveDynamicComponent as _resolveDynamicComponent"));
+        assert!(generated.code.contains("Transition as _Transition"));
+        assert!(generated
+            .code
+            .contains("const _component_Child = _resolveComponent(\"Child\")"));
+        assert!(generated.code.contains("_createVNode(_component_Child"));
+        assert!(generated.code.contains("_createVNode(_Transition"));
+        assert!(generated
+            .code
+            .contains("_createVNode(_resolveDynamicComponent(view)"));
+        assert!(!generated.code.contains("_component_Transition"));
+        assert!(!generated.code.contains("is: view"));
     }
 
     #[test]

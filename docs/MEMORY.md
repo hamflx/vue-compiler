@@ -1,5 +1,11 @@
 # Memory
 
+- Current round: structured Vue 3 DOM MIR component tags instead of encoding component targets as plain string tags.
+- `vuec_ast::Vue3VNodeCall.tag` is now `Vue3DomTag`, distinguishing native tags, component assets, dynamic components, and runtime-helper built-ins. DOM lowering projects `<Child>`, `<Transition>`, and `<component :is="view">` into those target variants while reusing the existing `JsAstStore` expression for dynamic `is`.
+- `generate_vue3_dom_mir` now derives `_resolveComponent` declarations, `_resolveDynamicComponent` calls, and built-in component helper imports from MIR tag variants. Dynamic component `is` bindings are consumed by the tag renderer and no longer emitted again as props in this structural emitter.
+- This is structural DOM MIR codegen progress. It does not complete component slot object lowering, exact dynamic component edge cases, or the final migration of the exact emitter to full `Vue3DomMir` consumption.
+- Verification for this component-tag MIR slice: `cargo fmt --all`, focused `cargo test -p vuec_vue3_core lower_vue3_ast_to_dom_mir_projects_component_tags_structurally`, focused `cargo test -p vuec_vue3_core generate_vue3_dom_mir_emits_component_tags_from_mir`, `cargo check -p vuec_ast -p vuec_vue3_core`, `cargo test -p vuec_vue3_core`, and `cargo test -p vuec_ast`.
+
 - Current round: extended structural Vue 3 HIR and DOM MIR props with ordered segment payloads for merge-sensitive codegen.
 - `HirProps` now keeps `segments` alongside the existing derived flat views, plus object `v-bind` / `v-on` payloads and dynamic-argument expression IDs. `Vue3DomProps` now mirrors those ordered target segments, records object binding/listener payloads, and carries normalize intent (`normalizeProps` / `guardReactiveProps`) so target codegen does not infer this from the source AST.
 - `lower_vue3_ast_to_dom_mir` now preserves ordered static attrs, object `v-bind`, dynamic `:[arg]`, object `v-on`, and dynamic `@[event]` facts through HIR into `Vue3DomMir`; object spreads and dynamic args project to `FULL_PROPS` and do not leak synthetic names into `dynamic_props`.

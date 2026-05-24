@@ -1279,7 +1279,7 @@ pub enum Vue3DomMirKind {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3VNodeCall {
-    pub tag: MirExpr,
+    pub tag: Vue3DomTag,
     pub props: Vue3DomProps,
     pub directives: Vec<Vue3DomDirective>,
     pub children: MirChildren,
@@ -1288,6 +1288,14 @@ pub struct Vue3VNodeCall {
     pub is_block: bool,
     pub disable_tracking: bool,
     pub is_component: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Vue3DomTag {
+    Native(String),
+    ComponentAsset(String),
+    DynamicComponent(JsExprId),
+    RuntimeHelper(RuntimeHelper),
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

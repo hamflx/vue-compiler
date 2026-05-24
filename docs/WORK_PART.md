@@ -78,9 +78,16 @@
 - [x] Vue 3 structural `Vue3DomMir` standalone codegen entry for current target-split MIR subset, consuming MIR + `JsAstStore` without AST fallback.
 - [x] Vue 3 structural `Vue3DomMir` VNode props/directive payload foundation, so current MIR codegen can emit attrs, bindings, events, class normalization, and runtime directive wrappers without AST fallback.
 - [x] Vue 3 structural HIR / `Vue3DomMir` ordered props segment payload for object `v-bind`, object `v-on`, dynamic arg props, merge props, normalize props, guard reactive props, toHandlers, and toHandlerKey emission from MIR.
+- [x] Vue 3 structural `Vue3DomMir` component tag payload for native tags, component assets, dynamic components, and runtime-helper built-ins, with MIR-driven component declarations/imports in standalone DOM MIR codegen.
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Replaced `Vue3VNodeCall.tag: MirExpr` with `Vue3DomTag`, a DOM-target tag payload that distinguishes native tags, component assets, dynamic components, and runtime helper built-ins.
+- DOM lowering now projects component tags structurally: normal component assets such as `<Child>`, built-ins such as `<Transition>`, and dynamic `<component :is="view">` no longer enter MIR as string tags. Dynamic component tags reuse the registered `JsAstStore` expression from the `is` binding.
+- `generate_vue3_dom_mir` now emits `_resolveComponent` declarations, `_resolveDynamicComponent(...)` calls, and built-in component helper imports from MIR tag variants. The tag renderer consumes dynamic component `is` props so the standalone MIR emitter does not duplicate `{ is: view }`.
+- This remains structural target-codegen work. Component slot object lowering, exact dynamic component edge cases, and complete exact emitter migration to `Vue3DomMir` remain open.
+- Verification this round: `cargo fmt --all`, focused `cargo test -p vuec_vue3_core lower_vue3_ast_to_dom_mir_projects_component_tags_structurally`, focused `cargo test -p vuec_vue3_core generate_vue3_dom_mir_emits_component_tags_from_mir`, `cargo check -p vuec_ast -p vuec_vue3_core`, `cargo test -p vuec_vue3_core`, and `cargo test -p vuec_ast`.
 
 - Extended HIR and Vue 3 DOM MIR props with ordered segment payloads. `HirProps` and `Vue3DomProps` now preserve static attrs, dynamic bindings, events, object `v-bind`, and object `v-on` in source order, while keeping the existing flat views as derived convenience data.
 - DOM lowering now registers dynamic argument expressions and object spread expressions in `JsAstStore` once, projects object spreads / dynamic args to `FULL_PROPS`, and keeps `dynamic_props` limited to static patch-name lists. `Vue3DomProps` carries normalize intent so target codegen no longer infers `_normalizeProps` / `_guardReactiveProps` from the source AST.
