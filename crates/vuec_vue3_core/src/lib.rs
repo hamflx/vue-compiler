@@ -9373,18 +9373,30 @@ impl<'a> Vue3DomMirCodegen<'a> {
     fn generate(self) -> CodegenResult {
         let mut writer = CodeWriter::new();
         let scope = RenderScope::default();
+        let hoists = self.hoist_declarations(&scope);
         let declarations = self
             .component_declarations()
             .into_iter()
             .chain(self.directive_declarations())
             .collect::<Vec<_>>();
         let body = self.render_root_children(self.mir.root, &scope);
-        let helpers = self.helpers(&format!("{}\n{}", declarations.join("\n"), body));
+        let helpers = self.helpers(&format!(
+            "{}\n{}\n{}",
+            hoists.join("\n"),
+            declarations.join("\n"),
+            body
+        ));
         if self.options.mode == "module" && !helpers.is_empty() {
             writer.push_line(&format!(
                 "import {{ {} }} from \"vue\"",
                 import_helper_aliases(&helpers)
             ));
+            writer.newline();
+        }
+        for hoist in &hoists {
+            writer.push_line(hoist);
+        }
+        if !hoists.is_empty() {
             writer.newline();
         }
         writer.push_line(&format!(
@@ -9407,6 +9419,29 @@ impl<'a> Vue3DomMirCodegen<'a> {
             ast_summary: format!("vue3-dom-mir-nodes={}", self.mir.len()),
             diagnostics: Vec::new(),
             preamble: String::new(),
+        }
+    }
+
+    fn hoist_declarations(&self, scope: &RenderScope) -> Vec<String> {
+        self.mir
+            .nodes
+            .iter()
+            .filter_map(|node| match node.kind {
+                Vue3DomMirKind::Hoisted { index } => {
+                    Some((index, self.render_hoisted_value(node.id, scope)))
+                }
+                _ => None,
+            })
+            .map(|(index, value)| format!("const _hoisted_{index} = {value}"))
+            .collect()
+    }
+
+    fn render_hoisted_value(&self, node_id: NodeId, scope: &RenderScope) -> String {
+        let children = self.render_children(node_id, Vue3DomMirRenderMode::Child, scope);
+        match children.as_slice() {
+            [] => "null".into(),
+            [single] => single.clone(),
+            _ => render_array(&children),
         }
     }
 
@@ -15968,6 +16003,12 @@ mod tests {
         );
 
         assert!(generated.code.contains("_hoisted_1"));
+        assert!(generated
+            .code
+            .contains("const _hoisted_1 = _createElementVNode(\"span\""));
+        assert!(generated
+            .code
+            .contains("export function render(_ctx, _cache)"));
         assert!(generated.code.contains("_cache[0] || (_cache[0] ="));
         assert!(generated.code.contains("_toDisplayString(_ctx.msg)"));
     }

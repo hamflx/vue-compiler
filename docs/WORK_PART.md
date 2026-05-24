@@ -87,9 +87,15 @@
 - [x] Vue 3 structural `Vue3DomMir` cacheHandlers event cache payload, with MIR-driven `_cache[n] || (_cache[n] = handler)` emission for standalone DOM MIR codegen.
 - [x] Vue 3 structural standalone `Vue3DomMir` codegen prefix-identifier rewriting for the current JS-store expression subset, with scoped `v-for` aliases, slot params, `$event`, and arrow handler params preserved as locals.
 - [x] Vue 3 structural standalone `Vue3DomMir` codegen helper import discovery for helpers introduced by bindingMetadata rewrites such as `_unref` and `_isRef`.
+- [x] Vue 3 structural standalone `Vue3DomMir` codegen hoist declarations for conservative `Hoisted` wrappers, with render output using `_hoisted_n` references and render-external const declarations generated from MIR children.
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Added MIR-driven hoist declaration output to standalone `generate_vue3_dom_mir`. `Vue3DomMirKind::Hoisted { index }` now renders its child body into `const _hoisted_{index} = ...` before the render function, while normal render traversal still emits `_hoisted_n` references.
+- Hoist declarations participate in helper discovery, so hoisted VNode declarations can pull in helpers such as `_createElementVNode` in module mode without relying on AST fallback scans.
+- This remains structural target-codegen work. The standalone emitter still uses the conservative hoist wrappers already present in `Vue3DomMir`; exact official `cacheStatic` / `stringifyStatic` parity and full exact codegen migration remain open.
+- Verification this round: focused `cargo test -p vuec_vue3_core lower_vue3_ast_to_dom_mir_projects_static_hoist_wrappers`, focused `cargo test -p vuec_vue3_core generate_vue3_dom_mir_emits_cache_and_hoist_wrappers`, focused `cargo test -p vuec_vue3_core generate_vue3_dom_mir`, `cargo fmt --all --check`, `cargo check -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo xtask run-conformance --suite vue3-core` (`652/652`; coverage report keeps `rust-backed` / `mixed` / `shim-backed` split), and `git diff --check`.
 
 - Tightened standalone `generate_vue3_dom_mir` helper discovery. The emitter now renders declarations/body before finalizing module imports and merges MIR-structural helpers with helpers actually present in the generated code, so bindingMetadata rewrites cannot introduce `_unref` / `_isRef` without imports.
 - Completed the current DOM MIR binding rewrite path for inline setup bindings: `setup-maybe-ref` interpolation output imports/uses `_unref`, and `setup-let` assignment handlers can emit `_isRef(count) ? count.value = _unref(count) + 1 : count` from Rust codegen while keeping HIR/MIR payloads as raw JS store ids.
