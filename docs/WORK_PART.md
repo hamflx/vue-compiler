@@ -65,9 +65,19 @@
 - [x] Vue 3 compiler-core Rust-backed `transformOnce` projection bridge for `v-once` eligibility / cache intent decisions (`vOnce.spec.ts` `8/8`; file remains `mixed` because it still exercises alias-runtime traversal and cache materialization).
 - [x] Vue 3 compiler-core Rust-backed internal `transformMemo` projection bridge for `v-memo` eligibility / block conversion / cache intent decisions (`vMemo.spec.ts` `7/7`; file remains `mixed` because it still exercises alias-runtime traversal and materialization).
 - [x] Vue 3 compiler-core Rust-backed `transformBind` projection bridge for `v-bind` key/value decisions (`vBind.spec.ts` `19/19`; file remains `mixed` because it still exercises alias-runtime traversal and element props materialization).
+- [x] Vue 3 compiler-core Rust-backed `transformSlotOutlet` / `processSlotOutlet` projection bridge for `<slot>` outlet name/props/codegen decisions (`transformSlotOutlet.spec.ts` `14/14`; file remains `mixed` because it still exercises alias-runtime traversal, buildProps, and codegen materialization).
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Moved Vue 3 compiler-core `transformSlotOutlet` / `processSlotOutlet` decisions into Rust via `vuec_vue3_core::transform_slot_outlet_projection`.
+- The Rust projection now owns official `<slot>` outlet decisions for default/static/dynamic slot names, `:name` same-name shorthand, non-name prop selection and camelize mutations, fallback presence, `scopeId` / `slotted` argument length, and `_ctx.$slots` vs `$slots` selection.
+- Added `vue3.core.transformSlotOutlet` to `vuec_node_bridge`.
+- Updated `xtask/src/compat.rs` only as bridge/materialization support: the alias runtime calls Rust for the outlet projection, applies Rust-selected prop mutations, lets existing `buildProps` materialize slot props and directive diagnostics, and builds the official `_renderSlot(...)` call from Rust-selected arguments. This is not counted as standalone JavaScript compiler semantics.
+- Focused official `compiler-core/__tests__/transforms/transformSlotOutlet.spec.ts` passes `14/14`. The file remains classified as `mixed`, because the official transform file still runs through alias-runtime traversal, `buildProps`, and codegen materialization even though the slot-outlet decisions are now Rust-backed.
+- Adjacent focused official checks this round: `vOnce.spec.ts` + `transformSlotOutlet.spec.ts` `22/22`, `vSlot.spec.ts` + `transformElement.spec.ts` `155/155`, and `vFor.spec.ts` + `vIf.spec.ts` `84/84`.
+- Full Vue 3 conformance after this slice: `vue3-core` `652/652` with `rust-backed 192/192`, `mixed 460/460`, `shim-backed 0/0`; `vue3-dom` `133/133` with `mixed 133/133`; `vue3-ssr` `129/129` with `mixed 129/129`.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_vue3_core transform_slot_outlet_projection`, `cargo test -p vuec_vue3_core -p vuec_node_bridge -p xtask` (`95/95` Vue 3 core tests and `20/20` xtask tests pass), `git diff --check`, `cargo xtask export-api --rust --version-line vue3`, focused specs listed above, `cargo xtask run-conformance --suite vue3-core` (`652/652`), `cargo xtask run-conformance --suite vue3-dom` (`133/133`), and `cargo xtask run-conformance --suite vue3-ssr` (`129/129`).
 
 - Moved Vue 3 compiler-core `transformBind` / `v-bind` decisions into Rust via `vuec_vue3_core::transform_bind_projection`.
 - The Rust projection now owns official `v-bind` key/value decisions for empty-expression diagnostics, dynamic argument `|| ""` guards, `.camel` static and helper-backed dynamic handling, `.prop` / `.attr` key prefixes, SSR prefix skipping, and browser empty-expression undefined values.

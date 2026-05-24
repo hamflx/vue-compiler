@@ -4935,35 +4935,17 @@ const vue3CoreRuntime = (() => {
     };
   };
   runtime.processSlotOutlet = function processSlotOutlet(node, context) {
-    let slotName = '"default"';
+    const projection = callBridge('vue3.core.transformSlotOutlet', {
+      node: runtime.dehydrateForBridge(node),
+      context: vue3TransformSlotOutletContextPayload(context),
+    });
+    const process = projection && projection.process || {};
+    materializeVue3SlotOutletMutations(process, node, context);
+    const nonNameProps = (process.nonNameProps || [])
+      .map(index => node.props && node.props[index])
+      .filter(Boolean);
+    const slotName = materializeVue3SlotOutletName(process.slotName, node, context);
     let slotProps;
-    const nonNameProps = [];
-    for (const prop of node.props || []) {
-      if (prop.type === NodeTypes.ATTRIBUTE) {
-        if (!prop.value) continue;
-        if (prop.name === 'name') {
-          slotName = JSON.stringify(prop.value.content);
-        } else {
-          prop.name = camelize(prop.name);
-          nonNameProps.push(prop);
-        }
-      } else if (prop.name === 'bind' && runtime.isStaticArgOf(prop.arg, 'name')) {
-        if (prop.exp) {
-          slotName = prop.exp;
-        } else if (prop.arg && prop.arg.type === NodeTypes.SIMPLE_EXPRESSION) {
-          const name = camelize(prop.arg.content);
-          slotName = prop.exp = runtime.createSimpleExpression(name, false, prop.arg.loc);
-          if (context && context.prefixIdentifiers) {
-            slotName = prop.exp = runtime.processExpression(prop.exp, context);
-          }
-        }
-      } else {
-        if (prop.name === 'bind' && prop.arg && runtime.isStaticExp(prop.arg)) {
-          prop.arg.content = camelize(prop.arg.content);
-        }
-        nonNameProps.push(prop);
-      }
-    }
     if (nonNameProps.length) {
       const built = runtime.buildProps(node, context, nonNameProps, false, false);
       slotProps = built.props;
@@ -4976,18 +4958,36 @@ const vue3CoreRuntime = (() => {
   runtime.transformSlotOutlet = function transformSlotOutlet(node, context) {
     if (node.type === NodeTypes.ELEMENT && node.tagType === ElementTypes.SLOT) {
       return () => {
-        const { slotName, slotProps } = runtime.processSlotOutlet(node, context);
-        const args = [context.prefixIdentifiers ? '_ctx.$slots' : '$slots', slotName, '{}', 'undefined', 'true'];
-        let expectedLen = 2;
+        const projection = callBridge('vue3.core.transformSlotOutlet', {
+          node: runtime.dehydrateForBridge(node),
+          context: vue3TransformSlotOutletContextPayload(context),
+        });
+        if (!projection || !projection.transform) return;
+        const process = projection.process || {};
+        materializeVue3SlotOutletMutations(process, node, context);
+        const nonNameProps = (process.nonNameProps || [])
+          .map(index => node.props && node.props[index])
+          .filter(Boolean);
+        const slotName = materializeVue3SlotOutletName(process.slotName, node, context);
+        let slotProps;
+        if (nonNameProps.length) {
+          const built = runtime.buildProps(node, context, nonNameProps, false, false);
+          slotProps = built.props;
+          if (built.directives && built.directives.length) {
+            context.onError(runtime.createCompilerError(ErrorCodes.X_V_SLOT_UNEXPECTED_DIRECTIVE_ON_SLOT_OUTLET, built.directives[0].loc));
+          }
+        }
+        const codegen = projection.codegen || {};
+        const args = [codegen.slots || (context.prefixIdentifiers ? '_ctx.$slots' : '$slots'), slotName, '{}', 'undefined', 'true'];
+        let expectedLen = codegen.expectedLen == null ? 2 : codegen.expectedLen;
         if (slotProps) {
           args[2] = slotProps;
-          expectedLen = 3;
+          expectedLen = Math.max(expectedLen, 3);
         }
         if (node.children && node.children.length) {
           args[3] = runtime.createFunctionExpression([], node.children, false, false, node.loc);
-          expectedLen = 4;
+          expectedLen = Math.max(expectedLen, 4);
         }
-        if (context.scopeId && !context.slotted) expectedLen = 5;
         args.splice(expectedLen);
         node.codegenNode = runtime.createCallExpression(context.helper(runtime.RENDER_SLOT), args);
       };
@@ -5725,6 +5725,19 @@ function vue3TransformSlotContextPayload(context) {
   };
 }
 
+function vue3TransformSlotOutletContextPayload(context) {
+  context = context || {};
+  return {
+    prefixIdentifiers: !!context.prefixIdentifiers,
+    inline: !!context.inline,
+    isTS: !!context.isTS,
+    scopeId: context.scopeId || undefined,
+    slotted: !!context.slotted,
+    identifiers: context.identifiers || {},
+    bindingMetadata: context.bindingMetadata || {},
+  };
+}
+
 function vue3TransformTextContextPayload(context) {
   context = context || {};
   return {
@@ -6338,6 +6351,46 @@ function materializeVue3SlotProjectionNode(projection, node, context) {
     default:
       if (typeof projection === 'string') return projection;
       throw new Error(`Unsupported Rust v-slot projection: ${projection.kind}`);
+  }
+}
+
+function materializeVue3SlotOutletMutations(process, node, context) {
+  for (const mutation of process && process.mutations || []) {
+    const prop = node && node.props && node.props[mutation.index];
+    if (!prop) continue;
+    if (mutation.kind === 'setPropName') {
+      prop.name = mutation.name || prop.name;
+    } else if (mutation.kind === 'setDirectiveArgContent' && prop.arg) {
+      prop.arg.content = mutation.content || '';
+    } else if (mutation.kind === 'setDirectiveExp') {
+      prop.exp = materializeVue3SlotOutletProjection(mutation.value, node, context);
+    }
+  }
+}
+
+function materializeVue3SlotOutletName(projection, node, context) {
+  if (!projection) return '"default"';
+  if (projection.kind === 'literal') return projection.value || '"default"';
+  return materializeVue3SlotOutletProjection(projection, node, context);
+}
+
+function materializeVue3SlotOutletProjection(projection, node, context) {
+  if (!projection || projection.kind === 'undefined') return undefined;
+  if (typeof projection === 'string') return projection;
+  if (projection.type) return projection;
+  switch (projection.kind) {
+    case 'node': {
+      if (projection.path === 'props') {
+        const prop = node && node.props && node.props[projection.index];
+        return prop && prop[projection.field || 'exp'];
+      }
+      return undefined;
+    }
+    case 'simple':
+    case 'compound':
+      return materializeVue3SlotProjectionNode(projection, node, context);
+    default:
+      throw new Error(`Unsupported Rust slot outlet projection: ${projection.kind}`);
   }
 }
 

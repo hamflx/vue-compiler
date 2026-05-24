@@ -1937,6 +1937,163 @@ pub fn track_v_for_slot_scopes_projection(payload: &Value) -> Value {
     })
 }
 
+pub fn transform_slot_outlet_projection(payload: &Value) -> Value {
+    let node = payload.get("node").unwrap_or(&Value::Null);
+    if json_node_type(node) != Some(1) || json_u64(node, "tagType") != Some(2) {
+        return json!({ "transform": false });
+    }
+    let context = payload.get("context").unwrap_or(&Value::Null);
+    let process = process_slot_outlet_projection(node, context);
+    let has_children = node
+        .get("children")
+        .and_then(Value::as_array)
+        .is_some_and(|children| !children.is_empty());
+    let mut expected_len = 2;
+    if has_children {
+        expected_len = 4;
+    }
+    if json_str(context, "scopeId").is_some() && !json_bool(context, "slotted") {
+        expected_len = 5;
+    }
+
+    json!({
+        "transform": true,
+        "process": process,
+        "codegen": {
+            "slots": if json_bool(context, "prefixIdentifiers") { "_ctx.$slots" } else { "$slots" },
+            "expectedLen": expected_len,
+            "hasChildren": has_children,
+            "helper": "RENDER_SLOT",
+        },
+    })
+}
+
+fn process_slot_outlet_projection(node: &Value, context: &Value) -> Value {
+    let mut slot_name = json!({ "kind": "literal", "value": "\"default\"" });
+    let mut non_name_props = Vec::<Value>::new();
+    let mut mutations = Vec::<Value>::new();
+
+    for (index, prop) in node
+        .get("props")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        if json_node_type(prop) == Some(6) {
+            if prop.get("value").is_none_or(Value::is_null) {
+                continue;
+            }
+            if json_str(prop, "name") == Some("name") {
+                let content = prop
+                    .get("value")
+                    .and_then(|value| json_str(value, "content"))
+                    .unwrap_or("");
+                slot_name = json!({ "kind": "literal", "value": quote_string(content) });
+            } else {
+                if let Some(name) = json_str(prop, "name") {
+                    let camel = camelize(name);
+                    if camel != name {
+                        mutations.push(json!({
+                            "kind": "setPropName",
+                            "index": index,
+                            "name": camel,
+                        }));
+                    }
+                }
+                non_name_props.push(json!(index));
+            }
+            continue;
+        }
+
+        if json_str(prop, "name") == Some("bind")
+            && prop.get("arg").is_some_and(|arg| {
+                json_node_type(arg) == Some(4)
+                    && json_bool(arg, "isStatic")
+                    && json_str(arg, "content") == Some("name")
+            })
+        {
+            if prop.get("exp").is_some_and(|exp| !exp.is_null()) {
+                slot_name =
+                    json!({ "kind": "node", "path": "props", "index": index, "field": "exp" });
+            } else if prop
+                .get("arg")
+                .is_some_and(|arg| json_node_type(arg) == Some(4))
+            {
+                let name = prop
+                    .get("arg")
+                    .and_then(|arg| json_str(arg, "content"))
+                    .map(camelize)
+                    .unwrap_or_default();
+                let loc = prop
+                    .get("arg")
+                    .and_then(|arg| arg.get("loc"))
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                let exp = json!({
+                    "kind": "simple",
+                    "content": name,
+                    "isStatic": false,
+                    "loc": loc,
+                });
+                mutations.push(json!({
+                    "kind": "setDirectiveExp",
+                    "index": index,
+                    "value": process_slot_outlet_maybe_process_expression(exp, context),
+                }));
+                slot_name =
+                    json!({ "kind": "node", "path": "props", "index": index, "field": "exp" });
+            }
+            continue;
+        }
+
+        if json_str(prop, "name") == Some("bind")
+            && prop
+                .get("arg")
+                .is_some_and(|arg| json_node_type(arg) == Some(4) && json_bool(arg, "isStatic"))
+        {
+            let content = prop
+                .get("arg")
+                .and_then(|arg| json_str(arg, "content"))
+                .unwrap_or("");
+            let camel = camelize(content);
+            if camel != content {
+                mutations.push(json!({
+                    "kind": "setDirectiveArgContent",
+                    "index": index,
+                    "content": camel,
+                }));
+            }
+        }
+        non_name_props.push(json!(index));
+    }
+
+    json!({
+        "slotName": slot_name,
+        "nonNameProps": non_name_props,
+        "mutations": mutations,
+    })
+}
+
+fn process_slot_outlet_maybe_process_expression(node: Value, context: &Value) -> Value {
+    if !json_bool(context, "prefixIdentifiers") {
+        return node;
+    }
+    let processed = process_expression_projection(&json!({
+        "node": {
+            "type": 4,
+            "content": json_str(&node, "content").unwrap_or(""),
+            "isStatic": json_bool(&node, "isStatic"),
+            "loc": node.get("loc").cloned().unwrap_or(Value::Null),
+        },
+        "context": context,
+    }));
+    match json_str(&processed, "kind") {
+        Some("simple") | Some("compound") => processed,
+        _ => node,
+    }
+}
+
 pub fn build_slots_projection(payload: &Value) -> Value {
     let node = payload.get("node").unwrap_or(&Value::Null);
     let context = payload.get("context").unwrap_or(&Value::Null);
@@ -12078,6 +12235,102 @@ mod tests {
             for_projection["dynamicSlots"][0]["slot"]["name"]["content"],
             json!("name")
         );
+    }
+
+    #[test]
+    fn transform_slot_outlet_projection_projects_name_props_and_codegen_shape() {
+        let named = transform_slot_outlet_projection(&json!({
+            "node": {
+                "type": 1,
+                "tagType": 2,
+                "props": [
+                    { "type": 6, "name": "name", "value": { "content": "foo" } },
+                    { "type": 6, "name": "foo-bar", "value": { "content": "baz" } },
+                    {
+                        "type": 7,
+                        "name": "bind",
+                        "arg": { "type": 4, "content": "qux-kebab", "isStatic": true },
+                        "exp": { "type": 4, "content": "qux", "isStatic": false }
+                    }
+                ],
+                "children": [{ "type": 2, "content": "fallback" }],
+                "loc": { "source": "<slot/>" }
+            },
+            "context": { "scopeId": "data-v-test", "slotted": false }
+        }));
+
+        assert_eq!(named["transform"], json!(true));
+        assert_eq!(
+            named["process"]["slotName"],
+            json!({ "kind": "literal", "value": "\"foo\"" })
+        );
+        assert_eq!(named["process"]["nonNameProps"], json!([1, 2]));
+        assert_eq!(
+            named["process"]["mutations"],
+            json!([
+                { "kind": "setPropName", "index": 1, "name": "fooBar" },
+                { "kind": "setDirectiveArgContent", "index": 2, "content": "quxKebab" }
+            ])
+        );
+        assert_eq!(named["codegen"]["expectedLen"], json!(5));
+        assert_eq!(named["codegen"]["slots"], json!("$slots"));
+    }
+
+    #[test]
+    fn transform_slot_outlet_projection_handles_dynamic_and_same_name_slots() {
+        let dynamic = transform_slot_outlet_projection(&json!({
+            "node": {
+                "type": 1,
+                "tagType": 2,
+                "props": [{
+                    "type": 7,
+                    "name": "bind",
+                    "arg": { "type": 4, "content": "name", "isStatic": true },
+                    "exp": { "type": 4, "content": "foo", "isStatic": false }
+                }],
+                "children": []
+            },
+            "context": {}
+        }));
+        assert_eq!(
+            dynamic["process"]["slotName"],
+            json!({ "kind": "node", "path": "props", "index": 0, "field": "exp" })
+        );
+        assert_eq!(dynamic["codegen"]["expectedLen"], json!(2));
+
+        let shorthand = transform_slot_outlet_projection(&json!({
+            "node": {
+                "type": 1,
+                "tagType": 2,
+                "props": [{
+                    "type": 7,
+                    "name": "bind",
+                    "arg": { "type": 4, "content": "name", "isStatic": true, "loc": { "source": "name" } }
+                }],
+                "children": []
+            },
+            "context": { "prefixIdentifiers": true, "bindingMetadata": {} }
+        }));
+        assert_eq!(
+            shorthand["process"]["mutations"][0],
+            json!({
+                "kind": "setDirectiveExp",
+                "index": 0,
+                "value": {
+                    "kind": "simple",
+                    "content": "_ctx.name",
+                    "isStatic": false,
+                    "constType": 0,
+                    "loc": { "source": "name" },
+                    "helpers": []
+                }
+            })
+        );
+        assert_eq!(
+            shorthand["process"]["slotName"],
+            json!({ "kind": "node", "path": "props", "index": 0, "field": "exp" })
+        );
+        assert_eq!(shorthand["codegen"]["slots"], json!("_ctx.$slots"));
     }
 
     #[test]
