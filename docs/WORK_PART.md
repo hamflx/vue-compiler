@@ -64,9 +64,19 @@
 - [x] Vue 3 compiler-core Rust-backed `transformExpression` projection bridge for interpolation/directive dispatch decisions (`transformExpressions.spec.ts` `47/47`; file remains `mixed` because it still exercises alias-runtime traversal and transform harness dependencies).
 - [x] Vue 3 compiler-core Rust-backed `transformOnce` projection bridge for `v-once` eligibility / cache intent decisions (`vOnce.spec.ts` `8/8`; file remains `mixed` because it still exercises alias-runtime traversal and cache materialization).
 - [x] Vue 3 compiler-core Rust-backed internal `transformMemo` projection bridge for `v-memo` eligibility / block conversion / cache intent decisions (`vMemo.spec.ts` `7/7`; file remains `mixed` because it still exercises alias-runtime traversal and materialization).
+- [x] Vue 3 compiler-core Rust-backed `transformBind` projection bridge for `v-bind` key/value decisions (`vBind.spec.ts` `19/19`; file remains `mixed` because it still exercises alias-runtime traversal and element props materialization).
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Moved Vue 3 compiler-core `transformBind` / `v-bind` decisions into Rust via `vuec_vue3_core::transform_bind_projection`.
+- The Rust projection now owns official `v-bind` key/value decisions for empty-expression diagnostics, dynamic argument `|| ""` guards, `.camel` static and helper-backed dynamic handling, `.prop` / `.attr` key prefixes, SSR prefix skipping, and browser empty-expression undefined values.
+- Added `vue3.core.transformBind` to `vuec_node_bridge`.
+- Updated `xtask/src/compat.rs` only as bridge/materialization support: the alias runtime sends directive/context facts to Rust, forwards Rust diagnostics, and materializes Rust simple/compound/helper projections back into official-shaped AST properties. This is not counted as standalone JavaScript compiler semantics.
+- Focused official `compiler-core/__tests__/transforms/vBind.spec.ts` passes `19/19`. The file remains classified as `mixed`, because the official transform file still runs through alias-runtime traversal and element props materialization even though the `transformBind` decisions are now Rust-backed.
+- Adjacent focused official checks this round: `vOn.spec.ts` + `vModel.spec.ts` `54/54`, and `transformElement.spec.ts` `124/124`.
+- Full Vue 3 conformance after this slice: `vue3-core` `652/652` with `rust-backed 192/192`, `mixed 460/460`, `shim-backed 0/0`; `vue3-dom` `133/133` with `mixed 133/133`; `vue3-ssr` `129/129` with `mixed 129/129`.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_vue3_core transform_bind_projection`, `cargo test -p vuec_vue3_core -p vuec_node_bridge -p xtask` (`93/93` Vue 3 core tests and `20/20` xtask tests pass), `git diff --check`, `cargo xtask export-api --rust --version-line vue3`, focused `vBind.spec.ts` (`19/19`), adjacent focused specs listed above, `cargo xtask run-conformance --suite vue3-core` (`652/652`), `cargo xtask run-conformance --suite vue3-dom` (`133/133`), and `cargo xtask run-conformance --suite vue3-ssr` (`129/129`).
 
 - Moved Vue 3 compiler-core internal `transformMemo` decisions into Rust via `vuec_vue3_core::transform_memo_projection`.
 - The Rust projection now owns official `v-memo` eligibility checks, already-seen skip, SSR skip, component-vs-plain-element block conversion decision, `WITH_MEMO` helper requirement, memo expression forwarding, and deterministic cache index selection.

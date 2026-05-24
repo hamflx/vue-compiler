@@ -1678,6 +1678,43 @@ pub fn transform_model_projection(payload: &Value) -> Value {
     })
 }
 
+pub fn transform_bind_projection(payload: &Value) -> Value {
+    let dir = payload.get("dir").unwrap_or(&Value::Null);
+    let context = payload.get("context").unwrap_or(&Value::Null);
+    let arg = dir.get("arg").filter(|value| !value.is_null());
+    let mut exp = dir.get("exp").filter(|value| !value.is_null());
+
+    if let Some(current_exp) = exp {
+        if json_node_type(current_exp) == Some(4)
+            && json_str(current_exp, "content")
+                .unwrap_or("")
+                .trim()
+                .is_empty()
+        {
+            if !json_bool(context, "browser") {
+                return json!({
+                    "errors": [{ "code": 34, "loc": "dir" }],
+                    "props": [{
+                        "key": transform_bind_raw_arg_projection(arg, dir),
+                        "value": transform_bind_empty_expression_value(dir),
+                    }],
+                });
+            }
+            exp = None;
+        }
+    }
+
+    json!({
+        "errors": [],
+        "props": [{
+            "key": transform_bind_key_projection(arg, dir, context),
+            "value": exp
+                .map(|_| json!({ "kind": "node", "path": "dir.exp" }))
+                .unwrap_or_else(|| json!({ "kind": "undefined" })),
+        }],
+    })
+}
+
 pub fn transform_on_projection(payload: &Value) -> Value {
     let dir = payload.get("dir").unwrap_or(&Value::Null);
     let node = payload.get("node").unwrap_or(&Value::Null);
@@ -4252,6 +4289,157 @@ fn model_expression_child_source(child: &Value) -> String {
         .as_str()
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| model_expression_source(child))
+}
+
+fn transform_bind_key_projection(arg: Option<&Value>, dir: &Value, context: &Value) -> Value {
+    let mut key = transform_bind_guarded_arg_projection(arg, dir);
+    if directive_has_modifier(dir, "camel") {
+        key = transform_bind_camel_projection(key);
+    }
+    if !json_bool(context, "inSSR") {
+        if directive_has_modifier(dir, "prop") {
+            key = transform_bind_prefix_projection(key, ".");
+        }
+        if directive_has_modifier(dir, "attr") {
+            key = transform_bind_prefix_projection(key, "^");
+        }
+    }
+    key
+}
+
+fn transform_bind_raw_arg_projection(arg: Option<&Value>, dir: &Value) -> Value {
+    let loc = arg
+        .and_then(|arg| arg.get("loc").cloned())
+        .unwrap_or_else(|| dir.get("loc").cloned().unwrap_or(Value::Null));
+    match arg {
+        Some(_) => json!({ "kind": "node", "path": "dir.arg", "loc": loc }),
+        None => json!({
+            "kind": "simple",
+            "content": "",
+            "isStatic": true,
+            "loc": loc,
+        }),
+    }
+}
+
+fn transform_bind_guarded_arg_projection(arg: Option<&Value>, dir: &Value) -> Value {
+    let loc = arg
+        .and_then(|arg| arg.get("loc").cloned())
+        .unwrap_or_else(|| dir.get("loc").cloned().unwrap_or(Value::Null));
+    let Some(arg) = arg else {
+        return json!({
+            "kind": "simple",
+            "content": "",
+            "isStatic": true,
+            "loc": loc,
+        });
+    };
+
+    if json_node_type(arg) == Some(4) {
+        let content = json_str(arg, "content").unwrap_or("");
+        if json_bool(arg, "isStatic") {
+            return json!({
+                "kind": "simple",
+                "content": content,
+                "isStatic": true,
+                "loc": loc,
+            });
+        }
+        return json!({
+            "kind": "simple",
+            "content": if content.is_empty() { "\"\"".to_string() } else { format!("{content} || \"\"") },
+            "isStatic": false,
+            "loc": loc,
+            "constType": arg.get("constType").cloned().unwrap_or(json!(0)),
+        });
+    }
+
+    json!({
+        "kind": "compound",
+        "children": [
+            "(",
+            { "kind": "node", "path": "dir.arg.children" },
+            ") || \"\"",
+        ],
+        "loc": loc,
+        "constType": arg.get("constType").cloned().unwrap_or(json!(0)),
+    })
+}
+
+fn transform_bind_empty_expression_value(dir: &Value) -> Value {
+    json!({
+        "kind": "simple",
+        "content": "",
+        "isStatic": true,
+        "loc": dir.get("loc").cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn transform_bind_camel_projection(key: Value) -> Value {
+    match json_str(&key, "kind") {
+        Some("simple") if json_bool(&key, "isStatic") => {
+            let mut next = key;
+            let content = json_str(&next, "content").unwrap_or("").to_string();
+            next["content"] = json!(camelize(&content));
+            next
+        }
+        Some("simple") => {
+            let mut next = key;
+            let content = json_str(&next, "content").unwrap_or("").to_string();
+            next["content"] = json!(format!("_camelize({content})"));
+            next["helpers"] = json!(["CAMELIZE"]);
+            next
+        }
+        Some("compound") => {
+            let children = key.get("children").cloned().unwrap_or_else(|| json!([]));
+            let mut next = key;
+            next["children"] = json!([
+                { "kind": "helperString", "helper": "CAMELIZE" },
+                { "kind": "children", "children": children },
+                ")",
+            ]);
+            next
+        }
+        _ => key,
+    }
+}
+
+fn transform_bind_prefix_projection(key: Value, prefix: &str) -> Value {
+    match json_str(&key, "kind") {
+        Some("simple") if json_bool(&key, "isStatic") => {
+            let mut next = key;
+            let content = json_str(&next, "content").unwrap_or("").to_string();
+            next["content"] = json!(format!("{prefix}{content}"));
+            next
+        }
+        Some("simple") => {
+            let mut next = key;
+            let content = json_str(&next, "content").unwrap_or("").to_string();
+            next["content"] = json!(format!("`{prefix}${{{content}}}`"));
+            next
+        }
+        Some("compound") => {
+            let children = key.get("children").cloned().unwrap_or_else(|| json!([]));
+            let mut next = key;
+            next["children"] = json!([
+                format!("'{prefix}' + ("),
+                { "kind": "children", "children": children },
+                ")",
+            ]);
+            next
+        }
+        _ => key,
+    }
+}
+
+fn directive_has_modifier(dir: &Value, name: &str) -> bool {
+    dir.get("modifiers")
+        .and_then(Value::as_array)
+        .is_some_and(|modifiers| {
+            modifiers.iter().any(|modifier| {
+                modifier.as_str().or_else(|| json_str(modifier, "content")) == Some(name)
+            })
+        })
 }
 
 fn transform_on_event_name_projection(
@@ -12004,6 +12192,158 @@ mod tests {
 
         assert_eq!(projection["patchFlag"], json!(16));
         assert_eq!(projection["normalizeProps"], json!(false));
+    }
+
+    #[test]
+    fn transform_bind_projection_projects_static_and_dynamic_args() {
+        let static_projection = transform_bind_projection(&json!({
+            "dir": {
+                "arg": { "type": 4, "content": "id", "isStatic": true, "loc": { "source": "id" } },
+                "exp": { "type": 4, "content": "id", "isStatic": false, "loc": { "source": "id" } },
+                "modifiers": []
+            },
+            "context": {}
+        }));
+        assert_eq!(
+            static_projection["props"][0]["key"],
+            json!({
+                "kind": "simple",
+                "content": "id",
+                "isStatic": true,
+                "loc": { "source": "id" }
+            })
+        );
+        assert_eq!(
+            static_projection["props"][0]["value"],
+            json!({ "kind": "node", "path": "dir.exp" })
+        );
+
+        let dynamic_projection = transform_bind_projection(&json!({
+            "dir": {
+                "arg": { "type": 4, "content": "id", "isStatic": false, "loc": { "source": "[id]" } },
+                "exp": { "type": 4, "content": "value", "isStatic": false },
+                "modifiers": []
+            },
+            "context": {}
+        }));
+        assert_eq!(
+            dynamic_projection["props"][0]["key"]["content"],
+            json!("id || \"\"")
+        );
+        assert_eq!(
+            dynamic_projection["props"][0]["key"]["isStatic"],
+            json!(false)
+        );
+    }
+
+    #[test]
+    fn transform_bind_projection_applies_camel_and_prefix_modifiers() {
+        let static_camel = transform_bind_projection(&json!({
+            "dir": {
+                "arg": { "type": 4, "content": "foo-bar", "isStatic": true },
+                "exp": { "type": 4, "content": "id", "isStatic": false },
+                "modifiers": [{ "content": "camel" }]
+            },
+            "context": {}
+        }));
+        assert_eq!(static_camel["props"][0]["key"]["content"], json!("fooBar"));
+
+        let dynamic_camel = transform_bind_projection(&json!({
+            "dir": {
+                "arg": { "type": 4, "content": "foo", "isStatic": false },
+                "exp": { "type": 4, "content": "id", "isStatic": false },
+                "modifiers": [{ "content": "camel" }]
+            },
+            "context": {}
+        }));
+        assert_eq!(
+            dynamic_camel["props"][0]["key"]["content"],
+            json!("_camelize(foo || \"\")")
+        );
+        assert_eq!(
+            dynamic_camel["props"][0]["key"]["helpers"],
+            json!(["CAMELIZE"])
+        );
+
+        let dynamic_prop = transform_bind_projection(&json!({
+            "dir": {
+                "arg": { "type": 4, "content": "fooBar", "isStatic": false },
+                "exp": { "type": 4, "content": "id", "isStatic": false },
+                "modifiers": [{ "content": "prop" }]
+            },
+            "context": {}
+        }));
+        assert_eq!(
+            dynamic_prop["props"][0]["key"]["content"],
+            json!("`.${fooBar || \"\"}`")
+        );
+
+        let ssr_prop = transform_bind_projection(&json!({
+            "dir": {
+                "arg": { "type": 4, "content": "fooBar", "isStatic": true },
+                "exp": { "type": 4, "content": "id", "isStatic": false },
+                "modifiers": [{ "content": "prop" }]
+            },
+            "context": { "inSSR": true }
+        }));
+        assert_eq!(ssr_prop["props"][0]["key"]["content"], json!("fooBar"));
+    }
+
+    #[test]
+    fn transform_bind_projection_handles_compound_args_and_empty_expressions() {
+        let compound = transform_bind_projection(&json!({
+            "dir": {
+                "arg": {
+                    "type": 8,
+                    "children": [
+                        { "type": 4, "content": "_ctx.foo", "isStatic": false },
+                        "(",
+                        { "type": 4, "content": "_ctx.bar", "isStatic": false },
+                        ")"
+                    ],
+                    "loc": { "source": "foo(bar)" }
+                },
+                "exp": { "type": 4, "content": "_ctx.id", "isStatic": false },
+                "modifiers": [{ "content": "camel" }, { "content": "prop" }]
+            },
+            "context": {}
+        }));
+        assert_eq!(compound["props"][0]["key"]["children"][0], json!("'.' + ("));
+        assert_eq!(
+            compound["props"][0]["key"]["children"][1]["children"][0],
+            json!({ "kind": "helperString", "helper": "CAMELIZE" })
+        );
+        assert_eq!(
+            compound["props"][0]["key"]["children"][1]["children"][1]["children"][0],
+            json!("(")
+        );
+
+        let missing = transform_bind_projection(&json!({
+            "dir": {
+                "arg": { "type": 4, "content": "arg", "isStatic": true },
+                "exp": { "type": 4, "content": "   ", "isStatic": false },
+                "modifiers": [],
+                "loc": { "source": "v-bind:arg=\"\"" }
+            },
+            "context": {}
+        }));
+        assert_eq!(missing["errors"], json!([{ "code": 34, "loc": "dir" }]));
+        assert_eq!(missing["props"][0]["value"]["content"], json!(""));
+        assert_eq!(missing["props"][0]["value"]["isStatic"], json!(true));
+
+        let browser_missing = transform_bind_projection(&json!({
+            "dir": {
+                "arg": { "type": 4, "content": "arg", "isStatic": true },
+                "exp": { "type": 4, "content": "", "isStatic": false },
+                "modifiers": []
+            },
+            "context": { "browser": true }
+        }));
+        assert_eq!(browser_missing["errors"], json!([]));
+        assert_eq!(
+            browser_missing["props"][0]["value"],
+            json!({ "kind": "undefined" })
+        );
     }
 
     #[test]

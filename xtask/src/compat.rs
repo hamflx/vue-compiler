@@ -4630,36 +4630,24 @@ const vue3CoreRuntime = (() => {
     }
   };
   runtime.transformBind = function transformBind(dir, _node, context) {
-    context = context || { helperString: name => `_${runtime.helperNameMap[name] || name}`, inSSR: false, onError: error => { throw error; } };
-    const arg = dir.arg || runtime.createSimpleExpression('', true, dir.loc);
-    let exp = dir.exp;
-    if (exp && exp.type === NodeTypes.SIMPLE_EXPRESSION && !String(exp.content || '').trim()) {
-      if (!runtime.isBrowserBuild()) {
-        context.onError(runtime.createCompilerError(ErrorCodes.X_V_BIND_NO_EXPRESSION, dir.loc));
-        return { props: [runtime.createObjectProperty(arg, runtime.createSimpleExpression('', true, dir.loc))] };
-      }
-      exp = undefined;
-    }
-    if (arg.type !== NodeTypes.SIMPLE_EXPRESSION) {
-      arg.children.unshift(`(`);
-      arg.children.push(`) || ""`);
-    } else if (!arg.isStatic) {
-      arg.content = arg.content ? `${arg.content} || ""` : `""`;
-    }
-    if (runtime.hasModifier(dir, 'camel')) {
-      if (arg.type === NodeTypes.SIMPLE_EXPRESSION) {
-        if (arg.isStatic) arg.content = camelize(arg.content);
-        else arg.content = `${context.helperString(runtime.CAMELIZE)}(${arg.content})`;
-      } else {
-        arg.children.unshift(`${context.helperString(runtime.CAMELIZE)}(`);
-        arg.children.push(`)`);
-      }
-    }
-    if (!context.inSSR) {
-      if (runtime.hasModifier(dir, 'prop')) runtime.injectBindPrefix(arg, '.');
-      if (runtime.hasModifier(dir, 'attr')) runtime.injectBindPrefix(arg, '^');
-    }
-    return { props: [runtime.createObjectProperty(arg, exp)] };
+    context = context || {
+      helper: name => name,
+      helperString: name => `_${runtime.helperNameMap[name] || name}`,
+      inSSR: false,
+      onError: error => { throw error; },
+    };
+    const projection = callBridge('vue3.core.transformBind', {
+      dir,
+      context: vue3TransformBindContextPayload(context),
+    });
+    materializeVue3BindErrors(projection, dir, context);
+    return {
+      props: (projection.props || []).map(prop => {
+        const key = materializeVue3OnProjection(prop.key, dir, context);
+        const value = materializeVue3OnProjection(prop.value, dir, context);
+        return runtime.createObjectProperty(key, value);
+      }),
+    };
   };
   runtime.transformOn = function transformOn(dir, node, context, augmentor) {
     context = context || { helperString: name => `_${runtime.helperNameMap[name] || name}`, helper: name => name, cache: value => value, onError: error => { throw error; } };
@@ -5561,6 +5549,14 @@ function vue3TransformOnContextPayload(context) {
   };
 }
 
+function vue3TransformBindContextPayload(context) {
+  context = context || {};
+  return {
+    inSSR: !!context.inSSR,
+    browser: vue3CoreRuntime.isBrowserBuild ? vue3CoreRuntime.isBrowserBuild() : false,
+  };
+}
+
 function vue3TransformOnceContextPayload(context) {
   context = context || {};
   return {
@@ -5587,6 +5583,17 @@ function materializeVue3OnErrors(projection, dir, context) {
   }
 }
 
+function materializeVue3BindErrors(projection, dir, context) {
+  if (!projection || !Array.isArray(projection.errors) || !context || !context.onError) return;
+  for (const error of projection.errors) {
+    const code = typeof error === 'number' ? error : error.code;
+    const loc = error && error.loc === 'arg'
+      ? dir && dir.arg && dir.arg.loc || dir && dir.loc || locStub
+      : dir && dir.loc || locStub;
+    context.onError(vue3CoreRuntime.createCompilerError(code, loc));
+  }
+}
+
 function materializeVue3OnProjection(projection, dir, context) {
   if (!projection || projection.kind === 'undefined') return undefined;
   if (typeof projection === 'string') return projection;
@@ -5597,6 +5604,15 @@ function materializeVue3OnProjection(projection, dir, context) {
       if (projection.path === 'dir.exp') return dir && dir.exp;
       if (projection.path === 'dir.arg.children') return (dir && dir.arg && dir.arg.children) || [];
       return undefined;
+    case 'children': {
+      const children = [];
+      for (const child of projection.children || []) {
+        const materialized = materializeVue3OnProjection(child, dir, context);
+        if (Array.isArray(materialized)) children.push(...materialized);
+        else children.push(materialized);
+      }
+      return children;
+    }
     case 'helperString': {
       const helper = helperSymbolFromProjection(projection.helper);
       return `${context && helper ? context.helperString(helper) : `_${vue3CoreRuntime.helperNameMap[helper]}`}(`;
