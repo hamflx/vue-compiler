@@ -16,13 +16,14 @@ AST/HIR/MIR设计：docs\3.AST_HIR_MIR_DESIGN.md（AST/HIR/MIR 以此为唯一�
 5. 以大的模块为维度进行开发、验证、提交，禁止做一点点提交
 6. 如果新的功能与此前的功能有冲突，可以重新设计新的架构，考虑各种场景，禁止编写复杂、难以理解的特殊 case 处理
 7. 如果你在修复问题，修复 2 次都没能修复，不要再盲目修复，你需要补充完整日志，根据日志分析出根因，然后再修复
-8. 只有当开发计划、官方兼容验收、输出契约验收、AST/HIR/MIR 结构验收全部满足时，才算真正完成
-9. AST/HIR/MIR 的结构验收必须严格遵循 `docs/3.AST_HIR_MIR_DESIGN.md` 的 public projection、lowering、target-split 约束，不能退回到旧的泛化 IR 口径
-10. Vue 3 public projection 的 directive `arg` / `exp` / `modifiers` 必须保留官方可观察的 `content`、`loc`、`isStatic` 差异，不能靠 trim、重写或 synthetic fallback 混淆差异
-11. 官方 conformance 结果必须区分 `rust-backed`、`shim-backed`、`mixed` 三类覆盖；只有明确经过 Rust 编译器实现的测试才能计入 Rust 编译器完成度
-12. `xtask/src/compat.rs` 中的 JavaScript alias/shim 只能作为官方测试 import、包入口、AST hydration/dehydration 和临时适配层；不能把在 shim 中补齐 compiler-core 语义当作 Rust 编译器功能完成
-13. 对 `processExpression`、`transformExpression`、`transformElement`、`processIf`、`processFor`、`transformText`、`buildProps`、`generate` 等 compiler-core 内部行为，最终验收必须落到 Rust 的 AST/transform/codegen 管线或 Rust-backed bridge/API 上
-14. 当 focused official spec 只通过 alias runtime 或 mixed path 时，进度报告必须明确标注为 alias-runtime slice，不能写成 Rust compiler parity
+8. `docs/2.DEVELOPMENT_PLAN.md` 是开发路线和验收依据，不是机械线性清单；如实现路径与计划冲突，必须先更新计划或记录决策，再继续开发
+9. 只有当开发计划、按影响面选择的官方兼容验收、输出契约验收、AST/HIR/MIR 结构验收全部满足时，才算真正完成；阶段完成不能只依赖 Rust 单元测试
+10. AST/HIR/MIR 的结构验收必须严格遵循 `docs/3.AST_HIR_MIR_DESIGN.md` 的 public projection、lowering、target-split 约束，不能退回到旧的泛化 IR 口径
+11. Vue 3 public projection 的 directive `arg` / `exp` / `modifiers` 必须保留官方可观察的 `content`、`loc`、`isStatic` 差异，不能靠 trim、重写或 synthetic fallback 混淆差异
+12. 官方 conformance 结果必须区分 `rust-backed`、`shim-backed`、`mixed` 三类覆盖；只有明确经过 Rust 编译器实现的测试才能计入 Rust 编译器完成度
+13. `xtask/src/compat.rs` 中的 JavaScript alias/shim 只能作为官方测试 import、包入口、AST hydration/dehydration 和临时适配层；不能把在 shim 中补齐 compiler-core 语义当作 Rust 编译器功能完成
+14. 对 `processExpression`、`transformExpression`、`transformElement`、`processIf`、`processFor`、`transformText`、`buildProps`、`generate` 等 compiler-core 内部行为，最终验收必须落到 Rust 的 AST/transform/codegen 管线或 Rust-backed bridge/API 上
+15. 当 focused official spec 只通过 alias runtime 或 mixed path 时，进度报告必须明确标注为 alias-runtime slice，不能写成 Rust compiler parity
 
 工作提示：
 
@@ -33,3 +34,4 @@ AST/HIR/MIR设计：docs\3.AST_HIR_MIR_DESIGN.md（AST/HIR/MIR 以此为唯一�
 5. 对于设计方案中与我们目标相冲突的地方（目标是兼容 vue2、vue2.7、vue3 官方的编译器，可以直接替代其工作），你可以直接以目标为准，进行重新设计，并更新设计方案，以新设计方案开发，并且，记录文档到 docs/COMPATIBILITY_CONCERNS.md
 6. 开发计划中的 AST/HIR/MIR 相关工作，必须严格遵循 docs/3.AST_HIR_MIR_DESIGN.md 的 public projection、lowering 和 target-split 约束
 7. 后续如果继续改 `compat.rs` 的 JavaScript shim，必须说明这是 import/API 适配、测试 runner 支撑，还是临时语义实现；临时语义实现必须有对应 Rust 迁移计划或单独记录为 compatibility concern
+8. 阶段性开发完成时，应按改动影响面运行对应官方验收；如果暂未运行，必须在进度记录中说明原因、风险和后续补跑点
