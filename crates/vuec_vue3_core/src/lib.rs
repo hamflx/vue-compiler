@@ -911,6 +911,79 @@ pub fn process_expression_projection(payload: &Value) -> Value {
     })
 }
 
+pub fn transform_expression_projection(payload: &Value) -> Value {
+    let node = payload.get("node").unwrap_or(&Value::Null);
+    let context = payload.get("context").unwrap_or(&Value::Null);
+    let mut operations = Vec::<Value>::new();
+    match json_node_type(node) {
+        Some(5) => {
+            let Some(content) = node.get("content") else {
+                return json!({ "operations": operations });
+            };
+            operations.push(json!({
+                "kind": "process",
+                "path": ["content"],
+                "projection": process_expression_projection(&json!({
+                    "node": content,
+                    "context": context,
+                })),
+            }));
+        }
+        Some(1) => {
+            let memo_index = node
+                .get("props")
+                .and_then(Value::as_array)
+                .and_then(|props| {
+                    props.iter().position(|prop| {
+                        json_node_type(prop) == Some(7) && json_str(prop, "name") == Some("memo")
+                    })
+                });
+            for (index, dir) in node
+                .get("props")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or(&[])
+                .iter()
+                .enumerate()
+            {
+                if json_node_type(dir) != Some(7) || json_str(dir, "name") == Some("for") {
+                    continue;
+                }
+                let arg = dir.get("arg").unwrap_or(&Value::Null);
+                if let Some(exp) = dir.get("exp").filter(|exp| json_node_type(exp) == Some(4)) {
+                    let skip_on_arg = json_str(dir, "name") == Some("on") && !arg.is_null();
+                    let skip_memo_key = memo_index.is_some()
+                        && json_node_type(arg) == Some(4)
+                        && json_str(arg, "content") == Some("key");
+                    if !skip_on_arg && !skip_memo_key {
+                        operations.push(json!({
+                            "kind": "process",
+                            "path": ["props", index.to_string(), "exp"],
+                            "projection": process_expression_projection(&json!({
+                                "node": exp,
+                                "context": context,
+                                "asParams": json_str(dir, "name") == Some("slot"),
+                            })),
+                        }));
+                    }
+                }
+                if json_node_type(arg) == Some(4) && !json_bool(arg, "isStatic") {
+                    operations.push(json!({
+                        "kind": "process",
+                        "path": ["props", index.to_string(), "arg"],
+                        "projection": process_expression_projection(&json!({
+                            "node": arg,
+                            "context": context,
+                        })),
+                    }));
+                }
+            }
+        }
+        _ => {}
+    }
+    json!({ "operations": operations })
+}
+
 pub fn cache_static_projection(payload: &Value) -> Value {
     let root = payload.get("root").unwrap_or(&Value::Null);
     let context = payload.get("context").unwrap_or(&Value::Null);
@@ -10694,6 +10767,85 @@ mod tests {
         );
         assert_eq!(projection["children"][3]["content"], json!("bar"));
         assert_eq!(projection["helpers"], json!(["IS_REF"]));
+    }
+
+    #[test]
+    fn transform_expression_projection_processes_interpolation_content() {
+        let projection = transform_expression_projection(&json!({
+            "node": {
+                "type": 5,
+                "content": {
+                    "type": 4,
+                    "content": "foo",
+                    "isStatic": false
+                }
+            },
+            "context": { "prefixIdentifiers": true, "identifiers": {}, "bindingMetadata": {} }
+        }));
+
+        assert_eq!(projection["operations"][0]["path"], json!(["content"]));
+        assert_eq!(
+            projection["operations"][0]["projection"]["content"],
+            json!("_ctx.foo")
+        );
+    }
+
+    #[test]
+    fn transform_expression_projection_processes_slot_params_but_skips_on_handlers() {
+        let projection = transform_expression_projection(&json!({
+            "node": {
+                "type": 1,
+                "props": [
+                    {
+                        "type": 7,
+                        "name": "slot",
+                        "arg": { "type": 4, "content": "foo", "isStatic": true },
+                        "exp": { "type": 4, "content": "{ bar }", "isStatic": false }
+                    },
+                    {
+                        "type": 7,
+                        "name": "on",
+                        "arg": { "type": 4, "content": "click", "isStatic": true },
+                        "exp": { "type": 4, "content": "submit", "isStatic": false }
+                    },
+                    {
+                        "type": 7,
+                        "name": "bind",
+                        "arg": { "type": 4, "content": "name", "isStatic": false },
+                        "exp": { "type": 4, "content": "value", "isStatic": false }
+                    }
+                ]
+            },
+            "context": { "prefixIdentifiers": true, "identifiers": {}, "bindingMetadata": {} }
+        }));
+
+        let operations = projection["operations"].as_array().expect("operations");
+        assert_eq!(operations.len(), 3);
+        assert_eq!(operations[0]["path"], json!(["props", "0", "exp"]));
+        assert_eq!(operations[0]["projection"]["identifiers"], json!(["bar"]));
+        assert_eq!(operations[1]["path"], json!(["props", "2", "exp"]));
+        assert_eq!(operations[2]["path"], json!(["props", "2", "arg"]));
+    }
+
+    #[test]
+    fn transform_expression_projection_skips_v_memo_key_expression() {
+        let projection = transform_expression_projection(&json!({
+            "node": {
+                "type": 1,
+                "props": [
+                    { "type": 7, "name": "memo" },
+                    {
+                        "type": 7,
+                        "name": "bind",
+                        "arg": { "type": 4, "content": "key", "isStatic": true },
+                        "exp": { "type": 4, "content": "item.id", "isStatic": false }
+                    }
+                ]
+            },
+            "context": { "prefixIdentifiers": true, "identifiers": {}, "bindingMetadata": {} }
+        }));
+
+        assert_eq!(projection["operations"], json!([]));
     }
 
     #[test]

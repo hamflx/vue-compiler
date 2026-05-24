@@ -4602,22 +4602,11 @@ const vue3CoreRuntime = (() => {
     return materializeVue3ProcessExpressionProjection(projection, node, context);
   };
   runtime.transformExpression = function transformExpression(node, context) {
-    if (node.type === NodeTypes.INTERPOLATION) {
-      node.content = runtime.processExpression(node.content, context);
-    } else if (node.type === NodeTypes.ELEMENT) {
-      const memo = runtime.findDir(node, 'memo');
-      for (const dir of node.props || []) {
-        if (dir.type !== NodeTypes.DIRECTIVE || dir.name === 'for') continue;
-        const exp = dir.exp;
-        const arg = dir.arg;
-        if (exp && exp.type === NodeTypes.SIMPLE_EXPRESSION && !(dir.name === 'on' && arg) && !(memo && arg && arg.type === NodeTypes.SIMPLE_EXPRESSION && arg.content === 'key')) {
-          dir.exp = runtime.processExpression(exp, context, dir.name === 'slot');
-        }
-        if (arg && arg.type === NodeTypes.SIMPLE_EXPRESSION && !arg.isStatic) {
-          dir.arg = runtime.processExpression(arg, context);
-        }
-      }
-    }
+    const projection = callBridge('vue3.core.transformExpression', {
+      node: runtime.dehydrateForBridge(node),
+      context: vue3ProcessExpressionContextPayload(context),
+    });
+    materializeVue3TransformExpressionProjection(projection, node, context);
   };
   runtime.isBrowserBuild = function isBrowserBuild() {
     return typeof __BROWSER__ !== 'undefined' && !!__BROWSER__;
@@ -5772,6 +5761,21 @@ function materializeVue3ProcessExpressionChild(child, context) {
     );
   }
   return child;
+}
+
+function materializeVue3TransformExpressionProjection(projection, node, context) {
+  if (!projection || !Array.isArray(projection.operations)) return;
+  for (const operation of projection.operations) {
+    if (!operation || operation.kind !== 'process') continue;
+    const holder = vue3HolderAtPath(node, operation.path);
+    if (!holder || !holder.owner) continue;
+    const current = holder.owner[holder.key];
+    holder.owner[holder.key] = materializeVue3ProcessExpressionProjection(
+      operation.projection,
+      current,
+      context,
+    );
+  }
 }
 
 function materializeVue3TransformTextProjection(projection, node, context) {
