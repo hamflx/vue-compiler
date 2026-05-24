@@ -792,6 +792,125 @@ pub fn is_member_expression_projection(payload: &Value) -> Value {
     })
 }
 
+pub fn process_expression_projection(payload: &Value) -> Value {
+    let node = payload.get("node").unwrap_or(&Value::Null);
+    let context = payload.get("context").unwrap_or(&Value::Null);
+    let raw = json_str(node, "content").unwrap_or("");
+    let as_params = json_bool(payload, "asParams");
+    let as_raw_statements = json_bool(payload, "asRawStatements");
+    if json_node_type(node) != Some(4)
+        || json_bool(node, "isStatic")
+        || !json_bool(context, "prefixIdentifiers")
+        || raw.trim().is_empty()
+    {
+        return json!({ "kind": "unchanged" });
+    }
+
+    if process_expression_is_static_literal(raw) {
+        return json!({
+            "kind": "setConstType",
+            "constType": 3,
+        });
+    }
+
+    let options = vue3_options_from_transform_context(context);
+    let locals = process_expression_locals(payload, context);
+    if as_params {
+        if is_simple_identifier_ascii(raw) {
+            return json!({
+                "kind": "setConstType",
+                "constType": 2,
+            });
+        }
+        return process_expression_params_projection(raw, node, context, &options);
+    }
+    let literal = matches!(raw, "true" | "false" | "null" | "this");
+    if is_simple_identifier_ascii(raw) {
+        let is_local = locals.iter().any(|local| local == raw);
+        let is_global = is_global_or_literal(raw);
+        if !as_params
+            && !is_local
+            && !literal
+            && (!is_global || options.binding_metadata.contains_key(raw))
+        {
+            let content = process_expression_rewrite_identifier(raw, &options, None, false, &[]);
+            return json!({
+                "kind": "simple",
+                "content": content,
+                "isStatic": false,
+                "constType": if process_expression_is_const_binding(raw, &options) { 1 } else { 0 },
+                "loc": node.get("loc").cloned().unwrap_or(Value::Null),
+                "helpers": vue3_for_helpers_for_content(&content),
+            });
+        }
+        if !is_local {
+            return json!({
+                "kind": "setConstType",
+                "constType": if literal { 3 } else { 2 },
+            });
+        }
+        return json!({ "kind": "unchanged" });
+    }
+
+    let source = if as_raw_statements {
+        format!(" {raw} ")
+    } else {
+        format!("({raw}){}", if as_params { "=>{}" } else { "" })
+    };
+    let store = JsAstStore::new();
+    let parse_ok = if process_expression_uses_supported_external_plugin(raw, context) {
+        true
+    } else if as_raw_statements {
+        let parsed = store.parse_program(&source, transform_on_source_type(context));
+        !parsed.panicked && parsed.errors.is_empty()
+    } else {
+        store
+            .parse_expression(&source, transform_on_source_type(context))
+            .is_ok()
+    };
+    if !parse_ok {
+        return json!({
+            "kind": "error",
+            "code": 46,
+            "loc": node.get("loc").cloned().unwrap_or(Value::Null),
+            "message": "Error parsing JavaScript expression: Unexpected token",
+        });
+    }
+
+    let mut effective_locals = locals;
+    if !as_raw_statements {
+        effective_locals.extend(transform_on_root_function_locals(raw));
+        effective_locals.sort();
+        effective_locals.dedup();
+    }
+    let children = process_expression_compound_children(
+        raw,
+        &options,
+        &effective_locals,
+        node.get("loc").unwrap_or(&Value::Null),
+    );
+    if children.is_empty() {
+        return json!({
+            "kind": "setConstType",
+            "constType": 3,
+        });
+    }
+    let rewritten = process_expression_rewrite_source(raw, &options, &effective_locals);
+    let mut helper_source = rewritten.clone();
+    for child in &children {
+        if let Some(content) = child.get("content").and_then(Value::as_str) {
+            helper_source.push_str(content);
+        }
+    }
+    json!({
+        "kind": "compound",
+        "children": children,
+        "loc": node.get("loc").cloned().unwrap_or(Value::Null),
+        "identifiers": effective_locals,
+        "helpers": vue3_for_helpers_for_content(&helper_source),
+    })
+}
+
 pub fn cache_static_projection(payload: &Value) -> Value {
     let root = payload.get("root").unwrap_or(&Value::Null);
     let context = payload.get("context").unwrap_or(&Value::Null);
@@ -4262,6 +4381,828 @@ fn transform_on_expression_source(exp: &Value) -> String {
         .and_then(|loc| json_str(loc, "source"))
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| model_expression_source(exp))
+}
+
+fn process_expression_locals(payload: &Value, context: &Value) -> Vec<String> {
+    if let Some(locals) = payload.get("localVars").and_then(Value::as_object) {
+        return locals
+            .iter()
+            .filter(|(_, count)| count.as_i64().unwrap_or(1) > 0)
+            .map(|(name, _)| name.clone())
+            .collect();
+    }
+    transform_context_locals(context)
+}
+
+fn process_expression_is_const_binding(raw: &str, options: &Vue3CompilerOptions) -> bool {
+    matches!(
+        options.binding_metadata.get(raw).map(String::as_str),
+        Some("setup-const" | "literal-const")
+    )
+}
+
+fn process_expression_is_static_literal(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    matches!(trimmed, "true" | "false" | "null" | "this")
+        || trimmed.ends_with('n')
+            && trimmed[..trimmed.len().saturating_sub(1)]
+                .parse::<i128>()
+                .is_ok()
+        || trimmed.parse::<f64>().is_ok()
+}
+
+fn process_expression_uses_supported_external_plugin(raw: &str, context: &Value) -> bool {
+    raw.contains("|>")
+        && context
+            .get("expressionPlugins")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .any(|plugin| {
+                plugin
+                    .as_str()
+                    .is_some_and(|name| name == "pipelineOperator")
+                    || plugin
+                        .as_array()
+                        .and_then(|items| items.first())
+                        .and_then(Value::as_str)
+                        == Some("pipelineOperator")
+            })
+}
+
+fn process_expression_rewrite_source(
+    raw: &str,
+    options: &Vue3CompilerOptions,
+    locals: &[String],
+) -> String {
+    if locals.is_empty() {
+        rewrite_js_like_expression(raw, options)
+    } else {
+        rewrite_js_like_expression_with_locals(raw, options, locals)
+    }
+}
+
+fn process_expression_compound_children(
+    raw: &str,
+    options: &Vue3CompilerOptions,
+    locals: &[String],
+    loc: &Value,
+) -> Vec<Value> {
+    let mut identifiers = process_expression_identifier_spans(raw, options, locals);
+    identifiers.sort_by_key(|identifier| (identifier.start, identifier.end));
+    let mut filtered = Vec::<ProcessExpressionIdentifier>::new();
+    for identifier in identifiers {
+        if identifier.start >= identifier.end || identifier.end > raw.len() {
+            continue;
+        }
+        if filtered
+            .last()
+            .is_some_and(|previous| identifier.start < previous.end)
+        {
+            continue;
+        }
+        filtered.push(identifier);
+    }
+
+    let mut children = Vec::new();
+    for (index, identifier) in filtered.iter().enumerate() {
+        let leading_start = filtered
+            .get(index.wrapping_sub(1))
+            .map(|last| last.end)
+            .unwrap_or(0);
+        if leading_start < identifier.start || identifier.prefix.is_some() {
+            children.push(json!(format!(
+                "{}{}",
+                raw.get(leading_start..identifier.start).unwrap_or_default(),
+                identifier.prefix.as_deref().unwrap_or("")
+            )));
+        }
+        let source = raw
+            .get(identifier.start..identifier.end)
+            .unwrap_or_default()
+            .to_string();
+        children.push(json!({
+            "kind": "simple",
+            "content": identifier.content,
+            "isStatic": false,
+            "constType": if identifier.is_constant { 3 } else { 0 },
+            "loc": vue3_for_child_loc(loc, raw, identifier.start, identifier.end),
+        }));
+        if index + 1 == filtered.len() && identifier.end < raw.len() {
+            children.push(json!(raw[identifier.end..].to_string()));
+        }
+        let _ = source;
+    }
+    children
+}
+
+fn process_expression_params_projection(
+    raw: &str,
+    node: &Value,
+    context: &Value,
+    options: &Vue3CompilerOptions,
+) -> Value {
+    let source = format!("({raw})=>{{}}");
+    let store = JsAstStore::new();
+    if store
+        .parse_expression(&source, transform_on_source_type(context))
+        .is_err()
+    {
+        return json!({
+            "kind": "error",
+            "code": 46,
+            "loc": node.get("loc").cloned().unwrap_or(Value::Null),
+            "message": "Error parsing JavaScript expression: Unexpected token",
+        });
+    }
+    let children =
+        process_expression_params_children(raw, options, node.get("loc").unwrap_or(&Value::Null));
+    if children.is_empty() {
+        return json!({
+            "kind": "setConstType",
+            "constType": 3,
+        });
+    }
+    let identifiers = vue3_for_alias_locals(raw);
+    let mut helper_source = String::new();
+    for child in &children {
+        if let Some(content) = child.get("content").and_then(Value::as_str) {
+            helper_source.push_str(content);
+        }
+    }
+    json!({
+        "kind": "compound",
+        "children": children,
+        "loc": node.get("loc").cloned().unwrap_or(Value::Null),
+        "identifiers": identifiers,
+        "helpers": vue3_for_helpers_for_content(&helper_source),
+    })
+}
+
+fn process_expression_params_children(
+    raw: &str,
+    options: &Vue3CompilerOptions,
+    loc: &Value,
+) -> Vec<Value> {
+    let mut identifiers = process_expression_param_identifier_spans(raw, (0, raw.len()), options);
+    identifiers.sort_by_key(|identifier| (identifier.start, identifier.end));
+    let mut filtered = Vec::<ProcessExpressionIdentifier>::new();
+    for identifier in identifiers {
+        if filtered
+            .last()
+            .is_some_and(|previous| identifier.start < previous.end)
+        {
+            continue;
+        }
+        filtered.push(identifier);
+    }
+    process_expression_children_from_identifiers(raw, loc, &filtered)
+}
+
+fn process_expression_children_from_identifiers(
+    raw: &str,
+    loc: &Value,
+    identifiers: &[ProcessExpressionIdentifier],
+) -> Vec<Value> {
+    let mut children = Vec::new();
+    for (index, identifier) in identifiers.iter().enumerate() {
+        let leading_start = identifiers
+            .get(index.wrapping_sub(1))
+            .map(|last| last.end)
+            .unwrap_or(0);
+        if leading_start < identifier.start || identifier.prefix.is_some() {
+            children.push(json!(format!(
+                "{}{}",
+                raw.get(leading_start..identifier.start).unwrap_or_default(),
+                identifier.prefix.as_deref().unwrap_or("")
+            )));
+        }
+        children.push(json!({
+            "kind": "simple",
+            "content": identifier.content,
+            "isStatic": false,
+            "constType": if identifier.is_constant { 3 } else { 0 },
+            "loc": vue3_for_child_loc(loc, raw, identifier.start, identifier.end),
+        }));
+        if index + 1 == identifiers.len() && identifier.end < raw.len() {
+            children.push(json!(raw[identifier.end..].to_string()));
+        }
+    }
+    children
+}
+
+#[derive(Clone, Debug)]
+struct ProcessExpressionIdentifier {
+    start: usize,
+    end: usize,
+    content: String,
+    prefix: Option<String>,
+    is_constant: bool,
+}
+
+#[derive(Clone, Debug)]
+struct ProcessExpressionArrowBinding {
+    name: String,
+    param_start: usize,
+    param_end: usize,
+    body_start: usize,
+    body_end: usize,
+}
+
+#[derive(Clone, Debug)]
+struct ProcessExpressionAssignmentRhs<'a> {
+    operator: &'a str,
+    source: &'a str,
+}
+
+fn process_expression_identifier_spans(
+    raw: &str,
+    options: &Vue3CompilerOptions,
+    locals: &[String],
+) -> Vec<ProcessExpressionIdentifier> {
+    let mut spans = Vec::new();
+    let mut quote = None::<char>;
+    let mut escaped = false;
+    let chars = raw.char_indices().collect::<Vec<_>>();
+    let mut index = 0usize;
+    let arrow_bindings = process_expression_arrow_bindings(raw);
+    while index < chars.len() {
+        let start = chars[index].0;
+        let ch = chars[index].1;
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == active_quote {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        if matches!(ch, '\'' | '"' | '`') {
+            quote = Some(ch);
+            index += 1;
+            continue;
+        }
+        if !is_identifier_start(ch) {
+            index += 1;
+            continue;
+        }
+        index += 1;
+        while index < chars.len() && is_identifier_continue(chars[index].1) {
+            index += 1;
+        }
+        let end = chars.get(index).map_or(raw.len(), |(offset, _)| *offset);
+        let ident = &raw[start..end];
+        let prev = previous_non_ws(raw, start);
+        let next = next_non_ws(raw, end);
+        if is_keyword(ident) {
+            continue;
+        }
+        if matches!(ident, "true" | "false" | "null" | "this") {
+            continue;
+        }
+        let local = locals.iter().any(|local| local == ident);
+        let property_key = next == Some(':') && prev != Some('?');
+        let static_member = prev == Some('.');
+        let function_name = process_expression_function_name(raw, start);
+        let method_name = process_expression_method_name(raw, start, end);
+        if method_name {
+            continue;
+        }
+        let arrow_param = process_expression_is_arrow_param(&arrow_bindings, ident, start, end);
+        let arrow_local = process_expression_is_arrow_local(&arrow_bindings, ident, start, end);
+        let function_param =
+            arrow_param || function_name || process_expression_is_function_param(raw, start);
+        if property_key && !function_param {
+            continue;
+        }
+        let is_global = is_global_or_literal(ident);
+        let assignment_rhs = process_expression_assignment_rhs(raw, start, end);
+        let content = if static_member || local || function_param || arrow_local || is_global {
+            ident.to_string()
+        } else {
+            process_expression_rewrite_identifier(
+                ident,
+                options,
+                assignment_rhs.as_ref(),
+                process_expression_update_argument(raw, start, end),
+                locals,
+            )
+        };
+        let prefix = if (property_key || process_expression_object_shorthand(raw, start, end))
+            && content != ident
+        {
+            Some(format!("{ident}: "))
+        } else {
+            None
+        };
+        let dynamic_static_reference = (static_member || is_global)
+            && process_expression_dynamic_static_reference(raw, start, end);
+        spans.push(ProcessExpressionIdentifier {
+            start,
+            end,
+            content,
+            prefix,
+            is_constant: ((static_member || is_global) && !dynamic_static_reference)
+                || function_param
+                || arrow_local,
+        });
+    }
+    spans
+}
+
+fn process_expression_param_identifier_spans(
+    raw: &str,
+    range: (usize, usize),
+    options: &Vue3CompilerOptions,
+) -> Vec<ProcessExpressionIdentifier> {
+    let mut spans = Vec::new();
+    let mut quote = None::<char>;
+    let mut escaped = false;
+    let chars = raw[range.0..range.1]
+        .char_indices()
+        .map(|(offset, ch)| (range.0 + offset, ch))
+        .collect::<Vec<_>>();
+    let mut index = 0usize;
+    while index < chars.len() {
+        let start = chars[index].0;
+        let ch = chars[index].1;
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == active_quote {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        if matches!(ch, '\'' | '"' | '`') {
+            quote = Some(ch);
+            index += 1;
+            continue;
+        }
+        if !is_identifier_start(ch) {
+            index += 1;
+            continue;
+        }
+        index += 1;
+        while index < chars.len() && is_identifier_continue(chars[index].1) {
+            index += 1;
+        }
+        let end = chars.get(index).map_or(range.1, |(offset, _)| *offset);
+        let ident = &raw[start..end];
+        if is_keyword(ident) || next_non_ws(raw, end) == Some(':') {
+            continue;
+        }
+        if process_expression_param_default_rhs(raw, range.0, start) {
+            let content = if is_global_or_literal(ident) {
+                ident.to_string()
+            } else {
+                process_expression_rewrite_identifier(ident, options, None, false, &[])
+            };
+            spans.push(ProcessExpressionIdentifier {
+                start,
+                end,
+                content,
+                prefix: None,
+                is_constant: is_global_or_literal(ident),
+            });
+        } else {
+            spans.push(ProcessExpressionIdentifier {
+                start,
+                end,
+                content: ident.to_string(),
+                prefix: None,
+                is_constant: true,
+            });
+        }
+    }
+    spans
+}
+
+fn process_expression_function_name(raw: &str, start: usize) -> bool {
+    let prefix = raw[..start].trim_end();
+    prefix.ends_with("function") || prefix.ends_with("function*")
+}
+
+fn process_expression_method_name(raw: &str, start: usize, end: usize) -> bool {
+    if !previous_non_ws(raw, start).is_some_and(|prev| matches!(prev, '{' | ',')) {
+        return false;
+    }
+    let Some(open) = next_non_ws_index(raw, end).filter(|(_, ch)| *ch == '(') else {
+        return false;
+    };
+    let Some(close) = find_matching_forward(raw, open.0, '(', ')') else {
+        return false;
+    };
+    next_non_ws_index(raw, close + 1).is_some_and(|(_, ch)| ch == '{')
+}
+
+fn process_expression_is_function_param(raw: &str, start: usize) -> bool {
+    let prefix = raw[..start].trim_end();
+    let Some(open) = prefix.rfind('(') else {
+        return false;
+    };
+    let before_open = prefix[..open].trim_end();
+    before_open.ends_with("function") || before_open.ends_with("function*")
+}
+
+fn process_expression_is_arrow_param(
+    bindings: &[ProcessExpressionArrowBinding],
+    ident: &str,
+    start: usize,
+    end: usize,
+) -> bool {
+    bindings.iter().any(|binding| {
+        binding.name == ident && binding.param_start == start && binding.param_end == end
+    })
+}
+
+fn process_expression_is_arrow_local(
+    bindings: &[ProcessExpressionArrowBinding],
+    ident: &str,
+    start: usize,
+    end: usize,
+) -> bool {
+    bindings.iter().any(|binding| {
+        binding.name == ident && binding.body_start <= start && end <= binding.body_end
+    })
+}
+
+fn process_expression_object_shorthand(raw: &str, start: usize, end: usize) -> bool {
+    previous_non_ws(raw, start).is_some_and(|prev| matches!(prev, '{' | ','))
+        && next_non_ws(raw, end).is_some_and(|next| matches!(next, '}' | ','))
+}
+
+fn process_expression_rewrite_identifier(
+    ident: &str,
+    options: &Vue3CompilerOptions,
+    assignment_rhs: Option<&ProcessExpressionAssignmentRhs<'_>>,
+    update_argument: bool,
+    locals: &[String],
+) -> String {
+    match options.binding_metadata.get(ident).map(String::as_str) {
+        Some("setup-ref") if options.inline => format!("{ident}.value"),
+        Some("setup-maybe-ref") if options.inline => {
+            if assignment_rhs.is_some() || update_argument {
+                format!("{ident}.value")
+            } else {
+                format!("_unref({ident})")
+            }
+        }
+        Some("setup-let") if options.inline => {
+            if let Some(rhs) = assignment_rhs {
+                let rewritten_rhs = process_expression_rewrite_source(rhs.source, options, locals);
+                format!(
+                    "_isRef({ident}) ? {ident}.value {} {} : {ident}",
+                    rhs.operator,
+                    rewritten_rhs.trim()
+                )
+            } else if update_argument {
+                format!("_isRef({ident}) ? {ident}.value++ : {ident}++")
+            } else {
+                format!("_unref({ident})")
+            }
+        }
+        _ => rewrite_identifier(ident, options),
+    }
+}
+
+fn process_expression_arrow_bindings(raw: &str) -> Vec<ProcessExpressionArrowBinding> {
+    let mut bindings = Vec::new();
+    for arrow in process_expression_arrow_offsets(raw) {
+        let Some(param_range) = process_expression_arrow_param_range(raw, arrow) else {
+            continue;
+        };
+        let body_start = skip_ws_forward(raw, arrow + 2);
+        let body_end = process_expression_arrow_body_end(raw, body_start);
+        for (param_start, param_end) in process_expression_param_binding_spans(raw, param_range) {
+            bindings.push(ProcessExpressionArrowBinding {
+                name: raw[param_start..param_end].to_string(),
+                param_start,
+                param_end,
+                body_start,
+                body_end,
+            });
+        }
+    }
+    bindings
+}
+
+fn process_expression_arrow_offsets(raw: &str) -> Vec<usize> {
+    let mut offsets = Vec::new();
+    let mut quote = None::<char>;
+    let mut escaped = false;
+    let chars = raw.char_indices().collect::<Vec<_>>();
+    let mut index = 0usize;
+    while index < chars.len() {
+        let (offset, ch) = chars[index];
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == active_quote {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        if matches!(ch, '\'' | '"' | '`') {
+            quote = Some(ch);
+            index += 1;
+            continue;
+        }
+        if ch == '=' && raw[offset..].starts_with("=>") {
+            offsets.push(offset);
+            index += 2;
+            continue;
+        }
+        index += 1;
+    }
+    offsets
+}
+
+fn process_expression_arrow_param_range(raw: &str, arrow: usize) -> Option<(usize, usize)> {
+    let (param_end, end_char) = previous_non_ws_index(raw, arrow)?;
+    if end_char == ')' {
+        let open = find_matching_backward(raw, param_end, '(', ')')?;
+        return Some((open + 1, param_end));
+    }
+    if !is_identifier_continue(end_char) {
+        return None;
+    }
+    let mut start = param_end;
+    while start > 0 {
+        let Some((prev, ch)) = previous_char(raw, start) else {
+            break;
+        };
+        if !is_identifier_continue(ch) {
+            break;
+        }
+        start = prev;
+    }
+    Some((start, param_end + end_char.len_utf8()))
+}
+
+fn process_expression_param_binding_spans(raw: &str, range: (usize, usize)) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut quote = None::<char>;
+    let mut escaped = false;
+    let chars = raw[range.0..range.1]
+        .char_indices()
+        .map(|(offset, ch)| (range.0 + offset, ch))
+        .collect::<Vec<_>>();
+    let mut index = 0usize;
+    while index < chars.len() {
+        let start = chars[index].0;
+        let ch = chars[index].1;
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == active_quote {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        if matches!(ch, '\'' | '"' | '`') {
+            quote = Some(ch);
+            index += 1;
+            continue;
+        }
+        if !is_identifier_start(ch) {
+            index += 1;
+            continue;
+        }
+        index += 1;
+        while index < chars.len() && is_identifier_continue(chars[index].1) {
+            index += 1;
+        }
+        let end = chars.get(index).map_or(range.1, |(offset, _)| *offset);
+        let ident = &raw[start..end];
+        if is_keyword(ident)
+            || process_expression_param_default_rhs(raw, range.0, start)
+            || next_non_ws(raw, end) == Some(':')
+        {
+            continue;
+        }
+        spans.push((start, end));
+    }
+    spans
+}
+
+fn process_expression_param_default_rhs(raw: &str, range_start: usize, start: usize) -> bool {
+    let mut offset = start;
+    while offset > range_start {
+        let Some((prev, ch)) = previous_char(raw, offset) else {
+            break;
+        };
+        if ch.is_whitespace() {
+            offset = prev;
+            continue;
+        }
+        return ch == '=';
+    }
+    false
+}
+
+fn process_expression_arrow_body_end(raw: &str, body_start: usize) -> usize {
+    if raw[body_start..].starts_with('{') {
+        return find_matching_forward(raw, body_start, '{', '}')
+            .map(|end| end + 1)
+            .unwrap_or(raw.len());
+    }
+    let mut quote = None::<char>;
+    let mut escaped = false;
+    let mut depth = 0usize;
+    for (offset, ch) in raw[body_start..].char_indices() {
+        let absolute = body_start + offset;
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(ch, '\'' | '"' | '`') {
+            quote = Some(ch);
+            continue;
+        }
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' if depth == 0 => return absolute,
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            ',' | ';' if depth == 0 => return absolute,
+            _ => {}
+        }
+    }
+    raw.len()
+}
+
+fn process_expression_assignment_rhs<'a>(
+    raw: &'a str,
+    start: usize,
+    end: usize,
+) -> Option<ProcessExpressionAssignmentRhs<'a>> {
+    if !previous_non_ws(raw, start).is_none_or(|prev| matches!(prev, '(' | '{' | '[' | ',' | ';')) {
+        return None;
+    }
+    let operator_start = skip_ws_forward(raw, end);
+    let operator = process_expression_assignment_operator(raw, operator_start)?;
+    let rhs_start = skip_ws_forward(raw, operator_start + operator.len());
+    let rhs_end = process_expression_assignment_rhs_end(raw, rhs_start);
+    let source = raw.get(rhs_start..rhs_end)?.trim();
+    (!source.is_empty()).then_some(ProcessExpressionAssignmentRhs { operator, source })
+}
+
+fn process_expression_assignment_operator(raw: &str, start: usize) -> Option<&str> {
+    [
+        ">>>=", "<<=", ">>=", "**=", "&&=", "||=", "??=", "+=", "-=", "*=", "/=", "%=", "&=", "|=",
+        "^=", "=",
+    ]
+    .into_iter()
+    .find(|operator| raw[start..].starts_with(operator) && !raw[start..].starts_with("=>"))
+}
+
+fn process_expression_assignment_rhs_end(raw: &str, rhs_start: usize) -> usize {
+    let mut quote = None::<char>;
+    let mut escaped = false;
+    let mut depth = 0usize;
+    for (offset, ch) in raw[rhs_start..].char_indices() {
+        let absolute = rhs_start + offset;
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(ch, '\'' | '"' | '`') {
+            quote = Some(ch);
+            continue;
+        }
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' if depth == 0 => return raw[..absolute].trim_end().len(),
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            ',' | ';' if depth == 0 => return raw[..absolute].trim_end().len(),
+            _ => {}
+        }
+    }
+    raw.trim_end().len()
+}
+
+fn process_expression_dynamic_static_reference(raw: &str, start: usize, end: usize) -> bool {
+    next_non_ws(raw, end) == Some('(') || process_expression_preceded_by_new(raw, start)
+}
+
+fn process_expression_preceded_by_new(raw: &str, start: usize) -> bool {
+    let prefix = raw[..start].trim_end();
+    prefix.strip_suffix("new").is_some_and(|before| {
+        before
+            .chars()
+            .last()
+            .is_none_or(|ch| !is_identifier_continue(ch))
+    })
+}
+
+fn skip_ws_forward(raw: &str, mut offset: usize) -> usize {
+    while offset < raw.len() {
+        let Some(ch) = raw[offset..].chars().next() else {
+            break;
+        };
+        if !ch.is_whitespace() {
+            break;
+        }
+        offset += ch.len_utf8();
+    }
+    offset
+}
+
+fn previous_non_ws_index(source: &str, offset: usize) -> Option<(usize, char)> {
+    source[..offset]
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| !ch.is_whitespace())
+}
+
+fn next_non_ws_index(source: &str, offset: usize) -> Option<(usize, char)> {
+    source[offset..]
+        .char_indices()
+        .find(|(_, ch)| !ch.is_whitespace())
+        .map(|(relative, ch)| (offset + relative, ch))
+}
+
+fn previous_char(source: &str, offset: usize) -> Option<(usize, char)> {
+    source[..offset].char_indices().next_back()
+}
+
+fn find_matching_forward(raw: &str, open: usize, open_ch: char, close_ch: char) -> Option<usize> {
+    let mut quote = None::<char>;
+    let mut escaped = false;
+    let mut depth = 0usize;
+    for (offset, ch) in raw[open..].char_indices() {
+        let absolute = open + offset;
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(ch, '\'' | '"' | '`') {
+            quote = Some(ch);
+            continue;
+        }
+        if ch == open_ch {
+            depth += 1;
+        } else if ch == close_ch {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                return Some(absolute);
+            }
+        }
+    }
+    None
+}
+
+fn find_matching_backward(raw: &str, close: usize, open_ch: char, close_ch: char) -> Option<usize> {
+    let mut depth = 0usize;
+    for (offset, ch) in raw[..=close].char_indices().rev() {
+        if ch == close_ch {
+            depth += 1;
+        } else if ch == open_ch {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                return Some(offset);
+            }
+        }
+    }
+    None
+}
+
+fn process_expression_update_argument(raw: &str, start: usize, end: usize) -> bool {
+    raw.get(end..).is_some_and(|tail| {
+        tail.trim_start().starts_with("++") || tail.trim_start().starts_with("--")
+    }) || raw
+        .get(..start)
+        .is_some_and(|head| head.trim_end().ends_with("++") || head.trim_end().ends_with("--"))
 }
 
 fn transform_on_projection_const_type(projection: &Value) -> u64 {
@@ -9635,6 +10576,124 @@ mod tests {
             interpolation.span.source(),
             Some(Span::new(FileId(7), 47, 56))
         );
+    }
+
+    fn process_expression_test_projection(content: &str, context: Value) -> Value {
+        process_expression_projection(&json!({
+            "node": {
+                "type": 4,
+                "content": content,
+                "isStatic": false,
+                "loc": {
+                    "start": { "offset": 0, "line": 1, "column": 1 },
+                    "end": { "offset": content.len(), "line": 1, "column": content.len() + 1 },
+                    "source": content
+                }
+            },
+            "context": context
+        }))
+    }
+
+    #[test]
+    fn process_expression_projection_prefixes_simple_identifier() {
+        let projection = process_expression_test_projection(
+            "foo",
+            json!({ "prefixIdentifiers": true, "identifiers": {}, "bindingMetadata": {} }),
+        );
+
+        assert_eq!(projection["kind"], json!("simple"));
+        assert_eq!(projection["content"], json!("_ctx.foo"));
+        assert_eq!(projection["constType"], json!(0));
+    }
+
+    #[test]
+    fn process_expression_projection_prefixes_object_shorthand_value() {
+        let projection = process_expression_test_projection(
+            "{ foo }",
+            json!({ "prefixIdentifiers": true, "identifiers": {}, "bindingMetadata": {} }),
+        );
+
+        assert_eq!(projection["kind"], json!("compound"));
+        assert_eq!(projection["children"][0], json!("{ foo: "));
+        assert_eq!(projection["children"][1]["content"], json!("_ctx.foo"));
+        assert_eq!(projection["children"][2], json!(" }"));
+    }
+
+    #[test]
+    fn process_expression_projection_keeps_static_object_literal_simple() {
+        let projection = process_expression_test_projection(
+            "{ foo: true }",
+            json!({ "prefixIdentifiers": true, "identifiers": {}, "bindingMetadata": {} }),
+        );
+
+        assert_eq!(projection["kind"], json!("setConstType"));
+        assert_eq!(projection["constType"], json!(3));
+    }
+
+    #[test]
+    fn process_expression_projection_preserves_slot_params_as_bindings() {
+        let projection = process_expression_projection(&json!({
+            "node": {
+                "type": 4,
+                "content": "{ foo }",
+                "isStatic": false,
+                "loc": {
+                    "start": { "offset": 0, "line": 1, "column": 1 },
+                    "end": { "offset": 7, "line": 1, "column": 8 },
+                    "source": "{ foo }"
+                }
+            },
+            "context": { "prefixIdentifiers": true, "identifiers": {}, "bindingMetadata": {} },
+            "asParams": true
+        }));
+
+        assert_eq!(projection["kind"], json!("compound"));
+        assert_eq!(projection["children"][0], json!("{ "));
+        assert_eq!(projection["children"][1]["content"], json!("foo"));
+        assert_eq!(projection["children"][2], json!(" }"));
+        assert_eq!(projection["identifiers"], json!(["foo"]));
+    }
+
+    #[test]
+    fn process_expression_projection_keeps_arrow_params_scoped_to_arrow_body() {
+        let projection = process_expression_test_projection(
+            "{ a: foo => foo, b: foo }",
+            json!({ "prefixIdentifiers": true, "identifiers": {}, "bindingMetadata": {} }),
+        );
+        let children = &projection["children"];
+
+        assert_eq!(projection["kind"], json!("compound"));
+        assert_eq!(children[0], json!("{ a: "));
+        assert_eq!(children[1]["content"], json!("foo"));
+        assert_eq!(children[2], json!(" => "));
+        assert_eq!(children[3]["content"], json!("foo"));
+        assert_eq!(children[4], json!(", b: "));
+        assert_eq!(children[5]["content"], json!("_ctx.foo"));
+        assert_eq!(children[6], json!(" }"));
+    }
+
+    #[test]
+    fn process_expression_projection_rewrites_setup_let_assignment_rhs() {
+        let projection = process_expression_test_projection(
+            "(async () => { x = await bar })()",
+            json!({
+                "prefixIdentifiers": true,
+                "inline": true,
+                "identifiers": {},
+                "bindingMetadata": {
+                    "x": "setup-let",
+                    "bar": "setup-const"
+                }
+            }),
+        );
+
+        assert_eq!(projection["kind"], json!("compound"));
+        assert_eq!(
+            projection["children"][1]["content"],
+            json!("_isRef(x) ? x.value = await bar : x")
+        );
+        assert_eq!(projection["children"][3]["content"], json!("bar"));
+        assert_eq!(projection["helpers"], json!(["IS_REF"]));
     }
 
     #[test]

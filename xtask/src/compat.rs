@@ -3497,7 +3497,7 @@ const vue3CoreRuntime = (() => {
     }
     const out = {};
     for (const key of Object.keys(value)) {
-      if (key === 'loc' || key === 'type' || key === 'tag' || key === 'tagType' || key === 'content' || key === 'isStatic' || key === 'constType' || key === 'props' || key === 'children' || key === 'codegenNode' || key === 'patchFlag' || key === 'dynamicProps' || key === 'directives' || key === 'isBlock' || key === 'isComponent' || key === 'disableTracking' || key === 'branches' || key === 'source' || key === 'parseResult' || key === 'valueAlias' || key === 'keyAlias' || key === 'objectIndexAlias' || key === 'returns' || key === 'body' || key === 'params' || key === 'newline' || key === 'isSlot' || key === 'isNonScopedSlot' || key === 'needPauseTracking' || key === 'inVOnce' || key === 'needArraySpread' || key === 'index' || key === 'elements' || key === 'test' || key === 'consequent' || key === 'alternate' || key === 'left' || key === 'right' || key === 'expressions' || key === 'helpers' || key === 'ssrHelpers' || key === 'components' || key === 'directives' || key === 'imports' || key === 'hoists' || key === 'cached' || key === 'temps' || key === 'properties' || key === 'key' || key === 'value' || key === 'arguments' || key === 'callee' || key === 'name' || key === 'arg' || key === 'exp' || key === 'modifiers') {
+      if (key === 'loc' || key === 'start' || key === 'end' || key === 'offset' || key === 'line' || key === 'column' || key === 'type' || key === 'tag' || key === 'tagType' || key === 'content' || key === 'isStatic' || key === 'constType' || key === 'props' || key === 'children' || key === 'codegenNode' || key === 'patchFlag' || key === 'dynamicProps' || key === 'directives' || key === 'isBlock' || key === 'isComponent' || key === 'disableTracking' || key === 'branches' || key === 'source' || key === 'parseResult' || key === 'valueAlias' || key === 'keyAlias' || key === 'objectIndexAlias' || key === 'returns' || key === 'body' || key === 'params' || key === 'newline' || key === 'isSlot' || key === 'isNonScopedSlot' || key === 'needPauseTracking' || key === 'inVOnce' || key === 'needArraySpread' || key === 'index' || key === 'elements' || key === 'test' || key === 'consequent' || key === 'alternate' || key === 'left' || key === 'right' || key === 'expressions' || key === 'helpers' || key === 'ssrHelpers' || key === 'components' || key === 'directives' || key === 'imports' || key === 'hoists' || key === 'cached' || key === 'temps' || key === 'properties' || key === 'key' || key === 'value' || key === 'arguments' || key === 'callee' || key === 'name' || key === 'arg' || key === 'exp' || key === 'modifiers') {
         out[key] = runtime.dehydrateForBridge(value[key], seen);
       }
     }
@@ -4592,280 +4592,14 @@ const vue3CoreRuntime = (() => {
   runtime.noopDirectiveTransform = () => ({ props: [] });
   runtime.processExpression = function processExpression(node, context, asParams = false, asRawStatements = false, localVars) {
     if (!node || node.type !== NodeTypes.SIMPLE_EXPRESSION) return node;
-    const rawExp = String(node.content || '');
-    if (!context || !context.prefixIdentifiers || !rawExp.trim()) return node;
-    const identifiers = localVars || Object.create(context.identifiers || null);
-    const bindingMetadata = context.bindingMetadata || {};
-    const literalAllowed = raw => raw === 'true' || raw === 'false' || raw === 'null' || raw === 'this';
-
-    const rewriteIdentifier = (raw, parent, id) => {
-      const type = Object.prototype.hasOwnProperty.call(bindingMetadata, raw) && bindingMetadata[raw];
-      if (context.inline) {
-        const isAssignmentLVal = parent && parent.type === 'AssignmentExpression' && parent.left === id;
-        const isUpdateArg = parent && parent.type === 'UpdateExpression' && parent.argument === id;
-        if (type === runtime.BindingTypes.SETUP_REF) return `${raw}.value`;
-        if (type === runtime.BindingTypes.SETUP_MAYBE_REF) {
-          return isAssignmentLVal || isUpdateArg ? `${raw}.value` : `${context.helperString(runtime.UNREF)}(${raw})`;
-        }
-        if (type === runtime.BindingTypes.SETUP_LET) {
-          if (isAssignmentLVal && parent.right) {
-            const rExp = rawExp.slice(parent.right.start - 1, parent.right.end - 1);
-            const rExpString = runtime.stringifyExpression(runtime.processExpression(
-              runtime.createSimpleExpression(rExp, false),
-              context,
-              false,
-              false,
-              knownIds || identifiers,
-            ));
-            return `${context.helperString(runtime.IS_REF)}(${raw}) ? ${raw}.value ${parent.operator} ${rExpString} : ${raw}`;
-          }
-          if (isUpdateArg) return `${context.helperString(runtime.IS_REF)}(${raw}) ? ${raw}.value${parent.operator} : ${raw}${parent.operator}`;
-          return `${context.helperString(runtime.UNREF)}(${raw})`;
-        }
-        if (type === runtime.BindingTypes.SETUP_CONST || type === runtime.BindingTypes.LITERAL_CONST || type === runtime.BindingTypes.SETUP_REACTIVE_CONST) return raw;
-        if (type === runtime.BindingTypes.PROPS) return `__props.${raw}`;
-        if (type === runtime.BindingTypes.PROPS_ALIASED) return `__props[${JSON.stringify((bindingMetadata.__propsAliases || {})[raw] || raw)}]`;
-      } else if (type) {
-        if (String(type).startsWith('setup') || type === runtime.BindingTypes.LITERAL_CONST) return `$setup.${raw}`;
-        if (type === runtime.BindingTypes.PROPS_ALIASED) return `$props[${JSON.stringify((bindingMetadata.__propsAliases || {})[raw] || raw)}]`;
-        return `$${type}.${raw}`;
-      }
-      return `_ctx.${raw}`;
-    };
-
-    if (runtime.isSimpleIdentifier(rawExp)) {
-      const isLocal = identifiers[rawExp];
-      const isGlobal = runtime.isGloballyAllowed(rawExp);
-      const isLiteral = literalAllowed(rawExp);
-      if (!asParams && !isLocal && !isLiteral && (!isGlobal || bindingMetadata[rawExp])) {
-        node.content = rewriteIdentifier(rawExp);
-        if (bindingMetadata[rawExp] === runtime.BindingTypes.SETUP_CONST || bindingMetadata[rawExp] === runtime.BindingTypes.LITERAL_CONST) {
-          node.constType = ConstantTypes.CAN_SKIP_PATCH;
-        }
-      } else if (!isLocal) {
-        node.constType = isLiteral ? ConstantTypes.CAN_STRINGIFY : ConstantTypes.CAN_CACHE;
-      }
-      return node;
-    }
-
-    const parser = runtime.getBabelParser();
-    if (!parser) return processExpressionByLexer(node, context, rawExp, rewriteIdentifier, identifiers, literalAllowed);
-    let ast;
-    const source = asRawStatements ? ` ${rawExp} ` : `(${rawExp})${asParams ? `=>{}` : ``}`;
-    try {
-      if (asRawStatements) {
-        ast = parser.parse(source, {
-          sourceType: 'module',
-          plugins: context.expressionPlugins || [],
-        });
-      } else {
-        ast = parser.parseExpression(source, {
-          sourceType: 'module',
-          plugins: context.expressionPlugins || [],
-        });
-      }
-      if (!asRawStatements && ast && ast.type === 'AssignmentExpression' && ast.left && ast.left.type === 'ObjectPattern') {
-        ast.left.type = 'ObjectExpression';
-      }
-    } catch (error) {
-      context.onError(runtime.createCompilerError(ErrorCodes.X_INVALID_EXPRESSION, node.loc, undefined, error && error.message ? error.message : String(error)));
-      return node;
-    }
-
-    const ids = [];
-    let knownIds = Object.create(identifiers || null);
-    const mark = name => {
-      if (!name) return;
-      knownIds[name] = (knownIds[name] || 0) + 1;
-    };
-    const extractPatternIds = pattern => {
-      const out = [];
-      const visitPattern = p => {
-        if (!p) return;
-        if (p.type === 'Identifier') out.push(p);
-        else if (p.type === 'RestElement') visitPattern(p.argument);
-        else if (p.type === 'AssignmentPattern') visitPattern(p.left);
-        else if (p.type === 'ArrayPattern') (p.elements || []).forEach(visitPattern);
-        else if (p.type === 'ObjectPattern') {
-          for (const prop of p.properties || []) {
-            if (prop.type === 'RestElement') visitPattern(prop.argument);
-            else visitPattern(prop.value || prop.argument || prop.key);
-          }
-        }
-      };
-      visitPattern(pattern);
-      return out;
-    };
-    const collectParamDefaultExpressions = (param, locals) => {
-      if (!param) return;
-      if (param.type === 'AssignmentPattern') visit(param.right, param, locals);
-      else if (param.type === 'ObjectPattern') {
-        for (const prop of param.properties || []) {
-          if (prop.type !== 'RestElement') collectParamDefaultExpressions(prop.value, locals);
-        }
-      } else if (param.type === 'ArrayPattern') {
-        (param.elements || []).forEach(item => collectParamDefaultExpressions(item, locals));
-      }
-    };
-    const addIdentifier = (id, replacement, prefix, isConstant) => {
-      if (id.start == null || id.end == null) return;
-      ids.push({ start: id.start - 1, end: id.end - 1, name: replacement || id.name, prefix: prefix || '', isConstant: !!isConstant });
-    };
-    const canPrefix = name => name !== 'require' && !runtime.isGloballyAllowed(name);
-    const visit = (n, parent, locals) => {
-      if (!n || typeof n.type !== 'string') return;
-      switch (n.type) {
-        case 'Identifier': {
-          const role = identifierRole(n, parent);
-          if (role.skip) return;
-          const isLocal = !!locals[n.name];
-          const isRef = role.reference;
-          if (isRef && !isLocal && canPrefix(n.name)) {
-            addIdentifier(n, rewriteIdentifier(n.name, parent, n), role.shorthand ? `${n.name}: ` : '', false);
-          } else {
-            const constant = !isLocal && !['CallExpression', 'NewExpression', 'MemberExpression', 'OptionalMemberExpression'].includes(parent && parent.type);
-            addIdentifier(n, n.name, '', constant);
-          }
-          return;
-        }
-        case 'FunctionExpression':
-        case 'FunctionDeclaration':
-        case 'ArrowFunctionExpression': {
-          if (n.id) addIdentifier(n.id, n.id.name, '', true);
-          for (const param of n.params || []) collectParamDefaultExpressions(param, locals);
-          const childLocals = Object.create(locals || null);
-          for (const param of n.params || []) {
-            for (const id of extractPatternIds(param)) {
-              addIdentifier(id, id.name, '', true);
-              markKnown(childLocals, id.name);
-            }
-          }
-          if (n.body) visit(n.body, n, childLocals);
-          return;
-        }
-        case 'ObjectProperty':
-        case 'Property': {
-          if (n.computed) visit(n.key, n, locals);
-          else if (n.key && n.key.type === 'Identifier') {
-            if (n.shorthand) {
-              const isLocal = !!locals[n.key.name];
-              const replacement = !isLocal && canPrefix(n.key.name) ? rewriteIdentifier(n.key.name, n, n.key) : n.key.name;
-              addIdentifier(n.key, replacement, `${n.key.name}: `, isLocal);
-              return;
-            }
-          }
-          visit(n.value, n, locals);
-          return;
-        }
-        case 'ObjectMethod': {
-          if (n.computed) visit(n.key, n, locals);
-          const childLocals = Object.create(locals || null);
-          for (const param of n.params || []) {
-            for (const id of extractPatternIds(param)) markKnown(childLocals, id.name);
-          }
-          visit(n.body, n, childLocals);
-          return;
-        }
-        case 'MemberExpression':
-        case 'OptionalMemberExpression':
-          visit(n.object, n, locals);
-          if (n.computed) visit(n.property, n, locals);
-          else if (n.property && n.property.type === 'Identifier') addIdentifier(n.property, n.property.name, '', false);
-          return;
-        case 'VariableDeclarator':
-          for (const id of extractPatternIds(n.id)) markKnown(locals, id.name);
-          visit(n.init, n, locals);
-          return;
-        case 'CatchClause': {
-          const childLocals = Object.create(locals || null);
-          for (const id of extractPatternIds(n.param)) markKnown(childLocals, id.name);
-          visit(n.body, n, childLocals);
-          return;
-        }
-      }
-      for (const key of Object.keys(n)) {
-        if (key === 'loc' || key === 'start' || key === 'end' || key === 'extra') continue;
-        const value = n[key];
-        if (Array.isArray(value)) value.forEach(child => visit(child, n, locals));
-        else if (value && typeof value.type === 'string') visit(value, n, locals);
-      }
-    };
-    const markKnown = (locals, name) => { if (name) locals[name] = (locals[name] || 0) + 1; };
-    const identifierRole = (id, parent) => {
-      if (!parent) return { reference: true };
-      if ((parent.type === 'ObjectProperty' || parent.type === 'Property') && parent.key === id && !parent.computed) {
-        return parent.shorthand ? { reference: true, shorthand: true } : { skip: true };
-      }
-      if ((parent.type === 'ObjectMethod' || parent.type === 'ClassMethod' || parent.type === 'ClassProperty') && parent.key === id && !parent.computed) return { skip: true };
-      if ((parent.type === 'MemberExpression' || parent.type === 'OptionalMemberExpression') && parent.property === id && !parent.computed) return { reference: false };
-      if ((parent.type === 'FunctionExpression' || parent.type === 'FunctionDeclaration') && parent.id === id) return { reference: false };
-      if (parent.type === 'LabeledStatement' && parent.label === id) return { skip: true };
-      if (parent.type === 'BreakStatement' || parent.type === 'ContinueStatement') return { skip: true };
-      if (parent.type === 'ImportSpecifier' || parent.type === 'ImportDefaultSpecifier' || parent.type === 'ImportNamespaceSpecifier') return { skip: true };
-      return { reference: true };
-    };
-    visit(unwrapExpressionAst(ast), null, knownIds);
-    ids.sort((a, b) => a.start - b.start || a.end - b.end);
-    const filtered = [];
-    for (const id of ids) {
-      if (id.start < 0 || id.end > rawExp.length || id.end <= id.start) continue;
-      const prev = filtered[filtered.length - 1];
-      if (prev && id.start < prev.end) continue;
-      filtered.push(id);
-    }
-    if (!filtered.length) {
-      node.constType = ConstantTypes.CAN_STRINGIFY;
-      return node;
-    }
-    const children = [];
-    for (let i = 0; i < filtered.length; i++) {
-      const id = filtered[i];
-      const last = filtered[i - 1];
-      const leadingText = rawExp.slice(last ? last.end : 0, id.start);
-      if (leadingText.length || id.prefix) children.push(leadingText + (id.prefix || ''));
-      const source = rawExp.slice(id.start, id.end);
-      children.push(runtime.createSimpleExpression(
-        id.name,
-        false,
-        {
-          start: runtime.advancePositionWithClone(node.loc.start, rawExp, id.start),
-          end: runtime.advancePositionWithClone(node.loc.start, rawExp, id.end),
-          source,
-        },
-        id.isConstant ? ConstantTypes.CAN_STRINGIFY : ConstantTypes.NOT_CONSTANT,
-      ));
-      if (i === filtered.length - 1 && id.end < rawExp.length) children.push(rawExp.slice(id.end));
-    }
-    const ret = runtime.createCompoundExpression(children, node.loc);
-    ret.ast = ast;
-    ret.identifiers = Object.keys(knownIds);
-    return ret;
-
-    function unwrapExpressionAst(parsed) {
-      if (!parsed) return parsed;
-      if (asRawStatements) return parsed;
-      if (asParams && parsed.type === 'ArrowFunctionExpression') return parsed;
-      if (parsed.type === 'SequenceExpression' && parsed.expressions && parsed.expressions.length === 1) return parsed.expressions[0];
-      if (parsed.type === 'ParenthesizedExpression') return parsed.expression;
-      return parsed;
-    }
-
-    function processExpressionByLexer(simpleNode, ctx, sourceText, rewrite, locals, isLiteral) {
-      const children = [];
-      const re = /[A-Za-z_$][\w$]*/g;
-      let last = 0;
-      let match;
-      while ((match = re.exec(sourceText))) {
-        const raw = match[0];
-        if (isLiteral(raw) || runtime.isGloballyAllowed(raw) || locals[raw]) continue;
-        children.push(sourceText.slice(last, match.index));
-        children.push(runtime.createSimpleExpression(rewrite(raw), false, simpleNode.loc));
-        last = match.index + raw.length;
-      }
-      if (!children.length) return simpleNode;
-      children.push(sourceText.slice(last));
-      return runtime.createCompoundExpression(children, simpleNode.loc);
-    }
+    const projection = callBridge('vue3.core.processExpression', {
+      node: runtime.dehydrateForBridge(node),
+      context: vue3ProcessExpressionContextPayload(context),
+      asParams: !!asParams,
+      asRawStatements: !!asRawStatements,
+      localVars: localVars || null,
+    });
+    return materializeVue3ProcessExpressionProjection(projection, node, context);
   };
   runtime.transformExpression = function transformExpression(node, context) {
     if (node.type === NodeTypes.INTERPOLATION) {
@@ -5957,6 +5691,18 @@ function vue3CacheStaticContextPayload(context) {
   };
 }
 
+function vue3ProcessExpressionContextPayload(context) {
+  context = context || {};
+  return {
+    prefixIdentifiers: !!context.prefixIdentifiers,
+    inline: !!context.inline,
+    isTS: !!context.isTS,
+    expressionPlugins: context.expressionPlugins || [],
+    identifiers: context.identifiers || {},
+    bindingMetadata: context.bindingMetadata || {},
+  };
+}
+
 function vue3ExpressionUtilityContextPayload(context) {
   context = context || {};
   return {
@@ -5964,6 +5710,68 @@ function vue3ExpressionUtilityContextPayload(context) {
     isTS: !!context.isTS,
     allowLexerFallback: false,
   };
+}
+
+function materializeVue3ProcessExpressionProjection(projection, node, context) {
+  if (!projection || projection.kind === 'unchanged') return node;
+  if (projection.kind === 'error') {
+    if (context && context.onError) {
+      context.onError(vue3CoreRuntime.createCompilerError(
+        projection.code || vue3CoreRuntime.ErrorCodes.X_INVALID_EXPRESSION,
+        projection.loc || node.loc,
+        undefined,
+        projection.message || 'Error parsing JavaScript expression',
+      ));
+    }
+    return node;
+  }
+  if (projection.kind === 'setConstType') {
+    node.constType = Number(projection.constType || 0);
+    return node;
+  }
+  if (Array.isArray(projection.helpers) && context && context.helper) {
+    for (const helper of projection.helpers) {
+      if (helper === 'UNREF') context.helper(vue3CoreRuntime.UNREF);
+      else if (helper === 'IS_REF') context.helper(vue3CoreRuntime.IS_REF);
+    }
+  }
+  if (projection.kind === 'simple') {
+    node.content = projection.content || '';
+    node.isStatic = !!projection.isStatic;
+    node.constType = Number(projection.constType || 0);
+    if (projection.loc) node.loc = projection.loc;
+    return node;
+  }
+  if (projection.kind === 'compound') {
+    const compound = vue3CoreRuntime.createCompoundExpression(
+      (projection.children || []).map(child => materializeVue3ProcessExpressionChild(child, context)),
+      projection.loc || node.loc,
+    );
+    compound.identifiers = projection.identifiers || [];
+    return compound;
+  }
+  throw new Error(`Unsupported Rust processExpression projection: ${projection.kind}`);
+}
+
+function materializeVue3ProcessExpressionChild(child, context) {
+  if (typeof child === 'string') return child;
+  if (!child || typeof child !== 'object') return child;
+  if (child.kind === 'simple') {
+    return vue3CoreRuntime.createSimpleExpression(
+      child.content || '',
+      !!child.isStatic,
+      child.loc || vue3CoreRuntime.locStub,
+      Number(child.constType || 0),
+    );
+  }
+  if (child.kind === 'compound') {
+    return materializeVue3ProcessExpressionProjection(
+      child,
+      vue3CoreRuntime.createSimpleExpression('', false),
+      context,
+    );
+  }
+  return child;
 }
 
 function materializeVue3TransformTextProjection(projection, node, context) {

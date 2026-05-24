@@ -60,9 +60,19 @@
 - [x] Vue 3 compiler-ssr mixed alias-runtime conformance closure for prepared official SSR source (`ssrComponent.spec.ts` `16/16`, `ssrInjectCssVars.spec.ts` `6/6`, full SSR suite `129/129`, `mixed` coverage).
 - [x] Vue 3 compiler-core Rust-backed public `generate(ast, options)` codegen slice for `codegen.spec.ts` (`34/34`; Vue 3 core coverage `rust-backed 192/192`, `mixed 460/460`).
 - [x] Vue 3 compiler-core Rust-backed `transformText` projection bridge for text merge / `TEXT_CALL` decisions (`transformText.spec.ts` `9/9`; file remains `mixed` because it still exercises alias-runtime harness dependencies).
+- [x] Vue 3 compiler-core Rust-backed `processExpression` projection bridge for expression prefixing / const classification decisions (`transformExpressions.spec.ts` `47/47`; file remains `mixed` because it still exercises alias-runtime traversal and transform harness dependencies).
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Moved Vue 3 compiler-core `processExpression` semantic decisions into Rust via `vuec_vue3_core::process_expression_projection`.
+- The Rust projection now owns identifier prefixing, setup binding rewrites, local/function/arrow parameter scoping, object shorthand rewriting, assignment RHS setup-let handling, parser validation, helper registration metadata, and static literal/object const classification.
+- Added `vue3.core.processExpression` to `vuec_node_bridge`.
+- Updated `xtask/src/compat.rs` only as bridge/materialization support: the alias runtime sends dehydrated expression/context payloads to Rust and materializes Rust simple/compound/setConstType projections into official-shaped AST nodes. This is not counted as JavaScript shim compiler semantics.
+- Kept `compiler-core/__tests__/transforms/transformExpressions.spec.ts` classified as `mixed`, even though `processExpression` decisions are Rust-backed, because the file still executes through alias-runtime traversal and transform harness dependencies.
+- Focused official checks this round: `transformExpressions.spec.ts` `47/47`, `cacheStatic.spec.ts` + `vSlot.spec.ts` `65/65`, DOM `stringifyStatic.spec.ts` `25/25`, and SSR `ssrComponent.spec.ts` `16/16`.
+- Full Vue 3 conformance after this slice: `vue3-core` `652/652` with `rust-backed 192/192`, `mixed 460/460`, `shim-backed 0/0`; `vue3-dom` `133/133` with `mixed 133/133`; `vue3-ssr` `129/129` with `mixed 129/129`.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_vue3_core -p vuec_node_bridge -p xtask` (`82/82` Vue 3 core tests and `20/20` xtask tests pass), `git diff --check`, `cargo xtask export-api --rust --version-line vue3`, focused specs listed above, `cargo xtask run-conformance --suite vue3-core` (`652/652`), `cargo xtask run-conformance --suite vue3-dom` (`133/133`), and `cargo xtask run-conformance --suite vue3-ssr` (`129/129`).
 
 - Moved Vue 3 compiler-core `transformText` semantic decisions into Rust via `vuec_vue3_core::transform_text_projection`.
 - The Rust projection now owns adjacent text/interpolation merging, `TEXT_CALL` wrapping, whitespace-only call elision, single root/plain-element fast paths, untransformed custom directive detection, compat `<template>` handling, and the official `context.ssr` patch-flag boundary.
