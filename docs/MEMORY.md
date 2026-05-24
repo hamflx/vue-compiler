@@ -1,5 +1,11 @@
 # Memory
 
+- Current round: added `<slot>` outlet name / props / fallback payloads to structural Vue 3 DOM MIR.
+- `Vue3DomMirKind::RenderSlot` now carries `Vue3RenderSlot`, including static or dynamic `Vue3DomSlotName`, non-name `Vue3DomProps`, and fallback child node IDs in the same `Vue3DomMir` document. DOM lowering filters the `name` prop out of outlet props after using it as the render-slot target.
+- `generate_vue3_dom_mir` now emits `_renderSlot(...)` name, props, and fallback function from MIR plus `JsAstStore`, including dynamic slot names and prefixed fallback interpolation expressions, without reading `Vue3Ast`.
+- This is structural target-codegen work and does not touch `xtask/src/compat.rs`. Exact compiler-core codegen migration to consume complete `Vue3DomMir` remains open.
+- Verification for this DOM MIR slot-outlet payload slice: focused `cargo test -p vuec_vue3_core slot_outlet_payload`, focused `cargo test -p vuec_vue3_core generate_vue3_dom_mir`, focused `cargo test -p vuec_vue3_core lower_vue3_ast_to_dom_mir_keeps_slot_outlet_target_split`, `cargo fmt --all --check`, `cargo check -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo xtask run-conformance --suite vue3-core` (`652/652`; coverage `rust-backed 192/192`, `mixed 460/460`, `shim-backed 0/0`), and `git diff --check`.
+
 - Current round: added dynamic component slot `v-if` / `v-else-if` / `v-else` alternate chains to structural Vue 3 DOM MIR.
 - `Vue3DomConditionalSlot` now carries `alternate: Option<Box<Vue3DomDynamicSlot>>`. DOM lowering groups adjacent dynamic slot branch chains into one `dynamic_slots` entry, stores branch slot objects and generated keys in MIR, and keeps condition expressions in `JsAstStore` in source order.
 - `generate_vue3_dom_mir` now renders nested dynamic slot alternates from MIR, so standalone codegen no longer has to treat `v-else-if` / `v-else` slot templates as independent dynamic slots or recover sibling branches from `Vue3Ast`.

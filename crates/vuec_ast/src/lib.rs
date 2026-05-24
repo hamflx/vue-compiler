@@ -1256,7 +1256,7 @@ pub enum Vue3DomMirKind {
     Interpolation { expression: JsExprId },
     If { condition: Option<JsExprId> },
     For(Vue3ForMir),
-    RenderSlot { name: Option<String> },
+    RenderSlot(Vue3RenderSlot),
     WithDirectives,
     Cache { index: u32 },
     Memo { expression: JsExprId, index: u32 },
@@ -1373,6 +1373,13 @@ pub struct Vue3DomDirective {
     pub dynamic_argument: Option<JsExprId>,
     pub expression: Option<JsExprId>,
     pub modifiers: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue3RenderSlot {
+    pub name: Vue3DomSlotName,
+    pub props: Vue3DomProps,
+    pub fallback: Vec<NodeId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

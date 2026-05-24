@@ -77,6 +77,7 @@
 - [x] Vue 3 exact render emitter consumes transformed root helper / component / directive state for asset declarations, helper imports, built-in/dynamic component tags, and runtime directive wrappers, with raw-AST public `generate` fallback.
 - [x] Vue 3 structural `Vue3DomMir` standalone codegen entry for current target-split MIR subset, consuming MIR + `JsAstStore` without AST fallback.
 - [x] Vue 3 structural `Vue3DomMir` VNode props/directive payload foundation, so current MIR codegen can emit attrs, bindings, events, class normalization, and runtime directive wrappers without AST fallback.
+- [x] Vue 3 structural `Vue3DomMir` `<slot>` outlet payload for static/dynamic names, non-name props, and fallback children, with MIR-driven `_renderSlot(...)` emission.
 - [x] Vue 3 structural HIR / `Vue3DomMir` ordered props segment payload for object `v-bind`, object `v-on`, dynamic arg props, merge props, normalize props, guard reactive props, toHandlers, and toHandlerKey emission from MIR.
 - [x] Vue 3 structural `Vue3DomMir` component tag payload for native tags, component assets, dynamic components, and runtime-helper built-ins, with MIR-driven component declarations/imports in standalone DOM MIR codegen.
 - [x] Vue 3 structural `Vue3DomMir` stable component slots payload for default and static named slots, with MIR-driven `_withCtx` slot object emission in standalone DOM MIR codegen.
