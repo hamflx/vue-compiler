@@ -54,9 +54,17 @@
 - [x] Vue 3 compiler-ssr official conformance execution wiring (real Vitest run; currently `12/129`, `mixed` coverage).
 - [x] Vue 3 compiler-ssr mixed alias-runtime `buildProps` / SSR template-literal formatting slice for `ssrText.spec.ts` (`8/8`; full SSR suite currently `68/129`, `mixed` coverage).
 - [x] Vue 3 compiler-ssr mixed alias-runtime SSR element attrs / built-in directive filtering slice for `ssrElement.spec.ts` (`32/32`; full SSR suite currently `75/129`, `mixed` coverage).
+- [x] Vue 3 compiler-ssr mixed alias-runtime structural directive first-pass slice for `ssrVFor.spec.ts`, `ssrVIf.spec.ts`, `ssrVModel.spec.ts`, and `ssrFallthroughAttrs.spec.ts` (full SSR suite currently `97/129`, `mixed` coverage).
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Closed the Vue 3 compiler-ssr structural directive first-pass compatibility slice through mixed alias-runtime support.
+- The generated compiler-core alias `processFor` and `processIf` now run as structural-only transforms when `context.inSSR` is true and no caller-provided client codegen callback is active. This avoids registering client-side Vue helpers during the official SSR source pipeline and leaves SSR codegen to the second-pass official transforms.
+- Full Vue 3 SSR conformance improves from `75/129` to `97/129`; `ssrVFor.spec.ts`, `ssrVIf.spec.ts`, `ssrVModel.spec.ts`, and `ssrFallthroughAttrs.spec.ts` are now fully passing.
+- Coverage remains explicitly `mixed`: this is alias-runtime support for official SSR source execution, not Rust-backed SSR semantic parity.
+- Vue 3 compiler-core and compiler-dom conformance were rechecked after the alias changes and remain `652/652` and `133/133`.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p xtask`, `cargo test -p xtask` (`20/20` pass), `cargo xtask run-conformance --suite vue3-core` (`652/652`), `cargo xtask run-conformance --suite vue3-dom` (`133/133`), and `cargo xtask run-conformance --suite vue3-ssr` as an expected failing real suite with `97/129`.
 
 - Closed the Vue 3 compiler-ssr `ssrElement.spec.ts` focused slice through mixed alias-runtime compiler-core support.
 - The generated compiler-core alias `buildProps` now matches the SSR element contract for the remaining base cases: object `v-on` is ignored in SSR element attrs, built-in directives such as `v-text` are not treated as custom directive runtime props, and SSR conditional expressions around helper calls keep the official snapshot parentheses.

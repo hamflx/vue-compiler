@@ -5299,6 +5299,7 @@ const vue3CoreRuntime = (() => {
     const action = projection && projection.action || { kind: 'noop' };
     const finalizeBranch = (ifNode, targetBranch, isRoot) => {
       if (processCodegen) return processCodegen(ifNode, targetBranch, isRoot);
+      if (context && context.inSSR) return undefined;
       return () => {
         if (isRoot) {
           ifNode.codegenNode = runtime.createIfCodegenNodeForBranch(targetBranch, action.keyBase || 0, context);
@@ -5431,7 +5432,7 @@ const vue3CoreRuntime = (() => {
       __vuecProjection: projection,
     };
     let renderExp;
-    if (!processCodegen) {
+    if (!processCodegen && !(context && context.inSSR)) {
       renderExp = runtime.createCallExpression(context.helper(runtime.RENDER_LIST), [forNode.source]);
       forNode.codegenNode = runtime.createVNodeCall(context, context.helper(runtime.FRAGMENT), undefined, renderExp, 256, undefined, undefined, true, true, false, node.loc);
     }
@@ -5443,7 +5444,7 @@ const vue3CoreRuntime = (() => {
       if (context.prefixIdentifiers) aliases.forEach(alias => context.removeIdentifiers(alias));
       if (onExit) {
         onExit();
-      } else {
+      } else if (renderExp) {
         materializeVue3ForTemplateKeyErrors(projection, node, dir, context);
         runtime.finalizeForCodegen(forNode, renderExp, context);
       }
