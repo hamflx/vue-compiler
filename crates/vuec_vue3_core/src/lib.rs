@@ -4681,7 +4681,9 @@ fn vue3_prop_from_attr(
             name: directive_name,
             raw_name: attr.name,
             arg: arg.map(Vue3Expression::Raw),
-            exp: attr.value.map(Vue3Expression::Raw),
+            exp: attr
+                .value
+                .map(|value| Vue3Expression::Raw(decode_html_attr_entities(&value))),
             modifiers,
             is_dynamic_arg,
             span: attr.span,
@@ -10025,6 +10027,33 @@ mod tests {
             Vue3AstKind::Text(value) if value.value == "><&'\"\u{00a0}&foo;"
         ));
         assert_eq!(text.span.source(), Some(Span::new(FileId(0), 0, 36)));
+    }
+
+    #[test]
+    fn base_parse_decodes_directive_expression_entities_but_keeps_raw_span() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<span :class="'foo' + '&gt;ar'"/>"#.into(),
+            file_id: FileId(0),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let root = ast.root_node().expect("root");
+        let element = ast.node(root.children[0]).expect("element");
+        let Vue3AstKind::Element(element) = &element.kind else {
+            panic!("expected element");
+        };
+        let Vue3Prop::Directive(dir) = &element.props[0] else {
+            panic!("expected directive");
+        };
+        assert_eq!(
+            dir.exp
+                .as_ref()
+                .map(Vue3Expression::source_string)
+                .as_deref(),
+            Some("'foo' + '>ar'")
+        );
+        assert_eq!(dir.exp_span, Some(Span::new(FileId(0), 14, 30)));
     }
 
     #[test]

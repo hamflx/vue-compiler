@@ -50,9 +50,17 @@
 - [x] Vue 3 compiler-dom Rust-backed dynamic built-in component helper projection for `Transition.spec.ts` (`14/14`; full DOM suite currently `91/133`, `mixed` coverage).
 - [x] Vue 3 compiler-dom mixed Rust projection plus alias-runtime augmentor slice for `vOn.spec.ts` (`12/12`; full DOM suite currently `102/133`, `mixed` coverage).
 - [x] Vue 3 compiler-dom mixed alias-runtime runtime-directive materialization slice for `vModel.spec.ts` (`18/18`; full DOM suite currently `115/133`, `mixed` coverage).
+- [x] Vue 3 compiler-dom mixed `stringifyStatic` / `transformHoist` closure with Rust directive-expression entity projection fix (`stringifyStatic.spec.ts` `25/25`; full DOM suite `133/133`, `mixed` coverage).
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Closed the Vue 3 compiler-dom `stringifyStatic.spec.ts` compatibility failures and the full Vue 3 DOM official conformance suite.
+- `vuec_vue3_core` now decodes directive expression HTML entities for DOM attribute values while preserving raw encoded spans. This fixes public projection and static evaluation for cases like `:class="'foo' + '&gt;ar'"`, `v-html="'&lt;span&gt;...'"`, and `v-text="'&lt;span&gt;...'"`.
+- The alias runtime now invokes caller-provided official DOM `transformHoist` after Rust `cacheStatic` materializes cache operations, allowing official `stringifyStatic` to consume cached static children and produce `createStaticVNode(...)` output.
+- Coverage classification is explicitly `mixed`: Rust owns the parser projection fix and Rust `cacheStatic` still selects the cached nodes, but the static HTML stringification itself executes through the official DOM transform via alias adapter support. This does not count as pure Rust-backed DOM stringification semantics.
+- Full Vue 3 DOM conformance is now `133/133` with coverage `mixed 133/133`, `rust-backed 0/0`, `shim-backed 0/0`. Vue 3 compiler-core conformance was rechecked and remains `652/652`.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_vue3_core -p vuec_node_bridge -p xtask` (`74/74` Vue 3 core tests and `18/18` xtask tests pass), `cargo xtask run-conformance --suite vue3-core` (`652/652`), and `cargo xtask run-conformance --suite vue3-dom` (`133/133`).
 
 - Closed the Vue 3 compiler-dom `vModel.spec.ts` remaining compatibility failures.
 - The alias runtime `transformElement` now consumes `needRuntime` from official DOM `transformModel`, registers the directive as runtime-backed, and emits `withDirectives(...)` with the selected DOM model helper (`vModelText`, `vModelRadio`, `vModelCheckbox`, `vModelSelect`, or `vModelDynamic`).

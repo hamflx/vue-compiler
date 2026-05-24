@@ -5620,6 +5620,9 @@ const vue3CoreRuntime = (() => {
     for (const operation of projection && projection.operations || []) {
       materializeVue3CacheStaticOperation(operation, root, context);
     }
+    if (context && typeof context.transformHoist === 'function') {
+      vue3ApplyTransformHoist(root, context);
+    }
   };
   const onceSeen = new WeakSet();
   runtime.transformOnce = function transformOnce(node, context) {
@@ -5917,6 +5920,57 @@ function materializeVue3CacheStaticOperation(operation, root, context) {
     default:
       throw new Error(`Unsupported Rust cacheStatic projection: ${operation.kind}`);
   }
+}
+
+function vue3ApplyTransformHoist(root, context) {
+  vue3ApplyTransformHoistToNode(root, context);
+}
+
+function vue3ApplyTransformHoistToNode(node, context) {
+  if (!node || !Array.isArray(node.children)) return;
+  if (vue3NodeHasCachedChildrenArray(node) || vue3ChildrenHaveCachedNodes(node.children)) {
+    context.transformHoist(node.children, context, node);
+  }
+  for (const child of node.children.slice()) {
+    if (child && child.type === vue3CoreRuntime.NodeTypes.ELEMENT && child.tagType === vue3CoreRuntime.ElementTypes.COMPONENT) {
+      context.scopes.vSlot++;
+      vue3ApplyTransformHoistToNode(child, context);
+      context.scopes.vSlot--;
+    } else if (child && child.type === vue3CoreRuntime.NodeTypes.IF) {
+      for (const branch of child.branches || []) vue3ApplyTransformHoistToNode(branch, context);
+    } else {
+      vue3ApplyTransformHoistToNode(child, context);
+    }
+  }
+}
+
+function vue3NodeHasCachedChildrenArray(node) {
+  return !!(
+    node
+    && node.type === vue3CoreRuntime.NodeTypes.ELEMENT
+    && node.codegenNode
+    && node.codegenNode.type === vue3CoreRuntime.NodeTypes.VNODE_CALL
+    && node.codegenNode.children
+    && node.codegenNode.children.type === vue3CoreRuntime.NodeTypes.JS_CACHE_EXPRESSION
+  );
+}
+
+function vue3ChildrenHaveCachedNodes(children) {
+  return (children || []).some(child => {
+    return child && (
+      (
+        child.type === vue3CoreRuntime.NodeTypes.ELEMENT
+        && child.tagType === vue3CoreRuntime.ElementTypes.ELEMENT
+        && child.codegenNode
+        && child.codegenNode.type === vue3CoreRuntime.NodeTypes.JS_CACHE_EXPRESSION
+      )
+      || (
+        child.type === vue3CoreRuntime.NodeTypes.TEXT_CALL
+        && child.codegenNode
+        && child.codegenNode.type === vue3CoreRuntime.NodeTypes.JS_CACHE_EXPRESSION
+      )
+    );
+  });
 }
 
 function vue3SetVNodeBlock(node, isBlock, context) {
