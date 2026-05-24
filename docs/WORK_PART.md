@@ -75,6 +75,7 @@
 - [x] Vue 3 structural `Vue3SsrMir` component props payload/codegen, with `_ssrRenderComponent` props emitted from SSR MIR instead of hard-coded `null` or AST fallback.
 - [x] Vue 3 structural `Vue3SsrMir` adjacent `v-if` / `v-else-if` / `v-else` alternate-chain nesting and standalone SSR MIR codegen ordering.
 - [x] Vue 3 structural `Vue3SsrMir` `v-for` source/value/key/index alias payload, with standalone SSR MIR `_ssrRenderList` codegen consuming the payload and preserving all loop aliases as locals.
+- [x] Vue 3 structural `Vue3SsrMir` Teleport/Suspense built-in component payloads, with `_ssrRenderTeleport` target/disabled and `_ssrRenderSuspense` slot object emitted from MIR instead of normal component fallback.
 - [x] Vue 3 structural DOM/SSR lowering contract entry for directive-backed `v-for` / `v-if` control-flow wrappers, including `HirFor`, `HirIf`, target-specific MIR nodes, `LoweringMap`, and `JsAstStore` source/alias/condition registrations.
 - [x] Vue 3 structural `Vue3DomMir` patch-flag projection foundation for class/style/text/props/hydration/full-props/vnode-hook bits and target `dynamic_props` names.
 - [x] Vue 3 structural DOM/SSR lowering contract entry for adjacent `v-if` / `v-else-if` / `v-else` branch chains as one `HirIf` with multiple branches.

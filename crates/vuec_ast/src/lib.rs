@@ -1409,6 +1409,17 @@ pub struct Vue3SsrFor {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue3SsrTeleport {
+    pub target: MirExpr,
+    pub disabled: MirExpr,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue3SsrSuspense {
+    pub slots: Vue3DomSlots,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Vue3SsrMirKind {
     Root,
     PushString(String),
@@ -1418,8 +1429,8 @@ pub enum Vue3SsrMirKind {
     RenderSlot(Vue3SsrSlot),
     If { condition: Option<JsExprId> },
     For(Vue3SsrFor),
-    Teleport,
-    Suspense,
+    Teleport(Vue3SsrTeleport),
+    Suspense(Vue3SsrSuspense),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1432,6 +1443,7 @@ pub enum VaporMirKind {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MirExpr {
     String(String),
+    Bool(bool),
     JsExpr(JsExprId),
     Helper(RuntimeHelper),
 }

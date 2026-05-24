@@ -16,7 +16,7 @@ use vuec_ast::{
     Vue3DomPropsNormalize, Vue3DomSlotName, Vue3DomStaticAttr, Vue3DomTag, Vue3Element,
     Vue3ElementType, Vue3Expression, Vue3ForMemo, Vue3ForMir, Vue3NodeKind, Vue3PatchFlags,
     Vue3Prop, Vue3Root, Vue3SlotFlag, Vue3SsrAttrs, Vue3SsrComponent, Vue3SsrFor, Vue3SsrMir,
-    Vue3SsrMirKind, Vue3VNodeCall,
+    Vue3SsrMirKind, Vue3SsrSuspense, Vue3SsrTeleport, Vue3VNodeCall,
 };
 use vuec_codegen::{CodeWriter, SourceMapArtifact, SourceMapSegment};
 use vuec_html::{HtmlTokenKind, HtmlTokenizer};
@@ -1693,6 +1693,196 @@ fn lower_vue3_slot_children_to_dom_mir(
         .collect()
 }
 
+fn lower_vue3_suspense_slots_to_ssr_mir(
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    ast: &Vue3Ast,
+    hir_id: NodeId,
+    mir_id: NodeId,
+    state: &mut Vue3SsrLoweringState,
+) -> Option<vuec_ast::Vue3DomSlots> {
+    let visible = visible_child_ids(ast, &ast_node.children);
+    if visible.is_empty() {
+        return None;
+    }
+    let mut slots = Vec::new();
+    let mut default_children = Vec::new();
+    for child_id in visible {
+        let Some(child) = ast.node(child_id) else {
+            continue;
+        };
+        if let Vue3AstKind::Element(child_element) = &child.kind {
+            if let Some(slot) = directive_by_name(child_element, "slot") {
+                if slot.is_dynamic_arg
+                    || directive_by_name(child_element, "if").is_some()
+                    || directive_by_name(child_element, "else").is_some()
+                    || directive_by_name(child_element, "else-if").is_some()
+                    || directive_by_name(child_element, "for").is_some()
+                {
+                    continue;
+                }
+                slots.push(lower_vue3_static_slot_to_ssr_mir(
+                    child_id,
+                    child,
+                    slot,
+                    &child.children,
+                    ast,
+                    hir_id,
+                    mir_id,
+                    state,
+                ));
+                continue;
+            }
+        }
+        default_children.push(child_id);
+    }
+    if !default_children.is_empty() {
+        slots.push(lower_vue3_default_slot_to_ssr_mir(
+            ast_node,
+            &default_children,
+            ast,
+            hir_id,
+            mir_id,
+            state,
+        ));
+    }
+    if slots.is_empty() {
+        None
+    } else {
+        Some(vuec_ast::Vue3DomSlots {
+            slots,
+            dynamic_slots: Vec::new(),
+            flag: Vue3SlotFlag::Stable,
+        })
+    }
+}
+
+fn lower_vue3_static_slot_to_ssr_mir(
+    ast_id: NodeId,
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    slot: &Vue3Directive,
+    children: &[NodeId],
+    ast: &Vue3Ast,
+    hir_parent: NodeId,
+    mir_parent: NodeId,
+    state: &mut Vue3SsrLoweringState,
+) -> vuec_ast::Vue3DomSlot {
+    let name = vue3_static_slot_directive_name(slot);
+    let params = register_vue3_slot_params_ssr(slot, ast_node.span.source(), state);
+    let slot_hir_id = lower_vue3_slot_decl_to_hir_ssr(
+        ast_id,
+        hir_parent,
+        mir_parent,
+        name.clone(),
+        params,
+        slot.span
+            .map(NodeSpan::from)
+            .unwrap_or_else(|| ast_node.span.clone()),
+        state,
+    );
+    vuec_ast::Vue3DomSlot {
+        name,
+        params,
+        children: lower_vue3_slot_children_to_ssr_mir(
+            children,
+            ast,
+            slot_hir_id,
+            mir_parent,
+            state,
+        ),
+    }
+}
+
+fn lower_vue3_default_slot_to_ssr_mir(
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    children: &[NodeId],
+    ast: &Vue3Ast,
+    hir_parent: NodeId,
+    mir_parent: NodeId,
+    state: &mut Vue3SsrLoweringState,
+) -> vuec_ast::Vue3DomSlot {
+    let slot_hir_id = lower_vue3_slot_decl_to_hir_ssr(
+        ast_node.id,
+        hir_parent,
+        mir_parent,
+        "default".into(),
+        None,
+        NodeSpan::generated(ast_node.span.source(), vuec_ast::GeneratedReason::Lowering),
+        state,
+    );
+    vuec_ast::Vue3DomSlot {
+        name: "default".into(),
+        params: None,
+        children: lower_vue3_slot_children_to_ssr_mir(
+            children,
+            ast,
+            slot_hir_id,
+            mir_parent,
+            state,
+        ),
+    }
+}
+
+fn lower_vue3_slot_decl_to_hir_ssr(
+    ast_id: NodeId,
+    hir_parent: NodeId,
+    mir_id: NodeId,
+    name: String,
+    params: Option<JsPatternId>,
+    span: NodeSpan,
+    state: &mut Vue3SsrLoweringState,
+) -> NodeId {
+    let hir_id = state.hir.push_child(
+        hir_parent,
+        HirNodeKind::SlotDecl(HirSlotDecl { name, params }),
+        span,
+    );
+    state.map.record_ast_to_hir(ast_id, hir_id);
+    state.map.record_hir_to_mir(hir_id, mir_id);
+    hir_id
+}
+
+fn register_vue3_slot_params_ssr(
+    slot: &Vue3Directive,
+    fallback_span: Option<Span>,
+    state: &mut Vue3SsrLoweringState,
+) -> Option<JsPatternId> {
+    slot.exp.as_ref().map(|exp| {
+        register_vue3_pattern_with_span(
+            &mut state.js,
+            exp,
+            slot.exp_span.or(fallback_span),
+            state.source_type,
+        )
+    })
+}
+
+fn lower_vue3_slot_children_to_ssr_mir(
+    children: &[NodeId],
+    ast: &Vue3Ast,
+    hir_parent: NodeId,
+    mir_parent: NodeId,
+    state: &mut Vue3SsrLoweringState,
+) -> Vec<NodeId> {
+    let before = state.mir.nodes.len();
+    lower_vue3_ssr_child_sequence(children, ast, hir_parent, mir_parent, state);
+    state
+        .mir
+        .nodes
+        .iter()
+        .skip(before)
+        .filter(|node| node.parent == Some(mir_parent))
+        .map(|node| node.id)
+        .collect::<Vec<_>>()
+}
+
+fn vue3_ssr_empty_slots(flag: Vue3SlotFlag) -> vuec_ast::Vue3DomSlots {
+    vuec_ast::Vue3DomSlots {
+        slots: Vec::new(),
+        dynamic_slots: Vec::new(),
+        flag,
+    }
+}
+
 fn visible_child_ids(ast: &Vue3Ast, children: &[NodeId]) -> Vec<NodeId> {
     children
         .iter()
@@ -2642,6 +2832,12 @@ fn lower_vue3_plain_element_to_ssr_mir(
 
     match element.tag_type {
         Vue3ElementType::Component => {
+            if let Some(mir_id) = lower_vue3_builtin_component_to_ssr_mir(
+                element, ast, ast_node, hir_id, mir_parent, state,
+            ) {
+                state.map.record_hir_to_mir(hir_id, mir_id);
+                return Some(hir_id);
+            }
             let props = match state.hir.node(hir_id).map(|node| &node.kind) {
                 Some(HirNodeKind::Component(component)) => {
                     lower_hir_props_to_dom_mir_without_event_cache(&component.props)
@@ -2692,6 +2888,119 @@ fn lower_vue3_plain_element_to_ssr_mir(
     }
 
     Some(hir_id)
+}
+
+fn lower_vue3_builtin_component_to_ssr_mir(
+    element: &Vue3Element,
+    ast: &Vue3Ast,
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    hir_id: NodeId,
+    mir_parent: NodeId,
+    state: &mut Vue3SsrLoweringState,
+) -> Option<NodeId> {
+    match element.tag.as_str() {
+        "Teleport" | "teleport" => {
+            let target = vue3_ssr_teleport_target(element, ast_node, state)?;
+            let disabled = vue3_ssr_teleport_disabled(element, ast_node, state);
+            let mir_id = state.mir.push_child(
+                mir_parent,
+                Vue3SsrMirKind::Teleport(Vue3SsrTeleport { target, disabled }),
+                ast_node.span.clone(),
+            );
+            lower_vue3_ssr_child_sequence(&ast_node.children, ast, hir_id, mir_id, state);
+            Some(mir_id)
+        }
+        "Suspense" | "suspense" => {
+            let mir_id = state.mir.push_child(
+                mir_parent,
+                Vue3SsrMirKind::Suspense(Vue3SsrSuspense {
+                    slots: vue3_ssr_empty_slots(Vue3SlotFlag::Stable),
+                }),
+                ast_node.span.clone(),
+            );
+            let slots = lower_vue3_suspense_slots_to_ssr_mir(ast_node, ast, hir_id, mir_id, state)
+                .unwrap_or_else(|| vue3_ssr_empty_slots(Vue3SlotFlag::Stable));
+            if let Some(node) = state.mir.node_mut(mir_id) {
+                if let Vue3SsrMirKind::Suspense(suspense) = &mut node.kind {
+                    suspense.slots = slots;
+                }
+            }
+            Some(mir_id)
+        }
+        _ => None,
+    }
+}
+
+fn vue3_ssr_teleport_target(
+    element: &Vue3Element,
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    state: &mut Vue3SsrLoweringState,
+) -> Option<MirExpr> {
+    element.props.iter().find_map(|prop| match prop {
+        Vue3Prop::Attribute(attr) if attr.name == "to" => attr
+            .value
+            .as_ref()
+            .map(|value| MirExpr::String(value.clone())),
+        Vue3Prop::Directive(dir)
+            if dir.name == "bind"
+                && !dir.is_dynamic_arg
+                && dir
+                    .arg
+                    .as_ref()
+                    .is_some_and(|arg| arg.source_string() == "to") =>
+        {
+            dir.exp
+                .as_ref()
+                .filter(|exp| !exp.source_string().trim().is_empty())
+                .map(|exp| {
+                    MirExpr::JsExpr(register_or_reuse_vue3_expression_with_span(
+                        &mut state.js,
+                        exp,
+                        dir.exp_span.or_else(|| ast_node.span.source()),
+                        state.source_type,
+                    ))
+                })
+        }
+        _ => None,
+    })
+}
+
+fn vue3_ssr_teleport_disabled(
+    element: &Vue3Element,
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    state: &mut Vue3SsrLoweringState,
+) -> MirExpr {
+    element
+        .props
+        .iter()
+        .find_map(|prop| match prop {
+            Vue3Prop::Attribute(attr) if attr.name == "disabled" => Some(MirExpr::Bool(true)),
+            Vue3Prop::Directive(dir)
+                if dir.name == "bind"
+                    && !dir.is_dynamic_arg
+                    && dir
+                        .arg
+                        .as_ref()
+                        .is_some_and(|arg| arg.source_string() == "disabled") =>
+            {
+                Some(
+                    dir.exp
+                        .as_ref()
+                        .filter(|exp| !exp.source_string().trim().is_empty())
+                        .map(|exp| {
+                            MirExpr::JsExpr(register_or_reuse_vue3_expression_with_span(
+                                &mut state.js,
+                                exp,
+                                dir.exp_span.or_else(|| ast_node.span.source()),
+                                state.source_type,
+                            ))
+                        })
+                        .unwrap_or(MirExpr::Bool(false)),
+                )
+            }
+            _ => None,
+        })
+        .unwrap_or(MirExpr::Bool(false))
 }
 
 fn lower_vue3_slot_outlet_props_to_ssr_mir(props: &HirProps) -> Vue3DomProps {
@@ -10698,6 +11007,7 @@ impl<'a> Vue3DomMirCodegen<'a> {
     fn render_mir_expr(&self, expr: &MirExpr, scope: &RenderScope) -> String {
         match expr {
             MirExpr::String(value) => quote_string(value),
+            MirExpr::Bool(value) => value.to_string(),
             MirExpr::JsExpr(expr) => self.render_js_expr(*expr, scope),
             MirExpr::Helper(helper) => helper_reference(*helper),
         }
@@ -10900,10 +11210,10 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                 Vue3SsrMirKind::For(_) => {
                     push_unique_helper(&mut helpers, RuntimeHelper::Vue3SsrRenderList);
                 }
-                Vue3SsrMirKind::Teleport => {
+                Vue3SsrMirKind::Teleport(_) => {
                     push_unique_helper(&mut helpers, RuntimeHelper::Vue3SsrRenderTeleport);
                 }
-                Vue3SsrMirKind::Suspense => {
+                Vue3SsrMirKind::Suspense(_) => {
                     push_unique_helper(&mut helpers, RuntimeHelper::Vue3SsrRenderSuspense);
                 }
             }
@@ -11034,23 +11344,11 @@ impl<'a> Vue3SsrMirCodegen<'a> {
             Vue3SsrMirKind::For(for_mir) => {
                 self.render_for(node_id, for_mir, scope, writer);
             }
-            Vue3SsrMirKind::Teleport => {
-                writer.push_line("_ssrRenderTeleport(_push, () => {");
-                writer.indent();
-                self.render_children(node_id, scope, writer);
-                writer.dedent();
-                writer.push_line("}, null, _parent);");
+            Vue3SsrMirKind::Teleport(teleport) => {
+                self.render_teleport(node_id, teleport, scope, writer);
             }
-            Vue3SsrMirKind::Suspense => {
-                writer.push_line("_ssrRenderSuspense(_push, {");
-                writer.indent();
-                writer.push_line("default: () => {");
-                writer.indent();
-                self.render_children(node_id, scope, writer);
-                writer.dedent();
-                writer.push_line("}");
-                writer.dedent();
-                writer.push_line("});");
+            Vue3SsrMirKind::Suspense(suspense) => {
+                self.render_suspense(suspense, scope, writer);
             }
         }
     }
@@ -11082,6 +11380,59 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         self.render_ordered_props(props, scope)
             .map(|rendered| self.render_normalized_props(props, rendered))
             .unwrap_or_else(|| "null".into())
+    }
+
+    fn render_teleport(
+        &self,
+        node_id: NodeId,
+        teleport: &Vue3SsrTeleport,
+        scope: &RenderScope,
+        writer: &mut CodeWriter,
+    ) {
+        writer.push_line("_ssrRenderTeleport(_push, (_push) => {");
+        writer.indent();
+        self.render_children(node_id, scope, writer);
+        writer.dedent();
+        writer.push_line(&format!(
+            "}}, {}, {}, _parent);",
+            self.render_mir_expr(&teleport.target, scope),
+            self.render_mir_expr(&teleport.disabled, scope)
+        ));
+    }
+
+    fn render_suspense(
+        &self,
+        suspense: &Vue3SsrSuspense,
+        scope: &RenderScope,
+        writer: &mut CodeWriter,
+    ) {
+        writer.push_line("_ssrRenderSuspense(_push, {");
+        writer.indent();
+        for slot in &suspense.slots.slots {
+            self.render_suspense_slot(slot, scope, writer);
+        }
+        writer.push_line(&format!("_: {}", vue3_slot_flag_value(suspense.slots.flag)));
+        writer.dedent();
+        writer.push_line("});");
+    }
+
+    fn render_suspense_slot(
+        &self,
+        slot: &vuec_ast::Vue3DomSlot,
+        scope: &RenderScope,
+        writer: &mut CodeWriter,
+    ) {
+        let child_scope = slot
+            .params
+            .map(|params| self.scope_with_pattern(scope, params))
+            .unwrap_or_else(|| scope.clone());
+        writer.push_line(&format!("{}: () => {{", json_key(&slot.name)));
+        writer.indent();
+        for child_id in &slot.children {
+            self.render_node(*child_id, &child_scope, writer);
+        }
+        writer.dedent();
+        writer.push_line("},");
     }
 
     fn render_slot(
@@ -11391,6 +11742,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
     fn render_mir_expr(&self, expr: &MirExpr, scope: &RenderScope) -> String {
         match expr {
             MirExpr::String(value) => quote_string(value),
+            MirExpr::Bool(value) => value.to_string(),
             MirExpr::JsExpr(expr) => self.render_js_expr(*expr, scope),
             MirExpr::Helper(helper) => helper_reference(*helper),
         }
@@ -11418,6 +11770,10 @@ impl<'a> Vue3SsrMirCodegen<'a> {
             .get(id.0 as usize)
             .map(|entry| entry.source.clone())
             .unwrap_or_else(|| "_item".into())
+    }
+
+    fn scope_with_pattern(&self, scope: &RenderScope, pattern: JsPatternId) -> RenderScope {
+        scope.with_locals(extract_v_for_alias_locals(&self.render_js_pattern(pattern)))
     }
 
     fn scope_with_for_mir(&self, scope: &RenderScope, for_mir: &Vue3SsrFor) -> RenderScope {
@@ -18123,6 +18479,66 @@ mod tests {
     }
 
     #[test]
+    fn lower_vue3_ast_to_ssr_mir_projects_builtin_component_payloads() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r##"<Teleport :to="target" :disabled="off"><div id="x"/></Teleport><Suspense><template #default><Foo/></template><template #fallback>loading</template></Suspense>"##.into(),
+            file_id: FileId(19),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_ssr_mir(&ast, &Vue3CompilerOptions::default());
+
+        assert_eq!(result.hir.validate_tree(), Ok(()));
+        assert_eq!(result.mir.validate_tree(), Ok(()));
+        let teleport = result
+            .mir
+            .nodes
+            .iter()
+            .find_map(|node| match &node.kind {
+                Vue3SsrMirKind::Teleport(teleport) => Some(teleport),
+                _ => None,
+            })
+            .expect("SSR MIR teleport");
+        assert_eq!(teleport.target, MirExpr::JsExpr(JsExprId(0)));
+        assert_eq!(teleport.disabled, MirExpr::JsExpr(JsExprId(1)));
+
+        let suspense = result
+            .mir
+            .nodes
+            .iter()
+            .find_map(|node| match &node.kind {
+                Vue3SsrMirKind::Suspense(suspense) => Some(suspense),
+                _ => None,
+            })
+            .expect("SSR MIR suspense");
+        assert_eq!(suspense.slots.flag, Vue3SlotFlag::Stable);
+        assert_eq!(
+            suspense
+                .slots
+                .slots
+                .iter()
+                .map(|slot| slot.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["default", "fallback"]
+        );
+        assert!(result
+            .mir
+            .nodes
+            .iter()
+            .all(|node| !matches!(&node.kind, Vue3SsrMirKind::RenderComponent(component) if matches!(&component.tag, MirExpr::String(tag) if tag == "Teleport" || tag == "Suspense"))));
+        assert_eq!(
+            result
+                .js
+                .expressions()
+                .iter()
+                .map(|entry| entry.source.as_str())
+                .collect::<Vec<_>>(),
+            vec!["target", "off"]
+        );
+    }
+
+    #[test]
     fn lower_vue3_ast_to_ssr_mir_groups_if_else_branch_chains() {
         let source = TemplateSource {
             filename: "foo.vue".into(),
@@ -18456,6 +18872,45 @@ mod tests {
         assert!(!generated.code.contains("_ctx.key"));
         assert!(!generated.code.contains("_ctx.index"));
         assert!(!generated.code.contains("_ctx.item"));
+    }
+
+    #[test]
+    fn generate_vue3_ssr_mir_emits_builtin_component_payloads_from_mir() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r##"<Teleport to="#modal" disabled><div id="x"/></Teleport><Suspense><template #default><Foo/></template><template #fallback>loading</template></Suspense>"##.into(),
+            file_id: FileId(49),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_ssr_mir(&ast, &Vue3CompilerOptions::default());
+        let generated = generate_vue3_ssr_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated
+            .code
+            .contains("ssrRenderTeleport as _ssrRenderTeleport"));
+        assert!(generated
+            .code
+            .contains("ssrRenderSuspense as _ssrRenderSuspense"));
+        assert!(generated
+            .code
+            .contains("_ssrRenderTeleport(_push, (_push) => {"));
+        assert!(generated.code.contains("}, \"#modal\", true, _parent);"));
+        assert!(generated.code.contains("_ssrRenderSuspense(_push, {"));
+        assert!(generated.code.contains("default: () => {"));
+        assert!(generated.code.contains("fallback: () => {"));
+        assert!(generated.code.contains("_: 1"));
+        assert!(generated.code.contains("_push(\"loading\");"));
+        assert!(!generated.code.contains("_ssrRenderComponent(\"Teleport\""));
+        assert!(!generated.code.contains("_ssrRenderComponent(\"Suspense\""));
     }
 
     #[test]

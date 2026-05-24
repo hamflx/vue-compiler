@@ -1,5 +1,11 @@
 # Memory
 
+- Current round: added Vue 3 SSR MIR built-in Teleport/Suspense payloads and standalone codegen consumption.
+- `Vue3SsrMirKind::Teleport` now carries `Vue3SsrTeleport { target, disabled }`; SSR lowering extracts static/dynamic `to` and static/dynamic `disabled` props into `MirExpr`, and standalone SSR MIR codegen emits `_ssrRenderTeleport(_push, contentFn, target, disabled, _parent)` from that payload instead of treating Teleport as a normal component or hard-coding target/disabled.
+- `Vue3SsrMirKind::Suspense` now carries `Vue3SsrSuspense { slots }`; SSR lowering projects stable implicit/explicit `default` and `fallback` slots into `Vue3DomSlots`, and standalone SSR MIR codegen emits `_ssrRenderSuspense(_push, { ...slots, _: flag })` from MIR payload.
+- This is structural SSR MIR lowering/codegen work only. It does not touch `xtask/src/compat.rs` and does not change the legacy official `compile_ssr` path.
+- Verification for this SSR MIR built-in component payload slice: focused `cargo test -p vuec_vue3_core lower_vue3_ast_to_ssr_mir_projects_builtin_component_payloads`, focused `cargo test -p vuec_vue3_core generate_vue3_ssr_mir_emits_builtin_component_payloads_from_mir`, focused `cargo test -p vuec_vue3_core lower_vue3_ast_to_ssr_mir`, focused `cargo test -p vuec_vue3_core generate_vue3_ssr_mir`, `cargo fmt --all --check`, `git diff --check`, `cargo check -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, and `cargo xtask run-conformance --suite vue3-core` (`652/652`; coverage `rust-backed 192/192`, `mixed 460/460`, `shim-backed 0/0`).
+
 - Current round: added Vue 3 SSR MIR `v-for` alias payload and standalone codegen consumption.
 - `Vue3SsrMirKind::For` now carries `Vue3SsrFor { source, value_alias, key_alias, index_alias }`, mirroring the HIR `v-for` alias projection for SSR target data without DOM MIR or AST fallback.
 - `generate_vue3_ssr_mir` now emits `_ssrRenderList(source, (value, key, index) => ...)` from SSR MIR and treats all alias patterns as loop-local scope when prefixing expressions, so `key`, `index`, and destructured aliases are not rewritten as `_ctx.*`.
