@@ -51,9 +51,17 @@
 - [x] Vue 3 compiler-dom mixed Rust projection plus alias-runtime augmentor slice for `vOn.spec.ts` (`12/12`; full DOM suite currently `102/133`, `mixed` coverage).
 - [x] Vue 3 compiler-dom mixed alias-runtime runtime-directive materialization slice for `vModel.spec.ts` (`18/18`; full DOM suite currently `115/133`, `mixed` coverage).
 - [x] Vue 3 compiler-dom mixed `stringifyStatic` / `transformHoist` closure with Rust directive-expression entity projection fix (`stringifyStatic.spec.ts` `25/25`; full DOM suite `133/133`, `mixed` coverage).
+- [x] Vue 3 compiler-ssr official conformance execution wiring (real Vitest run; currently `12/129`, `mixed` coverage).
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Wired Vue 3 compiler-ssr official conformance to a real Vitest runner instead of a pending / not-wired result.
+- The prepared SSR suite now copies official `compiler-ssr/__tests__`, official `compiler-ssr/src`, and official `compiler-dom/src`, then uses generated compiler-core shims plus alias/npm resolution for package imports. The runner aliases the monorepo-only `packages/compiler-core/src/transform` import used by SSR source.
+- Coverage classification for `vue3-ssr` is explicitly `mixed`: the current path executes official TypeScript SSR/DOM source, generated import shims, alias adapter code, and Rust bridge projections. This slice is runner/import wiring and visibility work, not Rust-backed SSR compiler semantic parity.
+- Real Vue 3 SSR conformance now reports `12/129` official tests passing and `117` failing. The suite is no longer hidden behind pending status; failures are visible snapshot/output mismatches across SSR element, component, scopeId, slot, suspense, transition, v-for, v-if, v-model, and v-show paths.
+- Vue 3 compiler-core and compiler-dom conformance were rechecked after the SSR runner wiring and remain `652/652` and `133/133`.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p xtask`, `cargo test -p xtask` (`20/20` pass), `cargo xtask run-conformance --suite vue3-core` (`652/652`), `cargo xtask run-conformance --suite vue3-dom` (`133/133`), and `cargo xtask run-conformance --suite vue3-ssr` as an expected failing real suite with `12/129`.
 
 - Closed the Vue 3 compiler-dom `stringifyStatic.spec.ts` compatibility failures and the full Vue 3 DOM official conformance suite.
 - `vuec_vue3_core` now decodes directive expression HTML entities for DOM attribute values while preserving raw encoded spans. This fixes public projection and static evaluation for cases like `:class="'foo' + '&gt;ar'"`, `v-html="'&lt;span&gt;...'"`, and `v-text="'&lt;span&gt;...'"`.

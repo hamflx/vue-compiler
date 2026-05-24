@@ -8962,6 +8962,7 @@ fn run_conformance_execution(
     match spec.name {
         "vue3-core" => run_vue3_core_conformance(spec, official_root, discovered, lock_hash),
         "vue3-dom" => run_vue3_dom_conformance(spec, official_root, discovered, lock_hash),
+        "vue3-ssr" => run_vue3_ssr_conformance(spec, official_root, discovered, lock_hash),
         _ => Ok(ConformanceExecutionResult {
             status: "pending".into(),
             runner: "not-wired".into(),
@@ -8996,6 +8997,16 @@ fn run_vue3_dom_conformance(
     lock_hash: Option<&str>,
 ) -> Result<ConformanceExecutionResult> {
     let prepared_root = prepare_vue3_dom_conformance_suite(spec, official_root, lock_hash)?;
+    run_vitest_conformance(spec, prepared_root, discovered)
+}
+
+fn run_vue3_ssr_conformance(
+    spec: ConformanceSuiteSpec,
+    official_root: &Path,
+    discovered: &[String],
+    lock_hash: Option<&str>,
+) -> Result<ConformanceExecutionResult> {
+    let prepared_root = prepare_vue3_ssr_conformance_suite(spec, official_root, lock_hash)?;
     run_vitest_conformance(spec, prepared_root, discovered)
 }
 
@@ -9316,6 +9327,106 @@ export default {
     Ok(())
 }
 
+fn prepare_vue3_ssr_conformance_suite(
+    spec: ConformanceSuiteSpec,
+    official_root: &Path,
+    lock_hash: Option<&str>,
+) -> Result<PathBuf> {
+    let prepared_root = PathBuf::from("target")
+        .join("conformance")
+        .join(lock_hash.unwrap_or("unknown-lock"))
+        .join("prepared")
+        .join(spec.name);
+    if prepared_root.exists() {
+        fs::remove_dir_all(&prepared_root)
+            .with_context(|| format!("failed to remove {}", prepared_root.display()))?;
+    }
+
+    let official_ssr_tests = official_root
+        .join("packages")
+        .join("compiler-ssr")
+        .join("__tests__");
+    let prepared_ssr_tests = prepared_root
+        .join("packages")
+        .join("compiler-ssr")
+        .join("__tests__");
+    copy_dir_recursive(&official_ssr_tests, &prepared_ssr_tests)?;
+
+    let official_ssr_src = official_root
+        .join("packages")
+        .join("compiler-ssr")
+        .join("src");
+    let prepared_ssr_src = prepared_root
+        .join("packages")
+        .join("compiler-ssr")
+        .join("src");
+    copy_dir_recursive(&official_ssr_src, &prepared_ssr_src)?;
+
+    write_vue3_core_source_shims(&prepared_root)?;
+    let official_dom_src = official_root
+        .join("packages")
+        .join("compiler-dom")
+        .join("src");
+    let prepared_dom_src = prepared_root
+        .join("packages")
+        .join("compiler-dom")
+        .join("src");
+    copy_dir_recursive(&official_dom_src, &prepared_dom_src)?;
+    write_vue3_ssr_conformance_shims(&prepared_root)?;
+    Ok(prepared_root)
+}
+
+fn write_vue3_ssr_conformance_shims(prepared_root: &Path) -> Result<()> {
+    write_vue3_core_test_setup(prepared_root)?;
+
+    let config = r#"
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const root = path.dirname(fileURLToPath(import.meta.url))
+const aliasRoot = process.env.VUEC_RUST_ALIAS_ROOT
+const npmRoot = process.env.VUEC_OFFICIAL_NPM_ROOT
+
+export default {
+  define: {
+    __DEV__: true,
+    __TEST__: true,
+    __VERSION__: '"test"',
+    __BROWSER__: false,
+    __GLOBAL__: false,
+    __ESM_BUNDLER__: true,
+    __ESM_BROWSER__: false,
+    __CJS__: true,
+    __SSR__: true,
+    __FEATURE_OPTIONS_API__: true,
+    __FEATURE_SUSPENSE__: true,
+    __FEATURE_PROD_DEVTOOLS__: false,
+    __FEATURE_PROD_HYDRATION_MISMATCH_DETAILS__: false,
+    __COMPAT__: true,
+  },
+  resolve: {
+    alias: {
+      '@vue/compiler-core': path.resolve(aliasRoot, 'node_modules/@vue/compiler-core/index.js'),
+      '@vue/compiler-dom': path.resolve(root, 'packages/compiler-dom/src/index.ts'),
+      '@vue/compiler-ssr': path.resolve(root, 'packages/compiler-ssr/src/index.ts'),
+      '@vue/compiler-sfc': path.resolve(aliasRoot, 'node_modules/@vue/compiler-sfc/dist/compiler-sfc.cjs.js'),
+      '@vue/shared': path.resolve(npmRoot, 'node_modules/@vue/shared/index.js'),
+      'packages/compiler-core/src/transform': path.resolve(root, 'packages/compiler-core/src/transform.ts'),
+      'source-map-js': path.resolve(npmRoot, 'node_modules/source-map-js/source-map.js'),
+    },
+  },
+  test: {
+    globals: true,
+    pool: 'forks',
+    setupFiles: ['./vuec-vitest-setup.ts'],
+    include: ['packages/compiler-ssr/__tests__/**/*.spec.ts'],
+  },
+}
+"#;
+    write_text(&prepared_root.join("vitest.config.ts"), config)?;
+    Ok(())
+}
+
 fn write_vue3_core_test_setup(prepared_root: &Path) -> Result<()> {
     write_text(
         &prepared_root.join("vuec-vitest-setup.ts"),
@@ -9505,7 +9616,7 @@ fn conformance_coverage_report(
 
 fn conformance_coverage_kind(spec: ConformanceSuiteSpec) -> ConformanceCoverageKind {
     match spec.name {
-        "vue3-core" | "vue3-dom" => ConformanceCoverageKind::Mixed,
+        "vue3-core" | "vue3-dom" | "vue3-ssr" => ConformanceCoverageKind::Mixed,
         _ => ConformanceCoverageKind::RustBacked,
     }
 }
@@ -9517,6 +9628,9 @@ fn conformance_coverage_reason(spec: ConformanceSuiteSpec) -> &'static str {
         }
         "vue3-dom" => {
             "Vue 3 compiler-dom official tests run through a prepared Vitest suite with official DOM source imports, generated compiler-core import shims, and the @vue/compiler-dom alias runtime. Public compile/parse exports call the Rust bridge, but internal DOM transform imports mostly execute official TypeScript source or compatibility adapter code; only explicitly bridged projections count as Rust-backed."
+        }
+        "vue3-ssr" => {
+            "Vue 3 compiler-ssr official tests run through a prepared Vitest suite with official SSR and DOM source imports, generated compiler-core import shims, and the alias runtime. Public @vue/compiler-ssr exports call the Rust bridge, but prepared SSR source tests execute mixed official TypeScript source, alias adapter code, and Rust bridge projections."
         }
         _ => {
             "Suite is routed through Rust alias package smoke/output paths; full official runner wiring may still be pending."
@@ -10277,6 +10391,46 @@ mod tests {
         let coverage = conformance_coverage_report(suite_spec(ConformanceSuite::Vue3Dom), None);
         assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
         assert!(coverage.reason.contains("official DOM source imports"));
+    }
+
+    #[test]
+    fn vue3_ssr_conformance_shims_use_ssr_vitest_glob() {
+        let temp = std::env::temp_dir().join(format!(
+            "vuec-xtask-vue3-ssr-shims-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        write_vue3_core_source_shims(&temp).unwrap();
+        write_vue3_ssr_conformance_shims(&temp).unwrap();
+
+        let config = fs::read_to_string(temp.join("vitest.config.ts")).unwrap();
+        assert!(!config.contains("vitest/config"));
+        assert!(config.contains("include: ['packages/compiler-ssr/__tests__/**/*.spec.ts']"));
+        assert!(config.contains(
+            "'@vue/compiler-dom': path.resolve(root, 'packages/compiler-dom/src/index.ts')"
+        ));
+        assert!(config.contains("'packages/compiler-core/src/transform': path.resolve(root, 'packages/compiler-core/src/transform.ts')"));
+
+        let transform = fs::read_to_string(
+            temp.join("packages")
+                .join("compiler-core")
+                .join("src")
+                .join("transform.ts"),
+        )
+        .unwrap();
+        assert!(transform.contains("export * from \"@vue/compiler-core\""));
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn vue3_ssr_conformance_coverage_is_mixed() {
+        let coverage = conformance_coverage_report(suite_spec(ConformanceSuite::Vue3Ssr), None);
+        assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
+        assert!(coverage
+            .reason
+            .contains("official SSR and DOM source imports"));
     }
 
     #[test]
