@@ -3209,6 +3209,8 @@ const vue3CoreRuntime = (() => {
     ['SUSPENSE', 'Suspense'],
     ['KEEP_ALIVE', 'KeepAlive'],
     ['BASE_TRANSITION', 'BaseTransition'],
+    ['TRANSITION', 'Transition'],
+    ['TRANSITION_GROUP', 'TransitionGroup'],
     ['OPEN_BLOCK', 'openBlock'],
     ['CREATE_BLOCK', 'createBlock'],
     ['CREATE_ELEMENT_BLOCK', 'createElementBlock'],
@@ -6428,8 +6430,29 @@ function vue3ResolveComponentContextPayload(context) {
       ? context.bindingMetadata.__isScriptSetup
       : undefined,
     compatIsOnElement: false,
-    builtInComponents: [],
+    builtInComponents: vue3BuiltInComponentPayload(context),
   };
+}
+
+function vue3BuiltInComponentPayload(context) {
+  const names = ['Transition', 'transition', 'TransitionGroup', 'transition-group'];
+  const out = [];
+  const seen = new Set();
+  for (const name of names) {
+    let helper;
+    try {
+      helper = context && context.isBuiltInComponent && context.isBuiltInComponent(name);
+    } catch (_) {
+      helper = undefined;
+    }
+    if (!helper) helper = vue3CoreRuntime.isCoreComponent(name);
+    const helperName = typeof helper === 'symbol' ? vue3CoreRuntime.helperNameMap[helper] : undefined;
+    if (helperName && !seen.has(name)) {
+      seen.add(name);
+      out.push({ tag: name, helperName });
+    }
+  }
+  return out;
 }
 
 function materializeVue3ComponentTypeProjection(projection, node, context) {
@@ -6444,7 +6467,13 @@ function materializeVue3ComponentTypeProjection(projection, node, context) {
       );
     case 'helper':
       if (helper && projection.registerHelper !== false) context.helper(helper);
-      return helper || projection.helper;
+      if (helper) return helper;
+      if (projection.helperName) {
+        const runtimeHelper = helperSymbolFromHelperName(projection.helperName);
+        if (runtimeHelper && projection.registerHelper !== false) context.helper(runtimeHelper);
+        return runtimeHelper || `_${projection.helperName}`;
+      }
+      return projection.helper;
     case 'expression':
       for (const name of projection.helpers || []) {
         const symbol = helperSymbolFromProjection(name);
@@ -6484,6 +6513,12 @@ function materializeVue3ComponentProjectionNode(projection, node, context) {
 
 function helperSymbolFromProjection(name) {
   return name && vue3CoreRuntime[name] || undefined;
+}
+
+function helperSymbolFromHelperName(name) {
+  return Object.values(vue3CoreRuntime).find(value => {
+    return typeof value === 'symbol' && vue3CoreRuntime.helperNameMap[value] === name;
+  });
 }
 
 function createRootCodegen(root, context) {

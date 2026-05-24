@@ -2881,20 +2881,30 @@ pub fn resolve_component_type_projection(payload: &Value) -> Value {
             "registerHelper": !ssr,
         });
     }
-    if context
+    if let Some(projection) = context
         .get("builtInComponents")
         .and_then(Value::as_array)
-        .is_some_and(|components| {
-            components
-                .iter()
-                .any(|component| component.as_str() == Some(&tag))
+        .and_then(|components| {
+            components.iter().find_map(|component| {
+                if component.as_str() == Some(&tag) {
+                    return Some(json!({
+                        "kind": "helper",
+                        "helper": tag,
+                        "registerHelper": !ssr,
+                    }));
+                }
+                let component_tag = component.get("tag").and_then(Value::as_str)?;
+                (component_tag == tag).then(|| {
+                    json!({
+                        "kind": "helper",
+                        "helperName": component.get("helperName").and_then(Value::as_str).unwrap_or(component_tag),
+                        "registerHelper": !ssr,
+                    })
+                })
+            })
         })
     {
-        return json!({
-            "kind": "helper",
-            "helper": tag,
-            "registerHelper": !ssr,
-        });
+        return projection;
     }
 
     if let Some(from_setup) = resolve_setup_reference(&tag, context) {

@@ -47,9 +47,17 @@
 - [x] Vue 3 compiler-dom Rust-backed parser compatibility slice for `parse.spec.ts` (`33/33`; full DOM suite currently `69/133`, `mixed` coverage).
 - [x] Vue 3 compiler-dom mixed alias-runtime transform execution slice for official DOM `baseCompile` callers (`ignoreSideEffectTags` closed; full DOM suite currently `87/133`, `mixed` coverage).
 - [x] Vue 3 compiler-dom Rust-backed dynamic runtime directive helper projection for `vShow.spec.ts` (`2/2`; full DOM suite currently `88/133`, `mixed` coverage).
+- [x] Vue 3 compiler-dom Rust-backed dynamic built-in component helper projection for `Transition.spec.ts` (`14/14`; full DOM suite currently `91/133`, `mixed` coverage).
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Closed the Vue 3 compiler-dom `Transition.spec.ts` remaining snapshot failures.
+- `vuec_vue3_core::resolve_component_type_projection` now accepts dynamic built-in component metadata from the alias runtime. DOM parserOptions built-ins such as `Transition` / `transition` and `TransitionGroup` / `transition-group` now resolve to runtime helper projections instead of `_resolveComponent(...)` assets.
+- The alias runtime now exposes DOM built-in helper symbols in `helperNameMap`, samples `context.isBuiltInComponent` for DOM built-ins when building the Rust resolver context, and materializes Rust `helperName` projections back into registered helper symbols so codegen destructures `Transition: _Transition`.
+- Full Vue 3 DOM conformance remains expected-failing but improves from `88/133` to `91/133`; `Transition.spec.ts` is no longer failing. Remaining failures are `stringifyStatic`, `vModel`, and `vOn`.
+- Vue 3 compiler-core conformance was rechecked after the resolver change and remains `652/652`.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_vue3_core` (`73/73` pass), `cargo test -p xtask` (`18/18` pass), `cargo xtask run-conformance --suite vue3-core` (`652/652`), and `cargo xtask run-conformance --suite vue3-dom` (expected fail with `91/133`).
 
 - Closed the Vue 3 compiler-dom `vShow.spec.ts` compatibility gap.
 - `vuec_vue3_core::build_directive_args_projection` now preserves dynamically registered runtime helper names, so DOM helpers registered by official `compiler-dom/src/runtimeHelpers.ts` (for example `V_SHOW -> vShow`) stay helper directives instead of being treated as custom directive assets.
