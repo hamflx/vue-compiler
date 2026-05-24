@@ -13,9 +13,9 @@ use vuec_ast::{
     MissingSpanReason, NodeId, NodeSpan, QuoteKind, RuntimeHelper, Vue3Ast, Vue3AstKind,
     Vue3Directive, Vue3DomBinding, Vue3DomDirective, Vue3DomEvent, Vue3DomMir, Vue3DomMirKind,
     Vue3DomObjectBinding, Vue3DomObjectListeners, Vue3DomPropSegment, Vue3DomProps,
-    Vue3DomPropsNormalize, Vue3DomStaticAttr, Vue3DomTag, Vue3Element, Vue3ElementType,
-    Vue3Expression, Vue3NodeKind, Vue3PatchFlags, Vue3Prop, Vue3Root, Vue3SlotFlag, Vue3SsrMir,
-    Vue3SsrMirKind, Vue3VNodeCall,
+    Vue3DomPropsNormalize, Vue3DomSlotName, Vue3DomStaticAttr, Vue3DomTag, Vue3Element,
+    Vue3ElementType, Vue3Expression, Vue3NodeKind, Vue3PatchFlags, Vue3Prop, Vue3Root,
+    Vue3SlotFlag, Vue3SsrMir, Vue3SsrMirKind, Vue3VNodeCall,
 };
 use vuec_codegen::{CodeWriter, SourceMapArtifact, SourceMapSegment};
 use vuec_html::{HtmlTokenKind, HtmlTokenizer};
@@ -1177,86 +1177,300 @@ fn lower_vue3_component_slots_to_dom_mir(
         return None;
     }
     let visible = visible_child_ids(ast, &ast_node.children);
-    if visible.is_empty() || !component_children_are_stable_slots(ast, &visible) {
+    if visible.is_empty() {
         return None;
     }
+    let slots_are_stable = component_children_are_stable_slots(ast, &visible);
 
     let mut slots = Vec::new();
+    let mut dynamic_slots = Vec::new();
     let mut default_children = Vec::new();
-    for child_id in visible {
+    for (index, child_id) in visible.iter().copied().enumerate() {
         let Some(child) = ast.node(child_id) else {
             continue;
         };
         if let Vue3AstKind::Element(child_element) = &child.kind {
             if let Some(slot) = directive_by_name(child_element, "slot") {
-                let name = vue3_static_slot_directive_name(slot);
-                let params = register_vue3_slot_params(slot, child.span.source(), state);
-                let slot_hir_id = lower_vue3_slot_decl_to_hir(
-                    child_id,
-                    hir_id,
-                    mir_id,
-                    name.clone(),
-                    params,
-                    slot.span
-                        .map(NodeSpan::from)
-                        .unwrap_or_else(|| child.span.clone()),
-                    state,
-                );
-                slots.push(vuec_ast::Vue3DomSlot {
-                    name,
-                    params,
-                    children: lower_vue3_slot_children_to_dom_mir(
+                if slots_are_stable {
+                    slots.push(lower_vue3_static_slot_to_dom_mir(
+                        child_id,
+                        child,
+                        slot,
                         &child.children,
                         ast,
-                        slot_hir_id,
+                        hir_id,
                         mir_id,
                         state,
-                    ),
-                });
+                    ));
+                } else if let Some(dynamic_slot) = lower_vue3_dynamic_slot_to_dom_mir(
+                    child_id,
+                    child,
+                    child_element,
+                    slot,
+                    ast,
+                    hir_id,
+                    mir_id,
+                    state,
+                    index,
+                ) {
+                    dynamic_slots.push(dynamic_slot);
+                }
                 continue;
             }
         }
-        default_children.push(child_id);
+        if slots_are_stable {
+            default_children.push(child_id);
+        }
     }
-    if !default_children.is_empty() {
-        let slot_name = on_component_slot
-            .map(vue3_static_slot_directive_name)
-            .unwrap_or_else(|| "default".into());
-        let slot_params = on_component_slot
-            .and_then(|slot| register_vue3_slot_params(slot, ast_node.span.source(), state));
-        let slot_hir_id = lower_vue3_slot_decl_to_hir(
-            ast_node.id,
+    if slots_are_stable && !default_children.is_empty() {
+        slots.push(lower_vue3_default_slot_to_dom_mir(
+            ast_node,
+            on_component_slot,
+            &default_children,
+            ast,
             hir_id,
             mir_id,
-            slot_name.clone(),
-            slot_params,
-            on_component_slot
-                .and_then(|slot| slot.span)
-                .map(NodeSpan::from)
-                .unwrap_or_else(|| {
-                    NodeSpan::generated(ast_node.span.source(), vuec_ast::GeneratedReason::Lowering)
-                }),
             state,
-        );
-        slots.push(vuec_ast::Vue3DomSlot {
-            name: slot_name,
-            params: slot_params,
-            children: lower_vue3_slot_children_to_dom_mir(
-                &default_children,
-                ast,
-                slot_hir_id,
-                mir_id,
-                state,
-            ),
-        });
+        ));
     }
-    if slots.is_empty() {
+    if slots.is_empty() && dynamic_slots.is_empty() {
         None
     } else {
         Some(vuec_ast::Vue3DomSlots {
             slots,
-            flag: Vue3SlotFlag::Stable,
+            dynamic_slots,
+            flag: if slots_are_stable {
+                Vue3SlotFlag::Stable
+            } else {
+                Vue3SlotFlag::Dynamic
+            },
         })
+    }
+}
+
+fn lower_vue3_static_slot_to_dom_mir(
+    ast_id: NodeId,
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    slot: &Vue3Directive,
+    children: &[NodeId],
+    ast: &Vue3Ast,
+    hir_parent: NodeId,
+    mir_parent: NodeId,
+    state: &mut Vue3DomLoweringState,
+) -> vuec_ast::Vue3DomSlot {
+    let name = vue3_static_slot_directive_name(slot);
+    let params = register_vue3_slot_params(slot, ast_node.span.source(), state);
+    let slot_hir_id = lower_vue3_slot_decl_to_hir(
+        ast_id,
+        hir_parent,
+        mir_parent,
+        name.clone(),
+        params,
+        slot.span
+            .map(NodeSpan::from)
+            .unwrap_or_else(|| ast_node.span.clone()),
+        state,
+    );
+    vuec_ast::Vue3DomSlot {
+        name,
+        params,
+        children: lower_vue3_slot_children_to_dom_mir(
+            children,
+            ast,
+            slot_hir_id,
+            mir_parent,
+            state,
+        ),
+    }
+}
+
+fn lower_vue3_default_slot_to_dom_mir(
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    on_component_slot: Option<&Vue3Directive>,
+    children: &[NodeId],
+    ast: &Vue3Ast,
+    hir_parent: NodeId,
+    mir_parent: NodeId,
+    state: &mut Vue3DomLoweringState,
+) -> vuec_ast::Vue3DomSlot {
+    let slot_name = on_component_slot
+        .map(vue3_static_slot_directive_name)
+        .unwrap_or_else(|| "default".into());
+    let slot_params = on_component_slot
+        .and_then(|slot| register_vue3_slot_params(slot, ast_node.span.source(), state));
+    let slot_hir_id = lower_vue3_slot_decl_to_hir(
+        ast_node.id,
+        hir_parent,
+        mir_parent,
+        slot_name.clone(),
+        slot_params,
+        on_component_slot
+            .and_then(|slot| slot.span)
+            .map(NodeSpan::from)
+            .unwrap_or_else(|| {
+                NodeSpan::generated(ast_node.span.source(), vuec_ast::GeneratedReason::Lowering)
+            }),
+        state,
+    );
+    vuec_ast::Vue3DomSlot {
+        name: slot_name,
+        params: slot_params,
+        children: lower_vue3_slot_children_to_dom_mir(
+            children,
+            ast,
+            slot_hir_id,
+            mir_parent,
+            state,
+        ),
+    }
+}
+
+fn lower_vue3_dynamic_slot_to_dom_mir(
+    ast_id: NodeId,
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    element: &Vue3Element,
+    slot: &Vue3Directive,
+    ast: &Vue3Ast,
+    hir_parent: NodeId,
+    mir_parent: NodeId,
+    state: &mut Vue3DomLoweringState,
+    index: usize,
+) -> Option<vuec_ast::Vue3DomDynamicSlot> {
+    if let Some(for_dir) = directive_by_name(element, "for") {
+        return Some(vuec_ast::Vue3DomDynamicSlot::For(
+            lower_vue3_for_slot_to_dom_mir(
+                ast_id, ast_node, slot, for_dir, ast, hir_parent, mir_parent, state,
+            )?,
+        ));
+    }
+    let slot_object = lower_vue3_dynamic_slot_object_to_dom_mir(
+        ast_id,
+        ast_node,
+        slot,
+        &ast_node.children,
+        ast,
+        hir_parent,
+        mir_parent,
+        state,
+        if directive_by_name(element, "if").is_some()
+            || directive_by_name(element, "else-if").is_some()
+        {
+            Some(index.to_string())
+        } else {
+            None
+        },
+    );
+    if let Some(if_dir) =
+        directive_by_name(element, "if").or_else(|| directive_by_name(element, "else-if"))
+    {
+        Some(vuec_ast::Vue3DomDynamicSlot::Conditional(
+            vuec_ast::Vue3DomConditionalSlot {
+                condition: lower_vue3_optional_condition(
+                    if_dir,
+                    ast_node,
+                    &mut state.js,
+                    state.source_type,
+                ),
+                slot: slot_object,
+            },
+        ))
+    } else {
+        Some(vuec_ast::Vue3DomDynamicSlot::Slot(slot_object))
+    }
+}
+
+fn lower_vue3_for_slot_to_dom_mir(
+    ast_id: NodeId,
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    slot: &Vue3Directive,
+    for_dir: &Vue3Directive,
+    ast: &Vue3Ast,
+    hir_parent: NodeId,
+    mir_parent: NodeId,
+    state: &mut Vue3DomLoweringState,
+) -> Option<vuec_ast::Vue3DomForSlot> {
+    let parsed = lower_vue3_for_directive(for_dir, ast_node, &mut state.js, state.source_type)?;
+    Some(vuec_ast::Vue3DomForSlot {
+        source: parsed.source,
+        value_alias: parsed.value_alias,
+        key_alias: parsed.key_alias,
+        index_alias: parsed.index_alias,
+        slot: lower_vue3_dynamic_slot_object_to_dom_mir(
+            ast_id,
+            ast_node,
+            slot,
+            &ast_node.children,
+            ast,
+            hir_parent,
+            mir_parent,
+            state,
+            None,
+        ),
+    })
+}
+
+fn lower_vue3_dynamic_slot_object_to_dom_mir(
+    ast_id: NodeId,
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    slot: &Vue3Directive,
+    children: &[NodeId],
+    ast: &Vue3Ast,
+    hir_parent: NodeId,
+    mir_parent: NodeId,
+    state: &mut Vue3DomLoweringState,
+    key: Option<String>,
+) -> vuec_ast::Vue3DomDynamicSlotObject {
+    let name = lower_vue3_slot_name_to_dom_mir(slot, ast_node, state);
+    let params = register_vue3_slot_params(slot, ast_node.span.source(), state);
+    let slot_hir_id = lower_vue3_slot_decl_to_hir(
+        ast_id,
+        hir_parent,
+        mir_parent,
+        vue3_slot_name_text(&name),
+        params,
+        slot.span
+            .map(NodeSpan::from)
+            .unwrap_or_else(|| ast_node.span.clone()),
+        state,
+    );
+    vuec_ast::Vue3DomDynamicSlotObject {
+        name,
+        params,
+        children: lower_vue3_slot_children_to_dom_mir(
+            children,
+            ast,
+            slot_hir_id,
+            mir_parent,
+            state,
+        ),
+        key,
+    }
+}
+
+fn lower_vue3_slot_name_to_dom_mir(
+    slot: &Vue3Directive,
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    state: &mut Vue3DomLoweringState,
+) -> Vue3DomSlotName {
+    let Some(arg) = slot.arg.as_ref() else {
+        return Vue3DomSlotName::Static("default".into());
+    };
+    if slot.is_dynamic_arg {
+        Vue3DomSlotName::Dynamic(register_vue3_expression_with_span(
+            &mut state.js,
+            arg,
+            slot.arg_span.or_else(|| ast_node.span.source()),
+            state.source_type,
+        ))
+    } else {
+        Vue3DomSlotName::Static(arg.source_string())
+    }
+}
+
+fn vue3_slot_name_text(name: &Vue3DomSlotName) -> String {
+    match name {
+        Vue3DomSlotName::Static(name) => name.clone(),
+        Vue3DomSlotName::Dynamic(id) => format!("#expr{}", id.0),
     }
 }
 
@@ -1443,7 +1657,28 @@ fn vue3_dom_mir_patch_flag(
     if (bits == 0 || bits == 32) && has_vnode_hook(element) {
         bits |= 512;
     }
+    if element.tag_type == Vue3ElementType::Component && component_has_dynamic_slots(ast, children)
+    {
+        bits |= 1024;
+    }
     bits
+}
+
+fn component_has_dynamic_slots(ast: &Vue3Ast, children: &[NodeId]) -> bool {
+    visible_child_ids(ast, children).iter().any(|child_id| {
+        let Some(child) = ast.node(*child_id) else {
+            return false;
+        };
+        let Vue3AstKind::Element(element) = &child.kind else {
+            return false;
+        };
+        directive_by_name(element, "slot").is_some_and(|slot| slot.is_dynamic_arg)
+            || directive_by_name(element, "slot").is_some()
+                && (directive_by_name(element, "if").is_some()
+                    || directive_by_name(element, "else").is_some()
+                    || directive_by_name(element, "else-if").is_some()
+                    || directive_by_name(element, "for").is_some())
+    })
 }
 
 fn lower_vue3_hir_payload_to_dom_mir(
@@ -8953,8 +9188,18 @@ impl<'a> Vue3DomMirCodegen<'a> {
                             push_unique_helper(&mut helpers, *helper);
                         }
                     }
-                    if let MirChildren::Slots(_) = &call.children {
+                    if let MirChildren::Slots(slots) = &call.children {
                         push_unique_helper(&mut helpers, RuntimeHelper::Vue3WithCtx);
+                        if !slots.dynamic_slots.is_empty() {
+                            push_unique_helper(&mut helpers, RuntimeHelper::Vue3CreateSlots);
+                        }
+                        if slots
+                            .dynamic_slots
+                            .iter()
+                            .any(|slot| matches!(slot, vuec_ast::Vue3DomDynamicSlot::For(_)))
+                        {
+                            push_unique_helper(&mut helpers, RuntimeHelper::Vue3RenderList);
+                        }
                     }
                     self.push_prop_helpers(&call.props, &mut helpers);
                     if !call.directives.is_empty() {
@@ -9435,7 +9680,12 @@ impl<'a> Vue3DomMirCodegen<'a> {
             .map(|slot| self.render_slot(slot))
             .collect::<Vec<_>>();
         properties.push(format!("_: {}", vue3_slot_flag_value(slots.flag)));
-        render_object(&properties)
+        let base = render_object(&properties);
+        if slots.dynamic_slots.is_empty() {
+            base
+        } else {
+            format!("_createSlots({base}, {})", self.render_dynamic_slots(slots))
+        }
     }
 
     fn render_slot(&self, slot: &vuec_ast::Vue3DomSlot) -> String {
@@ -9450,6 +9700,84 @@ impl<'a> Vue3DomMirCodegen<'a> {
             .collect::<Vec<_>>();
         let body = render_array(&rendered);
         format!("{}: _withCtx({params} => {body})", json_key(&slot.name))
+    }
+
+    fn render_dynamic_slots(&self, slots: &vuec_ast::Vue3DomSlots) -> String {
+        let rendered = slots
+            .dynamic_slots
+            .iter()
+            .map(|slot| self.render_dynamic_slot(slot))
+            .collect::<Vec<_>>();
+        render_array(&rendered)
+    }
+
+    fn render_dynamic_slot(&self, slot: &vuec_ast::Vue3DomDynamicSlot) -> String {
+        match slot {
+            vuec_ast::Vue3DomDynamicSlot::Slot(slot) => self.render_dynamic_slot_object(slot),
+            vuec_ast::Vue3DomDynamicSlot::Conditional(slot) => {
+                let condition = slot
+                    .condition
+                    .map(|condition| {
+                        render_condition(&self.render_js_expr(condition), self.options)
+                    })
+                    .unwrap_or_else(|| "true".into());
+                let slot = self.render_dynamic_slot_object(&slot.slot);
+                format!(
+                    "{condition}\n  ? {}\n  : undefined",
+                    indent_after_first_line(&slot, 4)
+                )
+            }
+            vuec_ast::Vue3DomDynamicSlot::For(slot) => self.render_for_slot(slot),
+        }
+    }
+
+    fn render_for_slot(&self, slot: &vuec_ast::Vue3DomForSlot) -> String {
+        let source = self.render_js_expr(slot.source);
+        let params = self.render_for_slot_params(slot);
+        let body = self.render_dynamic_slot_object(&slot.slot);
+        format!(
+            "_renderList({source}, ({params}) => {{\n  return {}\n}})",
+            indent_after_first_line(&body, 2)
+        )
+    }
+
+    fn render_for_slot_params(&self, slot: &vuec_ast::Vue3DomForSlot) -> String {
+        let mut params = vec![self.render_js_pattern(slot.value_alias)];
+        if let Some(key) = slot.key_alias {
+            params.push(self.render_js_pattern(key));
+        }
+        if let Some(index) = slot.index_alias {
+            params.push(self.render_js_pattern(index));
+        }
+        params.join(", ")
+    }
+
+    fn render_dynamic_slot_object(&self, slot: &vuec_ast::Vue3DomDynamicSlotObject) -> String {
+        let params = slot
+            .params
+            .map(|params| format!("({})", self.render_js_pattern(params)))
+            .unwrap_or_else(|| "()".into());
+        let children = slot
+            .children
+            .iter()
+            .filter_map(|child_id| self.render_node(*child_id, Vue3DomMirRenderMode::Child))
+            .collect::<Vec<_>>();
+        let body = render_array(&children);
+        let mut properties = vec![
+            format!("name: {}", self.render_slot_name(&slot.name)),
+            format!("fn: _withCtx({params} => {body})"),
+        ];
+        if let Some(key) = &slot.key {
+            properties.push(format!("key: {}", quote_string(key)));
+        }
+        render_object(&properties)
+    }
+
+    fn render_slot_name(&self, name: &Vue3DomSlotName) -> String {
+        match name {
+            Vue3DomSlotName::Static(name) => quote_string(name),
+            Vue3DomSlotName::Dynamic(name) => self.render_js_expr(*name),
+        }
     }
 
     fn render_if(&self, node_id: NodeId, condition: Option<JsExprId>) -> String {
@@ -12031,13 +12359,7 @@ fn render_patch_flag_kind(
 
 fn render_patch_flag_text(flag: Option<i32>) -> String {
     match flag {
-        Some(-1) => ", -1 /* CACHED */".into(),
-        Some(1) => ", 1 /* TEXT */".into(),
-        Some(2) => ", 2 /* CLASS */".into(),
-        Some(8) => ", 8 /* PROPS */".into(),
-        Some(16) => ", 16 /* FULL_PROPS */".into(),
-        Some(512) => ", 512 /* NEED_PATCH */".into(),
-        Some(flag) => format!(", {flag}"),
+        Some(flag) => format!(", {}", public_patch_flag_text(flag)),
         None => String::new(),
     }
 }
@@ -14423,6 +14745,7 @@ mod tests {
             panic!("component slots");
         };
         assert_eq!(slots.flag, Vue3SlotFlag::Stable);
+        assert!(slots.dynamic_slots.is_empty());
         assert_eq!(slots.slots.len(), 2);
         assert_eq!(slots.slots[0].name, "header");
         assert_eq!(slots.slots[0].params, Some(JsPatternId(0)));
@@ -14472,6 +14795,7 @@ mod tests {
             panic!("component slots");
         };
         assert_eq!(slots.flag, Vue3SlotFlag::Stable);
+        assert!(slots.dynamic_slots.is_empty());
         assert_eq!(slots.slots.len(), 1);
         assert_eq!(slots.slots[0].name, "default");
         assert_eq!(slots.slots[0].params, Some(JsPatternId(0)));
@@ -14481,6 +14805,65 @@ mod tests {
             .nodes
             .iter()
             .any(|node| matches!(&node.kind, HirNodeKind::SlotDecl(slot) if slot.name == "default" && slot.params == Some(JsPatternId(0)))));
+    }
+
+    #[test]
+    fn lower_vue3_ast_to_dom_mir_projects_dynamic_component_slots() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<Comp><template #[name]="slotProps"><span>{{ slotProps.label }}</span></template><template #fallback v-if="ok">Fallback</template><template #item v-for="(item, index) in list"><span>{{ item }}</span></template></Comp>"#.into(),
+            file_id: FileId(36),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+
+        let component = result
+            .mir
+            .nodes
+            .iter()
+            .find_map(|node| match &node.kind {
+                Vue3DomMirKind::VNodeCall(call)
+                    if call.tag == Vue3DomTag::ComponentAsset("Comp".into()) =>
+                {
+                    Some(call)
+                }
+                _ => None,
+            })
+            .expect("component");
+        assert_eq!(component.patch_flag.bits & 1024, 1024);
+        let MirChildren::Slots(slots) = &component.children else {
+            panic!("component slots");
+        };
+        assert_eq!(slots.flag, Vue3SlotFlag::Dynamic);
+        assert!(slots.slots.is_empty());
+        assert_eq!(slots.dynamic_slots.len(), 3);
+        assert!(matches!(
+            &slots.dynamic_slots[0],
+            vuec_ast::Vue3DomDynamicSlot::Slot(slot)
+                if matches!(slot.name, Vue3DomSlotName::Dynamic(_))
+                    && slot.params == Some(JsPatternId(0))
+        ));
+        assert!(matches!(
+            &slots.dynamic_slots[1],
+            vuec_ast::Vue3DomDynamicSlot::Conditional(slot)
+                if slot.condition.is_some()
+                    && matches!(slot.slot.name, Vue3DomSlotName::Static(ref name) if name == "fallback")
+                    && slot.slot.key.as_deref() == Some("1")
+        ));
+        assert!(matches!(
+            &slots.dynamic_slots[2],
+            vuec_ast::Vue3DomDynamicSlot::For(slot)
+                if slot.value_alias == JsPatternId(1)
+                    && slot.key_alias == Some(JsPatternId(2))
+                    && slot.index_alias.is_none()
+                    && matches!(slot.slot.name, Vue3DomSlotName::Static(ref name) if name == "item")
+        ));
+        assert!(result
+            .js
+            .expressions()
+            .iter()
+            .any(|entry| entry.source == "list"));
     }
 
     #[test]
@@ -15004,6 +15387,46 @@ mod tests {
         assert!(generated.code.contains("default: _withCtx(() => ["));
         assert!(generated.code.contains("_toDisplayString(msg)"));
         assert!(generated.code.contains("_: 1"));
+    }
+
+    #[test]
+    fn generate_vue3_dom_mir_emits_dynamic_component_slots_from_mir() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<Comp><template #[name]="slotProps"><span>{{ slotProps.label }}</span></template><template #fallback v-if="ok">Fallback</template><template #item v-for="(item, index) in list"><span>{{ item }}</span></template></Comp>"#.into(),
+            file_id: FileId(37),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+        let generated = generate_vue3_dom_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated.code.contains("createSlots as _createSlots"));
+        assert!(generated.code.contains("withCtx as _withCtx"));
+        assert!(generated.code.contains("renderList as _renderList"));
+        assert!(generated.code.contains("_createSlots({"));
+        assert!(generated.code.contains("_: 2"));
+        assert!(generated.code.contains("1024 /* DYNAMIC_SLOTS */"));
+        assert!(generated.code.contains("name: name"));
+        assert!(generated.code.contains("fn: _withCtx((slotProps) => ["));
+        assert!(generated.code.contains("_toDisplayString(slotProps.label)"));
+        assert!(generated.code.contains("ok"));
+        assert!(generated.code.contains(": undefined"));
+        assert!(generated.code.contains("name: \"fallback\""));
+        assert!(generated.code.contains("key: \"1\""));
+        assert!(generated
+            .code
+            .contains("_renderList(list, (item, index) => {"));
+        assert!(generated.code.contains("name: \"item\""));
+        assert!(generated.code.contains("_toDisplayString(item)"));
     }
 
     #[test]

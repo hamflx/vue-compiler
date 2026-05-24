@@ -1,5 +1,11 @@
 # Memory
 
+- Current round: added dynamic component slots payloads to structural Vue 3 DOM MIR.
+- `Vue3DomSlots` now carries `dynamic_slots` alongside stable slots. Dynamic entries cover static/dynamic slot names, optional slot params, conditional slot guards with generated keys, and slot `v-for` source / alias patterns. Slot params and loop expressions remain in `JsAstStore`; slot bodies remain child node IDs in the same `Vue3DomMir` document.
+- DOM lowering now projects dynamic slot names, slot `v-if` / `v-else-if`, and slot `v-for` into `MirChildren::Slots` and sets `Vue3SlotFlag::Dynamic`; `generate_vue3_dom_mir` emits `_createSlots`, `_renderList`, dynamic slot objects, conditional `undefined` fallbacks, and `1024 /* DYNAMIC_SLOTS */` from MIR.
+- This is structural DOM MIR codegen progress only. Forwarded slot flags, exact slot branch alternates, and complete exact component codegen parity remain open.
+- Verification for this dynamic-slot MIR slice: `cargo fmt --all`, focused `cargo test -p vuec_vue3_core lower_vue3_ast_to_dom_mir_projects_dynamic_component_slots`, focused `cargo test -p vuec_vue3_core generate_vue3_dom_mir_emits_dynamic_component_slots_from_mir`, `cargo fmt --all --check`, `cargo check -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, and `git diff --check`.
+
 - Current round: added a stable component slots payload to structural Vue 3 DOM MIR.
 - `MirChildren` now has a `Slots(Vue3DomSlots)` variant with stable slot entries, optional slot params stored as `JsPatternId`, and child MIR node IDs. DOM lowering projects default component children, static named `#slot` template children, and static on-component `v-slot` params into this payload, while leaving dynamic / conditional / loop slots for a later slice.
 - Stable slots now also create `HirNodeKind::SlotDecl` nodes before lowering slot bodies, preserving the documented AST -> HIR -> Vue3DomMir slot boundary instead of making slots a DOM-only reconstruction.

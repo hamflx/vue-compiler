@@ -80,9 +80,16 @@
 - [x] Vue 3 structural HIR / `Vue3DomMir` ordered props segment payload for object `v-bind`, object `v-on`, dynamic arg props, merge props, normalize props, guard reactive props, toHandlers, and toHandlerKey emission from MIR.
 - [x] Vue 3 structural `Vue3DomMir` component tag payload for native tags, component assets, dynamic components, and runtime-helper built-ins, with MIR-driven component declarations/imports in standalone DOM MIR codegen.
 - [x] Vue 3 structural `Vue3DomMir` stable component slots payload for default and static named slots, with MIR-driven `_withCtx` slot object emission in standalone DOM MIR codegen.
+- [x] Vue 3 structural `Vue3DomMir` dynamic component slots payload for dynamic slot names, slot `v-if`, and slot `v-for`, with MIR-driven `_createSlots`, `_renderList`, and `DYNAMIC_SLOTS` patch flag emission.
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Extended `Vue3DomSlots` with target payload for dynamic slot objects: dynamic/static names, optional slot params, slot children, conditional slot guards, slot loop aliases, and generated conditional keys.
+- DOM lowering now projects dynamic slot names, slot `v-if` / `v-else-if`, and slot `v-for` into `MirChildren::Slots` instead of leaving them for AST-based reconstruction. Stable slot lowering continues to emit `HirNodeKind::SlotDecl` before slot bodies.
+- `generate_vue3_dom_mir` now emits `_createSlots(...)`, dynamic slot object entries, conditional `undefined` fallbacks, `_renderList(...)` loop entries, and `1024 /* DYNAMIC_SLOTS */` from MIR. Patch flag comments now use the shared bit-name renderer so standalone MIR codegen prints `DYNAMIC_SLOTS`.
+- This remains structural target-codegen work. Forwarded slot flags, exact slot branch alternates, and complete exact component codegen parity remain open.
+- Verification this round: `cargo fmt --all`, focused `cargo test -p vuec_vue3_core lower_vue3_ast_to_dom_mir_projects_dynamic_component_slots`, focused `cargo test -p vuec_vue3_core generate_vue3_dom_mir_emits_dynamic_component_slots_from_mir`, `cargo fmt --all --check`, `cargo check -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, and `git diff --check`.
 
 - Added `MirChildren::Slots(Vue3DomSlots)` with stable slot entries, optional `JsPatternId` params, and child MIR node IDs. This keeps slot functions in DOM MIR target data rather than reconstructing component children from `Vue3Ast`.
 - DOM lowering now projects stable component slots for default children, static named `#slot` template children, and static on-component `v-slot` params. It also emits `HirNodeKind::SlotDecl` nodes before lowering slot bodies so the slot boundary stays visible in the AST -> HIR -> Vue3DomMir contract. Dynamic names, slot `v-if` / `v-for`, forwarded slots, and `_createSlots` remain intentionally outside this slice.

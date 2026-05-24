@@ -1413,6 +1413,7 @@ pub enum MirChildren {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3DomSlots {
     pub slots: Vec<Vue3DomSlot>,
+    pub dynamic_slots: Vec<Vue3DomDynamicSlot>,
     pub flag: Vue3SlotFlag,
 }
 
@@ -1421,6 +1422,42 @@ pub struct Vue3DomSlot {
     pub name: String,
     pub params: Option<JsPatternId>,
     pub children: Vec<NodeId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Vue3DomDynamicSlot {
+    Slot(Vue3DomDynamicSlotObject),
+    Conditional(Vue3DomConditionalSlot),
+    For(Vue3DomForSlot),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue3DomDynamicSlotObject {
+    pub name: Vue3DomSlotName,
+    pub params: Option<JsPatternId>,
+    pub children: Vec<NodeId>,
+    pub key: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue3DomConditionalSlot {
+    pub condition: Option<JsExprId>,
+    pub slot: Vue3DomDynamicSlotObject,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue3DomForSlot {
+    pub source: JsExprId,
+    pub value_alias: JsPatternId,
+    pub key_alias: Option<JsPatternId>,
+    pub index_alias: Option<JsPatternId>,
+    pub slot: Vue3DomDynamicSlotObject,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Vue3DomSlotName {
+    Static(String),
+    Dynamic(JsExprId),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
