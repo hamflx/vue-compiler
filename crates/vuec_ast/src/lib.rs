@@ -1271,6 +1271,10 @@ pub enum Vue3DomMirKind {
     Cache {
         index: u32,
     },
+    Memo {
+        expression: JsExprId,
+        index: u32,
+    },
     Hoisted {
         index: u32,
     },

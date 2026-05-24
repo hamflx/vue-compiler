@@ -1073,6 +1073,37 @@ fn lower_vue3_non_control_element_to_dom_mir(
     mir_parent: NodeId,
     state: &mut Vue3DomLoweringState,
 ) -> Option<(NodeId, NodeId)> {
+    if let Some(memo) =
+        directive_by_name(element, "memo").filter(|_| directive_by_name(element, "for").is_none())
+    {
+        let expression = register_vue3_expression_with_span(
+            &mut state.js,
+            memo.exp
+                .as_ref()
+                .unwrap_or(&Vue3Expression::Raw(String::new())),
+            memo.exp_span.or_else(|| ast_node.span.source()),
+            state.source_type,
+        );
+        let cache_id = state.next_cache_index;
+        state.next_cache_index += 1;
+        let wrapper_id = state.mir.push_child(
+            mir_parent,
+            Vue3DomMirKind::Memo {
+                expression,
+                index: cache_id,
+            },
+            NodeSpan::generated(ast_node.span.source(), vuec_ast::GeneratedReason::Lowering),
+        );
+        let lowered = lower_vue3_plain_element_to_dom_mir(
+            ast_id, element, ast, ast_node, hir_parent, wrapper_id, state,
+        );
+        if let Some((hir_id, _)) = lowered {
+            state.map.record_hir_to_mir(hir_id, wrapper_id);
+            return Some((hir_id, wrapper_id));
+        }
+        return None;
+    }
+
     if directive_by_name(element, "once").is_some() && state.in_v_once == 0 {
         let cache_id = state.next_cache_index;
         state.next_cache_index += 1;
@@ -2840,7 +2871,20 @@ fn lower_vue3_directives_to_hir(
             Vue3Prop::Directive(dir)
                 if !matches!(
                     dir.name.as_str(),
-                    "bind" | "on" | "if" | "else-if" | "else" | "for"
+                    "bind"
+                        | "cloak"
+                        | "else"
+                        | "else-if"
+                        | "for"
+                        | "html"
+                        | "if"
+                        | "memo"
+                        | "model"
+                        | "on"
+                        | "once"
+                        | "pre"
+                        | "slot"
+                        | "text"
                 ) =>
             {
                 Some(HirDirectiveUse {
@@ -9255,6 +9299,9 @@ impl<'a> Vue3DomMirCodegen<'a> {
                 Vue3DomMirKind::RenderSlot { .. } => {
                     push_unique_helper(&mut helpers, RuntimeHelper::Vue3RenderSlot);
                 }
+                Vue3DomMirKind::Memo { .. } => {
+                    push_unique_helper(&mut helpers, RuntimeHelper::Vue3WithMemo);
+                }
                 Vue3DomMirKind::Cache { .. } | Vue3DomMirKind::Hoisted { .. } => {}
             }
         }
@@ -9398,6 +9445,14 @@ impl<'a> Vue3DomMirCodegen<'a> {
             Vue3DomMirKind::Cache { index } => {
                 let rendered = self.render_root_children(node_id);
                 Some(format!("_cache[{index}] || (_cache[{index}] = {rendered})"))
+            }
+            Vue3DomMirKind::Memo { expression, index } => {
+                let rendered = self.render_root_children(node_id);
+                Some(format!(
+                    "_withMemo({}, () => {}, _cache, {index})",
+                    self.render_js_expr(*expression),
+                    rendered
+                ))
             }
             Vue3DomMirKind::Hoisted { index } => Some(format!("_hoisted_{index}")),
             Vue3DomMirKind::Fragment => {
@@ -15155,6 +15210,51 @@ mod tests {
     }
 
     #[test]
+    fn lower_vue3_ast_to_dom_mir_projects_v_memo_wrappers() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div><p v-memo="[msg]">{{ msg }}</p><span v-for="item in list" v-memo="[item.id]">{{ item.name }}</span></div>"#.into(),
+            file_id: FileId(20),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+
+        assert_eq!(result.hir.validate_tree(), Ok(()));
+        assert_eq!(result.mir.validate_tree(), Ok(()));
+        let memos = result
+            .mir
+            .nodes
+            .iter()
+            .filter_map(|node| match node.kind {
+                Vue3DomMirKind::Memo { expression, index } => Some((node.id, expression, index)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(memos.len(), 1);
+        assert_eq!(memos[0].1, JsExprId(0));
+        assert_eq!(memos[0].2, 0);
+        assert!(result
+            .mir
+            .node(memos[0].0)
+            .is_some_and(|node| node.children.len() == 1));
+        assert!(result
+            .mir
+            .nodes
+            .iter()
+            .any(|node| matches!(node.kind, Vue3DomMirKind::For { .. })));
+        assert_eq!(
+            result
+                .js
+                .expressions()
+                .iter()
+                .map(|entry| entry.source.as_str())
+                .collect::<Vec<_>>(),
+            vec!["[msg]", "msg", "list", "item.name"]
+        );
+    }
+
+    #[test]
     fn generate_vue3_dom_mir_emits_basic_vnode_tree_without_ast() {
         let source = TemplateSource {
             filename: "foo.vue".into(),
@@ -15242,6 +15342,34 @@ mod tests {
 
         assert!(generated.code.contains("_hoisted_1"));
         assert!(generated.code.contains("_cache[0] || (_cache[0] ="));
+        assert!(generated.code.contains("_toDisplayString(msg)"));
+    }
+
+    #[test]
+    fn generate_vue3_dom_mir_emits_v_memo_wrappers() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div><p v-memo="[msg]">{{ msg }}</p></div>"#.into(),
+            file_id: FileId(30),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+        let generated = generate_vue3_dom_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated.code.contains("withMemo as _withMemo"));
+        assert!(generated
+            .code
+            .contains("_withMemo([msg], () => (_openBlock(), _createElementBlock(\"p\""));
+        assert!(generated.code.contains("_cache, 0)"));
         assert!(generated.code.contains("_toDisplayString(msg)"));
     }
 

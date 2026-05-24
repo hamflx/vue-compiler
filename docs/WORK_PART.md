@@ -81,9 +81,16 @@
 - [x] Vue 3 structural `Vue3DomMir` component tag payload for native tags, component assets, dynamic components, and runtime-helper built-ins, with MIR-driven component declarations/imports in standalone DOM MIR codegen.
 - [x] Vue 3 structural `Vue3DomMir` stable component slots payload for default and static named slots, with MIR-driven `_withCtx` slot object emission in standalone DOM MIR codegen.
 - [x] Vue 3 structural `Vue3DomMir` dynamic component slots payload for dynamic slot names, slot `v-if`, and slot `v-for`, with MIR-driven `_createSlots`, `_renderList`, and `DYNAMIC_SLOTS` patch flag emission.
+- [x] Vue 3 structural `Vue3DomMir` non-`v-for` `v-memo` wrapper payload, with MIR-driven `_withMemo` emission in standalone DOM MIR codegen.
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Added `Vue3DomMirKind::Memo { expression, index }` as the DOM-target payload for non-`v-for` `v-memo`, keeping the memo expression in `JsAstStore` and the cache slot in MIR.
+- DOM lowering now wraps non-`v-for` memoized elements in `Memo` before lowering their VNode body. Structural directives such as `memo`, `once`, `slot`, `pre`, `html`, and `text` are no longer lowered as runtime HIR directives.
+- `generate_vue3_dom_mir` now imports `_withMemo` and emits `_withMemo(expression, () => vnode, _cache, index)` from MIR. This slice intentionally does not cover `v-for` memo cache guards (`_cached`, `_isMemoSame`, `_item.memo`), which remain a later target projection.
+- This remains structural target-codegen work. `v-for` memo cache MIR shape, cacheHandlers event caching, full hoist output, and exact DOM codegen parity remain open.
+- Verification this round: `cargo fmt --all`, focused `cargo test -p vuec_vue3_core lower_vue3_ast_to_dom_mir_projects_v_memo_wrappers`, focused `cargo test -p vuec_vue3_core generate_vue3_dom_mir_emits_v_memo_wrappers`, `cargo fmt --all --check`, `cargo check -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, and `git diff --check`.
 
 - Extended `Vue3DomSlots` with target payload for dynamic slot objects: dynamic/static names, optional slot params, slot children, conditional slot guards, slot loop aliases, and generated conditional keys.
 - DOM lowering now projects dynamic slot names, slot `v-if` / `v-else-if`, and slot `v-for` into `MirChildren::Slots` instead of leaving them for AST-based reconstruction. Stable slot lowering continues to emit `HirNodeKind::SlotDecl` before slot bodies.

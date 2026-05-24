@@ -1,5 +1,11 @@
 # Memory
 
+- Current round: added non-`v-for` `v-memo` wrappers to structural Vue 3 DOM MIR.
+- `Vue3DomMirKind::Memo { expression, index }` now stores the memo expression as a `JsExprId` and the target cache slot. DOM lowering wraps non-`v-for` memoized elements before lowering their VNode body; `v-for` memo cache guards remain out of scope for this slice.
+- `generate_vue3_dom_mir` now imports `_withMemo` and emits `_withMemo(expression, () => vnode, _cache, index)` from MIR. Structural directives such as `memo`, `once`, `slot`, `pre`, `html`, and `text` are excluded from runtime HIR directives.
+- This is structural DOM MIR codegen progress only. `v-for` memo cache MIR shape, cacheHandlers event caching, full hoist output, and exact DOM codegen parity remain open.
+- Verification for this v-memo MIR slice: `cargo fmt --all`, focused `cargo test -p vuec_vue3_core lower_vue3_ast_to_dom_mir_projects_v_memo_wrappers`, focused `cargo test -p vuec_vue3_core generate_vue3_dom_mir_emits_v_memo_wrappers`, `cargo fmt --all --check`, `cargo check -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, and `git diff --check`.
+
 - Current round: added dynamic component slots payloads to structural Vue 3 DOM MIR.
 - `Vue3DomSlots` now carries `dynamic_slots` alongside stable slots. Dynamic entries cover static/dynamic slot names, optional slot params, conditional slot guards with generated keys, and slot `v-for` source / alias patterns. Slot params and loop expressions remain in `JsAstStore`; slot bodies remain child node IDs in the same `Vue3DomMir` document.
 - DOM lowering now projects dynamic slot names, slot `v-if` / `v-else-if`, and slot `v-for` into `MirChildren::Slots` and sets `Vue3SlotFlag::Dynamic`; `generate_vue3_dom_mir` emits `_createSlots`, `_renderList`, dynamic slot objects, conditional `undefined` fallbacks, and `1024 /* DYNAMIC_SLOTS */` from MIR.
