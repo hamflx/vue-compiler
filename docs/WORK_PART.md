@@ -38,9 +38,16 @@
 - [x] Vue 3 compiler-core Rust-backed `buildDirectiveArgs` projection slice inside `transformElement.spec.ts`.
 - [x] Vue 3 compiler-core Rust-backed `transformElement` built-in component children projection slice.
 - [x] Vue 3 compiler-core Rust-backed public `baseCompile` vnode-hook / `NEED_PATCH` AST codegen slice.
+- [x] Vue 3 compiler-core Rust-backed `processFor` / `transformFor` projection bridge for `vFor.spec.ts`.
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Added a Rust-backed Vue 3 `processFor` / `transformFor` projection bridge.
+- `vuec_vue3_core::transform_for_projection` now owns official `v-for` expression parsing and decisions for skipped alias slots, destructuring aliases, source/value/key/index locations, malformed/no-expression diagnostics, prefixIdentifiers expression rewriting, OXC-backed alias local extraction, template child-key diagnostics, key property projection, fragment patch flags, stable fragment tracking, and loop child-block wrapper selection.
+- `vuec_node_bridge` now exposes `vue3.core.transformFor`. Generated alias code in `xtask/src/compat.rs` changed as bridge/materialization/traversal support: it calls Rust projections, materializes official-shaped AST expressions and VNode codegen nodes, applies Rust-selected v-for locals to the transform context, and forwards Rust-selected diagnostics. The generator indentation change is alias snapshot formatting compatibility only, not compiler semantics.
+- Focused official `compiler-core/__tests__/transforms/vFor.spec.ts` now passes `53/53` (previously `17/53`). Full Vue 3 core conformance is still expected-failing but improved to `589/652`; `transformElement.spec.ts` is now `124/124`, and remaining full-suite failures are concentrated in `cacheStatic`, `vSlot`, `utils`, plus small `vIf` / `vOn` gaps.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_vue3_core` (`55/55` pass), `cargo build -p vuec_node_bridge`, `cargo xtask verify-npm-alias --version-line vue3 --package @vue/compiler-core`, direct prepared Vitest `vFor.spec.ts` (`53/53` pass), `git diff --check`, and `cargo xtask run-conformance --suite vue3-core` as an expected fail with `589/652` passing.
 
 - Added Rust-backed Vue 3 public `baseCompile` vnode-hook codegen compatibility.
 - `vuec_vue3_core` now maps static `@vue:*` events to official `onVnode*` prop names, keeps vnode hooks out of dynamic prop lists, and emits `512 /* NEED_PATCH */` only when no stronger patch flag is selected.

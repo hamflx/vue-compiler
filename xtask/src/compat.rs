@@ -4109,25 +4109,13 @@ const vue3CoreRuntime = (() => {
     function genNodeListAsArray(nodes) {
       nodes = nodes || [];
       const multilines = nodes.length > 3 || nodes.some(n => Array.isArray(n) || !isTextLike(n));
-      const arrayIndentLevel = indentLevel;
       push(`[`);
       if (multilines) {
-        if (arrayIndentLevel === 3) {
-          indentLevel += 2;
-          newline();
-        } else {
-          indent();
-        }
+        indent();
       }
       genNodeList(nodes, multilines, true);
       if (multilines) {
-        if (arrayIndentLevel === 3) {
-          indentLevel = arrayIndentLevel + 1;
-          newline();
-          indentLevel = arrayIndentLevel;
-        } else {
-          deindent();
-        }
+        deindent();
       }
       push(`]`);
     }
@@ -4243,7 +4231,9 @@ const vue3CoreRuntime = (() => {
       indentLevel++;
       newline();
       push(`? `);
+      indentLevel++;
       genNode(node.consequent);
+      indentLevel--;
       newline();
       push(`: `);
       if (!nested) indentLevel++;
@@ -5281,16 +5271,20 @@ const vue3CoreRuntime = (() => {
   };
   runtime.transformIf = runtime.createStructuralDirectiveTransform(/^(if|else|else-if)$/, runtime.processIf);
   runtime.processFor = function processFor(node, dir, context, processCodegen) {
-    const parsed = parseForExpression(dir.exp && dir.exp.content || '');
-    const aliases = [parsed.value, parsed.key, parsed.index]
-      .filter(Boolean)
-      .map(exp => exp.content)
-      .filter(Boolean);
-    aliases.forEach(alias => context.addIdentifiers(alias));
+    const projection = callBridge('vue3.core.transformFor', {
+      node,
+      dir,
+      context: vue3TransformForContextPayload(context),
+    });
+    materializeVue3ForErrors(projection, node, dir, context);
+    if (!projection || !projection.parseResult) return;
+    const parsed = materializeVue3ForParseResult(projection.parseResult, dir, context);
+    const aliases = projection.locals || [];
+    if (context.prefixIdentifiers) aliases.forEach(alias => context.addIdentifiers(alias));
     const children = node.tagType === ElementTypes.TEMPLATE ? node.children || [] : [node];
     const forNode = {
       type: NodeTypes.FOR,
-      loc: node.loc,
+      loc: dir.loc,
       source: parsed.source,
       valueAlias: parsed.value,
       keyAlias: parsed.key,
@@ -5298,22 +5292,72 @@ const vue3CoreRuntime = (() => {
       parseResult: parsed,
       children,
       codegenNode: undefined,
+      __vuecProjection: projection,
     };
-    const renderExp = runtime.createCallExpression(context.helper(runtime.RENDER_LIST), [forNode.source]);
-    forNode.codegenNode = runtime.createVNodeCall(context, context.helper(runtime.FRAGMENT), undefined, renderExp, 256, undefined, undefined, true, true, false, node.loc);
+    let renderExp;
+    if (!processCodegen) {
+      renderExp = runtime.createCallExpression(context.helper(runtime.RENDER_LIST), [forNode.source]);
+      forNode.codegenNode = runtime.createVNodeCall(context, context.helper(runtime.FRAGMENT), undefined, renderExp, 256, undefined, undefined, true, true, false, node.loc);
+    }
     context.replaceNode(forNode);
     context.scopes.vFor++;
     const onExit = processCodegen ? processCodegen(forNode) : undefined;
     return () => {
-      if (onExit) onExit();
-      runtime.finalizeForCodegen(forNode, renderExp, context);
       context.scopes.vFor--;
-      aliases.forEach(alias => context.removeIdentifiers(alias));
+      if (context.prefixIdentifiers) aliases.forEach(alias => context.removeIdentifiers(alias));
+      if (onExit) {
+        onExit();
+      } else {
+        materializeVue3ForTemplateKeyErrors(projection, node, dir, context);
+        runtime.finalizeForCodegen(forNode, renderExp, context);
+      }
     };
   };
   runtime.transformFor = runtime.createStructuralDirectiveTransform('for', runtime.processFor);
+  runtime.transformFor = runtime.createStructuralDirectiveTransform('for', (node, dir, context) => {
+    return runtime.processFor(node, dir, context, (forNode) => {
+      const renderExp = runtime.createCallExpression(context.helper(runtime.RENDER_LIST), [forNode.source]);
+      const codegenProjection = callBridge('vue3.core.transformFor', {
+        phase: 'codegen',
+        node,
+        forNode: vue3ForNodePayload(forNode),
+        context: vue3TransformForContextPayload(context),
+      });
+      const keyProperty = materializeVue3ForKeyProperty(codegenProjection && codegenProjection.keyProperty, dir, context);
+      const isStableFragment = !!(codegenProjection && codegenProjection.isStableFragment);
+      forNode.codegenNode = runtime.createVNodeCall(
+        context,
+        context.helper(runtime.FRAGMENT),
+        undefined,
+        renderExp,
+        codegenProjection && codegenProjection.fragmentFlag || 256,
+        undefined,
+        undefined,
+        true,
+        codegenProjection ? !!codegenProjection.disableTracking : true,
+        false,
+        node.loc,
+      );
+      return () => {
+        materializeVue3ForTemplateKeyErrors(forNode.__vuecProjection, node, dir, context);
+        const exitProjection = callBridge('vue3.core.transformFor', {
+          phase: 'exitCodegen',
+          node,
+          forNode: vue3ForNodePayload(forNode),
+          isStableFragment,
+        });
+        const childBlock = materializeVue3ForChildBlock(exitProjection, node, forNode, keyProperty, context);
+        renderExp.arguments.push(runtime.createFunctionExpression(runtime.createForLoopParams(forNode.parseResult), childBlock, true));
+      };
+    });
+  });
   runtime.createForLoopParams = function createForLoopParams(parseResult) {
-    return [parseResult.value, parseResult.key, parseResult.index].filter(Boolean);
+    const args = [parseResult.value, parseResult.key, parseResult.index];
+    let i = args.length;
+    while (i--) {
+      if (args[i]) break;
+    }
+    return args.slice(0, i + 1).map((arg, index) => arg || runtime.createSimpleExpression(`_`.repeat(index + 1), false));
   };
   runtime.finalizeForCodegen = function finalizeForCodegen(forNode, renderExp, context) {
     if (!renderExp || renderExp.arguments.length > 1) return;
@@ -5471,20 +5515,6 @@ function selfNameFromFilename(filename) {
   return match[1].replace(/(^|[-_])(\w)/g, (_, _sep, ch) => ch.toUpperCase());
 }
 
-function parseForExpression(source) {
-  const match = String(source || '').match(vue3CoreRuntime.forAliasRE);
-  const iterable = match ? match[2].trim() : '';
-  const aliases = match ? match[1].trim().replace(/^\(|\)$/g, '') : '';
-  const parts = aliases.split(',').map(part => part.trim()).filter(Boolean);
-  return {
-    source: vue3CoreRuntime.createSimpleExpression(iterable, false),
-    value: parts[0] ? vue3CoreRuntime.createSimpleExpression(parts[0], false) : undefined,
-    key: parts[1] ? vue3CoreRuntime.createSimpleExpression(parts[1], false) : undefined,
-    index: parts[2] ? vue3CoreRuntime.createSimpleExpression(parts[2], false) : undefined,
-    finalized: false,
-  };
-}
-
 function vue3TransformModelContextPayload(context) {
   context = context || {};
   return {
@@ -5529,6 +5559,17 @@ function materializeVue3ModelProjection(projection, dir, context) {
 }
 
 function vue3TransformIfContextPayload(context) {
+  context = context || {};
+  return {
+    prefixIdentifiers: !!context.prefixIdentifiers,
+    inline: !!context.inline,
+    isTS: !!context.isTS,
+    identifiers: context.identifiers || {},
+    bindingMetadata: context.bindingMetadata || {},
+  };
+}
+
+function vue3TransformForContextPayload(context) {
   context = context || {};
   return {
     prefixIdentifiers: !!context.prefixIdentifiers,
@@ -5716,6 +5757,137 @@ function materializeVue3IfProjection(projection, node, dir) {
       );
     default:
       throw new Error(`Unsupported Rust v-if projection: ${projection.kind}`);
+  }
+}
+
+function materializeVue3ForErrors(projection, node, dir, context) {
+  if (!projection || !Array.isArray(projection.errors) || !context || !context.onError) return;
+  for (const error of projection.errors) {
+    context.onError(vue3CoreRuntime.createCompilerError(error.code, vue3ForErrorLoc(error, node, dir)));
+  }
+}
+
+function materializeVue3ForTemplateKeyErrors(projection, node, dir, context) {
+  if (!projection || !Array.isArray(projection.templateKeyErrors) || !context || !context.onError) return;
+  for (const error of projection.templateKeyErrors) {
+    context.onError(vue3CoreRuntime.createCompilerError(error.code, vue3ForErrorLoc(error, node, dir)));
+  }
+}
+
+function vue3ForErrorLoc(error, node, dir) {
+  if (!error) return dir && dir.loc || node && node.loc || locStub;
+  if (error.loc && typeof error.loc === 'object') return error.loc;
+  if (error.loc === 'node') return node && node.loc || dir && dir.loc || locStub;
+  return dir && dir.loc || node && node.loc || locStub;
+}
+
+function materializeVue3ForParseResult(parseResult, dir, context) {
+  return {
+    source: materializeVue3ForProjectionNode(parseResult && parseResult.source, dir, context),
+    value: materializeVue3ForProjectionNode(parseResult && parseResult.value, dir, context),
+    key: materializeVue3ForProjectionNode(parseResult && parseResult.key, dir, context),
+    index: materializeVue3ForProjectionNode(parseResult && parseResult.index, dir, context),
+    finalized: parseResult && parseResult.finalized !== undefined ? !!parseResult.finalized : true,
+  };
+}
+
+function vue3ForNodePayload(forNode) {
+  return {
+    source: forNode && forNode.source,
+    children: (forNode && forNode.children || []).map(child => ({
+      type: child && child.type,
+      tagType: child && child.tagType,
+      codegenNode: child && child.codegenNode ? {
+        type: child.codegenNode.type,
+        isBlock: !!child.codegenNode.isBlock,
+        isComponent: !!child.codegenNode.isComponent,
+      } : null,
+    })),
+  };
+}
+
+function materializeVue3ForKeyProperty(projection, dir, context) {
+  if (!projection || !projection.value) return null;
+  return vue3CoreRuntime.createObjectProperty(
+    'key',
+    materializeVue3ForProjectionNode(projection.value, dir, context),
+  );
+}
+
+function materializeVue3ForChildBlock(projection, node, forNode, keyProperty, context) {
+  projection = projection || {};
+  const children = forNode.children || [];
+  if (projection.kind === 'slotOutlet') {
+    const slotOutlet = projection.path === 'templateChild'
+      ? (node.children || [])[projection.index || 0]
+      : node;
+    const childBlock = slotOutlet && slotOutlet.codegenNode;
+    if (projection.path === 'templateChild' && keyProperty && childBlock) {
+      runtime.injectProp(childBlock, keyProperty, context);
+    }
+    return childBlock;
+  }
+  if (projection.kind === 'fragmentWrapper') {
+    return vue3CoreRuntime.createVNodeCall(
+      context,
+      context.helper(vue3CoreRuntime.FRAGMENT),
+      keyProperty ? vue3CoreRuntime.createObjectExpression([keyProperty]) : undefined,
+      node.children,
+      projection.patchFlag || 64,
+      undefined,
+      undefined,
+      true,
+      undefined,
+      false,
+    );
+  }
+  const childBlock = children[0] && children[0].codegenNode;
+  if (!childBlock) return undefined;
+  if (node.tagType === vue3CoreRuntime.ElementTypes.TEMPLATE && keyProperty) {
+    vue3CoreRuntime.injectProp(childBlock, keyProperty, context);
+  }
+  const shouldBeBlock = !!projection.childBlockIsBlock;
+  if (childBlock.isBlock !== shouldBeBlock) {
+    if (childBlock.isBlock) {
+      context.removeHelper(vue3CoreRuntime.OPEN_BLOCK);
+      context.removeHelper(vue3CoreRuntime.getVNodeBlockHelper(context.inSSR, childBlock.isComponent));
+    } else {
+      context.removeHelper(vue3CoreRuntime.getVNodeHelper(context.inSSR, childBlock.isComponent));
+    }
+  }
+  childBlock.isBlock = shouldBeBlock;
+  if (childBlock.isBlock) {
+    context.helper(vue3CoreRuntime.OPEN_BLOCK);
+    context.helper(vue3CoreRuntime.getVNodeBlockHelper(context.inSSR, childBlock.isComponent));
+  } else {
+    context.helper(vue3CoreRuntime.getVNodeHelper(context.inSSR, childBlock.isComponent));
+  }
+  return childBlock;
+}
+
+function materializeVue3ForProjectionNode(projection, dir, context) {
+  if (!projection || projection.kind === 'undefined') return undefined;
+  if (projection.type) return projection;
+  for (const name of projection.helpers || []) {
+    const symbol = helperSymbolFromProjection(name);
+    if (symbol && context) context.helper(symbol);
+  }
+  switch (projection.kind) {
+    case 'simple':
+      return vue3CoreRuntime.createSimpleExpression(
+        projection.content || '',
+        !!projection.isStatic,
+        projection.loc || (dir && dir.exp && dir.exp.loc) || locStub,
+        projection.constType || 0,
+      );
+    case 'compound':
+      return vue3CoreRuntime.createCompoundExpression(
+        (projection.children || []).map(child => materializeVue3ForProjectionNode(child, dir, context)),
+        projection.loc || (dir && dir.exp && dir.exp.loc) || locStub,
+      );
+    default:
+      if (typeof projection === 'string') return projection;
+      throw new Error(`Unsupported Rust v-for projection: ${projection.kind}`);
   }
 }
 

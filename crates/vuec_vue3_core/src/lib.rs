@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use oxc_ast::ast::{ChainElement, Expression};
+use oxc_ast::ast::{BindingPattern, ChainElement, Expression};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use vuec_ast::{
@@ -791,6 +791,818 @@ pub fn transform_if_projection(payload: &Value) -> Value {
         return transform_if_branch_codegen_projection(payload);
     }
     transform_if_process_projection(payload)
+}
+
+pub fn transform_for_projection(payload: &Value) -> Value {
+    if json_str(payload, "phase") == Some("codegen") {
+        return transform_for_codegen_projection(payload);
+    }
+    if json_str(payload, "phase") == Some("exitCodegen") {
+        return transform_for_exit_codegen_projection(payload);
+    }
+
+    let dir = payload.get("dir").unwrap_or(&Value::Null);
+    let node = payload.get("node").unwrap_or(&Value::Null);
+    let context = payload.get("context").unwrap_or(&Value::Null);
+    let mut errors = Vec::<Value>::new();
+    let Some(exp) = dir.get("exp").filter(|value| !value.is_null()) else {
+        errors.push(json!({ "code": 31, "loc": "dir" }));
+        return json!({ "errors": errors });
+    };
+    let raw = json_str(exp, "content")
+        .or_else(|| exp.get("loc").and_then(|loc| json_str(loc, "source")))
+        .unwrap_or("");
+    let Some(parsed) = parse_vue3_for_expression(raw) else {
+        errors.push(json!({ "code": 32, "loc": "dir" }));
+        return json!({ "errors": errors });
+    };
+
+    let mut source = vue3_for_expression_projection(
+        &parsed.source.content,
+        exp,
+        parsed.source.start,
+        parsed.source.end,
+        Vue3ForAstMode::Expression,
+    );
+    let mut value = parsed.value.as_ref().map(|part| {
+        vue3_for_expression_projection(
+            &part.content,
+            exp,
+            part.start,
+            part.end,
+            Vue3ForAstMode::Params,
+        )
+    });
+    let mut key = parsed.key.as_ref().map(|part| {
+        vue3_for_expression_projection(
+            &part.content,
+            exp,
+            part.start,
+            part.end,
+            Vue3ForAstMode::Params,
+        )
+    });
+    let mut index = parsed.index.as_ref().map(|part| {
+        vue3_for_expression_projection(
+            &part.content,
+            exp,
+            part.start,
+            part.end,
+            Vue3ForAstMode::Params,
+        )
+    });
+
+    if json_bool(context, "prefixIdentifiers") {
+        let options = vue3_options_from_transform_context(context);
+        let locals = transform_context_locals(context);
+        source = vue3_for_rewrite_projection_node(
+            &parsed.source.content,
+            &options,
+            &locals,
+            source["loc"].clone(),
+            Vue3ForAstMode::Expression,
+            false,
+        );
+        let scoped = parsed
+            .all_alias_locals()
+            .into_iter()
+            .chain(locals)
+            .collect::<Vec<_>>();
+        if let Some(part) = parsed.value.as_ref() {
+            value = Some(vue3_for_rewrite_projection_node(
+                &part.content,
+                &options,
+                &scoped,
+                value
+                    .as_ref()
+                    .and_then(|node| node.get("loc"))
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                Vue3ForAstMode::Params,
+                true,
+            ));
+        }
+        if let Some(part) = parsed.key.as_ref() {
+            key = Some(vue3_for_rewrite_projection_node(
+                &part.content,
+                &options,
+                &scoped,
+                key.as_ref()
+                    .and_then(|node| node.get("loc"))
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                Vue3ForAstMode::Params,
+                true,
+            ));
+        }
+        if let Some(part) = parsed.index.as_ref() {
+            index = Some(vue3_for_rewrite_projection_node(
+                &part.content,
+                &options,
+                &scoped,
+                index
+                    .as_ref()
+                    .and_then(|node| node.get("loc"))
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                Vue3ForAstMode::Params,
+                true,
+            ));
+        }
+    }
+
+    let parse_result = json!({
+        "source": source,
+        "value": value,
+        "key": key,
+        "index": index,
+        "finalized": true,
+    });
+    let template_key_errors = vue3_for_template_key_errors(node);
+
+    json!({
+        "errors": errors,
+        "parseResult": parse_result,
+        "locals": parsed.all_alias_locals(),
+        "children": if json_u64(node, "tagType") == Some(3) { "template" } else { "self" },
+        "templateKeyErrors": template_key_errors,
+    })
+}
+
+fn transform_for_codegen_projection(payload: &Value) -> Value {
+    let node = payload.get("node").unwrap_or(&Value::Null);
+    let for_node = payload.get("forNode").unwrap_or(&Value::Null);
+    let context = payload.get("context").unwrap_or(&Value::Null);
+    let source = for_node.get("source").unwrap_or(&Value::Null);
+    let is_stable_fragment = json_node_type(source) == Some(4)
+        && json_u64(source, "constType").is_some_and(|value| value > 0);
+    let key_projection = vue3_for_key_property_projection(node, context);
+    json!({
+        "keyProperty": key_projection,
+        "fragmentFlag": if is_stable_fragment {
+            64
+        } else if !key_projection.is_null() {
+            128
+        } else {
+            256
+        },
+        "disableTracking": !is_stable_fragment,
+        "isStableFragment": is_stable_fragment,
+    })
+}
+
+fn transform_for_exit_codegen_projection(payload: &Value) -> Value {
+    let node = payload.get("node").unwrap_or(&Value::Null);
+    let for_node = payload.get("forNode").unwrap_or(&Value::Null);
+    let children = for_node
+        .get("children")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    if vue3_for_is_slot_outlet_summary(node) {
+        return json!({ "kind": "slotOutlet", "path": "node" });
+    }
+    if json_u64(node, "tagType") == Some(3)
+        && node
+            .get("children")
+            .and_then(Value::as_array)
+            .is_some_and(|children| {
+                children.len() == 1 && vue3_for_is_slot_outlet_summary(&children[0])
+            })
+    {
+        return json!({ "kind": "slotOutlet", "path": "templateChild", "index": 0 });
+    }
+    let need_fragment_wrapper =
+        children.len() != 1 || children.first().and_then(json_node_type) != Some(1);
+    if need_fragment_wrapper {
+        return json!({ "kind": "fragmentWrapper", "patchFlag": 64 });
+    }
+    json!({
+        "kind": "singleElement",
+        "childBlockIsBlock": !json_bool(payload, "isStableFragment"),
+    })
+}
+
+fn vue3_for_is_slot_outlet_summary(node: &Value) -> bool {
+    json_node_type(node) == Some(1) && json_u64(node, "tagType") == Some(2)
+}
+
+fn vue3_for_key_property_projection(node: &Value, context: &Value) -> Value {
+    let Some((prop, is_directive)) = vue3_for_key_prop(node) else {
+        return Value::Null;
+    };
+    let value = if is_directive {
+        let Some(exp) = prop.get("exp").filter(|value| !value.is_null()) else {
+            return Value::Null;
+        };
+        let raw = json_str(exp, "content")
+            .or_else(|| exp.get("loc").and_then(|loc| json_str(loc, "source")))
+            .unwrap_or("");
+        if json_bool(context, "prefixIdentifiers") {
+            let options = vue3_options_from_transform_context(context);
+            let locals = transform_context_locals(context);
+            vue3_for_rewrite_projection_node(
+                raw,
+                &options,
+                &locals,
+                exp.get("loc").cloned().unwrap_or(Value::Null),
+                Vue3ForAstMode::Expression,
+                false,
+            )
+        } else {
+            vue3_for_expression_projection(raw, exp, 0, raw.len(), Vue3ForAstMode::Expression)
+        }
+    } else {
+        let Some(value) = prop.get("value").filter(|value| !value.is_null()) else {
+            return Value::Null;
+        };
+        let content = json_str(value, "content").unwrap_or("");
+        json!({
+            "kind": "simple",
+            "content": content,
+            "isStatic": true,
+            "constType": 3,
+            "loc": value.get("loc").cloned().unwrap_or_else(|| prop.get("loc").cloned().unwrap_or(Value::Null)),
+            "astMode": "expression",
+        })
+    };
+    json!({ "value": value })
+}
+
+fn vue3_for_key_prop(node: &Value) -> Option<(&Value, bool)> {
+    node.get("props")
+        .and_then(Value::as_array)?
+        .iter()
+        .find_map(|prop| match json_node_type(prop) {
+            Some(6) if json_str(prop, "name") == Some("key") => Some((prop, false)),
+            Some(7)
+                if json_str(prop, "name") == Some("bind")
+                    && prop.get("arg").is_some_and(|arg| {
+                        json_str(arg, "content") == Some("key") && json_bool(arg, "isStatic")
+                    }) =>
+            {
+                Some((prop, true))
+            }
+            _ => None,
+        })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Vue3ForParsed {
+    source: Vue3ForPart,
+    value: Option<Vue3ForPart>,
+    key: Option<Vue3ForPart>,
+    index: Option<Vue3ForPart>,
+}
+
+impl Vue3ForParsed {
+    fn all_alias_locals(&self) -> Vec<String> {
+        let mut locals = Vec::new();
+        for part in [&self.value, &self.key, &self.index].into_iter().flatten() {
+            for local in vue3_for_alias_locals(&part.content) {
+                if !locals.iter().any(|existing| existing == &local) {
+                    locals.push(local);
+                }
+            }
+        }
+        locals
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Vue3ForPart {
+    content: String,
+    start: usize,
+    end: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Vue3ForAstMode {
+    Expression,
+    Params,
+}
+
+fn parse_vue3_for_expression(source: &str) -> Option<Vue3ForParsed> {
+    let Vue3ForMatch { lhs_end, rhs_start } = find_vue3_for_match(source)?;
+    let rhs_end = trim_end_offset(source, rhs_start, source.len());
+    if rhs_start >= rhs_end {
+        return None;
+    }
+    let (alias_start, alias_end) = vue3_for_alias_content_span(source, 0, lhs_end);
+    let aliases = split_vue3_for_aliases(source, alias_start, alias_end);
+    Some(Vue3ForParsed {
+        source: Vue3ForPart {
+            content: source[rhs_start..rhs_end].to_string(),
+            start: rhs_start,
+            end: rhs_end,
+        },
+        value: aliases.first().and_then(|segment| segment.part(source)),
+        key: aliases.get(1).and_then(|segment| segment.part(source)),
+        index: aliases.get(2).and_then(|segment| segment.part(source)),
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Vue3ForMatch {
+    lhs_end: usize,
+    rhs_start: usize,
+}
+
+fn find_vue3_for_match(source: &str) -> Option<Vue3ForMatch> {
+    for (operator_start, _) in source.char_indices() {
+        let operator_len = if source[operator_start..].starts_with("in") {
+            2
+        } else if source[operator_start..].starts_with("of") {
+            2
+        } else {
+            continue;
+        };
+        if operator_start == 0 || !previous_char_is_whitespace(source, operator_start) {
+            continue;
+        }
+        let after_operator = operator_start + operator_len;
+        if !source[after_operator..]
+            .chars()
+            .next()
+            .is_some_and(char::is_whitespace)
+        {
+            continue;
+        }
+        let Some(rhs_start) = source[after_operator..]
+            .char_indices()
+            .find(|(_, ch)| !ch.is_whitespace())
+            .map(|(index, _)| after_operator + index)
+        else {
+            continue;
+        };
+        let lhs_end = trim_end_offset(source, 0, operator_start);
+        return Some(Vue3ForMatch { lhs_end, rhs_start });
+    }
+    None
+}
+
+fn previous_char_is_whitespace(source: &str, offset: usize) -> bool {
+    source[..offset]
+        .chars()
+        .next_back()
+        .is_some_and(char::is_whitespace)
+}
+
+fn vue3_for_alias_content_span(source: &str, start: usize, end: usize) -> (usize, usize) {
+    let mut start = trim_start_offset(source, start, end);
+    let mut end = trim_end_offset(source, start, end);
+    if source[start..end].starts_with('(') && source[start..end].ends_with(')') {
+        start += '('.len_utf8();
+        end = end.saturating_sub(')'.len_utf8());
+    }
+    start = trim_start_offset(source, start, end);
+    end = trim_end_offset(source, start, end);
+    (start, end)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Vue3ForAliasSegment {
+    start: usize,
+    end: usize,
+}
+
+impl Vue3ForAliasSegment {
+    fn part(&self, source: &str) -> Option<Vue3ForPart> {
+        let start = trim_start_offset(source, self.start, self.end);
+        let end = trim_end_offset(source, start, self.end);
+        (start < end).then(|| Vue3ForPart {
+            content: source[start..end].to_string(),
+            start,
+            end,
+        })
+    }
+}
+
+fn split_vue3_for_aliases(
+    source: &str,
+    alias_start: usize,
+    alias_end: usize,
+) -> Vec<Vue3ForAliasSegment> {
+    let mut items = Vec::new();
+    let mut depth = 0usize;
+    let mut quote = None::<char>;
+    let mut start = alias_start;
+    let mut escaped = false;
+    for (index, ch) in source[alias_start..alias_end].char_indices() {
+        let index = alias_start + index;
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' | '`' => quote = Some(ch),
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                items.push(Vue3ForAliasSegment { start, end: index });
+                start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    items.push(Vue3ForAliasSegment {
+        start,
+        end: alias_end,
+    });
+    items
+}
+
+fn trim_start_offset(source: &str, start: usize, end: usize) -> usize {
+    source[start..end]
+        .char_indices()
+        .find(|(_, ch)| !ch.is_whitespace())
+        .map(|(index, _)| start + index)
+        .unwrap_or(end)
+}
+
+fn trim_end_offset(source: &str, start: usize, end: usize) -> usize {
+    let mut trimmed = end;
+    for (index, ch) in source[start..end].char_indices().rev() {
+        if !ch.is_whitespace() {
+            trimmed = start + index + ch.len_utf8();
+            break;
+        }
+        trimmed = start + index;
+    }
+    trimmed
+}
+
+fn vue3_for_expression_projection(
+    content: &str,
+    exp: &Value,
+    start: usize,
+    end: usize,
+    ast_mode: Vue3ForAstMode,
+) -> Value {
+    json!({
+        "kind": "simple",
+        "content": content,
+        "isStatic": false,
+        "constType": 0,
+        "loc": vue3_for_exp_loc(exp, start, end),
+        "astMode": vue3_for_ast_mode_name(ast_mode),
+    })
+}
+
+fn vue3_for_rewrite_projection_node(
+    raw: &str,
+    options: &Vue3CompilerOptions,
+    locals: &[String],
+    loc: Value,
+    ast_mode: Vue3ForAstMode,
+    force_compound_for_complex: bool,
+) -> Value {
+    let rewritten = if locals.is_empty() {
+        rewrite_js_like_expression(raw, options)
+    } else {
+        rewrite_js_like_expression_with_locals(raw, options, locals)
+    };
+    let children = vue3_for_compound_children(raw, options, locals, ast_mode, &loc);
+    let is_simple = is_simple_identifier_ascii(raw.trim())
+        || children.is_empty()
+        || (!force_compound_for_complex && rewritten == raw.trim());
+    if is_simple {
+        return vue3_for_simple_projection(
+            rewritten.trim(),
+            loc,
+            vue3_for_const_type(rewritten.trim()),
+            ast_mode,
+        );
+    }
+    let helpers = vue3_for_helpers_for_content(&rewritten);
+    let mut value = json!({
+        "kind": "compound",
+        "children": children,
+        "loc": loc,
+        "astMode": vue3_for_ast_mode_name(ast_mode),
+    });
+    if !helpers.is_empty() {
+        value["helpers"] = json!(helpers);
+    }
+    value
+}
+
+fn vue3_for_simple_projection(
+    content: &str,
+    loc: Value,
+    const_type: u8,
+    ast_mode: Vue3ForAstMode,
+) -> Value {
+    let mut value = json!({
+        "kind": "simple",
+        "content": content,
+        "isStatic": false,
+        "constType": const_type,
+        "loc": loc,
+        "astMode": vue3_for_ast_mode_name(ast_mode),
+    });
+    let helpers = vue3_for_helpers_for_content(content);
+    if !helpers.is_empty() {
+        value["helpers"] = json!(helpers);
+    }
+    value
+}
+
+fn vue3_for_compound_children(
+    raw: &str,
+    options: &Vue3CompilerOptions,
+    locals: &[String],
+    ast_mode: Vue3ForAstMode,
+    loc: &Value,
+) -> Vec<Value> {
+    let mut children = Vec::new();
+    let mut quote = None::<char>;
+    let mut escaped = false;
+    let mut index = 0usize;
+    let mut last = 0usize;
+    let chars = raw.char_indices().collect::<Vec<_>>();
+    while index < chars.len() {
+        let start = chars[index].0;
+        let ch = chars[index].1;
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == active_quote {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        if matches!(ch, '\'' | '"' | '`') {
+            quote = Some(ch);
+            index += 1;
+            continue;
+        }
+        if !is_identifier_start(ch) {
+            index += 1;
+            continue;
+        }
+        index += 1;
+        while index < chars.len() && is_identifier_continue(chars[index].1) {
+            index += 1;
+        }
+        let end = chars.get(index).map_or(raw.len(), |(offset, _)| *offset);
+        let ident = &raw[start..end];
+        let Some(replacement) = vue3_for_identifier_projection_content(
+            raw, start, end, ident, options, locals, ast_mode,
+        ) else {
+            continue;
+        };
+        if last < start {
+            children.push(json!(raw[last..start]));
+        }
+        children.push(vue3_for_simple_projection(
+            &replacement,
+            vue3_for_child_loc(loc, raw, start, end),
+            if replacement == ident {
+                3
+            } else {
+                vue3_for_const_type(&replacement)
+            },
+            ast_mode,
+        ));
+        last = end;
+    }
+    if last < raw.len() {
+        children.push(json!(raw[last..].to_string()));
+    }
+    children
+}
+
+fn vue3_for_identifier_projection_content(
+    raw: &str,
+    start: usize,
+    end: usize,
+    ident: &str,
+    options: &Vue3CompilerOptions,
+    locals: &[String],
+    ast_mode: Vue3ForAstMode,
+) -> Option<String> {
+    if is_keyword(ident) || is_global_or_literal(ident) {
+        return None;
+    }
+    let prev = previous_non_ws(raw, start);
+    let next = next_non_ws(raw, end);
+    if next == Some(':') {
+        return None;
+    }
+    if prev == Some('.') {
+        return Some(ident.to_string());
+    }
+    if locals.iter().any(|local| local == ident) {
+        return Some(ident.to_string());
+    }
+    if ast_mode == Vue3ForAstMode::Params && next == Some('=') {
+        return Some(ident.to_string());
+    }
+    Some(rewrite_identifier(ident, options))
+}
+
+fn previous_non_ws(source: &str, offset: usize) -> Option<char> {
+    source[..offset]
+        .chars()
+        .rev()
+        .find(|ch| !ch.is_whitespace())
+}
+
+fn vue3_for_exp_loc(exp: &Value, start: usize, end: usize) -> Value {
+    let loc = exp.get("loc").unwrap_or(&Value::Null);
+    let source = json_str(loc, "source")
+        .or_else(|| json_str(exp, "content"))
+        .unwrap_or("");
+    vue3_for_loc_from_start(loc.get("start").unwrap_or(&Value::Null), source, start, end)
+}
+
+fn vue3_for_child_loc(parent_loc: &Value, source: &str, start: usize, end: usize) -> Value {
+    vue3_for_loc_from_start(
+        parent_loc.get("start").unwrap_or(&Value::Null),
+        source,
+        start,
+        end,
+    )
+}
+
+fn vue3_for_loc_from_start(start_pos: &Value, source: &str, start: usize, end: usize) -> Value {
+    let start = start.min(source.len());
+    let end = end.min(source.len()).max(start);
+    json!({
+        "start": vue3_for_advance_position(start_pos, source, start),
+        "end": vue3_for_advance_position(start_pos, source, end),
+        "source": source.get(start..end).unwrap_or_default(),
+    })
+}
+
+fn vue3_for_advance_position(start_pos: &Value, source: &str, amount: usize) -> Value {
+    let mut offset = start_pos
+        .get("offset")
+        .and_then(Value::as_i64)
+        .unwrap_or_default();
+    let mut line = start_pos.get("line").and_then(Value::as_i64).unwrap_or(1);
+    let mut column = start_pos.get("column").and_then(Value::as_i64).unwrap_or(1);
+    let mut index = 0usize;
+    for ch in source.chars() {
+        if index >= amount {
+            break;
+        }
+        let len = ch.len_utf8();
+        if index + len > amount {
+            offset += (amount - index) as i64;
+            column += (amount - index) as i64;
+            return json!({ "offset": offset, "line": line, "column": column });
+        }
+        index += len;
+        offset += len as i64;
+        if ch == '\n' {
+            line += 1;
+            column = 1;
+        } else {
+            column += 1;
+        }
+    }
+    if amount > index {
+        offset += (amount - index) as i64;
+        column += (amount - index) as i64;
+    }
+    json!({ "offset": offset, "line": line, "column": column })
+}
+
+fn vue3_for_ast_mode_name(mode: Vue3ForAstMode) -> &'static str {
+    match mode {
+        Vue3ForAstMode::Expression => "expression",
+        Vue3ForAstMode::Params => "params",
+    }
+}
+
+fn vue3_for_const_type(content: &str) -> u8 {
+    let content = content.trim();
+    if matches!(content, "true" | "false" | "null") {
+        return 3;
+    }
+    if (content.starts_with('"') && content.ends_with('"'))
+        || (content.starts_with('\'') && content.ends_with('\''))
+        || content.parse::<f64>().is_ok()
+    {
+        return 3;
+    }
+    0
+}
+
+fn vue3_for_helpers_for_content(content: &str) -> Vec<&'static str> {
+    let mut helpers = Vec::new();
+    if content.contains("_unref(") {
+        helpers.push("UNREF");
+    }
+    if content.contains("_isRef(") {
+        helpers.push("IS_REF");
+    }
+    helpers
+}
+
+fn vue3_for_alias_locals(alias: &str) -> Vec<String> {
+    let store = JsAstStore::new();
+    let wrapped = format!("({alias})=>{{}}");
+    if let Ok(Expression::ArrowFunctionExpression(function)) =
+        store.parse_expression(&wrapped, oxc_span::SourceType::ts())
+    {
+        let mut locals = Vec::new();
+        for param in &function.params.items {
+            collect_vue3_for_binding_pattern(&param.pattern, &mut locals);
+        }
+        if let Some(rest) = &function.params.rest {
+            collect_vue3_for_binding_pattern(&rest.rest.argument, &mut locals);
+        }
+        locals.sort();
+        locals.dedup();
+        return locals;
+    }
+    extract_v_for_alias_locals(alias)
+}
+
+fn collect_vue3_for_binding_pattern(pattern: &BindingPattern<'_>, locals: &mut Vec<String>) {
+    match pattern {
+        BindingPattern::BindingIdentifier(identifier) => {
+            locals.push(identifier.name.to_string());
+        }
+        BindingPattern::ObjectPattern(object) => {
+            for property in &object.properties {
+                collect_vue3_for_binding_pattern(&property.value, locals);
+            }
+            if let Some(rest) = &object.rest {
+                collect_vue3_for_binding_pattern(&rest.argument, locals);
+            }
+        }
+        BindingPattern::ArrayPattern(array) => {
+            for element in array.elements.iter().flatten() {
+                collect_vue3_for_binding_pattern(element, locals);
+            }
+            if let Some(rest) = &array.rest {
+                collect_vue3_for_binding_pattern(&rest.argument, locals);
+            }
+        }
+        BindingPattern::AssignmentPattern(assignment) => {
+            collect_vue3_for_binding_pattern(&assignment.left, locals);
+        }
+    }
+}
+
+fn vue3_for_template_key_errors(node: &Value) -> Vec<Value> {
+    if json_u64(node, "tagType") != Some(3) {
+        return Vec::new();
+    }
+    node.get("children")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|child| json_node_type(child) == Some(1))
+        .filter(|child| !vue3_for_child_has_structural_directive(child))
+        .filter_map(vue3_for_child_key_loc)
+        .take(1)
+        .map(|loc| json!({ "code": 33, "loc": loc }))
+        .collect()
+}
+
+fn vue3_for_child_has_structural_directive(node: &Value) -> bool {
+    node.get("props")
+        .and_then(Value::as_array)
+        .is_some_and(|props| {
+            props.iter().any(|prop| {
+                json_node_type(prop) == Some(7)
+                    && matches!(
+                        json_str(prop, "name"),
+                        Some("for" | "if" | "else" | "else-if")
+                    )
+            })
+        })
+}
+
+fn vue3_for_child_key_loc(node: &Value) -> Option<Value> {
+    node.get("props")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|prop| match json_node_type(prop) {
+            Some(6) => json_str(prop, "name") == Some("key"),
+            Some(7) => {
+                json_str(prop, "name") == Some("bind")
+                    && prop.get("arg").is_some_and(|arg| {
+                        json_str(arg, "content") == Some("key") && json_bool(arg, "isStatic")
+                    })
+            }
+            _ => false,
+        })
+        .and_then(|prop| prop.get("loc").cloned())
 }
 
 pub fn resolve_component_type_projection(payload: &Value) -> Value {
@@ -5844,6 +6656,135 @@ mod tests {
         assert_eq!(
             root_codegen_projection(&root),
             json!({ "kind": "fragment", "patchFlag": 2112 })
+        );
+    }
+
+    #[test]
+    fn transform_for_projection_preserves_skipped_alias_slots_and_locs() {
+        let source = "<span v-for=\"( item,, index ) in items\" />";
+        let exp_start = source.find("( item").unwrap();
+        let projection = transform_for_projection(&json!({
+            "dir": {
+                "exp": {
+                    "content": "( item,, index ) in items",
+                    "loc": {
+                        "start": { "offset": exp_start, "line": 1, "column": exp_start + 1 },
+                        "end": { "offset": exp_start + "( item,, index ) in items".len(), "line": 1, "column": exp_start + "( item,, index ) in items".len() + 1 },
+                        "source": "( item,, index ) in items"
+                    }
+                },
+                "loc": { "source": "v-for=\"( item,, index ) in items\"" }
+            },
+            "node": { "type": 1, "tagType": 0, "children": [] },
+            "context": {}
+        }));
+
+        assert_eq!(projection["parseResult"]["value"]["content"], json!("item"));
+        assert!(projection["parseResult"]["key"].is_null());
+        assert_eq!(
+            projection["parseResult"]["index"]["content"],
+            json!("index")
+        );
+        assert_eq!(
+            projection["parseResult"]["source"]["content"],
+            json!("items")
+        );
+        assert_eq!(
+            projection["parseResult"]["index"]["loc"]["start"]["offset"],
+            json!(source.find("index").unwrap())
+        );
+    }
+
+    #[test]
+    fn transform_for_projection_reports_missing_and_malformed_expression() {
+        let missing = transform_for_projection(&json!({
+            "dir": { "loc": { "source": "v-for" } },
+            "node": { "type": 1, "tagType": 0 },
+            "context": {}
+        }));
+        assert_eq!(missing["errors"], json!([{ "code": 31, "loc": "dir" }]));
+
+        let malformed = transform_for_projection(&json!({
+            "dir": {
+                "exp": {
+                    "content": "item in",
+                    "loc": { "start": { "offset": 0, "line": 1, "column": 1 }, "source": "item in" }
+                },
+                "loc": { "source": "v-for=\"item in\"" }
+            },
+            "node": { "type": 1, "tagType": 0 },
+            "context": {}
+        }));
+        assert_eq!(malformed["errors"], json!([{ "code": 32, "loc": "dir" }]));
+    }
+
+    #[test]
+    fn transform_for_projection_prefixes_source_and_alias_defaults() {
+        let projection = transform_for_projection(&json!({
+            "dir": {
+                "exp": {
+                    "content": "({ foo = bar, baz: [qux = quux] }) in list.concat([foo])",
+                    "loc": {
+                        "start": { "offset": 0, "line": 1, "column": 1 },
+                        "end": { "offset": 58, "line": 1, "column": 59 },
+                        "source": "({ foo = bar, baz: [qux = quux] }) in list.concat([foo])"
+                    }
+                },
+                "loc": { "source": "v-for" }
+            },
+            "node": { "type": 1, "tagType": 0, "children": [] },
+            "context": { "prefixIdentifiers": true, "identifiers": {}, "bindingMetadata": {} }
+        }));
+
+        assert_eq!(
+            projection["parseResult"]["source"]["kind"],
+            json!("compound")
+        );
+        assert_eq!(
+            projection["parseResult"]["source"]["children"][0]["content"],
+            json!("_ctx.list")
+        );
+        assert_eq!(
+            projection["parseResult"]["value"]["kind"],
+            json!("compound")
+        );
+        let value = &projection["parseResult"]["value"]["children"];
+        assert_eq!(value[1]["content"], json!("foo"));
+        assert_eq!(value[3]["content"], json!("_ctx.bar"));
+        assert_eq!(value[5]["content"], json!("qux"));
+        assert_eq!(value[7]["content"], json!("_ctx.quux"));
+        assert_eq!(projection["locals"], json!(["foo", "qux"]));
+    }
+
+    #[test]
+    fn transform_for_projection_reports_template_child_key_placement() {
+        let projection = transform_for_projection(&json!({
+            "dir": {
+                "exp": {
+                    "content": "item in items",
+                    "loc": { "start": { "offset": 0, "line": 1, "column": 1 }, "source": "item in items" }
+                },
+                "loc": { "source": "v-for" }
+            },
+            "node": {
+                "type": 1,
+                "tagType": 3,
+                "children": [{
+                    "type": 1,
+                    "tag": "div",
+                    "props": [{
+                        "type": 7,
+                        "name": "bind",
+                        "arg": { "type": 4, "content": "key", "isStatic": true },
+                        "loc": { "source": ":key=\"item.id\"" }
+                    }]
+                }]
+            },
+            "context": {}
+        }));
+        assert_eq!(
+            projection["templateKeyErrors"],
+            json!([{ "code": 33, "loc": { "source": ":key=\"item.id\"" } }])
         );
     }
 
