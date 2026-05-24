@@ -4427,12 +4427,22 @@ const vue3CoreRuntime = (() => {
 
     function genTemplateLiteral(node) {
       push('`');
-      for (const element of node.elements || []) {
+      const elements = node.elements || [];
+      const multiline = ssr && elements.filter(element => typeof element !== 'string').length > 1;
+      for (const element of elements) {
         if (typeof element === 'string') {
           push(element.replace(/(`|\$|\\)/g, '\\$1'));
         } else {
           push('${');
+          if (multiline) {
+            indentLevel++;
+            newline();
+          }
           genNode(element);
+          if (multiline) {
+            indentLevel--;
+            newline();
+          }
           push('}');
         }
       }
@@ -5528,8 +5538,15 @@ const vue3CoreRuntime = (() => {
   };
   runtime.buildProps = function buildProps(node, context, props = node && node.props || []) {
     const objectProps = [];
+    const mergeArgs = [];
     const directives = [];
     let hasDynamicKey = false;
+    const pushMergeArg = arg => {
+      if (objectProps.length) {
+        mergeArgs.push(runtime.createObjectExpression(runtime.dedupeProperties(objectProps.splice(0)), node && node.loc || locStub));
+      }
+      if (arg) mergeArgs.push(arg);
+    };
     for (const prop of props || []) {
       if (prop.type === NodeTypes.ATTRIBUTE) {
         objectProps.push(runtime.createObjectProperty(
@@ -5543,6 +5560,13 @@ const vue3CoreRuntime = (() => {
         const result = transform ? transform(prop, node, context) : runtime.transformBind(prop, node, context);
         objectProps.push(...((result && result.props) || []));
         if (result && result.props && result.props.some(p => p.key && !runtime.isStaticExp(p.key))) hasDynamicKey = true;
+      } else if (prop.name === 'bind' && !prop.arg) {
+        if (prop.exp) {
+          pushMergeArg(prop.exp);
+          hasDynamicKey = true;
+        } else if (context && context.onError) {
+          context.onError(runtime.createCompilerError(ErrorCodes.X_V_BIND_NO_EXPRESSION, prop.loc));
+        }
       } else if (prop.name === 'on' && prop.arg) {
         const transform = context && context.directiveTransforms && context.directiveTransforms.on;
         const result = transform ? transform(prop, node, context) : runtime.transformOn(prop, node, context);
@@ -5561,7 +5585,15 @@ const vue3CoreRuntime = (() => {
         directives.push(prop);
       }
     }
-    let propsExpression = objectProps.length ? runtime.createObjectExpression(runtime.dedupeProperties(objectProps), node && node.loc || locStub) : undefined;
+    let propsExpression;
+    if (mergeArgs.length) {
+      pushMergeArg();
+      propsExpression = mergeArgs.length > 1
+        ? runtime.createCallExpression(context && context.helper ? context.helper(runtime.MERGE_PROPS) : runtime.MERGE_PROPS, mergeArgs, node && node.loc || locStub)
+        : mergeArgs[0];
+    } else if (objectProps.length) {
+      propsExpression = runtime.createObjectExpression(runtime.dedupeProperties(objectProps), node && node.loc || locStub);
+    }
     if (propsExpression && hasDynamicKey && context && !context.inSSR) {
       propsExpression = runtime.createCallExpression(context.helper(runtime.NORMALIZE_PROPS), [propsExpression], node && node.loc || locStub);
     }

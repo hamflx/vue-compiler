@@ -52,9 +52,18 @@
 - [x] Vue 3 compiler-dom mixed alias-runtime runtime-directive materialization slice for `vModel.spec.ts` (`18/18`; full DOM suite currently `115/133`, `mixed` coverage).
 - [x] Vue 3 compiler-dom mixed `stringifyStatic` / `transformHoist` closure with Rust directive-expression entity projection fix (`stringifyStatic.spec.ts` `25/25`; full DOM suite `133/133`, `mixed` coverage).
 - [x] Vue 3 compiler-ssr official conformance execution wiring (real Vitest run; currently `12/129`, `mixed` coverage).
+- [x] Vue 3 compiler-ssr mixed alias-runtime `buildProps` / SSR template-literal formatting slice for `ssrText.spec.ts` (`8/8`; full SSR suite currently `68/129`, `mixed` coverage).
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Closed the Vue 3 compiler-ssr `ssrText.spec.ts` focused slice through mixed alias-runtime support.
+- The generated compiler-core alias `buildProps` now treats argument-less `v-bind="obj"` as a props / merge-props expression instead of a runtime directive, allowing official SSR `ssrTransformElement` to produce `_ssrRenderAttrs(_attrs)` for wrapper and fallthrough-attrs paths.
+- The generated alias codegen now formats SSR template literals with multiple dynamic parts using official-style multiline interpolation blocks, while preserving single-expression literals as one line.
+- Full Vue 3 SSR conformance improves from `12/129` to `68/129`; `ssrText.spec.ts` is now `8/8`, and additional element / v-model / v-show snapshots improved as a side effect of the same compiler-core contract fix.
+- Coverage remains explicitly `mixed`: this is alias materialization/codegen support for official SSR source execution, not Rust-backed SSR semantic parity. It must not be counted as pure Rust SSR implementation completion.
+- Vue 3 compiler-core and compiler-dom conformance were rechecked after the alias changes and remain `652/652` and `133/133`.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p xtask`, `cargo test -p xtask` (`20/20` pass), `cargo xtask run-conformance --suite vue3-core` (`652/652`), `cargo xtask run-conformance --suite vue3-dom` (`133/133`), and `cargo xtask run-conformance --suite vue3-ssr` as an expected failing real suite with `68/129`.
 
 - Wired Vue 3 compiler-ssr official conformance to a real Vitest runner instead of a pending / not-wired result.
 - The prepared SSR suite now copies official `compiler-ssr/__tests__`, official `compiler-ssr/src`, and official `compiler-dom/src`, then uses generated compiler-core shims plus alias/npm resolution for package imports. The runner aliases the monorepo-only `packages/compiler-core/src/transform` import used by SSR source.
