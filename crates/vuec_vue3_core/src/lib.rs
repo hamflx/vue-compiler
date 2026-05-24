@@ -7439,11 +7439,38 @@ fn process_expression_rewrite_source(
     options: &Vue3CompilerOptions,
     locals: &[String],
 ) -> String {
-    if locals.is_empty() {
-        rewrite_js_like_expression(raw, options)
-    } else {
-        rewrite_js_like_expression_with_locals(raw, options, locals)
+    let mut identifiers = process_expression_identifier_spans(raw, options, locals);
+    identifiers.sort_by_key(|identifier| (identifier.start, identifier.end));
+    let mut filtered = Vec::<ProcessExpressionIdentifier>::new();
+    for identifier in identifiers {
+        if identifier.start >= identifier.end || identifier.end > raw.len() {
+            continue;
+        }
+        if filtered
+            .last()
+            .is_some_and(|previous| identifier.start < previous.end)
+        {
+            continue;
+        }
+        filtered.push(identifier);
     }
+
+    if filtered.is_empty() {
+        return raw.to_string();
+    }
+
+    let mut output = String::new();
+    let mut last_end = 0usize;
+    for identifier in &filtered {
+        output.push_str(raw.get(last_end..identifier.start).unwrap_or_default());
+        if let Some(prefix) = &identifier.prefix {
+            output.push_str(prefix);
+        }
+        output.push_str(&identifier.content);
+        last_end = identifier.end;
+    }
+    output.push_str(raw.get(last_end..).unwrap_or_default());
+    output
 }
 
 fn process_expression_compound_children(
@@ -9345,7 +9372,14 @@ impl<'a> Vue3DomMirCodegen<'a> {
 
     fn generate(self) -> CodegenResult {
         let mut writer = CodeWriter::new();
-        let helpers = self.helpers();
+        let scope = RenderScope::default();
+        let declarations = self
+            .component_declarations()
+            .into_iter()
+            .chain(self.directive_declarations())
+            .collect::<Vec<_>>();
+        let body = self.render_root_children(self.mir.root, &scope);
+        let helpers = self.helpers(&format!("{}\n{}", declarations.join("\n"), body));
         if self.options.mode == "module" && !helpers.is_empty() {
             writer.push_line(&format!(
                 "import {{ {} }} from \"vue\"",
@@ -9358,22 +9392,13 @@ impl<'a> Vue3DomMirCodegen<'a> {
             render_args(self.options)
         ));
         writer.indent();
-        let declarations = self
-            .component_declarations()
-            .into_iter()
-            .chain(self.directive_declarations())
-            .collect::<Vec<_>>();
         for declaration in &declarations {
             writer.push_line(declaration);
         }
         if !declarations.is_empty() {
             writer.newline();
         }
-        let scope = RenderScope::default();
-        writer.push_line(&format!(
-            "return {}",
-            self.render_root_children(self.mir.root, &scope)
-        ));
+        writer.push_line(&format!("return {body}"));
         writer.dedent();
         writer.push_line("}");
         CodegenResult {
@@ -9385,7 +9410,7 @@ impl<'a> Vue3DomMirCodegen<'a> {
         }
     }
 
-    fn helpers(&self) -> Vec<RuntimeHelper> {
+    fn helpers(&self, helper_probe: &str) -> Vec<RuntimeHelper> {
         let mut helpers = Vec::new();
         for node in &self.mir.nodes {
             match &node.kind {
@@ -9483,6 +9508,9 @@ impl<'a> Vue3DomMirCodegen<'a> {
                 }
                 Vue3DomMirKind::Cache { .. } | Vue3DomMirKind::Hoisted { .. } => {}
             }
+        }
+        for helper in render_helpers_from_code(vue3_helper_order(false), helper_probe) {
+            push_unique_helper(&mut helpers, helper);
         }
         sort_helpers_by_order(&mut helpers, vue3_helper_order(false));
         helpers
@@ -10557,11 +10585,23 @@ fn vue3_helper_order(components_first: bool) -> &'static [RuntimeHelper] {
             RuntimeHelper::Vue3CreateElementBlock,
             RuntimeHelper::Vue3RenderSlot,
             RuntimeHelper::Vue3NormalizeClass,
+            RuntimeHelper::Vue3NormalizeProps,
+            RuntimeHelper::Vue3NormalizeStyle,
+            RuntimeHelper::Vue3GuardReactiveProps,
+            RuntimeHelper::Vue3MergeProps,
             RuntimeHelper::Vue3ResolveDirective,
             RuntimeHelper::Vue3WithDirectives,
-            RuntimeHelper::Vue3VShow,
             RuntimeHelper::Vue3IsMemoSame,
             RuntimeHelper::Vue3WithMemo,
+            RuntimeHelper::Vue3ToHandlers,
+            RuntimeHelper::Vue3Camelize,
+            RuntimeHelper::Vue3Capitalize,
+            RuntimeHelper::Vue3ToHandlerKey,
+            RuntimeHelper::Vue3PushScopeId,
+            RuntimeHelper::Vue3PopScopeId,
+            RuntimeHelper::Vue3Unref,
+            RuntimeHelper::Vue3IsRef,
+            RuntimeHelper::Vue3VShow,
         ]
     } else {
         &[
@@ -10589,9 +10629,21 @@ fn vue3_helper_order(components_first: bool) -> &'static [RuntimeHelper] {
             RuntimeHelper::Vue3CreateSlots,
             RuntimeHelper::Vue3ResolveDirective,
             RuntimeHelper::Vue3WithDirectives,
-            RuntimeHelper::Vue3VShow,
             RuntimeHelper::Vue3IsMemoSame,
             RuntimeHelper::Vue3WithMemo,
+            RuntimeHelper::Vue3NormalizeProps,
+            RuntimeHelper::Vue3NormalizeStyle,
+            RuntimeHelper::Vue3GuardReactiveProps,
+            RuntimeHelper::Vue3MergeProps,
+            RuntimeHelper::Vue3ToHandlers,
+            RuntimeHelper::Vue3Camelize,
+            RuntimeHelper::Vue3Capitalize,
+            RuntimeHelper::Vue3ToHandlerKey,
+            RuntimeHelper::Vue3PushScopeId,
+            RuntimeHelper::Vue3PopScopeId,
+            RuntimeHelper::Vue3Unref,
+            RuntimeHelper::Vue3IsRef,
+            RuntimeHelper::Vue3VShow,
         ]
     }
 }
@@ -13272,6 +13324,23 @@ fn rewrite_js_like_expression_into(
             let arrow_local = process_expression_is_arrow_local(&arrow_bindings, ident, start, end);
             let next = next_non_ws(expression, end);
             let prev = previous;
+            if let Some((replacement, consumed_end)) = rewrite_js_like_assignment(
+                ident,
+                expression,
+                start,
+                end,
+                options,
+                &scopes,
+                arrow_param || arrow_local,
+            ) {
+                output.push_str(&replacement);
+                index = chars
+                    .iter()
+                    .position(|(offset, _)| *offset >= consumed_end)
+                    .unwrap_or(chars.len());
+                previous = TokenKind::Other;
+                continue;
+            }
             if is_keyword(ident) {
                 output.push_str(ident);
                 match ident {
@@ -13395,6 +13464,42 @@ fn rewrite_js_like_expression_into(
     }
 }
 
+fn rewrite_js_like_assignment(
+    ident: &str,
+    expression: &str,
+    start: usize,
+    end: usize,
+    options: &Vue3CompilerOptions,
+    scopes: &[Scope],
+    arrow_local: bool,
+) -> Option<(String, usize)> {
+    if options.binding_metadata.get(ident).map(String::as_str) != Some("setup-let")
+        || !options.inline
+        || is_local(scopes, ident)
+        || arrow_local
+    {
+        return None;
+    }
+    let assignment = process_expression_assignment_rhs(expression, start, end)?;
+    let operator_start = skip_ws_forward(expression, end);
+    let rhs_start = skip_ws_forward(expression, operator_start + assignment.operator.len());
+    let rhs_end = process_expression_assignment_rhs_end(expression, rhs_start);
+    let rhs = expression.get(rhs_start..rhs_end)?.trim();
+    let locals = scopes
+        .iter()
+        .flat_map(|scope| scope.locals.iter().cloned())
+        .collect::<Vec<_>>();
+    let rewritten_rhs = rewrite_js_like_expression_with_locals(rhs, options, &locals);
+    Some((
+        format!(
+            "_isRef({ident}) ? {ident}.value {} {} : {ident}",
+            assignment.operator,
+            rewritten_rhs.trim()
+        ),
+        rhs_end,
+    ))
+}
+
 #[derive(Clone, Debug, Default)]
 struct Scope {
     locals: Vec<String>,
@@ -13500,6 +13605,7 @@ fn rewrite_identifier(ident: &str, options: &Vue3CompilerOptions) -> String {
     match options.binding_metadata.get(ident).map(String::as_str) {
         Some("setup-ref") if options.inline => format!("{ident}.value"),
         Some("setup-maybe-ref") if options.inline => format!("_unref({ident})"),
+        Some("setup-let") if options.inline => format!("_unref({ident})"),
         Some("setup-const" | "literal-const" | "setup-reactive-const") if options.inline => {
             ident.to_string()
         }
@@ -16091,6 +16197,58 @@ mod tests {
             .code
             .contains("onClick: event => _ctx.go(event, _ctx.item)"));
         assert!(!generated.code.contains("_ctx.event"));
+    }
+
+    #[test]
+    fn generate_vue3_dom_mir_imports_helpers_from_binding_rewrites() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div>{{ maybe }}</div>"#.into(),
+            file_id: FileId(32),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+        let mut options = Vue3CompilerOptions {
+            inline: true,
+            mode: "module".into(),
+            prefix_identifiers: true,
+            ..Vue3CompilerOptions::default()
+        };
+        options
+            .binding_metadata
+            .insert("maybe".into(), "setup-maybe-ref".into());
+        let generated = generate_vue3_dom_mir(&result.mir, &result.js, &options);
+
+        assert!(generated.code.contains("unref as _unref"));
+        assert!(generated.code.contains("_toDisplayString(_unref(maybe))"));
+    }
+
+    #[test]
+    fn generate_vue3_dom_mir_imports_is_ref_for_setup_let_handlers() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<button @click="count = count + 1">Save</button>"#.into(),
+            file_id: FileId(32),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+        let mut options = Vue3CompilerOptions {
+            inline: true,
+            mode: "module".into(),
+            prefix_identifiers: true,
+            ..Vue3CompilerOptions::default()
+        };
+        options
+            .binding_metadata
+            .insert("count".into(), "setup-let".into());
+        let generated = generate_vue3_dom_mir(&result.mir, &result.js, &options);
+
+        assert!(generated.code.contains("isRef as _isRef"));
+        assert!(generated
+            .code
+            .contains("_isRef(count) ? count.value = _unref(count) + 1 : count"));
     }
 
     #[test]

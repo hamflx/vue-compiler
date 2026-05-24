@@ -86,9 +86,15 @@
 - [x] Vue 3 structural `Vue3DomMir` `v-for` memo cache target payload, with MIR-driven alias params, key guard, `_isMemoSame`, `_cached`, `_item.memo`, and `_cache` render-list emission.
 - [x] Vue 3 structural `Vue3DomMir` cacheHandlers event cache payload, with MIR-driven `_cache[n] || (_cache[n] = handler)` emission for standalone DOM MIR codegen.
 - [x] Vue 3 structural standalone `Vue3DomMir` codegen prefix-identifier rewriting for the current JS-store expression subset, with scoped `v-for` aliases, slot params, `$event`, and arrow handler params preserved as locals.
+- [x] Vue 3 structural standalone `Vue3DomMir` codegen helper import discovery for helpers introduced by bindingMetadata rewrites such as `_unref` and `_isRef`.
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Tightened standalone `generate_vue3_dom_mir` helper discovery. The emitter now renders declarations/body before finalizing module imports and merges MIR-structural helpers with helpers actually present in the generated code, so bindingMetadata rewrites cannot introduce `_unref` / `_isRef` without imports.
+- Completed the current DOM MIR binding rewrite path for inline setup bindings: `setup-maybe-ref` interpolation output imports/uses `_unref`, and `setup-let` assignment handlers can emit `_isRef(count) ? count.value = _unref(count) + 1 : count` from Rust codegen while keeping HIR/MIR payloads as raw JS store ids.
+- This remains structural target-codegen work. It does not touch `xtask/src/compat.rs`, and exact compiler-core codegen migration to full `Vue3DomMir` consumption remains open.
+- Verification this round: focused `cargo test -p vuec_vue3_core generate_vue3_dom_mir`, focused `cargo test -p vuec_vue3_core base_compile_uses_binding_metadata_for_prefixed_interpolations`, focused `cargo test -p vuec_vue3_core process_expression_projection_rewrites_setup_let_assignment_rhs`, `cargo test -p vuec_vue3_core`, `cargo fmt --all --check`, `cargo check -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo xtask run-conformance --suite vue3-core` (`652/652`; coverage report keeps `rust-backed` / `mixed` / `shim-backed` split), and `git diff --check`.
 
 - Added prefix-identifier rewriting to standalone structural `generate_vue3_dom_mir`. The emitter now rewrites JS-store expressions/statements with the existing Rust prefix helpers when `prefixIdentifiers` or module mode is active, instead of rendering raw registered source for the current MIR subset.
 - `Vue3DomMirCodegen` now threads `RenderScope` through recursive node, prop, slot, dynamic-slot, `v-for`, memo, directive, dynamic-component, and event rendering. It preserves local aliases from `v-for`, destructuring, stable/dynamic slot params, dynamic slot loops, `$event`, and arrow handler params while prefixing external reads such as `_ctx.msg`, `_ctx.list`, dynamic slot names, directive values, object listeners, and cached handlers.
