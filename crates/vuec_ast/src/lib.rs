@@ -1340,6 +1340,12 @@ pub struct Vue3DomEvent {
     pub dynamic_name: Option<JsExprId>,
     pub handler: JsStmtId,
     pub dynamic_arg: bool,
+    pub cache: Option<Vue3DomEventCache>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue3DomEventCache {
+    pub index: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

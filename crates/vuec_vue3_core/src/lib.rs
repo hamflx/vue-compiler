@@ -11,8 +11,8 @@ use vuec_ast::{
     HirObjectListeners, HirPropSegment, HirProps, HirRoot, HirSlotDecl, HirSlotOutlet,
     HirStaticAttr, HirTag, JsExprId, JsPatternId, LoweringMap, MirChildren, MirExpr,
     MissingSpanReason, NodeId, NodeSpan, QuoteKind, RuntimeHelper, Vue3Ast, Vue3AstKind,
-    Vue3Directive, Vue3DomBinding, Vue3DomDirective, Vue3DomEvent, Vue3DomMir, Vue3DomMirKind,
-    Vue3DomObjectBinding, Vue3DomObjectListeners, Vue3DomPropSegment, Vue3DomProps,
+    Vue3Directive, Vue3DomBinding, Vue3DomDirective, Vue3DomEvent, Vue3DomEventCache, Vue3DomMir,
+    Vue3DomMirKind, Vue3DomObjectBinding, Vue3DomObjectListeners, Vue3DomPropSegment, Vue3DomProps,
     Vue3DomPropsNormalize, Vue3DomSlotName, Vue3DomStaticAttr, Vue3DomTag, Vue3Element,
     Vue3ElementType, Vue3Expression, Vue3ForMemo, Vue3ForMir, Vue3NodeKind, Vue3PatchFlags,
     Vue3Prop, Vue3Root, Vue3SlotFlag, Vue3SsrMir, Vue3SsrMirKind, Vue3VNodeCall,
@@ -1613,7 +1613,7 @@ fn lower_vue3_element_to_dom_mir_kind(
     }
 
     let is_component = element.tag_type == Vue3ElementType::Component;
-    let (props, directives) = lower_vue3_hir_payload_to_dom_mir(hir_kind);
+    let (props, directives) = lower_vue3_hir_payload_to_dom_mir(hir_kind, state);
     let tag = lower_vue3_element_tag_to_dom_mir(element, &props);
     Vue3DomMirKind::VNodeCall(Vue3VNodeCall {
         tag,
@@ -1714,10 +1714,11 @@ fn component_has_dynamic_slots(ast: &Vue3Ast, children: &[NodeId]) -> bool {
 
 fn lower_vue3_hir_payload_to_dom_mir(
     hir_kind: &HirNodeKind,
+    state: &mut Vue3DomLoweringState,
 ) -> (Vue3DomProps, Vec<Vue3DomDirective>) {
     match hir_kind {
         HirNodeKind::Element(element) => (
-            lower_hir_props_to_dom_mir(&element.props, false),
+            lower_hir_props_to_dom_mir(&element.props, false, state),
             element
                 .directives
                 .iter()
@@ -1726,22 +1727,26 @@ fn lower_vue3_hir_payload_to_dom_mir(
                 .collect(),
         ),
         HirNodeKind::Component(component) => (
-            lower_hir_props_to_dom_mir(&component.props, true),
+            lower_hir_props_to_dom_mir(&component.props, true, state),
             Vec::new(),
         ),
-        HirNodeKind::SlotOutlet(slot) => {
-            (lower_hir_props_to_dom_mir(&slot.props, false), Vec::new())
-        }
+        HirNodeKind::SlotOutlet(slot) => (
+            lower_hir_props_to_dom_mir(&slot.props, false, state),
+            Vec::new(),
+        ),
         _ => (Vue3DomProps::default(), Vec::new()),
     }
 }
 
-fn lower_hir_props_to_dom_mir(props: &HirProps, is_component: bool) -> Vue3DomProps {
-    let segments = props
-        .segments
-        .iter()
-        .map(|segment| lower_hir_prop_segment_to_dom_mir(segment, is_component))
-        .collect::<Vec<_>>();
+fn lower_hir_props_to_dom_mir(
+    props: &HirProps,
+    is_component: bool,
+    state: &mut Vue3DomLoweringState,
+) -> Vue3DomProps {
+    if !props.segments.is_empty() {
+        return lower_ordered_hir_props_to_dom_mir(props, is_component, state);
+    }
+
     Vue3DomProps {
         static_attrs: props
             .static_attrs
@@ -1756,7 +1761,7 @@ fn lower_hir_props_to_dom_mir(props: &HirProps, is_component: bool) -> Vue3DomPr
         events: props
             .events
             .iter()
-            .map(|event| lower_hir_event_to_dom_mir(event, is_component))
+            .map(|event| lower_hir_event_to_dom_mir(event, is_component, state))
             .collect(),
         object_bindings: props
             .object_bindings
@@ -1783,35 +1788,74 @@ fn lower_hir_props_to_dom_mir(props: &HirProps, is_component: bool) -> Vue3DomPr
                 .iter()
                 .any(|segment| matches!(segment, HirPropSegment::ObjectBinding(_))),
         },
-        segments,
+        segments: Vec::new(),
     }
 }
 
-fn lower_hir_prop_segment_to_dom_mir(
-    segment: &HirPropSegment,
+fn lower_ordered_hir_props_to_dom_mir(
+    props: &HirProps,
     is_component: bool,
-) -> Vue3DomPropSegment {
-    match segment {
-        HirPropSegment::StaticAttr(attr) => {
-            Vue3DomPropSegment::StaticAttr(lower_hir_static_attr_to_dom_mir(attr))
+    state: &mut Vue3DomLoweringState,
+) -> Vue3DomProps {
+    let mut segments = Vec::new();
+    let mut static_attrs = Vec::new();
+    let mut dynamic_bindings = Vec::new();
+    let mut events = Vec::new();
+    let mut object_bindings = Vec::new();
+    let mut object_listeners = Vec::new();
+
+    for segment in &props.segments {
+        match segment {
+            HirPropSegment::StaticAttr(attr) => {
+                let lowered = lower_hir_static_attr_to_dom_mir(attr);
+                static_attrs.push(lowered.clone());
+                segments.push(Vue3DomPropSegment::StaticAttr(lowered));
+            }
+            HirPropSegment::DynamicBinding(binding) => {
+                let lowered = lower_hir_binding_to_dom_mir(binding);
+                dynamic_bindings.push(lowered.clone());
+                segments.push(Vue3DomPropSegment::DynamicBinding(lowered));
+            }
+            HirPropSegment::Event(event) => {
+                let lowered = lower_hir_event_to_dom_mir(event, is_component, state);
+                events.push(lowered.clone());
+                segments.push(Vue3DomPropSegment::Event(lowered));
+            }
+            HirPropSegment::ObjectBinding(binding) => {
+                let lowered = Vue3DomObjectBinding {
+                    value: binding.value,
+                };
+                object_bindings.push(lowered.clone());
+                segments.push(Vue3DomPropSegment::ObjectBinding(lowered));
+            }
+            HirPropSegment::ObjectListeners(listeners) => {
+                let lowered = Vue3DomObjectListeners {
+                    value: listeners.value,
+                    preserve_case: !is_component,
+                };
+                object_listeners.push(lowered.clone());
+                segments.push(Vue3DomPropSegment::ObjectListeners(lowered));
+            }
         }
-        HirPropSegment::DynamicBinding(binding) => {
-            Vue3DomPropSegment::DynamicBinding(lower_hir_binding_to_dom_mir(binding))
-        }
-        HirPropSegment::Event(event) => {
-            Vue3DomPropSegment::Event(lower_hir_event_to_dom_mir(event, is_component))
-        }
-        HirPropSegment::ObjectBinding(binding) => {
-            Vue3DomPropSegment::ObjectBinding(Vue3DomObjectBinding {
-                value: binding.value,
-            })
-        }
-        HirPropSegment::ObjectListeners(listeners) => {
-            Vue3DomPropSegment::ObjectListeners(Vue3DomObjectListeners {
-                value: listeners.value,
-                preserve_case: !is_component,
-            })
-        }
+    }
+
+    Vue3DomProps {
+        segments,
+        static_attrs,
+        dynamic_bindings,
+        events,
+        object_bindings,
+        object_listeners,
+        normalize: Vue3DomPropsNormalize {
+            normalize_props: props
+                .segments
+                .iter()
+                .any(|segment| matches!(segment, HirPropSegment::ObjectBinding(_))),
+            guard_reactive_props: props
+                .segments
+                .iter()
+                .any(|segment| matches!(segment, HirPropSegment::ObjectBinding(_))),
+        },
     }
 }
 
@@ -1831,7 +1875,12 @@ fn lower_hir_binding_to_dom_mir(binding: &HirBinding) -> Vue3DomBinding {
     }
 }
 
-fn lower_hir_event_to_dom_mir(event: &HirEvent, is_component: bool) -> Vue3DomEvent {
+fn lower_hir_event_to_dom_mir(
+    event: &HirEvent,
+    is_component: bool,
+    state: &mut Vue3DomLoweringState,
+) -> Vue3DomEvent {
+    let cache = vue3_dom_event_cache(event, is_component, state);
     Vue3DomEvent {
         name: if event.dynamic_arg {
             event.name.clone()
@@ -1843,7 +1892,24 @@ fn lower_hir_event_to_dom_mir(event: &HirEvent, is_component: bool) -> Vue3DomEv
         dynamic_name: event.dynamic_name,
         handler: event.handler,
         dynamic_arg: event.dynamic_arg,
+        cache,
     }
+}
+
+fn vue3_dom_event_cache(
+    event: &HirEvent,
+    is_component: bool,
+    state: &mut Vue3DomLoweringState,
+) -> Option<Vue3DomEventCache> {
+    if !state.options.cache_handlers || state.in_v_once > 0 || is_component {
+        return None;
+    }
+    if event.dynamic_arg {
+        return None;
+    }
+    let index = state.next_cache_index;
+    state.next_cache_index += 1;
+    Some(Vue3DomEventCache { index })
 }
 
 fn lower_hir_directive_to_dom_mir(directive: &HirDirectiveUse) -> Vue3DomDirective {
@@ -9699,7 +9765,7 @@ impl<'a> Vue3DomMirCodegen<'a> {
     }
 
     fn render_event(&self, event: &Vue3DomEvent) -> String {
-        let handler = self.render_js_stmt(event.handler);
+        let handler = self.render_cached_event_handler(event);
         if event.dynamic_arg {
             let name = event
                 .dynamic_name
@@ -9709,6 +9775,17 @@ impl<'a> Vue3DomMirCodegen<'a> {
         } else {
             format!("{}: {}", json_key(&event.name), handler)
         }
+    }
+
+    fn render_cached_event_handler(&self, event: &Vue3DomEvent) -> String {
+        let handler = self.render_js_stmt(event.handler);
+        let Some(cache) = &event.cache else {
+            return handler;
+        };
+        format!(
+            "_cache[{}] || (_cache[{}] = {})",
+            cache.index, cache.index, handler
+        )
     }
 
     fn render_object_listeners(&self, listeners: &Vue3DomObjectListeners) -> String {
@@ -14801,6 +14878,49 @@ mod tests {
     }
 
     #[test]
+    fn lower_vue3_ast_to_dom_mir_projects_cache_handlers_event_slots() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div><button @click="go" @[event]="run" /><Child @save="save" /><p v-once @click="once">once</p></div>"#.into(),
+            file_id: FileId(32),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(
+            &ast,
+            &Vue3CompilerOptions {
+                cache_handlers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        let mut cached = result
+            .mir
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.kind {
+                Vue3DomMirKind::VNodeCall(call) => Some((
+                    call.tag.clone(),
+                    call.props
+                        .events
+                        .iter()
+                        .filter_map(|event| event.cache.as_ref().map(|cache| cache.index))
+                        .collect::<Vec<_>>(),
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        cached.retain(|(_, slots)| !slots.is_empty());
+
+        assert_eq!(cached, vec![(Vue3DomTag::Native("button".into()), vec![0])]);
+        assert!(result
+            .mir
+            .nodes
+            .iter()
+            .any(|node| matches!(node.kind, Vue3DomMirKind::Cache { index: 1 })));
+    }
+
+    #[test]
     fn lower_vue3_ast_to_dom_mir_keeps_ordered_prop_segments_and_object_spreads() {
         let source = TemplateSource {
             filename: "foo.vue".into(),
@@ -15704,6 +15824,38 @@ mod tests {
         assert!(generated.code.contains("[_toHandlerKey(event)]: run"));
         assert!(generated.code.contains("16 /* FULL_PROPS */"));
         assert!(!generated.code.contains("[\"name\"]"));
+    }
+
+    #[test]
+    fn generate_vue3_dom_mir_emits_cache_handlers_from_mir() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<button id="save" @click="go">Save</button>"#.into(),
+            file_id: FileId(32),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(
+            &ast,
+            &Vue3CompilerOptions {
+                cache_handlers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+        let generated = generate_vue3_dom_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                cache_handlers: true,
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated
+            .code
+            .contains("onClick: _cache[0] || (_cache[0] = go)"));
     }
 
     #[test]

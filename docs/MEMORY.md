@@ -1,5 +1,10 @@
 # Memory
 
+- Current round: added structural Vue 3 DOM MIR cacheHandlers event-cache payload. `vuec_ast::Vue3DomEvent` now carries optional `Vue3DomEventCache`, keeping cache slot indexes in the DOM target instead of HIR.
+- `vuec_vue3_core` DOM lowering now assigns cacheHandlers slots during HIR props -> `Vue3DomMir` projection, skipping component handlers, dynamic event names, and `v-once` bodies. `generate_vue3_dom_mir` consumes the MIR payload to emit `_cache[n] || (_cache[n] = handler)`.
+- This is structural target-codegen work. Standalone DOM MIR codegen still renders registered JS store expressions as raw source, and the exact AST emitter remains the official Vue 3 conformance path until complete MIR-driven exact codegen migration.
+- Verification for this cacheHandlers MIR slice: focused `cargo test -p vuec_vue3_core lower_vue3_ast_to_dom_mir_projects_cache_handlers_event_slots`, focused `cargo test -p vuec_vue3_core generate_vue3_dom_mir_emits_cache_handlers_from_mir`, `cargo fmt --all --check`, `cargo check -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo xtask run-conformance --suite vue3-core` (`652/652`; report distinguishes `rust-backed`, `mixed`, and `shim-backed`), and `git diff --check`.
+
 - Current round: added `v-for` memo cache target payloads to structural Vue 3 DOM MIR.
 - `Vue3DomMirKind::For` now carries `Vue3ForMir`, including source, value/key/index aliases, explicit key expression/string, and optional `Vue3ForMemo { expression, index }`. DOM lowering records the key/memo target payload after lowering the loop body, keeping `JsAstStore` ownership stable for existing element props.
 - `generate_vue3_dom_mir` now emits memoized render-list cache code from MIR: `__, ___, _cached` params, `const _memo`, optional key guard, `_isMemoSame`, `const _item`, `_item.memo`, `_cache` argument, and keyed fragment flag.
