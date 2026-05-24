@@ -1940,6 +1940,7 @@ fn lower_hir_directive_to_dom_mir(directive: &HirDirectiveUse) -> Vue3DomDirecti
     Vue3DomDirective {
         name: directive.name.clone(),
         argument: directive.argument.clone(),
+        dynamic_argument: directive.dynamic_argument,
         expression: directive.expression,
         modifiers: directive.modifiers.clone(),
     }
@@ -3039,9 +3040,24 @@ fn lower_vue3_directives_to_hir(
                         | "text"
                 ) =>
             {
+                let dynamic_argument = dir.arg.as_ref().and_then(|arg| {
+                    dir.is_dynamic_arg.then(|| {
+                        register_vue3_expression_with_span(
+                            js,
+                            arg,
+                            dir.arg_span.or_else(|| ast_node.span.source()),
+                            source_type,
+                        )
+                    })
+                });
                 Some(HirDirectiveUse {
                     name: dir.name.clone(),
-                    argument: dir.arg.as_ref().map(Vue3Expression::source_string),
+                    argument: dir
+                        .arg
+                        .as_ref()
+                        .filter(|_| !dir.is_dynamic_arg)
+                        .map(Vue3Expression::source_string),
+                    dynamic_argument,
                     expression: dir.exp.as_ref().map(|exp| {
                         register_vue3_expression_with_span(
                             js,
@@ -9967,11 +9983,16 @@ impl<'a> Vue3DomMirCodegen<'a> {
         let mut args = vec![runtime];
         if let Some(expression) = directive.expression {
             args.push(self.render_js_expr(expression, scope));
-        } else if directive.argument.is_some() || !directive.modifiers.is_empty() {
+        } else if directive.argument.is_some()
+            || directive.dynamic_argument.is_some()
+            || !directive.modifiers.is_empty()
+        {
             args.push("void 0".into());
         }
         if let Some(argument) = &directive.argument {
             args.push(quote_string(argument));
+        } else if let Some(argument) = directive.dynamic_argument {
+            args.push(self.render_js_expr(argument, scope));
         } else if !directive.modifiers.is_empty() {
             args.push("void 0".into());
         }
@@ -16113,6 +16134,68 @@ mod tests {
             .contains("[_directive_focus, _ctx.value, \"foo\", {"));
         assert!(generated.code.contains("bar: true"));
         assert!(generated.code.contains("[_vShow, _ctx.ok]"));
+    }
+
+    #[test]
+    fn generate_vue3_dom_mir_preserves_dynamic_runtime_directive_args() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div v-focus:[arg].bar="value"/>"#.into(),
+            file_id: FileId(32),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+
+        assert_eq!(
+            result
+                .js
+                .expressions()
+                .iter()
+                .map(|entry| entry.source.as_str())
+                .collect::<Vec<_>>(),
+            vec!["arg", "value"]
+        );
+        let directive_hir = result
+            .hir
+            .nodes
+            .iter()
+            .find_map(|node| match &node.kind {
+                HirNodeKind::Element(element) => element.directives.first(),
+                _ => None,
+            })
+            .expect("HIR directive");
+        assert_eq!(directive_hir.argument, None);
+        assert!(directive_hir.dynamic_argument.is_some());
+
+        let directive_mir = result
+            .mir
+            .nodes
+            .iter()
+            .find_map(|node| match &node.kind {
+                Vue3DomMirKind::VNodeCall(call) => call.directives.first(),
+                _ => None,
+            })
+            .expect("DOM MIR directive");
+        assert_eq!(directive_mir.argument, None);
+        assert!(directive_mir.dynamic_argument.is_some());
+
+        let generated = generate_vue3_dom_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated
+            .code
+            .contains("[_directive_focus, _ctx.value, _ctx.arg, {"));
+        assert!(!generated
+            .code
+            .contains("[_directive_focus, _ctx.value, \"arg\""));
     }
 
     #[test]

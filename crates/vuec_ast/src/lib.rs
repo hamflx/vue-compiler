@@ -1167,6 +1167,7 @@ pub struct HirRef {
 pub struct HirDirectiveUse {
     pub name: String,
     pub argument: Option<String>,
+    pub dynamic_argument: Option<JsExprId>,
     pub expression: Option<JsExprId>,
     pub modifiers: Vec<String>,
 }
@@ -1369,6 +1370,7 @@ pub struct Vue3DomPropsNormalize {
 pub struct Vue3DomDirective {
     pub name: String,
     pub argument: Option<String>,
+    pub dynamic_argument: Option<JsExprId>,
     pub expression: Option<JsExprId>,
     pub modifiers: Vec<String>,
 }

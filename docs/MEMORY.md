@@ -1,5 +1,10 @@
 # Memory
 
+- Current round: added runtime directive dynamic argument payloads to Vue 3 HIR and DOM MIR.
+- `HirDirectiveUse` and `Vue3DomDirective` now distinguish static `argument: Option<String>` from dynamic `dynamic_argument: Option<JsExprId>`. DOM lowering registers `v-focus:[arg]` style arguments once in `JsAstStore`, carries the expression id through HIR -> `Vue3DomMir`, and keeps static args as quoted string payloads.
+- `generate_vue3_dom_mir` now renders dynamic runtime directive args with the scoped JS expression renderer, so prefix/module mode emits `[_directive_focus, _ctx.value, _ctx.arg, ...]` instead of quoting `"arg"`. This is structural target-codegen work and does not touch `xtask/src/compat.rs`; exact MIR-driven DOM codegen migration remains open.
+- Verification for this runtime directive dynamic-arg slice: `cargo fmt --all`, focused `cargo test -p vuec_vue3_core generate_vue3_dom_mir_preserves_dynamic_runtime_directive_args`, focused `cargo test -p vuec_vue3_core generate_vue3_dom_mir_emits_runtime_directives_from_mir`, `cargo fmt --all --check`, `cargo check -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo xtask run-conformance --suite vue3-core` (`652/652`; report distinguishes `rust-backed`, `mixed`, and `shim-backed`), and `git diff --check`.
+
 - Current round: added MIR-driven hoist declarations to standalone Vue 3 DOM MIR codegen.
 - `generate_vue3_dom_mir` now renders each `Vue3DomMirKind::Hoisted { index }` wrapper's child body into `const _hoisted_{index} = ...` before the render function, and keeps normal render output as `_hoisted_n` references. The helper probe includes hoist declarations so hoisted VNodes can import `_createElementVNode` / related helpers in module mode.
 - This closes the previous dangling hoist-reference gap in the structural standalone emitter. It is still conservative target-codegen work: exact official `cacheStatic` / `stringifyStatic` parity and full MIR-driven exact codegen migration remain open.

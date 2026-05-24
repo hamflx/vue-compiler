@@ -88,9 +88,15 @@
 - [x] Vue 3 structural standalone `Vue3DomMir` codegen prefix-identifier rewriting for the current JS-store expression subset, with scoped `v-for` aliases, slot params, `$event`, and arrow handler params preserved as locals.
 - [x] Vue 3 structural standalone `Vue3DomMir` codegen helper import discovery for helpers introduced by bindingMetadata rewrites such as `_unref` and `_isRef`.
 - [x] Vue 3 structural standalone `Vue3DomMir` codegen hoist declarations for conservative `Hoisted` wrappers, with render output using `_hoisted_n` references and render-external const declarations generated from MIR children.
+- [x] Vue 3 structural runtime directive dynamic argument payload in HIR / `Vue3DomMir`, with standalone DOM MIR codegen rendering dynamic args as scoped expressions instead of quoted static strings.
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Added runtime directive dynamic argument payloads to HIR and `Vue3DomMir`. Static directive args remain string payloads, while dynamic args such as `v-focus:[arg]` are registered once in `JsAstStore` and referenced by `JsExprId`.
+- `generate_vue3_dom_mir` now renders runtime directive dynamic args through the same scoped JS expression renderer used for directive expressions, so prefix/module mode emits `_ctx.arg` instead of `"arg"` while preserving static args as quoted strings.
+- This remains structural target-codegen work. It does not touch `xtask/src/compat.rs`, and full exact DOM codegen migration to consume `Vue3DomMir` remains open.
+- Verification this round: `cargo fmt --all`, focused `cargo test -p vuec_vue3_core generate_vue3_dom_mir_preserves_dynamic_runtime_directive_args`, focused `cargo test -p vuec_vue3_core generate_vue3_dom_mir_emits_runtime_directives_from_mir`, `cargo fmt --all --check`, `cargo check -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo xtask run-conformance --suite vue3-core` (`652/652`; coverage report keeps `rust-backed` / `mixed` / `shim-backed` split), and `git diff --check`.
 
 - Added MIR-driven hoist declaration output to standalone `generate_vue3_dom_mir`. `Vue3DomMirKind::Hoisted { index }` now renders its child body into `const _hoisted_{index} = ...` before the render function, while normal render traversal still emits `_hoisted_n` references.
 - Hoist declarations participate in helper discovery, so hoisted VNode declarations can pull in helpers such as `_createElementVNode` in module mode without relying on AST fallback scans.
