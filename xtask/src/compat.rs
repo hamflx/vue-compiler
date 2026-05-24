@@ -4708,25 +4708,11 @@ const vue3CoreRuntime = (() => {
   };
   runtime.transformVBindShorthand = function transformVBindShorthand(node, context) {
     if (!node || node.type !== NodeTypes.ELEMENT) return;
-    for (const prop of node.props || []) {
-      if (
-        prop.type === NodeTypes.DIRECTIVE
-        && prop.name === 'bind'
-        && (!prop.exp || (runtime.isBrowserBuild() && prop.exp.type === NodeTypes.SIMPLE_EXPRESSION && !String(prop.exp.content || '').trim()))
-        && prop.arg
-      ) {
-        const arg = prop.arg;
-        if (arg.type !== NodeTypes.SIMPLE_EXPRESSION || !arg.isStatic) {
-          context.onError(runtime.createCompilerError(ErrorCodes.X_V_BIND_INVALID_SAME_NAME_ARGUMENT, arg.loc));
-          prop.exp = runtime.createSimpleExpression('', true, arg.loc);
-        } else {
-          const propName = camelize(arg.content);
-          if (/^[A-Za-z_$]/.test(propName[0] || '') || propName[0] === '-') {
-            prop.exp = runtime.createSimpleExpression(propName, false, arg.loc);
-          }
-        }
-      }
-    }
+    const projection = callBridge('vue3.core.transformVBindShorthand', {
+      node: runtime.dehydrateForBridge(node),
+      context: vue3TransformVBindShorthandContextPayload(context),
+    });
+    materializeVue3VBindShorthandProjection(projection, node, context);
   };
   runtime.transformElement = function transformElement(node, context) {
     return () => {
@@ -5557,6 +5543,12 @@ function vue3TransformBindContextPayload(context) {
   };
 }
 
+function vue3TransformVBindShorthandContextPayload(_context) {
+  return {
+    browser: vue3CoreRuntime.isBrowserBuild ? vue3CoreRuntime.isBrowserBuild() : false,
+  };
+}
+
 function vue3TransformOnceContextPayload(context) {
   context = context || {};
   return {
@@ -5592,6 +5584,32 @@ function materializeVue3BindErrors(projection, dir, context) {
       : dir && dir.loc || locStub;
     context.onError(vue3CoreRuntime.createCompilerError(code, loc));
   }
+}
+
+function materializeVue3VBindShorthandProjection(projection, node, context) {
+  for (const operation of projection && projection.operations || []) {
+    const prop = node && node.props && node.props[operation.index];
+    if (!prop || operation.kind !== 'setExp') continue;
+    for (const error of operation.errors || []) {
+      if (context && context.onError) {
+        const loc = error.loc === 'arg'
+          ? prop.arg && prop.arg.loc || prop.loc || vue3CoreRuntime.locStub
+          : prop.loc || vue3CoreRuntime.locStub;
+        context.onError(vue3CoreRuntime.createCompilerError(error.code, loc));
+      }
+    }
+    prop.exp = materializeVue3VBindShorthandExpression(operation.exp, prop);
+  }
+}
+
+function materializeVue3VBindShorthandExpression(projection, prop) {
+  if (!projection || projection.kind !== 'simple') return undefined;
+  return vue3CoreRuntime.createSimpleExpression(
+    projection.content || '',
+    !!projection.isStatic,
+    projection.loc || prop && prop.arg && prop.arg.loc || prop && prop.loc || vue3CoreRuntime.locStub,
+    projection.constType || 0,
+  );
 }
 
 function materializeVue3OnProjection(projection, dir, context) {

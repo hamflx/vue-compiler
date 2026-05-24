@@ -6,8 +6,12 @@ use oxc_ast::ast::{BindingPattern, ChainElement, Expression};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use vuec_ast::{
-    MissingSpanReason, NodeSpan, QuoteKind, RuntimeHelper, Vue3Ast, Vue3AstKind, Vue3Directive,
-    Vue3Element, Vue3ElementType, Vue3Expression, Vue3NodeKind, Vue3Prop,
+    Hir, HirBinding, HirConstness, HirDirectiveUse, HirElement, HirEvent, HirExpr, HirFor,
+    HirFragment, HirIf, HirIfBranch, HirInterpolation, HirNodeKind, HirProps, HirRoot,
+    HirSlotOutlet, HirStaticAttr, HirTag, JsExprId, JsPatternId, LoweringMap, MirChildren, MirExpr,
+    MissingSpanReason, NodeId, NodeSpan, QuoteKind, RuntimeHelper, Vue3Ast, Vue3AstKind,
+    Vue3Directive, Vue3DomMir, Vue3DomMirKind, Vue3Element, Vue3ElementType, Vue3Expression,
+    Vue3NodeKind, Vue3PatchFlags, Vue3Prop, Vue3SsrMir, Vue3SsrMirKind, Vue3VNodeCall,
 };
 use vuec_codegen::{CodeWriter, SourceMapArtifact, SourceMapSegment};
 use vuec_html::{HtmlTokenKind, HtmlTokenizer};
@@ -93,6 +97,28 @@ pub struct CodegenResult {
     pub ast_summary: String,
     pub diagnostics: Vec<String>,
     pub preamble: String,
+}
+
+/// Result of the structural Vue 3 DOM lowering contract.
+///
+/// This is intentionally separate from the legacy exact emitter path so AST /
+/// HIR / MIR structure can be verified without changing current official
+/// conformance behavior.
+pub struct Vue3DomLoweringResult {
+    pub hir: Hir,
+    pub mir: Vue3DomMir,
+    pub map: LoweringMap,
+    pub js: JsAstStore,
+}
+
+/// Result of the structural Vue 3 SSR lowering contract.
+///
+/// SSR lowering has its own target MIR and must not be derived from DOM MIR.
+pub struct Vue3SsrLoweringResult {
+    pub hir: Hir,
+    pub mir: Vue3SsrMir,
+    pub map: LoweringMap,
+    pub js: JsAstStore,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -680,6 +706,103 @@ impl Vue3Dialect {
         }
         result
     }
+
+    pub fn lower_to_dom_mir(ast: &Vue3Ast, options: &Vue3CompilerOptions) -> Vue3DomLoweringResult {
+        lower_vue3_ast_to_dom_mir(ast, options)
+    }
+
+    pub fn lower_to_ssr_mir(ast: &Vue3Ast, options: &Vue3CompilerOptions) -> Vue3SsrLoweringResult {
+        lower_vue3_ast_to_ssr_mir(ast, options)
+    }
+}
+
+/// Lower a Vue 3 AST document into the shared HIR and the Vue 3 DOM MIR target.
+///
+/// The lowering records explicit AST -> HIR and HIR -> MIR edges in
+/// `LoweringMap`, and registers template expressions into `JsAstStore`.
+pub fn lower_vue3_ast_to_dom_mir(
+    ast: &Vue3Ast,
+    options: &Vue3CompilerOptions,
+) -> Vue3DomLoweringResult {
+    let root_span = ast
+        .root_node()
+        .map(|node| node.span.clone())
+        .unwrap_or_else(|| NodeSpan::missing(MissingSpanReason::LoweringGap));
+    let mut state = Vue3DomLoweringState {
+        hir: Hir::new(HirNodeKind::Root(HirRoot), root_span.clone()),
+        mir: Vue3DomMir::new(Vue3DomMirKind::Root, root_span),
+        map: LoweringMap::default(),
+        js: JsAstStore::new(),
+        options: options.clone(),
+        source_type: expression_source_type(options),
+        do_not_hoist_root: ast
+            .root_node()
+            .and_then(|root| vue3_single_static_root_child(&root.children, ast)),
+        next_hoist_index: 1,
+        next_cache_index: 0,
+        in_v_once: 0,
+        in_static_hoist: 0,
+    };
+    state.map.record_ast_to_hir(ast.root, state.hir.root);
+    state.map.record_hir_to_mir(state.hir.root, state.mir.root);
+
+    if let Some(root) = ast.root_node() {
+        lower_vue3_dom_child_sequence(
+            &root.children,
+            ast,
+            state.hir.root,
+            state.mir.root,
+            &mut state,
+        );
+    }
+
+    Vue3DomLoweringResult {
+        hir: state.hir,
+        mir: state.mir,
+        map: state.map,
+        js: state.js,
+    }
+}
+
+/// Lower a Vue 3 AST document into the shared HIR and the Vue 3 SSR MIR target.
+///
+/// This is a structural contract entry for SSR. It records explicit AST -> HIR
+/// and HIR -> MIR edges and keeps SSR output in `Vue3SsrMir` instead of
+/// deriving it from DOM MIR.
+pub fn lower_vue3_ast_to_ssr_mir(
+    ast: &Vue3Ast,
+    options: &Vue3CompilerOptions,
+) -> Vue3SsrLoweringResult {
+    let root_span = ast
+        .root_node()
+        .map(|node| node.span.clone())
+        .unwrap_or_else(|| NodeSpan::missing(MissingSpanReason::LoweringGap));
+    let mut state = Vue3SsrLoweringState {
+        hir: Hir::new(HirNodeKind::Root(HirRoot), root_span.clone()),
+        mir: Vue3SsrMir::new(Vue3SsrMirKind::Root, root_span),
+        map: LoweringMap::default(),
+        js: JsAstStore::new(),
+        source_type: expression_source_type(options),
+    };
+    state.map.record_ast_to_hir(ast.root, state.hir.root);
+    state.map.record_hir_to_mir(state.hir.root, state.mir.root);
+
+    if let Some(root) = ast.root_node() {
+        lower_vue3_ssr_child_sequence(
+            &root.children,
+            ast,
+            state.hir.root,
+            state.mir.root,
+            &mut state,
+        );
+    }
+
+    Vue3SsrLoweringResult {
+        hir: state.hir,
+        mir: state.mir,
+        map: state.map,
+        js: state.js,
+    }
 }
 
 pub fn root_codegen_projection(root: &Value) -> Value {
@@ -695,6 +818,1395 @@ pub fn root_codegen_projection(root: &Value) -> Value {
             "kind": "fragment",
             "patchFlag": root_fragment_patch_flag(children),
         }),
+    }
+}
+
+struct Vue3DomLoweringState {
+    hir: Hir,
+    mir: Vue3DomMir,
+    map: LoweringMap,
+    js: JsAstStore,
+    options: Vue3CompilerOptions,
+    source_type: oxc_span::SourceType,
+    do_not_hoist_root: Option<NodeId>,
+    next_hoist_index: u32,
+    next_cache_index: u32,
+    in_v_once: u32,
+    in_static_hoist: u32,
+}
+
+struct Vue3SsrLoweringState {
+    hir: Hir,
+    mir: Vue3SsrMir,
+    map: LoweringMap,
+    js: JsAstStore,
+    source_type: oxc_span::SourceType,
+}
+
+fn lower_vue3_dom_child_sequence(
+    children: &[NodeId],
+    ast: &Vue3Ast,
+    hir_parent: NodeId,
+    mir_parent: NodeId,
+    state: &mut Vue3DomLoweringState,
+) {
+    let mut index = 0usize;
+    while index < children.len() {
+        let child_id = children[index];
+        let Some(child) = ast.node(child_id) else {
+            index += 1;
+            continue;
+        };
+        if let Vue3AstKind::Element(element) = &child.kind {
+            if directive_by_name(element, "for").is_some() {
+                lower_vue3_ast_node_to_dom_mir(child_id, ast, hir_parent, mir_parent, state);
+                index += 1;
+                continue;
+            }
+            if directive_by_name(element, "if").is_some() {
+                let (branch_ids, next_index) = collect_vue3_if_branch_chain(children, index, ast);
+                lower_vue3_if_branch_chain_to_dom_mir(
+                    &branch_ids,
+                    ast,
+                    hir_parent,
+                    mir_parent,
+                    state,
+                );
+                index = next_index;
+                continue;
+            }
+            if is_else_branch(element) {
+                index += 1;
+                continue;
+            }
+        }
+        lower_vue3_ast_node_to_dom_mir(child_id, ast, hir_parent, mir_parent, state);
+        index += 1;
+    }
+}
+
+fn collect_vue3_if_branch_chain(
+    children: &[NodeId],
+    start: usize,
+    ast: &Vue3Ast,
+) -> (Vec<NodeId>, usize) {
+    let mut branches = vec![children[start]];
+    let mut index = start + 1;
+    while index < children.len() {
+        let Some(node) = ast.node(children[index]) else {
+            index += 1;
+            continue;
+        };
+        match &node.kind {
+            Vue3AstKind::Comment(_) => {
+                index += 1;
+            }
+            Vue3AstKind::Text(text) if text.value.trim().is_empty() => {
+                index += 1;
+            }
+            Vue3AstKind::Element(element) if is_else_branch(element) => {
+                branches.push(children[index]);
+                index += 1;
+            }
+            _ => break,
+        }
+    }
+    (branches, index)
+}
+
+fn lower_vue3_ast_node_to_dom_mir(
+    ast_id: NodeId,
+    ast: &Vue3Ast,
+    hir_parent: NodeId,
+    mir_parent: NodeId,
+    state: &mut Vue3DomLoweringState,
+) -> Option<(NodeId, NodeId)> {
+    let ast_node = ast.node(ast_id)?;
+    match &ast_node.kind {
+        Vue3AstKind::Root(_) => None,
+        Vue3AstKind::Element(element) => {
+            if let Some(lowered) = lower_vue3_element_control_flow_to_dom_mir(
+                ast_id, element, ast, ast_node, hir_parent, mir_parent, state,
+            ) {
+                return lowered;
+            }
+            lower_vue3_non_control_element_to_dom_mir(
+                ast_id, element, ast, ast_node, hir_parent, mir_parent, state,
+            )
+        }
+        Vue3AstKind::Text(text) => {
+            let hir_id = state.hir.push_child(
+                hir_parent,
+                HirNodeKind::Text(vuec_ast::HirText {
+                    value: text.value.clone(),
+                }),
+                ast_node.span.clone(),
+            );
+            let mir_id = state.mir.push_child(
+                mir_parent,
+                Vue3DomMirKind::TextCall {
+                    value: MirExpr::String(text.value.clone()),
+                },
+                ast_node.span.clone(),
+            );
+            state.map.record_ast_to_hir(ast_id, hir_id);
+            state.map.record_hir_to_mir(hir_id, mir_id);
+            Some((hir_id, mir_id))
+        }
+        Vue3AstKind::Interpolation(interpolation) => {
+            let expr = register_vue3_expression_with_span(
+                &mut state.js,
+                &interpolation.expression,
+                ast_node.span.source(),
+                state.source_type,
+            );
+            let hir_id = state.hir.push_child(
+                hir_parent,
+                HirNodeKind::Interpolation(HirInterpolation {
+                    expression: HirExpr::Js(expr),
+                }),
+                ast_node.span.clone(),
+            );
+            let mir_id = state.mir.push_child(
+                mir_parent,
+                Vue3DomMirKind::Interpolation { expression: expr },
+                ast_node.span.clone(),
+            );
+            state.map.record_ast_to_hir(ast_id, hir_id);
+            state.map.record_hir_to_mir(hir_id, mir_id);
+            Some((hir_id, mir_id))
+        }
+        Vue3AstKind::Comment(comment) => {
+            let hir_id = state.hir.push_child(
+                hir_parent,
+                HirNodeKind::Fragment(HirFragment),
+                NodeSpan::generated(ast_node.span.source(), vuec_ast::GeneratedReason::Lowering),
+            );
+            let mir_id = state.mir.push_child(
+                mir_parent,
+                Vue3DomMirKind::TextCall {
+                    value: MirExpr::String(format!("<!--{}-->", comment.value)),
+                },
+                NodeSpan::generated(ast_node.span.source(), vuec_ast::GeneratedReason::Lowering),
+            );
+            state.map.record_ast_to_hir(ast_id, hir_id);
+            state.map.record_hir_to_mir(hir_id, mir_id);
+            Some((hir_id, mir_id))
+        }
+        Vue3AstKind::CompoundExpression(_) | Vue3AstKind::TextCall(_) => {
+            let hir_id = state.hir.push_child(
+                hir_parent,
+                HirNodeKind::Fragment(HirFragment),
+                ast_node.span.clone(),
+            );
+            let mir_id =
+                state
+                    .mir
+                    .push_child(mir_parent, Vue3DomMirKind::Fragment, ast_node.span.clone());
+            state.map.record_ast_to_hir(ast_id, hir_id);
+            state.map.record_hir_to_mir(hir_id, mir_id);
+            Some((hir_id, mir_id))
+        }
+        Vue3AstKind::If(_) | Vue3AstKind::IfBranch(_) | Vue3AstKind::For(_) => None,
+    }
+}
+
+fn lower_vue3_plain_element_to_dom_mir(
+    ast_id: NodeId,
+    element: &Vue3Element,
+    ast: &Vue3Ast,
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    hir_parent: NodeId,
+    mir_parent: NodeId,
+    state: &mut Vue3DomLoweringState,
+) -> Option<(NodeId, NodeId)> {
+    let hir_kind =
+        lower_vue3_element_to_hir_kind(element, ast_node, &mut state.js, state.source_type);
+    let mir_kind =
+        lower_vue3_element_to_dom_mir_kind(element, ast, ast_id, ast_node, &state.options);
+    let hir_id = state
+        .hir
+        .push_child(hir_parent, hir_kind, ast_node.span.clone());
+    let mir_id = state
+        .mir
+        .push_child(mir_parent, mir_kind, ast_node.span.clone());
+    state.map.record_ast_to_hir(ast_id, hir_id);
+    state.map.record_hir_to_mir(hir_id, mir_id);
+    lower_vue3_dom_children(ast_node, ast, hir_id, mir_id, state);
+    Some((hir_id, mir_id))
+}
+
+fn lower_vue3_non_control_element_to_dom_mir(
+    ast_id: NodeId,
+    element: &Vue3Element,
+    ast: &Vue3Ast,
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    hir_parent: NodeId,
+    mir_parent: NodeId,
+    state: &mut Vue3DomLoweringState,
+) -> Option<(NodeId, NodeId)> {
+    if directive_by_name(element, "once").is_some() && state.in_v_once == 0 {
+        let cache_id = state.next_cache_index;
+        state.next_cache_index += 1;
+        let wrapper_id = state.mir.push_child(
+            mir_parent,
+            Vue3DomMirKind::Cache { index: cache_id },
+            NodeSpan::generated(ast_node.span.source(), vuec_ast::GeneratedReason::Lowering),
+        );
+        state.in_v_once += 1;
+        let lowered = lower_vue3_plain_element_to_dom_mir(
+            ast_id, element, ast, ast_node, hir_parent, wrapper_id, state,
+        );
+        state.in_v_once -= 1;
+        if let Some((hir_id, _)) = lowered {
+            state.map.record_hir_to_mir(hir_id, wrapper_id);
+            return Some((hir_id, wrapper_id));
+        }
+        return None;
+    }
+
+    if state.options.hoist_static
+        && state.in_v_once == 0
+        && state.in_static_hoist == 0
+        && state.do_not_hoist_root != Some(ast_id)
+        && vue3_dom_mir_can_hoist_static_node(ast, ast_id)
+    {
+        let hoist_id = state.next_hoist_index;
+        state.next_hoist_index += 1;
+        let wrapper_id = state.mir.push_child(
+            mir_parent,
+            Vue3DomMirKind::Hoisted { index: hoist_id },
+            NodeSpan::generated(ast_node.span.source(), vuec_ast::GeneratedReason::Lowering),
+        );
+        state.in_static_hoist += 1;
+        let lowered = lower_vue3_plain_element_to_dom_mir(
+            ast_id, element, ast, ast_node, hir_parent, wrapper_id, state,
+        );
+        state.in_static_hoist -= 1;
+        if let Some((hir_id, _)) = lowered {
+            state.map.record_hir_to_mir(hir_id, wrapper_id);
+            return Some((hir_id, wrapper_id));
+        }
+        return None;
+    }
+
+    lower_vue3_plain_element_to_dom_mir(
+        ast_id, element, ast, ast_node, hir_parent, mir_parent, state,
+    )
+}
+
+fn lower_vue3_dom_children(
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    ast: &Vue3Ast,
+    hir_id: NodeId,
+    mir_id: NodeId,
+    state: &mut Vue3DomLoweringState,
+) {
+    let mut child_mir_ids = Vec::new();
+    let before = state.mir.nodes.len();
+    lower_vue3_dom_child_sequence(&ast_node.children, ast, hir_id, mir_id, state);
+    for node in state.mir.nodes.iter().skip(before) {
+        if node.parent == Some(mir_id) {
+            child_mir_ids.push(node.id);
+        }
+    }
+    if let Some(node) = state.mir.node_mut(mir_id) {
+        if let Vue3DomMirKind::VNodeCall(call) = &mut node.kind {
+            call.children = if child_mir_ids.is_empty() {
+                MirChildren::None
+            } else {
+                MirChildren::Nodes(child_mir_ids)
+            };
+        }
+    }
+}
+
+fn lower_vue3_element_to_dom_mir_kind(
+    element: &Vue3Element,
+    ast: &Vue3Ast,
+    ast_id: NodeId,
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    options: &Vue3CompilerOptions,
+) -> Vue3DomMirKind {
+    if element.tag_type == Vue3ElementType::SlotOutlet {
+        let name = element.props.iter().find_map(vue3_static_slot_outlet_name);
+        return Vue3DomMirKind::RenderSlot { name };
+    }
+
+    let is_component = element.tag_type == Vue3ElementType::Component;
+    Vue3DomMirKind::VNodeCall(Vue3VNodeCall {
+        tag: MirExpr::String(element.tag.clone()),
+        children: if ast_node.children.is_empty() {
+            MirChildren::None
+        } else {
+            MirChildren::Nodes(Vec::new())
+        },
+        patch_flag: Vue3PatchFlags {
+            bits: vue3_dom_mir_patch_flag(ast, ast_id, element, options),
+        },
+        dynamic_props: vue3_dom_mir_dynamic_props(element),
+        is_block: false,
+        disable_tracking: false,
+        is_component,
+    })
+}
+
+fn vue3_dom_mir_patch_flag(
+    ast: &Vue3Ast,
+    ast_id: NodeId,
+    element: &Vue3Element,
+    options: &Vue3CompilerOptions,
+) -> i32 {
+    let children = ast
+        .node(ast_id)
+        .map(|node| node.children.as_slice())
+        .unwrap_or(&[]);
+    let mut bits = 0;
+    if has_dynamic_arg_binding(element) {
+        bits |= 16;
+    } else {
+        if has_class_binding(element) && element.tag_type != Vue3ElementType::Component {
+            bits |= 2;
+        }
+        if has_style_binding(element) && element.tag_type != Vue3ElementType::Component {
+            bits |= 4;
+        }
+        if !vue3_dom_mir_props_patch_names(element).is_empty() {
+            bits |= 8;
+        }
+        if has_hydration_event_binding(element) {
+            bits |= 32;
+        }
+    }
+    if element.tag != "template"
+        && !children_literal_const_only(ast, children, options)
+        && has_dynamic_text_child(ast, children)
+    {
+        bits |= 1;
+    }
+    if (bits == 0 || bits == 32) && has_vnode_hook(element) {
+        bits |= 512;
+    }
+    bits
+}
+
+fn vue3_dom_mir_dynamic_props(element: &Vue3Element) -> Vec<String> {
+    element
+        .props
+        .iter()
+        .filter_map(|prop| match prop {
+            Vue3Prop::Directive(dir) if dir.name == "on" && !event_directive_is_vnode_hook(dir) => {
+                let event = dir
+                    .arg
+                    .as_ref()
+                    .map(Vue3Expression::source_string)
+                    .unwrap_or_default();
+                Some(event_handler_prop_name(element, &event))
+            }
+            Vue3Prop::Directive(dir) if dir.name == "bind" && !has_key_bind_dir(dir) => {
+                dir.arg.as_ref().map(Vue3Expression::source_string)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn vue3_dom_mir_props_patch_names(element: &Vue3Element) -> Vec<String> {
+    element
+        .props
+        .iter()
+        .filter_map(|prop| match prop {
+            Vue3Prop::Directive(dir) if dir.name == "on" && !event_directive_is_vnode_hook(dir) => {
+                let event = dir
+                    .arg
+                    .as_ref()
+                    .map(Vue3Expression::source_string)
+                    .unwrap_or_default();
+                Some(event_handler_prop_name(element, &event))
+            }
+            Vue3Prop::Directive(dir)
+                if dir.name == "bind"
+                    && !has_class_bind_dir(dir)
+                    && !has_style_bind_dir(dir)
+                    && !has_key_bind_dir(dir) =>
+            {
+                dir.arg.as_ref().map(Vue3Expression::source_string)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn has_style_binding(element: &Vue3Element) -> bool {
+    element.props.iter().any(|prop| {
+        matches!(
+            prop,
+            Vue3Prop::Directive(dir)
+                if dir.name == "bind"
+                    && dir
+                        .arg
+                        .as_ref()
+                        .is_some_and(|arg| arg.source_string() == "style")
+        )
+    })
+}
+
+fn has_style_bind_dir(dir: &Vue3Directive) -> bool {
+    dir.arg
+        .as_ref()
+        .is_some_and(|arg| arg.source_string() == "style")
+}
+
+fn has_dynamic_arg_binding(element: &Vue3Element) -> bool {
+    element.props.iter().any(|prop| {
+        matches!(
+            prop,
+            Vue3Prop::Directive(dir) if matches!(dir.name.as_str(), "bind" | "on") && dir.is_dynamic_arg
+        )
+    })
+}
+
+fn has_hydration_event_binding(element: &Vue3Element) -> bool {
+    let is_component = element.tag_type == Vue3ElementType::Component;
+    element.props.iter().any(|prop| {
+        let Vue3Prop::Directive(dir) = prop else {
+            return false;
+        };
+        if dir.name != "on" || event_directive_is_vnode_hook(dir) || is_component {
+            return false;
+        }
+        let Some(event) = dir.arg.as_ref().map(Vue3Expression::source_string) else {
+            return false;
+        };
+        let prop = event_handler_prop_name(element, &event);
+        prop.to_ascii_lowercase() != "onclick" && prop != "onUpdate:modelValue"
+    })
+}
+
+fn lower_vue3_element_control_flow_to_dom_mir(
+    ast_id: NodeId,
+    element: &Vue3Element,
+    ast: &Vue3Ast,
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    hir_parent: NodeId,
+    mir_parent: NodeId,
+    state: &mut Vue3DomLoweringState,
+) -> Option<Option<(NodeId, NodeId)>> {
+    if let Some(for_dir) = directive_by_name(element, "for") {
+        let lowered = lower_vue3_for_directive_to_dom_mir(
+            ast_id, element, ast, ast_node, for_dir, hir_parent, mir_parent, state,
+        );
+        return Some(lowered);
+    }
+    let if_dir = directive_by_name(element, "if")
+        .or_else(|| directive_by_name(element, "else-if"))
+        .filter(|dir| dir.exp.is_some());
+    if let Some(if_dir) = if_dir {
+        let lowered = lower_vue3_if_directive_to_dom_mir(
+            ast_id, element, ast, ast_node, if_dir, hir_parent, mir_parent, state,
+        );
+        return Some(lowered);
+    }
+    None
+}
+
+fn lower_vue3_if_branch_chain_to_dom_mir(
+    branch_ids: &[NodeId],
+    ast: &Vue3Ast,
+    hir_parent: NodeId,
+    mir_parent: NodeId,
+    state: &mut Vue3DomLoweringState,
+) -> Option<(NodeId, NodeId)> {
+    let first_id = *branch_ids.first()?;
+    let first_node = ast.node(first_id)?;
+    let first_element = match &first_node.kind {
+        Vue3AstKind::Element(element) => element,
+        _ => return None,
+    };
+    let first_dir = directive_by_name(first_element, "if")
+        .or_else(|| directive_by_name(first_element, "else-if"))?;
+    let condition =
+        lower_vue3_optional_condition(first_dir, first_node, &mut state.js, state.source_type);
+    let hir_id = state.hir.push_child(
+        hir_parent,
+        HirNodeKind::If(HirIf {
+            branches: Vec::new(),
+        }),
+        first_node.span.clone(),
+    );
+    let mir_id = state.mir.push_child(
+        mir_parent,
+        Vue3DomMirKind::If { condition },
+        first_node.span.clone(),
+    );
+    state.map.record_ast_to_hir(first_id, hir_id);
+    state.map.record_hir_to_mir(hir_id, mir_id);
+
+    for branch_id in branch_ids {
+        let Some(branch_node) = ast.node(*branch_id) else {
+            continue;
+        };
+        let Vue3AstKind::Element(branch_element) = &branch_node.kind else {
+            continue;
+        };
+        let condition = if *branch_id == first_id {
+            condition
+        } else {
+            vue3_branch_condition(
+                branch_element,
+                branch_node,
+                &mut state.js,
+                state.source_type,
+            )
+        };
+        if *branch_id != first_id {
+            let branch_mir = state.mir.push_child(
+                mir_id,
+                Vue3DomMirKind::If { condition },
+                branch_node.span.clone(),
+            );
+            state.map.record_ast_to_hir(*branch_id, hir_id);
+            state.map.record_hir_to_mir(hir_id, branch_mir);
+        }
+        if let Some((body_hir, _)) = lower_vue3_non_control_element_to_dom_mir(
+            *branch_id,
+            branch_element,
+            ast,
+            branch_node,
+            hir_id,
+            mir_id,
+            state,
+        ) {
+            if let Some(node) = state.hir.node_mut(hir_id) {
+                if let HirNodeKind::If(hir_if) = &mut node.kind {
+                    hir_if.branches.push(HirIfBranch {
+                        condition,
+                        body: body_hir,
+                    });
+                }
+            }
+        }
+    }
+
+    Some((hir_id, mir_id))
+}
+
+fn lower_vue3_for_directive_to_dom_mir(
+    ast_id: NodeId,
+    element: &Vue3Element,
+    ast: &Vue3Ast,
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    directive: &Vue3Directive,
+    hir_parent: NodeId,
+    mir_parent: NodeId,
+    state: &mut Vue3DomLoweringState,
+) -> Option<(NodeId, NodeId)> {
+    let parsed = lower_vue3_for_directive(directive, ast_node, &mut state.js, state.source_type)?;
+    let hir_id = state.hir.push_child(
+        hir_parent,
+        HirNodeKind::For(HirFor {
+            source: parsed.source,
+            value_alias: parsed.value_alias,
+            key_alias: parsed.key_alias,
+            index_alias: parsed.index_alias,
+            body: NodeId(0),
+        }),
+        ast_node.span.clone(),
+    );
+    let mir_id = state.mir.push_child(
+        mir_parent,
+        Vue3DomMirKind::For {
+            source: parsed.source,
+            alias: parsed.value_alias,
+        },
+        ast_node.span.clone(),
+    );
+    state.map.record_ast_to_hir(ast_id, hir_id);
+    state.map.record_hir_to_mir(hir_id, mir_id);
+
+    let body =
+        if let Some(if_dir) = directive_by_name(element, "if").filter(|dir| dir.exp.is_some()) {
+            lower_vue3_if_directive_to_dom_mir(
+                ast_id, element, ast, ast_node, if_dir, hir_id, mir_id, state,
+            )
+        } else {
+            lower_vue3_non_control_element_to_dom_mir(
+                ast_id, element, ast, ast_node, hir_id, mir_id, state,
+            )
+        };
+    if let Some((body_hir, _)) = body {
+        if let Some(node) = state.hir.node_mut(hir_id) {
+            if let HirNodeKind::For(hir_for) = &mut node.kind {
+                hir_for.body = body_hir;
+            }
+        }
+    }
+    Some((hir_id, mir_id))
+}
+
+fn lower_vue3_if_directive_to_dom_mir(
+    ast_id: NodeId,
+    element: &Vue3Element,
+    ast: &Vue3Ast,
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    directive: &Vue3Directive,
+    hir_parent: NodeId,
+    mir_parent: NodeId,
+    state: &mut Vue3DomLoweringState,
+) -> Option<(NodeId, NodeId)> {
+    let condition =
+        lower_vue3_optional_condition(directive, ast_node, &mut state.js, state.source_type);
+    let hir_id = state.hir.push_child(
+        hir_parent,
+        HirNodeKind::If(HirIf {
+            branches: Vec::new(),
+        }),
+        ast_node.span.clone(),
+    );
+    let mir_id = state.mir.push_child(
+        mir_parent,
+        Vue3DomMirKind::If { condition },
+        ast_node.span.clone(),
+    );
+    state.map.record_ast_to_hir(ast_id, hir_id);
+    state.map.record_hir_to_mir(hir_id, mir_id);
+
+    if let Some((body_hir, _)) = lower_vue3_non_control_element_to_dom_mir(
+        ast_id, element, ast, ast_node, hir_id, mir_id, state,
+    ) {
+        if let Some(node) = state.hir.node_mut(hir_id) {
+            if let HirNodeKind::If(hir_if) = &mut node.kind {
+                hir_if.branches.push(HirIfBranch {
+                    condition,
+                    body: body_hir,
+                });
+            }
+        }
+    }
+    Some((hir_id, mir_id))
+}
+
+fn lower_vue3_ast_node_to_ssr_mir(
+    ast_id: NodeId,
+    ast: &Vue3Ast,
+    hir_parent: NodeId,
+    mir_parent: NodeId,
+    state: &mut Vue3SsrLoweringState,
+) -> Option<NodeId> {
+    let ast_node = ast.node(ast_id)?;
+    match &ast_node.kind {
+        Vue3AstKind::Root(_) => None,
+        Vue3AstKind::Element(element) => {
+            if let Some(lowered) = lower_vue3_element_control_flow_to_ssr_mir(
+                ast_id, element, ast, ast_node, hir_parent, mir_parent, state,
+            ) {
+                return lowered;
+            }
+            lower_vue3_plain_element_to_ssr_mir(
+                ast_id, element, ast, ast_node, hir_parent, mir_parent, state,
+            )
+        }
+        Vue3AstKind::Text(text) => {
+            let hir_id = state.hir.push_child(
+                hir_parent,
+                HirNodeKind::Text(vuec_ast::HirText {
+                    value: text.value.clone(),
+                }),
+                ast_node.span.clone(),
+            );
+            let mir_id = state.mir.push_child(
+                mir_parent,
+                Vue3SsrMirKind::PushString(text.value.clone()),
+                ast_node.span.clone(),
+            );
+            state.map.record_ast_to_hir(ast_id, hir_id);
+            state.map.record_hir_to_mir(hir_id, mir_id);
+            Some(hir_id)
+        }
+        Vue3AstKind::Interpolation(interpolation) => {
+            let expr = register_vue3_expression_with_span(
+                &mut state.js,
+                &interpolation.expression,
+                ast_node.span.source(),
+                state.source_type,
+            );
+            let hir_id = state.hir.push_child(
+                hir_parent,
+                HirNodeKind::Interpolation(HirInterpolation {
+                    expression: HirExpr::Js(expr),
+                }),
+                ast_node.span.clone(),
+            );
+            let mir_id = state.mir.push_child(
+                mir_parent,
+                Vue3SsrMirKind::PushInterpolated(MirExpr::JsExpr(expr)),
+                ast_node.span.clone(),
+            );
+            state.map.record_ast_to_hir(ast_id, hir_id);
+            state.map.record_hir_to_mir(hir_id, mir_id);
+            Some(hir_id)
+        }
+        Vue3AstKind::Comment(comment) => {
+            let span =
+                NodeSpan::generated(ast_node.span.source(), vuec_ast::GeneratedReason::Lowering);
+            let hir_id =
+                state
+                    .hir
+                    .push_child(hir_parent, HirNodeKind::Fragment(HirFragment), span.clone());
+            let mir_id = state.mir.push_child(
+                mir_parent,
+                Vue3SsrMirKind::PushString(format!("<!--{}-->", comment.value)),
+                span,
+            );
+            state.map.record_ast_to_hir(ast_id, hir_id);
+            state.map.record_hir_to_mir(hir_id, mir_id);
+            Some(hir_id)
+        }
+        Vue3AstKind::CompoundExpression(_) | Vue3AstKind::TextCall(_) => {
+            let hir_id = state.hir.push_child(
+                hir_parent,
+                HirNodeKind::Fragment(HirFragment),
+                ast_node.span.clone(),
+            );
+            let mir_id = state.mir.push_child(
+                mir_parent,
+                Vue3SsrMirKind::PushString(String::new()),
+                NodeSpan::generated(ast_node.span.source(), vuec_ast::GeneratedReason::Lowering),
+            );
+            state.map.record_ast_to_hir(ast_id, hir_id);
+            state.map.record_hir_to_mir(hir_id, mir_id);
+            Some(hir_id)
+        }
+        Vue3AstKind::If(_) | Vue3AstKind::IfBranch(_) | Vue3AstKind::For(_) => None,
+    }
+}
+
+fn lower_vue3_ssr_child_sequence(
+    children: &[NodeId],
+    ast: &Vue3Ast,
+    hir_parent: NodeId,
+    mir_parent: NodeId,
+    state: &mut Vue3SsrLoweringState,
+) {
+    let mut index = 0usize;
+    while index < children.len() {
+        let child_id = children[index];
+        let Some(child) = ast.node(child_id) else {
+            index += 1;
+            continue;
+        };
+        if let Vue3AstKind::Element(element) = &child.kind {
+            if directive_by_name(element, "for").is_some() {
+                lower_vue3_ast_node_to_ssr_mir(child_id, ast, hir_parent, mir_parent, state);
+                index += 1;
+                continue;
+            }
+            if directive_by_name(element, "if").is_some() {
+                let (branch_ids, next_index) = collect_vue3_if_branch_chain(children, index, ast);
+                lower_vue3_if_branch_chain_to_ssr_mir(
+                    &branch_ids,
+                    ast,
+                    hir_parent,
+                    mir_parent,
+                    state,
+                );
+                index = next_index;
+                continue;
+            }
+            if is_else_branch(element) {
+                index += 1;
+                continue;
+            }
+        }
+        lower_vue3_ast_node_to_ssr_mir(child_id, ast, hir_parent, mir_parent, state);
+        index += 1;
+    }
+}
+
+fn lower_vue3_plain_element_to_ssr_mir(
+    ast_id: NodeId,
+    element: &Vue3Element,
+    ast: &Vue3Ast,
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    hir_parent: NodeId,
+    mir_parent: NodeId,
+    state: &mut Vue3SsrLoweringState,
+) -> Option<NodeId> {
+    let hir_kind =
+        lower_vue3_element_to_hir_kind(element, ast_node, &mut state.js, state.source_type);
+    let hir_id = state
+        .hir
+        .push_child(hir_parent, hir_kind, ast_node.span.clone());
+    state.map.record_ast_to_hir(ast_id, hir_id);
+
+    match element.tag_type {
+        Vue3ElementType::Component => {
+            let mir_id = state.mir.push_child(
+                mir_parent,
+                Vue3SsrMirKind::RenderComponent {
+                    tag: MirExpr::String(element.tag.clone()),
+                },
+                ast_node.span.clone(),
+            );
+            state.map.record_hir_to_mir(hir_id, mir_id);
+            lower_vue3_ssr_child_sequence(&ast_node.children, ast, hir_id, mir_id, state);
+        }
+        Vue3ElementType::SlotOutlet => {
+            let name = element.props.iter().find_map(vue3_static_slot_outlet_name);
+            let mir_id = state.mir.push_child(
+                mir_parent,
+                Vue3SsrMirKind::RenderSlot { name },
+                ast_node.span.clone(),
+            );
+            state.map.record_hir_to_mir(hir_id, mir_id);
+            lower_vue3_ssr_child_sequence(&ast_node.children, ast, hir_id, mir_id, state);
+        }
+        Vue3ElementType::Element | Vue3ElementType::Template => {
+            lower_vue3_native_element_to_ssr_mir(element, ast_node, ast, hir_id, mir_parent, state);
+        }
+    }
+
+    Some(hir_id)
+}
+
+fn lower_vue3_element_control_flow_to_ssr_mir(
+    ast_id: NodeId,
+    element: &Vue3Element,
+    ast: &Vue3Ast,
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    hir_parent: NodeId,
+    mir_parent: NodeId,
+    state: &mut Vue3SsrLoweringState,
+) -> Option<Option<NodeId>> {
+    if let Some(for_dir) = directive_by_name(element, "for") {
+        let lowered = lower_vue3_for_directive_to_ssr_mir(
+            ast_id, element, ast, ast_node, for_dir, hir_parent, mir_parent, state,
+        );
+        return Some(lowered);
+    }
+    let if_dir = directive_by_name(element, "if")
+        .or_else(|| directive_by_name(element, "else-if"))
+        .filter(|dir| dir.exp.is_some());
+    if let Some(if_dir) = if_dir {
+        let lowered = lower_vue3_if_directive_to_ssr_mir(
+            ast_id, element, ast, ast_node, if_dir, hir_parent, mir_parent, state,
+        );
+        return Some(lowered);
+    }
+    None
+}
+
+fn lower_vue3_if_branch_chain_to_ssr_mir(
+    branch_ids: &[NodeId],
+    ast: &Vue3Ast,
+    hir_parent: NodeId,
+    mir_parent: NodeId,
+    state: &mut Vue3SsrLoweringState,
+) -> Option<NodeId> {
+    let first_id = *branch_ids.first()?;
+    let first_node = ast.node(first_id)?;
+    let first_element = match &first_node.kind {
+        Vue3AstKind::Element(element) => element,
+        _ => return None,
+    };
+    let first_dir = directive_by_name(first_element, "if")
+        .or_else(|| directive_by_name(first_element, "else-if"))?;
+    let condition =
+        lower_vue3_optional_condition(first_dir, first_node, &mut state.js, state.source_type);
+    let hir_id = state.hir.push_child(
+        hir_parent,
+        HirNodeKind::If(HirIf {
+            branches: Vec::new(),
+        }),
+        first_node.span.clone(),
+    );
+    let mir_id = state.mir.push_child(
+        mir_parent,
+        Vue3SsrMirKind::If { condition },
+        first_node.span.clone(),
+    );
+    state.map.record_ast_to_hir(first_id, hir_id);
+    state.map.record_hir_to_mir(hir_id, mir_id);
+
+    for branch_id in branch_ids {
+        let Some(branch_node) = ast.node(*branch_id) else {
+            continue;
+        };
+        let Vue3AstKind::Element(branch_element) = &branch_node.kind else {
+            continue;
+        };
+        let condition = if *branch_id == first_id {
+            condition
+        } else {
+            vue3_branch_condition(
+                branch_element,
+                branch_node,
+                &mut state.js,
+                state.source_type,
+            )
+        };
+        if *branch_id != first_id {
+            let branch_mir = state.mir.push_child(
+                mir_id,
+                Vue3SsrMirKind::If { condition },
+                branch_node.span.clone(),
+            );
+            state.map.record_ast_to_hir(*branch_id, hir_id);
+            state.map.record_hir_to_mir(hir_id, branch_mir);
+        }
+        if let Some(body_hir) = lower_vue3_plain_element_to_ssr_mir(
+            *branch_id,
+            branch_element,
+            ast,
+            branch_node,
+            hir_id,
+            mir_id,
+            state,
+        ) {
+            if let Some(node) = state.hir.node_mut(hir_id) {
+                if let HirNodeKind::If(hir_if) = &mut node.kind {
+                    hir_if.branches.push(HirIfBranch {
+                        condition,
+                        body: body_hir,
+                    });
+                }
+            }
+        }
+    }
+
+    Some(hir_id)
+}
+
+fn lower_vue3_for_directive_to_ssr_mir(
+    ast_id: NodeId,
+    element: &Vue3Element,
+    ast: &Vue3Ast,
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    directive: &Vue3Directive,
+    hir_parent: NodeId,
+    mir_parent: NodeId,
+    state: &mut Vue3SsrLoweringState,
+) -> Option<NodeId> {
+    let parsed = lower_vue3_for_directive(directive, ast_node, &mut state.js, state.source_type)?;
+    let hir_id = state.hir.push_child(
+        hir_parent,
+        HirNodeKind::For(HirFor {
+            source: parsed.source,
+            value_alias: parsed.value_alias,
+            key_alias: parsed.key_alias,
+            index_alias: parsed.index_alias,
+            body: NodeId(0),
+        }),
+        ast_node.span.clone(),
+    );
+    let mir_id = state.mir.push_child(
+        mir_parent,
+        Vue3SsrMirKind::For {
+            source: parsed.source,
+            alias: parsed.value_alias,
+        },
+        ast_node.span.clone(),
+    );
+    state.map.record_ast_to_hir(ast_id, hir_id);
+    state.map.record_hir_to_mir(hir_id, mir_id);
+
+    let body = if let Some(if_dir) =
+        directive_by_name(element, "if").filter(|dir| dir.exp.is_some())
+    {
+        lower_vue3_if_directive_to_ssr_mir(
+            ast_id, element, ast, ast_node, if_dir, hir_id, mir_id, state,
+        )
+    } else {
+        lower_vue3_plain_element_to_ssr_mir(ast_id, element, ast, ast_node, hir_id, mir_id, state)
+    };
+    if let Some(body_hir) = body {
+        if let Some(node) = state.hir.node_mut(hir_id) {
+            if let HirNodeKind::For(hir_for) = &mut node.kind {
+                hir_for.body = body_hir;
+            }
+        }
+    }
+    Some(hir_id)
+}
+
+fn lower_vue3_if_directive_to_ssr_mir(
+    ast_id: NodeId,
+    element: &Vue3Element,
+    ast: &Vue3Ast,
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    directive: &Vue3Directive,
+    hir_parent: NodeId,
+    mir_parent: NodeId,
+    state: &mut Vue3SsrLoweringState,
+) -> Option<NodeId> {
+    let condition =
+        lower_vue3_optional_condition(directive, ast_node, &mut state.js, state.source_type);
+    let hir_id = state.hir.push_child(
+        hir_parent,
+        HirNodeKind::If(HirIf {
+            branches: Vec::new(),
+        }),
+        ast_node.span.clone(),
+    );
+    let mir_id = state.mir.push_child(
+        mir_parent,
+        Vue3SsrMirKind::If { condition },
+        ast_node.span.clone(),
+    );
+    state.map.record_ast_to_hir(ast_id, hir_id);
+    state.map.record_hir_to_mir(hir_id, mir_id);
+
+    if let Some(body_hir) =
+        lower_vue3_plain_element_to_ssr_mir(ast_id, element, ast, ast_node, hir_id, mir_id, state)
+    {
+        if let Some(node) = state.hir.node_mut(hir_id) {
+            if let HirNodeKind::If(hir_if) = &mut node.kind {
+                hir_if.branches.push(HirIfBranch {
+                    condition,
+                    body: body_hir,
+                });
+            }
+        }
+    }
+    Some(hir_id)
+}
+
+fn lower_vue3_native_element_to_ssr_mir(
+    element: &Vue3Element,
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    ast: &Vue3Ast,
+    hir_id: NodeId,
+    mir_parent: NodeId,
+    state: &mut Vue3SsrLoweringState,
+) {
+    let generated_span =
+        NodeSpan::generated(ast_node.span.source(), vuec_ast::GeneratedReason::Lowering);
+    let open_id = state.mir.push_child(
+        mir_parent,
+        Vue3SsrMirKind::PushString(vue3_ssr_open_tag_start(element)),
+        generated_span.clone(),
+    );
+    state.map.record_hir_to_mir(hir_id, open_id);
+
+    if vue3_element_has_dynamic_ssr_attrs(element) {
+        let attrs_id = state.mir.push_child(
+            mir_parent,
+            Vue3SsrMirKind::RenderAttrs,
+            generated_span.clone(),
+        );
+        state.map.record_hir_to_mir(hir_id, attrs_id);
+    }
+
+    let close_open_id = state.mir.push_child(
+        mir_parent,
+        Vue3SsrMirKind::PushString(if element.self_closing { "/>" } else { ">" }.into()),
+        generated_span.clone(),
+    );
+    state.map.record_hir_to_mir(hir_id, close_open_id);
+
+    if element.self_closing {
+        return;
+    }
+
+    lower_vue3_ssr_child_sequence(&ast_node.children, ast, hir_id, mir_parent, state);
+
+    let close_id = state.mir.push_child(
+        mir_parent,
+        Vue3SsrMirKind::PushString(format!("</{}>", element.tag)),
+        generated_span,
+    );
+    state.map.record_hir_to_mir(hir_id, close_id);
+}
+
+fn lower_vue3_element_to_hir_kind(
+    element: &Vue3Element,
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    js: &mut JsAstStore,
+    source_type: oxc_span::SourceType,
+) -> HirNodeKind {
+    if element.tag_type == Vue3ElementType::SlotOutlet {
+        return HirNodeKind::SlotOutlet(HirSlotOutlet {
+            name: element.props.iter().find_map(vue3_static_slot_outlet_name),
+            props: lower_vue3_props_to_hir(&element.props, ast_node, js, source_type),
+        });
+    }
+
+    let props = lower_vue3_props_to_hir(&element.props, ast_node, js, source_type);
+    if element.tag_type == Vue3ElementType::Component {
+        HirNodeKind::Component(vuec_ast::HirComponent {
+            name: element.tag.clone(),
+            props,
+        })
+    } else {
+        HirNodeKind::Element(HirElement {
+            tag: HirTag::Native(element.tag.clone()),
+            namespace: element.ns,
+            props,
+            directives: lower_vue3_directives_to_hir(&element.props, ast_node, js, source_type),
+            constness: HirConstness::Dynamic,
+        })
+    }
+}
+
+struct Vue3ForLoweringParts {
+    source: JsExprId,
+    value_alias: JsPatternId,
+    key_alias: Option<JsPatternId>,
+    index_alias: Option<JsPatternId>,
+}
+
+fn lower_vue3_for_directive(
+    directive: &Vue3Directive,
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    js: &mut JsAstStore,
+    source_type: oxc_span::SourceType,
+) -> Option<Vue3ForLoweringParts> {
+    let expression = directive.exp.as_ref()?.source_string();
+    let parsed = parse_vue3_for_expression(&expression)?;
+    let span = directive.exp_span.or_else(|| ast_node.span.source());
+    let source = js.register_expr(
+        parsed.source.content.clone(),
+        vue3_sub_span_or_fallback(span, parsed.source.start, parsed.source.end),
+        source_type,
+    );
+    let value = parsed.value?;
+    let value_alias = js.register_pattern(
+        value.content,
+        vue3_sub_span_or_fallback(span, value.start, value.end),
+        source_type,
+    );
+    let key_alias = parsed.key.map(|part| {
+        js.register_pattern(
+            part.content,
+            vue3_sub_span_or_fallback(span, part.start, part.end),
+            source_type,
+        )
+    });
+    let index_alias = parsed.index.map(|part| {
+        js.register_pattern(
+            part.content,
+            vue3_sub_span_or_fallback(span, part.start, part.end),
+            source_type,
+        )
+    });
+
+    Some(Vue3ForLoweringParts {
+        source,
+        value_alias,
+        key_alias,
+        index_alias,
+    })
+}
+
+fn lower_vue3_optional_condition(
+    directive: &Vue3Directive,
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    js: &mut JsAstStore,
+    source_type: oxc_span::SourceType,
+) -> Option<JsExprId> {
+    directive.exp.as_ref().map(|exp| {
+        register_vue3_expression_with_span(
+            js,
+            exp,
+            directive.exp_span.or_else(|| ast_node.span.source()),
+            source_type,
+        )
+    })
+}
+
+fn vue3_branch_condition(
+    element: &Vue3Element,
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    js: &mut JsAstStore,
+    source_type: oxc_span::SourceType,
+) -> Option<JsExprId> {
+    directive_by_name(element, "if")
+        .or_else(|| directive_by_name(element, "else-if"))
+        .and_then(|dir| lower_vue3_optional_condition(dir, ast_node, js, source_type))
+}
+
+fn vue3_sub_span_or_fallback(base: Option<Span>, start: usize, end: usize) -> Span {
+    if let Some(base) = base {
+        Span::new(base.file_id, base.start.0 + start, base.start.0 + end)
+    } else {
+        Span::new(FileId(0), start, end)
+    }
+}
+
+fn vue3_ssr_open_tag_start(element: &Vue3Element) -> String {
+    let mut rendered = String::new();
+    rendered.push('<');
+    rendered.push_str(&element.tag);
+    for prop in &element.props {
+        if let Vue3Prop::Attribute(attr) = prop {
+            rendered.push(' ');
+            rendered.push_str(&attr.name);
+            if let Some(value) = &attr.value {
+                rendered.push_str("=\"");
+                rendered.push_str(&vue3_ssr_escape_attr(value));
+                rendered.push('"');
+            }
+        }
+    }
+    rendered
+}
+
+fn vue3_element_has_dynamic_ssr_attrs(element: &Vue3Element) -> bool {
+    element.props.iter().any(|prop| {
+        matches!(
+            prop,
+            Vue3Prop::Directive(dir) if dir.name == "bind" && dir.exp.is_some()
+        )
+    })
+}
+
+fn vue3_ssr_escape_attr(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+}
+
+fn lower_vue3_props_to_hir(
+    props: &[Vue3Prop],
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    js: &mut JsAstStore,
+    source_type: oxc_span::SourceType,
+) -> HirProps {
+    let mut hir = HirProps::default();
+    for prop in props {
+        match prop {
+            Vue3Prop::Attribute(attr) => hir.static_attrs.push(HirStaticAttr {
+                name: attr.name.clone(),
+                value: attr.value.clone().unwrap_or_default(),
+            }),
+            Vue3Prop::Directive(dir) if dir.name == "bind" => {
+                if let (Some(arg), Some(exp)) = (&dir.arg, &dir.exp) {
+                    let name = arg.source_string();
+                    let value = register_vue3_expression_with_span(
+                        js,
+                        exp,
+                        dir.exp_span.or_else(|| ast_node.span.source()),
+                        source_type,
+                    );
+                    if name == "key" {
+                        hir.key = Some(value);
+                    } else if name == "ref" {
+                        hir.ref_name = Some(vuec_ast::HirRef {
+                            name: exp.source_string(),
+                            in_for: false,
+                        });
+                    }
+                    hir.dynamic_bindings.push(HirBinding {
+                        name,
+                        value,
+                        dynamic_arg: dir.is_dynamic_arg,
+                    });
+                }
+            }
+            Vue3Prop::Directive(dir) if dir.name == "on" => {
+                if let (Some(arg), Some(exp)) = (&dir.arg, &dir.exp) {
+                    hir.events.push(HirEvent {
+                        name: arg.source_string(),
+                        handler: register_vue3_statement_with_span(
+                            js,
+                            exp,
+                            dir.exp_span.or_else(|| ast_node.span.source()),
+                            source_type,
+                        ),
+                        modifiers: dir.modifiers.clone(),
+                    });
+                }
+            }
+            Vue3Prop::Directive(_) => {}
+        }
+    }
+    hir
+}
+
+fn lower_vue3_directives_to_hir(
+    props: &[Vue3Prop],
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    js: &mut JsAstStore,
+    source_type: oxc_span::SourceType,
+) -> Vec<HirDirectiveUse> {
+    props
+        .iter()
+        .filter_map(|prop| match prop {
+            Vue3Prop::Directive(dir)
+                if !matches!(
+                    dir.name.as_str(),
+                    "bind" | "on" | "if" | "else-if" | "else" | "for"
+                ) =>
+            {
+                Some(HirDirectiveUse {
+                    name: dir.name.clone(),
+                    argument: dir.arg.as_ref().map(Vue3Expression::source_string),
+                    expression: dir.exp.as_ref().map(|exp| {
+                        register_vue3_expression_with_span(
+                            js,
+                            exp,
+                            dir.exp_span.or_else(|| ast_node.span.source()),
+                            source_type,
+                        )
+                    }),
+                    modifiers: dir.modifiers.clone(),
+                })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn vue3_static_slot_outlet_name(prop: &Vue3Prop) -> Option<String> {
+    match prop {
+        Vue3Prop::Attribute(attr) if attr.name == "name" => attr.value.clone(),
+        Vue3Prop::Directive(dir)
+            if dir.name == "bind"
+                && dir
+                    .arg
+                    .as_ref()
+                    .is_some_and(|arg| arg.source_string() == "name") =>
+        {
+            dir.exp.as_ref().map(Vue3Expression::source_string)
+        }
+        _ => None,
+    }
+}
+
+fn register_vue3_expression_with_span(
+    store: &mut JsAstStore,
+    expression: &Vue3Expression,
+    span: Option<Span>,
+    source_type: oxc_span::SourceType,
+) -> vuec_ast::JsExprId {
+    match expression {
+        Vue3Expression::Raw(source) => store.register_expr(
+            source.clone(),
+            span.unwrap_or_else(|| Span::new(FileId(0), 0, source.len())),
+            source_type,
+        ),
+        Vue3Expression::JsExpr(id) => *id,
+    }
+}
+
+fn register_vue3_statement_with_span(
+    store: &mut JsAstStore,
+    expression: &Vue3Expression,
+    span: Option<Span>,
+    source_type: oxc_span::SourceType,
+) -> vuec_ast::JsStmtId {
+    match expression {
+        Vue3Expression::Raw(source) => store.register_stmt(
+            source.clone(),
+            span.unwrap_or_else(|| Span::new(FileId(0), 0, source.len())),
+            source_type,
+        ),
+        Vue3Expression::JsExpr(id) => store.register_stmt(
+            format!("#expr{}", id.0),
+            span.unwrap_or_else(|| Span::new(FileId(0), 0, 0)),
+            source_type,
+        ),
     }
 }
 
@@ -1713,6 +3225,26 @@ pub fn transform_bind_projection(payload: &Value) -> Value {
                 .unwrap_or_else(|| json!({ "kind": "undefined" })),
         }],
     })
+}
+
+pub fn transform_v_bind_shorthand_projection(payload: &Value) -> Value {
+    let node = payload.get("node").unwrap_or(&Value::Null);
+    if json_node_type(node) != Some(1) {
+        return json!({ "operations": [] });
+    }
+    let context = payload.get("context").unwrap_or(&Value::Null);
+    let operations = node
+        .get("props")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter_map(|(index, prop)| {
+            transform_v_bind_shorthand_operation(index, prop, json_bool(context, "browser"))
+        })
+        .collect::<Vec<_>>();
+
+    json!({ "operations": operations })
 }
 
 pub fn transform_on_projection(payload: &Value) -> Value {
@@ -4587,6 +6119,69 @@ fn transform_bind_prefix_projection(key: Value, prefix: &str) -> Value {
         }
         _ => key,
     }
+}
+
+fn transform_v_bind_shorthand_operation(
+    index: usize,
+    prop: &Value,
+    browser: bool,
+) -> Option<Value> {
+    if json_node_type(prop) != Some(7)
+        || json_str(prop, "name") != Some("bind")
+        || prop.get("arg").is_none_or(Value::is_null)
+        || !transform_v_bind_shorthand_needs_expansion(prop, browser)
+    {
+        return None;
+    }
+
+    let arg = prop.get("arg").unwrap_or(&Value::Null);
+    let loc = arg.get("loc").cloned().unwrap_or(Value::Null);
+    if json_node_type(arg) != Some(4) || !json_bool(arg, "isStatic") {
+        return Some(json!({
+            "kind": "setExp",
+            "index": index,
+            "exp": {
+                "kind": "simple",
+                "content": "",
+                "isStatic": true,
+                "loc": loc,
+            },
+            "errors": [{ "code": 53, "loc": "arg" }],
+        }));
+    }
+
+    let prop_name = camelize(json_str(arg, "content").unwrap_or(""));
+    if !transform_v_bind_shorthand_valid_first_char(&prop_name) {
+        return None;
+    }
+    Some(json!({
+        "kind": "setExp",
+        "index": index,
+        "exp": {
+            "kind": "simple",
+            "content": prop_name,
+            "isStatic": false,
+            "loc": loc,
+        },
+        "errors": [],
+    }))
+}
+
+fn transform_v_bind_shorthand_needs_expansion(prop: &Value, browser: bool) -> bool {
+    match prop.get("exp").filter(|value| !value.is_null()) {
+        None => true,
+        Some(exp) => {
+            browser
+                && json_node_type(exp) == Some(4)
+                && json_str(exp, "content").unwrap_or("").trim().is_empty()
+        }
+    }
+}
+
+fn transform_v_bind_shorthand_valid_first_char(value: &str) -> bool {
+    value.chars().next().is_some_and(|ch| {
+        ch == '-' || ch == '_' || ch == '$' || ch.is_ascii_alphabetic() || ch >= '\u{00a0}'
+    })
 }
 
 fn directive_has_modifier(dir: &Value, name: &str) -> bool {
@@ -8843,6 +10438,56 @@ fn is_static_element_for_cache(node: &vuec_ast::Node<Vue3NodeKind>) -> bool {
     )
 }
 
+fn vue3_single_static_root_child(children: &[NodeId], ast: &Vue3Ast) -> Option<NodeId> {
+    let mut element = None;
+    for child_id in children {
+        let Some(child) = ast.node(*child_id) else {
+            continue;
+        };
+        if matches!(child.kind, Vue3AstKind::Comment(_)) {
+            continue;
+        }
+        let Vue3AstKind::Element(element_kind) = &child.kind else {
+            return None;
+        };
+        if element_kind.tag_type == Vue3ElementType::SlotOutlet {
+            return None;
+        }
+        if element.replace(*child_id).is_some() {
+            return None;
+        }
+    }
+    element
+}
+
+fn vue3_dom_mir_can_hoist_static_node(ast: &Vue3Ast, node_id: NodeId) -> bool {
+    let Some(node) = ast.node(node_id) else {
+        return false;
+    };
+    let Vue3AstKind::Element(element) = &node.kind else {
+        return false;
+    };
+    if element.tag == "slot"
+        || element.tag_type != Vue3ElementType::Element
+        || !element
+            .props
+            .iter()
+            .all(|prop| matches!(prop, Vue3Prop::Attribute(_)))
+    {
+        return false;
+    }
+    node.children.iter().all(|child_id| {
+        let Some(child) = ast.node(*child_id) else {
+            return false;
+        };
+        match &child.kind {
+            Vue3AstKind::Text(_) | Vue3AstKind::Comment(_) => true,
+            Vue3AstKind::Element(_) => vue3_dom_mir_can_hoist_static_node(ast, *child_id),
+            _ => false,
+        }
+    })
+}
+
 fn has_dynamic_text_child(ast: &Vue3Ast, children: &[vuec_ast::NodeId]) -> bool {
     children.iter().any(|child_id| {
         ast.node(*child_id)
@@ -11044,6 +12689,564 @@ mod tests {
         );
     }
 
+    #[test]
+    fn lower_vue3_ast_to_dom_mir_records_hir_mir_edges_and_js_store() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: "<div id=\"app\" :class=\"foo\" @click=\"go\">{{ msg }}</div>".into(),
+            file_id: FileId(9),
+            base_offset: 11,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+
+        assert_eq!(result.hir.validate_tree(), Ok(()));
+        assert_eq!(result.mir.validate_tree(), Ok(()));
+        assert!(result
+            .map
+            .hir_for_ast(ast.root)
+            .any(|hir| hir == result.hir.root));
+        assert!(result
+            .map
+            .mir_for_hir(result.hir.root)
+            .any(|mir| mir == result.mir.root));
+        assert_eq!(
+            result
+                .js
+                .expressions()
+                .iter()
+                .map(|entry| entry.source.as_str())
+                .collect::<Vec<_>>(),
+            vec!["foo", "msg"]
+        );
+        assert_eq!(
+            result
+                .js
+                .statements()
+                .iter()
+                .map(|entry| entry.source.as_str())
+                .collect::<Vec<_>>(),
+            vec!["go"]
+        );
+
+        let div_hir = result
+            .hir
+            .nodes
+            .iter()
+            .find_map(|node| match &node.kind {
+                HirNodeKind::Element(element) => Some(element),
+                _ => None,
+            })
+            .expect("HIR element");
+        assert_eq!(div_hir.props.static_attrs[0].name, "id");
+        assert_eq!(div_hir.props.dynamic_bindings[0].name, "class");
+        assert_eq!(div_hir.props.events[0].name, "click");
+
+        let div_mir = result
+            .mir
+            .nodes
+            .iter()
+            .find_map(|node| match &node.kind {
+                Vue3DomMirKind::VNodeCall(call) => Some(call),
+                _ => None,
+            })
+            .expect("DOM MIR vnode");
+        assert_eq!(div_mir.tag, MirExpr::String("div".into()));
+        assert_eq!(div_mir.dynamic_props, vec!["class", "onClick"]);
+        assert_eq!(div_mir.patch_flag.bits, 11);
+        assert!(matches!(div_mir.children, MirChildren::Nodes(_)));
+    }
+
+    #[test]
+    fn lower_vue3_ast_to_dom_mir_keeps_slot_outlet_target_split() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: "<slot name=\"header\">fallback</slot>".into(),
+            file_id: FileId(10),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = Vue3Dialect::lower_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+
+        assert!(result
+            .hir
+            .nodes
+            .iter()
+            .any(|node| matches!(node.kind, HirNodeKind::SlotOutlet(_))));
+        assert!(result
+            .mir
+            .nodes
+            .iter()
+            .any(|node| matches!(node.kind, Vue3DomMirKind::RenderSlot { .. })));
+    }
+
+    #[test]
+    fn lower_vue3_ast_to_dom_mir_lowers_v_for_and_v_if_control_flow() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<li v-for="(item, key, index) in list" v-if="item.ok" :key="item.id">{{ item.name }}</li>"#.into(),
+            file_id: FileId(13),
+            base_offset: 3,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+
+        assert_eq!(result.hir.validate_tree(), Ok(()));
+        assert_eq!(result.mir.validate_tree(), Ok(()));
+        assert_eq!(
+            result
+                .js
+                .expressions()
+                .iter()
+                .map(|entry| entry.source.as_str())
+                .collect::<Vec<_>>(),
+            vec!["list", "item.ok", "item.id", "item.name"]
+        );
+        assert_eq!(
+            result
+                .js
+                .patterns()
+                .iter()
+                .map(|entry| entry.source.as_str())
+                .collect::<Vec<_>>(),
+            vec!["item", "key", "index"]
+        );
+
+        let for_node = result
+            .hir
+            .nodes
+            .iter()
+            .find_map(|node| match &node.kind {
+                HirNodeKind::For(hir_for) => Some((node.id, hir_for)),
+                _ => None,
+            })
+            .expect("HIR for");
+        assert!(result
+            .hir
+            .node(for_node.1.body)
+            .is_some_and(|node| matches!(node.kind, HirNodeKind::If(_))));
+
+        let if_hir = result
+            .hir
+            .node(for_node.1.body)
+            .and_then(|node| match &node.kind {
+                HirNodeKind::If(hir_if) => Some(hir_if),
+                _ => None,
+            })
+            .expect("HIR if");
+        assert_eq!(if_hir.branches.len(), 1);
+        assert!(result
+            .hir
+            .node(if_hir.branches[0].body)
+            .is_some_and(|node| matches!(node.kind, HirNodeKind::Element(_))));
+
+        assert!(result
+            .mir
+            .nodes
+            .iter()
+            .any(|node| matches!(node.kind, Vue3DomMirKind::For { .. })));
+        assert!(result
+            .mir
+            .nodes
+            .iter()
+            .any(|node| matches!(node.kind, Vue3DomMirKind::If { condition: Some(_) })));
+        assert!(result
+            .map
+            .hir_to_mir
+            .iter()
+            .any(|(hir, _)| *hir == for_node.0));
+
+        let li_mir = result
+            .mir
+            .nodes
+            .iter()
+            .find_map(|node| match &node.kind {
+                Vue3DomMirKind::VNodeCall(call) if call.tag == MirExpr::String("li".into()) => {
+                    Some(call)
+                }
+                _ => None,
+            })
+            .expect("li vnode");
+        assert_eq!(li_mir.patch_flag.bits, 1);
+        assert!(li_mir.dynamic_props.is_empty());
+    }
+
+    #[test]
+    fn lower_vue3_ast_to_dom_mir_projects_style_and_props_patch_flags() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div :style="style" :title="title" @input="onInput"></div>"#.into(),
+            file_id: FileId(15),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+
+        let div_mir = result
+            .mir
+            .nodes
+            .iter()
+            .find_map(|node| match &node.kind {
+                Vue3DomMirKind::VNodeCall(call) => Some(call),
+                _ => None,
+            })
+            .expect("DOM MIR vnode");
+        assert_eq!(div_mir.patch_flag.bits, 44);
+        assert_eq!(div_mir.dynamic_props, vec!["style", "title", "onInput"]);
+    }
+
+    #[test]
+    fn lower_vue3_ast_to_dom_mir_groups_if_else_branch_chains() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<p v-if="ok">yes</p><p v-else-if="maybe">maybe</p><p v-else>no</p>"#.into(),
+            file_id: FileId(16),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+
+        assert_eq!(result.hir.validate_tree(), Ok(()));
+        assert_eq!(result.mir.validate_tree(), Ok(()));
+        assert_eq!(
+            result
+                .hir
+                .nodes
+                .iter()
+                .filter(|node| matches!(node.kind, HirNodeKind::If(_)))
+                .count(),
+            1
+        );
+        let hir_if = result
+            .hir
+            .nodes
+            .iter()
+            .find_map(|node| match &node.kind {
+                HirNodeKind::If(hir_if) => Some(hir_if),
+                _ => None,
+            })
+            .expect("HIR if");
+        assert_eq!(hir_if.branches.len(), 3);
+        assert!(hir_if.branches[0].condition.is_some());
+        assert!(hir_if.branches[1].condition.is_some());
+        assert!(hir_if.branches[2].condition.is_none());
+        assert_eq!(
+            result
+                .mir
+                .nodes
+                .iter()
+                .filter(|node| matches!(node.kind, Vue3DomMirKind::If { .. }))
+                .count(),
+            3
+        );
+        assert_eq!(
+            result
+                .js
+                .expressions()
+                .iter()
+                .map(|entry| entry.source.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ok", "maybe"]
+        );
+    }
+
+    #[test]
+    fn lower_vue3_ast_to_dom_mir_projects_static_hoist_wrappers() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div><span id="one">one</span><span :id="two">two</span></div>"#.into(),
+            file_id: FileId(18),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(
+            &ast,
+            &Vue3CompilerOptions {
+                hoist_static: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert_eq!(result.hir.validate_tree(), Ok(()));
+        assert_eq!(result.mir.validate_tree(), Ok(()));
+        let hoists = result
+            .mir
+            .nodes
+            .iter()
+            .filter_map(|node| match node.kind {
+                Vue3DomMirKind::Hoisted { index } => Some((node.id, index)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(hoists.len(), 1);
+        assert_eq!(hoists[0].1, 1);
+        let hoisted_children = result
+            .mir
+            .node(hoists[0].0)
+            .map(|node| node.children.len())
+            .unwrap_or_default();
+        assert_eq!(hoisted_children, 1);
+        assert!(result
+            .map
+            .hir_to_mir
+            .iter()
+            .any(|(_, mir)| *mir == hoists[0].0));
+        assert_eq!(
+            result
+                .js
+                .expressions()
+                .iter()
+                .map(|entry| entry.source.as_str())
+                .collect::<Vec<_>>(),
+            vec!["two"]
+        );
+    }
+
+    #[test]
+    fn lower_vue3_ast_to_dom_mir_projects_v_once_cache_wrappers() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div><p v-once>{{ msg }}</p><p v-once><span v-once>nested</span></p></div>"#
+                .into(),
+            file_id: FileId(19),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+
+        assert_eq!(result.hir.validate_tree(), Ok(()));
+        assert_eq!(result.mir.validate_tree(), Ok(()));
+        let caches = result
+            .mir
+            .nodes
+            .iter()
+            .filter_map(|node| match node.kind {
+                Vue3DomMirKind::Cache { index } => Some((node.id, index)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(caches.len(), 2);
+        assert_eq!(
+            caches.iter().map(|(_, index)| *index).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert!(caches.iter().all(|(id, _)| result
+            .mir
+            .node(*id)
+            .is_some_and(|node| node.children.len() == 1)));
+        assert_eq!(
+            result
+                .js
+                .expressions()
+                .iter()
+                .map(|entry| entry.source.as_str())
+                .collect::<Vec<_>>(),
+            vec!["msg"]
+        );
+    }
+
+    #[test]
+    fn lower_vue3_ast_to_ssr_mir_records_target_split_edges_and_js_store() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: "<div id=\"app\" :class=\"foo\">{{ msg }}</div>".into(),
+            file_id: FileId(11),
+            base_offset: 5,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_ssr_mir(&ast, &Vue3CompilerOptions::default());
+
+        assert_eq!(result.hir.validate_tree(), Ok(()));
+        assert_eq!(result.mir.validate_tree(), Ok(()));
+        assert!(result
+            .map
+            .hir_for_ast(ast.root)
+            .any(|hir| hir == result.hir.root));
+        assert!(result
+            .map
+            .mir_for_hir(result.hir.root)
+            .any(|mir| mir == result.mir.root));
+        assert_eq!(
+            result
+                .js
+                .expressions()
+                .iter()
+                .map(|entry| entry.source.as_str())
+                .collect::<Vec<_>>(),
+            vec!["foo", "msg"]
+        );
+
+        let pushes = result
+            .mir
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.kind {
+                Vue3SsrMirKind::PushString(value) => Some(value.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(pushes, vec!["<div id=\"app\"", ">", "</div>"]);
+        assert!(result
+            .mir
+            .nodes
+            .iter()
+            .any(|node| matches!(node.kind, Vue3SsrMirKind::RenderAttrs)));
+        assert!(result.mir.nodes.iter().any(|node| matches!(
+            node.kind,
+            Vue3SsrMirKind::PushInterpolated(MirExpr::JsExpr(_))
+        )));
+        assert!(result
+            .mir
+            .nodes
+            .iter()
+            .all(|node| !matches!(node.kind, Vue3SsrMirKind::RenderComponent { .. })));
+    }
+
+    #[test]
+    fn lower_vue3_ast_to_ssr_mir_keeps_component_and_slot_target_split() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: "<Comp><slot name=\"header\">fallback</slot></Comp>".into(),
+            file_id: FileId(12),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = Vue3Dialect::lower_to_ssr_mir(&ast, &Vue3CompilerOptions::default());
+
+        assert!(result
+            .hir
+            .nodes
+            .iter()
+            .any(|node| matches!(node.kind, HirNodeKind::Component(_))));
+        assert!(result
+            .hir
+            .nodes
+            .iter()
+            .any(|node| matches!(node.kind, HirNodeKind::SlotOutlet(_))));
+        assert!(result.mir.nodes.iter().any(|node| matches!(
+            node.kind,
+            Vue3SsrMirKind::RenderComponent {
+                tag: MirExpr::String(_)
+            }
+        )));
+        assert!(result.mir.nodes.iter().any(|node| matches!(
+            &node.kind,
+            Vue3SsrMirKind::RenderSlot {
+                name: Some(name)
+            } if name == "header"
+        )));
+        assert!(result
+            .mir
+            .nodes
+            .iter()
+            .all(|node| !matches!(node.kind, Vue3SsrMirKind::PushInterpolated(_))));
+    }
+
+    #[test]
+    fn lower_vue3_ast_to_ssr_mir_lowers_v_for_and_v_if_control_flow() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<li v-for="item in list" v-if="item.ok">{{ item.name }}</li>"#.into(),
+            file_id: FileId(14),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_ssr_mir(&ast, &Vue3CompilerOptions::default());
+
+        assert_eq!(result.hir.validate_tree(), Ok(()));
+        assert_eq!(result.mir.validate_tree(), Ok(()));
+        assert_eq!(
+            result
+                .js
+                .expressions()
+                .iter()
+                .map(|entry| entry.source.as_str())
+                .collect::<Vec<_>>(),
+            vec!["list", "item.ok", "item.name"]
+        );
+        assert_eq!(
+            result
+                .js
+                .patterns()
+                .iter()
+                .map(|entry| entry.source.as_str())
+                .collect::<Vec<_>>(),
+            vec!["item"]
+        );
+
+        assert!(result
+            .hir
+            .nodes
+            .iter()
+            .any(|node| matches!(node.kind, HirNodeKind::For(_))));
+        assert!(result
+            .hir
+            .nodes
+            .iter()
+            .any(|node| matches!(node.kind, HirNodeKind::If(_))));
+        assert!(result
+            .mir
+            .nodes
+            .iter()
+            .any(|node| matches!(node.kind, Vue3SsrMirKind::For { .. })));
+        assert!(result
+            .mir
+            .nodes
+            .iter()
+            .any(|node| matches!(node.kind, Vue3SsrMirKind::If { condition: Some(_) })));
+        assert!(result
+            .mir
+            .nodes
+            .iter()
+            .any(|node| matches!(node.kind, Vue3SsrMirKind::PushInterpolated(_))));
+    }
+
+    #[test]
+    fn lower_vue3_ast_to_ssr_mir_groups_if_else_branch_chains() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<p v-if="ok">yes</p><p v-else-if="maybe">maybe</p><p v-else>no</p>"#.into(),
+            file_id: FileId(17),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_ssr_mir(&ast, &Vue3CompilerOptions::default());
+
+        assert_eq!(result.hir.validate_tree(), Ok(()));
+        assert_eq!(result.mir.validate_tree(), Ok(()));
+        let hir_if = result
+            .hir
+            .nodes
+            .iter()
+            .find_map(|node| match &node.kind {
+                HirNodeKind::If(hir_if) => Some(hir_if),
+                _ => None,
+            })
+            .expect("HIR if");
+        assert_eq!(hir_if.branches.len(), 3);
+        assert!(hir_if.branches[0].condition.is_some());
+        assert!(hir_if.branches[1].condition.is_some());
+        assert!(hir_if.branches[2].condition.is_none());
+        assert_eq!(
+            result
+                .mir
+                .nodes
+                .iter()
+                .filter(|node| matches!(node.kind, Vue3SsrMirKind::If { .. }))
+                .count(),
+            3
+        );
+        assert_eq!(
+            result
+                .js
+                .expressions()
+                .iter()
+                .map(|entry| entry.source.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ok", "maybe"]
+        );
+    }
+
     fn process_expression_test_projection(content: &str, context: Value) -> Value {
         process_expression_projection(&json!({
             "node": {
@@ -12596,6 +14799,108 @@ mod tests {
         assert_eq!(
             browser_missing["props"][0]["value"],
             json!({ "kind": "undefined" })
+        );
+    }
+
+    #[test]
+    fn transform_v_bind_shorthand_projection_expands_static_same_name_bindings() {
+        let projection = transform_v_bind_shorthand_projection(&json!({
+            "node": {
+                "type": 1,
+                "props": [{
+                    "type": 7,
+                    "name": "bind",
+                    "arg": {
+                        "type": 4,
+                        "content": "foo-bar",
+                        "isStatic": true,
+                        "loc": { "source": "foo-bar" }
+                    }
+                }]
+            },
+            "context": {}
+        }));
+
+        assert_eq!(
+            projection["operations"][0],
+            json!({
+                "kind": "setExp",
+                "index": 0,
+                "exp": {
+                    "kind": "simple",
+                    "content": "fooBar",
+                    "isStatic": false,
+                    "loc": { "source": "foo-bar" }
+                },
+                "errors": []
+            })
+        );
+    }
+
+    #[test]
+    fn transform_v_bind_shorthand_projection_reports_dynamic_args_and_browser_empty_exp() {
+        let invalid = transform_v_bind_shorthand_projection(&json!({
+            "node": {
+                "type": 1,
+                "props": [{
+                    "type": 7,
+                    "name": "bind",
+                    "arg": { "type": 4, "content": "foo", "isStatic": false, "loc": { "source": "[foo]" } }
+                }]
+            },
+            "context": {}
+        }));
+        assert_eq!(
+            invalid["operations"][0]["errors"],
+            json!([{ "code": 53, "loc": "arg" }])
+        );
+        assert_eq!(invalid["operations"][0]["exp"]["content"], json!(""));
+        assert_eq!(invalid["operations"][0]["exp"]["isStatic"], json!(true));
+
+        let browser_empty = transform_v_bind_shorthand_projection(&json!({
+            "node": {
+                "type": 1,
+                "props": [{
+                    "type": 7,
+                    "name": "bind",
+                    "arg": { "type": 4, "content": "name", "isStatic": true, "loc": { "source": "name" } },
+                    "exp": { "type": 4, "content": "  ", "isStatic": false }
+                }]
+            },
+            "context": { "browser": true }
+        }));
+        assert_eq!(
+            browser_empty["operations"][0]["exp"]["content"],
+            json!("name")
+        );
+
+        let invalid_first_char = transform_v_bind_shorthand_projection(&json!({
+            "node": {
+                "type": 1,
+                "props": [{
+                    "type": 7,
+                    "name": "bind",
+                    "arg": { "type": 4, "content": "1bad", "isStatic": true }
+                }]
+            },
+            "context": {}
+        }));
+        assert_eq!(invalid_first_char["operations"], json!([]));
+
+        let unicode_first_char = transform_v_bind_shorthand_projection(&json!({
+            "node": {
+                "type": 1,
+                "props": [{
+                    "type": 7,
+                    "name": "bind",
+                    "arg": { "type": 4, "content": "éclair", "isStatic": true, "loc": { "source": "éclair" } }
+                }]
+            },
+            "context": {}
+        }));
+        assert_eq!(
+            unicode_first_char["operations"][0]["exp"]["content"],
+            json!("éclair")
         );
     }
 

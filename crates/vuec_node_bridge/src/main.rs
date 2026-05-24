@@ -125,6 +125,9 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
         }
         "vue3.core.transformOn" => Ok(vuec_vue3_core::transform_on_projection(&payload)),
         "vue3.core.transformBind" => Ok(vuec_vue3_core::transform_bind_projection(&payload)),
+        "vue3.core.transformVBindShorthand" => Ok(
+            vuec_vue3_core::transform_v_bind_shorthand_projection(&payload),
+        ),
         "vue3.core.transformMemo" => Ok(vuec_vue3_core::transform_memo_projection(&payload)),
         "vue3.core.transformOnce" => Ok(vuec_vue3_core::transform_once_projection(&payload)),
         "vue3.core.transformModel" => Ok(vuec_vue3_core::transform_model_projection(&payload)),
