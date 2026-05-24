@@ -75,9 +75,15 @@
 - [x] Vue 3 structural `Vue3DomMir` hoist/cache target projection foundation for conservative static subtree hoist wrappers and top-level `v-once` cache wrappers.
 - [x] Vue 3 AST root helper / component / directive collection in Rust `Vue3Dialect::transform`, visible through public projection.
 - [x] Vue 3 exact render emitter consumes transformed root helper / component / directive state for asset declarations, helper imports, built-in/dynamic component tags, and runtime directive wrappers, with raw-AST public `generate` fallback.
+- [x] Vue 3 structural `Vue3DomMir` standalone codegen entry for current target-split MIR subset, consuming MIR + `JsAstStore` without AST fallback.
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Added `vuec_vue3_core::generate_vue3_dom_mir` as a standalone target-split codegen entry for structural DOM MIR. It emits render code from `Vue3DomMir` plus `JsAstStore` without reading the original AST, and derives module-mode helper imports from MIR node kinds.
+- The initial MIR emitter covers the current structural subset: VNode calls, text/interpolation text VNodes, slot outlets, `v-if` comment fallbacks, `v-for` render-list wrappers, fragment arrays, top-level `v-once` cache wrappers, conservative hoist references, patch flags, and dynamic prop names.
+- This does not replace the exact AST emitter and does not complete Vue 3 DOM exact codegen. Props/directive payloads that are not yet represented in `Vue3DomMir` remain impossible for this emitter to recover, so the next work is MIR shape expansion and exact DOM codegen parity.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p vuec_vue3_core -p vuec_node_bridge -p xtask`, focused `cargo test -p vuec_vue3_core generate_vue3_dom_mir`, `cargo test -p vuec_vue3_core`, and `git diff --check`.
 
 - Migrated Vue 3 exact render codegen state selection from legacy AST/code-string probing toward transformed `Vue3Root` fields. `Vue3Dialect::generate` now prefers `Vue3Root.helpers`, `Vue3Root.components`, and `Vue3Root.directives` for helper imports/destructuring and asset declarations, while keeping raw-AST fallback scans for direct `generate(ast, options)` callers that have not run `transform`.
 - Component codegen now aligns with root asset collection: built-in components render as runtime helpers, dynamic `<component :is>` renders through `_resolveDynamicComponent(...)`, and only collected component assets receive `_resolveComponent(...)` declarations. Runtime directive codegen now wraps current exact-emitter VNodes with `_withDirectives(...)`, emits custom directive / `v-show` runtime references from root or fallback state, and applies `NEED_PATCH` when runtime directives are present.

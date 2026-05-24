@@ -111,6 +111,19 @@ pub struct Vue3DomLoweringResult {
     pub js: JsAstStore,
 }
 
+/// Generate structural Vue 3 DOM render code from target-split DOM MIR.
+///
+/// This is intentionally separate from the legacy exact AST emitter. It only
+/// consumes `Vue3DomMir` plus the registered JS store, so it can be used to
+/// verify that target codegen is moving behind the AST -> HIR -> MIR boundary.
+pub fn generate_vue3_dom_mir(
+    mir: &Vue3DomMir,
+    js: &JsAstStore,
+    options: &Vue3CompilerOptions,
+) -> CodegenResult {
+    Vue3DomMirCodegen::new(mir, js, options).generate()
+}
+
 /// Result of the structural Vue 3 SSR lowering contract.
 ///
 /// SSR lowering has its own target MIR and must not be derived from DOM MIR.
@@ -8400,6 +8413,309 @@ fn render_helpers_from_code(order: &[RuntimeHelper], code: &str) -> Vec<RuntimeH
     helpers
 }
 
+struct Vue3DomMirCodegen<'a> {
+    mir: &'a Vue3DomMir,
+    js: &'a JsAstStore,
+    options: &'a Vue3CompilerOptions,
+}
+
+impl<'a> Vue3DomMirCodegen<'a> {
+    fn new(mir: &'a Vue3DomMir, js: &'a JsAstStore, options: &'a Vue3CompilerOptions) -> Self {
+        Self { mir, js, options }
+    }
+
+    fn generate(self) -> CodegenResult {
+        let mut writer = CodeWriter::new();
+        let helpers = self.helpers();
+        if self.options.mode == "module" && !helpers.is_empty() {
+            writer.push_line(&format!(
+                "import {{ {} }} from \"vue\"",
+                import_helper_aliases(&helpers)
+            ));
+            writer.newline();
+        }
+        writer.push_line(&format!(
+            "export function render({}) {{",
+            render_args(self.options)
+        ));
+        writer.indent();
+        writer.push_line(&format!(
+            "return {}",
+            self.render_root_children(self.mir.root)
+        ));
+        writer.dedent();
+        writer.push_line("}");
+        CodegenResult {
+            code: writer.finish().trim_end().to_string(),
+            map: None,
+            ast_summary: format!("vue3-dom-mir-nodes={}", self.mir.len()),
+            diagnostics: Vec::new(),
+            preamble: String::new(),
+        }
+    }
+
+    fn helpers(&self) -> Vec<RuntimeHelper> {
+        let mut helpers = Vec::new();
+        for node in &self.mir.nodes {
+            match &node.kind {
+                Vue3DomMirKind::Root
+                | Vue3DomMirKind::WithDirectives
+                | Vue3DomMirKind::Fragment => {}
+                Vue3DomMirKind::VNodeCall(call) => {
+                    let is_root_call = node.parent == Some(self.mir.root) || call.is_block;
+                    if is_root_call {
+                        push_unique_helper(&mut helpers, RuntimeHelper::Vue3OpenBlock);
+                        push_unique_helper(
+                            &mut helpers,
+                            if call.is_component {
+                                RuntimeHelper::Vue3CreateBlock
+                            } else {
+                                RuntimeHelper::Vue3CreateElementBlock
+                            },
+                        );
+                    } else {
+                        push_unique_helper(
+                            &mut helpers,
+                            if call.is_component {
+                                RuntimeHelper::Vue3CreateVNode
+                            } else {
+                                RuntimeHelper::Vue3CreateElementVNode
+                            },
+                        );
+                    }
+                }
+                Vue3DomMirKind::TextCall { .. } => {
+                    push_unique_helper(&mut helpers, RuntimeHelper::Vue3CreateTextVNode);
+                }
+                Vue3DomMirKind::Interpolation { .. } => {
+                    push_unique_helper(&mut helpers, RuntimeHelper::Vue3CreateTextVNode);
+                    push_unique_helper(&mut helpers, RuntimeHelper::Vue3ToDisplayString);
+                }
+                Vue3DomMirKind::If { condition } => {
+                    if condition.is_some() {
+                        push_unique_helper(&mut helpers, RuntimeHelper::Vue3CreateCommentVNode);
+                    }
+                }
+                Vue3DomMirKind::For { .. } => {
+                    push_unique_helper(&mut helpers, RuntimeHelper::Vue3OpenBlock);
+                    push_unique_helper(&mut helpers, RuntimeHelper::Vue3CreateElementBlock);
+                    push_unique_helper(&mut helpers, RuntimeHelper::Vue3Fragment);
+                    push_unique_helper(&mut helpers, RuntimeHelper::Vue3RenderList);
+                }
+                Vue3DomMirKind::RenderSlot { .. } => {
+                    push_unique_helper(&mut helpers, RuntimeHelper::Vue3RenderSlot);
+                }
+                Vue3DomMirKind::Cache { .. } | Vue3DomMirKind::Hoisted { .. } => {}
+            }
+        }
+        sort_helpers_by_order(&mut helpers, vue3_helper_order(false));
+        helpers
+    }
+
+    fn render_root_children(&self, parent: NodeId) -> String {
+        let rendered = self.render_children(parent, Vue3DomMirRenderMode::Root);
+        match rendered.as_slice() {
+            [] => "null".into(),
+            [single] => single.clone(),
+            _ => render_array(&rendered),
+        }
+    }
+
+    fn render_children(&self, parent: NodeId, mode: Vue3DomMirRenderMode) -> Vec<String> {
+        self.mir
+            .node(parent)
+            .map(|node| {
+                node.children
+                    .iter()
+                    .filter_map(|child_id| self.render_node(*child_id, mode))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn render_node(&self, node_id: NodeId, mode: Vue3DomMirRenderMode) -> Option<String> {
+        let node = self.mir.node(node_id)?;
+        match &node.kind {
+            Vue3DomMirKind::Root => Some(self.render_root_children(node_id)),
+            Vue3DomMirKind::VNodeCall(call) => Some(self.render_vnode_call(node_id, call, mode)),
+            Vue3DomMirKind::TextCall { value } => {
+                Some(format!("_createTextVNode({})", self.render_mir_expr(value)))
+            }
+            Vue3DomMirKind::Interpolation { expression } => Some(format!(
+                "_createTextVNode(_toDisplayString({}), 1 /* TEXT */)",
+                self.render_js_expr(*expression)
+            )),
+            Vue3DomMirKind::If { condition } => Some(self.render_if(node_id, *condition)),
+            Vue3DomMirKind::For { source, alias } => {
+                Some(self.render_for(node_id, *source, *alias))
+            }
+            Vue3DomMirKind::RenderSlot { name } => Some(format!(
+                "_renderSlot({}, {})",
+                if uses_prefixed_identifiers(self.options) {
+                    "_ctx.$slots"
+                } else {
+                    "$slots"
+                },
+                quote_string(name.as_deref().unwrap_or("default"))
+            )),
+            Vue3DomMirKind::WithDirectives => {
+                let children = self.render_children(node_id, Vue3DomMirRenderMode::Child);
+                children.first().cloned()
+            }
+            Vue3DomMirKind::Cache { index } => {
+                let rendered = self.render_root_children(node_id);
+                Some(format!("_cache[{index}] || (_cache[{index}] = {rendered})"))
+            }
+            Vue3DomMirKind::Hoisted { index } => Some(format!("_hoisted_{index}")),
+            Vue3DomMirKind::Fragment => {
+                let children = self.render_children(node_id, Vue3DomMirRenderMode::Child);
+                Some(render_array(&children))
+            }
+        }
+    }
+
+    fn render_vnode_call(
+        &self,
+        node_id: NodeId,
+        call: &Vue3VNodeCall,
+        mode: Vue3DomMirRenderMode,
+    ) -> String {
+        let children = self.render_vnode_children(call);
+        let patch_flag =
+            render_patch_flag_text((call.patch_flag.bits != 0).then_some(call.patch_flag.bits));
+        let dynamic_props = if call.dynamic_props.is_empty() {
+            String::new()
+        } else {
+            format!(
+                ", [{}]",
+                call.dynamic_props
+                    .iter()
+                    .map(|prop| quote_string(prop))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        let helper = if mode == Vue3DomMirRenderMode::Root || call.is_block {
+            if call.is_component {
+                "_createBlock"
+            } else {
+                "_createElementBlock"
+            }
+        } else if call.is_component {
+            "_createVNode"
+        } else {
+            "_createElementVNode"
+        };
+        let args = render_call_args(
+            self.render_mir_expr(&call.tag),
+            None,
+            children.as_deref(),
+            patch_flag.as_str(),
+            dynamic_props.as_str(),
+        );
+        if mode == Vue3DomMirRenderMode::Root || call.is_block {
+            format!(
+                "(_openBlock({}), {}({}))",
+                if call.disable_tracking { "true" } else { "" },
+                helper,
+                args
+            )
+        } else if self
+            .mir
+            .node(node_id)
+            .is_some_and(|node| node.parent == Some(self.mir.root))
+        {
+            format!("{}({})", helper, args)
+        } else {
+            format!("{}({})", helper, args)
+        }
+    }
+
+    fn render_vnode_children(&self, call: &Vue3VNodeCall) -> Option<String> {
+        match &call.children {
+            MirChildren::None => None,
+            MirChildren::Text(value) => Some(quote_string(value)),
+            MirChildren::Nodes(children) => {
+                let rendered = children
+                    .iter()
+                    .filter_map(|child_id| self.render_node(*child_id, Vue3DomMirRenderMode::Child))
+                    .collect::<Vec<_>>();
+                if rendered.is_empty() {
+                    None
+                } else if rendered.len() == 1 {
+                    rendered.into_iter().next()
+                } else {
+                    Some(render_array(&rendered))
+                }
+            }
+        }
+    }
+
+    fn render_if(&self, node_id: NodeId, condition: Option<JsExprId>) -> String {
+        let branch = self.render_root_children(node_id);
+        let Some(condition) = condition else {
+            return branch;
+        };
+        let condition = self.render_js_expr(condition);
+        format!(
+            "{}\n  ? {}\n  : _createCommentVNode(\"v-if\", true)",
+            render_condition(&condition, self.options),
+            indent_after_first_line(&branch, 4)
+        )
+    }
+
+    fn render_for(&self, node_id: NodeId, source: JsExprId, alias: JsPatternId) -> String {
+        let source = self.render_js_expr(source);
+        let alias = self.render_js_pattern(alias);
+        let children = self.render_children(node_id, Vue3DomMirRenderMode::Root);
+        let body = match children.as_slice() {
+            [] => "null".into(),
+            [single] => single.clone(),
+            _ => render_array(&children),
+        };
+        format!(
+            "(_openBlock(true), _createElementBlock(_Fragment, null, _renderList({source}, ({alias}) => {{\n  return {}\n}}), 256 /* UNKEYED_FRAGMENT */))",
+            indent_after_first_line(&body, 2)
+        )
+    }
+
+    fn render_mir_expr(&self, expr: &MirExpr) -> String {
+        match expr {
+            MirExpr::String(value) => quote_string(value),
+            MirExpr::JsExpr(expr) => self.render_js_expr(*expr),
+            MirExpr::Helper(helper) => helper_reference(*helper),
+        }
+    }
+
+    fn render_js_expr(&self, id: JsExprId) -> String {
+        self.js
+            .expressions()
+            .get(id.0 as usize)
+            .map(|entry| entry.source.clone())
+            .unwrap_or_else(|| "undefined".into())
+    }
+
+    fn render_js_pattern(&self, id: JsPatternId) -> String {
+        self.js
+            .patterns()
+            .get(id.0 as usize)
+            .map(|entry| entry.source.clone())
+            .unwrap_or_else(|| "_item".into())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Vue3DomMirRenderMode {
+    Root,
+    Child,
+}
+
+fn push_unique_helper(helpers: &mut Vec<RuntimeHelper>, helper: RuntimeHelper) {
+    if !helpers.contains(&helper) {
+        helpers.push(helper);
+    }
+}
+
 fn vue3_codegen_root(ast: &Vue3Ast) -> Option<&Vue3Root> {
     ast.root_node().and_then(|node| match &node.kind {
         Vue3AstKind::Root(root) => Some(root),
@@ -13354,6 +13670,96 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["msg"]
         );
+    }
+
+    #[test]
+    fn generate_vue3_dom_mir_emits_basic_vnode_tree_without_ast() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div :class="foo">{{ msg }}</div>"#.into(),
+            file_id: FileId(26),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+
+        let generated = generate_vue3_dom_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert_eq!(generated.ast_summary, "vue3-dom-mir-nodes=3");
+        assert!(generated.code.starts_with("export function render("));
+        assert!(generated.code.contains("_createElementBlock(\"div\""));
+        assert!(generated
+            .code
+            .contains("_createTextVNode(_toDisplayString(msg), 1 /* TEXT */)"));
+        assert!(generated.code.contains("3"));
+        assert!(generated.code.contains("[\"class\"]"));
+    }
+
+    #[test]
+    fn generate_vue3_dom_mir_emits_control_flow_from_js_store() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<li v-for="item in list" v-if="item.ok">{{ item.name }}</li>"#.into(),
+            file_id: FileId(27),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+        let generated = generate_vue3_dom_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated.code.contains("_renderList(list, (item) => {"));
+        assert!(generated.code.contains("item.ok"));
+        assert!(generated.code.contains("? (_openBlock()"));
+        assert!(generated.code.contains("_toDisplayString(item.name)"));
+        assert!(generated
+            .code
+            .contains("_createCommentVNode(\"v-if\", true)"));
+        assert!(!generated.code.contains("v-for"));
+    }
+
+    #[test]
+    fn generate_vue3_dom_mir_emits_cache_and_hoist_wrappers() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div><span id="one">one</span><p v-once>{{ msg }}</p></div>"#.into(),
+            file_id: FileId(28),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(
+            &ast,
+            &Vue3CompilerOptions {
+                hoist_static: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+        let generated = generate_vue3_dom_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                hoist_static: true,
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated.code.contains("_hoisted_1"));
+        assert!(generated.code.contains("_cache[0] || (_cache[0] ="));
+        assert!(generated.code.contains("_toDisplayString(msg)"));
     }
 
     #[test]
