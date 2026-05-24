@@ -1009,6 +1009,29 @@ pub fn transform_once_projection(payload: &Value) -> Value {
     })
 }
 
+pub fn transform_memo_projection(payload: &Value) -> Value {
+    let node = payload.get("node").unwrap_or(&Value::Null);
+    let context = payload.get("context").unwrap_or(&Value::Null);
+    let Some(dir) = vue3_directive(node, "memo", false) else {
+        return json!({ "kind": "noop" });
+    };
+    if json_node_type(node) != Some(1) || json_bool(payload, "seen") || json_bool(context, "inSSR")
+    {
+        return json!({ "kind": "noop" });
+    }
+    json!({
+        "kind": "enter",
+        "markSeen": true,
+        "exit": {
+            "wrapMemo": true,
+            "convertToBlock": json_u64(node, "tagType") != Some(1),
+            "helper": "WITH_MEMO",
+            "exp": dir.get("exp").cloned().unwrap_or(Value::Null),
+            "cacheIndex": json_u64(context, "cachedLength").unwrap_or(0),
+        }
+    })
+}
+
 pub fn cache_static_projection(payload: &Value) -> Value {
     let root = payload.get("root").unwrap_or(&Value::Null);
     let context = payload.get("context").unwrap_or(&Value::Null);
@@ -10909,6 +10932,77 @@ mod tests {
         assert_eq!(
             transform_once_projection(&json!({ "node": node, "context": { "inSSR": true } }))
                 ["kind"],
+            json!("noop")
+        );
+    }
+
+    #[test]
+    fn transform_memo_projection_enters_plain_element() {
+        let projection = transform_memo_projection(&json!({
+            "node": {
+                "type": 1,
+                "tagType": 0,
+                "props": [{
+                    "type": 7,
+                    "name": "memo",
+                    "exp": { "type": 4, "content": "[x]", "isStatic": false }
+                }]
+            },
+            "context": { "cachedLength": 3 }
+        }));
+
+        assert_eq!(projection["kind"], json!("enter"));
+        assert_eq!(projection["exit"]["helper"], json!("WITH_MEMO"));
+        assert_eq!(projection["exit"]["convertToBlock"], json!(true));
+        assert_eq!(projection["exit"]["cacheIndex"], json!(3));
+        assert_eq!(projection["exit"]["exp"]["content"], json!("[x]"));
+    }
+
+    #[test]
+    fn transform_memo_projection_keeps_component_vnode_shape() {
+        let projection = transform_memo_projection(&json!({
+            "node": {
+                "type": 1,
+                "tagType": 1,
+                "props": [{
+                    "type": 7,
+                    "name": "memo",
+                    "exp": { "type": 4, "content": "[x]", "isStatic": false }
+                }]
+            },
+            "context": {}
+        }));
+
+        assert_eq!(projection["kind"], json!("enter"));
+        assert_eq!(projection["exit"]["convertToBlock"], json!(false));
+    }
+
+    #[test]
+    fn transform_memo_projection_skips_seen_ssr_and_empty_nodes() {
+        let node = json!({
+            "type": 1,
+            "tagType": 0,
+            "props": [{
+                "type": 7,
+                "name": "memo",
+                "exp": { "type": 4, "content": "[x]", "isStatic": false }
+            }]
+        });
+        assert_eq!(
+            transform_memo_projection(&json!({ "node": node, "context": {}, "seen": true }))
+                ["kind"],
+            json!("noop")
+        );
+        assert_eq!(
+            transform_memo_projection(&json!({ "node": node, "context": { "inSSR": true } }))
+                ["kind"],
+            json!("noop")
+        );
+        assert_eq!(
+            transform_memo_projection(&json!({
+                "node": { "type": 1, "tagType": 0, "props": [{ "type": 7, "name": "memo" }] },
+                "context": {}
+            }))["kind"],
             json!("noop")
         );
     }

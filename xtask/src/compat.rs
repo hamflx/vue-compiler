@@ -5463,7 +5463,32 @@ const vue3CoreRuntime = (() => {
       }
     };
   };
-  runtime.transformMemo = () => {};
+  runtime.transformMemo = function transformMemo(node, context) {
+    const projection = callBridge('vue3.core.transformMemo', {
+      node: runtime.dehydrateForBridge(node),
+      context: vue3TransformMemoContextPayload(context),
+      seen: !!(node && node.__vuecMemoSeen),
+    });
+    if (!projection || projection.kind !== 'enter') return;
+    if (projection.markSeen) {
+      Object.defineProperty(node, '__vuecMemoSeen', { value: true, configurable: true });
+    }
+    return () => {
+      const exit = projection.exit || {};
+      if (!exit.wrapMemo) return;
+      const current = context.currentNode || node;
+      const codegenNode = node.codegenNode || current && current.codegenNode;
+      if (!codegenNode || codegenNode.type !== NodeTypes.VNODE_CALL) return;
+      if (exit.convertToBlock) runtime.convertToBlock(codegenNode, context);
+      node.codegenNode = runtime.createCallExpression(context.helper(runtime.WITH_MEMO), [
+        exit.exp,
+        runtime.createFunctionExpression(undefined, codegenNode),
+        '_cache',
+        String(exit.cacheIndex || context.cached.length),
+      ]);
+      context.cached.push(null);
+    };
+  };
   runtime.checkCompatEnabled = () => false;
   runtime.warnDeprecation = () => {};
   runtime.transformStyle = function transformStyle(node) {
@@ -5541,6 +5566,14 @@ function vue3TransformOnceContextPayload(context) {
   return {
     inVOnce: !!context.inVOnce,
     inSSR: !!context.inSSR,
+  };
+}
+
+function vue3TransformMemoContextPayload(context) {
+  context = context || {};
+  return {
+    inSSR: !!context.inSSR,
+    cachedLength: Array.isArray(context.cached) ? context.cached.length : 0,
   };
 }
 

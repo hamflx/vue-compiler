@@ -63,9 +63,19 @@
 - [x] Vue 3 compiler-core Rust-backed `processExpression` projection bridge for expression prefixing / const classification decisions (`transformExpressions.spec.ts` `47/47`; file remains `mixed` because it still exercises alias-runtime traversal and transform harness dependencies).
 - [x] Vue 3 compiler-core Rust-backed `transformExpression` projection bridge for interpolation/directive dispatch decisions (`transformExpressions.spec.ts` `47/47`; file remains `mixed` because it still exercises alias-runtime traversal and transform harness dependencies).
 - [x] Vue 3 compiler-core Rust-backed `transformOnce` projection bridge for `v-once` eligibility / cache intent decisions (`vOnce.spec.ts` `8/8`; file remains `mixed` because it still exercises alias-runtime traversal and cache materialization).
+- [x] Vue 3 compiler-core Rust-backed internal `transformMemo` projection bridge for `v-memo` eligibility / block conversion / cache intent decisions (`vMemo.spec.ts` `7/7`; file remains `mixed` because it still exercises alias-runtime traversal and materialization).
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Moved Vue 3 compiler-core internal `transformMemo` decisions into Rust via `vuec_vue3_core::transform_memo_projection`.
+- The Rust projection now owns official `v-memo` eligibility checks, already-seen skip, SSR skip, component-vs-plain-element block conversion decision, `WITH_MEMO` helper requirement, memo expression forwarding, and deterministic cache index selection.
+- Added `vue3.core.transformMemo` to `vuec_node_bridge`.
+- Updated `xtask/src/compat.rs` only as bridge/materialization support: the alias runtime sends node/context plus adapter-local seen state to Rust, marks the JS node as seen, materializes `convertToBlock`, builds the official `_withMemo(...)` call, and increments the transform cache slot. This is not counted as JavaScript shim compiler semantics.
+- Focused official `vMemo.spec.ts` remains `7/7`; a direct alias-runtime transform harness check confirms internal `transformMemo` materializes `withMemo`, converts plain elements to block VNodes, and increments `cached`.
+- Adjacent focused official checks this round: `vOnce.spec.ts`, `cacheStatic.spec.ts`, `vFor.spec.ts`, and `vIf.spec.ts` `126/126`.
+- Full Vue 3 conformance after this slice: `vue3-core` `652/652` with `rust-backed 192/192`, `mixed 460/460`, `shim-backed 0/0`; `vue3-dom` `133/133` with `mixed 133/133`; `vue3-ssr` `129/129` with `mixed 129/129`.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_vue3_core -p vuec_node_bridge -p xtask` (`90/90` Vue 3 core tests and `20/20` xtask tests pass), `git diff --check`, `cargo xtask export-api --rust --version-line vue3`, focused specs listed above, direct alias-runtime transform harness check, `cargo xtask run-conformance --suite vue3-core` (`652/652`), `cargo xtask run-conformance --suite vue3-dom` (`133/133`), and `cargo xtask run-conformance --suite vue3-ssr` (`129/129`).
 
 - Moved Vue 3 compiler-core `transformOnce` decisions into Rust via `vuec_vue3_core::transform_once_projection`.
 - The Rust projection now owns official `v-once` eligibility checks: element-only, directive presence, already-seen skip, nested `context.inVOnce` skip, SSR skip, helper requirement, enter `inVOnce`, and exit-time codegen cache intent.
