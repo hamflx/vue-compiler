@@ -128,6 +128,19 @@ pub fn generate_vue3_dom_mir(
     Vue3DomMirCodegen::new(mir, js, options).generate()
 }
 
+/// Generate structural Vue 3 SSR render code from target-split SSR MIR.
+///
+/// This emitter is intentionally separate from the legacy exact AST emitter.
+/// It consumes only `Vue3SsrMir` plus the registered JS store, so SSR target
+/// codegen can be verified behind the AST -> HIR -> MIR boundary.
+pub fn generate_vue3_ssr_mir(
+    mir: &Vue3SsrMir,
+    js: &JsAstStore,
+    options: &Vue3CompilerOptions,
+) -> CodegenResult {
+    Vue3SsrMirCodegen::new(mir, js, options).generate()
+}
+
 /// Result of the structural Vue 3 SSR lowering contract.
 ///
 /// SSR lowering has its own target MIR and must not be derived from DOM MIR.
@@ -2865,7 +2878,7 @@ fn lower_vue3_if_branch_chain_to_ssr_mir(
                 state.source_type,
             )
         };
-        if *branch_id != first_id {
+        let branch_mir = if *branch_id != first_id {
             let branch_mir = state.mir.push_child(
                 mir_id,
                 Vue3SsrMirKind::If { condition },
@@ -2873,14 +2886,17 @@ fn lower_vue3_if_branch_chain_to_ssr_mir(
             );
             state.map.record_ast_to_hir(*branch_id, hir_id);
             state.map.record_hir_to_mir(hir_id, branch_mir);
-        }
+            branch_mir
+        } else {
+            mir_id
+        };
         if let Some(body_hir) = lower_vue3_plain_element_to_ssr_mir(
             *branch_id,
             branch_element,
             ast,
             branch_node,
             hir_id,
-            mir_id,
+            branch_mir,
             state,
         ) {
             if let Some(node) = state.hir.node_mut(hir_id) {
@@ -10699,6 +10715,563 @@ impl<'a> Vue3DomMirCodegen<'a> {
     }
 }
 
+struct Vue3SsrMirCodegen<'a> {
+    mir: &'a Vue3SsrMir,
+    js: &'a JsAstStore,
+    options: &'a Vue3CompilerOptions,
+}
+
+impl<'a> Vue3SsrMirCodegen<'a> {
+    fn new(mir: &'a Vue3SsrMir, js: &'a JsAstStore, options: &'a Vue3CompilerOptions) -> Self {
+        Self { mir, js, options }
+    }
+
+    fn generate(self) -> CodegenResult {
+        let mut writer = CodeWriter::new();
+        let scope = RenderScope::default();
+        let vue_helpers = self.vue_helpers();
+        let ssr_helpers = self.ssr_helpers();
+        self.render_preamble(&mut writer, &vue_helpers, &ssr_helpers);
+        self.render_function_start(&mut writer);
+        writer.indent();
+        let use_with = self.use_with_block();
+        if use_with {
+            writer.push_line("with (_ctx) {");
+            writer.indent();
+        }
+        self.render_children(self.mir.root, &scope, &mut writer);
+        if use_with {
+            writer.dedent();
+            writer.push_line("}");
+        }
+        writer.dedent();
+        writer.push_line("}");
+        CodegenResult {
+            code: writer.finish().trim_end().to_string(),
+            map: None,
+            ast_summary: format!("vue3-ssr-mir-nodes={}", self.mir.len()),
+            diagnostics: Vec::new(),
+            preamble: String::new(),
+        }
+    }
+
+    fn render_preamble(
+        &self,
+        writer: &mut CodeWriter,
+        vue_helpers: &[RuntimeHelper],
+        ssr_helpers: &[RuntimeHelper],
+    ) {
+        if self.options.mode == "module" {
+            if !vue_helpers.is_empty() {
+                writer.push_line(&format!(
+                    "import {{ {} }} from \"vue\"",
+                    import_helper_aliases(vue_helpers)
+                ));
+            }
+            if !ssr_helpers.is_empty() {
+                writer.push_line(&format!(
+                    "import {{ {} }} from \"vue/server-renderer\"",
+                    import_helper_aliases(ssr_helpers)
+                ));
+            }
+            if !vue_helpers.is_empty() || !ssr_helpers.is_empty() {
+                writer.newline();
+            }
+            if !self.options.inline {
+                writer.push_str("export ");
+            }
+            return;
+        }
+        if !vue_helpers.is_empty() {
+            writer.push_line(&format!(
+                "const {{ {} }} = require(\"vue\")",
+                helper_aliases(vue_helpers)
+            ));
+        }
+        if !ssr_helpers.is_empty() {
+            writer.push_line(&format!(
+                "const {{ {} }} = require(\"vue/server-renderer\")",
+                helper_aliases(ssr_helpers)
+            ));
+        }
+        if !vue_helpers.is_empty() || !ssr_helpers.is_empty() {
+            writer.newline();
+        }
+        if !self.options.inline {
+            writer.push_str("return ");
+        }
+    }
+
+    fn render_function_start(&self, writer: &mut CodeWriter) {
+        let args = "_ctx, _push, _parent, _attrs";
+        if self.options.inline {
+            writer.push_line(&format!("({args}) => {{"));
+        } else {
+            writer.push_line(&format!("function ssrRender({args}) {{"));
+        }
+    }
+
+    fn use_with_block(&self) -> bool {
+        !self.options.prefix_identifiers && self.options.mode != "module"
+    }
+
+    fn vue_helpers(&self) -> Vec<RuntimeHelper> {
+        let mut helpers = Vec::new();
+        for node in &self.mir.nodes {
+            if let Vue3SsrMirKind::RenderSlot(slot) = &node.kind {
+                self.push_prop_helpers(&slot.props, &mut helpers);
+            }
+        }
+        sort_helpers_by_order(&mut helpers, vue3_helper_order(false));
+        helpers
+    }
+
+    fn ssr_helpers(&self) -> Vec<RuntimeHelper> {
+        let mut helpers = Vec::new();
+        for node in &self.mir.nodes {
+            match &node.kind {
+                Vue3SsrMirKind::Root | Vue3SsrMirKind::PushString(_) => {}
+                Vue3SsrMirKind::PushInterpolated(_) => {
+                    push_unique_helper(&mut helpers, RuntimeHelper::Vue3SsrInterpolate);
+                }
+                Vue3SsrMirKind::RenderAttrs => {}
+                Vue3SsrMirKind::RenderComponent { .. } => {
+                    push_unique_helper(&mut helpers, RuntimeHelper::Vue3SsrRenderComponent);
+                }
+                Vue3SsrMirKind::RenderSlot(_) => {
+                    push_unique_helper(&mut helpers, RuntimeHelper::Vue3SsrRenderSlot);
+                }
+                Vue3SsrMirKind::If { .. } => {}
+                Vue3SsrMirKind::For { .. } => {
+                    push_unique_helper(&mut helpers, RuntimeHelper::Vue3SsrRenderList);
+                }
+                Vue3SsrMirKind::Teleport => {
+                    push_unique_helper(&mut helpers, RuntimeHelper::Vue3SsrRenderTeleport);
+                }
+                Vue3SsrMirKind::Suspense => {
+                    push_unique_helper(&mut helpers, RuntimeHelper::Vue3SsrRenderSuspense);
+                }
+            }
+        }
+        sort_helpers_by_order(&mut helpers, vue3_ssr_helper_order());
+        helpers
+    }
+
+    fn push_prop_helpers(&self, props: &Vue3DomProps, helpers: &mut Vec<RuntimeHelper>) {
+        for binding in &props.dynamic_bindings {
+            if !binding.dynamic_arg && binding.name == "class" {
+                push_unique_helper(helpers, RuntimeHelper::Vue3NormalizeClass);
+            }
+        }
+        for event in &props.events {
+            if event.dynamic_arg {
+                push_unique_helper(helpers, RuntimeHelper::Vue3ToHandlerKey);
+            }
+        }
+        for listeners in &props.object_listeners {
+            if listeners.preserve_case {
+                push_unique_helper(helpers, RuntimeHelper::Vue3ToHandlers);
+            }
+        }
+        for segment in &props.segments {
+            match segment {
+                Vue3DomPropSegment::DynamicBinding(binding) => {
+                    if binding.dynamic_arg {
+                        continue;
+                    }
+                    if binding.name == "class" {
+                        push_unique_helper(helpers, RuntimeHelper::Vue3NormalizeClass);
+                    }
+                }
+                Vue3DomPropSegment::Event(event) if event.dynamic_arg => {
+                    push_unique_helper(helpers, RuntimeHelper::Vue3ToHandlerKey);
+                }
+                Vue3DomPropSegment::ObjectListeners(_) => {
+                    push_unique_helper(helpers, RuntimeHelper::Vue3ToHandlers);
+                }
+                Vue3DomPropSegment::StaticAttr(_)
+                | Vue3DomPropSegment::Event(_)
+                | Vue3DomPropSegment::ObjectBinding(_) => {}
+            }
+        }
+        if props_requires_merge_call(props) {
+            push_unique_helper(helpers, RuntimeHelper::Vue3MergeProps);
+        }
+        if props.normalize.guard_reactive_props {
+            push_unique_helper(helpers, RuntimeHelper::Vue3GuardReactiveProps);
+        }
+        if props.normalize.normalize_props {
+            push_unique_helper(helpers, RuntimeHelper::Vue3NormalizeProps);
+        }
+    }
+
+    fn render_children(&self, parent: NodeId, scope: &RenderScope, writer: &mut CodeWriter) {
+        let Some(node) = self.mir.node(parent) else {
+            return;
+        };
+        for child_id in &node.children {
+            self.render_node(*child_id, scope, writer);
+        }
+    }
+
+    fn render_node(&self, node_id: NodeId, scope: &RenderScope, writer: &mut CodeWriter) {
+        let Some(node) = self.mir.node(node_id) else {
+            return;
+        };
+        match &node.kind {
+            Vue3SsrMirKind::Root => self.render_children(node_id, scope, writer),
+            Vue3SsrMirKind::PushString(value) => {
+                writer.push_line(&format!("_push({});", quote_string(value)));
+            }
+            Vue3SsrMirKind::PushInterpolated(expr) => {
+                writer.push_line(&format!(
+                    "_push(_ssrInterpolate({}));",
+                    self.render_mir_expr(expr, scope)
+                ));
+            }
+            Vue3SsrMirKind::RenderAttrs => {}
+            Vue3SsrMirKind::RenderComponent { tag } => {
+                self.render_component(node_id, tag, scope, writer);
+            }
+            Vue3SsrMirKind::RenderSlot(slot) => {
+                self.render_slot(slot, scope, writer);
+            }
+            Vue3SsrMirKind::If { condition } => {
+                self.render_if(node_id, *condition, scope, writer);
+            }
+            Vue3SsrMirKind::For { source, alias } => {
+                self.render_for(node_id, *source, *alias, scope, writer);
+            }
+            Vue3SsrMirKind::Teleport => {
+                writer.push_line("_ssrRenderTeleport(_push, () => {");
+                writer.indent();
+                self.render_children(node_id, scope, writer);
+                writer.dedent();
+                writer.push_line("}, null, _parent);");
+            }
+            Vue3SsrMirKind::Suspense => {
+                writer.push_line("_ssrRenderSuspense(_push, {");
+                writer.indent();
+                writer.push_line("default: () => {");
+                writer.indent();
+                self.render_children(node_id, scope, writer);
+                writer.dedent();
+                writer.push_line("}");
+                writer.dedent();
+                writer.push_line("});");
+            }
+        }
+    }
+
+    fn render_component(
+        &self,
+        node_id: NodeId,
+        tag: &MirExpr,
+        scope: &RenderScope,
+        writer: &mut CodeWriter,
+    ) {
+        writer.push_line(&format!(
+            "_push(_ssrRenderComponent({}, null, {{",
+            self.render_mir_expr(tag, scope)
+        ));
+        writer.indent();
+        writer.push_line("default: () => {");
+        writer.indent();
+        self.render_children(node_id, scope, writer);
+        writer.dedent();
+        writer.push_line("}");
+        writer.dedent();
+        writer.push_line("}, _parent));");
+    }
+
+    fn render_slot(
+        &self,
+        slot: &vuec_ast::Vue3SsrSlot,
+        scope: &RenderScope,
+        writer: &mut CodeWriter,
+    ) {
+        let props = self.render_slot_props(&slot.props, scope);
+        let fallback = if slot.fallback.is_empty() {
+            "null".to_string()
+        } else {
+            let mut fallback = CodeWriter::new();
+            fallback.push_line("() => {");
+            fallback.indent();
+            for child_id in &slot.fallback {
+                self.render_node(*child_id, scope, &mut fallback);
+            }
+            fallback.dedent();
+            fallback.push_line("}");
+            fallback.finish().trim_end().to_string()
+        };
+        writer.push_line(&format!(
+            "_ssrRenderSlot(_ctx.$slots, {}, {}, {}, _push, _parent);",
+            self.render_slot_name(&slot.name, scope),
+            props,
+            fallback
+        ));
+    }
+
+    fn render_if(
+        &self,
+        node_id: NodeId,
+        condition: Option<JsExprId>,
+        scope: &RenderScope,
+        writer: &mut CodeWriter,
+    ) {
+        let Some(condition) = condition else {
+            self.render_children(node_id, scope, writer);
+            return;
+        };
+        writer.push_line(&format!(
+            "if ({}) {{",
+            render_condition(&self.render_js_expr(condition, scope), self.options)
+        ));
+        writer.indent();
+        let alternate = self.render_primary_if_children(node_id, scope, writer);
+        writer.dedent();
+        if let Some(alternate) = alternate {
+            writer.push_line("} else {");
+            writer.indent();
+            self.render_node(alternate, scope, writer);
+            writer.dedent();
+            writer.push_line("}");
+        } else {
+            writer.push_line("}");
+        }
+    }
+
+    fn render_primary_if_children(
+        &self,
+        node_id: NodeId,
+        scope: &RenderScope,
+        writer: &mut CodeWriter,
+    ) -> Option<NodeId> {
+        let Some(node) = self.mir.node(node_id) else {
+            return None;
+        };
+        let mut alternate = None;
+        for child_id in &node.children {
+            if matches!(
+                self.mir.node(*child_id).map(|child| &child.kind),
+                Some(Vue3SsrMirKind::If { .. })
+            ) && alternate.is_none()
+            {
+                alternate = Some(*child_id);
+                continue;
+            }
+            self.render_node(*child_id, scope, writer);
+        }
+        alternate
+    }
+
+    fn render_for(
+        &self,
+        node_id: NodeId,
+        source: JsExprId,
+        alias: JsPatternId,
+        scope: &RenderScope,
+        writer: &mut CodeWriter,
+    ) {
+        let source = self.render_js_expr(source, scope);
+        let params = self.render_js_pattern(alias);
+        let child_scope = self.scope_with_pattern(scope, alias);
+        writer.push_line(&format!("_ssrRenderList({source}, ({params}) => {{"));
+        writer.indent();
+        self.render_children(node_id, &child_scope, writer);
+        writer.dedent();
+        writer.push_line("});");
+    }
+
+    fn render_slot_name(&self, name: &Vue3DomSlotName, scope: &RenderScope) -> String {
+        match name {
+            Vue3DomSlotName::Static(name) => quote_string(name),
+            Vue3DomSlotName::Dynamic(name) => self.render_js_expr(*name, scope),
+        }
+    }
+
+    fn render_slot_props(&self, props: &Vue3DomProps, scope: &RenderScope) -> String {
+        let rendered = self
+            .render_ordered_props(props, scope)
+            .unwrap_or_else(|| "{}".into());
+        self.render_normalized_props(props, rendered)
+    }
+
+    fn render_ordered_props(&self, props: &Vue3DomProps, scope: &RenderScope) -> Option<String> {
+        if props.segments.is_empty() {
+            let mut entries = Vec::new();
+            for attr in &props.static_attrs {
+                entries.push(self.render_static_attr(attr));
+            }
+            for binding in &props.dynamic_bindings {
+                entries.push(self.render_dynamic_binding(binding, scope));
+            }
+            for event in &props.events {
+                entries.push(self.render_event(event, scope));
+            }
+            return self.render_plain_props(&entries);
+        }
+
+        let mut merge_args = Vec::new();
+        let mut object_entries = Vec::new();
+        for segment in &props.segments {
+            match segment {
+                Vue3DomPropSegment::StaticAttr(attr) => {
+                    object_entries.push(self.render_static_attr(attr));
+                }
+                Vue3DomPropSegment::DynamicBinding(binding) => {
+                    object_entries.push(self.render_dynamic_binding(binding, scope));
+                }
+                Vue3DomPropSegment::Event(event) => {
+                    object_entries.push(self.render_event(event, scope));
+                }
+                Vue3DomPropSegment::ObjectBinding(binding) => {
+                    self.push_merge_object_arg(&mut merge_args, &mut object_entries);
+                    merge_args.push(self.render_js_expr(binding.value, scope));
+                }
+                Vue3DomPropSegment::ObjectListeners(listeners) => {
+                    self.push_merge_object_arg(&mut merge_args, &mut object_entries);
+                    merge_args.push(self.render_object_listeners(listeners, scope));
+                }
+            }
+        }
+        self.push_merge_object_arg(&mut merge_args, &mut object_entries);
+        if merge_args.is_empty() {
+            None
+        } else if merge_args.len() == 1 {
+            merge_args.into_iter().next()
+        } else {
+            Some(format!("_mergeProps({})", merge_args.join(", ")))
+        }
+    }
+
+    fn render_static_attr(&self, attr: &Vue3DomStaticAttr) -> String {
+        format!("{}: {}", json_key(&attr.name), quote_string(&attr.value))
+    }
+
+    fn render_dynamic_binding(&self, binding: &Vue3DomBinding, scope: &RenderScope) -> String {
+        let value = self.render_js_expr(binding.value, scope);
+        if binding.dynamic_arg {
+            let name = binding
+                .dynamic_name
+                .map(|id| self.render_js_expr(id, scope))
+                .unwrap_or_else(|| binding.name.clone());
+            format!("[{}]: {}", render_dynamic_prop_key(&name), value)
+        } else if binding.name == "class" {
+            format!("class: _normalizeClass({value})")
+        } else {
+            format!("{}: {}", json_key(&binding.name), value)
+        }
+    }
+
+    fn render_event(&self, event: &Vue3DomEvent, scope: &RenderScope) -> String {
+        let handler = self.render_js_stmt(event.handler, scope);
+        if event.dynamic_arg {
+            let name = event
+                .dynamic_name
+                .map(|id| self.render_js_expr(id, scope))
+                .unwrap_or_else(|| event.name.clone());
+            format!("[_toHandlerKey({})]: {}", name.trim(), handler)
+        } else {
+            format!("{}: {}", json_key(&event.name), handler)
+        }
+    }
+
+    fn render_object_listeners(
+        &self,
+        listeners: &Vue3DomObjectListeners,
+        scope: &RenderScope,
+    ) -> String {
+        let handlers = self.render_js_expr(listeners.value, scope);
+        if listeners.preserve_case {
+            format!("_toHandlers({handlers}, true)")
+        } else {
+            format!("_toHandlers({handlers})")
+        }
+    }
+
+    fn push_merge_object_arg(
+        &self,
+        merge_args: &mut Vec<String>,
+        object_entries: &mut Vec<String>,
+    ) {
+        if let Some(object) = self.render_plain_props(object_entries) {
+            merge_args.push(object);
+            object_entries.clear();
+        }
+    }
+
+    fn render_plain_props(&self, entries: &[String]) -> Option<String> {
+        if entries.is_empty() {
+            None
+        } else if entries.len() == 1 {
+            Some(format!("{{ {} }}", entries.join(", ")))
+        } else {
+            Some(render_object(entries))
+        }
+    }
+
+    fn render_normalized_props(&self, props: &Vue3DomProps, rendered: String) -> String {
+        if !props.normalize.normalize_props {
+            return rendered;
+        }
+        let argument = if props.normalize.guard_reactive_props {
+            format!("_guardReactiveProps({rendered})")
+        } else {
+            rendered
+        };
+        format!("_normalizeProps({argument})")
+    }
+
+    fn render_mir_expr(&self, expr: &MirExpr, scope: &RenderScope) -> String {
+        match expr {
+            MirExpr::String(value) => quote_string(value),
+            MirExpr::JsExpr(expr) => self.render_js_expr(*expr, scope),
+            MirExpr::Helper(helper) => helper_reference(*helper),
+        }
+    }
+
+    fn render_js_expr(&self, id: JsExprId, scope: &RenderScope) -> String {
+        self.js
+            .expressions()
+            .get(id.0 as usize)
+            .map(|entry| rewrite_expression_with_scope(&entry.source, self.options, scope))
+            .unwrap_or_else(|| "undefined".into())
+    }
+
+    fn render_js_stmt(&self, id: vuec_ast::JsStmtId, scope: &RenderScope) -> String {
+        self.js
+            .statements()
+            .get(id.0 as usize)
+            .map(|entry| rewrite_handler_expression_with_scope(&entry.source, self.options, scope))
+            .unwrap_or_else(|| "undefined".into())
+    }
+
+    fn render_js_pattern(&self, id: JsPatternId) -> String {
+        self.js
+            .patterns()
+            .get(id.0 as usize)
+            .map(|entry| entry.source.clone())
+            .unwrap_or_else(|| "_item".into())
+    }
+
+    fn scope_with_pattern(&self, scope: &RenderScope, pattern: JsPatternId) -> RenderScope {
+        scope.with_locals(extract_v_for_alias_locals(&self.render_js_pattern(pattern)))
+    }
+}
+
+fn vue3_ssr_helper_order() -> &'static [RuntimeHelper] {
+    &[
+        RuntimeHelper::Vue3SsrInterpolate,
+        RuntimeHelper::Vue3SsrRenderAttrs,
+        RuntimeHelper::Vue3SsrRenderComponent,
+        RuntimeHelper::Vue3SsrRenderSlot,
+        RuntimeHelper::Vue3SsrRenderList,
+        RuntimeHelper::Vue3SsrRenderTeleport,
+        RuntimeHelper::Vue3SsrRenderSuspense,
+    ]
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Vue3DomMirRenderMode {
     Root,
@@ -17360,6 +17933,178 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["ok", "maybe"]
         );
+    }
+
+    #[test]
+    fn generate_vue3_ssr_mir_emits_basic_pushes_from_mir() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div>Hello {{ msg }}</div>"#.into(),
+            file_id: FileId(43),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_ssr_mir(&ast, &Vue3CompilerOptions::default());
+        let generated = generate_vue3_ssr_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert_eq!(generated.ast_summary, "vue3-ssr-mir-nodes=6");
+        assert!(generated
+            .code
+            .starts_with("import { ssrInterpolate as _ssrInterpolate }"));
+        assert!(generated
+            .code
+            .contains("export function ssrRender(_ctx, _push, _parent, _attrs)"));
+        assert!(generated.code.contains("_push(\"<div\");"));
+        assert!(generated.code.contains("_push(\"Hello \");"));
+        assert!(generated.code.contains("_push(_ssrInterpolate(_ctx.msg));"));
+        assert!(generated.code.contains("_push(\"</div>\");"));
+        assert!(!generated.code.contains("Vue3Ast"));
+    }
+
+    #[test]
+    fn generate_vue3_ssr_mir_keeps_render_attrs_marker_noop_until_payload_exists() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div :class="klass">Hi</div>"#.into(),
+            file_id: FileId(46),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_ssr_mir(&ast, &Vue3CompilerOptions::default());
+        assert!(result
+            .mir
+            .nodes
+            .iter()
+            .any(|node| matches!(node.kind, Vue3SsrMirKind::RenderAttrs)));
+        let generated = generate_vue3_ssr_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(!generated.code.contains("_ssrRenderAttrs(_attrs)"));
+        assert!(!generated.code.contains("ssrRenderAttrs as _ssrRenderAttrs"));
+        assert!(generated.code.contains("_push(\"<div\");"));
+        assert!(generated.code.contains("_push(\"Hi\");"));
+        assert!(generated.code.contains("_push(\"</div>\");"));
+    }
+
+    #[test]
+    fn generate_vue3_ssr_mir_emits_slot_outlet_payload_from_mir() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<slot :name="active" foo="bar" :baz="baz">fallback {{ msg }}</slot>"#.into(),
+            file_id: FileId(44),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_ssr_mir(&ast, &Vue3CompilerOptions::default());
+        let generated = generate_vue3_ssr_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated.code.contains("ssrRenderSlot as _ssrRenderSlot"));
+        assert!(generated.code.contains("ssrInterpolate as _ssrInterpolate"));
+        assert!(generated
+            .code
+            .contains("_ssrRenderSlot(_ctx.$slots, _ctx.active, {"));
+        assert!(generated.code.contains("foo: \"bar\""));
+        assert!(generated.code.contains("baz: _ctx.baz"));
+        assert!(generated.code.contains("() => {"));
+        assert!(generated.code.contains("_push(\"fallback \");"));
+        assert!(generated.code.contains("_push(_ssrInterpolate(_ctx.msg));"));
+        assert!(!generated.code.contains("name: _ctx.active"));
+    }
+
+    #[test]
+    fn generate_vue3_ssr_mir_keeps_slot_object_props_as_props() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<slot name="default" v-bind="slotProps" v-on="listeners" :foo="value" />"#
+                .into(),
+            file_id: FileId(47),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_ssr_mir(&ast, &Vue3CompilerOptions::default());
+        let generated = generate_vue3_ssr_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated.code.contains("mergeProps as _mergeProps"));
+        assert!(generated.code.contains("toHandlers as _toHandlers"));
+        assert!(generated
+            .code
+            .contains("_ssrRenderSlot(_ctx.$slots, \"default\", _normalizeProps("));
+        assert!(generated.code.contains("_mergeProps("));
+        assert!(generated.code.contains("_ctx.slotProps"));
+        assert!(generated.code.contains("_toHandlers(_ctx.listeners, true)"));
+        assert!(generated.code.contains("foo: _ctx.value"));
+        assert!(!generated.code.contains("_ssrRenderAttrs(_ctx.slotProps)"));
+        assert!(!generated.code.contains("ssrRenderAttrs as _ssrRenderAttrs"));
+    }
+
+    #[test]
+    fn generate_vue3_ssr_mir_emits_control_flow_and_components_from_mir() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<Comp><p v-if="ok">yes</p><p v-else-if="maybe">maybe</p><p v-else>no</p><li v-for="item in list">{{ item.name }}</li></Comp>"#.into(),
+            file_id: FileId(45),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_ssr_mir(&ast, &Vue3CompilerOptions::default());
+        let generated = generate_vue3_ssr_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated
+            .code
+            .contains("ssrRenderComponent as _ssrRenderComponent"));
+        assert!(generated.code.contains("ssrRenderList as _ssrRenderList"));
+        assert!(generated
+            .code
+            .contains("_push(_ssrRenderComponent(\"Comp\", null, {"));
+        assert!(generated.code.contains("if ((_ctx.ok)) {"));
+        assert!(generated.code.contains("} else {"));
+        assert!(generated.code.contains("if ((_ctx.maybe)) {"));
+        assert!(generated
+            .code
+            .contains("_ssrRenderList(_ctx.list, (item) => {"));
+        assert!(generated
+            .code
+            .contains("_push(_ssrInterpolate(item.name));"));
+        assert!(!generated.code.contains("_ctx.item"));
     }
 
     #[test]

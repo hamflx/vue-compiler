@@ -70,6 +70,7 @@
 - [x] Vue 3 structural `Vue3Ast -> HIR -> Vue3DomMir` lowering contract entry for basic nodes, slot outlets, explicit `LoweringMap`, and `JsAstStore` expression/event registrations.
 - [x] Vue 3 structural `Vue3Ast -> HIR -> Vue3SsrMir` lowering contract entry for basic nodes, components, slot outlets, dynamic attr marker, explicit `LoweringMap`, and `JsAstStore` expression registrations.
 - [x] Vue 3 structural `Vue3SsrMir` `<slot>` outlet payload for static/dynamic names, non-name props, and fallback children without deriving SSR from DOM MIR.
+- [x] Vue 3 structural standalone `Vue3SsrMir` codegen foundation for current MIR subset, consuming SSR MIR + `JsAstStore` for `_push`, interpolation, slot outlet, component, `v-if`, and `v-for` emission without AST or DOM MIR fallback.
 - [x] Vue 3 structural DOM/SSR lowering contract entry for directive-backed `v-for` / `v-if` control-flow wrappers, including `HirFor`, `HirIf`, target-specific MIR nodes, `LoweringMap`, and `JsAstStore` source/alias/condition registrations.
 - [x] Vue 3 structural `Vue3DomMir` patch-flag projection foundation for class/style/text/props/hydration/full-props/vnode-hook bits and target `dynamic_props` names.
 - [x] Vue 3 structural DOM/SSR lowering contract entry for adjacent `v-if` / `v-else-if` / `v-else` branch chains as one `HirIf` with multiple branches.

@@ -1,5 +1,10 @@
 # Memory
 
+- Current round: added standalone Vue 3 SSR MIR codegen foundation.
+- `generate_vue3_ssr_mir` now consumes only `Vue3SsrMir` plus `JsAstStore` and emits SSR render function/module shells, `_push(...)`, `_ssrInterpolate(...)`, `_ssrRenderSlot(...)`, `_ssrRenderComponent(...)`, `_ssrRenderList(...)`, and statement `v-if` / `v-for` bodies from MIR. Slot outlet codegen uses `Vue3SsrSlot` name/props/fallback payload directly and preserves `v-for` aliases while prefixing outer expressions.
+- This is structural target-codegen work and does not touch `xtask/src/compat.rs` or connect the official `compile_ssr` path. `RenderAttrs` remains a deliberate no-op marker until SSR attrs payload/codegen is added, so the emitter does not misroute `_attrs` as element attrs.
+- Verification for this SSR MIR codegen foundation slice: focused `cargo test -p vuec_vue3_core generate_vue3_ssr_mir`, focused `cargo test -p vuec_vue3_core lower_vue3_ast_to_ssr_mir`, `cargo fmt --all --check`, `git diff --check`, `cargo check -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, and `cargo xtask run-conformance --suite vue3-core` (`652/652`; coverage `rust-backed 192/192`, `mixed 460/460`, `shim-backed 0/0`).
+
 - Current round: added `<slot>` outlet name / props / fallback payloads to structural Vue 3 SSR MIR.
 - `Vue3SsrMirKind::RenderSlot` now carries `Vue3SsrSlot`, including static or dynamic `Vue3DomSlotName`, non-name `Vue3DomProps`, and fallback child node IDs in the same `Vue3SsrMir` document. SSR lowering filters the `name` prop out of outlet props and keeps fallback children as SSR MIR children.
 - This is structural target-lowering work and does not derive SSR from DOM MIR or touch `xtask/src/compat.rs`. Exact SSR codegen remains separate from this target-split MIR payload slice.
