@@ -1,5 +1,10 @@
 # Memory
 
+- Current round: fixed Vue 3 SSR MIR adjacent `v-if` / `v-else-if` / `v-else` alternate-chain lowering/codegen.
+- SSR branch-chain lowering now attaches each alternate branch under the previous branch MIR node instead of attaching every alternate directly under the first `If`. The standalone SSR MIR emitter's primary-branch + alternate-child logic now emits `if/else if/else` bodies in source order without rendering later branch bodies inside the first branch.
+- This is structural SSR MIR lowering/codegen work only. It does not touch `xtask/src/compat.rs` and does not change the legacy official `compile_ssr` path.
+- Verification for this SSR MIR if/else alternate-chain slice: focused `cargo test -p vuec_vue3_core lower_vue3_ast_to_ssr_mir_groups_if_else_branch_chains`, focused `cargo test -p vuec_vue3_core generate_vue3_ssr_mir_emits_control_flow_and_components_from_mir`, `cargo fmt --all --check`, `git diff --check`, `cargo check -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, and `cargo xtask run-conformance --suite vue3-core` (`652/652`; coverage `rust-backed 192/192`, `mixed 460/460`, `shim-backed 0/0`).
+
 - Current round: added Vue 3 SSR MIR component props payload and standalone component props codegen.
 - `Vue3SsrMirKind::RenderComponent` now carries `Vue3SsrComponent { tag, props }`. SSR lowering projects component props from HIR into `Vue3DomProps` payload, including static attrs, dynamic bindings, object `v-bind`, object listeners, and ordered prop segments where present.
 - `generate_vue3_ssr_mir` now emits the `_ssrRenderComponent` second argument from SSR MIR props using the existing structured props renderer (`_mergeProps`, `_normalizeProps`, `_guardReactiveProps`, `_toHandlers`, dynamic keys, and scoped JS-store rewrites) instead of hard-coding `null` or reading `Vue3Ast`.

@@ -2869,6 +2869,7 @@ fn lower_vue3_if_branch_chain_to_ssr_mir(
     state.map.record_ast_to_hir(first_id, hir_id);
     state.map.record_hir_to_mir(hir_id, mir_id);
 
+    let mut previous_branch_mir = mir_id;
     for branch_id in branch_ids {
         let Some(branch_node) = ast.node(*branch_id) else {
             continue;
@@ -2888,7 +2889,7 @@ fn lower_vue3_if_branch_chain_to_ssr_mir(
         };
         let branch_mir = if *branch_id != first_id {
             let branch_mir = state.mir.push_child(
-                mir_id,
+                previous_branch_mir,
                 Vue3SsrMirKind::If { condition },
                 branch_node.span.clone(),
             );
@@ -2916,6 +2917,7 @@ fn lower_vue3_if_branch_chain_to_ssr_mir(
                 }
             }
         }
+        previous_branch_mir = branch_mir;
     }
 
     Some(hir_id)
@@ -18081,6 +18083,23 @@ mod tests {
                 .count(),
             3
         );
+        let root_if = result
+            .mir
+            .nodes
+            .iter()
+            .find(|node| matches!(node.kind, Vue3SsrMirKind::If { condition: Some(_) }))
+            .expect("root if");
+        let nested_if = root_if
+            .children
+            .iter()
+            .filter(|child_id| {
+                result
+                    .mir
+                    .node(**child_id)
+                    .is_some_and(|child| matches!(child.kind, Vue3SsrMirKind::If { .. }))
+            })
+            .count();
+        assert_eq!(nested_if, 1);
         assert_eq!(
             result
                 .js
@@ -18310,6 +18329,18 @@ mod tests {
         assert!(generated.code.contains("if ((_ctx.ok)) {"));
         assert!(generated.code.contains("} else {"));
         assert!(generated.code.contains("if ((_ctx.maybe)) {"));
+        let ok_offset = generated.code.find("if ((_ctx.ok))").expect("ok branch");
+        let maybe_offset = generated
+            .code
+            .find("if ((_ctx.maybe))")
+            .expect("maybe branch");
+        let yes_offset = generated.code.find("_push(\"yes\")").expect("yes body");
+        let maybe_body_offset = generated.code.find("_push(\"maybe\")").expect("maybe body");
+        let no_offset = generated.code.find("_push(\"no\")").expect("else body");
+        assert!(ok_offset < yes_offset);
+        assert!(yes_offset < maybe_offset);
+        assert!(maybe_offset < maybe_body_offset);
+        assert!(maybe_body_offset < no_offset);
         assert!(generated
             .code
             .contains("_ssrRenderList(_ctx.list, (item) => {"));
