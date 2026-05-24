@@ -1818,6 +1818,10 @@ fn alias_export_expression(
     if target.kind == TargetKind::Vue3Dom && export_name == "transformStyle" {
         return alias_runtime_function_expression("vue3CoreRuntime", export_name, detail);
     }
+    if target.kind == TargetKind::Vue3Sfc && matches!(export_name, "babelParse" | "walkIdentifiers")
+    {
+        return alias_runtime_function_expression("vue3CoreRuntime", export_name, detail);
+    }
     match detail.kind.as_str() {
         "function" => alias_function_expression(target, export_name, detail),
         "symbol" => "Symbol.for('vuec.alias')".into(),
@@ -3532,6 +3536,9 @@ const vue3CoreRuntime = (() => {
       propsWithInjection = props;
     } else {
       propsWithInjection = runtime.createCallExpression(runtime.MERGE_PROPS, [runtime.createObjectExpression([prop]), props]);
+      if (parentCall && parentCall.callee === runtime.GUARD_REACTIVE_PROPS) {
+        parentCall = callPath[callPath.length - 2];
+      }
     }
     if (node.type === NodeTypes.JS_CALL_EXPRESSION && node.callee === runtime.RENDER_SLOT && node.arguments) {
       node.arguments[2] = propsWithInjection;
@@ -3700,12 +3707,20 @@ const vue3CoreRuntime = (() => {
     return runtime._babelParser;
   };
   runtime.isMemberExpressionBrowser = function isMemberExpressionBrowser(path) {
-    path = typeof path === 'string' ? path : path && path.content;
-    return /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*|\[[^\]]+\])*$/.test(String(path || '').trim())
-      || /^[A-Za-z_$][\w$]*\[[\s\S]+\]$/.test(String(path || '').trim());
+    const projection = callBridge('vue3.core.isMemberExpression', {
+      mode: 'browser',
+      node: runtime.dehydrateForBridge(path),
+      context: {},
+    });
+    return !!(projection && projection.isMemberExpression);
   };
-  runtime.isMemberExpressionNode = function isMemberExpressionNode(path) {
-    return runtime.isMemberExpressionBrowser(path);
+  runtime.isMemberExpressionNode = function isMemberExpressionNode(path, context = {}) {
+    const projection = callBridge('vue3.core.isMemberExpression', {
+      mode: 'node',
+      node: runtime.dehydrateForBridge(path),
+      context: vue3ExpressionUtilityContextPayload(context),
+    });
+    return !!(projection && projection.isMemberExpression);
   };
   runtime.isMemberExpression = runtime.isMemberExpressionNode;
   runtime.isFnExpressionBrowser = function isFnExpressionBrowser(exp) {
@@ -3721,11 +3736,27 @@ const vue3CoreRuntime = (() => {
     while (node && runtime.TS_NODE_TYPES.includes(node.type)) node = node.expression;
     return node;
   };
-  runtime.isReferencedIdentifier = function isReferencedIdentifier() { return true; };
+  runtime.isReferencedIdentifier = function isReferencedIdentifier(id, parent) {
+    if (!parent) return true;
+    if (id && id.name === 'arguments') return false;
+    if (parent.type === 'ObjectProperty' && parent.key === id) return false;
+    if (parent.type === 'RestElement') return false;
+    if (parent.type === 'ArrayPattern') return false;
+    return !String(parent.type || '').endsWith('Pattern');
+  };
   runtime.isInDestructureAssignment = function isInDestructureAssignment() { return false; };
   runtime.isInNewExpression = function isInNewExpression() { return false; };
   runtime.walkIdentifiers = function walkIdentifiers(root, onIdentifier) {
     if (root && root.type === NodeTypes.SIMPLE_EXPRESSION && runtime.isSimpleIdentifier(root.content)) onIdentifier(root);
+    if (root && root.type === 'ExpressionStatement' && root.expression) root = root.expression;
+    if (root && root.type === 'Program' && root.body && root.body[0]) return runtime.walkIdentifiers(root.body[0], onIdentifier);
+    if (root && root.type === 'ArrowFunctionExpression') {
+      for (const param of root.params || []) {
+        for (const ident of runtime.extractBabelIdentifiers(param)) {
+          onIdentifier(ident, param, [root], false, false);
+        }
+      }
+    }
   };
   runtime.extractIdentifiers = function extractIdentifiers(param) {
     if (!param) return [];
@@ -3736,7 +3767,28 @@ const vue3CoreRuntime = (() => {
   runtime.walkFunctionParams = function walkFunctionParams(node, onIdent) {
     for (const ident of runtime.extractIdentifiers(node && node.params)) onIdent(ident);
   };
+  runtime.extractBabelIdentifiers = function extractBabelIdentifiers(node) {
+    if (!node) return [];
+    if (Array.isArray(node)) return node.flatMap(runtime.extractBabelIdentifiers);
+    if (node.type === 'Identifier') return [node];
+    if (node.type === 'ObjectPattern') return (node.properties || []).flatMap(runtime.extractBabelIdentifiers);
+    if (node.type === 'ObjectProperty') {
+      const out = [];
+      if (node.key) out.push(...runtime.extractBabelIdentifiers(node.key));
+      if (node.value && node.value !== node.key) out.push(...runtime.extractBabelIdentifiers(node.value));
+      return out;
+    }
+    if (node.type === 'ArrayPattern') return (node.elements || []).flatMap(runtime.extractBabelIdentifiers);
+    if (node.type === 'RestElement') return runtime.extractBabelIdentifiers(node.argument);
+    if (node.type === 'AssignmentPattern') return runtime.extractBabelIdentifiers(node.left);
+    return [];
+  };
   runtime.walkBlockDeclarations = function walkBlockDeclarations() {};
+  runtime.babelParse = function babelParse(source, options) {
+    const parser = runtime.getBabelParser();
+    if (!parser || typeof parser.parse !== 'function') throw new Error('@babel/parser is unavailable');
+    return parser.parse(source, options);
+  };
   runtime.createTransformContext = function createTransformContext(root, options = {}) {
     const context = {
       filename: options.filename || '',
@@ -5740,6 +5792,15 @@ function vue3CacheStaticContextPayload(context) {
     inSSR: !!context.inSSR,
     identifiers: context.identifiers || {},
     bindingMetadata: context.bindingMetadata || {},
+  };
+}
+
+function vue3ExpressionUtilityContextPayload(context) {
+  context = context || {};
+  return {
+    expressionPlugins: context.expressionPlugins || [],
+    isTS: !!context.isTS,
+    allowLexerFallback: false,
   };
 }
 

@@ -42,9 +42,16 @@
 - [x] Vue 3 compiler-core Rust-backed `buildSlots` / slot-scope projection bridge for `vSlot.spec.ts`.
 - [x] Vue 3 compiler-core Rust-backed `transformOn` projection bridge for `vOn.spec.ts`.
 - [x] Vue 3 compiler-core Rust-backed `cacheStatic` / `getConstantType` projection bridge for `cacheStatic.spec.ts`.
+- [x] Vue 3 compiler-core official conformance closure (`652/652`) with Rust-backed `isMemberExpression` utility projection.
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Closed the remaining Vue 3 compiler-core official conformance failures.
+- `vuec_vue3_core::is_member_expression_projection` now owns the public utility decision for `isMemberExpressionBrowser` / `isMemberExpressionNode`, using the official browser lexer rules and Rust/OXC TypeScript-aware expression parsing for node mode.
+- `vuec_node_bridge` now exposes `vue3.core.isMemberExpression`. Generated alias code in `xtask/src/compat.rs` changed as API/test-runner/materialization support: it routes `isMemberExpression` to Rust, exposes `@vue/compiler-sfc` `babelParse` / `walkIdentifiers` from the runtime for the compiler-core utility test, and fixes `injectProp` materialization for nested `normalizeProps(guardReactiveProps(...))`. The `babelParse` / `walkIdentifiers` adapter support is not compiler semantics.
+- Full Vue 3 compiler-core conformance now passes `652/652` official tests. Coverage reports `rust-backed 158/158`, `mixed 494/494`, and `shim-backed 0/0`; the official suite is green, while the `mixed` bucket still honestly records tests that execute through the alias adapter path.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_vue3_core` (`68/68` pass), `cargo xtask verify-npm-alias --version-line vue3 --package @vue/compiler-core`, `cargo xtask verify-npm-alias --version-line vue3 --package @vue/compiler-sfc`, direct prepared Vitest `utils.spec.ts` + `vIf.spec.ts` (`38/38` pass), and `cargo xtask run-conformance --suite vue3-core` (`652/652` pass).
 
 - Added a Rust-backed Vue 3 `cacheStatic` / `getConstantType` projection bridge.
 - `vuec_vue3_core::cache_static_projection` now owns official static-cache walk decisions for static node/text caching, cached children arrays, default/named/dynamic slot-return caching, props and dynamic-props hoisting, `CACHED` patch flags, and SVG/math/foreignObject block downgrade with custom-directive exclusion. `vuec_vue3_core::get_constant_type_projection` now owns constant-type decisions for static expressions, interpolation/text calls, compound expressions, generated props, and allowed hoisted helper calls.

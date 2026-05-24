@@ -720,6 +720,21 @@ pub fn get_constant_type_projection(payload: &Value) -> Value {
     })
 }
 
+pub fn is_member_expression_projection(payload: &Value) -> Value {
+    let node = payload.get("node").unwrap_or(&Value::Null);
+    let context = payload.get("context").unwrap_or(&Value::Null);
+    let source = model_expression_source(node);
+    let mode = json_str(payload, "mode").unwrap_or("node");
+    let is_member = if mode == "browser" {
+        transform_on_is_member_expression_lexer(&source)
+    } else {
+        transform_on_is_member_expression(&source, context)
+    };
+    json!({
+        "isMemberExpression": is_member,
+    })
+}
+
 pub fn cache_static_projection(payload: &Value) -> Value {
     let root = payload.get("root").unwrap_or(&Value::Null);
     let context = payload.get("context").unwrap_or(&Value::Null);
@@ -4084,10 +4099,14 @@ fn transform_on_has_scope_ref(exp: &Value, context: &Value) -> bool {
 
 fn transform_on_is_member_expression(expression: &str, context: &Value) -> bool {
     let store = JsAstStore::new();
-    store
-        .parse_expression(expression.trim(), transform_on_source_type(context))
-        .map(|expression| transform_on_expression_is_member(&expression))
-        .unwrap_or_else(|_| transform_on_is_member_expression_lexer(expression))
+    let wrapped = format!("({})", expression.trim());
+    match store.parse_expression(&wrapped, transform_on_source_type(context)) {
+        Ok(expression) => transform_on_expression_is_member(&expression),
+        Err(_) if json_bool(context, "allowLexerFallback") => {
+            transform_on_is_member_expression_lexer(expression)
+        }
+        Err(_) => false,
+    }
 }
 
 fn transform_on_expression_is_member(expression: &Expression<'_>) -> bool {
@@ -4098,6 +4117,9 @@ fn transform_on_expression_is_member(expression: &Expression<'_>) -> bool {
         | Expression::PrivateFieldExpression(_) => true,
         Expression::ChainExpression(chain) => {
             transform_on_chain_element_is_member(&chain.expression)
+        }
+        Expression::ParenthesizedExpression(expression) => {
+            transform_on_expression_is_member(&expression.expression)
         }
         Expression::TSAsExpression(expression) => {
             transform_on_expression_is_member(&expression.expression)
@@ -4278,13 +4300,21 @@ fn transform_on_is_member_expression_lexer(expression: &str) -> bool {
         match ch {
             '\'' | '"' | '`' => quote = Some(ch),
             '[' => depth_square += 1,
-            ']' => depth_square = depth_square.saturating_sub(1),
+            ']' => {
+                if depth_square == 0 {
+                    return false;
+                }
+                depth_square -= 1;
+            }
             '(' => depth_paren += 1,
             ')' => {
                 if chars.peek().is_none() {
                     return false;
                 }
-                depth_paren = depth_paren.saturating_sub(1);
+                if depth_paren == 0 {
+                    return false;
+                }
+                depth_paren -= 1;
             }
             _ if depth_square == 0 && depth_paren == 0 => {
                 let valid = if index == 0 {

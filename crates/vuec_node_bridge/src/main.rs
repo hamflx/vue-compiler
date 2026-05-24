@@ -107,6 +107,9 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
         )),
         "vue3.core.cacheStatic" => Ok(vuec_vue3_core::cache_static_projection(&payload)),
         "vue3.core.getConstantType" => Ok(vuec_vue3_core::get_constant_type_projection(&payload)),
+        "vue3.core.isMemberExpression" => {
+            Ok(vuec_vue3_core::is_member_expression_projection(&payload))
+        }
         "vue3.core.transformOn" => Ok(vuec_vue3_core::transform_on_projection(&payload)),
         "vue3.core.transformModel" => Ok(vuec_vue3_core::transform_model_projection(&payload)),
         "vue3.core.transformIf" => Ok(vuec_vue3_core::transform_if_projection(&payload)),
