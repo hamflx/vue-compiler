@@ -55,9 +55,17 @@
 - [x] Vue 3 compiler-ssr mixed alias-runtime `buildProps` / SSR template-literal formatting slice for `ssrText.spec.ts` (`8/8`; full SSR suite currently `68/129`, `mixed` coverage).
 - [x] Vue 3 compiler-ssr mixed alias-runtime SSR element attrs / built-in directive filtering slice for `ssrElement.spec.ts` (`32/32`; full SSR suite currently `75/129`, `mixed` coverage).
 - [x] Vue 3 compiler-ssr mixed alias-runtime structural directive first-pass slice for `ssrVFor.spec.ts`, `ssrVIf.spec.ts`, `ssrVModel.spec.ts`, and `ssrFallthroughAttrs.spec.ts` (full SSR suite currently `97/129`, `mixed` coverage).
+- [x] Vue 3 compiler-ssr mixed alias-runtime built-in directive transform slice for `ssrVShow.spec.ts` (`7/7`; full SSR suite currently `99/129`, `mixed` coverage).
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Closed the Vue 3 compiler-ssr `ssrVShow.spec.ts` focused slice through mixed alias-runtime compiler-core support.
+- The generated compiler-core alias `buildProps` now applies caller-provided directive transforms for built-in directives when they exist, so official SSR `show` can materialize style props while non-prop built-ins such as `v-text` / `v-html` still avoid being treated as custom directive props.
+- Full Vue 3 SSR conformance improves from `97/129` to `99/129`; `ssrVShow.spec.ts` is now `7/7`.
+- Coverage remains explicitly `mixed`: this is alias materialization support for official SSR source execution, not Rust-backed SSR semantic parity.
+- Vue 3 compiler-core and compiler-dom conformance were rechecked after the alias change and remain `652/652` and `133/133`.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p xtask`, `cargo test -p xtask` (`20/20` pass), `cargo xtask run-conformance --suite vue3-core` (`652/652`), `cargo xtask run-conformance --suite vue3-dom` (`133/133`), and `cargo xtask run-conformance --suite vue3-ssr` as an expected failing real suite with `99/129`.
 
 - Closed the Vue 3 compiler-ssr structural directive first-pass compatibility slice through mixed alias-runtime support.
 - The generated compiler-core alias `processFor` and `processIf` now run as structural-only transforms when `context.inSSR` is true and no caller-provided client codegen callback is active. This avoids registering client-side Vue helpers during the official SSR source pipeline and leaves SSR codegen to the second-pass official transforms.

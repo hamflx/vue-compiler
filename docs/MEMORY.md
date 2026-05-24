@@ -1,5 +1,11 @@
 # Memory
 
+- Current round: closed the Vue 3 compiler-ssr `ssrVShow.spec.ts` focused slice through mixed alias-runtime compiler-core support. The official SSR `v-show` spec now passes `7/7`, and full Vue 3 SSR conformance improves from `97/129` to `99/129`.
+- The generated compiler-core alias `buildProps` now applies caller-provided directive transforms for built-in directives when they exist, so official SSR `show` can materialize style props while non-prop built-ins such as `v-text` / `v-html` still avoid being treated as custom directive props.
+- Coverage remains `mixed`: this is alias materialization support for official SSR source execution, not Rust-backed SSR transform/codegen parity.
+- Vue 3 compiler-core and compiler-dom conformance were rechecked after the alias runtime change and remain `652/652` and `133/133` respectively. Latest Vue 3 SSR state is a real expected failure with `99/129` passing and `30` failing.
+- Verification for this SSR `v-show` slice: `cargo fmt --all --check`, `cargo check -p xtask`, `cargo test -p xtask` (`20/20` pass), `cargo xtask run-conformance --suite vue3-core` (`652/652`), `cargo xtask run-conformance --suite vue3-dom` (`133/133`), and `cargo xtask run-conformance --suite vue3-ssr` (expected fail with `99/129`, `ssrVShow.spec.ts` `7/7`).
+
 - Current round: closed Vue 3 compiler-ssr structural directive first-pass compatibility through mixed alias-runtime support. Official SSR `ssrVFor.spec.ts`, `ssrVIf.spec.ts`, `ssrVModel.spec.ts`, and `ssrFallthroughAttrs.spec.ts` now pass fully; full Vue 3 SSR conformance improves from `75/129` to `97/129`.
 - The generated compiler-core alias `processFor` and `processIf` now run as structural-only transforms when `context.inSSR` is true and no caller-provided client codegen callback is active. This keeps the official SSR second-pass transforms in charge and avoids registering client-side Vue helpers such as `renderList`, `Fragment`, `openBlock`, `createBlock`, and `createCommentVNode`.
 - Coverage remains `mixed`: this is alias-runtime support for the official SSR source pipeline and does not count as Rust-backed SSR transform/codegen parity.

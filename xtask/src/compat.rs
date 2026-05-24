@@ -5588,6 +5588,10 @@ const vue3CoreRuntime = (() => {
             dynamicPropNames.push(modelProp.key.content);
           }
         }
+      } else if (context && context.directiveTransforms && context.directiveTransforms[prop.name]) {
+        const result = context.directiveTransforms[prop.name](prop, node, context);
+        objectProps.push(...((result && result.props) || []));
+        if (result && result.props && result.props.some(p => p.key && !runtime.isStaticExp(p.key))) hasDynamicKey = true;
       } else if (!runtime.isBuiltInDirective(prop.name)) {
         directives.push(prop);
       }
