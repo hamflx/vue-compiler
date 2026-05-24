@@ -700,6 +700,13 @@ fn json_u64(value: &Value, key: &str) -> Option<u64> {
     value.get(key).and_then(Value::as_u64)
 }
 
+fn json_usize(value: &Value, key: &str) -> Option<usize> {
+    value
+        .get(key)
+        .and_then(Value::as_u64)
+        .map(|value| value as usize)
+}
+
 pub fn transform_model_projection(payload: &Value) -> Value {
     let dir = payload.get("dir").unwrap_or(&Value::Null);
     let node = payload.get("node").unwrap_or(&Value::Null);
@@ -927,6 +934,563 @@ pub fn transform_for_projection(payload: &Value) -> Value {
         "children": if json_u64(node, "tagType") == Some(3) { "template" } else { "self" },
         "templateKeyErrors": template_key_errors,
     })
+}
+
+pub fn track_slot_scopes_projection(payload: &Value) -> Value {
+    let node = payload.get("node").unwrap_or(&Value::Null);
+    let Some(slot) = vue3_slot_directive(node, false) else {
+        return json!({ "track": false });
+    };
+    let locals = slot
+        .get("exp")
+        .filter(|exp| !exp.is_null())
+        .map(vue3_slot_param_locals)
+        .unwrap_or_default();
+    json!({
+        "track": true,
+        "slotProps": slot.get("exp").cloned().unwrap_or(Value::Null),
+        "locals": locals,
+    })
+}
+
+pub fn track_v_for_slot_scopes_projection(payload: &Value) -> Value {
+    let node = payload.get("node").unwrap_or(&Value::Null);
+    if json_node_type(node) != Some(1)
+        || json_u64(node, "tagType") != Some(3)
+        || vue3_slot_directive(node, true).is_none()
+    {
+        return json!({ "track": false });
+    }
+    let Some(dir) = vue3_directive(node, "for", true) else {
+        return json!({ "track": false });
+    };
+    let context = payload.get("context").unwrap_or(&Value::Null);
+    let projection = vue3_for_parse_result_projection(node, dir, context);
+    if projection.get("parseResult").is_none() {
+        return json!({ "track": false, "errors": projection.get("errors").cloned().unwrap_or_else(|| json!([])) });
+    }
+    json!({
+        "track": true,
+        "dir": dir,
+        "parseResult": projection["parseResult"].clone(),
+        "locals": projection["locals"].clone(),
+    })
+}
+
+pub fn build_slots_projection(payload: &Value) -> Value {
+    let node = payload.get("node").unwrap_or(&Value::Null);
+    let context = payload.get("context").unwrap_or(&Value::Null);
+    let children = node
+        .get("children")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let mut properties = Vec::<Value>::new();
+    let mut dynamic_slots = Vec::<Value>::new();
+    let mut errors = Vec::<Value>::new();
+    let mut has_dynamic_slots = json_usize(context, "vSlotDepth").unwrap_or_default() > 0
+        || json_usize(context, "vForDepth").unwrap_or_default() > 0;
+
+    if !json_bool(context, "ssr") && json_bool(context, "prefixIdentifiers") {
+        has_dynamic_slots = vue3_component_slot_scope_ref(node, children, context);
+    }
+
+    let on_component_slot = vue3_slot_directive(node, true);
+    if let Some(slot) = on_component_slot {
+        if slot
+            .get("arg")
+            .is_some_and(|arg| !json_bool(arg, "isStatic"))
+        {
+            has_dynamic_slots = true;
+        }
+        properties.push(json!({
+            "kind": "property",
+            "key": vue3_slot_name_projection(slot, context),
+            "params": slot.get("exp").cloned().unwrap_or(Value::Null),
+            "indices": vue3_all_child_indices(children),
+            "loc": node.get("loc").cloned().unwrap_or(Value::Null),
+        }));
+    }
+
+    let mut has_template_slots = false;
+    let mut has_named_default_slot = false;
+    let mut implicit_default_indices = Vec::<usize>::new();
+    let mut seen_slot_names = Vec::<String>::new();
+    let mut conditional_branch_index = 0usize;
+
+    for (index, child) in children.iter().enumerate() {
+        let Some(slot_dir) = vue3_template_slot_directive(child) else {
+            if json_node_type(child) != Some(3) {
+                implicit_default_indices.push(index);
+            }
+            continue;
+        };
+
+        if on_component_slot.is_some() {
+            errors.push(
+                json!({ "code": 37, "loc": slot_dir.get("loc").cloned().unwrap_or(Value::Null) }),
+            );
+            break;
+        }
+
+        has_template_slots = true;
+        let slot_name = vue3_slot_name_projection(slot_dir, context);
+        let static_slot_name = vue3_static_slot_name(slot_dir);
+        if static_slot_name.is_none() {
+            has_dynamic_slots = true;
+        }
+        let slot = vue3_slot_function_projection(slot_dir, &[index], child);
+
+        if let Some(if_dir) = vue3_directive(child, "if", false) {
+            has_dynamic_slots = true;
+            dynamic_slots.push(json!({
+                "kind": "conditional",
+                "test": vue3_slot_condition_projection(if_dir, context),
+                "consequent": vue3_dynamic_slot_projection(slot_name, slot, Some(conditional_branch_index)),
+                "alternate": vue3_default_fallback_projection(),
+            }));
+            conditional_branch_index += 1;
+            continue;
+        }
+
+        if let Some(else_dir) = vue3_else_slot_directive(child) {
+            if let Some(previous) = vue3_previous_non_comment_or_whitespace(children, index) {
+                if vue3_template_has_if_like_slot_directive(previous) {
+                    let alternate = if json_str(else_dir, "name") == Some("else-if") {
+                        json!({
+                            "kind": "conditional",
+                            "test": vue3_slot_condition_projection(else_dir, context),
+                            "consequent": vue3_dynamic_slot_projection(slot_name, slot, Some(conditional_branch_index)),
+                            "alternate": vue3_default_fallback_projection(),
+                        })
+                    } else {
+                        vue3_dynamic_slot_projection(
+                            slot_name,
+                            slot,
+                            Some(conditional_branch_index),
+                        )
+                    };
+                    vue3_append_slot_conditional_alternate(&mut dynamic_slots, alternate);
+                    conditional_branch_index += 1;
+                } else {
+                    errors.push(json!({ "code": 30, "loc": else_dir.get("loc").cloned().unwrap_or(Value::Null) }));
+                }
+            } else {
+                errors.push(json!({ "code": 30, "loc": else_dir.get("loc").cloned().unwrap_or(Value::Null) }));
+            }
+            continue;
+        }
+
+        if let Some(for_dir) = vue3_directive(child, "for", true) {
+            has_dynamic_slots = true;
+            let parsed_projection = vue3_slot_for_parse_result_projection(child, for_dir, context);
+            if let Some(parse_result) = parsed_projection.get("parseResult") {
+                dynamic_slots.push(json!({
+                    "kind": "for",
+                    "source": parse_result["source"].clone(),
+                    "params": {
+                        "value": parse_result["value"].clone(),
+                        "key": parse_result["key"].clone(),
+                        "index": parse_result["index"].clone(),
+                    },
+                    "slot": vue3_dynamic_slot_projection(slot_name, slot, None),
+                }));
+            } else {
+                errors.push(json!({ "code": 32, "loc": for_dir.get("loc").cloned().unwrap_or(Value::Null) }));
+            }
+            continue;
+        }
+
+        if let Some(name) = static_slot_name {
+            if seen_slot_names.iter().any(|seen| seen == &name) {
+                errors.push(json!({ "code": 38, "loc": slot_dir.get("loc").cloned().unwrap_or(Value::Null) }));
+                continue;
+            }
+            if name == "default" {
+                has_named_default_slot = true;
+            }
+            seen_slot_names.push(name);
+        }
+        properties.push(json!({
+            "kind": "property",
+            "key": slot_name,
+            "params": slot_dir.get("exp").cloned().unwrap_or(Value::Null),
+            "indices": [index],
+            "unwrapTemplate": true,
+            "loc": child.get("loc").cloned().unwrap_or_else(|| node.get("loc").cloned().unwrap_or(Value::Null)),
+        }));
+    }
+
+    if on_component_slot.is_none() {
+        if !has_template_slots {
+            properties.push(json!({
+                "kind": "property",
+                "key": vue3_static_slot_key("default"),
+                "params": Value::Null,
+                "indices": vue3_all_child_indices(children),
+                "loc": node.get("loc").cloned().unwrap_or(Value::Null),
+                "nonScoped": true,
+            }));
+        } else if !implicit_default_indices.is_empty()
+            && !vue3_all_indices_are_whitespace_text(children, &implicit_default_indices)
+        {
+            if has_named_default_slot {
+                if let Some(child) = implicit_default_indices
+                    .first()
+                    .and_then(|index| children.get(*index))
+                {
+                    errors.push(json!({ "code": 39, "loc": child.get("loc").cloned().unwrap_or(Value::Null) }));
+                }
+            } else {
+                properties.push(json!({
+                    "kind": "property",
+                    "key": vue3_static_slot_key("default"),
+                    "params": Value::Null,
+                    "indices": implicit_default_indices,
+                    "loc": node.get("loc").cloned().unwrap_or(Value::Null),
+                    "nonScoped": true,
+                }));
+            }
+        }
+    }
+
+    let slot_flag = if has_dynamic_slots {
+        2
+    } else if vue3_has_forwarded_slots(children) {
+        3
+    } else {
+        1
+    };
+
+    json!({
+        "properties": properties,
+        "dynamicSlots": dynamic_slots,
+        "slotFlag": slot_flag,
+        "slotFlagText": vue3_slot_flag_text(slot_flag),
+        "hasDynamicSlots": has_dynamic_slots,
+        "errors": errors,
+    })
+}
+
+fn vue3_for_parse_result_projection(node: &Value, dir: &Value, context: &Value) -> Value {
+    transform_for_projection(&json!({
+        "node": node,
+        "dir": dir,
+        "context": context,
+    }))
+}
+
+fn vue3_slot_for_parse_result_projection(node: &Value, dir: &Value, context: &Value) -> Value {
+    if let Some(parse_result) = dir.get("forParseResult").filter(|value| !value.is_null()) {
+        return json!({
+            "parseResult": {
+                "source": parse_result.get("source").cloned().unwrap_or(Value::Null),
+                "value": parse_result.get("value").cloned().unwrap_or(Value::Null),
+                "key": parse_result.get("key").cloned().unwrap_or(Value::Null),
+                "index": parse_result.get("index").cloned().unwrap_or(Value::Null),
+                "finalized": parse_result.get("finalized").and_then(Value::as_bool).unwrap_or(true),
+            }
+        });
+    }
+    vue3_for_parse_result_projection(node, dir, context)
+}
+
+fn vue3_directive<'a>(node: &'a Value, name: &str, allow_empty: bool) -> Option<&'a Value> {
+    node.get("props")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|prop| {
+            json_node_type(prop) == Some(7)
+                && json_str(prop, "name") == Some(name)
+                && (allow_empty || prop.get("exp").is_some_and(|exp| !exp.is_null()))
+        })
+}
+
+fn vue3_slot_directive(node: &Value, allow_empty: bool) -> Option<&Value> {
+    vue3_directive(node, "slot", allow_empty)
+}
+
+fn vue3_template_slot_directive(node: &Value) -> Option<&Value> {
+    if json_node_type(node) == Some(1) && json_u64(node, "tagType") == Some(3) {
+        vue3_slot_directive(node, true)
+    } else {
+        None
+    }
+}
+
+fn vue3_else_slot_directive(node: &Value) -> Option<&Value> {
+    node.get("props")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|prop| {
+            json_node_type(prop) == Some(7)
+                && matches!(json_str(prop, "name"), Some("else") | Some("else-if"))
+        })
+}
+
+fn vue3_template_has_if_like_slot_directive(node: &Value) -> bool {
+    vue3_template_slot_directive(node).is_some()
+        && node
+            .get("props")
+            .and_then(Value::as_array)
+            .is_some_and(|props| {
+                props.iter().any(|prop| {
+                    json_node_type(prop) == Some(7)
+                        && matches!(json_str(prop, "name"), Some("if") | Some("else-if"))
+                })
+            })
+}
+
+fn vue3_previous_non_comment_or_whitespace(children: &[Value], index: usize) -> Option<&Value> {
+    children[..index]
+        .iter()
+        .rev()
+        .find(|child| !vue3_is_comment_or_whitespace(child))
+}
+
+fn vue3_is_comment_or_whitespace(node: &Value) -> bool {
+    json_node_type(node) == Some(3) || vue3_is_whitespace_text(node)
+}
+
+fn vue3_is_whitespace_text(node: &Value) -> bool {
+    match json_node_type(node) {
+        Some(2) => json_str(node, "content").is_some_and(|content| {
+            content
+                .chars()
+                .all(|ch| matches!(ch, '\t' | '\r' | '\n' | '\u{000C}' | ' '))
+        }),
+        Some(12) => node.get("content").is_some_and(vue3_is_whitespace_text),
+        _ => false,
+    }
+}
+
+fn vue3_all_indices_are_whitespace_text(children: &[Value], indices: &[usize]) -> bool {
+    indices
+        .iter()
+        .filter_map(|index| children.get(*index))
+        .all(vue3_is_whitespace_text)
+}
+
+fn vue3_all_child_indices(children: &[Value]) -> Vec<usize> {
+    (0..children.len()).collect()
+}
+
+fn vue3_slot_name_projection(slot: &Value, context: &Value) -> Value {
+    let Some(arg) = slot.get("arg").filter(|arg| !arg.is_null()) else {
+        return vue3_static_slot_key("default");
+    };
+    if json_bool(arg, "isStatic") {
+        return vue3_static_slot_key(json_str(arg, "content").unwrap_or("default"));
+    }
+    let _ = context;
+    arg.clone()
+}
+
+fn vue3_static_slot_name(slot: &Value) -> Option<String> {
+    let Some(arg) = slot.get("arg").filter(|arg| !arg.is_null()) else {
+        return Some("default".to_string());
+    };
+    json_bool(arg, "isStatic").then(|| json_str(arg, "content").unwrap_or("default").to_string())
+}
+
+fn vue3_static_slot_key(name: &str) -> Value {
+    json!({
+        "kind": "simple",
+        "content": name,
+        "isStatic": true,
+        "constType": 3,
+    })
+}
+
+fn vue3_slot_param_locals(exp: &Value) -> Vec<String> {
+    let source = model_expression_source(exp);
+    vue3_for_alias_locals(source.trim())
+}
+
+fn vue3_slot_condition_projection(dir: &Value, context: &Value) -> Value {
+    let Some(exp) = dir.get("exp").filter(|exp| !exp.is_null()) else {
+        return json!({ "kind": "undefined" });
+    };
+    let _ = context;
+    exp.clone()
+}
+
+fn vue3_slot_function_projection(slot_dir: &Value, indices: &[usize], child: &Value) -> Value {
+    json!({
+        "kind": "slotFunction",
+        "params": slot_dir.get("exp").cloned().unwrap_or(Value::Null),
+        "indices": indices,
+        "unwrapTemplate": true,
+        "loc": child.get("loc").cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn vue3_dynamic_slot_projection(name: Value, slot: Value, key: Option<usize>) -> Value {
+    let mut value = json!({
+        "kind": "dynamicSlot",
+        "name": name,
+        "slot": slot,
+    });
+    if let Some(key) = key {
+        value["key"] = json!(key.to_string());
+    }
+    value
+}
+
+fn vue3_default_fallback_projection() -> Value {
+    json!({
+        "kind": "simple",
+        "content": "undefined",
+        "isStatic": false,
+        "constType": 0,
+    })
+}
+
+fn vue3_append_slot_conditional_alternate(dynamic_slots: &mut [Value], alternate: Value) {
+    let Some(last) = dynamic_slots.last_mut() else {
+        return;
+    };
+    let mut target = last;
+    loop {
+        let nested = target
+            .get("alternate")
+            .and_then(|value| value.get("kind"))
+            .and_then(Value::as_str)
+            == Some("conditional");
+        if !nested {
+            target["alternate"] = alternate;
+            break;
+        }
+        target = target.get_mut("alternate").expect("checked alternate");
+    }
+}
+
+fn vue3_slot_flag_text(flag: u8) -> &'static str {
+    match flag {
+        1 => "STABLE",
+        2 => "DYNAMIC",
+        3 => "FORWARDED",
+        _ => "",
+    }
+}
+
+fn vue3_has_forwarded_slots(children: &[Value]) -> bool {
+    children.iter().any(|child| match json_node_type(child) {
+        Some(1) => {
+            json_u64(child, "tagType") == Some(2)
+                || child
+                    .get("children")
+                    .and_then(Value::as_array)
+                    .is_some_and(|children| vue3_has_forwarded_slots(children))
+        }
+        Some(9) => child
+            .get("branches")
+            .and_then(Value::as_array)
+            .is_some_and(|branches| vue3_has_forwarded_slots(branches)),
+        Some(10) | Some(11) => child
+            .get("children")
+            .and_then(Value::as_array)
+            .is_some_and(|children| vue3_has_forwarded_slots(children)),
+        _ => false,
+    })
+}
+
+fn vue3_component_slot_scope_ref(node: &Value, children: &[Value], context: &Value) -> bool {
+    let mut names = transform_context_locals(context);
+    if let Some(slot) = vue3_slot_directive(node, false) {
+        if let Some(exp) = slot.get("exp").filter(|exp| !exp.is_null()) {
+            let slot_locals = vue3_slot_param_locals(exp);
+            names.retain(|name| !slot_locals.iter().any(|local| local == name));
+        }
+    }
+    if names.is_empty() {
+        return false;
+    }
+    node.get("props")
+        .and_then(Value::as_array)
+        .is_some_and(|props| {
+            props.iter().any(|prop| {
+                json_str(prop, "name") == Some("slot")
+                    && (prop
+                        .get("arg")
+                        .is_some_and(|arg| vue3_node_source_contains_any(arg, &names))
+                        || prop
+                            .get("exp")
+                            .is_some_and(|exp| vue3_node_source_contains_any(exp, &names)))
+            })
+        })
+        || children
+            .iter()
+            .any(|child| vue3_node_source_contains_any(child, &names))
+}
+
+fn vue3_node_source_contains_any(node: &Value, names: &[String]) -> bool {
+    if node.is_null() {
+        return false;
+    }
+    if json_node_type(node) != Some(11) {
+        if let Some(content) = json_str(node, "content") {
+            if names
+                .iter()
+                .any(|name| source_contains_identifier(content, name))
+            {
+                return true;
+            }
+        }
+    }
+    if !matches!(
+        json_node_type(node),
+        Some(1) | Some(9) | Some(10) | Some(11)
+    ) {
+        if let Some(source) = node.get("loc").and_then(|loc| json_str(loc, "source")) {
+            if names
+                .iter()
+                .any(|name| source_contains_identifier(source, name))
+            {
+                return true;
+            }
+        }
+    }
+    if let Some(children) = node.get("children").and_then(Value::as_array) {
+        if children
+            .iter()
+            .any(|child| vue3_node_source_contains_any(child, names))
+        {
+            return true;
+        }
+    }
+    if matches!(json_node_type(node), Some(1)) {
+        if let Some(props) = node.get("props").and_then(Value::as_array) {
+            if props
+                .iter()
+                .filter(|prop| json_str(prop, "name") != Some("for"))
+                .any(|prop| vue3_node_source_contains_any(prop, names))
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn source_contains_identifier(source: &str, name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let mut search_start = 0usize;
+    while let Some(offset) = source[search_start..].find(name) {
+        let start = search_start + offset;
+        let end = start + name.len();
+        let before = source[..start].chars().next_back();
+        let after = source[end..].chars().next();
+        if before.is_none_or(|ch| !is_identifier_continue(ch))
+            && after.is_none_or(|ch| !is_identifier_continue(ch))
+        {
+            return true;
+        }
+        search_start = end;
+    }
+    false
 }
 
 fn transform_for_codegen_projection(payload: &Value) -> Value {
@@ -3247,7 +3811,7 @@ fn normalize_text_children(
             retained_indices.push(index);
             continue;
         };
-        if text.value.chars().all(char::is_whitespace) {
+        if text.value.chars().all(is_vue3_html_whitespace) {
             let prev = retained_indices
                 .last()
                 .and_then(|idx| child_kinds.get(*idx))
@@ -3316,7 +3880,7 @@ fn condense_whitespace(value: &str) -> String {
     let mut out = String::new();
     let mut previous_ws = false;
     for ch in value.chars() {
-        if ch.is_whitespace() {
+        if is_vue3_html_whitespace(ch) {
             if !previous_ws {
                 out.push(' ');
             }
@@ -3327,6 +3891,10 @@ fn condense_whitespace(value: &str) -> String {
         }
     }
     out
+}
+
+fn is_vue3_html_whitespace(ch: char) -> bool {
+    matches!(ch, '\t' | '\n' | '\u{000C}' | '\r' | ' ')
 }
 
 fn render_helpers_from_code(order: &[RuntimeHelper], code: &str) -> Vec<RuntimeHelper> {
@@ -6267,6 +6835,7 @@ fn decode_html_text_entities(text: &str) -> String {
     }
     text.replace("&gt;", ">")
         .replace("&lt;", "<")
+        .replace("&nbsp;", "\u{00a0}")
         .replace("&amp;", "&")
         .replace("&apos;", "'")
         .replace("&quot;", "\"")
@@ -6785,6 +7354,130 @@ mod tests {
         assert_eq!(
             projection["templateKeyErrors"],
             json!([{ "code": 33, "loc": { "source": ":key=\"item.id\"" } }])
+        );
+    }
+
+    #[test]
+    fn build_slots_projection_tracks_slot_locals_and_dynamic_slots() {
+        let projection = build_slots_projection(&json!({
+            "node": {
+                "type": 1,
+                "tagType": 1,
+                "props": [{
+                    "type": 7,
+                    "name": "slot",
+                    "exp": {
+                        "type": 8,
+                        "children": [
+                            "{ ",
+                            { "type": 4, "content": "foo", "isStatic": false },
+                            " }"
+                        ],
+                        "loc": { "source": "{ foo }" }
+                    }
+                }],
+                "children": [
+                    { "type": 5, "content": { "type": 4, "content": "foo", "isStatic": false } }
+                ],
+                "loc": { "source": "<Comp/>" }
+            },
+            "context": { "prefixIdentifiers": true, "identifiers": {}, "bindingMetadata": {} }
+        }));
+
+        assert_eq!(
+            projection["properties"][0]["key"]["content"],
+            json!("default")
+        );
+        assert_eq!(projection["properties"][0]["indices"], json!([0]));
+        assert_eq!(projection["hasDynamicSlots"], json!(false));
+
+        let tracking = track_slot_scopes_projection(&json!({
+            "node": {
+                "type": 1,
+                "tagType": 1,
+                "props": [{
+                    "type": 7,
+                    "name": "slot",
+                    "exp": {
+                        "type": 8,
+                        "children": [
+                            "{ ",
+                            { "type": 4, "content": "foo", "isStatic": false },
+                            " }"
+                        ],
+                        "loc": { "source": "{ foo }" }
+                    }
+                }]
+            }
+        }));
+        assert_eq!(tracking["locals"], json!(["foo"]));
+    }
+
+    #[test]
+    fn build_slots_projection_lowers_if_and_for_dynamic_slots() {
+        let if_projection = build_slots_projection(&json!({
+            "node": {
+                "type": 1,
+                "tagType": 1,
+                "props": [],
+                "children": [{
+                    "type": 1,
+                    "tag": "template",
+                    "tagType": 3,
+                    "props": [
+                        { "type": 7, "name": "slot", "arg": { "type": 4, "content": "one", "isStatic": true }, "loc": { "source": "#one" } },
+                        { "type": 7, "name": "if", "exp": { "type": 4, "content": "_ctx.ok", "isStatic": false }, "loc": { "source": "v-if=\"ok\"" } }
+                    ],
+                    "children": [{ "type": 2, "content": "hello" }]
+                }]
+            },
+            "context": { "prefixIdentifiers": true, "identifiers": {}, "bindingMetadata": {} }
+        }));
+        assert_eq!(
+            if_projection["dynamicSlots"][0]["kind"],
+            json!("conditional")
+        );
+        assert_eq!(
+            if_projection["dynamicSlots"][0]["test"]["content"],
+            json!("_ctx.ok")
+        );
+
+        let for_projection = build_slots_projection(&json!({
+            "node": {
+                "type": 1,
+                "tagType": 1,
+                "props": [],
+                "children": [{
+                    "type": 1,
+                    "tag": "template",
+                    "tagType": 3,
+                    "props": [
+                        { "type": 7, "name": "slot", "arg": { "type": 4, "content": "name", "isStatic": false }, "loc": { "source": "#[name]" } },
+                        {
+                            "type": 7,
+                            "name": "for",
+                            "exp": { "type": 4, "content": "name in list", "loc": { "source": "name in list", "start": { "offset": 0, "line": 1, "column": 1 } } },
+                            "forParseResult": {
+                                "source": { "type": 4, "content": "_ctx.list", "isStatic": false },
+                                "value": { "type": 4, "content": "name", "isStatic": false },
+                                "key": null,
+                                "index": null
+                            }
+                        }
+                    ],
+                    "children": [{ "type": 5, "content": { "type": 4, "content": "name", "isStatic": false } }]
+                }]
+            },
+            "context": { "prefixIdentifiers": true, "identifiers": {}, "bindingMetadata": {} }
+        }));
+        assert_eq!(for_projection["dynamicSlots"][0]["kind"], json!("for"));
+        assert_eq!(
+            for_projection["dynamicSlots"][0]["source"]["content"],
+            json!("_ctx.list")
+        );
+        assert_eq!(
+            for_projection["dynamicSlots"][0]["slot"]["name"]["content"],
+            json!("name")
         );
     }
 
@@ -7361,7 +8054,7 @@ mod tests {
     fn base_parse_decodes_builtin_text_entities() {
         let source = TemplateSource {
             filename: "foo.vue".into(),
-            source: "&gt;&lt;&amp;&apos;&quot;&foo;".into(),
+            source: "&gt;&lt;&amp;&apos;&quot;&nbsp;&foo;".into(),
             file_id: FileId(0),
             base_offset: 0,
         };
@@ -7370,9 +8063,36 @@ mod tests {
         let text = ast.node(root.children[0]).expect("text");
         assert!(matches!(
             &text.kind,
-            Vue3AstKind::Text(value) if value.value == "><&'\"&foo;"
+            Vue3AstKind::Text(value) if value.value == "><&'\"\u{00a0}&foo;"
         ));
-        assert_eq!(text.span.source(), Some(Span::new(FileId(0), 0, 30)));
+        assert_eq!(text.span.source(), Some(Span::new(FileId(0), 0, 36)));
+    }
+
+    #[test]
+    fn base_parse_preserves_nbsp_as_non_whitespace_default_child() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source:
+                "<Comp>\n        \u{00a0}\n        <template #one>foo</template>\n      </Comp>"
+                    .into(),
+            file_id: FileId(0),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let root = ast.root_node().expect("root");
+        let comp_id = root.children[0];
+        let comp = ast.node(comp_id).expect("component");
+        assert!(matches!(
+            ast.node(comp.children[0]).map(|node| &node.kind),
+            Some(Vue3AstKind::Text(text)) if text.value.contains('\u{00a0}')
+        ));
+    }
+
+    #[test]
+    fn scope_ref_identifier_matching_uses_boundaries() {
+        assert!(source_contains_identifier("fn(i)", "i"));
+        assert!(!source_contains_identifier("click", "i"));
+        assert!(!source_contains_identifier("_ctx.list", "i"));
     }
 
     #[test]

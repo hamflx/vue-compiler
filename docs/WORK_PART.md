@@ -39,9 +39,16 @@
 - [x] Vue 3 compiler-core Rust-backed `transformElement` built-in component children projection slice.
 - [x] Vue 3 compiler-core Rust-backed public `baseCompile` vnode-hook / `NEED_PATCH` AST codegen slice.
 - [x] Vue 3 compiler-core Rust-backed `processFor` / `transformFor` projection bridge for `vFor.spec.ts`.
+- [x] Vue 3 compiler-core Rust-backed `buildSlots` / slot-scope projection bridge for `vSlot.spec.ts`.
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Added a Rust-backed Vue 3 `buildSlots` / slot-scope projection bridge.
+- `vuec_vue3_core::build_slots_projection` now owns official slot decisions for on-component slots, template named/default slots, dynamic slot names, dynamic `v-if` / `v-else(-if)` / `v-for` slots, duplicate/mixed/extraneous/misplaced slot diagnostics, slot flags, forwarded slot detection, prefixIdentifiers slot locals, and scope-ref based dynamic-slot forcing.
+- `vuec_node_bridge` now exposes `vue3.core.buildSlots`, `vue3.core.trackSlotScopes`, and `vue3.core.trackVForSlotScopes`. Generated alias code in `xtask/src/compat.rs` changed as bridge/traversal/materialization support: it preserves official `<template v-slot>` structural-directive ownership, calls Rust projections, materializes official-shaped slot object / `createSlots` / `renderList` AST nodes, applies Rust-returned slot locals to transform identifiers, forwards Rust diagnostics, and keeps helper order / conditional parentheses snapshot-compatible. The touched alias code is adapter/materialization support, not standalone compiler semantics.
+- Focused official `compiler-core/__tests__/transforms/vSlot.spec.ts` now passes `31/31` (previously `1/31`). Adjacent focused official `parse.spec.ts`, `vSlot.spec.ts`, `vFor.spec.ts`, and `transformElement.spec.ts` all pass together. Full Vue 3 core conformance is still expected-failing but improved to `620/652`; remaining failures are concentrated in `cacheStatic`, `utils`, plus small `vIf` / `vOn` gaps.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_vue3_core` (`59/59` pass), `cargo xtask verify-npm-alias --version-line vue3 --package @vue/compiler-core`, direct prepared Vitest `vSlot.spec.ts` (`31/31` pass), adjacent prepared Vitest `parse.spec.ts` + `vSlot.spec.ts` + `vFor.spec.ts` + `transformElement.spec.ts` (all pass), `git diff --check`, and `cargo xtask run-conformance --suite vue3-core` as an expected fail with `620/652` passing.
 
 - Added a Rust-backed Vue 3 `processFor` / `transformFor` projection bridge.
 - `vuec_vue3_core::transform_for_projection` now owns official `v-for` expression parsing and decisions for skipped alias slots, destructuring aliases, source/value/key/index locations, malformed/no-expression diagnostics, prefixIdentifiers expression rewriting, OXC-backed alias local extraction, template child-key diagnostics, key property projection, fragment patch flags, stable fragment tracking, and loop child-block wrapper selection.

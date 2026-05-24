@@ -108,6 +108,11 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
         "vue3.core.transformModel" => Ok(vuec_vue3_core::transform_model_projection(&payload)),
         "vue3.core.transformIf" => Ok(vuec_vue3_core::transform_if_projection(&payload)),
         "vue3.core.transformFor" => Ok(vuec_vue3_core::transform_for_projection(&payload)),
+        "vue3.core.trackSlotScopes" => Ok(vuec_vue3_core::track_slot_scopes_projection(&payload)),
+        "vue3.core.trackVForSlotScopes" => {
+            Ok(vuec_vue3_core::track_v_for_slot_scopes_projection(&payload))
+        }
+        "vue3.core.buildSlots" => Ok(vuec_vue3_core::build_slots_projection(&payload)),
         "vue3.core.resolveComponentType" => {
             Ok(vuec_vue3_core::resolve_component_type_projection(&payload))
         }

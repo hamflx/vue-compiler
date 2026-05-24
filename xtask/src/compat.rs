@@ -3634,6 +3634,13 @@ const vue3CoreRuntime = (() => {
     const source = runtime.stringifyExpression(node);
     return names.some(name => source.includes(name));
   };
+  runtime.expressionIdentifierNames = function expressionIdentifierNames(exp) {
+    if (!exp) return [];
+    if (typeof exp === 'string') return exp ? [exp] : [];
+    if (Array.isArray(exp.identifiers)) return exp.identifiers.filter(Boolean);
+    if (exp.type === NodeTypes.SIMPLE_EXPRESSION && exp.content) return [exp.content];
+    return [];
+  };
   runtime.getMemoedVNodeCall = function getMemoedVNodeCall(node) {
     return node && node.type === NodeTypes.JS_CALL_EXPRESSION && node.callee === runtime.WITH_MEMO ? node.arguments[1].returns : node;
   };
@@ -3785,11 +3792,17 @@ const vue3CoreRuntime = (() => {
         list.splice(removalIndex, 1);
       },
       onNodeRemoved() {},
-      addIdentifiers(name) { if (name) context.identifiers[name] = (context.identifiers[name] || 0) + 1; },
-      removeIdentifiers(name) {
-        if (!name || !context.identifiers[name]) return;
-        context.identifiers[name]--;
-        if (context.identifiers[name] <= 0) delete context.identifiers[name];
+      addIdentifiers(exp) {
+        for (const name of runtime.expressionIdentifierNames(exp)) {
+          context.identifiers[name] = (context.identifiers[name] || 0) + 1;
+        }
+      },
+      removeIdentifiers(exp) {
+        for (const name of runtime.expressionIdentifierNames(exp)) {
+          if (!context.identifiers[name]) continue;
+          context.identifiers[name]--;
+          if (context.identifiers[name] <= 0) delete context.identifiers[name];
+        }
       },
       hoist(exp) {
         if (typeof exp === 'string') exp = runtime.createSimpleExpression(exp);
@@ -4220,7 +4233,13 @@ const vue3CoreRuntime = (() => {
 
     function genConditionalExpression(node) {
       const nested = node.alternate && node.alternate.type === NodeTypes.JS_CONDITIONAL_EXPRESSION;
-      genNode(node.test);
+      if (node.test && node.test.type === NodeTypes.SIMPLE_EXPRESSION && !node.test.isStatic && !runtime.isSimpleIdentifier(node.test.content)) {
+        push(`(`);
+        genNode(node.test);
+        push(`)`);
+      } else {
+        genNode(node.test);
+      }
       if (node.newline === false) {
         push(` ? `);
         genNode(node.consequent);
@@ -4387,6 +4406,7 @@ const vue3CoreRuntime = (() => {
     const matches = typeof name === 'string' ? n => n === name : n => name.test(n);
     return (node, context) => {
       if (node.type !== NodeTypes.ELEMENT) return;
+      if (node.tagType === ElementTypes.TEMPLATE && (node.props || []).some(runtime.isVSlot)) return;
       const exitFns = [];
       for (let i = 0; i < node.props.length; i++) {
         const prop = node.props[i];
@@ -4952,6 +4972,9 @@ const vue3CoreRuntime = (() => {
             }
           } else if (prop.name === 'once' || prop.name === 'memo') {
             continue;
+          } else if (prop.name === 'slot') {
+            if (!isComponent) context.onError(runtime.createCompilerError(ErrorCodes.X_V_SLOT_MISPLACED, prop.loc));
+            continue;
           } else if (context.directiveTransforms && context.directiveTransforms[prop.name]) {
             const result = context.directiveTransforms[prop.name](prop, node, context);
             objectProps.push(...((result && result.props) || []));
@@ -5019,16 +5042,22 @@ const vue3CoreRuntime = (() => {
         : node.children && node.children.length
           ? node.children
           : undefined;
-      const childrenProjection = callBridge('vue3.core.transformElementChildren', {
-        tag: projectionNameFromHelperSymbol(tag),
-        children: node.children || [],
-      });
-      if (childrenProjection && childrenProjection.kind === 'slots') {
-        children = materializeVue3ElementSlotsProjection(childrenProjection, node, context);
-        if (childrenProjection.shouldUseBlock) shouldUseBlock = true;
-      } else if (childrenProjection && childrenProjection.kind === 'children') {
-        if (childrenProjection.shouldUseBlock) shouldUseBlock = true;
-        if (childrenProjection.patchFlag) patchFlag = (patchFlag || 0) | childrenProjection.patchFlag;
+      if (isComponent && node.children && node.children.length && tag !== runtime.TELEPORT && tag !== runtime.KEEP_ALIVE) {
+        const builtSlots = runtime.buildSlots(node, context);
+        children = builtSlots.slots;
+        if (builtSlots.hasDynamicSlots) patchFlag = (patchFlag || 0) | 1024;
+      } else {
+        const childrenProjection = callBridge('vue3.core.transformElementChildren', {
+          tag: projectionNameFromHelperSymbol(tag),
+          children: node.children || [],
+        });
+        if (childrenProjection && childrenProjection.kind === 'slots') {
+          children = materializeVue3ElementSlotsProjection(childrenProjection, node, context);
+          if (childrenProjection.shouldUseBlock) shouldUseBlock = true;
+        } else if (childrenProjection && childrenProjection.kind === 'children') {
+          if (childrenProjection.shouldUseBlock) shouldUseBlock = true;
+          if (childrenProjection.patchFlag) patchFlag = (patchFlag || 0) | childrenProjection.patchFlag;
+        }
       }
       if (!patchFlag && children && (children.type === NodeTypes.INTERPOLATION || children.type === NodeTypes.COMPOUND_EXPRESSION)) patchFlag = 1;
       node.codegenNode = runtime.createVNodeCall(context, tag, props, children, patchFlag, dynamicProps.length ? stringifyDynamicPropNames(dynamicProps) : undefined, undefined, shouldUseBlock, false, isComponent, node.loc);
@@ -5376,8 +5405,34 @@ const vue3CoreRuntime = (() => {
     }
     renderExp.arguments.push(runtime.createFunctionExpression(runtime.createForLoopParams(forNode.parseResult), childBlock, true));
   };
-  runtime.trackSlotScopes = () => {};
-  runtime.trackVForSlotScopes = () => {};
+  runtime.trackSlotScopes = function trackSlotScopes(node, context) {
+    if (!node || node.type !== NodeTypes.ELEMENT || !(node.tagType === ElementTypes.COMPONENT || node.tagType === ElementTypes.TEMPLATE)) return;
+    const projection = callBridge('vue3.core.trackSlotScopes', { node, context: vue3TransformSlotContextPayload(context) });
+    if (!projection || !projection.track) return;
+    const props = materializeVue3SlotProjectionNode(projection.slotProps, node, context);
+    const locals = (projection.locals || []).filter(Boolean);
+    if (context && context.prefixIdentifiers && props) context.addIdentifiers(props);
+    if (context && context.prefixIdentifiers) locals.forEach(local => context.addIdentifiers(local));
+    if (context && context.scopes) context.scopes.vSlot++;
+    return () => {
+      if (context && context.prefixIdentifiers && props) context.removeIdentifiers(props);
+      if (context && context.prefixIdentifiers) locals.forEach(local => context.removeIdentifiers(local));
+      if (context && context.scopes) context.scopes.vSlot--;
+    };
+  };
+  runtime.trackVForSlotScopes = function trackVForSlotScopes(node, context) {
+    if (!node || node.type !== NodeTypes.ELEMENT || node.tagType !== ElementTypes.TEMPLATE || !(node.props || []).some(runtime.isVSlot)) return;
+    const projection = callBridge('vue3.core.trackVForSlotScopes', { node, context: vue3TransformSlotContextPayload(context) });
+    if (!projection || !projection.track) return;
+    const parseResult = materializeVue3ForParseResult(projection.parseResult, projection.dir || runtime.findDir(node, 'for', true), context);
+    const locals = [parseResult.value, parseResult.key, parseResult.index].filter(Boolean);
+    for (const local of locals) context.addIdentifiers(local);
+    const dir = runtime.findDir(node, 'for', true);
+    if (dir) dir.forParseResult = parseResult;
+    return () => {
+      for (const local of locals) context.removeIdentifiers(local);
+    };
+  };
   runtime.buildProps = function buildProps(node, context, props = node && node.props || []) {
     const objectProps = [];
     const directives = [];
@@ -5433,8 +5488,17 @@ const vue3CoreRuntime = (() => {
     const elements = materializeVue3DirectiveArgsProjection(projection, dir, context);
     return runtime.createArrayExpression(elements);
   };
-  runtime.buildSlots = function buildSlots() {
-    return { slots: runtime.createObjectExpression([]), hasDynamicSlots: false };
+  runtime.buildSlots = function buildSlots(node, context) {
+    const projection = callBridge('vue3.core.buildSlots', {
+      node,
+      context: vue3TransformSlotContextPayload(context),
+    });
+    materializeVue3SlotErrors(projection, node, context);
+    const slots = materializeVue3SlotsProjection(projection, node, context);
+    return {
+      slots,
+      hasDynamicSlots: !!(projection && projection.hasDynamicSlots),
+    };
   };
   runtime.resolveComponentType = function resolveComponentType(node, context) {
     const projection = callBridge('vue3.core.resolveComponentType', {
@@ -5590,6 +5654,20 @@ function vue3TransformElementContextPayload(context) {
   };
 }
 
+function vue3TransformSlotContextPayload(context) {
+  context = context || {};
+  return {
+    prefixIdentifiers: !!context.prefixIdentifiers,
+    inline: !!context.inline,
+    isTS: !!context.isTS,
+    ssr: !!(context.ssr || context.inSSR),
+    identifiers: context.identifiers || {},
+    bindingMetadata: context.bindingMetadata || {},
+    vForDepth: context.scopes && context.scopes.vFor || 0,
+    vSlotDepth: context.scopes && context.scopes.vSlot || 0,
+  };
+}
+
 function vue3ElementDirectivePropSummaries(dir, result, extra = {}) {
   return ((result && result.props) || []).map(prop => {
     const key = prop && prop.key;
@@ -5686,6 +5764,138 @@ function materializeVue3ElementSlotsProjection(projection, node, context) {
   ));
   if (context) context.helper(vue3CoreRuntime.WITH_CTX);
   return vue3CoreRuntime.createObjectExpression(properties, node.loc);
+}
+
+function materializeVue3SlotErrors(projection, node, context) {
+  if (!projection || !Array.isArray(projection.errors) || !context || !context.onError) return;
+  for (const error of projection.errors) {
+    context.onError(vue3CoreRuntime.createCompilerError(error.code, error.loc || (node && node.loc) || vue3CoreRuntime.locStub));
+  }
+}
+
+function materializeVue3SlotsProjection(projection, node, context) {
+  projection = projection || {};
+  if (context) context.helper(vue3CoreRuntime.WITH_CTX);
+  const properties = [];
+  for (const property of projection.properties || []) {
+    properties.push(vue3CoreRuntime.createObjectProperty(
+      materializeVue3SlotProjectionNode(property.key, node, context),
+      materializeVue3SlotFunctionProjection(property, node, context),
+    ));
+  }
+  const slotFlag = projection.slotFlag || 1;
+  const flagText = projection.slotFlagText || (slotFlag === 2 ? 'DYNAMIC' : slotFlag === 3 ? 'FORWARDED' : 'STABLE');
+  properties.push(vue3CoreRuntime.createObjectProperty(
+    '_',
+    vue3CoreRuntime.createSimpleExpression(`${slotFlag} /* ${flagText} */`, false),
+  ));
+  let slots = vue3CoreRuntime.createObjectExpression(properties, node && node.loc || vue3CoreRuntime.locStub);
+  if (projection.dynamicSlots && projection.dynamicSlots.length) {
+    const dynamicSlotArray = vue3CoreRuntime.createArrayExpression(
+      projection.dynamicSlots.map(slot => materializeVue3DynamicSlotProjection(slot, node, context)),
+    );
+    if (context) context.helper(vue3CoreRuntime.CREATE_SLOTS);
+    slots = vue3CoreRuntime.createCallExpression(
+      context ? context.helper(vue3CoreRuntime.CREATE_SLOTS) : vue3CoreRuntime.CREATE_SLOTS,
+      [
+        slots,
+        dynamicSlotArray,
+      ],
+      node && node.loc || vue3CoreRuntime.locStub,
+    );
+  }
+  return slots;
+}
+
+function materializeVue3SlotFunctionProjection(property, node, context) {
+  const loc = property.loc || (node && node.loc) || vue3CoreRuntime.locStub;
+  const params = materializeVue3SlotProjectionNode(property.params, node, context);
+  const returns = materializeVue3SlotChildren(property, node);
+  const fn = vue3CoreRuntime.createFunctionExpression(params, returns, false, true, returns.length ? returns[0].loc : loc);
+  if (property.nonScoped && context && context.compatConfig) fn.isNonScopedSlot = true;
+  return fn;
+}
+
+function materializeVue3SlotChildren(property, node) {
+  const out = [];
+  for (const index of property.indices || []) {
+    const child = node && node.children && node.children[index];
+    if (!child) continue;
+    if (property.unwrapTemplate && child.type === vue3CoreRuntime.NodeTypes.ELEMENT && child.tag === 'template') {
+      out.push(...(child.children || []));
+    } else {
+      out.push(child);
+    }
+  }
+  return out;
+}
+
+function materializeVue3DynamicSlotProjection(projection, node, context) {
+  if (!projection) return vue3CoreRuntime.createSimpleExpression('undefined', false);
+  if (projection.kind === 'conditional') {
+    return vue3CoreRuntime.createConditionalExpression(
+      materializeVue3SlotProjectionNode(projection.test, node, context),
+      materializeVue3DynamicSlotProjection(projection.consequent, node, context),
+      materializeVue3DynamicSlotProjection(projection.alternate, node, context),
+    );
+  }
+  if (projection.kind === 'for') {
+    const params = projection.params || {};
+    if (context) context.helper(vue3CoreRuntime.RENDER_LIST);
+    return vue3CoreRuntime.createCallExpression(
+      context ? context.helper(vue3CoreRuntime.RENDER_LIST) : vue3CoreRuntime.RENDER_LIST,
+      [
+        materializeVue3SlotProjectionNode(projection.source, node, context),
+        vue3CoreRuntime.createFunctionExpression(
+          vue3CoreRuntime.createForLoopParams({
+            value: materializeVue3SlotProjectionNode(params.value, node, context),
+            key: materializeVue3SlotProjectionNode(params.key, node, context),
+            index: materializeVue3SlotProjectionNode(params.index, node, context),
+          }),
+          materializeVue3DynamicSlotProjection(projection.slot, node, context),
+          true,
+        ),
+      ],
+      node && node.loc || vue3CoreRuntime.locStub,
+    );
+  }
+  if (projection.kind === 'dynamicSlot') {
+    const properties = [
+      vue3CoreRuntime.createObjectProperty('name', materializeVue3SlotProjectionNode(projection.name, node, context)),
+      vue3CoreRuntime.createObjectProperty('fn', materializeVue3SlotFunctionProjection(projection.slot || {}, node, context)),
+    ];
+    if (projection.key != null) {
+      properties.push(vue3CoreRuntime.createObjectProperty('key', vue3CoreRuntime.createSimpleExpression(String(projection.key), true)));
+    }
+    return vue3CoreRuntime.createObjectExpression(properties);
+  }
+  return materializeVue3SlotProjectionNode(projection, node, context);
+}
+
+function materializeVue3SlotProjectionNode(projection, node, context) {
+  if (!projection || projection.kind === 'undefined') return undefined;
+  if (projection.type) return projection;
+  for (const name of projection.helpers || []) {
+    const symbol = helperSymbolFromProjection(name);
+    if (symbol && context) context.helper(symbol);
+  }
+  switch (projection.kind) {
+    case 'simple':
+      return vue3CoreRuntime.createSimpleExpression(
+        projection.content || '',
+        !!projection.isStatic,
+        projection.loc || (node && node.loc) || vue3CoreRuntime.locStub,
+        projection.constType || 0,
+      );
+    case 'compound':
+      return vue3CoreRuntime.createCompoundExpression(
+        (projection.children || []).map(child => materializeVue3SlotProjectionNode(child, node, context)),
+        projection.loc || (node && node.loc) || vue3CoreRuntime.locStub,
+      );
+    default:
+      if (typeof projection === 'string') return projection;
+      throw new Error(`Unsupported Rust v-slot projection: ${projection.kind}`);
+  }
 }
 
 function vue3IfSiblingPayload(siblings) {
