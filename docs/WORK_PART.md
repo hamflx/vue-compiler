@@ -57,9 +57,17 @@
 - [x] Vue 3 compiler-ssr mixed alias-runtime structural directive first-pass slice for `ssrVFor.spec.ts`, `ssrVIf.spec.ts`, `ssrVModel.spec.ts`, and `ssrFallthroughAttrs.spec.ts` (full SSR suite currently `97/129`, `mixed` coverage).
 - [x] Vue 3 compiler-ssr mixed alias-runtime built-in directive transform slice for `ssrVShow.spec.ts` (`7/7`; full SSR suite currently `99/129`, `mixed` coverage).
 - [x] Vue 3 compiler-ssr mixed alias-runtime slot outlet / Transition symbol adapter slice for `ssrSlotOutlet.spec.ts` (`11/11`; full SSR suite currently `121/129`, `mixed` coverage).
+- [x] Vue 3 compiler-ssr mixed alias-runtime conformance closure for prepared official SSR source (`ssrComponent.spec.ts` `16/16`, `ssrInjectCssVars.spec.ts` `6/6`, full SSR suite `129/129`, `mixed` coverage).
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Closed the remaining Vue 3 compiler-ssr prepared official suite through mixed alias-runtime compiler-core/codegen adapter support.
+- Full Vue 3 SSR conformance now passes `129/129`; the latest report classifies all prepared SSR tests as `mixed` (`rust-backed 0/0`, `shim-backed 0/0`).
+- `ssrComponent.spec.ts` now passes `16/16`; the alias adapter now aligns official vnode fallback sub-transform behavior by using `context.ssr` for structural-only suppression, including `trackVForSlotScopes` in `getBaseTransformPreset(true)`, honoring `resolveComponentType(node, context, ssr)`, and preserving dynamic slot `v-for` helper registration order.
+- `ssrInjectCssVars.spec.ts` now passes `6/6`; the alias generator now separates setup-inline helper preamble from `result.code` and emits inline render code as an arrow function.
+- Coverage remains explicitly `mixed`: this is prepared SSR source execution support and codegen/import adapter compatibility, not Rust-backed SSR transform/codegen parity.
+- Verification this round: `cargo fmt --all --check`, `cargo check -p xtask`, `cargo test -p xtask` (`20/20` pass), `git diff --check`, `cargo xtask export-api --rust --version-line vue3`, focused `ssrComponent.spec.ts` (`16/16`), focused `ssrInjectCssVars.spec.ts` (`6/6`), `cargo xtask run-conformance --suite vue3-core` (`652/652`), `cargo xtask run-conformance --suite vue3-dom` (`133/133`), and `cargo xtask run-conformance --suite vue3-ssr` (`129/129`).
 
 - Closed the Vue 3 compiler-ssr `ssrSlotOutlet.spec.ts` focused slice through mixed alias-runtime compiler-core support.
 - The generated compiler-core alias now materializes Rust `helperName` component projections back to the caller's own `context.isBuiltInComponent(...)` symbol when available, preserving official SSR source strict comparisons for `Transition` and `TransitionGroup`.

@@ -4000,13 +4000,19 @@ const vue3CoreRuntime = (() => {
     const runtimeModuleName = options.runtimeModuleName || 'vue';
     const runtimeGlobalName = options.runtimeGlobalName || 'Vue';
     const ssrRuntimeModuleName = options.ssrRuntimeModuleName || 'vue/server-renderer';
+    const isSetupInlined = !!options.inline;
     let code = '';
     let indentLevel = 0;
     let preamble = '';
     let pure = false;
-    const push = value => { code += String(value); };
+    let activeBuffer = isSetupInlined ? 'preamble' : 'code';
+    const currentOutput = () => activeBuffer === 'preamble' ? preamble : code;
+    const push = value => {
+      if (activeBuffer === 'preamble') preamble += String(value);
+      else code += String(value);
+    };
     const currentIndent = () => '  '.repeat(indentLevel);
-    const newline = () => { code += `\n${currentIndent()}`; };
+    const newline = () => { push(`\n${currentIndent()}`); };
     const indent = () => { indentLevel++; newline(); };
     const deindent = (withoutNewline = false) => {
       indentLevel = Math.max(0, indentLevel - 1);
@@ -4037,12 +4043,12 @@ const vue3CoreRuntime = (() => {
         newline();
       }
       genHoists(ast.hoists || []);
-      if (!code) push(`\n`);
+      if (!currentOutput()) push(`\n`);
       else {
-        if (!code.endsWith('\n')) newline();
-        if (!code.endsWith('\n\n')) newline();
+        if (!currentOutput().endsWith('\n')) newline();
+        if (!currentOutput().endsWith('\n\n')) newline();
       }
-      push(`export `);
+      if (!isSetupInlined) push(`export `);
     } else {
       const vueBinding = ssr ? `require(${JSON.stringify(runtimeModuleName)})` : runtimeGlobalName;
       if (helpers.length) {
@@ -4069,15 +4075,23 @@ const vue3CoreRuntime = (() => {
         newline();
       }
       genHoists(ast.hoists || []);
-      if (!code) push(`\n`);
+      if (!currentOutput()) push(`\n`);
       else newline();
       push(`return `);
+    }
+    if (isSetupInlined) {
+      activeBuffer = 'code';
+      indentLevel = 0;
     }
 
     const functionName = ssr ? 'ssrRender' : 'render';
     const args = ssr ? ['_ctx', '_push', '_parent', '_attrs'] : ['_ctx', '_cache'];
     if (options.bindingMetadata && !options.inline) args.push('$props', '$setup', '$data', '$options');
-    push(`function ${functionName}(${args.join(', ')}) {`);
+    if (isSetupInlined) {
+      push(`(${args.join(', ')}) => {`);
+    } else {
+      push(`function ${functionName}(${args.join(', ')}) {`);
+    }
     indent();
 
     if (useWithBlock) {
@@ -4247,7 +4261,7 @@ const vue3CoreRuntime = (() => {
     }
 
     function genVNodeCall(node) {
-      const call = node.isBlock ? helper(runtime.getVNodeBlockHelper(false, node.isComponent)) : helper(runtime.getVNodeHelper(false, node.isComponent));
+      const call = node.isBlock ? helper(runtime.getVNodeBlockHelper(ssr, node.isComponent)) : helper(runtime.getVNodeHelper(ssr, node.isComponent));
       const args = genNullableArgs([node.tag, node.props, node.children, patchFlagText(node.patchFlag), node.dynamicProps]);
       if (node.directives) push(`${helper(runtime.WITH_DIRECTIVES)}(`);
       if (node.isBlock) push(`(${helper(runtime.OPEN_BLOCK)}(${node.disableTracking ? 'true' : ''}), `);
@@ -4403,7 +4417,8 @@ const vue3CoreRuntime = (() => {
     }
 
     function genForExpression(node) {
-      push(`(${helper(runtime.OPEN_BLOCK)}(true), ${helper(runtime.CREATE_ELEMENT_BLOCK)}(${helper(runtime.FRAGMENT)}, null, ${helper(runtime.RENDER_LIST)}(`);
+      const blockHelper = helper(runtime.getVNodeBlockHelper(ssr, false));
+      push(`(${helper(runtime.OPEN_BLOCK)}(true), ${blockHelper}(${helper(runtime.FRAGMENT)}, null, ${helper(runtime.RENDER_LIST)}(`);
       genNode(node.source);
       push(`, (`);
       genNodeList(runtime.createForLoopParams(node.parseResult || node), false, true);
@@ -4413,11 +4428,11 @@ const vue3CoreRuntime = (() => {
       const children = node.children || [];
       const child = children.length === 1 ? children[0] : children;
       if (Array.isArray(child)) {
-        push(`(${helper(runtime.OPEN_BLOCK)}(), ${helper(runtime.CREATE_ELEMENT_BLOCK)}(${helper(runtime.FRAGMENT)}, null, `);
+        push(`(${helper(runtime.OPEN_BLOCK)}(), ${blockHelper}(${helper(runtime.FRAGMENT)}, null, `);
         genNodeListAsArray(child);
         push(`, 64 /* STABLE_FRAGMENT */))`);
       } else if (child && child.type === NodeTypes.TEXT_CALL) {
-        push(`(${helper(runtime.OPEN_BLOCK)}(), ${helper(runtime.CREATE_ELEMENT_BLOCK)}(${helper(runtime.FRAGMENT)}, null, [`);
+        push(`(${helper(runtime.OPEN_BLOCK)}(), ${blockHelper}(${helper(runtime.FRAGMENT)}, null, [`);
         indent();
         genNode(child);
         deindent();
@@ -5013,9 +5028,25 @@ const vue3CoreRuntime = (() => {
         };
         for (const prop of node.props) {
           if (prop.type === NodeTypes.ATTRIBUTE) {
+            if (
+              prop.name === 'is'
+              && (
+                node.tag === 'component'
+                || node.tag === 'Component'
+                || (prop.value && String(prop.value.content || '').startsWith('vue:'))
+              )
+            ) {
+              continue;
+            }
             objectProps.push(runtime.createObjectProperty(prop.name, runtime.createSimpleExpression(prop.value ? prop.value.content : '', true)));
             propSummaries.push({ kind: 'attribute', name: prop.name, value: prop.value && prop.value.content });
           } else if (prop.name === 'bind' && prop.arg) {
+            if (
+              runtime.isStaticArgOf(prop.arg, 'is')
+              && (node.tag === 'component' || node.tag === 'Component')
+            ) {
+              continue;
+            }
             const transform = context.directiveTransforms && context.directiveTransforms.bind;
             if (!transform) {
               if (runtime.isStaticArgOf(prop.arg, 'key')) propSummaries.push({ kind: 'directiveProp', forceBlock: true });
@@ -5299,7 +5330,7 @@ const vue3CoreRuntime = (() => {
     const action = projection && projection.action || { kind: 'noop' };
     const finalizeBranch = (ifNode, targetBranch, isRoot) => {
       if (processCodegen) return processCodegen(ifNode, targetBranch, isRoot);
-      if (context && context.inSSR) return undefined;
+      if (context && context.ssr) return undefined;
       return () => {
         if (isRoot) {
           ifNode.codegenNode = runtime.createIfCodegenNodeForBranch(targetBranch, action.keyBase || 0, context);
@@ -5432,7 +5463,7 @@ const vue3CoreRuntime = (() => {
       __vuecProjection: projection,
     };
     let renderExp;
-    if (!processCodegen && !(context && context.inSSR)) {
+    if (!processCodegen && !(context && context.ssr)) {
       renderExp = runtime.createCallExpression(context.helper(runtime.RENDER_LIST), [forNode.source]);
       forNode.codegenNode = runtime.createVNodeCall(context, context.helper(runtime.FRAGMENT), undefined, renderExp, 256, undefined, undefined, true, true, false, node.loc);
     }
@@ -5554,6 +5585,15 @@ const vue3CoreRuntime = (() => {
     };
     for (const prop of props || []) {
       if (prop.type === NodeTypes.ATTRIBUTE) {
+        if (
+          prop.name === 'is'
+          && (
+            node && (node.tag === 'component' || node.tag === 'Component')
+            || prop.value && String(prop.value.content || '').startsWith('vue:')
+          )
+        ) {
+          continue;
+        }
         objectProps.push(runtime.createObjectProperty(
           runtime.createSimpleExpression(prop.name, true, prop.nameLoc || prop.loc),
           runtime.createSimpleExpression(prop.value ? prop.value.content : '', true, prop.value ? prop.value.loc : prop.loc),
@@ -5561,6 +5601,9 @@ const vue3CoreRuntime = (() => {
         continue;
       }
       if (prop.name === 'bind' && prop.arg) {
+        if (runtime.isStaticArgOf(prop.arg, 'is') && node && (node.tag === 'component' || node.tag === 'Component')) {
+          continue;
+        }
         const transform = context && context.directiveTransforms && context.directiveTransforms.bind;
         const result = transform ? transform(prop, node, context) : runtime.transformBind(prop, node, context);
         objectProps.push(...((result && result.props) || []));
@@ -5636,16 +5679,27 @@ const vue3CoreRuntime = (() => {
       hasDynamicSlots: !!(projection && projection.hasDynamicSlots),
     };
   };
-  runtime.resolveComponentType = function resolveComponentType(node, context) {
+  runtime.resolveComponentType = function resolveComponentType(node, context, ssr = false) {
     const projection = callBridge('vue3.core.resolveComponentType', {
       node,
       context: vue3ResolveComponentContextPayload(context),
-      ssr: !!(context && context.inSSR),
+      ssr: !!ssr,
     });
     return materializeVue3ComponentTypeProjection(projection, node, context);
   };
-  runtime.getBaseTransformPreset = function getBaseTransformPreset() {
-    return [[runtime.transformOnce, runtime.transformIf, runtime.transformMemo, runtime.transformFor, runtime.transformExpression, runtime.transformSlotOutlet, runtime.transformElement, runtime.trackSlotScopes, runtime.transformText], { on: runtime.transformOn, bind: runtime.transformBind, model: runtime.transformModel }];
+  runtime.getBaseTransformPreset = function getBaseTransformPreset(prefixIdentifiers = false) {
+    return [[
+      runtime.transformOnce,
+      runtime.transformIf,
+      runtime.transformMemo,
+      runtime.transformFor,
+      ...(prefixIdentifiers ? [runtime.trackVForSlotScopes] : []),
+      runtime.transformExpression,
+      runtime.transformSlotOutlet,
+      runtime.transformElement,
+      runtime.trackSlotScopes,
+      runtime.transformText,
+    ], { on: runtime.transformOn, bind: runtime.transformBind, model: runtime.transformModel }];
   };
   runtime.getConstantType = function getConstantType(node) {
     if (!node) return ConstantTypes.NOT_CONSTANT;
@@ -6303,18 +6357,21 @@ function materializeVue3DynamicSlotProjection(projection, node, context, buildSl
   }
   if (projection.kind === 'for') {
     const params = projection.params || {};
-    if (context) context.helper(vue3CoreRuntime.RENDER_LIST);
+    const slot = materializeVue3DynamicSlotProjection(projection.slot, node, context, buildSlotFn);
+    const source = materializeVue3SlotProjectionNode(projection.source, node, context);
+    const loopParams = vue3CoreRuntime.createForLoopParams({
+      value: materializeVue3SlotProjectionNode(params.value, node, context),
+      key: materializeVue3SlotProjectionNode(params.key, node, context),
+      index: materializeVue3SlotProjectionNode(params.index, node, context),
+    });
+    const renderListHelper = context ? context.helper(vue3CoreRuntime.RENDER_LIST) : vue3CoreRuntime.RENDER_LIST;
     return vue3CoreRuntime.createCallExpression(
-      context ? context.helper(vue3CoreRuntime.RENDER_LIST) : vue3CoreRuntime.RENDER_LIST,
+      renderListHelper,
       [
-        materializeVue3SlotProjectionNode(projection.source, node, context),
+        source,
         vue3CoreRuntime.createFunctionExpression(
-          vue3CoreRuntime.createForLoopParams({
-            value: materializeVue3SlotProjectionNode(params.value, node, context),
-            key: materializeVue3SlotProjectionNode(params.key, node, context),
-            index: materializeVue3SlotProjectionNode(params.index, node, context),
-          }),
-          materializeVue3DynamicSlotProjection(projection.slot, node, context, buildSlotFn),
+          loopParams,
+          slot,
           true,
         ),
       ],
