@@ -1216,8 +1216,11 @@ fn lower_vue3_component_slots_to_dom_mir(
     let mut slots = Vec::new();
     let mut dynamic_slots = Vec::new();
     let mut default_children = Vec::new();
-    for (index, child_id) in visible.iter().copied().enumerate() {
+    let mut index = 0usize;
+    while index < visible.len() {
+        let child_id = visible[index];
         let Some(child) = ast.node(child_id) else {
+            index += 1;
             continue;
         };
         if let Vue3AstKind::Element(child_element) = &child.kind {
@@ -1233,18 +1236,19 @@ fn lower_vue3_component_slots_to_dom_mir(
                         mir_id,
                         state,
                     ));
-                } else if let Some(dynamic_slot) = lower_vue3_dynamic_slot_to_dom_mir(
-                    child_id,
-                    child,
-                    child_element,
-                    slot,
-                    ast,
-                    hir_id,
-                    mir_id,
-                    state,
-                    index,
-                ) {
+                    index += 1;
+                } else if let Some(dynamic_slot) =
+                    lower_vue3_dynamic_slot_to_dom_mir(&visible, index, ast, hir_id, mir_id, state)
+                {
+                    let next_index = if directive_by_name(child_element, "if").is_some() {
+                        collect_vue3_dynamic_slot_branch_chain(&visible, index, ast).1
+                    } else {
+                        index + 1
+                    };
                     dynamic_slots.push(dynamic_slot);
+                    index = next_index;
+                } else {
+                    index += 1;
                 }
                 continue;
             }
@@ -1252,6 +1256,7 @@ fn lower_vue3_component_slots_to_dom_mir(
         if slots_are_stable {
             default_children.push(child_id);
         }
+        index += 1;
     }
     if slots_are_stable && !default_children.is_empty() {
         slots.push(lower_vue3_default_slot_to_dom_mir(
@@ -1358,16 +1363,28 @@ fn lower_vue3_default_slot_to_dom_mir(
 }
 
 fn lower_vue3_dynamic_slot_to_dom_mir(
-    ast_id: NodeId,
-    ast_node: &vuec_ast::Node<Vue3NodeKind>,
-    element: &Vue3Element,
-    slot: &Vue3Directive,
+    visible: &[NodeId],
+    index: usize,
     ast: &Vue3Ast,
     hir_parent: NodeId,
     mir_parent: NodeId,
     state: &mut Vue3DomLoweringState,
-    index: usize,
 ) -> Option<vuec_ast::Vue3DomDynamicSlot> {
+    let ast_id = *visible.get(index)?;
+    let ast_node = ast.node(ast_id)?;
+    let Vue3AstKind::Element(element) = &ast_node.kind else {
+        return None;
+    };
+    let slot = directive_by_name(element, "slot")?;
+    if directive_by_name(element, "if").is_some() {
+        let (branches, _) = collect_vue3_dynamic_slot_branch_chain(visible, index, ast);
+        return lower_vue3_dynamic_slot_branch_to_dom_mir(
+            &branches, 0, ast, hir_parent, mir_parent, state,
+        );
+    }
+    if is_else_branch(element) {
+        return None;
+    }
     if let Some(for_dir) = directive_by_name(element, "for") {
         return Some(vuec_ast::Vue3DomDynamicSlot::For(
             lower_vue3_for_slot_to_dom_mir(
@@ -1392,18 +1409,81 @@ fn lower_vue3_dynamic_slot_to_dom_mir(
             None
         },
     );
-    if let Some(if_dir) =
-        directive_by_name(element, "if").or_else(|| directive_by_name(element, "else-if"))
-    {
+    Some(vuec_ast::Vue3DomDynamicSlot::Slot(slot_object))
+}
+
+fn collect_vue3_dynamic_slot_branch_chain(
+    visible: &[NodeId],
+    start: usize,
+    ast: &Vue3Ast,
+) -> (Vec<(NodeId, usize)>, usize) {
+    let mut branches = vec![(visible[start], start)];
+    let mut index = start + 1;
+    while index < visible.len() {
+        let Some(node) = ast.node(visible[index]) else {
+            index += 1;
+            continue;
+        };
+        let Vue3AstKind::Element(element) = &node.kind else {
+            break;
+        };
+        if is_else_branch(element) && directive_by_name(element, "slot").is_some() {
+            branches.push((visible[index], index));
+            index += 1;
+        } else {
+            break;
+        }
+    }
+    (branches, index)
+}
+
+fn lower_vue3_dynamic_slot_branch_to_dom_mir(
+    branches: &[(NodeId, usize)],
+    index: usize,
+    ast: &Vue3Ast,
+    hir_parent: NodeId,
+    mir_parent: NodeId,
+    state: &mut Vue3DomLoweringState,
+) -> Option<vuec_ast::Vue3DomDynamicSlot> {
+    let (ast_id, key_index) = branches.get(index).copied()?;
+    let ast_node = ast.node(ast_id)?;
+    let Vue3AstKind::Element(element) = &ast_node.kind else {
+        return None;
+    };
+    let slot = directive_by_name(element, "slot")?;
+    let slot_object = lower_vue3_dynamic_slot_object_to_dom_mir(
+        ast_id,
+        ast_node,
+        slot,
+        &ast_node.children,
+        ast,
+        hir_parent,
+        mir_parent,
+        state,
+        Some(key_index.to_string()),
+    );
+    let condition = if index == 0 {
+        directive_by_name(element, "if")
+    } else {
+        directive_by_name(element, "else-if")
+    };
+    if let Some(condition) = condition {
+        let condition =
+            lower_vue3_optional_condition(condition, ast_node, &mut state.js, state.source_type);
+        let alternate = lower_vue3_dynamic_slot_branch_to_dom_mir(
+            branches,
+            index + 1,
+            ast,
+            hir_parent,
+            mir_parent,
+            state,
+        )
+        .map(Box::new);
         Some(vuec_ast::Vue3DomDynamicSlot::Conditional(
             vuec_ast::Vue3DomConditionalSlot {
-                condition: lower_vue3_optional_condition(
-                    if_dir,
-                    ast_node,
-                    &mut state.js,
-                    state.source_type,
-                ),
+                condition,
                 slot: slot_object,
+                alternate,
             },
         ))
     } else {
@@ -10154,10 +10234,16 @@ impl<'a> Vue3DomMirCodegen<'a> {
                         render_condition(&self.render_js_expr(condition, scope), self.options)
                     })
                     .unwrap_or_else(|| "true".into());
-                let slot = self.render_dynamic_slot_object(&slot.slot, scope);
+                let slot_object = self.render_dynamic_slot_object(&slot.slot, scope);
+                let alternate = slot
+                    .alternate
+                    .as_deref()
+                    .map(|alternate| self.render_dynamic_slot(alternate, scope))
+                    .unwrap_or_else(|| "undefined".into());
                 format!(
-                    "{condition}\n  ? {}\n  : undefined",
-                    indent_after_first_line(&slot, 4)
+                    "{condition}\n  ? {}\n  : {}",
+                    indent_after_first_line(&slot_object, 4),
+                    indent_after_first_line(&alternate, 4)
                 )
             }
             vuec_ast::Vue3DomDynamicSlot::For(slot) => self.render_for_slot(slot, scope),
@@ -15591,6 +15677,7 @@ mod tests {
                 if slot.condition.is_some()
                     && matches!(slot.slot.name, Vue3DomSlotName::Static(ref name) if name == "fallback")
                     && slot.slot.key.as_deref() == Some("1")
+                    && slot.alternate.is_none()
         ));
         assert!(matches!(
             &slots.dynamic_slots[2],
@@ -15605,6 +15692,69 @@ mod tests {
             .expressions()
             .iter()
             .any(|entry| entry.source == "list"));
+    }
+
+    #[test]
+    fn lower_vue3_ast_to_dom_mir_chains_dynamic_slot_if_else_branches() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<Comp><template #one v-if="ok">One</template><template #two v-else-if="maybe">Two</template><template #fallback v-else>Fallback</template></Comp>"#.into(),
+            file_id: FileId(39),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+
+        let component = result
+            .mir
+            .nodes
+            .iter()
+            .find_map(|node| match &node.kind {
+                Vue3DomMirKind::VNodeCall(call)
+                    if call.tag == Vue3DomTag::ComponentAsset("Comp".into()) =>
+                {
+                    Some(call)
+                }
+                _ => None,
+            })
+            .expect("component");
+        let MirChildren::Slots(slots) = &component.children else {
+            panic!("component slots");
+        };
+        assert_eq!(slots.flag, Vue3SlotFlag::Dynamic);
+        assert_eq!(slots.dynamic_slots.len(), 1);
+        let vuec_ast::Vue3DomDynamicSlot::Conditional(first) = &slots.dynamic_slots[0] else {
+            panic!("first conditional slot");
+        };
+        assert!(first.condition.is_some());
+        assert!(matches!(first.slot.name, Vue3DomSlotName::Static(ref name) if name == "one"));
+        assert_eq!(first.slot.key.as_deref(), Some("0"));
+        let Some(second) = first.alternate.as_deref() else {
+            panic!("else-if alternate");
+        };
+        let vuec_ast::Vue3DomDynamicSlot::Conditional(second) = second else {
+            panic!("second conditional slot");
+        };
+        assert!(second.condition.is_some());
+        assert!(matches!(second.slot.name, Vue3DomSlotName::Static(ref name) if name == "two"));
+        assert_eq!(second.slot.key.as_deref(), Some("1"));
+        let Some(third) = second.alternate.as_deref() else {
+            panic!("else alternate");
+        };
+        let vuec_ast::Vue3DomDynamicSlot::Slot(third) = third else {
+            panic!("else slot");
+        };
+        assert!(matches!(third.name, Vue3DomSlotName::Static(ref name) if name == "fallback"));
+        assert_eq!(third.key.as_deref(), Some("2"));
+        assert_eq!(
+            result
+                .js
+                .expressions()
+                .iter()
+                .map(|entry| entry.source.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ok", "maybe"]
+        );
     }
 
     #[test]
@@ -16583,6 +16733,53 @@ mod tests {
         assert!(!generated.code.contains("_ctx.slotProps"));
         assert!(!generated.code.contains("_ctx.item"));
         assert!(!generated.code.contains("_ctx.index"));
+    }
+
+    #[test]
+    fn generate_vue3_dom_mir_emits_dynamic_slot_if_else_alternates_from_mir() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<Comp><template #one v-if="ok">One</template><template #two v-else-if="maybe">Two</template><template #fallback v-else>Fallback</template></Comp>"#.into(),
+            file_id: FileId(40),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+        let generated = generate_vue3_dom_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated.code.contains("createSlots as _createSlots"));
+        assert!(generated.code.contains("_ctx.ok"));
+        assert!(generated.code.contains("_ctx.maybe"));
+        assert!(generated.code.contains("name: \"one\""));
+        assert!(generated.code.contains("name: \"two\""));
+        assert!(generated.code.contains("name: \"fallback\""));
+        assert!(generated.code.contains("key: \"0\""));
+        assert!(generated.code.contains("key: \"1\""));
+        assert!(generated.code.contains("key: \"2\""));
+        let ok_offset = generated.code.find("_ctx.ok").expect("ok condition");
+        let maybe_offset = generated.code.find("_ctx.maybe").expect("maybe condition");
+        let one_offset = generated.code.find("name: \"one\"").expect("one slot");
+        let two_offset = generated.code.find("name: \"two\"").expect("two slot");
+        let fallback_offset = generated
+            .code
+            .find("name: \"fallback\"")
+            .expect("fallback slot");
+        assert!(ok_offset < one_offset);
+        assert!(one_offset < maybe_offset);
+        assert!(maybe_offset < two_offset);
+        assert!(two_offset < fallback_offset);
+        assert!(!generated.code.contains(": undefined"));
+        assert_eq!(generated.code.matches("name: \"one\"").count(), 1);
+        assert_eq!(generated.code.matches("name: \"two\"").count(), 1);
+        assert_eq!(generated.code.matches("name: \"fallback\"").count(), 1);
     }
 
     #[test]

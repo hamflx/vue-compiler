@@ -1453,6 +1453,7 @@ pub struct Vue3DomDynamicSlotObject {
 pub struct Vue3DomConditionalSlot {
     pub condition: Option<JsExprId>,
     pub slot: Vue3DomDynamicSlotObject,
+    pub alternate: Option<Box<Vue3DomDynamicSlot>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -81,6 +81,7 @@
 - [x] Vue 3 structural `Vue3DomMir` component tag payload for native tags, component assets, dynamic components, and runtime-helper built-ins, with MIR-driven component declarations/imports in standalone DOM MIR codegen.
 - [x] Vue 3 structural `Vue3DomMir` stable component slots payload for default and static named slots, with MIR-driven `_withCtx` slot object emission in standalone DOM MIR codegen.
 - [x] Vue 3 structural `Vue3DomMir` dynamic component slots payload for dynamic slot names, slot `v-if`, and slot `v-for`, with MIR-driven `_createSlots`, `_renderList`, and `DYNAMIC_SLOTS` patch flag emission.
+- [x] Vue 3 structural `Vue3DomMir` dynamic component slot `v-if` / `v-else-if` / `v-else` alternate-chain payload, with MIR-driven nested conditional slot codegen.
 - [x] Vue 3 structural `Vue3DomMir` forwarded component slot flag payload, with MIR-driven `_: 3` emission when stable slot bodies forward `<slot>`.
 - [x] Vue 3 structural `Vue3DomMir` non-`v-for` `v-memo` wrapper payload, with MIR-driven `_withMemo` emission in standalone DOM MIR codegen.
 - [x] Vue 3 structural `Vue3DomMir` `v-for` memo cache target payload, with MIR-driven alias params, key guard, `_isMemoSame`, `_cached`, `_item.memo`, and `_cache` render-list emission.

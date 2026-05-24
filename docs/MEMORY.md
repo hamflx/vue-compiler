@@ -1,5 +1,11 @@
 # Memory
 
+- Current round: added dynamic component slot `v-if` / `v-else-if` / `v-else` alternate chains to structural Vue 3 DOM MIR.
+- `Vue3DomConditionalSlot` now carries `alternate: Option<Box<Vue3DomDynamicSlot>>`. DOM lowering groups adjacent dynamic slot branch chains into one `dynamic_slots` entry, stores branch slot objects and generated keys in MIR, and keeps condition expressions in `JsAstStore` in source order.
+- `generate_vue3_dom_mir` now renders nested dynamic slot alternates from MIR, so standalone codegen no longer has to treat `v-else-if` / `v-else` slot templates as independent dynamic slots or recover sibling branches from `Vue3Ast`.
+- This is structural target-codegen work and does not touch `xtask/src/compat.rs`. Exact compiler-core codegen migration to consume complete `Vue3DomMir` remains open.
+- Verification for this DOM MIR dynamic-slot alternate slice: focused `cargo test -p vuec_vue3_core dynamic_slot_if_else`, focused `cargo test -p vuec_vue3_core lower_vue3_ast_to_dom_mir_projects_dynamic_component_slots`, focused `cargo test -p vuec_vue3_core generate_vue3_dom_mir_emits_dynamic_component_slots_from_mir`, focused `cargo test -p vuec_vue3_core generate_vue3_dom_mir`, `cargo fmt --all --check`, `cargo check -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo xtask run-conformance --suite vue3-core` (`652/652`; coverage `rust-backed 192/192`, `mixed 460/460`, `shim-backed 0/0`), and `git diff --check`.
+
 - Current round: added mode-aware function/module preamble generation to standalone Vue 3 DOM MIR codegen.
 - `generate_vue3_dom_mir` now emits a target-codegen shell that matches the selected compiler mode: module mode keeps Vue helper imports and `export function render(...)`, prefix function mode emits top-level `const { helper: _helper } = Vue` plus `return function render(...)`, and non-prefix function mode emits `_Vue`, wraps render body in `with (_ctx)`, and declares render helpers inside that with block.
 - Hoist declarations remain generated from `Vue3DomMirKind::Hoisted` children. In non-prefix function mode, static hoist helpers are destructured from `_Vue` before hoist declarations so render-external hoists can call `_createElementVNode` / related helpers without AST fallback scans.
