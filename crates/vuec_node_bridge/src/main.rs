@@ -373,21 +373,116 @@ fn usize_field(payload: &Value, name: &str) -> usize {
 }
 
 fn template_source(payload: &Value) -> TemplateSource {
+    let filename = template_filename(payload);
+    if let Some(source) = template_source_from_ast_payload(payload, filename.clone()) {
+        return source;
+    }
     TemplateSource {
-        filename: payload
-            .get("filename")
-            .or_else(|| {
-                payload
-                    .get("options")
-                    .and_then(|options| options.get("filename"))
-            })
-            .and_then(Value::as_str)
-            .unwrap_or("anonymous.vue")
-            .to_string(),
+        filename,
         source: string_field(payload, "source"),
         file_id: FileId(0),
         base_offset: 0,
     }
+}
+
+fn template_filename(payload: &Value) -> String {
+    payload
+        .get("filename")
+        .or_else(|| {
+            payload
+                .get("options")
+                .and_then(|options| options.get("filename"))
+        })
+        .and_then(Value::as_str)
+        .unwrap_or("anonymous.vue")
+        .to_string()
+}
+
+fn template_source_from_ast_payload(payload: &Value, filename: String) -> Option<TemplateSource> {
+    let ast = payload.get("ast")?;
+    let children = ast.get("children").and_then(Value::as_array)?;
+    let source = ast
+        .get("source")
+        .or_else(|| payload.get("source"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if children.is_empty() {
+        return Some(TemplateSource {
+            filename,
+            source: String::new(),
+            file_id: FileId(0),
+            base_offset: 0,
+        });
+    }
+    let mut start = usize::MAX;
+    let mut end = 0usize;
+    for child in children {
+        if let Some((child_start, child_end)) =
+            child.get("loc").and_then(|loc| loc_byte_range(source, loc))
+        {
+            start = start.min(child_start);
+            end = end.max(child_end);
+        }
+    }
+    if start == usize::MAX || end < start {
+        return None;
+    }
+    Some(TemplateSource {
+        filename,
+        source: source.get(start..end).unwrap_or_default().to_string(),
+        file_id: FileId(0),
+        base_offset: start,
+    })
+}
+
+fn loc_byte_range(source: &str, loc: &Value) -> Option<(usize, usize)> {
+    let start = loc_offset(loc, "start")?;
+    let end = loc_offset(loc, "end")?;
+    if end < start {
+        return None;
+    }
+    let loc_source = loc.get("source").and_then(Value::as_str);
+    let byte_range = source.get(start..end).map(|slice| ((start, end), slice));
+    if let Some(((byte_start, byte_end), slice)) = byte_range {
+        if loc_source.is_none_or(|expected| expected == slice) {
+            return Some((byte_start, byte_end));
+        }
+    }
+    let utf16_range =
+        utf16_offset_to_byte_index(source, start).zip(utf16_offset_to_byte_index(source, end));
+    if let Some((utf16_start, utf16_end)) = utf16_range {
+        if utf16_end >= utf16_start {
+            if let Some(slice) = source.get(utf16_start..utf16_end) {
+                if loc_source.is_none_or(|expected| expected == slice) {
+                    return Some((utf16_start, utf16_end));
+                }
+            }
+        }
+    }
+    byte_range
+        .map(|((byte_start, byte_end), _)| (byte_start, byte_end))
+        .or(utf16_range.filter(|(utf16_start, utf16_end)| utf16_end >= utf16_start))
+}
+
+fn loc_offset(loc: &Value, name: &str) -> Option<usize> {
+    loc.get(name)?
+        .get("offset")?
+        .as_u64()
+        .map(|offset| offset as usize)
+}
+
+fn utf16_offset_to_byte_index(source: &str, offset: usize) -> Option<usize> {
+    let mut utf16_units = 0usize;
+    for (byte_index, ch) in source.char_indices() {
+        if utf16_units == offset {
+            return Some(byte_index);
+        }
+        if utf16_units > offset {
+            return None;
+        }
+        utf16_units += ch.len_utf16();
+    }
+    (utf16_units == offset).then_some(source.len())
 }
 
 fn vue2_compile_value(compiled: &Vue2CompiledResult, options: &Vue2CompileOptions) -> Value {
@@ -2740,6 +2835,80 @@ mod tests {
             .iter()
             .any(|diagnostic| diagnostic.as_str()
                 == Some("<Transition> expects exactly one child element or component.")));
+    }
+
+    #[test]
+    fn vue3_dom_bridge_compile_ast_slices_sfc_template_children() {
+        let source =
+            "<template><div>{{ msg }}</div></template><script>boom()</script><style>.x{}</style>";
+        let compiled = dispatch(
+            "vue3.dom.compile",
+            json!({
+                "source": source,
+                "ast": {
+                    "type": 0,
+                    "source": source,
+                    "children": [{
+                        "type": 1,
+                        "tag": "div",
+                        "loc": {
+                            "start": { "offset": 10 },
+                            "end": { "offset": 30 },
+                            "source": "<div>{{ msg }}</div>"
+                        }
+                    }]
+                },
+                "options": {
+                    "mode": "module",
+                    "prefixIdentifiers": true,
+                    "sourceMap": true
+                }
+            }),
+        )
+        .expect("dom compile");
+
+        let code = compiled["code"].as_str().unwrap_or("");
+        assert!(code.contains("_ctx.msg"));
+        assert!(!compiled["diagnostics"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .iter()
+            .any(|diagnostic| diagnostic.as_str().unwrap_or("").contains("side effect")));
+        assert_eq!(compiled["map"]["sourcesContent"][0], "<div>{{ msg }}</div>");
+    }
+
+    #[test]
+    fn vue3_ssr_bridge_compile_ast_slices_sfc_template_children() {
+        let source =
+            "<template><div>{{ msg }}</div></template><script>boom()</script><style>.x{}</style>";
+        let compiled = dispatch(
+            "vue3.ssr.compile",
+            json!({
+                "source": source,
+                "ast": {
+                    "type": 0,
+                    "source": source,
+                    "children": [{
+                        "type": 1,
+                        "tag": "div",
+                        "loc": {
+                            "start": { "offset": 10 },
+                            "end": { "offset": 30 },
+                            "source": "<div>{{ msg }}</div>"
+                        }
+                    }]
+                },
+                "options": {
+                    "mode": "module",
+                    "prefixIdentifiers": true
+                }
+            }),
+        )
+        .expect("ssr compile");
+
+        let code = compiled["code"].as_str().unwrap_or("");
+        assert!(code.contains("_ssrInterpolate(msg)"));
+        assert!(!code.contains("boom"));
     }
 
     #[test]

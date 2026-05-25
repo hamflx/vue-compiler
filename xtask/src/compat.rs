@@ -2135,6 +2135,12 @@ fn alias_argument_object(target: TargetSpec, export_name: &str, _arity: u32) -> 
             "vue3BridgePayload(a0 && a0.source ? a0.source : a0, undefined, a1 || (a0 && a0.options) || {})"
                 .into()
         }
+        (TargetKind::Vue3Core, "baseCompile")
+        | (TargetKind::Vue3Dom, "compile")
+        | (TargetKind::Vue3Ssr, "compile") => {
+            "vue3CompileBridgePayload(a0, a0 && a0.filename, a1 || (a0 && a0.options) || {})"
+                .into()
+        }
         (TargetKind::Vue3Core | TargetKind::Vue3Dom | TargetKind::Vue3Ssr, _) => {
             "vue3BridgePayload(a0 && a0.source ? a0.source : a0, a0 && a0.filename, a1 || (a0 && a0.options) || {})"
                 .into()
@@ -6885,6 +6891,38 @@ function vue3BridgePayload(source, filename, options) {
     options,
     bridgeOptions: normalizeVue3OptionsForBridge(options, source),
   };
+}
+
+function vue3CompileBridgePayload(input, filename, options) {
+  if (input && typeof input === 'object' && input.type === vue3CoreRuntime.NodeTypes.ROOT && Array.isArray(input.children)) {
+    const source = typeof input.source === 'string' ? input.source : '';
+    const normalizedSource = vue3AstTemplateSource(input, source);
+    warnIgnoredDecodeEntities(options);
+    return {
+      source: normalizedSource,
+      filename,
+      options,
+      ast: vue3CoreRuntime.dehydrateForBridge(input),
+      bridgeOptions: normalizeVue3OptionsForBridge(options, normalizedSource),
+    };
+  }
+  return vue3BridgePayload(input && input.source ? input.source : input, filename, options);
+}
+
+function vue3AstTemplateSource(ast, source) {
+  const children = Array.isArray(ast && ast.children) ? ast.children : [];
+  if (!children.length) return '';
+  let start = Infinity;
+  let end = -Infinity;
+  for (const child of children) {
+    const locStart = child && child.loc && child.loc.start && child.loc.start.offset;
+    const locEnd = child && child.loc && child.loc.end && child.loc.end.offset;
+    if (Number.isFinite(locStart) && Number.isFinite(locEnd) && locEnd >= locStart) {
+      start = Math.min(start, locStart);
+      end = Math.max(end, locEnd);
+    }
+  }
+  return Number.isFinite(start) && end >= start ? String(source || '').slice(start, end) : source;
 }
 
 function warnIgnoredDecodeEntities(options) {
