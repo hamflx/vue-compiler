@@ -1501,7 +1501,7 @@ pub struct Vue3SsrSuspense {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Vue3SsrMirKind {
-    Root,
+    Root(Vue3SsrRoot),
     PushString(String),
     PushInterpolated(MirExpr),
     RenderContent(Vue3SsrContent),
@@ -1512,6 +1512,11 @@ pub enum Vue3SsrMirKind {
     For(Vue3SsrFor),
     Teleport(Vue3SsrTeleport),
     Suspense(Vue3SsrSuspense),
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue3SsrRoot {
+    pub imports: Vec<Vue3ImportItem>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

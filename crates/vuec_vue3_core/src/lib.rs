@@ -18,7 +18,7 @@ use vuec_ast::{
     Vue3Element, Vue3ElementType, Vue3Expression, Vue3ForMemo, Vue3ForMir, Vue3NodeKind,
     Vue3PatchFlags, Vue3Prop, Vue3Root, Vue3SlotFlag, Vue3SsrAttrs, Vue3SsrComponent,
     Vue3SsrContent, Vue3SsrFor, Vue3SsrMir, Vue3SsrMirKind, Vue3SsrModel, Vue3SsrModelKind,
-    Vue3SsrSuspense, Vue3SsrTeleport, Vue3VNodeCall,
+    Vue3SsrRoot, Vue3SsrSuspense, Vue3SsrTeleport, Vue3VNodeCall,
 };
 use vuec_codegen::{CodeWriter, SourceMapArtifact, SourceMapSegment};
 use vuec_html::{HtmlTokenKind, HtmlTokenizer};
@@ -837,7 +837,14 @@ pub fn lower_vue3_ast_to_ssr_mir(
         .unwrap_or_else(|| NodeSpan::missing(MissingSpanReason::LoweringGap));
     let mut state = Vue3SsrLoweringState {
         hir: Hir::new(HirNodeKind::Root(HirRoot), root_span.clone()),
-        mir: Vue3SsrMir::new(Vue3SsrMirKind::Root, root_span),
+        mir: Vue3SsrMir::new(
+            Vue3SsrMirKind::Root(Vue3SsrRoot {
+                imports: vue3_codegen_root(ast)
+                    .map(|root| root.imports.clone())
+                    .unwrap_or_default(),
+            }),
+            root_span,
+        ),
         map: LoweringMap::default(),
         js: JsAstStore::new(),
         source_type: expression_source_type(options),
@@ -12292,6 +12299,12 @@ impl<'a> Vue3SsrMirCodegen<'a> {
             if !vue_helpers.is_empty() || !ssr_helpers.is_empty() {
                 writer.newline();
             }
+            for import in self.asset_imports() {
+                writer.push_line(&format!("import {} from '{}'", import.name, import.path));
+            }
+            if !self.asset_imports().is_empty() {
+                writer.newline();
+            }
             if !self.options.inline {
                 writer.push_str("export ");
             }
@@ -12315,6 +12328,16 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         if !self.options.inline {
             writer.push_str("return ");
         }
+    }
+
+    fn asset_imports(&self) -> &[vuec_ast::Vue3ImportItem] {
+        self.mir
+            .node(self.mir.root)
+            .and_then(|node| match &node.kind {
+                Vue3SsrMirKind::Root(root) => Some(root.imports.as_slice()),
+                _ => None,
+            })
+            .unwrap_or(&[])
     }
 
     fn render_function_start(&self, writer: &mut CodeWriter) {
@@ -12380,7 +12403,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         let mut helpers = Vec::new();
         for node in &self.mir.nodes {
             match &node.kind {
-                Vue3SsrMirKind::Root | Vue3SsrMirKind::PushString(_) => {}
+                Vue3SsrMirKind::Root(_) | Vue3SsrMirKind::PushString(_) => {}
                 Vue3SsrMirKind::PushInterpolated(_) => {
                     push_unique_helper(&mut helpers, RuntimeHelper::Vue3SsrInterpolate);
                 }
@@ -12571,7 +12594,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
             return;
         };
         match &node.kind {
-            Vue3SsrMirKind::Root => self.render_children(node_id, scope, writer),
+            Vue3SsrMirKind::Root(_) => self.render_children(node_id, scope, writer),
             Vue3SsrMirKind::PushString(value) => {
                 writer.push_line(&format!("_push({});", quote_string(value)));
             }
@@ -20994,6 +21017,36 @@ mod tests {
     }
 
     #[test]
+    fn lower_vue3_ast_to_ssr_mir_projects_asset_import_root_payload() {
+        let mut ast = Vue3Dialect::base_parse(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: r#"<img :src="_imports_0">"#.into(),
+                file_id: FileId(72),
+                base_offset: 0,
+            },
+            &Vue3CompilerOptions::default(),
+        );
+        if let Some(root_node) = ast.root_node_mut() {
+            if let Vue3AstKind::Root(root) = &mut root_node.kind {
+                root.imports.push(vuec_ast::Vue3ImportItem {
+                    name: "_imports_0".into(),
+                    path: "./logo.png".into(),
+                });
+            }
+        }
+
+        let result = lower_vue3_ast_to_ssr_mir(&ast, &Vue3CompilerOptions::default());
+        let root_imports = match &result.mir.node(result.mir.root).unwrap().kind {
+            Vue3SsrMirKind::Root(root) => &root.imports,
+            _ => unreachable!("SSR MIR root kind"),
+        };
+        assert_eq!(root_imports.len(), 1);
+        assert_eq!(root_imports[0].name, "_imports_0");
+        assert_eq!(root_imports[0].path, "./logo.png");
+    }
+
+    #[test]
     fn lower_vue3_ast_to_ssr_mir_keeps_component_and_slot_target_split() {
         let source = TemplateSource {
             filename: "foo.vue".into(),
@@ -21343,6 +21396,46 @@ mod tests {
         assert!(generated.code.contains("_push(_ssrInterpolate(_ctx.msg));"));
         assert!(generated.code.contains("_push(\"</div>\");"));
         assert!(!generated.code.contains("Vue3Ast"));
+    }
+
+    #[test]
+    fn generate_vue3_ssr_mir_emits_asset_imports_from_mir_root() {
+        let mut ast = Vue3Dialect::base_parse(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: r#"<img :src="_imports_0">"#.into(),
+                file_id: FileId(73),
+                base_offset: 0,
+            },
+            &Vue3CompilerOptions::default(),
+        );
+        if let Some(root_node) = ast.root_node_mut() {
+            if let Vue3AstKind::Root(root) = &mut root_node.kind {
+                root.imports.push(vuec_ast::Vue3ImportItem {
+                    name: "_imports_0".into(),
+                    path: "./logo.png".into(),
+                });
+            }
+        }
+
+        let result = lower_vue3_ast_to_ssr_mir(&ast, &Vue3CompilerOptions::default());
+        let generated = generate_vue3_ssr_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated
+            .code
+            .contains("import _imports_0 from './logo.png'"));
+        assert!(generated
+            .code
+            .contains("_push(_ssrRenderAttr(\"src\", _imports_0));"));
+        assert!(!generated.code.contains("_ctx._imports_0"));
     }
 
     #[test]
