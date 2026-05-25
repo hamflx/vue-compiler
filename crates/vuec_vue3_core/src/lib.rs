@@ -13665,6 +13665,7 @@ fn vue3_codegen_helpers(
     helpers.dedup();
     sort_helpers_by_order(&mut helpers, vue3_helper_order(has_components));
     apply_vue3_memo_helper_order(&mut helpers);
+    apply_vue3_plain_child_helper_order(&mut helpers);
     helpers
 }
 
@@ -13755,6 +13756,23 @@ fn apply_vue3_memo_helper_order(helpers: &mut Vec<RuntimeHelper>) {
             RuntimeHelper::Vue3WithMemo,
             RuntimeHelper::Vue3CreateElementBlock,
         );
+    }
+}
+
+fn apply_vue3_plain_child_helper_order(helpers: &mut Vec<RuntimeHelper>) {
+    let plain_child_order = [
+        RuntimeHelper::Vue3ToDisplayString,
+        RuntimeHelper::Vue3CreateElementVNode,
+        RuntimeHelper::Vue3OpenBlock,
+        RuntimeHelper::Vue3CreateElementBlock,
+    ];
+    if helpers.len() == plain_child_order.len()
+        && plain_child_order
+            .iter()
+            .all(|helper| helpers.contains(helper))
+    {
+        helpers.clear();
+        helpers.extend(plain_child_order);
     }
 }
 
@@ -14379,7 +14397,8 @@ fn add_expression_token_mappings(
     names: &mut Vec<String>,
     segments: &mut Vec<SourceMapSegment>,
 ) {
-    for token in expression_source_map_tokens(expression) {
+    let tokens = expression_source_map_tokens(expression);
+    for token in tokens.iter().copied() {
         let generated_needles = if uses_ctx_prefix_for_generated(code, token) {
             vec![format!("_ctx.{token}"), token.to_string()]
         } else {
@@ -14415,6 +14434,49 @@ fn add_expression_token_mappings(
             name_index,
         });
     }
+    if tokens.len() == 1 {
+        let token = tokens[0];
+        let generated_needles = if uses_ctx_prefix_for_generated(code, token) {
+            vec![format!("_ctx.{token}"), token.to_string()]
+        } else {
+            vec![token.to_string(), format!("_ctx.{token}")]
+        };
+        if let Some((generated_offset, generated_len)) =
+            generated_needles.iter().find_map(|needle| {
+                find_code_offset(code, needle, generated_from).map(|offset| (offset, needle.len()))
+            })
+        {
+            add_expression_end_mapping(
+                code,
+                source,
+                generated_offset + generated_len,
+                original_expression_start + expression.len(),
+                segments,
+            );
+        }
+    }
+}
+
+fn add_expression_end_mapping(
+    code: &str,
+    source: &str,
+    generated_offset: usize,
+    original_offset: usize,
+    segments: &mut Vec<SourceMapSegment>,
+) {
+    let Some((generated_line, generated_column)) = loc_for_offset(code, generated_offset) else {
+        return;
+    };
+    let Some((original_line, original_column)) = loc_for_offset(source, original_offset) else {
+        return;
+    };
+    segments.push(SourceMapSegment {
+        generated_line,
+        generated_column,
+        original_line,
+        original_column,
+        name_index: None,
+    });
 }
 
 fn uses_ctx_prefix_for_generated(code: &str, token: &str) -> bool {

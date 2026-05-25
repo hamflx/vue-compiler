@@ -4,6 +4,7 @@ use anyhow::{bail, Context, Result};
 use oxc_ast::ast::{Expression, Statement};
 use oxc_span::SourceType;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::io::{self, Read};
 use vuec_ast::{NodeSpan, Vue3Ast, Vue3AstKind, Vue3Expression, Vue3Prop};
 use vuec_html::{HtmlTokenKind, HtmlTokenizer};
@@ -16,7 +17,7 @@ use vuec_source::FileId;
 use vuec_style::{compile_style, StyleCompileOptions};
 use vuec_vue2::{self, Vue2CompileOptions, Vue2CompiledResult, Vue2Error, Vue2Warning};
 use vuec_vue3_core::{TemplateSource, Vue3CompilerOptions, Vue3Dialect};
-use vuec_vue3_dom::{self, DomCompilerOptions};
+use vuec_vue3_dom::{self, AssetUrlOptions, DomCompilerOptions};
 use vuec_vue3_ssr::{self, SsrCompilerOptions};
 
 fn main() {
@@ -171,10 +172,13 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
             }
             let options = DomCompilerOptions {
                 core,
-                transform_asset_urls: bool_option(
+                transform_asset_urls: transform_asset_urls_enabled(
                     payload.get("options").unwrap_or(&Value::Null),
-                    "transformAssetUrls",
                     default_options.transform_asset_urls,
+                ),
+                asset_url_options: asset_url_options(
+                    payload.get("options").unwrap_or(&Value::Null),
+                    default_options.asset_url_options,
                 ),
                 decode_entities: bool_option(
                     payload.get("options").unwrap_or(&Value::Null),
@@ -199,10 +203,13 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
             }
             let options = DomCompilerOptions {
                 core,
-                transform_asset_urls: bool_option(
+                transform_asset_urls: transform_asset_urls_enabled(
                     payload.get("options").unwrap_or(&Value::Null),
-                    "transformAssetUrls",
                     default_options.transform_asset_urls,
+                ),
+                asset_url_options: asset_url_options(
+                    payload.get("options").unwrap_or(&Value::Null),
+                    default_options.asset_url_options,
                 ),
                 decode_entities: bool_option(
                     payload.get("options").unwrap_or(&Value::Null),
@@ -2498,6 +2505,59 @@ fn string_array_option(value: &Value, name: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn transform_asset_urls_enabled(value: &Value, fallback: bool) -> bool {
+    match value.get("transformAssetUrls") {
+        Some(Value::Bool(enabled)) => *enabled,
+        Some(Value::Object(_)) => true,
+        _ => fallback,
+    }
+}
+
+fn asset_url_options(value: &Value, mut options: AssetUrlOptions) -> AssetUrlOptions {
+    let Some(raw) = value.get("transformAssetUrls") else {
+        return options;
+    };
+    match raw {
+        Value::Bool(_) => options,
+        Value::Object(object) => {
+            if let Some(base) = object.get("base") {
+                options.base = if base.is_null() {
+                    None
+                } else {
+                    base.as_str().map(ToOwned::to_owned)
+                };
+            }
+            options.include_absolute =
+                bool_option(raw, "includeAbsolute", options.include_absolute);
+            if let Some(tags) = object.get("tags").and_then(Value::as_object) {
+                options.tags = asset_url_tags(tags);
+            } else if object
+                .iter()
+                .any(|(_, value)| matches!(value, Value::Array(_)))
+            {
+                options.tags = asset_url_tags(object);
+            }
+            options
+        }
+        _ => options,
+    }
+}
+
+fn asset_url_tags(object: &serde_json::Map<String, Value>) -> BTreeMap<String, Vec<String>> {
+    object
+        .iter()
+        .filter_map(|(tag, attrs)| {
+            let attrs = attrs
+                .as_array()?
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>();
+            Some((tag.clone(), attrs))
+        })
+        .collect()
+}
+
 fn sfc_template_options(value: Option<&Value>) -> SfcTemplateCompileOptions {
     let mut options = SfcTemplateCompileOptions::default();
     let Some(value) = value else {
@@ -2514,6 +2574,9 @@ fn sfc_template_options(value: Option<&Value>) -> SfcTemplateCompileOptions {
         "isProd",
         bool_option(value, "is_prod", options.is_prod),
     );
+    options.transform_asset_urls =
+        transform_asset_urls_enabled(value, options.transform_asset_urls);
+    options.asset_url_options = asset_url_options(value, options.asset_url_options);
     options.scope_id = value
         .get("scopeId")
         .or_else(|| value.get("scope_id"))
@@ -2631,5 +2694,41 @@ mod tests {
             .iter()
             .any(|diagnostic| diagnostic.as_str()
                 == Some("<Transition> expects exactly one child element or component.")));
+    }
+
+    #[test]
+    fn vue3_dom_bridge_parses_asset_url_options() {
+        let compiled = dispatch(
+            "vue3.dom.compile",
+            json!({
+                "source": r#"<img src="./bar.png"><img src="~bar.png">"#,
+                "options": {
+                    "transformAssetUrls": {
+                        "base": "/foo"
+                    }
+                }
+            }),
+        )
+        .expect("dom compile");
+
+        let code = compiled["code"].as_str().unwrap_or("");
+        assert!(code.contains(r#"src: "/foo/bar.png""#));
+        assert!(code.contains(r#"src: "~bar.png""#));
+
+        let disabled = dispatch(
+            "vue3.dom.compile",
+            json!({
+                "source": r#"<img src="./bar.png">"#,
+                "options": {
+                    "transformAssetUrls": false
+                }
+            }),
+        )
+        .expect("dom compile");
+
+        assert!(disabled["code"]
+            .as_str()
+            .unwrap_or("")
+            .contains(r#"src: "./bar.png""#));
     }
 }

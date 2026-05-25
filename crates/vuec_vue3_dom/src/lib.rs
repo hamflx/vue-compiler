@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use vuec_ast::{
     NodeId, TemplateAttribute, Vue3Ast, Vue3AstKind, Vue3Element, Vue3ElementType, Vue3Prop,
 };
@@ -14,7 +15,25 @@ pub struct DomCompilerOptions {
     pub core: Vue3CompilerOptions,
     pub is_custom_element: Vec<String>,
     pub transform_asset_urls: bool,
+    pub asset_url_options: AssetUrlOptions,
     pub decode_entities: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssetUrlOptions {
+    pub base: Option<String>,
+    pub include_absolute: bool,
+    pub tags: BTreeMap<String, Vec<String>>,
+}
+
+impl Default for AssetUrlOptions {
+    fn default() -> Self {
+        Self {
+            base: None,
+            include_absolute: false,
+            tags: default_asset_url_tags(),
+        }
+    }
 }
 
 impl Default for DomCompilerOptions {
@@ -30,6 +49,7 @@ impl Default for DomCompilerOptions {
             core,
             is_custom_element: Vec::new(),
             transform_asset_urls: true,
+            asset_url_options: AssetUrlOptions::default(),
             decode_entities: true,
         }
     }
@@ -58,6 +78,9 @@ pub fn compile(source: TemplateSource, options: DomCompilerOptions) -> CodegenRe
         if let Vue3AstKind::Element(element) = &mut node.kind {
             let tag = element.tag.clone();
             let mut attributes = element.template_attributes();
+            if options.transform_asset_urls {
+                transform_asset_url_attributes(&tag, &mut attributes, &options.asset_url_options);
+            }
             let directives = extract_directives(&attributes);
             let mut summaries = Vec::new();
             for directive in directives {
@@ -75,7 +98,11 @@ pub fn compile(source: TemplateSource, options: DomCompilerOptions) -> CodegenRe
                 }
             }
             if options.transform_asset_urls {
-                summaries.extend(asset_url_attributes(&tag, &attributes));
+                summaries.extend(asset_url_attributes(
+                    &tag,
+                    &attributes,
+                    &options.asset_url_options,
+                ));
             }
             if !summaries.is_empty() && !only_asset_summaries(&summaries) {
                 attributes.push(TemplateAttribute {
@@ -271,18 +298,247 @@ fn model_runtime_helper(tag: &str, directive: &DomDirective) -> &'static str {
     }
 }
 
-fn asset_url_attributes(tag: &str, attributes: &[TemplateAttribute]) -> Vec<String> {
+fn default_asset_url_tags() -> BTreeMap<String, Vec<String>> {
+    [
+        ("video", vec!["src", "poster"]),
+        ("source", vec!["src", "srcset"]),
+        ("img", vec!["src", "srcset"]),
+        ("image", vec!["xlink:href", "href"]),
+        ("use", vec!["xlink:href", "href"]),
+    ]
+    .into_iter()
+    .map(|(tag, attrs)| {
+        (
+            tag.to_string(),
+            attrs.into_iter().map(str::to_string).collect(),
+        )
+    })
+    .collect()
+}
+
+fn transform_asset_url_attributes(
+    tag: &str,
+    attributes: &mut [TemplateAttribute],
+    options: &AssetUrlOptions,
+) {
+    let asset_attrs = asset_url_attrs_for_tag(tag, options);
+    let Some(base) = options.base.as_deref().filter(|base| !base.is_empty()) else {
+        return;
+    };
+    for attr in attributes {
+        let is_srcset = attr.name == "srcset" && matches!(tag, "img" | "source");
+        if !is_srcset && !asset_attrs.iter().any(|candidate| candidate == &attr.name) {
+            continue;
+        }
+        let Some(value) = attr.value.as_mut() else {
+            continue;
+        };
+        if is_srcset {
+            *value = rewrite_srcset_base(value, base, options);
+        } else if should_rewrite_asset_url_base(tag, &attr.name, value, options) {
+            *value = join_asset_base(base, value);
+        }
+    }
+}
+
+fn asset_url_attrs_for_tag(tag: &str, options: &AssetUrlOptions) -> Vec<String> {
+    let mut attrs = options.tags.get(tag).cloned().unwrap_or_default();
+    if let Some(wildcard) = options.tags.get("*") {
+        attrs.extend(wildcard.iter().cloned());
+    }
+    attrs
+}
+
+fn should_rewrite_asset_url_base(
+    tag: &str,
+    attr: &str,
+    value: &str,
+    options: &AssetUrlOptions,
+) -> bool {
+    if is_external_url(value) || is_data_url(value) || value == "#" {
+        return false;
+    }
+    let hash_only = value.starts_with('#');
+    if hash_only && !can_transform_hash_import(tag, attr) {
+        return false;
+    }
+    value.starts_with('.') && (options.include_absolute || is_relative_url(value))
+}
+
+fn can_transform_hash_import(tag: &str, attr: &str) -> bool {
+    matches!(
+        (tag, attr),
+        ("video", "src" | "poster") | ("source", "src") | ("img", "src")
+    )
+}
+
+fn rewrite_srcset_base(value: &str, base: &str, options: &AssetUrlOptions) -> String {
+    let candidates = parse_srcset_candidates(value);
+    if candidates
+        .iter()
+        .any(|(url, _)| should_process_asset_url(url, options) && !url.starts_with('.'))
+    {
+        return value.to_string();
+    }
+
+    let mut changed = false;
+    let items = candidates
+        .into_iter()
+        .map(|(url, descriptor)| {
+            let rewritten = if url.starts_with('.') && should_process_asset_url(&url, options) {
+                changed = true;
+                join_asset_base(base, &url)
+            } else {
+                url
+            };
+            if descriptor.is_empty() {
+                rewritten
+            } else {
+                format!("{rewritten} {descriptor}")
+            }
+        })
+        .collect::<Vec<_>>();
+    if changed {
+        items.join(", ")
+    } else {
+        value.to_string()
+    }
+}
+
+fn should_process_asset_url(url: &str, options: &AssetUrlOptions) -> bool {
+    !url.is_empty()
+        && !is_external_url(url)
+        && !is_data_url(url)
+        && (options.include_absolute || is_relative_url(url))
+}
+
+fn parse_srcset_candidates(value: &str) -> Vec<(String, String)> {
+    let mut candidates = Vec::<(String, String)>::new();
+    for raw in value.split(',') {
+        let item = raw
+            .replace(['\t', '\n', '\u{000C}', '\r'], " ")
+            .trim()
+            .to_string();
+        if item.is_empty() {
+            continue;
+        }
+        let (url, descriptor) = item.split_once(' ').map_or_else(
+            || (item.clone(), String::new()),
+            |(url, descriptor)| (url.to_string(), descriptor.trim().to_string()),
+        );
+        candidates.push((url, descriptor));
+    }
+
+    let mut index = 0usize;
+    while index + 1 < candidates.len() {
+        if is_data_url(&candidates[index].0) {
+            let prefix = candidates.remove(index).0;
+            candidates[index].0 = format!("{prefix},{}", candidates[index].0);
+        }
+        index += 1;
+    }
+    candidates
+}
+
+fn join_asset_base(base: &str, raw_url: &str) -> String {
+    let (path, hash) = parse_asset_url(raw_url);
+    let normalized_path = strip_leading_dot_segments(&path);
+    let (host_prefix, base_path) = split_base_host_path(base);
+    let mut joined = join_url_path(base_path, &normalized_path);
+    if joined.is_empty() {
+        joined.push('/');
+    }
+    format!("{host_prefix}{joined}{hash}")
+}
+
+fn split_base_host_path(base: &str) -> (&str, &str) {
+    if let Some(protocol_index) = base.find("://") {
+        let after_protocol = protocol_index + 3;
+        let rest = &base[after_protocol..];
+        if let Some(path_index) = rest.find('/') {
+            let split = after_protocol + path_index;
+            return (&base[..split], &base[split..]);
+        }
+        return (base, "/");
+    }
+    if let Some(rest) = base.strip_prefix("//") {
+        if let Some(path_index) = rest.find('/') {
+            let split = 2 + path_index;
+            return (&base[..split], &base[split..]);
+        }
+        return (base, "/");
+    }
+    ("", base)
+}
+
+fn join_url_path(base: &str, relative: &str) -> String {
+    let mut parts = Vec::<&str>::new();
+    let absolute = base.starts_with('/');
+    for part in base.split('/').chain(relative.split('/')) {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            _ => parts.push(part),
+        }
+    }
+    let mut joined = parts.join("/");
+    if absolute {
+        joined.insert(0, '/');
+    }
+    if joined.is_empty() && absolute {
+        joined.push('/');
+    }
+    joined
+}
+
+fn strip_leading_dot_segments(value: &str) -> String {
+    let mut rest = value;
+    while let Some(stripped) = rest.strip_prefix("./") {
+        rest = stripped;
+    }
+    rest.to_string()
+}
+
+fn parse_asset_url(value: &str) -> (String, String) {
+    let normalized = value
+        .strip_prefix("~/")
+        .or_else(|| value.strip_prefix('~'))
+        .unwrap_or(value);
+    if let Some(index) = normalized.find('#') {
+        (
+            normalized[..index].to_string(),
+            normalized[index..].to_string(),
+        )
+    } else {
+        (normalized.to_string(), String::new())
+    }
+}
+
+fn is_relative_url(url: &str) -> bool {
+    matches!(url.chars().next(), Some('.' | '~' | '@' | '#'))
+}
+
+fn is_external_url(url: &str) -> bool {
+    url.starts_with("http://") || url.starts_with("https://") || url.starts_with("//")
+}
+
+fn is_data_url(url: &str) -> bool {
+    url.trim_start().to_ascii_lowercase().starts_with("data:")
+}
+
+fn asset_url_attributes(
+    tag: &str,
+    attributes: &[TemplateAttribute],
+    options: &AssetUrlOptions,
+) -> Vec<String> {
+    let asset_attrs = asset_url_attrs_for_tag(tag, options);
     let mut found = Vec::new();
     for attr in attributes {
-        let is_asset = matches!(
-            (tag, attr.name.as_str()),
-            ("img", "src")
-                | ("img", "srcset")
-                | ("source", "src")
-                | ("source", "srcset")
-                | ("video", "poster")
-        );
-        if is_asset {
+        if asset_attrs.iter().any(|candidate| candidate == &attr.name)
+            || (attr.name == "srcset" && matches!(tag, "img" | "source"))
+        {
             found.push(format!("asset:{}", attr.name));
         }
     }
@@ -534,6 +790,179 @@ mod tests {
         );
         assert!(result.ast_summary.starts_with("dom:"));
         assert!(result.code.contains("data-vuec-dom"));
+    }
+
+    #[test]
+    fn compile_rewrites_static_asset_urls_with_explicit_base() {
+        let result = compile(
+            TemplateSource {
+                filename: "x.vue".into(),
+                source: r#"<img src="./bar.png"><img src="bar.png"><img src="~bar.png"><img src="@theme/bar.png"><img src="/bar.png"><img src="data:image/png;base64,i">"#.into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            DomCompilerOptions {
+                asset_url_options: AssetUrlOptions {
+                    base: Some("/foo".into()),
+                    ..AssetUrlOptions::default()
+                },
+                ..DomCompilerOptions::default()
+            },
+        );
+
+        assert!(result.code.contains(r#"src: "/foo/bar.png""#));
+        assert!(result.code.contains(r#"src: "bar.png""#));
+        assert!(result.code.contains(r#"src: "~bar.png""#));
+        assert!(result.code.contains(r#"src: "@theme/bar.png""#));
+        assert!(result.code.contains(r#"src: "/bar.png""#));
+        assert!(result.code.contains(r#"src: "data:image/png;base64,i""#));
+    }
+
+    #[test]
+    fn compile_rewrites_asset_url_base_with_hosts_and_hashes() {
+        let cases = [
+            (
+                "http://localhost:3000/src/",
+                "./logo.png",
+                r#"src: "http://localhost:3000/src/logo.png""#,
+            ),
+            (
+                "http://localhost:3000",
+                "./logo.png",
+                r#"src: "http://localhost:3000/logo.png""#,
+            ),
+            (
+                "http://localhost",
+                "./logo.png",
+                r#"src: "http://localhost/logo.png""#,
+            ),
+            (
+                "//localhost",
+                "./logo.png",
+                r#"src: "//localhost/logo.png""#,
+            ),
+            (
+                "/foo",
+                "./icons.svg#heart",
+                r#"src: "/foo/icons.svg#heart""#,
+            ),
+        ];
+
+        for (index, (base, url, expected)) in cases.iter().enumerate() {
+            let result = compile(
+                TemplateSource {
+                    filename: format!("asset-base-{index}.vue"),
+                    source: format!(r#"<img src="{url}">"#),
+                    file_id: FileId(index as u32),
+                    base_offset: 0,
+                },
+                DomCompilerOptions {
+                    asset_url_options: AssetUrlOptions {
+                        base: Some((*base).into()),
+                        ..AssetUrlOptions::default()
+                    },
+                    ..DomCompilerOptions::default()
+                },
+            );
+
+            assert!(
+                result.code.contains(expected),
+                "base {base} url {url} generated:\n{}",
+                result.code
+            );
+        }
+    }
+
+    #[test]
+    fn compile_rewrites_srcset_base_when_all_processable_urls_are_dot_relative() {
+        let result = compile(
+            TemplateSource {
+                filename: "x.vue".into(),
+                source: r#"<img srcset="./logo.png, ./logo.png 2x, /logo.png 3x, data:image/png;base64,i 4x">"#.into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            DomCompilerOptions {
+                asset_url_options: AssetUrlOptions {
+                    base: Some("/foo".into()),
+                    ..AssetUrlOptions::default()
+                },
+                ..DomCompilerOptions::default()
+            },
+        );
+
+        assert!(result.code.contains(
+            r#"srcset: "/foo/logo.png, /foo/logo.png 2x, /logo.png 3x, data:image/png;base64,i 4x""#
+        ));
+    }
+
+    #[test]
+    fn compile_rewrites_srcset_base_independently_of_asset_tag_options() {
+        let result = compile(
+            TemplateSource {
+                filename: "x.vue".into(),
+                source: r#"<img src="./logo.png" srcset="./logo.png 2x">"#.into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            DomCompilerOptions {
+                asset_url_options: AssetUrlOptions {
+                    base: Some("/foo".into()),
+                    tags: BTreeMap::new(),
+                    ..AssetUrlOptions::default()
+                },
+                ..DomCompilerOptions::default()
+            },
+        );
+
+        assert!(result.code.contains(r#"src: "./logo.png""#));
+        assert!(result.code.contains(r#"srcset: "/foo/logo.png 2x""#));
+    }
+
+    #[test]
+    fn compile_leaves_mixed_import_srcset_unchanged_for_base_slice() {
+        let result = compile(
+            TemplateSource {
+                filename: "x.vue".into(),
+                source: r#"<img srcset="@/logo.png, ./logo.png 2x">"#.into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            DomCompilerOptions {
+                asset_url_options: AssetUrlOptions {
+                    base: Some("/foo".into()),
+                    ..AssetUrlOptions::default()
+                },
+                ..DomCompilerOptions::default()
+            },
+        );
+
+        assert!(result
+            .code
+            .contains(r#"srcset: "@/logo.png, ./logo.png 2x""#));
+    }
+
+    #[test]
+    fn compile_respects_disabled_asset_url_transform() {
+        let result = compile(
+            TemplateSource {
+                filename: "x.vue".into(),
+                source: r#"<img src="./bar.png">"#.into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            DomCompilerOptions {
+                transform_asset_urls: false,
+                asset_url_options: AssetUrlOptions {
+                    base: Some("/foo".into()),
+                    ..AssetUrlOptions::default()
+                },
+                ..DomCompilerOptions::default()
+            },
+        );
+
+        assert!(result.code.contains(r#"src: "./bar.png""#));
+        assert!(!result.code.contains("/foo/bar.png"));
     }
 
     #[test]

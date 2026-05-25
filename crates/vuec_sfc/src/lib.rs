@@ -8,7 +8,7 @@ use vuec_js::{JsAstStore, JsParseMode};
 use vuec_source::{FileId, SourceMap, Span};
 use vuec_style::{compile_style, StyleCompileOptions};
 use vuec_vue3_core::{TemplateSource, Vue3CompilerOptions};
-use vuec_vue3_dom::{compile as compile_dom, DomCompilerOptions};
+use vuec_vue3_dom::{compile as compile_dom, AssetUrlOptions, DomCompilerOptions};
 use vuec_vue3_ssr::{compile as compile_ssr, SsrCompilerOptions};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,6 +55,8 @@ pub struct SfcTemplateCompileOptions {
     pub scope_id: Option<String>,
     pub slotted: bool,
     pub is_prod: bool,
+    pub transform_asset_urls: bool,
+    pub asset_url_options: AssetUrlOptions,
 }
 
 impl Default for SfcTemplateCompileOptions {
@@ -65,6 +67,8 @@ impl Default for SfcTemplateCompileOptions {
             scope_id: None,
             slotted: false,
             is_prod: false,
+            transform_asset_urls: true,
+            asset_url_options: AssetUrlOptions::default(),
         }
     }
 }
@@ -287,6 +291,8 @@ impl SfcCompiler {
                 source,
                 DomCompilerOptions {
                     core,
+                    transform_asset_urls: options.transform_asset_urls,
+                    asset_url_options: options.asset_url_options.clone(),
                     ..DomCompilerOptions::default()
                 },
             );
@@ -358,6 +364,8 @@ impl SfcCompiler {
             template_source,
             DomCompilerOptions {
                 core,
+                transform_asset_urls: options.transform_asset_urls,
+                asset_url_options: options.asset_url_options,
                 ..DomCompilerOptions::default()
             },
         );
@@ -841,5 +849,27 @@ mod tests {
         );
         assert!(template.code.contains("ssrRender"));
         assert!(template.code.contains("_ssrInterpolate(msg)"));
+    }
+
+    #[test]
+    fn compile_template_passes_asset_url_base_to_dom_backend() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "foo.vue",
+            r#"<template><img src="./logo.png"><img src="~logo.png"></template>"#,
+        );
+        let template = compiler.compile_template(
+            &descriptor,
+            SfcTemplateCompileOptions {
+                asset_url_options: AssetUrlOptions {
+                    base: Some("/foo".into()),
+                    ..AssetUrlOptions::default()
+                },
+                ..SfcTemplateCompileOptions::default()
+            },
+        );
+
+        assert!(template.code.contains(r#"src: "/foo/logo.png""#));
+        assert!(template.code.contains(r#"src: "~logo.png""#));
     }
 }
