@@ -636,6 +636,39 @@ mod tests {
     }
 
     #[test]
+    fn compile_stringifies_static_children_with_asset_url_imports() {
+        let mut options = DomCompilerOptions::default();
+        options.core.mode = "module".into();
+        options.core.prefix_identifiers = true;
+        options.core.hoist_static = true;
+        options.core.stringify_static = true;
+        let result = compile(
+            TemplateSource {
+                filename: "x.vue".into(),
+                source: format!(
+                    r#"<div><img src="./bar.png" srcset="./bar.png, ./icons.svg#heart 2x" />{}</div>"#,
+                    r#"<span title="static">ok</span>"#.repeat(5)
+                ),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            options,
+        );
+
+        assert!(result.code.contains("import _imports_0 from './bar.png'"));
+        assert!(result.code.contains("import _imports_1 from './icons.svg'"));
+        assert!(
+            result.code.contains("_createStaticVNode"),
+            "{}",
+            result.code
+        );
+        assert!(result.code.contains(r##"_createStaticVNode("<img src=\"" + _imports_0 + "\" srcset=\"" + _imports_0 + ", " + _imports_1 + "#heart 2x\"><span title=\"static\">ok</span>"##));
+        assert!(!result.code.contains("src: _imports_0"));
+        assert!(!result.code.contains("_ctx._imports_0"));
+        assert!(!result.code.contains("_ctx._imports_1"));
+    }
+
+    #[test]
     fn compile_stringifies_static_children_when_transform_hoist_requested() {
         let mut options = DomCompilerOptions::default();
         options.core.prefix_identifiers = true;

@@ -16192,10 +16192,74 @@ const STRINGIFY_STATIC_NODE_COUNT: usize = 20;
 
 #[derive(Clone, Debug)]
 struct StaticHtmlAnalysis {
-    html: String,
+    html: StaticHtmlBuffer,
     dom_nodes: usize,
     node_count: usize,
     element_with_binding_count: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+struct StaticHtmlBuffer {
+    parts: Vec<StaticHtmlPart>,
+}
+
+#[derive(Clone, Debug)]
+enum StaticHtmlPart {
+    Text(String),
+    Expression(String),
+}
+
+impl StaticHtmlBuffer {
+    fn from_text(value: impl Into<String>) -> Self {
+        let mut buffer = Self::default();
+        buffer.push_text(value);
+        buffer
+    }
+
+    fn push_text(&mut self, value: impl Into<String>) {
+        let value = value.into();
+        if value.is_empty() {
+            return;
+        }
+        match self.parts.last_mut() {
+            Some(StaticHtmlPart::Text(existing)) => existing.push_str(&value),
+            _ => self.parts.push(StaticHtmlPart::Text(value)),
+        }
+    }
+
+    fn push_expression(&mut self, value: impl Into<String>) {
+        let value = value.into();
+        if value.trim().is_empty() {
+            return;
+        }
+        self.parts.push(StaticHtmlPart::Expression(value));
+    }
+
+    fn append(&mut self, other: Self) {
+        for part in other.parts {
+            match part {
+                StaticHtmlPart::Text(value) => self.push_text(value),
+                StaticHtmlPart::Expression(value) => self.push_expression(value),
+            }
+        }
+    }
+
+    fn to_js_expression(&self) -> String {
+        let parts = self
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                StaticHtmlPart::Text(value) if !value.is_empty() => Some(quote_string(value)),
+                StaticHtmlPart::Text(_) => None,
+                StaticHtmlPart::Expression(value) => Some(value.clone()),
+            })
+            .collect::<Vec<_>>();
+        if parts.is_empty() {
+            quote_string("")
+        } else {
+            parts.join(" + ")
+        }
+    }
 }
 
 fn render_static_vnode_cache(
@@ -16209,7 +16273,7 @@ fn render_static_vnode_cache(
     {
         Some(format!(
             "_createStaticVNode({}, {})",
-            quote_string(&analysis.html),
+            analysis.html.to_js_expression(),
             analysis.dom_nodes
         ))
     } else {
@@ -16226,7 +16290,7 @@ fn analyze_static_html_chunk(
         return None;
     }
     let mut analysis = StaticHtmlAnalysis {
-        html: String::new(),
+        html: StaticHtmlBuffer::default(),
         dom_nodes: children.len(),
         node_count: 0,
         element_with_binding_count: 0,
@@ -16234,7 +16298,7 @@ fn analyze_static_html_chunk(
     for child in children {
         analysis
             .html
-            .push_str(&static_html_for_node(ast, child, options)?);
+            .append(static_html_for_node(ast, child, options)?);
     }
     accumulate_static_html_analysis(ast, children, &mut analysis)?;
     Some(analysis)
@@ -16244,13 +16308,17 @@ fn static_html_for_node(
     ast: &Vue3Ast,
     node: &vuec_ast::Node<Vue3NodeKind>,
     options: &Vue3CompilerOptions,
-) -> Option<String> {
+) -> Option<StaticHtmlBuffer> {
     match &node.kind {
         Vue3AstKind::Element(element) => static_html_for_element(ast, node, element, options),
-        Vue3AstKind::Text(text) => Some(escape_static_html_text(&text.value)),
+        Vue3AstKind::Text(text) => Some(StaticHtmlBuffer::from_text(escape_static_html_text(
+            &text.value,
+        ))),
         Vue3AstKind::Interpolation(interpolation) => {
             let value = static_const_eval_source(&interpolation.expression.source_string())?;
-            Some(escape_static_html_text(&value.to_display_string()?))
+            Some(StaticHtmlBuffer::from_text(escape_static_html_text(
+                &value.to_display_string()?,
+            )))
         }
         _ => None,
     }
@@ -16261,7 +16329,7 @@ fn static_html_for_element(
     node: &vuec_ast::Node<Vue3NodeKind>,
     element: &Vue3Element,
     options: &Vue3CompilerOptions,
-) -> Option<String> {
+) -> Option<StaticHtmlBuffer> {
     if element.tag == "slot"
         || element.tag_type != Vue3ElementType::Element
         || (element.ns == vuec_ast::HtmlNamespace::Html
@@ -16274,9 +16342,9 @@ fn static_html_for_element(
         return None;
     }
 
-    let mut html = String::new();
-    html.push('<');
-    html.push_str(&element.tag);
+    let mut html = StaticHtmlBuffer::default();
+    html.push_text("<");
+    html.push_text(element.tag.as_str());
     let mut inner_html = None;
     for prop in &element.props {
         match prop {
@@ -16284,12 +16352,12 @@ fn static_html_for_element(
                 if !static_html_attr_is_stringifiable(&attr.name, element.ns) {
                     return None;
                 }
-                html.push(' ');
-                html.push_str(&attr.name);
+                html.push_text(" ");
+                html.push_text(attr.name.as_str());
                 if let Some(value) = &attr.value {
-                    html.push_str("=\"");
-                    html.push_str(&escape_static_html_attr(value));
-                    html.push('"');
+                    html.push_text("=\"");
+                    html.push_text(escape_static_html_attr(value));
+                    html.push_text("\"");
                 }
             }
             Vue3Prop::Directive(dir) if dir.name == "html" => {
@@ -16307,11 +16375,11 @@ fn static_html_for_element(
                 else {
                     continue;
                 };
-                html.push(' ');
-                html.push_str(&rendered.name);
-                html.push_str("=\"");
-                html.push_str(&escape_static_html_attr(&rendered.value));
-                html.push('"');
+                html.push_text(" ");
+                html.push_text(rendered.name.as_str());
+                html.push_text("=\"");
+                html.append(rendered.value);
+                html.push_text("\"");
             }
         }
     }
@@ -16320,23 +16388,23 @@ fn static_html_for_element(
         .as_deref()
         .filter(|scope_id| !scope_id.is_empty())
     {
-        html.push(' ');
-        html.push_str(scope_id);
+        html.push_text(" ");
+        html.push_text(scope_id);
     }
-    html.push('>');
+    html.push_text(">");
 
     if element.ns != vuec_ast::HtmlNamespace::Html || !static_html_is_void_tag(&element.tag) {
         if let Some(inner_html) = inner_html.filter(|value| !value.is_empty()) {
-            html.push_str(&inner_html);
+            html.push_text(inner_html);
         } else {
             for child_id in &node.children {
                 let child = ast.node(*child_id)?;
-                html.push_str(&static_html_for_node(ast, child, options)?);
+                html.append(static_html_for_node(ast, child, options)?);
             }
         }
-        html.push_str("</");
-        html.push_str(&element.tag);
-        html.push('>');
+        html.push_text("</");
+        html.push_text(element.tag.as_str());
+        html.push_text(">");
     }
 
     Some(html)
@@ -16345,7 +16413,7 @@ fn static_html_for_element(
 #[derive(Clone, Debug)]
 struct StaticHtmlAttr {
     name: String,
-    value: String,
+    value: StaticHtmlBuffer,
 }
 
 fn static_html_directive_attr(
@@ -16376,6 +16444,12 @@ fn static_html_bind_attr(
         return None;
     }
     let source = dir.exp.as_ref()?.source_string();
+    if is_asset_import_binding(dir) {
+        return Some(Some(StaticHtmlAttr {
+            name,
+            value: static_html_asset_import_expression(&source)?,
+        }));
+    }
     let value = static_const_eval_source(&source)?;
     if matches!(value, StaticConstValue::Null) {
         return Some(None);
@@ -16390,7 +16464,10 @@ fn static_html_bind_attr(
     } else {
         value.to_display_string()?
     };
-    Some(Some(StaticHtmlAttr { name, value }))
+    Some(Some(StaticHtmlAttr {
+        name,
+        value: StaticHtmlBuffer::from_text(escape_static_html_attr(&value)),
+    }))
 }
 
 fn accumulate_static_html_analysis(
@@ -17257,17 +17334,61 @@ fn is_asset_import_binding(dir: &Vue3Directive) -> bool {
 }
 
 fn expression_is_generated_asset_import(expression: &str) -> bool {
-    split_top_level_like(expression, '+')
+    generated_asset_import_expression_parts(expression).is_some()
+}
+
+fn static_html_asset_import_expression(expression: &str) -> Option<StaticHtmlBuffer> {
+    let mut html = StaticHtmlBuffer::default();
+    for part in generated_asset_import_expression_parts(expression)? {
+        match part {
+            AssetImportExpressionPart::Import(value) => html.push_expression(value),
+            AssetImportExpressionPart::Literal(value) => {
+                html.push_text(escape_static_html_attr(&value));
+            }
+        }
+    }
+    Some(html)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AssetImportExpressionPart {
+    Import(String),
+    Literal(String),
+}
+
+fn generated_asset_import_expression_parts(
+    expression: &str,
+) -> Option<Vec<AssetImportExpressionPart>> {
+    let parts = split_top_level_like(expression, '+');
+    if parts.is_empty() {
+        return None;
+    }
+    let parts = parts
         .into_iter()
-        .all(|part| {
+        .map(|part| {
             let part = part.trim();
-            is_generated_asset_import_ident(part) || quoted_js_literal(part)
+            if is_generated_asset_import_ident(part) {
+                Some(AssetImportExpressionPart::Import(part.to_string()))
+            } else if quoted_js_literal(part) {
+                match static_const_eval_source(part)? {
+                    StaticConstValue::String(value) => {
+                        Some(AssetImportExpressionPart::Literal(value))
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            }
         })
+        .collect::<Option<Vec<_>>>()?;
+    parts
+        .iter()
+        .any(|part| matches!(part, AssetImportExpressionPart::Import(_)))
+        .then_some(parts)
 }
 
 fn quoted_js_literal(value: &str) -> bool {
-    (value.starts_with('\'') && value.ends_with('\''))
-        || (value.starts_with('"') && value.ends_with('"'))
+    vue3_expression_is_string_literal(value)
 }
 
 fn directive_by_name<'a>(element: &'a Vue3Element, name: &str) -> Option<&'a Vue3Directive> {
@@ -23878,6 +23999,66 @@ mod tests {
             .code
             .contains(r#"<div style=\"color:red;\"><span class=\"foo bar\">1 + false</span>"#));
         assert!(!result.code.contains("_normalizeClass"));
+    }
+
+    #[test]
+    fn base_compile_stringifies_static_asset_import_bindings() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: format!(
+                r#"<div><img :src="_imports_0" :srcset="_imports_0 + ', ' + _imports_1 + '#heart 2x'" />{}</div>"#,
+                r#"<span class="foo"></span>"#.repeat(5)
+            ),
+            file_id: FileId(0),
+            base_offset: 0,
+        };
+        let mut ast = Vue3Dialect::base_parse(
+            source.clone(),
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                hoist_static: true,
+                stringify_static: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+        if let Some(root_node) = ast.root_node_mut() {
+            if let Vue3AstKind::Root(root) = &mut root_node.kind {
+                root.imports.push(vuec_ast::Vue3ImportItem {
+                    name: "_imports_0".into(),
+                    path: "./logo.png".into(),
+                });
+                root.imports.push(vuec_ast::Vue3ImportItem {
+                    name: "_imports_1".into(),
+                    path: "./icons.svg".into(),
+                });
+            }
+        }
+        let mut ctx = TransformContext::default();
+        Vue3Dialect::transform(&mut ast, &mut ctx);
+        let result = Vue3Dialect::finish_compile(
+            ast,
+            source,
+            Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                hoist_static: true,
+                stringify_static: true,
+                ..Vue3CompilerOptions::default()
+            },
+            ctx,
+        );
+
+        assert!(result.code.contains("import _imports_0 from './logo.png'"));
+        assert!(result.code.contains("import _imports_1 from './icons.svg'"));
+        assert!(
+            result.code.contains("_createStaticVNode"),
+            "{}",
+            result.code
+        );
+        assert!(result.code.contains(r##"_createStaticVNode("<img src=\"" + _imports_0 + "\" srcset=\"" + _imports_0 + ", " + _imports_1 + "#heart 2x\"><span class=\"foo\"></span>"##));
+        assert!(!result.code.contains("_ctx._imports_0"));
+        assert!(!result.code.contains("_ctx._imports_1"));
     }
 
     #[test]
