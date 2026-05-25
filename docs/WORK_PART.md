@@ -58,6 +58,7 @@
 - [x] Vue 3 compiler-ssr mixed alias-runtime built-in directive transform slice for `ssrVShow.spec.ts` (`7/7`; full SSR suite currently `99/129`, `mixed` coverage).
 - [x] Vue 3 compiler-ssr mixed alias-runtime slot outlet / Transition symbol adapter slice for `ssrSlotOutlet.spec.ts` (`11/11`; full SSR suite currently `121/129`, `mixed` coverage).
 - [x] Vue 3 compiler-ssr mixed alias-runtime conformance closure for prepared official SSR source (`ssrComponent.spec.ts` `16/16`, `ssrInjectCssVars.spec.ts` `6/6`, full SSR suite `129/129`, `mixed` coverage).
+- [x] Vue 3 compiler-sfc official conformance execution wiring (real prepared Vitest run; currently `96/461`, `mixed` coverage; failing suite now exposes SFC compileScript, template asset URL, and parse padding/source-location gaps instead of `not-wired` pending status).
 - [x] Vue 3 compiler-core Rust-backed public `generate(ast, options)` codegen slice for `codegen.spec.ts` (`34/34`; Vue 3 core coverage `rust-backed 192/192`, `mixed 460/460`).
 - [x] Vue 3 compiler-core Rust-backed `transformText` projection bridge for text merge / `TEXT_CALL` decisions (`transformText.spec.ts` `9/9`; file remains `mixed` because it still exercises alias-runtime harness dependencies).
 - [x] Vue 3 compiler-core Rust-backed `processExpression` projection bridge for expression prefixing / const classification decisions (`transformExpressions.spec.ts` `47/47`; file remains `mixed` because it still exercises alias-runtime traversal and transform harness dependencies).
@@ -126,9 +127,16 @@
 - [x] Vue 3 exact render emitter `cacheHandlers` event handler codegen for public `baseCompile`, sharing cache slots with memo/static caches.
 - [x] Vue 3 exact render emitter `v-once` cache-wrapper codegen for public `baseCompile`, sharing cache slots with memo/static/cacheHandlers caches and wrapping `v-if` / `v-for` control-flow output.
 - [x] Vue 3 exact render emitter object props merge codegen for public `baseCompile`, including argument-less `v-bind`, argument-less `v-on`, dynamic bind args, slot outlet props, and class/style patch-flag parity.
+- [x] Vue 3 compiler-sfc official conformance runner wiring, replacing `not-wired` pending status with a real mixed prepared Vitest report (`96/461`, `365` failing).
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Wired Vue 3 compiler-sfc official conformance to a real prepared Vitest runner.
+- The SFC runner now prepares official compiler-sfc tests/source, generated compiler-core relative shims, official DOM `stringifyStatic` source for relative test imports, deterministic SFC runner dependencies, and Vitest aliases for Rust compiler aliases plus SFC npm dependencies. It also classifies Vue 3 SFC conformance as `mixed` and counts Vitest suite-load failures as failures.
+- Current SFC conformance is no longer pending/not-wired: `cargo xtask run-conformance --suite vue3-sfc` executes `461` tests and reports `96` passed / `365` failed. The current failures expose real downstream gaps in SFC `compileScript` descriptor/source handling, template asset URL output, and parse padding/source-location behavior. This is harness/import-adapter progress only, not Rust SFC parity.
+- This touched `xtask/src/compat.rs` only for conformance runner wiring, dependency resolution, import aliases, and report accounting. It does not implement compiler semantics in `xtask`, does not change AST/HIR/MIR structure, and does not make mixed/shim conformance count as Rust compiler parity.
+- Verification this round: `cargo fmt --all`, `cargo fmt --all -- --check`, `cargo test -p xtask` (`23/23`), `cargo xtask run-conformance --suite vue3-core` (`652/652`), `cargo xtask run-conformance --suite vue3-dom` (`133/133`), `cargo xtask run-conformance --suite vue3-ssr` (`129/129`), and `cargo xtask run-conformance --suite vue3-sfc` (expected failing report, `96/461`, `365` failed, mixed coverage).
 
 - Added Rust-backed Vue 3 exact render emitter object props merge codegen for public `baseCompile`.
 - The exact emitter now emits official-shaped `_mergeProps`, `_normalizeProps`, `_guardReactiveProps`, and `_toHandlers` output for argument-less `v-bind="obj"` and `v-on="listeners"`, including native/component listener differences, source-order merge segments, cached event handler cache-slot sharing, and dynamic bind arg key fallbacks such as `_ctx.key || ""` / `_camelize(_ctx.name || "")`.

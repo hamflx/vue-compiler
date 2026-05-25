@@ -2560,14 +2560,16 @@ fn locked_runner_dependency_version(root: &Path, dependency: &str) -> Option<Str
 
 fn locked_pnpm_dependency_version(lock: &str, dependency: &str) -> Option<String> {
     for line in lock.lines() {
-        let trimmed = line.trim_start();
+        let trimmed = line.trim_start().trim_start_matches(['\'', '"']);
         let candidate = trimmed
             .strip_prefix(&format!("{dependency}@"))
             .or_else(|| trimmed.strip_prefix(&format!("/{dependency}@")));
         let Some(candidate) = candidate else {
             continue;
         };
-        let version_end = candidate.find(['(', ':']).unwrap_or(candidate.len());
+        let version_end = candidate
+            .find(['(', ':', '\'', '"'])
+            .unwrap_or(candidate.len());
         let version = candidate[..version_end].trim();
         if is_publishable_version(version) {
             return Some(version.to_string());
@@ -9113,6 +9115,7 @@ fn run_conformance_execution(
     match spec.name {
         "vue3-core" => run_vue3_core_conformance(spec, official_root, discovered, lock_hash),
         "vue3-dom" => run_vue3_dom_conformance(spec, official_root, discovered, lock_hash),
+        "vue3-sfc" => run_vue3_sfc_conformance(spec, official_root, discovered, lock_hash),
         "vue3-ssr" => run_vue3_ssr_conformance(spec, official_root, discovered, lock_hash),
         _ => Ok(ConformanceExecutionResult {
             status: "pending".into(),
@@ -9148,6 +9151,16 @@ fn run_vue3_dom_conformance(
     lock_hash: Option<&str>,
 ) -> Result<ConformanceExecutionResult> {
     let prepared_root = prepare_vue3_dom_conformance_suite(spec, official_root, lock_hash)?;
+    run_vitest_conformance(spec, prepared_root, discovered)
+}
+
+fn run_vue3_sfc_conformance(
+    spec: ConformanceSuiteSpec,
+    official_root: &Path,
+    discovered: &[String],
+    lock_hash: Option<&str>,
+) -> Result<ConformanceExecutionResult> {
+    let prepared_root = prepare_vue3_sfc_conformance_suite(spec, official_root, lock_hash)?;
     run_vitest_conformance(spec, prepared_root, discovered)
 }
 
@@ -9478,6 +9491,143 @@ export default {
     Ok(())
 }
 
+fn prepare_vue3_sfc_conformance_suite(
+    spec: ConformanceSuiteSpec,
+    official_root: &Path,
+    lock_hash: Option<&str>,
+) -> Result<PathBuf> {
+    let prepared_root = PathBuf::from("target")
+        .join("conformance")
+        .join(lock_hash.unwrap_or("unknown-lock"))
+        .join("prepared")
+        .join(spec.name);
+    if prepared_root.exists() {
+        fs::remove_dir_all(&prepared_root)
+            .with_context(|| format!("failed to remove {}", prepared_root.display()))?;
+    }
+
+    let official_sfc_tests = official_root
+        .join("packages")
+        .join("compiler-sfc")
+        .join("__tests__");
+    let prepared_sfc_tests = prepared_root
+        .join("packages")
+        .join("compiler-sfc")
+        .join("__tests__");
+    copy_dir_recursive(&official_sfc_tests, &prepared_sfc_tests)?;
+
+    let official_sfc_src = official_root
+        .join("packages")
+        .join("compiler-sfc")
+        .join("src");
+    let prepared_sfc_src = prepared_root
+        .join("packages")
+        .join("compiler-sfc")
+        .join("src");
+    copy_dir_recursive(&official_sfc_src, &prepared_sfc_src)?;
+
+    let official_dom_stringify = official_root
+        .join("packages")
+        .join("compiler-dom")
+        .join("src")
+        .join("transforms")
+        .join("stringifyStatic.ts");
+    let prepared_dom_transforms = prepared_root
+        .join("packages")
+        .join("compiler-dom")
+        .join("src")
+        .join("transforms");
+    fs::create_dir_all(&prepared_dom_transforms)
+        .with_context(|| format!("failed to create {}", prepared_dom_transforms.display()))?;
+    fs::copy(
+        &official_dom_stringify,
+        prepared_dom_transforms.join("stringifyStatic.ts"),
+    )
+    .with_context(|| {
+        format!(
+            "failed to copy {} into {}",
+            official_dom_stringify.display(),
+            prepared_dom_transforms.display()
+        )
+    })?;
+
+    write_vue3_core_source_shims(&prepared_root)?;
+    write_vue3_sfc_conformance_shims(&prepared_root)?;
+    Ok(prepared_root)
+}
+
+fn write_vue3_sfc_conformance_shims(prepared_root: &Path) -> Result<()> {
+    write_json(
+        &prepared_root.join("package.json"),
+        &serde_json::json!({
+            "private": true,
+            "type": "module",
+        }),
+    )?;
+    write_vue3_core_test_setup(prepared_root)?;
+
+    let config = r#"
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const root = path.dirname(fileURLToPath(import.meta.url))
+const aliasRoot = process.env.VUEC_RUST_ALIAS_ROOT
+const npmRoot = process.env.VUEC_OFFICIAL_NPM_ROOT
+
+export default {
+  define: {
+    __DEV__: true,
+    __TEST__: true,
+    __VERSION__: '"test"',
+    __BROWSER__: false,
+    __GLOBAL__: false,
+    __ESM_BUNDLER__: true,
+    __ESM_BROWSER__: false,
+    __CJS__: true,
+    __SSR__: true,
+    __FEATURE_OPTIONS_API__: true,
+    __FEATURE_SUSPENSE__: true,
+    __FEATURE_PROD_DEVTOOLS__: false,
+    __FEATURE_PROD_HYDRATION_MISMATCH_DETAILS__: false,
+    __COMPAT__: true,
+  },
+  resolve: {
+    alias: {
+      '@vue/compiler-core': path.resolve(aliasRoot, 'node_modules/@vue/compiler-core/index.js'),
+      '@vue/compiler-dom': path.resolve(aliasRoot, 'node_modules/@vue/compiler-dom/index.js'),
+      '@vue/compiler-ssr': path.resolve(aliasRoot, 'node_modules/@vue/compiler-ssr/dist/compiler-ssr.cjs.js'),
+      '@vue/compiler-sfc': path.resolve(aliasRoot, 'node_modules/@vue/compiler-sfc/dist/compiler-sfc.cjs.js'),
+      '@vue/shared': path.resolve(npmRoot, 'node_modules/@vue/shared/index.js'),
+      '@babel/parser': path.resolve(npmRoot, 'node_modules/@babel/parser/lib/index.js'),
+      '@babel/types': path.resolve(npmRoot, 'node_modules/@babel/types/lib/index.js'),
+      '@vue/consolidate': path.resolve(npmRoot, 'node_modules/@vue/consolidate/index.js'),
+      'estree-walker': path.resolve(npmRoot, 'node_modules/estree-walker/dist/esm/estree-walker.js'),
+      'hash-sum': path.resolve(npmRoot, 'node_modules/hash-sum/hash-sum.js'),
+      'lru-cache': path.resolve(npmRoot, 'node_modules/lru-cache/dist/esm/index.js'),
+      'magic-string': path.resolve(npmRoot, 'node_modules/magic-string/dist/magic-string.es.mjs'),
+      'merge-source-map': path.resolve(npmRoot, 'node_modules/merge-source-map/index.js'),
+      'minimatch': path.resolve(npmRoot, 'node_modules/minimatch/dist/esm/index.js'),
+      'postcss': path.resolve(npmRoot, 'node_modules/postcss/lib/postcss.mjs'),
+      'postcss-modules': path.resolve(npmRoot, 'node_modules/postcss-modules/build/index.js'),
+      'postcss-selector-parser': path.resolve(npmRoot, 'node_modules/postcss-selector-parser/dist/index.js'),
+      'pug': path.resolve(npmRoot, 'node_modules/pug/lib/index.js'),
+      'sass': path.resolve(npmRoot, 'node_modules/sass/sass.node.mjs'),
+      'source-map-js': path.resolve(npmRoot, 'node_modules/source-map-js/source-map.js'),
+      'typescript': path.resolve(npmRoot, 'node_modules/typescript/lib/typescript.js'),
+    },
+  },
+  test: {
+    globals: true,
+    pool: 'forks',
+    setupFiles: ['./vuec-vitest-setup.ts'],
+    include: ['packages/compiler-sfc/__tests__/**/*.spec.ts'],
+  },
+}
+"#;
+    write_text(&prepared_root.join("vitest.config.ts"), config)?;
+    Ok(())
+}
+
 fn prepare_vue3_ssr_conformance_suite(
     spec: ConformanceSuiteSpec,
     official_root: &Path,
@@ -9579,6 +9729,8 @@ export default {
 }
 
 fn write_vue3_core_test_setup(prepared_root: &Path) -> Result<()> {
+    fs::create_dir_all(prepared_root)
+        .with_context(|| format!("failed to create {}", prepared_root.display()))?;
     write_text(
         &prepared_root.join("vuec-vitest-setup.ts"),
         r#"
@@ -9699,12 +9851,12 @@ fn normalize_conformance_output(output: &str) -> String {
 
 fn read_vitest_counts(path: &Path) -> Result<ConformanceExecutionCounts> {
     let value = read_json::<serde_json::Value>(path)?;
-    let total = json_usize(&value, &["numTotalTests"]);
     let failed_suites = json_usize(&value, &["numFailedTestSuites"]);
-    let fail =
-        json_usize(&value, &["numFailedTests"]).max(if total == 0 { failed_suites } else { 0 });
+    let failed_tests = json_usize(&value, &["numFailedTests"]);
+    let fail = failed_tests + failed_suites.saturating_sub(failed_tests);
     let skip = json_usize(&value, &["numPendingTests"]) + json_usize(&value, &["numTodoTests"]);
     let pass = json_usize(&value, &["numPassedTests"]);
+    let total = json_usize(&value, &["numTotalTests"]).max(pass + fail + skip);
     let pending = total.saturating_sub(pass + fail + skip);
     Ok(ConformanceExecutionCounts {
         total,
@@ -9767,7 +9919,7 @@ fn conformance_coverage_report(
 
 fn conformance_coverage_kind(spec: ConformanceSuiteSpec) -> ConformanceCoverageKind {
     match spec.name {
-        "vue3-core" | "vue3-dom" | "vue3-ssr" => ConformanceCoverageKind::Mixed,
+        "vue3-core" | "vue3-dom" | "vue3-sfc" | "vue3-ssr" => ConformanceCoverageKind::Mixed,
         _ => ConformanceCoverageKind::RustBacked,
     }
 }
@@ -9779,6 +9931,9 @@ fn conformance_coverage_reason(spec: ConformanceSuiteSpec) -> &'static str {
         }
         "vue3-dom" => {
             "Vue 3 compiler-dom official tests run through a prepared Vitest suite with official DOM source imports, generated compiler-core import shims, and the @vue/compiler-dom alias runtime. Public compile/parse exports call the Rust bridge, but internal DOM transform imports mostly execute official TypeScript source or compatibility adapter code; only explicitly bridged projections count as Rust-backed."
+        }
+        "vue3-sfc" => {
+            "Vue 3 compiler-sfc official tests run through a prepared Vitest suite with official SFC TypeScript source and generated aliases for @vue/compiler-core, @vue/compiler-dom, @vue/compiler-ssr, and @vue/compiler-sfc. The SFC source under test executes mixed official TypeScript logic plus Rust alias bridge calls for compiler dependencies; this runner is conformance harness coverage, not standalone Rust SFC parity."
         }
         "vue3-ssr" => {
             "Vue 3 compiler-ssr official tests run through a prepared Vitest suite with official SSR and DOM source imports, generated compiler-core import shims, and the alias runtime. Public @vue/compiler-ssr exports call the Rust bridge, but prepared SSR source tests execute mixed official TypeScript source, alias adapter code, and Rust bridge projections."
@@ -10022,8 +10177,31 @@ fn suite_spec(suite: ConformanceSuite) -> ConformanceSuiteSpec {
             name: "vue3-sfc",
             version_line: VersionLine::Vue3,
             relative_test_dirs: &["packages/compiler-sfc/__tests__"],
-            package_requests: &["@vue/compiler-sfc"],
-            runner_dependencies: &["vitest", "esbuild", "typescript"],
+            package_requests: &[
+                "@vue/compiler-core",
+                "@vue/compiler-dom",
+                "@vue/compiler-sfc",
+                "@vue/compiler-ssr",
+            ],
+            runner_dependencies: &[
+                "@babel/parser",
+                "@babel/types",
+                "@vue/consolidate",
+                "esbuild",
+                "estree-walker",
+                "hash-sum",
+                "lru-cache",
+                "magic-string",
+                "merge-source-map",
+                "minimatch",
+                "postcss-modules",
+                "postcss-selector-parser",
+                "pug",
+                "sass",
+                "source-map-js",
+                "typescript",
+                "vitest",
+            ],
         },
         ConformanceSuite::Vue3Ssr => ConformanceSuiteSpec {
             name: "vue3-ssr",
@@ -10335,7 +10513,7 @@ mod tests {
         .unwrap();
 
         let counts = read_vitest_counts(&report).unwrap();
-        assert_eq!(counts.total, 0);
+        assert_eq!(counts.total, 1);
         assert_eq!(counts.fail, 1);
         let _ = fs::remove_dir_all(temp);
     }
@@ -10553,6 +10731,65 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_conformance_shims_use_sfc_vitest_glob() {
+        let temp = std::env::temp_dir().join(format!(
+            "vuec-xtask-vue3-sfc-shims-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        write_vue3_core_source_shims(&temp).unwrap();
+        write_vue3_sfc_conformance_shims(&temp).unwrap();
+
+        let config = fs::read_to_string(temp.join("vitest.config.ts")).unwrap();
+        assert!(!config.contains("vitest/config"));
+        assert!(config.contains("include: ['packages/compiler-sfc/__tests__/**/*.spec.ts']"));
+        assert!(config.contains(
+            "'@vue/compiler-core': path.resolve(aliasRoot, 'node_modules/@vue/compiler-core/index.js')"
+        ));
+        assert!(config.contains(
+            "'@vue/compiler-dom': path.resolve(aliasRoot, 'node_modules/@vue/compiler-dom/index.js')"
+        ));
+        assert!(config.contains(
+            "'@vue/compiler-ssr': path.resolve(aliasRoot, 'node_modules/@vue/compiler-ssr/dist/compiler-ssr.cjs.js')"
+        ));
+        assert!(config.contains(
+            "'@vue/compiler-sfc': path.resolve(aliasRoot, 'node_modules/@vue/compiler-sfc/dist/compiler-sfc.cjs.js')"
+        ));
+        assert!(config
+            .contains("'hash-sum': path.resolve(npmRoot, 'node_modules/hash-sum/hash-sum.js')"));
+        assert!(config.contains(
+            "'lru-cache': path.resolve(npmRoot, 'node_modules/lru-cache/dist/esm/index.js')"
+        ));
+        assert!(config
+            .contains("'postcss': path.resolve(npmRoot, 'node_modules/postcss/lib/postcss.mjs')"));
+        assert!(config.contains(
+            "'@babel/parser': path.resolve(npmRoot, 'node_modules/@babel/parser/lib/index.js')"
+        ));
+        let package_json = fs::read_to_string(temp.join("package.json")).unwrap();
+        assert!(package_json.contains("\"type\": \"module\""));
+        let transform_element = fs::read_to_string(
+            temp.join("packages")
+                .join("compiler-core")
+                .join("src")
+                .join("transforms")
+                .join("transformElement.ts"),
+        )
+        .unwrap();
+        assert!(transform_element.contains("__vuecRuntime"));
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn vue3_sfc_conformance_coverage_is_mixed() {
+        let coverage = conformance_coverage_report(suite_spec(ConformanceSuite::Vue3Sfc), None);
+        assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
+        assert!(coverage.reason.contains("official SFC TypeScript source"));
+        assert!(coverage.reason.contains("not standalone Rust SFC parity"));
+    }
+
+    #[test]
     fn vue3_ssr_conformance_shims_use_ssr_vitest_glob() {
         let temp = std::env::temp_dir().join(format!(
             "vuec-xtask-vue3-ssr-shims-{}",
@@ -10638,6 +10875,21 @@ mod tests {
             .map(api_require_request)
             .collect::<Vec<_>>();
         assert_eq!(requests, vec!["@vue/compiler-core", "@vue/compiler-dom"]);
+
+        let sfc_targets = conformance_targets(&[ConformanceSuite::Vue3Sfc]);
+        let sfc_requests = sfc_targets
+            .into_iter()
+            .map(api_require_request)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            sfc_requests,
+            vec![
+                "@vue/compiler-core",
+                "@vue/compiler-dom",
+                "@vue/compiler-ssr",
+                "@vue/compiler-sfc",
+            ]
+        );
     }
 
     #[test]
@@ -10655,9 +10907,22 @@ mod tests {
             root.join("package.json"),
             r#"{
               "devDependencies": {
+                "@babel/parser": "^7.29.3",
+                "@babel/types": "^7.29.0",
+                "@vue/consolidate": "1.0.0",
+                "estree-walker": "^2.0.2",
                 "vitest": "^4.1.5",
                 "esbuild": "^0.28.0",
+                "hash-sum": "^2.0.0",
                 "jsdom": "^29.1.1",
+                "lru-cache": "11.5.0",
+                "magic-string": "^0.30.21",
+                "merge-source-map": "^1.1.0",
+                "minimatch": "~10.2.5",
+                "postcss-modules": "^6.0.1",
+                "postcss-selector-parser": "^7.1.1",
+                "pug": "^3.0.4",
+                "sass": "^1.99.0",
                 "typescript": "~5.6.2",
                 "source-map-js": "catalog:"
               }
@@ -10670,8 +10935,21 @@ mod tests {
 packages:
   .
 snapshots:
+  '@babel/parser@7.29.3': {}
+  '@babel/types@7.29.0': {}
+  '@vue/consolidate@1.0.0': {}
   esbuild@0.28.0: {}
+  estree-walker@2.0.2: {}
+  hash-sum@2.0.0: {}
   jsdom@29.1.1: {}
+  lru-cache@11.5.0: {}
+  magic-string@0.30.21: {}
+  merge-source-map@1.1.0: {}
+  minimatch@10.2.5: {}
+  postcss-modules@6.0.1(postcss@8.5.14): {}
+  postcss-selector-parser@7.1.1: {}
+  pug@3.0.4: {}
+  sass@1.99.0: {}
   source-map-js@1.2.1: {}
   typescript@5.6.3: {}
   vitest@4.1.5(@types/node@24.12.2): {}
@@ -10696,6 +10974,31 @@ snapshots:
                 "jsdom@29.1.1",
                 "source-map-js@1.2.1",
                 "vitest@4.1.5"
+            ]
+        );
+        let sfc_specs = runner_dependency_specs(suite_spec(ConformanceSuite::Vue3Sfc), &temp)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            sfc_specs,
+            vec![
+                "@babel/parser@7.29.3",
+                "@babel/types@7.29.0",
+                "@vue/consolidate@1.0.0",
+                "esbuild@0.28.0",
+                "estree-walker@2.0.2",
+                "hash-sum@2.0.0",
+                "lru-cache@11.5.0",
+                "magic-string@0.30.21",
+                "merge-source-map@1.1.0",
+                "minimatch@10.2.5",
+                "postcss-modules@6.0.1",
+                "postcss-selector-parser@7.1.1",
+                "pug@3.0.4",
+                "sass@1.99.0",
+                "source-map-js@1.2.1",
+                "typescript@5.6.3",
+                "vitest@4.1.5",
             ]
         );
         let _ = fs::remove_dir_all(temp);
