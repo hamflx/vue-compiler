@@ -2,7 +2,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use oxc_ast::ast::{BindingPattern, ChainElement, Expression};
+use oxc_ast::ast::{
+    ArrayExpressionElement, BinaryOperator, BindingPattern, ChainElement, Expression,
+    ObjectPropertyKind, PropertyKey, PropertyKind, UnaryOperator,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use vuec_ast::{
@@ -15535,6 +15538,16 @@ fn render_element_children(
         .filter(|child| !matches!(child.kind, Vue3AstKind::Comment(_)))
         .collect::<Vec<_>>();
     if options.hoist_static
+        && options.stringify_static
+        && parent_mode == NodeRenderMode::Root
+        && !should_cache_children(&child_nodes)
+        && should_stringify_static_children(&child_nodes)
+    {
+        if let Some(static_call) = render_static_vnode_cache(ast, &child_nodes) {
+            return format!("[...(_cache[0] || (_cache[0] = [{static_call}]))]");
+        }
+    }
+    if options.hoist_static
         && parent_mode == NodeRenderMode::Root
         && should_cache_children(&child_nodes)
     {
@@ -16150,6 +16163,26 @@ fn is_static_element_for_cache(node: &vuec_ast::Node<Vue3NodeKind>) -> bool {
     )
 }
 
+fn should_stringify_static_children(children: &[&vuec_ast::Node<Vue3NodeKind>]) -> bool {
+    !children.is_empty()
+        && children
+            .iter()
+            .all(|child| is_stringifiable_static_node_for_cache(child))
+}
+
+fn is_stringifiable_static_node_for_cache(node: &vuec_ast::Node<Vue3NodeKind>) -> bool {
+    match &node.kind {
+        Vue3AstKind::Element(element) => {
+            element.tag != "slot" && element.props.iter().all(vue3_prop_is_static_cacheable)
+        }
+        Vue3AstKind::Text(_) => true,
+        Vue3AstKind::Interpolation(interpolation) => {
+            static_const_eval_source(&interpolation.expression.source_string()).is_some()
+        }
+        _ => false,
+    }
+}
+
 const STRINGIFY_STATIC_ELEMENT_WITH_BINDING_COUNT: usize = 5;
 const STRINGIFY_STATIC_NODE_COUNT: usize = 20;
 
@@ -16203,6 +16236,10 @@ fn static_html_for_node(ast: &Vue3Ast, node: &vuec_ast::Node<Vue3NodeKind>) -> O
     match &node.kind {
         Vue3AstKind::Element(element) => static_html_for_element(ast, node, element),
         Vue3AstKind::Text(text) => Some(escape_static_html_text(&text.value)),
+        Vue3AstKind::Interpolation(interpolation) => {
+            let value = static_const_eval_source(&interpolation.expression.source_string())?;
+            Some(escape_static_html_text(&value.to_display_string()?))
+        }
         _ => None,
     }
 }
@@ -16217,7 +16254,6 @@ fn static_html_for_element(
         || element.ns != vuec_ast::HtmlNamespace::Html
         || static_html_non_stringifiable_tag(&element.tag)
         || (static_html_is_void_tag(&element.tag) && !node.children.is_empty())
-        || has_runtime_directive(element)
         || directive_by_name(element, "once").is_some()
     {
         return None;
@@ -16226,6 +16262,7 @@ fn static_html_for_element(
     let mut html = String::new();
     html.push('<');
     html.push_str(&element.tag);
+    let mut inner_html = None;
     for prop in &element.props {
         match prop {
             Vue3Prop::Attribute(attr) => {
@@ -16240,15 +16277,38 @@ fn static_html_for_element(
                     html.push('"');
                 }
             }
-            Vue3Prop::Directive(_) => return None,
+            Vue3Prop::Directive(dir) if dir.name == "html" => {
+                let source = dir.exp.as_ref()?.source_string();
+                let value = static_const_eval_source(&source)?;
+                inner_html = Some(value.to_display_string()?);
+            }
+            Vue3Prop::Directive(dir) if dir.name == "text" => {
+                let source = dir.exp.as_ref()?.source_string();
+                let value = static_const_eval_source(&source)?;
+                inner_html = Some(escape_static_html_text(&value.to_display_string()?));
+            }
+            Vue3Prop::Directive(dir) => {
+                let Some(rendered) = static_html_directive_attr(&element.tag, dir)? else {
+                    continue;
+                };
+                html.push(' ');
+                html.push_str(&rendered.name);
+                html.push_str("=\"");
+                html.push_str(&escape_static_html_attr(&rendered.value));
+                html.push('"');
+            }
         }
     }
     html.push('>');
 
     if !static_html_is_void_tag(&element.tag) {
-        for child_id in &node.children {
-            let child = ast.node(*child_id)?;
-            html.push_str(&static_html_for_node(ast, child)?);
+        if let Some(inner_html) = inner_html.filter(|value| !value.is_empty()) {
+            html.push_str(&inner_html);
+        } else {
+            for child_id in &node.children {
+                let child = ast.node(*child_id)?;
+                html.push_str(&static_html_for_node(ast, child)?);
+            }
         }
         html.push_str("</");
         html.push_str(&element.tag);
@@ -16256,6 +16316,49 @@ fn static_html_for_element(
     }
 
     Some(html)
+}
+
+#[derive(Clone, Debug)]
+struct StaticHtmlAttr {
+    name: String,
+    value: String,
+}
+
+fn static_html_directive_attr(tag: &str, dir: &Vue3Directive) -> Option<Option<StaticHtmlAttr>> {
+    match dir.name.as_str() {
+        "bind" => static_html_bind_attr(tag, dir),
+        "html" | "text" => None,
+        _ => None,
+    }
+}
+
+fn static_html_bind_attr(tag: &str, dir: &Vue3Directive) -> Option<Option<StaticHtmlAttr>> {
+    if dir.is_dynamic_arg || !dir.modifiers.is_empty() {
+        return None;
+    }
+    let name = dir.arg.as_ref()?.source_string();
+    if !static_html_attr_is_stringifiable(&name) {
+        return None;
+    }
+    if tag == "option" && name == "value" {
+        return None;
+    }
+    let source = dir.exp.as_ref()?.source_string();
+    let value = static_const_eval_source(&source)?;
+    if matches!(value, StaticConstValue::Null) {
+        return Some(None);
+    }
+    if static_html_is_boolean_attr(&name) && matches!(value, StaticConstValue::Bool(false)) {
+        return Some(None);
+    }
+    let value = if name == "class" {
+        static_const_normalize_class(&value)?
+    } else if name == "style" {
+        static_const_stringify_style(&value)?
+    } else {
+        value.to_display_string()?
+    };
+    Some(Some(StaticHtmlAttr { name, value }))
 }
 
 fn accumulate_static_html_analysis(
@@ -16277,7 +16380,7 @@ fn accumulate_static_html_analysis(
                     .collect::<Vec<_>>();
                 accumulate_static_html_analysis(ast, &descendants, analysis)?;
             }
-            Vue3AstKind::Text(_) => {
+            Vue3AstKind::Text(_) | Vue3AstKind::Interpolation(_) => {
                 analysis.node_count += 1;
             }
             _ => return None,
@@ -16314,6 +16417,36 @@ fn static_html_attr_is_stringifiable(name: &str) -> bool {
                 | "placeholder"
                 | "for"
         )
+}
+
+fn static_html_is_boolean_attr(name: &str) -> bool {
+    matches!(
+        name,
+        "allowfullscreen"
+            | "async"
+            | "autofocus"
+            | "autoplay"
+            | "checked"
+            | "controls"
+            | "default"
+            | "defer"
+            | "disabled"
+            | "formnovalidate"
+            | "hidden"
+            | "inert"
+            | "ismap"
+            | "itemscope"
+            | "loop"
+            | "multiple"
+            | "muted"
+            | "nomodule"
+            | "novalidate"
+            | "open"
+            | "readonly"
+            | "required"
+            | "reversed"
+            | "selected"
+    )
 }
 
 fn static_html_non_stringifiable_tag(tag: &str) -> bool {
@@ -16360,6 +16493,299 @@ fn escape_static_html(value: &str, attr: bool) -> String {
             '>' => output.push_str("&gt;"),
             '"' if attr => output.push_str("&quot;"),
             _ => output.push(ch),
+        }
+    }
+    output
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum StaticConstValue {
+    String(String),
+    Number(String),
+    Bool(bool),
+    Null,
+    Array(Vec<StaticConstValue>),
+    Object(Vec<(String, StaticConstValue)>),
+}
+
+impl StaticConstValue {
+    fn to_display_string(&self) -> Option<String> {
+        match self {
+            Self::String(value) | Self::Number(value) => Some(value.clone()),
+            Self::Bool(true) => Some("true".into()),
+            Self::Bool(false) => Some("false".into()),
+            Self::Null => Some(String::new()),
+            Self::Array(_) | Self::Object(_) => None,
+        }
+    }
+
+    fn to_js_string(&self) -> Option<String> {
+        match self {
+            Self::String(value) | Self::Number(value) => Some(value.clone()),
+            Self::Bool(true) => Some("true".into()),
+            Self::Bool(false) => Some("false".into()),
+            Self::Null => Some("null".into()),
+            Self::Array(_) | Self::Object(_) => None,
+        }
+    }
+
+    fn truthy(&self) -> bool {
+        match self {
+            Self::String(value) => !value.is_empty(),
+            Self::Number(value) => !matches!(value.as_str(), "0" | "-0" | "NaN"),
+            Self::Bool(value) => *value,
+            Self::Null => false,
+            Self::Array(_) | Self::Object(_) => true,
+        }
+    }
+}
+
+fn static_const_eval_source(source: &str) -> Option<StaticConstValue> {
+    let store = JsAstStore::new();
+    let expression = store
+        .parse_expression(source.trim(), oxc_span::SourceType::ts())
+        .ok()?;
+    static_const_eval_expression(&expression)
+}
+
+fn static_const_eval_expression(expression: &Expression<'_>) -> Option<StaticConstValue> {
+    match expression {
+        Expression::StringLiteral(literal) => {
+            Some(StaticConstValue::String(literal.value.as_str().to_string()))
+        }
+        Expression::NumericLiteral(literal) => Some(StaticConstValue::Number(
+            static_const_number_string(literal.value),
+        )),
+        Expression::BooleanLiteral(literal) => Some(StaticConstValue::Bool(literal.value)),
+        Expression::NullLiteral(_) => Some(StaticConstValue::Null),
+        Expression::TemplateLiteral(literal) => {
+            if !literal.expressions.is_empty() || literal.quasis.len() != 1 {
+                return None;
+            }
+            let cooked = literal.quasis.first()?.value.cooked.as_ref()?;
+            Some(StaticConstValue::String(cooked.as_str().to_string()))
+        }
+        Expression::ParenthesizedExpression(expression) => {
+            static_const_eval_expression(&expression.expression)
+        }
+        Expression::TSAsExpression(expression) => {
+            static_const_eval_expression(&expression.expression)
+        }
+        Expression::TSSatisfiesExpression(expression) => {
+            static_const_eval_expression(&expression.expression)
+        }
+        Expression::TSTypeAssertion(expression) => {
+            static_const_eval_expression(&expression.expression)
+        }
+        Expression::TSNonNullExpression(expression) => {
+            static_const_eval_expression(&expression.expression)
+        }
+        Expression::TSInstantiationExpression(expression) => {
+            static_const_eval_expression(&expression.expression)
+        }
+        Expression::UnaryExpression(expression) => static_const_eval_unary(expression),
+        Expression::BinaryExpression(expression) => static_const_eval_binary(expression),
+        Expression::ArrayExpression(expression) => {
+            let mut values = Vec::new();
+            for element in &expression.elements {
+                values.push(static_const_eval_array_element(element)?);
+            }
+            Some(StaticConstValue::Array(values))
+        }
+        Expression::ObjectExpression(expression) => {
+            let mut values = Vec::new();
+            for property in &expression.properties {
+                let ObjectPropertyKind::ObjectProperty(property) = property else {
+                    return None;
+                };
+                if property.kind != PropertyKind::Init
+                    || property.method
+                    || property.shorthand
+                    || property.computed
+                {
+                    return None;
+                }
+                let key = static_const_property_key(&property.key)?;
+                let value = static_const_eval_expression(&property.value)?;
+                values.push((key, value));
+            }
+            Some(StaticConstValue::Object(values))
+        }
+        _ => None,
+    }
+}
+
+fn static_const_eval_array_element(
+    element: &ArrayExpressionElement<'_>,
+) -> Option<StaticConstValue> {
+    if element.is_elision() || element.is_spread() {
+        return None;
+    }
+    static_const_eval_expression(element.as_expression()?)
+}
+
+fn static_const_eval_unary(
+    expression: &oxc_ast::ast::UnaryExpression<'_>,
+) -> Option<StaticConstValue> {
+    let value = static_const_eval_expression(&expression.argument)?;
+    match expression.operator {
+        UnaryOperator::LogicalNot => Some(StaticConstValue::Bool(!value.truthy())),
+        UnaryOperator::UnaryPlus => Some(StaticConstValue::Number(static_const_number_string(
+            static_const_to_number(&value)?,
+        ))),
+        UnaryOperator::UnaryNegation => Some(StaticConstValue::Number(static_const_number_string(
+            -static_const_to_number(&value)?,
+        ))),
+        _ => None,
+    }
+}
+
+fn static_const_eval_binary(
+    expression: &oxc_ast::ast::BinaryExpression<'_>,
+) -> Option<StaticConstValue> {
+    if expression.operator != BinaryOperator::Addition {
+        return None;
+    }
+    let left = static_const_eval_expression(&expression.left)?;
+    let right = static_const_eval_expression(&expression.right)?;
+    if matches!(left, StaticConstValue::String(_)) || matches!(right, StaticConstValue::String(_)) {
+        Some(StaticConstValue::String(format!(
+            "{}{}",
+            left.to_js_string()?,
+            right.to_js_string()?
+        )))
+    } else {
+        Some(StaticConstValue::Number(static_const_number_string(
+            static_const_to_number(&left)? + static_const_to_number(&right)?,
+        )))
+    }
+}
+
+fn static_const_to_number(value: &StaticConstValue) -> Option<f64> {
+    match value {
+        StaticConstValue::String(value) if value.trim().is_empty() => Some(0.0),
+        StaticConstValue::String(value) => value.trim().parse::<f64>().ok(),
+        StaticConstValue::Number(value) => value.parse::<f64>().ok(),
+        StaticConstValue::Bool(true) => Some(1.0),
+        StaticConstValue::Bool(false) | StaticConstValue::Null => Some(0.0),
+        StaticConstValue::Array(_) | StaticConstValue::Object(_) => None,
+    }
+}
+
+fn static_const_property_key(key: &PropertyKey<'_>) -> Option<String> {
+    match key {
+        PropertyKey::StaticIdentifier(identifier) => Some(identifier.name.as_str().to_string()),
+        PropertyKey::StringLiteral(literal) => Some(literal.value.as_str().to_string()),
+        PropertyKey::NumericLiteral(literal) => Some(static_const_number_string(literal.value)),
+        _ => None,
+    }
+}
+
+fn static_const_number_string(value: f64) -> String {
+    if value.is_nan() {
+        "NaN".into()
+    } else if value.is_infinite() {
+        if value.is_sign_negative() {
+            "-Infinity".into()
+        } else {
+            "Infinity".into()
+        }
+    } else if value == 0.0 {
+        "0".into()
+    } else if value.fract() == 0.0 {
+        format!("{value:.0}")
+    } else {
+        value.to_string()
+    }
+}
+
+fn static_const_normalize_class(value: &StaticConstValue) -> Option<String> {
+    match value {
+        StaticConstValue::String(value) => Some(value.clone()),
+        StaticConstValue::Array(items) => {
+            let mut classes = Vec::new();
+            for item in items {
+                let normalized = static_const_normalize_class(item)?;
+                if !normalized.is_empty() {
+                    classes.push(normalized);
+                }
+            }
+            Some(classes.join(" "))
+        }
+        StaticConstValue::Object(properties) => Some(
+            properties
+                .iter()
+                .filter_map(|(key, value)| value.truthy().then(|| key.clone()))
+                .collect::<Vec<_>>()
+                .join(" "),
+        ),
+        StaticConstValue::Bool(_) | StaticConstValue::Number(_) | StaticConstValue::Null => {
+            Some(String::new())
+        }
+    }
+}
+
+fn static_const_stringify_style(value: &StaticConstValue) -> Option<String> {
+    match value {
+        StaticConstValue::String(value) => {
+            let style = vue3_parse_static_style(value);
+            Some(static_const_stringify_style_entries(style))
+        }
+        StaticConstValue::Object(properties) => Some(static_const_stringify_style_entries(
+            properties
+                .iter()
+                .filter_map(|(key, value)| {
+                    value
+                        .to_display_string()
+                        .filter(|_| !matches!(value, StaticConstValue::Null))
+                        .map(|value| (hyphenate_style_property(key), value))
+                })
+                .filter(|(_, value)| !value.is_empty())
+                .collect(),
+        )),
+        StaticConstValue::Array(items) => {
+            let mut entries = Vec::new();
+            for item in items {
+                match item {
+                    StaticConstValue::String(value) => {
+                        entries.extend(vue3_parse_static_style(value));
+                    }
+                    StaticConstValue::Object(properties) => {
+                        entries.extend(properties.iter().filter_map(|(key, value)| {
+                            value
+                                .to_display_string()
+                                .filter(|_| !matches!(value, StaticConstValue::Null))
+                                .map(|value| (hyphenate_style_property(key), value))
+                        }));
+                    }
+                    _ => return None,
+                }
+            }
+            Some(static_const_stringify_style_entries(entries))
+        }
+        StaticConstValue::Bool(_) | StaticConstValue::Number(_) | StaticConstValue::Null => None,
+    }
+}
+
+fn static_const_stringify_style_entries(entries: Vec<(String, String)>) -> String {
+    entries
+        .into_iter()
+        .filter(|(key, value)| !key.is_empty() && !value.is_empty())
+        .map(|(key, value)| format!("{key}:{value};"))
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+fn hyphenate_style_property(value: &str) -> String {
+    let mut output = String::new();
+    for (index, ch) in value.chars().enumerate() {
+        if ch.is_ascii_uppercase() {
+            if index > 0 {
+                output.push('-');
+            }
+            output.push(ch.to_ascii_lowercase());
+        } else {
+            output.push(ch);
         }
     }
     output
@@ -16754,6 +17180,38 @@ fn vue3_prop_is_stringifiable_static(prop: &Vue3Prop) -> bool {
     match prop {
         Vue3Prop::Attribute(_) => true,
         Vue3Prop::Directive(dir) => is_asset_import_binding(dir),
+    }
+}
+
+fn vue3_prop_is_static_cacheable(prop: &Vue3Prop) -> bool {
+    match prop {
+        Vue3Prop::Attribute(_) => true,
+        Vue3Prop::Directive(dir) => {
+            is_asset_import_binding(dir) || static_html_directive_is_stringifiable_static(dir)
+        }
+    }
+}
+
+fn static_html_directive_is_stringifiable_static(dir: &Vue3Directive) -> bool {
+    match dir.name.as_str() {
+        "bind" => {
+            !dir.is_dynamic_arg
+                && dir.modifiers.is_empty()
+                && dir
+                    .arg
+                    .as_ref()
+                    .is_some_and(|arg| static_html_attr_is_stringifiable(&arg.source_string()))
+                && dir
+                    .exp
+                    .as_ref()
+                    .is_some_and(|exp| static_const_eval_source(&exp.source_string()).is_some())
+        }
+        "html" | "text" => dir.exp.as_ref().is_some_and(|exp| {
+            static_const_eval_source(&exp.source_string())
+                .and_then(|value| value.to_display_string())
+                .is_some()
+        }),
+        _ => false,
     }
 }
 
@@ -23333,6 +23791,87 @@ mod tests {
             .contains(r#"<span title=\"foo&gt;bar\">&amp; &lt;</span>"#));
         assert!(result.code.contains(r#"<img title=\"foo&gt;bar\">"#));
         assert!(!result.code.contains("</img>"));
+    }
+
+    #[test]
+    fn base_compile_stringifies_static_constant_bindings_and_interpolations() {
+        let result = base_compile(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: format!(
+                    r#"<div><div :style="{{ color: 'red' }}">{}</div></div>"#,
+                    r#"<span :class="[{ foo: true }, { bar: true }]">{{ 1 }} + {{ false }}</span>"#
+                        .repeat(5)
+                ),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                hoist_static: true,
+                stringify_static: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(result.code.contains("_createStaticVNode"));
+        assert!(result
+            .code
+            .contains(r#"<div style=\"color:red;\"><span class=\"foo bar\">1 + false</span>"#));
+        assert!(!result.code.contains("_normalizeClass"));
+    }
+
+    #[test]
+    fn base_compile_stringifies_constant_binding_removals_and_escape() {
+        let result = base_compile(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: format!(
+                    "<div>{}{}</div>",
+                    r#"<span :title="null" :class="'foo' + '&gt;ar'">{{ '<' }}</span>"#.repeat(5),
+                    r#"<button :disabled="false">enable</button>"#.repeat(16)
+                ),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                hoist_static: true,
+                stringify_static: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(result
+            .code
+            .contains(r#"<span class=\"foo&gt;ar\">&lt;</span>"#));
+        assert!(result.code.contains(r#"<button>enable</button>"#));
+        assert!(!result.code.contains("title="));
+        assert!(!result.code.contains("disabled="));
+    }
+
+    #[test]
+    fn base_compile_bails_stringify_static_option_constant_value_binding() {
+        let result = base_compile(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: format!(
+                    "<div><select>{}</select></div>",
+                    r#"<option :value="1"/>"#.repeat(5)
+                ),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                hoist_static: true,
+                stringify_static: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(!result.code.contains("_createStaticVNode"));
+        assert!(result.code.contains("_cache[0] || (_cache[0] = ["));
     }
 
     #[test]

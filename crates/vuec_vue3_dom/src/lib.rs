@@ -655,6 +655,32 @@ mod tests {
     }
 
     #[test]
+    fn compile_stringifies_static_constant_bindings_when_transform_hoist_requested() {
+        let mut options = DomCompilerOptions::default();
+        options.core.prefix_identifiers = true;
+        options.core.hoist_static = true;
+        options.core.stringify_static = true;
+        let result = compile(
+            TemplateSource {
+                filename: "x.vue".into(),
+                source: format!(
+                    r#"<div><div :style="`color:red;`">{}</div></div>"#,
+                    r#"<span :class="[{ foo: true }, { bar: true }]">{{ 1 }} + {{ false }}</span>"#
+                        .repeat(5)
+                ),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            options,
+        );
+
+        assert!(result.code.contains("createStaticVNode"));
+        assert!(result.code.contains(
+            r#"<div style=\"color:red;\" data-vuec-dom=\"v-bind:\"><span class=\"foo bar\" data-vuec-dom=\"v-bind:\">1 + false</span>"#
+        ));
+    }
+
+    #[test]
     fn compile_transforms_srcset_imports_in_module_mode() {
         let mut options = DomCompilerOptions::default();
         options.core.mode = "module".into();
