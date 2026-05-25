@@ -24,6 +24,7 @@ pub struct DomCompilerOptions {
 impl Default for DomCompilerOptions {
     fn default() -> Self {
         let mut core = Vue3CompilerOptions::default();
+        core.dom_namespaces = true;
         core.built_in_components = vec![
             "Transition".into(),
             "transition".into(),
@@ -678,6 +679,32 @@ mod tests {
         assert!(result.code.contains(
             r#"<div style=\"color:red;\" data-vuec-dom=\"v-bind:\"><span class=\"foo bar\" data-vuec-dom=\"v-bind:\">1 + false</span>"#
         ));
+    }
+
+    #[test]
+    fn compile_stringifies_static_svg_namespace_children_by_default() {
+        let mut options = DomCompilerOptions::default();
+        options.core.prefix_identifiers = true;
+        options.core.hoist_static = true;
+        options.core.stringify_static = true;
+        let result = compile(
+            TemplateSource {
+                filename: "x.vue".into(),
+                source: format!(
+                    r#"<div><svg width="50" height="50" viewBox="0 0 50 50" fill="none" xmlns="http://www.w3.org/2000/svg">{}</svg></div>"#,
+                    r##"<rect width="50" height="50" fill="#C4C4C4"></rect>"##.repeat(5)
+                ),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            options,
+        );
+
+        assert!(result.code.contains("_createStaticVNode"));
+        assert!(result.code.contains(r#"<svg width=\"50\" height=\"50\" viewBox=\"0 0 50 50\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\">"#));
+        assert!(result
+            .code
+            .contains(r##"<rect width=\"50\" height=\"50\" fill=\"#C4C4C4\"></rect>"##));
     }
 
     #[test]

@@ -160,6 +160,7 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
             let source = template_source(&payload);
             let mut core = vue3_options(payload.get("options"));
             let default_options = DomCompilerOptions::default();
+            core.dom_namespaces = default_options.core.dom_namespaces;
             if core.built_in_components.is_empty() {
                 core.built_in_components = default_options.core.built_in_components.clone();
             }
@@ -198,6 +199,7 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
             let source = template_source(&payload);
             let mut core = vue3_options(payload.get("options"));
             let default_options = DomCompilerOptions::default();
+            core.dom_namespaces = default_options.core.dom_namespaces;
             if core.built_in_components.is_empty() {
                 core.built_in_components = default_options.core.built_in_components.clone();
             }
@@ -2738,6 +2740,20 @@ mod tests {
             .iter()
             .any(|diagnostic| diagnostic.as_str()
                 == Some("<Transition> expects exactly one child element or component.")));
+    }
+
+    #[test]
+    fn vue3_dom_bridge_uses_dom_namespace_defaults() {
+        let parsed = dispatch(
+            "vue3.dom.parse",
+            json!({ "source": "<svg><rect/></svg><math><ms>1</ms></math>", "options": {} }),
+        )
+        .expect("dom parse");
+
+        assert_eq!(parsed["children"][0]["ns"], json!(1));
+        assert_eq!(parsed["children"][0]["children"][0]["ns"], json!(1));
+        assert_eq!(parsed["children"][1]["ns"], json!(2));
+        assert_eq!(parsed["children"][1]["children"][0]["ns"], json!(2));
     }
 
     #[test]

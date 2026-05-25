@@ -16173,7 +16173,11 @@ fn should_stringify_static_children(children: &[&vuec_ast::Node<Vue3NodeKind>]) 
 fn is_stringifiable_static_node_for_cache(node: &vuec_ast::Node<Vue3NodeKind>) -> bool {
     match &node.kind {
         Vue3AstKind::Element(element) => {
-            element.tag != "slot" && element.props.iter().all(vue3_prop_is_static_cacheable)
+            element.tag != "slot"
+                && element
+                    .props
+                    .iter()
+                    .all(|prop| vue3_prop_is_static_cacheable_for_ns(prop, element.ns))
         }
         Vue3AstKind::Text(_) => true,
         Vue3AstKind::Interpolation(interpolation) => {
@@ -16251,9 +16255,11 @@ fn static_html_for_element(
 ) -> Option<String> {
     if element.tag == "slot"
         || element.tag_type != Vue3ElementType::Element
-        || element.ns != vuec_ast::HtmlNamespace::Html
-        || static_html_non_stringifiable_tag(&element.tag)
-        || (static_html_is_void_tag(&element.tag) && !node.children.is_empty())
+        || (element.ns == vuec_ast::HtmlNamespace::Html
+            && static_html_non_stringifiable_tag(&element.tag))
+        || (element.ns == vuec_ast::HtmlNamespace::Html
+            && static_html_is_void_tag(&element.tag)
+            && !node.children.is_empty())
         || directive_by_name(element, "once").is_some()
     {
         return None;
@@ -16266,7 +16272,7 @@ fn static_html_for_element(
     for prop in &element.props {
         match prop {
             Vue3Prop::Attribute(attr) => {
-                if !static_html_attr_is_stringifiable(&attr.name) {
+                if !static_html_attr_is_stringifiable(&attr.name, element.ns) {
                     return None;
                 }
                 html.push(' ');
@@ -16288,7 +16294,8 @@ fn static_html_for_element(
                 inner_html = Some(escape_static_html_text(&value.to_display_string()?));
             }
             Vue3Prop::Directive(dir) => {
-                let Some(rendered) = static_html_directive_attr(&element.tag, dir)? else {
+                let Some(rendered) = static_html_directive_attr(&element.tag, element.ns, dir)?
+                else {
                     continue;
                 };
                 html.push(' ');
@@ -16301,7 +16308,7 @@ fn static_html_for_element(
     }
     html.push('>');
 
-    if !static_html_is_void_tag(&element.tag) {
+    if element.ns != vuec_ast::HtmlNamespace::Html || !static_html_is_void_tag(&element.tag) {
         if let Some(inner_html) = inner_html.filter(|value| !value.is_empty()) {
             html.push_str(&inner_html);
         } else {
@@ -16324,23 +16331,31 @@ struct StaticHtmlAttr {
     value: String,
 }
 
-fn static_html_directive_attr(tag: &str, dir: &Vue3Directive) -> Option<Option<StaticHtmlAttr>> {
+fn static_html_directive_attr(
+    tag: &str,
+    ns: vuec_ast::HtmlNamespace,
+    dir: &Vue3Directive,
+) -> Option<Option<StaticHtmlAttr>> {
     match dir.name.as_str() {
-        "bind" => static_html_bind_attr(tag, dir),
+        "bind" => static_html_bind_attr(tag, ns, dir),
         "html" | "text" => None,
         _ => None,
     }
 }
 
-fn static_html_bind_attr(tag: &str, dir: &Vue3Directive) -> Option<Option<StaticHtmlAttr>> {
+fn static_html_bind_attr(
+    tag: &str,
+    ns: vuec_ast::HtmlNamespace,
+    dir: &Vue3Directive,
+) -> Option<Option<StaticHtmlAttr>> {
     if dir.is_dynamic_arg || !dir.modifiers.is_empty() {
         return None;
     }
     let name = dir.arg.as_ref()?.source_string();
-    if !static_html_attr_is_stringifiable(&name) {
+    if !static_html_attr_is_stringifiable(&name, ns) {
         return None;
     }
-    if tag == "option" && name == "value" {
+    if ns == vuec_ast::HtmlNamespace::Html && tag == "option" && name == "value" {
         return None;
     }
     let source = dir.exp.as_ref()?.source_string();
@@ -16389,34 +16404,30 @@ fn accumulate_static_html_analysis(
     Some(())
 }
 
-fn static_html_attr_is_stringifiable(name: &str) -> bool {
+const STATIC_HTML_KNOWN_HTML_ATTRS: &str = "accept,accept-charset,accesskey,action,align,allow,alt,async,autocapitalize,autocomplete,autofocus,autoplay,background,bgcolor,border,buffered,capture,challenge,charset,checked,cite,class,code,codebase,color,cols,colspan,content,contenteditable,contextmenu,controls,coords,crossorigin,csp,data,datetime,decoding,default,defer,dir,dirname,disabled,download,draggable,dropzone,enctype,enterkeyhint,for,form,formaction,formenctype,formmethod,formnovalidate,formtarget,headers,height,hidden,high,href,hreflang,http-equiv,icon,id,importance,inert,integrity,ismap,itemprop,keytype,kind,label,lang,language,loading,list,loop,low,manifest,max,maxlength,minlength,media,min,multiple,muted,name,novalidate,open,optimum,pattern,ping,placeholder,poster,preload,radiogroup,readonly,referrerpolicy,rel,required,reversed,rows,rowspan,sandbox,scope,scoped,selected,shape,size,sizes,slot,span,spellcheck,src,srcdoc,srclang,srcset,start,step,style,summary,tabindex,target,title,translate,type,usemap,value,width,wrap";
+
+const STATIC_HTML_KNOWN_SVG_ATTRS: &str = "xmlns,accent-height,accumulate,additive,alignment-baseline,alphabetic,amplitude,arabic-form,ascent,attributeName,attributeType,azimuth,baseFrequency,baseline-shift,baseProfile,bbox,begin,bias,by,calcMode,cap-height,class,clip,clipPathUnits,clip-path,clip-rule,color,color-interpolation,color-interpolation-filters,color-profile,color-rendering,contentScriptType,contentStyleType,crossorigin,cursor,cx,cy,d,decelerate,descent,diffuseConstant,direction,display,divisor,dominant-baseline,dur,dx,dy,edgeMode,elevation,enable-background,end,exponent,fill,fill-opacity,fill-rule,filter,filterRes,filterUnits,flood-color,flood-opacity,font-family,font-size,font-size-adjust,font-stretch,font-style,font-variant,font-weight,format,from,fr,fx,fy,g1,g2,glyph-name,glyph-orientation-horizontal,glyph-orientation-vertical,glyphRef,gradientTransform,gradientUnits,hanging,height,href,hreflang,horiz-adv-x,horiz-origin-x,id,ideographic,image-rendering,in,in2,intercept,k,k1,k2,k3,k4,kernelMatrix,kernelUnitLength,kerning,keyPoints,keySplines,keyTimes,lang,lengthAdjust,letter-spacing,lighting-color,limitingConeAngle,local,marker-end,marker-mid,marker-start,markerHeight,markerUnits,markerWidth,mask,maskContentUnits,maskUnits,mathematical,max,media,method,min,mode,name,numOctaves,offset,opacity,operator,order,orient,orientation,origin,overflow,overline-position,overline-thickness,panose-1,paint-order,path,pathLength,patternContentUnits,patternTransform,patternUnits,ping,pointer-events,points,pointsAtX,pointsAtY,pointsAtZ,preserveAlpha,preserveAspectRatio,primitiveUnits,r,radius,referrerPolicy,refX,refY,rel,rendering-intent,repeatCount,repeatDur,requiredExtensions,requiredFeatures,restart,result,rotate,rx,ry,scale,seed,shape-rendering,slope,spacing,specularConstant,specularExponent,speed,spreadMethod,startOffset,stdDeviation,stemh,stemv,stitchTiles,stop-color,stop-opacity,strikethrough-position,strikethrough-thickness,string,stroke,stroke-dasharray,stroke-dashoffset,stroke-linecap,stroke-linejoin,stroke-miterlimit,stroke-opacity,stroke-width,style,surfaceScale,systemLanguage,tabindex,tableValues,target,targetX,targetY,text-anchor,text-decoration,text-rendering,textLength,to,transform,transform-origin,type,u1,u2,underline-position,underline-thickness,unicode,unicode-bidi,unicode-range,units-per-em,v-alphabetic,v-hanging,v-ideographic,v-mathematical,values,vector-effect,version,vert-adv-y,vert-origin-x,vert-origin-y,viewBox,viewTarget,visibility,width,widths,word-spacing,writing-mode,x,x-height,x1,x2,xChannelSelector,xlink:actuate,xlink:arcrole,xlink:href,xlink:role,xlink:show,xlink:title,xlink:type,xmlns:xlink,xml:base,xml:lang,xml:space,y,y1,y2,yChannelSelector,z,zoomAndPan";
+
+const STATIC_HTML_KNOWN_MATHML_ATTRS: &str = "accent,accentunder,actiontype,align,alignmentscope,altimg,altimg-height,altimg-valign,altimg-width,alttext,bevelled,close,columnsalign,columnlines,columnspan,denomalign,depth,dir,display,displaystyle,encoding,equalcolumns,equalrows,fence,fontstyle,fontweight,form,frame,framespacing,groupalign,height,href,id,indentalign,indentalignfirst,indentalignlast,indentshift,indentshiftfirst,indentshiftlast,indextype,justify,largetop,largeop,lquote,lspace,mathbackground,mathcolor,mathsize,mathvariant,maxsize,minlabelspacing,mode,other,overflow,position,rowalign,rowlines,rowspan,rquote,rspace,scriptlevel,scriptminsize,scriptsizemultiplier,selection,separator,separators,shift,side,src,stackalign,stretchy,subscriptshift,superscriptshift,symmetric,voffset,width,widths,xlink:href,xlink:show,xlink:type,xmlns";
+
+fn static_html_attr_is_stringifiable(name: &str, ns: vuec_ast::HtmlNamespace) -> bool {
     name.starts_with("data-")
         || name.starts_with("aria-")
-        || matches!(
-            name,
-            "id" | "class"
-                | "style"
-                | "title"
-                | "role"
-                | "name"
-                | "type"
-                | "value"
-                | "alt"
-                | "src"
-                | "srcset"
-                | "href"
-                | "target"
-                | "rel"
-                | "width"
-                | "height"
-                | "disabled"
-                | "checked"
-                | "selected"
-                | "readonly"
-                | "multiple"
-                | "placeholder"
-                | "for"
-        )
+        || match ns {
+            vuec_ast::HtmlNamespace::Html => {
+                static_html_known_attr_contains(STATIC_HTML_KNOWN_HTML_ATTRS, name)
+            }
+            vuec_ast::HtmlNamespace::Svg => {
+                static_html_known_attr_contains(STATIC_HTML_KNOWN_SVG_ATTRS, name)
+            }
+            vuec_ast::HtmlNamespace::MathMl => {
+                static_html_known_attr_contains(STATIC_HTML_KNOWN_MATHML_ATTRS, name)
+            }
+        }
+}
+
+fn static_html_known_attr_contains(attrs: &str, name: &str) -> bool {
+    attrs.split(',').any(|attr| attr == name)
 }
 
 fn static_html_is_boolean_attr(name: &str) -> bool {
@@ -17183,16 +17194,19 @@ fn vue3_prop_is_stringifiable_static(prop: &Vue3Prop) -> bool {
     }
 }
 
-fn vue3_prop_is_static_cacheable(prop: &Vue3Prop) -> bool {
+fn vue3_prop_is_static_cacheable_for_ns(prop: &Vue3Prop, ns: vuec_ast::HtmlNamespace) -> bool {
     match prop {
-        Vue3Prop::Attribute(_) => true,
+        Vue3Prop::Attribute(attr) => static_html_attr_is_stringifiable(&attr.name, ns),
         Vue3Prop::Directive(dir) => {
-            is_asset_import_binding(dir) || static_html_directive_is_stringifiable_static(dir)
+            is_asset_import_binding(dir) || static_html_directive_is_stringifiable_static(dir, ns)
         }
     }
 }
 
-fn static_html_directive_is_stringifiable_static(dir: &Vue3Directive) -> bool {
+fn static_html_directive_is_stringifiable_static(
+    dir: &Vue3Directive,
+    ns: vuec_ast::HtmlNamespace,
+) -> bool {
     match dir.name.as_str() {
         "bind" => {
             !dir.is_dynamic_arg
@@ -17200,7 +17214,7 @@ fn static_html_directive_is_stringifiable_static(dir: &Vue3Directive) -> bool {
                 && dir
                     .arg
                     .as_ref()
-                    .is_some_and(|arg| static_html_attr_is_stringifiable(&arg.source_string()))
+                    .is_some_and(|arg| static_html_attr_is_stringifiable(&arg.source_string(), ns))
                 && dir
                     .exp
                     .as_ref()
@@ -23848,6 +23862,61 @@ mod tests {
         assert!(result.code.contains(r#"<button>enable</button>"#));
         assert!(!result.code.contains("title="));
         assert!(!result.code.contains("disabled="));
+    }
+
+    #[test]
+    fn base_compile_stringifies_static_svg_namespace_children() {
+        let result = base_compile(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: format!(
+                    r#"<div><svg width="50" height="50" viewBox="0 0 50 50" fill="none" xmlns="http://www.w3.org/2000/svg">{}</svg></div>"#,
+                    r##"<rect width="50" height="50" fill="#C4C4C4"></rect>"##.repeat(5)
+                ),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                hoist_static: true,
+                stringify_static: true,
+                dom_namespaces: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(result.code.contains("_createStaticVNode"));
+        assert!(result.code.contains(r#"<svg width=\"50\" height=\"50\" viewBox=\"0 0 50 50\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\">"#));
+        assert!(result
+            .code
+            .contains(r##"<rect width=\"50\" height=\"50\" fill=\"#C4C4C4\"></rect>"##));
+    }
+
+    #[test]
+    fn base_compile_stringifies_static_mathml_namespace_children() {
+        let result = base_compile(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: format!(
+                    r#"<div><math xmlns="http://www.w3.org/1998/Math/MathML">{}</math></div>"#,
+                    r#"<ms>1</ms>"#.repeat(20)
+                ),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                hoist_static: true,
+                stringify_static: true,
+                dom_namespaces: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(result.code.contains("_createStaticVNode"));
+        assert!(result
+            .code
+            .contains(r#"<math xmlns=\"http://www.w3.org/1998/Math/MathML\"><ms>1</ms>"#));
     }
 
     #[test]
