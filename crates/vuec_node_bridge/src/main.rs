@@ -121,6 +121,7 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
         "vue3.core.isMemberExpression" => {
             Ok(vuec_vue3_core::is_member_expression_projection(&payload))
         }
+        "vue3.core.isFunctionType" => Ok(vuec_vue3_core::is_function_type_projection(&payload)),
         "vue3.core.extractIdentifiers" => {
             Ok(vuec_vue3_core::extract_identifiers_projection(&payload))
         }

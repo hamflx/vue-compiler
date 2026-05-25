@@ -3785,7 +3785,12 @@ const vue3CoreRuntime = (() => {
   };
   runtime.isFnExpressionNode = function isFnExpressionNode(exp) { return runtime.isFnExpressionBrowser(exp); };
   runtime.isFnExpression = runtime.isFnExpressionNode;
-  runtime.isFunctionType = function isFunctionType(node) { return !!node && /Function/.test(String(node.type || '')); };
+  runtime.isFunctionType = function isFunctionType(node) {
+    const projection = callBridge('vue3.core.isFunctionType', {
+      node: runtime.dehydrateForBridge(node),
+    });
+    return !!(projection && projection.isFunctionType);
+  };
   runtime.nodeAtBridgePath = function nodeAtBridgePath(root, path) {
     let node = root;
     for (const segment of path || []) {

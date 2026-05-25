@@ -5107,6 +5107,14 @@ pub fn is_member_expression_projection(payload: &Value) -> Value {
     })
 }
 
+pub fn is_function_type_projection(payload: &Value) -> Value {
+    let node = payload.get("node").unwrap_or(&Value::Null);
+    let is_function_type = js_ast_type(node).is_some_and(js_ast_is_function_type);
+    json!({
+        "isFunctionType": is_function_type,
+    })
+}
+
 pub fn extract_identifiers_projection(payload: &Value) -> Value {
     let node = payload.get("node").unwrap_or(&Value::Null);
     let mut identifiers = Vec::new();
@@ -27636,6 +27644,28 @@ mod tests {
             .map(|item| item["name"].as_str().unwrap())
             .collect::<Vec<_>>();
         assert_eq!(names, vec!["bar", "rest"]);
+    }
+
+    #[test]
+    fn js_ast_function_type_projection_recognizes_babel_function_nodes() {
+        for kind in [
+            "FunctionDeclaration",
+            "FunctionExpression",
+            "ArrowFunctionExpression",
+            "ObjectMethod",
+            "ClassMethod",
+            "ClassPrivateMethod",
+        ] {
+            let projection = is_function_type_projection(&json!({
+                "node": { "type": kind }
+            }));
+            assert_eq!(projection["isFunctionType"], json!(true), "{kind}");
+        }
+
+        let projection = is_function_type_projection(&json!({
+            "node": { "type": "ObjectProperty" }
+        }));
+        assert_eq!(projection["isFunctionType"], json!(false));
     }
 
     #[test]
