@@ -14689,6 +14689,7 @@ enum NodeRenderMode {
 #[derive(Clone, Debug, Default)]
 struct RenderScope {
     locals: Vec<String>,
+    in_v_once: bool,
 }
 
 impl RenderScope {
@@ -14699,6 +14700,12 @@ impl RenderScope {
                 next.locals.push(local);
             }
         }
+        next
+    }
+
+    fn with_v_once(&self) -> Self {
+        let mut next = self.clone();
+        next.in_v_once = true;
         next
     }
 }
@@ -14799,20 +14806,40 @@ fn render_plain_element(
     } else {
         "_createElementVNode"
     };
-    let props = render_props(element, options, scope, branch_key);
+    let element_scope = if directive_by_name(element, "once").is_some() {
+        scope.with_v_once()
+    } else {
+        scope.clone()
+    };
+    let props = render_props(element, options, &element_scope, branch_key, memo_index);
     let children = ast
         .node(node_id)
-        .map(|node| render_element_children(ast, &node.children, options, mode, scope, memo_index))
+        .map(|node| {
+            render_element_children(
+                ast,
+                &node.children,
+                options,
+                mode,
+                &element_scope,
+                memo_index,
+            )
+        })
         .unwrap_or_default();
-    let patch_flag =
-        render_patch_flag_text(render_patch_flag_kind(ast, node_id, element, options, mode));
+    let patch_flag = render_patch_flag_text(render_patch_flag_kind(
+        ast,
+        node_id,
+        element,
+        options,
+        mode,
+        &element_scope,
+    ));
     let attrs = if props.is_empty() { None } else { Some(props) };
     let args = render_call_args(
         quote_string(tag),
         attrs.as_deref(),
         (!children.is_empty()).then_some(children.as_str()),
         patch_flag.as_str(),
-        dynamic_props_arg(element).as_str(),
+        dynamic_props_arg(element, options, &element_scope).as_str(),
     );
     let rendered = if mode == NodeRenderMode::Root {
         format!("(_openBlock(), {}({}))", helper, args)
@@ -14903,32 +14930,28 @@ fn render_component_element(
     memo_index: &mut MemoIndex,
 ) -> String {
     let tag = render_component_tag_expr(element, options, scope);
-    let props = render_props(element, options, scope, branch_key);
-    let attrs = if props.is_empty() {
-        "null".into()
-    } else {
-        props
-    };
+    let props = render_props(element, options, scope, branch_key, memo_index);
+    let attrs = if props.is_empty() { None } else { Some(props) };
     let children = render_component_slots(ast, node_id, options, scope, memo_index);
-    let patch_flag = component_patch_flag(ast, node_id);
+    let patch_flag = render_patch_flag_text(component_patch_flag_kind(
+        ast, node_id, element, options, scope,
+    ));
     let helper = if mode == NodeRenderMode::Root {
         "_createBlock"
     } else {
         "_createVNode"
     };
-    let children_arg = children.map_or_else(String::new, |children| format!(", {children}"));
+    let args = render_call_args(
+        tag,
+        attrs.as_deref(),
+        children.as_deref(),
+        patch_flag.as_str(),
+        dynamic_props_arg(element, options, scope).as_str(),
+    );
     let rendered = if mode == NodeRenderMode::Root {
-        format!(
-            "(_openBlock(), {}({}, {}{}{}))",
-            helper, tag, attrs, children_arg, patch_flag
-        )
-    } else if attrs == "null" && children_arg.is_empty() && patch_flag.is_empty() {
-        format!("{}({})", helper, tag)
+        format!("(_openBlock(), {}({}))", helper, args)
     } else {
-        format!(
-            "{}({}, {}{}{})",
-            helper, tag, attrs, children_arg, patch_flag
-        )
+        format!("{}({})", helper, args)
     };
     render_with_runtime_directives(rendered, element, options, scope)
 }
@@ -15342,11 +15365,24 @@ fn extract_slot_params(params: &str) -> Vec<String> {
     output
 }
 
-fn component_patch_flag(ast: &Vue3Ast, node_id: vuec_ast::NodeId) -> String {
+fn component_patch_flag_kind(
+    ast: &Vue3Ast,
+    node_id: vuec_ast::NodeId,
+    element: &Vue3Element,
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+) -> Option<i32> {
     let Some(node) = ast.node(node_id) else {
-        return String::new();
+        return None;
     };
     let visible = visible_children(ast, &node.children);
+    let mut flag = if has_dynamic_arg_binding(element) {
+        16
+    } else if has_dynamic_non_key_props(element, options, scope) {
+        8
+    } else {
+        0
+    };
     if visible.iter().any(|child| {
         matches!(
             &child.kind,
@@ -15358,10 +15394,9 @@ fn component_patch_flag(ast: &Vue3Ast, node_id: vuec_ast::NodeId) -> String {
                         || directive_by_name(element, "else-if").is_some())
         )
     }) {
-        ", 1024 /* DYNAMIC_SLOTS */".into()
-    } else {
-        String::new()
+        flag |= 1024;
     }
+    (flag != 0).then_some(flag)
 }
 
 fn visible_children<'a>(
@@ -17239,6 +17274,7 @@ fn render_patch_flag_kind(
     element: &Vue3Element,
     options: &Vue3CompilerOptions,
     mode: NodeRenderMode,
+    scope: &RenderScope,
 ) -> Option<i32> {
     let children = ast
         .node(node_id)
@@ -17246,9 +17282,11 @@ fn render_patch_flag_kind(
         .unwrap_or(&[]);
     if mode == NodeRenderMode::Cached {
         Some(-1)
+    } else if has_dynamic_arg_binding(element) {
+        Some(16)
     } else if has_class_binding(element) {
         Some(2)
-    } else if has_dynamic_non_key_props(element) {
+    } else if has_dynamic_non_key_props(element, options, scope) {
         Some(8)
     } else if element.tag != "template"
         && !children_literal_const_only(ast, children, options)
@@ -17286,7 +17324,8 @@ pub fn vue3_element_codegen_patch_flag(
     } else {
         NodeRenderMode::Child
     };
-    render_patch_flag_kind(ast, node_id, element, options, mode)
+    let scope = RenderScope::default();
+    render_patch_flag_kind(ast, node_id, element, options, mode, &scope)
 }
 
 fn render_props(
@@ -17294,8 +17333,9 @@ fn render_props(
     options: &Vue3CompilerOptions,
     scope: &RenderScope,
     branch_key: Option<usize>,
+    memo_index: &mut MemoIndex,
 ) -> String {
-    let dynamic_event = has_dynamic_non_key_props(element);
+    let dynamic_event = has_multiline_props(element, options);
     let mut props = Vec::new();
     if let Some(key) = branch_key {
         props.push(format!("key: {key}"));
@@ -17306,21 +17346,7 @@ fn render_props(
             None => Some(format!("{}: true", json_key(&attr.name))),
         },
         Vue3Prop::Directive(dir) if dir.name == "on" => {
-            let event = dir
-                .arg
-                .as_ref()
-                .map(Vue3Expression::source_string)
-                .unwrap_or_default();
-            let value = dir
-                .exp
-                .as_ref()
-                .map(Vue3Expression::source_string)
-                .unwrap_or_default();
-            Some(format!(
-                "{}: {}",
-                json_key(&event_handler_prop_name(element, &event)),
-                rewrite_handler_expression_with_scope(&value, options, scope)
-            ))
+            Some(render_event_prop(element, dir, options, scope, memo_index))
         }
         Vue3Prop::Directive(dir) if dir.name == "bind" => {
             let arg = dir
@@ -17368,6 +17394,151 @@ fn render_props(
     }
 }
 
+fn render_event_prop(
+    element: &Vue3Element,
+    dir: &Vue3Directive,
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+    memo_index: &mut MemoIndex,
+) -> String {
+    let key = render_event_prop_key(element, dir, options, scope);
+    let value = render_event_handler_value(element, dir, options, scope, memo_index);
+    format!("{key}: {value}")
+}
+
+fn render_event_prop_key(
+    element: &Vue3Element,
+    dir: &Vue3Directive,
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+) -> String {
+    if dir.is_dynamic_arg {
+        let event = dir
+            .arg
+            .as_ref()
+            .map(Vue3Expression::source_string)
+            .unwrap_or_default();
+        let event = rewrite_expression_with_scope(&event, options, scope);
+        let event = format!("_toHandlerKey({})", event.trim());
+        return format!("[{event}]");
+    }
+
+    let event = dir
+        .arg
+        .as_ref()
+        .map(Vue3Expression::source_string)
+        .unwrap_or_default();
+    json_key(&event_handler_prop_name(element, &event))
+}
+
+fn render_event_handler_value(
+    element: &Vue3Element,
+    dir: &Vue3Directive,
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+    memo_index: &mut MemoIndex,
+) -> String {
+    let raw = dir
+        .exp
+        .as_ref()
+        .map(Vue3Expression::source_string)
+        .unwrap_or_default();
+    let raw = raw.trim();
+    let is_member = transform_on_is_member_expression(
+        raw,
+        &json!({
+            "allowLexerFallback": true,
+            "isTS": options.is_ts,
+            "expressionPlugins": options.expression_plugins,
+        }),
+    );
+    let is_fn = transform_on_is_fn_expression(
+        raw,
+        &json!({
+            "isTS": options.is_ts,
+            "expressionPlugins": options.expression_plugins,
+        }),
+    );
+    let is_inline = !is_member && !is_fn;
+    let mut handler = if raw.is_empty() {
+        "() => {}".into()
+    } else if is_inline {
+        let value = rewrite_handler_expression_with_scope(raw, options, scope);
+        let has_multiple_statements = raw.contains(';');
+        if has_multiple_statements {
+            format!("$event => {{{value}}}")
+        } else {
+            format!("$event => ({value})")
+        }
+    } else {
+        rewrite_handler_expression_with_scope(raw, options, scope)
+    };
+
+    let should_cache =
+        should_cache_event_handler(element, dir, options, scope, raw, is_member, is_inline);
+    if should_cache && is_member {
+        let value = rewrite_handler_expression_with_scope(raw, options, scope);
+        handler = format!("(...args) => ({value} && {value}(...args))");
+    }
+    if should_cache {
+        let index = memo_index.alloc();
+        handler = format!("_cache[{index}] || (_cache[{index}] = {handler})");
+    }
+    handler
+}
+
+fn should_cache_event_handler(
+    element: &Vue3Element,
+    dir: &Vue3Directive,
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+    raw: &str,
+    is_member: bool,
+    is_inline: bool,
+) -> bool {
+    if !options.cache_handlers || scope.in_v_once {
+        return false;
+    }
+    if !uses_prefixed_identifiers(options) {
+        return false;
+    }
+    if raw.is_empty() {
+        return true;
+    }
+    if element.tag_type == Vue3ElementType::Component && is_member {
+        return false;
+    }
+    if event_handler_has_scope_ref(raw, scope) {
+        return false;
+    }
+    if !is_inline && event_handler_is_const_binding(raw, options) {
+        return false;
+    }
+    if is_inline && vue3_for_const_type(raw) > 0 {
+        return false;
+    }
+    if dir.is_dynamic_arg {
+        return true;
+    }
+    true
+}
+
+fn event_handler_has_scope_ref(raw: &str, scope: &RenderScope) -> bool {
+    scope
+        .locals
+        .iter()
+        .any(|local| source_contains_identifier(raw, local))
+}
+
+fn event_handler_is_const_binding(raw: &str, options: &Vue3CompilerOptions) -> bool {
+    let trimmed = raw.trim();
+    is_simple_identifier_ascii(trimmed)
+        && matches!(
+            options.binding_metadata.get(trimmed).map(String::as_str),
+            Some("setup-const" | "literal-const")
+        )
+}
+
 fn render_object(properties: &[String]) -> String {
     if properties.is_empty() {
         "{}".into()
@@ -17397,20 +17568,82 @@ fn has_class_binding(element: &Vue3Element) -> bool {
     })
 }
 
-fn has_dynamic_non_key_props(element: &Vue3Element) -> bool {
+fn has_dynamic_non_key_props(
+    element: &Vue3Element,
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+) -> bool {
     element.props.iter().any(|prop| {
         matches!(
             prop,
-            Vue3Prop::Directive(dir)
-                if (dir.name == "on" && !event_directive_is_vnode_hook(dir))
-                    || (dir.name == "bind"
-                        && dir
-                            .arg
-                            .as_ref()
-                            .is_none_or(|arg| arg.source_string() != "class" && arg.source_string() != "key")
-                        && !is_asset_import_binding(dir))
+            Vue3Prop::Directive(dir) if prop_requires_dynamic_patch(element, dir, options, scope)
         )
     })
+}
+
+fn has_multiline_props(element: &Vue3Element, options: &Vue3CompilerOptions) -> bool {
+    has_dynamic_arg_binding(element)
+        || has_dynamic_non_key_props(element, options, &RenderScope::default())
+}
+
+fn prop_requires_dynamic_patch(
+    element: &Vue3Element,
+    dir: &Vue3Directive,
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+) -> bool {
+    if dir.name == "on" && !event_directive_is_vnode_hook(dir) {
+        return !event_handler_can_skip_patch(element, dir, options, scope);
+    }
+    dir.name == "bind"
+        && dir
+            .arg
+            .as_ref()
+            .is_none_or(|arg| arg.source_string() != "class" && arg.source_string() != "key")
+        && !is_asset_import_binding(dir)
+}
+
+fn event_handler_can_skip_patch(
+    element: &Vue3Element,
+    dir: &Vue3Directive,
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+) -> bool {
+    if !options.cache_handlers || !uses_prefixed_identifiers(options) {
+        return false;
+    }
+    if directive_by_name(element, "once").is_some() {
+        return false;
+    }
+    let raw = dir
+        .exp
+        .as_ref()
+        .map(Vue3Expression::source_string)
+        .unwrap_or_default();
+    let raw = raw.trim();
+    let is_member = transform_on_is_member_expression(
+        raw,
+        &json!({
+            "allowLexerFallback": true,
+            "isTS": options.is_ts,
+            "expressionPlugins": options.expression_plugins,
+        }),
+    );
+    let is_fn = transform_on_is_fn_expression(
+        raw,
+        &json!({
+            "isTS": options.is_ts,
+            "expressionPlugins": options.expression_plugins,
+        }),
+    );
+    let is_inline = !is_member && !is_fn;
+    if !should_cache_event_handler(element, dir, options, scope, raw, is_member, is_inline) {
+        return false;
+    }
+    if element.tag_type == Vue3ElementType::Component && is_member {
+        return false;
+    }
+    true
 }
 
 fn has_vnode_hook(element: &Vue3Element) -> bool {
@@ -17431,12 +17664,22 @@ fn has_runtime_directive(element: &Vue3Element) -> bool {
     })
 }
 
-fn dynamic_props_arg(element: &Vue3Element) -> String {
+fn dynamic_props_arg(
+    element: &Vue3Element,
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+) -> String {
     let props = element
         .props
         .iter()
         .filter_map(|prop| match prop {
             Vue3Prop::Directive(dir) if dir.name == "on" && !event_directive_is_vnode_hook(dir) => {
+                if dir.is_dynamic_arg || dir.arg.is_none() {
+                    return None;
+                }
+                if event_handler_can_skip_patch(element, dir, options, scope) {
+                    return None;
+                }
                 let event = dir
                     .arg
                     .as_ref()
@@ -23955,6 +24198,68 @@ mod tests {
     }
 
     #[test]
+    fn base_compile_caches_native_event_handlers_with_cache_handlers() {
+        let result = base_compile(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: r#"<div><button @click="foo"/><button @click="foo($event)"/><button @[event]="run"/><Comp @save="save"/><Comp @submit="submit($event)"/><p v-once @click="once">once</p></div>"#.into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                cache_handlers: true,
+                mode: "module".into(),
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(result.code.contains("toHandlerKey as _toHandlerKey"));
+        assert!(result.code.contains(
+            "onClick: _cache[0] || (_cache[0] = (...args) => (_ctx.foo && _ctx.foo(...args)))"
+        ));
+        assert!(result
+            .code
+            .contains("onClick: _cache[1] || (_cache[1] = $event => (_ctx.foo($event)))"));
+        assert!(result.code.contains(
+            "[_toHandlerKey(_ctx.event)]: _cache[2] || (_cache[2] = (...args) => (_ctx.run && _ctx.run(...args)))"
+        ));
+        assert!(result.code.contains("onSave: _ctx.save"));
+        assert!(result
+            .code
+            .contains("onSubmit: _cache[3] || (_cache[3] = $event => (_ctx.submit($event)))"));
+        assert!(result.code.contains("onClick: _ctx.once"));
+        assert!(result.code.contains("16 /* FULL_PROPS */"));
+        assert!(result.code.contains("8 /* PROPS */, [\"onClick\"]"));
+    }
+
+    #[test]
+    fn base_compile_keeps_scoped_event_handlers_uncached_with_dynamic_props() {
+        let result = base_compile(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: r#"<div><button v-for="item in list" @click="select(item)"/></div>"#.into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                cache_handlers: true,
+                mode: "module".into(),
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(result
+            .code
+            .contains("onClick: $event => (_ctx.select(item))"));
+        assert!(result.code.contains("8 /* PROPS */, [\"onClick\"]"));
+        assert!(!result
+            .code
+            .contains("_cache[0] || (_cache[0] = $event => (_ctx.select(item)))"));
+    }
+
+    #[test]
     fn base_compile_marks_vnode_hook_need_patch() {
         let source = TemplateSource {
             filename: "foo.vue".into(),
@@ -23971,10 +24276,44 @@ mod tests {
                 ..Vue3CompilerOptions::default()
             },
         );
-        assert!(result.code.contains("onVnodeUpdated: _ctx.foo"));
+        assert!(result.code.contains(
+            "onVnodeUpdated: _cache[0] || (_cache[0] = (...args) => (_ctx.foo && _ctx.foo(...args)))"
+        ));
         assert!(result.code.contains("512 /* NEED_PATCH */"));
         assert!(!result.code.contains("onVue:updated"));
         assert!(!result.code.contains(r#"["onVnodeUpdated"]"#));
+    }
+
+    #[test]
+    fn base_compile_shares_cache_handler_slots_with_memo_and_static_cache() {
+        let result = base_compile(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source:
+                    r#"<div><button @click="go"/><section v-memo="[x]"><div><div>hello</div><div>hello</div></div></section></div>"#
+                        .into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                cache_handlers: true,
+                hoist_static: true,
+                mode: "module".into(),
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(result.code.contains(
+            "onClick: _cache[0] || (_cache[0] = (...args) => (_ctx.go && _ctx.go(...args)))"
+        ));
+        assert!(result
+            .code
+            .contains(r#"_withMemo([_ctx.x], () => (_openBlock(), _createElementBlock("section""#));
+        assert!(result.code.contains(", _cache, 1)"));
+        assert!(result
+            .code
+            .contains("_cache[2] || (_cache[2] = [_createElementVNode"));
     }
 
     #[test]
