@@ -669,6 +669,34 @@ mod tests {
     }
 
     #[test]
+    fn compile_stringifies_multiple_static_chunks_around_dynamic_child() {
+        let mut options = DomCompilerOptions::default();
+        options.core.prefix_identifiers = true;
+        options.core.hoist_static = true;
+        options.core.stringify_static = true;
+        let result = compile(
+            TemplateSource {
+                filename: "x.vue".into(),
+                source: format!(
+                    "<div>{}{{{{ msg }}}}{}</div>",
+                    r#"<span class="foo"></span>"#.repeat(5),
+                    r#"<span class="bar"></span>"#.repeat(5)
+                ),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            options,
+        );
+
+        assert_eq!(result.code.matches("_createStaticVNode(").count(), 2);
+        assert!(result.code.contains("_createStaticVNode(\"<span class=\\\"foo\\\"></span><span class=\\\"foo\\\"></span><span class=\\\"foo\\\"></span><span class=\\\"foo\\\"></span><span class=\\\"foo\\\"></span>\", 5)"));
+        assert!(result
+            .code
+            .contains("_createTextVNode(_toDisplayString(_ctx.msg), 1 /* TEXT */)"));
+        assert!(result.code.contains("_createStaticVNode(\"<span class=\\\"bar\\\"></span><span class=\\\"bar\\\"></span><span class=\\\"bar\\\"></span><span class=\\\"bar\\\"></span><span class=\\\"bar\\\"></span>\", 5)"));
+    }
+
+    #[test]
     fn compile_stringifies_static_children_when_transform_hoist_requested() {
         let mut options = DomCompilerOptions::default();
         options.core.prefix_identifiers = true;

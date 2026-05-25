@@ -15555,6 +15555,18 @@ fn render_element_children(
             if let Some(static_call) = render_static_vnode_cache(ast, &child_nodes, options) {
                 return format!("[...(_cache[0] || (_cache[0] = [{static_call}]))]");
             }
+            if let Some(rendered) = render_static_vnode_chunked_children(
+                ast,
+                &child_nodes,
+                options,
+                scope,
+                NodeRenderMode::Cached,
+            ) {
+                return format!(
+                    "[...(_cache[0] || (_cache[0] = [{}]))]",
+                    rendered.join(", ")
+                );
+            }
         }
         let rendered = child_nodes
             .iter()
@@ -15574,6 +15586,17 @@ fn render_element_children(
                 "[...(_cache[0] || (_cache[0] = [{}]))]",
                 rendered.join(", ")
             );
+        }
+    }
+    if options.hoist_static && options.stringify_static && parent_mode == NodeRenderMode::Root {
+        if let Some(rendered) = render_static_vnode_chunked_children(
+            ast,
+            &child_nodes,
+            options,
+            scope,
+            NodeRenderMode::Child,
+        ) {
+            return render_array(&rendered);
         }
     }
     if child_nodes.iter().all(|child| {
@@ -16198,6 +16221,28 @@ struct StaticHtmlAnalysis {
     element_with_binding_count: usize,
 }
 
+impl StaticHtmlAnalysis {
+    fn append(&mut self, other: StaticHtmlAnalysis) {
+        self.html.append(other.html);
+        self.dom_nodes += other.dom_nodes;
+        self.node_count += other.node_count;
+        self.element_with_binding_count += other.element_with_binding_count;
+    }
+
+    fn meets_threshold(&self) -> bool {
+        self.node_count >= STRINGIFY_STATIC_NODE_COUNT
+            || self.element_with_binding_count >= STRINGIFY_STATIC_ELEMENT_WITH_BINDING_COUNT
+    }
+
+    fn render_static_call(&self) -> String {
+        format!(
+            "_createStaticVNode({}, {})",
+            self.html.to_js_expression(),
+            self.dom_nodes
+        )
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 struct StaticHtmlBuffer {
     parts: Vec<StaticHtmlPart>,
@@ -16268,17 +16313,130 @@ fn render_static_vnode_cache(
     options: &Vue3CompilerOptions,
 ) -> Option<String> {
     let analysis = analyze_static_html_chunk(ast, children, options)?;
-    if analysis.node_count >= STRINGIFY_STATIC_NODE_COUNT
-        || analysis.element_with_binding_count >= STRINGIFY_STATIC_ELEMENT_WITH_BINDING_COUNT
-    {
-        Some(format!(
-            "_createStaticVNode({}, {})",
-            analysis.html.to_js_expression(),
-            analysis.dom_nodes
-        ))
+    if analysis.meets_threshold() {
+        Some(analysis.render_static_call())
     } else {
         None
     }
+}
+
+fn render_static_vnode_chunked_children(
+    ast: &Vue3Ast,
+    children: &[&vuec_ast::Node<Vue3NodeKind>],
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+    regular_mode: NodeRenderMode,
+) -> Option<Vec<String>> {
+    let chunks = static_vnode_chunks(ast, children, options);
+    if chunks.is_empty() {
+        return None;
+    }
+
+    let mut rendered = Vec::new();
+    let mut cursor = 0usize;
+    for chunk in chunks {
+        render_static_vnode_regular_segment(
+            ast,
+            children,
+            cursor,
+            chunk.start,
+            options,
+            scope,
+            regular_mode,
+            &mut rendered,
+        );
+        rendered.push(chunk.call);
+        cursor = chunk.end;
+    }
+    render_static_vnode_regular_segment(
+        ast,
+        children,
+        cursor,
+        children.len(),
+        options,
+        scope,
+        regular_mode,
+        &mut rendered,
+    );
+    Some(rendered)
+}
+
+#[derive(Clone, Debug)]
+struct StaticVNodeChunk {
+    start: usize,
+    end: usize,
+    call: String,
+}
+
+fn static_vnode_chunks(
+    ast: &Vue3Ast,
+    children: &[&vuec_ast::Node<Vue3NodeKind>],
+    options: &Vue3CompilerOptions,
+) -> Vec<StaticVNodeChunk> {
+    let mut chunks = Vec::new();
+    let mut start = 0usize;
+    let mut chunk_analysis = None::<StaticHtmlAnalysis>;
+
+    for (index, child) in children.iter().enumerate() {
+        if let Some(analysis) = analyze_static_html_chunk(ast, &[*child], options) {
+            if chunk_analysis.is_none() {
+                start = index;
+            }
+            match chunk_analysis.as_mut() {
+                Some(existing) => existing.append(analysis),
+                None => chunk_analysis = Some(analysis),
+            }
+            continue;
+        }
+        push_static_vnode_chunk(&mut chunks, start, index, &mut chunk_analysis);
+    }
+    push_static_vnode_chunk(&mut chunks, start, children.len(), &mut chunk_analysis);
+    chunks
+}
+
+fn push_static_vnode_chunk(
+    chunks: &mut Vec<StaticVNodeChunk>,
+    start: usize,
+    end: usize,
+    chunk_analysis: &mut Option<StaticHtmlAnalysis>,
+) {
+    let Some(analysis) = chunk_analysis.take() else {
+        return;
+    };
+    if analysis.meets_threshold() {
+        chunks.push(StaticVNodeChunk {
+            start,
+            end,
+            call: analysis.render_static_call(),
+        });
+    }
+}
+
+fn render_static_vnode_regular_segment(
+    ast: &Vue3Ast,
+    children: &[&vuec_ast::Node<Vue3NodeKind>],
+    start: usize,
+    end: usize,
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+    mode: NodeRenderMode,
+    rendered: &mut Vec<String>,
+) {
+    if start >= end {
+        return;
+    }
+    let ids = children[start..end]
+        .iter()
+        .map(|child| child.id)
+        .collect::<Vec<_>>();
+    rendered.extend(render_child_sequence(
+        ast,
+        &ids,
+        options,
+        mode,
+        scope,
+        &mut MemoIndex::default(),
+    ));
 }
 
 fn analyze_static_html_chunk(
@@ -23915,6 +24073,37 @@ mod tests {
         );
 
         assert!(result.code.contains("_createStaticVNode(\"<span class=\\\"foo\\\"></span><span class=\\\"foo\\\"></span><span class=\\\"foo\\\"></span><span class=\\\"foo\\\"></span><span class=\\\"foo\\\"></span>\", 5)"));
+    }
+
+    #[test]
+    fn base_compile_stringifies_multiple_static_chunks_around_dynamic_child() {
+        let result = base_compile(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: format!(
+                    "<div>{}{{{{ msg }}}}{}</div>",
+                    r#"<span class="foo"></span>"#.repeat(5),
+                    r#"<span class="bar"></span>"#.repeat(5)
+                ),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                hoist_static: true,
+                stringify_static: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert_eq!(result.code.matches("_createStaticVNode(").count(), 2);
+        assert!(result.code.contains("_createStaticVNode(\"<span class=\\\"foo\\\"></span><span class=\\\"foo\\\"></span><span class=\\\"foo\\\"></span><span class=\\\"foo\\\"></span><span class=\\\"foo\\\"></span>\", 5)"));
+        assert!(result
+            .code
+            .contains("_createTextVNode(_toDisplayString(_ctx.msg), 1 /* TEXT */)"));
+        assert!(result.code.contains("_createStaticVNode(\"<span class=\\\"bar\\\"></span><span class=\\\"bar\\\"></span><span class=\\\"bar\\\"></span><span class=\\\"bar\\\"></span><span class=\\\"bar\\\"></span>\", 5)"));
+        assert!(!result.code.contains("class: \"foo\""));
+        assert!(!result.code.contains("class: \"bar\""));
     }
 
     #[test]
