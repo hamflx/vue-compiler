@@ -17729,7 +17729,7 @@ fn render_props_for_target(
         }
         match prop {
             Vue3Prop::Attribute(attr) => {
-                object_entries.push(render_attribute_prop(attr));
+                object_entries.push(render_attribute_prop(element, attr));
             }
             Vue3Prop::Directive(dir) if dir.name == "on" && dir.arg.is_none() => {
                 if let Some(listeners) = render_object_listeners_prop(element, dir, options, scope)
@@ -17867,8 +17867,11 @@ fn exact_single_prop_prefers_multiline(entry: &str) -> bool {
     entry.contains('\n') || entry.starts_with("key: ") && entry.contains('(')
 }
 
-fn render_attribute_prop(attr: &vuec_ast::Vue3Attribute) -> String {
+fn render_attribute_prop(element: &Vue3Element, attr: &vuec_ast::Vue3Attribute) -> String {
     match &attr.value {
+        Some(value) if element.tag_type == Vue3ElementType::Element && attr.name == "style" => {
+            format!("style: {}", vue3_static_style_object_expr(value))
+        }
         Some(value) => format!("{}: {}", json_key(&attr.name), quote_string(value)),
         None => format!("{}: true", json_key(&attr.name)),
     }
@@ -25080,6 +25083,31 @@ mod tests {
         assert!(result.code.contains("style: _normalizeStyle(_ctx.style)"));
         assert!(result.code.contains("6 /* CLASS, STYLE */"));
         assert!(result.code.contains("8 /* PROPS */, [\"class\", \"foo\"]"));
+    }
+
+    #[test]
+    fn base_compile_normalizes_static_style_comments_for_native_props() {
+        let result = base_compile(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source:
+                    "<div style=\"/* before */ width: 300px; height: 100px/* after */\">{{ render }}</div>"
+                        .into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                mode: "module".into(),
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(result
+            .code
+            .contains(r#"style: {"width":"300px","height":"100px"}"#));
+        assert!(!result.code.contains("/* before */"));
+        assert!(!result.code.contains("/* after */"));
     }
 
     #[test]
