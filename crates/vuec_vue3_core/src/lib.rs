@@ -1975,6 +1975,7 @@ fn lower_vue3_element_to_dom_mir_kind(
     let (mut props, directives, v_show) = lower_vue3_hir_payload_to_dom_mir(hir_kind, state);
     let content = inject_vue3_dom_content_props(&mut props, element, ast_node, state);
     let models = inject_vue3_dom_model_props(&mut props, element, ast_node, state);
+    inject_vue3_transition_persisted_prop(&mut props, element, ast, ast_node);
     let tag = lower_vue3_element_tag_to_dom_mir(element, &props);
     Vue3DomMirKind::VNodeCall(Vue3VNodeCall {
         tag,
@@ -2253,6 +2254,90 @@ fn lower_vue3_element_tag_to_dom_mir(element: &Vue3Element, props: &Vue3DomProps
         return Vue3DomTag::RuntimeHelper(helper);
     }
     Vue3DomTag::ComponentAsset(element.tag.clone())
+}
+
+fn inject_vue3_transition_persisted_prop(
+    props: &mut Vue3DomProps,
+    element: &Vue3Element,
+    ast: &Vue3Ast,
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+) {
+    if element.tag_type != Vue3ElementType::Component
+        || vue3_core_component_runtime_helper(&element.tag) != Some(RuntimeHelper::Vue3Transition)
+        || !vue3_transition_single_child_has_v_show(ast, &ast_node.children)
+        || vue3_dom_final_prop_group_has_static_key(props, "persisted")
+    {
+        return;
+    }
+    let attr = Vue3DomStaticAttr {
+        name: "persisted".into(),
+        value: String::new(),
+    };
+    props.static_attrs.push(attr.clone());
+    if !props.segments.is_empty() {
+        props.segments.push(Vue3DomPropSegment::StaticAttr(attr));
+    }
+}
+
+fn vue3_dom_final_prop_group_has_static_key(props: &Vue3DomProps, name: &str) -> bool {
+    if props.segments.is_empty() {
+        return props.static_attrs.iter().any(|attr| attr.name == name)
+            || props
+                .dynamic_bindings
+                .iter()
+                .any(|binding| !binding.dynamic_arg && binding.name == name);
+    }
+    for segment in props.segments.iter().rev() {
+        match segment {
+            Vue3DomPropSegment::StaticAttr(attr) if attr.name == name => return true,
+            Vue3DomPropSegment::DynamicBinding(binding)
+                if !binding.dynamic_arg && binding.name == name =>
+            {
+                return true;
+            }
+            Vue3DomPropSegment::ObjectBinding(_) | Vue3DomPropSegment::ObjectListeners(_) => {
+                return false;
+            }
+            Vue3DomPropSegment::StaticAttr(_)
+            | Vue3DomPropSegment::DynamicBinding(_)
+            | Vue3DomPropSegment::Content(_)
+            | Vue3DomPropSegment::Model(_)
+            | Vue3DomPropSegment::Event(_) => {}
+        }
+    }
+    false
+}
+
+fn vue3_transition_single_child_has_v_show(ast: &Vue3Ast, children: &[NodeId]) -> bool {
+    let visible = vue3_transition_visible_child_ids(ast, children);
+    let [child_id] = visible.as_slice() else {
+        return false;
+    };
+    let Some(child) = ast.node(*child_id) else {
+        return false;
+    };
+    let Vue3AstKind::Element(element) = &child.kind else {
+        return false;
+    };
+    directive_by_name(element, "show").is_some()
+        && directive_by_name(element, "if").is_none()
+        && directive_by_name(element, "else").is_none()
+        && directive_by_name(element, "else-if").is_none()
+        && directive_by_name(element, "for").is_none()
+}
+
+fn vue3_transition_visible_child_ids(ast: &Vue3Ast, children: &[NodeId]) -> Vec<NodeId> {
+    children
+        .iter()
+        .copied()
+        .filter(|child_id| {
+            ast.node(*child_id).is_some_and(|child| match &child.kind {
+                Vue3AstKind::Comment(_) => false,
+                Vue3AstKind::Text(text) => !text.value.chars().all(is_vue3_html_whitespace),
+                _ => true,
+            })
+        })
+        .collect()
 }
 
 fn vue3_dom_mir_patch_flag(
@@ -18787,6 +18872,107 @@ mod tests {
     }
 
     #[test]
+    fn lower_vue3_ast_to_dom_mir_projects_transition_persisted_prop() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<Transition v-bind="base"><div v-show="ok"/></Transition><Transition><div/></Transition>"#.into(),
+            file_id: FileId(70),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+
+        assert_eq!(result.hir.validate_tree(), Ok(()));
+        assert_eq!(result.mir.validate_tree(), Ok(()));
+        let transitions = result
+            .mir
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.kind {
+                Vue3DomMirKind::VNodeCall(call)
+                    if call.tag == Vue3DomTag::RuntimeHelper(RuntimeHelper::Vue3Transition) =>
+                {
+                    Some(call)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(transitions.len(), 2);
+        assert!(matches!(
+            transitions[0].props.segments.as_slice(),
+            [
+                Vue3DomPropSegment::ObjectBinding(_),
+                Vue3DomPropSegment::StaticAttr(Vue3DomStaticAttr { name, value })
+            ] if name == "persisted" && value.is_empty()
+        ));
+        assert!(transitions[0]
+            .props
+            .static_attrs
+            .iter()
+            .any(|attr| attr.name == "persisted" && attr.value.is_empty()));
+        assert!(transitions[1]
+            .props
+            .static_attrs
+            .iter()
+            .all(|attr| attr.name != "persisted"));
+    }
+
+    #[test]
+    fn lower_vue3_ast_to_dom_mir_keeps_transition_persisted_override_order() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<Transition :persisted="user" v-bind="base"><div v-show="ok"/></Transition><Transition v-bind="base" :persisted="user"><div v-show="ok"/></Transition>"#.into(),
+            file_id: FileId(72),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+
+        assert_eq!(result.hir.validate_tree(), Ok(()));
+        assert_eq!(result.mir.validate_tree(), Ok(()));
+        let transitions = result
+            .mir
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.kind {
+                Vue3DomMirKind::VNodeCall(call)
+                    if call.tag == Vue3DomTag::RuntimeHelper(RuntimeHelper::Vue3Transition) =>
+                {
+                    Some(call)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(transitions.len(), 2);
+        assert!(matches!(
+            transitions[0].props.segments.as_slice(),
+            [
+                Vue3DomPropSegment::DynamicBinding(Vue3DomBinding {
+                    name,
+                    dynamic_arg: false,
+                    ..
+                }),
+                Vue3DomPropSegment::ObjectBinding(_),
+                Vue3DomPropSegment::StaticAttr(Vue3DomStaticAttr {
+                    name: injected,
+                    value
+                })
+            ] if name == "persisted" && injected == "persisted" && value.is_empty()
+        ));
+        assert!(matches!(
+            transitions[1].props.segments.as_slice(),
+            [
+                Vue3DomPropSegment::ObjectBinding(_),
+                Vue3DomPropSegment::DynamicBinding(Vue3DomBinding {
+                    name,
+                    dynamic_arg: false,
+                    ..
+                })
+            ] if name == "persisted"
+        ));
+    }
+
+    #[test]
     fn lower_vue3_ast_to_dom_mir_projects_stable_component_slots() {
         let source = TemplateSource {
             filename: "foo.vue".into(),
@@ -20336,6 +20522,38 @@ mod tests {
         assert!(generated.code.contains("_toDisplayString(_ctx.msg)"));
         assert!(!generated.code.contains("_ctx.item"));
         assert!(generated.code.contains("_: 1"));
+    }
+
+    #[test]
+    fn generate_vue3_dom_mir_emits_transition_persisted_prop_from_mir() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<Transition v-bind="base"><div v-show="ok"/></Transition>"#.into(),
+            file_id: FileId(71),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+        let generated = generate_vue3_dom_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated.code.contains("Transition as _Transition"));
+        assert!(generated.code.contains("withCtx as _withCtx"));
+        assert!(generated.code.contains("vShow as _vShow"));
+        assert!(generated.code.contains("mergeProps as _mergeProps"));
+        assert!(generated.code.contains("_createBlock(_Transition"));
+        assert!(generated.code.contains("_mergeProps(_ctx.base"));
+        assert!(generated.code.contains("_ctx.base"));
+        assert!(generated.code.contains("{ persisted: \"\" }"));
+        assert!(generated.code.contains("[_vShow, _ctx.ok]"));
+        assert!(generated.code.contains("512 /* NEED_PATCH */"));
     }
 
     #[test]

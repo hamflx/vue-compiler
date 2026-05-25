@@ -17,8 +17,15 @@ pub struct DomCompilerOptions {
 
 impl Default for DomCompilerOptions {
     fn default() -> Self {
+        let mut core = Vue3CompilerOptions::default();
+        core.built_in_components = vec![
+            "Transition".into(),
+            "transition".into(),
+            "TransitionGroup".into(),
+            "transition-group".into(),
+        ];
         Self {
-            core: Vue3CompilerOptions::default(),
+            core,
             is_custom_element: Vec::new(),
             transform_asset_urls: true,
             decode_entities: true,
@@ -367,6 +374,32 @@ mod tests {
         );
         assert!(result.ast_summary.starts_with("dom:"));
         assert!(result.code.contains("data-vuec-dom"));
+    }
+
+    #[test]
+    fn parse_marks_dom_transition_builtins() {
+        let ast = parse(
+            TemplateSource {
+                filename: "x.vue".into(),
+                source: "<transition/><transition-group/>".into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            &DomCompilerOptions::default(),
+        );
+        let tags = ast
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.kind {
+                Vue3AstKind::Element(element) => Some((
+                    element.tag.as_str(),
+                    element.tag_type == vuec_ast::Vue3ElementType::Component,
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(tags, vec![("transition", true), ("transition-group", true)]);
     }
 
     #[test]
