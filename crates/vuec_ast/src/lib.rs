@@ -1285,6 +1285,7 @@ pub struct Vue3VNodeCall {
     pub tag: Vue3DomTag,
     pub props: Vue3DomProps,
     pub directives: Vec<Vue3DomDirective>,
+    pub content: Option<Vue3DomContent>,
     pub children: MirChildren,
     pub patch_flag: Vue3PatchFlags,
     pub dynamic_props: Vec<String>,
@@ -1316,6 +1317,7 @@ pub struct Vue3DomProps {
 pub enum Vue3DomPropSegment {
     StaticAttr(Vue3DomStaticAttr),
     DynamicBinding(Vue3DomBinding),
+    Content(Vue3DomContent),
     Event(Vue3DomEvent),
     ObjectBinding(Vue3DomObjectBinding),
     ObjectListeners(Vue3DomObjectListeners),
@@ -1333,6 +1335,12 @@ pub struct Vue3DomBinding {
     pub dynamic_name: Option<JsExprId>,
     pub value: JsExprId,
     pub dynamic_arg: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Vue3DomContent {
+    Html { expression: Option<JsExprId> },
+    Text { expression: Option<JsExprId> },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

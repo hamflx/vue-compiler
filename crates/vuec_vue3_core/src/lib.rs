@@ -11,13 +11,13 @@ use vuec_ast::{
     HirObjectListeners, HirPropSegment, HirProps, HirRoot, HirSlotDecl, HirSlotOutlet,
     HirStaticAttr, HirTag, JsExprId, JsPatternId, LoweringMap, MirChildren, MirExpr,
     MissingSpanReason, NodeId, NodeSpan, QuoteKind, RuntimeHelper, Vue3Ast, Vue3AstKind,
-    Vue3Directive, Vue3DomBinding, Vue3DomDirective, Vue3DomEvent, Vue3DomEventCache, Vue3DomMir,
-    Vue3DomMirKind, Vue3DomObjectBinding, Vue3DomObjectListeners, Vue3DomPropSegment, Vue3DomProps,
-    Vue3DomPropsNormalize, Vue3DomSlotName, Vue3DomStaticAttr, Vue3DomTag, Vue3Element,
-    Vue3ElementType, Vue3Expression, Vue3ForMemo, Vue3ForMir, Vue3NodeKind, Vue3PatchFlags,
-    Vue3Prop, Vue3Root, Vue3SlotFlag, Vue3SsrAttrs, Vue3SsrComponent, Vue3SsrContent, Vue3SsrFor,
-    Vue3SsrMir, Vue3SsrMirKind, Vue3SsrModel, Vue3SsrModelKind, Vue3SsrSuspense, Vue3SsrTeleport,
-    Vue3VNodeCall,
+    Vue3Directive, Vue3DomBinding, Vue3DomContent, Vue3DomDirective, Vue3DomEvent,
+    Vue3DomEventCache, Vue3DomMir, Vue3DomMirKind, Vue3DomObjectBinding, Vue3DomObjectListeners,
+    Vue3DomPropSegment, Vue3DomProps, Vue3DomPropsNormalize, Vue3DomSlotName, Vue3DomStaticAttr,
+    Vue3DomTag, Vue3Element, Vue3ElementType, Vue3Expression, Vue3ForMemo, Vue3ForMir,
+    Vue3NodeKind, Vue3PatchFlags, Vue3Prop, Vue3Root, Vue3SlotFlag, Vue3SsrAttrs, Vue3SsrComponent,
+    Vue3SsrContent, Vue3SsrFor, Vue3SsrMir, Vue3SsrMirKind, Vue3SsrModel, Vue3SsrModelKind,
+    Vue3SsrSuspense, Vue3SsrTeleport, Vue3VNodeCall,
 };
 use vuec_codegen::{CodeWriter, SourceMapArtifact, SourceMapSegment};
 use vuec_html::{HtmlTokenKind, HtmlTokenizer};
@@ -1191,6 +1191,15 @@ fn lower_vue3_dom_children(
         }
     }
 
+    if let Some(node) = state.mir.node_mut(mir_id) {
+        if let Vue3DomMirKind::VNodeCall(call) = &mut node.kind {
+            if call.content.is_some() {
+                call.children = MirChildren::None;
+                return;
+            }
+        }
+    }
+
     if let Some(slots) = lower_vue3_component_slots_to_dom_mir(ast_node, ast, hir_id, mir_id, state)
     {
         if let Some(node) = state.mir.node_mut(mir_id) {
@@ -1962,12 +1971,14 @@ fn lower_vue3_element_to_dom_mir_kind(
     }
 
     let is_component = element.tag_type == Vue3ElementType::Component;
-    let (props, directives) = lower_vue3_hir_payload_to_dom_mir(hir_kind, state);
+    let (mut props, directives) = lower_vue3_hir_payload_to_dom_mir(hir_kind, state);
+    let content = inject_vue3_dom_content_props(&mut props, element, ast_node, state);
     let tag = lower_vue3_element_tag_to_dom_mir(element, &props);
     Vue3DomMirKind::VNodeCall(Vue3VNodeCall {
         tag,
         props,
         directives,
+        content,
         children: if ast_node.children.is_empty() {
             MirChildren::None
         } else {
@@ -1980,6 +1991,78 @@ fn lower_vue3_element_to_dom_mir_kind(
         is_block: false,
         disable_tracking: false,
         is_component,
+    })
+}
+
+fn inject_vue3_dom_content_props(
+    props: &mut Vue3DomProps,
+    element: &Vue3Element,
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    state: &mut Vue3DomLoweringState,
+) -> Option<Vue3DomContent> {
+    let mut segment_index = 0usize;
+    let mut content = None;
+    let mut segments = Vec::new();
+    for prop in &element.props {
+        match prop {
+            Vue3Prop::Attribute(_) => {
+                push_existing_vue3_dom_prop_segment(props, &mut segments, &mut segment_index);
+            }
+            Vue3Prop::Directive(dir) if dir.name == "html" || dir.name == "text" => {
+                let lowered = if dir.name == "html" {
+                    Vue3DomContent::Html {
+                        expression: lower_vue3_dom_content_expression(dir, ast_node, state),
+                    }
+                } else {
+                    Vue3DomContent::Text {
+                        expression: lower_vue3_dom_content_expression(dir, ast_node, state),
+                    }
+                };
+                if content.is_none() {
+                    content = Some(lowered.clone());
+                }
+                segments.push(Vue3DomPropSegment::Content(lowered));
+            }
+            Vue3Prop::Directive(dir) if dir.name == "bind" || dir.name == "on" => {
+                push_existing_vue3_dom_prop_segment(props, &mut segments, &mut segment_index);
+            }
+            Vue3Prop::Directive(_) => {}
+        }
+    }
+    while segment_index < props.segments.len() {
+        push_existing_vue3_dom_prop_segment(props, &mut segments, &mut segment_index);
+    }
+    if content.is_some() {
+        props.segments = segments;
+    }
+    content
+}
+
+fn push_existing_vue3_dom_prop_segment(
+    props: &Vue3DomProps,
+    segments: &mut Vec<Vue3DomPropSegment>,
+    index: &mut usize,
+) {
+    if let Some(segment) = props.segments.get(*index).cloned() {
+        segments.push(segment);
+        *index += 1;
+    }
+}
+
+fn lower_vue3_dom_content_expression(
+    directive: &Vue3Directive,
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    state: &mut Vue3DomLoweringState,
+) -> Option<JsExprId> {
+    directive.exp.as_ref().and_then(|expression| {
+        (!expression.source_string().trim().is_empty()).then(|| {
+            register_or_reuse_vue3_expression_with_span(
+                &mut state.js,
+                expression,
+                directive.exp_span.or_else(|| ast_node.span.source()),
+                state.source_type,
+            )
+        })
     })
 }
 
@@ -2309,7 +2392,7 @@ fn lower_hir_directive_to_dom_mir(directive: &HirDirectiveUse) -> Vue3DomDirecti
 }
 
 fn vue3_dom_mir_dynamic_props(element: &Vue3Element) -> Vec<String> {
-    element
+    let mut props = element
         .props
         .iter()
         .filter_map(|prop| match prop {
@@ -2332,11 +2415,13 @@ fn vue3_dom_mir_dynamic_props(element: &Vue3Element) -> Vec<String> {
             }
             _ => None,
         })
-        .collect()
+        .collect::<Vec<_>>();
+    props.extend(vue3_dom_content_dynamic_props(element));
+    props
 }
 
 fn vue3_dom_mir_props_patch_names(element: &Vue3Element) -> Vec<String> {
-    element
+    let mut props = element
         .props
         .iter()
         .filter_map(|prop| match prop {
@@ -2362,6 +2447,20 @@ fn vue3_dom_mir_props_patch_names(element: &Vue3Element) -> Vec<String> {
                 }
                 dir.arg.as_ref().map(Vue3Expression::source_string)
             }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    props.extend(vue3_dom_content_dynamic_props(element));
+    props
+}
+
+fn vue3_dom_content_dynamic_props(element: &Vue3Element) -> Vec<String> {
+    element
+        .props
+        .iter()
+        .filter_map(|prop| match prop {
+            Vue3Prop::Directive(dir) if dir.name == "html" => Some("innerHTML".into()),
+            Vue3Prop::Directive(dir) if dir.name == "text" => Some("textContent".into()),
             _ => None,
         })
         .collect()
@@ -10761,6 +10860,17 @@ impl<'a> Vue3DomMirCodegen<'a> {
                 Vue3DomPropSegment::ObjectListeners(_) => {
                     push_unique_helper(helpers, RuntimeHelper::Vue3ToHandlers);
                 }
+                Vue3DomPropSegment::Content(content) => {
+                    if matches!(
+                        content,
+                        Vue3DomContent::Text {
+                            expression: Some(_)
+                        }
+                    ) && !vue3_dom_content_text_is_static(content, self.js, self.options)
+                    {
+                        push_unique_helper(helpers, RuntimeHelper::Vue3ToDisplayString);
+                    }
+                }
                 Vue3DomPropSegment::StaticAttr(_)
                 | Vue3DomPropSegment::Event(_)
                 | Vue3DomPropSegment::ObjectBinding(_) => {}
@@ -11014,6 +11124,9 @@ impl<'a> Vue3DomMirCodegen<'a> {
                     }
                     object_entries.push(self.render_dynamic_binding(binding, scope));
                 }
+                Vue3DomPropSegment::Content(content) => {
+                    object_entries.push(self.render_content_prop(content, scope));
+                }
                 Vue3DomPropSegment::Event(event) => {
                     object_entries.push(self.render_event(event, scope));
                 }
@@ -11053,6 +11166,37 @@ impl<'a> Vue3DomMirCodegen<'a> {
             format!("class: _normalizeClass({value})")
         } else {
             format!("{}: {}", json_key(&binding.name), value)
+        }
+    }
+
+    fn render_content_prop(&self, content: &Vue3DomContent, scope: &RenderScope) -> String {
+        let name = match content {
+            Vue3DomContent::Html { .. } => "innerHTML",
+            Vue3DomContent::Text { .. } => "textContent",
+        };
+        format!(
+            "{}: {}",
+            json_key(name),
+            self.render_content_value(content, scope)
+        )
+    }
+
+    fn render_content_value(&self, content: &Vue3DomContent, scope: &RenderScope) -> String {
+        match content {
+            Vue3DomContent::Html { expression } => expression
+                .map(|expression| self.render_js_expr(expression, scope))
+                .unwrap_or_else(|| quote_string("")),
+            Vue3DomContent::Text { expression } => {
+                let Some(expression) = expression else {
+                    return quote_string("");
+                };
+                let value = self.render_js_expr(*expression, scope);
+                if vue3_dom_content_text_is_static(content, self.js, self.options) {
+                    value
+                } else {
+                    format!("_toDisplayString({value})")
+                }
+            }
         }
     }
 
@@ -11753,6 +11897,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                         push_unique_helper(helpers, RuntimeHelper::Vue3SsrRenderAttrs);
                     }
                     Vue3DomPropSegment::StaticAttr(_)
+                    | Vue3DomPropSegment::Content(_)
                     | Vue3DomPropSegment::Event(_)
                     | Vue3DomPropSegment::ObjectListeners(_) => {}
                 }
@@ -11837,6 +11982,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                     push_unique_helper(helpers, RuntimeHelper::Vue3ToHandlers);
                 }
                 Vue3DomPropSegment::StaticAttr(_)
+                | Vue3DomPropSegment::Content(_)
                 | Vue3DomPropSegment::Event(_)
                 | Vue3DomPropSegment::ObjectBinding(_) => {}
             }
@@ -12084,6 +12230,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                         self.render_ssr_binding(binding, scope)
                     ));
                 }
+                Vue3DomPropSegment::Content(_) => {}
                 Vue3DomPropSegment::ObjectBinding(binding) => {
                     writer.push_line(&format!(
                         "_push(_ssrRenderAttrs({}));",
@@ -12253,6 +12400,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                     Vue3DomPropSegment::DynamicBinding(binding) if binding.name != "style" => {
                         object_entries.push(self.render_ssr_object_binding(binding, scope));
                     }
+                    Vue3DomPropSegment::Content(_) => {}
                     Vue3DomPropSegment::ObjectBinding(binding) => {
                         self.push_merge_object_arg(&mut merge_args, &mut object_entries);
                         merge_args.push(self.render_js_expr(binding.value, scope));
@@ -12314,6 +12462,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                         parts.push(self.render_js_expr(binding.value, scope));
                     }
                     Vue3DomPropSegment::StaticAttr(_)
+                    | Vue3DomPropSegment::Content(_)
                     | Vue3DomPropSegment::DynamicBinding(_)
                     | Vue3DomPropSegment::Event(_)
                     | Vue3DomPropSegment::ObjectBinding(_)
@@ -12473,6 +12622,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                 Vue3DomPropSegment::DynamicBinding(binding) => {
                     object_entries.push(self.render_dynamic_binding(binding, scope));
                 }
+                Vue3DomPropSegment::Content(_) => {}
                 Vue3DomPropSegment::Event(event) => {
                     object_entries.push(self.render_event(event, scope));
                 }
@@ -12668,6 +12818,7 @@ fn props_requires_merge_call(props: &Vue3DomProps) -> bool {
         match segment {
             Vue3DomPropSegment::StaticAttr(_)
             | Vue3DomPropSegment::DynamicBinding(_)
+            | Vue3DomPropSegment::Content(_)
             | Vue3DomPropSegment::Event(_) => pending_object_entries = true,
             Vue3DomPropSegment::ObjectBinding(_) | Vue3DomPropSegment::ObjectListeners(_) => {
                 if pending_object_entries {
@@ -12682,6 +12833,50 @@ fn props_requires_merge_call(props: &Vue3DomProps) -> bool {
         args += 1;
     }
     args > 1
+}
+
+fn vue3_dom_content_text_is_static(
+    content: &Vue3DomContent,
+    js: &JsAstStore,
+    options: &Vue3CompilerOptions,
+) -> bool {
+    let Vue3DomContent::Text {
+        expression: Some(expression),
+    } = content
+    else {
+        return true;
+    };
+    let Some(entry) = js.expressions().get(expression.0 as usize) else {
+        return false;
+    };
+    let source = entry.source.trim();
+    process_expression_is_static_literal(source)
+        || matches!(
+            options.binding_metadata.get(source).map(String::as_str),
+            Some("literal-const")
+        )
+        || vue3_expression_is_string_literal(source)
+}
+
+fn vue3_expression_is_string_literal(source: &str) -> bool {
+    let mut chars = source.chars();
+    let Some(quote) = chars.next() else {
+        return false;
+    };
+    if !matches!(quote, '\'' | '"') || !source.ends_with(quote) || source.len() < 2 {
+        return false;
+    }
+    let mut escaped = false;
+    for ch in source[quote.len_utf8()..source.len() - quote.len_utf8()].chars() {
+        if escaped {
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == quote {
+            return false;
+        }
+    }
+    !escaped
 }
 
 fn ssr_attrs_has_object_binding(props: &Vue3DomProps) -> bool {
@@ -17638,6 +17833,75 @@ mod tests {
     }
 
     #[test]
+    fn lower_vue3_ast_to_dom_mir_projects_content_override_payloads() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div><section v-html="raw">old</section><p v-text="msg"/><span>keep</span></div>"#.into(),
+            file_id: FileId(58),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+
+        assert_eq!(result.hir.validate_tree(), Ok(()));
+        assert_eq!(result.mir.validate_tree(), Ok(()));
+        assert_eq!(
+            result
+                .js
+                .expressions()
+                .iter()
+                .map(|entry| entry.source.as_str())
+                .collect::<Vec<_>>(),
+            vec!["raw", "msg"]
+        );
+        let content_calls = result
+            .mir
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.kind {
+                Vue3DomMirKind::VNodeCall(call) if call.content.is_some() => Some(call),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(content_calls.len(), 2);
+        assert!(matches!(
+            content_calls[0].content,
+            Some(Vue3DomContent::Html {
+                expression: Some(JsExprId(0))
+            })
+        ));
+        assert!(matches!(
+            content_calls[0].props.segments.as_slice(),
+            [Vue3DomPropSegment::Content(Vue3DomContent::Html { .. })]
+        ));
+        assert_eq!(content_calls[0].children, MirChildren::None);
+        assert_eq!(content_calls[0].patch_flag.bits, 8);
+        assert_eq!(content_calls[0].dynamic_props, vec!["innerHTML"]);
+        assert!(matches!(
+            content_calls[1].content,
+            Some(Vue3DomContent::Text {
+                expression: Some(JsExprId(1))
+            })
+        ));
+        assert_eq!(content_calls[1].children, MirChildren::None);
+        assert_eq!(content_calls[1].patch_flag.bits, 8);
+        assert_eq!(content_calls[1].dynamic_props, vec!["textContent"]);
+        let texts = result
+            .mir
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.kind {
+                Vue3DomMirKind::TextCall {
+                    value: MirExpr::String(value),
+                } => Some(value.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(!texts.contains(&"old"));
+        assert!(texts.contains(&"keep"));
+    }
+
+    #[test]
     fn lower_vue3_ast_to_dom_mir_projects_component_tags_structurally() {
         let source = TemplateSource {
             filename: "foo.vue".into(),
@@ -18576,6 +18840,70 @@ mod tests {
             .contains("}, _cache, 0), 128 /* KEYED_FRAGMENT */)"));
         assert!(!generated.code.contains("_ctx.x"));
         assert!(!generated.code.contains("_ctx.y"));
+    }
+
+    #[test]
+    fn generate_vue3_dom_mir_emits_content_override_payloads_from_mir() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div><section v-html="raw">old</section><p v-text="msg"/><span>keep</span></div>"#.into(),
+            file_id: FileId(59),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+        let generated = generate_vue3_dom_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated
+            .code
+            .contains("toDisplayString as _toDisplayString"));
+        assert!(generated.code.contains("{ innerHTML: _ctx.raw }"));
+        assert!(generated
+            .code
+            .contains("textContent: _toDisplayString(_ctx.msg)"));
+        assert!(generated.code.contains("8 /* PROPS */, [\"innerHTML\"]"));
+        assert!(generated.code.contains("8 /* PROPS */, [\"textContent\"]"));
+        assert!(generated.code.contains("\"keep\""));
+        assert!(!generated.code.contains("\"old\""));
+    }
+
+    #[test]
+    fn generate_vue3_dom_mir_merges_content_override_with_object_bindings() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div v-bind="before" v-html="raw"/><p v-text="'hi'" v-bind="after"/>"#
+                .into(),
+            file_id: FileId(60),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+        let generated = generate_vue3_dom_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated.code.contains("mergeProps as _mergeProps"));
+        assert!(generated
+            .code
+            .contains("_mergeProps(_ctx.before, { innerHTML: _ctx.raw })"));
+        assert!(generated
+            .code
+            .contains("_mergeProps({ textContent: 'hi' }, _ctx.after)"));
+        assert!(!generated.code.contains("_toDisplayString('hi')"));
     }
 
     #[test]
