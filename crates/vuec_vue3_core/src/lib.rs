@@ -565,6 +565,24 @@ impl Vue3Dialect {
                                             &mut directives,
                                             &mut helpers,
                                         );
+                                        collect_vue3_binding_rewrite_helpers(
+                                            dir,
+                                            options,
+                                            &mut helpers,
+                                        );
+                                        if dir.name == "model"
+                                            && vue3_dom_model_kind(element).is_some()
+                                        {
+                                            helpers.insert(RuntimeHelper::Vue3WithDirectives);
+                                            if render_model_assignment_for_directive(dir, options)
+                                                .contains("_isRef(")
+                                            {
+                                                helpers.insert(RuntimeHelper::Vue3IsRef);
+                                            }
+                                            helpers.insert(vue3_dom_model_runtime_helper(
+                                                vue3_dom_model_kind(element).unwrap(),
+                                            ));
+                                        }
                                         if dir.name == "memo" {
                                             has_memo = true;
                                             if directive_by_name(element, "for").is_some() {
@@ -5051,7 +5069,8 @@ pub fn process_expression_projection(payload: &Value) -> Value {
             && !literal
             && (!is_global || options.binding_metadata.contains_key(raw))
         {
-            let content = process_expression_rewrite_identifier(raw, &options, None, false, &[]);
+            let content =
+                process_expression_rewrite_identifier(raw, &options, None, None, false, &[]);
             return json!({
                 "kind": "simple",
                 "content": content,
@@ -8574,6 +8593,32 @@ fn model_assignment_projection(
     })
 }
 
+fn render_inline_model_assignment(
+    raw: &str,
+    event_arg: &str,
+    binding_type: Option<&str>,
+    options: &Vue3CompilerOptions,
+    fallback_target: impl FnOnce() -> String,
+) -> String {
+    if !options.inline || !is_simple_identifier_ascii(raw) {
+        let target = fallback_target();
+        return format!("{event_arg} => (({target}) = $event)");
+    }
+    match binding_type {
+        Some("setup-ref") => format!("{event_arg} => (({raw}).value = $event)"),
+        Some("setup-maybe-ref") => {
+            format!("{event_arg} => (_isRef({raw}) ? ({raw}).value = $event : null)")
+        }
+        Some("setup-let") => {
+            format!("{event_arg} => (_isRef({raw}) ? ({raw}).value = $event : {raw} = $event)")
+        }
+        _ => {
+            let target = fallback_target();
+            format!("{event_arg} => (({target}) = $event)")
+        }
+    }
+}
+
 fn model_prop_name_projection(arg: Option<&Value>) -> Value {
     match arg {
         Some(_) => json!({ "kind": "node", "path": "dir.arg" }),
@@ -9036,13 +9081,7 @@ fn transform_on_rewrite_expression_node(
     } else {
         rewrite_js_like_expression_with_locals(raw, options, &effective_locals)
     };
-    let children = vue3_for_compound_children(
-        raw,
-        options,
-        &effective_locals,
-        Vue3ForAstMode::Expression,
-        &loc,
-    );
+    let children = process_expression_compound_children(raw, options, &effective_locals, &loc);
     let const_type = transform_on_const_type(trimmed, rewritten.trim(), options);
     if is_simple_identifier_ascii(trimmed) || (children.is_empty() && !as_raw_statements) {
         return transform_on_simple_projection(rewritten.trim(), exp, const_type);
@@ -9409,6 +9448,12 @@ struct ProcessExpressionAssignmentRhs<'a> {
     source: &'a str,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ProcessExpressionUpdate {
+    operator: &'static str,
+    prefix: bool,
+}
+
 fn process_expression_identifier_spans(
     raw: &str,
     options: &Vue3CompilerOptions,
@@ -9474,19 +9519,54 @@ fn process_expression_identifier_spans(
         }
         let is_global = is_global_or_literal(ident);
         let assignment_rhs = process_expression_assignment_rhs(raw, start, end);
+        let update_argument = process_expression_update_argument(raw, start, end);
+        let destructure_assignment = process_expression_is_destructure_assignment(raw, start);
         let content = if static_member || local || function_param || arrow_local || is_global {
-            ident.to_string()
+            if !static_member
+                && !local
+                && !function_param
+                && arrow_local
+                && (assignment_rhs.is_some() || update_argument.is_some() || destructure_assignment)
+                && options.binding_metadata.contains_key(ident)
+            {
+                process_expression_rewrite_identifier(
+                    ident,
+                    options,
+                    assignment_rhs.as_ref(),
+                    update_argument,
+                    destructure_assignment,
+                    locals,
+                )
+            } else {
+                ident.to_string()
+            }
         } else {
             process_expression_rewrite_identifier(
                 ident,
                 options,
                 assignment_rhs.as_ref(),
-                process_expression_update_argument(raw, start, end),
+                update_argument,
+                destructure_assignment,
                 locals,
             )
         };
-        let prefix = if (property_key || process_expression_object_shorthand(raw, start, end))
-            && content != ident
+        let (replacement_start, replacement_end) = if update_argument.is_some() && content != ident
+        {
+            update_argument
+                .and_then(|update| process_expression_update_range(raw, start, end, update))
+                .unwrap_or((start, end))
+        } else {
+            (start, end)
+        };
+        let object_shorthand = process_expression_object_shorthand(raw, start, end);
+        let prefix = if property_key && content != ident
+            || object_shorthand
+                && (content != ident
+                    || destructure_assignment
+                        && options
+                            .binding_metadata
+                            .get(ident)
+                            .is_some_and(|kind| kind == "setup-let"))
         {
             Some(format!("{ident}: "))
         } else {
@@ -9495,8 +9575,8 @@ fn process_expression_identifier_spans(
         let dynamic_static_reference = (static_member || is_global)
             && process_expression_dynamic_static_reference(raw, start, end);
         spans.push(ProcessExpressionIdentifier {
-            start,
-            end,
+            start: replacement_start,
+            end: replacement_end,
             content,
             prefix,
             is_constant: ((static_member || is_global) && !dynamic_static_reference)
@@ -9556,7 +9636,7 @@ fn process_expression_param_identifier_spans(
             let content = if is_global_or_literal(ident) {
                 ident.to_string()
             } else {
-                process_expression_rewrite_identifier(ident, options, None, false, &[])
+                process_expression_rewrite_identifier(ident, options, None, None, false, &[])
             };
             spans.push(ProcessExpressionIdentifier {
                 start,
@@ -9636,13 +9716,26 @@ fn process_expression_rewrite_identifier(
     ident: &str,
     options: &Vue3CompilerOptions,
     assignment_rhs: Option<&ProcessExpressionAssignmentRhs<'_>>,
-    update_argument: bool,
+    update_argument: Option<ProcessExpressionUpdate>,
+    destructure_assignment: bool,
     locals: &[String],
 ) -> String {
     match options.binding_metadata.get(ident).map(String::as_str) {
-        Some("setup-ref") if options.inline => format!("{ident}.value"),
+        Some("setup-ref") if options.inline => {
+            if let Some(update) = update_argument {
+                let prefix = if update.prefix { update.operator } else { "" };
+                let postfix = if update.prefix { "" } else { update.operator };
+                format!("{prefix}{ident}.value{postfix}")
+            } else {
+                format!("{ident}.value")
+            }
+        }
         Some("setup-maybe-ref") if options.inline => {
-            if assignment_rhs.is_some() || update_argument {
+            if let Some(update) = update_argument {
+                let prefix = if update.prefix { update.operator } else { "" };
+                let postfix = if update.prefix { "" } else { update.operator };
+                format!("{prefix}{ident}.value{postfix}")
+            } else if assignment_rhs.is_some() || destructure_assignment {
                 format!("{ident}.value")
             } else {
                 format!("_unref({ident})")
@@ -9656,8 +9749,14 @@ fn process_expression_rewrite_identifier(
                     rhs.operator,
                     rewritten_rhs.trim()
                 )
-            } else if update_argument {
-                format!("_isRef({ident}) ? {ident}.value++ : {ident}++")
+            } else if let Some(update) = update_argument {
+                let prefix = if update.prefix { update.operator } else { "" };
+                let postfix = if update.prefix { "" } else { update.operator };
+                format!(
+                    "_isRef({ident}) ? {prefix}{ident}.value{postfix} : {prefix}{ident}{postfix}"
+                )
+            } else if destructure_assignment {
+                ident.to_string()
             } else {
                 format!("_unref({ident})")
             }
@@ -9848,7 +9947,7 @@ fn process_expression_assignment_rhs<'a>(
     start: usize,
     end: usize,
 ) -> Option<ProcessExpressionAssignmentRhs<'a>> {
-    if !previous_non_ws(raw, start).is_none_or(|prev| matches!(prev, '(' | '{' | '[' | ',' | ';')) {
+    if !process_expression_assignment_can_start(raw, start) {
         return None;
     }
     let operator_start = skip_ws_forward(raw, end);
@@ -9857,6 +9956,35 @@ fn process_expression_assignment_rhs<'a>(
     let rhs_end = process_expression_assignment_rhs_end(raw, rhs_start);
     let source = raw.get(rhs_start..rhs_end)?.trim();
     (!source.is_empty()).then_some(ProcessExpressionAssignmentRhs { operator, source })
+}
+
+fn process_expression_assignment_can_start(raw: &str, start: usize) -> bool {
+    if previous_non_ws(raw, start).is_none_or(|prev| matches!(prev, '(' | '{' | '[' | ',' | ';')) {
+        return true;
+    }
+    let Some((prev_index, prev)) = previous_non_ws_index(raw, start) else {
+        return true;
+    };
+    if !raw[prev_index + prev.len_utf8()..start]
+        .chars()
+        .any(is_line_terminator)
+    {
+        return false;
+    }
+    process_expression_token_can_end_statement(raw, prev_index, prev)
+}
+
+fn process_expression_token_can_end_statement(raw: &str, index: usize, ch: char) -> bool {
+    ch == ')'
+        || ch == ']'
+        || ch == '}'
+        || ch == '\''
+        || ch == '"'
+        || ch == '`'
+        || is_identifier_continue(ch)
+        || ch.is_ascii_digit()
+        || raw[..index + ch.len_utf8()].trim_end().ends_with("++")
+        || raw[..index + ch.len_utf8()].trim_end().ends_with("--")
 }
 
 fn process_expression_assignment_operator(raw: &str, start: usize) -> Option<&str> {
@@ -9893,10 +10021,120 @@ fn process_expression_assignment_rhs_end(raw: &str, rhs_start: usize) -> usize {
             ')' | ']' | '}' if depth == 0 => return raw[..absolute].trim_end().len(),
             ')' | ']' | '}' => depth = depth.saturating_sub(1),
             ',' | ';' if depth == 0 => return raw[..absolute].trim_end().len(),
+            '\n' | '\r'
+                if depth == 0
+                    && process_expression_line_terminator_can_end_rhs(raw, rhs_start, absolute) =>
+            {
+                return raw[..absolute].trim_end().len();
+            }
             _ => {}
         }
     }
     raw.trim_end().len()
+}
+
+fn process_expression_line_terminator_can_end_rhs(
+    raw: &str,
+    rhs_start: usize,
+    offset: usize,
+) -> bool {
+    if raw[rhs_start..offset].trim().is_empty() {
+        return false;
+    }
+    let mut next_offset = offset;
+    while next_offset < raw.len() {
+        let Some(ch) = raw[next_offset..].chars().next() else {
+            break;
+        };
+        if !is_line_terminator(ch) {
+            break;
+        }
+        next_offset += ch.len_utf8();
+    }
+    !next_non_ws(raw, next_offset).is_some_and(process_expression_token_continues_expression)
+}
+
+fn process_expression_token_continues_expression(ch: char) -> bool {
+    matches!(
+        ch,
+        '.' | '?'
+            | ':'
+            | '+'
+            | '-'
+            | '*'
+            | '/'
+            | '%'
+            | '&'
+            | '|'
+            | '^'
+            | '='
+            | '<'
+            | '>'
+            | '('
+            | '['
+    )
+}
+
+fn is_line_terminator(ch: char) -> bool {
+    matches!(ch, '\n' | '\r')
+}
+
+fn process_expression_is_destructure_assignment(raw: &str, start: usize) -> bool {
+    let Some(open) = process_expression_destructure_open_before(raw, start) else {
+        return false;
+    };
+    let close_ch = match raw.as_bytes().get(open) {
+        Some(b'{') => '}',
+        Some(b'[') => ']',
+        _ => return false,
+    };
+    let Some(close) = find_matching_forward(raw, open, raw.as_bytes()[open] as char, close_ch)
+    else {
+        return false;
+    };
+    if !(open < start && start < close) {
+        return false;
+    }
+    next_non_ws(raw, close + close_ch.len_utf8()) == Some('=')
+}
+
+fn process_expression_destructure_open_before(raw: &str, start: usize) -> Option<usize> {
+    let mut quote = None::<char>;
+    let mut escaped = false;
+    let mut stack = Vec::<(usize, char)>::new();
+    for (offset, ch) in raw[..start].char_indices() {
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(ch, '\'' | '"' | '`') {
+            quote = Some(ch);
+            continue;
+        }
+        match ch {
+            '(' | '[' | '{' => stack.push((offset, ch)),
+            ')' => pop_matching_open(&mut stack, '('),
+            ']' => pop_matching_open(&mut stack, '['),
+            '}' => pop_matching_open(&mut stack, '{'),
+            _ => {}
+        }
+    }
+    stack
+        .into_iter()
+        .rev()
+        .find_map(|(offset, ch)| matches!(ch, '{' | '[').then_some(offset))
+}
+
+fn pop_matching_open(stack: &mut Vec<(usize, char)>, expected: char) {
+    if stack.last().is_some_and(|(_, ch)| *ch == expected) {
+        stack.pop();
+    }
 }
 
 fn process_expression_dynamic_static_reference(raw: &str, start: usize, end: usize) -> bool {
@@ -9991,12 +10229,40 @@ fn find_matching_backward(raw: &str, close: usize, open_ch: char, close_ch: char
     None
 }
 
-fn process_expression_update_argument(raw: &str, start: usize, end: usize) -> bool {
-    raw.get(end..).is_some_and(|tail| {
-        tail.trim_start().starts_with("++") || tail.trim_start().starts_with("--")
-    }) || raw
-        .get(..start)
-        .is_some_and(|head| head.trim_end().ends_with("++") || head.trim_end().ends_with("--"))
+fn process_expression_update_argument(
+    raw: &str,
+    start: usize,
+    end: usize,
+) -> Option<ProcessExpressionUpdate> {
+    if let Some(tail) = raw.get(end..).map(str::trim_start) {
+        if tail.starts_with("++") {
+            return Some(ProcessExpressionUpdate {
+                operator: "++",
+                prefix: false,
+            });
+        }
+        if tail.starts_with("--") {
+            return Some(ProcessExpressionUpdate {
+                operator: "--",
+                prefix: false,
+            });
+        }
+    }
+    if let Some(head) = raw.get(..start).map(str::trim_end) {
+        if head.ends_with("++") {
+            return Some(ProcessExpressionUpdate {
+                operator: "++",
+                prefix: true,
+            });
+        }
+        if head.ends_with("--") {
+            return Some(ProcessExpressionUpdate {
+                operator: "--",
+                prefix: true,
+            });
+        }
+    }
+    None
 }
 
 fn transform_on_projection_const_type(projection: &Value) -> u64 {
@@ -11862,8 +12128,14 @@ impl<'a> Vue3DomMirCodegen<'a> {
     }
 
     fn render_model_assignment(&self, model: &Vue3DomModel, scope: &RenderScope) -> String {
-        let target = self.render_js_expr(model.expression, scope);
-        format!("$event => (({target}) = $event)")
+        let raw = self.raw_js_expr(model.expression).unwrap_or_default();
+        render_inline_model_assignment(
+            raw,
+            "$event",
+            self.options.binding_metadata.get(raw).map(String::as_str),
+            self.options,
+            || self.render_js_expr(model.expression, scope),
+        )
     }
 
     fn render_event(&self, event: &Vue3DomEvent, scope: &RenderScope) -> String {
@@ -12356,6 +12628,13 @@ impl<'a> Vue3DomMirCodegen<'a> {
             .get(id.0 as usize)
             .map(|entry| rewrite_expression_with_scope(&entry.source, self.options, scope))
             .unwrap_or_else(|| "undefined".into())
+    }
+
+    fn raw_js_expr(&self, id: JsExprId) -> Option<&str> {
+        self.js
+            .expressions()
+            .get(id.0 as usize)
+            .map(|entry| entry.source.trim())
     }
 
     fn render_js_stmt(&self, id: vuec_ast::JsStmtId, scope: &RenderScope) -> String {
@@ -16010,6 +16289,9 @@ fn render_with_runtime_directives(
         .props
         .iter()
         .filter_map(|prop| match prop {
+            Vue3Prop::Directive(dir) if dir.name == "model" => {
+                render_model_runtime_directive_arg(element, dir, options, scope)
+            }
             Vue3Prop::Directive(dir) if vue3_directive_needs_runtime_asset(&dir.name) => {
                 Some(render_runtime_directive_arg(dir, options, scope))
             }
@@ -16062,6 +16344,34 @@ fn render_runtime_directive_arg(
         args.push(render_object(&modifiers));
     }
     format!("[{}]", args.join(", "))
+}
+
+fn render_model_runtime_directive_arg(
+    element: &Vue3Element,
+    dir: &Vue3Directive,
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+) -> Option<String> {
+    if dir.arg.is_some() {
+        return None;
+    }
+    let helper = helper_reference(vue3_dom_model_runtime_helper(vue3_dom_model_kind(element)?));
+    let expression = dir
+        .exp
+        .as_ref()
+        .map(|exp| rewrite_expression_with_scope(&exp.source_string(), options, scope))
+        .unwrap_or_else(|| "undefined".into());
+    let mut args = vec![helper, expression];
+    if !dir.modifiers.is_empty() {
+        args.push("void 0".into());
+        let modifiers = dir
+            .modifiers
+            .iter()
+            .map(|modifier| format!("{}: true", json_key(modifier)))
+            .collect::<Vec<_>>();
+        args.push(render_object(&modifiers));
+    }
+    Some(format!("[{}]", args.join(", ")))
 }
 
 #[derive(Clone, Debug, Default)]
@@ -16536,6 +16846,41 @@ fn collect_vue3_runtime_directive_asset(
         helpers.insert(RuntimeHelper::Vue3ResolveDirective);
     }
     helpers.insert(RuntimeHelper::Vue3WithDirectives);
+}
+
+fn collect_vue3_binding_rewrite_helpers(
+    directive: &Vue3Directive,
+    options: &Vue3CompilerOptions,
+    helpers: &mut BTreeSet<RuntimeHelper>,
+) {
+    if !uses_prefixed_identifiers(options) {
+        return;
+    }
+    let source = directive
+        .exp
+        .as_ref()
+        .map(Vue3Expression::source_string)
+        .unwrap_or_default();
+    if source.trim().is_empty() {
+        return;
+    }
+    let rewritten = if directive.name == "on" && directive.arg.is_some() {
+        let scope = RenderScope::default();
+        rewrite_handler_expression_with_scope(&source, options, &scope)
+    } else {
+        rewrite_js_like_expression(&source, options)
+    };
+    for helper in vue3_for_helpers_for_content(&rewritten) {
+        match helper {
+            "UNREF" => {
+                helpers.insert(RuntimeHelper::Vue3Unref);
+            }
+            "IS_REF" => {
+                helpers.insert(RuntimeHelper::Vue3IsRef);
+            }
+            _ => {}
+        }
+    }
 }
 
 fn vue3_core_component_runtime_helper(tag: &str) -> Option<RuntimeHelper> {
@@ -18623,6 +18968,11 @@ fn render_props_for_target(
                     object_entries.push(binding);
                 }
             }
+            Vue3Prop::Directive(dir)
+                if dir.name == "model" && vue3_dom_model_kind(element).is_some() =>
+            {
+                object_entries.push(render_model_update_prop_exact(dir, options));
+            }
             _ => {}
         }
     }
@@ -18787,6 +19137,33 @@ fn render_binding_prop(
     } else {
         Some(format!("{}: {}", json_key(&key), expression))
     }
+}
+
+fn render_model_update_prop_exact(dir: &Vue3Directive, options: &Vue3CompilerOptions) -> String {
+    format!(
+        "{}: {}",
+        json_key("onUpdate:modelValue"),
+        render_model_assignment_for_directive(dir, options)
+    )
+}
+
+fn render_model_assignment_for_directive(
+    dir: &Vue3Directive,
+    options: &Vue3CompilerOptions,
+) -> String {
+    let raw = dir
+        .exp
+        .as_ref()
+        .map(Vue3Expression::source_string)
+        .unwrap_or_default();
+    let raw = raw.trim();
+    render_inline_model_assignment(
+        raw,
+        "$event",
+        options.binding_metadata.get(raw).map(String::as_str),
+        options,
+        || rewrite_expression_with_scope(raw, options, &RenderScope::default()),
+    )
 }
 
 fn render_static_binding_prop_key(dir: &Vue3Directive) -> String {
@@ -19017,6 +19394,9 @@ fn prop_requires_dynamic_patch(
     options: &Vue3CompilerOptions,
     scope: &RenderScope,
 ) -> bool {
+    if dir.name == "model" && vue3_dom_model_kind(element).is_some() {
+        return true;
+    }
     if dir.name == "on" && !event_directive_is_vnode_hook(dir) {
         return !event_handler_can_skip_patch(element, dir, options, scope);
     }
@@ -19131,6 +19511,11 @@ fn dynamic_props_arg(
                     return None;
                 }
                 (!arg.is_empty()).then_some(render_static_binding_prop_key(dir))
+            }
+            Vue3Prop::Directive(dir)
+                if dir.name == "model" && vue3_dom_model_kind(element).is_some() =>
+            {
+                Some("onUpdate:modelValue".into())
             }
             _ => None,
         })
@@ -19545,6 +19930,38 @@ fn rewrite_js_like_expression_into(
             previous = TokenKind::Other;
             continue;
         }
+        if (ch == '+' || ch == '-')
+            && expression
+                .get(byte..)
+                .is_some_and(|tail| tail.starts_with("++") || tail.starts_with("--"))
+        {
+            let operator = if ch == '+' { "++" } else { "--" };
+            let ident_start = skip_ws_forward(expression, byte + operator.len());
+            if let Some((ident, ident_end)) = read_identifier_at(expression, ident_start) {
+                if let Some((replacement, consumed_end)) = rewrite_js_like_update(
+                    ident,
+                    expression,
+                    ident_start,
+                    ident_end,
+                    options,
+                    &scopes,
+                    process_expression_is_arrow_param(
+                        &arrow_bindings,
+                        ident,
+                        ident_start,
+                        ident_end,
+                    ),
+                ) {
+                    output.push_str(&replacement);
+                    index = chars
+                        .iter()
+                        .position(|(offset, _)| *offset >= consumed_end)
+                        .unwrap_or(chars.len());
+                    previous = TokenKind::Other;
+                    continue;
+                }
+            }
+        }
         if is_identifier_start(ch) {
             let start = byte;
             index += 1;
@@ -19559,6 +19976,44 @@ fn rewrite_js_like_expression_into(
             let arrow_local = process_expression_is_arrow_local(&arrow_bindings, ident, start, end);
             let next = next_non_ws(expression, end);
             let prev = previous;
+            if !process_expression_update_argument(expression, start, end)
+                .is_some_and(|update| update.prefix)
+            {
+                if let Some((replacement, consumed_end)) = rewrite_js_like_update(
+                    ident,
+                    expression,
+                    start,
+                    end,
+                    options,
+                    &scopes,
+                    arrow_param,
+                ) {
+                    output.push_str(&replacement);
+                    index = chars
+                        .iter()
+                        .position(|(offset, _)| *offset >= consumed_end)
+                        .unwrap_or(chars.len());
+                    previous = TokenKind::Other;
+                    continue;
+                }
+            }
+            if let Some((replacement, consumed_end)) = rewrite_js_like_destructure_identifier(
+                ident,
+                expression,
+                start,
+                end,
+                options,
+                &scopes,
+                arrow_param,
+            ) {
+                output.push_str(&replacement);
+                index = chars
+                    .iter()
+                    .position(|(offset, _)| *offset >= consumed_end)
+                    .unwrap_or(chars.len());
+                previous = TokenKind::Other;
+                continue;
+            }
             if let Some((replacement, consumed_end)) = rewrite_js_like_assignment(
                 ident,
                 expression,
@@ -19566,7 +20021,7 @@ fn rewrite_js_like_expression_into(
                 end,
                 options,
                 &scopes,
-                arrow_param || arrow_local,
+                arrow_param,
             ) {
                 output.push_str(&replacement);
                 index = chars
@@ -19709,13 +20164,10 @@ fn rewrite_js_like_assignment(
     scopes: &[Scope],
     arrow_local: bool,
 ) -> Option<(String, usize)> {
-    if options.binding_metadata.get(ident).map(String::as_str) != Some("setup-let")
-        || !options.inline
-        || is_local(scopes, ident)
-        || arrow_local
-    {
+    if !options.inline || is_local(scopes, ident) || arrow_local {
         return None;
     }
+    let binding = options.binding_metadata.get(ident).map(String::as_str)?;
     let assignment = process_expression_assignment_rhs(expression, start, end)?;
     let operator_start = skip_ws_forward(expression, end);
     let rhs_start = skip_ws_forward(expression, operator_start + assignment.operator.len());
@@ -19726,14 +20178,124 @@ fn rewrite_js_like_assignment(
         .flat_map(|scope| scope.locals.iter().cloned())
         .collect::<Vec<_>>();
     let rewritten_rhs = rewrite_js_like_expression_with_locals(rhs, options, &locals);
-    Some((
-        format!(
-            "_isRef({ident}) ? {ident}.value {} {} : {ident}",
-            assignment.operator,
-            rewritten_rhs.trim()
-        ),
-        rhs_end,
-    ))
+    let replacement = match binding {
+        "setup-ref" | "setup-maybe-ref" => {
+            format!(
+                "{ident}.value {} {}",
+                assignment.operator,
+                rewritten_rhs.trim()
+            )
+        }
+        "setup-let" => {
+            format!(
+                "_isRef({ident}) ? {ident}.value {} {} : {ident} {} {}",
+                assignment.operator,
+                rewritten_rhs.trim(),
+                assignment.operator,
+                rewritten_rhs.trim()
+            )
+        }
+        _ => return None,
+    };
+    Some((replacement, rhs_end))
+}
+
+fn rewrite_js_like_update(
+    ident: &str,
+    expression: &str,
+    start: usize,
+    end: usize,
+    options: &Vue3CompilerOptions,
+    scopes: &[Scope],
+    arrow_local: bool,
+) -> Option<(String, usize)> {
+    if !options.inline || is_local(scopes, ident) || arrow_local {
+        return None;
+    }
+    let binding = options.binding_metadata.get(ident).map(String::as_str)?;
+    let update = process_expression_update_argument(expression, start, end)?;
+    let (_, consumed_end) = process_expression_update_range(expression, start, end, update)?;
+    let prefix = if update.prefix { update.operator } else { "" };
+    let postfix = if update.prefix { "" } else { update.operator };
+    let replacement = match binding {
+        "setup-ref" | "setup-maybe-ref" => format!("{prefix}{ident}.value{postfix}"),
+        "setup-let" => {
+            format!("_isRef({ident}) ? {prefix}{ident}.value{postfix} : {prefix}{ident}{postfix}")
+        }
+        _ => return None,
+    };
+    Some((replacement, consumed_end))
+}
+
+fn rewrite_js_like_destructure_identifier(
+    ident: &str,
+    expression: &str,
+    start: usize,
+    end: usize,
+    options: &Vue3CompilerOptions,
+    scopes: &[Scope],
+    arrow_param: bool,
+) -> Option<(String, usize)> {
+    if !options.inline
+        || is_local(scopes, ident)
+        || arrow_param
+        || !process_expression_is_destructure_assignment(expression, start)
+    {
+        return None;
+    }
+    let binding = options.binding_metadata.get(ident).map(String::as_str)?;
+    let rewritten = match binding {
+        "setup-ref" | "setup-maybe-ref" => format!("{ident}.value"),
+        "setup-let" => ident.to_string(),
+        _ => return None,
+    };
+    if process_expression_object_shorthand(expression, start, end) {
+        Some((format!("{ident}: {rewritten}"), end))
+    } else {
+        Some((rewritten, end))
+    }
+}
+
+fn process_expression_update_range(
+    expression: &str,
+    start: usize,
+    end: usize,
+    update: ProcessExpressionUpdate,
+) -> Option<(usize, usize)> {
+    if update.prefix {
+        let operator_start = previous_operator_start(expression, start, update.operator)?;
+        Some((operator_start, end))
+    } else {
+        let operator_start = skip_ws_forward(expression, end);
+        expression
+            .get(operator_start..)
+            .is_some_and(|tail| tail.starts_with(update.operator))
+            .then_some((start, operator_start + update.operator.len()))
+    }
+}
+
+fn previous_operator_start(expression: &str, start: usize, operator: &str) -> Option<usize> {
+    let head = expression.get(..start)?.trim_end();
+    if !head.ends_with(operator) {
+        return None;
+    }
+    Some(head.len().saturating_sub(operator.len()))
+}
+
+fn read_identifier_at(source: &str, start: usize) -> Option<(&str, usize)> {
+    let mut chars = source.get(start..)?.char_indices();
+    let (_, first) = chars.next()?;
+    if !is_identifier_start(first) {
+        return None;
+    }
+    let mut end = start + first.len_utf8();
+    for (relative, ch) in chars {
+        if !is_identifier_continue(ch) {
+            return Some((&source[start..end], end));
+        }
+        end = start + relative + ch.len_utf8();
+    }
+    Some((&source[start..end], end))
 }
 
 #[derive(Clone, Debug, Default)]
@@ -23818,9 +24380,158 @@ mod tests {
         let generated = generate_vue3_dom_mir(&result.mir, &result.js, &options);
 
         assert!(generated.code.contains("isRef as _isRef"));
+        assert!(generated.code.contains(
+            "_isRef(count) ? count.value = _unref(count) + 1 : count = _unref(count) + 1"
+        ));
+    }
+
+    #[test]
+    fn generate_vue3_dom_mir_rewrites_inline_v_model_assignments_by_binding() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source:
+                r#"<div><input v-model="count"><input v-model="maybe"><input v-model="lett"></div>"#
+                    .into(),
+            file_id: FileId(88),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+        let mut options = Vue3CompilerOptions {
+            inline: true,
+            mode: "module".into(),
+            prefix_identifiers: true,
+            ..Vue3CompilerOptions::default()
+        };
+        options
+            .binding_metadata
+            .insert("count".into(), "setup-ref".into());
+        options
+            .binding_metadata
+            .insert("maybe".into(), "setup-maybe-ref".into());
+        options
+            .binding_metadata
+            .insert("lett".into(), "setup-let".into());
+        let generated = generate_vue3_dom_mir(&result.mir, &result.js, &options);
+
+        assert!(generated.code.contains("isRef as _isRef"));
         assert!(generated
             .code
-            .contains("_isRef(count) ? count.value = _unref(count) + 1 : count"));
+            .contains("\"onUpdate:modelValue\": $event => ((count).value = $event)"));
+        assert!(generated.code.contains(
+            "\"onUpdate:modelValue\": $event => (_isRef(maybe) ? (maybe).value = $event : null)"
+        ));
+        assert!(generated
+            .code
+            .contains("\"onUpdate:modelValue\": $event => (_isRef(lett) ? (lett).value = $event : lett = $event)"));
+    }
+
+    #[test]
+    fn generate_vue3_dom_mir_rewrites_inline_handler_assignment_bindings() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<button @click="count = 1; maybe = count; lett += count; count++; --maybe; lett--">Save</button>"#.into(),
+            file_id: FileId(89),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+        let mut options = Vue3CompilerOptions {
+            inline: true,
+            mode: "module".into(),
+            prefix_identifiers: true,
+            ..Vue3CompilerOptions::default()
+        };
+        options
+            .binding_metadata
+            .insert("count".into(), "setup-ref".into());
+        options
+            .binding_metadata
+            .insert("maybe".into(), "setup-maybe-ref".into());
+        options
+            .binding_metadata
+            .insert("lett".into(), "setup-let".into());
+        let generated = generate_vue3_dom_mir(&result.mir, &result.js, &options);
+
+        assert!(generated.code.contains("count.value = 1"));
+        assert!(generated.code.contains("maybe.value = count.value"));
+        assert!(generated
+            .code
+            .contains("_isRef(lett) ? lett.value += count.value : lett += count.value"));
+        assert!(generated.code.contains("count.value++"));
+        assert!(generated.code.contains("--maybe.value"));
+        assert!(generated
+            .code
+            .contains("_isRef(lett) ? lett.value-- : lett--"));
+    }
+
+    #[test]
+    fn base_compile_rewrites_inline_v_model_and_nested_handler_assignments() {
+        let mut options = Vue3CompilerOptions {
+            inline: true,
+            mode: "module".into(),
+            prefix_identifiers: true,
+            cache_handlers: true,
+            ..Vue3CompilerOptions::default()
+        };
+        options
+            .binding_metadata
+            .insert("count".into(), "setup-ref".into());
+        options
+            .binding_metadata
+            .insert("maybe".into(), "setup-maybe-ref".into());
+        options
+            .binding_metadata
+            .insert("lett".into(), "setup-let".into());
+        options
+            .binding_metadata
+            .insert("v".into(), "setup-let".into());
+        options
+            .binding_metadata
+            .insert("val".into(), "literal-const".into());
+
+        let result = Vue3Dialect::base_compile(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: r#"<div><input v-model="count"/><input v-model="maybe"/><input v-model="lett"/><button @click="() => { v = lett }"/><button @click="() => {
+  let a = '' + lett
+  v = a
+}"/><button @click="() => {
+  (() => {
+    let x = a
+    (() => {
+      let z = x
+      let z2 = z
+    })
+    let lz = z
+  })
+  v = a
+}"/><button @click="({ count } = val); [maybe] = val; ({ lett } = val)"/></div>"#.into(),
+                file_id: FileId(91),
+                base_offset: 0,
+            },
+            options,
+        );
+
+        assert!(result.preamble.contains("vModelText as _vModelText"));
+        assert!(result.code.contains("[_vModelText, count.value]"));
+        assert!(result.code.contains("(count).value = $event"));
+        assert!(result
+            .code
+            .contains("_isRef(maybe) ? (maybe).value = $event : null"));
+        assert!(result
+            .code
+            .contains("_isRef(lett) ? (lett).value = $event : lett = $event"));
+        assert!(result
+            .code
+            .contains("_isRef(v) ? v.value = _unref(lett) : v = _unref(lett)"));
+        assert!(result.code.contains("_isRef(v) ? v.value = a : v = a"));
+        assert!(result
+            .code
+            .contains("_isRef(v) ? v.value = _ctx.a : v = _ctx.a"));
+        assert!(result.code.contains("({ count: count.value } = val)"));
+        assert!(result.code.contains("[maybe.value] = val"));
+        assert!(result.code.contains("({ lett: lett } = val)"));
     }
 
     #[test]
@@ -25626,6 +26337,38 @@ mod tests {
         }))
     }
 
+    fn process_expression_test_statement_projection(content: &str, context: Value) -> Value {
+        process_expression_projection(&json!({
+            "node": {
+                "type": 4,
+                "content": content,
+                "isStatic": false,
+                "loc": {
+                    "start": { "offset": 0, "line": 1, "column": 1 },
+                    "end": { "offset": content.len(), "line": 1, "column": content.len() + 1 },
+                    "source": content
+                }
+            },
+            "context": context,
+            "asRawStatements": true
+        }))
+    }
+
+    fn projection_code(value: &Value) -> String {
+        match json_str(value, "kind") {
+            Some("simple") => json_str(value, "content").unwrap_or("").to_string(),
+            Some("compound") => value
+                .get("children")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or(&[])
+                .iter()
+                .map(projection_code)
+                .collect::<String>(),
+            _ => value.as_str().unwrap_or_default().to_string(),
+        }
+    }
+
     #[test]
     fn process_expression_projection_prefixes_simple_identifier() {
         let projection = process_expression_test_projection(
@@ -25726,6 +26469,55 @@ mod tests {
         );
         assert_eq!(projection["children"][3]["content"], json!("bar"));
         assert_eq!(projection["helpers"], json!(["IS_REF"]));
+    }
+
+    #[test]
+    fn process_expression_projection_rewrites_inline_assignment_update_and_destructure() {
+        let context = json!({
+            "prefixIdentifiers": true,
+            "inline": true,
+            "identifiers": {},
+            "bindingMetadata": {
+                "count": "setup-ref",
+                "maybe": "setup-maybe-ref",
+                "lett": "setup-let",
+                "val": "setup-const"
+            }
+        });
+
+        let assignment = process_expression_test_statement_projection(
+            "count = 1; maybe = count; lett += count",
+            context.clone(),
+        );
+        let code = projection_code(&assignment);
+        assert!(code.contains("count.value = 1"), "{code}");
+        assert!(code.contains("maybe.value = count.value"), "{code}");
+        assert!(
+            code.contains("_isRef(lett) ? lett.value += count.value : lett += count.value"),
+            "{code}"
+        );
+        assert_eq!(assignment["helpers"], json!(["IS_REF"]));
+
+        let update = process_expression_test_statement_projection(
+            "count++; --maybe; lett--",
+            context.clone(),
+        );
+        let code = projection_code(&update);
+        assert!(code.contains("count.value++"), "{code}");
+        assert!(code.contains("--maybe.value"), "{code}");
+        assert!(
+            code.contains("_isRef(lett) ? lett.value-- : lett--"),
+            "{code}"
+        );
+
+        let destructure = process_expression_test_statement_projection(
+            "({ count } = val); [maybe] = val; ({ lett } = val)",
+            context,
+        );
+        let code = projection_code(&destructure);
+        assert!(code.contains("({ count: count.value } = val)"), "{code}");
+        assert!(code.contains("[maybe.value] = val"), "{code}");
+        assert!(code.contains("({ lett: lett } = val)"), "{code}");
     }
 
     #[test]
@@ -27999,6 +28791,42 @@ mod tests {
             }
         }));
         assert_eq!(component_member["props"][0]["cache"], json!(false));
+    }
+
+    #[test]
+    fn transform_on_projection_rewrites_inline_assignment_bindings() {
+        let projection = transform_on_projection(&json!({
+            "dir": {
+                "arg": { "type": 4, "content": "click", "isStatic": true },
+                "exp": {
+                    "type": 4,
+                    "content": "maybe = count; --lett",
+                    "loc": { "source": "maybe = count; --lett" }
+                },
+                "modifiers": []
+            },
+            "node": { "tagType": 0 },
+            "context": {
+                "prefixIdentifiers": true,
+                "inline": true,
+                "identifiers": {},
+                "bindingMetadata": {
+                    "count": "setup-ref",
+                    "maybe": "setup-maybe-ref",
+                    "lett": "setup-let"
+                }
+            }
+        }));
+
+        let code = projection_code(&projection["props"][0]["value"]);
+        assert!(
+            code.contains("maybe.value = count.value; _isRef(lett) ? --lett.value : --lett"),
+            "{code}"
+        );
+        assert_eq!(
+            projection["props"][0]["value"]["children"][1]["helpers"],
+            json!(["IS_REF"])
+        );
     }
 
     #[test]
