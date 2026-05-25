@@ -347,12 +347,10 @@ mod tests {
         );
 
         assert!(result.code.contains("import _imports_0 from './logo.png'"));
+        assert!(result.code.contains("_ssrRenderAttr(\"src\", _imports_0)"));
         assert!(result
             .code
-            .contains("_push(_ssrRenderAttr(\"src\", _imports_0));"));
-        assert!(result
-            .code
-            .contains("_push(_ssrRenderAttr(\"srcset\", _imports_0 + ' 2x'));"));
+            .contains("_ssrRenderAttr(\"srcset\", _imports_0 + ' 2x')"));
         assert!(!result.code.contains("_ctx._imports_"));
         assert!(result.ast_summary.contains("elements=1"));
     }

@@ -231,8 +231,10 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
         "vue3.ssr.compile" => {
             let source = template_source(&payload);
             let default_options = SsrCompilerOptions::default();
+            let mut core = vue3_options(payload.get("options"));
+            apply_bridge_dom_parser_defaults(&mut core, payload.get("options"));
             let options = SsrCompilerOptions {
-                core: vue3_options(payload.get("options")),
+                core,
                 scope_id: payload
                     .get("options")
                     .and_then(|options| options.get("scopeId"))
@@ -3310,8 +3312,8 @@ mod tests {
 
         let code = compiled["code"].as_str().unwrap_or("");
         assert!(code.contains("import _imports_0 from './bar.png'"));
-        assert!(code.contains("_push(_ssrRenderAttr(\"src\", _imports_0));"));
-        assert!(code.contains("_push(_ssrRenderAttr(\"srcset\", _imports_0 + ' 2x'));"));
+        assert!(code.contains("_ssrRenderAttr(\"src\", _imports_0)"));
+        assert!(code.contains("_ssrRenderAttr(\"srcset\", _imports_0 + ' 2x')"));
         assert!(!code.contains("_ctx._imports_"));
 
         let disabled = dispatch(
@@ -3330,5 +3332,26 @@ mod tests {
         let disabled_code = disabled["code"].as_str().unwrap_or("");
         assert!(!disabled_code.contains("import _imports_0"));
         assert!(disabled_code.contains(r#"src=\"./bar.png\""#));
+    }
+
+    #[test]
+    fn vue3_ssr_bridge_uses_dom_parser_defaults_for_components() {
+        let compiled = dispatch(
+            "vue3.ssr.compile",
+            json!({
+                "source": r#"<router-link><img src="./logo.png"></router-link>"#,
+                "options": {
+                    "mode": "module",
+                    "prefixIdentifiers": true
+                }
+            }),
+        )
+        .expect("ssr compile");
+
+        let code = compiled["code"].as_str().unwrap_or("");
+        assert!(code.contains("resolveComponent as _resolveComponent"));
+        assert!(code.contains("const _component_router_link = _resolveComponent(\"router-link\")"));
+        assert!(code.contains("_push(_ssrRenderComponent(_component_router_link, null, {"));
+        assert!(code.contains("_createVNode(\"img\", { src: _imports_0 })"));
     }
 }
