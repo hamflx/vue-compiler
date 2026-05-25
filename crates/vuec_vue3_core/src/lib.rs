@@ -19523,6 +19523,8 @@ impl<'a> PublicAstCodegen<'a> {
             self.push(&format!("import {name} from '{}'", path));
             self.newline();
         }
+        self.newline();
+        self.newline();
     }
 
     fn gen_assets(&mut self) {
@@ -19588,7 +19590,9 @@ impl<'a> PublicAstCodegen<'a> {
         }
         let previous = self.pure;
         self.pure = true;
-        self.newline();
+        if !self.code.ends_with("\n\n\n") {
+            self.newline();
+        }
         for (index, exp) in hoists.iter().enumerate() {
             if exp.is_null() {
                 continue;
@@ -20494,8 +20498,82 @@ mod tests {
         );
 
         assert!(result.code.contains("import _imports_0 from './logo.png'"));
+        assert!(result
+            .code
+            .contains("import _imports_0 from './logo.png'\n\n\nexport function render"));
         assert!(result.code.contains("src: _imports_0"));
         assert!(!result.code.contains("_ctx._imports_0"));
+    }
+
+    #[test]
+    fn generate_public_ast_separates_root_imports_from_hoists() {
+        let ast = json!({
+            "type": 0,
+            "helpers": ["openBlock", "createElementBlock", "createElementVNode", "Fragment"],
+            "components": [],
+            "directives": [],
+            "hoists": [{
+                "type": 4,
+                "content": "_imports_0 + '#fragment'",
+                "isStatic": false,
+                "constType": 3
+            }],
+            "imports": [{
+                "exp": {
+                    "type": 4,
+                    "content": "_imports_0",
+                    "isStatic": false,
+                    "constType": 3
+                },
+                "path": "./icons.svg"
+            }],
+            "cached": [],
+            "temps": 0,
+            "codegenNode": {
+                "type": 13,
+                "tag": "_Fragment",
+                "props": null,
+                "children": [{
+                    "type": 13,
+                    "tag": "\"use\"",
+                    "props": {
+                        "type": 15,
+                        "properties": [{
+                            "type": 16,
+                            "key": {
+                                "type": 4,
+                                "content": "href",
+                                "isStatic": true
+                            },
+                            "value": {
+                                "type": 4,
+                                "content": "_hoisted_1",
+                                "isStatic": false
+                            }
+                        }]
+                    },
+                    "children": null,
+                    "isBlock": false,
+                    "isComponent": false
+                }],
+                "patchFlag": "64",
+                "isBlock": true,
+                "isComponent": false
+            }
+        });
+
+        let result = generate_public_ast(
+            &ast,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(result.code.contains(
+            "import _imports_0 from './icons.svg'\n\n\nconst _hoisted_1 = _imports_0 + '#fragment'\n\nexport function render"
+        ));
     }
 
     #[test]
