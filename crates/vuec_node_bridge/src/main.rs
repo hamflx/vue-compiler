@@ -158,6 +158,10 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
         "vue3.dom.compile" => {
             let source = template_source(&payload);
             let mut core = vue3_options(payload.get("options"));
+            let default_options = DomCompilerOptions::default();
+            if core.built_in_components.is_empty() {
+                core.built_in_components = default_options.core.built_in_components.clone();
+            }
             if payload
                 .get("options")
                 .and_then(|options| options.get("mode"))
@@ -170,12 +174,12 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
                 transform_asset_urls: bool_option(
                     payload.get("options").unwrap_or(&Value::Null),
                     "transformAssetUrls",
-                    DomCompilerOptions::default().transform_asset_urls,
+                    default_options.transform_asset_urls,
                 ),
                 decode_entities: bool_option(
                     payload.get("options").unwrap_or(&Value::Null),
                     "decodeEntities",
-                    DomCompilerOptions::default().decode_entities,
+                    default_options.decode_entities,
                 ),
                 is_custom_element: string_array_option(
                     payload.get("options").unwrap_or(&Value::Null),
@@ -188,17 +192,22 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
         }
         "vue3.dom.parse" => {
             let source = template_source(&payload);
+            let mut core = vue3_options(payload.get("options"));
+            let default_options = DomCompilerOptions::default();
+            if core.built_in_components.is_empty() {
+                core.built_in_components = default_options.core.built_in_components.clone();
+            }
             let options = DomCompilerOptions {
-                core: vue3_options(payload.get("options")),
+                core,
                 transform_asset_urls: bool_option(
                     payload.get("options").unwrap_or(&Value::Null),
                     "transformAssetUrls",
-                    DomCompilerOptions::default().transform_asset_urls,
+                    default_options.transform_asset_urls,
                 ),
                 decode_entities: bool_option(
                     payload.get("options").unwrap_or(&Value::Null),
                     "decodeEntities",
-                    DomCompilerOptions::default().decode_entities,
+                    default_options.decode_entities,
                 ),
                 is_custom_element: string_array_option(
                     payload.get("options").unwrap_or(&Value::Null),
@@ -2593,5 +2602,34 @@ mod tests {
         assert_eq!(directive["modifiers"][0]["content"], json!("prop"));
         assert_eq!(directive["modifiers"][0]["isStatic"], json!(false));
         assert_eq!(directive["modifiers"][0]["loc"]["source"], json!(""));
+    }
+
+    #[test]
+    fn vue3_dom_bridge_uses_dom_builtin_defaults() {
+        let parsed = dispatch(
+            "vue3.dom.parse",
+            json!({ "source": "<transition/><transition-group/>", "options": {} }),
+        )
+        .expect("dom parse");
+
+        assert_eq!(parsed["children"][0]["tagType"], json!(1));
+        assert_eq!(parsed["children"][1]["tagType"], json!(1));
+
+        let compiled = dispatch(
+            "vue3.dom.compile",
+            json!({ "source": "<transition><div/><div/></transition>", "options": {} }),
+        )
+        .expect("dom compile");
+
+        assert!(compiled["code"]
+            .as_str()
+            .unwrap_or("")
+            .contains("_Transition"));
+        assert!(compiled["diagnostics"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .iter()
+            .any(|diagnostic| diagnostic.as_str()
+                == Some("<Transition> expects exactly one child element or component.")));
     }
 }

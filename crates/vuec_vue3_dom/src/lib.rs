@@ -2,7 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use vuec_ast::{NodeId, TemplateAttribute, Vue3Ast, Vue3AstKind, Vue3Prop};
+use vuec_ast::{
+    NodeId, TemplateAttribute, Vue3Ast, Vue3AstKind, Vue3Element, Vue3ElementType, Vue3Prop,
+};
 use vuec_diagnostics::{Diagnostic, Severity};
 use vuec_pass::TransformContext;
 use vuec_vue3_core::{CodegenResult, TemplateSource, Vue3CompilerOptions, Vue3Dialect};
@@ -51,6 +53,7 @@ pub fn compile(source: TemplateSource, options: DomCompilerOptions) -> CodegenRe
     let mut ast = parse(source.clone(), &options);
     let mut ctx = TransformContext::default();
     remove_side_effect_nodes(&mut ast, &mut ctx);
+    report_transition_invalid_children(&ast, &mut ctx);
     for node in &mut ast.nodes {
         if let Vue3AstKind::Element(element) = &mut node.kind {
             let tag = element.tag.clone();
@@ -292,6 +295,163 @@ fn only_asset_summaries(summaries: &[String]) -> bool {
         .all(|summary| summary.starts_with("asset:"))
 }
 
+fn report_transition_invalid_children(ast: &Vue3Ast, ctx: &mut TransformContext) {
+    report_transition_invalid_children_for_node(ast, ast.root, ctx);
+}
+
+fn report_transition_invalid_children_for_node(
+    ast: &Vue3Ast,
+    node_id: NodeId,
+    ctx: &mut TransformContext,
+) {
+    let Some(node) = ast.node(node_id) else {
+        return;
+    };
+    if let Vue3AstKind::Element(element) = &node.kind {
+        if element.tag_type == Vue3ElementType::Component
+            && matches!(element.tag.as_str(), "Transition" | "transition")
+            && transition_children_are_invalid(ast, &node.children)
+        {
+            ctx.report(Diagnostic {
+                code: "63".into(),
+                severity: Severity::Error,
+                message: "<Transition> expects exactly one child element or component.".into(),
+                span: node.span.source(),
+                notes: Vec::new(),
+            });
+        }
+    }
+    for child_id in node.children.clone() {
+        report_transition_invalid_children_for_node(ast, child_id, ctx);
+    }
+}
+
+fn transition_children_are_invalid(ast: &Vue3Ast, children: &[NodeId]) -> bool {
+    if children.is_empty() {
+        return false;
+    }
+    transition_child_sequence_is_invalid(ast, &transition_visible_child_ids(ast, children), false)
+}
+
+fn transition_child_sequence_is_invalid(
+    ast: &Vue3Ast,
+    visible_children: &[NodeId],
+    empty_is_invalid: bool,
+) -> bool {
+    if visible_children.is_empty() {
+        return empty_is_invalid;
+    }
+    let mut logical_children = 0usize;
+    let mut invalid = false;
+    let mut index = 0usize;
+    while index < visible_children.len() {
+        logical_children += 1;
+        let child_id = visible_children[index];
+        if transition_child_starts_if_chain(ast, child_id) {
+            let (branches, next_index) = collect_transition_if_chain(ast, visible_children, index);
+            invalid |= branches
+                .iter()
+                .any(|branch_id| transition_if_branch_is_invalid(ast, *branch_id));
+            index = next_index;
+        } else {
+            invalid |= transition_single_child_is_invalid(ast, child_id);
+            index += 1;
+        }
+    }
+    logical_children != 1 || invalid
+}
+
+fn transition_single_child_is_invalid(ast: &Vue3Ast, child_id: NodeId) -> bool {
+    let Some(child) = ast.node(child_id) else {
+        return false;
+    };
+    let Vue3AstKind::Element(element) = &child.kind else {
+        return false;
+    };
+    element_has_directive(element, "for")
+}
+
+fn transition_if_branch_is_invalid(ast: &Vue3Ast, branch_id: NodeId) -> bool {
+    let Some(branch) = ast.node(branch_id) else {
+        return false;
+    };
+    let Vue3AstKind::Element(element) = &branch.kind else {
+        return false;
+    };
+    if element_has_directive(element, "for") {
+        return true;
+    }
+    if element.tag == "template" {
+        return transition_child_sequence_is_invalid(
+            ast,
+            &transition_visible_child_ids(ast, &branch.children),
+            true,
+        );
+    }
+    false
+}
+
+fn collect_transition_if_chain(
+    ast: &Vue3Ast,
+    visible_children: &[NodeId],
+    start: usize,
+) -> (Vec<NodeId>, usize) {
+    let mut branches = vec![visible_children[start]];
+    let mut index = start + 1;
+    while index < visible_children.len() {
+        let Some(node) = ast.node(visible_children[index]) else {
+            index += 1;
+            continue;
+        };
+        let Vue3AstKind::Element(element) = &node.kind else {
+            break;
+        };
+        if element_has_directive(element, "else-if") || element_has_directive(element, "else") {
+            branches.push(visible_children[index]);
+            index += 1;
+        } else {
+            break;
+        }
+    }
+    (branches, index)
+}
+
+fn transition_child_starts_if_chain(ast: &Vue3Ast, child_id: NodeId) -> bool {
+    ast.node(child_id).is_some_and(|child| {
+        matches!(
+            &child.kind,
+            Vue3AstKind::Element(element) if element_has_directive(element, "if")
+        )
+    })
+}
+
+fn transition_visible_child_ids(ast: &Vue3Ast, children: &[NodeId]) -> Vec<NodeId> {
+    children
+        .iter()
+        .copied()
+        .filter(|child_id| {
+            ast.node(*child_id).is_some_and(|child| match &child.kind {
+                Vue3AstKind::Comment(_) => false,
+                Vue3AstKind::Text(text) => !text.value.chars().all(is_html_whitespace),
+                _ => true,
+            })
+        })
+        .collect()
+}
+
+fn element_has_directive(element: &Vue3Element, name: &str) -> bool {
+    element.props.iter().any(|prop| {
+        matches!(
+            prop,
+            Vue3Prop::Directive(directive) if directive.name == name
+        )
+    })
+}
+
+fn is_html_whitespace(ch: char) -> bool {
+    matches!(ch, '\t' | '\n' | '\u{000C}' | '\r' | ' ')
+}
+
 fn remove_side_effect_nodes(ast: &mut Vue3Ast, ctx: &mut TransformContext) {
     remove_side_effect_children(ast, ast.root, ctx);
 }
@@ -400,6 +560,58 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(tags, vec![("transition", true), ("transition-group", true)]);
+    }
+
+    #[test]
+    fn compile_reports_transition_invalid_children_diagnostics() {
+        let cases = [
+            ("<transition><div>hey</div><div>hey</div></transition>", true),
+            ("<transition><div v-for=\"i in items\">hey</div></transition>", true),
+            (
+                "<transition><div v-if=\"a\" v-for=\"i in items\">hey</div><div v-else v-for=\"i in items\">hey</div></transition>",
+                true,
+            ),
+            ("<transition><template v-if=\"ok\"></template></transition>", true),
+            (
+                "<transition><template v-if=\"a\"></template><template v-else></template></transition>",
+                true,
+            ),
+            (
+                "<transition><div v-if=\"one\">hey</div><div v-if=\"other\">hey</div></transition>",
+                true,
+            ),
+            ("<transition><div>hey</div></transition>", false),
+            ("<transition><div v-if=\"a\">hey</div></transition>", false),
+            (
+                "<transition><div v-if=\"a\">hey</div><div v-else-if=\"b\">hey</div><div v-else>hey</div></transition>",
+                false,
+            ),
+            (
+                "<transition><div v-if=\"a\">hey</div><div v-else>hey</div></transition>",
+                false,
+            ),
+            ("<transition>\u{00a0}<div>foo</div></transition>", true),
+            (
+                "<transition><!-- foo --> <!-- bar --><div>foo bar</div></transition>",
+                false,
+            ),
+        ];
+        for (index, (source, should_warn)) in cases.iter().enumerate() {
+            let result = compile(
+                TemplateSource {
+                    filename: format!("case-{index}.vue"),
+                    source: (*source).into(),
+                    file_id: FileId(index as u32),
+                    base_offset: 0,
+                },
+                DomCompilerOptions::default(),
+            );
+
+            let has_warning = result.diagnostics.iter().any(|diagnostic| {
+                diagnostic == "<Transition> expects exactly one child element or component."
+            });
+            assert_eq!(has_warning, *should_warn, "case {index}: {source}");
+        }
     }
 
     #[test]
