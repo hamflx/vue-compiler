@@ -562,6 +562,7 @@ impl Vue3Dialect {
                                     if let Vue3Prop::Directive(dir) = prop {
                                         collect_vue3_runtime_directive_asset(
                                             dir,
+                                            options,
                                             &mut directives,
                                             &mut helpers,
                                         );
@@ -887,6 +888,12 @@ fn inline_preamble_helpers(helpers: &mut Vec<RuntimeHelper>, expr: &str) {
         } else {
             if !expr.contains("_toDisplayString") {
                 preferred.clear();
+            }
+            if helpers.contains(&RuntimeHelper::Vue3Unref)
+                && !helpers.contains(&RuntimeHelper::Vue3IsRef)
+                && expr.contains("_withDirectives")
+            {
+                preferred.push(RuntimeHelper::Vue3Unref);
             }
             preferred.push(RuntimeHelper::Vue3CreateElementVNode);
             preferred.push(RuntimeHelper::Vue3IsRef);
@@ -9944,11 +9951,32 @@ fn process_expression_rewrite_source(
         if let Some(prefix) = &identifier.prefix {
             output.push_str(prefix);
         }
-        output.push_str(&identifier.content);
+        let content = parenthesize_rewritten_identifier_for_new_expression(
+            raw,
+            identifier.start,
+            identifier.end,
+            &identifier.content,
+        );
+        output.push_str(&content);
         last_end = identifier.end;
     }
     output.push_str(raw.get(last_end..).unwrap_or_default());
     output
+}
+
+fn parenthesize_rewritten_identifier_for_new_expression(
+    raw: &str,
+    start: usize,
+    end: usize,
+    content: &str,
+) -> String {
+    if !content.starts_with("_unref(") || !process_expression_is_in_new_expression(raw, start) {
+        return content.to_string();
+    }
+    match next_non_ws(raw, end) {
+        Some('.') | Some('(') => format!("({content})"),
+        _ => content.to_string(),
+    }
 }
 
 fn process_expression_compound_children(
@@ -10381,6 +10409,38 @@ fn process_expression_is_arrow_local(
     bindings.iter().any(|binding| {
         binding.name == ident && binding.body_start <= start && end <= binding.body_end
     })
+}
+
+fn process_expression_is_in_new_expression(raw: &str, start: usize) -> bool {
+    let head = raw.get(..start).unwrap_or("").trim_end();
+    if head.ends_with("new") {
+        return head
+            .strip_suffix("new")
+            .and_then(|before| before.chars().next_back())
+            .is_none_or(|ch| !is_identifier_continue(ch));
+    }
+    let mut depth = 0usize;
+    for (index, ch) in head.char_indices().rev() {
+        match ch {
+            ')' | ']' => depth += 1,
+            '(' | '[' => {
+                depth = depth.saturating_sub(1);
+            }
+            '.' if depth == 0 => {
+                return process_expression_is_in_new_expression(raw, index);
+            }
+            ch if ch.is_whitespace() && depth == 0 => {
+                let prefix = head.get(..index).unwrap_or("").trim_end();
+                return prefix.ends_with("new")
+                    && prefix
+                        .strip_suffix("new")
+                        .and_then(|before| before.chars().next_back())
+                        .is_none_or(|before| !is_identifier_continue(before));
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 fn process_expression_object_shorthand(raw: &str, start: usize, end: usize) -> bool {
@@ -11266,6 +11326,36 @@ fn camelize(value: &str) -> String {
     output
 }
 
+fn setup_reference_name_for_tag(tag: &str, options: &Vue3CompilerOptions) -> Option<String> {
+    setup_reference_name(tag, options)
+}
+
+fn setup_reference_name(name: &str, options: &Vue3CompilerOptions) -> Option<String> {
+    let camel_name = camelize(name);
+    let pascal_name = capitalize(&camel_name);
+    for candidate in [name.to_string(), camel_name, pascal_name] {
+        if options
+            .binding_metadata
+            .get(&candidate)
+            .is_some_and(|kind| {
+                matches!(
+                    kind.as_str(),
+                    "setup-const"
+                        | "setup-reactive-const"
+                        | "literal-const"
+                        | "setup-let"
+                        | "setup-ref"
+                        | "setup-maybe-ref"
+                        | "props"
+                )
+            })
+        {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 fn to_handler_key(value: &str) -> String {
     if value.is_empty() {
         String::new()
@@ -11433,6 +11523,9 @@ fn vue3_tag_type(tag: &str, props: &[Vue3Prop], options: &Vue3CompilerOptions) -
         return Vue3ElementType::Component;
     }
     if vue3_core_component_helper(tag).is_some() || matches!(tag, "component" | "Component") {
+        return Vue3ElementType::Component;
+    }
+    if setup_reference_name_for_tag(tag, options).is_some() {
         return Vue3ElementType::Component;
     }
     if props.iter().any(|prop| {
@@ -15705,6 +15798,7 @@ fn sort_helpers_by_order(helpers: &mut Vec<RuntimeHelper>, order: &[RuntimeHelpe
 }
 
 fn reorder_helpers_by_preference(helpers: &mut Vec<RuntimeHelper>, preferred: &[RuntimeHelper]) {
+    helpers.dedup();
     let mut reordered = Vec::with_capacity(helpers.len());
     for helper in preferred {
         if helpers.contains(helper) {
@@ -16528,7 +16622,7 @@ fn render_root_expr(
                 ast,
                 children,
                 options,
-                NodeRenderMode::Child,
+                NodeRenderMode::RootChild,
                 scope,
                 memo_index,
             );
@@ -16575,6 +16669,7 @@ enum NodeRenderMode {
     Root,
     OnceRoot,
     OnceBlockRoot,
+    RootChild,
     Child,
     Cached,
 }
@@ -16944,12 +17039,38 @@ fn render_component_tag_expr(
     if let Some(helper) = vue3_core_component_runtime_helper(&element.tag) {
         return helper_reference(helper);
     }
+    if let Some(expression) = render_direct_setup_or_props_component_tag(&element.tag, options) {
+        return expression;
+    }
     if let Some(expression) =
         render_namespaced_setup_or_props_component_tag(&element.tag, options, scope)
     {
         return expression;
     }
     component_asset_id(&element.tag)
+}
+
+fn render_direct_setup_or_props_component_tag(
+    tag: &str,
+    options: &Vue3CompilerOptions,
+) -> Option<String> {
+    let name = setup_reference_name_for_tag(tag, options)?;
+    match options.binding_metadata.get(&name).map(String::as_str) {
+        Some("setup-const" | "setup-reactive-const" | "literal-const") if options.inline => {
+            Some(name.to_string())
+        }
+        Some("setup-let" | "setup-ref" | "setup-maybe-ref") if options.inline => {
+            Some(format!("_unref({name})"))
+        }
+        Some("props") if options.inline => {
+            Some(format!("_unref(__props[{}])", quote_string(&name)))
+        }
+        Some(kind) if kind.starts_with("setup") || kind == "literal-const" => {
+            Some(format!("$setup[{}]", quote_string(&name)))
+        }
+        Some("props") => Some(format!("_unref($props[{}])", quote_string(&name))),
+        _ => None,
+    }
 }
 
 fn render_namespaced_setup_or_props_component_tag(
@@ -17038,6 +17159,8 @@ fn render_runtime_directive_arg(
 ) -> String {
     let runtime = if dir.name == "show" {
         "_vShow".to_string()
+    } else if let Some(runtime) = render_setup_runtime_directive(&dir.name, options) {
+        runtime
     } else {
         directive_asset_id(&dir.name)
     };
@@ -17070,6 +17193,27 @@ fn render_runtime_directive_arg(
         args.push(render_object(&modifiers));
     }
     format!("[{}]", args.join(", "))
+}
+
+fn render_setup_runtime_directive(name: &str, options: &Vue3CompilerOptions) -> Option<String> {
+    let binding = format!("v-{name}");
+    let name = setup_reference_name(&binding, options)?;
+    match options.binding_metadata.get(&name).map(String::as_str) {
+        Some("setup-const" | "setup-reactive-const" | "literal-const") if options.inline => {
+            Some(name.to_string())
+        }
+        Some("setup-let" | "setup-ref" | "setup-maybe-ref") if options.inline => {
+            Some(format!("_unref({name})"))
+        }
+        Some("props") if options.inline => {
+            Some(format!("_unref(__props[{}])", quote_string(&name)))
+        }
+        Some(kind) if kind.starts_with("setup") || kind == "literal-const" => {
+            Some(format!("$setup[{}]", quote_string(&name)))
+        }
+        Some("props") => Some(format!("_unref($props[{}])", quote_string(&name))),
+        _ => None,
+    }
 }
 
 fn render_model_runtime_directive_arg(
@@ -17524,7 +17668,8 @@ fn collect_vue3_component_asset(
 ) {
     if let Some(helper) = vue3_core_component_runtime_helper(&element.tag) {
         helpers.insert(helper);
-    } else if !matches!(element.tag.as_str(), "component" | "Component")
+    } else if !vue3_tag_is_direct_setup_or_props_reference(&element.tag, options)
+        && !matches!(element.tag.as_str(), "component" | "Component")
         && !vue3_tag_is_namespaced_setup_or_props_reference(&element.tag, options)
     {
         components.insert(element.tag.clone());
@@ -17534,6 +17679,10 @@ fn collect_vue3_component_asset(
     {
         helpers.insert(RuntimeHelper::Vue3ResolveDynamicComponent);
     }
+}
+
+fn vue3_tag_is_direct_setup_or_props_reference(tag: &str, options: &Vue3CompilerOptions) -> bool {
+    setup_reference_name_for_tag(tag, options).is_some()
 }
 
 fn vue3_tag_is_namespaced_setup_or_props_reference(
@@ -17562,6 +17711,7 @@ fn vue3_tag_is_namespaced_setup_or_props_reference(
 
 fn collect_vue3_runtime_directive_asset(
     directive: &Vue3Directive,
+    options: &Vue3CompilerOptions,
     directives: &mut BTreeSet<String>,
     helpers: &mut BTreeSet<RuntimeHelper>,
 ) {
@@ -17572,6 +17722,12 @@ fn collect_vue3_runtime_directive_asset(
         helpers.insert(RuntimeHelper::Vue3VShow);
     } else if directive.name == "model" {
         helpers.insert(RuntimeHelper::Vue3VModelDynamic);
+    } else if setup_reference_name(&format!("v-{}", directive.name), options).is_some() {
+        if render_setup_runtime_directive(&directive.name, options)
+            .is_some_and(|runtime| runtime.contains("_unref("))
+        {
+            helpers.insert(RuntimeHelper::Vue3Unref);
+        }
     } else {
         directives.insert(directive.name.clone());
         helpers.insert(RuntimeHelper::Vue3ResolveDirective);
@@ -17875,6 +18031,16 @@ fn render_child_sequence(
             index += 1;
             continue;
         }
+        if options.hoist_static
+            && mode == NodeRenderMode::RootChild
+            && is_static_element_tree_for_cache(ast, child)
+        {
+            rendered.push(render_static_element_cache(
+                ast, child.id, options, scope, memo_index,
+            ));
+            index += 1;
+            continue;
+        }
         if is_text_like(child) {
             let start = index;
             index += 1;
@@ -17936,6 +18102,43 @@ fn render_child_sequence(
         index += 1;
     }
     rendered
+}
+
+fn is_static_element_tree_for_cache(ast: &Vue3Ast, node: &vuec_ast::Node<Vue3NodeKind>) -> bool {
+    let Vue3AstKind::Element(element) = &node.kind else {
+        return false;
+    };
+    if element.tag == "slot"
+        || element.tag_type != Vue3ElementType::Element
+        || !element.props.iter().all(vue3_prop_is_stringifiable_static)
+    {
+        return false;
+    }
+    node.children.iter().all(|child_id| {
+        ast.node(*child_id).is_some_and(|child| match &child.kind {
+            Vue3AstKind::Text(_) | Vue3AstKind::Comment(_) => true,
+            Vue3AstKind::Element(_) => is_static_element_tree_for_cache(ast, child),
+            _ => false,
+        })
+    })
+}
+
+fn render_static_element_cache(
+    ast: &Vue3Ast,
+    node_id: vuec_ast::NodeId,
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+    memo_index: &mut MemoIndex,
+) -> String {
+    let rendered = render_node_expr_scoped(
+        ast,
+        node_id,
+        options,
+        NodeRenderMode::Cached,
+        scope,
+        memo_index,
+    );
+    render_cached_single_child(rendered, memo_index.alloc())
 }
 
 fn is_text_like(node: &vuec_ast::Node<Vue3NodeKind>) -> bool {
@@ -20217,6 +20420,18 @@ fn event_handler_can_skip_patch(
     options: &Vue3CompilerOptions,
     scope: &RenderScope,
 ) -> bool {
+    if !dir.is_dynamic_arg
+        && dir.arg.is_some()
+        && event_handler_is_const_binding(
+            &dir.exp
+                .as_ref()
+                .map(Vue3Expression::source_string)
+                .unwrap_or_default(),
+            options,
+        )
+    {
+        return true;
+    }
     if !options.cache_handlers || !uses_prefixed_identifiers(options) {
         return false;
     }
@@ -20926,7 +21141,10 @@ fn rewrite_js_like_expression_into(
             {
                 output.push_str(ident);
             } else {
-                output.push_str(&rewrite_identifier(ident, options));
+                let content = rewrite_identifier(ident, options);
+                output.push_str(&parenthesize_rewritten_identifier_for_new_expression(
+                    expression, start, end, &content,
+                ));
             }
             previous = TokenKind::Identifier;
             continue;
@@ -27783,6 +28001,122 @@ mod tests {
             .contains("_createBlock(_unref(__props[\"Foo\"]).Bar)"));
         assert!(result.code.contains("unref"));
         assert!(!result.code.contains("_component_Foo46Bar"));
+    }
+
+    #[test]
+    fn base_compile_uses_inline_setup_imports_for_component_and_directive_assets() {
+        let mut options = Vue3CompilerOptions {
+            prefix_identifiers: true,
+            mode: "module".into(),
+            inline: true,
+            ..Vue3CompilerOptions::default()
+        };
+        options
+            .binding_metadata
+            .insert("ChildComp".into(), "setup-const".into());
+        options
+            .binding_metadata
+            .insert("SomeOtherComp".into(), "setup-const".into());
+        options
+            .binding_metadata
+            .insert("vMyDir".into(), "setup-maybe-ref".into());
+        let result = base_compile(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: r#"<div><div v-my-dir/><ChildComp/><some-other-comp/></div>"#.into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            options,
+        );
+
+        assert!(result.code.contains("[_unref(vMyDir)]"));
+        assert!(result.code.contains("_createVNode(ChildComp)"));
+        assert!(result.code.contains("_createVNode(SomeOtherComp)"));
+        assert!(!result.code.contains("_resolveDirective(\"my-dir\")"));
+        assert!(!result.code.contains("_resolveComponent(\"ChildComp\")"));
+        assert!(!result
+            .code
+            .contains("_resolveComponent(\"some-other-comp\")"));
+    }
+
+    #[test]
+    fn base_compile_caches_root_static_siblings_in_inline_hoist_mode() {
+        let mut options = Vue3CompilerOptions {
+            prefix_identifiers: true,
+            mode: "module".into(),
+            inline: true,
+            hoist_static: true,
+            ..Vue3CompilerOptions::default()
+        };
+        options
+            .binding_metadata
+            .insert("count".into(), "setup-ref".into());
+        let result = base_compile(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: "<div>{{ count }}</div><div>static</div>".into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            options,
+        );
+
+        assert!(result.code.contains(
+            "_cache[0] || (_cache[0] = _createElementVNode(\"div\", null, \"static\", -1 /* CACHED */))"
+        ));
+    }
+
+    #[test]
+    fn base_compile_wraps_unref_constructor_targets_in_new_expressions() {
+        let mut options = Vue3CompilerOptions {
+            prefix_identifiers: true,
+            mode: "module".into(),
+            inline: true,
+            ..Vue3CompilerOptions::default()
+        };
+        options
+            .binding_metadata
+            .insert("Foo".into(), "setup-maybe-ref".into());
+        let result = base_compile(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: "<div>{{ new Foo() }}</div><div>{{ new Foo.Bar() }}</div>".into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            options,
+        );
+
+        assert!(result.code.contains("new (_unref(Foo))()"));
+        assert!(result.code.contains("new (_unref(Foo)).Bar()"));
+    }
+
+    #[test]
+    fn base_compile_skips_patch_props_for_inline_setup_const_handlers() {
+        let mut options = Vue3CompilerOptions {
+            prefix_identifiers: true,
+            mode: "module".into(),
+            inline: true,
+            cache_handlers: true,
+            ..Vue3CompilerOptions::default()
+        };
+        options
+            .binding_metadata
+            .insert("fn".into(), "setup-const".into());
+        let result = base_compile(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: r#"<div @click="fn"/>"#.into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            options,
+        );
+
+        assert!(result.code.contains("{ onClick: fn }"));
+        assert!(!result.code.contains("PROPS"));
+        assert!(!result.code.contains("[\"onClick\"]"));
     }
 
     #[test]
