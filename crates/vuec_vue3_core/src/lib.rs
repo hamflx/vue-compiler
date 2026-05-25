@@ -16495,6 +16495,7 @@ fn static_html_for_element(
         || (element.ns == vuec_ast::HtmlNamespace::Html
             && static_html_is_void_tag(&element.tag)
             && !node.children.is_empty())
+        || static_html_has_invalid_inner_html_placement(ast, node, element)
         || directive_by_name(element, "once").is_some()
     {
         return None;
@@ -16717,6 +16718,47 @@ fn static_html_non_stringifiable_tag(tag: &str) -> bool {
         tag,
         "caption" | "thead" | "tr" | "th" | "tbody" | "td" | "tfoot" | "colgroup" | "col"
     )
+}
+
+fn static_html_has_invalid_inner_html_placement(
+    ast: &Vue3Ast,
+    node: &vuec_ast::Node<Vue3NodeKind>,
+    element: &Vue3Element,
+) -> bool {
+    element.ns == vuec_ast::HtmlNamespace::Html
+        && element.tag.eq_ignore_ascii_case("p")
+        && node
+            .children
+            .iter()
+            .any(|child_id| static_html_contains_invalid_p_descendant(ast, *child_id))
+}
+
+fn static_html_contains_invalid_p_descendant(ast: &Vue3Ast, node_id: vuec_ast::NodeId) -> bool {
+    let Some(node) = ast.node(node_id) else {
+        return false;
+    };
+    let Vue3AstKind::Element(element) = &node.kind else {
+        return false;
+    };
+    if element.ns != vuec_ast::HtmlNamespace::Html {
+        return false;
+    }
+    static_html_is_invalid_p_child_tag(&element.tag)
+        || node
+            .children
+            .iter()
+            .any(|child_id| static_html_contains_invalid_p_descendant(ast, *child_id))
+}
+
+fn static_html_is_invalid_p_child_tag(tag: &str) -> bool {
+    static_html_tag_list_contains(STATIC_HTML_INVALID_P_CHILD_TAGS, tag)
+}
+
+const STATIC_HTML_INVALID_P_CHILD_TAGS: &str = "address,article,aside,blockquote,center,details,dialog,dir,div,dl,fieldset,figure,footer,form,h1,h2,h3,h4,h5,h6,header,hgroup,hr,li,main,nav,menu,ol,p,pre,section,table,ul";
+
+fn static_html_tag_list_contains(tags: &str, tag: &str) -> bool {
+    tags.split(',')
+        .any(|candidate| candidate.eq_ignore_ascii_case(tag))
 }
 
 fn static_html_is_void_tag(tag: &str) -> bool {
@@ -24104,6 +24146,59 @@ mod tests {
         assert!(result.code.contains("_createStaticVNode(\"<span class=\\\"bar\\\"></span><span class=\\\"bar\\\"></span><span class=\\\"bar\\\"></span><span class=\\\"bar\\\"></span><span class=\\\"bar\\\"></span>\", 5)"));
         assert!(!result.code.contains("class: \"foo\""));
         assert!(!result.code.contains("class: \"bar\""));
+    }
+
+    #[test]
+    fn base_compile_bails_stringify_static_invalid_p_child_placement() {
+        let result = base_compile(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: format!(
+                    "<div><p>{}</p></div>",
+                    r#"<span class="inline"></span>"#.repeat(5)
+                        + "<span><div class=\"block\"></div></span>"
+                ),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                hoist_static: true,
+                stringify_static: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(!result.code.contains("_createStaticVNode"));
+        assert!(result.code.contains("_cache[0] || (_cache[0] = ["));
+        assert!(result.code.contains("_createElementVNode(\"p\""));
+        assert!(result
+            .code
+            .contains("_createElementVNode(\"div\", { class: \"block\" })"));
+    }
+
+    #[test]
+    fn base_compile_stringifies_static_p_with_phrasing_children() {
+        let result = base_compile(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: format!(
+                    "<div><p>{}</p></div>",
+                    r#"<span class="inline"></span>"#.repeat(5)
+                ),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                hoist_static: true,
+                stringify_static: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(result.code.contains("_createStaticVNode"));
+        assert!(result.code.contains("_createStaticVNode(\"<p><span class=\\\"inline\\\"></span><span class=\\\"inline\\\"></span><span class=\\\"inline\\\"></span><span class=\\\"inline\\\"></span><span class=\\\"inline\\\"></span></p>\", 1)"));
     }
 
     #[test]

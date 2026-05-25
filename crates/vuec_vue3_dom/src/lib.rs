@@ -697,6 +697,34 @@ mod tests {
     }
 
     #[test]
+    fn compile_bails_stringify_static_invalid_p_child_placement() {
+        let mut options = DomCompilerOptions::default();
+        options.core.prefix_identifiers = true;
+        options.core.hoist_static = true;
+        options.core.stringify_static = true;
+        let result = compile(
+            TemplateSource {
+                filename: "x.vue".into(),
+                source: format!(
+                    "<div><p>{}</p></div>",
+                    r#"<span class="inline"></span>"#.repeat(5)
+                        + "<span><div class=\"block\"></div></span>"
+                ),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            options,
+        );
+
+        assert!(!result.code.contains("_createStaticVNode"));
+        assert!(result.code.contains("_cache[0] || (_cache[0] = ["));
+        assert!(result.code.contains("_createElementVNode(\"p\""));
+        assert!(result
+            .code
+            .contains("_createElementVNode(\"div\", { class: \"block\" })"));
+    }
+
+    #[test]
     fn compile_stringifies_static_children_when_transform_hoist_requested() {
         let mut options = DomCompilerOptions::default();
         options.core.prefix_identifiers = true;
