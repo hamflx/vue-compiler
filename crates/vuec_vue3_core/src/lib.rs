@@ -631,13 +631,13 @@ impl Vue3Dialect {
             helpers.insert(RuntimeHelper::Vue3OpenBlock);
             helpers.insert(RuntimeHelper::Vue3CreateElementBlock);
         }
-        if has_nested_element {
+        if has_nested_element || root_needs_fragment_block(ast) {
             helpers.insert(RuntimeHelper::Vue3CreateElementVNode);
         }
         if has_text_call {
             helpers.insert(RuntimeHelper::Vue3CreateTextVNode);
         }
-        if has_fragment {
+        if has_fragment || root_needs_fragment_block(ast) {
             helpers.insert(RuntimeHelper::Vue3Fragment);
         }
         if has_render_list {
@@ -699,18 +699,7 @@ impl Vue3Dialect {
             let imports = vue3_codegen_imports(ast);
             let mut memo_index = MemoIndex::default();
             let scope = RenderScope::default();
-            let expr = if root.children.len() == 1 {
-                render_node_expr_scoped(
-                    ast,
-                    root.children[0],
-                    options,
-                    NodeRenderMode::Root,
-                    &scope,
-                    &mut memo_index,
-                )
-            } else {
-                render_children_array(ast, &root.children, options, true, &mut memo_index)
-            };
+            let expr = render_root_expr(ast, &root.children, options, &scope, &mut memo_index);
             let declarations = component_declarations
                 .iter()
                 .chain(directive_declarations.iter())
@@ -719,7 +708,7 @@ impl Vue3Dialect {
             let mut helpers =
                 vue3_codegen_helpers(ast, ctx, &declarations, &expr, !components.is_empty());
             if options.inline {
-                inline_preamble_helpers(&mut helpers);
+                inline_preamble_helpers(&mut helpers, &expr);
                 if !helpers.is_empty() {
                     preamble = format!(
                         "import {{ {} }} from \"vue\"\n\n",
@@ -847,12 +836,79 @@ impl Vue3Dialect {
     }
 }
 
-fn inline_preamble_helpers(helpers: &mut Vec<RuntimeHelper>) {
-    move_helper_before(
-        helpers,
-        RuntimeHelper::Vue3Unref,
-        RuntimeHelper::Vue3OpenBlock,
-    );
+fn inline_preamble_helpers(helpers: &mut Vec<RuntimeHelper>, expr: &str) {
+    if expr.contains("_vModel") {
+        let preferred = if expr.contains("_Fragment") {
+            &[
+                RuntimeHelper::Vue3VModelRadio,
+                RuntimeHelper::Vue3VModelCheckbox,
+                RuntimeHelper::Vue3VModelText,
+                RuntimeHelper::Vue3VModelSelect,
+                RuntimeHelper::Vue3VModelDynamic,
+                RuntimeHelper::Vue3CreateElementVNode,
+                RuntimeHelper::Vue3WithDirectives,
+                RuntimeHelper::Vue3Unref,
+                RuntimeHelper::Vue3IsRef,
+                RuntimeHelper::Vue3Fragment,
+                RuntimeHelper::Vue3OpenBlock,
+                RuntimeHelper::Vue3CreateElementBlock,
+            ][..]
+        } else {
+            &[
+                RuntimeHelper::Vue3Unref,
+                RuntimeHelper::Vue3IsRef,
+                RuntimeHelper::Vue3VModelRadio,
+                RuntimeHelper::Vue3VModelCheckbox,
+                RuntimeHelper::Vue3VModelText,
+                RuntimeHelper::Vue3VModelSelect,
+                RuntimeHelper::Vue3VModelDynamic,
+                RuntimeHelper::Vue3WithDirectives,
+                RuntimeHelper::Vue3OpenBlock,
+                RuntimeHelper::Vue3CreateElementBlock,
+            ][..]
+        };
+        reorder_helpers_by_preference(helpers, preferred);
+        return;
+    }
+
+    if expr.contains("_createElementVNode") {
+        let mut preferred = Vec::new();
+        if helpers.contains(&RuntimeHelper::Vue3Unref) {
+            preferred.push(RuntimeHelper::Vue3Unref);
+        }
+        if expr.contains("_toDisplayString") {
+            preferred.push(RuntimeHelper::Vue3ToDisplayString);
+            preferred.push(RuntimeHelper::Vue3CreateTextVNode);
+        }
+        if expr.contains("_withCtx") {
+            preferred.push(RuntimeHelper::Vue3WithCtx);
+            preferred.push(RuntimeHelper::Vue3CreateVNode);
+            preferred.push(RuntimeHelper::Vue3CreateElementVNode);
+        } else {
+            if !expr.contains("_toDisplayString") {
+                preferred.clear();
+            }
+            preferred.push(RuntimeHelper::Vue3CreateElementVNode);
+            preferred.push(RuntimeHelper::Vue3IsRef);
+            if helpers.contains(&RuntimeHelper::Vue3Unref)
+                && !preferred.contains(&RuntimeHelper::Vue3Unref)
+            {
+                preferred.push(RuntimeHelper::Vue3Unref);
+            }
+            preferred.push(RuntimeHelper::Vue3WithDirectives);
+            preferred.push(RuntimeHelper::Vue3CreateVNode);
+        }
+        preferred.push(RuntimeHelper::Vue3Fragment);
+        preferred.push(RuntimeHelper::Vue3OpenBlock);
+        preferred.push(RuntimeHelper::Vue3CreateElementBlock);
+        reorder_helpers_by_preference(helpers, &preferred);
+    } else {
+        move_helper_before(
+            helpers,
+            RuntimeHelper::Vue3Unref,
+            RuntimeHelper::Vue3OpenBlock,
+        );
+    }
 }
 
 /// Lower a Vue 3 AST document into the shared HIR and the Vue 3 DOM MIR target.
@@ -2021,6 +2077,21 @@ fn visible_child_ids(ast: &Vue3Ast, children: &[NodeId]) -> Vec<NodeId> {
         .collect()
 }
 
+fn root_needs_fragment_block(ast: &Vue3Ast) -> bool {
+    let Some(root) = ast.root_node() else {
+        return false;
+    };
+    let visible = visible_child_ids(ast, &root.children);
+    match visible.as_slice() {
+        [] => false,
+        [single] => {
+            root.children.as_slice() != [*single]
+                || !root_single_visible_child_uses_direct_codegen(ast, *single)
+        }
+        _ => true,
+    }
+}
+
 fn component_children_are_stable_slots(ast: &Vue3Ast, children: &[NodeId]) -> bool {
     children.iter().all(|child_id| {
         let Some(child) = ast.node(*child_id) else {
@@ -2481,7 +2552,11 @@ fn vue3_dom_mir_patch_flag(
     if element.tag != "template" && child_sequence_is_direct_dynamic_text(ast, children, options) {
         bits |= 1;
     }
-    if (bits == 0 || bits == 32) && (has_vnode_hook(element) || has_runtime_directive(element)) {
+    if (bits == 0 || bits == 32)
+        && (has_vnode_hook(element)
+            || has_runtime_directive(element)
+            || has_native_v_model(element))
+    {
         bits |= 512;
     }
     if element.tag_type == Vue3ElementType::Component && component_has_dynamic_slots(ast, children)
@@ -2872,7 +2947,6 @@ fn vue3_dom_mir_dynamic_props(element: &Vue3Element) -> Vec<String> {
         })
         .collect::<Vec<_>>();
     props.extend(vue3_dom_content_dynamic_props(element));
-    props.extend(vue3_dom_model_dynamic_props(element));
     props
 }
 
@@ -2910,7 +2984,6 @@ fn vue3_dom_mir_props_patch_names(element: &Vue3Element) -> Vec<String> {
         })
         .collect::<Vec<_>>();
     props.extend(vue3_dom_content_dynamic_props(element));
-    props.extend(vue3_dom_model_dynamic_props(element));
     props
 }
 
@@ -2926,17 +2999,16 @@ fn vue3_dom_content_dynamic_props(element: &Vue3Element) -> Vec<String> {
         .collect()
 }
 
-fn vue3_dom_model_dynamic_props(element: &Vue3Element) -> Vec<String> {
-    element
-        .props
-        .iter()
-        .filter_map(|prop| match prop {
-            Vue3Prop::Directive(dir) if dir.name == "model" && dir.arg.is_none() => {
-                vue3_dom_model_kind(element).map(|_| "onUpdate:modelValue".into())
-            }
-            _ => None,
-        })
-        .collect()
+fn has_native_v_model(element: &Vue3Element) -> bool {
+    element.props.iter().any(|prop| {
+        matches!(
+            prop,
+            Vue3Prop::Directive(dir)
+                if dir.name == "model"
+                    && dir.arg.is_none()
+                    && vue3_dom_model_kind(element).is_some()
+        )
+    })
 }
 
 fn vue3_bind_directive_static_dom_key(
@@ -15824,27 +15896,73 @@ fn find_code_offset(code: &str, needle: &str, from: usize) -> Option<usize> {
     code.get(from..)?.find(needle).map(|offset| from + offset)
 }
 
-fn render_children_array(
+fn render_root_expr(
     ast: &Vue3Ast,
     children: &[vuec_ast::NodeId],
     options: &Vue3CompilerOptions,
-    is_root: bool,
+    scope: &RenderScope,
     memo_index: &mut MemoIndex,
 ) -> String {
-    let scope = RenderScope::default();
-    let rendered = render_child_sequence(
-        ast,
-        children,
-        options,
-        if is_root {
-            NodeRenderMode::Root
-        } else {
-            NodeRenderMode::Child
-        },
-        &scope,
-        memo_index,
-    );
-    render_array(&rendered)
+    let visible = visible_child_ids(ast, children);
+    match visible.as_slice() {
+        [] => "null".into(),
+        [single]
+            if children == [*single]
+                && root_single_visible_child_uses_direct_codegen(ast, *single) =>
+        {
+            render_node_expr_scoped(
+                ast,
+                *single,
+                options,
+                NodeRenderMode::Root,
+                scope,
+                memo_index,
+            )
+        }
+        _ => {
+            let rendered = render_child_sequence(
+                ast,
+                children,
+                options,
+                NodeRenderMode::Child,
+                scope,
+                memo_index,
+            );
+            format!(
+                "(_openBlock(), _createElementBlock(_Fragment, null, {}, {}))",
+                render_array(&rendered),
+                public_patch_flag_text(root_fragment_patch_flag_ast(ast, children) as i32)
+            )
+        }
+    }
+}
+
+fn root_single_visible_child_uses_direct_codegen(
+    ast: &Vue3Ast,
+    child_id: vuec_ast::NodeId,
+) -> bool {
+    ast.node(child_id).is_some_and(|node| match &node.kind {
+        Vue3AstKind::Element(element) => {
+            element.tag_type != Vue3ElementType::SlotOutlet
+                && directive_by_name(element, "if").is_none()
+                && directive_by_name(element, "for").is_none()
+        }
+        _ => false,
+    })
+}
+
+fn root_fragment_patch_flag_ast(ast: &Vue3Ast, children: &[vuec_ast::NodeId]) -> u16 {
+    let visible = visible_child_ids(ast, children).len();
+    if visible == 1
+        && children.iter().any(|child_id| {
+            ast.node(*child_id)
+                .is_some_and(|child| matches!(child.kind, Vue3AstKind::Comment(_)))
+        })
+    {
+        64 | 2048
+    } else {
+        64
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -16356,11 +16474,16 @@ fn render_model_runtime_directive_arg(
         return None;
     }
     let helper = helper_reference(vue3_dom_model_runtime_helper(vue3_dom_model_kind(element)?));
-    let expression = dir
+    let mut expression = dir
         .exp
         .as_ref()
-        .map(|exp| rewrite_expression_with_scope(&exp.source_string(), options, scope))
+        .map(|exp| {
+            rewrite_expression_with_scope_preserve_outer(&exp.source_string(), options, scope)
+        })
         .unwrap_or_else(|| "undefined".into());
+    if expression.contains('\n') {
+        expression = dedent_after_first_line(&expression, 4);
+    }
     let mut args = vec![helper, expression];
     if !dir.modifiers.is_empty() {
         args.push("void 0".into());
@@ -17744,6 +17867,20 @@ fn indent_after_first_line(value: &str, spaces: usize) -> String {
     output
 }
 
+fn dedent_after_first_line(value: &str, spaces: usize) -> String {
+    let prefix = " ".repeat(spaces);
+    let mut lines = value.lines();
+    let Some(first) = lines.next() else {
+        return String::new();
+    };
+    let mut output = first.to_string();
+    for line in lines {
+        output.push('\n');
+        output.push_str(line.strip_prefix(&prefix).unwrap_or(line));
+    }
+    output
+}
+
 fn render_condition(condition: &str, options: &Vue3CompilerOptions) -> String {
     if uses_prefixed_identifiers(options) {
         format!("({condition})")
@@ -18818,7 +18955,11 @@ fn render_patch_flag_kind(
         {
             flag |= 1;
         }
-        if flag == 0 && (has_vnode_hook(element) || has_runtime_directive(element)) {
+        if flag == 0
+            && (has_vnode_hook(element)
+                || has_runtime_directive(element)
+                || has_native_v_model(element))
+        {
             flag |= 512;
         }
         (flag != 0).then_some(flag)
@@ -18971,7 +19112,9 @@ fn render_props_for_target(
             Vue3Prop::Directive(dir)
                 if dir.name == "model" && vue3_dom_model_kind(element).is_some() =>
             {
-                object_entries.push(render_model_update_prop_exact(dir, options));
+                object_entries.push(render_model_update_prop_exact(
+                    dir, options, scope, memo_index,
+                ));
             }
             _ => {}
         }
@@ -19139,11 +19282,16 @@ fn render_binding_prop(
     }
 }
 
-fn render_model_update_prop_exact(dir: &Vue3Directive, options: &Vue3CompilerOptions) -> String {
+fn render_model_update_prop_exact(
+    dir: &Vue3Directive,
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+    memo_index: &mut MemoIndex,
+) -> String {
     format!(
         "{}: {}",
         json_key("onUpdate:modelValue"),
-        render_model_assignment_for_directive(dir, options)
+        render_model_assignment_for_directive_cached(dir, options, scope, memo_index)
     )
 }
 
@@ -19164,6 +19312,43 @@ fn render_model_assignment_for_directive(
         options,
         || rewrite_expression_with_scope(raw, options, &RenderScope::default()),
     )
+}
+
+fn render_model_assignment_for_directive_cached(
+    dir: &Vue3Directive,
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+    memo_index: &mut MemoIndex,
+) -> String {
+    let raw = dir
+        .exp
+        .as_ref()
+        .map(Vue3Expression::source_string)
+        .unwrap_or_default();
+    let raw = raw.trim();
+    let mut assignment = render_inline_model_assignment(
+        raw,
+        "$event",
+        options.binding_metadata.get(raw).map(String::as_str),
+        options,
+        || rewrite_expression_with_scope(raw, options, scope),
+    );
+    if should_cache_model_update_exact(raw, options, scope) {
+        let index = memo_index.alloc();
+        assignment = format!("_cache[{index}] || (_cache[{index}] = {assignment})");
+    }
+    assignment
+}
+
+fn should_cache_model_update_exact(
+    raw: &str,
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+) -> bool {
+    options.cache_handlers
+        && uses_prefixed_identifiers(options)
+        && !scope.in_v_once
+        && !event_handler_has_scope_ref(raw, scope)
 }
 
 fn render_static_binding_prop_key(dir: &Vue3Directive) -> String {
@@ -19289,6 +19474,9 @@ fn render_event_handler_value(
     }
     if should_cache {
         let index = memo_index.alloc();
+        if handler.contains('\n') {
+            handler = dedent_after_first_line(&handler, 2);
+        }
         handler = format!("_cache[{index}] || (_cache[{index}] = {handler})");
     }
     handler
@@ -19395,7 +19583,7 @@ fn prop_requires_dynamic_patch(
     scope: &RenderScope,
 ) -> bool {
     if dir.name == "model" && vue3_dom_model_kind(element).is_some() {
-        return true;
+        return false;
     }
     if dir.name == "on" && !event_directive_is_vnode_hook(dir) {
         return !event_handler_can_skip_patch(element, dir, options, scope);
@@ -19511,11 +19699,6 @@ fn dynamic_props_arg(
                     return None;
                 }
                 (!arg.is_empty()).then_some(render_static_binding_prop_key(dir))
-            }
-            Vue3Prop::Directive(dir)
-                if dir.name == "model" && vue3_dom_model_kind(element).is_some() =>
-            {
-                Some("onUpdate:modelValue".into())
             }
             _ => None,
         })
@@ -19835,6 +20018,21 @@ fn rewrite_expression_with_scope(
     }
 }
 
+fn rewrite_expression_with_scope_preserve_outer(
+    expression: &str,
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+) -> String {
+    if !uses_prefixed_identifiers(options) {
+        return expression.to_string();
+    }
+    if scope.locals.is_empty() {
+        rewrite_js_like_expression(expression, options)
+    } else {
+        rewrite_js_like_expression_with_locals(expression, options, &scope.locals)
+    }
+}
+
 fn rewrite_identifier_with_scope(
     ident: &str,
     options: &Vue3CompilerOptions,
@@ -19910,6 +20108,39 @@ fn rewrite_js_like_expression_into(
     while index < chars.len() {
         let byte = chars[index].0;
         let ch = chars[index].1;
+        if ch == '/' {
+            if let Some(tail) = expression.get(byte..) {
+                if tail.starts_with("//") {
+                    while index < chars.len() {
+                        let current = chars[index].1;
+                        output.push(current);
+                        index += 1;
+                        if current == '\n' || current == '\r' {
+                            break;
+                        }
+                    }
+                    previous = TokenKind::Other;
+                    continue;
+                }
+                if tail.starts_with("/*") {
+                    output.push('/');
+                    output.push('*');
+                    index += 2;
+                    while index < chars.len() {
+                        let current = chars[index].1;
+                        output.push(current);
+                        index += 1;
+                        if current == '*' && index < chars.len() && chars[index].1 == '/' {
+                            output.push('/');
+                            index += 1;
+                            break;
+                        }
+                    }
+                    previous = TokenKind::Other;
+                    continue;
+                }
+            }
+        }
         if ch == '\'' || ch == '"' || ch == '`' {
             let quote = ch;
             output.push(ch);
@@ -22597,10 +22828,10 @@ mod tests {
                 ..
             })]
         ));
-        assert_eq!(calls[0].patch_flag.bits, 8);
-        assert_eq!(calls[0].dynamic_props, vec!["onUpdate:modelValue"]);
+        assert_eq!(calls[0].patch_flag.bits, 512);
+        assert!(calls[0].dynamic_props.is_empty());
         assert_eq!(calls[3].patch_flag.bits, 8);
-        assert_eq!(calls[3].dynamic_props, vec!["type", "onUpdate:modelValue"]);
+        assert_eq!(calls[3].dynamic_props, vec!["type"]);
     }
 
     #[test]
@@ -23901,9 +24132,8 @@ mod tests {
         assert!(generated
             .code
             .contains("\"onUpdate:modelValue\": $event => ((_ctx.body) = $event)"));
-        assert!(generated
-            .code
-            .contains("8 /* PROPS */, [\"onUpdate:modelValue\"]"));
+        assert!(generated.code.contains("512 /* NEED_PATCH */"));
+        assert!(!generated.code.contains("[\"onUpdate:modelValue\"]"));
     }
 
     #[test]
@@ -26180,6 +26410,31 @@ mod tests {
         }
         assert!(!root.helpers.contains(&RuntimeHelper::Vue3ResolveDirective));
         assert!(!root.helpers.contains(&RuntimeHelper::Vue3WithDirectives));
+    }
+
+    #[test]
+    fn base_compile_wraps_multiple_root_children_in_fragment_block() {
+        let result = base_compile(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: r#"<div/><span/>"#.into(),
+                file_id: FileId(92),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(result.code.contains("Fragment as _Fragment"));
+        assert!(result
+            .code
+            .contains("return (_openBlock(), _createElementBlock(_Fragment, null, ["));
+        assert!(result.code.contains("_createElementVNode(\"div\")"));
+        assert!(result.code.contains("_createElementVNode(\"span\")"));
+        assert!(result.code.contains("64 /* STABLE_FRAGMENT */"));
     }
 
     #[test]
