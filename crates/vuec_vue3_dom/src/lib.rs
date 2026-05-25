@@ -24,13 +24,8 @@ pub struct DomCompilerOptions {
 impl Default for DomCompilerOptions {
     fn default() -> Self {
         let mut core = Vue3CompilerOptions::default();
+        apply_dom_parser_defaults(&mut core);
         core.dom_namespaces = true;
-        core.built_in_components = vec![
-            "Transition".into(),
-            "transition".into(),
-            "TransitionGroup".into(),
-            "transition-group".into(),
-        ];
         Self {
             core,
             is_custom_element: Vec::new(),
@@ -40,6 +35,277 @@ impl Default for DomCompilerOptions {
         }
     }
 }
+
+pub fn apply_dom_parser_defaults(core: &mut Vue3CompilerOptions) {
+    if core.void_tags.is_empty() {
+        core.void_tags = DOM_VOID_TAGS.iter().map(|tag| (*tag).to_string()).collect();
+    }
+    if core.native_tags.is_none() {
+        core.native_tags = Some(
+            DOM_HTML_TAGS
+                .iter()
+                .chain(DOM_SVG_TAGS.iter())
+                .chain(DOM_MATH_TAGS.iter())
+                .map(|tag| (*tag).to_string())
+                .collect(),
+        );
+    }
+    if core.pre_tags.is_empty() {
+        core.pre_tags = vec!["pre".into()];
+    }
+    if core.ignore_newline_tags.is_empty() {
+        core.ignore_newline_tags = vec!["pre".into(), "textarea".into()];
+    }
+    core.dom_namespaces = true;
+    if core.built_in_components.is_empty() {
+        core.built_in_components = vec![
+            "Transition".into(),
+            "transition".into(),
+            "TransitionGroup".into(),
+            "transition-group".into(),
+        ];
+    }
+}
+
+const DOM_VOID_TAGS: &[&str] = &[
+    "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source",
+    "track", "wbr",
+];
+
+const DOM_HTML_TAGS: &[&str] = &[
+    "html",
+    "body",
+    "base",
+    "head",
+    "link",
+    "meta",
+    "style",
+    "title",
+    "address",
+    "article",
+    "aside",
+    "footer",
+    "header",
+    "hgroup",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "nav",
+    "section",
+    "div",
+    "dd",
+    "dl",
+    "dt",
+    "figcaption",
+    "figure",
+    "picture",
+    "hr",
+    "img",
+    "li",
+    "main",
+    "ol",
+    "p",
+    "pre",
+    "ul",
+    "a",
+    "b",
+    "abbr",
+    "bdi",
+    "bdo",
+    "br",
+    "cite",
+    "code",
+    "data",
+    "dfn",
+    "em",
+    "i",
+    "kbd",
+    "mark",
+    "q",
+    "rp",
+    "rt",
+    "ruby",
+    "s",
+    "samp",
+    "small",
+    "span",
+    "strong",
+    "sub",
+    "sup",
+    "time",
+    "u",
+    "var",
+    "wbr",
+    "area",
+    "audio",
+    "map",
+    "track",
+    "video",
+    "embed",
+    "object",
+    "param",
+    "source",
+    "canvas",
+    "script",
+    "noscript",
+    "del",
+    "ins",
+    "caption",
+    "col",
+    "colgroup",
+    "table",
+    "thead",
+    "tbody",
+    "td",
+    "th",
+    "tr",
+    "button",
+    "datalist",
+    "fieldset",
+    "form",
+    "input",
+    "label",
+    "legend",
+    "meter",
+    "optgroup",
+    "option",
+    "output",
+    "progress",
+    "select",
+    "textarea",
+    "details",
+    "dialog",
+    "menu",
+    "summary",
+    "template",
+    "blockquote",
+    "iframe",
+    "tfoot",
+];
+
+const DOM_SVG_TAGS: &[&str] = &[
+    "svg",
+    "animate",
+    "animateMotion",
+    "animateTransform",
+    "circle",
+    "clipPath",
+    "color-profile",
+    "defs",
+    "desc",
+    "discard",
+    "ellipse",
+    "feBlend",
+    "feColorMatrix",
+    "feComponentTransfer",
+    "feComposite",
+    "feConvolveMatrix",
+    "feDiffuseLighting",
+    "feDisplacementMap",
+    "feDistantLight",
+    "feDropShadow",
+    "feFlood",
+    "feFuncA",
+    "feFuncB",
+    "feFuncG",
+    "feFuncR",
+    "feGaussianBlur",
+    "feImage",
+    "feMerge",
+    "feMergeNode",
+    "feMorphology",
+    "feOffset",
+    "fePointLight",
+    "feSpecularLighting",
+    "feSpotLight",
+    "feTile",
+    "feTurbulence",
+    "filter",
+    "foreignObject",
+    "g",
+    "hatch",
+    "hatchpath",
+    "image",
+    "line",
+    "linearGradient",
+    "marker",
+    "mask",
+    "mesh",
+    "meshgradient",
+    "meshpatch",
+    "meshrow",
+    "metadata",
+    "mpath",
+    "path",
+    "pattern",
+    "polygon",
+    "polyline",
+    "radialGradient",
+    "rect",
+    "set",
+    "solidcolor",
+    "stop",
+    "switch",
+    "symbol",
+    "text",
+    "textPath",
+    "title",
+    "tspan",
+    "unknown",
+    "use",
+    "view",
+];
+
+const DOM_MATH_TAGS: &[&str] = &[
+    "annotation",
+    "annotation-xml",
+    "maction",
+    "maligngroup",
+    "malignmark",
+    "math",
+    "menclose",
+    "merror",
+    "mfenced",
+    "mfrac",
+    "mfraction",
+    "mglyph",
+    "mi",
+    "mlabeledtr",
+    "mlongdiv",
+    "mmultiscripts",
+    "mn",
+    "mo",
+    "mover",
+    "mpadded",
+    "mphantom",
+    "mprescripts",
+    "mroot",
+    "mrow",
+    "ms",
+    "mscarries",
+    "mscarry",
+    "msgroup",
+    "msline",
+    "mspace",
+    "msqrt",
+    "msrow",
+    "mstack",
+    "mstyle",
+    "msub",
+    "msubsup",
+    "msup",
+    "mtable",
+    "mtd",
+    "mtext",
+    "mtr",
+    "munder",
+    "munderover",
+    "none",
+    "semantics",
+];
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DomDirective {
@@ -549,6 +815,29 @@ mod tests {
         );
         assert!(result.ast_summary.starts_with("dom:"));
         assert!(result.code.contains("data-vuec-dom"));
+    }
+
+    #[test]
+    fn parse_uses_dom_parser_defaults() {
+        let ast = parse(
+            TemplateSource {
+                filename: "x.vue".into(),
+                source: "<input><hello/>".into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            &DomCompilerOptions::default(),
+        );
+        let root = ast.node(ast.root).expect("root");
+        let input = ast.node(root.children[0]).expect("input");
+        let hello = ast.node(root.children[1]).expect("hello");
+
+        assert!(input.children.is_empty());
+        assert!(matches!(
+            &hello.kind,
+            Vue3AstKind::Element(element)
+                if element.tag == "hello" && element.tag_type == Vue3ElementType::Component
+        ));
     }
 
     #[test]

@@ -6941,21 +6941,34 @@ function normalizeVue3OptionsForBridge(options, source) {
     if (typeof options[key] !== 'function') normalized[key] = options[key];
   }
   const tags = extractVueTemplateTags(String(source || ''));
-  normalized.__vuecVoidTags = collectVuePredicateHits(options.isVoidTag, tags);
-  normalized.__vuecPreTags = collectVuePredicateHits(options.isPreTag, tags);
-  normalized.__vuecIgnoreNewlineTags = collectVuePredicateHits(options.isIgnoreNewlineTag, tags);
-  normalized.__vuecNamespaces = collectVueNamespaceHits(options.getNamespace, tags);
-  normalized.__vuecDomNamespaces = typeof options.getNamespace === 'function';
+  if (hasVuePredicateOption(options, 'isVoidTag')) {
+    normalized.__vuecVoidTags = collectVuePredicateHits(options.isVoidTag, tags);
+  }
+  if (hasVuePredicateOption(options, 'isPreTag')) {
+    normalized.__vuecPreTags = collectVuePredicateHits(options.isPreTag, tags);
+  }
+  if (hasVuePredicateOption(options, 'isIgnoreNewlineTag')) {
+    normalized.__vuecIgnoreNewlineTags = collectVuePredicateHits(options.isIgnoreNewlineTag, tags);
+  }
+  if (typeof options.getNamespace === 'function') {
+    normalized.__vuecNamespaces = collectVueNamespaceHits(options.getNamespace, tags);
+    normalized.__vuecDomNamespaces = true;
+  }
   if (Object.prototype.hasOwnProperty.call(options, 'ns')) {
     normalized.__vuecRootNamespace = options.ns;
   }
-  if (typeof options.isNativeTag === 'function') {
+  if (hasVuePredicateOption(options, 'isNativeTag')) {
     normalized.__vuecNativeTags = collectVuePredicateHits(options.isNativeTag, tags);
   }
   normalized.__vuecCustomElements = collectVuePredicateHits(options.isCustomElement, tags);
   normalized.__vuecBuiltInComponents = collectVuePredicateHits(options.isBuiltInComponent, tags);
   normalized.__vuecStringifyStatic = typeof options.transformHoist === 'function';
   return normalized;
+}
+
+function hasVuePredicateOption(options, name) {
+  return Object.prototype.hasOwnProperty.call(options, name) &&
+    (typeof options[name] === 'function' || Array.isArray(options[name]));
 }
 
 function extractVueTemplateTags(source) {

@@ -61,6 +61,8 @@ pub struct Vue3CompilerOptions {
     pub whitespace: String,
     pub pre_tags: Vec<String>,
     pub ignore_newline_tags: Vec<String>,
+    pub sfc_parse_mode: bool,
+    pub sfc_plain_template_langs: Vec<String>,
     pub binding_metadata: BTreeMap<String, String>,
     pub props_aliases: BTreeMap<String, String>,
     pub inline: bool,
@@ -93,6 +95,8 @@ impl Default for Vue3CompilerOptions {
             whitespace: "condense".into(),
             pre_tags: Vec::new(),
             ignore_newline_tags: Vec::new(),
+            sfc_parse_mode: false,
+            sfc_plain_template_langs: Vec::new(),
             binding_metadata: BTreeMap::new(),
             props_aliases: BTreeMap::new(),
             inline: false,
@@ -295,6 +299,15 @@ impl Vue3Dialect {
                         v_pre_depth == 0 && attributes.iter().any(|attr| attr.name == "v-pre");
                     let in_v_pre = v_pre_depth > 0 || starts_v_pre;
                     let raw_text_kind = vue3_raw_text_kind(&name, namespace, in_v_pre);
+                    let sfc_plain_template = vue3_is_sfc_plain_template(
+                        &name,
+                        current_parent,
+                        root,
+                        &attributes,
+                        options,
+                    );
+                    let sfc_custom_block =
+                        vue3_is_sfc_custom_block(&name, current_parent, root, options);
                     let id = ast.push_child(
                         current_parent,
                         vue3_element_kind(
@@ -313,7 +326,26 @@ impl Vue3Dialect {
                             source.base_offset + token.end,
                         )),
                     );
-                    if !self_closing && !is_void {
+                    if sfc_plain_template || sfc_custom_block {
+                        if let Some((text_end, end_tag_end)) =
+                            find_matching_raw_text_end(&source.source, token.end, &name)
+                        {
+                            push_raw_text(
+                                &mut ast,
+                                id,
+                                source.file_id,
+                                source.base_offset + token.end,
+                                &source.source[token.end..text_end],
+                            );
+                            if let Some(node) = ast.node_mut(id) {
+                                if let Some(span) = node.span.source_mut() {
+                                    span.end =
+                                        vuec_source::BytePos(source.base_offset + end_tag_end);
+                                }
+                            }
+                            tokenizer.set_cursor(end_tag_end);
+                        }
+                    } else if !self_closing && !is_void {
                         stack.push(id);
                         namespace_stack.push(namespace);
                         if in_v_pre {
@@ -10790,6 +10822,35 @@ pub fn find_matching_raw_text_end(
     None
 }
 
+fn vue3_is_sfc_plain_template(
+    tag: &str,
+    parent: vuec_ast::NodeId,
+    root: vuec_ast::NodeId,
+    attributes: &[vuec_html::HtmlAttribute],
+    options: &Vue3CompilerOptions,
+) -> bool {
+    if parent != root || tag != "template" || options.sfc_plain_template_langs.is_empty() {
+        return false;
+    }
+    let Some(lang) = attributes
+        .iter()
+        .find(|attr| attr.name == "lang")
+        .and_then(|attr| attr.value.as_deref())
+    else {
+        return false;
+    };
+    vue3_sfc_plain_template_lang(lang, options)
+}
+
+fn vue3_is_sfc_custom_block(
+    tag: &str,
+    parent: vuec_ast::NodeId,
+    root: vuec_ast::NodeId,
+    options: &Vue3CompilerOptions,
+) -> bool {
+    options.sfc_parse_mode && parent == root && tag != "template"
+}
+
 fn matching_raw_text_end_tag_end(source: &str, start: usize, tag: &str) -> Option<usize> {
     let after_slash = start.checked_add("</".len())?;
     let tag_end = after_slash.checked_add(tag.len())?;
@@ -10928,6 +10989,9 @@ fn normalize_text_children(
     let Some(parent) = ast.node(parent_id) else {
         return;
     };
+    if sfc_raw_text_parent(ast, parent_id, options) {
+        return;
+    }
     let parent_tag = match &parent.kind {
         Vue3AstKind::Element(element) => Some(element.tag.clone()),
         _ => None,
@@ -10998,6 +11062,54 @@ fn normalize_text_children(
         .filter_map(|(index, child_id)| keep_flags[index].then_some(child_id))
         .collect::<Vec<_>>();
     ast.replace_children(parent_id, retained);
+}
+
+fn sfc_raw_text_parent(
+    ast: &Vue3Ast,
+    parent_id: vuec_ast::NodeId,
+    options: &Vue3CompilerOptions,
+) -> bool {
+    if !options.sfc_parse_mode {
+        return false;
+    }
+    let Some(parent) = ast.node(parent_id) else {
+        return false;
+    };
+    if parent.parent != Some(ast.root) {
+        return false;
+    }
+    matches!(
+        &parent.kind,
+        Vue3AstKind::Element(element)
+            if element.tag != "template" || vue3_sfc_plain_template_element(element, options)
+    )
+}
+
+fn vue3_sfc_plain_template_element(
+    element: &vuec_ast::Vue3Element,
+    options: &Vue3CompilerOptions,
+) -> bool {
+    element.tag == "template"
+        && element.props.iter().any(|prop| {
+            matches!(
+                prop,
+                Vue3Prop::Attribute(attr)
+                    if attr.name == "lang"
+                        && attr
+                            .value
+                            .as_deref()
+                            .is_some_and(|lang| vue3_sfc_plain_template_lang(lang, options))
+            )
+        })
+}
+
+fn vue3_sfc_plain_template_lang(lang: &str, options: &Vue3CompilerOptions) -> bool {
+    !lang.is_empty()
+        && ((options.sfc_parse_mode && lang != "html")
+            || options
+                .sfc_plain_template_langs
+                .iter()
+                .any(|candidate| candidate == lang))
 }
 
 fn should_keep_whitespace_between(

@@ -160,10 +160,7 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
             let source = template_source(&payload);
             let mut core = vue3_options(payload.get("options"));
             let default_options = DomCompilerOptions::default();
-            core.dom_namespaces = default_options.core.dom_namespaces;
-            if core.built_in_components.is_empty() {
-                core.built_in_components = default_options.core.built_in_components.clone();
-            }
+            apply_bridge_dom_parser_defaults(&mut core, payload.get("options"));
             if payload
                 .get("options")
                 .and_then(|options| options.get("mode"))
@@ -199,10 +196,7 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
             let source = template_source(&payload);
             let mut core = vue3_options(payload.get("options"));
             let default_options = DomCompilerOptions::default();
-            core.dom_namespaces = default_options.core.dom_namespaces;
-            if core.built_in_components.is_empty() {
-                core.built_in_components = default_options.core.built_in_components.clone();
-            }
+            apply_bridge_dom_parser_defaults(&mut core, payload.get("options"));
             let options = DomCompilerOptions {
                 core,
                 transform_asset_urls: transform_asset_urls_enabled(
@@ -351,6 +345,36 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
         }
         other => bail!("unsupported bridge command `{other}`"),
     }
+}
+
+fn apply_bridge_dom_parser_defaults(core: &mut Vue3CompilerOptions, options: Option<&Value>) {
+    let explicit_void_tags = bridge_option_has(options, "__vuecVoidTags");
+    let explicit_pre_tags = bridge_option_has(options, "__vuecPreTags");
+    let explicit_ignore_newline_tags = bridge_option_has(options, "__vuecIgnoreNewlineTags");
+    let explicit_native_tags = bridge_option_has(options, "__vuecNativeTags");
+    let void_tags = core.void_tags.clone();
+    let pre_tags = core.pre_tags.clone();
+    let ignore_newline_tags = core.ignore_newline_tags.clone();
+    let native_tags = core.native_tags.clone();
+
+    vuec_vue3_dom::apply_dom_parser_defaults(core);
+
+    if explicit_void_tags {
+        core.void_tags = void_tags;
+    }
+    if explicit_pre_tags {
+        core.pre_tags = pre_tags;
+    }
+    if explicit_ignore_newline_tags {
+        core.ignore_newline_tags = ignore_newline_tags;
+    }
+    if explicit_native_tags {
+        core.native_tags = native_tags;
+    }
+}
+
+fn bridge_option_has(options: Option<&Value>, name: &str) -> bool {
+    options.is_some_and(|options| options.get(name).is_some())
 }
 
 fn string_field(payload: &Value, name: &str) -> String {
@@ -1021,7 +1045,7 @@ fn vue3_parse_diagnostics(
 ) -> Vec<Value> {
     let mut diagnostics = Vec::new();
     collect_html_parse_error_diagnostics(source, options, &mut diagnostics);
-    collect_invalid_lt_diagnostics(ast, source, base_offset, &mut diagnostics);
+    collect_invalid_lt_diagnostics(ast, source, base_offset, options, &mut diagnostics);
     collect_missing_interpolation_end_diagnostics(source, options, &mut diagnostics);
     collect_invalid_end_tag_diagnostics(ast, source, base_offset, options, &mut diagnostics);
     collect_missing_directive_name_diagnostics(ast, source, base_offset, &mut diagnostics);
@@ -1116,6 +1140,8 @@ fn collect_html_parse_error_diagnostics(
                     let raw_text_kind =
                         vuec_vue3_core::vue3_raw_text_kind(&name, namespace, in_v_pre);
                     let raw_tag = name.clone();
+                    let sfc_raw_text =
+                        sfc_diagnostic_raw_text_block(options, stack.len(), &raw_tag, &attributes);
                     stack.push(OpenDiagnosticElement {
                         name,
                         start: token.start,
@@ -1126,7 +1152,7 @@ fn collect_html_parse_error_diagnostics(
                     if in_v_pre {
                         v_pre_depth += 1;
                     }
-                    if raw_text_kind.is_some() {
+                    if raw_text_kind.is_some() || sfc_raw_text {
                         if let Some((_text_end, end_tag_end)) =
                             vuec_vue3_core::find_matching_raw_text_end(source, token.end, &raw_tag)
                         {
@@ -1221,6 +1247,59 @@ struct OpenDiagnosticElement {
     namespace: vuec_ast::HtmlNamespace,
     attributes: Vec<vuec_html::HtmlAttribute>,
     in_v_pre: bool,
+}
+
+fn sfc_diagnostic_raw_text_block(
+    options: &Vue3CompilerOptions,
+    depth: usize,
+    tag: &str,
+    attributes: &[vuec_html::HtmlAttribute],
+) -> bool {
+    if !options.sfc_parse_mode || depth != 0 {
+        return false;
+    }
+    tag != "template" || sfc_plain_template_attrs(attributes, options)
+}
+
+fn sfc_plain_template_element(
+    element: &vuec_ast::Vue3Element,
+    options: &Vue3CompilerOptions,
+) -> bool {
+    if element.tag != "template" {
+        return false;
+    }
+    element.props.iter().any(|prop| {
+        matches!(
+            prop,
+            Vue3Prop::Attribute(attr)
+                if attr.name == "lang"
+                    && attr
+                        .value
+                        .as_deref()
+                        .is_some_and(|lang| sfc_plain_template_lang(lang, options))
+        )
+    })
+}
+
+fn sfc_plain_template_attrs(
+    attributes: &[vuec_html::HtmlAttribute],
+    options: &Vue3CompilerOptions,
+) -> bool {
+    attributes.iter().any(|attr| {
+        attr.name == "lang"
+            && attr
+                .value
+                .as_deref()
+                .is_some_and(|lang| sfc_plain_template_lang(lang, options))
+    })
+}
+
+fn sfc_plain_template_lang(lang: &str, options: &Vue3CompilerOptions) -> bool {
+    !lang.is_empty()
+        && options
+            .sfc_plain_template_langs
+            .iter()
+            .any(|candidate| candidate == lang)
 }
 
 fn vue3_diagnostic_tag_namespace(
@@ -1477,13 +1556,15 @@ fn collect_invalid_lt_diagnostics(
     ast: &Vue3Ast,
     source: &str,
     base_offset: usize,
+    options: &Vue3CompilerOptions,
     diagnostics: &mut Vec<Value>,
 ) {
     for node in &ast.nodes {
         let Vue3AstKind::Text(_) = &node.kind else {
             continue;
         };
-        if text_has_raw_text_parent(ast, node.id) {
+        if text_has_raw_text_parent(ast, node.id) || text_has_sfc_raw_parent(ast, node.id, options)
+        {
             continue;
         }
         let Some(span) = node.span.source() else {
@@ -1541,6 +1622,32 @@ fn text_has_raw_text_parent(ast: &Vue3Ast, node_id: vuec_ast::NodeId) -> bool {
     })
 }
 
+fn text_has_sfc_raw_parent(
+    ast: &Vue3Ast,
+    node_id: vuec_ast::NodeId,
+    options: &Vue3CompilerOptions,
+) -> bool {
+    if !options.sfc_parse_mode {
+        return false;
+    }
+    let Some(parent_id) = ast.node(node_id).and_then(|node| node.parent) else {
+        return false;
+    };
+    let Some(parent) = ast.node(parent_id) else {
+        return false;
+    };
+    let Some(root) = ast.node(ast.root) else {
+        return false;
+    };
+    parent.parent == Some(ast.root)
+        && root.children.contains(&parent_id)
+        && matches!(
+            &parent.kind,
+            Vue3AstKind::Element(element)
+                if element.tag != "template" || sfc_plain_template_element(element, options)
+        )
+}
+
 fn collect_missing_interpolation_end_diagnostics(
     source: &str,
     options: &Vue3CompilerOptions,
@@ -1577,6 +1684,8 @@ fn collect_missing_interpolation_end_diagnostics(
                 let raw_text_kind = vuec_vue3_core::vue3_raw_text_kind(&name, namespace, in_v_pre);
                 if !self_closing && !is_void {
                     let raw_tag = name.clone();
+                    let sfc_raw_text =
+                        sfc_diagnostic_raw_text_block(options, stack.len(), &raw_tag, &attributes);
                     stack.push(OpenDiagnosticElement {
                         name,
                         start: token.start,
@@ -1587,7 +1696,7 @@ fn collect_missing_interpolation_end_diagnostics(
                     if in_v_pre {
                         v_pre_depth += 1;
                     }
-                    if raw_text_kind.is_some() {
+                    if raw_text_kind.is_some() || sfc_raw_text {
                         if let Some((_text_end, end_tag_end)) =
                             vuec_vue3_core::find_matching_raw_text_end(source, token.end, &raw_tag)
                         {
@@ -1687,6 +1796,8 @@ fn collect_invalid_end_tag_diagnostics(
                     && !tag_token_is_incomplete_at_eof(source, token.start, token.end)
                 {
                     let raw_tag = name.clone();
+                    let sfc_raw_text =
+                        sfc_diagnostic_raw_text_block(options, stack.len(), &raw_tag, &attributes);
                     stack.push(OpenDiagnosticElement {
                         name,
                         start: token.start,
@@ -1697,7 +1808,7 @@ fn collect_invalid_end_tag_diagnostics(
                     if in_v_pre {
                         v_pre_depth += 1;
                     }
-                    if raw_text_kind.is_some() {
+                    if raw_text_kind.is_some() || sfc_raw_text {
                         if let Some((_text_end, end_tag_end)) =
                             vuec_vue3_core::find_matching_raw_text_end(source, token.end, &raw_tag)
                         {
@@ -1921,19 +2032,20 @@ fn vue3_inner_loc_value(
     let element_start = span.start.0.saturating_sub(base_offset);
     let element_end = span.end.0.saturating_sub(base_offset).min(source.len());
     let open_end = vue3_open_tag_end(source, element_start, element_end).unwrap_or(element_start);
-    let inner_end = node
-        .children
-        .last()
-        .and_then(|child_id| ast.node(*child_id))
-        .and_then(|child| child.span.source())
-        .map(|child_span| {
-            child_span
-                .end
-                .0
-                .saturating_sub(base_offset)
-                .min(source.len())
-        })
-        .unwrap_or(open_end);
+    let inner_end = vue3_close_tag_start(source, open_end, element_end).unwrap_or_else(|| {
+        node.children
+            .last()
+            .and_then(|child_id| ast.node(*child_id))
+            .and_then(|child| child.span.source())
+            .map(|child_span| {
+                child_span
+                    .end
+                    .0
+                    .saturating_sub(base_offset)
+                    .min(source.len())
+            })
+            .unwrap_or(open_end)
+    });
     vue3_source_loc_value(source, open_end, inner_end)
 }
 
@@ -1949,6 +2061,20 @@ fn vue3_open_tag_end(source: &str, start: usize, end: usize) -> Option<usize> {
         }
     }
     None
+}
+
+fn vue3_close_tag_start(source: &str, open_end: usize, element_end: usize) -> Option<usize> {
+    let mut cursor = open_end.min(source.len());
+    let end = element_end.min(source.len());
+    let mut close_start = None;
+    while cursor < end {
+        let Some(offset) = source.get(cursor..end)?.find("</") else {
+            break;
+        };
+        close_start = Some(cursor + offset);
+        cursor += offset + "</".len();
+    }
+    close_start
 }
 
 fn span_to_node_span(span: Option<vuec_source::Span>) -> NodeSpan {
@@ -2549,6 +2675,10 @@ fn vue3_options(value: Option<&Value>) -> Vue3CompilerOptions {
     if let Some(whitespace) = value.get("whitespace").and_then(Value::as_str) {
         options.whitespace = whitespace.to_string();
     }
+    if vue3_parse_mode_is_sfc(Some(value)) {
+        options.sfc_parse_mode = true;
+        options.sfc_plain_template_langs = vec!["pug".to_string()];
+    }
     options.void_tags = string_array_option(value, "__vuecVoidTags");
     options.pre_tags = string_array_option(value, "__vuecPreTags");
     options.ignore_newline_tags = string_array_option(value, "__vuecIgnoreNewlineTags");
@@ -2923,6 +3053,139 @@ mod tests {
         assert_eq!(parsed["children"][0]["children"][0]["ns"], json!(1));
         assert_eq!(parsed["children"][1]["ns"], json!(2));
         assert_eq!(parsed["children"][1]["children"][0]["ns"], json!(2));
+    }
+
+    #[test]
+    fn vue3_dom_bridge_sfc_inner_loc_ends_at_closing_tag_start() {
+        let parsed = dispatch(
+            "vue3.dom.parse",
+            json!({
+                "source": "<template>\n<div></div>\n</template>",
+                "options": {
+                    "parseMode": "sfc"
+                }
+            }),
+        )
+        .expect("dom parse");
+
+        let template = &parsed["children"][0];
+        assert_eq!(template["innerLoc"]["source"], json!("\n<div></div>\n"));
+        assert_eq!(template["innerLoc"]["start"]["offset"], json!(10));
+        assert_eq!(template["innerLoc"]["end"]["offset"], json!(23));
+    }
+
+    #[test]
+    fn vue3_dom_bridge_sfc_plain_template_lang_keeps_raw_text() {
+        let parsed = dispatch(
+            "vue3.dom.parse",
+            json!({
+                "source": "<template lang=\"pug\">p(v-if=\"1 < 2\") test <div/></template>",
+                "options": {
+                    "parseMode": "sfc"
+                }
+            }),
+        )
+        .expect("dom parse");
+
+        let template = &parsed["children"][0];
+        assert_eq!(template["children"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            template["children"][0]["content"],
+            json!("p(v-if=\"1 < 2\") test <div/>")
+        );
+        assert!(parsed["__vuecDiagnostics"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn vue3_dom_bridge_sfc_parse_uses_dom_void_tag_defaults() {
+        let parsed = dispatch(
+            "vue3.dom.parse",
+            json!({
+                "source": "<template><input></template>",
+                "options": {
+                    "parseMode": "sfc"
+                }
+            }),
+        )
+        .expect("dom parse");
+
+        let input = &parsed["children"][0]["children"][0];
+        assert_eq!(input["tag"], json!("input"));
+        assert_eq!(input["children"].as_array().unwrap().len(), 0);
+        assert!(parsed["__vuecDiagnostics"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn vue3_dom_bridge_sfc_custom_blocks_are_raw_text() {
+        let parsed = dispatch(
+            "vue3.dom.parse",
+            json!({
+                "source": "<template><input></template><foo> <-& </foo>",
+                "options": {
+                    "parseMode": "sfc"
+                }
+            }),
+        )
+        .expect("dom parse");
+
+        let custom_block = &parsed["children"][1];
+        assert_eq!(custom_block["tag"], json!("foo"));
+        assert_eq!(custom_block["children"].as_array().unwrap().len(), 1);
+        assert_eq!(custom_block["children"][0]["content"], json!(" <-& "));
+        assert!(parsed["__vuecDiagnostics"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn vue3_dom_bridge_sfc_parse_classifies_non_native_tags_as_components() {
+        let parsed = dispatch(
+            "vue3.dom.parse",
+            json!({
+                "source": "<template><hello/></template>",
+                "options": {
+                    "parseMode": "sfc"
+                }
+            }),
+        )
+        .expect("dom parse");
+
+        let hello = &parsed["children"][0]["children"][0];
+        assert_eq!(hello["tag"], json!("hello"));
+        assert_eq!(hello["tagType"], json!(1));
+
+        let custom = dispatch(
+            "vue3.dom.parse",
+            json!({
+                "source": "<template><hello/></template>",
+                "options": {
+                    "parseMode": "sfc",
+                    "__vuecCustomElements": ["hello"]
+                }
+            }),
+        )
+        .expect("dom parse");
+        assert_eq!(custom["children"][0]["children"][0]["tagType"], json!(0));
+    }
+
+    #[test]
+    fn vue3_dom_bridge_respects_explicit_empty_dom_parser_predicates() {
+        let parsed = dispatch(
+            "vue3.dom.parse",
+            json!({
+                "source": "<input><hello/>",
+                "options": {
+                    "__vuecVoidTags": [],
+                    "__vuecNativeTags": []
+                }
+            }),
+        )
+        .expect("dom parse");
+
+        assert_eq!(parsed["children"][0]["children"][0]["tag"], json!("hello"));
+        assert!(parsed["__vuecDiagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|diagnostic| diagnostic["code"] == json!(24)));
     }
 
     #[test]
