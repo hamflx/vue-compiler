@@ -860,7 +860,7 @@ mod tests {
         let mut compiler = SfcCompiler::new();
         let descriptor = compiler.parse(
             "foo.vue",
-            r#"<template><img src="./logo.png"><img src="~logo.png"></template>"#,
+            r#"<template><img src="./logo.png"><img src="~logo.png"><img srcset="@/logo.png 1x, ./logo.png 2x"></template>"#,
         );
         let template = compiler.compile_template(
             &descriptor,
@@ -875,8 +875,36 @@ mod tests {
 
         assert!(template.code.contains(r#"src: "/foo/logo.png""#));
         assert!(template.code.contains("import _imports_0 from 'logo.png'"));
+        assert!(template
+            .code
+            .contains("import _imports_1 from '@/logo.png'"));
         assert!(template.code.contains("src: _imports_0"));
+        assert!(template
+            .code
+            .contains(r#"srcset: _imports_1 + ' 1x, ' + "/foo/logo.png" + ' 2x'"#));
         assert!(!template.code.contains(r#"src: "~logo.png""#));
+    }
+
+    #[test]
+    fn compile_template_supports_custom_asset_url_tags() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor =
+            compiler.parse("foo.vue", r#"<template><foo bar="~baz"></foo></template>"#);
+        let mut tags = BTreeMap::new();
+        tags.insert("foo".into(), vec!["bar".into()]);
+        let template = compiler.compile_template(
+            &descriptor,
+            SfcTemplateCompileOptions {
+                asset_url_options: AssetUrlOptions {
+                    tags,
+                    ..AssetUrlOptions::default()
+                },
+                ..SfcTemplateCompileOptions::default()
+            },
+        );
+
+        assert!(template.code.contains("import _imports_0 from 'baz'"));
+        assert!(template.code.contains("bar: _imports_0"));
     }
 
     #[test]

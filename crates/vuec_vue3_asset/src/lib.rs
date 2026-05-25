@@ -62,8 +62,23 @@ pub fn transform_asset_url_props(
         let value_span = attr.value_span.or(attr.span);
         if is_srcset {
             if let Some(base) = base {
-                if let Some(rewritten) = rewrite_srcset_base(&value, base, options) {
-                    attr.value = Some(rewritten);
+                if let Some(transform) =
+                    transform_srcset_with_base(&value, base, options, enable_imports, imports)
+                {
+                    match transform {
+                        SrcsetTransform::Static(rewritten) => {
+                            attr.value = Some(rewritten);
+                        }
+                        SrcsetTransform::Expression(expression) => {
+                            *prop = asset_bind_directive(
+                                "srcset",
+                                expression,
+                                attr.span,
+                                attr.name_span,
+                                value_span,
+                            );
+                        }
+                    }
                     continue;
                 }
             }
@@ -143,40 +158,52 @@ fn can_transform_hash_import(tag: &str, attr: &str) -> bool {
     )
 }
 
-fn rewrite_srcset_base(value: &str, base: &str, options: &AssetUrlOptions) -> Option<String> {
-    let candidates = parse_srcset_candidates(value);
+enum SrcsetTransform {
+    Static(String),
+    Expression(String),
+}
+
+fn transform_srcset_with_base(
+    value: &str,
+    base: &str,
+    options: &AssetUrlOptions,
+    enable_imports: bool,
+    imports: &mut Vec<Vue3ImportItem>,
+) -> Option<SrcsetTransform> {
+    let mut candidates = parse_srcset_candidates(value);
     if !candidates
         .iter()
         .any(|(url, _)| should_process_asset_url(url, options))
     {
         return None;
     }
-    if candidates
-        .iter()
-        .any(|(url, _)| should_process_asset_url(url, options) && !url.starts_with('.'))
-    {
-        return None;
+
+    let mut rewritten_items = Vec::<String>::new();
+    let mut need_import_transform = false;
+    for (url, descriptor) in &mut candidates {
+        if url.starts_with('.') {
+            *url = join_asset_base(base, url);
+            if descriptor.is_empty() {
+                rewritten_items.push(url.clone());
+            } else {
+                rewritten_items.push(format!("{url} {descriptor}"));
+            }
+        } else if should_process_asset_url(url, options) {
+            need_import_transform = true;
+        } else if descriptor.is_empty() {
+            rewritten_items.push(url.clone());
+        } else {
+            rewritten_items.push(format!("{url} {descriptor}"));
+        }
     }
 
-    let mut changed = false;
-    let items = candidates
-        .into_iter()
-        .map(|(url, descriptor)| {
-            let rewritten = if url.starts_with('.') && should_process_asset_url(&url, options) {
-                changed = true;
-                join_asset_base(base, &url)
-            } else {
-                url
-            };
-            if descriptor.is_empty() {
-                rewritten
-            } else {
-                format!("{rewritten} {descriptor}")
-            }
-        })
-        .collect::<Vec<_>>();
-    if changed {
-        Some(items.join(", "))
+    if !need_import_transform {
+        return Some(SrcsetTransform::Static(rewritten_items.join(", ")));
+    }
+
+    if enable_imports {
+        asset_srcset_import_expression_from_candidates(&candidates, options, imports)
+            .map(SrcsetTransform::Expression)
     } else {
         None
     }
@@ -198,6 +225,14 @@ fn asset_srcset_import_expression(
     imports: &mut Vec<Vue3ImportItem>,
 ) -> Option<String> {
     let candidates = parse_srcset_candidates(value);
+    asset_srcset_import_expression_from_candidates(&candidates, options, imports)
+}
+
+fn asset_srcset_import_expression_from_candidates(
+    candidates: &[(String, String)],
+    options: &AssetUrlOptions,
+    imports: &mut Vec<Vue3ImportItem>,
+) -> Option<String> {
     if !candidates
         .iter()
         .any(|(url, _)| should_process_asset_url(url, options))
@@ -461,4 +496,158 @@ fn is_external_url(url: &str) -> bool {
 
 fn is_data_url(url: &str) -> bool {
     url.trim_start().to_ascii_lowercase().starts_with("data:")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vuec_ast::Vue3Attribute;
+
+    fn attr(name: &str, value: &str) -> Vue3Prop {
+        Vue3Prop::Attribute(Vue3Attribute {
+            name: name.into(),
+            value: Some(value.into()),
+            span: None,
+            name_span: None,
+            value_span: None,
+            quote: None,
+        })
+    }
+
+    fn directive_expression(prop: &Vue3Prop) -> &str {
+        let Vue3Prop::Directive(directive) = prop else {
+            panic!("expected directive prop, got {prop:?}");
+        };
+        let Some(Vue3Expression::Raw(expression)) = directive.exp.as_ref() else {
+            panic!("expected raw directive expression, got {directive:?}");
+        };
+        expression
+    }
+
+    fn attribute_value(prop: &Vue3Prop) -> &str {
+        let Vue3Prop::Attribute(attribute) = prop else {
+            panic!("expected attribute prop, got {prop:?}");
+        };
+        attribute.value.as_deref().expect("attribute value")
+    }
+
+    #[test]
+    fn explicit_base_rewrites_only_dot_relative_asset_urls() {
+        let mut props = vec![
+            attr("src", "./bar.png"),
+            attr("poster", "~poster.png"),
+            attr("data-id", "./ignored.png"),
+        ];
+        let mut imports = Vec::new();
+
+        transform_asset_url_props(
+            "video",
+            &mut props,
+            &AssetUrlOptions {
+                base: Some("/foo".into()),
+                ..AssetUrlOptions::default()
+            },
+            true,
+            &mut imports,
+        );
+
+        assert_eq!(attribute_value(&props[0]), "/foo/bar.png");
+        assert_eq!(directive_expression(&props[1]), "_imports_0");
+        assert_eq!(imports[0].path, "poster.png");
+        assert_eq!(attribute_value(&props[2]), "./ignored.png");
+    }
+
+    #[test]
+    fn custom_asset_url_tags_import_tilde_with_explicit_base() {
+        let mut props = vec![attr("bar", "~baz")];
+        let mut imports = Vec::new();
+        let mut tags = BTreeMap::new();
+        tags.insert("foo".into(), vec!["bar".into()]);
+
+        transform_asset_url_props(
+            "foo",
+            &mut props,
+            &AssetUrlOptions {
+                base: Some("/foo".into()),
+                tags,
+                ..AssetUrlOptions::default()
+            },
+            true,
+            &mut imports,
+        );
+
+        assert_eq!(directive_expression(&props[0]), "_imports_0");
+        assert_eq!(imports[0].path, "baz");
+    }
+
+    #[test]
+    fn explicit_base_srcset_rewrites_dot_candidates_and_imports_alias_candidates() {
+        let mut props = vec![attr("srcset", "@/logo.png 1x, ./logo.png 2x")];
+        let mut imports = Vec::new();
+
+        transform_asset_url_props(
+            "img",
+            &mut props,
+            &AssetUrlOptions {
+                base: Some("/foo/".into()),
+                ..AssetUrlOptions::default()
+            },
+            true,
+            &mut imports,
+        );
+
+        assert_eq!(
+            directive_expression(&props[0]),
+            r#"_imports_0 + ' 1x, ' + "/foo/logo.png" + ' 2x'"#
+        );
+        assert_eq!(imports[0].path, "@/logo.png");
+    }
+
+    #[test]
+    fn srcset_imports_subpath_hash_and_preserves_svg_fragments() {
+        let mut props = vec![attr(
+            "srcset",
+            "#src/assets/vue.svg, ./icons.svg#icon-heart 2x, ./foo%.png 3x",
+        )];
+        let mut imports = Vec::new();
+
+        transform_asset_url_props(
+            "img",
+            &mut props,
+            &AssetUrlOptions::default(),
+            true,
+            &mut imports,
+        );
+
+        assert_eq!(
+            directive_expression(&props[0]),
+            "_imports_0 + ', ' + _imports_1 + '#icon-heart' + ' 2x, ' + _imports_2 + ' 3x'"
+        );
+        assert_eq!(imports[0].path, "#src/assets/vue.svg");
+        assert_eq!(imports[1].path, "./icons.svg");
+        assert_eq!(imports[2].path, "./foo%.png");
+    }
+
+    #[test]
+    fn pure_hash_values_on_custom_tags_stay_static() {
+        let mut props = vec![attr("bar", "#src/assets/vue.svg")];
+        let mut imports = Vec::new();
+        let mut tags = BTreeMap::new();
+        tags.insert("foo".into(), vec!["bar".into()]);
+
+        transform_asset_url_props(
+            "foo",
+            &mut props,
+            &AssetUrlOptions {
+                include_absolute: true,
+                tags,
+                ..AssetUrlOptions::default()
+            },
+            true,
+            &mut imports,
+        );
+
+        assert_eq!(attribute_value(&props[0]), "#src/assets/vue.svg");
+        assert!(imports.is_empty());
+    }
 }

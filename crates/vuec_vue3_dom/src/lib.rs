@@ -841,7 +841,16 @@ mod tests {
     }
 
     #[test]
-    fn compile_rewrites_static_asset_urls_with_explicit_base_without_module_imports() {
+    fn compile_rewrites_explicit_base_assets_in_module_mode() {
+        let mut options = DomCompilerOptions {
+            asset_url_options: AssetUrlOptions {
+                base: Some("/foo".into()),
+                ..AssetUrlOptions::default()
+            },
+            ..DomCompilerOptions::default()
+        };
+        options.core.mode = "module".into();
+        options.core.prefix_identifiers = true;
         let result = compile(
             TemplateSource {
                 filename: "x.vue".into(),
@@ -849,23 +858,21 @@ mod tests {
                 file_id: FileId(0),
                 base_offset: 0,
             },
-            DomCompilerOptions {
-                asset_url_options: AssetUrlOptions {
-                    base: Some("/foo".into()),
-                    ..AssetUrlOptions::default()
-                },
-                ..DomCompilerOptions::default()
-            },
+            options,
         );
 
         assert!(result.code.contains(r#"src: "/foo/bar.png""#));
         assert!(result.code.contains(r#"src: "bar.png""#));
-        assert!(result.code.contains(r#"src: "~bar.png""#));
-        assert!(result.code.contains(r#"src: "@theme/bar.png""#));
+        assert!(result.code.contains("import _imports_0 from 'bar.png'"));
+        assert!(result
+            .code
+            .contains("import _imports_1 from '@theme/bar.png'"));
+        assert!(result.code.contains("src: _imports_0"));
+        assert!(result.code.contains("src: _imports_1"));
         assert!(result.code.contains(r#"src: "/bar.png""#));
         assert!(result.code.contains(r#"src: "data:image/png;base64,i""#));
-        assert!(!result.code.contains("_imports_"));
-        assert!(!result.code.contains("import _imports_"));
+        assert!(!result.code.contains(r#"src: "~bar.png""#));
+        assert!(!result.code.contains(r#"src: "@theme/bar.png""#));
     }
 
     #[test]
@@ -1237,26 +1244,57 @@ mod tests {
     }
 
     #[test]
-    fn compile_leaves_mixed_import_srcset_unchanged_for_base_slice() {
+    fn compile_rewrites_mixed_srcset_base_candidates_and_imports_alias_candidates() {
+        let mut options = DomCompilerOptions {
+            asset_url_options: AssetUrlOptions {
+                base: Some("/foo".into()),
+                ..AssetUrlOptions::default()
+            },
+            ..DomCompilerOptions::default()
+        };
+        options.core.mode = "module".into();
+        options.core.prefix_identifiers = true;
         let result = compile(
             TemplateSource {
                 filename: "x.vue".into(),
-                source: r#"<img srcset="@/logo.png, ./logo.png 2x">"#.into(),
+                source: r#"<img srcset="@/logo.png 1x, ./logo.png 2x">"#.into(),
                 file_id: FileId(0),
                 base_offset: 0,
             },
-            DomCompilerOptions {
-                asset_url_options: AssetUrlOptions {
-                    base: Some("/foo".into()),
-                    ..AssetUrlOptions::default()
-                },
-                ..DomCompilerOptions::default()
-            },
+            options,
         );
 
+        assert!(result.code.contains("import _imports_0 from '@/logo.png'"));
         assert!(result
             .code
-            .contains(r#"srcset: "@/logo.png, ./logo.png 2x""#));
+            .contains(r#"srcset: _imports_0 + ' 1x, ' + "/foo/logo.png" + ' 2x'"#));
+    }
+
+    #[test]
+    fn compile_transforms_asset_url_options_for_custom_tags() {
+        let mut tags = BTreeMap::new();
+        tags.insert("foo".into(), vec!["bar".into()]);
+        let mut options = DomCompilerOptions {
+            asset_url_options: AssetUrlOptions {
+                tags,
+                ..AssetUrlOptions::default()
+            },
+            ..DomCompilerOptions::default()
+        };
+        options.core.mode = "module".into();
+        options.core.prefix_identifiers = true;
+        let result = compile(
+            TemplateSource {
+                filename: "x.vue".into(),
+                source: r#"<foo bar="~baz"></foo>"#.into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            options,
+        );
+
+        assert!(result.code.contains("import _imports_0 from 'baz'"));
+        assert!(result.code.contains("bar: _imports_0"));
     }
 
     #[test]
