@@ -487,6 +487,7 @@ impl Vue3Dialect {
         let mut has_dynamic_component_slots = false;
         let mut has_memo = false;
         let mut has_for_memo = false;
+        let mut has_once = false;
         let mut walk = vec![(root_id, true)];
         while let Some((node_id, is_root)) = walk.pop() {
             if let Some(node) = ast.node(node_id) {
@@ -531,6 +532,9 @@ impl Vue3Dialect {
                                             if directive_by_name(element, "for").is_some() {
                                                 has_for_memo = true;
                                             }
+                                        }
+                                        if dir.name == "once" {
+                                            has_once = true;
                                         }
                                         match dir.name.as_str() {
                                             "for" => {
@@ -607,6 +611,9 @@ impl Vue3Dialect {
         }
         if has_memo {
             helpers.insert(RuntimeHelper::Vue3WithMemo);
+        }
+        if has_once {
+            helpers.insert(RuntimeHelper::Vue3SetBlockTracking);
         }
         if let Some(root) = ast.root_node_mut() {
             if let Vue3AstKind::Root(root) = &mut root.kind {
@@ -13935,6 +13942,7 @@ fn move_helper_before(
 fn vue3_helper_order(components_first: bool) -> &'static [RuntimeHelper] {
     if components_first {
         &[
+            RuntimeHelper::Vue3SetBlockTracking,
             RuntimeHelper::Vue3ToDisplayString,
             RuntimeHelper::Vue3CreateTextVNode,
             RuntimeHelper::Vue3CreateElementVNode,
@@ -13983,6 +13991,7 @@ fn vue3_helper_order(components_first: bool) -> &'static [RuntimeHelper] {
         ]
     } else {
         &[
+            RuntimeHelper::Vue3SetBlockTracking,
             RuntimeHelper::Vue3ToDisplayString,
             RuntimeHelper::Vue3OpenBlock,
             RuntimeHelper::Vue3CreateElementBlock,
@@ -14682,14 +14691,35 @@ fn render_children_array(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum NodeRenderMode {
     Root,
+    OnceRoot,
+    OnceBlockRoot,
     Child,
     Cached,
+}
+
+fn root_like_render_mode(mode: NodeRenderMode) -> bool {
+    matches!(
+        mode,
+        NodeRenderMode::Root | NodeRenderMode::OnceRoot | NodeRenderMode::OnceBlockRoot
+    )
+}
+
+fn block_render_mode(mode: NodeRenderMode) -> bool {
+    matches!(mode, NodeRenderMode::Root | NodeRenderMode::OnceBlockRoot)
+}
+
+fn once_children_mode(mode: NodeRenderMode) -> bool {
+    matches!(
+        mode,
+        NodeRenderMode::OnceRoot | NodeRenderMode::OnceBlockRoot
+    )
 }
 
 #[derive(Clone, Debug, Default)]
 struct RenderScope {
     locals: Vec<String>,
     in_v_once: bool,
+    memo_index_overrides: BTreeMap<vuec_ast::NodeId, usize>,
 }
 
 impl RenderScope {
@@ -14706,6 +14736,12 @@ impl RenderScope {
     fn with_v_once(&self) -> Self {
         let mut next = self.clone();
         next.in_v_once = true;
+        next
+    }
+
+    fn with_memo_index_override(&self, node_id: vuec_ast::NodeId, index: usize) -> Self {
+        let mut next = self.clone();
+        next.memo_index_overrides.insert(node_id, index);
         next
     }
 }
@@ -14769,7 +14805,14 @@ fn render_node_expr_scoped(
                 );
             }
             if directive_by_name(element, "if").is_some() {
-                return render_if_chain(ast, &[node_id], options, mode, scope, memo_index);
+                return render_maybe_once_if_chain(
+                    ast,
+                    &[node_id],
+                    options,
+                    mode,
+                    scope,
+                    memo_index,
+                );
             }
             if is_else_branch(element) {
                 return "null".into();
@@ -14780,6 +14823,13 @@ fn render_node_expr_scoped(
         }
         _ => "null".into(),
     }
+}
+
+fn render_with_v_once(rendered: String, index: usize) -> String {
+    format!(
+        "_cache[{index}] || (\n  _setBlockTracking(-1, true),\n  (_cache[{index}] = {}).cacheIndex = {index},\n  _setBlockTracking(1),\n  _cache[{index}]\n)",
+        indent_after_first_line(&rendered, 2)
+    )
 }
 
 fn render_plain_element(
@@ -14801,12 +14851,12 @@ fn render_plain_element(
             ast, node_id, element, options, mode, scope, branch_key, memo_index,
         );
     }
-    let helper = if mode == NodeRenderMode::Root {
+    let helper = if block_render_mode(mode) {
         "_createElementBlock"
     } else {
         "_createElementVNode"
     };
-    let element_scope = if directive_by_name(element, "once").is_some() {
+    let element_scope = if directive_by_name(element, "once").is_some() || scope.in_v_once {
         scope.with_v_once()
     } else {
         scope.clone()
@@ -14841,7 +14891,7 @@ fn render_plain_element(
         patch_flag.as_str(),
         dynamic_props_arg(element, options, &element_scope).as_str(),
     );
-    let rendered = if mode == NodeRenderMode::Root {
+    let rendered = if block_render_mode(mode) {
         format!("(_openBlock(), {}({}))", helper, args)
     } else {
         format!("{}({})", helper, args)
@@ -14860,20 +14910,62 @@ fn render_maybe_memo_element(
     memo_index: &mut MemoIndex,
 ) -> String {
     let Some(memo) = directive_by_name(element, "memo") else {
+        if directive_by_name(element, "once").is_some() && !scope.in_v_once {
+            let once_index = memo_index.alloc();
+            let scope = scope.with_v_once();
+            let rendered = render_plain_element(
+                ast,
+                node_id,
+                element,
+                options,
+                NodeRenderMode::OnceRoot,
+                &scope,
+                branch_key,
+                memo_index,
+            );
+            return render_with_v_once(rendered, once_index);
+        }
+        let scope = if scope.in_v_once {
+            scope.with_v_once()
+        } else {
+            scope.clone()
+        };
         return render_plain_element(
-            ast, node_id, element, options, mode, scope, branch_key, memo_index,
+            ast, node_id, element, options, mode, &scope, branch_key, memo_index,
         );
     };
+    let cache_index = scope
+        .memo_index_overrides
+        .get(&node_id)
+        .copied()
+        .unwrap_or_else(|| memo_index.alloc());
+    let once_index = (directive_by_name(element, "once").is_some() && !scope.in_v_once)
+        .then(|| memo_index.alloc());
     let memo_mode = if element.tag_type == Vue3ElementType::Component {
-        mode
+        if once_index.is_some() && matches!(mode, NodeRenderMode::Root) {
+            NodeRenderMode::OnceRoot
+        } else {
+            mode
+        }
+    } else if once_index.is_some() && matches!(mode, NodeRenderMode::Root) {
+        NodeRenderMode::OnceBlockRoot
     } else {
         NodeRenderMode::Root
     };
-    let cache_index = memo_index.alloc();
+    let scope = if once_index.is_some() || scope.in_v_once {
+        scope.with_v_once()
+    } else {
+        scope.clone()
+    };
     let rendered = render_plain_element(
-        ast, node_id, element, options, memo_mode, scope, branch_key, memo_index,
+        ast, node_id, element, options, memo_mode, &scope, branch_key, memo_index,
     );
-    render_with_memo(memo, rendered, options, scope, cache_index)
+    let rendered = render_with_memo(memo, rendered, options, &scope, cache_index);
+    if let Some(index) = once_index {
+        render_with_v_once(rendered, index)
+    } else {
+        rendered
+    }
 }
 
 fn render_with_memo(
@@ -15603,8 +15695,25 @@ fn render_element_children(
         .filter(|child| !matches!(child.kind, Vue3AstKind::Comment(_)))
         .collect::<Vec<_>>();
     if options.hoist_static
+        && once_children_mode(parent_mode)
+        && child_nodes.len() == 1
+        && child_nodes
+            .first()
+            .is_some_and(|child| is_static_element_for_cache(child))
+    {
+        let rendered = render_node_expr_scoped(
+            ast,
+            child_nodes[0].id,
+            options,
+            NodeRenderMode::Cached,
+            scope,
+            memo_index,
+        );
+        return render_array(&[render_cached_single_child(rendered, memo_index.alloc())]);
+    }
+    if options.hoist_static
         && options.stringify_static
-        && parent_mode == NodeRenderMode::Root
+        && root_like_render_mode(parent_mode)
         && !should_cache_children(&child_nodes)
         && should_stringify_static_children(&child_nodes)
     {
@@ -15613,7 +15722,7 @@ fn render_element_children(
         }
     }
     if options.hoist_static
-        && parent_mode == NodeRenderMode::Root
+        && root_like_render_mode(parent_mode)
         && should_cache_children(&child_nodes)
     {
         if options.stringify_static {
@@ -15648,7 +15757,7 @@ fn render_element_children(
             return render_cached_children_array(rendered, memo_index.alloc());
         }
     }
-    if options.hoist_static && options.stringify_static && parent_mode == NodeRenderMode::Root {
+    if options.hoist_static && options.stringify_static && root_like_render_mode(parent_mode) {
         if let Some(rendered) = render_static_vnode_chunked_children(
             ast,
             &child_nodes,
@@ -15680,7 +15789,7 @@ fn render_element_children(
         String::new()
     } else if rendered.len() == 1
         && child_nodes.first().is_some_and(|child| is_text_like(child))
-        && parent_mode != NodeRenderMode::Root
+        && !root_like_render_mode(parent_mode)
     {
         rendered.into_iter().next().unwrap()
     } else {
@@ -15693,6 +15802,10 @@ fn render_cached_children_array(rendered: Vec<String>, cache_index: usize) -> St
         "[...(_cache[{cache_index}] || (_cache[{cache_index}] = [{}]))]",
         rendered.join(", ")
     )
+}
+
+fn render_cached_single_child(rendered: String, cache_index: usize) -> String {
+    format!("_cache[{cache_index}] || (_cache[{cache_index}] = {rendered})")
 }
 
 fn render_child_sequence(
@@ -15755,7 +15868,7 @@ fn render_child_sequence(
                     }
                     break;
                 }
-                rendered.push(render_if_chain(
+                rendered.push(render_maybe_once_if_chain(
                     ast,
                     &branch_ids,
                     options,
@@ -15884,6 +15997,46 @@ fn render_if_chain(
     render_branch(ast, branch_ids, 0, options, mode, scope, memo_index)
 }
 
+fn render_maybe_once_if_chain(
+    ast: &Vue3Ast,
+    branch_ids: &[vuec_ast::NodeId],
+    options: &Vue3CompilerOptions,
+    mode: NodeRenderMode,
+    scope: &RenderScope,
+    memo_index: &mut MemoIndex,
+) -> String {
+    if scope.in_v_once {
+        return render_if_chain(ast, branch_ids, options, mode, scope, memo_index);
+    }
+    let Some(first_element) = branch_ids
+        .first()
+        .and_then(|branch_id| ast.node(*branch_id))
+        .and_then(|node| match &node.kind {
+            Vue3AstKind::Element(element) => Some(element),
+            _ => None,
+        })
+    else {
+        return render_if_chain(ast, branch_ids, options, mode, scope, memo_index);
+    };
+    if directive_by_name(first_element, "once").is_none() {
+        return render_if_chain(ast, branch_ids, options, mode, scope, memo_index);
+    }
+    let (once_index, scoped) = if directive_by_name(first_element, "memo").is_some() {
+        let memo_slot = memo_index.alloc();
+        let once_slot = memo_index.alloc();
+        (
+            once_slot,
+            scope
+                .with_v_once()
+                .with_memo_index_override(branch_ids[0], memo_slot),
+        )
+    } else {
+        (memo_index.alloc(), scope.with_v_once())
+    };
+    let rendered = render_if_chain(ast, branch_ids, options, mode, &scoped, memo_index);
+    render_with_v_once(rendered, once_index)
+}
+
 fn render_if_branch_expr(
     ast: &Vue3Ast,
     node_id: vuec_ast::NodeId,
@@ -15944,45 +16097,39 @@ fn render_for_node(
     _memo_index: &mut MemoIndex,
 ) -> String {
     let Some(expression) = directive.exp.as_ref().map(Vue3Expression::source_string) else {
-        return render_plain_element(
-            ast,
-            node_id,
-            element,
-            options,
-            NodeRenderMode::Root,
-            scope,
-            None,
-            _memo_index,
-        );
+        return render_once_plain_fallback(ast, node_id, element, options, scope, _memo_index);
     };
     let parsed = parse_v_for_expression(&expression);
     let Some((source, aliases)) = parsed else {
-        return render_plain_element(
-            ast,
-            node_id,
-            element,
-            options,
-            NodeRenderMode::Root,
-            scope,
-            None,
-            _memo_index,
-        );
+        return render_once_plain_fallback(ast, node_id, element, options, scope, _memo_index);
     };
     let source = rewrite_expression_with_scope(&source, options, scope);
     let scoped = scope.with_locals(normalize_v_for_aliases(&aliases));
+    let should_wrap_once = directive_by_name(element, "once").is_some() && !scope.in_v_once;
+    let once_index = (should_wrap_once && directive_by_name(element, "memo").is_none())
+        .then(|| _memo_index.alloc());
+    let scoped = if directive_by_name(element, "once").is_some() && !scope.in_v_once {
+        scoped.with_v_once()
+    } else {
+        scoped
+    };
     let params = aliases.join(", ");
     let Some(memo) = directive_by_name(element, "memo") else {
         let body = render_v_for_body(ast, node_id, element, options, &scoped, _memo_index);
         let fragment_flag = v_for_fragment_patch_flag(element);
         let body = indent_after_first_line(&body, 2);
-        return format!(
+        let rendered = format!(
             "(_openBlock(true), _createElementBlock(_Fragment, null, _renderList({source}, ({params}) => {{\n  return {body}\n}}), {fragment_flag}))"
         );
+        return once_index.map_or(rendered.clone(), |index| {
+            render_with_v_once(rendered, index)
+        });
     };
     let cache_index = _memo_index.alloc();
     // Vue's transformMemo reserves a cache slot for v-for memo wrappers even
     // though the emitted render-list memo path only references cache_index.
     _memo_index.reserve();
+    let once_index = should_wrap_once.then(|| _memo_index.alloc());
     let body = render_v_for_body(ast, node_id, element, options, &scoped, _memo_index);
     let params = format!("{params}, __, ___, _cached");
     let memo_expression = memo
@@ -15999,9 +16146,48 @@ fn render_for_node(
         },
     );
     let body = indent_after_first_line(&body, 2);
-    format!(
+    let rendered = format!(
         "(_openBlock(true), _createElementBlock(_Fragment, null, _renderList({source}, ({params}) => {{\n  const _memo = ({memo_expression})\n  if ({guard}) return _cached\n  const _item = {body}\n  _item.memo = _memo\n  return _item\n}}, _cache, {cache_index}), 128 /* KEYED_FRAGMENT */))"
-    )
+    );
+    once_index.map_or(rendered.clone(), |index| {
+        render_with_v_once(rendered, index)
+    })
+}
+
+fn render_once_plain_fallback(
+    ast: &Vue3Ast,
+    node_id: vuec_ast::NodeId,
+    element: &Vue3Element,
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+    memo_index: &mut MemoIndex,
+) -> String {
+    if directive_by_name(element, "once").is_some() && !scope.in_v_once {
+        let once_index = memo_index.alloc();
+        let scope = scope.with_v_once();
+        let rendered = render_plain_element(
+            ast,
+            node_id,
+            element,
+            options,
+            NodeRenderMode::OnceRoot,
+            &scope,
+            None,
+            memo_index,
+        );
+        render_with_v_once(rendered, once_index)
+    } else {
+        render_plain_element(
+            ast,
+            node_id,
+            element,
+            options,
+            NodeRenderMode::Root,
+            scope,
+            None,
+            memo_index,
+        )
+    }
 }
 
 fn render_v_for_body(
@@ -24231,6 +24417,126 @@ mod tests {
         assert!(result.code.contains("onClick: _ctx.once"));
         assert!(result.code.contains("16 /* FULL_PROPS */"));
         assert!(result.code.contains("8 /* PROPS */, [\"onClick\"]"));
+    }
+
+    #[test]
+    fn base_compile_wraps_v_once_nodes_with_block_tracking_cache() {
+        let result = base_compile(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: r#"<div><p v-once @click="foo"><span>hello</span></p></div>"#.into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                cache_handlers: true,
+                hoist_static: true,
+                mode: "module".into(),
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(result
+            .code
+            .contains("setBlockTracking as _setBlockTracking"));
+        assert!(result.code.contains("_cache[0] || ("));
+        assert!(result.code.contains("_setBlockTracking(-1, true)"));
+        assert!(result
+            .code
+            .contains("(_cache[0] = _createElementVNode(\"p\", {"));
+        assert!(result.code.contains("onClick: _ctx.foo"));
+        assert!(result.code.contains(")).cacheIndex = 0"));
+        assert!(result.code.contains("_setBlockTracking(1)"));
+        assert!(result.code.contains(
+            "_cache[1] || (_cache[1] = _createElementVNode(\"span\", null, \"hello\", -1 /* CACHED */))"
+        ));
+        assert!(!result.code.contains("_cache[0] = (...args)"));
+    }
+
+    #[test]
+    fn base_compile_keeps_v_once_memo_static_cache_indexes_distinct() {
+        let result = base_compile(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: r#"<section v-memo="[x]" v-once><span>hello</span></section>"#.into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                cache_handlers: true,
+                hoist_static: true,
+                mode: "module".into(),
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(result.code.contains("return _cache[1] || ("));
+        assert!(result
+            .code
+            .contains("_withMemo([_ctx.x], () => (_openBlock(), _createElementBlock(\"section\""));
+        assert!(result.code.contains(", _cache, 0)"));
+        assert!(result.code.contains("(_cache[1] = _withMemo"));
+        assert!(result.code.contains(
+            "_cache[2] || (_cache[2] = _createElementVNode(\"span\", null, \"hello\", -1 /* CACHED */))"
+        ));
+        assert!(!result.code.contains("_cache[0] || ("));
+    }
+
+    #[test]
+    fn base_compile_wraps_v_for_v_once_around_fragment() {
+        let result = base_compile(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: r#"<div><p v-for="item in list" v-once>{{ item }}</p></div>"#.into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                cache_handlers: true,
+                hoist_static: true,
+                mode: "module".into(),
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(result.code.contains("_cache[0] || ("));
+        assert!(result
+            .code
+            .contains("(_cache[0] = (_openBlock(true), _createElementBlock(_Fragment"));
+        assert!(result.code.contains("_renderList(_ctx.list, (item) => {"));
+        assert!(result.code.contains(")).cacheIndex = 0"));
+    }
+
+    #[test]
+    fn base_compile_wraps_v_if_v_once_around_chain() {
+        let result = base_compile(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: r#"<div><p v-if="ok" v-once>{{ msg }}</p><p v-else>no</p></div>"#.into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                cache_handlers: true,
+                hoist_static: true,
+                mode: "module".into(),
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(result.code.contains("_cache[0] || ("));
+        assert!(result.code.contains("(_cache[0] = (_ctx.ok)"));
+        assert!(result
+            .code
+            .contains("? (_openBlock(), _createElementBlock(\"p\", { key: 0 }"));
+        assert!(result
+            .code
+            .contains(": (_openBlock(), _createElementBlock(\"p\", { key: 1 }"));
+        assert!(result.code.contains(")).cacheIndex = 0"));
     }
 
     #[test]
