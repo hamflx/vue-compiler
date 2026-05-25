@@ -610,6 +610,31 @@ mod tests {
     }
 
     #[test]
+    fn compile_caches_static_children_with_asset_url_imports() {
+        let mut options = DomCompilerOptions::default();
+        options.core.mode = "module".into();
+        options.core.prefix_identifiers = true;
+        options.core.hoist_static = true;
+        let result = compile(
+            TemplateSource {
+                filename: "x.vue".into(),
+                source: r#"<div><img src="./bar.png"><span title="static">ok</span></div>"#.into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            options,
+        );
+
+        assert!(result.code.contains("import _imports_0 from './bar.png'"));
+        assert!(result.code.contains("_cache[0] || (_cache[0] = ["));
+        assert!(result.code.contains("src: _imports_0"));
+        assert!(result.code.contains("-1"));
+        assert!(!result.code.contains("_ctx._imports_0"));
+        assert!(!result.code.contains("8 /* PROPS */"));
+        assert!(!result.code.contains("[\"src\"]"));
+    }
+
+    #[test]
     fn compile_transforms_srcset_imports_in_module_mode() {
         let mut options = DomCompilerOptions::default();
         options.core.mode = "module".into();

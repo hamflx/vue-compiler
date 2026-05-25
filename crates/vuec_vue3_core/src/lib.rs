@@ -16137,9 +16137,7 @@ fn is_static_element_for_cache(node: &vuec_ast::Node<Vue3NodeKind>) -> bool {
     matches!(
         &node.kind,
         Vue3AstKind::Element(element) if element.tag != "slot"
-            && element.props.iter().all(|prop| {
-                matches!(prop, Vue3Prop::Attribute(_))
-            })
+            && element.props.iter().all(vue3_prop_is_stringifiable_static)
     )
 }
 
@@ -16174,10 +16172,7 @@ fn vue3_dom_mir_can_hoist_static_node(ast: &Vue3Ast, node_id: NodeId) -> bool {
     };
     if element.tag == "slot"
         || element.tag_type != Vue3ElementType::Element
-        || !element
-            .props
-            .iter()
-            .all(|prop| matches!(prop, Vue3Prop::Attribute(_)))
+        || !element.props.iter().all(vue3_prop_is_stringifiable_static)
     {
         return false;
     }
@@ -16531,8 +16526,17 @@ fn has_key_bind_dir(dir: &Vue3Directive) -> bool {
         .is_some_and(|arg| arg.source_string() == "key")
 }
 
+fn vue3_prop_is_stringifiable_static(prop: &Vue3Prop) -> bool {
+    match prop {
+        Vue3Prop::Attribute(_) => true,
+        Vue3Prop::Directive(dir) => is_asset_import_binding(dir),
+    }
+}
+
 fn is_asset_import_binding(dir: &Vue3Directive) -> bool {
     dir.name == "bind"
+        && !dir.is_dynamic_arg
+        && dir.arg.is_some()
         && dir
             .exp
             .as_ref()
@@ -19911,6 +19915,72 @@ mod tests {
             .unwrap();
         assert_eq!(img.dynamic_props, Vec::<String>::new());
         assert_eq!(img.patch_flag.bits, 0);
+    }
+
+    #[test]
+    fn lower_vue3_ast_to_dom_mir_hoists_static_asset_import_bindings() {
+        let mut ast = Vue3Dialect::base_parse(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: r#"<div><img :src="_imports_0" /><span :id="dynamic"></span></div>"#.into(),
+                file_id: FileId(26),
+                base_offset: 0,
+            },
+            &Vue3CompilerOptions::default(),
+        );
+        if let Some(root_node) = ast.root_node_mut() {
+            if let Vue3AstKind::Root(root) = &mut root_node.kind {
+                root.imports.push(vuec_ast::Vue3ImportItem {
+                    name: "_imports_0".into(),
+                    path: "./logo.png".into(),
+                });
+            }
+        }
+
+        let result = lower_vue3_ast_to_dom_mir(
+            &ast,
+            &Vue3CompilerOptions {
+                hoist_static: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        let hoists = result
+            .mir
+            .nodes
+            .iter()
+            .filter_map(|node| match node.kind {
+                Vue3DomMirKind::Hoisted { index } => Some((node.id, index)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(hoists.len(), 1);
+        assert_eq!(hoists[0].1, 1);
+        assert_eq!(
+            result.mir.node(hoists[0].0).map(|node| node.children.len()),
+            Some(1)
+        );
+
+        let generated = generate_vue3_dom_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                hoist_static: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated
+            .code
+            .contains("import _imports_0 from './logo.png'"));
+        assert!(generated
+            .code
+            .contains("const _hoisted_1 = _createElementVNode(\"img\", { src: _imports_0 })"));
+        assert!(generated.code.contains("_hoisted_1"));
+        assert!(generated.code.contains("id: _ctx.dynamic"));
+        assert!(!generated.code.contains("_ctx._imports_0"));
     }
 
     #[test]
