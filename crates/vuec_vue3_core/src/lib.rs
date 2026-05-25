@@ -15543,7 +15543,7 @@ fn render_element_children(
         && !should_cache_children(&child_nodes)
         && should_stringify_static_children(&child_nodes)
     {
-        if let Some(static_call) = render_static_vnode_cache(ast, &child_nodes) {
+        if let Some(static_call) = render_static_vnode_cache(ast, &child_nodes, options) {
             return format!("[...(_cache[0] || (_cache[0] = [{static_call}]))]");
         }
     }
@@ -15552,7 +15552,7 @@ fn render_element_children(
         && should_cache_children(&child_nodes)
     {
         if options.stringify_static {
-            if let Some(static_call) = render_static_vnode_cache(ast, &child_nodes) {
+            if let Some(static_call) = render_static_vnode_cache(ast, &child_nodes, options) {
                 return format!("[...(_cache[0] || (_cache[0] = [{static_call}]))]");
             }
         }
@@ -16201,8 +16201,9 @@ struct StaticHtmlAnalysis {
 fn render_static_vnode_cache(
     ast: &Vue3Ast,
     children: &[&vuec_ast::Node<Vue3NodeKind>],
+    options: &Vue3CompilerOptions,
 ) -> Option<String> {
-    let analysis = analyze_static_html_chunk(ast, children)?;
+    let analysis = analyze_static_html_chunk(ast, children, options)?;
     if analysis.node_count >= STRINGIFY_STATIC_NODE_COUNT
         || analysis.element_with_binding_count >= STRINGIFY_STATIC_ELEMENT_WITH_BINDING_COUNT
     {
@@ -16219,6 +16220,7 @@ fn render_static_vnode_cache(
 fn analyze_static_html_chunk(
     ast: &Vue3Ast,
     children: &[&vuec_ast::Node<Vue3NodeKind>],
+    options: &Vue3CompilerOptions,
 ) -> Option<StaticHtmlAnalysis> {
     if children.is_empty() {
         return None;
@@ -16230,15 +16232,21 @@ fn analyze_static_html_chunk(
         element_with_binding_count: 0,
     };
     for child in children {
-        analysis.html.push_str(&static_html_for_node(ast, child)?);
+        analysis
+            .html
+            .push_str(&static_html_for_node(ast, child, options)?);
     }
     accumulate_static_html_analysis(ast, children, &mut analysis)?;
     Some(analysis)
 }
 
-fn static_html_for_node(ast: &Vue3Ast, node: &vuec_ast::Node<Vue3NodeKind>) -> Option<String> {
+fn static_html_for_node(
+    ast: &Vue3Ast,
+    node: &vuec_ast::Node<Vue3NodeKind>,
+    options: &Vue3CompilerOptions,
+) -> Option<String> {
     match &node.kind {
-        Vue3AstKind::Element(element) => static_html_for_element(ast, node, element),
+        Vue3AstKind::Element(element) => static_html_for_element(ast, node, element, options),
         Vue3AstKind::Text(text) => Some(escape_static_html_text(&text.value)),
         Vue3AstKind::Interpolation(interpolation) => {
             let value = static_const_eval_source(&interpolation.expression.source_string())?;
@@ -16252,6 +16260,7 @@ fn static_html_for_element(
     ast: &Vue3Ast,
     node: &vuec_ast::Node<Vue3NodeKind>,
     element: &Vue3Element,
+    options: &Vue3CompilerOptions,
 ) -> Option<String> {
     if element.tag == "slot"
         || element.tag_type != Vue3ElementType::Element
@@ -16306,6 +16315,14 @@ fn static_html_for_element(
             }
         }
     }
+    if let Some(scope_id) = options
+        .scope_id
+        .as_deref()
+        .filter(|scope_id| !scope_id.is_empty())
+    {
+        html.push(' ');
+        html.push_str(scope_id);
+    }
     html.push('>');
 
     if element.ns != vuec_ast::HtmlNamespace::Html || !static_html_is_void_tag(&element.tag) {
@@ -16314,7 +16331,7 @@ fn static_html_for_element(
         } else {
             for child_id in &node.children {
                 let child = ast.node(*child_id)?;
-                html.push_str(&static_html_for_node(ast, child)?);
+                html.push_str(&static_html_for_node(ast, child, options)?);
             }
         }
         html.push_str("</");
@@ -23805,6 +23822,34 @@ mod tests {
             .contains(r#"<span title=\"foo&gt;bar\">&amp; &lt;</span>"#));
         assert!(result.code.contains(r#"<img title=\"foo&gt;bar\">"#));
         assert!(!result.code.contains("</img>"));
+    }
+
+    #[test]
+    fn base_compile_stringifies_static_html_with_scope_id() {
+        let result = base_compile(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: format!(
+                    "<div>{}</div>",
+                    r#"<span class="foo"><i>ok</i></span>"#.repeat(5)
+                ),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                mode: "module".into(),
+                hoist_static: true,
+                stringify_static: true,
+                scope_id: Some("data-v-test".into()),
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(result.code.contains("_createStaticVNode"));
+        assert!(result
+            .code
+            .contains(r#"<span class=\"foo\" data-v-test><i data-v-test>ok</i></span>"#));
     }
 
     #[test]

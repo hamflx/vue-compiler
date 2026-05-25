@@ -682,6 +682,33 @@ mod tests {
     }
 
     #[test]
+    fn compile_stringifies_static_children_with_scope_id() {
+        let mut options = DomCompilerOptions::default();
+        options.core.prefix_identifiers = true;
+        options.core.mode = "module".into();
+        options.core.hoist_static = true;
+        options.core.stringify_static = true;
+        options.core.scope_id = Some("data-v-test".into());
+        let result = compile(
+            TemplateSource {
+                filename: "x.vue".into(),
+                source: format!(
+                    r#"<div><div :style="`color:red;`">{}</div></div>"#,
+                    r#"<span class="foo">ok</span>"#.repeat(5)
+                ),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            options,
+        );
+
+        assert!(result.code.contains("_createStaticVNode"));
+        assert!(result.code.contains(
+            r#"<div style=\"color:red;\" data-vuec-dom=\"v-bind:\" data-v-test><span class=\"foo\" data-v-test>ok</span>"#
+        ));
+    }
+
+    #[test]
     fn compile_stringifies_static_svg_namespace_children_by_default() {
         let mut options = DomCompilerOptions::default();
         options.core.prefix_identifiers = true;
