@@ -2400,6 +2400,15 @@ fn vue3_options(value: Option<&Value>) -> Vue3CompilerOptions {
         "hoistStatic",
         bool_option(value, "hoist_static", options.hoist_static),
     );
+    options.stringify_static = bool_option(
+        value,
+        "stringifyStatic",
+        bool_option(
+            value,
+            "__vuecStringifyStatic",
+            bool_option(value, "stringify_static", options.stringify_static),
+        ),
+    );
     options.cache_handlers = bool_option(
         value,
         "cacheHandlers",
@@ -2798,6 +2807,26 @@ mod tests {
         .expect("dom parse");
 
         assert_eq!(parsed["imports"], json!([]));
+    }
+
+    #[test]
+    fn vue3_dom_bridge_stringifies_static_children_from_sentinel_option() {
+        let compiled = dispatch(
+            "vue3.dom.compile",
+            json!({
+                "source": format!("<div>{}</div>", r#"<span class="foo"/>"#.repeat(5)),
+                "options": {
+                    "prefixIdentifiers": true,
+                    "hoistStatic": true,
+                    "__vuecStringifyStatic": true
+                }
+            }),
+        )
+        .expect("dom compile");
+
+        let code = compiled["code"].as_str().unwrap_or("");
+        assert!(code.contains("createStaticVNode"));
+        assert!(code.contains("_createStaticVNode(\"<span class=\\\"foo\\\"></span><span class=\\\"foo\\\"></span><span class=\\\"foo\\\"></span><span class=\\\"foo\\\"></span><span class=\\\"foo\\\"></span>\", 5)"));
     }
 
     #[test]

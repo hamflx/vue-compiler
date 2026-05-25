@@ -635,6 +635,26 @@ mod tests {
     }
 
     #[test]
+    fn compile_stringifies_static_children_when_transform_hoist_requested() {
+        let mut options = DomCompilerOptions::default();
+        options.core.prefix_identifiers = true;
+        options.core.hoist_static = true;
+        options.core.stringify_static = true;
+        let result = compile(
+            TemplateSource {
+                filename: "x.vue".into(),
+                source: format!("<div>{}</div>", r#"<span class="foo"/>"#.repeat(5)),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            options,
+        );
+
+        assert!(result.code.contains("createStaticVNode"));
+        assert!(result.code.contains("_createStaticVNode(\"<span class=\\\"foo\\\"></span><span class=\\\"foo\\\"></span><span class=\\\"foo\\\"></span><span class=\\\"foo\\\"></span><span class=\\\"foo\\\"></span>\", 5)"));
+    }
+
+    #[test]
     fn compile_transforms_srcset_imports_in_module_mode() {
         let mut options = DomCompilerOptions::default();
         options.core.mode = "module".into();

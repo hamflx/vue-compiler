@@ -6902,6 +6902,7 @@ function normalizeVue3OptionsForBridge(options, source) {
   }
   normalized.__vuecCustomElements = collectVuePredicateHits(options.isCustomElement, tags);
   normalized.__vuecBuiltInComponents = collectVuePredicateHits(options.isBuiltInComponent, tags);
+  normalized.__vuecStringifyStatic = typeof options.transformHoist === 'function';
   return normalized;
 }
 
@@ -10535,6 +10536,13 @@ mod tests {
         assert!(v_model.contains("__vuecRuntime"));
         assert!(v_model.contains("transformModel"));
         let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn vue3_alias_runtime_projects_transform_hoist_to_rust_stringify_option() {
+        assert!(ALIAS_RUNTIME_JS.contains(
+            "normalized.__vuecStringifyStatic = typeof options.transformHoist === 'function';"
+        ));
     }
 
     #[test]
