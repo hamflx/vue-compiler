@@ -68,6 +68,8 @@ pub struct Vue3CompilerOptions {
     pub inline: bool,
     pub ssr: bool,
     pub optimize_imports: bool,
+    pub source_map_source: Option<String>,
+    pub source_map_base_offset: usize,
 }
 
 impl Default for Vue3CompilerOptions {
@@ -102,6 +104,8 @@ impl Default for Vue3CompilerOptions {
             inline: false,
             ssr: false,
             optimize_imports: false,
+            source_map_source: None,
+            source_map_base_offset: 0,
         }
     }
 }
@@ -14272,7 +14276,7 @@ fn helper_name(helper: RuntimeHelper) -> &'static str {
     }
 }
 
-fn source_map_for_render(
+pub fn source_map_for_render(
     code: &str,
     ast: &Vue3Ast,
     source: &TemplateSource,
@@ -14286,12 +14290,21 @@ fn source_map_for_render(
     };
     let mut names = Vec::new();
     let mut segments = Vec::new();
+    let source_map_source = options
+        .source_map_source
+        .as_deref()
+        .unwrap_or(&source.source);
+    let source_map_base_offset = if options.source_map_source.is_some() {
+        options.source_map_base_offset
+    } else {
+        source.base_offset
+    };
     collect_source_map_segments(
         code,
         ast,
         &root.children,
-        source.base_offset,
-        &source.source,
+        source_map_base_offset,
+        source_map_source,
         options,
         &mut names,
         &mut segments,
@@ -14320,7 +14333,7 @@ fn source_map_for_render(
     Some(SourceMapArtifact::from_segments(
         None,
         source_name,
-        source.source.clone(),
+        source_map_source.to_string(),
         names,
         segments,
     ))

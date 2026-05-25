@@ -6903,7 +6903,10 @@ function vue3CompileBridgePayload(input, filename, options) {
       filename,
       options,
       ast: vue3CoreRuntime.dehydrateForBridge(input),
-      bridgeOptions: normalizeVue3OptionsForBridge(options, normalizedSource),
+      bridgeOptions: Object.assign(
+        normalizeVue3OptionsForBridge(options, normalizedSource),
+        { __vuecSourceMapSource: source, __vuecSourceMapBaseOffset: 0 },
+      ),
     };
   }
   return vue3BridgePayload(input && input.source ? input.source : input, filename, options);

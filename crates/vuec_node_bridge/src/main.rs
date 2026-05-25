@@ -2647,6 +2647,14 @@ fn vue3_options(value: Option<&Value>) -> Vue3CompilerOptions {
         "sourceMap",
         bool_option(value, "source_map", options.source_map),
     );
+    options.source_map_source = value
+        .get("__vuecSourceMapSource")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    options.source_map_base_offset = value
+        .get("__vuecSourceMapBaseOffset")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
     options.comments = bool_option(value, "comments", options.comments);
     if let Some(mode) = value.get("mode").and_then(Value::as_str) {
         options.mode = mode.to_string();
@@ -2991,7 +2999,9 @@ mod tests {
                 "options": {
                     "mode": "module",
                     "prefixIdentifiers": true,
-                    "sourceMap": true
+                    "sourceMap": true,
+                    "__vuecSourceMapSource": source,
+                    "__vuecSourceMapBaseOffset": 0
                 }
             }),
         )
@@ -3004,7 +3014,8 @@ mod tests {
             .unwrap_or(&Vec::new())
             .iter()
             .any(|diagnostic| diagnostic.as_str().unwrap_or("").contains("side effect")));
-        assert_eq!(compiled["map"]["sourcesContent"][0], "<div>{{ msg }}</div>");
+        assert_eq!(compiled["map"]["sourcesContent"][0], source);
+        assert!(compiled["map"]["mappings"].as_str().unwrap_or("").len() > 4);
     }
 
     #[test]
@@ -3030,7 +3041,10 @@ mod tests {
                 },
                 "options": {
                     "mode": "module",
-                    "prefixIdentifiers": true
+                    "prefixIdentifiers": true,
+                    "sourceMap": true,
+                    "__vuecSourceMapSource": source,
+                    "__vuecSourceMapBaseOffset": 0
                 }
             }),
         )
@@ -3039,6 +3053,9 @@ mod tests {
         let code = compiled["code"].as_str().unwrap_or("");
         assert!(code.contains("_ssrInterpolate(msg)"));
         assert!(!code.contains("boom"));
+        assert_eq!(compiled["map"]["sources"], json!(["anonymous.vue"]));
+        assert_eq!(compiled["map"]["sourcesContent"][0], source);
+        assert!(compiled["map"]["mappings"].as_str().unwrap_or("").len() > 4);
     }
 
     #[test]

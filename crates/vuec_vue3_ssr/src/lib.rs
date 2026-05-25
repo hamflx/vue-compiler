@@ -6,8 +6,8 @@ use vuec_codegen::CodeWriter;
 use vuec_vue3_asset::transform_asset_url_props;
 pub use vuec_vue3_asset::AssetUrlOptions;
 use vuec_vue3_core::{
-    generate_vue3_ssr_mir, lower_vue3_ast_to_ssr_mir, CodegenResult, TemplateSource,
-    Vue3CompilerOptions, Vue3Dialect,
+    generate_vue3_ssr_mir, lower_vue3_ast_to_ssr_mir, source_map_for_render, CodegenResult,
+    TemplateSource, Vue3CompilerOptions, Vue3Dialect,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,7 +51,7 @@ pub struct SsrCompileResult {
 }
 
 pub fn compile(source: TemplateSource, options: SsrCompilerOptions) -> SsrCompileResult {
-    let mut ast = Vue3Dialect::base_parse(source, &options.core);
+    let mut ast = Vue3Dialect::base_parse(source.clone(), &options.core);
     if options.transform_asset_urls {
         transform_ssr_asset_urls(&mut ast, &options);
     }
@@ -98,9 +98,15 @@ pub fn compile(source: TemplateSource, options: SsrCompilerOptions) -> SsrCompil
     }
     writer.dedent();
     writer.push_line("}");
+    let code = writer.finish();
+    let map = options
+        .core
+        .source_map
+        .then(|| source_map_for_render(&code, &ast, &source, &options.core))
+        .flatten();
     SsrCompileResult {
-        code: writer.finish(),
-        map: None,
+        code,
+        map,
         ast_summary: format!(
             "ssr:elements={},interpolations={},components={},slots={},teleports={},suspenses={}",
             summary.elements,
