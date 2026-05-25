@@ -1,5 +1,10 @@
 # Memory
 
+- Current round: added Vue 3 SSR MIR `v-html` / `v-text` content override payload and standalone codegen consumption.
+- `Vue3SsrMirKind::RenderContent(Vue3SsrContent)` now stores native SSR children override target data. `Html { expression }` renders raw `expression ?? ""`; `Text { expression }` renders `_ssrInterpolate(expression)`. SSR lowering skips original children for these directives and expands self-closing elements into open/content/close MIR output.
+- This is structural SSR MIR lowering/codegen work only. It does not touch `xtask/src/compat.rs` and does not change the legacy official `compile_ssr` path.
+- Verification for this SSR MIR content override slice: focused `cargo test -p vuec_vue3_core content_override`, focused `cargo test -p vuec_vue3_core lower_vue3_ast_to_ssr_mir`, focused `cargo test -p vuec_vue3_core generate_vue3_ssr_mir`, `cargo fmt --all --check`, `git diff --check`, `cargo check -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo xtask run-conformance --suite vue3-core` (`652/652`), and `cargo xtask run-conformance --suite vue3-ssr` (`129/129`, existing mixed official path, not counted as standalone MIR completion by itself).
+
 - Current round: added Vue 3 SSR MIR `v-model` target payload and standalone codegen consumption.
 - `Vue3SsrAttrs` now carries `v_model: Option<Vue3SsrModel>`. The payload covers input value/radio/checkbox/dynamic type/object `v-bind`, textarea interpolation replacement, and select descendant option `selected` fragments. `MirExpr::Null` is now available for SSR model value fallback such as checkbox/dynamic-type inputs with no explicit value.
 - SSR lowering records native `v-model` expression/value/type/true-value data into `Vue3SsrMir` and threads select model context to descendant `option` nodes, including options under `v-for`; standalone `generate_vue3_ssr_mir` consumes only SSR MIR + `JsAstStore` to emit `_ssrRenderAttr`, `_ssrIncludeBooleanAttr`, `_ssrLooseEqual`, `_ssrLooseContain`, `_ssrRenderDynamicModel`, and `_ssrGetDynamicModelProps` based output.

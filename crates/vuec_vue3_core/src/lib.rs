@@ -15,8 +15,8 @@ use vuec_ast::{
     Vue3DomMirKind, Vue3DomObjectBinding, Vue3DomObjectListeners, Vue3DomPropSegment, Vue3DomProps,
     Vue3DomPropsNormalize, Vue3DomSlotName, Vue3DomStaticAttr, Vue3DomTag, Vue3Element,
     Vue3ElementType, Vue3Expression, Vue3ForMemo, Vue3ForMir, Vue3NodeKind, Vue3PatchFlags,
-    Vue3Prop, Vue3Root, Vue3SlotFlag, Vue3SsrAttrs, Vue3SsrComponent, Vue3SsrFor, Vue3SsrMir,
-    Vue3SsrMirKind, Vue3SsrModel, Vue3SsrModelKind, Vue3SsrSuspense, Vue3SsrTeleport,
+    Vue3Prop, Vue3Root, Vue3SlotFlag, Vue3SsrAttrs, Vue3SsrComponent, Vue3SsrContent, Vue3SsrFor,
+    Vue3SsrMir, Vue3SsrMirKind, Vue3SsrModel, Vue3SsrModelKind, Vue3SsrSuspense, Vue3SsrTeleport,
     Vue3VNodeCall,
 };
 use vuec_codegen::{CodeWriter, SourceMapArtifact, SourceMapSegment};
@@ -3348,6 +3348,12 @@ fn lower_vue3_native_element_to_ssr_mir(
         None
     };
     let v_model = lower_vue3_ssr_v_model(element, ast_node, state);
+    let content = lower_vue3_ssr_content(element, ast_node, state);
+    let has_content_override = content.is_some()
+        || matches!(
+            v_model.as_ref().map(|model| &model.kind),
+            Some(Vue3SsrModelKind::Textarea)
+        );
     let open_id = state.mir.push_child(
         mir_parent,
         Vue3SsrMirKind::PushString(vue3_ssr_open_tag_start(
@@ -3370,19 +3376,33 @@ fn lower_vue3_native_element_to_ssr_mir(
 
     let close_open_id = state.mir.push_child(
         mir_parent,
-        Vue3SsrMirKind::PushString(if element.self_closing { "/>" } else { ">" }.into()),
+        Vue3SsrMirKind::PushString(
+            if element.self_closing && !has_content_override {
+                "/>"
+            } else {
+                ">"
+            }
+            .into(),
+        ),
         generated_span.clone(),
     );
     state.map.record_hir_to_mir(hir_id, close_open_id);
 
-    if element.self_closing {
+    if element.self_closing && !has_content_override {
         return;
     }
 
     if let Some(model) = select_model {
         state.select_model_stack.push(model);
     }
-    if let Some(expression) = v_model
+    if let Some(content) = content {
+        let content_id = state.mir.push_child(
+            mir_parent,
+            Vue3SsrMirKind::RenderContent(content),
+            generated_span.clone(),
+        );
+        state.map.record_hir_to_mir(hir_id, content_id);
+    } else if let Some(expression) = v_model
         .as_ref()
         .filter(|model| matches!(model.kind, Vue3SsrModelKind::Textarea))
         .map(|model| model.expression)
@@ -3562,6 +3582,37 @@ fn lower_vue3_ssr_v_model(
         _ => None,
     }?;
     Some(Vue3SsrModel { expression, kind })
+}
+
+fn lower_vue3_ssr_content(
+    element: &Vue3Element,
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    state: &mut Vue3SsrLoweringState,
+) -> Option<Vue3SsrContent> {
+    if let Some(expression) = vue3_ssr_directive_expression(element, "html", ast_node, state) {
+        return Some(Vue3SsrContent::Html { expression });
+    }
+    vue3_ssr_directive_expression(element, "text", ast_node, state)
+        .map(|expression| Vue3SsrContent::Text { expression })
+}
+
+fn vue3_ssr_directive_expression(
+    element: &Vue3Element,
+    name: &str,
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    state: &mut Vue3SsrLoweringState,
+) -> Option<JsExprId> {
+    let directive = directive_by_name(element, name)?;
+    let expression = directive.exp.as_ref()?;
+    if expression.source_string().trim().is_empty() {
+        return None;
+    }
+    Some(register_or_reuse_vue3_expression_with_span(
+        &mut state.js,
+        expression,
+        directive.exp_span.or_else(|| ast_node.span.source()),
+        state.source_type,
+    ))
 }
 
 fn vue3_ssr_v_model_expression(
@@ -11635,6 +11686,10 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                 Vue3SsrMirKind::PushInterpolated(_) => {
                     push_unique_helper(&mut helpers, RuntimeHelper::Vue3SsrInterpolate);
                 }
+                Vue3SsrMirKind::RenderContent(Vue3SsrContent::Text { .. }) => {
+                    push_unique_helper(&mut helpers, RuntimeHelper::Vue3SsrInterpolate);
+                }
+                Vue3SsrMirKind::RenderContent(Vue3SsrContent::Html { .. }) => {}
                 Vue3SsrMirKind::RenderAttrs(attrs) => {
                     self.push_ssr_attr_helpers(attrs, &mut helpers);
                     if attrs.v_show.is_some() && !ssr_attrs_has_object_binding(&attrs.props) {
@@ -11821,6 +11876,9 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                     self.render_mir_expr(expr, scope)
                 ));
             }
+            Vue3SsrMirKind::RenderContent(content) => {
+                self.render_content(content, scope, writer);
+            }
             Vue3SsrMirKind::RenderAttrs(attrs) => {
                 self.render_attrs(attrs, scope, writer);
             }
@@ -11953,6 +12011,28 @@ impl<'a> Vue3SsrMirCodegen<'a> {
             props,
             fallback
         ));
+    }
+
+    fn render_content(
+        &self,
+        content: &Vue3SsrContent,
+        scope: &RenderScope,
+        writer: &mut CodeWriter,
+    ) {
+        match content {
+            Vue3SsrContent::Html { expression } => {
+                writer.push_line(&format!(
+                    "_push(({}) ?? \"\");",
+                    self.render_js_expr(*expression, scope)
+                ));
+            }
+            Vue3SsrContent::Text { expression } => {
+                writer.push_line(&format!(
+                    "_push(_ssrInterpolate({}));",
+                    self.render_js_expr(*expression, scope)
+                ));
+            }
+        }
     }
 
     fn render_attrs(&self, attrs: &Vue3SsrAttrs, scope: &RenderScope, writer: &mut CodeWriter) {
@@ -19596,6 +19676,56 @@ mod tests {
     }
 
     #[test]
+    fn lower_vue3_ast_to_ssr_mir_projects_content_override_payloads() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div><section v-html="raw">old</section><p v-text="msg"/><span>keep</span></div>"#.into(),
+            file_id: FileId(56),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_ssr_mir(&ast, &Vue3CompilerOptions::default());
+
+        assert_eq!(result.hir.validate_tree(), Ok(()));
+        assert_eq!(result.mir.validate_tree(), Ok(()));
+        assert!(result.mir.nodes.iter().any(|node| matches!(
+            node.kind,
+            Vue3SsrMirKind::RenderContent(Vue3SsrContent::Html {
+                expression: JsExprId(0)
+            })
+        )));
+        assert!(result.mir.nodes.iter().any(|node| matches!(
+            node.kind,
+            Vue3SsrMirKind::RenderContent(Vue3SsrContent::Text {
+                expression: JsExprId(1)
+            })
+        )));
+        assert_eq!(
+            result
+                .js
+                .expressions()
+                .iter()
+                .map(|entry| entry.source.as_str())
+                .collect::<Vec<_>>(),
+            vec!["raw", "msg"]
+        );
+        let pushes = result
+            .mir
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.kind {
+                Vue3SsrMirKind::PushString(value) => Some(value.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(!pushes.contains(&"old"));
+        assert!(pushes.contains(&"<p"));
+        assert!(pushes.contains(&">"));
+        assert!(pushes.contains(&"</p>"));
+        assert!(pushes.contains(&"keep"));
+    }
+
+    #[test]
     fn generate_vue3_ssr_mir_emits_v_show_style_payload_from_mir() {
         let source = TemplateSource {
             filename: "foo.vue".into(),
@@ -19843,6 +19973,37 @@ mod tests {
         assert!(generated.code.contains(
             "_push(_ssrRenderAttrs((_temp0 = _mergeProps(_ctx.obj, { style: [{\"color\":\"red\"}, (_ctx.ok) ? null : { display: \"none\" }] }), _mergeProps(_temp0, _ssrGetDynamicModelProps(_temp0, _ctx.foo)))));"
         ));
+    }
+
+    #[test]
+    fn generate_vue3_ssr_mir_emits_content_override_payloads_from_mir() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source:
+                r#"<div><section v-html="raw">old</section><p v-text="msg"/><span>keep</span></div>"#
+                    .into(),
+            file_id: FileId(57),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_ssr_mir(&ast, &Vue3CompilerOptions::default());
+        let generated = generate_vue3_ssr_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated.code.contains("ssrInterpolate as _ssrInterpolate"));
+        assert!(generated.code.contains("_push((_ctx.raw) ?? \"\");"));
+        assert!(generated.code.contains("_push(_ssrInterpolate(_ctx.msg));"));
+        assert!(generated.code.contains("_push(\"<p\");"));
+        assert!(generated.code.contains("_push(\"</p>\");"));
+        assert!(!generated.code.contains("_push(\"old\");"));
+        assert!(generated.code.contains("_push(\"keep\");"));
     }
 
     #[test]

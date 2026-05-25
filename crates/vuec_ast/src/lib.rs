@@ -1415,6 +1415,12 @@ pub enum Vue3SsrModelKind {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Vue3SsrContent {
+    Html { expression: JsExprId },
+    Text { expression: JsExprId },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3SsrComponent {
     pub tag: MirExpr,
     pub props: Vue3DomProps,
@@ -1444,6 +1450,7 @@ pub enum Vue3SsrMirKind {
     Root,
     PushString(String),
     PushInterpolated(MirExpr),
+    RenderContent(Vue3SsrContent),
     RenderAttrs(Vue3SsrAttrs),
     RenderComponent(Vue3SsrComponent),
     RenderSlot(Vue3SsrSlot),
