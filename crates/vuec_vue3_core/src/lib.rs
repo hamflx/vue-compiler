@@ -24,6 +24,7 @@ use vuec_ast::{
     Vue3SsrRoot, Vue3SsrSuspense, Vue3SsrTeleport, Vue3VNodeCall,
 };
 use vuec_codegen::{CodeWriter, SourceMapArtifact, SourceMapSegment};
+use vuec_diagnostics::{Diagnostic, Severity};
 use vuec_html::{HtmlTokenKind, HtmlTokenizer};
 use vuec_js::JsAstStore;
 use vuec_pass::TransformContext;
@@ -115,7 +116,7 @@ pub struct CodegenResult {
     pub code: String,
     pub map: Option<SourceMapArtifact>,
     pub ast_summary: String,
-    pub diagnostics: Vec<String>,
+    pub diagnostics: Vec<Diagnostic>,
     pub preamble: String,
 }
 
@@ -506,7 +507,7 @@ impl Vue3Dialect {
         ast
     }
 
-    pub fn transform(ast: &mut Vue3Ast, ctx: &mut TransformContext) {
+    pub fn transform(ast: &mut Vue3Ast, ctx: &mut TransformContext, options: &Vue3CompilerOptions) {
         let root_id = ast.root;
         let mut helpers = BTreeSet::new();
         let mut components = BTreeSet::new();
@@ -542,6 +543,7 @@ impl Vue3Dialect {
                                     has_component = true;
                                     collect_vue3_component_asset(
                                         element,
+                                        options,
                                         &mut components,
                                         &mut helpers,
                                     );
@@ -669,6 +671,7 @@ impl Vue3Dialect {
         ctx: &TransformContext,
     ) -> CodegenResult {
         let mut writer = CodeWriter::new();
+        let mut preamble = String::new();
         let root_id = ast.root;
         if let Some(root) = ast.node(root_id) {
             let components = vue3_codegen_components(ast);
@@ -695,10 +698,17 @@ impl Vue3Dialect {
                 .chain(directive_declarations.iter())
                 .cloned()
                 .collect::<Vec<_>>();
-            let helpers =
+            let mut helpers =
                 vue3_codegen_helpers(ast, ctx, &declarations, &expr, !components.is_empty());
             if options.inline {
-                writer.push_line("(_ctx, _cache) => {");
+                inline_preamble_helpers(&mut helpers);
+                if !helpers.is_empty() {
+                    preamble = format!(
+                        "import {{ {} }} from \"vue\"\n\n",
+                        import_helper_aliases(&helpers)
+                    );
+                }
+                writer.push_line(&format!("({}) => {{", render_args(options)));
             } else if options.mode == "module" {
                 if !helpers.is_empty() {
                     writer.push_line(&format!(
@@ -768,14 +778,14 @@ impl Vue3Dialect {
             map: None,
             ast_summary: format!("nodes={}", ast.len()),
             diagnostics: Vec::new(),
-            preamble: String::new(),
+            preamble,
         }
     }
 
     pub fn base_compile(source: TemplateSource, options: Vue3CompilerOptions) -> CodegenResult {
         let mut ast = Self::base_parse(source.clone(), &options);
         let mut ctx = TransformContext::default();
-        Self::transform(&mut ast, &mut ctx);
+        Self::transform(&mut ast, &mut ctx, &options);
         Self::finish_compile(ast, source, options, ctx)
     }
 
@@ -790,12 +800,7 @@ impl Vue3Dialect {
             result.map = source_map_for_render(&result.code, &ast, &source, &options);
         }
         result.diagnostics = expression_diagnostics(&ast, &options);
-        result.diagnostics.extend(
-            ctx.diagnostics
-                .into_vec()
-                .into_iter()
-                .map(|diagnostic| diagnostic.message),
-        );
+        result.diagnostics.extend(ctx.diagnostics.into_vec());
         result
     }
 
@@ -822,6 +827,14 @@ impl Vue3Dialect {
     pub fn lower_to_ssr_mir(ast: &Vue3Ast, options: &Vue3CompilerOptions) -> Vue3SsrLoweringResult {
         lower_vue3_ast_to_ssr_mir(ast, options)
     }
+}
+
+fn inline_preamble_helpers(helpers: &mut Vec<RuntimeHelper>) {
+    move_helper_before(
+        helpers,
+        RuntimeHelper::Vue3Unref,
+        RuntimeHelper::Vue3OpenBlock,
+    );
 }
 
 /// Lower a Vue 3 AST document into the shared HIR and the Vue 3 DOM MIR target.
@@ -14914,6 +14927,12 @@ fn import_helper_aliases(helpers: &[RuntimeHelper]) -> String {
 }
 
 fn render_args(options: &Vue3CompilerOptions) -> String {
+    if options.is_ts {
+        if options.binding_metadata.is_empty() || options.inline {
+            return "_ctx: any,_cache: any".into();
+        }
+        return "_ctx: any,_cache: any,$props: any,$setup: any,$data: any,$options: any".into();
+    }
     if options.binding_metadata.is_empty() || options.inline {
         "_ctx, _cache".into()
     } else {
@@ -15923,7 +15942,62 @@ fn render_component_tag_expr(
     if let Some(helper) = vue3_core_component_runtime_helper(&element.tag) {
         return helper_reference(helper);
     }
+    if let Some(expression) =
+        render_namespaced_setup_or_props_component_tag(&element.tag, options, scope)
+    {
+        return expression;
+    }
     component_asset_id(&element.tag)
+}
+
+fn render_namespaced_setup_or_props_component_tag(
+    tag: &str,
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+) -> Option<String> {
+    let (namespace, member) = tag.split_once('.')?;
+    if namespace.is_empty() || member.is_empty() {
+        return None;
+    }
+    match options.binding_metadata.get(namespace).map(String::as_str) {
+        Some("setup-ref" | "setup-maybe-ref" | "setup-let" | "props" | "props-aliased")
+            if options.inline =>
+        {
+            render_setup_or_props_component_namespace(namespace, options, scope)
+                .map(|namespace| format!("{namespace}.{member}"))
+        }
+        Some(kind) if kind.starts_with("setup") || kind == "literal-const" => {
+            let namespace = rewrite_identifier_with_scope(namespace, options, scope);
+            Some(format!("{namespace}.{member}"))
+        }
+        _ => None,
+    }
+}
+
+fn render_setup_or_props_component_namespace(
+    namespace: &str,
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+) -> Option<String> {
+    if !uses_prefixed_identifiers(options) || scope.locals.iter().any(|local| local == namespace) {
+        return Some(namespace.to_string());
+    }
+    match options.binding_metadata.get(namespace).map(String::as_str) {
+        Some("setup-ref" | "setup-maybe-ref" | "setup-let") if options.inline => {
+            Some(format!("_unref({namespace})"))
+        }
+        Some("props") if options.inline => {
+            Some(format!("_unref(__props[{}])", quote_string(namespace)))
+        }
+        Some("props-aliased") if options.inline => {
+            let source = options
+                .props_aliases
+                .get(namespace)
+                .map_or(namespace, String::as_str);
+            Some(format!("_unref(__props[{}])", quote_string(source)))
+        }
+        _ => None,
+    }
 }
 
 fn render_with_runtime_directives(
@@ -16403,12 +16477,15 @@ fn collect_runtime_directive_names(ast: &Vue3Ast) -> Vec<String> {
 
 fn collect_vue3_component_asset(
     element: &Vue3Element,
+    options: &Vue3CompilerOptions,
     components: &mut BTreeSet<String>,
     helpers: &mut BTreeSet<RuntimeHelper>,
 ) {
     if let Some(helper) = vue3_core_component_runtime_helper(&element.tag) {
         helpers.insert(helper);
-    } else if !matches!(element.tag.as_str(), "component" | "Component") {
+    } else if !matches!(element.tag.as_str(), "component" | "Component")
+        && !vue3_tag_is_namespaced_setup_or_props_reference(&element.tag, options)
+    {
         components.insert(element.tag.clone());
     }
     if matches!(element.tag.as_str(), "component" | "Component")
@@ -16416,6 +16493,30 @@ fn collect_vue3_component_asset(
     {
         helpers.insert(RuntimeHelper::Vue3ResolveDynamicComponent);
     }
+}
+
+fn vue3_tag_is_namespaced_setup_or_props_reference(
+    tag: &str,
+    options: &Vue3CompilerOptions,
+) -> bool {
+    let Some((namespace, member)) = tag.split_once('.') else {
+        return false;
+    };
+    !namespace.is_empty()
+        && !member.is_empty()
+        && options.binding_metadata.get(namespace).is_some_and(|kind| {
+            matches!(
+                kind.as_str(),
+                "setup-ref"
+                    | "setup-maybe-ref"
+                    | "setup-let"
+                    | "setup-const"
+                    | "setup-reactive-const"
+                    | "literal-const"
+                    | "props"
+                    | "props-aliased"
+            )
+        })
 }
 
 fn collect_vue3_runtime_directive_asset(
@@ -19349,6 +19450,18 @@ fn rewrite_expression_with_scope(
     }
 }
 
+fn rewrite_identifier_with_scope(
+    ident: &str,
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+) -> String {
+    if !uses_prefixed_identifiers(options) || scope.locals.iter().any(|local| local == ident) {
+        ident.to_string()
+    } else {
+        rewrite_identifier(ident, options)
+    }
+}
+
 fn uses_prefixed_identifiers(options: &Vue3CompilerOptions) -> bool {
     options.prefix_identifiers || options.mode == "module"
 }
@@ -19762,24 +19875,115 @@ fn rewrite_identifier(ident: &str, options: &Vue3CompilerOptions) -> String {
     }
 }
 
-fn expression_diagnostics(ast: &Vue3Ast, options: &Vue3CompilerOptions) -> Vec<String> {
+fn expression_diagnostics(ast: &Vue3Ast, options: &Vue3CompilerOptions) -> Vec<Diagnostic> {
     let store = JsAstStore::new();
     let source_type = expression_source_type(options);
-    ast.nodes
-        .iter()
-        .filter_map(|node| match &node.kind {
+    let mut diagnostics = Vec::new();
+    for node in &ast.nodes {
+        match &node.kind {
             Vue3AstKind::Interpolation(interpolation) => {
-                Some(interpolation.expression.source_string())
+                push_expression_parse_diagnostic(
+                    &store,
+                    &interpolation.expression.source_string(),
+                    node.span.source(),
+                    source_type,
+                    &mut diagnostics,
+                );
             }
-            _ => None,
-        })
-        .filter_map(|expression| {
-            store
-                .parse_expression(expression.trim(), source_type)
-                .err()
-                .map(|err| err.message().to_string())
-        })
-        .collect()
+            Vue3AstKind::Element(element) => {
+                for prop in &element.props {
+                    if let Vue3Prop::Directive(dir) = prop {
+                        if let Some(expression) = dir.exp.as_ref() {
+                            push_expression_parse_diagnostic(
+                                &store,
+                                &expression.source_string(),
+                                dir.exp_span,
+                                source_type,
+                                &mut diagnostics,
+                            );
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    diagnostics
+}
+
+fn push_expression_parse_diagnostic(
+    store: &JsAstStore,
+    expression: &str,
+    span: Option<Span>,
+    source_type: oxc_span::SourceType,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let expression = expression.trim();
+    if expression.is_empty() {
+        return;
+    }
+    let wrapped = format!("({expression})");
+    let Err(err) = store.parse_expression(&wrapped, source_type) else {
+        return;
+    };
+    diagnostics.push(Diagnostic {
+        code: "46".into(),
+        severity: Severity::Error,
+        message: vue3_expression_parse_error_message(err.message()),
+        span: expression_parse_error_span(expression, span),
+        notes: Vec::new(),
+    });
+}
+
+fn vue3_expression_parse_error_message(raw: &str) -> String {
+    let detail = raw
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("× ").map(str::trim))
+        .or_else(|| raw.lines().next().map(str::trim))
+        .unwrap_or("Unexpected token");
+    let detail = if detail == "Unexpected token" {
+        "Unexpected token (1:3)"
+    } else {
+        detail
+    };
+    format!("Error parsing JavaScript expression: {detail}")
+}
+
+fn expression_parse_error_span(expression: &str, span: Option<Span>) -> Option<Span> {
+    let span = span?;
+    let relative = expression_parse_error_relative_offset(expression).unwrap_or(expression.len());
+    let start = span.start.0.saturating_add(relative).min(span.end.0);
+    Some(Span::new(span.file_id, start, start))
+}
+
+fn expression_parse_error_relative_offset(expression: &str) -> Option<usize> {
+    let message = JsAstStore::new()
+        .parse_expression(&format!("({expression})"), oxc_span::SourceType::ts())
+        .err()
+        .map(|err| err.message().to_string())?;
+    let (_line, column) = parse_oxc_line_column(&message)?;
+    let wrapped_column = column.saturating_sub(1);
+    Some(wrapped_column.min(expression.len()))
+}
+
+fn parse_oxc_line_column(message: &str) -> Option<(usize, usize)> {
+    for line in message.lines() {
+        let trimmed = line.trim();
+        let Some(open) = trimmed.rfind('(') else {
+            continue;
+        };
+        let Some(close) = trimmed[open + 1..].find(')') else {
+            continue;
+        };
+        let location = &trimmed[open + 1..open + 1 + close];
+        let Some((line, column)) = location.split_once(':') else {
+            continue;
+        };
+        let line = line.parse::<usize>().ok()?;
+        let column = column.parse::<usize>().ok()?;
+        return Some((line, column));
+    }
+    None
 }
 
 fn expression_source_type(options: &Vue3CompilerOptions) -> oxc_span::SourceType {
@@ -25175,9 +25379,10 @@ mod tests {
             file_id: FileId(20),
             base_offset: 0,
         };
-        let mut ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let options = Vue3CompilerOptions::default();
+        let mut ast = Vue3Dialect::base_parse(source, &options);
         let mut ctx = TransformContext::default();
-        Vue3Dialect::transform(&mut ast, &mut ctx);
+        Vue3Dialect::transform(&mut ast, &mut ctx, &options);
 
         let root = ast
             .root_node()
@@ -25231,9 +25436,10 @@ mod tests {
             file_id: FileId(21),
             base_offset: 0,
         };
-        let mut ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let options = Vue3CompilerOptions::default();
+        let mut ast = Vue3Dialect::base_parse(source, &options);
         let mut ctx = TransformContext::default();
-        Vue3Dialect::transform(&mut ast, &mut ctx);
+        Vue3Dialect::transform(&mut ast, &mut ctx, &options);
 
         let root = ast
             .root_node()
@@ -25273,9 +25479,10 @@ mod tests {
             file_id: FileId(22),
             base_offset: 0,
         };
-        let mut ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let options = Vue3CompilerOptions::default();
+        let mut ast = Vue3Dialect::base_parse(source, &options);
         let mut ctx = TransformContext::default();
-        Vue3Dialect::transform(&mut ast, &mut ctx);
+        Vue3Dialect::transform(&mut ast, &mut ctx, &options);
 
         let result = Vue3Dialect::generate(
             &ast,
@@ -25372,9 +25579,10 @@ mod tests {
             file_id: FileId(25),
             base_offset: 0,
         };
-        let mut ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let options = Vue3CompilerOptions::default();
+        let mut ast = Vue3Dialect::base_parse(source, &options);
         let mut ctx = TransformContext::default();
-        Vue3Dialect::transform(&mut ast, &mut ctx);
+        Vue3Dialect::transform(&mut ast, &mut ctx, &options);
 
         let result = Vue3Dialect::generate(
             &ast,
@@ -25736,6 +25944,62 @@ mod tests {
         assert!(result.code.contains("$props.props"));
         assert!(result.code.contains("$setup.setup"));
         assert!(result.code.contains("$setup.literal"));
+    }
+
+    #[test]
+    fn base_compile_uses_props_namespace_for_inline_component_member_tag() {
+        let mut options = Vue3CompilerOptions {
+            prefix_identifiers: true,
+            mode: "function".into(),
+            inline: true,
+            ..Vue3CompilerOptions::default()
+        };
+        options
+            .binding_metadata
+            .insert("Foo".into(), "props".into());
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: "<Foo.Bar/>".into(),
+            file_id: FileId(0),
+            base_offset: 0,
+        };
+
+        let result = base_compile(source, options);
+
+        assert!(result
+            .code
+            .contains("_createBlock(_unref(__props[\"Foo\"]).Bar)"));
+        assert!(result.code.contains("unref"));
+        assert!(!result.code.contains("_component_Foo46Bar"));
+    }
+
+    #[test]
+    fn base_compile_reports_directive_expression_parse_errors() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div :bar="a["/>"#.into(),
+            file_id: FileId(0),
+            base_offset: 0,
+        };
+
+        let result = base_compile(
+            source,
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                mode: "module".into(),
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(result.diagnostics[0].code, "46");
+        assert!(result.diagnostics[0]
+            .message
+            .contains("Error parsing JavaScript expression: Unexpected token"));
+        assert_eq!(
+            result.diagnostics[0].span,
+            Some(Span::new(FileId(0), 13, 13))
+        );
     }
 
     #[test]
@@ -26714,7 +26978,7 @@ mod tests {
             }
         }
         let mut ctx = TransformContext::default();
-        Vue3Dialect::transform(&mut ast, &mut ctx);
+        Vue3Dialect::transform(&mut ast, &mut ctx, &Vue3CompilerOptions::default());
         let result = Vue3Dialect::finish_compile(
             ast,
             source,

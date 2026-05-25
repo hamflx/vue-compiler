@@ -326,6 +326,7 @@ pub fn compile(source: TemplateSource, options: DomCompilerOptions) -> CodegenRe
     let mut ctx = TransformContext::default();
     remove_side_effect_nodes(&mut ast, &mut ctx);
     report_transition_invalid_children(&ast, &mut ctx);
+    report_invalid_native_v_model(&ast, &mut ctx);
     let mut asset_imports = Vec::<Vue3ImportItem>::new();
     for node_index in 0..ast.nodes.len() {
         if let Vue3AstKind::Element(element) = &mut ast.nodes[node_index].kind {
@@ -347,7 +348,7 @@ pub fn compile(source: TemplateSource, options: DomCompilerOptions) -> CodegenRe
         }
     }
     let dom_summary = dom_directive_summary(&ast);
-    Vue3Dialect::transform(&mut ast, &mut ctx);
+    Vue3Dialect::transform(&mut ast, &mut ctx, &options.core);
     let mut result = Vue3Dialect::finish_compile(ast, source, options.core, ctx);
     result.ast_summary = if dom_summary.is_empty() {
         format!("dom:{}", result.ast_summary)
@@ -575,6 +576,37 @@ fn vue3_dom_root_mut(ast: &mut Vue3Ast) -> Option<&mut Vue3Root> {
 
 fn report_transition_invalid_children(ast: &Vue3Ast, ctx: &mut TransformContext) {
     report_transition_invalid_children_for_node(ast, ast.root, ctx);
+}
+
+fn report_invalid_native_v_model(ast: &Vue3Ast, ctx: &mut TransformContext) {
+    for node in &ast.nodes {
+        let Vue3AstKind::Element(element) = &node.kind else {
+            continue;
+        };
+        if element.tag_type != Vue3ElementType::Element {
+            continue;
+        }
+        if matches!(
+            element.tag.as_str(),
+            "input" | "textarea" | "select" | "script" | "style"
+        ) {
+            continue;
+        }
+        let Some(model) = element.props.iter().find_map(|prop| match prop {
+            Vue3Prop::Directive(dir) if dir.name == "model" => Some(dir),
+            _ => None,
+        }) else {
+            continue;
+        };
+        ctx.report(Diagnostic {
+            code: "58".into(),
+            severity: Severity::Error,
+            message: "v-model can only be used on <input>, <textarea> and <select> elements."
+                .into(),
+            span: model.span.or_else(|| node.span.source()),
+            notes: Vec::new(),
+        });
+    }
 }
 
 fn report_transition_invalid_children_for_node(
@@ -1391,10 +1423,34 @@ mod tests {
             );
 
             let has_warning = result.diagnostics.iter().any(|diagnostic| {
-                diagnostic == "<Transition> expects exactly one child element or component."
+                diagnostic.message == "<Transition> expects exactly one child element or component."
             });
             assert_eq!(has_warning, *should_warn, "case {index}: {source}");
         }
+    }
+
+    #[test]
+    fn compile_reports_invalid_native_v_model_diagnostics() {
+        let result = compile(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: r#"<div v-model="baz"/>"#.into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            DomCompilerOptions::default(),
+        );
+
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(result.diagnostics[0].code, "58");
+        assert_eq!(
+            result.diagnostics[0].message,
+            "v-model can only be used on <input>, <textarea> and <select> elements."
+        );
+        assert_eq!(
+            result.diagnostics[0].span,
+            Some(vuec_source::Span::new(FileId(0), 5, 18))
+        );
     }
 
     #[test]

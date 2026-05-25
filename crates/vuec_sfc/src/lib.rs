@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeMap;
 use vuec_codegen::SourceMapArtifact;
+use vuec_diagnostics::{Diagnostic, Severity};
 use vuec_js::{JsAstStore, JsParseMode};
 use vuec_source::{FileId, SourceMap, Span};
 use vuec_style::{compile_style, StyleCompileOptions};
@@ -282,7 +283,10 @@ impl SfcCompiler {
             return SfcTemplateCompileResult {
                 code: result.code,
                 map: result.map,
-                errors: Vec::new(),
+                errors: sfc_template_errors_from_diagnostics(
+                    &result.diagnostics,
+                    &template.content,
+                ),
                 bindings: Vec::new(),
                 ast_summary: ast_summary.clone(),
                 ast: format!("ast:{ast_summary}"),
@@ -304,7 +308,10 @@ impl SfcCompiler {
             return SfcTemplateCompileResult {
                 code: result.code,
                 map: result.map,
-                errors: Vec::new(),
+                errors: sfc_template_errors_from_diagnostics(
+                    &result.diagnostics,
+                    &template.content,
+                ),
                 bindings: Vec::new(),
                 ast_summary: ast_summary.clone(),
                 ast: format!("ast:{ast_summary}"),
@@ -354,7 +361,10 @@ impl SfcCompiler {
             return SfcTemplateCompileResult {
                 code: result.code,
                 map: result.map,
-                errors: side_effect_errors,
+                errors: merge_template_errors(
+                    side_effect_errors,
+                    sfc_template_errors_from_diagnostics(&result.diagnostics, &raw_source),
+                ),
                 bindings: Vec::new(),
                 ast_summary: result.ast_summary.clone(),
                 ast: json!({
@@ -380,7 +390,10 @@ impl SfcCompiler {
         SfcTemplateCompileResult {
             code: result.code,
             map: result.map,
-            errors: side_effect_errors,
+            errors: merge_template_errors(
+                side_effect_errors,
+                sfc_template_errors_from_diagnostics(&result.diagnostics, &raw_source),
+            ),
             bindings: Vec::new(),
             ast_summary: result.ast_summary.clone(),
             ast: json!({
@@ -642,6 +655,42 @@ fn scoped_style_vars(id: Option<&str>, vars: &[String]) -> Vec<String> {
             }
         })
         .collect()
+}
+
+fn merge_template_errors(
+    mut first: Vec<SfcTemplateError>,
+    second: Vec<SfcTemplateError>,
+) -> Vec<SfcTemplateError> {
+    first.extend(second);
+    first
+}
+
+fn sfc_template_errors_from_diagnostics(
+    diagnostics: &[Diagnostic],
+    source: &str,
+) -> Vec<SfcTemplateError> {
+    diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.severity == Severity::Error)
+        .filter_map(|diagnostic| sfc_template_error_from_diagnostic(diagnostic, source))
+        .collect()
+}
+
+fn sfc_template_error_from_diagnostic(
+    diagnostic: &Diagnostic,
+    source: &str,
+) -> Option<SfcTemplateError> {
+    let span = diagnostic.span?;
+    let start = span.start.0.min(source.len());
+    let end = span.end.0.min(source.len()).max(start);
+    Some(SfcTemplateError {
+        code: diagnostic.code.parse().unwrap_or(0),
+        loc: SfcSourceLocation {
+            start: position_at(source, start)?,
+            end: position_at(source, end)?,
+            source: source.get(start..end).unwrap_or_default().to_string(),
+        },
+    })
 }
 
 fn script_bindings(names: &[String]) -> BTreeMap<String, String> {
@@ -951,6 +1000,22 @@ mod tests {
     }
 
     #[test]
+    fn compile_template_source_returns_dom_compile_errors() {
+        let compiler = SfcCompiler::new();
+        let template = compiler.compile_template_source(
+            "x.vue",
+            r#"<div :bar="a[" v-model="baz"/>"#,
+            SfcTemplateCompileOptions::default(),
+        );
+
+        assert_eq!(template.errors.len(), 2);
+        assert_eq!(template.errors[0].code, 46);
+        assert_eq!(template.errors[0].loc.start.offset, 13);
+        assert_eq!(template.errors[1].code, 58);
+        assert_eq!(template.errors[1].loc.source, r#"v-model="baz""#);
+    }
+
+    #[test]
     fn compile_template_ssr_transforms_asset_urls_to_imports() {
         let mut compiler = SfcCompiler::new();
         let descriptor = compiler.parse(
@@ -970,10 +1035,10 @@ mod tests {
             .contains("import _imports_0 from './logo.png'"));
         assert!(template
             .code
-            .contains("_push(_ssrRenderAttr(\"src\", _imports_0));"));
+            .contains("_ssrRenderAttr(\"src\", _imports_0)"));
         assert!(template
             .code
-            .contains("_push(_ssrRenderAttr(\"srcset\", _imports_0 + ' 2x'));"));
+            .contains("_ssrRenderAttr(\"srcset\", _imports_0 + ' 2x')"));
         assert!(!template.code.contains("_ctx._imports_"));
     }
 

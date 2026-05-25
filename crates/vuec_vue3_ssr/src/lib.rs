@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use vuec_ast::{TemplateAttribute, Vue3Ast, Vue3AstKind, Vue3ImportItem, Vue3NodeKind};
 use vuec_codegen::CodeWriter;
+use vuec_diagnostics::Diagnostic;
 use vuec_vue3_asset::transform_asset_url_props;
 pub use vuec_vue3_asset::AssetUrlOptions;
 use vuec_vue3_core::{
@@ -46,7 +47,7 @@ pub struct SsrCompileResult {
     pub code: String,
     pub map: Option<vuec_codegen::SourceMapArtifact>,
     pub ast_summary: String,
-    pub diagnostics: Vec<String>,
+    pub diagnostics: Vec<Diagnostic>,
     pub preamble: String,
 }
 

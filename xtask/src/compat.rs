@@ -7032,8 +7032,8 @@ function emitVue3CompileDiagnostics(result, options) {
   for (const diagnostic of result.diagnostics) {
     const message = typeof diagnostic === 'string' ? diagnostic : diagnostic && diagnostic.message;
     const error = new SyntaxError(message || 'Vue compiler error');
-    error.code = 64;
-    error.loc = undefined;
+    error.code = diagnostic && diagnostic.code !== undefined ? diagnostic.code : 64;
+    error.loc = diagnostic && diagnostic.loc !== undefined ? diagnostic.loc : undefined;
     onError(error);
   }
 }

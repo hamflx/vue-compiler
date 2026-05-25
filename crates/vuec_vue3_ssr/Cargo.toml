@@ -8,6 +8,7 @@ license.workspace = true
 serde.workspace = true
 vuec_ast = { path = "../vuec_ast" }
 vuec_codegen = { path = "../vuec_codegen" }
+vuec_diagnostics = { path = "../vuec_diagnostics" }
 vuec_source = { path = "../vuec_source" }
 vuec_vue3_asset = { path = "../vuec_vue3_asset" }
 vuec_vue3_core = { path = "../vuec_vue3_core" }

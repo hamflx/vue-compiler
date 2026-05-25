@@ -188,9 +188,8 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
                     "isCustomElement",
                 ),
             };
-            Ok(serde_json::to_value(vuec_vue3_dom::compile(
-                source, options,
-            ))?)
+            let result = vuec_vue3_dom::compile(source.clone(), options);
+            Ok(vue3_compile_value(result, &source))
         }
         "vue3.dom.parse" => {
             let source = template_source(&payload);
@@ -254,9 +253,8 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
                     default_options.asset_url_options,
                 ),
             };
-            Ok(serde_json::to_value(vuec_vue3_ssr::compile(
-                source, options,
-            ))?)
+            let result = vuec_vue3_ssr::compile(source.clone(), options);
+            Ok(vue3_ssr_compile_value(result, &source))
         }
         "sfc.parse" => {
             let filename = string_field_or(&payload, "filename", "anonymous.vue");
@@ -869,7 +867,7 @@ fn block_content_end_from_loc(loc: &vuec_sfc::SfcBlockLocation) -> usize {
 fn vue3_base_compile_value(source: TemplateSource, options: Vue3CompilerOptions) -> Value {
     let mut ast = Vue3Dialect::base_parse(source.clone(), &options);
     let mut ctx = vuec_pass::TransformContext::default();
-    Vue3Dialect::transform(&mut ast, &mut ctx);
+    Vue3Dialect::transform(&mut ast, &mut ctx, &options);
     let result = Vue3Dialect::finish_compile(ast.clone(), source.clone(), options.clone(), ctx);
     let ast_value = vue3_parse_value(
         &ast,
@@ -884,7 +882,60 @@ fn vue3_base_compile_value(source: TemplateSource, options: Vue3CompilerOptions)
         "code": result.code,
         "preamble": result.preamble,
         "map": result.map,
+        "diagnostics": vue3_compile_diagnostics_value(
+            &result.diagnostics,
+            &source.source,
+            source.base_offset,
+        ),
     })
+}
+
+fn vue3_compile_value(result: vuec_vue3_core::CodegenResult, source: &TemplateSource) -> Value {
+    json!({
+        "code": result.code,
+        "map": result.map,
+        "ast_summary": result.ast_summary,
+        "diagnostics": vue3_compile_diagnostics_value(
+            &result.diagnostics,
+            &source.source,
+            source.base_offset,
+        ),
+        "preamble": result.preamble,
+    })
+}
+
+fn vue3_ssr_compile_value(
+    result: vuec_vue3_ssr::SsrCompileResult,
+    source: &TemplateSource,
+) -> Value {
+    json!({
+        "code": result.code,
+        "map": result.map,
+        "ast_summary": result.ast_summary,
+        "diagnostics": vue3_compile_diagnostics_value(
+            &result.diagnostics,
+            &source.source,
+            source.base_offset,
+        ),
+        "preamble": result.preamble,
+    })
+}
+
+fn vue3_compile_diagnostics_value(
+    diagnostics: &[vuec_diagnostics::Diagnostic],
+    source: &str,
+    base_offset: usize,
+) -> Vec<Value> {
+    diagnostics
+        .iter()
+        .map(|diagnostic| {
+            json!({
+                "code": diagnostic.code.parse::<u32>().ok().unwrap_or(0),
+                "message": diagnostic.message,
+                "loc": diagnostic.span.map(|span| vue3_source_span_value(source, base_offset, span)).unwrap_or_else(vue3_loc_stub_value),
+            })
+        })
+        .collect()
 }
 
 fn vue3_parse_value(
@@ -2973,8 +3024,36 @@ mod tests {
             .as_array()
             .unwrap_or(&Vec::new())
             .iter()
-            .any(|diagnostic| diagnostic.as_str()
-                == Some("<Transition> expects exactly one child element or component.")));
+            .any(
+                |diagnostic| diagnostic.get("message").and_then(Value::as_str)
+                    == Some("<Transition> expects exactly one child element or component.")
+            ));
+    }
+
+    #[test]
+    fn vue3_dom_bridge_projects_compile_diagnostic_objects() {
+        let compiled = dispatch(
+            "vue3.dom.compile",
+            json!({
+                "source": r#"<div :bar="a[" v-model="baz"/>"#,
+                "options": {
+                    "mode": "module",
+                    "prefixIdentifiers": true
+                }
+            }),
+        )
+        .expect("dom compile");
+
+        let diagnostics = compiled["diagnostics"].as_array().expect("diagnostics");
+        assert_eq!(diagnostics.len(), 2);
+        assert_eq!(diagnostics[0]["code"], json!(46));
+        assert!(diagnostics[0]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Error parsing JavaScript expression: Unexpected token"));
+        assert_eq!(diagnostics[0]["loc"]["start"]["offset"], json!(13));
+        assert_eq!(diagnostics[1]["code"], json!(58));
+        assert_eq!(diagnostics[1]["loc"]["source"], json!("v-model=\"baz\""));
     }
 
     #[test]
@@ -3015,7 +3094,11 @@ mod tests {
             .as_array()
             .unwrap_or(&Vec::new())
             .iter()
-            .any(|diagnostic| diagnostic.as_str().unwrap_or("").contains("side effect")));
+            .any(|diagnostic| diagnostic
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .contains("side effect")));
         assert_eq!(compiled["map"]["sourcesContent"][0], source);
         assert!(compiled["map"]["mappings"].as_str().unwrap_or("").len() > 4);
     }
