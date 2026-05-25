@@ -3795,24 +3795,151 @@ const vue3CoreRuntime = (() => {
   runtime.isReferencedIdentifier = function isReferencedIdentifier(id, parent) {
     if (!parent) return true;
     if (id && id.name === 'arguments') return false;
-    if (parent.type === 'ObjectProperty' && parent.key === id) return false;
+    if (parent.type === 'ObjectProperty' && parent.key === id && !parent.computed) return false;
     if (parent.type === 'RestElement') return false;
     if (parent.type === 'ArrayPattern') return false;
     return !String(parent.type || '').endsWith('Pattern');
   };
   runtime.isInDestructureAssignment = function isInDestructureAssignment() { return false; };
   runtime.isInNewExpression = function isInNewExpression() { return false; };
-  runtime.walkIdentifiers = function walkIdentifiers(root, onIdentifier) {
-    if (root && root.type === NodeTypes.SIMPLE_EXPRESSION && runtime.isSimpleIdentifier(root.content)) onIdentifier(root);
-    if (root && root.type === 'ExpressionStatement' && root.expression) root = root.expression;
-    if (root && root.type === 'Program' && root.body && root.body[0]) return runtime.walkIdentifiers(root.body[0], onIdentifier);
-    if (root && root.type === 'ArrowFunctionExpression') {
-      for (const param of root.params || []) {
-        for (const ident of runtime.extractBabelIdentifiers(param)) {
-          onIdentifier(ident, param, [root], false, false);
-        }
+  runtime.walkIdentifiers = function walkIdentifiers(root, onIdentifier, includeAll = false, parentStack = [], knownIds = Object.create(null)) {
+    const seen = new Set();
+    function markKnown(name) {
+      if (!name) return;
+      knownIds[name] = (knownIds[name] || 0) + 1;
+    }
+    function emit(node, parent) {
+      if (!node || typeof node.name !== 'string' || node.name === 'arguments') return;
+      const isLocal = !!knownIds[node.name];
+      const isRefed = runtime.isReferencedIdentifier(node, parent);
+      if (includeAll || (isRefed && !isLocal)) {
+        onIdentifier(node, parent || null, parentStack.slice(), isRefed, isLocal);
       }
     }
+    function visitChild(parent, child) {
+      if (!child) return;
+      parentStack.push(parent);
+      visit(child, parent);
+      parentStack.pop();
+    }
+    function visit(node, parent) {
+      if (!node) return;
+      if (Array.isArray(node)) {
+        for (const child of node) visit(child, parent);
+        return;
+      }
+      if (typeof node !== 'object') return;
+      if (node.type === NodeTypes.SIMPLE_EXPRESSION) {
+        if (node.ast) visit(node.ast, parent);
+        else if (runtime.isSimpleIdentifier(node.content)) emit({ type: 'Identifier', name: node.content }, parent);
+        return;
+      }
+      if (seen.has(node)) return;
+      seen.add(node);
+      if (node.type && node.type.startsWith('TS') && !runtime.TS_NODE_TYPES.includes(node.type)) return;
+      switch (node.type) {
+        case 'Identifier':
+          emit(node, parent);
+          break;
+        case 'Program':
+          visitChild(node, node.body || []);
+          break;
+        case 'ExpressionStatement':
+        case 'ChainExpression':
+        case 'ParenthesizedExpression':
+        case 'TSAsExpression':
+        case 'TSTypeAssertion':
+        case 'TSNonNullExpression':
+        case 'TSInstantiationExpression':
+        case 'TSSatisfiesExpression':
+          visitChild(node, node.expression);
+          break;
+        case 'MemberExpression':
+        case 'OptionalMemberExpression':
+          visitChild(node, node.object);
+          if (node.computed) visitChild(node, node.property);
+          break;
+        case 'CallExpression':
+        case 'OptionalCallExpression':
+        case 'NewExpression':
+          visitChild(node, node.callee);
+          visitChild(node, node.arguments || []);
+          break;
+        case 'ArrayExpression':
+        case 'SequenceExpression':
+          visitChild(node, node.elements || node.expressions || []);
+          break;
+        case 'ObjectExpression':
+          visitChild(node, node.properties || []);
+          break;
+        case 'ObjectProperty':
+        case 'Property':
+          if (node.computed) visitChild(node, node.key);
+          visitChild(node, node.value);
+          break;
+        case 'SpreadElement':
+          visitChild(node, node.argument);
+          break;
+        case 'TemplateLiteral':
+          visitChild(node, node.expressions || []);
+          break;
+        case 'TaggedTemplateExpression':
+          visitChild(node, node.tag);
+          visitChild(node, node.quasi);
+          break;
+        case 'BinaryExpression':
+        case 'LogicalExpression':
+          visitChild(node, node.left);
+          visitChild(node, node.right);
+          break;
+        case 'ConditionalExpression':
+          visitChild(node, node.test);
+          visitChild(node, node.consequent);
+          visitChild(node, node.alternate);
+          break;
+        case 'UnaryExpression':
+        case 'UpdateExpression':
+        case 'AwaitExpression':
+        case 'YieldExpression':
+          visitChild(node, node.argument);
+          break;
+        case 'AssignmentExpression':
+          if (node.left && /MemberExpression$/.test(String(node.left.type || ''))) visitChild(node, node.left);
+          visitChild(node, node.right);
+          break;
+        case 'ArrowFunctionExpression':
+        case 'FunctionExpression':
+        case 'FunctionDeclaration':
+          for (const param of node.params || []) {
+            for (const ident of runtime.extractBabelIdentifiers(param)) markKnown(ident.name);
+          }
+          visitChild(node, node.body);
+          break;
+        case 'BlockStatement':
+          visitChild(node, node.body || []);
+          break;
+        case 'ReturnStatement':
+        case 'ThrowStatement':
+          visitChild(node, node.argument);
+          break;
+        case 'IfStatement':
+          visitChild(node, node.test);
+          visitChild(node, node.consequent);
+          visitChild(node, node.alternate);
+          break;
+        case 'ForStatement':
+          visitChild(node, node.test);
+          visitChild(node, node.update);
+          visitChild(node, node.body);
+          break;
+        case 'WhileStatement':
+        case 'DoWhileStatement':
+          visitChild(node, node.test);
+          visitChild(node, node.body);
+          break;
+      }
+    }
+    visit(root, null);
   };
   runtime.extractIdentifiers = function extractIdentifiers(param) {
     if (!param) return [];
@@ -3827,11 +3954,17 @@ const vue3CoreRuntime = (() => {
     if (!node) return [];
     if (Array.isArray(node)) return node.flatMap(runtime.extractBabelIdentifiers);
     if (node.type === 'Identifier') return [node];
+    if (runtime.TS_NODE_TYPES.includes(node.type)) return runtime.extractBabelIdentifiers(node.expression);
+    if (node.type === 'MemberExpression') {
+      let object = node;
+      while (object && object.type === 'MemberExpression') object = object.object;
+      return runtime.extractBabelIdentifiers(object);
+    }
     if (node.type === 'ObjectPattern') return (node.properties || []).flatMap(runtime.extractBabelIdentifiers);
     if (node.type === 'ObjectProperty') {
       const out = [];
-      if (node.key) out.push(...runtime.extractBabelIdentifiers(node.key));
-      if (node.value && node.value !== node.key) out.push(...runtime.extractBabelIdentifiers(node.value));
+      if (node.computed && node.key) out.push(...runtime.extractBabelIdentifiers(node.key));
+      if (node.value) out.push(...runtime.extractBabelIdentifiers(node.value));
       return out;
     }
     if (node.type === 'ArrayPattern') return (node.elements || []).flatMap(runtime.extractBabelIdentifiers);
