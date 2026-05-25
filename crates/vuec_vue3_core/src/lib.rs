@@ -2411,10 +2411,7 @@ fn vue3_dom_mir_patch_flag(
             bits |= 32;
         }
     }
-    if element.tag != "template"
-        && !children_literal_const_only(ast, children, options)
-        && has_dynamic_text_child(ast, children)
-    {
+    if element.tag != "template" && child_sequence_is_direct_dynamic_text(ast, children, options) {
         bits |= 1;
     }
     if (bits == 0 || bits == 32) && (has_vnode_hook(element) || has_runtime_directive(element)) {
@@ -14844,7 +14841,7 @@ fn render_plain_element(
 ) -> String {
     let tag = &element.tag;
     if tag == "slot" {
-        return render_slot_outlet(element, options, scope);
+        return render_slot_outlet(element, options, scope, memo_index);
     }
     if element.tag_type == Vue3ElementType::Component {
         return render_component_element(
@@ -15648,6 +15645,7 @@ fn render_slot_outlet(
     element: &Vue3Element,
     options: &Vue3CompilerOptions,
     scope: &RenderScope,
+    memo_index: &mut MemoIndex,
 ) -> String {
     let name = element
         .props
@@ -15659,6 +15657,9 @@ fn render_slot_outlet(
         .map(quote_string)
         .or_else(|| {
             directive_by_name(element, "bind").and_then(|dir| {
+                if dir.is_dynamic_arg {
+                    return None;
+                }
                 let arg = dir.arg.as_ref()?.source_string();
                 (arg == "name").then(|| {
                     rewrite_expression_with_scope(
@@ -15678,7 +15679,12 @@ fn render_slot_outlet(
     } else {
         "$slots"
     };
-    format!("_renderSlot({}, {})", slots, name)
+    let props = render_slot_outlet_props(element, options, scope, memo_index);
+    if props.is_empty() {
+        format!("_renderSlot({}, {})", slots, name)
+    } else {
+        format!("_renderSlot({}, {}, {})", slots, name, props)
+    }
 }
 
 fn render_element_children(
@@ -17407,11 +17413,27 @@ fn vue3_dom_mir_can_hoist_static_node(ast: &Vue3Ast, node_id: NodeId) -> bool {
     })
 }
 
-fn has_dynamic_text_child(ast: &Vue3Ast, children: &[vuec_ast::NodeId]) -> bool {
-    children.iter().any(|child_id| {
-        ast.node(*child_id)
-            .is_some_and(|child| matches!(child.kind, Vue3AstKind::Interpolation(_)))
-    })
+fn child_sequence_is_direct_dynamic_text(
+    ast: &Vue3Ast,
+    children: &[vuec_ast::NodeId],
+    options: &Vue3CompilerOptions,
+) -> bool {
+    let visible = children
+        .iter()
+        .filter_map(|child_id| ast.node(*child_id))
+        .filter(|child| !matches!(child.kind, Vue3AstKind::Comment(_)))
+        .collect::<Vec<_>>();
+    !visible.is_empty()
+        && visible.iter().all(|child| {
+            matches!(
+                child.kind,
+                Vue3AstKind::Text(_) | Vue3AstKind::Interpolation(_)
+            )
+        })
+        && !children_literal_const_only(ast, children, options)
+        && visible
+            .iter()
+            .any(|child| matches!(child.kind, Vue3AstKind::Interpolation(_)))
 }
 
 fn child_sequence_needs_text_vnode(ast: &Vue3Ast, children: &[vuec_ast::NodeId]) -> bool {
@@ -17470,19 +17492,26 @@ fn render_patch_flag_kind(
         Some(-1)
     } else if has_dynamic_arg_binding(element) {
         Some(16)
-    } else if has_class_binding(element) {
-        Some(2)
-    } else if has_dynamic_non_key_props(element, options, scope) {
-        Some(8)
-    } else if element.tag != "template"
-        && !children_literal_const_only(ast, children, options)
-        && has_dynamic_text_child(ast, children)
-    {
-        Some(1)
-    } else if has_vnode_hook(element) || has_runtime_directive(element) {
-        Some(512)
     } else {
-        None
+        let mut flag = 0;
+        if element.tag_type == Vue3ElementType::Element && has_class_binding(element) {
+            flag |= 2;
+        }
+        if element.tag_type == Vue3ElementType::Element && has_style_binding(element) {
+            flag |= 4;
+        }
+        if has_dynamic_non_key_props(element, options, scope) {
+            flag |= 8;
+        }
+        if element.tag != "template"
+            && child_sequence_is_direct_dynamic_text(ast, children, options)
+        {
+            flag |= 1;
+        }
+        if flag == 0 && (has_vnode_hook(element) || has_runtime_directive(element)) {
+            flag |= 512;
+        }
+        (flag != 0).then_some(flag)
     }
 }
 
@@ -17521,63 +17550,307 @@ fn render_props(
     branch_key: Option<usize>,
     memo_index: &mut MemoIndex,
 ) -> String {
-    let dynamic_event = has_multiline_props(element, options);
-    let mut props = Vec::new();
+    render_props_for_target(
+        element,
+        options,
+        scope,
+        branch_key,
+        memo_index,
+        ExactPropsTarget::VNode,
+    )
+}
+
+fn render_slot_outlet_props(
+    element: &Vue3Element,
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+    memo_index: &mut MemoIndex,
+) -> String {
+    render_props_for_target(
+        element,
+        options,
+        scope,
+        None,
+        memo_index,
+        ExactPropsTarget::SlotOutlet,
+    )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExactPropsTarget {
+    VNode,
+    SlotOutlet,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExactPropsArgKind {
+    Object,
+    ObjectBinding,
+    ObjectListeners,
+    DynamicEvent,
+}
+
+#[derive(Clone, Debug)]
+struct ExactPropsArg {
+    kind: ExactPropsArgKind,
+    code: String,
+}
+
+fn render_props_for_target(
+    element: &Vue3Element,
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+    branch_key: Option<usize>,
+    memo_index: &mut MemoIndex,
+    target: ExactPropsTarget,
+) -> String {
+    let use_runtime_prop_normalization = exact_props_use_runtime_normalization(element, target);
+    let mut merge_args = Vec::new();
+    let mut object_entries = Vec::new();
     if let Some(key) = branch_key {
-        props.push(format!("key: {key}"));
+        object_entries.push(format!("key: {key}"));
     }
-    props.extend(element.props.iter().filter_map(|prop| match prop {
-        Vue3Prop::Attribute(attr) => match &attr.value {
-            Some(value) => Some(format!("{}: {}", json_key(&attr.name), quote_string(value))),
-            None => Some(format!("{}: true", json_key(&attr.name))),
-        },
-        Vue3Prop::Directive(dir) if dir.name == "on" => {
-            Some(render_event_prop(element, dir, options, scope, memo_index))
+
+    for prop in &element.props {
+        if !exact_props_include_prop(prop, target) {
+            continue;
         }
+        match prop {
+            Vue3Prop::Attribute(attr) => {
+                object_entries.push(render_attribute_prop(attr));
+            }
+            Vue3Prop::Directive(dir) if dir.name == "on" && dir.arg.is_none() => {
+                if let Some(listeners) = render_object_listeners_prop(element, dir, options, scope)
+                {
+                    push_exact_object_arg(&mut merge_args, &mut object_entries);
+                    merge_args.push(ExactPropsArg {
+                        kind: ExactPropsArgKind::ObjectListeners,
+                        code: listeners,
+                    });
+                }
+            }
+            Vue3Prop::Directive(dir) if dir.name == "on" && dir.is_dynamic_arg => {
+                push_exact_object_arg(&mut merge_args, &mut object_entries);
+                merge_args.push(ExactPropsArg {
+                    kind: ExactPropsArgKind::DynamicEvent,
+                    code: render_plain_props(&[render_event_prop(
+                        element, dir, options, scope, memo_index,
+                    )])
+                    .unwrap_or_else(|| "{}".into()),
+                });
+            }
+            Vue3Prop::Directive(dir) if dir.name == "on" => {
+                object_entries.push(render_event_prop(element, dir, options, scope, memo_index));
+            }
+            Vue3Prop::Directive(dir) if dir.name == "bind" && dir.arg.is_none() => {
+                if let Some(binding) = render_object_binding_prop(dir, options, scope) {
+                    push_exact_object_arg(&mut merge_args, &mut object_entries);
+                    merge_args.push(ExactPropsArg {
+                        kind: ExactPropsArgKind::ObjectBinding,
+                        code: binding,
+                    });
+                }
+            }
+            Vue3Prop::Directive(dir) if dir.name == "bind" => {
+                if let Some(binding) =
+                    render_binding_prop(dir, options, scope, use_runtime_prop_normalization)
+                {
+                    object_entries.push(binding);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    push_exact_object_arg(&mut merge_args, &mut object_entries);
+    render_exact_props_args(
+        merge_args,
+        exact_props_has_dynamic_bind_arg(element, target),
+    )
+}
+
+fn exact_props_include_prop(prop: &Vue3Prop, target: ExactPropsTarget) -> bool {
+    if target != ExactPropsTarget::SlotOutlet {
+        return true;
+    }
+    match prop {
+        Vue3Prop::Attribute(attr) => attr.name != "name",
         Vue3Prop::Directive(dir) if dir.name == "bind" => {
-            let arg = dir
-                .arg
-                .as_ref()
-                .map(Vue3Expression::source_string)
-                .unwrap_or_default();
-            let value = dir
-                .exp
-                .as_ref()
-                .map(Vue3Expression::source_string)
-                .unwrap_or_default();
-            if arg.is_empty() || value.is_empty() {
-                return None;
-            }
-            let expression = rewrite_expression_with_scope(&value, options, scope);
-            if arg == "class" {
-                Some(format!("class: _normalizeClass({expression})"))
-            } else if dir.is_dynamic_arg {
-                Some(format!(
-                    "[{}]: {}",
-                    rewrite_expression_with_scope(&arg, options, scope),
-                    expression
-                ))
-            } else {
-                Some(format!("{}: {}", json_key(&arg), expression))
-            }
+            dir.is_dynamic_arg
+                || dir
+                    .arg
+                    .as_ref()
+                    .is_none_or(|arg| arg.source_string() != "name")
         }
-        _ => None,
-    }));
-    if props.is_empty() {
-        String::new()
-    } else if dynamic_event {
-        format!("{{\n  {}\n}}", props.join(",\n  "))
-    } else if props.len() > 1 || has_class_binding(element) {
-        render_object(&props)
-    } else if props.len() == 1
-        && props
-            .first()
-            .is_some_and(|prop| prop.starts_with("key: ") && prop.contains('('))
-    {
-        render_object(&props)
-    } else {
-        format!("{{ {} }}", props.join(", "))
+        _ => true,
     }
+}
+
+fn exact_props_use_runtime_normalization(element: &Vue3Element, target: ExactPropsTarget) -> bool {
+    element.props.iter().any(|prop| {
+        exact_props_include_prop(prop, target)
+            && matches!(
+                prop,
+                Vue3Prop::Directive(dir)
+                    if matches!(dir.name.as_str(), "bind" | "on")
+                        && (dir.is_dynamic_arg || dir.arg.is_none())
+            )
+    })
+}
+
+fn exact_props_has_dynamic_bind_arg(element: &Vue3Element, target: ExactPropsTarget) -> bool {
+    element.props.iter().any(|prop| {
+        exact_props_include_prop(prop, target)
+            && matches!(
+                prop,
+                Vue3Prop::Directive(dir)
+                    if dir.name == "bind" && dir.is_dynamic_arg && dir.arg.is_some()
+            )
+    })
+}
+
+fn push_exact_object_arg(merge_args: &mut Vec<ExactPropsArg>, object_entries: &mut Vec<String>) {
+    if let Some(code) = render_plain_props(object_entries) {
+        merge_args.push(ExactPropsArg {
+            kind: ExactPropsArgKind::Object,
+            code,
+        });
+        object_entries.clear();
+    }
+}
+
+fn render_exact_props_args(args: Vec<ExactPropsArg>, has_dynamic_bind_arg: bool) -> String {
+    match args.as_slice() {
+        [] => String::new(),
+        [arg] if arg.kind == ExactPropsArgKind::ObjectBinding => {
+            format!("_normalizeProps(_guardReactiveProps({}))", arg.code)
+        }
+        [arg] if arg.kind == ExactPropsArgKind::Object && has_dynamic_bind_arg => {
+            format!("_normalizeProps({})", arg.code)
+        }
+        [arg] => arg.code.clone(),
+        _ => format!(
+            "_mergeProps({})",
+            args.iter()
+                .map(|arg| arg.code.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+fn render_plain_props(entries: &[String]) -> Option<String> {
+    if entries.is_empty() {
+        None
+    } else if entries.len() == 1 && exact_single_prop_prefers_multiline(&entries[0]) {
+        Some(render_object(entries))
+    } else if entries.len() == 1 {
+        Some(format!("{{ {} }}", entries.join(", ")))
+    } else {
+        Some(render_object(entries))
+    }
+}
+
+fn exact_single_prop_prefers_multiline(entry: &str) -> bool {
+    entry.contains('\n') || entry.starts_with("key: ") && entry.contains('(')
+}
+
+fn render_attribute_prop(attr: &vuec_ast::Vue3Attribute) -> String {
+    match &attr.value {
+        Some(value) => format!("{}: {}", json_key(&attr.name), quote_string(value)),
+        None => format!("{}: true", json_key(&attr.name)),
+    }
+}
+
+fn render_object_binding_prop(
+    dir: &Vue3Directive,
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+) -> Option<String> {
+    let value = dir.exp.as_ref()?.source_string();
+    let value = value.trim();
+    (!value.is_empty()).then(|| rewrite_expression_with_scope(value, options, scope))
+}
+
+fn render_object_listeners_prop(
+    element: &Vue3Element,
+    dir: &Vue3Directive,
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+) -> Option<String> {
+    let value = dir.exp.as_ref()?.source_string();
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let value = rewrite_expression_with_scope(value, options, scope);
+    if element.tag_type == Vue3ElementType::Component {
+        Some(format!("_toHandlers({value})"))
+    } else {
+        Some(format!("_toHandlers({value}, true)"))
+    }
+}
+
+fn render_binding_prop(
+    dir: &Vue3Directive,
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+    use_runtime_prop_normalization: bool,
+) -> Option<String> {
+    let arg = dir.arg.as_ref()?.source_string();
+    let value = dir.exp.as_ref()?.source_string();
+    let value = value.trim();
+    if arg.is_empty() || value.is_empty() {
+        return None;
+    }
+    let expression = rewrite_expression_with_scope(value, options, scope);
+    if dir.is_dynamic_arg {
+        let key = render_dynamic_binding_prop_key(dir, &arg, options, scope);
+        return Some(format!("[{key}]: {expression}"));
+    }
+    let key = render_static_binding_prop_key(dir);
+    if key == "class" && !use_runtime_prop_normalization {
+        Some(format!("class: _normalizeClass({expression})"))
+    } else if key == "style" && !use_runtime_prop_normalization {
+        Some(format!("style: _normalizeStyle({expression})"))
+    } else {
+        Some(format!("{}: {}", json_key(&key), expression))
+    }
+}
+
+fn render_static_binding_prop_key(dir: &Vue3Directive) -> String {
+    let mut key = dir
+        .arg
+        .as_ref()
+        .map(Vue3Expression::source_string)
+        .unwrap_or_default();
+    if dir.modifiers.iter().any(|modifier| modifier == "camel") {
+        key = camelize(&key);
+    }
+    if dir.modifiers.iter().any(|modifier| modifier == "prop") {
+        key = format!(".{key}");
+    } else if dir.modifiers.iter().any(|modifier| modifier == "attr") {
+        key = format!("^{key}");
+    }
+    key
+}
+
+fn render_dynamic_binding_prop_key(
+    dir: &Vue3Directive,
+    arg: &str,
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+) -> String {
+    let mut key = render_dynamic_prop_key(&rewrite_expression_with_scope(arg, options, scope));
+    if dir.modifiers.iter().any(|modifier| modifier == "camel") {
+        key = format!("_camelize({key})");
+    }
+    if dir.modifiers.iter().any(|modifier| modifier == "prop") {
+        key = format!("'.' + ({key})");
+    } else if dir.modifiers.iter().any(|modifier| modifier == "attr") {
+        key = format!("'^' + ({key})");
+    }
+    key
 }
 
 fn render_event_prop(
@@ -17767,11 +18040,6 @@ fn has_dynamic_non_key_props(
     })
 }
 
-fn has_multiline_props(element: &Vue3Element, options: &Vue3CompilerOptions) -> bool {
-    has_dynamic_arg_binding(element)
-        || has_dynamic_non_key_props(element, options, &RenderScope::default())
-}
-
 fn prop_requires_dynamic_patch(
     element: &Vue3Element,
     dir: &Vue3Directive,
@@ -17781,12 +18049,19 @@ fn prop_requires_dynamic_patch(
     if dir.name == "on" && !event_directive_is_vnode_hook(dir) {
         return !event_handler_can_skip_patch(element, dir, options, scope);
     }
-    dir.name == "bind"
-        && dir
-            .arg
-            .as_ref()
-            .is_none_or(|arg| arg.source_string() != "class" && arg.source_string() != "key")
-        && !is_asset_import_binding(dir)
+    if dir.name != "bind" || is_asset_import_binding(dir) {
+        return false;
+    }
+    let Some(arg) = dir.arg.as_ref().map(Vue3Expression::source_string) else {
+        return true;
+    };
+    if arg == "key" {
+        return false;
+    }
+    if element.tag_type == Vue3ElementType::Element && matches!(arg.as_str(), "class" | "style") {
+        return false;
+    }
+    true
 }
 
 fn event_handler_can_skip_patch(
@@ -17873,14 +18148,18 @@ fn dynamic_props_arg(
                     .unwrap_or_default();
                 Some(event_handler_prop_name(element, &event))
             }
-            Vue3Prop::Directive(dir)
-                if dir.name == "bind" && !has_class_bind_dir(dir) && !has_key_bind_dir(dir) =>
-            {
-                if is_asset_import_binding(dir) {
-                    None
-                } else {
-                    dir.arg.as_ref().map(Vue3Expression::source_string)
+            Vue3Prop::Directive(dir) if dir.name == "bind" && !has_key_bind_dir(dir) => {
+                if is_asset_import_binding(dir) || dir.is_dynamic_arg {
+                    return None;
                 }
+                let arg = dir.arg.as_ref()?.source_string();
+                if arg.is_empty()
+                    || element.tag_type == Vue3ElementType::Element
+                        && matches!(arg.as_str(), "class" | "style")
+                {
+                    return None;
+                }
+                (!arg.is_empty()).then_some(render_static_binding_prop_key(dir))
             }
             _ => None,
         })
@@ -18212,7 +18491,11 @@ fn normalize_handler_indent(expression: &str) -> String {
     let mut normalized = String::from(first);
     for line in lines {
         normalized.push('\n');
-        normalized.push_str(line.strip_prefix("  ").unwrap_or(line));
+        normalized.push_str(
+            line.strip_prefix("    ")
+                .or_else(|| line.strip_prefix("  "))
+                .unwrap_or(line),
+        );
     }
     normalized
 }
@@ -19415,7 +19698,7 @@ impl<'a> PublicAstCodegen<'a> {
         let multilines = properties.len() > 1
             || properties
                 .iter()
-                .any(|prop| json_u64(prop.get("value").unwrap_or(&Value::Null), "type") != Some(4));
+                .any(public_object_property_prefers_multiline);
         self.push(if multilines { "{" } else { "{ " });
         if multilines {
             self.indent();
@@ -19960,6 +20243,20 @@ fn patch_flag_names(flag: i32) -> Vec<&'static str> {
 
 fn public_is_text_like(node: &Value) -> bool {
     node.as_str().is_some() || matches!(json_u64(node, "type"), Some(2 | 4 | 5 | 8))
+}
+
+fn public_object_property_prefers_multiline(prop: &Value) -> bool {
+    let value = prop.get("value").unwrap_or(&Value::Null);
+    if json_u64(value, "type") != Some(4) {
+        return true;
+    }
+    let content = json_str(value, "content").unwrap_or("");
+    if content.contains('\n') {
+        return true;
+    }
+    prop.get("key").is_some_and(|key| {
+        json_u64(key, "type") == Some(4) && json_str(key, "content") == Some("key")
+    }) && content.contains('(')
 }
 
 fn is_simple_identifier(name: &str) -> bool {
@@ -24417,6 +24714,219 @@ mod tests {
         assert!(result.code.contains("onClick: _ctx.once"));
         assert!(result.code.contains("16 /* FULL_PROPS */"));
         assert!(result.code.contains("8 /* PROPS */, [\"onClick\"]"));
+    }
+
+    #[test]
+    fn base_compile_emits_object_v_bind_merge_props() {
+        let result = base_compile(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: r#"<div><p v-bind="obj"/><section id="x" v-bind="base" :class="cls" :style="style" :foo="bar"/></div>"#
+                    .into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                cache_handlers: true,
+                hoist_static: true,
+                mode: "module".into(),
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(result.code.contains("normalizeProps as _normalizeProps"));
+        assert!(result
+            .code
+            .contains("guardReactiveProps as _guardReactiveProps"));
+        assert!(result.code.contains("mergeProps as _mergeProps"));
+        assert!(result
+            .code
+            .contains("_normalizeProps(_guardReactiveProps(_ctx.obj))"));
+        assert!(result.code.contains(
+            "_mergeProps({ id: \"x\" }, _ctx.base, {\n      class: _ctx.cls,\n      style: _ctx.style,\n      foo: _ctx.bar\n    })"
+        ));
+        assert!(result.code.contains("16 /* FULL_PROPS */"));
+        assert!(result.code.contains("[\"foo\"]"));
+        assert!(!result.code.contains("_normalizeClass(_ctx.cls)"));
+        assert!(!result.code.contains("_normalizeStyle(_ctx.style)"));
+        assert!(!result.code.contains("[\"style\"]"));
+    }
+
+    #[test]
+    fn base_compile_keeps_component_merge_dynamic_props() {
+        let result = base_compile(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: r#"<Comp v-bind="obj" :class="cls"/><Comp v-bind="obj" :style="style"/>"#
+                    .into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                cache_handlers: true,
+                mode: "module".into(),
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(result
+            .code
+            .contains("_mergeProps(_ctx.obj, { class: _ctx.cls })"));
+        assert!(result
+            .code
+            .contains("_mergeProps(_ctx.obj, { style: _ctx.style })"));
+        assert!(result.code.contains("16 /* FULL_PROPS */, [\"class\"]"));
+        assert!(result.code.contains("16 /* FULL_PROPS */, [\"style\"]"));
+    }
+
+    #[test]
+    fn base_compile_uses_class_and_style_patch_flags_for_native_props() {
+        let result = base_compile(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: r#"<div :class="cls" :style="style"/><Comp :class="cls" :foo="foo"/>"#
+                    .into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                mode: "module".into(),
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(result.code.contains("normalizeClass as _normalizeClass"));
+        assert!(result.code.contains("normalizeStyle as _normalizeStyle"));
+        assert!(result.code.contains("class: _normalizeClass(_ctx.cls)"));
+        assert!(result.code.contains("style: _normalizeStyle(_ctx.style)"));
+        assert!(result.code.contains("6 /* CLASS, STYLE */"));
+        assert!(result.code.contains("8 /* PROPS */, [\"class\", \"foo\"]"));
+    }
+
+    #[test]
+    fn base_compile_emits_object_v_on_to_handlers_for_native_and_component() {
+        let result = base_compile(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: r#"<div v-on="listeners"/><Comp v-on="listeners"/>"#.into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                cache_handlers: true,
+                mode: "module".into(),
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(result.code.contains("toHandlers as _toHandlers"));
+        assert!(result
+            .code
+            .contains("\"div\", _toHandlers(_ctx.listeners, true)"));
+        assert!(result
+            .code
+            .contains("_component_Comp, _toHandlers(_ctx.listeners)"));
+        assert!(!result.code.contains("on: _ctx.listeners"));
+        assert!(!result.code.contains("on: _cache"));
+    }
+
+    #[test]
+    fn base_compile_preserves_merge_props_order_and_cache_slots() {
+        let result = base_compile(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: r#"<div :foo="bar" v-bind="obj" v-on="listeners" @click="foo"/>"#.into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                cache_handlers: true,
+                mode: "module".into(),
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(result.code.contains("mergeProps as _mergeProps"));
+        assert!(result.code.contains("toHandlers as _toHandlers"));
+        assert!(result.code.contains(
+            "_mergeProps({ foo: _ctx.bar }, _ctx.obj, _toHandlers(_ctx.listeners, true), {"
+        ));
+        assert!(result.code.contains(
+            "onClick: _cache[0] || (_cache[0] = (...args) => (_ctx.foo && _ctx.foo(...args)))"
+        ));
+        assert!(result.code.contains("16 /* FULL_PROPS */, [\"foo\"]"));
+        assert!(!result.code.contains("_cache[1]"));
+    }
+
+    #[test]
+    fn base_compile_normalizes_dynamic_bind_args() {
+        let result = base_compile(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: r#"<div :class="cls" :[key]="value" @click="foo"/><Comp :[name].camel="value"/>"#
+                    .into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                cache_handlers: true,
+                mode: "module".into(),
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(result.code.contains("normalizeProps as _normalizeProps"));
+        assert!(result.code.contains("camelize as _camelize"));
+        assert!(result.code.contains("class: _ctx.cls"));
+        assert!(result.code.contains("[_ctx.key || \"\"]: _ctx.value"));
+        assert!(result
+            .code
+            .contains("[_camelize(_ctx.name || \"\")]: _ctx.value"));
+        assert!(result.code.contains("onClick: _cache[0] || (_cache[0] ="));
+        assert!(result.code.contains("16 /* FULL_PROPS */"));
+        assert!(!result.code.contains("_normalizeClass(_ctx.cls)"));
+        assert!(!result.code.contains("[\"key\"]"));
+        assert!(!result.code.contains("[\"name\"]"));
+    }
+
+    #[test]
+    fn base_compile_merges_slot_outlet_props() {
+        let result = base_compile(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: r#"<slot v-bind="slotProps" v-on="listeners" :foo="value"/><slot :[name]="value" :bar="bar"/>"#
+                    .into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                mode: "module".into(),
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(result.code.contains("renderSlot as _renderSlot"));
+        assert!(result.code.contains("mergeProps as _mergeProps"));
+        assert!(result.code.contains("toHandlers as _toHandlers"));
+        assert!(result.code.contains("normalizeProps as _normalizeProps"));
+        assert!(result.code.contains(
+            "_renderSlot(_ctx.$slots, \"default\", _mergeProps(_ctx.slotProps, _toHandlers(_ctx.listeners, true), { foo: _ctx.value }))"
+        ));
+        assert!(result
+            .code
+            .contains("_renderSlot(_ctx.$slots, \"default\", _normalizeProps({"));
+        assert!(result.code.contains("[_ctx.name || \"\"]: _ctx.value"));
+        assert!(result.code.contains("bar: _ctx.bar"));
+        assert!(!result
+            .code
+            .contains("_renderSlot(_ctx.$slots, _ctx.value, _normalizeProps"));
     }
 
     #[test]
