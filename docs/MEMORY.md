@@ -1,5 +1,10 @@
 # Memory
 
+- Current round: added Vue 3 DOM MIR native `v-show` payload and standalone codegen consumption.
+- `Vue3VNodeCall` now stores `v_show: Option<JsExprId>` as DOM target data. DOM lowering projects HIR `show` directive expressions into that field and keeps `show` out of generic `Vue3DomDirective`, so custom runtime directives remain separate from native DOM directive payloads.
+- `generate_vue3_dom_mir` now consumes this payload directly, emitting `_withDirectives(..., [[_vShow, expression]])`, importing `vShow`, skipping `_resolveDirective("show")`, and applying runtime-directive `NEED_PATCH` from DOM MIR lowering.
+- Verification for this DOM MIR `v-show` slice: focused `cargo check -p vuec_ast -p vuec_vue3_core`, focused `cargo test -p vuec_vue3_core v_show`, focused `cargo test -p vuec_vue3_core generate_vue3_dom_mir`, focused `cargo test -p vuec_vue3_core lower_vue3_ast_to_dom_mir`, `cargo fmt --all --check`, `git diff --check`, `cargo check -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo test -p vuec_ast -p vuec_vue3_core -p vuec_node_bridge -p xtask`, `cargo xtask run-conformance --suite vue3-core` (`652/652`), `cargo xtask run-conformance --suite vue3-dom` (`133/133`, mixed official path, regression evidence), and `cargo xtask run-conformance --suite vue3-ssr` (`129/129`, mixed official path, regression evidence).
+
 - Current round: added Vue 3 DOM MIR native `v-bind` modifier payload and standalone codegen consumption.
 - `HirBinding` now preserves source `v-bind` modifiers, while `Vue3DomBinding` projects DOM-target `.camel`, `.prop`, and `.attr` flags. HIR does not carry runtime helpers or DOM prop/attr prefix decisions.
 - `generate_vue3_dom_mir` now consumes this payload directly, emitting static camelized keys, dynamic `_camelize(...)` keys, `.` / `^` DOM prop key prefixes, `.prop` hydration metadata, and FULL_PROPS dynamic-prop suppression from DOM MIR plus `JsAstStore`. SSR codegen keeps `.prop` / `.attr` DOM prefixes out of SSR attrs while still supporting `.camel` key normalization.

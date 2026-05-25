@@ -1285,6 +1285,7 @@ pub struct Vue3ForMemo {
 pub struct Vue3VNodeCall {
     pub tag: Vue3DomTag,
     pub props: Vue3DomProps,
+    pub v_show: Option<JsExprId>,
     pub directives: Vec<Vue3DomDirective>,
     pub models: Vec<Vue3DomModel>,
     pub content: Option<Vue3DomContent>,
