@@ -11,8 +11,8 @@ use vuec_ast::{
     HirObjectListeners, HirPropSegment, HirProps, HirRoot, HirSlotDecl, HirSlotOutlet,
     HirStaticAttr, HirTag, JsExprId, JsPatternId, LoweringMap, MirChildren, MirExpr,
     MissingSpanReason, NodeId, NodeSpan, QuoteKind, RuntimeHelper, Vue3Ast, Vue3AstKind,
-    Vue3Directive, Vue3DomBinding, Vue3DomContent, Vue3DomDirective, Vue3DomEvent,
-    Vue3DomEventCache, Vue3DomMir, Vue3DomMirKind, Vue3DomModel, Vue3DomModelKind,
+    Vue3Directive, Vue3DomBinding, Vue3DomClickEvent, Vue3DomContent, Vue3DomDirective,
+    Vue3DomEvent, Vue3DomEventCache, Vue3DomMir, Vue3DomMirKind, Vue3DomModel, Vue3DomModelKind,
     Vue3DomObjectBinding, Vue3DomObjectListeners, Vue3DomPropSegment, Vue3DomProps,
     Vue3DomPropsNormalize, Vue3DomSlotName, Vue3DomStaticAttr, Vue3DomTag, Vue3Element,
     Vue3ElementType, Vue3Expression, Vue3ForMemo, Vue3ForMir, Vue3NodeKind, Vue3PatchFlags,
@@ -2483,18 +2483,122 @@ fn lower_hir_event_to_dom_mir(
     state: &mut Vue3DomLoweringState,
 ) -> Vue3DomEvent {
     let cache = vue3_dom_event_cache(event, is_component, state);
+    let base_name = if event.dynamic_arg {
+        event.name.clone()
+    } else if is_component {
+        event_handler_prop_name_for_component(&event.name)
+    } else {
+        event_handler_prop_name_for_element(&event.name)
+    };
+    let modifiers = vue3_dom_event_modifiers_for(&base_name, event.dynamic_arg, &event.modifiers);
     Vue3DomEvent {
         name: if event.dynamic_arg {
             event.name.clone()
         } else if is_component {
-            event_handler_prop_name_for_component(&event.name)
+            let event_name = modifiers
+                .click_event
+                .map(vue3_dom_click_event_name)
+                .unwrap_or_else(|| event.name.clone());
+            event_handler_prop_name_for_component(&event_name)
         } else {
-            event_handler_prop_name_for_element(&event.name)
+            let event_name = modifiers
+                .click_event
+                .map(vue3_dom_click_event_name)
+                .unwrap_or_else(|| event.name.clone());
+            event_handler_prop_name_for_element(&event_name)
         },
         dynamic_name: event.dynamic_name,
         handler: event.handler,
         dynamic_arg: event.dynamic_arg,
+        runtime_modifiers: modifiers.runtime_modifiers,
+        key_modifiers: modifiers.key_modifiers,
+        option_modifiers: modifiers.option_modifiers,
+        click_event: modifiers.click_event,
         cache,
+    }
+}
+
+#[derive(Default)]
+struct Vue3DomEventModifiers {
+    runtime_modifiers: Vec<String>,
+    key_modifiers: Vec<String>,
+    option_modifiers: Vec<String>,
+    click_event: Option<Vue3DomClickEvent>,
+}
+
+fn vue3_dom_event_modifiers_for(
+    event_key: &str,
+    dynamic_arg: bool,
+    raw_modifiers: &[String],
+) -> Vue3DomEventModifiers {
+    let mut modifiers = Vue3DomEventModifiers::default();
+    for modifier in raw_modifiers {
+        if vue3_dom_event_option_modifier(modifier) {
+            modifiers.option_modifiers.push(modifier.clone());
+            continue;
+        }
+        if vue3_dom_event_maybe_key_modifier(modifier) {
+            if dynamic_arg {
+                modifiers.runtime_modifiers.push(modifier.clone());
+                modifiers.key_modifiers.push(modifier.clone());
+            } else if vue3_dom_event_is_keyboard_event_key(event_key) {
+                modifiers.key_modifiers.push(modifier.clone());
+            } else {
+                modifiers.runtime_modifiers.push(modifier.clone());
+            }
+            continue;
+        }
+        if vue3_dom_event_non_key_modifier(modifier) {
+            modifiers.runtime_modifiers.push(modifier.clone());
+        } else if dynamic_arg || vue3_dom_event_is_keyboard_event_key(event_key) {
+            modifiers.key_modifiers.push(modifier.clone());
+        }
+    }
+    if dynamic_arg || event_key.eq_ignore_ascii_case("onclick") {
+        if modifiers
+            .runtime_modifiers
+            .iter()
+            .any(|modifier| modifier == "right")
+        {
+            modifiers.click_event = Some(Vue3DomClickEvent::ContextMenu);
+        }
+        if modifiers
+            .runtime_modifiers
+            .iter()
+            .any(|modifier| modifier == "middle")
+        {
+            modifiers.click_event = Some(Vue3DomClickEvent::MouseUp);
+        }
+    }
+    modifiers
+}
+
+fn vue3_dom_event_option_modifier(modifier: &str) -> bool {
+    matches!(modifier, "passive" | "once" | "capture")
+}
+
+fn vue3_dom_event_non_key_modifier(modifier: &str) -> bool {
+    matches!(
+        modifier,
+        "stop" | "prevent" | "self" | "ctrl" | "shift" | "alt" | "meta" | "exact" | "middle"
+    )
+}
+
+fn vue3_dom_event_maybe_key_modifier(modifier: &str) -> bool {
+    matches!(modifier, "left" | "right")
+}
+
+fn vue3_dom_event_is_keyboard_event_key(event_key: &str) -> bool {
+    matches!(
+        event_key.to_ascii_lowercase().as_str(),
+        "onkeyup" | "onkeydown" | "onkeypress"
+    )
+}
+
+fn vue3_dom_click_event_name(click_event: Vue3DomClickEvent) -> String {
+    match click_event {
+        Vue3DomClickEvent::ContextMenu => "contextmenu".into(),
+        Vue3DomClickEvent::MouseUp => "mouseup".into(),
     }
 }
 
@@ -3360,11 +3464,20 @@ fn lower_hir_props_to_dom_mir_without_event_cache(props: &HirProps) -> Vue3DomPr
 }
 
 fn lower_hir_event_to_dom_mir_without_cache(event: &HirEvent) -> Vue3DomEvent {
+    let modifiers = vue3_dom_event_modifiers_for(
+        &event_handler_prop_name_for_element(&event.name),
+        event.dynamic_arg,
+        &event.modifiers,
+    );
     Vue3DomEvent {
         name: event.name.clone(),
         dynamic_name: event.dynamic_name,
         handler: event.handler,
         dynamic_arg: event.dynamic_arg,
+        runtime_modifiers: modifiers.runtime_modifiers,
+        key_modifiers: modifiers.key_modifiers,
+        option_modifiers: modifiers.option_modifiers,
+        click_event: modifiers.click_event,
         cache: None,
     }
 }
@@ -10998,37 +11111,42 @@ impl<'a> Vue3DomMirCodegen<'a> {
     }
 
     fn push_prop_helpers(&self, props: &Vue3DomProps, helpers: &mut Vec<RuntimeHelper>) {
-        for segment in &props.segments {
-            match segment {
-                Vue3DomPropSegment::DynamicBinding(binding) => {
-                    if binding.dynamic_arg {
-                        continue;
+        if props.segments.is_empty() {
+            for binding in &props.dynamic_bindings {
+                push_vue3_dom_binding_helpers(binding, helpers);
+            }
+            for event in &props.events {
+                push_vue3_dom_event_helpers(event, helpers);
+            }
+            for _ in &props.object_listeners {
+                push_unique_helper(helpers, RuntimeHelper::Vue3ToHandlers);
+            }
+        } else {
+            for segment in &props.segments {
+                match segment {
+                    Vue3DomPropSegment::DynamicBinding(binding) => {
+                        push_vue3_dom_binding_helpers(binding, helpers);
                     }
-                    if binding.name == "class" {
-                        push_unique_helper(helpers, RuntimeHelper::Vue3NormalizeClass);
+                    Vue3DomPropSegment::Event(event) => {
+                        push_vue3_dom_event_helpers(event, helpers);
                     }
-                }
-                Vue3DomPropSegment::Event(event) if event.dynamic_arg => {
-                    push_unique_helper(helpers, RuntimeHelper::Vue3ToHandlerKey);
-                }
-                Vue3DomPropSegment::ObjectListeners(_) => {
-                    push_unique_helper(helpers, RuntimeHelper::Vue3ToHandlers);
-                }
-                Vue3DomPropSegment::Content(content) => {
-                    if matches!(
-                        content,
-                        Vue3DomContent::Text {
-                            expression: Some(_)
+                    Vue3DomPropSegment::ObjectListeners(_) => {
+                        push_unique_helper(helpers, RuntimeHelper::Vue3ToHandlers);
+                    }
+                    Vue3DomPropSegment::Content(content) => {
+                        if matches!(
+                            content,
+                            Vue3DomContent::Text {
+                                expression: Some(_)
+                            }
+                        ) && !vue3_dom_content_text_is_static(content, self.js, self.options)
+                        {
+                            push_unique_helper(helpers, RuntimeHelper::Vue3ToDisplayString);
                         }
-                    ) && !vue3_dom_content_text_is_static(content, self.js, self.options)
-                    {
-                        push_unique_helper(helpers, RuntimeHelper::Vue3ToDisplayString);
                     }
+                    Vue3DomPropSegment::Model(_) => {}
+                    Vue3DomPropSegment::StaticAttr(_) | Vue3DomPropSegment::ObjectBinding(_) => {}
                 }
-                Vue3DomPropSegment::Model(_) => {}
-                Vue3DomPropSegment::StaticAttr(_)
-                | Vue3DomPropSegment::Event(_)
-                | Vue3DomPropSegment::ObjectBinding(_) => {}
             }
         }
         if props_requires_merge_call(props) {
@@ -11373,19 +11491,36 @@ impl<'a> Vue3DomMirCodegen<'a> {
 
     fn render_event(&self, event: &Vue3DomEvent, scope: &RenderScope) -> String {
         let handler = self.render_cached_event_handler(event, scope);
+        let key = self.render_event_key(event, scope);
+        format!("{key}: {handler}")
+    }
+
+    fn render_event_key(&self, event: &Vue3DomEvent, scope: &RenderScope) -> String {
         if event.dynamic_arg {
             let name = event
                 .dynamic_name
                 .map(|id| self.render_js_expr(id, scope))
                 .unwrap_or_else(|| event.name.clone());
-            format!("[_toHandlerKey({})]: {}", name.trim(), handler)
+            let handler_key = format!("_toHandlerKey({})", name.trim());
+            let transformed = self.render_event_click_key(event, handler_key);
+            return format!("[{}]", self.render_event_option_key(event, transformed));
+        }
+        json_key(&self.render_event_option_key(event, event.name.clone()))
+    }
+
+    fn render_event_option_key(&self, event: &Vue3DomEvent, key: String) -> String {
+        let postfix = vue3_dom_event_option_postfix(&event.option_modifiers);
+        if postfix.is_empty() {
+            key
+        } else if event.dynamic_arg {
+            format!("({key}) + {}", quote_string(&postfix))
         } else {
-            format!("{}: {}", json_key(&event.name), handler)
+            format!("{key}{postfix}")
         }
     }
 
     fn render_cached_event_handler(&self, event: &Vue3DomEvent, scope: &RenderScope) -> String {
-        let handler = self.render_js_stmt(event.handler, scope);
+        let handler = self.render_guarded_event_handler(event, scope);
         let Some(cache) = &event.cache else {
             return handler;
         };
@@ -11393,6 +11528,35 @@ impl<'a> Vue3DomMirCodegen<'a> {
             "_cache[{}] || (_cache[{}] = {})",
             cache.index, cache.index, handler
         )
+    }
+
+    fn render_guarded_event_handler(&self, event: &Vue3DomEvent, scope: &RenderScope) -> String {
+        let mut handler = self.render_js_stmt(event.handler, scope);
+        if !event.runtime_modifiers.is_empty() {
+            handler = format!(
+                "_withModifiers({handler}, {})",
+                render_string_array(&event.runtime_modifiers)
+            );
+        }
+        if !event.key_modifiers.is_empty() {
+            handler = format!(
+                "_withKeys({handler}, {})",
+                render_string_array(&event.key_modifiers)
+            );
+        }
+        handler
+    }
+
+    fn render_event_click_key(&self, event: &Vue3DomEvent, key: String) -> String {
+        match event.click_event {
+            Some(Vue3DomClickEvent::ContextMenu) => {
+                format!("({key}) === \"onClick\" ? \"onContextmenu\" : ({key})")
+            }
+            Some(Vue3DomClickEvent::MouseUp) => {
+                format!("({key}) === \"onClick\" ? \"onMouseup\" : ({key})")
+            }
+            None => key,
+        }
     }
 
     fn render_object_listeners(
@@ -12865,15 +13029,61 @@ impl<'a> Vue3SsrMirCodegen<'a> {
     }
 
     fn render_event(&self, event: &Vue3DomEvent, scope: &RenderScope) -> String {
-        let handler = self.render_js_stmt(event.handler, scope);
+        let handler = self.render_guarded_event_handler(event, scope);
+        let key = self.render_event_key(event, scope);
+        format!("{key}: {handler}")
+    }
+
+    fn render_event_key(&self, event: &Vue3DomEvent, scope: &RenderScope) -> String {
         if event.dynamic_arg {
             let name = event
                 .dynamic_name
                 .map(|id| self.render_js_expr(id, scope))
                 .unwrap_or_else(|| event.name.clone());
-            format!("[_toHandlerKey({})]: {}", name.trim(), handler)
+            let handler_key = format!("_toHandlerKey({})", name.trim());
+            let transformed = self.render_event_click_key(event, handler_key);
+            return format!("[{}]", self.render_event_option_key(event, transformed));
+        }
+        json_key(&self.render_event_option_key(event, event.name.clone()))
+    }
+
+    fn render_guarded_event_handler(&self, event: &Vue3DomEvent, scope: &RenderScope) -> String {
+        let mut handler = self.render_js_stmt(event.handler, scope);
+        if !event.runtime_modifiers.is_empty() {
+            handler = format!(
+                "_withModifiers({handler}, {})",
+                render_string_array(&event.runtime_modifiers)
+            );
+        }
+        if !event.key_modifiers.is_empty() {
+            handler = format!(
+                "_withKeys({handler}, {})",
+                render_string_array(&event.key_modifiers)
+            );
+        }
+        handler
+    }
+
+    fn render_event_click_key(&self, event: &Vue3DomEvent, key: String) -> String {
+        match event.click_event {
+            Some(Vue3DomClickEvent::ContextMenu) => {
+                format!("({key}) === \"onClick\" ? \"onContextmenu\" : ({key})")
+            }
+            Some(Vue3DomClickEvent::MouseUp) => {
+                format!("({key}) === \"onClick\" ? \"onMouseup\" : ({key})")
+            }
+            None => key,
+        }
+    }
+
+    fn render_event_option_key(&self, event: &Vue3DomEvent, key: String) -> String {
+        let postfix = vue3_dom_event_option_postfix(&event.option_modifiers);
+        if postfix.is_empty() {
+            key
+        } else if event.dynamic_arg {
+            format!("({key}) + {}", quote_string(&postfix))
         } else {
-            format!("{}: {}", json_key(&event.name), handler)
+            format!("{key}{postfix}")
         }
     }
 
@@ -13003,6 +13213,24 @@ enum Vue3DomMirRenderMode {
 fn push_unique_helper(helpers: &mut Vec<RuntimeHelper>, helper: RuntimeHelper) {
     if !helpers.contains(&helper) {
         helpers.push(helper);
+    }
+}
+
+fn push_vue3_dom_binding_helpers(binding: &Vue3DomBinding, helpers: &mut Vec<RuntimeHelper>) {
+    if !binding.dynamic_arg && binding.name == "class" {
+        push_unique_helper(helpers, RuntimeHelper::Vue3NormalizeClass);
+    }
+}
+
+fn push_vue3_dom_event_helpers(event: &Vue3DomEvent, helpers: &mut Vec<RuntimeHelper>) {
+    if event.dynamic_arg {
+        push_unique_helper(helpers, RuntimeHelper::Vue3ToHandlerKey);
+    }
+    if !event.runtime_modifiers.is_empty() {
+        push_unique_helper(helpers, RuntimeHelper::Vue3WithModifiers);
+    }
+    if !event.key_modifiers.is_empty() {
+        push_unique_helper(helpers, RuntimeHelper::Vue3WithKeys);
     }
 }
 
@@ -15472,6 +15700,24 @@ fn render_array(items: &[String]) -> String {
                 .join(",\n")
         )
     }
+}
+
+fn render_string_array(items: &[String]) -> String {
+    format!(
+        "[{}]",
+        items
+            .iter()
+            .map(|item| quote_string(item))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+fn vue3_dom_event_option_postfix(modifiers: &[String]) -> String {
+    modifiers
+        .iter()
+        .map(|modifier| capitalize(modifier))
+        .collect()
 }
 
 fn indent_lines(value: &str, spaces: usize) -> String {
@@ -17974,6 +18220,62 @@ mod tests {
     }
 
     #[test]
+    fn lower_vue3_ast_to_dom_mir_projects_v_on_modifier_payloads() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div><button @click.stop.capture.once="go"/><input @keyup.enter.prevent="submit"/><button @click.right="menu"/><button @mouseup.right="mouseup"/><button @[event].left="dynamic"/><button @[name].right="dynamicRight"/></div>"#.into(),
+            file_id: FileId(64),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+
+        assert_eq!(result.hir.validate_tree(), Ok(()));
+        assert_eq!(result.mir.validate_tree(), Ok(()));
+        let events = result
+            .mir
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.kind {
+                Vue3DomMirKind::VNodeCall(call) => call.props.events.first(),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(events.len(), 6);
+
+        assert_eq!(events[0].name, "onClick");
+        assert_eq!(events[0].runtime_modifiers, vec!["stop"]);
+        assert_eq!(events[0].key_modifiers, Vec::<String>::new());
+        assert_eq!(events[0].option_modifiers, vec!["capture", "once"]);
+        assert_eq!(events[0].click_event, None);
+
+        assert_eq!(events[1].name, "onKeyup");
+        assert_eq!(events[1].runtime_modifiers, vec!["prevent"]);
+        assert_eq!(events[1].key_modifiers, vec!["enter"]);
+        assert_eq!(events[1].option_modifiers, Vec::<String>::new());
+
+        assert_eq!(events[2].name, "onContextmenu");
+        assert_eq!(events[2].runtime_modifiers, vec!["right"]);
+        assert_eq!(events[2].click_event, Some(Vue3DomClickEvent::ContextMenu));
+
+        assert_eq!(events[3].name, "onMouseup");
+        assert_eq!(events[3].runtime_modifiers, vec!["right"]);
+        assert_eq!(events[3].key_modifiers, Vec::<String>::new());
+        assert_eq!(events[3].click_event, None);
+
+        assert_eq!(events[4].name, "event");
+        assert!(events[4].dynamic_arg);
+        assert_eq!(events[4].runtime_modifiers, vec!["left"]);
+        assert_eq!(events[4].key_modifiers, vec!["left"]);
+
+        assert_eq!(events[5].name, "name");
+        assert!(events[5].dynamic_arg);
+        assert_eq!(events[5].runtime_modifiers, vec!["right"]);
+        assert_eq!(events[5].key_modifiers, vec!["right"]);
+        assert_eq!(events[5].click_event, Some(Vue3DomClickEvent::ContextMenu));
+    }
+
+    #[test]
     fn lower_vue3_ast_to_dom_mir_keeps_ordered_prop_segments_and_object_spreads() {
         let source = TemplateSource {
             filename: "foo.vue".into(),
@@ -19431,6 +19733,84 @@ mod tests {
         assert!(generated
             .code
             .contains("onClick: _cache[0] || (_cache[0] = _ctx.go)"));
+    }
+
+    #[test]
+    fn generate_vue3_dom_mir_emits_v_on_modifier_payloads_from_mir() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div><button @click.stop.capture.once="go"/><input @keyup.enter.prevent="submit"/><button @click.right="menu"/><button @mouseup.right="mouseup"/><button @[event].left="dynamic"/><button @[name].right="dynamicRight"/></div>"#.into(),
+            file_id: FileId(65),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+        let generated = generate_vue3_dom_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated.code.contains("withModifiers as _withModifiers"));
+        assert!(generated.code.contains("withKeys as _withKeys"));
+        assert!(generated.code.contains("toHandlerKey as _toHandlerKey"));
+        assert!(generated
+            .code
+            .contains("onClickCaptureOnce: _withModifiers(_ctx.go, [\"stop\"])"));
+        assert!(generated.code.contains(
+            "onKeyup: _withKeys(_withModifiers(_ctx.submit, [\"prevent\"]), [\"enter\"])"
+        ));
+        assert!(generated
+            .code
+            .contains("onContextmenu: _withModifiers(_ctx.menu, [\"right\"])"));
+        assert!(generated
+            .code
+            .contains("onMouseup: _withModifiers(_ctx.mouseup, [\"right\"])"));
+        assert!(generated.code.contains(
+            "[_toHandlerKey(_ctx.event)]: _withKeys(_withModifiers(_ctx.dynamic, [\"left\"]), [\"left\"])"
+        ));
+        assert!(generated.code.contains(
+            "[(_toHandlerKey(_ctx.name)) === \"onClick\" ? \"onContextmenu\" : (_toHandlerKey(_ctx.name))]: _withKeys(_withModifiers(_ctx.dynamicRight, [\"right\"]), [\"right\"])"
+        ));
+    }
+
+    #[test]
+    fn generate_vue3_dom_mir_caches_v_on_modifier_handler_from_mir() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<button @keyup.enter.capture="submit">Save</button>"#.into(),
+            file_id: FileId(66),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(
+            &ast,
+            &Vue3CompilerOptions {
+                cache_handlers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+        let generated = generate_vue3_dom_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                cache_handlers: true,
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated.code.contains(
+            "onKeyupCapture: _cache[0] || (_cache[0] = _withKeys(_ctx.submit, [\"enter\"]))"
+        ));
+        assert!(!generated
+            .code
+            .contains("8 /* PROPS */, [\"onKeyupCapture\"]"));
     }
 
     #[test]

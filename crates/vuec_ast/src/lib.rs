@@ -1367,7 +1367,17 @@ pub struct Vue3DomEvent {
     pub dynamic_name: Option<JsExprId>,
     pub handler: JsStmtId,
     pub dynamic_arg: bool,
+    pub runtime_modifiers: Vec<String>,
+    pub key_modifiers: Vec<String>,
+    pub option_modifiers: Vec<String>,
+    pub click_event: Option<Vue3DomClickEvent>,
     pub cache: Option<Vue3DomEventCache>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Vue3DomClickEvent {
+    ContextMenu,
+    MouseUp,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
