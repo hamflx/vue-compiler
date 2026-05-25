@@ -1815,8 +1815,20 @@ fn alias_export_expression(
             return format!("vue3CoreRuntime[{}]", js_string_literal(export_name));
         }
     }
-    if target.kind == TargetKind::Vue3Dom && export_name == "transformStyle" {
-        return alias_runtime_function_expression("vue3CoreRuntime", export_name, detail);
+    if target.kind == TargetKind::Vue3Dom && export_name == "parserOptions" {
+        return "vue3DomParserOptions".into();
+    }
+    if target.kind == TargetKind::Vue3Dom
+        && !matches!(
+            export_name,
+            "baseCompile" | "baseParse" | "compile" | "generate" | "parse"
+        )
+        && vue3_core_runtime_export(export_name, detail).is_some()
+    {
+        if detail.kind == "function" {
+            return alias_runtime_function_expression("vue3CoreRuntime", export_name, detail);
+        }
+        return format!("vue3CoreRuntime[{}]", js_string_literal(export_name));
     }
     if target.kind == TargetKind::Vue3Sfc && matches!(export_name, "babelParse" | "walkIdentifiers")
     {
@@ -6972,6 +6984,21 @@ function emitVue3CompileDiagnostics(result, options) {
   }
 }
 
+const vue3DomParserOptions = {
+  parseMode: 'html',
+  isVoidTag: tag => /^(?:area|base|br|col|embed|hr|img|input|link|meta|param|source|track|wbr)$/i.test(String(tag || '')),
+  isNativeTag: tag => /^(?:html|body|base|head|link|meta|style|title|address|article|aside|footer|header|hgroup|h1|h2|h3|h4|h5|h6|nav|section|div|dd|dl|dt|figcaption|figure|picture|hr|img|li|main|ol|p|pre|ul|a|b|abbr|bdi|bdo|br|cite|code|data|dfn|em|i|kbd|mark|q|rp|rt|ruby|s|samp|small|span|strong|sub|sup|time|u|var|wbr|area|audio|map|track|video|embed|object|param|source|canvas|script|noscript|del|ins|caption|col|colgroup|table|thead|tbody|td|th|tr|button|datalist|fieldset|form|input|label|legend|meter|optgroup|option|output|progress|select|textarea|details|dialog|menu|summary|template|blockquote|iframe|tfoot|svg|math)$/i.test(String(tag || '')),
+  isPreTag: tag => String(tag || '').toLowerCase() === 'pre',
+  isIgnoreNewlineTag: tag => /^(?:pre|textarea)$/i.test(String(tag || '')),
+  decodeEntities: undefined,
+  isBuiltInComponent: tag => {
+    if (tag === 'Transition' || tag === 'transition') return vue3CoreRuntime.TRANSITION;
+    if (tag === 'TransitionGroup' || tag === 'transition-group') return vue3CoreRuntime.TRANSITION_GROUP;
+    return undefined;
+  },
+  getNamespace: (_tag, parent, rootNamespace) => parent && parent.ns !== undefined ? parent.ns : rootNamespace,
+};
+
 function preflightAliasCall(name, payload) {
   if (name === 'vue3.core.baseCompile') {
     const options = payload && payload.options ? payload.options : {};
@@ -9575,6 +9602,9 @@ const aliasRoot = process.env.VUEC_RUST_ALIAS_ROOT
 const npmRoot = process.env.VUEC_OFFICIAL_NPM_ROOT
 
 export default {
+  oxc: {
+    target: 'es2020',
+  },
   define: {
     __DEV__: true,
     __TEST__: true,
@@ -10408,6 +10438,51 @@ mod tests {
     }
 
     #[test]
+    fn vue3_dom_core_runtime_exports_forward_to_alias_runtime() {
+        let function_detail = ApiExportDetail {
+            kind: "function".into(),
+            tag: "[object Function]".into(),
+            name: Some("unwrapTSNode".into()),
+            function_arity: Some(1),
+            is_async_function: Some(false),
+            is_class_like: Some(false),
+            own_property_names: vec!["length".into(), "name".into(), "prototype".into()],
+        };
+        let object_detail = ApiExportDetail {
+            kind: "object".into(),
+            tag: "[object Object]".into(),
+            name: None,
+            function_arity: None,
+            is_async_function: None,
+            is_class_like: None,
+            own_property_names: vec!["DATA".into(), "SETUP_CONST".into()],
+        };
+        let target = TargetSpec {
+            version_line: VersionLine::Vue3,
+            package: "@vue/compiler-dom",
+            entry: "index",
+            kind: TargetKind::Vue3Dom,
+        };
+
+        assert!(
+            alias_export_expression(target, "unwrapTSNode", Some(&function_detail))
+                .contains("vue3CoreRuntime[\"unwrapTSNode\"].apply")
+        );
+        assert_eq!(
+            alias_export_expression(target, "BindingTypes", Some(&object_detail)),
+            "vue3CoreRuntime[\"BindingTypes\"]"
+        );
+        assert_eq!(
+            alias_export_expression(target, "parserOptions", Some(&object_detail)),
+            "vue3DomParserOptions"
+        );
+        assert!(
+            alias_export_expression(target, "createSimpleExpression", Some(&function_detail))
+                .contains("vue3CoreRuntime[\"createSimpleExpression\"].apply")
+        );
+    }
+
+    #[test]
     fn allowed_api_diff_requires_exact_target_diff_and_reason() {
         let target = TargetSpec {
             version_line: VersionLine::Vue26,
@@ -10744,6 +10819,8 @@ mod tests {
 
         let config = fs::read_to_string(temp.join("vitest.config.ts")).unwrap();
         assert!(!config.contains("vitest/config"));
+        assert!(config.contains("oxc:"));
+        assert!(config.contains("target: 'es2020'"));
         assert!(config.contains("include: ['packages/compiler-sfc/__tests__/**/*.spec.ts']"));
         assert!(config.contains(
             "'@vue/compiler-core': path.resolve(aliasRoot, 'node_modules/@vue/compiler-core/index.js')"

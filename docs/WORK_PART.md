@@ -59,6 +59,7 @@
 - [x] Vue 3 compiler-ssr mixed alias-runtime slot outlet / Transition symbol adapter slice for `ssrSlotOutlet.spec.ts` (`11/11`; full SSR suite currently `121/129`, `mixed` coverage).
 - [x] Vue 3 compiler-ssr mixed alias-runtime conformance closure for prepared official SSR source (`ssrComponent.spec.ts` `16/16`, `ssrInjectCssVars.spec.ts` `6/6`, full SSR suite `129/129`, `mixed` coverage).
 - [x] Vue 3 compiler-sfc official conformance execution wiring (real prepared Vitest run; currently `96/461`, `mixed` coverage; failing suite now exposes SFC compileScript, template asset URL, and parse padding/source-location gaps instead of `not-wired` pending status).
+- [x] Vue 3 compiler-sfc prepared runner transform and compiler-dom re-export adapter slice (`384/461`, `mixed` coverage; `compileScript.spec.ts` `70/88`).
 - [x] Vue 3 compiler-core Rust-backed public `generate(ast, options)` codegen slice for `codegen.spec.ts` (`34/34`; Vue 3 core coverage `rust-backed 192/192`, `mixed 460/460`).
 - [x] Vue 3 compiler-core Rust-backed `transformText` projection bridge for text merge / `TEXT_CALL` decisions (`transformText.spec.ts` `9/9`; file remains `mixed` because it still exercises alias-runtime harness dependencies).
 - [x] Vue 3 compiler-core Rust-backed `processExpression` projection bridge for expression prefixing / const classification decisions (`transformExpressions.spec.ts` `47/47`; file remains `mixed` because it still exercises alias-runtime traversal and transform harness dependencies).
@@ -131,6 +132,12 @@
 - [ ] Migrate Vue 3 compiler-core internal transform/codegen parity from alias runtime into the Rust AST/transform/codegen pipeline.
 
 ## Completed This Round
+
+- Fixed the Vue 3 compiler-sfc prepared Vitest runner's TypeScript transform target by pinning `oxc.target` to `es2020`. This removes the Vitest/Vite/OXC class-field ordering crash around official `ScriptCompileContext.source = this.descriptor.source`.
+- Updated the generated Vue 3 `@vue/compiler-dom` alias adapter so compiler-core re-exported utilities forward to the existing `vue3CoreRuntime`, while DOM public bridge entrypoints stay bridged to Rust. The alias also now exposes a DOM `parserOptions` object for official SFC template import-usage analysis.
+- Current SFC conformance improved from `96/461` to `384/461` official tests passed, still `mixed` coverage with `77` failures. Focused `compileScript.spec.ts` improved to `70/88`; remaining failures are real downstream SFC/DOM gaps such as inline template compilation, module-string import syntax, defineProps destructure behavior, template asset/srcset transforms, and parse padding/source-location exactness.
+- This touched `xtask/src/compat.rs` only for runner transform configuration and API/import adapter behavior. It does not implement compiler semantics in `xtask`, does not change AST/HIR/MIR structure, and does not make mixed SFC conformance count as standalone Rust SFC parity.
+- Verification this round: `cargo fmt --all`, `cargo fmt --all -- --check`, `git diff --check`, `cargo test -p xtask` (`24/24`), `cargo xtask diff-api --version-line vue3 --package @vue/compiler-dom`, `cargo xtask verify-npm-alias --version-line vue3`, focused prepared Vitest `compileScript.spec.ts` (`70/88`), `cargo xtask run-conformance --suite vue3-dom` (`133/133`), and `cargo xtask run-conformance --suite vue3-sfc` (expected failing report, `384/461`, `77` failed, mixed coverage).
 
 - Wired Vue 3 compiler-sfc official conformance to a real prepared Vitest runner.
 - The SFC runner now prepares official compiler-sfc tests/source, generated compiler-core relative shims, official DOM `stringifyStatic` source for relative test imports, deterministic SFC runner dependencies, and Vitest aliases for Rust compiler aliases plus SFC npm dependencies. It also classifies Vue 3 SFC conformance as `mixed` and counts Vitest suite-load failures as failures.
