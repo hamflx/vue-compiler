@@ -1285,6 +1285,7 @@ pub struct Vue3VNodeCall {
     pub tag: Vue3DomTag,
     pub props: Vue3DomProps,
     pub directives: Vec<Vue3DomDirective>,
+    pub models: Vec<Vue3DomModel>,
     pub content: Option<Vue3DomContent>,
     pub children: MirChildren,
     pub patch_flag: Vue3PatchFlags,
@@ -1318,6 +1319,7 @@ pub enum Vue3DomPropSegment {
     StaticAttr(Vue3DomStaticAttr),
     DynamicBinding(Vue3DomBinding),
     Content(Vue3DomContent),
+    Model(Vue3DomModel),
     Event(Vue3DomEvent),
     ObjectBinding(Vue3DomObjectBinding),
     ObjectListeners(Vue3DomObjectListeners),
@@ -1341,6 +1343,22 @@ pub struct Vue3DomBinding {
 pub enum Vue3DomContent {
     Html { expression: Option<JsExprId> },
     Text { expression: Option<JsExprId> },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue3DomModel {
+    pub expression: JsExprId,
+    pub kind: Vue3DomModelKind,
+    pub modifiers: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Vue3DomModelKind {
+    Text,
+    Radio,
+    Checkbox,
+    Select,
+    Dynamic,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

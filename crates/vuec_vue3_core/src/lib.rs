@@ -12,12 +12,13 @@ use vuec_ast::{
     HirStaticAttr, HirTag, JsExprId, JsPatternId, LoweringMap, MirChildren, MirExpr,
     MissingSpanReason, NodeId, NodeSpan, QuoteKind, RuntimeHelper, Vue3Ast, Vue3AstKind,
     Vue3Directive, Vue3DomBinding, Vue3DomContent, Vue3DomDirective, Vue3DomEvent,
-    Vue3DomEventCache, Vue3DomMir, Vue3DomMirKind, Vue3DomObjectBinding, Vue3DomObjectListeners,
-    Vue3DomPropSegment, Vue3DomProps, Vue3DomPropsNormalize, Vue3DomSlotName, Vue3DomStaticAttr,
-    Vue3DomTag, Vue3Element, Vue3ElementType, Vue3Expression, Vue3ForMemo, Vue3ForMir,
-    Vue3NodeKind, Vue3PatchFlags, Vue3Prop, Vue3Root, Vue3SlotFlag, Vue3SsrAttrs, Vue3SsrComponent,
-    Vue3SsrContent, Vue3SsrFor, Vue3SsrMir, Vue3SsrMirKind, Vue3SsrModel, Vue3SsrModelKind,
-    Vue3SsrSuspense, Vue3SsrTeleport, Vue3VNodeCall,
+    Vue3DomEventCache, Vue3DomMir, Vue3DomMirKind, Vue3DomModel, Vue3DomModelKind,
+    Vue3DomObjectBinding, Vue3DomObjectListeners, Vue3DomPropSegment, Vue3DomProps,
+    Vue3DomPropsNormalize, Vue3DomSlotName, Vue3DomStaticAttr, Vue3DomTag, Vue3Element,
+    Vue3ElementType, Vue3Expression, Vue3ForMemo, Vue3ForMir, Vue3NodeKind, Vue3PatchFlags,
+    Vue3Prop, Vue3Root, Vue3SlotFlag, Vue3SsrAttrs, Vue3SsrComponent, Vue3SsrContent, Vue3SsrFor,
+    Vue3SsrMir, Vue3SsrMirKind, Vue3SsrModel, Vue3SsrModelKind, Vue3SsrSuspense, Vue3SsrTeleport,
+    Vue3VNodeCall,
 };
 use vuec_codegen::{CodeWriter, SourceMapArtifact, SourceMapSegment};
 use vuec_html::{HtmlTokenKind, HtmlTokenizer};
@@ -1973,11 +1974,13 @@ fn lower_vue3_element_to_dom_mir_kind(
     let is_component = element.tag_type == Vue3ElementType::Component;
     let (mut props, directives) = lower_vue3_hir_payload_to_dom_mir(hir_kind, state);
     let content = inject_vue3_dom_content_props(&mut props, element, ast_node, state);
+    let models = inject_vue3_dom_model_props(&mut props, element, ast_node, state);
     let tag = lower_vue3_element_tag_to_dom_mir(element, &props);
     Vue3DomMirKind::VNodeCall(Vue3VNodeCall {
         tag,
         props,
         directives,
+        models,
         content,
         children: if ast_node.children.is_empty() {
             MirChildren::None
@@ -2036,6 +2039,136 @@ fn inject_vue3_dom_content_props(
         props.segments = segments;
     }
     content
+}
+
+fn inject_vue3_dom_model_props(
+    props: &mut Vue3DomProps,
+    element: &Vue3Element,
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    state: &mut Vue3DomLoweringState,
+) -> Vec<Vue3DomModel> {
+    let mut segment_index = 0usize;
+    let mut models = Vec::new();
+    let mut segments = Vec::new();
+    for prop in &element.props {
+        match prop {
+            Vue3Prop::Attribute(_) => {
+                push_existing_vue3_dom_prop_segment(props, &mut segments, &mut segment_index);
+            }
+            Vue3Prop::Directive(dir) if dir.name == "model" => {
+                if let Some(model) = lower_vue3_dom_model(element, dir, ast_node, state) {
+                    models.push(model.clone());
+                    segments.push(Vue3DomPropSegment::Model(model));
+                }
+            }
+            Vue3Prop::Directive(dir) if dir.name == "bind" || dir.name == "on" => {
+                push_existing_vue3_dom_prop_segment(props, &mut segments, &mut segment_index);
+            }
+            Vue3Prop::Directive(_) => {}
+        }
+    }
+    while segment_index < props.segments.len() {
+        push_existing_vue3_dom_prop_segment(props, &mut segments, &mut segment_index);
+    }
+    if !models.is_empty() {
+        props.segments = segments;
+    }
+    models
+}
+
+fn lower_vue3_dom_model(
+    element: &Vue3Element,
+    directive: &Vue3Directive,
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    state: &mut Vue3DomLoweringState,
+) -> Option<Vue3DomModel> {
+    if element.tag_type == Vue3ElementType::Component || directive.arg.is_some() {
+        return None;
+    }
+    if !matches!(element.tag.as_str(), "input" | "textarea" | "select")
+        && !state
+            .options
+            .custom_elements
+            .iter()
+            .any(|candidate| candidate == &element.tag)
+    {
+        return None;
+    }
+    let expression = directive.exp.as_ref()?;
+    if expression.source_string().trim().is_empty() {
+        return None;
+    }
+    let kind = vue3_dom_model_kind(element)?;
+    Some(Vue3DomModel {
+        expression: register_or_reuse_vue3_expression_with_span(
+            &mut state.js,
+            expression,
+            directive.exp_span.or_else(|| ast_node.span.source()),
+            state.source_type,
+        ),
+        kind,
+        modifiers: directive.modifiers.clone(),
+    })
+}
+
+fn vue3_dom_model_kind(element: &Vue3Element) -> Option<Vue3DomModelKind> {
+    match element.tag.as_str() {
+        "select" => Some(Vue3DomModelKind::Select),
+        "textarea" => Some(Vue3DomModelKind::Text),
+        "input" => vue3_dom_input_model_kind(element),
+        _ if element.tag_type == Vue3ElementType::Element => Some(Vue3DomModelKind::Text),
+        _ => None,
+    }
+}
+
+fn vue3_dom_input_model_kind(element: &Vue3Element) -> Option<Vue3DomModelKind> {
+    if vue3_dom_has_dynamic_key_v_bind(element) {
+        return Some(Vue3DomModelKind::Dynamic);
+    }
+    match vue3_dom_input_type(element) {
+        Some(Vue3DomInputType::Dynamic) => Some(Vue3DomModelKind::Dynamic),
+        Some(Vue3DomInputType::Static(value)) => match value.as_str() {
+            "radio" => Some(Vue3DomModelKind::Radio),
+            "checkbox" => Some(Vue3DomModelKind::Checkbox),
+            "file" => None,
+            _ => Some(Vue3DomModelKind::Text),
+        },
+        None => Some(Vue3DomModelKind::Text),
+    }
+}
+
+enum Vue3DomInputType {
+    Static(String),
+    Dynamic,
+}
+
+fn vue3_dom_input_type(element: &Vue3Element) -> Option<Vue3DomInputType> {
+    element.props.iter().find_map(|prop| match prop {
+        Vue3Prop::Attribute(attr) if attr.name == "type" => Some(Vue3DomInputType::Static(
+            attr.value.clone().unwrap_or_default(),
+        )),
+        Vue3Prop::Directive(dir)
+            if dir.name == "bind"
+                && !dir.is_dynamic_arg
+                && dir
+                    .arg
+                    .as_ref()
+                    .is_some_and(|arg| arg.source_string() == "type") =>
+        {
+            Some(Vue3DomInputType::Dynamic)
+        }
+        _ => None,
+    })
+}
+
+fn vue3_dom_has_dynamic_key_v_bind(element: &Vue3Element) -> bool {
+    element.props.iter().any(|prop| {
+        matches!(
+            prop,
+            Vue3Prop::Directive(dir)
+                if dir.name == "bind" && dir.exp.is_some() && (dir.arg.is_none() || dir.is_dynamic_arg)
+        )
+    })
 }
 
 fn push_existing_vue3_dom_prop_segment(
@@ -2417,6 +2550,7 @@ fn vue3_dom_mir_dynamic_props(element: &Vue3Element) -> Vec<String> {
         })
         .collect::<Vec<_>>();
     props.extend(vue3_dom_content_dynamic_props(element));
+    props.extend(vue3_dom_model_dynamic_props(element));
     props
 }
 
@@ -2451,6 +2585,7 @@ fn vue3_dom_mir_props_patch_names(element: &Vue3Element) -> Vec<String> {
         })
         .collect::<Vec<_>>();
     props.extend(vue3_dom_content_dynamic_props(element));
+    props.extend(vue3_dom_model_dynamic_props(element));
     props
 }
 
@@ -2461,6 +2596,19 @@ fn vue3_dom_content_dynamic_props(element: &Vue3Element) -> Vec<String> {
         .filter_map(|prop| match prop {
             Vue3Prop::Directive(dir) if dir.name == "html" => Some("innerHTML".into()),
             Vue3Prop::Directive(dir) if dir.name == "text" => Some("textContent".into()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn vue3_dom_model_dynamic_props(element: &Vue3Element) -> Vec<String> {
+    element
+        .props
+        .iter()
+        .filter_map(|prop| match prop {
+            Vue3Prop::Directive(dir) if dir.name == "model" && dir.arg.is_none() => {
+                vue3_dom_model_kind(element).map(|_| "onUpdate:modelValue".into())
+            }
             _ => None,
         })
         .collect()
@@ -10776,12 +10924,18 @@ impl<'a> Vue3DomMirCodegen<'a> {
                     if !call.directives.is_empty() {
                         push_unique_helper(&mut helpers, RuntimeHelper::Vue3WithDirectives);
                     }
+                    if !call.models.is_empty() {
+                        push_unique_helper(&mut helpers, RuntimeHelper::Vue3WithDirectives);
+                    }
                     for directive in &call.directives {
                         if directive.name == "show" {
                             push_unique_helper(&mut helpers, RuntimeHelper::Vue3VShow);
                         } else {
                             push_unique_helper(&mut helpers, RuntimeHelper::Vue3ResolveDirective);
                         }
+                    }
+                    for model in &call.models {
+                        push_unique_helper(&mut helpers, vue3_dom_model_runtime_helper(model.kind));
                     }
                     let is_root_call = node.parent == Some(self.mir.root) || call.is_block;
                     if is_root_call {
@@ -10871,6 +11025,7 @@ impl<'a> Vue3DomMirCodegen<'a> {
                         push_unique_helper(helpers, RuntimeHelper::Vue3ToDisplayString);
                     }
                 }
+                Vue3DomPropSegment::Model(_) => {}
                 Vue3DomPropSegment::StaticAttr(_)
                 | Vue3DomPropSegment::Event(_)
                 | Vue3DomPropSegment::ObjectBinding(_) => {}
@@ -11127,6 +11282,9 @@ impl<'a> Vue3DomMirCodegen<'a> {
                 Vue3DomPropSegment::Content(content) => {
                     object_entries.push(self.render_content_prop(content, scope));
                 }
+                Vue3DomPropSegment::Model(model) => {
+                    object_entries.push(self.render_model_update_prop(model, scope));
+                }
                 Vue3DomPropSegment::Event(event) => {
                     object_entries.push(self.render_event(event, scope));
                 }
@@ -11198,6 +11356,19 @@ impl<'a> Vue3DomMirCodegen<'a> {
                 }
             }
         }
+    }
+
+    fn render_model_update_prop(&self, model: &Vue3DomModel, scope: &RenderScope) -> String {
+        format!(
+            "{}: {}",
+            json_key("onUpdate:modelValue"),
+            self.render_model_assignment(model, scope)
+        )
+    }
+
+    fn render_model_assignment(&self, model: &Vue3DomModel, scope: &RenderScope) -> String {
+        let target = self.render_js_expr(model.expression, scope);
+        format!("$event => (({target}) = $event)")
     }
 
     fn render_event(&self, event: &Vue3DomEvent, scope: &RenderScope) -> String {
@@ -11276,15 +11447,37 @@ impl<'a> Vue3DomMirCodegen<'a> {
         call: &Vue3VNodeCall,
         scope: &RenderScope,
     ) -> String {
-        if call.directives.is_empty() {
+        if call.directives.is_empty() && call.models.is_empty() {
             return vnode;
         }
-        let directives = call
-            .directives
+        let mut directives = call
+            .models
             .iter()
-            .map(|directive| self.render_directive_arg(directive, scope))
+            .map(|model| self.render_model_directive_arg(model, scope))
             .collect::<Vec<_>>();
+        directives.extend(
+            call.directives
+                .iter()
+                .map(|directive| self.render_directive_arg(directive, scope)),
+        );
         format!("_withDirectives({vnode}, {})", render_array(&directives))
+    }
+
+    fn render_model_directive_arg(&self, model: &Vue3DomModel, scope: &RenderScope) -> String {
+        let mut args = vec![
+            helper_reference(vue3_dom_model_runtime_helper(model.kind)),
+            self.render_js_expr(model.expression, scope),
+        ];
+        if !model.modifiers.is_empty() {
+            args.push("void 0".into());
+            let modifiers = model
+                .modifiers
+                .iter()
+                .map(|modifier| format!("{}: true", json_key(modifier)))
+                .collect::<Vec<_>>();
+            args.push(render_object(&modifiers));
+        }
+        format!("[{}]", args.join(", "))
     }
 
     fn render_slot_outlet(&self, slot: &vuec_ast::Vue3RenderSlot, scope: &RenderScope) -> String {
@@ -11898,6 +12091,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                     }
                     Vue3DomPropSegment::StaticAttr(_)
                     | Vue3DomPropSegment::Content(_)
+                    | Vue3DomPropSegment::Model(_)
                     | Vue3DomPropSegment::Event(_)
                     | Vue3DomPropSegment::ObjectListeners(_) => {}
                 }
@@ -11983,6 +12177,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                 }
                 Vue3DomPropSegment::StaticAttr(_)
                 | Vue3DomPropSegment::Content(_)
+                | Vue3DomPropSegment::Model(_)
                 | Vue3DomPropSegment::Event(_)
                 | Vue3DomPropSegment::ObjectBinding(_) => {}
             }
@@ -12231,6 +12426,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                     ));
                 }
                 Vue3DomPropSegment::Content(_) => {}
+                Vue3DomPropSegment::Model(_) => {}
                 Vue3DomPropSegment::ObjectBinding(binding) => {
                     writer.push_line(&format!(
                         "_push(_ssrRenderAttrs({}));",
@@ -12401,6 +12597,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                         object_entries.push(self.render_ssr_object_binding(binding, scope));
                     }
                     Vue3DomPropSegment::Content(_) => {}
+                    Vue3DomPropSegment::Model(_) => {}
                     Vue3DomPropSegment::ObjectBinding(binding) => {
                         self.push_merge_object_arg(&mut merge_args, &mut object_entries);
                         merge_args.push(self.render_js_expr(binding.value, scope));
@@ -12463,6 +12660,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                     }
                     Vue3DomPropSegment::StaticAttr(_)
                     | Vue3DomPropSegment::Content(_)
+                    | Vue3DomPropSegment::Model(_)
                     | Vue3DomPropSegment::DynamicBinding(_)
                     | Vue3DomPropSegment::Event(_)
                     | Vue3DomPropSegment::ObjectBinding(_)
@@ -12623,6 +12821,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                     object_entries.push(self.render_dynamic_binding(binding, scope));
                 }
                 Vue3DomPropSegment::Content(_) => {}
+                Vue3DomPropSegment::Model(_) => {}
                 Vue3DomPropSegment::Event(event) => {
                     object_entries.push(self.render_event(event, scope));
                 }
@@ -12819,6 +13018,7 @@ fn props_requires_merge_call(props: &Vue3DomProps) -> bool {
             Vue3DomPropSegment::StaticAttr(_)
             | Vue3DomPropSegment::DynamicBinding(_)
             | Vue3DomPropSegment::Content(_)
+            | Vue3DomPropSegment::Model(_)
             | Vue3DomPropSegment::Event(_) => pending_object_entries = true,
             Vue3DomPropSegment::ObjectBinding(_) | Vue3DomPropSegment::ObjectListeners(_) => {
                 if pending_object_entries {
@@ -12900,6 +13100,16 @@ fn vue3_slot_flag_value(flag: Vue3SlotFlag) -> u8 {
 
 fn dom_tag_consumes_binding(tag: &Vue3DomTag, binding: &Vue3DomBinding) -> bool {
     matches!(tag, Vue3DomTag::DynamicComponent(_)) && !binding.dynamic_arg && binding.name == "is"
+}
+
+fn vue3_dom_model_runtime_helper(kind: Vue3DomModelKind) -> RuntimeHelper {
+    match kind {
+        Vue3DomModelKind::Text => RuntimeHelper::Vue3VModelText,
+        Vue3DomModelKind::Radio => RuntimeHelper::Vue3VModelRadio,
+        Vue3DomModelKind::Checkbox => RuntimeHelper::Vue3VModelCheckbox,
+        Vue3DomModelKind::Select => RuntimeHelper::Vue3VModelSelect,
+        Vue3DomModelKind::Dynamic => RuntimeHelper::Vue3VModelDynamic,
+    }
 }
 
 fn vue3_codegen_root(ast: &Vue3Ast) -> Option<&Vue3Root> {
@@ -13191,6 +13401,11 @@ fn vue3_helper_order(components_first: bool) -> &'static [RuntimeHelper] {
             RuntimeHelper::Vue3PopScopeId,
             RuntimeHelper::Vue3Unref,
             RuntimeHelper::Vue3IsRef,
+            RuntimeHelper::Vue3VModelRadio,
+            RuntimeHelper::Vue3VModelCheckbox,
+            RuntimeHelper::Vue3VModelText,
+            RuntimeHelper::Vue3VModelSelect,
+            RuntimeHelper::Vue3VModelDynamic,
             RuntimeHelper::Vue3VShow,
         ]
     } else {
@@ -13233,6 +13448,11 @@ fn vue3_helper_order(components_first: bool) -> &'static [RuntimeHelper] {
             RuntimeHelper::Vue3PopScopeId,
             RuntimeHelper::Vue3Unref,
             RuntimeHelper::Vue3IsRef,
+            RuntimeHelper::Vue3VModelRadio,
+            RuntimeHelper::Vue3VModelCheckbox,
+            RuntimeHelper::Vue3VModelText,
+            RuntimeHelper::Vue3VModelSelect,
+            RuntimeHelper::Vue3VModelDynamic,
             RuntimeHelper::Vue3VShow,
         ]
     }
@@ -14582,6 +14802,8 @@ fn collect_vue3_runtime_directive_asset(
     }
     if directive.name == "show" {
         helpers.insert(RuntimeHelper::Vue3VShow);
+    } else if directive.name == "model" {
+        helpers.insert(RuntimeHelper::Vue3VModelDynamic);
     } else {
         directives.insert(directive.name.clone());
         helpers.insert(RuntimeHelper::Vue3ResolveDirective);
@@ -17902,6 +18124,67 @@ mod tests {
     }
 
     #[test]
+    fn lower_vue3_ast_to_dom_mir_projects_native_v_model_payloads() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div><input v-model="text"><input type="radio" v-model="picked"><input type="checkbox" v-model.trim="checked"><input :type="kind" v-model="dynamic"><select v-model="selected"/><textarea v-model.lazy="body">old</textarea></div>"#.into(),
+            file_id: FileId(61),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+
+        assert_eq!(result.hir.validate_tree(), Ok(()));
+        assert_eq!(result.mir.validate_tree(), Ok(()));
+        assert_eq!(
+            result
+                .js
+                .expressions()
+                .iter()
+                .map(|entry| entry.source.as_str())
+                .collect::<Vec<_>>(),
+            vec!["text", "picked", "checked", "kind", "dynamic", "selected", "body"]
+        );
+        let calls = result
+            .mir
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.kind {
+                Vue3DomMirKind::VNodeCall(call) if !call.models.is_empty() => Some(call),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(calls.len(), 6);
+        assert_eq!(
+            calls
+                .iter()
+                .map(|call| call.models[0].kind)
+                .collect::<Vec<_>>(),
+            vec![
+                Vue3DomModelKind::Text,
+                Vue3DomModelKind::Radio,
+                Vue3DomModelKind::Checkbox,
+                Vue3DomModelKind::Dynamic,
+                Vue3DomModelKind::Select,
+                Vue3DomModelKind::Text,
+            ]
+        );
+        assert_eq!(calls[2].models[0].modifiers, vec!["trim"]);
+        assert_eq!(calls[5].models[0].modifiers, vec!["lazy"]);
+        assert!(matches!(
+            calls[0].props.segments.as_slice(),
+            [Vue3DomPropSegment::Model(Vue3DomModel {
+                kind: Vue3DomModelKind::Text,
+                ..
+            })]
+        ));
+        assert_eq!(calls[0].patch_flag.bits, 8);
+        assert_eq!(calls[0].dynamic_props, vec!["onUpdate:modelValue"]);
+        assert_eq!(calls[3].patch_flag.bits, 8);
+        assert_eq!(calls[3].dynamic_props, vec!["type", "onUpdate:modelValue"]);
+    }
+
+    #[test]
     fn lower_vue3_ast_to_dom_mir_projects_component_tags_structurally() {
         let source = TemplateSource {
             filename: "foo.vue".into(),
@@ -18904,6 +19187,80 @@ mod tests {
             .code
             .contains("_mergeProps({ textContent: 'hi' }, _ctx.after)"));
         assert!(!generated.code.contains("_toDisplayString('hi')"));
+    }
+
+    #[test]
+    fn generate_vue3_dom_mir_emits_native_v_model_payloads_from_mir() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div><input v-model="text"><input type="radio" v-model="picked"><input type="checkbox" v-model.trim="checked"><input :type="kind" v-model="dynamic"><select v-model="selected"/><textarea v-model.lazy="body"/></div>"#.into(),
+            file_id: FileId(62),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+        let generated = generate_vue3_dom_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated.code.contains("vModelText as _vModelText"));
+        assert!(generated.code.contains("vModelRadio as _vModelRadio"));
+        assert!(generated.code.contains("vModelCheckbox as _vModelCheckbox"));
+        assert!(generated.code.contains("vModelSelect as _vModelSelect"));
+        assert!(generated.code.contains("vModelDynamic as _vModelDynamic"));
+        assert!(generated.code.contains("withDirectives as _withDirectives"));
+        assert!(generated.code.contains("[_vModelText, _ctx.text]"));
+        assert!(generated.code.contains("[_vModelRadio, _ctx.picked]"));
+        assert!(generated.code.contains("_vModelCheckbox"));
+        assert!(generated.code.contains("_ctx.checked"));
+        assert!(generated.code.contains("trim: true"));
+        assert!(generated.code.contains("[_vModelDynamic, _ctx.dynamic]"));
+        assert!(generated.code.contains("[_vModelSelect, _ctx.selected]"));
+        assert!(generated.code.contains("_ctx.body"));
+        assert!(generated.code.contains("lazy: true"));
+        assert!(generated
+            .code
+            .contains("\"onUpdate:modelValue\": $event => ((_ctx.text) = $event)"));
+        assert!(generated
+            .code
+            .contains("\"onUpdate:modelValue\": $event => ((_ctx.body) = $event)"));
+        assert!(generated
+            .code
+            .contains("8 /* PROPS */, [\"onUpdate:modelValue\"]"));
+    }
+
+    #[test]
+    fn generate_vue3_dom_mir_merges_native_v_model_with_object_bindings() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<input v-bind="before" v-model="text" class="field"><input v-model="after" v-bind="tail">"#.into(),
+            file_id: FileId(63),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+        let generated = generate_vue3_dom_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated.code.contains("mergeProps as _mergeProps"));
+        assert!(generated.code.contains("_mergeProps(_ctx.before"));
+        assert!(generated.code.contains("class: \"field\""));
+        assert!(generated.code.contains("_mergeProps({ \"onUpdate:modelValue\": $event => ((_ctx.after) = $event) }, _ctx.tail)"));
+        assert!(generated.code.contains("[_vModelDynamic, _ctx.text]"));
+        assert!(generated.code.contains("[_vModelDynamic, _ctx.after]"));
     }
 
     #[test]
