@@ -633,10 +633,19 @@ impl Vue3Dialect {
             let directives = vue3_codegen_directives(ast);
             let directive_declarations = render_directive_declarations(&directives);
             let imports = vue3_codegen_imports(ast);
+            let mut memo_index = MemoIndex::default();
+            let scope = RenderScope::default();
             let expr = if root.children.len() == 1 {
-                render_node_expr(ast, root.children[0], options, NodeRenderMode::Root)
+                render_node_expr_scoped(
+                    ast,
+                    root.children[0],
+                    options,
+                    NodeRenderMode::Root,
+                    &scope,
+                    &mut memo_index,
+                )
             } else {
-                render_children_array(ast, &root.children, options, true)
+                render_children_array(ast, &root.children, options, true, &mut memo_index)
             };
             let declarations = component_declarations
                 .iter()
@@ -14652,6 +14661,7 @@ fn render_children_array(
     children: &[vuec_ast::NodeId],
     options: &Vue3CompilerOptions,
     is_root: bool,
+    memo_index: &mut MemoIndex,
 ) -> String {
     let scope = RenderScope::default();
     let rendered = render_child_sequence(
@@ -14664,7 +14674,7 @@ fn render_children_array(
             NodeRenderMode::Child
         },
         &scope,
-        &mut MemoIndex::default(),
+        memo_index,
     );
     render_array(&rendered)
 }
@@ -14704,22 +14714,10 @@ impl MemoIndex {
         self.next += 1;
         index
     }
-}
 
-fn render_node_expr(
-    ast: &Vue3Ast,
-    node_id: vuec_ast::NodeId,
-    options: &Vue3CompilerOptions,
-    mode: NodeRenderMode,
-) -> String {
-    render_node_expr_scoped(
-        ast,
-        node_id,
-        options,
-        mode,
-        &RenderScope::default(),
-        &mut MemoIndex::default(),
-    )
+    fn reserve(&mut self) {
+        self.next += 1;
+    }
 }
 
 fn render_node_expr_scoped(
@@ -14785,13 +14783,16 @@ fn render_plain_element(
     mode: NodeRenderMode,
     scope: &RenderScope,
     branch_key: Option<usize>,
+    memo_index: &mut MemoIndex,
 ) -> String {
     let tag = &element.tag;
     if tag == "slot" {
         return render_slot_outlet(element, options, scope);
     }
     if element.tag_type == Vue3ElementType::Component {
-        return render_component_element(ast, node_id, element, options, mode, scope, branch_key);
+        return render_component_element(
+            ast, node_id, element, options, mode, scope, branch_key, memo_index,
+        );
     }
     let helper = if mode == NodeRenderMode::Root {
         "_createElementBlock"
@@ -14801,7 +14802,7 @@ fn render_plain_element(
     let props = render_props(element, options, scope, branch_key);
     let children = ast
         .node(node_id)
-        .map(|node| render_element_children(ast, &node.children, options, mode, scope))
+        .map(|node| render_element_children(ast, &node.children, options, mode, scope, memo_index))
         .unwrap_or_default();
     let patch_flag =
         render_patch_flag_text(render_patch_flag_kind(ast, node_id, element, options, mode));
@@ -14832,16 +14833,20 @@ fn render_maybe_memo_element(
     memo_index: &mut MemoIndex,
 ) -> String {
     let Some(memo) = directive_by_name(element, "memo") else {
-        return render_plain_element(ast, node_id, element, options, mode, scope, branch_key);
+        return render_plain_element(
+            ast, node_id, element, options, mode, scope, branch_key, memo_index,
+        );
     };
     let memo_mode = if element.tag_type == Vue3ElementType::Component {
         mode
     } else {
         NodeRenderMode::Root
     };
-    let rendered =
-        render_plain_element(ast, node_id, element, options, memo_mode, scope, branch_key);
-    render_with_memo(memo, rendered, options, scope, memo_index.alloc())
+    let cache_index = memo_index.alloc();
+    let rendered = render_plain_element(
+        ast, node_id, element, options, memo_mode, scope, branch_key, memo_index,
+    );
+    render_with_memo(memo, rendered, options, scope, cache_index)
 }
 
 fn render_with_memo(
@@ -14895,6 +14900,7 @@ fn render_component_element(
     mode: NodeRenderMode,
     scope: &RenderScope,
     branch_key: Option<usize>,
+    memo_index: &mut MemoIndex,
 ) -> String {
     let tag = render_component_tag_expr(element, options, scope);
     let props = render_props(element, options, scope, branch_key);
@@ -14903,7 +14909,7 @@ fn render_component_element(
     } else {
         props
     };
-    let children = render_component_slots(ast, node_id, options, scope);
+    let children = render_component_slots(ast, node_id, options, scope, memo_index);
     let patch_flag = component_patch_flag(ast, node_id);
     let helper = if mode == NodeRenderMode::Root {
         "_createBlock"
@@ -15047,6 +15053,7 @@ fn render_component_slots(
     node_id: vuec_ast::NodeId,
     options: &Vue3CompilerOptions,
     scope: &RenderScope,
+    memo_index: &mut MemoIndex,
 ) -> Option<String> {
     let node = ast.node(node_id)?;
     let visible = visible_children(ast, &node.children);
@@ -15066,10 +15073,12 @@ fn render_component_slots(
     });
     if dynamic_slots {
         Some(render_dynamic_component_slots(
-            ast, &visible, options, scope,
+            ast, &visible, options, scope, memo_index,
         ))
     } else {
-        Some(render_stable_component_slots(ast, &visible, options, scope))
+        Some(render_stable_component_slots(
+            ast, &visible, options, scope, memo_index,
+        ))
     }
 }
 
@@ -15078,6 +15087,7 @@ fn render_stable_component_slots(
     children: &[&vuec_ast::Node<Vue3NodeKind>],
     options: &Vue3CompilerOptions,
     scope: &RenderScope,
+    memo_index: &mut MemoIndex,
 ) -> String {
     let mut slots = Vec::new();
     let mut default_children = Vec::new();
@@ -15085,7 +15095,7 @@ fn render_stable_component_slots(
         if let Vue3AstKind::Element(element) = &child.kind {
             if let Some(slot) = directive_by_name(element, "slot") {
                 slots.push(render_static_slot_property(
-                    ast, child.id, element, slot, options, scope,
+                    ast, child.id, element, slot, options, scope, memo_index,
                 ));
                 continue;
             }
@@ -15096,7 +15106,7 @@ fn render_stable_component_slots(
         slots.push(render_slot_property(
             "default",
             "()",
-            render_slot_children(ast, &default_children, options, scope),
+            render_slot_children(ast, &default_children, options, scope, memo_index),
         ));
     }
     slots.push("_: 1 /* STABLE */".into());
@@ -15108,6 +15118,7 @@ fn render_dynamic_component_slots(
     children: &[&vuec_ast::Node<Vue3NodeKind>],
     options: &Vue3CompilerOptions,
     scope: &RenderScope,
+    memo_index: &mut MemoIndex,
 ) -> String {
     let mut dynamic_entries = Vec::new();
     for (index, child) in children.iter().enumerate() {
@@ -15119,15 +15130,15 @@ fn render_dynamic_component_slots(
         };
         if let Some(if_dir) = directive_by_name(element, "if") {
             dynamic_entries.push(render_conditional_dynamic_slot(
-                ast, child.id, element, slot, if_dir, options, scope, index,
+                ast, child.id, element, slot, if_dir, options, scope, index, memo_index,
             ));
         } else if let Some(for_dir) = directive_by_name(element, "for") {
             dynamic_entries.push(render_for_dynamic_slot(
-                ast, child.id, element, slot, for_dir, options, scope,
+                ast, child.id, element, slot, for_dir, options, scope, memo_index,
             ));
         } else {
             dynamic_entries.push(render_dynamic_slot_object(
-                ast, child.id, element, slot, options, scope, None,
+                ast, child.id, element, slot, options, scope, None, memo_index,
             ));
         }
     }
@@ -15144,6 +15155,7 @@ fn render_static_slot_property(
     slot: &Vue3Directive,
     options: &Vue3CompilerOptions,
     scope: &RenderScope,
+    memo_index: &mut MemoIndex,
 ) -> String {
     let name = slot
         .arg
@@ -15161,7 +15173,7 @@ fn render_static_slot_property(
     let slot_scope = slot_function_scope(scope, &params);
     let children = ast
         .node(node_id)
-        .map(|node| render_slot_children(ast, &node.children, options, &slot_scope))
+        .map(|node| render_slot_children(ast, &node.children, options, &slot_scope, memo_index))
         .unwrap_or_else(|| "[]".into());
     render_slot_property(&name, &params, children)
 }
@@ -15179,6 +15191,7 @@ fn render_conditional_dynamic_slot(
     options: &Vue3CompilerOptions,
     scope: &RenderScope,
     index: usize,
+    memo_index: &mut MemoIndex,
 ) -> String {
     let condition = if_dir
         .exp
@@ -15189,7 +15202,16 @@ fn render_conditional_dynamic_slot(
         &rewrite_expression_with_scope(&condition, options, scope),
         options,
     );
-    let slot = render_dynamic_slot_object(ast, node_id, element, slot, options, scope, Some(index));
+    let slot = render_dynamic_slot_object(
+        ast,
+        node_id,
+        element,
+        slot,
+        options,
+        scope,
+        Some(index),
+        memo_index,
+    );
     format!(
         "{condition}\n  ? {}\n  : undefined",
         indent_after_first_line(&slot, 4)
@@ -15204,6 +15226,7 @@ fn render_for_dynamic_slot(
     for_dir: &Vue3Directive,
     options: &Vue3CompilerOptions,
     scope: &RenderScope,
+    memo_index: &mut MemoIndex,
 ) -> String {
     let expression = for_dir
         .exp
@@ -15211,12 +15234,16 @@ fn render_for_dynamic_slot(
         .map(Vue3Expression::source_string)
         .unwrap_or_default();
     let Some((source, aliases)) = parse_v_for_expression(&expression) else {
-        return render_dynamic_slot_object(ast, node_id, element, slot, options, scope, None);
+        return render_dynamic_slot_object(
+            ast, node_id, element, slot, options, scope, None, memo_index,
+        );
     };
     let source = rewrite_expression_with_scope(&source, options, scope);
     let scoped = scope.with_locals(normalize_v_for_aliases(&aliases));
     let params = aliases.join(", ");
-    let body = render_dynamic_slot_object(ast, node_id, element, slot, options, &scoped, None);
+    let body = render_dynamic_slot_object(
+        ast, node_id, element, slot, options, &scoped, None, memo_index,
+    );
     format!(
         "_renderList({source}, ({params}) => {{\n  return {}\n}})",
         indent_after_first_line(&body, 2)
@@ -15231,6 +15258,7 @@ fn render_dynamic_slot_object(
     options: &Vue3CompilerOptions,
     scope: &RenderScope,
     key: Option<usize>,
+    memo_index: &mut MemoIndex,
 ) -> String {
     let name = slot_name_expression(slot, options, scope);
     let params = slot
@@ -15243,7 +15271,7 @@ fn render_dynamic_slot_object(
     let slot_scope = slot_function_scope(scope, &params);
     let children = ast
         .node(node_id)
-        .map(|node| render_slot_children(ast, &node.children, options, &slot_scope))
+        .map(|node| render_slot_children(ast, &node.children, options, &slot_scope, memo_index))
         .unwrap_or_else(|| "[]".into());
     let mut properties = vec![
         format!("name: {name}"),
@@ -15276,6 +15304,7 @@ fn render_slot_children(
     children: &[vuec_ast::NodeId],
     options: &Vue3CompilerOptions,
     scope: &RenderScope,
+    memo_index: &mut MemoIndex,
 ) -> String {
     let rendered = render_child_sequence(
         ast,
@@ -15283,7 +15312,7 @@ fn render_slot_children(
         options,
         NodeRenderMode::Child,
         scope,
-        &mut MemoIndex::default(),
+        memo_index,
     );
     render_array(&rendered)
 }
@@ -15531,6 +15560,7 @@ fn render_element_children(
     options: &Vue3CompilerOptions,
     parent_mode: NodeRenderMode,
     scope: &RenderScope,
+    memo_index: &mut MemoIndex,
 ) -> String {
     let child_nodes = children
         .iter()
@@ -15544,7 +15574,7 @@ fn render_element_children(
         && should_stringify_static_children(&child_nodes)
     {
         if let Some(static_call) = render_static_vnode_cache(ast, &child_nodes, options) {
-            return format!("[...(_cache[0] || (_cache[0] = [{static_call}]))]");
+            return render_cached_children_array(vec![static_call], memo_index.alloc());
         }
     }
     if options.hoist_static
@@ -15553,7 +15583,7 @@ fn render_element_children(
     {
         if options.stringify_static {
             if let Some(static_call) = render_static_vnode_cache(ast, &child_nodes, options) {
-                return format!("[...(_cache[0] || (_cache[0] = [{static_call}]))]");
+                return render_cached_children_array(vec![static_call], memo_index.alloc());
             }
             if let Some(rendered) = render_static_vnode_chunked_children(
                 ast,
@@ -15561,11 +15591,9 @@ fn render_element_children(
                 options,
                 scope,
                 NodeRenderMode::Cached,
+                memo_index,
             ) {
-                return format!(
-                    "[...(_cache[0] || (_cache[0] = [{}]))]",
-                    rendered.join(", ")
-                );
+                return render_cached_children_array(rendered, memo_index.alloc());
             }
         }
         let rendered = child_nodes
@@ -15577,15 +15605,12 @@ fn render_element_children(
                     options,
                     NodeRenderMode::Cached,
                     scope,
-                    &mut MemoIndex::default(),
+                    memo_index,
                 )
             })
             .collect::<Vec<_>>();
         if !rendered.is_empty() {
-            return format!(
-                "[...(_cache[0] || (_cache[0] = [{}]))]",
-                rendered.join(", ")
-            );
+            return render_cached_children_array(rendered, memo_index.alloc());
         }
     }
     if options.hoist_static && options.stringify_static && parent_mode == NodeRenderMode::Root {
@@ -15595,6 +15620,7 @@ fn render_element_children(
             options,
             scope,
             NodeRenderMode::Child,
+            memo_index,
         ) {
             return render_array(&rendered);
         }
@@ -15613,7 +15639,7 @@ fn render_element_children(
         options,
         NodeRenderMode::Child,
         scope,
-        &mut MemoIndex::default(),
+        memo_index,
     );
     if rendered.is_empty() {
         String::new()
@@ -15625,6 +15651,13 @@ fn render_element_children(
     } else {
         render_array(&rendered)
     }
+}
+
+fn render_cached_children_array(rendered: Vec<String>, cache_index: usize) -> String {
+    format!(
+        "[...(_cache[{cache_index}] || (_cache[{cache_index}] = [{}]))]",
+        rendered.join(", ")
+    )
 }
 
 fn render_child_sequence(
@@ -15829,7 +15862,7 @@ fn render_if_branch_expr(
     if element.tag == "template" {
         let children = ast
             .node(node_id)
-            .map(|node| render_fragment_children(ast, &node.children, options, scope))
+            .map(|node| render_fragment_children(ast, &node.children, options, scope, memo_index))
             .unwrap_or_else(|| "[]".into());
         return format!(
             "(_openBlock(), _createElementBlock(_Fragment, {{ key: {branch_key} }}, {children}, 64 /* STABLE_FRAGMENT */))"
@@ -15852,6 +15885,7 @@ fn render_fragment_children(
     children: &[vuec_ast::NodeId],
     options: &Vue3CompilerOptions,
     scope: &RenderScope,
+    memo_index: &mut MemoIndex,
 ) -> String {
     let rendered = render_child_sequence(
         ast,
@@ -15859,7 +15893,7 @@ fn render_fragment_children(
         options,
         NodeRenderMode::Child,
         scope,
-        &mut MemoIndex::default(),
+        memo_index,
     );
     render_array(&rendered)
 }
@@ -15883,6 +15917,7 @@ fn render_for_node(
             NodeRenderMode::Root,
             scope,
             None,
+            _memo_index,
         );
     };
     let parsed = parse_v_for_expression(&expression);
@@ -15895,19 +15930,25 @@ fn render_for_node(
             NodeRenderMode::Root,
             scope,
             None,
+            _memo_index,
         );
     };
     let source = rewrite_expression_with_scope(&source, options, scope);
     let scoped = scope.with_locals(normalize_v_for_aliases(&aliases));
     let params = aliases.join(", ");
-    let body = render_v_for_body(ast, node_id, element, options, &scoped);
     let Some(memo) = directive_by_name(element, "memo") else {
+        let body = render_v_for_body(ast, node_id, element, options, &scoped, _memo_index);
         let fragment_flag = v_for_fragment_patch_flag(element);
         let body = indent_after_first_line(&body, 2);
         return format!(
             "(_openBlock(true), _createElementBlock(_Fragment, null, _renderList({source}, ({params}) => {{\n  return {body}\n}}), {fragment_flag}))"
         );
     };
+    let cache_index = _memo_index.alloc();
+    // Vue's transformMemo reserves a cache slot for v-for memo wrappers even
+    // though the emitted render-list memo path only references cache_index.
+    _memo_index.reserve();
+    let body = render_v_for_body(ast, node_id, element, options, &scoped, _memo_index);
     let params = format!("{params}, __, ___, _cached");
     let memo_expression = memo
         .exp
@@ -15924,7 +15965,7 @@ fn render_for_node(
     );
     let body = indent_after_first_line(&body, 2);
     format!(
-        "(_openBlock(true), _createElementBlock(_Fragment, null, _renderList({source}, ({params}) => {{\n  const _memo = ({memo_expression})\n  if ({guard}) return _cached\n  const _item = {body}\n  _item.memo = _memo\n  return _item\n}}, _cache, 0), 128 /* KEYED_FRAGMENT */))"
+        "(_openBlock(true), _createElementBlock(_Fragment, null, _renderList({source}, ({params}) => {{\n  const _memo = ({memo_expression})\n  if ({guard}) return _cached\n  const _item = {body}\n  _item.memo = _memo\n  return _item\n}}, _cache, {cache_index}), 128 /* KEYED_FRAGMENT */))"
     )
 }
 
@@ -15934,6 +15975,7 @@ fn render_v_for_body(
     element: &Vue3Element,
     options: &Vue3CompilerOptions,
     scope: &RenderScope,
+    memo_index: &mut MemoIndex,
 ) -> String {
     if element.tag == "template" {
         let Some(node) = ast.node(node_id) else {
@@ -15952,13 +15994,14 @@ fn render_v_for_body(
                         NodeRenderMode::Root,
                         scope,
                         None,
+                        memo_index,
                     );
                     return inject_key_into_vnode_call(&body, key.as_deref());
                 }
             }
         }
         let key = v_for_key_expression(element, options, scope);
-        let children = render_fragment_children(ast, &node.children, options, scope);
+        let children = render_fragment_children(ast, &node.children, options, scope, memo_index);
         let props = key
             .map(|key| format!("{{ key: {key} }}"))
             .unwrap_or_else(|| "null".into());
@@ -15974,6 +16017,7 @@ fn render_v_for_body(
         NodeRenderMode::Root,
         scope,
         None,
+        memo_index,
     )
 }
 
@@ -16326,6 +16370,7 @@ fn render_static_vnode_chunked_children(
     options: &Vue3CompilerOptions,
     scope: &RenderScope,
     regular_mode: NodeRenderMode,
+    memo_index: &mut MemoIndex,
 ) -> Option<Vec<String>> {
     let chunks = static_vnode_chunks(ast, children, options);
     if chunks.is_empty() {
@@ -16343,6 +16388,7 @@ fn render_static_vnode_chunked_children(
             options,
             scope,
             regular_mode,
+            memo_index,
             &mut rendered,
         );
         rendered.push(chunk.call);
@@ -16356,6 +16402,7 @@ fn render_static_vnode_chunked_children(
         options,
         scope,
         regular_mode,
+        memo_index,
         &mut rendered,
     );
     Some(rendered)
@@ -16420,6 +16467,7 @@ fn render_static_vnode_regular_segment(
     options: &Vue3CompilerOptions,
     scope: &RenderScope,
     mode: NodeRenderMode,
+    memo_index: &mut MemoIndex,
     rendered: &mut Vec<String>,
 ) {
     if start >= end {
@@ -16430,12 +16478,7 @@ fn render_static_vnode_regular_segment(
         .map(|child| child.id)
         .collect::<Vec<_>>();
     rendered.extend(render_child_sequence(
-        ast,
-        &ids,
-        options,
-        mode,
-        scope,
-        &mut MemoIndex::default(),
+        ast, &ids, options, mode, scope, memo_index,
     ));
 }
 
@@ -24020,6 +24063,68 @@ mod tests {
         assert!(result.code.contains(
             r#"_withMemo([_ctx.x], () => (_openBlock(), _createElementBlock("div")), _cache, 0)"#
         ));
+    }
+
+    #[test]
+    fn base_compile_keeps_static_cache_and_v_memo_cache_indexes_distinct() {
+        let result = base_compile(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: "<div><section v-memo=\"[x]\"><div><div>hello</div><div>hello</div></div></section></div>"
+                    .into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                mode: "module".into(),
+                hoist_static: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(result
+            .code
+            .contains(r#"_withMemo([_ctx.x], () => (_openBlock(), _createElementBlock("section""#));
+        assert!(result.code.contains(", _cache, 0)"));
+        assert!(result
+            .code
+            .contains("_cache[1] || (_cache[1] = [_createElementVNode"));
+        assert!(!result
+            .code
+            .contains("_cache[0] || (_cache[0] = [_createElementVNode"));
+    }
+
+    #[test]
+    fn base_compile_keeps_static_cache_and_v_for_memo_cache_indexes_distinct() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div><div v-for="{ x, y } in list" :key="x" v-memo="[x, y === z]"><span>foobar</span></div></div>"#.into(),
+            file_id: FileId(0),
+            base_offset: 0,
+        };
+        let result = base_compile(
+            source,
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                mode: "module".into(),
+                hoist_static: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(result
+            .code
+            .contains("_renderList(_ctx.list, ({ x, y }, __, ___, _cached) =>"));
+        assert!(result
+            .code
+            .contains("}, _cache, 0), 128 /* KEYED_FRAGMENT */)"));
+        assert!(result
+            .code
+            .contains("_cache[2] || (_cache[2] = [_createElementVNode"));
+        assert!(!result
+            .code
+            .contains("_cache[0] || (_cache[0] = [_createElementVNode"));
     }
 
     #[test]
