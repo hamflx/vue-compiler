@@ -1136,6 +1136,7 @@ pub struct HirBinding {
     pub dynamic_name: Option<JsExprId>,
     pub value: JsExprId,
     pub dynamic_arg: bool,
+    pub modifiers: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1337,6 +1338,9 @@ pub struct Vue3DomBinding {
     pub dynamic_name: Option<JsExprId>,
     pub value: JsExprId,
     pub dynamic_arg: bool,
+    pub camel: bool,
+    pub force_prop: bool,
+    pub force_attr: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

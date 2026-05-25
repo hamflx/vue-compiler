@@ -2277,7 +2277,7 @@ fn vue3_dom_mir_patch_flag(
         if !vue3_dom_mir_props_patch_names(element).is_empty() {
             bits |= 8;
         }
-        if has_hydration_event_binding(element) {
+        if has_hydration_event_binding(element) || has_prop_bind_modifier(element) {
             bits |= 32;
         }
     }
@@ -2474,6 +2474,9 @@ fn lower_hir_binding_to_dom_mir(binding: &HirBinding) -> Vue3DomBinding {
         dynamic_name: binding.dynamic_name,
         value: binding.value,
         dynamic_arg: binding.dynamic_arg,
+        camel: binding.modifiers.iter().any(|modifier| modifier == "camel"),
+        force_prop: binding.modifiers.iter().any(|modifier| modifier == "prop"),
+        force_attr: binding.modifiers.iter().any(|modifier| modifier == "attr"),
     }
 }
 
@@ -2629,6 +2632,9 @@ fn lower_hir_directive_to_dom_mir(directive: &HirDirectiveUse) -> Vue3DomDirecti
 }
 
 fn vue3_dom_mir_dynamic_props(element: &Vue3Element) -> Vec<String> {
+    if has_dynamic_arg_binding(element) {
+        return Vec::new();
+    }
     let mut props = element
         .props
         .iter()
@@ -2648,7 +2654,7 @@ fn vue3_dom_mir_dynamic_props(element: &Vue3Element) -> Vec<String> {
                 if dir.is_dynamic_arg {
                     return None;
                 }
-                dir.arg.as_ref().map(Vue3Expression::source_string)
+                vue3_bind_directive_static_dom_key(dir, true)
             }
             _ => None,
         })
@@ -2683,7 +2689,7 @@ fn vue3_dom_mir_props_patch_names(element: &Vue3Element) -> Vec<String> {
                 if dir.is_dynamic_arg {
                     return None;
                 }
-                dir.arg.as_ref().map(Vue3Expression::source_string)
+                vue3_bind_directive_static_dom_key(dir, true)
             }
             _ => None,
         })
@@ -2718,6 +2724,38 @@ fn vue3_dom_model_dynamic_props(element: &Vue3Element) -> Vec<String> {
         .collect()
 }
 
+fn vue3_bind_directive_static_dom_key(
+    directive: &Vue3Directive,
+    apply_dom_prefix: bool,
+) -> Option<String> {
+    if directive.is_dynamic_arg {
+        return None;
+    }
+    let name = directive.arg.as_ref().map(Vue3Expression::source_string)?;
+    let binding = Vue3DomBinding {
+        name,
+        dynamic_name: None,
+        value: JsExprId(0),
+        dynamic_arg: false,
+        camel: directive
+            .modifiers
+            .iter()
+            .any(|modifier| modifier == "camel"),
+        force_prop: directive
+            .modifiers
+            .iter()
+            .any(|modifier| modifier == "prop"),
+        force_attr: directive
+            .modifiers
+            .iter()
+            .any(|modifier| modifier == "attr"),
+    };
+    Some(render_vue3_dom_binding_static_key(
+        &binding,
+        apply_dom_prefix,
+    ))
+}
+
 fn has_style_binding(element: &Vue3Element) -> bool {
     element.props.iter().any(|prop| {
         matches!(
@@ -2745,6 +2783,16 @@ fn has_dynamic_arg_binding(element: &Vue3Element) -> bool {
             Vue3Prop::Directive(dir)
                 if matches!(dir.name.as_str(), "bind" | "on")
                     && (dir.is_dynamic_arg || dir.arg.is_none())
+        )
+    })
+}
+
+fn has_prop_bind_modifier(element: &Vue3Element) -> bool {
+    element.props.iter().any(|prop| {
+        matches!(
+            prop,
+            Vue3Prop::Directive(dir)
+                if dir.name == "bind" && dir.modifiers.iter().any(|modifier| modifier == "prop")
         )
     })
 }
@@ -4435,6 +4483,7 @@ fn lower_vue3_props_to_hir(
                         dynamic_name,
                         value,
                         dynamic_arg: dir.is_dynamic_arg,
+                        modifiers: dir.modifiers.clone(),
                     };
                     hir.segments
                         .push(HirPropSegment::DynamicBinding(lowered.clone()));
@@ -11433,15 +11482,26 @@ impl<'a> Vue3DomMirCodegen<'a> {
     fn render_dynamic_binding(&self, binding: &Vue3DomBinding, scope: &RenderScope) -> String {
         let value = self.render_js_expr(binding.value, scope);
         if binding.dynamic_arg {
-            let name = binding
-                .dynamic_name
-                .map(|id| self.render_js_expr(id, scope))
-                .unwrap_or_else(|| binding.name.clone());
-            format!("[{}]: {}", render_dynamic_prop_key(&name), value)
+            format!(
+                "[{}]: {}",
+                render_vue3_dom_binding_dynamic_key(
+                    binding,
+                    binding
+                        .dynamic_name
+                        .map(|id| self.render_js_expr(id, scope))
+                        .unwrap_or_else(|| binding.name.clone()),
+                    true,
+                ),
+                value
+            )
         } else if binding.name == "class" {
             format!("class: _normalizeClass({value})")
         } else {
-            format!("{}: {}", json_key(&binding.name), value)
+            format!(
+                "{}: {}",
+                json_key(&render_vue3_dom_binding_static_key(binding, true)),
+                value
+            )
         }
     }
 
@@ -12298,6 +12358,9 @@ impl<'a> Vue3SsrMirCodegen<'a> {
     fn push_ssr_binding_helper(&self, binding: &Vue3DomBinding, helpers: &mut Vec<RuntimeHelper>) {
         if binding.dynamic_arg {
             push_unique_helper(helpers, RuntimeHelper::Vue3SsrRenderDynamicAttr);
+            if binding.camel {
+                push_unique_helper(helpers, RuntimeHelper::Vue3Camelize);
+            }
         } else if binding.name == "class" {
             push_unique_helper(helpers, RuntimeHelper::Vue3SsrRenderClass);
         } else if binding.name == "style" {
@@ -12785,13 +12848,24 @@ impl<'a> Vue3SsrMirCodegen<'a> {
     fn render_ssr_object_binding(&self, binding: &Vue3DomBinding, scope: &RenderScope) -> String {
         let value = self.render_js_expr(binding.value, scope);
         if binding.dynamic_arg {
-            let name = binding
-                .dynamic_name
-                .map(|id| self.render_js_expr(id, scope))
-                .unwrap_or_else(|| binding.name.clone());
-            format!("[{}]: {}", render_dynamic_prop_key(&name), value)
+            format!(
+                "[{}]: {}",
+                render_vue3_dom_binding_dynamic_key(
+                    binding,
+                    binding
+                        .dynamic_name
+                        .map(|id| self.render_js_expr(id, scope))
+                        .unwrap_or_else(|| binding.name.clone()),
+                    true,
+                ),
+                value
+            )
         } else {
-            format!("{}: {}", json_key(&binding.name), value)
+            format!(
+                "{}: {}",
+                json_key(&render_vue3_dom_binding_static_key(binding, true)),
+                value
+            )
         }
     }
 
@@ -12850,17 +12924,24 @@ impl<'a> Vue3SsrMirCodegen<'a> {
     fn render_ssr_binding(&self, binding: &Vue3DomBinding, scope: &RenderScope) -> String {
         let value = self.render_js_expr(binding.value, scope);
         if binding.dynamic_arg {
-            let name = binding
-                .dynamic_name
-                .map(|id| self.render_js_expr(id, scope))
-                .unwrap_or_else(|| binding.name.clone());
+            let name = render_vue3_dom_binding_dynamic_key(
+                binding,
+                binding
+                    .dynamic_name
+                    .map(|id| self.render_js_expr(id, scope))
+                    .unwrap_or_else(|| binding.name.clone()),
+                false,
+            );
             format!("_ssrRenderDynamicAttr({name}, {value})")
         } else if binding.name == "class" {
             format!("` class=\"${{_ssrRenderClass({value})}}\"`")
         } else if binding.name == "style" {
             format!("` style=\"${{_ssrRenderStyle({value})}}\"`")
         } else {
-            format!("_ssrRenderAttr({}, {value})", quote_string(&binding.name))
+            format!(
+                "_ssrRenderAttr({}, {value})",
+                quote_string(&render_vue3_dom_binding_static_key(binding, false))
+            )
         }
     }
 
@@ -13016,15 +13097,26 @@ impl<'a> Vue3SsrMirCodegen<'a> {
     fn render_dynamic_binding(&self, binding: &Vue3DomBinding, scope: &RenderScope) -> String {
         let value = self.render_js_expr(binding.value, scope);
         if binding.dynamic_arg {
-            let name = binding
-                .dynamic_name
-                .map(|id| self.render_js_expr(id, scope))
-                .unwrap_or_else(|| binding.name.clone());
-            format!("[{}]: {}", render_dynamic_prop_key(&name), value)
+            format!(
+                "[{}]: {}",
+                render_vue3_dom_binding_dynamic_key(
+                    binding,
+                    binding
+                        .dynamic_name
+                        .map(|id| self.render_js_expr(id, scope))
+                        .unwrap_or_else(|| binding.name.clone()),
+                    true,
+                ),
+                value
+            )
         } else if binding.name == "class" {
             format!("class: _normalizeClass({value})")
         } else {
-            format!("{}: {}", json_key(&binding.name), value)
+            format!(
+                "{}: {}",
+                json_key(&render_vue3_dom_binding_static_key(binding, true)),
+                value
+            )
         }
     }
 
@@ -13220,6 +13312,9 @@ fn push_vue3_dom_binding_helpers(binding: &Vue3DomBinding, helpers: &mut Vec<Run
     if !binding.dynamic_arg && binding.name == "class" {
         push_unique_helper(helpers, RuntimeHelper::Vue3NormalizeClass);
     }
+    if binding.dynamic_arg && binding.camel {
+        push_unique_helper(helpers, RuntimeHelper::Vue3Camelize);
+    }
 }
 
 fn push_vue3_dom_event_helpers(event: &Vue3DomEvent, helpers: &mut Vec<RuntimeHelper>) {
@@ -13236,6 +13331,44 @@ fn push_vue3_dom_event_helpers(event: &Vue3DomEvent, helpers: &mut Vec<RuntimeHe
 
 fn render_dynamic_prop_key(key: &str) -> String {
     format!("{} || \"\"", key.trim())
+}
+
+fn render_vue3_dom_binding_static_key(binding: &Vue3DomBinding, apply_dom_prefix: bool) -> String {
+    let mut name = if binding.camel {
+        camelize(&binding.name)
+    } else {
+        binding.name.clone()
+    };
+    if apply_dom_prefix {
+        if binding.force_prop {
+            name = format!(".{name}");
+        } else if binding.force_attr {
+            name = format!("^{name}");
+        }
+    }
+    name
+}
+
+fn render_vue3_dom_binding_dynamic_key(
+    binding: &Vue3DomBinding,
+    name: String,
+    apply_dom_prefix: bool,
+) -> String {
+    if !apply_dom_prefix && !binding.camel {
+        return name.trim().to_string();
+    }
+    let mut key = render_dynamic_prop_key(&name);
+    if binding.camel {
+        key = format!("_camelize({key})");
+    }
+    if apply_dom_prefix {
+        if binding.force_prop {
+            key = format!("'.' + ({key})");
+        } else if binding.force_attr {
+            key = format!("'^' + ({key})");
+        }
+    }
+    key
 }
 
 fn props_requires_merge_call(props: &Vue3DomProps) -> bool {
@@ -18276,6 +18409,53 @@ mod tests {
     }
 
     #[test]
+    fn lower_vue3_ast_to_dom_mir_projects_v_bind_modifier_payloads() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div :foo-bar.camel="foo" :fooBar.prop="bar" :foo-bar.attr="baz" :[name].camel="value" :[propName].prop="propValue"/>"#.into(),
+            file_id: FileId(67),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+
+        assert_eq!(result.hir.validate_tree(), Ok(()));
+        assert_eq!(result.mir.validate_tree(), Ok(()));
+        let hir = result
+            .hir
+            .nodes
+            .iter()
+            .find_map(|node| match &node.kind {
+                HirNodeKind::Element(element) => Some(element),
+                _ => None,
+            })
+            .expect("HIR element");
+        assert_eq!(hir.props.dynamic_bindings[0].modifiers, vec!["camel"]);
+        assert_eq!(hir.props.dynamic_bindings[1].modifiers, vec!["prop"]);
+        assert_eq!(hir.props.dynamic_bindings[2].modifiers, vec!["attr"]);
+
+        let call = result
+            .mir
+            .nodes
+            .iter()
+            .find_map(|node| match &node.kind {
+                Vue3DomMirKind::VNodeCall(call) => Some(call),
+                _ => None,
+            })
+            .expect("DOM MIR vnode");
+        assert_eq!(call.props.dynamic_bindings.len(), 5);
+        assert!(call.props.dynamic_bindings[0].camel);
+        assert!(call.props.dynamic_bindings[1].force_prop);
+        assert!(call.props.dynamic_bindings[2].force_attr);
+        assert!(call.props.dynamic_bindings[3].dynamic_arg);
+        assert!(call.props.dynamic_bindings[3].camel);
+        assert!(call.props.dynamic_bindings[4].dynamic_arg);
+        assert!(call.props.dynamic_bindings[4].force_prop);
+        assert_eq!(call.patch_flag.bits, 16);
+        assert!(call.dynamic_props.is_empty());
+    }
+
+    #[test]
     fn lower_vue3_ast_to_dom_mir_keeps_ordered_prop_segments_and_object_spreads() {
         let source = TemplateSource {
             filename: "foo.vue".into(),
@@ -19704,6 +19884,64 @@ mod tests {
     }
 
     #[test]
+    fn generate_vue3_dom_mir_emits_v_bind_modifier_payloads_from_mir() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div :foo-bar.camel="foo" :fooBar.prop="bar" :foo-bar.attr="baz" :[name].camel="value" :[propName].prop="propValue"/>"#.into(),
+            file_id: FileId(68),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+        let generated = generate_vue3_dom_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated.code.contains("camelize as _camelize"));
+        assert!(generated.code.contains("fooBar: _ctx.foo"));
+        assert!(generated.code.contains("\".fooBar\": _ctx.bar"));
+        assert!(generated.code.contains("\"^foo-bar\": _ctx.baz"));
+        assert!(generated
+            .code
+            .contains("[_camelize(_ctx.name || \"\")]: _ctx.value"));
+        assert!(generated
+            .code
+            .contains("['.' + (_ctx.propName || \"\")]: _ctx.propValue"));
+        assert!(generated.code.contains("16 /* FULL_PROPS */"));
+    }
+
+    #[test]
+    fn generate_vue3_dom_mir_marks_static_prop_modifier_for_hydration() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div :id.prop="id"/>"#.into(),
+            file_id: FileId(69),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+        let generated = generate_vue3_dom_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated.code.contains("\".id\": _ctx.id"));
+        assert!(generated.code.contains("40 /* PROPS, NEED_HYDRATION */"));
+        assert!(generated.code.contains("[\".id\"]"));
+    }
+
+    #[test]
     fn generate_vue3_dom_mir_emits_cache_handlers_from_mir() {
         let source = TemplateSource {
             filename: "foo.vue".into(),
@@ -20618,6 +20856,43 @@ mod tests {
             .contains("_push(_ssrRenderAttrs(_ctx.extra));"));
         assert!(generated.code.contains("_push(\"Hi\");"));
         assert!(generated.code.contains("_push(\"</div>\");"));
+    }
+
+    #[test]
+    fn generate_vue3_ssr_mir_ignores_dom_bind_prefix_modifiers() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div :foo-bar.camel="foo" :id.prop="id" :role.attr="role" :[name].camel="value">Hi</div>"#.into(),
+            file_id: FileId(70),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_ssr_mir(&ast, &Vue3CompilerOptions::default());
+        let generated = generate_vue3_ssr_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated.code.contains("camelize as _camelize"));
+        assert!(generated
+            .code
+            .contains("_push(_ssrRenderAttr(\"fooBar\", _ctx.foo));"));
+        assert!(generated
+            .code
+            .contains("_push(_ssrRenderAttr(\"id\", _ctx.id));"));
+        assert!(generated
+            .code
+            .contains("_push(_ssrRenderAttr(\"role\", _ctx.role));"));
+        assert!(generated
+            .code
+            .contains("_push(_ssrRenderDynamicAttr(_camelize(_ctx.name || \"\"), _ctx.value));"));
+        assert!(!generated.code.contains("\".id\""));
+        assert!(!generated.code.contains("\"^role\""));
     }
 
     #[test]
