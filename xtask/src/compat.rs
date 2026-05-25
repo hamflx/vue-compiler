@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 use clap::{Args, ValueEnum};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -9603,6 +9603,7 @@ fn prepare_vue3_sfc_conformance_suite(
         .join("compiler-sfc")
         .join("src");
     copy_dir_recursive(&official_sfc_src, &prepared_sfc_src)?;
+    patch_vue3_sfc_compile_template_asset_bridge(&prepared_sfc_src.join("compileTemplate.ts"))?;
 
     let official_dom_stringify = official_root
         .join("packages")
@@ -9632,6 +9633,28 @@ fn prepare_vue3_sfc_conformance_suite(
     write_vue3_core_source_shims(&prepared_root)?;
     write_vue3_sfc_conformance_shims(&prepared_root)?;
     Ok(prepared_root)
+}
+
+fn patch_vue3_sfc_compile_template_asset_bridge(path: &Path) -> Result<()> {
+    let source =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    if source.contains("transformAssetUrls:")
+        && source.contains("normalizeOptions(transformAssetUrls)")
+        && source.contains("(compilerOptions as any).transformAssetUrls")
+    {
+        return Ok(());
+    }
+    let needle = "    ...compilerOptions,\n    hmr: !isProd,";
+    let replacement = "    ...compilerOptions,\n    transformAssetUrls:\n      isObject(transformAssetUrls)\n        ? normalizeOptions(transformAssetUrls)\n        : transformAssetUrls === false\n          ? false\n          : (compilerOptions as any).transformAssetUrls,\n    hmr: !isProd,";
+    ensure!(
+        source.replace("\r\n", "\n").contains(needle),
+        "Vue 3 SFC compileTemplate asset bridge patch anchor not found in {}",
+        path.display()
+    );
+    write_text(
+        path,
+        &source.replace("\r\n", "\n").replace(needle, replacement),
+    )
 }
 
 fn write_vue3_sfc_conformance_shims(prepared_root: &Path) -> Result<()> {
@@ -10911,6 +10934,33 @@ mod tests {
         )
         .unwrap();
         assert!(transform_element.contains("__vuecRuntime"));
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn vue3_sfc_compile_template_patch_projects_asset_options() {
+        let temp = std::env::temp_dir().join(format!(
+            "vuec-xtask-vue3-sfc-asset-patch-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp).unwrap();
+        let path = temp.join("compileTemplate.ts");
+        fs::write(
+            &path,
+            "compile({\r\n    mode: 'module',\r\n    ...compilerOptions,\r\n    hmr: !isProd,\r\n})\r\n",
+        )
+        .unwrap();
+
+        patch_vue3_sfc_compile_template_asset_bridge(&path).unwrap();
+        patch_vue3_sfc_compile_template_asset_bridge(&path).unwrap();
+
+        let patched = fs::read_to_string(&path).unwrap();
+        assert_eq!(patched.matches("transformAssetUrls:").count(), 1);
+        assert!(patched.contains("normalizeOptions(transformAssetUrls)"));
+        assert!(patched.contains("(compilerOptions as any).transformAssetUrls"));
         let _ = fs::remove_dir_all(temp);
     }
 
