@@ -3228,6 +3228,11 @@ const vue3CoreRuntime = (() => {
   errorMessages[21] = "'<?' is allowed only in XML context.";
   errorMessages[22] = "Illegal '/' in tags.";
   errorMessages[27] = 'End bracket for dynamic directive argument was not found. Note that dynamic directive argument cannot contain spaces.';
+  errorMessages[41] = 'v-model is missing expression.';
+  errorMessages[42] = 'v-model value must be a valid JavaScript member expression.';
+  errorMessages[43] = 'v-model cannot be used on v-for or v-slot scope variables because they are not writable.';
+  errorMessages[44] = 'v-model cannot be used on a prop, because local prop bindings are not writable.\nUse a v-bind binding combined with a v-on listener that emits update:x event instead.';
+  errorMessages[45] = 'v-model cannot be used on a const binding because it is not writable.';
   errorMessages[46] = 'Error parsing JavaScript expression: ';
   errorMessages[50] = '"cacheHandlers" option is only supported when the "prefixIdentifiers" option is enabled.';
   errorMessages[51] = '"scopeId" option is only supported in module mode.';

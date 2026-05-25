@@ -584,6 +584,30 @@ impl Vue3Dialect {
                                                 vue3_dom_model_kind(element).unwrap(),
                                             ));
                                         }
+                                        if dir.name == "model"
+                                            && element.tag_type == Vue3ElementType::Component
+                                        {
+                                            let value = dir
+                                                .exp
+                                                .as_ref()
+                                                .map(Vue3Expression::source_string)
+                                                .unwrap_or_default();
+                                            let scope = RenderScope::default();
+                                            for helper in vue3_for_helpers_for_content(
+                                                &rewrite_expression_with_scope(
+                                                    &value, options, &scope,
+                                                ),
+                                            ) {
+                                                if helper == "UNREF" {
+                                                    helpers.insert(RuntimeHelper::Vue3Unref);
+                                                }
+                                            }
+                                            if render_model_assignment_for_directive(dir, options)
+                                                .contains("_isRef(")
+                                            {
+                                                helpers.insert(RuntimeHelper::Vue3IsRef);
+                                            }
+                                        }
                                         if dir.name == "memo" {
                                             has_memo = true;
                                             if directive_by_name(element, "for").is_some() {
@@ -910,6 +934,23 @@ fn inline_preamble_helpers(helpers: &mut Vec<RuntimeHelper>, expr: &str) {
         preferred.push(RuntimeHelper::Vue3CreateElementBlock);
         reorder_helpers_by_preference(helpers, &preferred);
     } else {
+        if expr.contains("\"onUpdate:")
+            && helpers.contains(&RuntimeHelper::Vue3Unref)
+            && helpers.contains(&RuntimeHelper::Vue3ResolveComponent)
+            && helpers.contains(&RuntimeHelper::Vue3IsRef)
+        {
+            reorder_helpers_by_preference(
+                helpers,
+                &[
+                    RuntimeHelper::Vue3Unref,
+                    RuntimeHelper::Vue3ResolveComponent,
+                    RuntimeHelper::Vue3IsRef,
+                    RuntimeHelper::Vue3OpenBlock,
+                    RuntimeHelper::Vue3CreateBlock,
+                ],
+            );
+            return;
+        }
         move_helper_before(
             helpers,
             RuntimeHelper::Vue3Unref,
@@ -11286,7 +11327,7 @@ fn normalize_member_expression_whitespace(expression: &str) -> String {
     output
 }
 
-fn model_is_member_expression(expression: &str) -> bool {
+pub fn model_is_member_expression(expression: &str) -> bool {
     let store = JsAstStore::new();
     store
         .parse_expression(expression, oxc_span::SourceType::mjs())
@@ -19935,6 +19976,13 @@ fn render_props_for_target(
                     dir, options, scope, memo_index,
                 ));
             }
+            Vue3Prop::Directive(dir)
+                if dir.name == "model" && element.tag_type == Vue3ElementType::Component =>
+            {
+                object_entries.extend(render_component_model_props(
+                    dir, options, scope, memo_index,
+                ));
+            }
             _ => {}
         }
     }
@@ -20112,6 +20160,72 @@ fn render_model_update_prop_exact(
         json_key("onUpdate:modelValue"),
         render_model_assignment_for_directive_cached(dir, options, scope, memo_index)
     )
+}
+
+fn render_component_model_props(
+    dir: &Vue3Directive,
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+    memo_index: &mut MemoIndex,
+) -> Vec<String> {
+    let prop_name = component_model_prop_name(dir);
+    let value = dir
+        .exp
+        .as_ref()
+        .map(Vue3Expression::source_string)
+        .unwrap_or_default();
+    let value = rewrite_expression_with_scope(&value, options, scope);
+    let mut props = vec![format!("{}: {}", json_key(&prop_name), value)];
+    props.push(render_component_model_update_prop(
+        dir, options, scope, memo_index,
+    ));
+    let modifiers = component_model_modifiers_prop(dir);
+    if !modifiers.is_empty() {
+        props.push(modifiers);
+    }
+    props
+}
+
+fn component_model_prop_name(dir: &Vue3Directive) -> String {
+    dir.arg
+        .as_ref()
+        .map(Vue3Expression::source_string)
+        .filter(|arg| !arg.trim().is_empty())
+        .map(|arg| arg.trim().to_string())
+        .unwrap_or_else(|| "modelValue".into())
+}
+
+fn render_component_model_update_prop(
+    dir: &Vue3Directive,
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+    memo_index: &mut MemoIndex,
+) -> String {
+    format!(
+        "{}: {}",
+        json_key(&format!(
+            "onUpdate:{}",
+            camelize(&component_model_prop_name(dir))
+        )),
+        render_model_assignment_for_directive_cached(dir, options, scope, memo_index)
+    )
+}
+
+fn component_model_modifiers_prop(dir: &Vue3Directive) -> String {
+    if dir.modifiers.is_empty() {
+        return String::new();
+    }
+    let prop_name = if dir.arg.is_some() {
+        format!("{}Modifiers", component_model_prop_name(dir))
+    } else {
+        "modelModifiers".into()
+    };
+    let entries = dir
+        .modifiers
+        .iter()
+        .map(|modifier| format!("{modifier}: true"))
+        .collect::<Vec<_>>();
+    format!("{}: {}", json_key(&prop_name), render_object(&entries))
 }
 
 fn render_model_assignment_for_directive(
@@ -20401,6 +20515,9 @@ fn prop_requires_dynamic_patch(
     options: &Vue3CompilerOptions,
     scope: &RenderScope,
 ) -> bool {
+    if dir.name == "model" && element.tag_type == Vue3ElementType::Component {
+        return true;
+    }
     if dir.name == "model" && vue3_dom_model_kind(element).is_some() {
         return false;
     }
@@ -20530,6 +20647,11 @@ fn dynamic_props_arg(
                     return None;
                 }
                 (!arg.is_empty()).then_some(render_static_binding_prop_key(dir))
+            }
+            Vue3Prop::Directive(dir)
+                if dir.name == "model" && element.tag_type == Vue3ElementType::Component =>
+            {
+                Some(component_model_prop_name(dir))
             }
             _ => None,
         })
@@ -21537,6 +21659,9 @@ fn expression_diagnostics(ast: &Vue3Ast, options: &Vue3CompilerOptions) -> Vec<D
                                 &mut diagnostics,
                             );
                         }
+                        if dir.name == "model" {
+                            push_model_binding_diagnostic(element, dir, options, &mut diagnostics);
+                        }
                     }
                 }
             }
@@ -21544,6 +21669,68 @@ fn expression_diagnostics(ast: &Vue3Ast, options: &Vue3CompilerOptions) -> Vec<D
         }
     }
     diagnostics
+}
+
+fn push_model_binding_diagnostic(
+    element: &Vue3Element,
+    dir: &Vue3Directive,
+    options: &Vue3CompilerOptions,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let Some(expression) = dir.exp.as_ref() else {
+        diagnostics.push(vue3_model_diagnostic(
+            "41",
+            "v-model is missing expression.",
+            dir.arg_span.or(dir.exp_span),
+        ));
+        return;
+    };
+    let raw = expression.source_string();
+    let raw = raw.trim();
+    if raw.is_empty() {
+        diagnostics.push(vue3_model_diagnostic(
+            "42",
+            "v-model value must be a valid JavaScript member expression.",
+            dir.exp_span,
+        ));
+        return;
+    }
+    match options.binding_metadata.get(raw).map(String::as_str) {
+        Some("props" | "props-aliased") => diagnostics.push(vue3_model_diagnostic(
+            "44",
+            "v-model cannot be used on a prop, because local prop bindings are not writable.\nUse a v-bind binding combined with a v-on listener that emits update:x event instead.",
+            dir.exp_span,
+        )),
+        Some("literal-const" | "setup-const") => diagnostics.push(vue3_model_diagnostic(
+            "45",
+            "v-model cannot be used on a const binding because it is not writable.",
+            dir.exp_span,
+        )),
+        _ if model_binding_host_supports_expression_diagnostic(element)
+            && !model_is_member_expression(raw) =>
+        {
+            diagnostics.push(vue3_model_diagnostic(
+                "42",
+                "v-model value must be a valid JavaScript member expression.",
+                dir.exp_span,
+            ));
+        }
+        _ => {}
+    }
+}
+
+fn model_binding_host_supports_expression_diagnostic(element: &Vue3Element) -> bool {
+    element.tag_type == Vue3ElementType::Component || vue3_dom_model_kind(element).is_some()
+}
+
+fn vue3_model_diagnostic(code: &str, message: &str, span: Option<Span>) -> Diagnostic {
+    Diagnostic {
+        code: code.into(),
+        severity: Severity::Error,
+        message: message.into(),
+        span,
+        notes: Vec::new(),
+    }
 }
 
 fn push_expression_parse_diagnostic(
@@ -25604,6 +25791,78 @@ mod tests {
         assert!(result.code.contains("({ count: count.value } = val)"));
         assert!(result.code.contains("[maybe.value] = val"));
         assert!(result.code.contains("({ lett: lett } = val)"));
+    }
+
+    #[test]
+    fn base_compile_emits_inline_component_v_model_props_and_diagnostics() {
+        let mut options = Vue3CompilerOptions {
+            inline: true,
+            mode: "module".into(),
+            prefix_identifiers: true,
+            cache_handlers: true,
+            ..Vue3CompilerOptions::default()
+        };
+        options
+            .binding_metadata
+            .insert("name".into(), "setup-let".into());
+        let result = Vue3Dialect::base_compile(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: r#"<MyComponent v-model="name" />"#.into(),
+                file_id: FileId(92),
+                base_offset: 0,
+            },
+            options,
+        );
+
+        assert!(result.preamble.contains("unref as _unref"));
+        assert!(result.preamble.contains("isRef as _isRef"));
+        assert!(result.code.contains("modelValue: _unref(name)"));
+        assert!(result.code.contains(
+            "\"onUpdate:modelValue\": _cache[0] || (_cache[0] = $event => (_isRef(name) ? (name).value = $event : name = $event))"
+        ));
+        assert!(result.code.contains("8 /* PROPS */, [\"modelValue\"]"));
+        assert!(result.diagnostics.is_empty());
+
+        let mut invalid_options = Vue3CompilerOptions {
+            inline: true,
+            mode: "module".into(),
+            prefix_identifiers: true,
+            ..Vue3CompilerOptions::default()
+        };
+        invalid_options
+            .binding_metadata
+            .insert("foo".into(), "literal-const".into());
+        let invalid = Vue3Dialect::base_compile(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: r#"<input v-model="foo" />"#.into(),
+                file_id: FileId(92),
+                base_offset: 0,
+            },
+            invalid_options,
+        );
+
+        assert_eq!(invalid.diagnostics.len(), 1);
+        assert_eq!(invalid.diagnostics[0].code, "45");
+        assert!(invalid.diagnostics[0]
+            .message
+            .contains("v-model cannot be used on a const binding"));
+
+        let empty = Vue3Dialect::base_compile(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: r#"<input v-model="" />"#.into(),
+                file_id: FileId(92),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+        assert_eq!(empty.diagnostics.len(), 1);
+        assert_eq!(empty.diagnostics[0].code, "42");
     }
 
     #[test]

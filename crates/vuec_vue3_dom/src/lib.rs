@@ -326,7 +326,7 @@ pub fn compile(source: TemplateSource, options: DomCompilerOptions) -> CodegenRe
     let mut ctx = TransformContext::default();
     remove_side_effect_nodes(&mut ast, &mut ctx);
     report_transition_invalid_children(&ast, &mut ctx);
-    report_invalid_native_v_model(&ast, &mut ctx);
+    report_invalid_native_v_model(&ast, &options.core, &mut ctx);
     let mut asset_imports = Vec::<Vue3ImportItem>::new();
     for node_index in 0..ast.nodes.len() {
         if let Vue3AstKind::Element(element) = &mut ast.nodes[node_index].kind {
@@ -578,7 +578,11 @@ fn report_transition_invalid_children(ast: &Vue3Ast, ctx: &mut TransformContext)
     report_transition_invalid_children_for_node(ast, ast.root, ctx);
 }
 
-fn report_invalid_native_v_model(ast: &Vue3Ast, ctx: &mut TransformContext) {
+fn report_invalid_native_v_model(
+    ast: &Vue3Ast,
+    options: &Vue3CompilerOptions,
+    ctx: &mut TransformContext,
+) {
     for node in &ast.nodes {
         let Vue3AstKind::Element(element) = &node.kind else {
             continue;
@@ -598,6 +602,9 @@ fn report_invalid_native_v_model(ast: &Vue3Ast, ctx: &mut TransformContext) {
         }) else {
             continue;
         };
+        if model_binding_error_preempts_invalid_native_model(model, options) {
+            continue;
+        }
         ctx.report(Diagnostic {
             code: "58".into(),
             severity: Severity::Error,
@@ -607,6 +614,27 @@ fn report_invalid_native_v_model(ast: &Vue3Ast, ctx: &mut TransformContext) {
             notes: Vec::new(),
         });
     }
+}
+
+fn model_binding_error_preempts_invalid_native_model(
+    model: &vuec_ast::Vue3Directive,
+    options: &Vue3CompilerOptions,
+) -> bool {
+    let Some(expression) = model.exp.as_ref() else {
+        return true;
+    };
+    let raw = expression.source_string();
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return true;
+    }
+    if matches!(
+        options.binding_metadata.get(raw).map(String::as_str),
+        Some("props" | "props-aliased" | "literal-const" | "setup-const")
+    ) {
+        return true;
+    }
+    !vuec_vue3_core::model_is_member_expression(raw)
 }
 
 fn report_transition_invalid_children_for_node(
@@ -1450,6 +1478,33 @@ mod tests {
         assert_eq!(
             result.diagnostics[0].span,
             Some(vuec_source::Span::new(FileId(0), 5, 18))
+        );
+    }
+
+    #[test]
+    fn compile_suppresses_invalid_native_v_model_after_binding_errors() {
+        let mut options = DomCompilerOptions::default();
+        options
+            .core
+            .binding_metadata
+            .insert("foo".into(), "literal-const".into());
+        let result = compile(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: r#"<div v-model="foo"/><div v-model="foo + bar"/>"#.into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            options,
+        );
+
+        assert_eq!(
+            result
+                .diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.code.as_str())
+                .collect::<Vec<_>>(),
+            ["45", "42"]
         );
     }
 
