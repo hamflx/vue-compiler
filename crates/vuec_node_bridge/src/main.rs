@@ -6,7 +6,7 @@ use oxc_span::SourceType;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::io::{self, Read};
-use vuec_ast::{NodeSpan, Vue3Ast, Vue3AstKind, Vue3Expression, Vue3Prop};
+use vuec_ast::{NodeSpan, Vue3Ast, Vue3AstKind, Vue3Expression, Vue3ImportItem, Vue3Prop};
 use vuec_html::{HtmlTokenKind, HtmlTokenizer};
 use vuec_js::JsAstStore;
 use vuec_sfc::{
@@ -763,6 +763,7 @@ fn vue3_parse_value(
     options: &Vue3CompilerOptions,
     include_codegen: bool,
 ) -> Value {
+    let imports = vue3_root_imports_value(ast);
     json!({
         "type": 0,
         "source": source,
@@ -771,12 +772,37 @@ fn vue3_parse_value(
         "components": [],
         "directives": [],
         "hoists": [],
-        "imports": [],
+        "imports": imports,
         "cached": [],
         "temps": 0,
         "codegenNode": Value::Null,
         "loc": ast.root_node().map(|node| vue3_loc_value(source, base_offset, &node.span)).unwrap_or_else(vue3_loc_stub_value),
         "__vuecDiagnostics": vue3_parse_diagnostics(ast, source, base_offset, options),
+    })
+}
+
+fn vue3_root_imports_value(ast: &Vue3Ast) -> Vec<Value> {
+    ast.root_node()
+        .and_then(|node| match &node.kind {
+            Vue3AstKind::Root(root) => Some(&root.imports),
+            _ => None,
+        })
+        .into_iter()
+        .flatten()
+        .map(vue3_import_item_value)
+        .collect()
+}
+
+fn vue3_import_item_value(import: &Vue3ImportItem) -> Value {
+    json!({
+        "exp": {
+            "type": 4,
+            "content": import.name,
+            "isStatic": false,
+            "constType": 3,
+            "loc": vue3_loc_stub_value(),
+        },
+        "path": import.path,
     })
 }
 
@@ -822,7 +848,7 @@ fn vue3_node_summary(
         return Value::Null;
     };
     match &node.kind {
-        Vue3AstKind::Root(_) => json!({
+        Vue3AstKind::Root(root) => json!({
             "type": 0,
             "source": source,
             "children": node.children.iter().filter_map(|child_id| ast.node(*child_id)).map(|child| vue3_node_summary(ast, source, base_offset, child.id, include_sfc_inner_loc, options, include_codegen)).collect::<Vec<_>>(),
@@ -830,7 +856,7 @@ fn vue3_node_summary(
             "components": [],
             "directives": [],
             "hoists": [],
-            "imports": [],
+            "imports": root.imports.iter().map(vue3_import_item_value).collect::<Vec<_>>(),
             "cached": [],
             "temps": 0,
             "codegenNode": Value::Null,
@@ -2730,5 +2756,38 @@ mod tests {
             .as_str()
             .unwrap_or("")
             .contains(r#"src: "./bar.png""#));
+    }
+
+    #[test]
+    fn vue3_dom_bridge_projects_asset_url_imports() {
+        let compiled = dispatch(
+            "vue3.dom.compile",
+            json!({
+                "source": r#"<img src="./bar.png" srcset="./bar.png 2x">"#,
+                "options": {
+                    "mode": "module"
+                }
+            }),
+        )
+        .expect("dom compile");
+
+        let code = compiled["code"].as_str().unwrap_or("");
+        assert!(code.contains("import _imports_0 from './bar.png'"));
+        assert!(code.contains("src: _imports_0"));
+        assert!(code.contains("srcset: _imports_0 + ' 2x'"));
+        assert!(!code.contains("_ctx._imports_"));
+
+        let parsed = dispatch(
+            "vue3.dom.parse",
+            json!({
+                "source": r#"<img src="./bar.png">"#,
+                "options": {
+                    "mode": "module"
+                }
+            }),
+        )
+        .expect("dom parse");
+
+        assert_eq!(parsed["imports"], json!([]));
     }
 }

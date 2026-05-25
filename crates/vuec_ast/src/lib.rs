@@ -834,6 +834,7 @@ pub struct Vue3Root {
     pub helpers: BTreeSet<RuntimeHelper>,
     pub components: BTreeSet<String>,
     pub directives: BTreeSet<String>,
+    pub imports: Vec<Vue3ImportItem>,
     pub hoists: Vec<Vue3HoistSlot>,
     pub temps: u32,
     pub cached: u32,
@@ -847,6 +848,7 @@ impl Default for Vue3Root {
             helpers: BTreeSet::new(),
             components: BTreeSet::new(),
             directives: BTreeSet::new(),
+            imports: Vec::new(),
             hoists: Vec::new(),
             temps: 0,
             cached: 0,
@@ -1012,6 +1014,12 @@ pub struct Vue3TextCall {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3HoistSlot {
     pub node: NodeId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue3ImportItem {
+    pub name: String,
+    pub path: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

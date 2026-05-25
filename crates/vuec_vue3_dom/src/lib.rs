@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use vuec_ast::{
-    NodeId, TemplateAttribute, Vue3Ast, Vue3AstKind, Vue3Element, Vue3ElementType, Vue3Prop,
+    NodeId, TemplateAttribute, Vue3Ast, Vue3AstKind, Vue3Element, Vue3ElementType, Vue3Expression,
+    Vue3ImportItem, Vue3Prop, Vue3Root,
 };
 use vuec_diagnostics::{Diagnostic, Severity};
 use vuec_pass::TransformContext;
@@ -74,14 +75,21 @@ pub fn compile(source: TemplateSource, options: DomCompilerOptions) -> CodegenRe
     let mut ctx = TransformContext::default();
     remove_side_effect_nodes(&mut ast, &mut ctx);
     report_transition_invalid_children(&ast, &mut ctx);
-    for node in &mut ast.nodes {
-        if let Vue3AstKind::Element(element) = &mut node.kind {
+    let mut asset_imports = Vec::<Vue3ImportItem>::new();
+    for node_index in 0..ast.nodes.len() {
+        if let Vue3AstKind::Element(element) = &mut ast.nodes[node_index].kind {
             let tag = element.tag.clone();
-            let mut attributes = element.template_attributes();
+            let source_attributes = element.template_attributes();
             if options.transform_asset_urls {
-                transform_asset_url_attributes(&tag, &mut attributes, &options.asset_url_options);
+                transform_asset_url_props(
+                    &tag,
+                    &mut element.props,
+                    &options.asset_url_options,
+                    options.core.mode == "module",
+                    &mut asset_imports,
+                );
             }
-            let directives = extract_directives(&attributes);
+            let directives = extract_directives(&source_attributes);
             let mut summaries = Vec::new();
             for directive in directives {
                 match directive.name.as_str() {
@@ -100,17 +108,21 @@ pub fn compile(source: TemplateSource, options: DomCompilerOptions) -> CodegenRe
             if options.transform_asset_urls {
                 summaries.extend(asset_url_attributes(
                     &tag,
-                    &attributes,
+                    &source_attributes,
                     &options.asset_url_options,
                 ));
             }
             if !summaries.is_empty() && !only_asset_summaries(&summaries) {
-                attributes.push(TemplateAttribute {
+                element.props.push(Vue3Prop::from(TemplateAttribute {
                     name: "data-vuec-dom".into(),
                     value: Some(summaries.join(",")),
-                });
+                }));
             }
-            element.props = attributes.into_iter().map(Vue3Prop::from).collect();
+        }
+    }
+    if !asset_imports.is_empty() {
+        if let Some(root) = vue3_dom_root_mut(&mut ast) {
+            root.imports = asset_imports;
         }
     }
     Vue3Dialect::transform(&mut ast, &mut ctx);
@@ -316,28 +328,67 @@ fn default_asset_url_tags() -> BTreeMap<String, Vec<String>> {
     .collect()
 }
 
-fn transform_asset_url_attributes(
+fn transform_asset_url_props(
     tag: &str,
-    attributes: &mut [TemplateAttribute],
+    props: &mut [Vue3Prop],
     options: &AssetUrlOptions,
+    enable_imports: bool,
+    imports: &mut Vec<Vue3ImportItem>,
 ) {
     let asset_attrs = asset_url_attrs_for_tag(tag, options);
-    let Some(base) = options.base.as_deref().filter(|base| !base.is_empty()) else {
-        return;
-    };
-    for attr in attributes {
+    let base = options.base.as_deref().filter(|base| !base.is_empty());
+    for prop in props {
+        let Vue3Prop::Attribute(attr) = prop else {
+            continue;
+        };
         let is_srcset = attr.name == "srcset" && matches!(tag, "img" | "source");
         if !is_srcset && !asset_attrs.iter().any(|candidate| candidate == &attr.name) {
             continue;
         }
-        let Some(value) = attr.value.as_mut() else {
+        let Some(value) = attr.value.clone() else {
             continue;
         };
+        let value_span = attr.value_span.or(attr.span);
         if is_srcset {
-            *value = rewrite_srcset_base(value, base, options);
-        } else if should_rewrite_asset_url_base(tag, &attr.name, value, options) {
-            *value = join_asset_base(base, value);
+            if let Some(base) = base {
+                if let Some(rewritten) = rewrite_srcset_base(&value, base, options) {
+                    attr.value = Some(rewritten);
+                    continue;
+                }
+            }
+            if enable_imports {
+                if let Some(expression) = asset_srcset_import_expression(&value, options, imports) {
+                    *prop = asset_bind_directive(
+                        "srcset",
+                        expression,
+                        attr.span,
+                        attr.name_span,
+                        value_span,
+                    );
+                }
+            }
+        } else if should_process_asset_attr(tag, &attr.name, &value, options) {
+            if let Some(base) = base.filter(|_| value.starts_with('.')) {
+                attr.value = Some(join_asset_base(base, &value));
+            } else if enable_imports {
+                let expression = asset_url_import_expression(tag, &attr.name, &value, imports);
+                *prop = asset_bind_directive(
+                    &attr.name,
+                    expression,
+                    attr.span,
+                    attr.name_span,
+                    value_span,
+                );
+            }
         }
+    }
+}
+
+fn vue3_dom_root_mut(ast: &mut Vue3Ast) -> Option<&mut Vue3Root> {
+    let root = ast.root_node_mut()?;
+    match &mut root.kind {
+        Vue3AstKind::Root(root) => Some(root),
+        _ => None,
     }
 }
 
@@ -349,7 +400,7 @@ fn asset_url_attrs_for_tag(tag: &str, options: &AssetUrlOptions) -> Vec<String> 
     attrs
 }
 
-fn should_rewrite_asset_url_base(
+fn should_process_asset_attr(
     tag: &str,
     attr: &str,
     value: &str,
@@ -362,7 +413,7 @@ fn should_rewrite_asset_url_base(
     if hash_only && !can_transform_hash_import(tag, attr) {
         return false;
     }
-    value.starts_with('.') && (options.include_absolute || is_relative_url(value))
+    options.include_absolute || is_relative_url(value)
 }
 
 fn can_transform_hash_import(tag: &str, attr: &str) -> bool {
@@ -372,13 +423,19 @@ fn can_transform_hash_import(tag: &str, attr: &str) -> bool {
     )
 }
 
-fn rewrite_srcset_base(value: &str, base: &str, options: &AssetUrlOptions) -> String {
+fn rewrite_srcset_base(value: &str, base: &str, options: &AssetUrlOptions) -> Option<String> {
     let candidates = parse_srcset_candidates(value);
+    if !candidates
+        .iter()
+        .any(|(url, _)| should_process_asset_url(url, options))
+    {
+        return None;
+    }
     if candidates
         .iter()
         .any(|(url, _)| should_process_asset_url(url, options) && !url.starts_with('.'))
     {
-        return value.to_string();
+        return None;
     }
 
     let mut changed = false;
@@ -399,10 +456,168 @@ fn rewrite_srcset_base(value: &str, base: &str, options: &AssetUrlOptions) -> St
         })
         .collect::<Vec<_>>();
     if changed {
-        items.join(", ")
+        Some(items.join(", "))
     } else {
-        value.to_string()
+        None
     }
+}
+
+fn asset_url_import_expression(
+    tag: &str,
+    attr: &str,
+    value: &str,
+    imports: &mut Vec<Vue3ImportItem>,
+) -> String {
+    let (path, hash) = parse_asset_url(value);
+    import_expression_from_parts(tag, attr, &path, &hash, imports)
+}
+
+fn asset_srcset_import_expression(
+    value: &str,
+    options: &AssetUrlOptions,
+    imports: &mut Vec<Vue3ImportItem>,
+) -> Option<String> {
+    let candidates = parse_srcset_candidates(value);
+    if !candidates
+        .iter()
+        .any(|(url, _)| should_process_asset_url(url, options))
+    {
+        return None;
+    }
+
+    let mut parts = Vec::<String>::new();
+    for (index, (url, descriptor)) in candidates.iter().enumerate() {
+        let mut item = if should_process_asset_url(url, options) {
+            let (path, hash) = parse_asset_url(url);
+            import_expression_from_parts("img", "src", &path, &hash, imports)
+        } else {
+            quote_js_double_string(url)
+        };
+        let is_not_last = index + 1 < candidates.len();
+        if !descriptor.is_empty() && is_not_last {
+            item = format!(
+                "{item} + {}",
+                quote_js_single_string(&format!(" {descriptor}, "))
+            );
+        } else if !descriptor.is_empty() {
+            item = format!(
+                "{item} + {}",
+                quote_js_single_string(&format!(" {descriptor}"))
+            );
+        } else if is_not_last {
+            item = format!("{item} + {}", quote_js_single_string(", "));
+        }
+        parts.push(item);
+    }
+    (!parts.is_empty()).then(|| parts.join(" + "))
+}
+
+fn import_expression_from_parts(
+    tag: &str,
+    attr: &str,
+    path: &str,
+    hash: &str,
+    imports: &mut Vec<Vue3ImportItem>,
+) -> String {
+    if path.is_empty() && hash.is_empty() {
+        return "''".into();
+    }
+    let source = if path.is_empty() && !hash.is_empty() {
+        hash
+    } else {
+        path
+    };
+    let name = register_asset_import(source, imports);
+    if !path.is_empty() && !hash.is_empty() {
+        format!("{name} + {}", quote_js_single_string(hash))
+    } else if path.is_empty() && !hash.is_empty() && !can_transform_hash_import(tag, attr) {
+        quote_js_single_string(hash)
+    } else {
+        name
+    }
+}
+
+fn register_asset_import(source: &str, imports: &mut Vec<Vue3ImportItem>) -> String {
+    let normalized = normalize_decoded_import_path(source);
+    if let Some(index) = imports.iter().position(|import| import.path == normalized) {
+        return format!("_imports_{index}");
+    }
+    let name = format!("_imports_{}", imports.len());
+    imports.push(Vue3ImportItem {
+        name: name.clone(),
+        path: normalized,
+    });
+    name
+}
+
+fn normalize_decoded_import_path(source: &str) -> String {
+    percent_decode_lossless(source)
+}
+
+fn percent_decode_lossless(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let Some(high) = bytes.get(index + 1).and_then(|byte| hex_value(*byte)) else {
+                return source.to_string();
+            };
+            let Some(low) = bytes.get(index + 2).and_then(|byte| hex_value(*byte)) else {
+                return source.to_string();
+            };
+            output.push((high << 4) | low);
+            index += 3;
+        } else {
+            output.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(output).unwrap_or_else(|_| source.to_string())
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn quote_js_single_string(value: &str) -> String {
+    let escaped = value
+        .replace('\\', "\\\\")
+        .replace('\'', "\\'")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t");
+    format!("'{escaped}'")
+}
+
+fn quote_js_double_string(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".into())
+}
+
+fn asset_bind_directive(
+    name: &str,
+    expression: String,
+    span: Option<vuec_source::Span>,
+    name_span: Option<vuec_source::Span>,
+    exp_span: Option<vuec_source::Span>,
+) -> Vue3Prop {
+    Vue3Prop::Directive(vuec_ast::Vue3Directive {
+        name: "bind".into(),
+        raw_name: format!(":{name}"),
+        arg: Some(Vue3Expression::Raw(name.to_string())),
+        exp: Some(Vue3Expression::Raw(expression)),
+        modifiers: Vec::new(),
+        is_dynamic_arg: false,
+        span,
+        arg_span: name_span,
+        exp_span,
+        modifier_spans: Vec::new(),
+    })
 }
 
 fn should_process_asset_url(url: &str, options: &AssetUrlOptions) -> bool {
@@ -793,7 +1008,7 @@ mod tests {
     }
 
     #[test]
-    fn compile_rewrites_static_asset_urls_with_explicit_base() {
+    fn compile_rewrites_static_asset_urls_with_explicit_base_without_module_imports() {
         let result = compile(
             TemplateSource {
                 filename: "x.vue".into(),
@@ -816,6 +1031,62 @@ mod tests {
         assert!(result.code.contains(r#"src: "@theme/bar.png""#));
         assert!(result.code.contains(r#"src: "/bar.png""#));
         assert!(result.code.contains(r#"src: "data:image/png;base64,i""#));
+        assert!(!result.code.contains("_imports_"));
+        assert!(!result.code.contains("import _imports_"));
+    }
+
+    #[test]
+    fn compile_transforms_asset_urls_to_imports_in_module_mode() {
+        let mut options = DomCompilerOptions::default();
+        options.core.mode = "module".into();
+        options.core.prefix_identifiers = true;
+        let result = compile(
+            TemplateSource {
+                filename: "x.vue".into(),
+                source: r##"<img src="./bar.png"><img src="~fixtures/logo.png"><img src="@theme/bar.png"><img src="./icons.svg#heart"><use href="#local"></use>"##.into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            options,
+        );
+
+        assert!(result.code.contains("import _imports_0 from './bar.png'"));
+        assert!(result
+            .code
+            .contains("import _imports_1 from 'fixtures/logo.png'"));
+        assert!(result
+            .code
+            .contains("import _imports_2 from '@theme/bar.png'"));
+        assert!(result.code.contains("import _imports_3 from './icons.svg'"));
+        assert!(result.code.contains("src: _imports_0"));
+        assert!(result.code.contains("src: _imports_1"));
+        assert!(result.code.contains("src: _imports_2"));
+        assert!(result.code.contains(r#"src: _imports_3 + '#heart'"#));
+        assert!(result.code.contains(r##"href: "#local""##));
+        assert!(!result.code.contains("_ctx._imports_"));
+    }
+
+    #[test]
+    fn compile_transforms_srcset_imports_in_module_mode() {
+        let mut options = DomCompilerOptions::default();
+        options.core.mode = "module".into();
+        options.core.prefix_identifiers = true;
+        let result = compile(
+            TemplateSource {
+                filename: "x.vue".into(),
+                source: r#"<img src="./logo.png" srcset="./logo.png, ./icons.svg#heart 2x, /absolute.png 3x, data:image/png;base64,i 4x">"#.into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            options,
+        );
+
+        assert!(result.code.contains("import _imports_0 from './logo.png'"));
+        assert!(result.code.contains("import _imports_1 from './icons.svg'"));
+        assert!(result.code.matches("import _imports_0").count() == 1);
+        assert!(result.code.contains(
+            r#"srcset: _imports_0 + ', ' + _imports_1 + '#heart' + ' 2x, ' + "/absolute.png" + ' 3x, ' + "data:image/png;base64,i" + ' 4x'"#
+        ));
     }
 
     #[test]

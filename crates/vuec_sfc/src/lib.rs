@@ -870,6 +870,29 @@ mod tests {
         );
 
         assert!(template.code.contains(r#"src: "/foo/logo.png""#));
-        assert!(template.code.contains(r#"src: "~logo.png""#));
+        assert!(template.code.contains("import _imports_0 from 'logo.png'"));
+        assert!(template.code.contains("src: _imports_0"));
+        assert!(!template.code.contains(r#"src: "~logo.png""#));
+    }
+
+    #[test]
+    fn compile_template_transforms_asset_urls_to_imports() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "foo.vue",
+            r#"<template><img src="./logo.png" srcset="./logo.png 2x"><img src="@theme/logo.png"></template>"#,
+        );
+        let template = compiler.compile_template(&descriptor, SfcTemplateCompileOptions::default());
+
+        assert!(template
+            .code
+            .contains("import _imports_0 from './logo.png'"));
+        assert!(template
+            .code
+            .contains("import _imports_1 from '@theme/logo.png'"));
+        assert!(template.code.contains("src: _imports_0"));
+        assert!(template.code.contains("srcset: _imports_0 + ' 2x'"));
+        assert!(!template.code.contains("_ctx._imports_"));
+        assert!(!template.code.contains("PROPS"));
     }
 }

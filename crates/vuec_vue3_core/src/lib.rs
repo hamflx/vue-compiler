@@ -627,6 +627,7 @@ impl Vue3Dialect {
             let component_declarations = render_component_declarations(&components);
             let directives = vue3_codegen_directives(ast);
             let directive_declarations = render_directive_declarations(&directives);
+            let imports = vue3_codegen_imports(ast);
             let expr = if root.children.len() == 1 {
                 render_node_expr(ast, root.children[0], options, NodeRenderMode::Root)
             } else {
@@ -647,6 +648,12 @@ impl Vue3Dialect {
                         "import {{ {} }} from \"vue\"",
                         import_helper_aliases(&helpers)
                     ));
+                    writer.newline();
+                }
+                for import in &imports {
+                    writer.push_line(import);
+                }
+                if !imports.is_empty() {
                     writer.newline();
                 }
                 writer.push_line("export function render(_ctx, _cache) {");
@@ -13585,6 +13592,14 @@ fn vue3_root_has_codegen_state(root: &Vue3Root) -> bool {
     !root.helpers.is_empty() || !root.components.is_empty() || !root.directives.is_empty()
 }
 
+fn vue3_codegen_imports(ast: &Vue3Ast) -> Vec<String> {
+    vue3_codegen_root(ast)
+        .into_iter()
+        .flat_map(|root| root.imports.iter())
+        .map(|import| format!("import {} from '{}'", import.name, import.path))
+        .collect()
+}
+
 fn vue3_codegen_components(ast: &Vue3Ast) -> Vec<String> {
     if let Some(root) = vue3_codegen_root(ast).filter(|root| vue3_root_has_codegen_state(root)) {
         root.components.iter().cloned().collect()
@@ -16336,7 +16351,8 @@ fn has_dynamic_non_key_props(element: &Vue3Element) -> bool {
                         && dir
                             .arg
                             .as_ref()
-                            .is_none_or(|arg| arg.source_string() != "class" && arg.source_string() != "key"))
+                            .is_none_or(|arg| arg.source_string() != "class" && arg.source_string() != "key")
+                        && !is_asset_import_binding(dir))
         )
     })
 }
@@ -16375,7 +16391,11 @@ fn dynamic_props_arg(element: &Vue3Element) -> String {
             Vue3Prop::Directive(dir)
                 if dir.name == "bind" && !has_class_bind_dir(dir) && !has_key_bind_dir(dir) =>
             {
-                dir.arg.as_ref().map(Vue3Expression::source_string)
+                if is_asset_import_binding(dir) {
+                    None
+                } else {
+                    dir.arg.as_ref().map(Vue3Expression::source_string)
+                }
             }
             _ => None,
         })
@@ -16446,6 +16466,28 @@ fn has_key_bind_dir(dir: &Vue3Directive) -> bool {
     dir.arg
         .as_ref()
         .is_some_and(|arg| arg.source_string() == "key")
+}
+
+fn is_asset_import_binding(dir: &Vue3Directive) -> bool {
+    dir.name == "bind"
+        && dir
+            .exp
+            .as_ref()
+            .is_some_and(|exp| expression_is_generated_asset_import(&exp.source_string()))
+}
+
+fn expression_is_generated_asset_import(expression: &str) -> bool {
+    split_top_level_like(expression, '+')
+        .into_iter()
+        .all(|part| {
+            let part = part.trim();
+            is_generated_asset_import_ident(part) || quoted_js_literal(part)
+        })
+}
+
+fn quoted_js_literal(value: &str) -> bool {
+    (value.starts_with('\'') && value.ends_with('\''))
+        || (value.starts_with('"') && value.ends_with('"'))
 }
 
 fn directive_by_name<'a>(element: &'a Vue3Element, name: &str) -> Option<&'a Vue3Directive> {
@@ -16743,6 +16785,7 @@ fn rewrite_js_like_expression_into(
                     && matches!(prev, TokenKind::OpenParen | TokenKind::Comma));
             if skip_property
                 || is_global_or_literal(ident)
+                || is_generated_asset_import_ident(ident)
                 || is_local(&scopes, ident)
                 || arrow_param
                 || arrow_local
@@ -16953,6 +16996,12 @@ fn is_global_or_literal(value: &str) -> bool {
             | "Reflect"
             | "globalThis"
     )
+}
+
+fn is_generated_asset_import_ident(value: &str) -> bool {
+    value
+        .strip_prefix("_imports_")
+        .is_some_and(|suffix| !suffix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_digit()))
 }
 
 fn rewrite_identifier(ident: &str, options: &Vue3CompilerOptions) -> String {
