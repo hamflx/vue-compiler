@@ -1259,7 +1259,7 @@ pub enum Vue2NormalizationType {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Vue3DomMirKind {
-    Root,
+    Root(Vue3DomRoot),
     VNodeCall(Vue3VNodeCall),
     TextCall { value: MirExpr },
     Interpolation { expression: JsExprId },
@@ -1271,6 +1271,11 @@ pub enum Vue3DomMirKind {
     Memo { expression: JsExprId, index: u32 },
     Hoisted { index: u32 },
     Fragment,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue3DomRoot {
+    pub imports: Vec<Vue3ImportItem>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1667,7 +1672,7 @@ mod tests {
             vue3.node(id).unwrap().kind,
             Vue3NodeKind::Element(_)
         ));
-        let mut mir = Vue3DomMir::new(Vue3DomMirKind::Root, None);
+        let mut mir = Vue3DomMir::new(Vue3DomMirKind::Root(Vue3DomRoot::default()), None);
         let _ = mir.push_child(
             mir.root,
             Vue3DomMirKind::TextCall {

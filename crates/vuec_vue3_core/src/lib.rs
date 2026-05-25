@@ -14,11 +14,11 @@ use vuec_ast::{
     Vue3Directive, Vue3DomBinding, Vue3DomClickEvent, Vue3DomContent, Vue3DomDirective,
     Vue3DomEvent, Vue3DomEventCache, Vue3DomMir, Vue3DomMirKind, Vue3DomModel, Vue3DomModelKind,
     Vue3DomObjectBinding, Vue3DomObjectListeners, Vue3DomPropSegment, Vue3DomProps,
-    Vue3DomPropsNormalize, Vue3DomSlotName, Vue3DomStaticAttr, Vue3DomTag, Vue3Element,
-    Vue3ElementType, Vue3Expression, Vue3ForMemo, Vue3ForMir, Vue3NodeKind, Vue3PatchFlags,
-    Vue3Prop, Vue3Root, Vue3SlotFlag, Vue3SsrAttrs, Vue3SsrComponent, Vue3SsrContent, Vue3SsrFor,
-    Vue3SsrMir, Vue3SsrMirKind, Vue3SsrModel, Vue3SsrModelKind, Vue3SsrSuspense, Vue3SsrTeleport,
-    Vue3VNodeCall,
+    Vue3DomPropsNormalize, Vue3DomRoot, Vue3DomSlotName, Vue3DomStaticAttr, Vue3DomTag,
+    Vue3Element, Vue3ElementType, Vue3Expression, Vue3ForMemo, Vue3ForMir, Vue3NodeKind,
+    Vue3PatchFlags, Vue3Prop, Vue3Root, Vue3SlotFlag, Vue3SsrAttrs, Vue3SsrComponent,
+    Vue3SsrContent, Vue3SsrFor, Vue3SsrMir, Vue3SsrMirKind, Vue3SsrModel, Vue3SsrModelKind,
+    Vue3SsrSuspense, Vue3SsrTeleport, Vue3VNodeCall,
 };
 use vuec_codegen::{CodeWriter, SourceMapArtifact, SourceMapSegment};
 use vuec_html::{HtmlTokenKind, HtmlTokenizer};
@@ -781,7 +781,14 @@ pub fn lower_vue3_ast_to_dom_mir(
         .unwrap_or_else(|| NodeSpan::missing(MissingSpanReason::LoweringGap));
     let mut state = Vue3DomLoweringState {
         hir: Hir::new(HirNodeKind::Root(HirRoot), root_span.clone()),
-        mir: Vue3DomMir::new(Vue3DomMirKind::Root, root_span),
+        mir: Vue3DomMir::new(
+            Vue3DomMirKind::Root(Vue3DomRoot {
+                imports: vue3_codegen_root(ast)
+                    .map(|root| root.imports.clone())
+                    .unwrap_or_default(),
+            }),
+            root_span,
+        ),
         map: LoweringMap::default(),
         js: JsAstStore::new(),
         options: options.clone(),
@@ -2759,6 +2766,9 @@ fn vue3_dom_mir_dynamic_props(element: &Vue3Element) -> Vec<String> {
                 Some(event_handler_prop_name(element, &event))
             }
             Vue3Prop::Directive(dir) if dir.name == "bind" && !has_key_bind_dir(dir) => {
+                if is_asset_import_binding(dir) {
+                    return None;
+                }
                 if dir.is_dynamic_arg {
                     return None;
                 }
@@ -2794,6 +2804,9 @@ fn vue3_dom_mir_props_patch_names(element: &Vue3Element) -> Vec<String> {
                     && !has_style_bind_dir(dir)
                     && !has_key_bind_dir(dir) =>
             {
+                if is_asset_import_binding(dir) {
+                    return None;
+                }
                 if dir.is_dynamic_arg {
                     return None;
                 }
@@ -11082,6 +11095,12 @@ impl<'a> Vue3DomMirCodegen<'a> {
                 ));
                 writer.newline();
             }
+            for import in self.asset_imports() {
+                writer.push_line(&format!("import {} from '{}'", import.name, import.path));
+            }
+            if !self.asset_imports().is_empty() {
+                writer.newline();
+            }
         } else if self.options.prefix_identifiers {
             if !helpers.is_empty() {
                 writer.push_line(&format!("const {{ {} }} = Vue", helper_aliases(helpers)));
@@ -11106,6 +11125,16 @@ impl<'a> Vue3DomMirCodegen<'a> {
         if !hoists.is_empty() {
             writer.newline();
         }
+    }
+
+    fn asset_imports(&self) -> &[vuec_ast::Vue3ImportItem] {
+        self.mir
+            .node(self.mir.root)
+            .and_then(|node| match &node.kind {
+                Vue3DomMirKind::Root(root) => Some(root.imports.as_slice()),
+                _ => None,
+            })
+            .unwrap_or(&[])
     }
 
     fn render_render_start(&self, writer: &mut CodeWriter) {
@@ -11158,7 +11187,7 @@ impl<'a> Vue3DomMirCodegen<'a> {
         let mut helpers = Vec::new();
         for node in &self.mir.nodes {
             match &node.kind {
-                Vue3DomMirKind::Root
+                Vue3DomMirKind::Root(_)
                 | Vue3DomMirKind::WithDirectives
                 | Vue3DomMirKind::Fragment => {}
                 Vue3DomMirKind::VNodeCall(call) => {
@@ -11398,7 +11427,7 @@ impl<'a> Vue3DomMirCodegen<'a> {
     ) -> Option<String> {
         let node = self.mir.node(node_id)?;
         match &node.kind {
-            Vue3DomMirKind::Root => Some(self.render_root_children(node_id, scope)),
+            Vue3DomMirKind::Root(_) => Some(self.render_root_children(node_id, scope)),
             Vue3DomMirKind::VNodeCall(call) => {
                 Some(self.render_vnode_call(node_id, call, mode, scope))
             }
@@ -19807,6 +19836,91 @@ mod tests {
             .contains("_createTextVNode(_toDisplayString(_ctx.msg), 1 /* TEXT */)"));
         assert!(generated.code.contains("3"));
         assert!(generated.code.contains("[\"class\"]"));
+    }
+
+    #[test]
+    fn lower_vue3_ast_to_dom_mir_projects_asset_import_root_payload() {
+        let mut ast = Vue3Dialect::base_parse(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: r#"<img :src="_imports_0">"#.into(),
+                file_id: FileId(26),
+                base_offset: 0,
+            },
+            &Vue3CompilerOptions::default(),
+        );
+        if let Some(root_node) = ast.root_node_mut() {
+            if let Vue3AstKind::Root(root) = &mut root_node.kind {
+                root.imports.push(vuec_ast::Vue3ImportItem {
+                    name: "_imports_0".into(),
+                    path: "./logo.png".into(),
+                });
+            }
+        }
+
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+        let root_imports = match &result.mir.node(result.mir.root).unwrap().kind {
+            Vue3DomMirKind::Root(root) => &root.imports,
+            _ => unreachable!("DOM MIR root kind"),
+        };
+        assert_eq!(root_imports.len(), 1);
+        assert_eq!(root_imports[0].name, "_imports_0");
+        assert_eq!(root_imports[0].path, "./logo.png");
+        let img = result
+            .mir
+            .nodes
+            .iter()
+            .find_map(|node| match &node.kind {
+                Vue3DomMirKind::VNodeCall(call) => Some(call),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(img.dynamic_props, Vec::<String>::new());
+        assert_eq!(img.patch_flag.bits, 0);
+    }
+
+    #[test]
+    fn generate_vue3_dom_mir_emits_asset_imports_from_mir_root() {
+        let mut ast = Vue3Dialect::base_parse(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: r#"<img :src="_imports_0" :srcset="_imports_0 + ' 2x'">"#.into(),
+                file_id: FileId(26),
+                base_offset: 0,
+            },
+            &Vue3CompilerOptions::default(),
+        );
+        if let Some(root_node) = ast.root_node_mut() {
+            if let Vue3AstKind::Root(root) = &mut root_node.kind {
+                root.imports.push(vuec_ast::Vue3ImportItem {
+                    name: "_imports_0".into(),
+                    path: "./logo.png".into(),
+                });
+            }
+        }
+
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+        let generated = generate_vue3_dom_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated
+            .code
+            .contains("import _imports_0 from './logo.png'"));
+        assert!(
+            generated.code.find("from \"vue\"").unwrap()
+                < generated.code.find("./logo.png").unwrap()
+        );
+        assert!(generated.code.contains("src: _imports_0"));
+        assert!(generated.code.contains("srcset: _imports_0 + ' 2x'"));
+        assert!(!generated.code.contains("_ctx._imports_0"));
+        assert!(!generated.code.contains("[\"src\""));
     }
 
     #[test]
