@@ -19450,6 +19450,7 @@ impl<'a> PublicAstCodegen<'a> {
                 ));
                 self.newline();
             }
+            self.gen_imports();
             self.gen_hoists();
             if self.code.is_empty() {
                 self.push("\n");
@@ -19510,6 +19511,17 @@ impl<'a> PublicAstCodegen<'a> {
         }
         if !self.options.inline {
             self.push("return ");
+        }
+    }
+
+    fn gen_imports(&mut self) {
+        let imports = public_asset_imports(self.root);
+        if imports.is_empty() {
+            return;
+        }
+        for (name, path) in imports {
+            self.push(&format!("import {name} from '{}'", path));
+            self.newline();
         }
     }
 
@@ -20286,6 +20298,22 @@ fn json_string_array(value: Option<&Value>) -> Vec<String> {
         .collect()
 }
 
+fn public_asset_imports(root: &Value) -> Vec<(String, String)> {
+    root.get("imports")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let path = json_str(item, "path")?.to_string();
+            let name = item
+                .get("exp")
+                .and_then(|exp| json_str(exp, "content"))
+                .or_else(|| json_str(item, "name"))?;
+            Some((name.to_string(), path))
+        })
+        .collect()
+}
+
 fn directive_asset_id(name: &str) -> String {
     format!("_directive_{}", to_valid_asset_part(name))
 }
@@ -20410,6 +20438,64 @@ mod tests {
         };
         let result = compile_ssr(source, Vue3CompilerOptions::default());
         assert!(result.code.starts_with("/* ssr */"));
+    }
+
+    #[test]
+    fn generate_public_ast_emits_root_imports() {
+        let ast = json!({
+            "type": 0,
+            "helpers": ["openBlock", "createElementBlock"],
+            "components": [],
+            "directives": [],
+            "hoists": [],
+            "imports": [{
+                "exp": {
+                    "type": 4,
+                    "content": "_imports_0",
+                    "isStatic": false,
+                    "constType": 3
+                },
+                "path": "./logo.png"
+            }],
+            "cached": [],
+            "temps": 0,
+            "codegenNode": {
+                "type": 13,
+                "tag": "\"img\"",
+                "props": {
+                    "type": 15,
+                    "properties": [{
+                        "type": 16,
+                        "key": {
+                            "type": 4,
+                            "content": "src",
+                            "isStatic": true
+                        },
+                        "value": {
+                            "type": 4,
+                            "content": "_imports_0",
+                            "isStatic": false
+                        }
+                    }]
+                },
+                "children": null,
+                "isBlock": true,
+                "isComponent": false
+            }
+        });
+
+        let result = generate_public_ast(
+            &ast,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(result.code.contains("import _imports_0 from './logo.png'"));
+        assert!(result.code.contains("src: _imports_0"));
+        assert!(!result.code.contains("_ctx._imports_0"));
     }
 
     #[test]

@@ -3517,7 +3517,7 @@ const vue3CoreRuntime = (() => {
     }
     const out = {};
     for (const key of Object.keys(value)) {
-      if (key === 'loc' || key === 'start' || key === 'end' || key === 'offset' || key === 'line' || key === 'column' || key === 'type' || key === 'tag' || key === 'tagType' || key === 'content' || key === 'isStatic' || key === 'constType' || key === 'props' || key === 'children' || key === 'codegenNode' || key === 'patchFlag' || key === 'dynamicProps' || key === 'directives' || key === 'isBlock' || key === 'isComponent' || key === 'disableTracking' || key === 'branches' || key === 'source' || key === 'parseResult' || key === 'valueAlias' || key === 'keyAlias' || key === 'objectIndexAlias' || key === 'returns' || key === 'body' || key === 'params' || key === 'newline' || key === 'isSlot' || key === 'isNonScopedSlot' || key === 'needPauseTracking' || key === 'inVOnce' || key === 'needArraySpread' || key === 'index' || key === 'elements' || key === 'test' || key === 'consequent' || key === 'alternate' || key === 'left' || key === 'right' || key === 'expressions' || key === 'helpers' || key === 'ssrHelpers' || key === 'components' || key === 'directives' || key === 'imports' || key === 'hoists' || key === 'cached' || key === 'temps' || key === 'properties' || key === 'key' || key === 'value' || key === 'arguments' || key === 'callee' || key === 'name' || key === 'arg' || key === 'exp' || key === 'modifiers') {
+      if (key === 'loc' || key === 'start' || key === 'end' || key === 'offset' || key === 'line' || key === 'column' || key === 'type' || key === 'tag' || key === 'tagType' || key === 'content' || key === 'isStatic' || key === 'constType' || key === 'props' || key === 'children' || key === 'codegenNode' || key === 'patchFlag' || key === 'dynamicProps' || key === 'directives' || key === 'isBlock' || key === 'isComponent' || key === 'disableTracking' || key === 'branches' || key === 'source' || key === 'parseResult' || key === 'valueAlias' || key === 'keyAlias' || key === 'objectIndexAlias' || key === 'returns' || key === 'body' || key === 'params' || key === 'newline' || key === 'isSlot' || key === 'isNonScopedSlot' || key === 'needPauseTracking' || key === 'inVOnce' || key === 'needArraySpread' || key === 'index' || key === 'elements' || key === 'test' || key === 'consequent' || key === 'alternate' || key === 'left' || key === 'right' || key === 'expressions' || key === 'helpers' || key === 'ssrHelpers' || key === 'components' || key === 'directives' || key === 'imports' || key === 'path' || key === 'hoists' || key === 'cached' || key === 'temps' || key === 'properties' || key === 'key' || key === 'value' || key === 'arguments' || key === 'callee' || key === 'name' || key === 'arg' || key === 'exp' || key === 'modifiers') {
         out[key] = runtime.dehydrateForBridge(value[key], seen);
       }
     }
@@ -10847,6 +10847,11 @@ mod tests {
         assert!(ALIAS_RUNTIME_JS.contains(
             "normalized.__vuecStringifyStatic = typeof options.transformHoist === 'function';"
         ));
+    }
+
+    #[test]
+    fn vue3_alias_runtime_dehydrates_public_ast_import_paths() {
+        assert!(ALIAS_RUNTIME_JS.contains("key === 'imports' || key === 'path'"));
     }
 
     #[test]
