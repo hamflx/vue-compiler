@@ -16,7 +16,8 @@ use vuec_ast::{
     Vue3DomPropsNormalize, Vue3DomSlotName, Vue3DomStaticAttr, Vue3DomTag, Vue3Element,
     Vue3ElementType, Vue3Expression, Vue3ForMemo, Vue3ForMir, Vue3NodeKind, Vue3PatchFlags,
     Vue3Prop, Vue3Root, Vue3SlotFlag, Vue3SsrAttrs, Vue3SsrComponent, Vue3SsrFor, Vue3SsrMir,
-    Vue3SsrMirKind, Vue3SsrSuspense, Vue3SsrTeleport, Vue3VNodeCall,
+    Vue3SsrMirKind, Vue3SsrModel, Vue3SsrModelKind, Vue3SsrSuspense, Vue3SsrTeleport,
+    Vue3VNodeCall,
 };
 use vuec_codegen::{CodeWriter, SourceMapArtifact, SourceMapSegment};
 use vuec_html::{HtmlTokenKind, HtmlTokenizer};
@@ -825,6 +826,7 @@ pub fn lower_vue3_ast_to_ssr_mir(
         map: LoweringMap::default(),
         js: JsAstStore::new(),
         source_type: expression_source_type(options),
+        select_model_stack: Vec::new(),
     };
     state.map.record_ast_to_hir(ast.root, state.hir.root);
     state.map.record_hir_to_mir(state.hir.root, state.mir.root);
@@ -883,6 +885,7 @@ struct Vue3SsrLoweringState {
     map: LoweringMap,
     js: JsAstStore,
     source_type: oxc_span::SourceType,
+    select_model_stack: Vec<JsExprId>,
 }
 
 fn lower_vue3_dom_child_sequence(
@@ -3339,14 +3342,24 @@ fn lower_vue3_native_element_to_ssr_mir(
     let generated_span =
         NodeSpan::generated(ast_node.span.source(), vuec_ast::GeneratedReason::Lowering);
     let v_show = lower_vue3_ssr_v_show(hir_id, state);
+    let select_model = if element.tag == "select" {
+        vue3_ssr_v_model_expression(element, ast_node, state)
+    } else {
+        None
+    };
+    let v_model = lower_vue3_ssr_v_model(element, ast_node, state);
     let open_id = state.mir.push_child(
         mir_parent,
-        Vue3SsrMirKind::PushString(vue3_ssr_open_tag_start(element, v_show.is_some())),
+        Vue3SsrMirKind::PushString(vue3_ssr_open_tag_start(
+            element,
+            v_show.is_some(),
+            v_model.as_ref(),
+        )),
         generated_span.clone(),
     );
     state.map.record_hir_to_mir(hir_id, open_id);
 
-    if let Some(attrs) = lower_vue3_ssr_attrs(hir_id, v_show, state) {
+    if let Some(attrs) = lower_vue3_ssr_attrs(hir_id, v_show, v_model.clone(), state) {
         let attrs_id = state.mir.push_child(
             mir_parent,
             Vue3SsrMirKind::RenderAttrs(attrs),
@@ -3366,7 +3379,26 @@ fn lower_vue3_native_element_to_ssr_mir(
         return;
     }
 
-    lower_vue3_ssr_child_sequence(&ast_node.children, ast, hir_id, mir_parent, state);
+    if let Some(model) = select_model {
+        state.select_model_stack.push(model);
+    }
+    if let Some(expression) = v_model
+        .as_ref()
+        .filter(|model| matches!(model.kind, Vue3SsrModelKind::Textarea))
+        .map(|model| model.expression)
+    {
+        let text_id = state.mir.push_child(
+            mir_parent,
+            Vue3SsrMirKind::PushInterpolated(MirExpr::JsExpr(expression)),
+            generated_span.clone(),
+        );
+        state.map.record_hir_to_mir(hir_id, text_id);
+    } else {
+        lower_vue3_ssr_child_sequence(&ast_node.children, ast, hir_id, mir_parent, state);
+    }
+    if select_model.is_some() {
+        state.select_model_stack.pop();
+    }
 
     let close_id = state.mir.push_child(
         mir_parent,
@@ -3502,13 +3534,203 @@ fn lower_vue3_ssr_v_show(hir_id: NodeId, state: &Vue3SsrLoweringState) -> Option
     }
 }
 
-fn vue3_ssr_open_tag_start(element: &Vue3Element, omit_static_style: bool) -> String {
+fn lower_vue3_ssr_v_model(
+    element: &Vue3Element,
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    state: &mut Vue3SsrLoweringState,
+) -> Option<Vue3SsrModel> {
+    if element.tag == "option" {
+        let expression = *state.select_model_stack.last()?;
+        if vue3_ssr_has_static_attr(element, "selected") {
+            return None;
+        }
+        return Some(Vue3SsrModel {
+            expression,
+            kind: Vue3SsrModelKind::SelectOption {
+                value: vue3_ssr_value_binding(element, ast_node, state),
+            },
+        });
+    }
+    if !matches!(element.tag.as_str(), "input" | "textarea") {
+        return None;
+    }
+
+    let expression = vue3_ssr_v_model_expression(element, ast_node, state)?;
+    let kind = match element.tag.as_str() {
+        "input" => vue3_ssr_input_v_model_kind(element, ast_node, state),
+        "textarea" => Some(Vue3SsrModelKind::Textarea),
+        _ => None,
+    }?;
+    Some(Vue3SsrModel { expression, kind })
+}
+
+fn vue3_ssr_v_model_expression(
+    element: &Vue3Element,
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    state: &mut Vue3SsrLoweringState,
+) -> Option<JsExprId> {
+    let directive = directive_by_name(element, "model")?;
+    let expression = directive.exp.as_ref()?;
+    if expression.source_string().trim().is_empty() {
+        return None;
+    }
+    Some(register_or_reuse_vue3_expression_with_span(
+        &mut state.js,
+        expression,
+        directive.exp_span.or_else(|| ast_node.span.source()),
+        state.source_type,
+    ))
+}
+
+fn vue3_ssr_input_v_model_kind(
+    element: &Vue3Element,
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    state: &mut Vue3SsrLoweringState,
+) -> Option<Vue3SsrModelKind> {
+    if vue3_ssr_has_dynamic_key_v_bind(element) {
+        return Some(Vue3SsrModelKind::InputDynamicProps);
+    }
+    let input_type = vue3_ssr_input_type_binding(element, ast_node, state);
+    match input_type {
+        Some(Vue3SsrInputType::Dynamic(type_expr)) => Some(Vue3SsrModelKind::InputDynamicType {
+            type_expr,
+            value: vue3_ssr_value_binding(element, ast_node, state),
+        }),
+        Some(Vue3SsrInputType::Static(value)) => match value.as_str() {
+            "radio" => Some(Vue3SsrModelKind::InputRadio {
+                value: vue3_ssr_value_binding(element, ast_node, state),
+            }),
+            "checkbox" => vue3_ssr_true_value_binding(element, ast_node, state)
+                .map(|true_value| Vue3SsrModelKind::InputCheckboxTrueValue { true_value })
+                .or_else(|| {
+                    Some(Vue3SsrModelKind::InputCheckbox {
+                        value: vue3_ssr_value_binding(element, ast_node, state),
+                    })
+                }),
+            "file" => None,
+            _ => Some(Vue3SsrModelKind::InputValue),
+        },
+        None => Some(Vue3SsrModelKind::InputValue),
+    }
+}
+
+enum Vue3SsrInputType {
+    Static(String),
+    Dynamic(JsExprId),
+}
+
+fn vue3_ssr_input_type_binding(
+    element: &Vue3Element,
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    state: &mut Vue3SsrLoweringState,
+) -> Option<Vue3SsrInputType> {
+    element.props.iter().find_map(|prop| match prop {
+        Vue3Prop::Attribute(attr) if attr.name == "type" => Some(Vue3SsrInputType::Static(
+            attr.value.clone().unwrap_or_default(),
+        )),
+        Vue3Prop::Directive(dir)
+            if dir.name == "bind"
+                && !dir.is_dynamic_arg
+                && dir
+                    .arg
+                    .as_ref()
+                    .is_some_and(|arg| arg.source_string() == "type") =>
+        {
+            dir.exp.as_ref().map(|exp| {
+                Vue3SsrInputType::Dynamic(register_or_reuse_vue3_expression_with_span(
+                    &mut state.js,
+                    exp,
+                    dir.exp_span.or_else(|| ast_node.span.source()),
+                    state.source_type,
+                ))
+            })
+        }
+        _ => None,
+    })
+}
+
+fn vue3_ssr_value_binding(
+    element: &Vue3Element,
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    state: &mut Vue3SsrLoweringState,
+) -> MirExpr {
+    vue3_ssr_static_or_dynamic_prop_expr(element, "value", ast_node, state).unwrap_or(MirExpr::Null)
+}
+
+fn vue3_ssr_true_value_binding(
+    element: &Vue3Element,
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    state: &mut Vue3SsrLoweringState,
+) -> Option<MirExpr> {
+    vue3_ssr_static_or_dynamic_prop_expr(element, "true-value", ast_node, state)
+}
+
+fn vue3_ssr_static_or_dynamic_prop_expr(
+    element: &Vue3Element,
+    name: &str,
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    state: &mut Vue3SsrLoweringState,
+) -> Option<MirExpr> {
+    element.props.iter().find_map(|prop| match prop {
+        Vue3Prop::Attribute(attr) if attr.name == name => {
+            Some(MirExpr::String(attr.value.clone().unwrap_or_default()))
+        }
+        Vue3Prop::Directive(dir)
+            if dir.name == "bind"
+                && !dir.is_dynamic_arg
+                && dir
+                    .arg
+                    .as_ref()
+                    .is_some_and(|arg| arg.source_string() == name) =>
+        {
+            dir.exp.as_ref().map(|exp| {
+                MirExpr::JsExpr(register_or_reuse_vue3_expression_with_span(
+                    &mut state.js,
+                    exp,
+                    dir.exp_span.or_else(|| ast_node.span.source()),
+                    state.source_type,
+                ))
+            })
+        }
+        _ => None,
+    })
+}
+
+fn vue3_ssr_has_static_attr(element: &Vue3Element, name: &str) -> bool {
+    element.props.iter().any(|prop| {
+        matches!(
+            prop,
+            Vue3Prop::Attribute(attr) if attr.name == name
+        )
+    })
+}
+
+fn vue3_ssr_has_dynamic_key_v_bind(element: &Vue3Element) -> bool {
+    element.props.iter().any(|prop| {
+        matches!(
+            prop,
+            Vue3Prop::Directive(dir)
+                if dir.name == "bind" && dir.exp.is_some() && (dir.arg.is_none() || dir.is_dynamic_arg)
+        )
+    })
+}
+
+fn vue3_ssr_open_tag_start(
+    element: &Vue3Element,
+    omit_static_style: bool,
+    v_model: Option<&Vue3SsrModel>,
+) -> String {
     let mut rendered = String::new();
     rendered.push('<');
     rendered.push_str(&element.tag);
     for prop in &element.props {
         if let Vue3Prop::Attribute(attr) = prop {
-            if omit_static_style && attr.name == "style" {
+            if vue3_ssr_should_omit_static_attr(
+                element,
+                attr.name.as_str(),
+                omit_static_style,
+                v_model,
+            ) {
                 continue;
             }
             rendered.push(' ');
@@ -3523,31 +3745,65 @@ fn vue3_ssr_open_tag_start(element: &Vue3Element, omit_static_style: bool) -> St
     rendered
 }
 
+fn vue3_ssr_should_omit_static_attr(
+    element: &Vue3Element,
+    name: &str,
+    omit_static_style: bool,
+    v_model: Option<&Vue3SsrModel>,
+) -> bool {
+    if omit_static_style && name == "style" {
+        return true;
+    }
+    if element.tag == "input" && matches!(name, "true-value" | "false-value") {
+        return true;
+    }
+    if matches!(
+        v_model.map(|model| &model.kind),
+        Some(Vue3SsrModelKind::InputDynamicProps)
+    ) {
+        return true;
+    }
+    if matches!(
+        v_model.map(|model| &model.kind),
+        Some(Vue3SsrModelKind::InputValue)
+    ) && name == "value"
+    {
+        return true;
+    }
+    false
+}
+
 fn lower_vue3_ssr_attrs(
     hir_id: NodeId,
     v_show: Option<JsExprId>,
+    v_model: Option<Vue3SsrModel>,
     state: &Vue3SsrLoweringState,
 ) -> Option<Vue3SsrAttrs> {
     let props = match state.hir.node(hir_id).map(|node| &node.kind) {
-        Some(HirNodeKind::Element(element)) => filter_vue3_ssr_attr_props(&element.props, v_show),
+        Some(HirNodeKind::Element(element)) => {
+            filter_vue3_ssr_attr_props(&element.props, v_show, v_model.as_ref())
+        }
         _ => HirProps::default(),
     };
     if props.segments.is_empty()
         && props.dynamic_bindings.is_empty()
         && props.object_bindings.is_empty()
         && v_show.is_none()
+        && v_model.is_none()
     {
         return None;
     }
     Some(Vue3SsrAttrs {
         props: lower_hir_props_to_dom_mir_without_event_cache(&props),
         v_show,
+        v_model,
     })
 }
 
 fn filter_vue3_ssr_attr_props(
     props: &HirProps,
     include_static_style: Option<JsExprId>,
+    v_model: Option<&Vue3SsrModel>,
 ) -> HirProps {
     let mut filtered = HirProps::default();
     for segment in &props.segments {
@@ -3560,7 +3816,18 @@ fn filter_vue3_ssr_attr_props(
                     .segments
                     .push(HirPropSegment::StaticAttr(attr.clone()));
             }
+            HirPropSegment::StaticAttr(attr)
+                if vue3_ssr_should_keep_static_attr_in_payload(attr, v_model) =>
+            {
+                filtered.static_attrs.push(attr.clone());
+                filtered
+                    .segments
+                    .push(HirPropSegment::StaticAttr(attr.clone()));
+            }
             HirPropSegment::DynamicBinding(binding) => {
+                if vue3_ssr_should_skip_dynamic_binding(binding, v_model) {
+                    continue;
+                }
                 filtered.dynamic_bindings.push(binding.clone());
                 filtered
                     .segments
@@ -3578,10 +3845,39 @@ fn filter_vue3_ssr_attr_props(
         }
     }
     if filtered.segments.is_empty() {
-        filtered.dynamic_bindings = props.dynamic_bindings.clone();
+        filtered.dynamic_bindings = props
+            .dynamic_bindings
+            .iter()
+            .filter(|binding| !vue3_ssr_should_skip_dynamic_binding(binding, v_model))
+            .cloned()
+            .collect();
         filtered.object_bindings = props.object_bindings.clone();
     }
     filtered
+}
+
+fn vue3_ssr_should_keep_static_attr_in_payload(
+    attr: &HirStaticAttr,
+    v_model: Option<&Vue3SsrModel>,
+) -> bool {
+    matches!(
+        v_model.map(|model| &model.kind),
+        Some(Vue3SsrModelKind::InputDynamicProps)
+    ) && !matches!(attr.name.as_str(), "true-value" | "false-value")
+}
+
+fn vue3_ssr_should_skip_dynamic_binding(
+    binding: &HirBinding,
+    v_model: Option<&Vue3SsrModel>,
+) -> bool {
+    if binding.dynamic_arg {
+        return false;
+    }
+    matches!(binding.name.as_str(), "true-value" | "false-value")
+        || matches!(
+            v_model.map(|model| &model.kind),
+            Some(Vue3SsrModelKind::InputValue)
+        ) && binding.name == "value"
 }
 
 fn vue3_ssr_escape_attr(value: &str) -> String {
@@ -11116,6 +11412,7 @@ impl<'a> Vue3DomMirCodegen<'a> {
         match expr {
             MirExpr::String(value) => quote_string(value),
             MirExpr::Bool(value) => value.to_string(),
+            MirExpr::Null => "null".into(),
             MirExpr::JsExpr(expr) => self.render_js_expr(*expr, scope),
             MirExpr::Helper(helper) => helper_reference(*helper),
         }
@@ -11199,6 +11496,10 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         self.render_preamble(&mut writer, &vue_helpers, &ssr_helpers);
         self.render_function_start(&mut writer);
         writer.indent();
+        if self.needs_dynamic_model_temp() {
+            writer.push_line("let _temp0;");
+            writer.newline();
+        }
         let use_with = self.use_with_block();
         if use_with {
             writer.push_line("with (_ctx) {");
@@ -11280,6 +11581,19 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         !self.options.prefix_identifiers && self.options.mode != "module"
     }
 
+    fn needs_dynamic_model_temp(&self) -> bool {
+        self.mir.nodes.iter().any(|node| {
+            matches!(
+                &node.kind,
+                Vue3SsrMirKind::RenderAttrs(attrs)
+                    if matches!(
+                        attrs.v_model.as_ref().map(|model| &model.kind),
+                        Some(Vue3SsrModelKind::InputDynamicProps)
+                    )
+            )
+        })
+    }
+
     fn vue_helpers(&self) -> Vec<RuntimeHelper> {
         let mut helpers = Vec::new();
         for node in &self.mir.nodes {
@@ -11290,10 +11604,21 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                 Vue3SsrMirKind::RenderSlot(slot) => {
                     self.push_prop_helpers(&slot.props, &mut helpers);
                 }
-                Vue3SsrMirKind::RenderAttrs(attrs)
-                    if attrs.v_show.is_some() && ssr_attrs_has_object_binding(&attrs.props) =>
-                {
-                    push_unique_helper(&mut helpers, RuntimeHelper::Vue3MergeProps);
+                Vue3SsrMirKind::RenderAttrs(attrs) => {
+                    if (attrs.v_show.is_some() && ssr_attrs_has_object_binding(&attrs.props))
+                        || matches!(
+                            attrs.v_model.as_ref().map(|model| &model.kind),
+                            Some(Vue3SsrModelKind::InputDynamicProps)
+                        )
+                    {
+                        if matches!(
+                            attrs.v_model.as_ref().map(|model| &model.kind),
+                            Some(Vue3SsrModelKind::InputDynamicProps)
+                        ) {
+                            self.push_prop_helpers(&attrs.props, &mut helpers);
+                        }
+                        push_unique_helper(&mut helpers, RuntimeHelper::Vue3MergeProps);
+                    }
                 }
                 _ => {}
             }
@@ -11339,34 +11664,76 @@ impl<'a> Vue3SsrMirCodegen<'a> {
     }
 
     fn push_ssr_attr_helpers(&self, attrs: &Vue3SsrAttrs, helpers: &mut Vec<RuntimeHelper>) {
+        self.push_ssr_v_model_helpers(attrs, helpers);
         let props = &attrs.props;
-        if attrs.v_show.is_some() && ssr_attrs_has_object_binding(props) {
+        if (attrs.v_show.is_some()
+            || matches!(
+                attrs.v_model.as_ref().map(|model| &model.kind),
+                Some(Vue3SsrModelKind::InputDynamicProps)
+            ))
+            && ssr_attrs_has_object_binding(props)
+        {
             push_unique_helper(helpers, RuntimeHelper::Vue3SsrRenderAttrs);
             return;
         }
-        for binding in &props.dynamic_bindings {
-            if attrs.v_show.is_none() || binding.name != "style" {
-                self.push_ssr_binding_helper(binding, helpers);
+        if props.segments.is_empty() {
+            for binding in &props.dynamic_bindings {
+                if attrs.v_show.is_none() || binding.name != "style" {
+                    self.push_ssr_binding_helper(binding, helpers);
+                }
             }
-        }
-        for binding in &props.object_bindings {
-            let _ = binding;
-            push_unique_helper(helpers, RuntimeHelper::Vue3SsrRenderAttrs);
-        }
-        for segment in &props.segments {
-            match segment {
-                Vue3DomPropSegment::DynamicBinding(binding) => {
-                    if attrs.v_show.is_none() || binding.name != "style" {
-                        self.push_ssr_binding_helper(binding, helpers);
+            for binding in &props.object_bindings {
+                let _ = binding;
+                push_unique_helper(helpers, RuntimeHelper::Vue3SsrRenderAttrs);
+            }
+        } else {
+            for segment in &props.segments {
+                match segment {
+                    Vue3DomPropSegment::DynamicBinding(binding) => {
+                        if attrs.v_show.is_none() || binding.name != "style" {
+                            self.push_ssr_binding_helper(binding, helpers);
+                        }
                     }
+                    Vue3DomPropSegment::ObjectBinding(_) => {
+                        push_unique_helper(helpers, RuntimeHelper::Vue3SsrRenderAttrs);
+                    }
+                    Vue3DomPropSegment::StaticAttr(_)
+                    | Vue3DomPropSegment::Event(_)
+                    | Vue3DomPropSegment::ObjectListeners(_) => {}
                 }
-                Vue3DomPropSegment::ObjectBinding(_) => {
-                    push_unique_helper(helpers, RuntimeHelper::Vue3SsrRenderAttrs);
-                }
-                Vue3DomPropSegment::StaticAttr(_)
-                | Vue3DomPropSegment::Event(_)
-                | Vue3DomPropSegment::ObjectListeners(_) => {}
             }
+        }
+    }
+
+    fn push_ssr_v_model_helpers(&self, attrs: &Vue3SsrAttrs, helpers: &mut Vec<RuntimeHelper>) {
+        let Some(model) = &attrs.v_model else {
+            return;
+        };
+        match &model.kind {
+            Vue3SsrModelKind::InputValue => {
+                push_unique_helper(helpers, RuntimeHelper::Vue3SsrRenderAttr);
+            }
+            Vue3SsrModelKind::InputRadio { .. }
+            | Vue3SsrModelKind::InputCheckboxTrueValue { .. }
+            | Vue3SsrModelKind::SelectOption { .. } => {
+                push_unique_helper(helpers, RuntimeHelper::Vue3SsrIncludeBooleanAttr);
+                push_unique_helper(helpers, RuntimeHelper::Vue3SsrLooseEqual);
+                if matches!(model.kind, Vue3SsrModelKind::SelectOption { .. }) {
+                    push_unique_helper(helpers, RuntimeHelper::Vue3SsrLooseContain);
+                }
+            }
+            Vue3SsrModelKind::InputCheckbox { .. } => {
+                push_unique_helper(helpers, RuntimeHelper::Vue3SsrIncludeBooleanAttr);
+                push_unique_helper(helpers, RuntimeHelper::Vue3SsrLooseContain);
+            }
+            Vue3SsrModelKind::InputDynamicType { .. } => {
+                push_unique_helper(helpers, RuntimeHelper::Vue3SsrRenderDynamicModel);
+            }
+            Vue3SsrModelKind::InputDynamicProps => {
+                push_unique_helper(helpers, RuntimeHelper::Vue3SsrRenderAttrs);
+                push_unique_helper(helpers, RuntimeHelper::Vue3SsrGetDynamicModelProps);
+            }
+            Vue3SsrModelKind::Textarea => {}
         }
     }
 
@@ -11589,8 +11956,24 @@ impl<'a> Vue3SsrMirCodegen<'a> {
     }
 
     fn render_attrs(&self, attrs: &Vue3SsrAttrs, scope: &RenderScope, writer: &mut CodeWriter) {
+        if attrs.v_show.is_some()
+            && matches!(
+                attrs.v_model.as_ref().map(|model| &model.kind),
+                Some(Vue3SsrModelKind::InputDynamicProps)
+            )
+        {
+            self.render_attrs_with_v_show_and_dynamic_model_props(attrs, scope, writer);
+            return;
+        }
         if attrs.v_show.is_some() {
             self.render_attrs_with_v_show(attrs, scope, writer);
+            return;
+        }
+        if matches!(
+            attrs.v_model.as_ref().map(|model| &model.kind),
+            Some(Vue3SsrModelKind::InputDynamicProps)
+        ) {
+            self.render_attrs_with_dynamic_model_props(attrs, scope, writer);
             return;
         }
         let props = &attrs.props;
@@ -11606,6 +11989,9 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                     "_push(_ssrRenderAttrs({}));",
                     self.render_js_expr(binding.value, scope)
                 ));
+            }
+            if let Some(model) = &attrs.v_model {
+                self.render_v_model_attr(model, scope, writer);
             }
             return;
         }
@@ -11628,6 +12014,98 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                 | Vue3DomPropSegment::Event(_)
                 | Vue3DomPropSegment::ObjectListeners(_) => {}
             }
+        }
+        if let Some(model) = &attrs.v_model {
+            self.render_v_model_attr(model, scope, writer);
+        }
+    }
+
+    fn render_attrs_with_dynamic_model_props(
+        &self,
+        attrs: &Vue3SsrAttrs,
+        scope: &RenderScope,
+        writer: &mut CodeWriter,
+    ) {
+        let Some(model) = &attrs.v_model else {
+            return;
+        };
+        let model_expr = self.render_js_expr(model.expression, scope);
+        let props_expr = self.render_dynamic_model_props_base(&attrs.props, scope);
+        let rendered = format!(
+            "(_temp0 = {props_expr}, _mergeProps(_temp0, _ssrGetDynamicModelProps(_temp0, {model_expr})))"
+        );
+        writer.push_line(&format!("_push(_ssrRenderAttrs({rendered}));"));
+    }
+
+    fn render_dynamic_model_props_base(&self, props: &Vue3DomProps, scope: &RenderScope) -> String {
+        self.render_ordered_props(props, scope)
+            .map(|rendered| self.render_normalized_props(props, rendered))
+            .unwrap_or_else(|| "{}".into())
+    }
+
+    fn render_attrs_with_v_show_and_dynamic_model_props(
+        &self,
+        attrs: &Vue3SsrAttrs,
+        scope: &RenderScope,
+        writer: &mut CodeWriter,
+    ) {
+        let Some(model) = &attrs.v_model else {
+            return;
+        };
+        let style = self.render_v_show_style(&attrs.props, attrs.v_show.expect("v-show"), scope);
+        let props_expr = self.render_v_show_merged_attrs(&attrs.props, &style, scope);
+        let model_expr = self.render_js_expr(model.expression, scope);
+        writer.push_line(&format!(
+            "_push(_ssrRenderAttrs((_temp0 = {props_expr}, _mergeProps(_temp0, _ssrGetDynamicModelProps(_temp0, {model_expr})))));"
+        ));
+    }
+
+    fn render_v_model_attr(
+        &self,
+        model: &Vue3SsrModel,
+        scope: &RenderScope,
+        writer: &mut CodeWriter,
+    ) {
+        let Some(rendered) = self.render_v_model_attr_expr(model, scope) else {
+            return;
+        };
+        writer.push_line(&format!("_push({rendered});"));
+    }
+
+    fn render_v_model_attr_expr(
+        &self,
+        model: &Vue3SsrModel,
+        scope: &RenderScope,
+    ) -> Option<String> {
+        let expression = self.render_js_expr(model.expression, scope);
+        match &model.kind {
+            Vue3SsrModelKind::InputValue => {
+                Some(format!("_ssrRenderAttr(\"value\", {expression})"))
+            }
+            Vue3SsrModelKind::InputRadio { value } => Some(format!(
+                "(_ssrIncludeBooleanAttr(_ssrLooseEqual({expression}, {}))) ? \" checked\" : \"\"",
+                self.render_mir_expr(value, scope)
+            )),
+            Vue3SsrModelKind::InputCheckbox { value } => Some(format!(
+                "(_ssrIncludeBooleanAttr((Array.isArray({expression})) ? _ssrLooseContain({expression}, {}) : {expression})) ? \" checked\" : \"\"",
+                self.render_mir_expr(value, scope)
+            )),
+            Vue3SsrModelKind::InputCheckboxTrueValue { true_value } => Some(format!(
+                "(_ssrIncludeBooleanAttr(_ssrLooseEqual({expression}, {}))) ? \" checked\" : \"\"",
+                self.render_mir_expr(true_value, scope)
+            )),
+            Vue3SsrModelKind::InputDynamicType { type_expr, value } => Some(format!(
+                "_ssrRenderDynamicModel({}, {expression}, {})",
+                self.render_js_expr(*type_expr, scope),
+                self.render_mir_expr(value, scope)
+            )),
+            Vue3SsrModelKind::SelectOption { value } => {
+                let value = self.render_mir_expr(value, scope);
+                Some(format!(
+                    "(_ssrIncludeBooleanAttr((Array.isArray({expression})) ? _ssrLooseContain({expression}, {value}) : _ssrLooseEqual({expression}, {value}))) ? \" selected\" : \"\""
+                ))
+            }
+            Vue3SsrModelKind::InputDynamicProps | Vue3SsrModelKind::Textarea => None,
         }
     }
 
@@ -11666,6 +12144,9 @@ impl<'a> Vue3SsrMirCodegen<'a> {
             }
         }
         writer.push_line(&format!("_push({});", self.render_ssr_style_attr(&style)));
+        if let Some(model) = &attrs.v_model {
+            self.render_v_model_attr(model, scope, writer);
+        }
     }
 
     fn render_v_show_merged_attrs(
@@ -12017,6 +12498,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         match expr {
             MirExpr::String(value) => quote_string(value),
             MirExpr::Bool(value) => value.to_string(),
+            MirExpr::Null => "null".into(),
             MirExpr::JsExpr(expr) => self.render_js_expr(*expr, scope),
             MirExpr::Helper(helper) => helper_reference(*helper),
         }
@@ -12070,6 +12552,11 @@ fn vue3_ssr_helper_order() -> &'static [RuntimeHelper] {
         RuntimeHelper::Vue3SsrRenderAttrs,
         RuntimeHelper::Vue3SsrRenderAttr,
         RuntimeHelper::Vue3SsrRenderDynamicAttr,
+        RuntimeHelper::Vue3SsrIncludeBooleanAttr,
+        RuntimeHelper::Vue3SsrLooseContain,
+        RuntimeHelper::Vue3SsrLooseEqual,
+        RuntimeHelper::Vue3SsrRenderDynamicModel,
+        RuntimeHelper::Vue3SsrGetDynamicModelProps,
         RuntimeHelper::Vue3SsrRenderComponent,
         RuntimeHelper::Vue3SsrRenderSlot,
         RuntimeHelper::Vue3SsrRenderList,
@@ -19038,6 +19525,77 @@ mod tests {
     }
 
     #[test]
+    fn lower_vue3_ast_to_ssr_mir_projects_v_model_payloads() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div><input v-model="bar"><input type="radio" value="foo" v-model="bar"><input type="checkbox" :true-value="foo" v-model="baz"><input :type="kind" :value="value" v-model="model"><textarea v-model="text">old</textarea><select v-model="picked"><option value="1"></option></select></div>"#.into(),
+            file_id: FileId(50),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_ssr_mir(&ast, &Vue3CompilerOptions::default());
+
+        assert_eq!(result.hir.validate_tree(), Ok(()));
+        assert_eq!(result.mir.validate_tree(), Ok(()));
+        let models = result
+            .mir
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.kind {
+                Vue3SsrMirKind::RenderAttrs(attrs) => attrs.v_model.as_ref(),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(models.len(), 6);
+        assert!(matches!(models[0].kind, Vue3SsrModelKind::InputValue));
+        assert!(matches!(
+            models[1].kind,
+            Vue3SsrModelKind::InputRadio {
+                value: MirExpr::String(ref value)
+            } if value == "foo"
+        ));
+        assert!(matches!(
+            models[2].kind,
+            Vue3SsrModelKind::InputCheckboxTrueValue {
+                true_value: MirExpr::JsExpr(JsExprId(2))
+            }
+        ));
+        assert!(matches!(
+            models[3].kind,
+            Vue3SsrModelKind::InputDynamicType {
+                type_expr: JsExprId(4),
+                value: MirExpr::JsExpr(JsExprId(5))
+            }
+        ));
+        assert!(matches!(models[4].kind, Vue3SsrModelKind::Textarea));
+        assert!(matches!(
+            models[5].kind,
+            Vue3SsrModelKind::SelectOption {
+                value: MirExpr::String(ref value)
+            } if value == "1"
+        ));
+        assert_eq!(
+            result
+                .js
+                .expressions()
+                .iter()
+                .map(|entry| entry.source.as_str())
+                .collect::<Vec<_>>(),
+            vec!["bar", "bar", "foo", "baz", "kind", "value", "model", "text", "picked"]
+        );
+        let pushes = result
+            .mir
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.kind {
+                Vue3SsrMirKind::PushString(value) => Some(value.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(!pushes.contains(&"old"));
+    }
+
+    #[test]
     fn generate_vue3_ssr_mir_emits_v_show_style_payload_from_mir() {
         let source = TemplateSource {
             filename: "foo.vue".into(),
@@ -19096,6 +19654,194 @@ mod tests {
         assert!(!generated.code.contains("style=\\\"display:flex\\\""));
         assert!(generated.code.contains(
             r#"_push(_ssrRenderAttrs(_mergeProps(_ctx.extra, { title: _ctx.title }, { style: [{"display":"flex"}, _ctx.style, (_ctx.ok) ? null : { display: "none" }] })));"#
+        ));
+    }
+
+    #[test]
+    fn generate_vue3_ssr_mir_emits_v_model_input_payloads_from_mir() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div><input v-model="bar"><input type="radio" value="foo" v-model="bar"><input type="checkbox" :true-value="foo" v-model="baz"><input :type="kind" v-model="foo" :value="value"></div>"#.into(),
+            file_id: FileId(51),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_ssr_mir(&ast, &Vue3CompilerOptions::default());
+        let generated = generate_vue3_ssr_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated.code.contains("ssrRenderAttr as _ssrRenderAttr"));
+        assert!(generated
+            .code
+            .contains("ssrIncludeBooleanAttr as _ssrIncludeBooleanAttr"));
+        assert!(generated.code.contains("ssrLooseEqual as _ssrLooseEqual"));
+        assert!(generated
+            .code
+            .contains("ssrRenderDynamicModel as _ssrRenderDynamicModel"));
+        assert!(generated
+            .code
+            .contains("_push(_ssrRenderAttr(\"value\", _ctx.bar));"));
+        assert!(generated.code.contains(
+            "_push((_ssrIncludeBooleanAttr(_ssrLooseEqual(_ctx.bar, \"foo\"))) ? \" checked\" : \"\");"
+        ));
+        assert!(generated.code.contains(
+            "_push((_ssrIncludeBooleanAttr(_ssrLooseEqual(_ctx.baz, _ctx.foo))) ? \" checked\" : \"\");"
+        ));
+        assert!(generated
+            .code
+            .contains("_push(_ssrRenderDynamicModel(_ctx.kind, _ctx.foo, _ctx.value));"));
+        assert!(generated
+            .code
+            .contains("_push(_ssrRenderAttr(\"value\", _ctx.value));"));
+        assert!(!generated.code.contains("true-value"));
+    }
+
+    #[test]
+    fn generate_vue3_ssr_mir_emits_textarea_and_select_v_model_payloads() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div><textarea v-model="text">old</textarea><select v-model="model"><option value="1"></option><option v-for="item in items" :value="item">{{ item }}</option></select></div>"#.into(),
+            file_id: FileId(52),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_ssr_mir(&ast, &Vue3CompilerOptions::default());
+        let generated = generate_vue3_ssr_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated.code.contains("ssrInterpolate as _ssrInterpolate"));
+        assert!(generated
+            .code
+            .contains("ssrIncludeBooleanAttr as _ssrIncludeBooleanAttr"));
+        assert!(generated
+            .code
+            .contains("ssrLooseContain as _ssrLooseContain"));
+        assert!(generated.code.contains("ssrLooseEqual as _ssrLooseEqual"));
+        assert!(generated
+            .code
+            .contains("_push(_ssrInterpolate(_ctx.text));"));
+        assert!(!generated.code.contains("_push(\"old\");"));
+        assert!(generated.code.contains(
+            "_push((_ssrIncludeBooleanAttr((Array.isArray(_ctx.model)) ? _ssrLooseContain(_ctx.model, \"1\") : _ssrLooseEqual(_ctx.model, \"1\"))) ? \" selected\" : \"\");"
+        ));
+        assert!(generated
+            .code
+            .contains("_ssrRenderList(_ctx.items, (item) => {"));
+        assert!(generated.code.contains(
+            "_push((_ssrIncludeBooleanAttr((Array.isArray(_ctx.model)) ? _ssrLooseContain(_ctx.model, item) : _ssrLooseEqual(_ctx.model, item))) ? \" selected\" : \"\");"
+        ));
+        assert!(!generated.code.contains("_ctx.item)"));
+        assert!(!generated.code.contains("_ctx.item,"));
+    }
+
+    #[test]
+    fn generate_vue3_ssr_mir_merges_input_object_v_model_props() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<input id="x" v-bind="obj" v-model="foo" class="y">"#.into(),
+            file_id: FileId(53),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_ssr_mir(&ast, &Vue3CompilerOptions::default());
+        let generated = generate_vue3_ssr_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated.code.contains("mergeProps as _mergeProps"));
+        assert!(generated
+            .code
+            .contains("ssrGetDynamicModelProps as _ssrGetDynamicModelProps"));
+        assert!(generated.code.contains("let _temp0;"));
+        assert!(!generated
+            .code
+            .contains("_push(\"<input id=\\\"x\\\" class=\\\"y\\\"\");"));
+        assert!(generated.code.contains(
+            "_push(_ssrRenderAttrs((_temp0 = _mergeProps({ id: \"x\" }, _ctx.obj, { class: \"y\" }), _mergeProps(_temp0, _ssrGetDynamicModelProps(_temp0, _ctx.foo)))));"
+        ));
+    }
+
+    #[test]
+    fn generate_vue3_ssr_mir_merges_dynamic_key_input_v_model_props() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<input :[name]="value" v-model="foo">"#.into(),
+            file_id: FileId(54),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_ssr_mir(&ast, &Vue3CompilerOptions::default());
+        let generated = generate_vue3_ssr_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated.code.contains("mergeProps as _mergeProps"));
+        assert!(generated.code.contains("normalizeProps as _normalizeProps"));
+        assert!(generated
+            .code
+            .contains("ssrGetDynamicModelProps as _ssrGetDynamicModelProps"));
+        assert!(generated.code.contains("_temp0 = _normalizeProps("));
+        assert!(generated
+            .code
+            .contains("_normalizeProps({ [_ctx.name || \"\"]: _ctx.value })"));
+        assert!(generated
+            .code
+            .contains("_mergeProps(_temp0, _ssrGetDynamicModelProps(_temp0, _ctx.foo))"));
+    }
+
+    #[test]
+    fn generate_vue3_ssr_mir_merges_v_show_input_object_v_model_props() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<input v-bind="obj" style="color:red" v-show="ok" v-model="foo">"#.into(),
+            file_id: FileId(55),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_ssr_mir(&ast, &Vue3CompilerOptions::default());
+        let generated = generate_vue3_ssr_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated.code.contains("mergeProps as _mergeProps"));
+        assert!(generated.code.contains("ssrRenderAttrs as _ssrRenderAttrs"));
+        assert!(generated
+            .code
+            .contains("ssrGetDynamicModelProps as _ssrGetDynamicModelProps"));
+        assert!(generated.code.contains(
+            "_push(_ssrRenderAttrs((_temp0 = _mergeProps(_ctx.obj, { style: [{\"color\":\"red\"}, (_ctx.ok) ? null : { display: \"none\" }] }), _mergeProps(_temp0, _ssrGetDynamicModelProps(_temp0, _ctx.foo)))));"
         ));
     }
 

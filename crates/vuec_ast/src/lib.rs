@@ -1393,6 +1393,25 @@ pub struct Vue3SsrSlot {
 pub struct Vue3SsrAttrs {
     pub props: Vue3DomProps,
     pub v_show: Option<JsExprId>,
+    pub v_model: Option<Vue3SsrModel>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue3SsrModel {
+    pub expression: JsExprId,
+    pub kind: Vue3SsrModelKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Vue3SsrModelKind {
+    InputValue,
+    InputRadio { value: MirExpr },
+    InputCheckbox { value: MirExpr },
+    InputCheckboxTrueValue { true_value: MirExpr },
+    InputDynamicType { type_expr: JsExprId, value: MirExpr },
+    InputDynamicProps,
+    Textarea,
+    SelectOption { value: MirExpr },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1445,6 +1464,7 @@ pub enum VaporMirKind {
 pub enum MirExpr {
     String(String),
     Bool(bool),
+    Null,
     JsExpr(JsExprId),
     Helper(RuntimeHelper),
 }
