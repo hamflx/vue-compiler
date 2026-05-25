@@ -847,6 +847,7 @@ pub fn lower_vue3_ast_to_ssr_mir(
         ),
         map: LoweringMap::default(),
         js: JsAstStore::new(),
+        options: options.clone(),
         source_type: expression_source_type(options),
         select_model_stack: Vec::new(),
     };
@@ -906,6 +907,7 @@ struct Vue3SsrLoweringState {
     mir: Vue3SsrMir,
     map: LoweringMap,
     js: JsAstStore,
+    options: Vue3CompilerOptions,
     source_type: oxc_span::SourceType,
     select_model_stack: Vec<JsExprId>,
 }
@@ -3896,6 +3898,7 @@ fn lower_vue3_native_element_to_ssr_mir(
             element,
             v_show.is_some(),
             v_model.as_ref(),
+            &state.options,
         )),
         generated_span.clone(),
     );
@@ -4306,10 +4309,14 @@ fn vue3_ssr_open_tag_start(
     element: &Vue3Element,
     omit_static_style: bool,
     v_model: Option<&Vue3SsrModel>,
+    options: &Vue3CompilerOptions,
 ) -> String {
     let mut rendered = String::new();
     rendered.push('<');
     rendered.push_str(&element.tag);
+    if options.slotted {
+        rendered.push_str(" data-vuec-slotted");
+    }
     for prop in &element.props {
         if let Vue3Prop::Attribute(attr) = prop {
             if vue3_ssr_should_omit_static_attr(
@@ -4328,6 +4335,10 @@ fn vue3_ssr_open_tag_start(
                 rendered.push('"');
             }
         }
+    }
+    if let Some(scope_id) = &options.scope_id {
+        rendered.push(' ');
+        rendered.push_str(scope_id);
     }
     rendered
 }

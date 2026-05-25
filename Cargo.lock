@@ -1003,6 +1003,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "vuec_vue3_asset"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "vuec_ast",
+ "vuec_source",
+]
+
+[[package]]
 name = "vuec_vue3_core"
 version = "0.1.0"
 dependencies = [
@@ -1029,6 +1039,7 @@ dependencies = [
  "vuec_diagnostics",
  "vuec_pass",
  "vuec_source",
+ "vuec_vue3_asset",
  "vuec_vue3_core",
 ]
 
@@ -1040,6 +1051,7 @@ dependencies = [
  "vuec_ast",
  "vuec_codegen",
  "vuec_source",
+ "vuec_vue3_asset",
  "vuec_vue3_core",
 ]
 

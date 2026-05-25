@@ -234,6 +234,7 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
         }
         "vue3.ssr.compile" => {
             let source = template_source(&payload);
+            let default_options = SsrCompilerOptions::default();
             let options = SsrCompilerOptions {
                 core: vue3_options(payload.get("options")),
                 scope_id: payload
@@ -246,6 +247,14 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
                     .and_then(|options| options.get("slotted"))
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
+                transform_asset_urls: transform_asset_urls_enabled(
+                    payload.get("options").unwrap_or(&Value::Null),
+                    default_options.transform_asset_urls,
+                ),
+                asset_url_options: asset_url_options(
+                    payload.get("options").unwrap_or(&Value::Null),
+                    default_options.asset_url_options,
+                ),
             };
             Ok(serde_json::to_value(vuec_vue3_ssr::compile(
                 source, options,
@@ -2789,5 +2798,43 @@ mod tests {
         .expect("dom parse");
 
         assert_eq!(parsed["imports"], json!([]));
+    }
+
+    #[test]
+    fn vue3_ssr_bridge_projects_asset_url_imports() {
+        let compiled = dispatch(
+            "vue3.ssr.compile",
+            json!({
+                "source": r#"<img src="./bar.png" srcset="./bar.png 2x">"#,
+                "options": {
+                    "mode": "module",
+                    "prefixIdentifiers": true
+                }
+            }),
+        )
+        .expect("ssr compile");
+
+        let code = compiled["code"].as_str().unwrap_or("");
+        assert!(code.contains("import _imports_0 from './bar.png'"));
+        assert!(code.contains("_push(_ssrRenderAttr(\"src\", _imports_0));"));
+        assert!(code.contains("_push(_ssrRenderAttr(\"srcset\", _imports_0 + ' 2x'));"));
+        assert!(!code.contains("_ctx._imports_"));
+
+        let disabled = dispatch(
+            "vue3.ssr.compile",
+            json!({
+                "source": r#"<img src="./bar.png">"#,
+                "options": {
+                    "mode": "module",
+                    "prefixIdentifiers": true,
+                    "transformAssetUrls": false
+                }
+            }),
+        )
+        .expect("ssr compile");
+
+        let disabled_code = disabled["code"].as_str().unwrap_or("");
+        assert!(!disabled_code.contains("import _imports_0"));
+        assert!(disabled_code.contains(r#"src=\"./bar.png\""#));
     }
 }

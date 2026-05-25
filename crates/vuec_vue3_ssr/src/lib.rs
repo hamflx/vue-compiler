@@ -1,15 +1,22 @@
 #![forbid(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
-use vuec_ast::{TemplateAttribute, Vue3AstKind, Vue3NodeKind};
+use vuec_ast::{TemplateAttribute, Vue3Ast, Vue3AstKind, Vue3ImportItem, Vue3NodeKind};
 use vuec_codegen::CodeWriter;
-use vuec_vue3_core::{TemplateSource, Vue3CompilerOptions, Vue3Dialect};
+use vuec_vue3_asset::transform_asset_url_props;
+pub use vuec_vue3_asset::AssetUrlOptions;
+use vuec_vue3_core::{
+    generate_vue3_ssr_mir, lower_vue3_ast_to_ssr_mir, CodegenResult, TemplateSource,
+    Vue3CompilerOptions, Vue3Dialect,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SsrCompilerOptions {
     pub core: Vue3CompilerOptions,
     pub scope_id: Option<String>,
     pub slotted: bool,
+    pub transform_asset_urls: bool,
+    pub asset_url_options: AssetUrlOptions,
 }
 
 impl Default for SsrCompilerOptions {
@@ -18,6 +25,8 @@ impl Default for SsrCompilerOptions {
             core: Vue3CompilerOptions::default(),
             scope_id: None,
             slotted: false,
+            transform_asset_urls: true,
+            asset_url_options: AssetUrlOptions::default(),
         }
     }
 }
@@ -42,8 +51,29 @@ pub struct SsrCompileResult {
 }
 
 pub fn compile(source: TemplateSource, options: SsrCompilerOptions) -> SsrCompileResult {
-    let ast = Vue3Dialect::base_parse(source, &options.core);
+    let mut ast = Vue3Dialect::base_parse(source, &options.core);
+    if options.transform_asset_urls {
+        transform_ssr_asset_urls(&mut ast, &options);
+    }
     let summary = summarize_ssr(&ast.nodes.iter().map(|node| &node.kind).collect::<Vec<_>>());
+    if ast_has_asset_imports(&ast) && options.core.mode == "module" {
+        let generated = generate_asset_import_ssr(&ast, &options);
+        return SsrCompileResult {
+            code: generated.code,
+            map: generated.map,
+            ast_summary: format!(
+                "ssr:elements={},interpolations={},components={},slots={},teleports={},suspenses={}",
+                summary.elements,
+                summary.interpolations,
+                summary.components,
+                summary.slots,
+                summary.teleports,
+                summary.suspenses
+            ),
+            diagnostics: generated.diagnostics,
+            preamble: generated.preamble,
+        };
+    }
     let has_slot = ast.nodes.iter().any(
         |node| matches!(node.kind, Vue3AstKind::Element(ref element) if element.tag == "slot"),
     );
@@ -83,6 +113,43 @@ pub fn compile(source: TemplateSource, options: SsrCompilerOptions) -> SsrCompil
         diagnostics: Vec::new(),
         preamble: String::new(),
     }
+}
+
+fn transform_ssr_asset_urls(ast: &mut Vue3Ast, options: &SsrCompilerOptions) {
+    let mut asset_imports = Vec::<Vue3ImportItem>::new();
+    for node in &mut ast.nodes {
+        if let Vue3AstKind::Element(element) = &mut node.kind {
+            transform_asset_url_props(
+                &element.tag,
+                &mut element.props,
+                &options.asset_url_options,
+                options.core.mode == "module",
+                &mut asset_imports,
+            );
+        }
+    }
+    if asset_imports.is_empty() {
+        return;
+    }
+    if let Some(root_node) = ast.root_node_mut() {
+        if let Vue3AstKind::Root(root) = &mut root_node.kind {
+            root.imports = asset_imports;
+        }
+    }
+}
+
+fn ast_has_asset_imports(ast: &Vue3Ast) -> bool {
+    ast.root_node()
+        .and_then(|node| match &node.kind {
+            Vue3AstKind::Root(root) => Some(!root.imports.is_empty()),
+            _ => None,
+        })
+        .unwrap_or(false)
+}
+
+fn generate_asset_import_ssr(ast: &Vue3Ast, options: &SsrCompilerOptions) -> CodegenResult {
+    let lowering = lower_vue3_ast_to_ssr_mir(ast, &options.core);
+    generate_vue3_ssr_mir(&lowering.mir, &lowering.js, &options.core)
 }
 
 pub fn summarize_ssr(nodes: &[&Vue3NodeKind]) -> SsrTransformSummary {
@@ -250,6 +317,87 @@ mod tests {
                 ..SsrCompilerOptions::default()
             },
         );
+        assert!(result.code.contains("data-v-x"));
+        assert!(result.code.contains("data-vuec-slotted"));
+    }
+
+    #[test]
+    fn compile_transforms_asset_urls_to_imports_in_module_mode() {
+        let result = compile(
+            TemplateSource {
+                filename: "x.vue".into(),
+                source: r#"<img src="./logo.png" srcset="./logo.png 2x">"#.into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            SsrCompilerOptions {
+                core: Vue3CompilerOptions {
+                    mode: "module".into(),
+                    prefix_identifiers: true,
+                    ..Vue3CompilerOptions::default()
+                },
+                ..SsrCompilerOptions::default()
+            },
+        );
+
+        assert!(result.code.contains("import _imports_0 from './logo.png'"));
+        assert!(result
+            .code
+            .contains("_push(_ssrRenderAttr(\"src\", _imports_0));"));
+        assert!(result
+            .code
+            .contains("_push(_ssrRenderAttr(\"srcset\", _imports_0 + ' 2x'));"));
+        assert!(!result.code.contains("_ctx._imports_"));
+        assert!(result.ast_summary.contains("elements=1"));
+    }
+
+    #[test]
+    fn compile_respects_disabled_asset_url_transform() {
+        let result = compile(
+            TemplateSource {
+                filename: "x.vue".into(),
+                source: r#"<img src="./logo.png">"#.into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            SsrCompilerOptions {
+                core: Vue3CompilerOptions {
+                    mode: "module".into(),
+                    prefix_identifiers: true,
+                    ..Vue3CompilerOptions::default()
+                },
+                transform_asset_urls: false,
+                ..SsrCompilerOptions::default()
+            },
+        );
+
+        assert!(!result.code.contains("import _imports_0"));
+        assert!(result.code.contains(r#"src=\"./logo.png\""#));
+    }
+
+    #[test]
+    fn compile_keeps_scope_and_slotted_on_asset_import_mir_path() {
+        let result = compile(
+            TemplateSource {
+                filename: "x.vue".into(),
+                source: r#"<img src="./logo.png">"#.into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            SsrCompilerOptions {
+                core: Vue3CompilerOptions {
+                    mode: "module".into(),
+                    prefix_identifiers: true,
+                    scope_id: Some("data-v-x".into()),
+                    slotted: true,
+                    ..Vue3CompilerOptions::default()
+                },
+                scope_id: Some("data-v-x".into()),
+                slotted: true,
+                ..SsrCompilerOptions::default()
+            },
+        );
+
         assert!(result.code.contains("data-v-x"));
         assert!(result.code.contains("data-vuec-slotted"));
     }

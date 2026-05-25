@@ -1,5 +1,5 @@
 [package]
-name = "vuec_vue3_dom"
+name = "vuec_vue3_asset"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,8 +8,4 @@ license.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 vuec_ast = { path = "../vuec_ast" }
-vuec_diagnostics = { path = "../vuec_diagnostics" }
-vuec_pass = { path = "../vuec_pass" }
 vuec_source = { path = "../vuec_source" }
-vuec_vue3_asset = { path = "../vuec_vue3_asset" }
-vuec_vue3_core = { path = "../vuec_vue3_core" }
