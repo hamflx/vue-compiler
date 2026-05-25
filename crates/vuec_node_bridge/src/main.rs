@@ -121,6 +121,17 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
         "vue3.core.isMemberExpression" => {
             Ok(vuec_vue3_core::is_member_expression_projection(&payload))
         }
+        "vue3.core.extractIdentifiers" => {
+            Ok(vuec_vue3_core::extract_identifiers_projection(&payload))
+        }
+        "vue3.core.isStaticProperty" => Ok(vuec_vue3_core::is_static_property_projection(&payload)),
+        "vue3.core.isInDestructureAssignment" => Ok(
+            vuec_vue3_core::is_in_destructure_assignment_projection(&payload),
+        ),
+        "vue3.core.isReferencedIdentifier" => Ok(
+            vuec_vue3_core::is_referenced_identifier_projection(&payload),
+        ),
+        "vue3.core.walkIdentifiers" => Ok(vuec_vue3_core::walk_identifiers_projection(&payload)),
         "vue3.core.processExpression" => {
             Ok(vuec_vue3_core::process_expression_projection(&payload))
         }

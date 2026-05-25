@@ -5100,6 +5100,610 @@ pub fn is_member_expression_projection(payload: &Value) -> Value {
     })
 }
 
+pub fn extract_identifiers_projection(payload: &Value) -> Value {
+    let node = payload.get("node").unwrap_or(&Value::Null);
+    let mut identifiers = Vec::new();
+    js_ast_extract_identifiers(node, &mut Vec::new(), &mut identifiers);
+    json!({
+        "identifiers": identifiers,
+    })
+}
+
+pub fn is_static_property_projection(payload: &Value) -> Value {
+    let node = payload.get("node").unwrap_or(&Value::Null);
+    json!({
+        "isStaticProperty": js_ast_is_static_property(node),
+    })
+}
+
+pub fn is_in_destructure_assignment_projection(payload: &Value) -> Value {
+    let parent = payload.get("parent").unwrap_or(&Value::Null);
+    let parent_stack = payload
+        .get("parentStack")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    json!({
+        "isInDestructureAssignment": js_ast_is_in_destructure_assignment(parent, &parent_stack),
+    })
+}
+
+pub fn is_referenced_identifier_projection(payload: &Value) -> Value {
+    let node = payload.get("node").unwrap_or(&Value::Null);
+    let parent = payload.get("parent").unwrap_or(&Value::Null);
+    let parent_stack = payload
+        .get("parentStack")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let relation = json_str(payload, "relation");
+    json!({
+        "isReferencedIdentifier": js_ast_is_referenced_identifier(
+            node,
+            parent,
+            &parent_stack,
+            relation,
+        ),
+    })
+}
+
+pub fn walk_identifiers_projection(payload: &Value) -> Value {
+    let root = payload.get("root").unwrap_or(&Value::Null);
+    let include_all = json_bool(payload, "includeAll");
+    let mut known_ids = payload
+        .get("knownIds")
+        .and_then(Value::as_object)
+        .map(|known| {
+            known
+                .iter()
+                .map(|(name, count)| (name.clone(), count.as_i64().unwrap_or_default()))
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+    let mut events = Vec::new();
+    let mut parent_stack = Vec::new();
+    js_ast_walk_identifiers(
+        root,
+        Vec::new(),
+        None,
+        None,
+        &mut parent_stack,
+        include_all,
+        &mut known_ids,
+        &mut events,
+    );
+    json!({
+        "identifiers": events,
+        "knownIds": known_ids,
+    })
+}
+
+fn js_ast_extract_identifiers(node: &Value, path: &mut Vec<Value>, out: &mut Vec<Value>) {
+    if let Some(items) = node.as_array() {
+        for (index, item) in items.iter().enumerate() {
+            path.push(json!(index));
+            js_ast_extract_identifiers(item, path, out);
+            path.pop();
+        }
+        return;
+    }
+
+    match js_ast_type(node) {
+        Some("Identifier") => {
+            out.push(json!({
+                "name": json_str(node, "name").unwrap_or(""),
+                "start": json_u64(node, "start"),
+                "end": json_u64(node, "end"),
+                "path": path.clone(),
+            }));
+        }
+        Some("MemberExpression" | "OptionalMemberExpression") => {
+            path.push(json!("object"));
+            if let Some(object) = node.get("object") {
+                js_ast_extract_identifiers(object, path, out);
+            }
+            path.pop();
+        }
+        Some("ObjectPattern") => {
+            if let Some(properties) = node.get("properties").and_then(Value::as_array) {
+                for (index, prop) in properties.iter().enumerate() {
+                    path.push(json!("properties"));
+                    path.push(json!(index));
+                    if js_ast_type(prop) == Some("RestElement") {
+                        path.push(json!("argument"));
+                        if let Some(argument) = prop.get("argument") {
+                            js_ast_extract_identifiers(argument, path, out);
+                        }
+                        path.pop();
+                    } else {
+                        path.push(json!("value"));
+                        if let Some(value) = prop.get("value") {
+                            js_ast_extract_identifiers(value, path, out);
+                        }
+                        path.pop();
+                    }
+                    path.pop();
+                    path.pop();
+                }
+            }
+        }
+        Some("ObjectProperty" | "Property") => {
+            path.push(json!("value"));
+            if let Some(value) = node.get("value") {
+                js_ast_extract_identifiers(value, path, out);
+            }
+            path.pop();
+        }
+        Some("ArrayPattern") => {
+            if let Some(elements) = node.get("elements").and_then(Value::as_array) {
+                for (index, element) in elements.iter().enumerate() {
+                    if element.is_null() {
+                        continue;
+                    }
+                    path.push(json!("elements"));
+                    path.push(json!(index));
+                    js_ast_extract_identifiers(element, path, out);
+                    path.pop();
+                    path.pop();
+                }
+            }
+        }
+        Some("RestElement") => {
+            path.push(json!("argument"));
+            if let Some(argument) = node.get("argument") {
+                js_ast_extract_identifiers(argument, path, out);
+            }
+            path.pop();
+        }
+        Some("AssignmentPattern") => {
+            path.push(json!("left"));
+            if let Some(left) = node.get("left") {
+                js_ast_extract_identifiers(left, path, out);
+            }
+            path.pop();
+        }
+        Some("TSParameterProperty") => {
+            path.push(json!("parameter"));
+            if let Some(parameter) = node.get("parameter") {
+                js_ast_extract_identifiers(parameter, path, out);
+            }
+            path.pop();
+        }
+        Some(kind) if js_ast_is_ts_expression_wrapper(kind) => {
+            path.push(json!("expression"));
+            if let Some(expression) = node.get("expression") {
+                js_ast_extract_identifiers(expression, path, out);
+            }
+            path.pop();
+        }
+        _ => {}
+    }
+}
+
+#[derive(Clone)]
+struct JsAstAncestor<'a> {
+    node: &'a Value,
+    path: Vec<Value>,
+}
+
+fn js_ast_walk_identifiers<'a>(
+    node: &'a Value,
+    path: Vec<Value>,
+    parent: Option<&'a Value>,
+    relation: Option<&str>,
+    parent_stack: &mut Vec<JsAstAncestor<'a>>,
+    include_all: bool,
+    known_ids: &mut BTreeMap<String, i64>,
+    events: &mut Vec<Value>,
+) {
+    if node.is_null() {
+        return;
+    }
+    if let Some(parent_type) = parent.and_then(js_ast_type) {
+        if parent_type.starts_with("TS") && !js_ast_is_ts_expression_wrapper(parent_type) {
+            return;
+        }
+    }
+
+    let mut scope_ids = js_ast_scope_identifiers(node);
+    scope_ids.sort();
+    scope_ids.dedup();
+    for name in &scope_ids {
+        *known_ids.entry(name.clone()).or_insert(0) += 1;
+    }
+
+    if js_ast_type(node) == Some("Identifier") {
+        let name = json_str(node, "name").unwrap_or("");
+        if name != "arguments" {
+            let is_local = known_ids.get(name).copied().unwrap_or_default() > 0;
+            let stack_nodes = parent_stack
+                .iter()
+                .map(|ancestor| ancestor.node.clone())
+                .collect::<Vec<_>>();
+            let is_refed = parent.map_or(true, |parent| {
+                js_ast_is_referenced_identifier(node, parent, &stack_nodes, relation)
+            });
+            if include_all || (is_refed && !is_local) {
+                let parent_path = parent_stack.last().map(|ancestor| ancestor.path.clone());
+                let parent_stack_paths = parent_stack
+                    .iter()
+                    .map(|ancestor| ancestor.path.clone())
+                    .collect::<Vec<_>>();
+                events.push(json!({
+                    "name": name,
+                    "start": json_u64(node, "start"),
+                    "end": json_u64(node, "end"),
+                    "path": path,
+                    "parentPath": parent_path,
+                    "parentStackPaths": parent_stack_paths,
+                    "isReferenced": is_refed,
+                    "isLocal": is_local,
+                }));
+            }
+        }
+    } else {
+        let children = js_ast_child_entries(node);
+        parent_stack.push(JsAstAncestor {
+            node,
+            path: path.clone(),
+        });
+        for (child_relation, child_path, child) in children {
+            let mut full_child_path = path.clone();
+            full_child_path.extend(child_path);
+            js_ast_walk_identifiers(
+                child,
+                full_child_path,
+                Some(node),
+                Some(&child_relation),
+                parent_stack,
+                include_all,
+                known_ids,
+                events,
+            );
+        }
+        parent_stack.pop();
+    }
+
+    for name in scope_ids {
+        if let Some(count) = known_ids.get_mut(&name) {
+            *count -= 1;
+            if *count <= 0 {
+                known_ids.remove(&name);
+            }
+        }
+    }
+}
+
+fn js_ast_child_entries<'a>(node: &'a Value) -> Vec<(String, Vec<Value>, &'a Value)> {
+    const KEYS: &[&str] = &[
+        "body",
+        "declarations",
+        "declaration",
+        "id",
+        "init",
+        "test",
+        "update",
+        "left",
+        "right",
+        "argument",
+        "arguments",
+        "callee",
+        "object",
+        "property",
+        "properties",
+        "key",
+        "value",
+        "elements",
+        "expressions",
+        "params",
+        "consequent",
+        "alternate",
+        "cases",
+        "discriminant",
+        "handler",
+        "finalizer",
+        "block",
+        "param",
+        "specifiers",
+        "local",
+        "imported",
+        "source",
+        "superClass",
+        "quasi",
+        "tag",
+        "expression",
+    ];
+
+    let mut out = Vec::new();
+    for key in KEYS {
+        let Some(value) = node.get(*key) else {
+            continue;
+        };
+        if let Some(items) = value.as_array() {
+            for (index, item) in items.iter().enumerate() {
+                if item.is_object() {
+                    out.push(((*key).to_string(), vec![json!(*key), json!(index)], item));
+                }
+            }
+        } else if value.is_object() {
+            out.push(((*key).to_string(), vec![json!(*key)], value));
+        }
+    }
+    out
+}
+
+fn js_ast_scope_identifiers(node: &Value) -> Vec<String> {
+    match js_ast_type(node) {
+        Some(kind) if js_ast_is_function_type(kind) => node
+            .get("params")
+            .map(js_ast_extract_identifier_names)
+            .unwrap_or_default(),
+        Some("BlockStatement") | Some("SwitchCase") => js_ast_walk_block_declaration_names(node),
+        Some("SwitchStatement") => js_ast_walk_switch_statement_names(node, false),
+        Some("CatchClause") => node
+            .get("param")
+            .map(js_ast_extract_identifier_names)
+            .unwrap_or_default(),
+        Some("ForStatement" | "ForOfStatement" | "ForInStatement") => {
+            js_ast_walk_for_statement_names(node, false)
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn js_ast_walk_block_declaration_names(block: &Value) -> Vec<String> {
+    let body = if js_ast_type(block) == Some("SwitchCase") {
+        block.get("consequent")
+    } else {
+        block.get("body")
+    };
+    let Some(body) = body.and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for stmt in body {
+        match js_ast_type(stmt) {
+            Some("VariableDeclaration") if !json_bool(stmt, "declare") => {
+                if let Some(declarations) = stmt.get("declarations").and_then(Value::as_array) {
+                    for decl in declarations {
+                        if let Some(id) = decl.get("id") {
+                            names.extend(js_ast_extract_identifier_names(id));
+                        }
+                    }
+                }
+            }
+            Some("FunctionDeclaration" | "ClassDeclaration") => {
+                if !json_bool(stmt, "declare") {
+                    if let Some(id) = stmt.get("id") {
+                        if let Some(name) = json_str(id, "name") {
+                            names.push(name.to_string());
+                        }
+                    }
+                }
+            }
+            Some("ForStatement" | "ForOfStatement" | "ForInStatement") => {
+                names.extend(js_ast_walk_for_statement_names(stmt, true));
+            }
+            Some("SwitchStatement") => names.extend(js_ast_walk_switch_statement_names(stmt, true)),
+            _ => {}
+        }
+    }
+    names
+}
+
+fn js_ast_walk_for_statement_names(stmt: &Value, is_var: bool) -> Vec<String> {
+    let variable = if js_ast_type(stmt) == Some("ForStatement") {
+        stmt.get("init")
+    } else {
+        stmt.get("left")
+    };
+    let Some(variable) = variable else {
+        return Vec::new();
+    };
+    if js_ast_type(variable) != Some("VariableDeclaration") {
+        return Vec::new();
+    }
+    let kind_is_var = json_str(variable, "kind") == Some("var");
+    if kind_is_var != is_var {
+        return Vec::new();
+    }
+    let mut names = Vec::new();
+    if let Some(declarations) = variable.get("declarations").and_then(Value::as_array) {
+        for decl in declarations {
+            if let Some(id) = decl.get("id") {
+                names.extend(js_ast_extract_identifier_names(id));
+            }
+        }
+    }
+    names
+}
+
+fn js_ast_walk_switch_statement_names(stmt: &Value, is_var: bool) -> Vec<String> {
+    let Some(cases) = stmt.get("cases").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for case in cases {
+        if let Some(consequent) = case.get("consequent").and_then(Value::as_array) {
+            for stmt in consequent {
+                if js_ast_type(stmt) == Some("VariableDeclaration")
+                    && (json_str(stmt, "kind") == Some("var")) == is_var
+                {
+                    if let Some(declarations) = stmt.get("declarations").and_then(Value::as_array) {
+                        for decl in declarations {
+                            if let Some(id) = decl.get("id") {
+                                names.extend(js_ast_extract_identifier_names(id));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        names.extend(js_ast_walk_block_declaration_names(case));
+    }
+    names
+}
+
+fn js_ast_extract_identifier_names(node: &Value) -> Vec<String> {
+    let mut identifiers = Vec::new();
+    js_ast_extract_identifiers(node, &mut Vec::new(), &mut identifiers);
+    identifiers
+        .into_iter()
+        .filter_map(|ident| {
+            ident
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+fn js_ast_is_static_property(node: &Value) -> bool {
+    matches!(
+        js_ast_type(node),
+        Some("ObjectProperty" | "ObjectMethod" | "Property")
+    ) && !json_bool(node, "computed")
+}
+
+fn js_ast_is_referenced_identifier(
+    id: &Value,
+    parent: &Value,
+    parent_stack: &[Value],
+    relation: Option<&str>,
+) -> bool {
+    if parent.is_null() {
+        return true;
+    }
+    if json_str(id, "name") == Some("arguments") {
+        return false;
+    }
+    let grandparent = parent_stack
+        .len()
+        .checked_sub(2)
+        .and_then(|index| parent_stack.get(index));
+    if js_ast_is_referenced(parent, grandparent, relation) {
+        return true;
+    }
+    match js_ast_type(parent) {
+        Some("AssignmentExpression" | "AssignmentPattern") => true,
+        Some("ObjectProperty" | "Property") => {
+            relation != Some("key") && js_ast_is_in_destructure_assignment(parent, parent_stack)
+        }
+        Some("ArrayPattern") => js_ast_is_in_destructure_assignment(parent, parent_stack),
+        _ => false,
+    }
+}
+
+fn js_ast_is_referenced(
+    parent: &Value,
+    grandparent: Option<&Value>,
+    relation: Option<&str>,
+) -> bool {
+    match js_ast_type(parent) {
+        Some("MemberExpression" | "OptionalMemberExpression") => {
+            if relation == Some("property") {
+                json_bool(parent, "computed")
+            } else {
+                relation == Some("object")
+            }
+        }
+        Some("JSXMemberExpression") => relation == Some("object"),
+        Some("VariableDeclarator") => relation == Some("init"),
+        Some("ArrowFunctionExpression") => relation == Some("body"),
+        Some("PrivateName") => false,
+        Some("ClassMethod" | "ClassPrivateMethod" | "ObjectMethod") => {
+            relation == Some("key") && json_bool(parent, "computed")
+        }
+        Some("ObjectProperty" | "Property") => {
+            if relation == Some("key") {
+                json_bool(parent, "computed")
+            } else {
+                grandparent.and_then(js_ast_type) != Some("ObjectPattern")
+            }
+        }
+        Some("ClassProperty" | "PropertyDefinition") => {
+            relation != Some("key") || json_bool(parent, "computed")
+        }
+        Some("ClassPrivateProperty") => relation != Some("key"),
+        Some("ClassDeclaration" | "ClassExpression") => relation == Some("superClass"),
+        Some("AssignmentExpression") => relation == Some("right"),
+        Some("AssignmentPattern") => relation == Some("right"),
+        Some(
+            "LabeledStatement"
+            | "CatchClause"
+            | "RestElement"
+            | "BreakStatement"
+            | "ContinueStatement"
+            | "FunctionDeclaration"
+            | "FunctionExpression"
+            | "ExportNamespaceSpecifier"
+            | "ExportDefaultSpecifier"
+            | "ImportDefaultSpecifier"
+            | "ImportNamespaceSpecifier"
+            | "ImportSpecifier"
+            | "ImportAttribute"
+            | "JSXAttribute"
+            | "ObjectPattern"
+            | "ArrayPattern"
+            | "MetaProperty"
+            | "PrivateIdentifier",
+        ) => false,
+        Some("ExportSpecifier") => {
+            if grandparent
+                .and_then(|node| node.get("source"))
+                .is_some_and(|source| !source.is_null())
+            {
+                false
+            } else {
+                relation == Some("local")
+            }
+        }
+        Some("ObjectTypeProperty") => relation != Some("key"),
+        Some("TSEnumMember") => relation != Some("id"),
+        Some("TSPropertySignature") => relation != Some("key") || json_bool(parent, "computed"),
+        _ => true,
+    }
+}
+
+fn js_ast_is_in_destructure_assignment(parent: &Value, parent_stack: &[Value]) -> bool {
+    if !matches!(
+        js_ast_type(parent),
+        Some("ObjectProperty" | "Property" | "ArrayPattern")
+    ) {
+        return false;
+    }
+    for ancestor in parent_stack.iter().rev() {
+        match js_ast_type(ancestor) {
+            Some("AssignmentExpression") => return true,
+            Some("ObjectProperty" | "Property") => {}
+            Some(kind) if kind.ends_with("Pattern") => {}
+            _ => break,
+        }
+    }
+    false
+}
+
+fn js_ast_type(node: &Value) -> Option<&str> {
+    json_str(node, "type")
+}
+
+fn js_ast_is_ts_expression_wrapper(kind: &str) -> bool {
+    matches!(
+        kind,
+        "TSAsExpression"
+            | "TSTypeAssertion"
+            | "TSNonNullExpression"
+            | "TSInstantiationExpression"
+            | "TSSatisfiesExpression"
+    )
+}
+
+fn js_ast_is_function_type(kind: &str) -> bool {
+    kind.ends_with("FunctionExpression")
+        || kind == "FunctionDeclaration"
+        || kind.ends_with("Method")
+}
+
 pub fn process_expression_projection(payload: &Value) -> Value {
     let node = payload.get("node").unwrap_or(&Value::Null);
     let context = payload.get("context").unwrap_or(&Value::Null);
@@ -15942,6 +16546,7 @@ fn root_single_visible_child_uses_direct_codegen(
     child_id: vuec_ast::NodeId,
 ) -> bool {
     ast.node(child_id).is_some_and(|node| match &node.kind {
+        Vue3AstKind::Interpolation(_) => true,
         Vue3AstKind::Element(element) => {
             element.tag_type != Vue3ElementType::SlotOutlet
                 && directive_by_name(element, "if").is_none()
@@ -16391,7 +16996,10 @@ fn render_setup_or_props_component_namespace(
                 .props_aliases
                 .get(namespace)
                 .map_or(namespace, String::as_str);
-            Some(format!("_unref(__props[{}])", quote_string(source)))
+            Some(format!(
+                "_unref({})",
+                render_props_access("__props", source)
+            ))
         }
         _ => None,
     }
@@ -20650,14 +21258,14 @@ fn rewrite_identifier(ident: &str, options: &Vue3CompilerOptions) -> String {
                 .props_aliases
                 .get(ident)
                 .map_or(ident, String::as_str);
-            format!("__props[{}]", quote_string(source))
+            render_props_access("__props", source)
         }
         Some("props-aliased") => {
             let source = options
                 .props_aliases
                 .get(ident)
                 .map_or(ident, String::as_str);
-            format!("$props[{}]", quote_string(source))
+            render_props_access("$props", source)
         }
         Some("data" | "options") if options.inline => format!("_ctx.{ident}"),
         Some(kind) if kind.starts_with("setup") || kind == "literal-const" => {
@@ -20665,6 +21273,14 @@ fn rewrite_identifier(ident: &str, options: &Vue3CompilerOptions) -> String {
         }
         Some(kind) => format!("${kind}.{ident}"),
         None => format!("_ctx.{ident}"),
+    }
+}
+
+fn render_props_access(base: &str, key: &str) -> String {
+    if is_simple_identifier_ascii(key) {
+        format!("{base}.{key}")
+    } else {
+        format!("{base}[{}]", quote_string(key))
     }
 }
 
@@ -26773,6 +27389,155 @@ mod tests {
         assert!(code.contains("({ count: count.value } = val)"), "{code}");
         assert!(code.contains("[maybe.value] = val"), "{code}");
         assert!(code.contains("({ lett: lett } = val)"), "{code}");
+    }
+
+    #[test]
+    fn js_ast_extract_identifiers_projects_destructure_patterns() {
+        let pattern = json!({
+            "type": "ObjectPattern",
+            "properties": [{
+                "type": "ObjectProperty",
+                "key": { "type": "Identifier", "name": "foo", "start": 8, "end": 11 },
+                "value": {
+                    "type": "AssignmentPattern",
+                    "left": { "type": "Identifier", "name": "bar", "start": 15, "end": 18 },
+                    "right": { "type": "Identifier", "name": "baz", "start": 21, "end": 24 }
+                },
+                "computed": false,
+                "shorthand": false
+            }, {
+                "type": "RestElement",
+                "argument": { "type": "Identifier", "name": "rest", "start": 29, "end": 33 }
+            }]
+        });
+        let projection = extract_identifiers_projection(&json!({ "node": pattern }));
+        let names = projection["identifiers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["name"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["bar", "rest"]);
+    }
+
+    #[test]
+    fn js_ast_reference_projection_excludes_declarations_and_params() {
+        let parent_stack = vec![json!({
+            "type": "VariableDeclaration",
+            "kind": "const"
+        })];
+        let parent = json!({
+            "type": "VariableDeclarator",
+            "id": { "type": "Identifier", "name": "foo" },
+            "init": { "type": "Identifier", "name": "bar" }
+        });
+        let id = json!({ "type": "Identifier", "name": "foo" });
+        assert!(!js_ast_is_referenced_identifier(
+            &id,
+            &parent,
+            &parent_stack,
+            Some("id")
+        ));
+        let id = json!({ "type": "Identifier", "name": "bar" });
+        assert!(js_ast_is_referenced_identifier(
+            &id,
+            &parent,
+            &parent_stack,
+            Some("init")
+        ));
+
+        let function = json!({
+            "type": "FunctionDeclaration",
+            "id": { "type": "Identifier", "name": "test" },
+            "params": [{ "type": "Identifier", "name": "foo" }],
+            "body": { "type": "BlockStatement", "body": [] }
+        });
+        let id = json!({ "type": "Identifier", "name": "foo" });
+        assert!(!js_ast_is_referenced_identifier(
+            &id,
+            &function,
+            &[],
+            Some("params")
+        ));
+    }
+
+    #[test]
+    fn js_ast_walk_identifiers_respects_function_and_for_locals() {
+        let root = json!({
+            "type": "Program",
+            "body": [{
+                "type": "FunctionDeclaration",
+                "id": { "type": "Identifier", "name": "test" },
+                "params": [{ "type": "Identifier", "name": "foo", "start": 14, "end": 17 }],
+                "body": {
+                    "type": "BlockStatement",
+                    "body": [{
+                        "type": "ExpressionStatement",
+                        "expression": {
+                            "type": "CallExpression",
+                            "callee": { "type": "Identifier", "name": "console", "start": 27, "end": 34 },
+                            "arguments": [{ "type": "Identifier", "name": "foo", "start": 39, "end": 42 }]
+                        }
+                    }]
+                }
+            }, {
+                "type": "ForStatement",
+                "init": {
+                    "type": "VariableDeclaration",
+                    "kind": "let",
+                    "declarations": [{
+                        "type": "VariableDeclarator",
+                        "id": { "type": "Identifier", "name": "i", "start": 55, "end": 56 },
+                        "init": { "type": "NumericLiteral", "value": 0 }
+                    }]
+                },
+                "test": {
+                    "type": "BinaryExpression",
+                    "left": { "type": "Identifier", "name": "i", "start": 63, "end": 64 },
+                    "right": { "type": "Identifier", "name": "len", "start": 67, "end": 70 }
+                },
+                "update": {
+                    "type": "UpdateExpression",
+                    "argument": { "type": "Identifier", "name": "i", "start": 72, "end": 73 },
+                    "operator": "++",
+                    "prefix": false
+                },
+                "body": { "type": "BlockStatement", "body": [] }
+            }]
+        });
+        let projection = walk_identifiers_projection(&json!({ "root": root }));
+        let names = projection["identifiers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["name"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["console", "len"]);
+    }
+
+    #[test]
+    fn js_ast_destructure_assignment_detects_object_pattern_assignment() {
+        let parent = json!({
+            "type": "ObjectProperty",
+            "key": { "type": "Identifier", "name": "foo" },
+            "value": { "type": "Identifier", "name": "foo" },
+            "computed": false,
+            "shorthand": true
+        });
+        let stack = vec![
+            json!({
+                "type": "AssignmentExpression",
+                "left": {
+                    "type": "ObjectPattern",
+                    "properties": [parent.clone()]
+                }
+            }),
+            json!({
+                "type": "ObjectPattern",
+                "properties": [parent.clone()]
+            }),
+        ];
+        assert!(js_ast_is_in_destructure_assignment(&parent, &stack));
     }
 
     #[test]

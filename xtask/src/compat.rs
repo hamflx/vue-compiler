@@ -3517,7 +3517,7 @@ const vue3CoreRuntime = (() => {
     }
     const out = {};
     for (const key of Object.keys(value)) {
-      if (key === 'loc' || key === 'start' || key === 'end' || key === 'offset' || key === 'line' || key === 'column' || key === 'type' || key === 'tag' || key === 'tagType' || key === 'content' || key === 'isStatic' || key === 'constType' || key === 'props' || key === 'children' || key === 'codegenNode' || key === 'patchFlag' || key === 'dynamicProps' || key === 'directives' || key === 'isBlock' || key === 'isComponent' || key === 'disableTracking' || key === 'branches' || key === 'source' || key === 'parseResult' || key === 'valueAlias' || key === 'keyAlias' || key === 'objectIndexAlias' || key === 'returns' || key === 'body' || key === 'params' || key === 'newline' || key === 'isSlot' || key === 'isNonScopedSlot' || key === 'needPauseTracking' || key === 'inVOnce' || key === 'needArraySpread' || key === 'index' || key === 'elements' || key === 'test' || key === 'consequent' || key === 'alternate' || key === 'left' || key === 'right' || key === 'expressions' || key === 'helpers' || key === 'ssrHelpers' || key === 'components' || key === 'directives' || key === 'imports' || key === 'path' || key === 'hoists' || key === 'cached' || key === 'temps' || key === 'properties' || key === 'key' || key === 'value' || key === 'arguments' || key === 'callee' || key === 'name' || key === 'arg' || key === 'exp' || key === 'modifiers') {
+      if (key === 'loc' || key === 'start' || key === 'end' || key === 'offset' || key === 'line' || key === 'column' || key === 'type' || key === 'tag' || key === 'tagType' || key === 'content' || key === 'isStatic' || key === 'constType' || key === 'props' || key === 'children' || key === 'codegenNode' || key === 'patchFlag' || key === 'dynamicProps' || key === 'directives' || key === 'isBlock' || key === 'isComponent' || key === 'disableTracking' || key === 'branches' || key === 'source' || key === 'parseResult' || key === 'valueAlias' || key === 'keyAlias' || key === 'objectIndexAlias' || key === 'returns' || key === 'body' || key === 'params' || key === 'newline' || key === 'isSlot' || key === 'isNonScopedSlot' || key === 'needPauseTracking' || key === 'inVOnce' || key === 'needArraySpread' || key === 'index' || key === 'elements' || key === 'test' || key === 'consequent' || key === 'alternate' || key === 'left' || key === 'right' || key === 'expressions' || key === 'expression' || key === 'helpers' || key === 'ssrHelpers' || key === 'components' || key === 'directives' || key === 'imports' || key === 'path' || key === 'hoists' || key === 'cached' || key === 'temps' || key === 'properties' || key === 'key' || key === 'value' || key === 'arguments' || key === 'argument' || key === 'callee' || key === 'object' || key === 'property' || key === 'name' || key === 'arg' || key === 'exp' || key === 'modifiers' || key === 'program' || key === 'declarations' || key === 'declaration' || key === 'id' || key === 'init' || key === 'update' || key === 'computed' || key === 'shorthand' || key === 'kind' || key === 'declare' || key === 'operator' || key === 'prefix' || key === 'async' || key === 'cases' || key === 'discriminant' || key === 'handler' || key === 'finalizer' || key === 'block' || key === 'param' || key === 'parameter' || key === 'specifiers' || key === 'local' || key === 'imported' || key === 'superClass' || key === 'quasi') {
         out[key] = runtime.dehydrateForBridge(value[key], seen);
       }
     }
@@ -3786,166 +3786,87 @@ const vue3CoreRuntime = (() => {
   runtime.isFnExpressionNode = function isFnExpressionNode(exp) { return runtime.isFnExpressionBrowser(exp); };
   runtime.isFnExpression = runtime.isFnExpressionNode;
   runtime.isFunctionType = function isFunctionType(node) { return !!node && /Function/.test(String(node.type || '')); };
-  runtime.isStaticProperty = function isStaticProperty(node) { return !!node && node.type === 'Property' && !node.computed; };
+  runtime.nodeAtBridgePath = function nodeAtBridgePath(root, path) {
+    let node = root;
+    for (const segment of path || []) {
+      if (node == null) return undefined;
+      node = node[segment];
+    }
+    return node;
+  };
+  runtime.bridgePathForChild = function bridgePathForChild(parent, child) {
+    if (!parent || !child || typeof parent !== 'object') return undefined;
+    for (const key of Object.keys(parent)) {
+      const value = parent[key];
+      if (value === child) return [key];
+      if (Array.isArray(value)) {
+        const index = value.indexOf(child);
+        if (index !== -1) return [key, index];
+      }
+    }
+    return undefined;
+  };
+  runtime.bridgeRelationForChild = function bridgeRelationForChild(parent, child) {
+    const path = runtime.bridgePathForChild(parent, child);
+    return path && typeof path[0] === 'string' ? path[0] : undefined;
+  };
+  runtime.isStaticProperty = function isStaticProperty(node) {
+    const projection = callBridge('vue3.core.isStaticProperty', {
+      node: runtime.dehydrateForBridge(node),
+    });
+    return !!(projection && projection.isStaticProperty);
+  };
   runtime.isStaticPropertyKey = function isStaticPropertyKey(node, parent) { return !!parent && runtime.isStaticProperty(parent) && parent.key === node; };
   runtime.unwrapTSNode = function unwrapTSNode(node) {
     while (node && runtime.TS_NODE_TYPES.includes(node.type)) node = node.expression;
     return node;
   };
-  runtime.isReferencedIdentifier = function isReferencedIdentifier(id, parent) {
-    if (!parent) return true;
-    if (id && id.name === 'arguments') return false;
-    if (parent.type === 'ObjectProperty' && parent.key === id && !parent.computed) return false;
-    if (parent.type === 'RestElement') return false;
-    if (parent.type === 'ArrayPattern') return false;
-    return !String(parent.type || '').endsWith('Pattern');
+  runtime.isReferencedIdentifier = function isReferencedIdentifier(id, parent, parentStack = []) {
+    const projection = callBridge('vue3.core.isReferencedIdentifier', {
+      node: runtime.dehydrateForBridge(id),
+      parent: runtime.dehydrateForBridge(parent),
+      parentStack: runtime.dehydrateForBridge(parentStack),
+      relation: runtime.bridgeRelationForChild(parent, id),
+    });
+    return !!(projection && projection.isReferencedIdentifier);
   };
-  runtime.isInDestructureAssignment = function isInDestructureAssignment() { return false; };
+  runtime.isInDestructureAssignment = function isInDestructureAssignment(parent, parentStack = []) {
+    const projection = callBridge('vue3.core.isInDestructureAssignment', {
+      parent: runtime.dehydrateForBridge(parent),
+      parentStack: runtime.dehydrateForBridge(parentStack),
+    });
+    return !!(projection && projection.isInDestructureAssignment);
+  };
   runtime.isInNewExpression = function isInNewExpression() { return false; };
   runtime.walkIdentifiers = function walkIdentifiers(root, onIdentifier, includeAll = false, parentStack = [], knownIds = Object.create(null)) {
-    const seen = new Set();
-    function markKnown(name) {
-      if (!name) return;
-      knownIds[name] = (knownIds[name] || 0) + 1;
+    const projection = callBridge('vue3.core.walkIdentifiers', {
+      root: runtime.dehydrateForBridge(root),
+      includeAll: !!includeAll,
+      knownIds: runtime.dehydrateForBridge(knownIds),
+    });
+    for (const event of (projection && projection.identifiers) || []) {
+      const id = runtime.nodeAtBridgePath(root, event.path);
+      const parent = runtime.nodeAtBridgePath(root, event.parentPath);
+      const stack = (event.parentStackPaths || [])
+        .map(path => runtime.nodeAtBridgePath(root, path))
+        .filter(Boolean);
+      if (id) onIdentifier(id, parent || null, stack.length ? stack : parentStack.slice(), !!event.isReferenced, !!event.isLocal);
     }
-    function emit(node, parent) {
-      if (!node || typeof node.name !== 'string' || node.name === 'arguments') return;
-      const isLocal = !!knownIds[node.name];
-      const isRefed = runtime.isReferencedIdentifier(node, parent);
-      if (includeAll || (isRefed && !isLocal)) {
-        onIdentifier(node, parent || null, parentStack.slice(), isRefed, isLocal);
-      }
+    if (projection && projection.knownIds) {
+      for (const key of Object.keys(knownIds)) delete knownIds[key];
+      Object.assign(knownIds, projection.knownIds);
     }
-    function visitChild(parent, child) {
-      if (!child) return;
-      parentStack.push(parent);
-      visit(child, parent);
-      parentStack.pop();
-    }
-    function visit(node, parent) {
-      if (!node) return;
-      if (Array.isArray(node)) {
-        for (const child of node) visit(child, parent);
-        return;
-      }
-      if (typeof node !== 'object') return;
-      if (node.type === NodeTypes.SIMPLE_EXPRESSION) {
-        if (node.ast) visit(node.ast, parent);
-        else if (runtime.isSimpleIdentifier(node.content)) emit({ type: 'Identifier', name: node.content }, parent);
-        return;
-      }
-      if (seen.has(node)) return;
-      seen.add(node);
-      if (node.type && node.type.startsWith('TS') && !runtime.TS_NODE_TYPES.includes(node.type)) return;
-      switch (node.type) {
-        case 'Identifier':
-          emit(node, parent);
-          break;
-        case 'Program':
-          visitChild(node, node.body || []);
-          break;
-        case 'ExpressionStatement':
-        case 'ChainExpression':
-        case 'ParenthesizedExpression':
-        case 'TSAsExpression':
-        case 'TSTypeAssertion':
-        case 'TSNonNullExpression':
-        case 'TSInstantiationExpression':
-        case 'TSSatisfiesExpression':
-          visitChild(node, node.expression);
-          break;
-        case 'MemberExpression':
-        case 'OptionalMemberExpression':
-          visitChild(node, node.object);
-          if (node.computed) visitChild(node, node.property);
-          break;
-        case 'CallExpression':
-        case 'OptionalCallExpression':
-        case 'NewExpression':
-          visitChild(node, node.callee);
-          visitChild(node, node.arguments || []);
-          break;
-        case 'ArrayExpression':
-        case 'SequenceExpression':
-          visitChild(node, node.elements || node.expressions || []);
-          break;
-        case 'ObjectExpression':
-          visitChild(node, node.properties || []);
-          break;
-        case 'ObjectProperty':
-        case 'Property':
-          if (node.computed) visitChild(node, node.key);
-          visitChild(node, node.value);
-          break;
-        case 'SpreadElement':
-          visitChild(node, node.argument);
-          break;
-        case 'TemplateLiteral':
-          visitChild(node, node.expressions || []);
-          break;
-        case 'TaggedTemplateExpression':
-          visitChild(node, node.tag);
-          visitChild(node, node.quasi);
-          break;
-        case 'BinaryExpression':
-        case 'LogicalExpression':
-          visitChild(node, node.left);
-          visitChild(node, node.right);
-          break;
-        case 'ConditionalExpression':
-          visitChild(node, node.test);
-          visitChild(node, node.consequent);
-          visitChild(node, node.alternate);
-          break;
-        case 'UnaryExpression':
-        case 'UpdateExpression':
-        case 'AwaitExpression':
-        case 'YieldExpression':
-          visitChild(node, node.argument);
-          break;
-        case 'AssignmentExpression':
-          if (node.left && /MemberExpression$/.test(String(node.left.type || ''))) visitChild(node, node.left);
-          visitChild(node, node.right);
-          break;
-        case 'ArrowFunctionExpression':
-        case 'FunctionExpression':
-        case 'FunctionDeclaration':
-          for (const param of node.params || []) {
-            for (const ident of runtime.extractBabelIdentifiers(param)) markKnown(ident.name);
-          }
-          visitChild(node, node.body);
-          break;
-        case 'BlockStatement':
-          visitChild(node, node.body || []);
-          break;
-        case 'ReturnStatement':
-        case 'ThrowStatement':
-          visitChild(node, node.argument);
-          break;
-        case 'IfStatement':
-          visitChild(node, node.test);
-          visitChild(node, node.consequent);
-          visitChild(node, node.alternate);
-          break;
-        case 'ForStatement':
-          visitChild(node, node.test);
-          visitChild(node, node.update);
-          visitChild(node, node.body);
-          break;
-        case 'WhileStatement':
-        case 'DoWhileStatement':
-          visitChild(node, node.test);
-          visitChild(node, node.body);
-          break;
-      }
-    }
-    visit(root, null);
   };
   runtime.extractIdentifiers = function extractIdentifiers(param) {
     if (!param) return [];
     if (typeof param === 'string') return param.split(',').map(s => s.trim()).filter(Boolean).map(content => runtime.createSimpleExpression(content, false));
     if (param.type === NodeTypes.SIMPLE_EXPRESSION) return [param];
-    return [];
+    const projection = callBridge('vue3.core.extractIdentifiers', {
+      node: runtime.dehydrateForBridge(param),
+    });
+    return ((projection && projection.identifiers) || [])
+      .map(item => runtime.nodeAtBridgePath(param, item.path))
+      .filter(Boolean);
   };
   runtime.walkFunctionParams = function walkFunctionParams(node, onIdent) {
     for (const ident of runtime.extractIdentifiers(node && node.params)) onIdent(ident);
