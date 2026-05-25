@@ -254,6 +254,8 @@ impl SfcCompiler {
         let core = Vue3CompilerOptions {
             prefix_identifiers: true,
             mode: "module".into(),
+            hoist_static: true,
+            cache_handlers: true,
             scope_id: options.scope_id.clone(),
             slotted: options.slotted,
             source_map: true,
@@ -325,6 +327,8 @@ impl SfcCompiler {
         let core = Vue3CompilerOptions {
             prefix_identifiers: true,
             mode: "module".into(),
+            hoist_static: true,
+            cache_handlers: true,
             scope_id: options.scope_id.clone(),
             slotted: options.slotted,
             source_map: true,
@@ -926,6 +930,24 @@ mod tests {
         assert!(template.code.contains("srcset: _imports_0 + ' 2x'"));
         assert!(!template.code.contains("_ctx._imports_"));
         assert!(!template.code.contains("PROPS"));
+    }
+
+    #[test]
+    fn compile_template_uses_official_cache_handler_default() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "foo.vue",
+            r#"<template><input @blur="onBlur" @[validateEvent]="onValidateEvent"></template>"#,
+        );
+        let template = compiler.compile_template(&descriptor, SfcTemplateCompileOptions::default());
+
+        assert!(template.code.contains("toHandlerKey as _toHandlerKey"));
+        assert!(template.code.contains("mergeProps as _mergeProps"));
+        assert!(template.code.contains(
+            "_cache[0] || (_cache[0] = (...args) => (_ctx.onBlur && _ctx.onBlur(...args)))"
+        ));
+        assert!(template.code.contains("_cache[1] || (_cache[1] = (...args) => (_ctx.onValidateEvent && _ctx.onValidateEvent(...args)))"));
+        assert!(!template.code.contains("data-vuec-dom"));
     }
 
     #[test]

@@ -13874,6 +13874,7 @@ fn vue3_codegen_helpers(
     sort_helpers_by_order(&mut helpers, vue3_helper_order(has_components));
     apply_vue3_memo_helper_order(&mut helpers);
     apply_vue3_plain_child_helper_order(&mut helpers);
+    apply_vue3_dynamic_event_helper_order(&mut helpers, &helper_probe);
     helpers
 }
 
@@ -13982,6 +13983,22 @@ fn apply_vue3_plain_child_helper_order(helpers: &mut Vec<RuntimeHelper>) {
         helpers.clear();
         helpers.extend(plain_child_order);
     }
+}
+
+fn apply_vue3_dynamic_event_helper_order(helpers: &mut Vec<RuntimeHelper>, helper_probe: &str) {
+    if !helpers.contains(&RuntimeHelper::Vue3ToHandlerKey) {
+        return;
+    }
+    if !helper_probe.contains("[_toHandlerKey(") {
+        return;
+    }
+    let preferred = [
+        RuntimeHelper::Vue3ToHandlerKey,
+        RuntimeHelper::Vue3MergeProps,
+        RuntimeHelper::Vue3OpenBlock,
+        RuntimeHelper::Vue3CreateElementBlock,
+    ];
+    reorder_helpers_by_preference(helpers, &preferred);
 }
 
 fn sort_helpers_by_order(helpers: &mut Vec<RuntimeHelper>, order: &[RuntimeHelper]) {
@@ -17840,6 +17857,7 @@ fn render_exact_props_args(args: Vec<ExactPropsArg>, has_dynamic_bind_arg: bool)
         [arg] if arg.kind == ExactPropsArgKind::Object && has_dynamic_bind_arg => {
             format!("_normalizeProps({})", arg.code)
         }
+        [arg] if arg.kind == ExactPropsArgKind::DynamicEvent => arg.code.clone(),
         [arg] => arg.code.clone(),
         _ => format!(
             "_mergeProps({})",
@@ -17864,7 +17882,9 @@ fn render_plain_props(entries: &[String]) -> Option<String> {
 }
 
 fn exact_single_prop_prefers_multiline(entry: &str) -> bool {
-    entry.contains('\n') || entry.starts_with("key: ") && entry.contains('(')
+    entry.contains('\n')
+        || entry.contains("_cache[")
+        || entry.starts_with("key: ") && entry.contains('(')
 }
 
 fn render_attribute_prop(element: &Vue3Element, attr: &vuec_ast::Vue3Attribute) -> String {
@@ -24993,6 +25013,37 @@ mod tests {
         assert!(result.code.contains("onClick: _ctx.once"));
         assert!(result.code.contains("16 /* FULL_PROPS */"));
         assert!(result.code.contains("8 /* PROPS */, [\"onClick\"]"));
+    }
+
+    #[test]
+    fn base_compile_merges_static_and_dynamic_native_events() {
+        let result = base_compile(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: r#"<input @blur="onBlur" @[validateEvent]="onValidateEvent">"#.into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                cache_handlers: true,
+                hoist_static: true,
+                mode: "module".into(),
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(result.code.contains(
+            r#"import { toHandlerKey as _toHandlerKey, mergeProps as _mergeProps, openBlock as _openBlock, createElementBlock as _createElementBlock } from "vue""#
+        ));
+        assert!(result.code.contains(
+            "onBlur: _cache[0] || (_cache[0] = (...args) => (_ctx.onBlur && _ctx.onBlur(...args)))"
+        ));
+        assert!(result.code.contains("[_toHandlerKey(_ctx.validateEvent)]: _cache[1] || (_cache[1] = (...args) => (_ctx.onValidateEvent && _ctx.onValidateEvent(...args)))"));
+        assert!(result.code.contains("_mergeProps({\n"));
+        assert!(result.code.contains("  }, {\n"));
+        assert!(result.code.contains("16 /* FULL_PROPS */"));
+        assert!(!result.code.contains("\"data-vuec-dom\""));
     }
 
     #[test]

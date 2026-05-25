@@ -8,8 +8,8 @@ use vuec_ast::{
 };
 use vuec_diagnostics::{Diagnostic, Severity};
 use vuec_pass::TransformContext;
+use vuec_vue3_asset::transform_asset_url_props;
 pub use vuec_vue3_asset::AssetUrlOptions;
-use vuec_vue3_asset::{asset_url_attributes, transform_asset_url_props};
 use vuec_vue3_core::{CodegenResult, TemplateSource, Vue3CompilerOptions, Vue3Dialect};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -330,7 +330,6 @@ pub fn compile(source: TemplateSource, options: DomCompilerOptions) -> CodegenRe
     for node_index in 0..ast.nodes.len() {
         if let Vue3AstKind::Element(element) = &mut ast.nodes[node_index].kind {
             let tag = element.tag.clone();
-            let source_attributes = element.template_attributes();
             if options.transform_asset_urls {
                 transform_asset_url_props(
                     &tag,
@@ -340,35 +339,6 @@ pub fn compile(source: TemplateSource, options: DomCompilerOptions) -> CodegenRe
                     &mut asset_imports,
                 );
             }
-            let directives = extract_directives(&source_attributes);
-            let mut summaries = Vec::new();
-            for directive in directives {
-                match directive.name.as_str() {
-                    "html" => summaries.push("v-html".to_string()),
-                    "text" => summaries.push("v-text".to_string()),
-                    "show" => summaries.push("v-show".to_string()),
-                    "model" => summaries.push(format!(
-                        "v-model:{}",
-                        model_runtime_helper(&tag, &directive)
-                    )),
-                    "on" => summaries.push(format!("v-on:{}", directive.modifiers.join("."))),
-                    "bind" => summaries.push(format!("v-bind:{}", directive.modifiers.join("."))),
-                    _ => summaries.push(format!("v-{}", directive.name)),
-                }
-            }
-            if options.transform_asset_urls {
-                summaries.extend(asset_url_attributes(
-                    &tag,
-                    &source_attributes,
-                    &options.asset_url_options,
-                ));
-            }
-            if !summaries.is_empty() && !only_asset_summaries(&summaries) {
-                element.props.push(Vue3Prop::from(TemplateAttribute {
-                    name: "data-vuec-dom".into(),
-                    value: Some(summaries.join(",")),
-                }));
-            }
         }
     }
     if !asset_imports.is_empty() {
@@ -376,10 +346,44 @@ pub fn compile(source: TemplateSource, options: DomCompilerOptions) -> CodegenRe
             root.imports = asset_imports;
         }
     }
+    let dom_summary = dom_directive_summary(&ast);
     Vue3Dialect::transform(&mut ast, &mut ctx);
     let mut result = Vue3Dialect::finish_compile(ast, source, options.core, ctx);
-    result.ast_summary = format!("dom:{}", result.ast_summary);
+    result.ast_summary = if dom_summary.is_empty() {
+        format!("dom:{}", result.ast_summary)
+    } else {
+        format!("dom:{};{}", result.ast_summary, dom_summary.join("|"))
+    };
     result
+}
+
+fn dom_directive_summary(ast: &Vue3Ast) -> Vec<String> {
+    ast.nodes
+        .iter()
+        .filter_map(|node| {
+            let Vue3AstKind::Element(element) = &node.kind else {
+                return None;
+            };
+            let summaries = element
+                .template_attributes()
+                .iter()
+                .filter_map(|attr| {
+                    parse_directive(attr).map(|directive| match directive.name.as_str() {
+                        "html" => "v-html".to_string(),
+                        "text" => "v-text".to_string(),
+                        "show" => "v-show".to_string(),
+                        "model" => {
+                            format!("v-model:{}", model_runtime_helper(&element.tag, &directive))
+                        }
+                        "on" => format!("v-on:{}", directive.modifiers.join(".")),
+                        "bind" => format!("v-bind:{}", directive.modifiers.join(".")),
+                        _ => format!("v-{}", directive.name),
+                    })
+                })
+                .collect::<Vec<_>>();
+            (!summaries.is_empty()).then(|| summaries.join(","))
+        })
+        .collect()
 }
 
 pub fn normalize_dom_ast(ast: &mut Vue3Ast, options: &DomCompilerOptions) {
@@ -567,12 +571,6 @@ fn vue3_dom_root_mut(ast: &mut Vue3Ast) -> Option<&mut Vue3Root> {
         Vue3AstKind::Root(root) => Some(root),
         _ => None,
     }
-}
-
-fn only_asset_summaries(summaries: &[String]) -> bool {
-    summaries
-        .iter()
-        .all(|summary| summary.starts_with("asset:"))
 }
 
 fn report_transition_invalid_children(ast: &Vue3Ast, ctx: &mut TransformContext) {
@@ -814,7 +812,8 @@ mod tests {
             DomCompilerOptions::default(),
         );
         assert!(result.ast_summary.starts_with("dom:"));
-        assert!(result.code.contains("data-vuec-dom"));
+        assert!(result.ast_summary.contains("v-model:vModelText"));
+        assert!(!result.code.contains("data-vuec-dom"));
     }
 
     #[test]
@@ -1061,9 +1060,9 @@ mod tests {
         );
 
         assert!(result.code.contains("createStaticVNode"));
-        assert!(result.code.contains(
-            r#"<div style=\"color:red;\" data-vuec-dom=\"v-bind:\"><span class=\"foo bar\" data-vuec-dom=\"v-bind:\">1 + false</span>"#
-        ));
+        assert!(result
+            .code
+            .contains(r#"<div style=\"color:red;\"><span class=\"foo bar\">1 + false</span>"#));
     }
 
     #[test]
@@ -1089,7 +1088,7 @@ mod tests {
 
         assert!(result.code.contains("_createStaticVNode"));
         assert!(result.code.contains(
-            r#"<div style=\"color:red;\" data-vuec-dom=\"v-bind:\" data-v-test><span class=\"foo\" data-v-test>ok</span>"#
+            r#"<div style=\"color:red;\" data-v-test><span class=\"foo\" data-v-test>ok</span>"#
         ));
     }
 
