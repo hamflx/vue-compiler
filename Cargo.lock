@@ -882,6 +882,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "vuec_cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde",
+ "serde_json",
+ "vuec_codegen",
+ "vuec_diagnostics",
+ "vuec_sfc",
+ "vuec_source",
+ "vuec_vue2",
+ "vuec_vue3_core",
+ "vuec_vue3_dom",
+ "vuec_vue3_ssr",
+]
+
+[[package]]
 name = "vuec_codegen"
 version = "0.1.0"
 dependencies = [
