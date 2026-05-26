@@ -302,54 +302,51 @@ pub fn compile_ssr(template: &str, options: Vue2CompileOptions) -> Vue2CompiledR
 }
 
 pub fn generate_code_frame(source: &str, start: usize, end: usize) -> String {
-    let mut line_starts = vec![0usize];
-    for (index, ch) in source.char_indices() {
-        if ch == '\n' {
-            line_starts.push(index + 1);
-        }
-    }
-    let start_line = line_index_at(&line_starts, start);
-    let end_line = line_index_at(&line_starts, end);
-    let first = start_line.saturating_sub(2);
-    let last = (end_line + 2).min(line_starts.len().saturating_sub(1));
-    let mut lines = Vec::new();
-    for line_index in first..=last {
-        let line_start = line_starts[line_index];
-        let line_end = line_starts
-            .get(line_index + 1)
-            .copied()
-            .unwrap_or(source.len())
-            .saturating_sub(usize::from(line_index + 1 < line_starts.len()));
-        let line = &source[line_start..line_end];
-        lines.push(format!("{}  |  {}", line_index + 1, line));
-        let highlight_start = if line_index == start_line {
-            start.saturating_sub(line_start)
-        } else if line_index > start_line && line_index <= end_line {
-            0
-        } else {
+    let source_lines = source
+        .split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+        .collect::<Vec<_>>();
+    let mut count = 0usize;
+    let mut rendered = Vec::new();
+    for (index, line) in source_lines.iter().enumerate() {
+        count += line.len() + 1;
+        if count < start {
             continue;
-        };
-        let highlight_end = if line_index == end_line {
-            end.saturating_sub(line_start).min(line.len())
-        } else {
-            line.len()
-        };
-        let width = highlight_end.saturating_sub(highlight_start).max(1);
-        lines.push(format!(
-            "   |  {}{}",
-            " ".repeat(highlight_start),
-            "^".repeat(width)
-        ));
-    }
-    lines.join("\n")
-}
+        }
 
-fn line_index_at(line_starts: &[usize], offset: usize) -> usize {
-    match line_starts.binary_search(&offset) {
-        Ok(index) => index,
-        Err(0) => 0,
-        Err(index) => index - 1,
+        let mut output_index = index.saturating_sub(2);
+        while output_index <= index + 2 || end > count {
+            let Some(output_line) = source_lines.get(output_index) else {
+                output_index += 1;
+                continue;
+            };
+            rendered.push(format!(
+                "{}{}|  {}",
+                output_index + 1,
+                " ".repeat(3usize.saturating_sub((output_index + 1).to_string().len())),
+                output_line
+            ));
+            let line_len = output_line.len();
+            if output_index == index {
+                let pad = start.saturating_sub(count - line.len() - 1);
+                let width = if end > count {
+                    line_len.saturating_sub(pad)
+                } else {
+                    end.saturating_sub(start)
+                };
+                rendered.push(format!("   |  {}{}", " ".repeat(pad), "^".repeat(width)));
+            } else if output_index > index {
+                if end > count {
+                    let width = (end - count).min(line_len);
+                    rendered.push(format!("   |  {}", "^".repeat(width)));
+                }
+                count += line_len + 1;
+            }
+            output_index += 1;
+        }
+        break;
     }
+    rendered.join("\n")
 }
 
 fn parse_element_tree(
@@ -3288,5 +3285,13 @@ mod tests {
         let frame = generate_code_frame(source, start, start + 9);
         assert!(frame.contains("2  |    <span key=\"one\"></span>"));
         assert!(frame.contains("^"));
+
+        let multiline = "<div attr=\"some\n  multiline\nattr\n\">\n</div>";
+        let multiline_start = multiline.find("attr=").unwrap();
+        let multiline_end = multiline.find("\">").unwrap() + 1;
+        assert_eq!(
+            generate_code_frame(multiline, multiline_start, multiline_end),
+            "1  |  <div attr=\"some\n   |       ^^^^^^^^^^\n2  |    multiline\n   |  ^^^^^^^^^^^\n3  |  attr\n   |  ^^^^\n4  |  \">\n   |  ^"
+        );
     }
 }

@@ -1,5 +1,11 @@
 # Memory
 
+- Current round: completed a Vue 2 compiler Rust codeframe parity slice.
+- `vuec_vue2::generate_code_frame` now follows Vue 2's official line-window and multiline underline behavior, so multiline highlights stop at the actual highlighted end instead of also printing trailing context after the highlighted range.
+- No AST/HIR/MIR structure changed. `xtask/src/compat.rs` was not touched in this slice.
+- Current Vue 2 conformance movement: `vue2-compiler` improved from `96/188` to `97/188`; `vue27-compiler` remains `93/190`; `vue27-sfc` remains `5/144`.
+- Verification for this Vue 2 codeframe slice: `cargo test -p vuec_vue2 --lib` (`12/12`), `cargo xtask run-conformance --suite vue2-compiler` (expected fail, `97/188`), `cargo xtask run-conformance --suite vue27-compiler` (expected fail, unchanged `93/190`), and `cargo xtask run-conformance --suite vue27-sfc` (expected fail, unchanged `5/144`).
+
 - Current round: completed a Vue 2 compiler Rust `v-pre` template codegen parity slice.
 - `vuec_vue2` now preserves `v-pre` state while parsing descendant text and when generating static roots, so `<template>` inside a `v-pre` block is emitted as a real template element and interpolations remain literal text. This closes the official Vue 2 codegen case `does not squash templates inside v-pre`.
 - No AST/HIR/MIR structure changed. `xtask/src/compat.rs` was not touched in this slice.
