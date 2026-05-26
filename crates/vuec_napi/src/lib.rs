@@ -3,6 +3,7 @@
 use napi::{bindgen_prelude::Unknown, Env, Result};
 use napi_derive::napi;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use vuec_ast::{NodeSpan, Vue3Ast, Vue3AstKind, Vue3Expression, Vue3Prop};
 use vuec_sfc::{
     SfcCompiler, SfcScriptCompileOptions, SfcStyleCompileOptions, SfcTemplateCompileOptions,
@@ -201,7 +202,97 @@ fn template_source(source: &str, options: &Value) -> TemplateSource {
 }
 
 fn vue2_options(value: Value) -> Vue2CompileOptions {
-    serde_json::from_value::<Vue2CompileOptions>(value).unwrap_or_default()
+    let mut options = Vue2CompileOptions::default();
+    let Value::Object(_) = value else {
+        return options;
+    };
+    options.warn = bool_option(&value, "warn", options.warn);
+    options.output_source_range = bool_option(
+        &value,
+        "outputSourceRange",
+        bool_option(&value, "output_source_range", options.output_source_range),
+    );
+    options.comments = bool_option(&value, "comments", options.comments);
+    options.preserve_whitespace = bool_option(
+        &value,
+        "preserveWhitespace",
+        bool_option(&value, "preserve_whitespace", options.preserve_whitespace),
+    );
+    options.should_decode_newlines = bool_option(
+        &value,
+        "shouldDecodeNewlines",
+        bool_option(
+            &value,
+            "should_decode_newlines",
+            options.should_decode_newlines,
+        ),
+    );
+    options.should_decode_newlines_for_href = bool_option(
+        &value,
+        "shouldDecodeNewlinesForHref",
+        bool_option(
+            &value,
+            "should_decode_newlines_for_href",
+            options.should_decode_newlines_for_href,
+        ),
+    );
+    options.optimize = bool_option(&value, "optimize", options.optimize);
+    options.disable_default_must_use_prop = bool_option(
+        &value,
+        "__vuecDisableDefaultMustUseProp",
+        bool_option(
+            &value,
+            "disable_default_must_use_prop",
+            options.disable_default_must_use_prop,
+        ),
+    );
+    if let Some(delimiters) = value.get("delimiters").and_then(Value::as_array) {
+        if delimiters.len() == 2 {
+            if let (Some(open), Some(close)) = (delimiters[0].as_str(), delimiters[1].as_str()) {
+                options.delimiters = Some([open.into(), close.into()]);
+            }
+        }
+    }
+    options.whitespace = value
+        .get("whitespace")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    if let Some(namespaces) = string_map_option(&value, "__vuecTagNamespaces") {
+        options.tag_namespaces = namespaces;
+        options.use_default_tag_namespaces = false;
+    }
+    options.use_default_tag_namespaces = bool_option(
+        &value,
+        "__vuecUseDefaultTagNamespaces",
+        bool_option(
+            &value,
+            "use_default_tag_namespaces",
+            options.use_default_tag_namespaces,
+        ),
+    );
+    if value.get("__vuecReservedTags").is_some() {
+        options.reserved_tags = Some(string_array_option(&value, "__vuecReservedTags"));
+        options.use_default_reserved_tags = false;
+    }
+    options.use_default_reserved_tags = bool_option(
+        &value,
+        "__vuecUseDefaultReservedTags",
+        bool_option(
+            &value,
+            "use_default_reserved_tags",
+            options.use_default_reserved_tags,
+        ),
+    );
+    if let Some(bindings) = string_map_option(&value, "bindings") {
+        options.bindings = bindings;
+    }
+    if let Some(bindings) = value.get("bindings") {
+        options.bindings_is_script_setup = bindings
+            .get("__isScriptSetup")
+            .and_then(Value::as_bool)
+            .unwrap_or(options.bindings_is_script_setup);
+    }
+    options
 }
 
 fn vue27_rewrite_default_options(value: Value) -> Vue27RewriteDefaultOptions {
@@ -680,6 +771,26 @@ fn string_option(value: &Value, name: &str, fallback: &str) -> String {
         .to_string()
 }
 
+fn string_map_option(value: &Value, name: &str) -> Option<BTreeMap<String, String>> {
+    value.get(name).and_then(Value::as_object).map(|object| {
+        object
+            .iter()
+            .filter_map(|(key, value)| value.as_str().map(|value| (key.clone(), value.into())))
+            .collect()
+    })
+}
+
+fn string_array_option(value: &Value, name: &str) -> Vec<String> {
+    value
+        .get(name)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
 #[napi(js_name = "apiManifest")]
 pub fn api_manifest() -> Result<String> {
     to_json_string(json!({
@@ -722,5 +833,23 @@ mod tests {
         assert!(options.prefix_identifiers);
         assert!(options.source_map);
         assert_eq!(options.scope_id.as_deref(), Some("data-v-test"));
+    }
+
+    #[test]
+    fn vue2_options_accepts_sparse_public_keys() {
+        let options = vue2_options(json!({
+            "comments": true,
+            "delimiters": ["[[", "]]"],
+            "whitespace": "condense",
+            "preserveWhitespace": false,
+            "shouldDecodeNewlinesForHref": true
+        }));
+        assert!(options.comments);
+        assert_eq!(options.delimiters, Some(["[[".into(), "]]".into()]));
+        assert_eq!(options.whitespace.as_deref(), Some("condense"));
+        assert!(!options.preserve_whitespace);
+        assert!(options.should_decode_newlines_for_href);
+        assert!(options.warn);
+        assert!(options.optimize);
     }
 }
