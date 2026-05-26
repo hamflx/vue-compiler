@@ -16,7 +16,7 @@ use vuec_sfc::{
     SfcAttrValue, SfcBlock, SfcBlockAttrs, SfcCompiler, SfcDescriptor, SfcScriptBlock,
     SfcScriptCompileOptions, SfcStyleCompileOptions, SfcTemplateCompileOptions,
     Vue27ParseComponentOptions, Vue27PrefixIdentifiersOptions, Vue27RewriteDefaultOptions,
-    Vue27SfcPad,
+    Vue27SfcPad, Vue27TemplatePreprocessOptions,
 };
 use vuec_source::FileId;
 use vuec_style::{compile_style, StyleCompileOptions};
@@ -378,8 +378,23 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
         }
         "sfc.vue27.compileTemplate" => {
             let source = string_field(&payload, "source");
+            let filename = string_field_or(&payload, "filename", "template.vue.html");
             let options = vue27_sfc_template_vue2_options(payload.get("options"));
-            let compiled = vuec_vue2::compile(&source, options);
+            let compiler = SfcCompiler::new();
+            let preprocessed = compiler.preprocess_vue27_template(
+                &source,
+                vue27_template_preprocess_options(payload.get("options"), &filename),
+            );
+            if !preprocessed.errors.is_empty() || !preprocessed.tips.is_empty() {
+                return Ok(json!({
+                    "ast": {},
+                    "code": "var render = function () {}\nvar staticRenderFns = []\n",
+                    "source": source,
+                    "tips": preprocessed.tips,
+                    "errors": preprocessed.errors,
+                }));
+            }
+            let compiled = vuec_vue2::compile(&preprocessed.source, options);
             Ok(json!({
                 "ast": vue27_template_ast_value(&compiled),
                 "code": vue27_template_code(&compiled.render, &compiled.static_render_fns),
@@ -3623,6 +3638,20 @@ fn vue27_sfc_template_vue2_options(value: Option<&Value>) -> Vue2CompileOptions 
     options
 }
 
+fn vue27_template_preprocess_options(
+    value: Option<&Value>,
+    filename: &str,
+) -> Vue27TemplatePreprocessOptions {
+    let lang = value
+        .and_then(|value| value.get("preprocessLang"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    Vue27TemplatePreprocessOptions {
+        lang,
+        filename: Some(filename.to_string()),
+    }
+}
+
 fn vue27_sfc_asset_url_options(value: &Value) -> Vue2SfcAssetUrlTransformOptions {
     let mut options = Vue2SfcAssetUrlTransformOptions::default();
     if let Some(extra) = value.get("transformAssetUrlsOptions") {
@@ -4662,6 +4691,49 @@ mod tests {
         assert!(code.contains(r#""src":"/base/logo.png""#));
         assert!(code.contains(r#""src":require("/logo.png")"#));
         assert!(code.contains(r#""src":require("@/logo.png")"#));
+    }
+
+    #[test]
+    fn vue27_bridge_compile_template_preprocesses_pug_and_reports_missing_lang() {
+        let compiled = dispatch(
+            "sfc.vue27.compileTemplate",
+            json!({
+                "source": "body\n h1 Pug Examples\n div.container\n   p Cool Pug example!\n",
+                "filename": "example.vue",
+                "options": {
+                    "preprocessLang": "pug"
+                }
+            }),
+        )
+        .expect("vue27 sfc compileTemplate");
+
+        assert!(compiled["errors"].as_array().unwrap().is_empty());
+        let code = compiled["code"].as_str().unwrap_or("");
+        assert!(code.contains("_c('body'"));
+        assert!(code.contains("staticClass:\"container\""));
+
+        let missing = dispatch(
+            "sfc.vue27.compileTemplate",
+            json!({
+                "source": "",
+                "filename": "example.vue",
+                "options": {
+                    "preprocessLang": "unknownLang"
+                }
+            }),
+        )
+        .expect("vue27 sfc compileTemplate");
+
+        assert_eq!(missing["errors"].as_array().unwrap().len(), 1);
+        assert_eq!(missing["tips"].as_array().unwrap().len(), 1);
+        assert!(missing["errors"][0]
+            .as_str()
+            .unwrap_or("")
+            .contains("unknownLang"));
+        assert_eq!(
+            missing["code"],
+            json!("var render = function () {}\nvar staticRenderFns = []\n")
+        );
     }
 
     #[test]
