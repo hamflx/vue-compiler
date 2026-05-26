@@ -3594,6 +3594,15 @@ fn vue2_options(value: Option<&Value>) -> Vue2CompileOptions {
             options.use_default_reserved_tags,
         ),
     );
+    if let Some(bindings) = string_map_option(value, "bindings") {
+        options.bindings = bindings;
+    }
+    if let Some(bindings) = value.get("bindings") {
+        options.bindings_is_script_setup = bindings
+            .get("__isScriptSetup")
+            .and_then(Value::as_bool)
+            .unwrap_or(options.bindings_is_script_setup);
+    }
     options
 }
 

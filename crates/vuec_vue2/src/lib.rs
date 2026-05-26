@@ -26,6 +26,8 @@ pub struct Vue2CompileOptions {
     pub use_default_tag_namespaces: bool,
     pub reserved_tags: Option<Vec<String>>,
     pub use_default_reserved_tags: bool,
+    pub bindings: BTreeMap<String, String>,
+    pub bindings_is_script_setup: bool,
 }
 
 impl Default for Vue2CompileOptions {
@@ -47,6 +49,8 @@ impl Default for Vue2CompileOptions {
             use_default_tag_namespaces: true,
             reserved_tags: None,
             use_default_reserved_tags: true,
+            bindings: BTreeMap::new(),
+            bindings_is_script_setup: true,
         }
     }
 }
@@ -1546,7 +1550,8 @@ fn gen_element(element: &mut Vue2Element, state: &mut CodegenState<'_>) -> Strin
         let code = if let Some(component) = element.component.clone() {
             gen_component(&component, element, state)
         } else {
-            let data = if !element.plain || (element.pre && is_component(element, state.options)) {
+            let maybe_component = is_component(element, state.options);
+            let data = if !element.plain || (element.pre && maybe_component) {
                 Some(gen_data(element, state))
             } else {
                 None
@@ -1556,7 +1561,8 @@ fn gen_element(element: &mut Vue2Element, state: &mut CodegenState<'_>) -> Strin
             } else {
                 gen_children(element, state, true)
             };
-            let tag = js_string_single(&element.tag);
+            let tag = binding_component_tag(element, state.options, maybe_component)
+                .unwrap_or_else(|| js_string_single(&element.tag));
             match (data, children) {
                 (Some(data), Some(children)) => format!("_c({tag},{data},{children})"),
                 (Some(data), None) => format!("_c({tag},{data})"),
@@ -3007,6 +3013,45 @@ fn is_component(element: &Vue2Element, options: &Vue2CompileOptions) -> bool {
     element.component.is_some() || !is_reserved_tag_with_options(&element.tag, options)
 }
 
+fn binding_component_tag(
+    element: &Vue2Element,
+    options: &Vue2CompileOptions,
+    maybe_component: bool,
+) -> Option<String> {
+    if !maybe_component || !options.bindings_is_script_setup || options.bindings.is_empty() {
+        return None;
+    }
+    check_binding_type(&options.bindings, &element.tag)
+}
+
+fn check_binding_type(bindings: &BTreeMap<String, String>, key: &str) -> Option<String> {
+    let camel_name = camelize(key);
+    let pascal_name = capitalize(&camel_name);
+    let candidates = [key, camel_name.as_str(), pascal_name.as_str()];
+    for binding_type in ["setup-const", "setup-reactive-const"] {
+        if let Some(name) = check_binding_type_candidates(bindings, &candidates, binding_type) {
+            return Some(name);
+        }
+    }
+    for binding_type in ["setup-let", "setup-ref", "setup-maybe-ref"] {
+        if let Some(name) = check_binding_type_candidates(bindings, &candidates, binding_type) {
+            return Some(name);
+        }
+    }
+    None
+}
+
+fn check_binding_type_candidates(
+    bindings: &BTreeMap<String, String>,
+    candidates: &[&str],
+    binding_type: &str,
+) -> Option<String> {
+    candidates.iter().find_map(|candidate| {
+        (bindings.get(*candidate).map(String::as_str) == Some(binding_type))
+            .then(|| (*candidate).to_string())
+    })
+}
+
 fn get_normalization_type(children: &[Vue2Node], options: &Vue2CompileOptions) -> u8 {
     let mut result = 0;
     for child in children {
@@ -3244,6 +3289,16 @@ fn camelize(value: &str) -> String {
             out.push(ch);
         }
     }
+    out
+}
+
+fn capitalize(value: &str) -> String {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    let mut out = first.to_uppercase().collect::<String>();
+    out.push_str(chars.as_str());
     out
 }
 
@@ -3563,6 +3618,47 @@ mod tests {
             options(),
         );
         assert_eq!(empty.render, r#"with(this){return _c('my-component',{})}"#);
+    }
+
+    #[test]
+    fn generates_vue27_setup_binding_component_tags_like_official_codegen() {
+        let mut parsed = compile("<div><Foo/><foo-bar></foo-bar></div>", options())
+            .element_ast
+            .unwrap();
+        optimize(&mut parsed, &options());
+        let generated = generate(
+            Some(&parsed),
+            &Vue2CompileOptions {
+                bindings: BTreeMap::from([
+                    ("Foo".into(), "setup-const".into()),
+                    ("FooBar".into(), "setup-const".into()),
+                ]),
+                ..options()
+            },
+        );
+        assert_eq!(
+            generated.render,
+            r#"with(this){return _c('div',[_c(Foo),_c(FooBar)],1)}"#
+        );
+    }
+
+    #[test]
+    fn vue27_setup_bindings_do_not_resolve_native_tags() {
+        let mut parsed = compile("<div><form>{{ n }}</form></div>", options())
+            .element_ast
+            .unwrap();
+        optimize(&mut parsed, &options());
+        let generated = generate(
+            Some(&parsed),
+            &Vue2CompileOptions {
+                bindings: BTreeMap::from([("form".into(), "setup-const".into())]),
+                ..options()
+            },
+        );
+        assert_eq!(
+            generated.render,
+            r#"with(this){return _c('div',[_c('form',[_v(_s(n))])])}"#
+        );
     }
 
     #[test]

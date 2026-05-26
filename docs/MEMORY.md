@@ -1,5 +1,11 @@
 # Memory
 
+- Current round: completed the Vue 2.7 compiler Rust binding-metadata codegen parity slice.
+- `vuec_vue2` now carries Vue 2.7 `bindings` metadata in `Vue2CompileOptions` and mirrors official codegen for script-setup component tags: non-reserved component candidates check raw, camelized, and PascalCase binding names; setup const/reactive-const and setup let/ref/maybe-ref bindings emit expression tags such as `_c(Foo)` / `_c(FooBar)` instead of string tags. Native reserved tags such as `form` remain native even when a same-name binding exists.
+- `vuec_node_bridge` now deserializes Vue 2 `options.bindings` and `bindings.__isScriptSetup` into Rust options. This is option forwarding only; no compiler semantics were added to `xtask/src/compat.rs`, and AST/HIR/MIR structures did not change.
+- Current Vue 2 conformance state: `vue27-compiler` improved from `189/190` to `190/190` and reports `rust-backed`; `vue2-compiler` remains `188/188` and reports `rust-backed`.
+- Verification for this Vue 2.7 binding codegen slice: `cargo fmt --all --check`, `git diff --check`, `cargo test -p vuec_vue2 --lib`, `cargo test -p vuec_node_bridge`, `cargo build -p vuec_node_bridge`, `cargo test -p xtask`, `cargo xtask run-conformance --suite vue27-compiler` (`190/190`), and `cargo xtask run-conformance --suite vue2-compiler` (`188/188`).
+
 - Current round: completed the Vue 2.7 compiler conformance runner/API bridge support slice.
 - `xtask/src/compat.rs` now generates Vue 2 `generateCodeFrame` aliases with the three arguments used by official codeframe tests even though the public function length reports as one, and the Vue 2 Vitest setup now exposes a warning mock compatible with official `(console.error as any).mock.calls` assertions.
 - This `xtask/src/compat.rs` work is API/runner/import support only. No compiler semantics were added to the shim, and AST/HIR/MIR structures did not change.
