@@ -1182,7 +1182,6 @@ fn vue27_script_value(script: &SfcScriptBlock) -> Value {
     if let Some(object) = value.as_object_mut() {
         object.remove("errors");
         object.remove("deps");
-        object.remove("scriptAst");
         object.insert("content".into(), json!(script.content.clone()));
         object.insert(
             "start".into(),
@@ -4164,6 +4163,23 @@ mod tests {
         let content = compiled["content"].as_str().unwrap_or("");
         assert!(content.contains("\"4003f1a6\": (_vm.color)"));
         assert!(content.contains("export default __default__"));
+    }
+
+    #[test]
+    fn vue27_bridge_compile_script_preserves_script_ast_and_internal_binding_flag() {
+        let compiled = dispatch(
+            "sfc.vue27.compileScript",
+            json!({
+                "source": "<script>export default { props: ['foo'] }</script>",
+                "filename": "test.vue",
+                "options": {}
+            }),
+        )
+        .expect("vue27 script");
+
+        assert!(compiled["scriptAst"].as_array().is_some());
+        assert_eq!(compiled["bindings"]["foo"], json!("props"));
+        assert_eq!(compiled["bindings"]["__isScriptSetup"], json!("false"));
     }
 
     #[test]

@@ -3,9 +3,9 @@
 use oxc_ast::ast::{
     Argument, ArrowFunctionExpression, AssignmentTarget, BindingPattern, ExportDefaultDeclaration,
     ExportDefaultDeclarationKind, ExportNamedDeclaration, ExportSpecifier, Expression, Function,
-    ImportDeclarationSpecifier, ModuleExportName, ObjectExpression, ObjectProperty,
-    ObjectPropertyKind, PropertyKey, SimpleAssignmentTarget, Statement, VariableDeclaration,
-    VariableDeclarationKind, WithStatement,
+    ImportDeclarationSpecifier, ImportOrExportKind, ModuleExportName, ObjectExpression,
+    ObjectProperty, ObjectPropertyKind, PropertyKey, SimpleAssignmentTarget, Statement,
+    VariableDeclaration, VariableDeclarationKind, WithStatement,
 };
 use oxc_span::GetSpan;
 use serde::{Deserialize, Serialize};
@@ -2272,6 +2272,7 @@ struct Vue27ScriptSetupAnalysis {
     setup_bindings: BTreeMap<String, String>,
     props_bindings: Vec<String>,
     props_runtime: Option<String>,
+    user_import_aliases: BTreeMap<String, String>,
 }
 
 fn analyze_vue27_script_setup(script_setup: &SfcBlock) -> Vue27ScriptSetupAnalysis {
@@ -2305,6 +2306,13 @@ fn analyze_vue27_script_setup(script_setup: &SfcBlock) -> Vue27ScriptSetupAnalys
                     for specifier in specifiers {
                         let local = import_specifier_local(specifier);
                         let imported = import_specifier_imported(specifier);
+                        if source_value == "vue" {
+                            if let Some(imported) = imported.as_deref() {
+                                analysis
+                                    .user_import_aliases
+                                    .insert(imported.to_string(), local.clone());
+                            }
+                        }
                         if source_value == "vue"
                             && matches!(
                                 imported.as_deref(),
@@ -2412,7 +2420,8 @@ fn analyze_vue27_setup_variable_declaration(
                 }
             }
         }
-        let binding_type = vue27_setup_binding_type(declaration.kind, declarator.init.as_ref());
+        let binding_type =
+            vue27_setup_binding_type(declaration.kind, declarator.init.as_ref(), analysis);
         collect_pattern_binding_types(&declarator.id, binding_type, &mut analysis.setup_bindings);
         collect_pattern_bindings(&declarator.id, &mut analysis.return_bindings);
     }
@@ -2427,6 +2436,7 @@ fn analyze_vue27_setup_variable_declaration(
 fn vue27_setup_binding_type(
     kind: VariableDeclarationKind,
     init: Option<&Expression<'_>>,
+    analysis: &Vue27ScriptSetupAnalysis,
 ) -> &'static str {
     if kind != VariableDeclarationKind::Const {
         return "setup-let";
@@ -2436,10 +2446,19 @@ fn vue27_setup_binding_type(
     }) {
         return "setup-const";
     }
-    if init.is_some_and(|init| is_call_expression_named(init, "ref")) {
+    if init.is_some_and(|init| is_vue27_ref_call(init, analysis)) {
         return "setup-ref";
     }
     "setup-maybe-ref"
+}
+
+fn is_vue27_ref_call(expression: &Expression<'_>, analysis: &Vue27ScriptSetupAnalysis) -> bool {
+    let ref_name = analysis
+        .user_import_aliases
+        .get("ref")
+        .map(String::as_str)
+        .unwrap_or("ref");
+    is_call_expression_named(expression, ref_name)
 }
 
 fn is_literal_expression(expression: &Expression<'_>) -> bool {
@@ -2547,7 +2566,8 @@ fn vue27_setup_binding_metadata(descriptor: &SfcDescriptor) -> BTreeMap<String, 
         .as_ref()
         .map(analyze_vue27_script_setup)
         .map(|analysis| {
-            let mut bindings = analysis.setup_bindings;
+            let mut bindings = vue27_script_setup_script_bindings(descriptor);
+            bindings.extend(analysis.setup_bindings);
             for prop in analysis.props_bindings {
                 bindings.insert(prop, "props".into());
             }
@@ -2559,8 +2579,14 @@ fn vue27_setup_binding_metadata(descriptor: &SfcDescriptor) -> BTreeMap<String, 
 }
 
 fn vue27_normal_script_binding_metadata(descriptor: &SfcDescriptor) -> BTreeMap<String, String> {
+    let mut bindings = vue27_script_options_binding_metadata(descriptor);
+    bindings.insert("__isScriptSetup".into(), "false".into());
+    bindings
+}
+
+fn vue27_script_options_binding_metadata(descriptor: &SfcDescriptor) -> BTreeMap<String, String> {
     let Some(script) = descriptor.script.as_ref() else {
-        return BTreeMap::from([("__isScriptSetup".into(), "false".into())]);
+        return BTreeMap::new();
     };
     let allocator = oxc_allocator::Allocator::default();
     let parsed = oxc_parser::Parser::new(
@@ -2574,9 +2600,9 @@ fn vue27_normal_script_binding_metadata(descriptor: &SfcDescriptor) -> BTreeMap<
     })
     .parse();
     if parsed.panicked || !parsed.errors.is_empty() {
-        return BTreeMap::from([("__isScriptSetup".into(), "false".into())]);
+        return BTreeMap::new();
     }
-    let mut bindings = BTreeMap::from([("__isScriptSetup".into(), "false".into())]);
+    let mut bindings = BTreeMap::new();
     for statement in &parsed.program.body {
         if let Statement::ExportDefaultDeclaration(default) = statement {
             match &default.declaration {
@@ -2595,6 +2621,120 @@ fn vue27_normal_script_binding_metadata(descriptor: &SfcDescriptor) -> BTreeMap<
         }
     }
     bindings
+}
+
+fn vue27_script_setup_script_bindings(descriptor: &SfcDescriptor) -> BTreeMap<String, String> {
+    let Some(script) = descriptor.script.as_ref() else {
+        return BTreeMap::new();
+    };
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(
+        &allocator,
+        &script.content,
+        script_source_type_from_attrs(&script.attrs),
+    )
+    .with_options(oxc_parser::ParseOptions {
+        parse_regular_expression: true,
+        ..oxc_parser::ParseOptions::default()
+    })
+    .parse();
+    if parsed.panicked || !parsed.errors.is_empty() {
+        return BTreeMap::new();
+    }
+    let mut bindings = BTreeMap::new();
+    for statement in &parsed.program.body {
+        collect_vue27_top_level_script_binding(statement, &mut bindings);
+    }
+    bindings
+}
+
+fn collect_vue27_top_level_script_binding(
+    statement: &Statement<'_>,
+    bindings: &mut BTreeMap<String, String>,
+) {
+    match statement {
+        Statement::ImportDeclaration(import) => {
+            let source = import.source.value.as_str();
+            if let Some(specifiers) = &import.specifiers {
+                for specifier in specifiers {
+                    let local = import_specifier_local(specifier);
+                    let imported = import_specifier_imported(specifier);
+                    let binding_type = if matches!(imported.as_deref(), Some("*"))
+                        || (matches!(imported.as_deref(), Some("default"))
+                            && source.ends_with(".vue"))
+                        || source == "vue"
+                    {
+                        "setup-const"
+                    } else {
+                        "setup-maybe-ref"
+                    };
+                    bindings.insert(local, binding_type.into());
+                }
+            }
+        }
+        Statement::VariableDeclaration(declaration) if !declaration.declare => {
+            collect_vue27_script_declaration_bindings(declaration, bindings);
+        }
+        Statement::FunctionDeclaration(function) if !function.declare => {
+            if let Some(id) = &function.id {
+                bindings.insert(id.name.to_string(), "setup-const".into());
+            }
+        }
+        Statement::ClassDeclaration(class) if !class.declare => {
+            if let Some(id) = &class.id {
+                bindings.insert(id.name.to_string(), "setup-const".into());
+            }
+        }
+        Statement::TSEnumDeclaration(declaration) if !declaration.declare => {
+            bindings.insert(declaration.id.name.to_string(), "setup-const".into());
+        }
+        Statement::ExportNamedDeclaration(declaration)
+            if declaration.export_kind == ImportOrExportKind::Value =>
+        {
+            if let Some(declaration) = &declaration.declaration {
+                match declaration {
+                    oxc_ast::ast::Declaration::VariableDeclaration(declaration)
+                        if !declaration.declare =>
+                    {
+                        collect_vue27_script_declaration_bindings(declaration, bindings);
+                    }
+                    oxc_ast::ast::Declaration::FunctionDeclaration(function)
+                        if !function.declare =>
+                    {
+                        if let Some(id) = &function.id {
+                            bindings.insert(id.name.to_string(), "setup-const".into());
+                        }
+                    }
+                    oxc_ast::ast::Declaration::ClassDeclaration(class) if !class.declare => {
+                        if let Some(id) = &class.id {
+                            bindings.insert(id.name.to_string(), "setup-const".into());
+                        }
+                    }
+                    oxc_ast::ast::Declaration::TSEnumDeclaration(declaration)
+                        if !declaration.declare =>
+                    {
+                        bindings.insert(declaration.id.name.to_string(), "setup-const".into());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_vue27_script_declaration_bindings(
+    declaration: &VariableDeclaration<'_>,
+    bindings: &mut BTreeMap<String, String>,
+) {
+    let binding_type = if declaration.kind == VariableDeclarationKind::Const {
+        "setup-const"
+    } else {
+        "setup-let"
+    };
+    for declarator in &declaration.declarations {
+        collect_pattern_binding_types(&declarator.id, binding_type, bindings);
+    }
 }
 
 fn analyze_vue27_options_bindings(
@@ -2629,6 +2769,9 @@ fn analyze_vue27_options_bindings(
                     }
                 }
             }
+            "inject" => {
+                collect_vue27_object_or_array_keys(&property.value, bindings, "options");
+            }
             _ => {
                 if let Expression::ObjectExpression(_) = &property.value {
                     continue;
@@ -2638,6 +2781,28 @@ fn analyze_vue27_options_bindings(
         if key == "setup" || key == "data" {
             collect_returned_object_keys(&property.value, key.as_str(), bindings);
         }
+    }
+}
+
+fn collect_vue27_object_or_array_keys(
+    expression: &Expression<'_>,
+    bindings: &mut BTreeMap<String, String>,
+    binding_type: &str,
+) {
+    match expression {
+        Expression::ObjectExpression(object) => {
+            for key in object_expression_keys(object) {
+                bindings.insert(key, binding_type.to_string());
+            }
+        }
+        Expression::ArrayExpression(array) => {
+            for element in &array.elements {
+                if let Some(Expression::StringLiteral(literal)) = element.as_expression() {
+                    bindings.insert(literal.value.to_string(), binding_type.to_string());
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -3251,6 +3416,121 @@ defineProps({ foo: String })
         assert!(script.content.contains("\"xxxxxxxx-foo\": (_vm.foo)"));
         assert!(script.content.contains("return { color, size, ref }"));
         assert!(!script.content.contains("defineProps"));
+    }
+
+    #[test]
+    fn vue27_compile_script_reports_options_and_inject_bindings() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "foo.vue",
+            r#"<script>
+export default {
+  inject: ['foo', 'bar'],
+  props: { baz: String },
+  setup() { return { qux: null } },
+  data() { return { quux: null } },
+  methods: { quuz() {} },
+  computed: { corge() {} }
+}
+</script>"#,
+        );
+        let script = compiler.compile_vue27_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert_eq!(
+            script.bindings.get("foo").map(String::as_str),
+            Some("options")
+        );
+        assert_eq!(
+            script.bindings.get("bar").map(String::as_str),
+            Some("options")
+        );
+        assert_eq!(
+            script.bindings.get("baz").map(String::as_str),
+            Some("props")
+        );
+        assert_eq!(
+            script.bindings.get("qux").map(String::as_str),
+            Some("setup-maybe-ref")
+        );
+        assert_eq!(
+            script.bindings.get("quux").map(String::as_str),
+            Some("data")
+        );
+        assert_eq!(
+            script.bindings.get("quuz").map(String::as_str),
+            Some("options")
+        );
+        assert_eq!(
+            script.bindings.get("corge").map(String::as_str),
+            Some("options")
+        );
+        assert_eq!(
+            script.bindings.get("__isScriptSetup").map(String::as_str),
+            Some("false")
+        );
+    }
+
+    #[test]
+    fn vue27_compile_script_merges_normal_script_bindings_into_setup_metadata() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "foo.vue",
+            r#"<script>
+import { xx } from './x'
+export const aa = 1
+let bb = 2
+function cc() {}
+class dd {}
+</script>
+<script setup>
+import { ref as r } from 'vue'
+import { x } from './x'
+const a = r(1)
+let b = 2
+</script>"#,
+        );
+        let script = compiler.compile_vue27_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert_eq!(
+            script.bindings.get("xx").map(String::as_str),
+            Some("setup-maybe-ref")
+        );
+        assert_eq!(
+            script.bindings.get("aa").map(String::as_str),
+            Some("setup-const")
+        );
+        assert_eq!(
+            script.bindings.get("bb").map(String::as_str),
+            Some("setup-let")
+        );
+        assert_eq!(
+            script.bindings.get("cc").map(String::as_str),
+            Some("setup-const")
+        );
+        assert_eq!(
+            script.bindings.get("dd").map(String::as_str),
+            Some("setup-const")
+        );
+        assert_eq!(
+            script.bindings.get("x").map(String::as_str),
+            Some("setup-maybe-ref")
+        );
+        assert_eq!(
+            script.bindings.get("r").map(String::as_str),
+            Some("setup-const")
+        );
+        assert_eq!(
+            script.bindings.get("a").map(String::as_str),
+            Some("setup-ref")
+        );
+        assert_eq!(
+            script.bindings.get("b").map(String::as_str),
+            Some("setup-let")
+        );
+        assert_eq!(
+            script.bindings.get("__isScriptSetup").map(String::as_str),
+            Some("true")
+        );
     }
 
     #[test]

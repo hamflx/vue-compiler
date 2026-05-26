@@ -1965,6 +1965,8 @@ fn alias_function_expression(
                 format!(
                     "(() => {{ const __vuecGenerateResult = {call}; __vuecGenerateResult.ast = a0; return __vuecGenerateResult; }})()"
                 )
+            } else if target.kind == TargetKind::Vue27Sfc && export_name == "compileScript" {
+                format!("hydrateVue27CompileScriptResult({call})")
             } else if is_vue2_template_compile {
                 format!(
                     "(() => {{ const __vuecVue2Result = {call}; emitVue2CompileWarnings(__vuecVue2Result, __vuecPayload.options); return __vuecVue2Result; }})()"
@@ -7001,6 +7003,21 @@ function bridgePayloadForCall(payload) {
     }
   }
   return bridgePayload;
+}
+
+function hydrateVue27CompileScriptResult(result) {
+  if (!result || typeof result !== 'object') return result;
+  const bindings = result.bindings;
+  if (bindings && typeof bindings === 'object' && Object.prototype.hasOwnProperty.call(bindings, '__isScriptSetup')) {
+    const isScriptSetup = bindings.__isScriptSetup === true || bindings.__isScriptSetup === 'true';
+    delete bindings.__isScriptSetup;
+    Object.defineProperty(bindings, '__isScriptSetup', {
+      enumerable: false,
+      configurable: true,
+      value: isScriptSetup
+    });
+  }
+  return result;
 }
 
 function vue3BridgePayload(source, filename, options) {
@@ -12078,6 +12095,30 @@ mod tests {
         assert!(OUTPUT_CONTRACT_PROBE_SCRIPT
             .contains("versionLine === 'vue2_7' && entry === 'vue/compiler-sfc'"));
         assert!(OUTPUT_CONTRACT_PROBE_SCRIPT.contains("api.parse({ source: fixture"));
+    }
+
+    #[test]
+    fn vue27_sfc_compile_script_alias_hydrates_binding_metadata_shape() {
+        let target = TargetSpec {
+            version_line: VersionLine::Vue27,
+            package: "vue",
+            entry: "vue/compiler-sfc",
+            kind: TargetKind::Vue27Sfc,
+        };
+        let detail = ApiExportDetail {
+            kind: "function".into(),
+            tag: "[object Function]".into(),
+            name: Some("compileScript".into()),
+            function_arity: Some(2),
+            is_async_function: Some(false),
+            is_class_like: Some(false),
+            own_property_names: vec!["length".into(), "name".into(), "prototype".into()],
+        };
+        let expression = alias_export_expression(target, "compileScript", Some(&detail));
+
+        assert!(expression.contains("hydrateVue27CompileScriptResult"));
+        assert!(ALIAS_RUNTIME_JS.contains("function hydrateVue27CompileScriptResult"));
+        assert!(ALIAS_RUNTIME_JS.contains("Object.defineProperty(bindings, '__isScriptSetup'"));
     }
 
     #[test]
