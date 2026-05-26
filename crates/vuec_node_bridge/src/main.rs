@@ -21,7 +21,8 @@ use vuec_sfc::{
 use vuec_source::FileId;
 use vuec_style::{compile_style, StyleCompileOptions};
 use vuec_vue2::{
-    self, Vue2CompileOptions, Vue2CompiledResult, Vue2Element, Vue2Error, Vue2Warning,
+    self, Vue2CompileOptions, Vue2CompiledResult, Vue2Element, Vue2Error,
+    Vue2SfcAssetUrlTransformOptions, Vue2Warning,
 };
 use vuec_vue3_core::{TemplateSource, Vue3CompilerOptions, Vue3Dialect};
 use vuec_vue3_dom::{self, AssetUrlOptions, DomCompilerOptions};
@@ -377,7 +378,8 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
         }
         "sfc.vue27.compileTemplate" => {
             let source = string_field(&payload, "source");
-            let compiled = vuec_vue2::compile(&source, Vue2CompileOptions::default());
+            let options = vue27_sfc_template_vue2_options(payload.get("options"));
+            let compiled = vuec_vue2::compile(&source, options);
             Ok(json!({
                 "ast": vue27_template_ast_value(&compiled),
                 "code": vue27_template_code(&compiled.render, &compiled.static_render_fns),
@@ -1089,6 +1091,11 @@ fn vue27_template_expr(render: &str) -> String {
     code = code.replace("_c('", "_c(\"");
     code = code.replace("',", "\", ");
     code = code.replace("')", "\")");
+    code = code.replace("{attrs:{", "{attrs: {");
+    code = code.replace("{domProps:{", "{domProps: {");
+    for key in ["href", "src", "srcset"] {
+        code = code.replace(&format!("\"{key}\":"), &format!("{key}: "));
+    }
     code
 }
 
@@ -3590,6 +3597,92 @@ fn vue2_options(value: Option<&Value>) -> Vue2CompileOptions {
     options
 }
 
+fn vue27_sfc_template_vue2_options(value: Option<&Value>) -> Vue2CompileOptions {
+    let mut options = Vue2CompileOptions::default();
+    let Some(value) = value else {
+        return options;
+    };
+    options.bindings = string_map_option(value, "bindings").unwrap_or_default();
+    if let Some(bindings) = value.get("bindings") {
+        options.bindings_is_script_setup = bindings
+            .get("__isScriptSetup")
+            .and_then(Value::as_bool)
+            .unwrap_or(options.bindings_is_script_setup);
+    }
+    if transform_asset_urls_enabled(value, false) {
+        options.sfc_asset_url_transform = Some(vue27_sfc_asset_url_options(value));
+    }
+    options
+}
+
+fn vue27_sfc_asset_url_options(value: &Value) -> Vue2SfcAssetUrlTransformOptions {
+    let mut options = Vue2SfcAssetUrlTransformOptions::default();
+    if let Some(extra) = value.get("transformAssetUrlsOptions") {
+        if let Some(base) = extra.get("base") {
+            options.base = if base.is_null() {
+                None
+            } else {
+                base.as_str().map(ToOwned::to_owned)
+            };
+        }
+        options.include_absolute = bool_option(extra, "includeAbsolute", options.include_absolute);
+    }
+    match value.get("transformAssetUrls") {
+        Some(Value::Object(object)) => {
+            if !object.contains_key("base")
+                && !object.contains_key("includeAbsolute")
+                && !object.contains_key("tags")
+            {
+                let tags = vue27_sfc_asset_url_tags(object);
+                if !tags.is_empty() {
+                    let mut merged = vuec_vue2::vue2_sfc_default_asset_url_tags();
+                    for (tag, attrs) in tags {
+                        merged.insert(tag, attrs);
+                    }
+                    options.tags = merged;
+                }
+            } else if let Some(tags) = object.get("tags").and_then(Value::as_object) {
+                let parsed = vue27_sfc_asset_url_tags(tags);
+                if !parsed.is_empty() {
+                    options.tags = parsed;
+                }
+            }
+            if let Some(base) = object.get("base") {
+                options.base = if base.is_null() {
+                    None
+                } else {
+                    base.as_str().map(ToOwned::to_owned)
+                };
+            }
+            options.include_absolute = object
+                .get("includeAbsolute")
+                .and_then(Value::as_bool)
+                .unwrap_or(options.include_absolute);
+        }
+        Some(Value::Bool(_)) | None => {}
+        _ => {}
+    }
+    options
+}
+
+fn vue27_sfc_asset_url_tags(object: &Map<String, Value>) -> BTreeMap<String, Vec<String>> {
+    object
+        .iter()
+        .filter_map(|(tag, attrs)| match attrs {
+            Value::String(attr) => Some((tag.clone(), vec![attr.clone()])),
+            Value::Array(items) => {
+                let attrs = items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .collect::<Vec<_>>();
+                (!attrs.is_empty()).then_some((tag.clone(), attrs))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 fn vue3_options(value: Option<&Value>) -> Vue3CompilerOptions {
     let mut options = Vue3CompilerOptions::default();
     let Some(value) = value else {
@@ -4500,6 +4593,50 @@ mod tests {
             .as_str()
             .unwrap_or("")
             .contains(r#"src: "./bar.png""#));
+    }
+
+    #[test]
+    fn vue27_bridge_compile_template_transforms_asset_urls() {
+        let compiled = dispatch(
+            "sfc.vue27.compileTemplate",
+            json!({
+                "source": r#"<div><img src="./logo.png" srcset="./logo.png 2x"><svg><use href="~@svg/file.svg#fragment"/></svg></div>"#,
+                "options": {
+                    "transformAssetUrls": {
+                        "use": "href"
+                    }
+                }
+            }),
+        )
+        .expect("vue27 sfc compileTemplate");
+
+        let code = compiled["code"].as_str().unwrap_or("");
+        assert!(code.contains(r#"src: require("./logo.png")"#));
+        assert!(code.contains(r#"srcset: require("./logo.png") + " 2x""#));
+        assert!(code.contains(r##"href: require("@svg/file.svg") + "#fragment""##));
+    }
+
+    #[test]
+    fn vue27_bridge_compile_template_asset_options_support_base_and_absolute_urls() {
+        let compiled = dispatch(
+            "sfc.vue27.compileTemplate",
+            json!({
+                "source": r#"<div><img src="./logo.png"><img src="/logo.png"><img src="@/logo.png"></div>"#,
+                "options": {
+                    "transformAssetUrls": true,
+                    "transformAssetUrlsOptions": {
+                        "base": "/base/",
+                        "includeAbsolute": true
+                    }
+                }
+            }),
+        )
+        .expect("vue27 sfc compileTemplate");
+
+        let code = compiled["code"].as_str().unwrap_or("");
+        assert!(code.contains(r#""src":"/base/logo.png""#));
+        assert!(code.contains(r#""src":require("/logo.png")"#));
+        assert!(code.contains(r#""src":require("@/logo.png")"#));
     }
 
     #[test]
