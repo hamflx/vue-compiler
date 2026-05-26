@@ -308,6 +308,7 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
                     .and_then(|options| options.get("slotted"))
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
+                mode_is_explicit: bridge_option_has(payload.get("options"), "mode"),
                 transform_asset_urls: transform_asset_urls_enabled(
                     payload.get("options").unwrap_or(&Value::Null),
                     default_options.transform_asset_urls,
@@ -4422,6 +4423,50 @@ mod tests {
         assert_eq!(compiled["map"]["sources"], json!(["anonymous.vue"]));
         assert_eq!(compiled["map"]["sourcesContent"][0], source);
         assert!(compiled["map"]["mappings"].as_str().unwrap_or("").len() > 4);
+    }
+
+    #[test]
+    fn vue3_ssr_bridge_uses_public_compile_defaults() {
+        let compiled = dispatch(
+            "vue3.ssr.compile",
+            json!({
+                "source": "<div>{{ msg }}</div>",
+                "options": {
+                    "prefixIdentifiers": false,
+                    "cacheHandlers": true,
+                    "hoistStatic": true,
+                    "scopeId": "data-v-x"
+                }
+            }),
+        )
+        .expect("ssr compile");
+
+        let code = compiled["code"].as_str().unwrap_or("");
+        assert!(!code.contains("with (_ctx)"));
+        assert!(code.contains("_ssrInterpolate(_ctx.msg)"));
+        assert!(code.contains("_ssrRenderAttrs(_attrs)"));
+        assert!(code.contains("data-v-x"));
+        assert!(!code.contains("_hoisted_"));
+        assert!(!code.contains("_cache["));
+    }
+
+    #[test]
+    fn vue3_ssr_bridge_ignores_scope_id_for_explicit_function_mode() {
+        let compiled = dispatch(
+            "vue3.ssr.compile",
+            json!({
+                "source": "<div class=\"a\"></div>",
+                "options": {
+                    "mode": "function",
+                    "scopeId": "data-v-ignored"
+                }
+            }),
+        )
+        .expect("ssr compile");
+
+        let code = compiled["code"].as_str().unwrap_or("");
+        assert!(!code.contains("data-v-ignored"));
+        assert!(code.contains("_ssrRenderAttrs(_mergeProps("));
     }
 
     #[test]

@@ -15,6 +15,7 @@ pub struct SsrCompilerOptions {
     pub core: Vue3CompilerOptions,
     pub scope_id: Option<String>,
     pub slotted: bool,
+    pub mode_is_explicit: bool,
     pub transform_asset_urls: bool,
     pub asset_url_options: AssetUrlOptions,
 }
@@ -25,6 +26,7 @@ impl Default for SsrCompilerOptions {
             core: Vue3CompilerOptions::default(),
             scope_id: None,
             slotted: false,
+            mode_is_explicit: false,
             transform_asset_urls: true,
             asset_url_options: AssetUrlOptions::default(),
         }
@@ -52,13 +54,7 @@ pub struct SsrCompileResult {
 
 pub fn compile(source: TemplateSource, options: SsrCompilerOptions) -> SsrCompileResult {
     let mut options = options;
-    options.core.ssr = true;
-    if options.core.scope_id.is_none() {
-        options.core.scope_id = options.scope_id.clone();
-    }
-    if options.slotted {
-        options.core.slotted = true;
-    }
+    normalize_public_ssr_compile_options(&mut options);
     let mut ast = Vue3Dialect::base_parse(source.clone(), &options.core);
     if options.transform_asset_urls {
         transform_ssr_asset_urls(&mut ast, &options);
@@ -82,6 +78,21 @@ pub fn compile(source: TemplateSource, options: SsrCompilerOptions) -> SsrCompil
         ),
         diagnostics: generated.diagnostics,
         preamble: generated.preamble,
+    }
+}
+
+fn normalize_public_ssr_compile_options(options: &mut SsrCompilerOptions) {
+    options.core.ssr = true;
+    options.core.prefix_identifiers = true;
+    options.core.cache_handlers = false;
+    options.core.hoist_static = false;
+    if options.mode_is_explicit && options.core.mode == "function" {
+        options.core.scope_id = None;
+    } else if options.core.scope_id.is_none() {
+        options.core.scope_id = options.scope_id.clone();
+    }
+    if options.slotted {
+        options.core.slotted = true;
     }
 }
 
@@ -164,12 +175,68 @@ mod tests {
             SsrCompilerOptions::default(),
         );
         assert!(result.code.contains("function ssrRender"));
-        assert!(result.code.contains("_ssrInterpolate(msg)"));
+        assert!(result.code.contains("_ssrInterpolate(_ctx.msg)"));
+        assert!(!result.code.contains("with (_ctx)"));
         assert!(result.ast_summary.contains("teleports=1"));
     }
 
     #[test]
-    fn scope_and_slotted_are_emitted() {
+    fn compile_uses_official_public_ssr_defaults() {
+        let result = compile(
+            TemplateSource {
+                filename: "x.vue".into(),
+                source: "<div>{{ msg }}</div>".into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            SsrCompilerOptions {
+                core: Vue3CompilerOptions {
+                    prefix_identifiers: false,
+                    cache_handlers: true,
+                    hoist_static: true,
+                    scope_id: Some("data-v-x".into()),
+                    ..Vue3CompilerOptions::default()
+                },
+                scope_id: Some("data-v-x".into()),
+                ..SsrCompilerOptions::default()
+            },
+        );
+
+        assert!(!result.code.contains("with (_ctx)"));
+        assert!(result.code.contains("_ssrInterpolate(_ctx.msg)"));
+        assert!(result.code.contains("_ssrRenderAttrs(_attrs)"));
+        assert!(result.code.contains("data-v-x"));
+        assert!(!result.code.contains("_hoisted_"));
+        assert!(!result.code.contains("_cache["));
+    }
+
+    #[test]
+    fn compile_ignores_scope_id_for_explicit_function_mode() {
+        let result = compile(
+            TemplateSource {
+                filename: "x.vue".into(),
+                source: "<div class=\"a\"></div>".into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            SsrCompilerOptions {
+                core: Vue3CompilerOptions {
+                    mode: "function".into(),
+                    scope_id: Some("data-v-ignored".into()),
+                    ..Vue3CompilerOptions::default()
+                },
+                scope_id: Some("data-v-ignored".into()),
+                mode_is_explicit: true,
+                ..SsrCompilerOptions::default()
+            },
+        );
+
+        assert!(!result.code.contains("data-v-ignored"));
+        assert!(result.code.contains("_ssrRenderAttrs(_mergeProps("));
+    }
+
+    #[test]
+    fn module_scope_and_slotted_are_emitted() {
         let result = compile(
             TemplateSource {
                 filename: "x.vue".into(),
@@ -178,6 +245,10 @@ mod tests {
                 base_offset: 0,
             },
             SsrCompilerOptions {
+                core: Vue3CompilerOptions {
+                    mode: "module".into(),
+                    ..Vue3CompilerOptions::default()
+                },
                 scope_id: Some("data-v-x".into()),
                 slotted: true,
                 ..SsrCompilerOptions::default()
@@ -252,7 +323,6 @@ mod tests {
             SsrCompilerOptions {
                 core: Vue3CompilerOptions {
                     mode: "module".into(),
-                    prefix_identifiers: true,
                     scope_id: Some("data-v-x".into()),
                     slotted: true,
                     ..Vue3CompilerOptions::default()
