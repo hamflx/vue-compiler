@@ -1,5 +1,11 @@
 # Memory
 
+- Current round: completed a Vue 2 `outputSourceRange` diagnostic span parity slice.
+- `vuec_vue2` now preserves raw attribute spans on `Vue2Attribute` instead of widening them to the element start tag, carries consumed `v-if` / `v-else-if` / `v-else` / `v-for` / `key` spans on `Vue2Element`, and uses those spans for invalid expression diagnostics and `<slot>` key warnings. Vue 2 public error/tip serialization now omits absent `start` / `end` fields, so text-only root errors can expose `start` without an `end` like the official compiler.
+- `docs/3.AST_HIR_MIR_DESIGN.md` was updated because the new Vue 2 source-range fields are AST diagnostic contract data, not optimizer/codegen state. `xtask/src/compat.rs` was not touched in this slice.
+- Current Vue 2 conformance movement: `vue2-compiler` improved from `185/188` to `187/188`, and `vue27-compiler` improved from `182/190` to `184/190`. Coverage remains `rust-backed`; the full suites still fail with real remaining Vue2.6 runtime constructor setup gap and Vue2.7 codeframe/codegen gaps, with no pending tests.
+- Verification for this Vue 2 source-range slice: `cargo fmt --all --check`, `git diff --check`, `cargo test -p vuec_vue2 --lib`, `cargo test -p xtask`, `cargo build -p vuec_node_bridge`, `cargo xtask run-conformance --suite vue2-compiler` (expected fail, `187/188`), and `cargo xtask run-conformance --suite vue27-compiler` (expected fail, `184/190`).
+
 - Current round: completed a Vue 2 platform options and optimizer integration slice.
 - `vuec_vue2` now exposes a Rust `optimize(&mut Vue2Element, &Vue2CompileOptions)` entry point, makes static analysis respect platform `isReservedTag` data, makes namespace assignment respect `getTagNamespace` data, and fixes related parser/compiler warnings for forbidden raw-text elements, root `v-else` + `v-for`, and transition-group index keys.
 - `vuec_node_bridge` now supports `vue2.optimize` and deserializes sampled Vue 2 platform options (`__vuecTagNamespaces`, `__vuecReservedTags`, and default-platform toggles) into Rust compile options.

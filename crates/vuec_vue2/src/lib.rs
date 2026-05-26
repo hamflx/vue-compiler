@@ -54,7 +54,9 @@ impl Default for Vue2CompileOptions {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue2Warning {
     pub msg: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub start: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub end: Option<usize>,
     pub tip: bool,
 }
@@ -62,7 +64,9 @@ pub struct Vue2Warning {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue2Error {
     pub msg: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub start: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub end: Option<usize>,
 }
 
@@ -166,14 +170,24 @@ pub struct Vue2Element {
     pub once: bool,
     pub has_bindings: bool,
     pub if_exp: Option<String>,
+    #[serde(default)]
+    pub if_span: Option<Span>,
     pub elseif: Option<String>,
+    #[serde(default)]
+    pub elseif_span: Option<Span>,
     pub else_branch: bool,
+    #[serde(default)]
+    pub else_span: Option<Span>,
     pub if_conditions: Vec<Vue2IfCondition>,
     pub for_exp: Option<String>,
+    #[serde(default)]
+    pub for_span: Option<Span>,
     pub alias: Option<String>,
     pub iterator1: Option<String>,
     pub iterator2: Option<String>,
     pub key: Option<String>,
+    #[serde(default)]
+    pub key_span: Option<Span>,
     pub ref_name: Option<String>,
     pub ref_in_for: bool,
     pub slot_name: Option<String>,
@@ -640,7 +654,7 @@ fn create_element(
         .map(|attr| Vue2Attribute {
             name: attr.name,
             value: attr.value.unwrap_or_default(),
-            span: Some(Span::new(FileId(0), start, end)),
+            span: Some(Span::new(FileId(0), attr.start, attr.end)),
             dynamic: false,
         })
         .collect::<Vec<_>>();
@@ -671,14 +685,19 @@ fn create_element(
         once: false,
         has_bindings: false,
         if_exp: None,
+        if_span: None,
         elseif: None,
+        elseif_span: None,
         else_branch: false,
+        else_span: None,
         if_conditions: Vec::new(),
         for_exp: None,
+        for_span: None,
         alias: None,
         iterator1: None,
         iterator2: None,
         key: None,
+        key_span: None,
         ref_name: None,
         ref_in_for: false,
         slot_name: None,
@@ -896,7 +915,8 @@ fn process_raw_attrs(element: &mut Vue2Element) {
 }
 
 fn process_structural_directives(element: &mut Vue2Element, diagnostics: &mut DiagnosticSink) {
-    if let Some(value) = remove_attr(element, "v-for") {
+    if let Some((value, span)) = remove_attr_with_span(element, "v-for") {
+        element.for_span = span;
         if let Some(parsed) = parse_for(&value) {
             element.for_exp = Some(parsed.for_exp);
             element.alias = Some(parsed.alias);
@@ -906,18 +926,21 @@ fn process_structural_directives(element: &mut Vue2Element, diagnostics: &mut Di
             diagnostics.push(vue2_warning(
                 "W_VUE2_INVALID_FOR",
                 format!("Invalid v-for expression: {value}"),
-                element.span,
+                span,
             ));
         }
     }
-    if let Some(value) = remove_attr(element, "v-if") {
+    if let Some((value, span)) = remove_attr_with_span(element, "v-if") {
         element.if_exp = Some(value);
+        element.if_span = span;
     } else {
-        if remove_attr(element, "v-else").is_some() {
+        if let Some((_, span)) = remove_attr_with_span(element, "v-else") {
             element.else_branch = true;
+            element.else_span = span;
         }
-        if let Some(value) = remove_attr(element, "v-else-if") {
+        if let Some((value, span)) = remove_attr_with_span(element, "v-else-if") {
             element.elseif = Some(value);
+            element.elseif_span = span;
         }
     }
     if remove_attr(element, "v-once").is_some() {
@@ -940,15 +963,16 @@ fn process_element(
 }
 
 fn process_key(element: &mut Vue2Element, diagnostics: &mut DiagnosticSink) {
-    if let Some(value) = get_binding_attr(element, "key", true) {
+    if let Some((value, span)) = get_binding_attr_with_span(element, "key", true) {
         if element.tag == "template" {
             diagnostics.push(vue2_warning(
                 "W_VUE2_TEMPLATE_KEY",
                 "<template> cannot be keyed. Place the key on real elements instead.",
-                element.span,
+                span.or(element.span),
             ));
         }
         element.key = Some(value);
+        element.key_span = span;
     }
 }
 
@@ -1016,7 +1040,7 @@ fn process_slot_outlet(element: &mut Vue2Element, diagnostics: &mut DiagnosticSi
             diagnostics.push(vue2_warning(
                 "W_VUE2_SLOT_KEY",
                 "`key` does not work on <slot> because slots are abstract outlets and can possibly expand into multiple elements.",
-                element.span,
+                element.key_span.or(element.span),
             ));
         }
     }
@@ -2164,16 +2188,16 @@ fn validate_expressions(root: Option<&Vue2Element>, diagnostics: &mut Diagnostic
 }
 
 fn validate_element_expressions(element: &Vue2Element, diagnostics: &mut DiagnosticSink) {
-    for (raw, expr) in [
-        ("v-if", element.if_exp.as_deref()),
-        ("v-for", element.for_exp.as_deref()),
+    for (raw, expr, span) in [
+        ("v-if", element.if_exp.as_deref(), element.if_span),
+        ("v-for", element.for_exp.as_deref(), element.for_span),
     ] {
         if let Some(expr) = expr {
             if is_invalid_js_expression(expr) {
                 diagnostics.push(vue2_error(
                     "E_VUE2_INVALID_EXPRESSION",
                     format!("Raw expression: {raw}=\"{expr}\""),
-                    element.span,
+                    span.or(element.span),
                 ));
             }
         }
@@ -2432,23 +2456,36 @@ fn project_element(ast: &mut Vue2Ast, parent: vuec_ast::NodeId, element: &Vue2El
 }
 
 fn get_binding_attr(element: &mut Vue2Element, name: &str, get_static: bool) -> Option<String> {
-    let dynamic = remove_attr(element, &format!(":{name}"))
-        .or_else(|| remove_attr(element, &format!("v-bind:{name}")));
-    if let Some(value) = dynamic {
-        Some(parse_filters(&value))
+    get_binding_attr_with_span(element, name, get_static).map(|(value, _)| value)
+}
+
+fn get_binding_attr_with_span(
+    element: &mut Vue2Element,
+    name: &str,
+    get_static: bool,
+) -> Option<(String, Option<Span>)> {
+    let dynamic = remove_attr_with_span(element, &format!(":{name}"))
+        .or_else(|| remove_attr_with_span(element, &format!("v-bind:{name}")));
+    if let Some((value, span)) = dynamic {
+        Some((parse_filters(&value), span))
     } else if get_static {
-        remove_attr(element, name).map(|value| js_string(&value))
+        remove_attr_with_span(element, name).map(|(value, span)| (js_string(&value), span))
     } else {
         None
     }
 }
 
 fn remove_attr(element: &mut Vue2Element, name: &str) -> Option<String> {
+    remove_attr_with_span(element, name).map(|(value, _)| value)
+}
+
+fn remove_attr_with_span(element: &mut Vue2Element, name: &str) -> Option<(String, Option<Span>)> {
     let value = element.attrs_map.get(name).cloned()?;
+    let span = element.raw_attrs_map.get(name).and_then(|attr| attr.span);
     if let Some(index) = element.attrs_list.iter().position(|attr| attr.name == name) {
         element.attrs_list.remove(index);
     }
-    Some(value)
+    Some((value, span))
 }
 
 fn remove_slot_binding(element: &mut Vue2Element) -> Option<(String, String, Option<Span>)> {
@@ -3248,17 +3285,28 @@ fn split_compilation_issues(diagnostics: &DiagnosticSink) -> (Vec<Vue2Error>, Ve
             Severity::Error | Severity::Warning => errors.push(Vue2Error {
                 msg: diagnostic.message.clone(),
                 start: diagnostic.span.map(|span| span.start.0),
-                end: diagnostic.span.map(|span| span.end.0),
+                end: vue2_issue_end(diagnostic),
             }),
             Severity::Tip | Severity::Note => tips.push(Vue2Warning {
                 msg: diagnostic.message.clone(),
                 start: diagnostic.span.map(|span| span.start.0),
-                end: diagnostic.span.map(|span| span.end.0),
+                end: vue2_issue_end(diagnostic),
                 tip: matches!(diagnostic.severity, Severity::Tip),
             }),
         }
     }
     (errors, tips)
+}
+
+fn vue2_issue_end(diagnostic: &Diagnostic) -> Option<usize> {
+    if diagnostic.code == "W_VUE2_TEXT_OUTSIDE_ROOT"
+        && diagnostic
+            .message
+            .contains("requires a root element, rather than just text")
+    {
+        return None;
+    }
+    diagnostic.span.map(|span| span.end.0)
 }
 
 fn render_diagnostic_message(diagnostic: &Diagnostic) -> String {
@@ -3280,8 +3328,11 @@ impl Vue2Element {
     fn clone_without_conditions(&self) -> Self {
         let mut clone = self.clone();
         clone.if_exp = None;
+        clone.if_span = None;
         clone.elseif = None;
+        clone.elseif_span = None;
         clone.else_branch = false;
+        clone.else_span = None;
         clone.if_conditions = Vec::new();
         clone
     }
@@ -3633,6 +3684,37 @@ mod tests {
                 "{template}"
             );
         }
+    }
+
+    #[test]
+    fn collects_vue2_source_ranges_like_official_compiler() {
+        let text_root = compile("hello", options());
+        assert_eq!(text_root.errors.len(), 1);
+        assert_eq!(text_root.errors[0].start, Some(0));
+        assert_eq!(text_root.errors[0].end, None);
+
+        let invalid_expr = compile(r#"<div v-if="a----">{{ b++++ }}</div>"#, options());
+        assert_eq!(invalid_expr.errors.len(), 2);
+        assert!(invalid_expr.errors[0]
+            .msg
+            .contains(r#"Raw expression: v-if="a----""#));
+        assert_eq!(invalid_expr.errors[0].start, Some(5));
+        assert_eq!(invalid_expr.errors[0].end, Some(17));
+        assert!(invalid_expr.errors[1]
+            .msg
+            .contains("Raw expression: {{ b++++ }}"));
+        assert_eq!(invalid_expr.errors[1].start, Some(18));
+        assert_eq!(invalid_expr.errors[1].end, Some(29));
+
+        let unclosed = compile("<div><span></div>", options());
+        assert_eq!(unclosed.errors.len(), 1);
+        assert_eq!(unclosed.errors[0].start, Some(5));
+        assert_eq!(unclosed.errors[0].end, Some(11));
+
+        let slot_key = compile(r#"<div><slot v-bind:key="key" /></div>"#, options());
+        assert_eq!(slot_key.errors.len(), 1);
+        assert_eq!(slot_key.errors[0].start, Some(11));
+        assert_eq!(slot_key.errors[0].end, Some(27));
     }
 
     #[test]
