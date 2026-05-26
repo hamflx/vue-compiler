@@ -2,6 +2,8 @@
 
 use serde::Serialize;
 use serde_json::{json, Value};
+#[cfg(panic = "unwind")]
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use vuec_sfc::{
     SfcCompiler, SfcScriptCompileOptions, SfcStyleCompileOptions, SfcTemplateCompileOptions,
 };
@@ -29,95 +31,111 @@ pub fn version() -> String {
 
 #[wasm_bindgen(js_name = compileVue2)]
 pub fn compile_vue2(template: &str, options_json: Option<String>) -> String {
-    let options = parse_options(options_json);
-    result_to_json(vuec_vue2::compile(template, vue2_options(&options)))
+    wasm_json_boundary(|| {
+        let options = parse_options(options_json)?;
+        Ok(vuec_vue2::compile(template, vue2_options(&options)))
+    })
 }
 
 #[wasm_bindgen(js_name = compileVue3Dom)]
 pub fn compile_vue3_dom(source: &str, options_json: Option<String>) -> String {
-    let options = parse_options(options_json);
-    let template = template_source(source, &options);
-    let mut core = vue3_options(&options);
-    apply_dom_parser_defaults(&mut core);
-    result_to_json(compile_dom(
-        template,
-        DomCompilerOptions {
-            core,
-            ..DomCompilerOptions::default()
-        },
-    ))
+    wasm_json_boundary(|| {
+        let options = parse_options(options_json)?;
+        let template = template_source(source, &options);
+        let mut core = vue3_options(&options);
+        apply_dom_parser_defaults(&mut core);
+        Ok(compile_dom(
+            template,
+            DomCompilerOptions {
+                core,
+                ..DomCompilerOptions::default()
+            },
+        ))
+    })
 }
 
 #[wasm_bindgen(js_name = compileVue3Ssr)]
 pub fn compile_vue3_ssr(source: &str, options_json: Option<String>) -> String {
-    let options = parse_options(options_json);
-    let template = template_source(source, &options);
-    let mut core = vue3_options(&options);
-    apply_dom_parser_defaults(&mut core);
-    result_to_json(compile_ssr(
-        template,
-        SsrCompilerOptions {
-            scope_id: string_option(&options, "scopeId")
-                .or_else(|| string_option(&options, "scope_id")),
-            slotted: bool_option(&options, "slotted", false),
-            mode_is_explicit: options.get("mode").is_some(),
-            core,
-            ..SsrCompilerOptions::default()
-        },
-    ))
+    wasm_json_boundary(|| {
+        let options = parse_options(options_json)?;
+        let template = template_source(source, &options);
+        let mut core = vue3_options(&options);
+        apply_dom_parser_defaults(&mut core);
+        Ok(compile_ssr(
+            template,
+            SsrCompilerOptions {
+                scope_id: string_option(&options, "scopeId")
+                    .or_else(|| string_option(&options, "scope_id")),
+                slotted: bool_option(&options, "slotted", false),
+                mode_is_explicit: options.get("mode").is_some(),
+                core,
+                ..SsrCompilerOptions::default()
+            },
+        ))
+    })
 }
 
 #[wasm_bindgen(js_name = parseSfc)]
 pub fn parse_sfc(source: &str, options_json: Option<String>) -> String {
-    let options = parse_options(options_json);
-    let filename = string_option(&options, "filename").unwrap_or_else(|| "anonymous.vue".into());
-    let mut compiler = SfcCompiler::new();
-    result_to_json(compiler.parse(filename, source))
+    wasm_json_boundary(|| {
+        let options = parse_options(options_json)?;
+        let filename =
+            string_option(&options, "filename").unwrap_or_else(|| "anonymous.vue".into());
+        let mut compiler = SfcCompiler::new();
+        Ok(compiler.parse(filename, source))
+    })
 }
 
 #[wasm_bindgen(js_name = compileSfcTemplate)]
 pub fn compile_sfc_template(source: &str, options_json: Option<String>) -> String {
-    let options = parse_options(options_json);
-    let filename = string_option(&options, "filename").unwrap_or_else(|| "anonymous.vue".into());
-    let mut compiler = SfcCompiler::new();
-    let descriptor = compiler.parse(filename, source);
-    result_to_json(compiler.compile_template(&descriptor, sfc_template_options(&options)))
+    wasm_json_boundary(|| {
+        let options = parse_options(options_json)?;
+        let filename =
+            string_option(&options, "filename").unwrap_or_else(|| "anonymous.vue".into());
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename, source);
+        Ok(compiler.compile_template(&descriptor, sfc_template_options(&options)))
+    })
 }
 
 #[wasm_bindgen(js_name = compileSfcTemplateSource)]
 pub fn compile_sfc_template_source(source: &str, options_json: Option<String>) -> String {
-    let options = parse_options(options_json);
-    let filename =
-        string_option(&options, "filename").unwrap_or_else(|| "template.vue.html".into());
-    let compiler = SfcCompiler::new();
-    result_to_json(compiler.compile_template_source(
-        filename,
-        source,
-        sfc_template_options(&options),
-    ))
+    wasm_json_boundary(|| {
+        let options = parse_options(options_json)?;
+        let filename =
+            string_option(&options, "filename").unwrap_or_else(|| "template.vue.html".into());
+        let compiler = SfcCompiler::new();
+        Ok(compiler.compile_template_source(filename, source, sfc_template_options(&options)))
+    })
 }
 
 #[wasm_bindgen(js_name = compileSfcScript)]
 pub fn compile_sfc_script(source: &str, options_json: Option<String>) -> String {
-    let options = parse_options(options_json);
-    let filename = string_option(&options, "filename").unwrap_or_else(|| "anonymous.vue".into());
-    let mut compiler = SfcCompiler::new();
-    let descriptor = compiler.parse(filename, source);
-    result_to_json(compiler.compile_script(&descriptor, sfc_script_options(&options)))
+    wasm_json_boundary(|| {
+        let options = parse_options(options_json)?;
+        let filename =
+            string_option(&options, "filename").unwrap_or_else(|| "anonymous.vue".into());
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename, source);
+        Ok(compiler.compile_script(&descriptor, sfc_script_options(&options)))
+    })
 }
 
 #[wasm_bindgen(js_name = compileSfcStyle)]
 pub fn compile_sfc_style(source: &str, options_json: Option<String>) -> String {
-    let options = parse_options(options_json);
-    let filename = string_option(&options, "filename").unwrap_or_else(|| "anonymous.vue".into());
-    let mut compiler = SfcCompiler::new();
-    let descriptor = compiler.parse(filename, source);
-    result_to_json(compiler.compile_style(&descriptor, sfc_style_options(&options)))
+    wasm_json_boundary(|| {
+        let options = parse_options(options_json)?;
+        let filename =
+            string_option(&options, "filename").unwrap_or_else(|| "anonymous.vue".into());
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename, source);
+        Ok(compiler.compile_style(&descriptor, sfc_style_options(&options)))
+    })
 }
 
 pub fn compile_vue2_json(template: &str, options: Value) -> Value {
     serde_json::to_value(vuec_vue2::compile(template, vue2_options(&options)))
-        .unwrap_or_else(error_value)
+        .unwrap_or_else(serialization_error_value)
 }
 
 pub fn compile_vue3_dom_json(source: &str, options: Value) -> Value {
@@ -131,7 +149,7 @@ pub fn compile_vue3_dom_json(source: &str, options: Value) -> Value {
             ..DomCompilerOptions::default()
         },
     ))
-    .unwrap_or_else(error_value)
+    .unwrap_or_else(serialization_error_value)
 }
 
 pub fn compile_sfc_template_json(source: &str, options: Value) -> Value {
@@ -139,25 +157,101 @@ pub fn compile_sfc_template_json(source: &str, options: Value) -> Value {
     let mut compiler = SfcCompiler::new();
     let descriptor = compiler.parse(filename, source);
     serde_json::to_value(compiler.compile_template(&descriptor, sfc_template_options(&options)))
-        .unwrap_or_else(error_value)
+        .unwrap_or_else(serialization_error_value)
 }
 
-fn parse_options(options_json: Option<String>) -> Value {
-    options_json
-        .filter(|json| !json.trim().is_empty())
-        .and_then(|json| serde_json::from_str(&json).ok())
-        .unwrap_or(Value::Null)
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct WasmBoundaryError {
+    code: &'static str,
+    message: String,
+}
+
+impl WasmBoundaryError {
+    fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+}
+
+fn wasm_json_boundary<T>(operation: impl FnOnce() -> Result<T, WasmBoundaryError>) -> String
+where
+    T: Serialize,
+{
+    #[cfg(panic = "unwind")]
+    {
+        match catch_unwind(AssertUnwindSafe(operation)) {
+            Ok(Ok(value)) => result_to_json(value),
+            Ok(Err(error)) => value_to_json(boundary_error_value(error.code, error.message)),
+            Err(payload) => value_to_json(boundary_error_value(
+                "VUEC_WASM_PANIC",
+                format!("compiler panicked: {}", panic_payload_message(payload)),
+            )),
+        }
+    }
+
+    #[cfg(not(panic = "unwind"))]
+    {
+        match operation() {
+            Ok(value) => result_to_json(value),
+            Err(error) => value_to_json(boundary_error_value(error.code, error.message)),
+        }
+    }
+}
+
+fn parse_options(options_json: Option<String>) -> Result<Value, WasmBoundaryError> {
+    let Some(json) = options_json.filter(|json| !json.trim().is_empty()) else {
+        return Ok(Value::Null);
+    };
+    serde_json::from_str(&json).map_err(|err| {
+        WasmBoundaryError::new(
+            "VUEC_WASM_INVALID_OPTIONS_JSON",
+            format!("invalid options JSON: {err}"),
+        )
+    })
 }
 
 fn result_to_json<T: Serialize>(value: T) -> String {
     serde_json::to_string(&value)
-        .unwrap_or_else(|err| serde_json::to_string(&error_value(err)).unwrap_or_default())
+        .unwrap_or_else(|err| value_to_json(serialization_error_value(err)))
 }
 
-fn error_value(error: impl std::fmt::Display) -> Value {
+fn value_to_json(value: Value) -> String {
+    serde_json::to_string(&value).unwrap_or_else(|_| "{}".into())
+}
+
+fn serialization_error_value(error: impl std::fmt::Display) -> Value {
+    boundary_error_value(
+        "VUEC_WASM_SERIALIZE",
+        format!("serialization failed: {error}"),
+    )
+}
+
+fn boundary_error_value(code: &'static str, message: impl Into<String>) -> Value {
+    let message = message.into();
     json!({
-        "errors": [format!("serialization failed: {error}")],
+        "errors": [{
+            "code": code,
+            "message": message,
+        }],
+        "diagnostics": [{
+            "severity": "error",
+            "code": code,
+            "message": message,
+        }],
     })
+}
+
+#[cfg(panic = "unwind")]
+fn panic_payload_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).into()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "unknown panic payload".into()
+    }
 }
 
 fn template_source(source: &str, options: &Value) -> TemplateSource {
@@ -356,5 +450,31 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .contains("_s(msg)"));
+    }
+
+    #[test]
+    fn wasm_exports_report_invalid_options_json() {
+        let value: Value =
+            serde_json::from_str(&compile_vue3_dom("<div/>", Some("{not json".into())))
+                .expect("json");
+        assert_eq!(value["errors"][0]["code"], "VUEC_WASM_INVALID_OPTIONS_JSON");
+        assert!(value["errors"][0]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("invalid options JSON"));
+    }
+
+    #[test]
+    #[cfg(panic = "unwind")]
+    fn wasm_boundary_converts_panics_to_json_errors() {
+        let value: Value = serde_json::from_str(&wasm_json_boundary(|| -> Result<Value, _> {
+            panic!("wasm boundary panic")
+        }))
+        .expect("json");
+        assert_eq!(value["errors"][0]["code"], "VUEC_WASM_PANIC");
+        assert!(value["errors"][0]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("wasm boundary panic"));
     }
 }

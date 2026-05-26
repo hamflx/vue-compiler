@@ -1,5 +1,10 @@
 # Memory
 
+- Current round: completed the M17 WASM recoverable error-conversion slice.
+- `vuec_wasm` exported JSON-string functions now strictly parse options JSON instead of silently falling back to defaults. Invalid options JSON and serialization failures return structured `errors` plus `diagnostics` objects with stable `VUEC_WASM_*` codes. Unwind-capable builds also convert caught boundary panics to the same envelope; wasm32 remains `panic=abort`, with panic visibility handled by the existing console hook.
+- The Node wasm-bindgen smoke now imports the raw generated wasm module in addition to the JS loader and verifies invalid-options error conversion directly at the ABI boundary.
+- Verification: `cargo fmt --all -- --check`, `cargo check -p vuec_wasm -p xtask`, `cargo test -p vuec_wasm -p xtask`, `cargo xtask verify-wasm`, and `git diff --check`.
+
 - Current round: completed the M17 WASM runtime initialization slice.
 - `vuec_wasm` now configures a wasm32-only `wee_alloc` global allocator and installs `console_error_panic_hook` from a wasm-bindgen start function, so browser/Node instantiated wasm modules get JS-console panic diagnostics without moving compiler semantics into JS.
 - Verification: `cargo fmt --all -- --check`, `cargo check -p vuec_wasm -p xtask`, `cargo test -p vuec_wasm -p xtask`, `cargo xtask verify-wasm`, and `git diff --check`.

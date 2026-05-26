@@ -6,6 +6,8 @@ import { init } from './index.js';
 const pkgPath = process.env.VUEC_WASM_PKG && path.isAbsolute(process.env.VUEC_WASM_PKG)
   ? pathToFileURL(process.env.VUEC_WASM_PKG).href
   : process.env.VUEC_WASM_PKG || './pkg/vuec_wasm.js';
+const rawMod = await import(pkgPath);
+const rawWasm = rawMod && rawMod.default && typeof rawMod.default === 'object' ? rawMod.default : rawMod;
 const wasm = await init(pkgPath);
 
 assert.equal(typeof wasm.version(), 'string');
@@ -28,6 +30,10 @@ const diagnostic = wasm.compileDom('<div v-model="x"/>', {
 });
 assert.equal(diagnostic.diagnostics[0].severity, 'error');
 assert.match(diagnostic.diagnostics[0].message, /v-model/);
+
+const invalidOptions = JSON.parse(rawWasm.compileVue3Dom('<div/>', '{not json'));
+assert.equal(invalidOptions.errors[0].code, 'VUEC_WASM_INVALID_OPTIONS_JSON');
+assert.equal(invalidOptions.diagnostics[0].severity, 'error');
 
 const ssr = wasm.compileSsr('<div>{{ msg }}</div>', {
   mode: 'module',
