@@ -13754,7 +13754,12 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         let mut spans = Vec::new();
         let mut index = 0usize;
         while index < children.len() {
-            if let Some((_, next_index)) = self.collect_ssr_static_element_span(children, index) {
+            if let Some(next_index) = self.collect_ssr_text_span(children, index) {
+                spans.push(SsrRootSpan { start: index });
+                index = next_index;
+            } else if let Some((_, next_index)) =
+                self.collect_ssr_static_element_span(children, index)
+            {
                 spans.push(SsrRootSpan { start: index });
                 index = next_index;
             } else {
@@ -13763,6 +13768,28 @@ impl<'a> Vue3SsrMirCodegen<'a> {
             }
         }
         spans
+    }
+
+    fn collect_ssr_text_span(&self, children: &[NodeId], index: usize) -> Option<usize> {
+        let mut cursor = index;
+        while cursor < children.len() && self.is_ssr_text_span_part(children[cursor]) {
+            cursor += 1;
+        }
+        (cursor > index).then_some(cursor)
+    }
+
+    fn is_ssr_text_span_part(&self, child: NodeId) -> bool {
+        match self.mir.node(child).map(|node| &node.kind) {
+            Some(Vue3SsrMirKind::PushInterpolated(_)) => true,
+            Some(Vue3SsrMirKind::PushString(value)) => {
+                !value.starts_with("<!--")
+                    && value != ">"
+                    && value != "/>"
+                    && !value.starts_with("</")
+                    && parse_ssr_open_tag_start(value).is_none()
+            }
+            _ => false,
+        }
     }
 
     fn collect_ssr_static_element_span(
@@ -14475,7 +14502,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
             parts.push(SsrTemplatePart::Static(prefix.to_string()));
         }
         let mut dynamic = !prefix.is_empty() || scope_id_expr.is_some();
-        let next_index = self.collect_ssr_template_element(
+        let next_index = self.collect_ssr_template_node(
             children,
             index,
             scope,
@@ -14488,7 +14515,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         while next_index < children.len() {
             let continuation_root_attrs =
                 root_attrs.filter(|root_attrs| root_attrs.attrs.is_none());
-            let Some(next) = self.collect_ssr_template_element(
+            let Some(next) = self.collect_ssr_template_node(
                 children,
                 next_index,
                 scope,
@@ -14501,10 +14528,71 @@ impl<'a> Vue3SsrMirCodegen<'a> {
             };
             next_index = next;
         }
-        if !dynamic {
+        let has_content = dynamic
+            || parts.iter().any(|part| match part {
+                SsrTemplatePart::Static(value) => !value.is_empty(),
+                SsrTemplatePart::Expr(_) => true,
+            });
+        if !has_content {
             return None;
         }
         Some((render_ssr_template_literal(&parts), next_index))
+    }
+
+    fn collect_ssr_template_node(
+        &self,
+        children: &[NodeId],
+        index: usize,
+        scope: &RenderScope,
+        scope_id_expr: Option<&str>,
+        parts: &mut Vec<SsrTemplatePart>,
+        dynamic: &mut bool,
+        root_attrs: Option<&SsrRootAttrs>,
+    ) -> Option<usize> {
+        let node = self.mir.node(*children.get(index)?)?;
+        match &node.kind {
+            Vue3SsrMirKind::PushString(value) if parse_ssr_open_tag_start(value).is_some() => self
+                .collect_ssr_template_element(
+                    children,
+                    index,
+                    scope,
+                    scope_id_expr,
+                    parts,
+                    dynamic,
+                    root_attrs,
+                ),
+            Vue3SsrMirKind::PushString(value)
+                if value != ">" && value != "/>" && !value.starts_with("</") =>
+            {
+                parts.push(SsrTemplatePart::Static(value.clone()));
+                Some(index + 1)
+            }
+            Vue3SsrMirKind::PushInterpolated(expr) => {
+                parts.push(SsrTemplatePart::Expr(format!(
+                    "_ssrInterpolate({})",
+                    self.render_mir_expr(expr, scope)
+                )));
+                *dynamic = true;
+                Some(index + 1)
+            }
+            Vue3SsrMirKind::RenderContent(Vue3SsrContent::Html { expression }) => {
+                parts.push(SsrTemplatePart::Expr(format!(
+                    "({}) ?? \"\"",
+                    self.render_js_expr(*expression, scope)
+                )));
+                *dynamic = true;
+                Some(index + 1)
+            }
+            Vue3SsrMirKind::RenderContent(Vue3SsrContent::Text { expression }) => {
+                parts.push(SsrTemplatePart::Expr(format!(
+                    "_ssrInterpolate({})",
+                    self.render_js_expr(*expression, scope)
+                )));
+                *dynamic = true;
+                Some(index + 1)
+            }
+            _ => None,
+        }
     }
 
     fn collect_ssr_template_element(
@@ -14603,7 +14691,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                 .is_some_and(|node| matches!(node.kind, Vue3SsrMirKind::PushString(_)))
             {
                 if parse_ssr_open_tag_start(self.ssr_push_string(children[cursor])?).is_some() {
-                    cursor = self.collect_ssr_template_element(
+                    cursor = self.collect_ssr_template_node(
                         children,
                         cursor,
                         scope,
@@ -15678,6 +15766,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
             return None;
         };
         let mut alternate = None;
+        let mut primary_children = Vec::new();
         for child_id in &node.children {
             if matches!(
                 self.mir.node(*child_id).map(|child| &child.kind),
@@ -15687,8 +15776,9 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                 alternate = Some(*child_id);
                 continue;
             }
-            self.render_node(*child_id, scope, None, writer);
+            primary_children.push(*child_id);
         }
+        self.render_child_slice(&primary_children, scope, None, None, writer);
         alternate
     }
 
@@ -27401,6 +27491,61 @@ mod tests {
     }
 
     #[test]
+    fn generate_vue3_ssr_mir_merges_root_text_and_interpolation_slices() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"foo {{ bar }} baz"#.into(),
+            file_id: FileId(43),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_ssr_mir(&ast, &Vue3CompilerOptions::default());
+        let generated = generate_vue3_ssr_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated.code.contains("ssrInterpolate: _ssrInterpolate"));
+        assert!(generated.code.contains("_push(`foo ${"));
+        assert!(generated.code.contains("_ssrInterpolate(_ctx.bar)"));
+        assert!(generated.code.contains("} baz`)"));
+        assert!(!generated.code.contains("<!--[-->"));
+        assert!(!generated.code.contains("_push(\"foo \")"));
+        assert!(!generated.code.contains("_push(_ssrInterpolate(_ctx.bar));"));
+    }
+
+    #[test]
+    fn generate_vue3_ssr_mir_merges_static_root_fragments() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"foo<!--x--><div></div><span>bar</span>"#.into(),
+            file_id: FileId(43),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_ssr_mir(&ast, &Vue3CompilerOptions::default());
+        let generated = generate_vue3_ssr_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated
+            .code
+            .contains("_push(`<!--[-->foo<!--x--><div></div><span>bar</span><!--]-->`)"));
+        assert!(!generated.code.contains("_push(\"foo\")"));
+        assert!(!generated.code.contains("_push(\"<!--x-->\")"));
+        assert!(!generated.code.contains("_push(\"<div\")"));
+    }
+
+    #[test]
     fn generate_vue3_ssr_mir_emits_asset_imports_from_mir_root() {
         let mut ast = Vue3Dialect::base_parse(
             TemplateSource {
@@ -27838,7 +27983,9 @@ mod tests {
             .code
             .contains("ssrLooseContain as _ssrLooseContain"));
         assert!(generated.code.contains("ssrLooseEqual as _ssrLooseEqual"));
-        assert!(generated
+        assert!(generated.code.contains("_push(`${"));
+        assert!(generated.code.contains("_ssrInterpolate(_ctx.text)"));
+        assert!(!generated
             .code
             .contains("_push(_ssrInterpolate(_ctx.text));"));
         assert!(!generated.code.contains("_push(\"old\");"));
@@ -28117,9 +28264,18 @@ mod tests {
             .code
             .find("if ((_ctx.maybe))")
             .expect("maybe branch");
-        let yes_offset = generated.code.find("_push(\"yes\")").expect("yes body");
-        let maybe_body_offset = generated.code.find("_push(\"maybe\")").expect("maybe body");
-        let no_offset = generated.code.find("_push(\"no\")").expect("else body");
+        let yes_offset = generated
+            .code
+            .find("_push(`<p>yes</p>`)")
+            .expect("yes body");
+        let maybe_body_offset = generated
+            .code
+            .find("_push(`<p>maybe</p>`)")
+            .expect("maybe body");
+        let no_offset = generated
+            .code
+            .find("_push(`<p>no</p>`)")
+            .expect("else body");
         assert!(ok_offset < yes_offset);
         assert!(yes_offset < maybe_offset);
         assert!(maybe_offset < maybe_body_offset);
