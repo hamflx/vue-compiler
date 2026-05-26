@@ -905,7 +905,9 @@ fn inline_preamble_helpers(helpers: &mut Vec<RuntimeHelper>, expr: &str) {
         }
         if expr.contains("_toDisplayString") {
             preferred.push(RuntimeHelper::Vue3ToDisplayString);
-            preferred.push(RuntimeHelper::Vue3CreateTextVNode);
+            if expr.contains("_createTextVNode") {
+                preferred.push(RuntimeHelper::Vue3CreateTextVNode);
+            }
         }
         if expr.contains("_withCtx") {
             preferred.push(RuntimeHelper::Vue3WithCtx);
@@ -16440,6 +16442,24 @@ fn apply_vue3_memo_helper_order(helpers: &mut Vec<RuntimeHelper>) {
 }
 
 fn apply_vue3_plain_child_helper_order(helpers: &mut Vec<RuntimeHelper>) {
+    let fragment_content_prop_order = [
+        RuntimeHelper::Vue3ToDisplayString,
+        RuntimeHelper::Vue3CreateElementVNode,
+        RuntimeHelper::Vue3NormalizeStyle,
+        RuntimeHelper::Vue3Fragment,
+        RuntimeHelper::Vue3OpenBlock,
+        RuntimeHelper::Vue3CreateElementBlock,
+    ];
+    if helpers.len() == fragment_content_prop_order.len()
+        && fragment_content_prop_order
+            .iter()
+            .all(|helper| helpers.contains(helper))
+    {
+        helpers.clear();
+        helpers.extend(fragment_content_prop_order);
+        return;
+    }
+
     let plain_child_order = [
         RuntimeHelper::Vue3ToDisplayString,
         RuntimeHelper::Vue3CreateElementVNode,
@@ -17585,19 +17605,22 @@ fn render_plain_element(
         scope.clone()
     };
     let props = render_props(element, options, &element_scope, branch_key, memo_index);
-    let children = ast
-        .node(node_id)
-        .map(|node| {
-            render_element_children(
-                ast,
-                &node.children,
-                options,
-                mode,
-                &element_scope,
-                memo_index,
-            )
-        })
-        .unwrap_or_default();
+    let children = if exact_content_directive(element).is_some() {
+        String::new()
+    } else {
+        ast.node(node_id)
+            .map(|node| {
+                render_element_children(
+                    ast,
+                    &node.children,
+                    options,
+                    mode,
+                    &element_scope,
+                    memo_index,
+                )
+            })
+            .unwrap_or_default()
+    };
     let patch_flag = render_patch_flag_text(render_patch_flag_kind(
         ast,
         node_id,
@@ -20666,6 +20689,9 @@ fn render_props_for_target(
                     object_entries.push(binding);
                 }
             }
+            Vue3Prop::Directive(dir) if dir.name == "html" || dir.name == "text" => {
+                object_entries.push(render_content_directive_prop(dir, options, scope));
+            }
             Vue3Prop::Directive(dir)
                 if dir.name == "model" && vue3_dom_model_kind(element).is_some() =>
             {
@@ -20777,6 +20803,8 @@ fn render_plain_props(entries: &[String]) -> Option<String> {
 fn exact_single_prop_prefers_multiline(entry: &str) -> bool {
     entry.contains('\n')
         || entry.contains("_cache[")
+        || entry.contains(": _toDisplayString(")
+        || entry.contains(": _normalizeStyle(")
         || entry.starts_with("key: ") && entry.contains('(')
 }
 
@@ -20844,6 +20872,35 @@ fn render_binding_prop(
     } else {
         Some(format!("{}: {}", json_key(&key), expression))
     }
+}
+
+fn render_content_directive_prop(
+    dir: &Vue3Directive,
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+) -> String {
+    let value = dir
+        .exp
+        .as_ref()
+        .map(Vue3Expression::source_string)
+        .unwrap_or_default();
+    let value = value.trim();
+    let key = if dir.name == "html" {
+        "innerHTML"
+    } else {
+        "textContent"
+    };
+    let expression = if value.is_empty() {
+        quote_string("")
+    } else {
+        let expression = rewrite_expression_with_scope(value, options, scope);
+        if dir.name == "text" && !content_directive_text_is_static(dir, options) {
+            format!("_toDisplayString({expression})")
+        } else {
+            expression
+        }
+    };
+    format!("{}: {}", json_key(key), expression)
 }
 
 fn render_model_update_prop_exact(
@@ -21218,6 +21275,9 @@ fn prop_requires_dynamic_patch(
     if dir.name == "model" && vue3_dom_model_kind(element).is_some() {
         return false;
     }
+    if dir.name == "html" || dir.name == "text" {
+        return true;
+    }
     if dir.name == "on" && !event_directive_is_vnode_hook(dir) {
         return !event_handler_can_skip_patch(element, dir, options, scope);
     }
@@ -21350,6 +21410,8 @@ fn dynamic_props_arg(
             {
                 Some(component_model_prop_name(dir))
             }
+            Vue3Prop::Directive(dir) if dir.name == "html" => Some("innerHTML".into()),
+            Vue3Prop::Directive(dir) if dir.name == "text" => Some("textContent".into()),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -21371,6 +21433,26 @@ fn event_directive_is_vnode_hook(dir: &Vue3Directive) -> bool {
     dir.arg
         .as_ref()
         .is_some_and(|arg| arg.source_string().starts_with("vue:"))
+}
+
+fn exact_content_directive(element: &Vue3Element) -> Option<&Vue3Directive> {
+    element.props.iter().find_map(|prop| match prop {
+        Vue3Prop::Directive(dir) if dir.name == "html" || dir.name == "text" => Some(dir),
+        _ => None,
+    })
+}
+
+fn content_directive_text_is_static(dir: &Vue3Directive, options: &Vue3CompilerOptions) -> bool {
+    let Some(source) = dir.exp.as_ref().map(Vue3Expression::source_string) else {
+        return true;
+    };
+    let source = source.trim();
+    process_expression_is_static_literal(source)
+        || matches!(
+            options.binding_metadata.get(source).map(String::as_str),
+            Some("literal-const")
+        )
+        || vue3_expression_is_string_literal(source)
 }
 
 fn event_handler_prop_name(element: &Vue3Element, event: &str) -> String {
@@ -29393,6 +29475,37 @@ mod tests {
         assert!(!result.code.contains("_normalizeClass(_ctx.cls)"));
         assert!(!result.code.contains("_normalizeStyle(_ctx.style)"));
         assert!(!result.code.contains("[\"style\"]"));
+    }
+
+    #[test]
+    fn base_compile_emits_dom_content_directive_props() {
+        let result = base_compile(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: r#"<div><section v-html="raw">old</section><p v-text="msg">old</p><span v-text="'hi'" v-bind="after"/></div>"#
+                    .into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                mode: "module".into(),
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(result.code.contains("toDisplayString as _toDisplayString"));
+        assert!(result.code.contains("{ innerHTML: _ctx.raw }"));
+        assert!(result
+            .code
+            .contains("textContent: _toDisplayString(_ctx.msg)"));
+        assert!(result
+            .code
+            .contains("_mergeProps({ textContent: 'hi' }, _ctx.after)"));
+        assert!(result.code.contains("8 /* PROPS */, [\"innerHTML\"]"));
+        assert!(result.code.contains("8 /* PROPS */, [\"textContent\"]"));
+        assert!(!result.code.contains("\"old\""));
+        assert!(!result.code.contains("_toDisplayString('hi')"));
     }
 
     #[test]

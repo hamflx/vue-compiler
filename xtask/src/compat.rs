@@ -11135,6 +11135,8 @@ fn prepare_vue3_dom_conformance_suite(
 }
 
 fn write_vue3_dom_conformance_shims(prepared_root: &Path) -> Result<()> {
+    rewrite_vue3_dom_public_index_spec_import(prepared_root)?;
+
     let dom_src = prepared_root
         .join("packages")
         .join("compiler-dom")
@@ -11192,6 +11194,27 @@ export default {
 }
 "#;
     write_text(&prepared_root.join("vitest.config.ts"), config)?;
+    Ok(())
+}
+
+fn rewrite_vue3_dom_public_index_spec_import(prepared_root: &Path) -> Result<()> {
+    let index_spec = prepared_root
+        .join("packages")
+        .join("compiler-dom")
+        .join("__tests__")
+        .join("index.spec.ts");
+    if !index_spec.exists() {
+        return Ok(());
+    }
+    let original = fs::read_to_string(&index_spec)
+        .with_context(|| format!("failed to read {}", index_spec.display()))?;
+    let rewritten = original.replace(
+        "import { compile } from '../src'",
+        "import { compile } from '@vue/compiler-dom'",
+    );
+    if rewritten != original {
+        write_text(&index_spec, &rewritten)?;
+    }
     Ok(())
 }
 
@@ -11781,6 +11804,7 @@ fn conformance_coverage_file_kind(
         || path.ends_with("packages/compiler-core/__tests__/parse.spec.ts")
         || path.ends_with("packages/compiler-core/__tests__/scopeId.spec.ts")
         || path.ends_with("packages/compiler-core/__tests__/utils.spec.ts")
+        || path.ends_with("packages/compiler-dom/__tests__/index.spec.ts")
         || path.ends_with("packages/compiler-dom/__tests__/parse.spec.ts")
     {
         ConformanceCoverageKind::RustBacked
@@ -12822,11 +12846,20 @@ mod tests {
                 .as_nanos()
         ));
         write_vue3_core_source_shims(&temp).unwrap();
+        let index_spec = temp
+            .join("packages")
+            .join("compiler-dom")
+            .join("__tests__")
+            .join("index.spec.ts");
+        fs::create_dir_all(index_spec.parent().unwrap()).unwrap();
+        fs::write(&index_spec, "import { compile } from '../src'\n").unwrap();
         write_vue3_dom_conformance_shims(&temp).unwrap();
 
         let config = fs::read_to_string(temp.join("vitest.config.ts")).unwrap();
         assert!(!config.contains("vitest/config"));
         assert!(config.contains("include: ['packages/compiler-dom/__tests__/**/*.spec.ts']"));
+        let index_spec = fs::read_to_string(index_spec).unwrap();
+        assert!(index_spec.contains("import { compile } from '@vue/compiler-dom'"));
 
         let transform_style = fs::read_to_string(
             temp.join("packages")
@@ -12933,6 +12966,12 @@ mod tests {
             r#"{
               "testResults": [
                 {
+                  "name": "F:/repo/prepared/vue3-dom/packages/compiler-dom/__tests__/index.spec.ts",
+                  "assertionResults": [
+                    { "status": "passed" }
+                  ]
+                },
+                {
                   "name": "F:/repo/prepared/vue3-dom/packages/compiler-dom/__tests__/parse.spec.ts",
                   "assertionResults": [
                     { "status": "passed" },
@@ -12960,8 +12999,8 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             counts: ConformanceExecutionCounts {
-                total: 5,
-                pass: 4,
+                total: 6,
+                pass: 5,
                 fail: 1,
                 skip: 0,
                 pending: 0,
@@ -12972,13 +13011,17 @@ mod tests {
             conformance_coverage_report(suite_spec(ConformanceSuite::Vue3Dom), Some(&execution));
 
         assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
-        assert_eq!(coverage.rust_backed_pass, 3);
-        assert_eq!(coverage.rust_backed_total, 3);
+        assert_eq!(coverage.rust_backed_pass, 4);
+        assert_eq!(coverage.rust_backed_total, 4);
         assert_eq!(
             coverage.files[0].source,
             ConformanceCoverageKind::RustBacked
         );
-        assert_eq!(coverage.files[1].source, ConformanceCoverageKind::Mixed);
+        assert_eq!(
+            coverage.files[1].source,
+            ConformanceCoverageKind::RustBacked
+        );
+        assert_eq!(coverage.files[2].source, ConformanceCoverageKind::Mixed);
         assert!(coverage.files[0]
             .reason
             .contains("routed through vuec_node_bridge"));
