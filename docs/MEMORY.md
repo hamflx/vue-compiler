@@ -1,5 +1,10 @@
 # Memory
 
+- Current round: corrected Vue 3 compiler-dom conformance coverage for the Rust-backed public parser slice.
+- `packages/compiler-dom/__tests__/parse.spec.ts` is now classified as `rust-backed` because the prepared DOM test imports `baseParse` from `@vue/compiler-core`, whose generated alias directly calls `vuec_node_bridge` command `vue3.core.baseParse` and hydrates the Rust public AST projection; the official DOM `parserOptions` object remains an API option input, not compiler semantics in `xtask/src/compat.rs`.
+- Current Vue 3 DOM conformance remains `133/133`, but coverage is now more precise: top-level `mixed`, with `rust-backed: 33/33` for DOM parser coverage and `mixed: 100/100` for DOM index/decoder/transform files that still execute official TypeScript source or alias-runtime adapter paths.
+- Verification for this coverage slice: `cargo fmt --all --check`, `git diff --check`, `cargo check -p xtask`, `cargo test -p xtask`, focused official Vitest `packages/compiler-dom/__tests__/parse.spec.ts` (`33/33`), and `cargo xtask run-conformance --suite vue3-dom` (`133/133`, coverage `rust-backed 33/33`, `mixed 100/100`).
+
 - Current round: completed the Vue 2.7 SFC `compileStyle` PostCSS API adapter slice.
 - The generated `vue/compiler-sfc` alias now keeps caller-provided `postcssPlugins` and `postcssOptions` on the JavaScript side because plugin callbacks cannot be serialized through the JSON bridge. Rust still performs the style source compile/preprocess/scoped/CSS-var path through `vuec_node_bridge`; the alias adapter only runs the caller PostCSS callbacks/options afterward and preserves sync LazyResult-style errors plus async `compileStyleAsync` Promise behavior.
 - Conformance coverage now marks mixed file-level coverage accurately. Full `vue27-sfc` reports `144/144` official tests passed, with top-level coverage `mixed`, `rust-backed: 134/134`, and `mixed: 10/10` for `compileStyle.spec.ts` because of the JavaScript PostCSS callback boundary. This is full Vue 2.7 SFC official-suite pass, not a pure Rust claim for PostCSS callback execution.

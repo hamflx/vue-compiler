@@ -11781,6 +11781,7 @@ fn conformance_coverage_file_kind(
         || path.ends_with("packages/compiler-core/__tests__/parse.spec.ts")
         || path.ends_with("packages/compiler-core/__tests__/scopeId.spec.ts")
         || path.ends_with("packages/compiler-core/__tests__/utils.spec.ts")
+        || path.ends_with("packages/compiler-dom/__tests__/parse.spec.ts")
     {
         ConformanceCoverageKind::RustBacked
     } else {
@@ -12914,6 +12915,74 @@ mod tests {
         let coverage = conformance_coverage_report(suite_spec(ConformanceSuite::Vue3Dom), None);
         assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
         assert!(coverage.reason.contains("official DOM source imports"));
+    }
+
+    #[test]
+    fn vue3_dom_coverage_counts_public_parse_as_rust_backed() {
+        let temp = std::env::temp_dir().join(format!(
+            "vuec-xtask-vue3-dom-coverage-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp).unwrap();
+        let report = temp.join("vitest-report.json");
+        fs::write(
+            &report,
+            r#"{
+              "testResults": [
+                {
+                  "name": "F:/repo/prepared/vue3-dom/packages/compiler-dom/__tests__/parse.spec.ts",
+                  "assertionResults": [
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" }
+                  ]
+                },
+                {
+                  "name": "F:/repo/prepared/vue3-dom/packages/compiler-dom/__tests__/transforms/vModel.spec.ts",
+                  "assertionResults": [
+                    { "status": "passed" },
+                    { "status": "failed" }
+                  ]
+                }
+              ]
+            }"#,
+        )
+        .unwrap();
+        let execution = ConformanceExecutionResult {
+            status: "failed".into(),
+            runner: "vitest".into(),
+            prepared_root: "prepared".into(),
+            output_file: report.display().to_string(),
+            exit_code: Some(1),
+            stdout: String::new(),
+            stderr: String::new(),
+            counts: ConformanceExecutionCounts {
+                total: 5,
+                pass: 4,
+                fail: 1,
+                skip: 0,
+                pending: 0,
+            },
+        };
+
+        let coverage =
+            conformance_coverage_report(suite_spec(ConformanceSuite::Vue3Dom), Some(&execution));
+
+        assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
+        assert_eq!(coverage.rust_backed_pass, 3);
+        assert_eq!(coverage.rust_backed_total, 3);
+        assert_eq!(
+            coverage.files[0].source,
+            ConformanceCoverageKind::RustBacked
+        );
+        assert_eq!(coverage.files[1].source, ConformanceCoverageKind::Mixed);
+        assert!(coverage.files[0]
+            .reason
+            .contains("routed through vuec_node_bridge"));
+        let _ = fs::remove_dir_all(temp);
     }
 
     #[test]

@@ -45,6 +45,7 @@
 - [x] Vue 3 compiler-core official conformance closure (`652/652`) with Rust-backed `isMemberExpression` utility projection.
 - [x] Vue 3 compiler-dom official conformance execution wiring (real Vitest run; currently `45/133`, `mixed` coverage).
 - [x] Vue 3 compiler-dom Rust-backed parser compatibility slice for `parse.spec.ts` (`33/33`; full DOM suite currently `69/133`, `mixed` coverage).
+- [x] Vue 3 compiler-dom coverage classification correction for public parser coverage, marking official `parse.spec.ts` as Rust-backed through `vue3.core.baseParse` bridge hydration while keeping DOM transform/source files mixed; full DOM suite remains `133/133`, now reported as `rust-backed 33/33`, `mixed 100/100`.
 - [x] Vue 3 compiler-dom mixed alias-runtime transform execution slice for official DOM `baseCompile` callers (`ignoreSideEffectTags` closed; full DOM suite currently `87/133`, `mixed` coverage).
 - [x] Vue 3 compiler-dom Rust-backed dynamic runtime directive helper projection for `vShow.spec.ts` (`2/2`; full DOM suite currently `88/133`, `mixed` coverage).
 - [x] Vue 3 compiler-dom Rust-backed dynamic built-in component helper projection for `Transition.spec.ts` (`14/14`; full DOM suite currently `91/133`, `mixed` coverage).
