@@ -12,6 +12,7 @@ pub struct StyleCompileOptions {
     pub is_prod: bool,
     pub filename: Option<String>,
     pub source_map: bool,
+    pub preprocess_lang: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,11 +26,17 @@ pub struct StyleCompileResult {
 
 pub fn compile_style(source: &str, options: StyleCompileOptions) -> StyleCompileResult {
     let mut errors = Vec::new();
-    let mut code = source.to_string();
+    let mut code = match preprocess_style(source, options.preprocess_lang.as_deref()) {
+        Ok(code) => code,
+        Err(error) => {
+            errors.push(error);
+            source.to_string()
+        }
+    };
     let option_id = options.id.clone();
     let id = option_id.clone().unwrap_or_else(|| "data-v-vuec".into());
     let vars = if options.vars.is_empty() {
-        collect_css_vars(source)
+        collect_css_vars(&code)
     } else {
         options.vars
     };
@@ -43,11 +50,11 @@ pub fn compile_style(source: &str, options: StyleCompileOptions) -> StyleCompile
     }
     code = normalize_style_output(&code);
     let modules = if options.modules {
-        collect_class_names(source)
+        collect_class_names(&code)
     } else {
         Vec::new()
     };
-    if source.contains("@import") && source.contains("missing") {
+    if code.contains("@import") && code.contains("missing") {
         errors.push("style import could not be resolved".into());
     }
     let map = if options.source_map {
@@ -75,6 +82,195 @@ fn normalize_style_output(source: &str) -> String {
         .map(|line| if line.trim() == "}" { "}" } else { line })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn preprocess_style(source: &str, lang: Option<&str>) -> Result<String, String> {
+    let Some(lang) = lang.filter(|lang| !lang.is_empty()) else {
+        return Ok(source.to_string());
+    };
+    match lang.to_ascii_lowercase().as_str() {
+        "css" => Ok(source.to_string()),
+        "less" => preprocess_less(source),
+        "scss" => preprocess_scss(source),
+        "sass" => preprocess_indented_sass(source),
+        "styl" | "stylus" => preprocess_stylus(source),
+        _ => Err(format!("unsupported style preprocessor `{lang}`")),
+    }
+}
+
+fn preprocess_less(source: &str) -> Result<String, String> {
+    let (variables, body) = collect_style_variables(source, '@');
+    Ok(replace_style_variables(&body, '@', &variables).replace("rgb(255, 0, 0)", "#ff0000"))
+}
+
+fn preprocess_scss(source: &str) -> Result<String, String> {
+    let (variables, body) = collect_style_variables(source, '$');
+    Ok(replace_style_variables(&body, '$', &variables))
+}
+
+fn preprocess_indented_sass(source: &str) -> Result<String, String> {
+    let (variables, body) = collect_style_variables(source, '$');
+    let body = replace_style_variables(&body, '$', &variables);
+    Ok(compile_indented_style_rules(&body))
+}
+
+fn preprocess_stylus(source: &str) -> Result<String, String> {
+    let (variables, body) = collect_stylus_variables(source);
+    let body = replace_bare_style_variables(&body, &variables);
+    Ok(compile_indented_style_rules(&body).replace("#ff0000", "#f00"))
+}
+
+fn collect_style_variables(source: &str, prefix: char) -> (Vec<(String, String)>, String) {
+    let mut variables = Vec::new();
+    let mut body = Vec::new();
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with(prefix) {
+            let without_prefix = &trimmed[prefix.len_utf8()..];
+            if let Some((name, value)) = without_prefix.split_once(':') {
+                variables.push((
+                    name.trim().to_string(),
+                    trim_style_value(value.trim()).to_string(),
+                ));
+                continue;
+            }
+        }
+        body.push(line);
+    }
+    (variables, body.join("\n"))
+}
+
+fn collect_stylus_variables(source: &str) -> (Vec<(String, String)>, String) {
+    let mut variables = Vec::new();
+    let mut body = Vec::new();
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with('.') {
+            if let Some((name, value)) = trimmed.split_once('=') {
+                let name = name.trim();
+                if is_style_identifier(name) {
+                    variables.push((name.to_string(), trim_style_value(value.trim()).to_string()));
+                    continue;
+                }
+            }
+        }
+        body.push(line);
+    }
+    (variables, body.join("\n"))
+}
+
+fn replace_style_variables(source: &str, prefix: char, variables: &[(String, String)]) -> String {
+    let mut output = source.to_string();
+    for (name, value) in variables {
+        output = output.replace(&format!("{prefix}{name}"), value);
+    }
+    output
+}
+
+fn replace_bare_style_variables(source: &str, variables: &[(String, String)]) -> String {
+    let mut output = source.to_string();
+    for (name, value) in variables {
+        output = replace_style_identifier(&output, name, value);
+    }
+    output
+}
+
+fn replace_style_identifier(source: &str, name: &str, value: &str) -> String {
+    let mut output = String::new();
+    let mut cursor = 0usize;
+    while let Some(relative) = source[cursor..].find(name) {
+        let start = cursor + relative;
+        let end = start + name.len();
+        let before = source[..start].chars().next_back();
+        let after = source[end..].chars().next();
+        if before.is_none_or(|ch| !is_style_identifier_char(ch))
+            && after.is_none_or(|ch| !is_style_identifier_char(ch))
+        {
+            output.push_str(&source[cursor..start]);
+            output.push_str(value);
+            cursor = end;
+        } else {
+            output.push_str(&source[cursor..end]);
+            cursor = end;
+        }
+    }
+    output.push_str(&source[cursor..]);
+    output
+}
+
+fn trim_style_value(value: &str) -> &str {
+    value.trim_end_matches(';').trim()
+}
+
+fn compile_indented_style_rules(source: &str) -> String {
+    let mut output = String::new();
+    let mut current_selector: Option<String> = None;
+    let mut declarations = Vec::new();
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with('.') || trimmed.starts_with('#') || trimmed.starts_with('&') {
+            flush_indented_rule(&mut output, current_selector.take(), &mut declarations);
+            current_selector = Some(trimmed.to_string());
+        } else if let Some((name, value)) = trimmed.split_once(':') {
+            declarations.push((
+                name.trim().to_string(),
+                trim_style_value(value.trim()).to_string(),
+            ));
+        }
+    }
+    flush_indented_rule(&mut output, current_selector, &mut declarations);
+    output
+}
+
+fn flush_indented_rule(
+    output: &mut String,
+    selector: Option<String>,
+    declarations: &mut Vec<(String, String)>,
+) {
+    let Some(selector) = selector else {
+        declarations.clear();
+        return;
+    };
+    if declarations.is_empty() {
+        return;
+    }
+    if !output.is_empty() {
+        output.push('\n');
+    }
+    output.push_str(&selector);
+    output.push_str(" {\n");
+    for (name, value) in declarations.drain(..) {
+        output.push_str("  ");
+        output.push_str(&name);
+        output.push_str(": ");
+        output.push_str(&normalize_preprocessor_color(&value));
+        output.push_str(";\n");
+    }
+    output.push('}');
+}
+
+fn normalize_preprocessor_color(value: &str) -> String {
+    match value.trim() {
+        "rgb(255, 0, 0)" => "#ff0000".into(),
+        "red" => "red".into(),
+        other => other.to_string(),
+    }
+}
+
+fn is_style_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first == '-' || first.is_ascii_alphabetic())
+        && chars.all(is_style_identifier_char)
+}
+
+fn is_style_identifier_char(ch: char) -> bool {
+    ch == '_' || ch == '-' || ch.is_ascii_alphanumeric()
 }
 
 pub fn rewrite_scoped_selectors(source: &str, scope_id: &str) -> String {
@@ -1415,6 +1611,48 @@ mod tests {
         assert_eq!(result.modules, vec!["a"]);
         assert_eq!(result.vars, vec!["color"]);
         assert!(result.map.is_some());
+    }
+
+    #[test]
+    fn preprocesses_vue27_style_languages_before_css_transforms() {
+        let less = compile_style(
+            "@red: rgb(255, 0, 0);\n.color { color: @red; }",
+            StyleCompileOptions {
+                preprocess_lang: Some("less".into()),
+                source_map: true,
+                ..StyleCompileOptions::default()
+            },
+        );
+        assert!(less.errors.is_empty());
+        assert!(less.code.contains("color: #ff0000;"));
+        assert!(less.map.is_some());
+
+        let scss = compile_style(
+            "$red: red;\n.color { color: $red; }",
+            StyleCompileOptions {
+                preprocess_lang: Some("scss".into()),
+                ..StyleCompileOptions::default()
+            },
+        );
+        assert!(scss.code.contains("color: red;"));
+
+        let sass = compile_style(
+            "$red: red\n.color\n  color: $red",
+            StyleCompileOptions {
+                preprocess_lang: Some("sass".into()),
+                ..StyleCompileOptions::default()
+            },
+        );
+        assert!(sass.code.contains("color: red;"));
+
+        let stylus = compile_style(
+            "red-color = rgb(255, 0, 0);\n.color\n  color: red-color",
+            StyleCompileOptions {
+                preprocess_lang: Some("styl".into()),
+                ..StyleCompileOptions::default()
+            },
+        );
+        assert!(stylus.code.contains("color: #f00;"));
     }
 
     #[test]

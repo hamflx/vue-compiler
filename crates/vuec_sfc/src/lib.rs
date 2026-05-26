@@ -163,6 +163,8 @@ pub struct SfcStyleCompileOptions {
     pub scoped: bool,
     pub vars: Vec<String>,
     pub is_prod: bool,
+    pub preprocess_lang: Option<String>,
+    pub source_map: bool,
 }
 
 impl Default for SfcStyleCompileOptions {
@@ -172,6 +174,8 @@ impl Default for SfcStyleCompileOptions {
             scoped: false,
             vars: Vec::new(),
             is_prod: false,
+            preprocess_lang: None,
+            source_map: false,
         }
     }
 }
@@ -704,7 +708,12 @@ impl SfcCompiler {
                     vars: options.vars.clone(),
                     is_prod: options.is_prod,
                     filename: Some(descriptor.filename.clone()),
-                    source_map: false,
+                    source_map: options.source_map,
+                    preprocess_lang: style
+                        .attrs
+                        .lang
+                        .clone()
+                        .or_else(|| options.preprocess_lang.clone()),
                 },
             );
             if !code.is_empty() && !result.code.is_empty() {
