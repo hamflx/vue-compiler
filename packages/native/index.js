@@ -9,11 +9,19 @@ function fromJson(json) {
 }
 
 function compileVue2(template, options = {}) {
-  return fromJson(binding.compileVue2(template, options));
+  return normalizeVue2CompileResult(fromJson(binding.compileVue2(template, options)));
 }
 
 function compileToFunctionsVue2(template, options = {}) {
-  return fromJson(binding.compileToFunctionsVue2(template, options));
+  return normalizeVue2CompileResult(fromJson(binding.compileToFunctionsVue2(template, options)));
+}
+
+function compileSsrVue2(template, options = {}) {
+  return normalizeVue2CompileResult(fromJson(binding.compileSsrVue2(template, options)));
+}
+
+function generateCodeFrameVue2(source, start = 0, end = start) {
+  return binding.generateCodeFrameVue2(String(source || ''), Number(start) || 0, Number(end) || 0);
 }
 
 function baseCompileVue3(source, options = {}) {
@@ -70,17 +78,54 @@ function parse(source, options = {}) {
 
 function compileTemplate(options) {
   const opts = options || {};
-  return compileSfcTemplate(String(opts.source || ''), opts);
+  return compileSfcTemplate(templateSfcSource(String(opts.source || '')), opts);
 }
 
 function compileScript(descriptor, options = {}) {
   const source = descriptor && typeof descriptor.source === 'string' ? descriptor.source : '';
-  return compileSfcScript(source, options);
+  const opts = {
+    filename: descriptor && descriptor.filename,
+    ...options,
+  };
+  return compileSfcScript(source, opts);
 }
 
 function compileStyle(options) {
   const opts = options || {};
-  return compileSfcStyle(String(opts.source || ''), opts);
+  return compileSfcStyle(styleSfcSource(String(opts.source || ''), opts), opts);
+}
+
+function normalizeVue2CompileResult(result) {
+  if (result && Array.isArray(result.static_render_fns) && !Array.isArray(result.staticRenderFns)) {
+    result.staticRenderFns = result.static_render_fns;
+  }
+  return result;
+}
+
+function templateSfcSource(source) {
+  return /<template(?:\s|>)/i.test(source) ? source : `<template>${source}</template>`;
+}
+
+function styleSfcSource(source, options) {
+  if (/<style(?:\s|>)/i.test(source)) {
+    return source;
+  }
+  const attrs = [];
+  if (options.scoped) {
+    attrs.push('scoped');
+  }
+  if (options.modules || options.module) {
+    attrs.push('module');
+  }
+  const lang = options.lang || options.preprocessLang || options.preprocess_lang;
+  if (lang) {
+    attrs.push(`lang="${escapeAttribute(lang)}"`);
+  }
+  return `<style${attrs.length ? ` ${attrs.join(' ')}` : ''}>${source}</style>`;
+}
+
+function escapeAttribute(value) {
+  return String(value).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
 }
 
 module.exports = {
@@ -88,6 +133,8 @@ module.exports = {
   apiManifest: () => fromJson(binding.apiManifest()),
   compileVue2,
   compileToFunctionsVue2,
+  compileSsrVue2,
+  generateCodeFrameVue2,
   baseCompileVue3,
   compileVue3Dom,
   compileVue3Ssr,

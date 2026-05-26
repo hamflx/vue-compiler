@@ -76,6 +76,7 @@ enum Command {
         scope: SelectionArgs,
     },
     VerifyNapi,
+    VerifyNapiAlias,
     SummarizeCompat {
         #[arg(long)]
         locked: bool,
@@ -115,6 +116,7 @@ fn main() -> Result<()> {
         Command::RunOutputContract { scope } => run_output_contract(&scope),
         Command::VerifyNpmAlias { scope } => verify_npm_alias(&scope),
         Command::VerifyNapi => verify_napi()?,
+        Command::VerifyNapiAlias => verify_napi_alias()?,
         Command::SummarizeCompat { locked, lock } => summarize_compat(locked, &lock),
     };
     println!("{}", serde_json::to_string_pretty(&report)?);
@@ -122,6 +124,64 @@ fn main() -> Result<()> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+fn verify_napi_alias() -> Result<compat::JsonReport> {
+    let mut violations = Vec::new();
+    let mut created = Vec::new();
+    let alias_root = PathBuf::from("target").join("napi-alias");
+    let node_modules = alias_root.join("node_modules");
+    let native_package_dir = node_modules.join("@vuec-rs").join("native");
+    let binding_path = native_package_dir.join("vuec_napi.node");
+
+    match build_napi_crate() {
+        Ok(()) => {}
+        Err(err) => violations.push(format!("failed to build vuec_napi: {err:#}")),
+    }
+
+    if violations.is_empty() {
+        match prepare_napi_alias_tree(&alias_root) {
+            Ok(paths) => created.extend(paths.into_iter().map(|path| path.display().to_string())),
+            Err(err) => violations.push(format!("failed to prepare NAPI alias packages: {err:#}")),
+        }
+    }
+
+    if violations.is_empty() {
+        match copy_napi_binding(&binding_path) {
+            Ok(path) => created.push(path.display().to_string()),
+            Err(err) => violations.push(format!("failed to install NAPI binding: {err:#}")),
+        }
+    }
+
+    let smoke_output = if violations.is_empty() {
+        match run_napi_alias_smoke(&alias_root) {
+            Ok(output) => Some(output),
+            Err(err) => {
+                violations.push(format!("NAPI alias smoke failed: {err:#}"));
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let item_status = if violations.is_empty() {
+        compat::ReportStatus::Pass
+    } else {
+        compat::ReportStatus::Fail
+    };
+    Ok(
+        compat::JsonReport::new("verify_napi_alias", item_status)
+            .with_items(vec![compat::ReportItem::new(
+                "official-package-name-napi-alias",
+                item_status,
+                smoke_output.unwrap_or_else(|| "NAPI alias smoke did not run".into()),
+                Some(alias_root),
+            )])
+            .with_created(created)
+            .with_violations(violations)
+            .with_note("builds vuec_napi, installs @vuec-rs/native plus official package-name alias templates under target/napi-alias, and requires them from Node"),
+    )
 }
 
 fn ensure_dir(path: &PathBuf) -> Result<()> {
@@ -212,6 +272,103 @@ fn copy_napi_binding(target_path: &Path) -> Result<PathBuf> {
     Ok(target_path.to_path_buf())
 }
 
+fn prepare_napi_alias_tree(alias_root: &Path) -> Result<Vec<PathBuf>> {
+    ensure_target_child(alias_root)?;
+    let node_modules = alias_root.join("node_modules");
+    if alias_root.exists() {
+        std::fs::remove_dir_all(alias_root)
+            .with_context(|| format!("failed to remove {}", alias_root.display()))?;
+    }
+    std::fs::create_dir_all(&node_modules)
+        .with_context(|| format!("failed to create {}", node_modules.display()))?;
+
+    let mut created = Vec::new();
+    let native_target = node_modules.join("@vuec-rs").join("native");
+    copy_dir_recursive(Path::new("packages/native"), &native_target)?;
+    created.push(native_target);
+
+    for (source, target) in [
+        (
+            PathBuf::from("packages/native-aliases/vue-template-compiler"),
+            node_modules.join("vue-template-compiler"),
+        ),
+        (
+            PathBuf::from("packages/native-aliases/vue"),
+            node_modules.join("vue"),
+        ),
+        (
+            PathBuf::from("packages/native-aliases/@vue/compiler-core"),
+            node_modules.join("@vue").join("compiler-core"),
+        ),
+        (
+            PathBuf::from("packages/native-aliases/@vue/compiler-dom"),
+            node_modules.join("@vue").join("compiler-dom"),
+        ),
+        (
+            PathBuf::from("packages/native-aliases/@vue/compiler-ssr"),
+            node_modules.join("@vue").join("compiler-ssr"),
+        ),
+        (
+            PathBuf::from("packages/native-aliases/@vue/compiler-sfc"),
+            node_modules.join("@vue").join("compiler-sfc"),
+        ),
+    ] {
+        copy_dir_recursive(&source, &target)?;
+        created.push(target);
+    }
+
+    std::fs::copy(
+        Path::new("packages/native-aliases/smoke.js"),
+        alias_root.join("smoke.js"),
+    )
+    .context("failed to copy NAPI alias smoke script")?;
+    created.push(alias_root.join("smoke.js"));
+    Ok(created)
+}
+
+fn ensure_target_child(path: &Path) -> Result<()> {
+    let cwd = std::env::current_dir().context("failed to resolve current directory")?;
+    let target_root = cwd.join("target");
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+    let expected = target_root.join("napi-alias");
+    if absolute != expected {
+        anyhow::bail!(
+            "refusing to recursively replace {}; expected {}",
+            absolute.display(),
+            expected.display()
+        );
+    }
+    Ok(())
+}
+
+fn copy_dir_recursive(source: &Path, target: &Path) -> Result<()> {
+    std::fs::create_dir_all(target)
+        .with_context(|| format!("failed to create {}", target.display()))?;
+    for entry in
+        std::fs::read_dir(source).with_context(|| format!("failed to read {}", source.display()))?
+    {
+        let entry = entry?;
+        let source_path = entry.path();
+        let target_path = target.join(entry.file_name());
+        if source_path.is_dir() {
+            copy_dir_recursive(&source_path, &target_path)?;
+        } else {
+            std::fs::copy(&source_path, &target_path).with_context(|| {
+                format!(
+                    "failed to copy {} to {}",
+                    source_path.display(),
+                    target_path.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
 fn napi_library_path() -> PathBuf {
     let (prefix, suffix) = match std::env::consts::OS {
         "windows" => ("", ".dll"),
@@ -232,6 +389,23 @@ fn run_native_smoke(package_dir: &Path) -> Result<String> {
     if !output.status.success() {
         anyhow::bail!(
             "node smoke exited with {:?}\nstdout:\n{}\nstderr:\n{}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn run_napi_alias_smoke(alias_root: &Path) -> Result<String> {
+    let output = ProcessCommand::new("node")
+        .arg("smoke.js")
+        .current_dir(alias_root)
+        .output()
+        .with_context(|| format!("failed to spawn node smoke in {}", alias_root.display()))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "node NAPI alias smoke exited with {:?}\nstdout:\n{}\nstderr:\n{}",
             output.status.code(),
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)

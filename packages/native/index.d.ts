@@ -35,6 +35,8 @@ export function apiManifest(): {
 
 export function compileVue2(template: string, options?: Record<string, unknown>): Vue2CompileResult;
 export function compileToFunctionsVue2(template: string, options?: Record<string, unknown>): unknown;
+export function compileSsrVue2(template: string, options?: Record<string, unknown>): Vue2CompileResult;
+export function generateCodeFrameVue2(source: string, start?: number, end?: number): string;
 export function baseCompileVue3(source: string, options?: Record<string, unknown>): Vue3CodegenResult;
 export function compileVue3Dom(source: string, options?: Record<string, unknown>): Vue3CodegenResult;
 export function compileVue3Ssr(source: string, options?: Record<string, unknown>): Vue3CodegenResult;

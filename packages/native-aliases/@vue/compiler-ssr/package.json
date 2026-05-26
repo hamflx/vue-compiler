@@ -1,0 +1,7 @@
+{
+  "name": "@vue/compiler-ssr",
+  "version": "0.0.0-vuec-napi",
+  "private": true,
+  "main": "dist/compiler-ssr.cjs.js",
+  "types": "dist/compiler-ssr.d.ts"
+}

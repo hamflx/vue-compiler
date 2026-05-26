@@ -1,0 +1,7 @@
+{
+  "name": "@vue/compiler-core",
+  "version": "0.0.0-vuec-napi",
+  "private": true,
+  "main": "index.js",
+  "types": "index.d.ts"
+}

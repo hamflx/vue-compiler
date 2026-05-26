@@ -37,6 +37,19 @@ pub fn compile_to_functions_vue2(
     ))
 }
 
+#[napi(js_name = "compileSsrVue2")]
+pub fn compile_ssr_vue2(env: Env, template: String, options: Option<Unknown>) -> Result<String> {
+    to_json_string(vuec_vue2::compile_ssr(
+        &template,
+        vue2_options(from_js_options(&env, options)?),
+    ))
+}
+
+#[napi(js_name = "generateCodeFrameVue2")]
+pub fn generate_code_frame_vue2(source: String, start: u32, end: u32) -> String {
+    vuec_vue2::generate_code_frame(&source, start as usize, end as usize)
+}
+
 #[napi(js_name = "compileVue3Dom")]
 pub fn compile_vue3_dom(env: Env, source: String, options: Option<Unknown>) -> Result<String> {
     let raw_options = from_js_options(&env, options)?;
@@ -307,6 +320,8 @@ pub fn api_manifest() -> Result<String> {
                 "version",
                 "compileVue2",
                 "compileToFunctionsVue2",
+                "compileSsrVue2",
+                "generateCodeFrameVue2",
                 "baseCompileVue3",
                 "compileVue3Dom",
                 "compileVue3Ssr",
