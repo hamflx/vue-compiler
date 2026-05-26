@@ -892,7 +892,7 @@ fn process_element(
 ) {
     process_key(element, diagnostics);
     process_ref(element);
-    process_slot_content(element);
+    process_slot_content(element, diagnostics);
     process_slot_outlet(element, diagnostics);
     process_component(element);
     process_platform_modules(element, diagnostics);
@@ -919,7 +919,7 @@ fn process_ref(element: &mut Vue2Element) {
     }
 }
 
-fn process_slot_content(element: &mut Vue2Element) {
+fn process_slot_content(element: &mut Vue2Element, diagnostics: &mut DiagnosticSink) {
     if element.tag == "template" {
         element.slot_scope =
             remove_attr(element, "scope").or_else(|| remove_attr(element, "slot-scope"));
@@ -945,8 +945,19 @@ fn process_slot_content(element: &mut Vue2Element) {
         }
     }
 
-    if let Some((name, value)) = remove_slot_binding(element) {
+    if let Some((name, value, span)) = remove_slot_binding(element) {
         let (target, dynamic) = slot_name_from_binding(&name);
+        let raw = name
+            .strip_prefix("v-slot:")
+            .or_else(|| name.strip_prefix('#'))
+            .unwrap_or("default");
+        if raw.starts_with('[') {
+            warn_invalid_dynamic_arg(
+                raw.trim_start_matches('[').trim_end_matches(']'),
+                span,
+                diagnostics,
+            );
+        }
         element.slot_target = Some(target);
         element.slot_target_dynamic = dynamic;
         element.slot_new_syntax = true;
@@ -1039,6 +1050,13 @@ fn process_attrs(
             if is_bind_name(&name_no_modifiers) {
                 let mut name = bind_arg_name(&name_no_modifiers);
                 let is_dynamic = is_dynamic_arg(&name);
+                if name.starts_with('[') {
+                    warn_invalid_dynamic_arg(
+                        name.trim_start_matches('[').trim_end_matches(']'),
+                        attr.span,
+                        diagnostics,
+                    );
+                }
                 if is_dynamic {
                     name = name
                         .trim_start_matches('[')
@@ -1092,6 +1110,13 @@ fn process_attrs(
                 }
             } else if is_on_name(&name_no_modifiers) {
                 let name = on_arg_name(&name_no_modifiers);
+                if name.starts_with('[') {
+                    warn_invalid_dynamic_arg(
+                        name.trim_start_matches('[').trim_end_matches(']'),
+                        attr.span,
+                        diagnostics,
+                    );
+                }
                 add_handler(
                     &mut element.events,
                     name,
@@ -1103,6 +1128,15 @@ fn process_attrs(
                 );
             } else {
                 let (name, arg, is_dynamic_arg) = directive_name_and_arg(&name_no_modifiers);
+                if is_dynamic_arg || arg.as_ref().is_some_and(|arg| arg.starts_with('[')) {
+                    if let Some(arg) = arg.as_ref() {
+                        warn_invalid_dynamic_arg(
+                            arg.trim_start_matches('[').trim_end_matches(']'),
+                            attr.span,
+                            diagnostics,
+                        );
+                    }
+                }
                 if name == "model" {
                     if is_component(element) {
                         gen_component_model(element, &value, &modifiers);
@@ -1163,7 +1197,7 @@ fn process_attrs(
         }
     }
 
-    if options.warn && has_duplicate_attr(&element.attrs) {
+    if options.warn && has_duplicate_attr(&element.raw_attrs_list) {
         diagnostics.push(vue2_warning(
             "W_VUE2_DUPLICATE_ATTR",
             "duplicate attribute",
@@ -2375,13 +2409,13 @@ fn remove_attr(element: &mut Vue2Element, name: &str) -> Option<String> {
     Some(value)
 }
 
-fn remove_slot_binding(element: &mut Vue2Element) -> Option<(String, String)> {
+fn remove_slot_binding(element: &mut Vue2Element) -> Option<(String, String, Option<Span>)> {
     let index = element
         .attrs_list
         .iter()
         .position(|attr| attr.name.starts_with("v-slot") || attr.name.starts_with('#'))?;
     let attr = element.attrs_list.remove(index);
-    Some((attr.name, attr.value))
+    Some((attr.name, attr.value, attr.span))
 }
 
 fn slot_name_from_binding(name: &str) -> (String, bool) {
@@ -2422,6 +2456,20 @@ fn bind_arg_name(name: &str) -> String {
 
 fn is_dynamic_arg(name: &str) -> bool {
     name.starts_with('[') && name.ends_with(']')
+}
+
+fn warn_invalid_dynamic_arg(arg: &str, span: Option<Span>, diagnostics: &mut DiagnosticSink) {
+    if arg.contains(char::is_whitespace)
+        || arg.contains('\'')
+        || arg.contains('"')
+        || arg.contains('+')
+    {
+        diagnostics.push(vue2_warning(
+            "W_VUE2_INVALID_DYNAMIC_ARG",
+            "Invalid dynamic argument expression: attribute names cannot contain spaces, quotes, <, >, / or =.",
+            span,
+        ));
+    }
 }
 
 fn on_arg_name(name: &str) -> String {
@@ -3502,6 +3550,32 @@ mod tests {
         match &root.children[0] {
             Vue2Node::Text(text) => assert_eq!(text.text, "\u{00a0}"),
             Vue2Node::Element(_) => panic!("expected non-breaking space text"),
+        }
+    }
+
+    #[test]
+    fn warns_for_vue2_duplicate_raw_attrs_and_invalid_dynamic_args() {
+        let duplicate = compile(r#"<p class="one" class="two"></p>"#, options());
+        assert!(duplicate
+            .errors
+            .iter()
+            .any(|error| error.msg.contains("duplicate attribute")));
+
+        for template in [
+            r#"<div v-bind:['foo' + bar]="baz"/>"#,
+            r#"<div :['foo' + bar]="baz"/>"#,
+            r#"<div @['foo' + bar]="baz"/>"#,
+            r#"<foo #['foo' + bar]="baz"/>"#,
+            r#"<div :['foo' + bar].some.mod="baz"/>"#,
+        ] {
+            let result = compile(template, options());
+            assert!(
+                result
+                    .errors
+                    .iter()
+                    .any(|error| error.msg.contains("Invalid dynamic argument expression")),
+                "{template}"
+            );
         }
     }
 

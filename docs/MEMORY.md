@@ -1,5 +1,12 @@
 # Memory
 
+- Current round: completed a Vue 2 Rust parser diagnostic slice for duplicate raw attributes and invalid dynamic arguments.
+- `vuec_vue2` now detects duplicate attributes against `raw_attrs_list` before parser transforms consume `attrsList`, so duplicate static attrs still warn after class/style/module processing.
+- Vue 2 dynamic directive arguments now emit the official invalid dynamic argument warning for malformed bind/on/slot argument names, including recovery cases where tokenizer splitting leaves an unterminated `[...]` directive name. This is implemented in Rust parser diagnostics, not in generated shims.
+- No AST/HIR/MIR structure changed. `xtask/src/compat.rs` was not touched in this slice.
+- Current Vue 2 conformance movement: `vue2-compiler` improved from `171/188` to `177/188`, and `vue27-compiler` improved from `168/190` to `174/190`. Coverage remains `rust-backed`; the full suites still fail with real remaining parser/optimizer/compile-option/codeframe parity gaps.
+- Verification for this Vue 2 parser diagnostics slice: `cargo fmt --all --check`, `git diff --check`, `cargo test -p vuec_vue2 --lib`, `cargo build -p vuec_node_bridge`, `cargo xtask run-conformance --suite vue2-compiler` (expected fail, `177/188`), and `cargo xtask run-conformance --suite vue27-compiler` (expected fail, `174/190`).
+
 - Current round: completed a Vue 2 Rust parser raw-text and whitespace semantics slice.
 - `vuec_vue2` now parses `script` / `style` / `textarea` as raw-text elements instead of recursively tokenizing their bodies as child HTML, strips the first newline for `<textarea>` like `<pre>`, preserves whitespace inside `<pre>` descendants, and handles `whitespace: "condense"` inline spaces plus `&nbsp;` without collapsing away the official text node.
 - `vuec_html::HtmlTokenizer` now exposes its cursor so the Vue 2 parser can switch to raw-text consumption while keeping tokenizer ownership and source offsets deterministic.
