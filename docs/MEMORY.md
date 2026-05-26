@@ -1,5 +1,12 @@
 # Memory
 
+- Current round: completed a Vue 2 compiler Rust codegen/data-object parity slice for refs and `v-model`.
+- `vuec_vue2` now treats `ref`, `refInFor`, `model`, `pre`, inline-template, validation, listener/data wrappers, and other codegen-visible state as non-plain data-object triggers, so plain-looking elements that still need VNode data no longer drop generated data. DOM `v-model` no longer emits duplicate runtime directive metadata, and model assignment generation now follows official Vue 2 whitespace semantics by using the trimmed expression only for path parsing while preserving original expression whitespace for direct assignment output.
+- Vue 2 props codegen now distinguishes static HTML attributes from JavaScript expression-valued DOM props/dynamic attrs, preserving newline/entity handling for real attrs while avoiding JS expression newline escaping in `domProps`.
+- This is Rust compiler implementation work in `crates/vuec_vue2`; `xtask/src/compat.rs` was not changed, and no AST/HIR/MIR structure changed.
+- Current Vue 2 conformance movement: `vue2-compiler` improved from `59/188` to `64/188`, and `vue27-compiler` improved from `57/190` to `62/190`. `vue27-sfc` remains `5/144`, unchanged by this template-compiler codegen slice.
+- Verification for this Vue 2 codegen/data-object slice: `cargo fmt --all --check`, `git diff --check`, `cargo test -p vuec_vue2 --lib` (`8/8`), `cargo build -p vuec_node_bridge`, `cargo xtask run-conformance --suite vue2-compiler` (expected fail, `64/188`), `cargo xtask run-conformance --suite vue27-compiler` (expected fail, `62/190`), and `cargo xtask run-conformance --suite vue27-sfc` (expected fail, unchanged `5/144`).
+
 - Current round: completed Vue 2 official conformance runner wiring for Vue 2.6 compiler, Vue 2.7 compiler, and Vue 2.7 compiler-sfc.
 - `xtask/src/compat.rs` now prepares Vue 2.6 Jasmine and Vue 2.7 Vitest official test trees, preserves official internal import paths through generated source shims, and routes compiler/SFC public calls into the Rust npm alias packages through `vuec_node_bridge`. This is runner/import adapter support only; no Vue 2 compiler semantics were added to `xtask/src/compat.rs`.
 - Vue 2.6 Jasmine reports now include Vitest-style per-file `testResults`, so conformance coverage can report file counts instead of only aggregate totals. Vue 2 coverage reasons now explicitly state that the suites execute real official tests and that failures are real Rust parity gaps, not `not-wired` pending status.

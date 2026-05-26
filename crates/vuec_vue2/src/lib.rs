@@ -591,20 +591,7 @@ fn close_element(
     _in_v_pre: &mut bool,
 ) {
     trim_ending_whitespace(&mut element);
-    element.plain = element.key.is_none()
-        && element.scoped_slots.is_empty()
-        && element.attrs.is_empty()
-        && element.props.is_empty()
-        && element.directives.is_empty()
-        && element.events.is_empty()
-        && element.dynamic_attrs.is_empty()
-        && element.static_class.is_none()
-        && element.class_binding.is_none()
-        && element.static_style.is_none()
-        && element.style_binding.is_none()
-        && element.component.is_none()
-        && !element.inline_template
-        && !element.has_bindings;
+    element.plain = element_generates_empty_data(&element);
 
     if let Some(parent) = stack.last_mut() {
         if element.elseif.is_some() || element.else_branch {
@@ -981,16 +968,6 @@ fn process_attrs(
                         modifiers,
                         span: attr.span,
                     });
-                } else {
-                    element.directives.push(Vue2Directive {
-                        name,
-                        raw_name,
-                        value: Some(value),
-                        arg,
-                        is_dynamic_arg,
-                        modifiers,
-                        span: attr.span,
-                    });
                 }
             }
             remove_attr(element, &attr.name);
@@ -1089,6 +1066,34 @@ fn process_if_conditions(
         ),
         element.span,
     ));
+}
+
+fn element_generates_empty_data(element: &Vue2Element) -> bool {
+    element.key.is_none()
+        && element.ref_name.is_none()
+        && !element.ref_in_for
+        && !element.pre
+        && !element.forbidden
+        && element.component.is_none()
+        && element.static_class.is_none()
+        && element.class_binding.is_none()
+        && element.static_style.is_none()
+        && element.style_binding.is_none()
+        && element.attrs.is_empty()
+        && element.props.is_empty()
+        && element.dynamic_attrs.is_empty()
+        && element.directives.is_empty()
+        && element.events.is_empty()
+        && element.native_events.is_empty()
+        && element.slot_target.is_none()
+        && element.scoped_slots.is_empty()
+        && element.model.is_none()
+        && element.wrap_data.is_none()
+        && element.wrap_listeners.is_none()
+        && element.validate.is_none()
+        && element.validators.is_empty()
+        && !element.inline_template
+        && !element.has_bindings
 }
 
 fn push_text_node(
@@ -1398,13 +1403,17 @@ fn gen_data(element: &mut Vue2Element, state: &mut CodegenState<'_>) -> String {
     if !element.attrs.is_empty() {
         parts.push(format!(
             "attrs:{}",
-            gen_props(&element.attrs, state.options)
+            gen_props(
+                &element.attrs,
+                state.options,
+                PropValueKind::StaticAttribute
+            )
         ));
     }
     if !element.props.is_empty() {
         parts.push(format!(
             "domProps:{}",
-            gen_props(&element.props, state.options)
+            gen_props(&element.props, state.options, PropValueKind::Expression)
         ));
     }
     if !element.events.is_empty() {
@@ -1451,7 +1460,11 @@ fn gen_data(element: &mut Vue2Element, state: &mut CodegenState<'_>) -> String {
         data = format!(
             "_b({data},{},{} )",
             js_string(&element.tag),
-            gen_props(&element.dynamic_attrs, state.options)
+            gen_props(
+                &element.dynamic_attrs,
+                state.options,
+                PropValueKind::Expression
+            )
         )
         .replace("} )", "})");
     }
@@ -1626,17 +1639,29 @@ fn gen_scoped_slots(element: &mut Vue2Element, state: &mut CodegenState<'_>) -> 
     format!("scopedSlots:_u([{slots}])")
 }
 
-fn gen_props(attrs: &[Vue2Attribute], options: &Vue2CompileOptions) -> String {
+#[derive(Clone, Copy)]
+enum PropValueKind {
+    StaticAttribute,
+    Expression,
+}
+
+fn gen_props(
+    attrs: &[Vue2Attribute],
+    options: &Vue2CompileOptions,
+    value_kind: PropValueKind,
+) -> String {
     let static_props = attrs
         .iter()
         .filter(|attr| !attr.dynamic)
         .map(|attr| {
-            let value = decode_newline_entities_for_attr(&attr.name, &attr.value, options);
-            format!(
-                "{}:{}",
-                js_string(&attr.name),
-                transform_special_newlines(&value)
-            )
+            let value = match value_kind {
+                PropValueKind::StaticAttribute => {
+                    let value = decode_newline_entities_for_attr(&attr.name, &attr.value, options);
+                    transform_special_newlines(&value)
+                }
+                PropValueKind::Expression => attr.value.clone(),
+            };
+            format!("{}:{value}", js_string(&attr.name))
         })
         .collect::<Vec<_>>()
         .join(",");
@@ -2302,22 +2327,22 @@ fn gen_dom_model(
 }
 
 fn gen_assignment_code(value: &str, assignment: &str) -> String {
-    let value = value.trim();
-    if let Some(dot) = value.rfind('.') {
-        if !value[dot + 1..].contains(']') && !value[dot + 1..].contains('[') {
+    let parsed_value = value.trim();
+    if let Some(dot) = parsed_value.rfind('.') {
+        if !parsed_value[dot + 1..].contains(']') && !parsed_value[dot + 1..].contains('[') {
             return format!(
                 "$set({}, \"{}\", {assignment})",
-                &value[..dot],
-                &value[dot + 1..]
+                &parsed_value[..dot],
+                &parsed_value[dot + 1..]
             );
         }
     }
-    if value.ends_with(']') {
-        if let Some(open) = find_model_bracket(value) {
+    if parsed_value.ends_with(']') {
+        if let Some(open) = find_model_bracket(parsed_value) {
             return format!(
                 "$set({}, {}, {assignment})",
-                &value[..open],
-                &value[open + 1..value.len() - 1]
+                &parsed_value[..open],
+                &parsed_value[open + 1..parsed_value.len() - 1]
             );
         }
     }
@@ -2845,6 +2870,42 @@ mod tests {
         );
         assert!(result.render.contains("_f(\"c\")(_f(\"b\")(a))"));
         assert!(result.render.contains("$event.stopPropagation();"));
+    }
+
+    #[test]
+    fn generates_ref_data_and_single_dom_model_directive() {
+        let plain_ref = compile(r#"<p ref="component1"></p>"#, options());
+        assert_eq!(
+            plain_ref.render,
+            r#"with(this){return _c('p',{ref:"component1"})}"#
+        );
+
+        let for_ref = compile(
+            r#"<ul><li v-for="item in items" ref="component1"></li></ul>"#,
+            options(),
+        );
+        assert_eq!(
+            for_ref.render,
+            r#"with(this){return _c('ul',_l((items),function(item){return _c('li',{ref:"component1",refInFor:true})}),0)}"#
+        );
+
+        let model = compile(r#"<input v-model="test">"#, options());
+        assert_eq!(model.render.matches(r#"name:"model""#).count(), 1);
+        assert!(model
+            .render
+            .contains(r#"domProps:{"value":(test)},on:{"input":function($event){if($event.target.composing)return;test=$event.target.value}}"#));
+
+        let multiline_model = compile("<input v-model=\"\n test \n\">", options());
+        let expected_value_prop = concat!("domProps:{\"value\":(\n", " test \n", ")}");
+        assert!(multiline_model.render.contains(expected_value_prop));
+        assert!(multiline_model
+            .render
+            .contains("if($event.target.composing)return;\n test \n=$event.target.value"));
+
+        let component_model = compile("<my-component v-model=\"\n test \n\" />", options());
+        assert!(component_model
+            .render
+            .contains("callback:function ($$v) {\n test \n=$$v}"));
     }
 
     #[test]
