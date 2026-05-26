@@ -126,6 +126,8 @@ const errorMessages = {};
 for (let i = 0; i <= 54; i += 1) {
   errorMessages[i] = '';
 }
+errorMessages[ErrorCodes.X_CACHE_HANDLER_NOT_SUPPORTED] = '"cacheHandlers" option is only supported when the "prefixIdentifiers" option is enabled.';
+errorMessages[ErrorCodes.X_SCOPE_ID_NOT_SUPPORTED] = '"scopeId" option is only supported in module mode.';
 
 const TS_NODE_TYPES = [
   'TSAsExpression',
@@ -200,7 +202,9 @@ function normalizeOptions(options) {
 }
 
 function baseCompile(source) {
-  return native.baseCompileVue3(String(source || ''), normalizeOptions(arguments[1]));
+  const options = normalizeOptions(arguments[1]);
+  validateBaseCompileOptions(options);
+  return native.baseCompileVue3(String(source || ''), options);
 }
 
 function compile(source, options) {
@@ -221,6 +225,17 @@ function generate(ast) {
 
 function generateCodeFrame(source) {
   return native.generateCodeFrameVue2(String(source || ''), Number(arguments[1]) || 0, Number(arguments[2]) || 0);
+}
+
+function validateBaseCompileOptions(options) {
+  const isModuleMode = options.mode === 'module';
+  const prefixIdentifiers = options.prefixIdentifiers === true || isModuleMode;
+  if (!prefixIdentifiers && options.cacheHandlers) {
+    throw createCompilerError(ErrorCodes.X_CACHE_HANDLER_NOT_SUPPORTED);
+  }
+  if (options.scopeId && !isModuleMode) {
+    throw createCompilerError(ErrorCodes.X_SCOPE_ID_NOT_SUPPORTED);
+  }
 }
 
 function advancePositionWithClone(pos, source) {

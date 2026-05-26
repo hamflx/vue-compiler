@@ -20,7 +20,26 @@ function parseComponent(source) {
 }
 
 function compileTemplate(options) {
-  return native.compileTemplate(options || {});
+  const opts = options || {};
+  const source = String(opts.source || '');
+  const result = native.compileVue2(source, {
+    ...opts,
+    outputSourceRange: Boolean(opts.outputSourceRange),
+  });
+  return {
+    code: [
+      `var render = function render() {`,
+      `  ${result.render}`,
+      `}`,
+      `var staticRenderFns = [${(result.staticRenderFns || []).map(fn => `function render() { ${fn} }`).join(',')}]`,
+      `render._withStripped = true`,
+      '',
+    ].join('\n'),
+    ast: result.ast || result.element_ast || null,
+    errors: result.errors || [],
+    tips: result.tips || [],
+    source: source,
+  };
 }
 
 function compileScript(descriptor) {

@@ -1660,11 +1660,277 @@ fn ensure_node_bridge_binary() -> Result<PathBuf> {
     Ok(PathBuf::from("target").join("debug").join(exe_name))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AliasBackend {
+    Generated,
+    Napi,
+}
+
+impl AliasBackend {
+    fn name(self) -> &'static str {
+        match self {
+            AliasBackend::Generated => "generated",
+            AliasBackend::Napi => "napi",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            AliasBackend::Generated => "generated Rust",
+            AliasBackend::Napi => "NAPI-backed",
+        }
+    }
+
+    fn root(self, version_line: VersionLine) -> PathBuf {
+        match self {
+            AliasBackend::Generated => rust_alias_root(version_line),
+            AliasBackend::Napi => napi_alias_root(version_line),
+        }
+    }
+
+    fn option_command(self) -> &'static str {
+        match self {
+            AliasBackend::Generated => "run_option_matrix",
+            AliasBackend::Napi => "run_napi_option_matrix",
+        }
+    }
+
+    fn output_command(self) -> &'static str {
+        match self {
+            AliasBackend::Generated => "run_output_contract",
+            AliasBackend::Napi => "run_napi_output_contract",
+        }
+    }
+
+    fn option_report_name(self) -> &'static str {
+        match self {
+            AliasBackend::Generated => "option-matrix.json",
+            AliasBackend::Napi => "napi-option-matrix.json",
+        }
+    }
+
+    fn output_report_name(self) -> &'static str {
+        match self {
+            AliasBackend::Generated => "output-contract.json",
+            AliasBackend::Napi => "napi-output-contract.json",
+        }
+    }
+
+    fn option_side(self) -> &'static str {
+        match self {
+            AliasBackend::Generated => "rust",
+            AliasBackend::Napi => "napi",
+        }
+    }
+
+    fn option_note(self) -> &'static str {
+        match self {
+            AliasBackend::Generated => {
+                "option matrix now executes official vs Rust probe cases and records per-row results"
+            }
+            AliasBackend::Napi => {
+                "option matrix executes official packages against NAPI-backed official package-name aliases"
+            }
+        }
+    }
+
+    fn output_note(self) -> &'static str {
+        match self {
+            AliasBackend::Generated => {
+                "output contract executes official npm packages and generated Rust alias packages against representative fixtures"
+            }
+            AliasBackend::Napi => {
+                "output contract executes official npm packages and NAPI-backed official package-name aliases against representative fixtures"
+            }
+        }
+    }
+}
+
 fn rust_alias_root(version_line: VersionLine) -> PathBuf {
     PathBuf::from("target")
         .join("compat")
         .join("rust-alias")
         .join(version_line.as_str())
+}
+
+fn napi_alias_root(version_line: VersionLine) -> PathBuf {
+    PathBuf::from("target")
+        .join("compat")
+        .join("napi-alias")
+        .join(version_line.as_str())
+}
+
+fn prepare_alias_backend(backend: AliasBackend, targets: &[TargetSpec]) -> Result<Vec<PathBuf>> {
+    match backend {
+        AliasBackend::Generated => generate_rust_alias_packages(targets),
+        AliasBackend::Napi => prepare_napi_alias_packages(targets),
+    }
+}
+
+fn prepare_napi_alias_packages(targets: &[TargetSpec]) -> Result<Vec<PathBuf>> {
+    run_command("cargo", &["build", "-p", "vuec_napi"], None)
+        .context("failed to build vuec_napi")?;
+    let mut version_lines = Vec::new();
+    for target in targets {
+        if !version_lines.contains(&target.version_line) {
+            version_lines.push(target.version_line);
+        }
+    }
+    let mut created = Vec::new();
+    for version_line in version_lines {
+        let root = napi_alias_root(version_line);
+        reset_napi_alias_root(&root)?;
+        prepare_napi_alias_root(version_line, &root)?;
+        created.push(root);
+    }
+    Ok(created)
+}
+
+fn reset_napi_alias_root(root: &Path) -> Result<()> {
+    ensure_target_compat_child(root, "napi-alias")?;
+    if root.exists() {
+        fs::remove_dir_all(root).with_context(|| format!("failed to remove {}", root.display()))?;
+    }
+    fs::create_dir_all(root).with_context(|| format!("failed to create {}", root.display()))
+}
+
+fn ensure_target_compat_child(path: &Path, child: &str) -> Result<()> {
+    let cwd = std::env::current_dir().context("failed to resolve current directory")?;
+    let expected = cwd.join("target").join("compat").join(child);
+    let absolute = absolute_path(path);
+    ensure!(
+        absolute.starts_with(&expected),
+        "refusing to recursively replace {}; expected a path under {}",
+        absolute.display(),
+        expected.display()
+    );
+    Ok(())
+}
+
+fn prepare_napi_alias_root(version_line: VersionLine, root: &Path) -> Result<()> {
+    let node_modules = root.join("node_modules");
+    fs::create_dir_all(&node_modules)
+        .with_context(|| format!("failed to create {}", node_modules.display()))?;
+
+    let native_target = node_modules.join("@vuec-rs").join("native");
+    copy_dir_recursive(Path::new("packages/native"), &native_target)?;
+    copy_napi_binding(&native_target.join("vuec_napi.node"))?;
+
+    copy_napi_alias_package(
+        Path::new("packages/native-aliases/vue-template-compiler"),
+        &node_modules.join("vue-template-compiler"),
+    )?;
+    select_napi_vue_template_compiler(version_line, &node_modules.join("vue-template-compiler"))?;
+    copy_napi_alias_package(
+        Path::new("packages/native-aliases/vue"),
+        &node_modules.join("vue"),
+    )?;
+    copy_napi_alias_package(
+        Path::new("packages/native-aliases/@vue/compiler-core"),
+        &node_modules.join("@vue").join("compiler-core"),
+    )?;
+    copy_napi_alias_package(
+        Path::new("packages/native-aliases/@vue/compiler-dom"),
+        &node_modules.join("@vue").join("compiler-dom"),
+    )?;
+    copy_napi_alias_package(
+        Path::new("packages/native-aliases/@vue/compiler-ssr"),
+        &node_modules.join("@vue").join("compiler-ssr"),
+    )?;
+    copy_napi_alias_package(
+        Path::new("packages/native-aliases/@vue/compiler-sfc"),
+        &node_modules.join("@vue").join("compiler-sfc"),
+    )?;
+    write_napi_alias_versions(version_line, &node_modules)?;
+    Ok(())
+}
+
+fn copy_napi_alias_package(source: &Path, target: &Path) -> Result<()> {
+    copy_dir_recursive(source, target)
+}
+
+fn select_napi_vue_template_compiler(version_line: VersionLine, package_dir: &Path) -> Result<()> {
+    let variant = match version_line {
+        VersionLine::Vue26 => "index-vue2_6.js",
+        VersionLine::Vue27 | VersionLine::Vue3 => "index-vue2_7.js",
+    };
+    fs::copy(package_dir.join(variant), package_dir.join("index.js"))
+        .with_context(|| format!("failed to select {} for {}", variant, package_dir.display()))?;
+    Ok(())
+}
+
+fn write_napi_alias_versions(version_line: VersionLine, node_modules: &Path) -> Result<()> {
+    for target in all_targets()
+        .iter()
+        .copied()
+        .filter(|target| target.version_line == version_line)
+    {
+        let manifest = read_json::<ManifestFile>(&target.relative_api_manifest_path("official"))?;
+        let package_json = napi_alias_package_json_path(target, node_modules);
+        write_package_json_version(
+            &package_json,
+            manifest.package_version.as_deref().unwrap_or("0.0.0"),
+        )?;
+    }
+    Ok(())
+}
+
+fn napi_alias_package_json_path(target: TargetSpec, node_modules: &Path) -> PathBuf {
+    match target.kind {
+        TargetKind::Vue26Template | TargetKind::Vue27Template => node_modules
+            .join("vue-template-compiler")
+            .join("package.json"),
+        TargetKind::Vue27Sfc => node_modules.join("vue").join("package.json"),
+        TargetKind::Vue3Core => node_modules
+            .join("@vue")
+            .join("compiler-core")
+            .join("package.json"),
+        TargetKind::Vue3Dom => node_modules
+            .join("@vue")
+            .join("compiler-dom")
+            .join("package.json"),
+        TargetKind::Vue3Ssr => node_modules
+            .join("@vue")
+            .join("compiler-ssr")
+            .join("package.json"),
+        TargetKind::Vue3Sfc => node_modules
+            .join("@vue")
+            .join("compiler-sfc")
+            .join("package.json"),
+    }
+}
+
+fn write_package_json_version(path: &Path, version: &str) -> Result<()> {
+    let mut value = read_json::<serde_json::Value>(path)?;
+    value["version"] = serde_json::Value::String(version.to_string());
+    write_json(path, &value)
+}
+
+fn copy_napi_binding(target_path: &Path) -> Result<()> {
+    let source_path = napi_library_path();
+    if let Some(parent) = target_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    fs::copy(&source_path, target_path).with_context(|| {
+        format!(
+            "failed to copy {} to {}",
+            source_path.display(),
+            target_path.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn napi_library_path() -> PathBuf {
+    let (prefix, suffix) = match std::env::consts::OS {
+        "windows" => ("", ".dll"),
+        "macos" => ("lib", ".dylib"),
+        _ => ("lib", ".so"),
+    };
+    PathBuf::from("target")
+        .join("debug")
+        .join(format!("{prefix}vuec_napi{suffix}"))
 }
 
 fn rust_alias_package_dir(target: TargetSpec) -> PathBuf {
@@ -8394,13 +8660,21 @@ pub fn audit_option_matrix(scope: &SelectionArgs) -> JsonReport {
 }
 
 pub fn run_option_matrix(scope: &SelectionArgs) -> JsonReport {
+    run_option_matrix_with_backend(scope, AliasBackend::Generated)
+}
+
+pub fn run_napi_option_matrix(scope: &SelectionArgs) -> JsonReport {
+    run_option_matrix_with_backend(scope, AliasBackend::Napi)
+}
+
+fn run_option_matrix_with_backend(scope: &SelectionArgs, backend: AliasBackend) -> JsonReport {
     let targets = select_targets(scope);
     let lock_path = PathBuf::from("compat/official-revisions.lock");
     let lock_hash = file_sha256(&lock_path).ok();
     let lock = match load_official_lock(&lock_path) {
         Ok(lock) => lock,
         Err(err) => {
-            let mut report = JsonReport::new("run_option_matrix", ReportStatus::Fail);
+            let mut report = JsonReport::new(backend.option_command(), ReportStatus::Fail);
             report.metadata = report.metadata.with_lock_hash(lock_hash);
             return report
                 .with_scope(scope)
@@ -8410,8 +8684,13 @@ pub fn run_option_matrix(scope: &SelectionArgs) -> JsonReport {
     let mut items = Vec::new();
     let mut violations = Vec::new();
     let mut target_reports = Vec::new();
-    if let Err(err) = generate_rust_alias_packages(&targets) {
-        violations.push(format!("failed to generate Rust alias packages: {err:#}"));
+    let mut created = Vec::new();
+    match prepare_alias_backend(backend, &targets) {
+        Ok(paths) => created.extend(paths.into_iter().map(|path| path.display().to_string())),
+        Err(err) => violations.push(format!(
+            "failed to prepare {} alias packages: {err:#}",
+            backend.label()
+        )),
     }
     for target in targets {
         let path = target.relative_option_matrix_path();
@@ -8457,7 +8736,7 @@ pub fn run_option_matrix(scope: &SelectionArgs) -> JsonReport {
                 continue;
             }
         };
-        let rust_root = rust_alias_root(target.version_line);
+        let rust_root = backend.root(target.version_line);
         let mut row_reports = Vec::new();
         for row in &matrix.rows {
             if row.status == "pending" {
@@ -8485,7 +8764,7 @@ pub fn run_option_matrix(scope: &SelectionArgs) -> JsonReport {
                 row.option_value.as_ref(),
             );
             let rust_probe = run_option_probe(
-                "rust",
+                backend.option_side(),
                 target,
                 &rust_root,
                 &api_require_request(target),
@@ -8568,37 +8847,42 @@ pub fn run_option_matrix(scope: &SelectionArgs) -> JsonReport {
             "version_line": target.version_line,
             "package": target.package,
             "entry": target.entry,
+            "alias_backend": backend.name(),
             "rows": row_reports,
         }));
     }
     let report_path = PathBuf::from("target")
         .join("conformance")
         .join(lock_hash.as_deref().unwrap_or("unknown-lock"))
-        .join("option-matrix.json");
+        .join(backend.option_report_name());
     if let Some(parent) = report_path.parent() {
         if let Err(err) = fs::create_dir_all(parent) {
             violations.push(format!("failed to create {}: {err}", parent.display()));
         }
     }
     let report_body = serde_json::json!({
-        "command": "run_option_matrix",
+        "command": backend.option_command(),
         "lock_hash": lock_hash,
+        "alias_backend": backend.name(),
         "targets": target_reports,
         "counts": output_contract_counts_from_items(&items),
     });
     if let Err(err) = write_json(&report_path, &report_body) {
         violations.push(format!("failed to write {}: {err}", report_path.display()));
     }
-    let mut report = JsonReport::new("run_option_matrix", aggregate_status(&items));
+    let mut report = JsonReport::new(backend.option_command(), aggregate_status(&items));
     report.metadata = report.metadata.with_lock_hash(lock_hash);
     report
         .with_scope(scope)
         .with_items(items)
         .with_violations(violations)
-        .with_created(vec![report_path.display().to_string()])
-        .with_note(
-            "option matrix now executes official vs Rust probe cases and records per-row results",
+        .with_created(
+            created
+                .into_iter()
+                .chain([report_path.display().to_string()])
+                .collect(),
         )
+        .with_note(backend.option_note())
 }
 
 pub fn run_conformance(args: &ConformanceArgs) -> JsonReport {
@@ -8817,15 +9101,24 @@ pub fn generate_output_contract(scope: &SelectionArgs) -> JsonReport {
 }
 
 pub fn run_output_contract(scope: &SelectionArgs) -> JsonReport {
+    run_output_contract_with_backend(scope, AliasBackend::Generated)
+}
+
+pub fn run_napi_output_contract(scope: &SelectionArgs) -> JsonReport {
+    run_output_contract_with_backend(scope, AliasBackend::Napi)
+}
+
+fn run_output_contract_with_backend(scope: &SelectionArgs, backend: AliasBackend) -> JsonReport {
     let targets = select_targets(scope);
     let mut items = Vec::new();
     let mut violations = Vec::new();
+    let mut created = Vec::new();
     let lock_path = PathBuf::from("compat/official-revisions.lock");
     let lock_hash = file_sha256(&lock_path).ok();
     let lock = match load_official_lock(&lock_path) {
         Ok(lock) => lock,
         Err(err) => {
-            let mut report = JsonReport::new("run_output_contract", ReportStatus::Fail);
+            let mut report = JsonReport::new(backend.output_command(), ReportStatus::Fail);
             report.metadata = report.metadata.with_lock_hash(lock_hash);
             return report
                 .with_scope(scope)
@@ -8835,11 +9128,15 @@ pub fn run_output_contract(scope: &SelectionArgs) -> JsonReport {
     let report_path = PathBuf::from("target")
         .join("conformance")
         .join(lock_hash.as_deref().unwrap_or("unknown-lock"))
-        .join("output-contract.json");
+        .join(backend.output_report_name());
     let mut target_reports = Vec::new();
 
-    if let Err(err) = generate_rust_alias_packages(&targets) {
-        violations.push(format!("failed to generate Rust alias packages: {err:#}"));
+    match prepare_alias_backend(backend, &targets) {
+        Ok(paths) => created.extend(paths.into_iter().map(|path| path.display().to_string())),
+        Err(err) => violations.push(format!(
+            "failed to prepare {} alias packages: {err:#}",
+            backend.label()
+        )),
     }
     for target in targets {
         let path = target.relative_output_contract_path();
@@ -8903,9 +9200,15 @@ pub fn run_output_contract(scope: &SelectionArgs) -> JsonReport {
                 continue;
             }
         };
-        let rust_root = rust_alias_root(target.version_line);
+        let rust_root = backend.root(target.version_line);
         match run_output_contract_probe(target, &official_root, &rust_root) {
-            Ok(target_report) => {
+            Ok(mut target_report) => {
+                if let Some(object) = target_report.as_object_mut() {
+                    object.insert(
+                        "alias_backend".into(),
+                        serde_json::Value::String(backend.name().into()),
+                    );
+                }
                 let failed = json_usize(&target_report, &["counts", "fail"]);
                 let pending = json_usize(&target_report, &["counts", "pending"]);
                 let passed = json_usize(&target_report, &["counts", "pass"]);
@@ -8946,8 +9249,9 @@ pub fn run_output_contract(scope: &SelectionArgs) -> JsonReport {
         }
     }
     let aggregate = serde_json::json!({
-        "command": "run_output_contract",
+        "command": backend.output_command(),
         "lock_hash": lock_hash,
+        "alias_backend": backend.name(),
         "targets": target_reports,
         "counts": output_contract_counts_from_items(&items),
     });
@@ -8959,14 +9263,19 @@ pub fn run_output_contract(scope: &SelectionArgs) -> JsonReport {
     if let Err(err) = write_json(&report_path, &aggregate) {
         violations.push(format!("failed to write {}: {err}", report_path.display()));
     }
-    let mut report = JsonReport::new("run_output_contract", ReportStatus::Pending);
+    let mut report = JsonReport::new(backend.output_command(), ReportStatus::Pending);
     report.metadata = report.metadata.with_lock_hash(lock_hash);
     report
         .with_scope(scope)
         .with_items(items)
         .with_violations(violations)
-        .with_created(vec![report_path.display().to_string()])
-        .with_note("output contract executes official npm packages and generated Rust alias packages against representative fixtures")
+        .with_created(
+            created
+                .into_iter()
+                .chain([report_path.display().to_string()])
+                .collect(),
+        )
+        .with_note(backend.output_note())
 }
 
 pub fn verify_npm_alias(scope: &SelectionArgs) -> JsonReport {
