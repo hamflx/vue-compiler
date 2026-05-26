@@ -1,5 +1,10 @@
 # Memory
 
+- Current round: completed the M17 WASM browser smoke slice.
+- Added `wasm-bindgen-test` browser tests inside `vuec_wasm` for Vue 3 DOM template compile, SFC template compile, and invalid-options error conversion in a real browser wasm target. Added `cargo xtask verify-wasm-browser` / `pnpm test:wasm-browser`, which runs `wasm-pack test --headless --chrome crates/vuec_wasm`.
+- `verify-wasm-browser` writes a temporary webdriver capabilities file under `target/wasm-browser`, pins a real Chrome binary when found, and supports `VUEC_WASM_CHROMEDRIVER` for environments where wasm-pack's downloaded ChromeDriver does not match the installed Chrome.
+- Verification: installed `wasm-pack 0.15.0`; downloaded a matching Chrome 148 ChromeDriver under ignored `target/wasm-browser`; ran `VUEC_WASM_CHROMEDRIVER=target/wasm-browser/chromedriver-148/chromedriver-win64/chromedriver.exe cargo xtask verify-wasm-browser` (`3/3` browser tests). Also ran `cargo fmt --all -- --check`, `cargo check -p vuec_wasm -p xtask`, `cargo test -p vuec_wasm -p xtask`, `cargo xtask verify-wasm`, and `git diff --check`.
+
 - Current round: completed the M17 WASM recoverable error-conversion slice.
 - `vuec_wasm` exported JSON-string functions now strictly parse options JSON instead of silently falling back to defaults. Invalid options JSON and serialization failures return structured `errors` plus `diagnostics` objects with stable `VUEC_WASM_*` codes. Unwind-capable builds also convert caught boundary panics to the same envelope; wasm32 remains `panic=abort`, with panic visibility handled by the existing console hook.
 - The Node wasm-bindgen smoke now imports the raw generated wasm module in addition to the JS loader and verifies invalid-options error conversion directly at the ABI boundary.

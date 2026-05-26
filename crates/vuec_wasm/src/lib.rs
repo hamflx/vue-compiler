@@ -478,3 +478,50 @@ mod tests {
             .contains("wasm boundary panic"));
     }
 }
+
+#[cfg(all(test, target_arch = "wasm32"))]
+mod browser_tests {
+    use super::*;
+    use wasm_bindgen_test::*;
+
+    wasm_bindgen_test_configure!(run_in_browser);
+
+    #[wasm_bindgen_test]
+    fn browser_compiles_vue3_dom_template() {
+        let value: Value = serde_json::from_str(&compile_vue3_dom(
+            "<div>{{ msg }}</div>",
+            Some(
+                json!({ "mode": "module", "prefixIdentifiers": true, "sourceMap": true })
+                    .to_string(),
+            ),
+        ))
+        .expect("json");
+        assert!(value["code"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("_toDisplayString(_ctx.msg)"));
+        assert_eq!(value["map"]["version"], 3);
+    }
+
+    #[wasm_bindgen_test]
+    fn browser_compiles_sfc_template() {
+        let value: Value = serde_json::from_str(&compile_sfc_template(
+            "<template><div>{{ msg }}</div></template>",
+            Some(json!({ "filename": "Browser.vue" }).to_string()),
+        ))
+        .expect("json");
+        assert!(value["code"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("export function render"));
+    }
+
+    #[wasm_bindgen_test]
+    fn browser_reports_invalid_options_json() {
+        let value: Value =
+            serde_json::from_str(&compile_vue3_dom("<div/>", Some("{not json".into())))
+                .expect("json");
+        assert_eq!(value["errors"][0]["code"], "VUEC_WASM_INVALID_OPTIONS_JSON");
+        assert_eq!(value["diagnostics"][0]["severity"], "error");
+    }
+}

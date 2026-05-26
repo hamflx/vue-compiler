@@ -10,7 +10,7 @@ use compat::{
     run_option_matrix, run_output_contract, summarize_compat, sync_official_tests,
     verify_npm_alias, verify_official_lock, ConformanceArgs, SelectionArgs,
 };
-use serde_json::Value as JsonValue;
+use serde_json::{json, Value as JsonValue};
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 
@@ -94,6 +94,7 @@ enum Command {
     VerifyNapiApi,
     VerifyNapiPlatform,
     VerifyWasm,
+    VerifyWasmBrowser,
     SummarizeCompat {
         #[arg(long)]
         locked: bool,
@@ -140,6 +141,7 @@ fn main() -> Result<()> {
         Command::VerifyNapiApi => verify_napi_api()?,
         Command::VerifyNapiPlatform => verify_napi_platform()?,
         Command::VerifyWasm => verify_wasm()?,
+        Command::VerifyWasmBrowser => verify_wasm_browser()?,
         Command::SummarizeCompat { locked, lock } => summarize_compat(locked, &lock),
     };
     println!("{}", serde_json::to_string_pretty(&report)?);
@@ -675,7 +677,40 @@ fn verify_wasm() -> Result<compat::JsonReport> {
             .with_items(items)
             .with_created(created)
             .with_violations(violations)
-            .with_note("runs vuec_wasm Rust API tests, builds the wasm-bindgen package when the wasm target/tooling is installed, and executes the @vuec-rs/wasm Node smoke; browser and WASI gates still require wasm-pack/wasmtime CI tooling"),
+            .with_note("runs vuec_wasm Rust API tests, builds the wasm-bindgen package when the wasm target/tooling is installed, and executes the @vuec-rs/wasm Node smoke; browser coverage is handled by verify-wasm-browser and WASI coverage remains a separate gate"),
+    )
+}
+
+fn verify_wasm_browser() -> Result<compat::JsonReport> {
+    let mut violations = Vec::new();
+    let mut items = Vec::new();
+    let status = match run_wasm_pack_browser_test() {
+        Ok(output) => {
+            items.push(compat::ReportItem::new(
+                "vuec_wasm-browser-smoke",
+                compat::ReportStatus::Pass,
+                output,
+                Some(PathBuf::from("crates/vuec_wasm")),
+            ));
+            compat::ReportStatus::Pass
+        }
+        Err(err) => {
+            violations.push(format!("WASM browser smoke failed: {err:#}"));
+            items.push(compat::ReportItem::new(
+                "vuec_wasm-browser-smoke",
+                compat::ReportStatus::Fail,
+                format!("{err:#}"),
+                Some(PathBuf::from("crates/vuec_wasm")),
+            ));
+            compat::ReportStatus::Fail
+        }
+    };
+
+    Ok(
+        compat::JsonReport::new("verify_wasm_browser", status)
+            .with_items(items)
+            .with_violations(violations)
+            .with_note("runs `wasm-pack test --headless --chrome crates/vuec_wasm`; requires wasm-pack plus Chrome, and supports VUEC_WASM_CHROME/VUEC_WASM_CHROMEDRIVER overrides"),
     )
 }
 
@@ -694,6 +729,134 @@ fn run_cargo(args: &[&str]) -> Result<String> {
         );
     }
     Ok(normalize_command_output(&output.stdout, &output.stderr))
+}
+
+fn run_wasm_pack_browser_test() -> Result<String> {
+    let wasm_pack = resolve_program("wasm-pack")?;
+    let chrome = resolve_browser_chrome_binary();
+    let webdriver = write_wasm_webdriver_config(chrome.as_deref())?;
+    let mut command = ProcessCommand::new(wasm_pack);
+    command.args(["test", "--headless", "--chrome"]);
+    if let Some(driver) = resolve_browser_chromedriver() {
+        command.arg("--chromedriver").arg(driver);
+    }
+    command.arg("crates/vuec_wasm").env(
+        "WASM_BINDGEN_TEST_WEBDRIVER_JSON",
+        absolute_path(&webdriver),
+    );
+    let output = command
+        .output()
+        .context("failed to spawn wasm-pack test --headless --chrome crates/vuec_wasm")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "wasm-pack browser test exited with {:?}\nstdout:\n{}\nstderr:\n{}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(normalize_command_output(&output.stdout, &output.stderr))
+}
+
+fn write_wasm_webdriver_config(chrome_binary: Option<&Path>) -> Result<PathBuf> {
+    let dir = PathBuf::from("target").join("wasm-browser");
+    std::fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
+    let path = dir.join("webdriver.json");
+    let chrome_options = if let Some(binary) = chrome_binary {
+        json!({
+            "binary": binary.display().to_string(),
+            "args": [
+                "headless=new",
+                "disable-dev-shm-usage",
+                "no-sandbox"
+            ]
+        })
+    } else {
+        json!({
+            "args": [
+                "headless=new",
+                "disable-dev-shm-usage",
+                "no-sandbox"
+            ]
+        })
+    };
+    let config = json!({
+        "browserName": "chrome",
+        "goog:chromeOptions": chrome_options,
+    });
+    std::fs::write(&path, serde_json::to_vec_pretty(&config)?)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(path)
+}
+
+fn resolve_browser_chrome_binary() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("VUEC_WASM_CHROME") {
+        let path = PathBuf::from(path);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    if cfg!(windows) {
+        return chrome_candidate_paths()
+            .into_iter()
+            .find(|path| path.exists());
+    }
+    chrome_candidate_paths()
+        .into_iter()
+        .find(|path| is_real_chrome_binary(path))
+}
+
+fn resolve_browser_chromedriver() -> Option<PathBuf> {
+    let path = std::env::var_os("VUEC_WASM_CHROMEDRIVER").map(PathBuf::from)?;
+    if path.exists() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
+fn chrome_candidate_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if cfg!(windows) {
+        paths.push(PathBuf::from(
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        ));
+        paths.push(PathBuf::from(
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        ));
+    } else if cfg!(target_os = "macos") {
+        paths.push(PathBuf::from(
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        ));
+    } else {
+        for program in [
+            "google-chrome",
+            "google-chrome-stable",
+            "chromium",
+            "chromium-browser",
+        ] {
+            if let Ok(path) = resolve_program(program) {
+                paths.push(PathBuf::from(path));
+            }
+        }
+    }
+    paths
+}
+
+fn is_real_chrome_binary(path: &Path) -> bool {
+    if !path.exists() {
+        return false;
+    }
+    let output = ProcessCommand::new(path).arg("--version").output();
+    output
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| {
+            let text = normalize_command_output(&output.stdout, &output.stderr);
+            text.to_ascii_lowercase().contains("chrome")
+                || text.to_ascii_lowercase().contains("chromium")
+        })
+        .unwrap_or(false)
 }
 
 fn build_wasm_package() -> Result<Vec<PathBuf>> {
@@ -788,7 +951,12 @@ fn resolve_program(program: &str) -> Result<String> {
     if !output.status.success() {
         anyhow::bail!("required program `{program}` was not found on PATH");
     }
-    Ok(program.to_string())
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or(program)
+        .to_string())
 }
 
 fn run_wasm_smoke() -> Result<String> {
