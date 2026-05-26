@@ -401,7 +401,8 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
             let filename = string_field_or(&payload, "filename", "anonymous.vue");
             let mut compiler = SfcCompiler::new();
             let descriptor = compiler.parse(filename, &source);
-            let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+            let script = compiler
+                .compile_vue27_script(&descriptor, sfc_script_options(payload.get("options")));
             Ok(vue27_script_value(&script))
         }
         "sfc.compileStyle" | "sfc.compileStyleAsync" => {
@@ -417,13 +418,19 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
         "sfc.vue27.compileStyle" | "sfc.vue27.compileStyleAsync" => {
             let source = string_field(&payload, "source");
             let filename = string_field_or(&payload, "filename", "anonymous.vue");
-            let options = sfc_style_options(payload.get("options"));
+            let mut options = sfc_style_options(payload.get("options"));
+            options.scoped = payload
+                .get("options")
+                .and_then(|value| value.get("scoped"))
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
             let style = compile_style(
                 &source,
                 StyleCompileOptions {
                     id: options.id.clone(),
                     scoped: options.scoped,
-                    vars: vue27_scoped_style_vars(options.id.as_deref(), &options.vars),
+                    vars: options.vars.clone(),
+                    is_prod: options.is_prod,
                     filename: Some(filename),
                     source_map: false,
                     modules: false,
@@ -1038,34 +1045,15 @@ fn vue27_attrs_value(attrs: &SfcBlockAttrs) -> Value {
 }
 
 fn vue27_css_vars(descriptor: &SfcDescriptor) -> Vec<String> {
-    descriptor
-        .styles
-        .iter()
-        .flat_map(|style| vuec_style::collect_css_vars(&style.content))
-        .collect()
-}
-
-fn vue27_scoped_style_vars(id: Option<&str>, vars: &[String]) -> Vec<String> {
-    let Some(id) = id else {
-        return vars.to_vec();
-    };
-    let prefix = id
-        .strip_prefix("data-v-")
-        .unwrap_or(id)
-        .trim_matches('_')
-        .trim_matches('-');
-    if prefix.is_empty() {
-        return vars.to_vec();
-    }
-    vars.iter()
-        .map(|var| {
-            if var.starts_with(&format!("{prefix}-")) {
-                var.clone()
-            } else {
-                format!("{prefix}-{var}")
+    let mut vars = Vec::new();
+    for style in &descriptor.styles {
+        for var in vuec_style::collect_css_vars(&style.content) {
+            if !vars.iter().any(|existing| existing == &var) {
+                vars.push(var);
             }
-        })
-        .collect()
+        }
+    }
+    vars
 }
 
 fn vue27_template_code(render: &str, static_render_fns: &[String]) -> String {
@@ -1188,7 +1176,7 @@ fn vue27_script_value(script: &SfcScriptBlock) -> Value {
         object.remove("errors");
         object.remove("deps");
         object.remove("scriptAst");
-        object.insert("content".into(), json!(vue27_script_content(script)));
+        object.insert("content".into(), json!(script.content.clone()));
         object.insert(
             "start".into(),
             json!(script
@@ -1205,54 +1193,10 @@ fn vue27_script_value(script: &SfcScriptBlock) -> Value {
                 .map(block_content_end_from_loc)
                 .unwrap_or(0)),
         );
-        object["bindings"] = json!(script
-            .bindings
-            .keys()
-            .map(|key| (key.clone(), "setup-const".to_string()))
-            .collect::<std::collections::BTreeMap<_, _>>());
+        object["bindings"] = json!(script.bindings);
         object["imports"] = json!({});
     }
     value
-}
-
-fn vue27_script_content(script: &SfcScriptBlock) -> String {
-    if !script.setup {
-        return script.content.clone();
-    }
-    let component_name = extract_component_name(&script.content).unwrap_or("anonymous");
-    let setup_body = extract_setup_body(&script.content);
-    let bindings = script
-        .bindings
-        .keys()
-        .cloned()
-        .collect::<Vec<_>>()
-        .join(",");
-    let returned = if bindings.is_empty() {
-        "__sfc: true".to_string()
-    } else {
-        format!("__sfc: true,{bindings}")
-    };
-    format!(
-        "import {{ defineComponent as _defineComponent }} from 'vue'\n\nexport default /*#__PURE__*/_defineComponent({{\n  __name: '{}',\n  setup(__props) {{\n{}\nreturn {{ {} }}\n}}\n\n}})",
-        component_name, setup_body, returned
-    )
-}
-
-fn extract_component_name(content: &str) -> Option<&str> {
-    let marker = "__name: '";
-    let start = content.find(marker)? + marker.len();
-    let rest = &content[start..];
-    let end = rest.find('\'')?;
-    Some(&rest[..end])
-}
-
-fn extract_setup_body(content: &str) -> String {
-    let Some(after_import) = content.find('\n') else {
-        return String::new();
-    };
-    let rest = &content[after_import + 1..];
-    let setup = rest.split("export default").next().unwrap_or(rest).trim();
-    setup.to_string()
 }
 
 fn block_content_start_from_loc(loc: &vuec_sfc::SfcBlockLocation) -> usize {
@@ -3915,6 +3859,33 @@ fn sfc_template_options(value: Option<&Value>) -> SfcTemplateCompileOptions {
     options
 }
 
+fn sfc_script_options(value: Option<&Value>) -> SfcScriptCompileOptions {
+    let mut options = SfcScriptCompileOptions::default();
+    let Some(value) = value else {
+        return options;
+    };
+    options.id = value
+        .get("id")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    options.inline_template = bool_option(
+        value,
+        "inlineTemplate",
+        bool_option(value, "inline_template", options.inline_template),
+    );
+    options.ref_sugar = bool_option(
+        value,
+        "refSugar",
+        bool_option(value, "ref_sugar", options.ref_sugar),
+    );
+    options.is_prod = bool_option(
+        value,
+        "isProd",
+        bool_option(value, "is_prod", options.is_prod),
+    );
+    options
+}
+
 fn sfc_style_options(value: Option<&Value>) -> SfcStyleCompileOptions {
     let mut options = SfcStyleCompileOptions::default();
     let Some(value) = value else {
@@ -3925,6 +3896,11 @@ fn sfc_style_options(value: Option<&Value>) -> SfcStyleCompileOptions {
         .and_then(Value::as_str)
         .map(ToOwned::to_owned);
     options.scoped = bool_option(value, "scoped", options.scoped);
+    options.is_prod = bool_option(
+        value,
+        "isProd",
+        bool_option(value, "is_prod", options.is_prod),
+    );
     options.vars = value
         .get("vars")
         .and_then(Value::as_array)
@@ -4055,6 +4031,46 @@ mod tests {
         assert_eq!(directive["modifiers"][0]["content"], json!("prop"));
         assert_eq!(directive["modifiers"][0]["isStatic"], json!(false));
         assert_eq!(directive["modifiers"][0]["loc"]["source"], json!(""));
+    }
+
+    #[test]
+    fn vue27_bridge_compile_style_rewrites_css_vars_with_default_scope() {
+        let compiled = dispatch(
+            "sfc.vue27.compileStyle",
+            json!({
+                "source": ".foo { color: v-bind(color); font-size: v-bind('font.size'); }",
+                "filename": "test.css",
+                "options": {
+                    "id": "data-v-test"
+                }
+            }),
+        )
+        .expect("vue27 style");
+
+        let code = compiled["code"].as_str().unwrap_or("");
+        assert!(code.contains(".foo[data-v-test]"));
+        assert!(code.contains("var(--test-color)"));
+        assert!(code.contains("var(--test-font_size)"));
+    }
+
+    #[test]
+    fn vue27_bridge_compile_script_passes_css_var_options() {
+        let compiled = dispatch(
+            "sfc.vue27.compileScript",
+            json!({
+                "source": "<script>const a = 1</script><style>div{ color: v-bind(color); }</style>",
+                "filename": "test.vue",
+                "options": {
+                    "id": "xxxxxxxx",
+                    "isProd": true
+                }
+            }),
+        )
+        .expect("vue27 script");
+
+        let content = compiled["content"].as_str().unwrap_or("");
+        assert!(content.contains("\"4003f1a6\": (_vm.color)"));
+        assert!(content.contains("export default __default__"));
     }
 
     #[test]

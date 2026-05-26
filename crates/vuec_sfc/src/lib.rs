@@ -3,8 +3,9 @@
 use oxc_ast::ast::{
     Argument, ArrowFunctionExpression, AssignmentTarget, BindingPattern, ExportDefaultDeclaration,
     ExportDefaultDeclarationKind, ExportNamedDeclaration, ExportSpecifier, Expression, Function,
-    ModuleExportName, ObjectProperty, ObjectPropertyKind, PropertyKey, SimpleAssignmentTarget,
-    Statement, VariableDeclaration, WithStatement,
+    ImportDeclarationSpecifier, ModuleExportName, ObjectExpression, ObjectProperty,
+    ObjectPropertyKind, PropertyKey, SimpleAssignmentTarget, Statement, VariableDeclaration,
+    VariableDeclarationKind, WithStatement,
 };
 use oxc_span::GetSpan;
 use serde::{Deserialize, Serialize};
@@ -15,7 +16,7 @@ use vuec_diagnostics::{Diagnostic, Severity};
 use vuec_html::{HtmlAttribute, HtmlTokenKind, HtmlTokenizer};
 use vuec_js::{JsAstStore, JsParseMode};
 use vuec_source::{FileId, SourceMap, Span};
-use vuec_style::{compile_style, StyleCompileOptions};
+use vuec_style::{collect_css_vars, compile_style, gen_css_var_name, StyleCompileOptions};
 use vuec_vue3_core::{TemplateSource, Vue3CompilerOptions};
 use vuec_vue3_dom::{
     apply_dom_parser_defaults, compile as compile_dom, AssetUrlOptions, DomCompilerOptions,
@@ -140,6 +141,7 @@ pub struct SfcScriptCompileOptions {
     pub id: Option<String>,
     pub inline_template: bool,
     pub ref_sugar: bool,
+    pub is_prod: bool,
 }
 
 impl Default for SfcScriptCompileOptions {
@@ -148,6 +150,7 @@ impl Default for SfcScriptCompileOptions {
             id: None,
             inline_template: false,
             ref_sugar: false,
+            is_prod: false,
         }
     }
 }
@@ -157,6 +160,7 @@ pub struct SfcStyleCompileOptions {
     pub id: Option<String>,
     pub scoped: bool,
     pub vars: Vec<String>,
+    pub is_prod: bool,
 }
 
 impl Default for SfcStyleCompileOptions {
@@ -165,6 +169,7 @@ impl Default for SfcStyleCompileOptions {
             id: None,
             scoped: false,
             vars: Vec::new(),
+            is_prod: false,
         }
     }
 }
@@ -574,6 +579,82 @@ impl SfcCompiler {
         }
     }
 
+    pub fn compile_vue27_script(
+        &mut self,
+        descriptor: &SfcDescriptor,
+        options: SfcScriptCompileOptions,
+    ) -> SfcScriptBlock {
+        let mut raw_content = String::new();
+        let mut script_ast = Vec::new();
+        let mut script_setup_ast = Vec::new();
+        let source_type = script_source_type(descriptor);
+        if let Some(script) = descriptor.script.as_ref() {
+            raw_content.push_str(&script.content);
+            let id = self.js.register_program(
+                script.content.clone(),
+                Span::new(descriptor.source_file, script.loc.start, script.loc.end),
+                script_mode(&script.attrs),
+                source_type,
+            );
+            script_ast.push(format!("JsProgramId({})", id.0));
+        }
+        if let Some(script_setup) = descriptor.script_setup.as_ref() {
+            if !raw_content.is_empty() {
+                raw_content.push('\n');
+            }
+            raw_content.push_str(&script_setup.content);
+            let id = self.js.register_program(
+                script_setup.content.clone(),
+                Span::new(
+                    descriptor.source_file,
+                    script_setup.loc.start,
+                    script_setup.loc.end,
+                ),
+                script_mode(&script_setup.attrs),
+                source_type,
+            );
+            script_setup_ast.push(format!("JsProgramId({})", id.0));
+        }
+        let summary = self.js.summarize_program(&raw_content, source_type);
+        let css_vars = descriptor_css_vars(descriptor);
+        let content = vue27_script_content(descriptor, &options, &css_vars);
+        let bindings = if descriptor.script_setup.is_some() {
+            vue27_setup_binding_metadata(descriptor)
+        } else {
+            vue27_normal_script_binding_metadata(descriptor)
+        };
+        let attrs = descriptor
+            .script
+            .as_ref()
+            .or(descriptor.script_setup.as_ref())
+            .map(|block| block.attrs.clone())
+            .unwrap_or_default();
+
+        SfcScriptBlock {
+            type_name: "script".into(),
+            content,
+            loc: descriptor
+                .script
+                .as_ref()
+                .or(descriptor.script_setup.as_ref())
+                .map(|block| block.loc.clone()),
+            attrs,
+            setup: descriptor.script_setup.is_some(),
+            lang: descriptor
+                .script_setup
+                .as_ref()
+                .or(descriptor.script.as_ref())
+                .and_then(|block| block.attrs.lang.clone()),
+            bindings,
+            imports: summary.imports,
+            errors: summary.errors,
+            map: None,
+            script_ast,
+            script_setup_ast,
+            deps: Vec::new(),
+        }
+    }
+
     pub fn compile_style(
         &self,
         descriptor: &SfcDescriptor,
@@ -591,7 +672,8 @@ impl SfcCompiler {
                     id: options.id.clone(),
                     scoped: options.scoped || style.attrs.scoped,
                     modules: style.attrs.module.is_some(),
-                    vars: scoped_style_vars(options.id.as_deref(), &options.vars),
+                    vars: options.vars.clone(),
+                    is_prod: options.is_prod,
                     filename: Some(descriptor.filename.clone()),
                     source_map: false,
                 },
@@ -2042,27 +2124,626 @@ fn style_dependencies(style: &SfcBlock) -> Vec<String> {
     dependencies
 }
 
-fn scoped_style_vars(id: Option<&str>, vars: &[String]) -> Vec<String> {
-    let Some(id) = id else {
-        return vars.to_vec();
-    };
-    let prefix = id
-        .strip_prefix("data-v-")
-        .unwrap_or(id)
-        .trim_matches('_')
-        .trim_matches('-');
-    if prefix.is_empty() {
-        return vars.to_vec();
-    }
-    vars.iter()
-        .map(|var| {
-            if var.starts_with(&format!("{prefix}-")) {
-                var.clone()
-            } else {
-                format!("{prefix}-{var}")
+fn descriptor_css_vars(descriptor: &SfcDescriptor) -> Vec<String> {
+    let mut vars = Vec::new();
+    for style in &descriptor.styles {
+        for var in collect_css_vars(&style.content) {
+            if !vars.iter().any(|existing| existing == &var) {
+                vars.push(var);
             }
+        }
+    }
+    vars
+}
+
+fn vue27_script_content(
+    descriptor: &SfcDescriptor,
+    options: &SfcScriptCompileOptions,
+    css_vars: &[String],
+) -> String {
+    if let Some(script_setup) = descriptor.script_setup.as_ref() {
+        return vue27_script_setup_content(descriptor, script_setup, options, css_vars);
+    }
+    let Some(script) = descriptor.script.as_ref() else {
+        return String::new();
+    };
+    if css_vars.is_empty() {
+        return script.content.clone();
+    }
+    let scope_id = vue27_scope_id(options.id.as_deref());
+    let bindings = vue27_normal_script_binding_metadata(descriptor);
+    let content = rewrite_vue27_default(
+        &script.content,
+        "__default__",
+        Vue27RewriteDefaultOptions {
+            typescript: script_is_typescript(&script.attrs),
+            decorators: script_is_typescript(&script.attrs),
+        },
+    );
+    format!(
+        "{}{}\nexport default __default__",
+        content,
+        gen_vue27_normal_script_css_vars_code(css_vars, &bindings, &scope_id, options.is_prod)
+    )
+}
+
+fn vue27_script_setup_content(
+    descriptor: &SfcDescriptor,
+    script_setup: &SfcBlock,
+    options: &SfcScriptCompileOptions,
+    css_vars: &[String],
+) -> String {
+    let scope_id = vue27_scope_id(options.id.as_deref());
+    let analysis = analyze_vue27_script_setup(script_setup);
+    let bindings = vue27_setup_binding_metadata(descriptor);
+    let css_vars_code = if css_vars.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n{}\n",
+            gen_vue27_css_vars_code(css_vars, &bindings, &scope_id, options.is_prod)
+        )
+    };
+    let props = analysis
+        .props_runtime
+        .as_ref()
+        .map(|props| format!("\n  props: {},", props.trim()))
+        .unwrap_or_default();
+    let return_bindings = analysis
+        .return_bindings
+        .iter()
+        .filter(|name| {
+            !analysis
+                .removed_bindings
+                .iter()
+                .any(|removed| removed == *name)
         })
+        .cloned()
+        .collect::<Vec<_>>();
+    let returned = if return_bindings.is_empty() {
+        "{}".to_string()
+    } else {
+        format!("{{ {} }}", return_bindings.join(", "))
+    };
+    let helper_import = if css_vars.is_empty() {
+        ""
+    } else {
+        "import { useCssVars as _useCssVars } from 'vue'\n"
+    };
+    format!(
+        "{}{}\nexport default {{{}\n  setup(__props) {{\n{}{}\nreturn {}\n}}\n\n}}",
+        helper_import,
+        analysis.module_content,
+        props,
+        css_vars_code,
+        analysis.setup_content,
+        returned
+    )
+}
+
+fn vue27_scope_id(id: Option<&str>) -> String {
+    id.and_then(|id| id.strip_prefix("data-v-").or(Some(id)))
+        .unwrap_or("")
+        .to_string()
+}
+
+fn gen_vue27_normal_script_css_vars_code(
+    css_vars: &[String],
+    bindings: &BTreeMap<String, String>,
+    id: &str,
+    is_prod: bool,
+) -> String {
+    format!(
+        "\nimport {{ useCssVars as _useCssVars }} from 'vue'\nconst __injectCSSVars__ = () => {{\n{}}}\nconst __setup__ = __default__.setup\n__default__.setup = __setup__\n  ? (props, ctx) => {{ __injectCSSVars__();return __setup__(props, ctx) }}\n  : __injectCSSVars__\n",
+        gen_vue27_css_vars_code(css_vars, bindings, id, is_prod)
+    )
+}
+
+fn gen_vue27_css_vars_code(
+    css_vars: &[String],
+    bindings: &BTreeMap<String, String>,
+    id: &str,
+    is_prod: bool,
+) -> String {
+    let vars = css_vars
+        .iter()
+        .map(|var| format!("\"{}\": ({})", gen_css_var_name(id, var, is_prod), var))
+        .collect::<Vec<_>>()
+        .join(",\n  ");
+    let expression = format!("({{\n  {vars}\n}})");
+    let prefixed = prefix_vue27_identifiers(
+        &expression,
+        Vue27PrefixIdentifiersOptions {
+            is_functional: false,
+            is_ts: false,
+            bindings: bindings.clone(),
+        },
+    );
+    format!("_useCssVars((_vm, _setup) => {prefixed})")
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Vue27ScriptSetupAnalysis {
+    module_content: String,
+    setup_content: String,
+    return_bindings: Vec<String>,
+    import_return_bindings: Vec<String>,
+    removed_bindings: Vec<String>,
+    setup_bindings: BTreeMap<String, String>,
+    props_bindings: Vec<String>,
+    props_runtime: Option<String>,
+}
+
+fn analyze_vue27_script_setup(script_setup: &SfcBlock) -> Vue27ScriptSetupAnalysis {
+    let source = script_setup.content.as_str();
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(
+        &allocator,
+        source,
+        script_source_type_from_attrs(&script_setup.attrs),
+    )
+    .with_options(oxc_parser::ParseOptions {
+        parse_regular_expression: true,
+        ..oxc_parser::ParseOptions::default()
+    })
+    .parse();
+    if parsed.panicked || !parsed.errors.is_empty() {
+        return Vue27ScriptSetupAnalysis {
+            setup_content: source.to_string(),
+            ..Vue27ScriptSetupAnalysis::default()
+        };
+    }
+
+    let mut edits = SourceEdits::new(source);
+    let mut analysis = Vue27ScriptSetupAnalysis::default();
+    for statement in &parsed.program.body {
+        match statement {
+            Statement::ImportDeclaration(import) => {
+                let source_value = import.source.value.as_str();
+                let mut kept_specifiers = Vec::new();
+                if let Some(specifiers) = &import.specifiers {
+                    for specifier in specifiers {
+                        let local = import_specifier_local(specifier);
+                        let imported = import_specifier_imported(specifier);
+                        if source_value == "vue"
+                            && matches!(
+                                imported.as_deref(),
+                                Some("defineProps" | "defineEmits" | "defineExpose")
+                            )
+                        {
+                            analysis.removed_bindings.push(local);
+                        } else {
+                            if source_value == "vue" {
+                                analysis
+                                    .setup_bindings
+                                    .insert(local.clone(), "setup-const".into());
+                            } else {
+                                analysis
+                                    .setup_bindings
+                                    .insert(local.clone(), "setup-maybe-ref".into());
+                            }
+                            kept_specifiers.push(import_specifier_source(source, specifier));
+                            push_unique(&mut analysis.import_return_bindings, &local);
+                        }
+                    }
+                }
+                if kept_specifiers.is_empty() {
+                    edits.remove(
+                        statement.span().start as usize,
+                        statement.span().end as usize,
+                    );
+                } else if kept_specifiers.len()
+                    < import
+                        .specifiers
+                        .as_ref()
+                        .map_or(0, |specifiers| specifiers.len())
+                {
+                    edits.overwrite(
+                        statement.span().start as usize,
+                        statement.span().end as usize,
+                        format!(
+                            "import {{ {} }} from '{}'",
+                            kept_specifiers.join(", "),
+                            source_value
+                        ),
+                    );
+                }
+            }
+            Statement::VariableDeclaration(declaration) => {
+                analyze_vue27_setup_variable_declaration(
+                    source,
+                    declaration,
+                    &mut edits,
+                    &mut analysis,
+                );
+            }
+            Statement::FunctionDeclaration(function) => {
+                if let Some(id) = &function.id {
+                    push_unique(&mut analysis.return_bindings, id.name.as_str());
+                    analysis
+                        .setup_bindings
+                        .insert(id.name.to_string(), "setup-const".into());
+                }
+            }
+            Statement::ClassDeclaration(class) => {
+                if let Some(id) = &class.id {
+                    push_unique(&mut analysis.return_bindings, id.name.as_str());
+                    analysis
+                        .setup_bindings
+                        .insert(id.name.to_string(), "setup-const".into());
+                }
+            }
+            Statement::ExpressionStatement(statement) => {
+                if let Expression::CallExpression(call) = &statement.expression {
+                    if is_call_named(call, "defineProps") {
+                        collect_define_props_argument(source, call, &mut analysis);
+                        edits.remove(statement.span.start as usize, statement.span.end as usize);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let content = edits.apply();
+    let (module_content, setup_content) = split_vue27_setup_module_content(&content);
+    analysis.module_content = module_content;
+    for value in analysis.import_return_bindings.clone() {
+        push_unique(&mut analysis.return_bindings, &value);
+    }
+    analysis.setup_content = trim_trailing_blank_lines(&setup_content).to_string();
+    analysis
+}
+
+fn analyze_vue27_setup_variable_declaration(
+    source: &str,
+    declaration: &VariableDeclaration<'_>,
+    edits: &mut SourceEdits<'_>,
+    analysis: &mut Vue27ScriptSetupAnalysis,
+) {
+    let mut remove_declaration = false;
+    for declarator in &declaration.declarations {
+        if let Some(init) = &declarator.init {
+            if let Expression::CallExpression(call) = init {
+                if is_call_named(call, "defineProps") {
+                    collect_define_props_argument(source, call, analysis);
+                    collect_pattern_bindings(&declarator.id, &mut analysis.removed_bindings);
+                    remove_declaration = true;
+                    continue;
+                }
+            }
+        }
+        let binding_type = vue27_setup_binding_type(declaration.kind, declarator.init.as_ref());
+        collect_pattern_binding_types(&declarator.id, binding_type, &mut analysis.setup_bindings);
+        collect_pattern_bindings(&declarator.id, &mut analysis.return_bindings);
+    }
+    if remove_declaration && declaration.declarations.len() == 1 {
+        edits.remove(
+            declaration.span.start as usize,
+            declaration.span.end as usize,
+        );
+    }
+}
+
+fn vue27_setup_binding_type(
+    kind: VariableDeclarationKind,
+    init: Option<&Expression<'_>>,
+) -> &'static str {
+    if kind != VariableDeclarationKind::Const {
+        return "setup-let";
+    }
+    if init.is_some_and(|init| {
+        is_literal_expression(init) || is_call_expression_named(init, "defineProps")
+    }) {
+        return "setup-const";
+    }
+    if init.is_some_and(|init| is_call_expression_named(init, "ref")) {
+        return "setup-ref";
+    }
+    "setup-maybe-ref"
+}
+
+fn is_literal_expression(expression: &Expression<'_>) -> bool {
+    matches!(
+        expression,
+        Expression::StringLiteral(_)
+            | Expression::NumericLiteral(_)
+            | Expression::BooleanLiteral(_)
+            | Expression::NullLiteral(_)
+            | Expression::RegExpLiteral(_)
+            | Expression::BigIntLiteral(_)
+    )
+}
+
+fn is_call_expression_named(expression: &Expression<'_>, name: &str) -> bool {
+    matches!(expression, Expression::CallExpression(call) if is_call_named(call, name))
+}
+
+fn is_call_named(call: &oxc_ast::ast::CallExpression<'_>, name: &str) -> bool {
+    matches!(&call.callee, Expression::Identifier(identifier) if identifier.name == name)
+}
+
+fn collect_define_props_argument(
+    source: &str,
+    call: &oxc_ast::ast::CallExpression<'_>,
+    analysis: &mut Vue27ScriptSetupAnalysis,
+) {
+    let Some(argument) = call.arguments.first() else {
+        return;
+    };
+    let expression = argument.to_expression();
+    if let Expression::ObjectExpression(object) = expression {
+        for key in object_expression_keys(object) {
+            push_unique(&mut analysis.props_bindings, &key);
+        }
+        let start = expression.span().start as usize;
+        let end = expression.span().end as usize;
+        analysis.props_runtime = source.get(start..end).map(ToOwned::to_owned);
+    }
+}
+
+fn object_expression_keys(object: &ObjectExpression<'_>) -> Vec<String> {
+    object
+        .properties
+        .iter()
+        .filter_map(|property| property.as_property())
+        .filter(|property| !property.computed)
+        .filter_map(|property| property.key.static_name().map(|name| name.into_owned()))
         .collect()
+}
+
+fn import_specifier_local(specifier: &ImportDeclarationSpecifier<'_>) -> String {
+    match specifier {
+        ImportDeclarationSpecifier::ImportSpecifier(specifier) => specifier.local.name.to_string(),
+        ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
+            specifier.local.name.to_string()
+        }
+        ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
+            specifier.local.name.to_string()
+        }
+    }
+}
+
+fn import_specifier_imported(specifier: &ImportDeclarationSpecifier<'_>) -> Option<String> {
+    match specifier {
+        ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
+            Some(specifier.imported.name().to_string())
+        }
+        ImportDeclarationSpecifier::ImportDefaultSpecifier(_) => Some("default".into()),
+        ImportDeclarationSpecifier::ImportNamespaceSpecifier(_) => Some("*".into()),
+    }
+}
+
+fn import_specifier_source(source: &str, specifier: &ImportDeclarationSpecifier<'_>) -> String {
+    source[specifier.span().start as usize..specifier.span().end as usize].to_string()
+}
+
+fn split_vue27_setup_module_content(content: &str) -> (String, String) {
+    let mut module = String::new();
+    let mut setup = String::new();
+    let mut last_module_indent = "";
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("import ") {
+            if !module.is_empty() && !module.ends_with('\n') {
+                module.push('\n');
+            }
+            module.push_str(trimmed);
+            module.push('\n');
+            last_module_indent = &line[..line.len() - trimmed.len()];
+        } else {
+            setup.push_str(line);
+            setup.push('\n');
+        }
+    }
+    if !last_module_indent.is_empty() {
+        module.push_str(last_module_indent);
+    }
+    (module, setup)
+}
+
+fn vue27_setup_binding_metadata(descriptor: &SfcDescriptor) -> BTreeMap<String, String> {
+    let mut bindings = descriptor
+        .script_setup
+        .as_ref()
+        .map(analyze_vue27_script_setup)
+        .map(|analysis| {
+            let mut bindings = analysis.setup_bindings;
+            for prop in analysis.props_bindings {
+                bindings.insert(prop, "props".into());
+            }
+            bindings
+        })
+        .unwrap_or_default();
+    bindings.insert("__isScriptSetup".into(), "true".into());
+    bindings
+}
+
+fn vue27_normal_script_binding_metadata(descriptor: &SfcDescriptor) -> BTreeMap<String, String> {
+    let Some(script) = descriptor.script.as_ref() else {
+        return BTreeMap::from([("__isScriptSetup".into(), "false".into())]);
+    };
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(
+        &allocator,
+        &script.content,
+        script_source_type_from_attrs(&script.attrs),
+    )
+    .with_options(oxc_parser::ParseOptions {
+        parse_regular_expression: true,
+        ..oxc_parser::ParseOptions::default()
+    })
+    .parse();
+    if parsed.panicked || !parsed.errors.is_empty() {
+        return BTreeMap::from([("__isScriptSetup".into(), "false".into())]);
+    }
+    let mut bindings = BTreeMap::from([("__isScriptSetup".into(), "false".into())]);
+    for statement in &parsed.program.body {
+        if let Statement::ExportDefaultDeclaration(default) = statement {
+            match &default.declaration {
+                ExportDefaultDeclarationKind::ObjectExpression(object) => {
+                    analyze_vue27_options_bindings(object, &mut bindings);
+                }
+                ExportDefaultDeclarationKind::CallExpression(call) => {
+                    if let Some(argument) = call.arguments.first() {
+                        if let Expression::ObjectExpression(object) = argument.to_expression() {
+                            analyze_vue27_options_bindings(object, &mut bindings);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    bindings
+}
+
+fn analyze_vue27_options_bindings(
+    object: &ObjectExpression<'_>,
+    bindings: &mut BTreeMap<String, String>,
+) {
+    for property in &object.properties {
+        let Some(property) = property.as_property() else {
+            continue;
+        };
+        let Some(key) = property.key.static_name().map(|name| name.into_owned()) else {
+            continue;
+        };
+        match key.as_str() {
+            "props" => {
+                if let Expression::ObjectExpression(props) = &property.value {
+                    for key in object_expression_keys(props) {
+                        bindings.insert(key, "props".into());
+                    }
+                } else if let Expression::ArrayExpression(array) = &property.value {
+                    for element in &array.elements {
+                        if let Some(Expression::StringLiteral(literal)) = element.as_expression() {
+                            bindings.insert(literal.value.to_string(), "props".into());
+                        }
+                    }
+                }
+            }
+            "computed" | "methods" => {
+                if let Expression::ObjectExpression(values) = &property.value {
+                    for key in object_expression_keys(values) {
+                        bindings.insert(key, "options".into());
+                    }
+                }
+            }
+            _ => {
+                if let Expression::ObjectExpression(_) = &property.value {
+                    continue;
+                }
+            }
+        }
+        if key == "setup" || key == "data" {
+            collect_returned_object_keys(&property.value, key.as_str(), bindings);
+        }
+    }
+}
+
+fn collect_returned_object_keys(
+    expression: &Expression<'_>,
+    option_key: &str,
+    bindings: &mut BTreeMap<String, String>,
+) {
+    let body = match expression {
+        Expression::FunctionExpression(function) => {
+            function.body.as_ref().map(|body| &body.statements)
+        }
+        Expression::ArrowFunctionExpression(function) => Some(&function.body.statements),
+        _ => None,
+    };
+    let Some(body) = body else {
+        return;
+    };
+    for statement in body {
+        if let Statement::ReturnStatement(statement) = statement {
+            if let Some(Expression::ObjectExpression(object)) = &statement.argument {
+                for key in object_expression_keys(object) {
+                    bindings.insert(
+                        key,
+                        if option_key == "setup" {
+                            "setup-maybe-ref".into()
+                        } else {
+                            "data".into()
+                        },
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn collect_pattern_binding_types(
+    pattern: &BindingPattern<'_>,
+    binding_type: &str,
+    bindings: &mut BTreeMap<String, String>,
+) {
+    match pattern {
+        BindingPattern::BindingIdentifier(identifier) => {
+            bindings.insert(identifier.name.to_string(), binding_type.to_string());
+        }
+        BindingPattern::ObjectPattern(pattern) => {
+            for property in &pattern.properties {
+                collect_pattern_binding_types(&property.value, binding_type, bindings);
+            }
+            if let Some(rest) = &pattern.rest {
+                collect_pattern_binding_types(&rest.argument, binding_type, bindings);
+            }
+        }
+        BindingPattern::ArrayPattern(pattern) => {
+            for element in pattern.elements.iter().flatten() {
+                collect_pattern_binding_types(element, binding_type, bindings);
+            }
+            if let Some(rest) = &pattern.rest {
+                collect_pattern_binding_types(&rest.argument, binding_type, bindings);
+            }
+        }
+        BindingPattern::AssignmentPattern(pattern) => {
+            collect_pattern_binding_types(&pattern.left, binding_type, bindings);
+        }
+    }
+}
+
+fn collect_pattern_bindings(pattern: &BindingPattern<'_>, bindings: &mut Vec<String>) {
+    match pattern {
+        BindingPattern::BindingIdentifier(identifier) => {
+            push_unique(bindings, identifier.name.as_str());
+        }
+        BindingPattern::ObjectPattern(pattern) => {
+            for property in &pattern.properties {
+                collect_pattern_bindings(&property.value, bindings);
+            }
+            if let Some(rest) = &pattern.rest {
+                collect_pattern_bindings(&rest.argument, bindings);
+            }
+        }
+        BindingPattern::ArrayPattern(pattern) => {
+            for element in pattern.elements.iter().flatten() {
+                collect_pattern_bindings(element, bindings);
+            }
+            if let Some(rest) = &pattern.rest {
+                collect_pattern_bindings(&rest.argument, bindings);
+            }
+        }
+        BindingPattern::AssignmentPattern(pattern) => {
+            collect_pattern_bindings(&pattern.left, bindings);
+        }
+    }
+}
+
+fn push_unique(values: &mut Vec<String>, value: &str) {
+    if !values.iter().any(|existing| existing == value) {
+        values.push(value.to_string());
+    }
+}
+
+fn trim_trailing_blank_lines(value: &str) -> &str {
+    value.trim_end_matches(|ch| matches!(ch, '\n' | '\r'))
+}
+
+fn script_is_typescript(attrs: &SfcBlockAttrs) -> bool {
+    matches!(attrs.lang.as_deref(), Some("ts" | "tsx"))
 }
 
 fn merge_template_errors(
@@ -2240,6 +2921,14 @@ fn script_source_type(descriptor: &SfcDescriptor) -> oxc_span::SourceType {
         .or(descriptor.script.as_ref())
         .and_then(|block| block.attrs.lang.as_deref());
     match lang {
+        Some("tsx") => oxc_span::SourceType::tsx(),
+        Some("ts") => oxc_span::SourceType::ts(),
+        _ => oxc_span::SourceType::mjs(),
+    }
+}
+
+fn script_source_type_from_attrs(attrs: &SfcBlockAttrs) -> oxc_span::SourceType {
+    match attrs.lang.as_deref() {
         Some("tsx") => oxc_span::SourceType::tsx(),
         Some("ts") => oxc_span::SourceType::ts(),
         _ => oxc_span::SourceType::mjs(),
@@ -2509,6 +3198,59 @@ mod tests {
             compiler.prefix_vue27_identifiers(source, options),
             "function render(){var _vm=this,_c=_vm._self._c,_setup=_vm._self._setupProxy;return _c('div',{on:{click:function($event){_setup.count++}}},[_vm._v(_vm._s(_setup.count))])}"
         );
+    }
+
+    #[test]
+    fn vue27_compile_script_injects_normal_script_css_vars() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "foo.vue",
+            "<script>const a = 1</script><style>div{ color: v-bind(color); }</style>",
+        );
+        let script = compiler.compile_vue27_script(
+            &descriptor,
+            SfcScriptCompileOptions {
+                id: Some("xxxxxxxx".into()),
+                ..SfcScriptCompileOptions::default()
+            },
+        );
+
+        assert!(script.content.contains("const __default__ = {}"));
+        assert!(script
+            .content
+            .contains("import { useCssVars as _useCssVars } from 'vue'"));
+        assert!(script.content.contains("\"xxxxxxxx-color\": (_vm.color)"));
+        assert!(script.content.contains("export default __default__"));
+    }
+
+    #[test]
+    fn vue27_compile_script_injects_setup_css_vars_with_props() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "foo.vue",
+            r#"<script setup>
+import { defineProps, ref } from 'vue'
+const color = 'red'
+const size = ref('10px')
+defineProps({ foo: String })
+</script><style>div{ color: v-bind(color); width: v-bind(size); border: v-bind(foo); }</style>"#,
+        );
+        let script = compiler.compile_vue27_script(
+            &descriptor,
+            SfcScriptCompileOptions {
+                id: Some("xxxxxxxx".into()),
+                ..SfcScriptCompileOptions::default()
+            },
+        );
+
+        assert!(script.content.contains("props: { foo: String },"));
+        assert!(script
+            .content
+            .contains("\"xxxxxxxx-color\": (_setup.color)"));
+        assert!(script.content.contains("\"xxxxxxxx-size\": (_setup.size)"));
+        assert!(script.content.contains("\"xxxxxxxx-foo\": (_vm.foo)"));
+        assert!(script.content.contains("return { color, size, ref }"));
+        assert!(!script.content.contains("defineProps"));
     }
 
     #[test]

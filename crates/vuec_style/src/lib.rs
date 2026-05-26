@@ -9,6 +9,7 @@ pub struct StyleCompileOptions {
     pub scoped: bool,
     pub modules: bool,
     pub vars: Vec<String>,
+    pub is_prod: bool,
     pub filename: Option<String>,
     pub source_map: bool,
 }
@@ -25,7 +26,8 @@ pub struct StyleCompileResult {
 pub fn compile_style(source: &str, options: StyleCompileOptions) -> StyleCompileResult {
     let mut errors = Vec::new();
     let mut code = source.to_string();
-    let id = options.id.unwrap_or_else(|| "data-v-vuec".into());
+    let option_id = options.id.clone();
+    let id = option_id.clone().unwrap_or_else(|| "data-v-vuec".into());
     let vars = if options.vars.is_empty() {
         collect_css_vars(source)
     } else {
@@ -36,7 +38,8 @@ pub fn compile_style(source: &str, options: StyleCompileOptions) -> StyleCompile
         code = rewrite_scoped_selectors(&code, &id);
     }
     if !vars.is_empty() {
-        code = rewrite_css_vars(&code, &vars);
+        let var_id = option_id.as_deref().map(style_var_id).unwrap_or_default();
+        code = rewrite_css_vars(&code, &var_id, options.is_prod);
     }
     code = normalize_style_output(&code);
     let modules = if options.modules {
@@ -66,7 +69,12 @@ pub fn compile_style(source: &str, options: StyleCompileOptions) -> StyleCompile
 }
 
 fn normalize_style_output(source: &str) -> String {
-    source.replace("; }", ";\n}")
+    source
+        .replace("; }", ";\n}")
+        .lines()
+        .map(|line| if line.trim() == "}" { "}" } else { line })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 pub fn rewrite_scoped_selectors(source: &str, scope_id: &str) -> String {
@@ -84,43 +92,219 @@ pub fn rewrite_scoped_selectors(source: &str, scope_id: &str) -> String {
 
 pub fn collect_css_vars(source: &str) -> Vec<String> {
     let mut vars = Vec::new();
-    let mut cursor = 0usize;
-    while let Some(start) = source[cursor..].find("v-bind(") {
-        let start = cursor + start + "v-bind(".len();
-        let Some(end_offset) = source[start..].find(')') else {
-            break;
-        };
-        let end = start + end_offset;
-        let value = source[start..end]
-            .trim()
-            .trim_matches(['"', '\''])
-            .to_string();
-        if !value.is_empty() && !vars.iter().any(|existing| existing == &value) {
-            vars.push(value);
+    for binding in css_var_bindings(source) {
+        if !binding.expression.is_empty()
+            && !vars.iter().any(|existing| existing == &binding.expression)
+        {
+            vars.push(binding.expression);
         }
-        cursor = end + 1;
     }
     vars
 }
 
-fn rewrite_css_vars(source: &str, vars: &[String]) -> String {
-    let mut code = source.to_string();
-    for var in vars {
-        let source_var = var.rsplit_once('-').map(|(_, raw)| raw).unwrap_or(var);
-        let css_var = format!("var(--{var})");
-        code = code.replace(&format!("v-bind({source_var})"), &css_var);
-        code = code.replace(&format!("v-bind('{source_var}')"), &css_var);
-        code = code.replace(&format!("v-bind(\"{source_var}\")"), &css_var);
+pub fn gen_css_var_name(id: &str, raw: &str, is_prod: bool) -> String {
+    if is_prod {
+        hash_sum_string(&format!("{id}{raw}"))
+    } else {
+        let mut name = String::new();
+        if !id.is_empty() {
+            name.push_str(id);
+            name.push('-');
+        }
+        for ch in raw.chars() {
+            if ch == '-' || ch == '_' || ch.is_ascii_alphanumeric() {
+                name.push(ch);
+            } else {
+                name.push('_');
+            }
+        }
+        name
     }
-    code
+}
+
+pub fn rewrite_css_vars(source: &str, id: &str, is_prod: bool) -> String {
+    let bindings = css_var_bindings(source);
+    if bindings.is_empty() {
+        return source.to_string();
+    }
+    let mut output = String::new();
+    let mut cursor = 0usize;
+    for binding in bindings {
+        if binding.start < cursor {
+            continue;
+        }
+        output.push_str(&source[cursor..binding.start]);
+        output.push_str("var(--");
+        output.push_str(&gen_css_var_name(id, &binding.expression, is_prod));
+        output.push(')');
+        cursor = binding.end;
+    }
+    output.push_str(&source[cursor..]);
+    output
+}
+
+fn style_var_id(id: &str) -> String {
+    id.strip_prefix("data-v-").unwrap_or(id).to_string()
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CssVarBinding {
+    start: usize,
+    end: usize,
+    expression: String,
+}
+
+fn css_var_bindings(source: &str) -> Vec<CssVarBinding> {
+    let mut bindings = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < source.len() {
+        if source[cursor..].starts_with("/*") {
+            let Some(end_offset) = source[cursor + 2..].find("*/") else {
+                break;
+            };
+            cursor += 2 + end_offset + 2;
+            continue;
+        }
+        let Some(start_offset) = find_next_v_bind(source, cursor) else {
+            break;
+        };
+        let open_end = start_offset + v_bind_prefix_len(&source[start_offset..]);
+        let Some(end) = lex_css_var_binding(source, open_end) else {
+            cursor = open_end;
+            continue;
+        };
+        bindings.push(CssVarBinding {
+            start: start_offset,
+            end: end + 1,
+            expression: normalize_expression(&source[open_end..end]),
+        });
+        cursor = end + 1;
+    }
+    bindings
+}
+
+fn find_next_v_bind(source: &str, cursor: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut index = cursor;
+    while index + "v-bind".len() <= source.len() {
+        if source[index..].starts_with("/*") {
+            if let Some(end_offset) = source[index + 2..].find("*/") {
+                index += 2 + end_offset + 2;
+                continue;
+            }
+            return None;
+        }
+        if source[index..].starts_with("v-bind") {
+            let mut open = index + "v-bind".len();
+            while open < source.len() && bytes[open].is_ascii_whitespace() {
+                open += 1;
+            }
+            if open < source.len() && bytes[open] == b'(' {
+                return Some(index);
+            }
+        }
+        let ch = source[index..].chars().next()?;
+        index += ch.len_utf8();
+    }
+    None
+}
+
+fn v_bind_prefix_len(source: &str) -> usize {
+    let mut len = "v-bind".len();
+    let bytes = source.as_bytes();
+    while len < source.len() && bytes[len].is_ascii_whitespace() {
+        len += 1;
+    }
+    len + 1
+}
+
+fn lex_css_var_binding(source: &str, start: usize) -> Option<usize> {
+    let mut state = CssVarLexerState::InParens;
+    let mut depth = 0usize;
+    let mut index = start;
+    while index < source.len() {
+        let ch = source[index..].chars().next()?;
+        match state {
+            CssVarLexerState::InParens => match ch {
+                '\'' => state = CssVarLexerState::InSingleQuote,
+                '"' => state = CssVarLexerState::InDoubleQuote,
+                '(' => depth += 1,
+                ')' if depth > 0 => depth -= 1,
+                ')' => return Some(index),
+                _ => {}
+            },
+            CssVarLexerState::InSingleQuote => {
+                if ch == '\'' {
+                    state = CssVarLexerState::InParens;
+                }
+            }
+            CssVarLexerState::InDoubleQuote => {
+                if ch == '"' {
+                    state = CssVarLexerState::InParens;
+                }
+            }
+        }
+        index += ch.len_utf8();
+    }
+    None
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CssVarLexerState {
+    InParens,
+    InSingleQuote,
+    InDoubleQuote,
+}
+
+fn normalize_expression(value: &str) -> String {
+    let value = value.trim();
+    if value.len() >= 2
+        && ((value.starts_with('\'') && value.ends_with('\''))
+            || (value.starts_with('"') && value.ends_with('"')))
+    {
+        value[1..value.len() - 1].to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+fn hash_sum_string(value: &str) -> String {
+    let mut hash = 0i32;
+    hash = hash_sum_fold(hash, "");
+    hash = hash_sum_fold(hash, "[object String]");
+    hash = hash_sum_fold(hash, "string");
+    hash = hash_sum_fold(hash, value);
+    format!("{:0>8}", format!("{hash:x}"))
+}
+
+fn hash_sum_fold(mut hash: i32, text: &str) -> i32 {
+    if text.is_empty() {
+        return hash;
+    }
+    for code in text.encode_utf16() {
+        hash = hash
+            .wrapping_shl(5)
+            .wrapping_sub(hash)
+            .wrapping_add(code as i32);
+    }
+    if hash < 0 {
+        hash.wrapping_mul(-2)
+    } else {
+        hash
+    }
 }
 
 fn rewrite_selector_list(selector: &str, scope_id: &str) -> String {
-    selector
+    let rewritten = selector
         .split(',')
         .map(|part| rewrite_single_selector(part.trim(), scope_id))
         .collect::<Vec<_>>()
-        .join(", ")
+        .join(", ");
+    if selector.ends_with(' ') {
+        format!("{rewritten} ")
+    } else {
+        rewritten
+    }
 }
 
 fn rewrite_single_selector(selector: &str, scope_id: &str) -> String {
@@ -202,9 +386,48 @@ mod tests {
             },
         );
         assert!(result.code.contains(".a[data-v-x]"));
-        assert!(result.code.contains("var(--color)"));
+        assert!(result.code.contains("var(--x-color)"));
         assert_eq!(result.modules, vec!["a"]);
         assert_eq!(result.vars, vec!["color"]);
         assert!(result.map.is_some());
+    }
+
+    #[test]
+    fn collects_css_vars_like_vue27() {
+        let vars = collect_css_vars(
+            r#"
+            /* color: v-bind(ignored); */
+            div {
+              color: v-bind(color);
+              width: v-bind('font.size');
+              top: v-bind((a + b) / 2 + 'px');
+              height: v-bind("count.toString(");
+              border: v-bind(color);
+            }
+            "#,
+        );
+
+        assert_eq!(
+            vars,
+            vec![
+                "color",
+                "font.size",
+                "(a + b) / 2 + 'px'",
+                "count.toString("
+            ]
+        );
+    }
+
+    #[test]
+    fn rewrites_css_vars_with_vue27_names() {
+        let code = rewrite_css_vars(
+            ".foo { color: v-bind(color); font-size: v-bind('font.size'); }",
+            "test",
+            false,
+        );
+        assert!(code.contains("var(--test-color)"));
+        assert!(code.contains("var(--test-font_size)"));
+        assert_eq!(gen_css_var_name("xxxxxxxx", "color", true), "4003f1a6");
+        assert_eq!(gen_css_var_name("xxxxxxxx", "font.size", true), "41b6490a");
     }
 }
