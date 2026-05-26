@@ -2041,6 +2041,7 @@ fn alias_body_arity(target: TargetSpec, export_name: &str, arity: u32) -> u32 {
         | (TargetKind::Vue3Dom, "parse")
         | (TargetKind::Vue3Core | TargetKind::Vue3Dom | TargetKind::Vue3Ssr, "compile")
         | (TargetKind::Vue3Sfc, "parse")
+        | (TargetKind::Vue27Sfc, "parseComponent")
         | (TargetKind::Vue27Sfc | TargetKind::Vue3Sfc, "compileScript") => arity.max(2),
         (TargetKind::Vue26Template | TargetKind::Vue27Template, "generateCodeFrame") => {
             arity.max(3)
@@ -2085,6 +2086,7 @@ fn bridge_command(target: TargetSpec, export_name: &str) -> Option<&'static str>
             Some("vue2.generateCodeFrame")
         }
         (TargetKind::Vue27Sfc, "parse") => Some("sfc.vue27.parse"),
+        (TargetKind::Vue27Sfc, "parseComponent") => Some("sfc.vue27.parseComponent"),
         (TargetKind::Vue3Sfc, "parse") => Some("sfc.parse"),
         (TargetKind::Vue27Sfc, "compileTemplate") => Some("sfc.vue27.compileTemplate"),
         (TargetKind::Vue3Sfc, "compileTemplate") => Some("sfc.compileTemplate"),
@@ -2114,6 +2116,9 @@ fn alias_argument_object(target: TargetSpec, export_name: &str, _arity: u32) -> 
         }
         (TargetKind::Vue27Sfc, "parse") => {
             "{ source: a0 && a0.source ? a0.source : '', filename: a0 && a0.filename, options: a0 }".into()
+        }
+        (TargetKind::Vue27Sfc, "parseComponent") => {
+            "{ source: a0 == null ? '' : String(a0), options: a1 || {} }".into()
         }
         (TargetKind::Vue27Sfc, "compileTemplate") => {
             "{ source: a0 && a0.source ? a0.source : '', filename: a0 && (a0.filename || a0.id || 'template.vue.html'), options: a0 }"

@@ -13,8 +13,9 @@ use vuec_ast::{NodeSpan, Vue3Ast, Vue3AstKind, Vue3Expression, Vue3ImportItem, V
 use vuec_html::{HtmlTokenKind, HtmlTokenizer};
 use vuec_js::JsAstStore;
 use vuec_sfc::{
-    SfcBlock, SfcBlockAttrs, SfcCompiler, SfcDescriptor, SfcScriptBlock, SfcScriptCompileOptions,
-    SfcStyleCompileOptions, SfcTemplateCompileOptions,
+    SfcAttrValue, SfcBlock, SfcBlockAttrs, SfcCompiler, SfcDescriptor, SfcScriptBlock,
+    SfcScriptCompileOptions, SfcStyleCompileOptions, SfcTemplateCompileOptions,
+    Vue27ParseComponentOptions, Vue27SfcPad,
 };
 use vuec_source::FileId;
 use vuec_style::{compile_style, StyleCompileOptions};
@@ -333,6 +334,18 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
             let mut compiler = SfcCompiler::new();
             let descriptor = compiler.parse(filename, &source);
             Ok(vue27_descriptor_value(&descriptor))
+        }
+        "sfc.vue27.parseComponent" => {
+            let source = string_field(&payload, "source");
+            let mut compiler = SfcCompiler::new();
+            let result = compiler.parse_vue27_component(
+                &source,
+                vue27_parse_component_options(payload.get("options")),
+            );
+            Ok(vue27_parse_component_value(
+                &result.descriptor,
+                &result.errors,
+            ))
         }
         "sfc.compileTemplate" => {
             let source = string_field(&payload, "source");
@@ -898,6 +911,15 @@ fn vue2_tips_value(tips: &[Vue2Warning], output_source_range: bool) -> Value {
     }
 }
 
+fn vue27_parse_component_value(
+    descriptor: &SfcDescriptor,
+    errors: &[vuec_sfc::Vue27SfcParseError],
+) -> Value {
+    let mut value = vue27_descriptor_value(descriptor);
+    value["errors"] = json!(errors);
+    value
+}
+
 fn vue27_descriptor_value(descriptor: &SfcDescriptor) -> Value {
     json!({
         "source": descriptor.source,
@@ -917,8 +939,8 @@ fn vue27_block_value(descriptor: &SfcDescriptor, block: &SfcBlock) -> Value {
     let mut value = json!({
         "type": block.type_name,
         "content": block.content,
-        "start": block_content_start(block),
-        "end": block_content_end(block),
+        "start": block.content_start,
+        "end": block.content_end,
         "attrs": vue27_attrs_value(&block.attrs),
     });
     if matches!(block.type_name.as_str(), "script" | "style") {
@@ -929,6 +951,16 @@ fn vue27_block_value(descriptor: &SfcDescriptor, block: &SfcBlock) -> Value {
     }
     if let Some(lang) = block.attrs.lang.as_ref() {
         value["lang"] = json!(lang);
+    }
+    if let Some(src) = block.attrs.src.as_ref() {
+        value["src"] = json!(src);
+    }
+    if let Some(module) = block.attrs.module.as_ref() {
+        if module.is_empty() {
+            value["module"] = json!(true);
+        } else {
+            value["module"] = json!(module);
+        }
     }
     value
 }
@@ -955,6 +987,15 @@ fn vue27_block_map(descriptor: &SfcDescriptor) -> Value {
 
 fn vue27_attrs_value(attrs: &SfcBlockAttrs) -> Value {
     let mut object = serde_json::Map::new();
+    for (name, value) in &attrs.raw {
+        object.insert(
+            name.clone(),
+            match value {
+                SfcAttrValue::Bool(value) => json!(value),
+                SfcAttrValue::String(value) => json!(value),
+            },
+        );
+    }
     if attrs.scoped {
         object.insert("scoped".into(), json!(true));
     }
@@ -975,26 +1016,6 @@ fn vue27_attrs_value(attrs: &SfcBlockAttrs) -> Value {
         }
     }
     Value::Object(object)
-}
-
-fn block_content_start(block: &SfcBlock) -> usize {
-    block.loc.start + opening_tag_len(block)
-}
-
-fn block_content_end(block: &SfcBlock) -> usize {
-    block
-        .loc
-        .end
-        .saturating_sub(block.type_name.len() + "</>".len())
-}
-
-fn opening_tag_len(block: &SfcBlock) -> usize {
-    block
-        .loc
-        .end
-        .saturating_sub(block.loc.start)
-        .saturating_sub(block.content.len())
-        .saturating_sub(block.type_name.len() + "</>".len())
 }
 
 fn vue27_css_vars(descriptor: &SfcDescriptor) -> Vec<String> {
@@ -3895,6 +3916,24 @@ fn sfc_style_options(value: Option<&Value>) -> SfcStyleCompileOptions {
                 .collect()
         })
         .unwrap_or_default();
+    options
+}
+
+fn vue27_parse_component_options(value: Option<&Value>) -> Vue27ParseComponentOptions {
+    let mut options = Vue27ParseComponentOptions::default();
+    let Some(value) = value else {
+        return options;
+    };
+    options.output_source_range = bool_option(value, "outputSourceRange", false);
+    if let Some(deindent) = value.get("deindent").and_then(Value::as_bool) {
+        options.deindent = Some(deindent);
+    }
+    options.pad = match value.get("pad") {
+        Some(Value::Bool(true)) => Vue27SfcPad::True,
+        Some(Value::String(value)) if value == "line" => Vue27SfcPad::Line,
+        Some(Value::String(value)) if value == "space" => Vue27SfcPad::Space,
+        _ => Vue27SfcPad::False,
+    };
     options
 }
 

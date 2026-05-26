@@ -10,6 +10,7 @@ serde_json.workspace = true
 vuec_codegen = { path = "../vuec_codegen" }
 vuec_ast = { path = "../vuec_ast" }
 vuec_diagnostics = { path = "../vuec_diagnostics" }
+vuec_html = { path = "../vuec_html" }
 vuec_js = { path = "../vuec_js" }
 vuec_source = { path = "../vuec_source" }
 vuec_style = { path = "../vuec_style" }

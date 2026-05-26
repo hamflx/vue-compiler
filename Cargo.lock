@@ -966,6 +966,7 @@ dependencies = [
  "vuec_ast",
  "vuec_codegen",
  "vuec_diagnostics",
+ "vuec_html",
  "vuec_js",
  "vuec_source",
  "vuec_style",

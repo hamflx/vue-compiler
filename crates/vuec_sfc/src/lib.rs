@@ -5,6 +5,7 @@ use serde_json::json;
 use std::collections::BTreeMap;
 use vuec_codegen::SourceMapArtifact;
 use vuec_diagnostics::{Diagnostic, Severity};
+use vuec_html::{HtmlAttribute, HtmlTokenKind, HtmlTokenizer};
 use vuec_js::{JsAstStore, JsParseMode};
 use vuec_source::{FileId, SourceMap, Span};
 use vuec_style::{compile_style, StyleCompileOptions};
@@ -20,6 +21,10 @@ pub struct SfcBlock {
     pub content: String,
     pub attrs: SfcBlockAttrs,
     pub loc: SfcBlockLocation,
+    #[serde(skip)]
+    pub content_start: usize,
+    #[serde(skip)]
+    pub content_end: usize,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,6 +35,14 @@ pub struct SfcBlockAttrs {
     pub module: Option<String>,
     pub setup: bool,
     pub generic: Option<String>,
+    pub raw: BTreeMap<String, SfcAttrValue>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum SfcAttrValue {
+    Bool(bool),
+    String(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,6 +62,45 @@ pub struct SfcDescriptor {
     pub script_setup: Option<SfcBlock>,
     pub styles: Vec<SfcBlock>,
     pub custom_blocks: Vec<SfcBlock>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue27ParseComponentOptions {
+    pub pad: Vue27SfcPad,
+    pub deindent: Option<bool>,
+    pub output_source_range: bool,
+}
+
+impl Default for Vue27ParseComponentOptions {
+    fn default() -> Self {
+        Self {
+            pad: Vue27SfcPad::False,
+            deindent: None,
+            output_source_range: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Vue27SfcPad {
+    #[default]
+    False,
+    True,
+    Line,
+    Space,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue27ParseComponentResult {
+    pub descriptor: SfcDescriptor,
+    pub errors: Vec<Vue27SfcParseError>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue27SfcParseError {
+    pub msg: String,
+    pub start: Option<usize>,
+    pub end: Option<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -192,33 +244,47 @@ impl SfcCompiler {
             Some(std::path::PathBuf::from(&filename)),
             source.to_string(),
         );
-        let mut descriptor = SfcDescriptor {
+        descriptor_from_blocks(
             filename,
-            source: source.to_string(),
+            source,
             source_file,
-            template: None,
-            script: None,
-            script_setup: None,
-            styles: Vec::new(),
-            custom_blocks: Vec::new(),
-        };
+            extract_sfc_blocks(source, source_file, SfcBlockContentMode::Raw).blocks,
+        )
+    }
 
-        for block in extract_basic_blocks(source, source_file) {
-            match block.type_name.as_str() {
-                "template" => descriptor.template = Some(block),
-                "script" => {
-                    if block.attrs.setup {
-                        descriptor.script_setup = Some(block);
-                    } else {
-                        descriptor.script = Some(block);
-                    }
-                }
-                "style" => descriptor.styles.push(block),
-                _ => descriptor.custom_blocks.push(block),
-            }
+    pub fn parse_vue27_component(
+        &mut self,
+        source: &str,
+        options: Vue27ParseComponentOptions,
+    ) -> Vue27ParseComponentResult {
+        let filename = "anonymous.vue".to_string();
+        let source_file = self.sources.add_file(
+            Some(std::path::PathBuf::from(&filename)),
+            source.to_string(),
+        );
+        let extracted = extract_sfc_blocks(
+            source,
+            source_file,
+            SfcBlockContentMode::Vue27 { options: &options },
+        );
+        let descriptor = descriptor_from_blocks(filename, source, source_file, extracted.blocks);
+
+        Vue27ParseComponentResult {
+            descriptor,
+            errors: if options.output_source_range {
+                extracted.errors
+            } else {
+                extracted
+                    .errors
+                    .into_iter()
+                    .map(|error| Vue27SfcParseError {
+                        msg: error.msg,
+                        start: None,
+                        end: None,
+                    })
+                    .collect()
+            },
         }
-
-        descriptor
     }
 
     pub fn compile_template(
@@ -542,83 +608,443 @@ impl Default for SfcCompiler {
     }
 }
 
-fn extract_basic_blocks(source: &str, source_file: FileId) -> Vec<SfcBlock> {
-    let mut blocks = Vec::new();
-    for tag in ["template", "script", "style"] {
-        let mut cursor = 0usize;
-        while let Some(start) = source[cursor..].find(&format!("<{tag}")) {
-            let start = cursor + start;
-            let after_start = match source[start..].find('>') {
-                Some(offset) => start + offset + 1,
-                None => break,
-            };
-            let end_tag = format!("</{tag}>");
-            let end = match source[after_start..].find(&end_tag) {
-                Some(offset) => after_start + offset,
-                None => break,
-            };
-            let head = &source[start..after_start];
-            let attrs = parse_attrs(head);
-            let content = source[after_start..end].to_string();
-            blocks.push(SfcBlock {
-                type_name: tag.to_string(),
-                content,
-                attrs,
-                loc: SfcBlockLocation {
-                    start,
-                    end: end + end_tag.len(),
-                    source_file,
-                },
-            });
-            cursor = end + end_tag.len();
-        }
-    }
-    blocks
+#[derive(Clone, Debug)]
+struct ExtractedSfcBlocks {
+    blocks: Vec<SfcBlock>,
+    errors: Vec<Vue27SfcParseError>,
 }
 
-fn parse_attrs(head: &str) -> SfcBlockAttrs {
+#[derive(Clone, Copy)]
+enum SfcBlockContentMode<'a> {
+    Raw,
+    Vue27 {
+        options: &'a Vue27ParseComponentOptions,
+    },
+}
+
+struct OpenSfcBlock {
+    type_name: String,
+    attrs: SfcBlockAttrs,
+    start: usize,
+    open_end: usize,
+    self_closing: bool,
+}
+
+fn descriptor_from_blocks(
+    filename: String,
+    source: &str,
+    source_file: FileId,
+    blocks: Vec<SfcBlock>,
+) -> SfcDescriptor {
+    let mut descriptor = SfcDescriptor {
+        filename,
+        source: source.to_string(),
+        source_file,
+        template: None,
+        script: None,
+        script_setup: None,
+        styles: Vec::new(),
+        custom_blocks: Vec::new(),
+    };
+
+    for block in blocks {
+        match block.type_name.as_str() {
+            "template" => descriptor.template = Some(block),
+            "script" => {
+                if block.attrs.setup {
+                    descriptor.script_setup = Some(block);
+                } else {
+                    descriptor.script = Some(block);
+                }
+            }
+            "style" => descriptor.styles.push(block),
+            _ => descriptor.custom_blocks.push(block),
+        }
+    }
+
+    descriptor
+}
+
+fn extract_sfc_blocks(
+    source: &str,
+    source_file: FileId,
+    mode: SfcBlockContentMode<'_>,
+) -> ExtractedSfcBlocks {
+    let mut blocks = Vec::new();
+    let mut errors = Vec::new();
+    let mut stack: Vec<(String, usize, usize)> = Vec::new();
+    let mut current_block: Option<OpenSfcBlock> = None;
+    let mut depth = 0usize;
+    let mut malformed_tail_start = None;
+    let mut tokenizer = HtmlTokenizer::new(source);
+
+    loop {
+        let token = tokenizer.next_token();
+        match token.kind {
+            HtmlTokenKind::StartTag {
+                name,
+                attributes,
+                self_closing,
+            } => {
+                if depth == 0 {
+                    current_block = Some(OpenSfcBlock {
+                        type_name: name.clone(),
+                        attrs: attrs_from_html(&attributes),
+                        start: token.start,
+                        open_end: token.end,
+                        self_closing,
+                    });
+                }
+
+                if !self_closing {
+                    if depth == 0 && is_plain_text_sfc_tag(&name) {
+                        consume_plain_text_element(
+                            source,
+                            source_file,
+                            mode,
+                            &mut tokenizer,
+                            &mut blocks,
+                            &mut current_block,
+                            token.end,
+                        );
+                        depth = 0;
+                    } else {
+                        stack.push((name, token.start, token.end));
+                        depth += 1;
+                    }
+                } else if depth == 0 {
+                    if let Some(open) = current_block.take() {
+                        blocks.push(finish_sfc_block(
+                            source,
+                            source_file,
+                            mode,
+                            open,
+                            0,
+                            token.end,
+                        ));
+                    }
+                }
+            }
+            HtmlTokenKind::EndTag { name } => {
+                if depth == 0 {
+                    continue;
+                }
+                let Some(pos) = matching_open_pos(&stack, &name) else {
+                    if name.is_empty() {
+                        malformed_tail_start.get_or_insert(token.start);
+                    } else if name.eq_ignore_ascii_case("br") && depth == 0 {
+                        current_block = Some(OpenSfcBlock {
+                            type_name: name,
+                            attrs: SfcBlockAttrs::default(),
+                            start: token.start,
+                            open_end: token.end,
+                            self_closing: true,
+                        });
+                    }
+                    continue;
+                };
+                while stack.len() > pos + 1 {
+                    if let Some((tag, start, end)) = stack.pop() {
+                        errors.push(Vue27SfcParseError {
+                            msg: format!("tag <{tag}> has no matching end tag."),
+                            start: Some(start),
+                            end: Some(end),
+                        });
+                        depth = depth.saturating_sub(1);
+                    }
+                }
+                stack.pop();
+                if depth == 1 {
+                    if let Some(open) = current_block.take() {
+                        blocks.push(finish_sfc_block(
+                            source,
+                            source_file,
+                            mode,
+                            open,
+                            token.start,
+                            token.end,
+                        ));
+                    }
+                }
+                depth = depth.saturating_sub(1);
+            }
+            HtmlTokenKind::Eof => {
+                while let Some((tag, start, end)) = stack.pop() {
+                    errors.push(Vue27SfcParseError {
+                        msg: format!("tag <{tag}> has no matching end tag."),
+                        start: Some(start),
+                        end: Some(end),
+                    });
+                    if stack.is_empty() {
+                        if let Some(open) = current_block.take() {
+                            let fallback_end = malformed_tail_start.unwrap_or_else(|| {
+                                malformed_tail_content_end(source, &open, token.start)
+                            });
+                            blocks.push(finish_sfc_block(
+                                source,
+                                source_file,
+                                mode,
+                                open,
+                                fallback_end,
+                                token.end,
+                            ));
+                        }
+                    }
+                }
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    blocks.sort_by_key(|block| block.loc.start);
+    ExtractedSfcBlocks { blocks, errors }
+}
+
+fn consume_plain_text_element(
+    source: &str,
+    source_file: FileId,
+    mode: SfcBlockContentMode<'_>,
+    tokenizer: &mut HtmlTokenizer<'_>,
+    blocks: &mut Vec<SfcBlock>,
+    current_block: &mut Option<OpenSfcBlock>,
+    content_start: usize,
+) {
+    let Some(open) = current_block.take() else {
+        return;
+    };
+    let lower_name = open.type_name.to_ascii_lowercase();
+    let rest = &source[content_start..];
+    let needle = format!("</{lower_name}");
+    if let Some(close_offset) = find_ascii_case_insensitive(rest, &needle) {
+        let close_start = content_start + close_offset;
+        let close_end = source[close_start..]
+            .find('>')
+            .map(|offset| close_start + offset + 1)
+            .unwrap_or(source.len());
+        tokenizer.set_cursor(close_end);
+        blocks.push(finish_sfc_block(
+            source,
+            source_file,
+            mode,
+            open,
+            close_start,
+            close_end,
+        ));
+    } else {
+        tokenizer.set_cursor(source.len());
+        blocks.push(finish_sfc_block(
+            source,
+            source_file,
+            mode,
+            open,
+            source.len(),
+            source.len(),
+        ));
+    }
+}
+
+fn finish_sfc_block(
+    source: &str,
+    source_file: FileId,
+    mode: SfcBlockContentMode<'_>,
+    open: OpenSfcBlock,
+    content_end: usize,
+    close_end: usize,
+) -> SfcBlock {
+    let content_start = open.open_end.min(source.len());
+    let raw_end = content_end.min(source.len()).max(content_start);
+    let mut content = source[content_start..raw_end].to_string();
+    if let SfcBlockContentMode::Vue27 { options } = mode {
+        if should_vue27_deindent(&open, options) {
+            content = deindent(&content);
+        }
+        if open.type_name != "template" && options.pad.is_enabled() {
+            content = vue27_pad_content(source, &open, &options.pad) + &content;
+        }
+    }
+
+    SfcBlock {
+        type_name: open.type_name,
+        content,
+        attrs: open.attrs,
+        loc: SfcBlockLocation {
+            start: open.start,
+            end: if open.self_closing { 0 } else { close_end },
+            source_file,
+        },
+        content_start,
+        content_end: raw_end,
+    }
+}
+
+fn matching_open_pos(stack: &[(String, usize, usize)], name: &str) -> Option<usize> {
+    let lower_name = name.to_ascii_lowercase();
+    stack
+        .iter()
+        .rposition(|(tag, _, _)| tag.to_ascii_lowercase() == lower_name)
+}
+
+fn malformed_tail_content_end(source: &str, open: &OpenSfcBlock, fallback: usize) -> usize {
+    let fallback = fallback.min(source.len());
+    let tail = &source[open.open_end.min(source.len())..fallback];
+    let Some(last_lt) = tail.rfind('<') else {
+        return fallback;
+    };
+    let absolute = open.open_end + last_lt;
+    if source[absolute..fallback].contains('>') {
+        return fallback;
+    }
+    absolute
+}
+
+fn attrs_from_html(attributes: &[HtmlAttribute]) -> SfcBlockAttrs {
     let mut attrs = SfcBlockAttrs::default();
-    if head.contains("lang=\"ts\"") || head.contains("lang='ts'") {
-        attrs.lang = Some("ts".into());
-    }
-    if head.contains("scoped") {
-        attrs.scoped = true;
-    }
-    if head.contains("setup") {
-        attrs.setup = true;
-    }
-    if let Some(src) = attr_value(head, "src") {
-        attrs.src = Some(src.to_string());
-    }
-    if let Some(module_pos) = head.find("module") {
-        let tail = &head[module_pos..];
-        if let Some(eq_pos) = tail.find('=') {
-            let value = tail[eq_pos + 1..].trim().trim_matches(['"', '\'', '>']);
-            attrs.module = if value.is_empty() {
-                Some(String::new())
-            } else {
-                Some(value.to_string())
-            };
-        } else {
-            attrs.module = Some(String::new());
+    for attribute in attributes {
+        let value = attribute
+            .value
+            .as_ref()
+            .map(|value| SfcAttrValue::String(value.clone()))
+            .unwrap_or(SfcAttrValue::Bool(true));
+        attrs.raw.insert(attribute.name.clone(), value.clone());
+        match attribute.name.as_str() {
+            "lang" => {
+                if let SfcAttrValue::String(value) = value {
+                    attrs.lang = Some(value);
+                }
+            }
+            "src" => {
+                if let SfcAttrValue::String(value) = value {
+                    attrs.src = Some(value);
+                }
+            }
+            "scoped" => {
+                attrs.scoped = true;
+            }
+            "setup" => {
+                attrs.setup = true;
+            }
+            "generic" => {
+                if let SfcAttrValue::String(value) = value {
+                    attrs.generic = Some(value);
+                }
+            }
+            "module" => {
+                attrs.module = Some(match value {
+                    SfcAttrValue::String(value) => value,
+                    SfcAttrValue::Bool(_) => String::new(),
+                });
+            }
+            _ => {}
         }
     }
     attrs
 }
 
-fn attr_value<'a>(head: &'a str, name: &str) -> Option<&'a str> {
-    let start = head.find(name)?;
-    let tail = &head[start + name.len()..];
-    let tail = tail.trim_start();
-    let tail = tail.strip_prefix('=')?.trim_start();
-    let quote = tail.chars().next()?;
-    if quote != '"' && quote != '\'' {
-        return None;
+fn is_plain_text_sfc_tag(name: &str) -> bool {
+    matches!(name.to_ascii_lowercase().as_str(), "script" | "style")
+}
+
+fn should_vue27_deindent(block: &OpenSfcBlock, options: &Vue27ParseComponentOptions) -> bool {
+    if options.deindent == Some(true) {
+        return true;
     }
-    let value_start = quote.len_utf8();
-    let value_tail = &tail[value_start..];
-    let value_end = value_tail.find(quote)?;
-    Some(&value_tail[..value_end])
+    if options.deindent == Some(false) {
+        return false;
+    }
+    !(block.type_name == "script"
+        && block
+            .attrs
+            .lang
+            .as_deref()
+            .is_none_or(|lang| matches!(lang, "js" | "jsx" | "ts" | "tsx")))
+}
+
+fn deindent(source: &str) -> String {
+    if !source
+        .chars()
+        .next()
+        .is_some_and(|ch| matches!(ch, '\r' | '\n' | ' ' | '\t'))
+    {
+        return source.to_string();
+    }
+    let mut indent_char = None;
+    let mut min_indent = usize::MAX;
+    let lines = split_preserving_no_cr(source);
+    for line in &lines {
+        if line.chars().all(char::is_whitespace) {
+            continue;
+        }
+        match indent_char {
+            None => {
+                let Some(ch) = line.chars().next() else {
+                    continue;
+                };
+                if ch != ' ' && ch != '\t' {
+                    return source.to_string();
+                }
+                indent_char = Some(ch);
+                min_indent = min_indent.min(line.chars().take_while(|value| *value == ch).count());
+            }
+            Some(ch) => {
+                min_indent = min_indent.min(line.chars().take_while(|value| *value == ch).count());
+            }
+        }
+    }
+    if min_indent == usize::MAX || min_indent == 0 {
+        return source.to_string();
+    }
+    lines
+        .iter()
+        .map(|line| strip_chars(line, min_indent))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn split_preserving_no_cr(source: &str) -> Vec<String> {
+    source
+        .split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line).to_string())
+        .collect()
+}
+
+fn strip_chars(source: &str, count: usize) -> String {
+    let mut cursor = 0usize;
+    for _ in 0..count {
+        let Some(ch) = source[cursor..].chars().next() else {
+            return String::new();
+        };
+        cursor += ch.len_utf8();
+    }
+    source[cursor..].to_string()
+}
+
+impl Vue27SfcPad {
+    fn is_enabled(&self) -> bool {
+        !matches!(self, Vue27SfcPad::False)
+    }
+}
+
+fn vue27_pad_content(source: &str, block: &OpenSfcBlock, pad: &Vue27SfcPad) -> String {
+    if matches!(pad, Vue27SfcPad::Space) {
+        return source[..block.open_end]
+            .chars()
+            .map(|ch| if matches!(ch, '\n' | '\r') { ch } else { ' ' })
+            .collect();
+    }
+    let offset = source[..block.open_end].split('\n').count();
+    let pad_char = if block.type_name == "script" && block.attrs.lang.is_none() {
+        "//\n"
+    } else {
+        "\n"
+    };
+    pad_char.repeat(offset.saturating_sub(1))
+}
+
+fn find_ascii_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
+    haystack
+        .to_ascii_lowercase()
+        .find(&needle.to_ascii_lowercase())
 }
 
 fn style_dependencies(style: &SfcBlock) -> Vec<String> {
@@ -864,6 +1290,152 @@ mod tests {
         assert!(descriptor.template.is_some());
         assert!(descriptor.script_setup.is_some());
         assert_eq!(descriptor.styles.len(), 1);
+    }
+
+    #[test]
+    fn vue27_parse_component_preserves_top_level_blocks_and_attrs() {
+        let mut compiler = SfcCompiler::new();
+        let result = compiler.parse_vue27_component(
+            r#"
+<template><div><style>nested</style></div></template>
+<style bool-attr val-attr="test" module></style>
+<example name="simple"><my-button>Hello</my-button></example>
+<div><style>ignored</style></div>
+"#,
+            Vue27ParseComponentOptions::default(),
+        );
+
+        let descriptor = result.descriptor;
+        assert_eq!(
+            descriptor.template.as_ref().unwrap().content.trim(),
+            "<div><style>nested</style></div>"
+        );
+        assert_eq!(descriptor.styles.len(), 1);
+        assert_eq!(
+            descriptor.styles[0].attrs.raw.get("bool-attr"),
+            Some(&SfcAttrValue::Bool(true))
+        );
+        assert_eq!(
+            descriptor.styles[0].attrs.raw.get("val-attr"),
+            Some(&SfcAttrValue::String("test".into()))
+        );
+        assert_eq!(descriptor.styles[0].attrs.module.as_deref(), Some(""));
+        assert_eq!(descriptor.custom_blocks.len(), 2);
+        assert_eq!(descriptor.custom_blocks[0].type_name, "example");
+        assert_eq!(
+            descriptor.custom_blocks[0].content.trim(),
+            "<my-button>Hello</my-button>"
+        );
+        assert_eq!(descriptor.custom_blocks[1].type_name, "div");
+    }
+
+    #[test]
+    fn vue27_parse_component_deindents_like_official_parser() {
+        let content = r#"<template>
+        <div></div>
+      </template>
+      <script>
+        export default {}
+      </script>
+      <style>
+        h1 { color: red }
+      </style>"#;
+        let mut compiler = SfcCompiler::new();
+        let default = compiler.parse_vue27_component(
+            content,
+            Vue27ParseComponentOptions {
+                pad: Vue27SfcPad::False,
+                ..Vue27ParseComponentOptions::default()
+            },
+        );
+        assert_eq!(
+            default.descriptor.template.unwrap().content,
+            "\n<div></div>\n"
+        );
+        assert_eq!(
+            default.descriptor.script.unwrap().content,
+            "\n        export default {}\n      "
+        );
+        assert_eq!(
+            default.descriptor.styles[0].content,
+            "\nh1 { color: red }\n"
+        );
+
+        let enabled = compiler.parse_vue27_component(
+            content,
+            Vue27ParseComponentOptions {
+                deindent: Some(true),
+                ..Vue27ParseComponentOptions::default()
+            },
+        );
+        assert_eq!(
+            enabled.descriptor.script.unwrap().content,
+            "\nexport default {}\n"
+        );
+    }
+
+    #[test]
+    fn vue27_parse_component_pads_non_template_content() {
+        let content = r#"<template>
+        <div></div>
+      </template>
+      <script>
+        export default {}
+      </script>
+      <style>
+        h1 { color: red }
+      </style>"#;
+        let mut compiler = SfcCompiler::new();
+        let line = compiler.parse_vue27_component(
+            content,
+            Vue27ParseComponentOptions {
+                pad: Vue27SfcPad::Line,
+                deindent: Some(true),
+                ..Vue27ParseComponentOptions::default()
+            },
+        );
+        assert_eq!(
+            line.descriptor.script.unwrap().content,
+            format!("{}\nexport default {{}}\n", "//\n".repeat(3))
+        );
+        assert_eq!(
+            line.descriptor.styles[0].content,
+            "\n\n\n\n\n\n\nh1 { color: red }\n"
+        );
+
+        let space = compiler.parse_vue27_component(
+            content,
+            Vue27ParseComponentOptions {
+                pad: Vue27SfcPad::Space,
+                deindent: Some(true),
+                ..Vue27ParseComponentOptions::default()
+            },
+        );
+        let script_pad = content[..space.descriptor.script.as_ref().unwrap().content_start]
+            .chars()
+            .map(|ch| if matches!(ch, '\n' | '\r') { ch } else { ' ' })
+            .collect::<String>();
+        assert_eq!(
+            space.descriptor.script.unwrap().content,
+            script_pad + "\nexport default {}\n"
+        );
+    }
+
+    #[test]
+    fn vue27_parse_component_recovers_unclosed_template_with_source_range() {
+        let mut compiler = SfcCompiler::new();
+        let result = compiler.parse_vue27_component(
+            "<template>hi</",
+            Vue27ParseComponentOptions {
+                output_source_range: true,
+                ..Vue27ParseComponentOptions::default()
+            },
+        );
+
+        assert_eq!(result.descriptor.template.unwrap().content, "hi");
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].start, Some(0));
+        assert_eq!(result.errors[0].end, Some(10));
     }
 
     #[test]
