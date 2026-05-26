@@ -422,7 +422,7 @@ fn parse_element_tree(
             }
             HtmlTokenKind::Text(text) | HtmlTokenKind::Cdata(text) => {
                 if let Some(parent) = stack.last_mut() {
-                    push_text_node(parent, &text, token.start, token.end, options);
+                    push_text_node(parent, &text, token.start, token.end, options, in_v_pre);
                 } else if !text.trim().is_empty() {
                     let message = if text == template {
                         "Component template requires a root element, rather than just text."
@@ -596,8 +596,11 @@ fn close_element(
     root: &mut Option<Vue2Element>,
     diagnostics: &mut DiagnosticSink,
     options: &Vue2CompileOptions,
-    _in_v_pre: &mut bool,
+    in_v_pre: &mut bool,
 ) {
+    if element.pre {
+        *in_v_pre = false;
+    }
     trim_ending_whitespace(&mut element);
     cleanup_scoped_slot_children(&mut element);
     element.plain = element_generates_empty_data(&element);
@@ -1153,6 +1156,7 @@ fn push_text_node(
     start: usize,
     end: usize,
     options: &Vue2CompileOptions,
+    in_v_pre: bool,
 ) {
     let mut text = if is_text_tag(&parent.tag) {
         text.to_string()
@@ -1180,7 +1184,7 @@ fn push_text_node(
     } else if options.whitespace.as_deref() == Some("condense") && parent.tag != "pre" {
         text = condense_whitespace(&text);
     }
-    let expression = if parent.pre {
+    let expression = if parent.pre || in_v_pre {
         None
     } else {
         parse_text(&text, options.delimiters.as_ref())
@@ -3250,6 +3254,22 @@ mod tests {
             options(),
         );
         assert_eq!(empty.render, r#"with(this){return _c('my-component',{})}"#);
+    }
+
+    #[test]
+    fn generates_vue2_v_pre_template_like_official_codegen() {
+        let result = compile(
+            r#"<div v-pre><template><p>{{msg}}</p></template></div>"#,
+            options(),
+        );
+        assert_eq!(result.render, r#"with(this){return _m(0)}"#);
+        assert_eq!(
+            result.static_render_fns,
+            vec![
+                r#"with(this){return _c('div',{pre:true},[_c('template',[_c('p',[_v("{{msg}}")])])],2)}"#
+                    .to_string()
+            ]
+        );
     }
 
     #[test]

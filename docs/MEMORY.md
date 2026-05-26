@@ -1,5 +1,11 @@
 # Memory
 
+- Current round: completed a Vue 2 compiler Rust `v-pre` template codegen parity slice.
+- `vuec_vue2` now preserves `v-pre` state while parsing descendant text and when generating static roots, so `<template>` inside a `v-pre` block is emitted as a real template element and interpolations remain literal text. This closes the official Vue 2 codegen case `does not squash templates inside v-pre`.
+- No AST/HIR/MIR structure changed. `xtask/src/compat.rs` was not touched in this slice.
+- Current Vue 2 conformance movement: `vue2-compiler` improved from `95/188` to `96/188`, and `vue27-compiler` improved from `92/190` to `93/190`. `vue27-sfc` remains `5/144`.
+- Verification for this Vue 2 `v-pre` slice: `cargo test -p vuec_vue2 --lib` (`12/12`), `cargo xtask run-conformance --suite vue2-compiler` (expected fail, `96/188`), `cargo xtask run-conformance --suite vue27-compiler` (expected fail, `93/190`), and `cargo xtask run-conformance --suite vue27-sfc` (expected fail, unchanged `5/144`).
+
 - Current round: completed a Vue 2 compiler Rust inline-template codegen and warning parity slice.
 - `vuec_vue2` now generates `inlineTemplate:{render,staticRenderFns}` from the first element child, matching official Vue 2 behavior even when an inline-template component has multiple children. Empty inline-template components still omit inlineTemplate data, while invalid child counts now produce the official `Inline-template components must have exactly one child element.` compiler warning through Rust diagnostics.
 - The Vue 2 official alias adapter in `xtask/src/compat.rs` now forwards Rust compile warnings to the official Vue 2 test warning channel (`console.error`) and exposes the Jasmine `console.error.calls` shape. This is API/runner warning adapter support only; compiler semantics remain in Rust, and parse-stage shims suppress only the codegen-stage inline-template warning to avoid double-emitting it during official `parse -> generate` tests.
