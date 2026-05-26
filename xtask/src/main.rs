@@ -93,6 +93,7 @@ enum Command {
     VerifyNapiAlias,
     VerifyNapiApi,
     VerifyNapiPlatform,
+    VerifyWasm,
     SummarizeCompat {
         #[arg(long)]
         locked: bool,
@@ -138,6 +139,7 @@ fn main() -> Result<()> {
         Command::VerifyNapiAlias => verify_napi_alias()?,
         Command::VerifyNapiApi => verify_napi_api()?,
         Command::VerifyNapiPlatform => verify_napi_platform()?,
+        Command::VerifyWasm => verify_wasm()?,
         Command::SummarizeCompat { locked, lock } => summarize_compat(locked, &lock),
     };
     println!("{}", serde_json::to_string_pretty(&report)?);
@@ -596,6 +598,230 @@ fn verify_napi() -> Result<compat::JsonReport> {
             .with_violations(violations)
             .with_note("builds vuec_napi, installs packages/native/vuec_napi.node, and runs the Node loader smoke"),
     )
+}
+
+fn verify_wasm() -> Result<compat::JsonReport> {
+    let mut items = Vec::new();
+    let mut violations = Vec::new();
+    let mut created = Vec::new();
+
+    let rust_status = match run_cargo(&["test", "-p", "vuec_wasm"]) {
+        Ok(output) => {
+            items.push(compat::ReportItem::new(
+                "vuec_wasm-rust-api",
+                compat::ReportStatus::Pass,
+                output,
+                Some(PathBuf::from("crates/vuec_wasm")),
+            ));
+            compat::ReportStatus::Pass
+        }
+        Err(err) => {
+            violations.push(format!("vuec_wasm Rust tests failed: {err:#}"));
+            items.push(compat::ReportItem::new(
+                "vuec_wasm-rust-api",
+                compat::ReportStatus::Fail,
+                format!("{err:#}"),
+                Some(PathBuf::from("crates/vuec_wasm")),
+            ));
+            compat::ReportStatus::Fail
+        }
+    };
+
+    let wasm_status = match build_wasm_package() {
+        Ok(paths) => {
+            created.extend(paths.into_iter().map(|path| path.display().to_string()));
+            match run_wasm_smoke() {
+                Ok(output) => {
+                    items.push(compat::ReportItem::new(
+                        "@vuec-rs/wasm-node-smoke",
+                        compat::ReportStatus::Pass,
+                        output,
+                        Some(PathBuf::from("packages/wasm")),
+                    ));
+                    compat::ReportStatus::Pass
+                }
+                Err(err) => {
+                    violations.push(format!("WASM Node smoke failed: {err:#}"));
+                    items.push(compat::ReportItem::new(
+                        "@vuec-rs/wasm-node-smoke",
+                        compat::ReportStatus::Fail,
+                        format!("{err:#}"),
+                        Some(PathBuf::from("packages/wasm")),
+                    ));
+                    compat::ReportStatus::Fail
+                }
+            }
+        }
+        Err(err) => {
+            violations.push(format!("failed to build wasm package: {err:#}"));
+            items.push(compat::ReportItem::new(
+                "@vuec-rs/wasm-build",
+                compat::ReportStatus::Fail,
+                format!("{err:#}"),
+                Some(PathBuf::from("packages/wasm/pkg-node")),
+            ));
+            compat::ReportStatus::Fail
+        }
+    };
+
+    let status =
+        if rust_status == compat::ReportStatus::Pass && wasm_status == compat::ReportStatus::Pass {
+            compat::ReportStatus::Pass
+        } else {
+            compat::ReportStatus::Fail
+        };
+    Ok(
+        compat::JsonReport::new("verify_wasm", status)
+            .with_items(items)
+            .with_created(created)
+            .with_violations(violations)
+            .with_note("runs vuec_wasm Rust API tests, builds the wasm-bindgen package when the wasm target/tooling is installed, and executes the @vuec-rs/wasm Node smoke; browser and WASI gates still require wasm-pack/wasmtime CI tooling"),
+    )
+}
+
+fn run_cargo(args: &[&str]) -> Result<String> {
+    let output = ProcessCommand::new("cargo")
+        .args(args)
+        .output()
+        .with_context(|| format!("failed to spawn cargo {}", args.join(" ")))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "cargo {} exited with {:?}\nstdout:\n{}\nstderr:\n{}",
+            args.join(" "),
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(normalize_command_output(&output.stdout, &output.stderr))
+}
+
+fn build_wasm_package() -> Result<Vec<PathBuf>> {
+    let installed = installed_rust_targets()?;
+    if !installed
+        .iter()
+        .any(|target| target == "wasm32-unknown-unknown")
+    {
+        anyhow::bail!(
+            "rust target wasm32-unknown-unknown is not installed; run `rustup target add wasm32-unknown-unknown`"
+        );
+    }
+    let wasm_bindgen = resolve_program("wasm-bindgen")?;
+    let pkg_dir = PathBuf::from("packages").join("wasm").join("pkg-node");
+    if pkg_dir.exists() {
+        std::fs::remove_dir_all(&pkg_dir)
+            .with_context(|| format!("failed to remove {}", pkg_dir.display()))?;
+    }
+    std::fs::create_dir_all(&pkg_dir)
+        .with_context(|| format!("failed to create {}", pkg_dir.display()))?;
+    let output = ProcessCommand::new("cargo")
+        .args([
+            "build",
+            "-p",
+            "vuec_wasm",
+            "--target",
+            "wasm32-unknown-unknown",
+        ])
+        .output()
+        .context("failed to spawn cargo build -p vuec_wasm --target wasm32-unknown-unknown")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "cargo build -p vuec_wasm --target wasm32-unknown-unknown exited with {:?}\nstdout:\n{}\nstderr:\n{}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let wasm_path = PathBuf::from("target")
+        .join("wasm32-unknown-unknown")
+        .join("debug")
+        .join("vuec_wasm.wasm");
+    let output = ProcessCommand::new(wasm_bindgen)
+        .args([
+            "--target",
+            "nodejs",
+            "--out-dir",
+            &pkg_dir.display().to_string(),
+            &wasm_path.display().to_string(),
+        ])
+        .output()
+        .context("failed to spawn wasm-bindgen")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "wasm-bindgen exited with {:?}\nstdout:\n{}\nstderr:\n{}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    std::fs::write(pkg_dir.join("package.json"), r#"{"type":"commonjs"}"#)
+        .with_context(|| format!("failed to write {}", pkg_dir.join("package.json").display()))?;
+    Ok(vec![pkg_dir])
+}
+
+fn installed_rust_targets() -> Result<Vec<String>> {
+    let output = ProcessCommand::new("rustup")
+        .args(["target", "list", "--installed"])
+        .output()
+        .context("failed to spawn rustup target list --installed")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "rustup target list --installed exited with {:?}\nstderr:\n{}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect())
+}
+
+fn resolve_program(program: &str) -> Result<String> {
+    let check = if cfg!(windows) { "where" } else { "which" };
+    let output = ProcessCommand::new(check)
+        .arg(program)
+        .output()
+        .with_context(|| format!("failed to spawn {check} {program}"))?;
+    if !output.status.success() {
+        anyhow::bail!("required program `{program}` was not found on PATH");
+    }
+    Ok(program.to_string())
+}
+
+fn run_wasm_smoke() -> Result<String> {
+    let pkg_path = absolute_path(&PathBuf::from("packages/wasm/pkg-node/vuec_wasm.js"));
+    let output = ProcessCommand::new("node")
+        .arg("smoke.js")
+        .env("VUEC_WASM_PKG", pkg_path)
+        .current_dir("packages/wasm")
+        .output()
+        .context("failed to spawn @vuec-rs/wasm smoke")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "node WASM smoke exited with {:?}\nstdout:\n{}\nstderr:\n{}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn normalize_command_output(stdout: &[u8], stderr: &[u8]) -> String {
+    let mut text = String::new();
+    text.push_str(String::from_utf8_lossy(stdout).trim());
+    let stderr = String::from_utf8_lossy(stderr);
+    let stderr = stderr.trim();
+    if !stderr.is_empty() {
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(stderr);
+    }
+    text.lines().take(40).collect::<Vec<_>>().join("\n")
 }
 
 fn build_napi_crate() -> Result<()> {

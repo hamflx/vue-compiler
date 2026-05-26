@@ -8,6 +8,7 @@
     "test:napi-alias": "cargo xtask verify-napi-alias",
     "test:napi-api": "cargo xtask verify-napi-api",
     "test:napi-platform": "cargo xtask verify-napi-platform",
+    "test:wasm": "cargo xtask verify-wasm",
     "conformance": "cargo xtask run-conformance --all"
   }
 }

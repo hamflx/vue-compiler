@@ -2,6 +2,8 @@
 /node_modules
 /vendor
 /packages/native/vuec_napi.node
+/packages/wasm/pkg
+/packages/wasm/pkg-node
 /.idea
 /.vscode
 /.DS_Store

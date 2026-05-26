@@ -1,0 +1,19 @@
+[package]
+name = "vuec_wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+wasm-bindgen.workspace = true
+vuec_sfc = { path = "../vuec_sfc" }
+vuec_source = { path = "../vuec_source" }
+vuec_vue2 = { path = "../vuec_vue2" }
+vuec_vue3_core = { path = "../vuec_vue3_core" }
+vuec_vue3_dom = { path = "../vuec_vue3_dom" }
+vuec_vue3_ssr = { path = "../vuec_vue3_ssr" }

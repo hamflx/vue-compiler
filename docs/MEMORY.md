@@ -1,5 +1,11 @@
 # Memory
 
+- Current round: added the first M17 `vuec_wasm` delivery slice.
+- Added `crates/vuec_wasm` as a wasm-bindgen-compatible Rust crate that exposes JSON-string ABI functions for Vue 2 template compile, Vue 3 DOM/SSR template compile, SFC parse/template/script/style compile, diagnostics, and source-map carrying result objects. The crate delegates to existing Rust compiler crates; no compiler semantics were moved into JS or `xtask`.
+- Added the local `@vuec-rs/wasm` package with an async `init()` browser/Node loader, type declarations, and a smoke that exercises Vue 2, Vue 3 DOM with source maps, SSR, SFC parse/template/style, and diagnostic propagation. Generated wasm-bindgen output under `packages/wasm/pkg*` is ignored.
+- Added `cargo xtask verify-wasm` / `pnpm test:wasm`. The command runs Rust API tests, builds `vuec_wasm` for `wasm32-unknown-unknown`, runs `wasm-bindgen --target nodejs`, and executes the Node smoke. Browser `wasm-pack test --headless --chrome` and WASI/wasmtime smoke are still open M17 gates.
+- Verification: `rustup target add wasm32-unknown-unknown`, `cargo install wasm-bindgen-cli --version 0.2.122`, `cargo fmt --all -- --check`, `cargo check -p vuec_wasm -p xtask`, `cargo test -p vuec_wasm -p xtask`, `cargo xtask verify-wasm`, and `git diff --check`.
+
 - Current round: added `cargo xtask run-napi-conformance` as the official-test execution backend for NAPI-backed official package-name aliases.
 - `run_conformance` now selects an alias backend internally: the existing command preserves generated Rust alias behavior and report names, while `run-napi-conformance` prepares version-isolated NAPI alias roots, runs the same prepared Jasmine/Vitest official suites against those package names, writes `napi-*.json` reports, and records `alias_backend: "napi"` in each report.
 - NAPI conformance reports are intentionally classified as `mixed` harness coverage because prepared source shims, official TypeScript source, and JavaScript-only adapters can still participate. The command does not add compiler semantics to `xtask/src/compat.rs` and does not claim pure Rust/NAPI semantic coverage.
