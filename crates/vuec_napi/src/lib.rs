@@ -161,6 +161,23 @@ pub fn compile_sfc_template(env: Env, source: String, options: Option<Unknown>) 
     to_json_string(result)
 }
 
+#[napi(js_name = "compileSfcTemplateSource")]
+pub fn compile_sfc_template_source(
+    env: Env,
+    source: String,
+    options: Option<Unknown>,
+) -> Result<String> {
+    let raw_options = from_js_options(&env, options)?;
+    let filename = string_option(&raw_options, "filename", "template.vue.html");
+    let compiler = SfcCompiler::new();
+    let result = compiler.compile_template_source(
+        filename,
+        &source,
+        sfc_template_options(Some(&raw_options)),
+    );
+    to_json_string(result)
+}
+
 #[napi(js_name = "compileSfcScript")]
 pub fn compile_sfc_script(env: Env, source: String, options: Option<Unknown>) -> Result<String> {
     let raw_options = from_js_options(&env, options)?;
@@ -959,6 +976,7 @@ pub fn api_manifest() -> Result<String> {
                 "compileVue3Ssr",
                 "parseSfc",
                 "compileSfcTemplate",
+                "compileSfcTemplateSource",
                 "compileSfcScript",
                 "compileVue27SfcTemplate",
                 "compileVue27SfcScript",

@@ -141,6 +141,10 @@ function compileSfcTemplate(source, options = {}) {
   return fromJson(binding.compileSfcTemplate(source, options));
 }
 
+function compileSfcTemplateSource(source, options = {}) {
+  return fromJson(binding.compileSfcTemplateSource(source, options));
+}
+
 function compileSfcScript(source, options = {}) {
   return fromJson(binding.compileSfcScript(source, options));
 }
@@ -183,7 +187,7 @@ function parse(source, options = {}) {
 
 function compileTemplate(options) {
   const opts = options || {};
-  return compileSfcTemplate(templateSfcSource(String(opts.source || '')), opts);
+  return compileSfcTemplateSource(String(opts.source || ''), opts);
 }
 
 function compileScript(descriptor, options = {}) {
@@ -260,6 +264,7 @@ module.exports = {
   compileVue3Ssr,
   parseSfc,
   compileSfcTemplate,
+  compileSfcTemplateSource,
   compileSfcScript,
   compileVue27SfcTemplate,
   compileVue27SfcScript,
