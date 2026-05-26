@@ -3127,6 +3127,7 @@ fn vue3_position(source: &str, offset: usize) -> Value {
     let mut line = 1usize;
     let mut column = 1usize;
     let mut index = 0usize;
+    let mut utf16_offset = 0usize;
     for ch in source.chars() {
         if index >= offset {
             break;
@@ -3136,14 +3137,17 @@ fn vue3_position(source: &str, offset: usize) -> Value {
             line += 1;
             column = 1;
         } else {
-            column += 1;
+            column += ch.len_utf16();
         }
+        utf16_offset += ch.len_utf16();
     }
     if offset > index {
-        column += offset - index;
+        let extra = offset - index;
+        column += extra;
+        utf16_offset += extra;
     }
     json!({
-        "offset": offset,
+        "offset": utf16_offset,
         "line": line,
         "column": column,
     })
@@ -3783,6 +3787,36 @@ mod tests {
         assert_eq!(template["innerLoc"]["source"], json!("\n<div></div>\n"));
         assert_eq!(template["innerLoc"]["start"]["offset"], json!(10));
         assert_eq!(template["innerLoc"]["end"]["offset"], json!(23));
+    }
+
+    #[test]
+    fn vue3_dom_bridge_sfc_inner_loc_offsets_are_utf16() {
+        let source = r#"<script>import { "😏" as foo } from './foo'</script><script setup>import { "😏" as foo } from './foo'</script>"#;
+        let parsed = dispatch(
+            "vue3.dom.parse",
+            json!({
+                "source": source,
+                "options": {
+                    "parseMode": "sfc"
+                }
+            }),
+        )
+        .expect("dom parse");
+
+        let script = &parsed["children"][0];
+        let script_setup = &parsed["children"][1];
+        assert_eq!(
+            script["innerLoc"]["source"],
+            json!(r#"import { "😏" as foo } from './foo'"#)
+        );
+        assert_eq!(script["innerLoc"]["start"]["offset"], json!(8));
+        assert_eq!(script["innerLoc"]["end"]["offset"], json!(43));
+        assert_eq!(
+            script_setup["innerLoc"]["source"],
+            json!(r#"import { "😏" as foo } from './foo'"#)
+        );
+        assert_eq!(script_setup["innerLoc"]["start"]["offset"], json!(66));
+        assert_eq!(script_setup["innerLoc"]["end"]["offset"], json!(101));
     }
 
     #[test]

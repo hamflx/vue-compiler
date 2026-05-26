@@ -17006,6 +17006,21 @@ fn add_element_prop_mappings(
                         );
                     }
                 }
+                if dir.name == "on" && dir.arg.is_some() {
+                    if let (Some(exp), Some(span)) = (&dir.exp, dir.exp_span) {
+                        let expression = exp.source_string();
+                        add_event_handler_token_mappings(
+                            code,
+                            source,
+                            expression.trim(),
+                            span.start.0.saturating_sub(base_offset),
+                            0,
+                            uses_prefixed_identifiers(options),
+                            names,
+                            segments,
+                        );
+                    }
+                }
                 if matches!(dir.name.as_str(), "if" | "else-if" | "for") {
                     if let (Some(exp), Some(span)) = (&dir.exp, dir.exp_span) {
                         let expression = exp.source_string();
@@ -17064,7 +17079,54 @@ fn add_expression_token_mappings(
     names: &mut Vec<String>,
     segments: &mut Vec<SourceMapSegment>,
 ) {
-    let tokens = expression_source_map_tokens(expression);
+    add_expression_token_mappings_with_options(
+        code,
+        source,
+        expression,
+        original_expression_start,
+        generated_from,
+        precise_members,
+        false,
+        names,
+        segments,
+    );
+}
+
+fn add_event_handler_token_mappings(
+    code: &str,
+    source: &str,
+    expression: &str,
+    original_expression_start: usize,
+    generated_from: usize,
+    precise_members: bool,
+    names: &mut Vec<String>,
+    segments: &mut Vec<SourceMapSegment>,
+) {
+    add_expression_token_mappings_with_options(
+        code,
+        source,
+        expression,
+        original_expression_start,
+        generated_from,
+        precise_members,
+        true,
+        names,
+        segments,
+    );
+}
+
+fn add_expression_token_mappings_with_options(
+    code: &str,
+    source: &str,
+    expression: &str,
+    original_expression_start: usize,
+    generated_from: usize,
+    precise_members: bool,
+    include_globals: bool,
+    names: &mut Vec<String>,
+    segments: &mut Vec<SourceMapSegment>,
+) {
+    let tokens = expression_source_map_tokens(expression, include_globals);
     for token in tokens.iter().copied() {
         let generated_needles = if uses_ctx_prefix_for_generated(code, token) {
             vec![format!("_ctx.{token}"), token.to_string()]
@@ -17156,7 +17218,7 @@ fn is_member_tail_token(expression: &str, token: &str) -> bool {
         .any(|(index, _)| index > 0 && expression[..index].ends_with('.'))
 }
 
-fn expression_source_map_tokens(expression: &str) -> Vec<&str> {
+fn expression_source_map_tokens(expression: &str, include_globals: bool) -> Vec<&str> {
     let mut tokens = Vec::new();
     for (index, ch) in expression.char_indices() {
         if !is_identifier_start(ch) {
@@ -17177,7 +17239,7 @@ fn expression_source_map_tokens(expression: &str) -> Vec<&str> {
             })
             .unwrap_or(expression.len());
         let token = &expression[index..end];
-        if !is_keyword(token) && !is_global_or_literal(token) {
+        if !is_keyword(token) && (include_globals || !is_global_or_literal(token)) {
             tokens.push(token);
         }
     }
@@ -22237,13 +22299,23 @@ fn expression_diagnostics(ast: &Vue3Ast, options: &Vue3CompilerOptions) -> Vec<D
                 for prop in &element.props {
                     if let Vue3Prop::Directive(dir) = prop {
                         if let Some(expression) = dir.exp.as_ref() {
-                            push_expression_parse_diagnostic(
-                                &store,
-                                &expression.source_string(),
-                                dir.exp_span,
-                                source_type,
-                                &mut diagnostics,
-                            );
+                            if dir.name == "on" && dir.arg.is_some() {
+                                push_event_handler_parse_diagnostic(
+                                    &store,
+                                    &expression.source_string(),
+                                    dir.exp_span,
+                                    source_type,
+                                    &mut diagnostics,
+                                );
+                            } else {
+                                push_expression_parse_diagnostic(
+                                    &store,
+                                    &expression.source_string(),
+                                    dir.exp_span,
+                                    source_type,
+                                    &mut diagnostics,
+                                );
+                            }
                         }
                         if dir.name == "model" {
                             push_model_binding_diagnostic(element, dir, options, &mut diagnostics);
@@ -22317,6 +22389,45 @@ fn vue3_model_diagnostic(code: &str, message: &str, span: Option<Span>) -> Diagn
         span,
         notes: Vec::new(),
     }
+}
+
+fn push_event_handler_parse_diagnostic(
+    store: &JsAstStore,
+    expression: &str,
+    span: Option<Span>,
+    source_type: oxc_span::SourceType,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let expression = expression.trim();
+    if expression.is_empty() {
+        return;
+    }
+    let wrapped = format!("({expression})");
+    if store.parse_expression(&wrapped, source_type).is_ok() {
+        return;
+    }
+    if !expression.contains(';') {
+        push_expression_parse_diagnostic(store, expression, span, source_type, diagnostics);
+        return;
+    }
+    let parsed = store.parse_program(expression, source_type);
+    if !parsed.panicked && parsed.errors.is_empty() {
+        return;
+    }
+    diagnostics.push(Diagnostic {
+        code: "46".into(),
+        severity: Severity::Error,
+        message: parsed
+            .errors
+            .first()
+            .map(ToString::to_string)
+            .map(|raw| vue3_expression_parse_error_message(&raw))
+            .unwrap_or_else(|| {
+                "Error parsing JavaScript expression: Unexpected token (1:3)".into()
+            }),
+        span: expression_parse_error_span(expression, span),
+        notes: Vec::new(),
+    });
 }
 
 fn push_expression_parse_diagnostic(
@@ -29042,6 +29153,29 @@ mod tests {
         assert!(result.code.contains("for (const x in _ctx.list)"));
         assert!(result.code.contains("_ctx.log(x)"));
         assert!(result.code.contains("_ctx.error(_ctx.x)"));
+    }
+
+    #[test]
+    fn base_compile_maps_event_handler_statement_identifiers() {
+        let result = base_compile(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: r#"<button @click="throw new Error(`msg`);"></button>"#.into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                mode: "module".into(),
+                source_map: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(result.diagnostics.is_empty());
+        assert!(result.code.contains("throw new Error(`msg`);"));
+        let map = result.map.expect("source map");
+        assert!(map.names.contains(&"Error".into()));
     }
 
     #[test]
