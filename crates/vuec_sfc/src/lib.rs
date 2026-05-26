@@ -9,7 +9,9 @@ use vuec_js::{JsAstStore, JsParseMode};
 use vuec_source::{FileId, SourceMap, Span};
 use vuec_style::{compile_style, StyleCompileOptions};
 use vuec_vue3_core::{TemplateSource, Vue3CompilerOptions};
-use vuec_vue3_dom::{compile as compile_dom, AssetUrlOptions, DomCompilerOptions};
+use vuec_vue3_dom::{
+    apply_dom_parser_defaults, compile as compile_dom, AssetUrlOptions, DomCompilerOptions,
+};
 use vuec_vue3_ssr::{compile as compile_ssr, SsrCompilerOptions};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -252,7 +254,7 @@ impl SfcCompiler {
                 tips: Vec::new(),
             };
         };
-        let core = Vue3CompilerOptions {
+        let mut core = Vue3CompilerOptions {
             prefix_identifiers: true,
             mode: "module".into(),
             hoist_static: true,
@@ -262,6 +264,7 @@ impl SfcCompiler {
             source_map: true,
             ..Vue3CompilerOptions::default()
         };
+        apply_dom_parser_defaults(&mut core);
         let source = TemplateSource {
             filename: descriptor.filename.clone(),
             source: template.content.clone(),
@@ -331,7 +334,7 @@ impl SfcCompiler {
         let filename = filename.into();
         let raw_source = source.to_string();
         let side_effect_errors = side_effect_tag_errors(source);
-        let core = Vue3CompilerOptions {
+        let mut core = Vue3CompilerOptions {
             prefix_identifiers: true,
             mode: "module".into(),
             hoist_static: true,
@@ -341,6 +344,7 @@ impl SfcCompiler {
             source_map: true,
             ..Vue3CompilerOptions::default()
         };
+        apply_dom_parser_defaults(&mut core);
         let template_source = TemplateSource {
             filename: filename.clone(),
             source: raw_source.clone(),
@@ -661,7 +665,15 @@ fn merge_template_errors(
     mut first: Vec<SfcTemplateError>,
     second: Vec<SfcTemplateError>,
 ) -> Vec<SfcTemplateError> {
-    first.extend(second);
+    for error in second {
+        if !first.iter().any(|existing| {
+            existing.code == error.code
+                && existing.loc.start.offset == error.loc.start.offset
+                && existing.loc.end.offset == error.loc.end.offset
+        }) {
+            first.push(error);
+        }
+    }
     first
 }
 
@@ -905,7 +917,7 @@ mod tests {
             },
         );
         assert!(template.code.contains("ssrRender"));
-        assert!(template.code.contains("_ssrInterpolate(msg)"));
+        assert!(template.code.contains("_ssrInterpolate(_ctx.msg)"));
     }
 
     #[test]
@@ -1000,6 +1012,29 @@ mod tests {
     }
 
     #[test]
+    fn compile_template_source_does_not_cache_dynamic_interpolation_subtrees() {
+        let compiler = SfcCompiler::new();
+        let template = compiler.compile_template_source(
+            "contract.vue",
+            r#"<template><div>{{ msg }}</div></template><script setup lang="ts">const msg = 'x'</script><style scoped>.a{ color: v-bind(color); }</style>"#,
+            SfcTemplateCompileOptions {
+                scope_id: Some("data-v-contract".into()),
+                slotted: false,
+                ssr: false,
+                ..SfcTemplateCompileOptions::default()
+            },
+        );
+
+        assert!(template.code.contains("_toDisplayString(_ctx.msg)"));
+        assert!(template.code.contains("1 /* TEXT */"));
+        assert!(!template.code.contains("-1 /* CACHED */"));
+        assert!(!template.code.contains("[...(_cache[0]"));
+        assert_eq!(template.errors.len(), 2);
+        assert_eq!(template.errors[0].code, 64);
+        assert_eq!(template.errors[1].code, 64);
+    }
+
+    #[test]
     fn compile_template_source_returns_dom_compile_errors() {
         let compiler = SfcCompiler::new();
         let template = compiler.compile_template_source(
@@ -1033,12 +1068,10 @@ mod tests {
         assert!(template
             .code
             .contains("import _imports_0 from './logo.png'"));
-        assert!(template
-            .code
-            .contains("_ssrRenderAttr(\"src\", _imports_0)"));
-        assert!(template
-            .code
-            .contains("_ssrRenderAttr(\"srcset\", _imports_0 + ' 2x')"));
+        assert!(template.code.contains("src: _imports_0"));
+        assert!(template.code.contains("srcset: _imports_0 + ' 2x'"));
+        assert!(template.code.contains("_ssrRenderAttrs(_mergeProps("));
+        assert!(!template.code.contains("</img>"));
         assert!(!template.code.contains("_ctx._imports_"));
     }
 
@@ -1056,6 +1089,8 @@ mod tests {
         );
 
         assert!(!template.code.contains("import _imports_0"));
-        assert!(template.code.contains(r#"src=\"./logo.png\""#));
+        assert!(template.code.contains(r#"src: "./logo.png""#));
+        assert!(template.code.contains("_ssrRenderAttrs(_mergeProps("));
+        assert!(!template.code.contains("</img>"));
     }
 }

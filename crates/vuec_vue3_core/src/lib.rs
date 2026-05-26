@@ -18650,7 +18650,7 @@ fn render_element_children(
         && child_nodes.len() == 1
         && child_nodes
             .first()
-            .is_some_and(|child| is_static_element_for_cache(child))
+            .is_some_and(|child| is_static_element_tree_for_cache(ast, child))
     {
         let rendered = render_node_expr_scoped(
             ast,
@@ -18665,7 +18665,7 @@ fn render_element_children(
     if options.hoist_static
         && options.stringify_static
         && root_like_render_mode(parent_mode)
-        && !should_cache_children(&child_nodes)
+        && !should_cache_children(ast, &child_nodes)
         && should_stringify_static_children(&child_nodes)
     {
         if let Some(static_call) = render_static_vnode_cache(ast, &child_nodes, options) {
@@ -18674,7 +18674,7 @@ fn render_element_children(
     }
     if options.hoist_static
         && root_like_render_mode(parent_mode)
-        && should_cache_children(&child_nodes)
+        && should_cache_children(ast, &child_nodes)
     {
         if options.stringify_static {
             if let Some(static_call) = render_static_vnode_cache(ast, &child_nodes, options) {
@@ -18858,7 +18858,10 @@ fn is_static_element_tree_for_cache(ast: &Vue3Ast, node: &vuec_ast::Node<Vue3Nod
     };
     if element.tag == "slot"
         || element.tag_type != Vue3ElementType::Element
-        || !element.props.iter().all(vue3_prop_is_stringifiable_static)
+        || !element
+            .props
+            .iter()
+            .all(vue3_prop_is_vnode_cacheable_static)
     {
         return false;
     }
@@ -19448,19 +19451,11 @@ fn render_condition(condition: &str, options: &Vue3CompilerOptions) -> String {
     }
 }
 
-fn should_cache_children(children: &[&vuec_ast::Node<Vue3NodeKind>]) -> bool {
+fn should_cache_children(ast: &Vue3Ast, children: &[&vuec_ast::Node<Vue3NodeKind>]) -> bool {
     !children.is_empty()
         && children
             .iter()
-            .all(|child| is_static_element_for_cache(child))
-}
-
-fn is_static_element_for_cache(node: &vuec_ast::Node<Vue3NodeKind>) -> bool {
-    matches!(
-        &node.kind,
-        Vue3AstKind::Element(element) if element.tag != "slot"
-            && element.props.iter().all(vue3_prop_is_stringifiable_static)
-    )
+            .all(|child| is_static_element_tree_for_cache(ast, child))
 }
 
 fn should_stringify_static_children(children: &[&vuec_ast::Node<Vue3NodeKind>]) -> bool {
@@ -20403,7 +20398,10 @@ fn vue3_dom_mir_can_hoist_static_node(ast: &Vue3Ast, node_id: NodeId) -> bool {
     };
     if element.tag == "slot"
         || element.tag_type != Vue3ElementType::Element
-        || !element.props.iter().all(vue3_prop_is_stringifiable_static)
+        || !element
+            .props
+            .iter()
+            .all(vue3_prop_is_vnode_cacheable_static)
     {
         return false;
     }
@@ -21423,10 +21421,20 @@ fn has_key_bind_dir(dir: &Vue3Directive) -> bool {
         .is_some_and(|arg| arg.source_string() == "key")
 }
 
-fn vue3_prop_is_stringifiable_static(prop: &Vue3Prop) -> bool {
+fn vue3_prop_is_vnode_cacheable_static(prop: &Vue3Prop) -> bool {
     match prop {
         Vue3Prop::Attribute(_) => true,
-        Vue3Prop::Directive(dir) => is_asset_import_binding(dir),
+        Vue3Prop::Directive(dir) => {
+            is_asset_import_binding(dir)
+                || dir.name == "bind"
+                    && !dir.is_dynamic_arg
+                    && dir.modifiers.is_empty()
+                    && dir.arg.is_some()
+                    && dir
+                        .exp
+                        .as_ref()
+                        .is_some_and(|exp| static_const_eval_source(&exp.source_string()).is_some())
+        }
     }
 }
 
@@ -29133,6 +29141,29 @@ mod tests {
         assert!(result.code.contains(
             "_cache[0] || (_cache[0] = _createElementVNode(\"div\", null, \"static\", -1 /* CACHED */))"
         ));
+    }
+
+    #[test]
+    fn base_compile_does_not_cache_dynamic_interpolation_subtrees() {
+        let result = base_compile(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: "<template><div>{{ msg }}</div></template>".into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                mode: "module".into(),
+                hoist_static: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(result.code.contains("_toDisplayString(_ctx.msg)"));
+        assert!(result.code.contains("1 /* TEXT */"));
+        assert!(!result.code.contains("-1 /* CACHED */"));
+        assert!(!result.code.contains("_cache[0] || (_cache[0] = ["));
     }
 
     #[test]
