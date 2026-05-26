@@ -2560,7 +2560,10 @@ fn runner_dependency_specs(
     let mut specs = Vec::new();
     for dependency in spec.runner_dependencies {
         let version = locked_runner_dependency_version(&root, dependency)
-            .or_else(|| manifest_dependency_version(&manifest, dependency));
+            .or_else(|| manifest_dependency_version(&manifest, dependency))
+            .or_else(|| {
+                fallback_runner_dependency_version(vendor_dir, spec.version_line, dependency)
+            });
         let Some(version) = version else {
             return Ok(None);
         };
@@ -2572,6 +2575,25 @@ fn runner_dependency_specs(
     specs.sort();
     specs.dedup();
     Ok(Some(specs))
+}
+
+fn fallback_runner_dependency_version(
+    vendor_dir: &Path,
+    current: VersionLine,
+    dependency: &str,
+) -> Option<String> {
+    [VersionLine::Vue26, VersionLine::Vue27, VersionLine::Vue3]
+        .into_iter()
+        .filter(|version_line| *version_line != current)
+        .find_map(|version_line| {
+            let root = vendor_dir.join(version_line.as_str());
+            let manifest = read_json::<serde_json::Value>(&root.join("package.json")).ok();
+            locked_runner_dependency_version(&root, dependency).or_else(|| {
+                manifest
+                    .as_ref()
+                    .and_then(|manifest| manifest_dependency_version(manifest, dependency))
+            })
+        })
 }
 
 fn locked_runner_dependency_version(root: &Path, dependency: &str) -> Option<String> {
@@ -10503,8 +10525,20 @@ const fs = require('fs')
 const path = require('path')
 const Module = require('module')
 const Jasmine = require('jasmine')
+const { JSDOM } = require('jsdom')
+
+const dom = new JSDOM('<!doctype html><html><body></body></html>')
+global.window = dom.window
+global.document = dom.window.document
+global.navigator = dom.window.navigator
+
+function vuecInteropDefault(value) {
+  return value && Object.prototype.hasOwnProperty.call(value, 'default') ? value.default : value
+}
+globalThis.__vuecInteropDefault = vuecInteropDefault
 
 require('@babel/register')({
+  cache: false,
   extensions: ['.js', '.ts'],
   ignore: [/node_modules/],
   plugins: [
@@ -10518,7 +10552,7 @@ require('@babel/register')({
             for (const spec of path.node.specifiers) {
               if (t.isImportDefaultSpecifier(spec)) {
                 statements.push(t.variableDeclaration('const', [
-                  t.variableDeclarator(spec.local, t.memberExpression(t.callExpression(t.identifier('require'), [source]), t.identifier('default'))),
+                  t.variableDeclarator(spec.local, t.callExpression(t.memberExpression(t.identifier('globalThis'), t.identifier('__vuecInteropDefault')), [t.callExpression(t.identifier('require'), [source])])),
                 ]))
               } else if (t.isImportNamespaceSpecifier(spec)) {
                 statements.push(t.variableDeclaration('const', [
@@ -11622,7 +11656,7 @@ fn suite_spec(suite: ConformanceSuite) -> ConformanceSuiteSpec {
             version_line: VersionLine::Vue26,
             relative_test_dirs: &["test/unit/modules/compiler"],
             package_requests: &["vue-template-compiler"],
-            runner_dependencies: &["@babel/register", "jasmine"],
+            runner_dependencies: &["@babel/register", "jasmine", "jsdom"],
         },
         ConformanceSuite::Vue27Compiler => ConformanceSuiteSpec {
             name: "vue27-compiler",
@@ -12301,8 +12335,16 @@ mod tests {
 
         let runner = fs::read_to_string(temp.join("vuec-jasmine-runner.js")).unwrap();
         assert!(runner.contains("const Jasmine = require('jasmine')"));
+        assert!(runner.contains("const { JSDOM } = require('jsdom')"));
+        assert!(runner.contains("global.document = dom.window.document"));
+        assert!(runner.contains("function vuecInteropDefault(value)"));
+        assert!(runner.contains("globalThis.__vuecInteropDefault = vuecInteropDefault"));
+        assert!(runner.contains("cache: false"));
+        assert!(runner.contains("t.identifier('__vuecInteropDefault')"));
         assert!(runner.contains("testResults: Array.from(testResultsByFile.values())"));
         assert!(runner.contains("compiler-options.spec.js"));
+        let vue2_specs = suite_spec(ConformanceSuite::Vue2Compiler);
+        assert!(vue2_specs.runner_dependencies.contains(&"jsdom"));
 
         let specs = suite_spec(ConformanceSuite::Vue27Compiler);
         assert!(specs.runner_dependencies.contains(&"jsdom"));
@@ -12753,11 +12795,35 @@ snapshots:
             }"#,
         )
         .unwrap();
+        let fallback_root = temp.join("vue2_7");
+        fs::create_dir_all(&fallback_root).unwrap();
+        fs::write(
+            fallback_root.join("package.json"),
+            r#"{
+              "devDependencies": {
+                "jsdom": "^19.0.0"
+              }
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            fallback_root.join("pnpm-lock.yaml"),
+            r#"
+packages:
+  .
+snapshots:
+  /jsdom@19.0.0: {}
+"#,
+        )
+        .unwrap();
 
         let specs = runner_dependency_specs(suite_spec(ConformanceSuite::Vue2Compiler), &temp)
             .unwrap()
             .unwrap();
-        assert_eq!(specs, vec!["@babel/register@^7.0.0", "jasmine@^2.99.0"]);
+        assert_eq!(
+            specs,
+            vec!["@babel/register@^7.0.0", "jasmine@^2.99.0", "jsdom@19.0.0"]
+        );
         let _ = fs::remove_dir_all(temp);
     }
 

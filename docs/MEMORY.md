@@ -1,5 +1,11 @@
 # Memory
 
+- Current round: completed the Vue 2.6 compiler conformance runner/import support closure.
+- `xtask/src/compat.rs` now gives the Vue 2.6 Jasmine runner a deterministic `jsdom` DOM environment, disables Babel register cache for regenerated prepared suites, and uses a CommonJS default-import interop helper so `import Vue from 'vue'` binds to the Vue constructor when the official runtime exports via `module.exports`. Runner dependency resolution can now fall back to the same synced official vendor tree for runner infrastructure dependencies missing from the current baseline manifest; in this slice Vue 2.6 resolves `jsdom` from the Vue 2.7 official lock/manifest rather than from an unpinned latest version.
+- This `xtask/src/compat.rs` work is runner/import support only. No compiler semantics were added to the shim, and AST/HIR/MIR structures did not change.
+- Current Vue 2 conformance movement: `vue2-compiler` improved from `187/188` to `188/188` and now passes as `rust-backed`; `vue27-compiler` remains an expected failing report at `184/190` with existing codeframe/codegen gaps.
+- Verification for this Vue 2 runner support slice: `cargo fmt --all --check`, `git diff --check`, `cargo test -p xtask`, `cargo xtask run-conformance --suite vue2-compiler` (`188/188`), and `cargo xtask run-conformance --suite vue27-compiler` (expected fail, `184/190`).
+
 - Current round: completed a Vue 2 `outputSourceRange` diagnostic span parity slice.
 - `vuec_vue2` now preserves raw attribute spans on `Vue2Attribute` instead of widening them to the element start tag, carries consumed `v-if` / `v-else-if` / `v-else` / `v-for` / `key` spans on `Vue2Element`, and uses those spans for invalid expression diagnostics and `<slot>` key warnings. Vue 2 public error/tip serialization now omits absent `start` / `end` fields, so text-only root errors can expose `start` without an `end` like the official compiler.
 - `docs/3.AST_HIR_MIR_DESIGN.md` was updated because the new Vue 2 source-range fields are AST diagnostic contract data, not optimizer/codegen state. `xtask/src/compat.rs` was not touched in this slice.
