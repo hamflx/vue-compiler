@@ -1,5 +1,12 @@
 # Memory
 
+- Current round: completed an M16 NAPI Vue 2.7 `vue/compiler-sfc` API manifest parity slice.
+- Added the official Vue 2.7 `vue/compiler-sfc` manifest to `cargo xtask verify-napi-api`; the command now verifies four NAPI-backed official package-name targets: Vue 2.6 / Vue 2.7 `vue-template-compiler`, Vue 2.7 `vue/compiler-sfc`, and Vue 3 `@vue/compiler-ssr`.
+- Updated the NAPI `vue/compiler-sfc` alias so the eight official exports (`parse`, `parseComponent`, `compileTemplate`, `compileScript`, `compileStyle`, `compileStyleAsync`, `rewriteDefault`, `generateCodeFrame`) expose official names/arities/types and call native Rust-backed SFC/template/style/script/rewrite/codeframe APIs instead of smoke-era unavailable stubs.
+- Added native `rewriteDefaultVue27` to `vuec_napi` and the local `@vuec-rs/native` loader, forwarding to `vuec_sfc::SfcCompiler::rewrite_vue27_default` with parser plugin option handling. This keeps rewrite semantics in Rust and uses the JS alias only as package/API adapter glue.
+- This is product API adapter progress only. It does not route official conformance through NAPI, does not complete broad NAPI API diff for Vue 3 core/dom/sfc packages, does not change AST/HIR/MIR structures, and does not move compiler semantics into `xtask/src/compat.rs`.
+- Verification for this NAPI Vue 2.7 SFC API manifest slice: `cargo fmt --all --check`, `git diff --check`, `cargo check -p xtask -p vuec_napi`, `cargo test -p xtask`, `cargo test -p vuec_napi`, `cargo xtask verify-napi`, `cargo xtask verify-napi-alias`, `cargo xtask verify-napi-api` (`4/4` pass), `cargo xtask verify-napi-platform`, `pnpm test:napi`, `pnpm test:napi-alias`, `pnpm test:napi-api`, `pnpm test:napi-platform`, `cargo test --workspace`, and `cargo xtask summarize-compat --locked` (`7/7` pass).
+
 - Current round: completed an M16 NAPI Vue 3 `@vue/compiler-ssr` API manifest parity slice.
 - Generalized `cargo xtask verify-napi-api` so it can prepare isolated NAPI-backed official package-name aliases beyond Vue 2 template compiler targets. The command now covers Vue 2.6 / Vue 2.7 `vue-template-compiler` and Vue 3 `@vue/compiler-ssr` in separate `target/napi-api/<version>/<package>` trees.
 - Updated the NAPI `@vue/compiler-ssr` alias so its public `compile` export has the official one-argument function arity while still forwarding the optional options argument through `arguments` to the native Rust SSR compile call.

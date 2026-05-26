@@ -150,6 +150,19 @@ fn verify_napi_api() -> Result<compat::JsonReport> {
             },
         },
         NapiApiTarget {
+            version_line: "vue2_7",
+            package: "vue/compiler-sfc",
+            entry: "vue/compiler-sfc",
+            alias: NapiApiAlias::PackageTemplate {
+                source: "packages/native-aliases/vue",
+                package_subpath: &["vue"],
+                manifest_package: "vue",
+                manifest_file: "vue_compiler-sfc.json",
+                package_json_subpath: &["vue"],
+                types_base_subpath: &["vue"],
+            },
+        },
+        NapiApiTarget {
             version_line: "vue3",
             package: "@vue/compiler-ssr",
             entry: "index",
@@ -157,6 +170,7 @@ fn verify_napi_api() -> Result<compat::JsonReport> {
                 source: "packages/native-aliases/@vue/compiler-ssr",
                 package_subpath: &["@vue", "compiler-ssr"],
                 manifest_package: "_vue_compiler-ssr",
+                manifest_file: "index.json",
                 package_json_subpath: &["@vue", "compiler-ssr"],
                 types_base_subpath: &["@vue", "compiler-ssr"],
             },
@@ -264,6 +278,7 @@ enum NapiApiAlias {
         source: &'static str,
         package_subpath: &'static [&'static str],
         manifest_package: &'static str,
+        manifest_file: &'static str,
         package_json_subpath: &'static [&'static str],
         types_base_subpath: &'static [&'static str],
     },
@@ -321,18 +336,25 @@ impl NapiApiTarget {
     }
 
     fn official_manifest_path(self) -> PathBuf {
-        let manifest_package = match self.alias {
-            NapiApiAlias::Vue2TemplateCompiler { .. } => "vue-template-compiler",
+        let (manifest_package, manifest_file) = match self.alias {
+            NapiApiAlias::Vue2TemplateCompiler { .. } => ("vue-template-compiler", "index.json"),
             NapiApiAlias::PackageTemplate {
                 manifest_package, ..
-            } => manifest_package,
+            } => (manifest_package, self.manifest_file_name()),
         };
         PathBuf::from("compat")
             .join("api")
             .join("official")
             .join(self.version_line)
             .join(manifest_package)
-            .join("index.json")
+            .join(manifest_file)
+    }
+
+    fn manifest_file_name(self) -> &'static str {
+        match self.alias {
+            NapiApiAlias::Vue2TemplateCompiler { .. } => "index.json",
+            NapiApiAlias::PackageTemplate { manifest_file, .. } => manifest_file,
+        }
     }
 }
 

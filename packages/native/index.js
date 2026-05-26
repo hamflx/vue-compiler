@@ -105,6 +105,10 @@ function generateCodeFrameVue2(source, start = 0, end = start) {
   return binding.generateCodeFrameVue2(String(source || ''), Number(start) || 0, Number(end) || 0);
 }
 
+function rewriteDefaultVue27(source, variable, parserPlugins) {
+  return binding.rewriteDefaultVue27(String(source || ''), String(variable || ''), parserPlugins || []);
+}
+
 function baseCompileVue3(source, options = {}) {
   return fromJson(binding.baseCompileVue3(source, options));
 }
@@ -227,6 +231,7 @@ module.exports = {
   compileToFunctionsVue2,
   compileSsrVue2,
   generateCodeFrameVue2,
+  rewriteDefaultVue27,
   baseCompileVue3,
   compileVue3Dom,
   compileVue3Ssr,

@@ -138,6 +138,11 @@
 
 ## Current NAPI Foundation Slice
 
+- Added an M16 NAPI Vue 2.7 `vue/compiler-sfc` API manifest parity slice. The NAPI alias now exposes the official eight exports (`parse`, `parseComponent`, `compileTemplate`, `compileScript`, `compileStyle`, `compileStyleAsync`, `rewriteDefault`, and `generateCodeFrame`) with official names/arities/types, and `cargo xtask verify-napi-api` now covers this target alongside Vue 2.6 / Vue 2.7 `vue-template-compiler` and Vue 3 `@vue/compiler-ssr`.
+- Added native `rewriteDefaultVue27` to `vuec_napi` and the local `@vuec-rs/native` loader, forwarding Vue 2.7 SFC default-export rewriting to `vuec_sfc::SfcCompiler::rewrite_vue27_default` while keeping the JS alias as official package/API adapter glue.
+- This is package/API adapter progress only: official conformance is still not routed through NAPI, Vue 3 core/dom/sfc NAPI API parity remains open, no compiler semantics were added to `xtask/src/compat.rs`, and no AST/HIR/MIR structures changed.
+- Verification this round: `cargo fmt --all --check`, `git diff --check`, `cargo check -p xtask -p vuec_napi`, `cargo test -p xtask`, `cargo test -p vuec_napi`, `cargo xtask verify-napi`, `cargo xtask verify-napi-alias`, `cargo xtask verify-napi-api` (`4/4`), `cargo xtask verify-napi-platform`, `pnpm test:napi`, `pnpm test:napi-alias`, `pnpm test:napi-api`, `pnpm test:napi-platform`, `cargo test --workspace`, and `cargo xtask summarize-compat --locked`.
+
 - Added an M16 NAPI Vue 3 `@vue/compiler-ssr` API manifest parity slice. The NAPI alias now exposes `compile` with the official one-argument public arity while preserving options forwarding through `arguments`.
 - Generalized `cargo xtask verify-napi-api` from a Vue 2 template-only probe into a package-target probe that prepares isolated NAPI package trees and compares official manifest fields for each covered target. It now verifies Vue 2.6 / Vue 2.7 `vue-template-compiler` plus Vue 3 `@vue/compiler-ssr`.
 - This is package/API adapter progress only: official conformance is still not routed through NAPI, Vue 2.7 `vue/compiler-sfc` and Vue 3 core/dom/sfc NAPI API parity remain open, and no compiler semantics or AST/HIR/MIR structures changed.

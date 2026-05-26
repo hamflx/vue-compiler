@@ -5,6 +5,7 @@ use napi_derive::napi;
 use serde_json::{json, Value};
 use vuec_sfc::{
     SfcCompiler, SfcScriptCompileOptions, SfcStyleCompileOptions, SfcTemplateCompileOptions,
+    Vue27RewriteDefaultOptions,
 };
 use vuec_source::FileId;
 use vuec_vue2::Vue2CompileOptions;
@@ -48,6 +49,18 @@ pub fn compile_ssr_vue2(env: Env, template: String, options: Option<Unknown>) ->
 #[napi(js_name = "generateCodeFrameVue2")]
 pub fn generate_code_frame_vue2(source: String, start: u32, end: u32) -> String {
     vuec_vue2::generate_code_frame(&source, start as usize, end as usize)
+}
+
+#[napi(js_name = "rewriteDefaultVue27")]
+pub fn rewrite_default_vue27(
+    env: Env,
+    source: String,
+    variable: String,
+    parser_plugins: Option<Unknown>,
+) -> Result<String> {
+    let plugin_options = vue27_rewrite_default_options(from_js_options(&env, parser_plugins)?);
+    let compiler = SfcCompiler::new();
+    Ok(compiler.rewrite_vue27_default(&source, &variable, plugin_options))
 }
 
 #[napi(js_name = "compileVue3Dom")]
@@ -148,6 +161,25 @@ fn template_source(source: &str, options: &Value) -> TemplateSource {
 
 fn vue2_options(value: Value) -> Vue2CompileOptions {
     serde_json::from_value::<Vue2CompileOptions>(value).unwrap_or_default()
+}
+
+fn vue27_rewrite_default_options(value: Value) -> Vue27RewriteDefaultOptions {
+    let plugins = match &value {
+        Value::Array(values) => values.as_slice(),
+        Value::Null => &[],
+        other => std::slice::from_ref(other),
+    };
+    Vue27RewriteDefaultOptions {
+        typescript: plugins
+            .iter()
+            .any(|plugin| plugin.as_str() == Some("typescript")),
+        decorators: plugins.iter().any(|plugin| {
+            matches!(
+                plugin.as_str(),
+                Some("decorators" | "decorators-legacy" | "decoratorAutoAccessors")
+            )
+        }),
+    }
 }
 
 fn vue3_options(value: Option<&Value>) -> Vue3CompilerOptions {
@@ -322,6 +354,7 @@ pub fn api_manifest() -> Result<String> {
                 "compileToFunctionsVue2",
                 "compileSsrVue2",
                 "generateCodeFrameVue2",
+                "rewriteDefaultVue27",
                 "baseCompileVue3",
                 "compileVue3Dom",
                 "compileVue3Ssr",
