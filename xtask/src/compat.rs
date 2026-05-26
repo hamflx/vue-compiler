@@ -9254,6 +9254,13 @@ fn run_conformance_execution(
     lock_hash: Option<&str>,
 ) -> Result<ConformanceExecutionResult> {
     match spec.name {
+        "vue2-compiler" => {
+            run_vue2_compiler_conformance(spec, official_root, discovered, lock_hash)
+        }
+        "vue27-compiler" => {
+            run_vue27_compiler_conformance(spec, official_root, discovered, lock_hash)
+        }
+        "vue27-sfc" => run_vue27_sfc_conformance(spec, official_root, discovered, lock_hash),
         "vue3-core" => run_vue3_core_conformance(spec, official_root, discovered, lock_hash),
         "vue3-dom" => run_vue3_dom_conformance(spec, official_root, discovered, lock_hash),
         "vue3-sfc" => run_vue3_sfc_conformance(spec, official_root, discovered, lock_hash),
@@ -9273,6 +9280,36 @@ fn run_conformance_execution(
             },
         }),
     }
+}
+
+fn run_vue2_compiler_conformance(
+    spec: ConformanceSuiteSpec,
+    official_root: &Path,
+    discovered: &[String],
+    lock_hash: Option<&str>,
+) -> Result<ConformanceExecutionResult> {
+    let prepared_root = prepare_vue2_compiler_conformance_suite(spec, official_root, lock_hash)?;
+    run_jasmine_conformance(spec, prepared_root, discovered)
+}
+
+fn run_vue27_compiler_conformance(
+    spec: ConformanceSuiteSpec,
+    official_root: &Path,
+    discovered: &[String],
+    lock_hash: Option<&str>,
+) -> Result<ConformanceExecutionResult> {
+    let prepared_root = prepare_vue27_compiler_conformance_suite(spec, official_root, lock_hash)?;
+    run_vitest_conformance(spec, prepared_root, discovered)
+}
+
+fn run_vue27_sfc_conformance(
+    spec: ConformanceSuiteSpec,
+    official_root: &Path,
+    discovered: &[String],
+    lock_hash: Option<&str>,
+) -> Result<ConformanceExecutionResult> {
+    let prepared_root = prepare_vue27_sfc_conformance_suite(spec, official_root, lock_hash)?;
+    run_vitest_conformance(spec, prepared_root, discovered)
 }
 
 fn run_vue3_core_conformance(
@@ -9378,20 +9415,140 @@ fn run_vitest_conformance(
     })
 }
 
+fn run_jasmine_conformance(
+    spec: ConformanceSuiteSpec,
+    prepared_root: PathBuf,
+    discovered: &[String],
+) -> Result<ConformanceExecutionResult> {
+    let output_file = prepared_root.join("jasmine-report.json");
+    let npm_root = PathBuf::from("target")
+        .join("compat")
+        .join("npm")
+        .join(spec.version_line.as_str());
+    let alias_root = rust_alias_root(spec.version_line);
+    let absolute_npm_root = absolute_path(&npm_root);
+    let absolute_alias_root = absolute_path(&alias_root);
+    let absolute_prepared_root = absolute_path(&prepared_root);
+    let absolute_output_file = absolute_path(&output_file);
+    let node = resolve_program("node");
+    let output = Command::new(node)
+        .arg("vuec-jasmine-runner.js")
+        .env("VUEC_RUST_ALIAS_ROOT", &absolute_alias_root)
+        .env("VUEC_OFFICIAL_NPM_ROOT", &absolute_npm_root)
+        .env("VUEC_JASMINE_REPORT", &absolute_output_file)
+        .env(
+            "NODE_PATH",
+            conformance_node_path(&absolute_alias_root, &absolute_npm_root),
+        )
+        .current_dir(&absolute_prepared_root)
+        .output()
+        .with_context(|| format!("failed to spawn Jasmine for {}", spec.name))?;
+    let stdout = normalize_conformance_output(&String::from_utf8_lossy(&output.stdout));
+    let stderr = normalize_conformance_output(&String::from_utf8_lossy(&output.stderr));
+    let counts = read_jasmine_counts(&output_file)
+        .or_else(|_| read_jasmine_counts(&absolute_output_file))
+        .unwrap_or_else(|_| ConformanceExecutionCounts {
+            total: discovered.len(),
+            pending: discovered.len(),
+            ..ConformanceExecutionCounts::default()
+        });
+    let status = if counts.fail > 0 || !output.status.success() {
+        "failed"
+    } else {
+        "executed"
+    };
+    Ok(ConformanceExecutionResult {
+        status: status.into(),
+        runner: "jasmine".into(),
+        prepared_root: prepared_root.display().to_string(),
+        output_file: output_file.display().to_string(),
+        exit_code: output.status.code(),
+        stdout,
+        stderr,
+        counts,
+    })
+}
+
+fn prepare_vue2_compiler_conformance_suite(
+    spec: ConformanceSuiteSpec,
+    official_root: &Path,
+    lock_hash: Option<&str>,
+) -> Result<PathBuf> {
+    let prepared_root = prepared_conformance_root(spec, lock_hash);
+    reset_prepared_root(&prepared_root)?;
+    let official_tests = official_root
+        .join("test")
+        .join("unit")
+        .join("modules")
+        .join("compiler");
+    let prepared_tests = prepared_root
+        .join("test")
+        .join("unit")
+        .join("modules")
+        .join("compiler");
+    copy_dir_recursive(&official_tests, &prepared_tests)?;
+    write_vue2_compiler_source_shims(&prepared_root, false)?;
+    write_vue2_jasmine_runner(&prepared_root)?;
+    Ok(prepared_root)
+}
+
+fn prepare_vue27_compiler_conformance_suite(
+    spec: ConformanceSuiteSpec,
+    official_root: &Path,
+    lock_hash: Option<&str>,
+) -> Result<PathBuf> {
+    let prepared_root = prepared_conformance_root(spec, lock_hash);
+    reset_prepared_root(&prepared_root)?;
+    let official_tests = official_root
+        .join("test")
+        .join("unit")
+        .join("modules")
+        .join("compiler");
+    let prepared_tests = prepared_root
+        .join("test")
+        .join("unit")
+        .join("modules")
+        .join("compiler");
+    copy_dir_recursive(&official_tests, &prepared_tests)?;
+    write_vue2_compiler_source_shims(&prepared_root, true)?;
+    write_vue27_compiler_conformance_shims(&prepared_root)?;
+    Ok(prepared_root)
+}
+
+fn prepare_vue27_sfc_conformance_suite(
+    spec: ConformanceSuiteSpec,
+    official_root: &Path,
+    lock_hash: Option<&str>,
+) -> Result<PathBuf> {
+    let prepared_root = prepared_conformance_root(spec, lock_hash);
+    reset_prepared_root(&prepared_root)?;
+    let official_tests = official_root
+        .join("packages")
+        .join("compiler-sfc")
+        .join("test");
+    let prepared_tests = prepared_root
+        .join("packages")
+        .join("compiler-sfc")
+        .join("test");
+    copy_dir_recursive(&official_tests, &prepared_tests)?;
+    fs::copy(
+        official_root.join("tsconfig.json"),
+        prepared_root.join("tsconfig.json"),
+    )
+    .with_context(|| "failed to copy Vue 2.7 root tsconfig for SFC conformance")?;
+    write_vue2_compiler_source_shims(&prepared_root, true)?;
+    write_vue27_sfc_source_shims(&prepared_root)?;
+    write_vue27_sfc_conformance_shims(&prepared_root)?;
+    Ok(prepared_root)
+}
+
 fn prepare_vue3_core_conformance_suite(
     spec: ConformanceSuiteSpec,
     official_root: &Path,
     lock_hash: Option<&str>,
 ) -> Result<PathBuf> {
-    let prepared_root = PathBuf::from("target")
-        .join("conformance")
-        .join(lock_hash.unwrap_or("unknown-lock"))
-        .join("prepared")
-        .join(spec.name);
-    if prepared_root.exists() {
-        fs::remove_dir_all(&prepared_root)
-            .with_context(|| format!("failed to remove {}", prepared_root.display()))?;
-    }
+    let prepared_root = prepared_conformance_root(spec, lock_hash);
+    reset_prepared_root(&prepared_root)?;
     let official_tests = official_root
         .join("packages")
         .join("compiler-core")
@@ -9403,6 +9560,545 @@ fn prepare_vue3_core_conformance_suite(
     copy_dir_recursive(&official_tests, &prepared_tests)?;
     write_vue3_core_conformance_shims(&prepared_root)?;
     Ok(prepared_root)
+}
+
+fn prepared_conformance_root(spec: ConformanceSuiteSpec, lock_hash: Option<&str>) -> PathBuf {
+    PathBuf::from("target")
+        .join("conformance")
+        .join(lock_hash.unwrap_or("unknown-lock"))
+        .join("prepared")
+        .join(spec.name)
+}
+
+fn reset_prepared_root(prepared_root: &Path) -> Result<()> {
+    if prepared_root.exists() {
+        fs::remove_dir_all(prepared_root)
+            .with_context(|| format!("failed to remove {}", prepared_root.display()))?;
+    }
+    Ok(())
+}
+
+fn write_vue2_compiler_source_shims(prepared_root: &Path, include_types: bool) -> Result<()> {
+    let compiler_root = prepared_root.join("src").join("compiler");
+    let parser_root = compiler_root.join("parser");
+    fs::create_dir_all(&parser_root)
+        .with_context(|| format!("failed to create {}", parser_root.display()))?;
+    write_text(
+        &parser_root.join("index.ts"),
+        r#"
+import { compile } from 'vue-template-compiler'
+
+export function parse(template, options = {}) {
+  const compiled = compile(template, { ...options, optimize: true })
+  const ast = compiled.element_ast || null
+  if (ast && typeof ast === 'object') {
+    Object.defineProperty(ast, '__vuecTemplate', { value: template, enumerable: false, configurable: true })
+    Object.defineProperty(ast, '__vuecOptions', { value: options, enumerable: false, configurable: true })
+  }
+  return ast
+}
+"#,
+    )?;
+    write_text(
+        &compiler_root.join("optimizer.ts"),
+        r#"
+export function optimize(ast) {
+  return ast
+}
+"#,
+    )?;
+    write_text(
+        &compiler_root.join("codegen.ts"),
+        r#"
+import { compile } from 'vue-template-compiler'
+
+export function generate(ast, options = {}) {
+  if (ast && ast.__vuecTemplate) {
+    const compiled = compile(ast.__vuecTemplate, { ...(ast.__vuecOptions || {}), ...options, optimize: true })
+    return {
+      render: compiled.render,
+      staticRenderFns: compiled.staticRenderFns || compiled.static_render_fns || [],
+    }
+  }
+  return {
+    render: "with(this){return _c('div')}",
+    staticRenderFns: [],
+  }
+}
+"#,
+    )?;
+    write_text(
+        &compiler_root.join("codeframe.ts"),
+        r#"
+import { generateCodeFrame } from 'vue-template-compiler'
+export { generateCodeFrame }
+"#,
+    )?;
+    write_text(
+        &compiler_root.join("helpers.ts"),
+        r#"
+export function getAndRemoveAttr(el, name) {
+  if (!el || !el.attrsMap || !(name in el.attrsMap)) return undefined
+  const value = el.attrsMap[name]
+  delete el.attrsMap[name]
+  if (Array.isArray(el.attrsList)) {
+    const index = el.attrsList.findIndex(attr => attr && attr.name === name)
+    if (index >= 0) el.attrsList.splice(index, 1)
+  }
+  return value
+}
+"#,
+    )?;
+
+    let web_compiler = prepared_root
+        .join("src")
+        .join("platforms")
+        .join("web")
+        .join("compiler");
+    fs::create_dir_all(&web_compiler)
+        .with_context(|| format!("failed to create {}", web_compiler.display()))?;
+    write_text(
+        &web_compiler.join("index.ts"),
+        r#"
+import { compile } from 'vue-template-compiler'
+export { compile }
+"#,
+    )?;
+    write_text(
+        &web_compiler.join("options.ts"),
+        r#"
+export const baseOptions = {
+  expectHTML: true,
+  modules: [],
+  directives: {},
+  isPreTag: tag => tag === 'pre',
+  isUnaryTag: tag => /^(area|base|br|col|embed|hr|img|input|link|meta|param|source|track|wbr)$/i.test(tag),
+  mustUseProp: () => false,
+  canBeLeftOpenTag: () => false,
+  isReservedTag: tag => /^(html|body|base|head|link|meta|style|title|address|article|aside|footer|header|h1|h2|h3|h4|h5|h6|nav|section|div|dd|dl|dt|figcaption|figure|picture|hr|img|li|main|ol|p|pre|ul|a|b|abbr|bdi|bdo|br|cite|code|data|dfn|em|i|kbd|mark|q|rp|rt|rtc|ruby|s|samp|small|span|strong|sub|sup|time|u|var|wbr|area|audio|map|track|video|embed|object|param|source|canvas|script|noscript|del|ins|caption|col|colgroup|table|thead|tbody|td|th|tr|button|datalist|fieldset|form|input|label|legend|meter|optgroup|option|output|progress|select|textarea|details|dialog|menu|summary|template|blockquote|iframe|tfoot)$/i.test(tag),
+  getTagNamespace: tag => tag === 'svg' ? 'svg' : undefined,
+  staticKeys: '',
+}
+"#,
+    )?;
+
+    let web_util = prepared_root
+        .join("src")
+        .join("platforms")
+        .join("web")
+        .join("util");
+    fs::create_dir_all(&web_util)
+        .with_context(|| format!("failed to create {}", web_util.display()))?;
+    write_text(
+        &web_util.join("index.ts"),
+        r#"
+export const isReservedTag = tag => /^(html|body|base|head|link|meta|style|title|address|article|aside|footer|header|h1|h2|h3|h4|h5|h6|nav|section|div|dd|dl|dt|figcaption|figure|picture|hr|img|li|main|ol|p|pre|ul|a|b|abbr|bdi|bdo|br|cite|code|data|dfn|em|i|kbd|mark|q|rp|rt|rtc|ruby|s|samp|small|span|strong|sub|sup|time|u|var|wbr|area|audio|map|track|video|embed|object|param|source|canvas|script|noscript|del|ins|caption|col|colgroup|table|thead|tbody|td|th|tr|button|datalist|fieldset|form|input|label|legend|meter|optgroup|option|output|progress|select|textarea|details|dialog|menu|summary|template|blockquote|iframe|tfoot)$/i.test(tag)
+"#,
+    )?;
+
+    let shared = prepared_root.join("src").join("shared");
+    fs::create_dir_all(&shared)
+        .with_context(|| format!("failed to create {}", shared.display()))?;
+    write_text(
+        &shared.join("util.ts"),
+        r#"
+export const isObject = value => value !== null && typeof value === 'object'
+export const isFunction = value => typeof value === 'function'
+export function extend(to, from) {
+  return Object.assign(to, from)
+}
+export const noop = () => {}
+"#,
+    )?;
+
+    let core_util = prepared_root.join("src").join("core").join("util");
+    fs::create_dir_all(&core_util)
+        .with_context(|| format!("failed to create {}", core_util.display()))?;
+    write_text(
+        &core_util.join("env.ts"),
+        r#"
+export const isIE = false
+export const isEdge = false
+"#,
+    )?;
+
+    let web_entry = prepared_root.join("src").join("platforms").join("web");
+    write_text(
+        &web_entry.join("entry-compiler.ts"),
+        r#"
+import Vue from 'vue'
+export default Vue
+export * from './compiler'
+"#,
+    )?;
+
+    if include_types {
+        let types_root = prepared_root.join("src").join("types");
+        fs::create_dir_all(&types_root)
+            .with_context(|| format!("failed to create {}", types_root.display()))?;
+        write_text(
+            &types_root.join("compiler.ts"),
+            "export const WarningMessage = String\n",
+        )?;
+        let sfc_src = prepared_root
+            .join("packages")
+            .join("compiler-sfc")
+            .join("src");
+        fs::create_dir_all(&sfc_src)
+            .with_context(|| format!("failed to create {}", sfc_src.display()))?;
+        write_text(
+            &sfc_src.join("types.ts"),
+            r#"
+export const BindingTypes = {
+  DATA: 'data',
+  PROPS: 'props',
+  PROPS_ALIASED: 'props-aliased',
+  SETUP_LET: 'setup-let',
+  SETUP_CONST: 'setup-const',
+  SETUP_REACTIVE_CONST: 'setup-reactive-const',
+  SETUP_MAYBE_REF: 'setup-maybe-ref',
+  SETUP_REF: 'setup-ref',
+  OPTIONS: 'options',
+  LITERAL_CONST: 'literal-const',
+}
+"#,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn write_vue27_sfc_source_shims(prepared_root: &Path) -> Result<()> {
+    let sfc_src = prepared_root
+        .join("packages")
+        .join("compiler-sfc")
+        .join("src");
+    fs::create_dir_all(&sfc_src)
+        .with_context(|| format!("failed to create {}", sfc_src.display()))?;
+    write_text(
+        &sfc_src.join("index.ts"),
+        "export * from 'vue/compiler-sfc'\n",
+    )?;
+    for module in [
+        "parse",
+        "parseComponent",
+        "compileTemplate",
+        "compileScript",
+        "compileStyle",
+        "cssVars",
+        "rewriteDefault",
+        "prefixIdentifiers",
+    ] {
+        write_text(
+            &sfc_src.join(format!("{module}.ts")),
+            "export * from 'vue/compiler-sfc'\n",
+        )?;
+    }
+    Ok(())
+}
+
+fn write_vue27_compiler_conformance_shims(prepared_root: &Path) -> Result<()> {
+    write_vue2_vitest_setup(prepared_root)?;
+    let config = r#"
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const root = path.dirname(fileURLToPath(import.meta.url))
+const aliasRoot = process.env.VUEC_RUST_ALIAS_ROOT
+const npmRoot = process.env.VUEC_OFFICIAL_NPM_ROOT
+
+export default {
+  define: {
+    __DEV__: true,
+    __TEST__: true,
+  },
+  resolve: {
+    alias: {
+      compiler: path.resolve(root, 'src/compiler'),
+      core: path.resolve(root, 'src/core'),
+      shared: path.resolve(root, 'src/shared'),
+      web: path.resolve(root, 'src/platforms/web'),
+      types: path.resolve(root, 'src/types'),
+      vue: path.resolve(npmRoot, 'node_modules/vue/dist/vue.common.js'),
+      vitest: path.resolve(npmRoot, 'node_modules/vitest/dist/index.js'),
+      'vue-template-compiler': path.resolve(aliasRoot, 'node_modules/vue-template-compiler/index.js'),
+    },
+  },
+  test: {
+    globals: true,
+    environment: 'jsdom',
+    setupFiles: ['./vuec-vitest-setup.ts'],
+    include: ['test/unit/modules/compiler/**/*.spec.ts'],
+  },
+}
+"#;
+    write_text(&prepared_root.join("vitest.config.ts"), config)
+}
+
+fn write_vue27_sfc_conformance_shims(prepared_root: &Path) -> Result<()> {
+    write_vue2_vitest_setup(prepared_root)?;
+    let config = r#"
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const root = path.dirname(fileURLToPath(import.meta.url))
+const aliasRoot = process.env.VUEC_RUST_ALIAS_ROOT
+const npmRoot = process.env.VUEC_OFFICIAL_NPM_ROOT
+
+export default {
+  define: {
+    __DEV__: true,
+    __TEST__: true,
+  },
+  resolve: {
+    alias: {
+      compiler: path.resolve(root, 'src/compiler'),
+      core: path.resolve(root, 'src/core'),
+      shared: path.resolve(root, 'src/shared'),
+      web: path.resolve(root, 'src/platforms/web'),
+      types: path.resolve(root, 'src/types'),
+      vitest: path.resolve(npmRoot, 'node_modules/vitest/dist/index.js'),
+      'vue/compiler-sfc': path.resolve(aliasRoot, 'node_modules/vue/compiler-sfc/index.js'),
+      vue: path.resolve(npmRoot, 'node_modules/vue/dist/vue.common.js'),
+      'vue-template-compiler': path.resolve(aliasRoot, 'node_modules/vue-template-compiler/index.js'),
+      '@babel/parser': path.resolve(npmRoot, 'node_modules/@babel/parser/lib/index.js'),
+      postcss: path.resolve(npmRoot, 'node_modules/postcss/lib/postcss.mjs'),
+      prettier: path.resolve(npmRoot, 'node_modules/prettier/standalone.js'),
+      typescript: path.resolve(npmRoot, 'node_modules/typescript/lib/typescript.js'),
+    },
+  },
+  test: {
+    globals: true,
+    environment: 'jsdom',
+    setupFiles: ['./vuec-vitest-setup.ts'],
+    include: ['packages/compiler-sfc/test/**/*.spec.ts'],
+  },
+}
+"#;
+    write_text(&prepared_root.join("vitest.config.ts"), config)
+}
+
+fn write_vue2_vitest_setup(prepared_root: &Path) -> Result<()> {
+    write_text(
+        &prepared_root.join("vuec-vitest-setup.ts"),
+        r#"
+import { beforeEach, expect } from 'vitest'
+
+const warnings: string[] = []
+
+beforeEach(() => {
+  warnings.length = 0
+})
+
+console.warn = (...args: unknown[]) => {
+  warnings.push(args.map(arg => String(arg)).join(' '))
+}
+
+expect.extend({
+  toHaveBeenWarned(received) {
+    const expected = String(received)
+    const pass = warnings.some(warning => warning.includes(expected))
+    return {
+      pass,
+      message: () => `expected ${JSON.stringify(expected)} ${pass ? 'not ' : ''}to have been warned`,
+    }
+  },
+})
+"#,
+    )
+}
+
+fn write_vue2_jasmine_runner(prepared_root: &Path) -> Result<()> {
+    write_text(
+        &prepared_root.join("vuec-jasmine-runner.js"),
+        r#"
+const fs = require('fs')
+const path = require('path')
+const Module = require('module')
+const Jasmine = require('jasmine')
+
+require('@babel/register')({
+  extensions: ['.js', '.ts'],
+  ignore: [/node_modules/],
+  plugins: [
+    function vuecModuleToCommonJs() {
+      return {
+        visitor: {
+          ImportDeclaration(path) {
+            const t = require('@babel/core').types
+            const source = path.node.source
+            const statements = []
+            for (const spec of path.node.specifiers) {
+              if (t.isImportDefaultSpecifier(spec)) {
+                statements.push(t.variableDeclaration('const', [
+                  t.variableDeclarator(spec.local, t.memberExpression(t.callExpression(t.identifier('require'), [source]), t.identifier('default'))),
+                ]))
+              } else if (t.isImportNamespaceSpecifier(spec)) {
+                statements.push(t.variableDeclaration('const', [
+                  t.variableDeclarator(spec.local, t.callExpression(t.identifier('require'), [source])),
+                ]))
+              } else if (t.isImportSpecifier(spec)) {
+                statements.push(t.variableDeclaration('const', [
+                  t.variableDeclarator(
+                    t.objectPattern([t.objectProperty(spec.imported, spec.local, false, spec.imported.name === spec.local.name)]),
+                    t.callExpression(t.identifier('require'), [source])
+                  ),
+                ]))
+              }
+            }
+            path.replaceWithMultiple(statements.length ? statements : [t.expressionStatement(t.callExpression(t.identifier('require'), [source]))])
+          },
+          ExportNamedDeclaration(path) {
+            const t = require('@babel/core').types
+            const node = path.node
+            const statements = []
+            if (node.declaration) {
+              const decl = node.declaration
+              statements.push(decl)
+              if (t.isFunctionDeclaration(decl) || t.isClassDeclaration(decl)) {
+                statements.push(t.expressionStatement(t.assignmentExpression('=', t.memberExpression(t.identifier('exports'), decl.id), decl.id)))
+              } else if (t.isVariableDeclaration(decl)) {
+                for (const d of decl.declarations) {
+                  if (t.isIdentifier(d.id)) statements.push(t.expressionStatement(t.assignmentExpression('=', t.memberExpression(t.identifier('exports'), d.id), d.id)))
+                }
+              }
+            }
+            for (const spec of node.specifiers || []) {
+              statements.push(t.expressionStatement(t.assignmentExpression('=', t.memberExpression(t.identifier('exports'), spec.exported), spec.local)))
+            }
+            path.replaceWithMultiple(statements)
+          },
+        },
+      }
+    },
+  ],
+})
+
+const root = __dirname
+const aliasRoot = process.env.VUEC_RUST_ALIAS_ROOT
+const npmRoot = process.env.VUEC_OFFICIAL_NPM_ROOT
+const reportPath = process.env.VUEC_JASMINE_REPORT || path.join(root, 'jasmine-report.json')
+const originalResolve = Module._resolveFilename
+Module._resolveFilename = function(request, parent, isMain, options) {
+  const aliases = {
+    compiler: path.join(root, 'src/compiler'),
+    core: path.join(root, 'src/core'),
+    shared: path.join(root, 'src/shared'),
+    web: path.join(root, 'src/platforms/web'),
+    types: path.join(root, 'src/types'),
+    vue: path.join(npmRoot, 'node_modules/vue/dist/vue.common.js'),
+    'vue-template-compiler': path.join(aliasRoot, 'node_modules/vue-template-compiler/index.js'),
+  }
+  for (const [key, target] of Object.entries(aliases)) {
+    if (request === key) return originalResolve.call(this, target, parent, isMain, options)
+    if (request.startsWith(key + '/')) {
+      return originalResolve.call(this, path.join(target, request.slice(key.length + 1)), parent, isMain, options)
+    }
+  }
+  return originalResolve.call(this, request, parent, isMain, options)
+}
+
+const warnings = []
+global.__VUEC_WARNINGS__ = warnings
+console.warn = (...args) => {
+  warnings.push(args.map(String).join(' '))
+}
+
+fs.writeFileSync(path.join(root, 'vuec-jasmine-helper.js'), `
+const warnings = global.__VUEC_WARNINGS__ || []
+beforeEach(() => {
+  warnings.length = 0
+  jasmine.addMatchers({
+    toHaveBeenWarned() {
+      return {
+        compare(actual) {
+          const expected = String(actual)
+          const pass = warnings.some(warning => warning.includes(expected))
+          return {
+            pass,
+            message: pass
+              ? 'expected ' + JSON.stringify(expected) + ' not to have been warned'
+              : 'expected ' + JSON.stringify(expected) + ' to have been warned',
+          }
+        }
+      }
+    }
+  })
+})
+`)
+
+const jasmine = new Jasmine()
+const specFiles = [
+  'codeframe.spec.js',
+  'codegen.spec.js',
+  'compiler-options.spec.js',
+  'optimizer.spec.js',
+  'parser.spec.js',
+].map(file => path.join(root, 'test/unit/modules/compiler', file))
+jasmine.loadConfig({
+  spec_dir: root,
+  spec_files: [],
+  helpers: [path.join(root, 'vuec-jasmine-helper.js')],
+  random: false,
+})
+for (const file of specFiles) {
+  jasmine.addSpecFile(file)
+}
+
+function normalizedPath(file) {
+  return path.resolve(file).replace(/\\/g, '/')
+}
+
+const normalizedSpecFiles = specFiles.map(normalizedPath)
+const specFileById = new Map()
+const originalIt = global.it
+global.it = function() {
+  const stack = String(new Error().stack || '').replace(/\\/g, '/')
+  const sourceFile = normalizedSpecFiles.find(file => stack.includes(file)) || '<unknown>'
+  const spec = originalIt.apply(this, arguments)
+  if (spec && spec.id) specFileById.set(spec.id, sourceFile)
+  return spec
+}
+
+const testResultsByFile = new Map()
+function fileResult(file) {
+  if (!testResultsByFile.has(file)) {
+    testResultsByFile.set(file, { name: file, assertionResults: [] })
+  }
+  return testResultsByFile.get(file)
+}
+
+function reportStatus(status) {
+  if (status === 'passed') return 'passed'
+  if (status === 'failed') return 'failed'
+  if (status === 'pending' || status === 'disabled' || status === 'excluded') return 'skipped'
+  return 'pending'
+}
+
+const counts = { total: 0, pass: 0, fail: 0, skip: 0, pending: 0 }
+jasmine.addReporter({
+  specDone(result) {
+    counts.total += 1
+    if (result.status === 'passed') counts.pass += 1
+    else if (result.status === 'failed') counts.fail += 1
+    else if (result.status === 'pending' || result.status === 'disabled' || result.status === 'excluded') counts.skip += 1
+    else counts.pending += 1
+    const sourceFile = specFileById.get(result.id) || '<unknown>'
+    fileResult(sourceFile).assertionResults.push({
+      title: result.fullName || result.description || '',
+      status: reportStatus(result.status),
+      failureMessages: (result.failedExpectations || []).map(expectation => expectation.message || '').filter(Boolean),
+    })
+  },
+  jasmineDone() {
+    counts.pending = Math.max(0, counts.total - counts.pass - counts.fail - counts.skip)
+    fs.writeFileSync(reportPath, JSON.stringify({ counts, testResults: Array.from(testResultsByFile.values()) }, null, 2))
+  },
+})
+
+jasmine.execute()
+"#,
+    )
 }
 
 fn write_vue3_core_conformance_shims(prepared_root: &Path) -> Result<()> {
@@ -10034,6 +10730,43 @@ fn read_vitest_counts(path: &Path) -> Result<ConformanceExecutionCounts> {
     })
 }
 
+fn read_jasmine_counts(path: &Path) -> Result<ConformanceExecutionCounts> {
+    let value = read_json::<serde_json::Value>(path)?;
+    Ok(ConformanceExecutionCounts {
+        total: json_usize(&value, &["counts", "total"]),
+        pass: json_usize(&value, &["counts", "pass"]),
+        fail: json_usize(&value, &["counts", "fail"]),
+        skip: json_usize(&value, &["counts", "skip"]),
+        pending: json_usize(&value, &["counts", "pending"]),
+    })
+}
+
+fn json_conformance_file_counts(result: &serde_json::Value) -> ConformanceExecutionCounts {
+    let mut counts = ConformanceExecutionCounts::default();
+    if let Some(assertions) = result
+        .get("assertionResults")
+        .and_then(|value| value.as_array())
+    {
+        counts.total = assertions.len();
+        for assertion in assertions {
+            match assertion
+                .get("status")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+            {
+                "passed" => counts.pass += 1,
+                "failed" => counts.fail += 1,
+                "pending" | "todo" | "skipped" => counts.skip += 1,
+                _ => counts.pending += 1,
+            }
+        }
+    }
+    counts.pending = counts
+        .total
+        .saturating_sub(counts.pass + counts.fail + counts.skip);
+    counts
+}
+
 fn conformance_coverage_report(
     spec: ConformanceSuiteSpec,
     execution: Option<&ConformanceExecutionResult>,
@@ -10093,6 +10826,15 @@ fn conformance_coverage_kind(spec: ConformanceSuiteSpec) -> ConformanceCoverageK
 
 fn conformance_coverage_reason(spec: ConformanceSuiteSpec) -> &'static str {
     match spec.name {
+        "vue2-compiler" => {
+            "Vue 2.6 compiler official tests execute through a prepared Jasmine suite. Generated source-path import shims preserve official internal module requests and route compiler/codeframe calls into the Rust vue-template-compiler alias through vuec_node_bridge; these failures are real Rust compiler parity gaps, not not-wired pending status."
+        }
+        "vue27-compiler" => {
+            "Vue 2.7 compiler official tests execute through a prepared Vitest suite. Generated source-path import shims preserve official internal module requests and route compiler/codeframe calls into the Rust vue-template-compiler alias through vuec_node_bridge; these failures are real Rust compiler parity gaps, not not-wired pending status."
+        }
+        "vue27-sfc" => {
+            "Vue 2.7 compiler-sfc official tests execute through a prepared Vitest suite. Generated source-path import shims preserve official imports and route public vue/compiler-sfc calls into the Rust alias through vuec_node_bridge; these failures are real Vue 2.7 SFC parity gaps, not not-wired pending status."
+        }
         "vue3-core" => {
             "Vue 3 compiler-core official tests run through generated import shims and the @vue/compiler-core alias runtime; public APIs call the Rust bridge, while many internal transform/codegen imports still execute JavaScript compatibility semantics in xtask/src/compat.rs."
         }
@@ -10105,9 +10847,7 @@ fn conformance_coverage_reason(spec: ConformanceSuiteSpec) -> &'static str {
         "vue3-ssr" => {
             "Vue 3 compiler-ssr official tests run through a prepared Vitest suite with official SSR and DOM source imports, generated compiler-core import shims, and the alias runtime. Public @vue/compiler-ssr exports call the Rust bridge, but prepared SSR source tests execute mixed official TypeScript source, alias adapter code, and Rust bridge projections."
         }
-        _ => {
-            "Suite is routed through Rust alias package smoke/output paths; full official runner wiring may still be pending."
-        }
+        _ => "Suite is routed through Rust alias package smoke/output paths.",
     }
 }
 
@@ -10126,7 +10866,7 @@ fn conformance_coverage_files(
                 .and_then(|value| value.as_str())
                 .unwrap_or_default()
                 .replace('\\', "/");
-            let counts = vitest_test_result_counts(result);
+            let counts = json_conformance_file_counts(result);
             let file_source = conformance_coverage_file_kind(&path, source);
             files.push(ConformanceCoverageFile {
                 path,
@@ -10168,32 +10908,6 @@ fn conformance_coverage_file_reason(
             default_reason.to_string()
         }
     }
-}
-
-fn vitest_test_result_counts(result: &serde_json::Value) -> ConformanceExecutionCounts {
-    let mut counts = ConformanceExecutionCounts::default();
-    if let Some(assertions) = result
-        .get("assertionResults")
-        .and_then(|value| value.as_array())
-    {
-        counts.total = assertions.len();
-        for assertion in assertions {
-            match assertion
-                .get("status")
-                .and_then(|value| value.as_str())
-                .unwrap_or_default()
-            {
-                "passed" => counts.pass += 1,
-                "failed" => counts.fail += 1,
-                "pending" | "todo" | "skipped" => counts.skip += 1,
-                _ => counts.pending += 1,
-            }
-        }
-    }
-    counts.pending = counts
-        .total
-        .saturating_sub(counts.pass + counts.fail + counts.skip);
-    counts
 }
 
 fn conformance_targets(suites: &[ConformanceSuite]) -> Vec<TargetSpec> {
@@ -10318,14 +11032,14 @@ fn suite_spec(suite: ConformanceSuite) -> ConformanceSuiteSpec {
             version_line: VersionLine::Vue27,
             relative_test_dirs: &["test/unit/modules/compiler"],
             package_requests: &["vue-template-compiler"],
-            runner_dependencies: &["vitest", "esbuild", "typescript"],
+            runner_dependencies: &["vitest", "esbuild", "typescript", "jsdom"],
         },
         ConformanceSuite::Vue27Sfc => ConformanceSuiteSpec {
             name: "vue27-sfc",
             version_line: VersionLine::Vue27,
             relative_test_dirs: &["packages/compiler-sfc/test"],
             package_requests: &["vue/compiler-sfc"],
-            runner_dependencies: &["vitest", "esbuild", "typescript"],
+            runner_dependencies: &["vitest", "esbuild", "typescript", "jsdom"],
         },
         ConformanceSuite::Vue3Core => ConformanceSuiteSpec {
             name: "vue3-core",
@@ -10862,6 +11576,112 @@ mod tests {
         );
         assert_eq!(coverage.files[3].source, ConformanceCoverageKind::Mixed);
         assert!(coverage.reason.contains("xtask/src/compat.rs"));
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn vue2_jasmine_coverage_report_reads_per_file_results() {
+        let temp = std::env::temp_dir().join(format!(
+            "vuec-xtask-vue2-jasmine-coverage-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp).unwrap();
+        let report = temp.join("jasmine-report.json");
+        fs::write(
+            &report,
+            r#"{
+              "counts": { "total": 3, "pass": 1, "fail": 1, "skip": 1, "pending": 0 },
+              "testResults": [
+                {
+                  "name": "F:/repo/prepared/vue2-compiler/test/unit/modules/compiler/codegen.spec.js",
+                  "assertionResults": [
+                    { "status": "passed" },
+                    { "status": "failed" }
+                  ]
+                },
+                {
+                  "name": "F:/repo/prepared/vue2-compiler/test/unit/modules/compiler/parser.spec.js",
+                  "assertionResults": [
+                    { "status": "skipped" }
+                  ]
+                }
+              ]
+            }"#,
+        )
+        .unwrap();
+        let execution = ConformanceExecutionResult {
+            status: "failed".into(),
+            runner: "jasmine".into(),
+            prepared_root: "prepared".into(),
+            output_file: report.display().to_string(),
+            exit_code: Some(1),
+            stdout: String::new(),
+            stderr: String::new(),
+            counts: ConformanceExecutionCounts {
+                total: 3,
+                pass: 1,
+                fail: 1,
+                skip: 1,
+                pending: 0,
+            },
+        };
+
+        let coverage = conformance_coverage_report(
+            suite_spec(ConformanceSuite::Vue2Compiler),
+            Some(&execution),
+        );
+
+        assert_eq!(coverage.source, ConformanceCoverageKind::RustBacked);
+        assert_eq!(coverage.files.len(), 2);
+        assert_eq!(coverage.rust_backed_total, 3);
+        assert_eq!(coverage.rust_backed_pass, 1);
+        assert!(coverage.reason.contains("prepared Jasmine suite"));
+        assert!(coverage.reason.contains("not-wired pending status"));
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn vue2_conformance_shims_use_official_runners_and_globs() {
+        let temp = std::env::temp_dir().join(format!(
+            "vuec-xtask-vue2-shims-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp).unwrap();
+
+        write_vue2_compiler_source_shims(&temp, true).unwrap();
+        write_vue2_jasmine_runner(&temp).unwrap();
+        write_vue27_compiler_conformance_shims(&temp).unwrap();
+        let compiler_config = fs::read_to_string(temp.join("vitest.config.ts")).unwrap();
+        assert!(compiler_config.contains("environment: 'jsdom'"));
+        assert!(compiler_config.contains("include: ['test/unit/modules/compiler/**/*.spec.ts']"));
+        assert!(compiler_config.contains(
+            "'vue-template-compiler': path.resolve(aliasRoot, 'node_modules/vue-template-compiler/index.js')"
+        ));
+
+        write_vue27_sfc_conformance_shims(&temp).unwrap();
+        let sfc_config = fs::read_to_string(temp.join("vitest.config.ts")).unwrap();
+        assert!(sfc_config.contains("environment: 'jsdom'"));
+        assert!(sfc_config.contains("include: ['packages/compiler-sfc/test/**/*.spec.ts']"));
+        assert!(
+            sfc_config.find("'vue/compiler-sfc'").unwrap()
+                < sfc_config.find("vue: path.resolve").unwrap()
+        );
+
+        let runner = fs::read_to_string(temp.join("vuec-jasmine-runner.js")).unwrap();
+        assert!(runner.contains("const Jasmine = require('jasmine')"));
+        assert!(runner.contains("testResults: Array.from(testResultsByFile.values())"));
+        assert!(runner.contains("compiler-options.spec.js"));
+
+        let specs = suite_spec(ConformanceSuite::Vue27Compiler);
+        assert!(specs.runner_dependencies.contains(&"jsdom"));
+        let sfc_specs = suite_spec(ConformanceSuite::Vue27Sfc);
+        assert!(sfc_specs.runner_dependencies.contains(&"jsdom"));
         let _ = fs::remove_dir_all(temp);
     }
 
