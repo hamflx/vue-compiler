@@ -98,6 +98,10 @@ pub struct Vue2Directive {
 pub struct Vue2EventHandler {
     pub value: String,
     pub modifiers: BTreeMap<String, bool>,
+    #[serde(skip)]
+    pub modifier_order: Vec<String>,
+    #[serde(skip)]
+    pub has_modifier_object: bool,
     pub dynamic: bool,
     pub span: Option<Span>,
 }
@@ -871,7 +875,7 @@ fn process_attrs(
         let value = attr.value.clone();
         if is_directive_name(&raw_name) {
             element.has_bindings = true;
-            let (name_no_modifiers, modifiers) = split_modifiers(&raw_name);
+            let (name_no_modifiers, modifiers, modifier_order) = split_modifiers(&raw_name);
             if is_bind_name(&name_no_modifiers) {
                 let mut name = bind_arg_name(&name_no_modifiers);
                 let is_dynamic = is_dynamic_arg(&name);
@@ -920,6 +924,7 @@ fn process_attrs(
                             format!("update:{}", camelize(&name)),
                             sync_code,
                             BTreeMap::new(),
+                            Vec::new(),
                             false,
                             attr.span,
                         );
@@ -932,6 +937,7 @@ fn process_attrs(
                     name,
                     value,
                     modifiers,
+                    modifier_order,
                     false,
                     attr.span,
                 );
@@ -1705,7 +1711,7 @@ fn gen_handler(handler: &Vue2EventHandler) -> String {
     let is_method_path = is_simple_path(&handler.value);
     let is_function_expression = is_function_expression(&handler.value);
     let is_function_invocation = is_function_invocation(&handler.value);
-    if handler.modifiers.is_empty() {
+    if !handler.has_modifier_object {
         if is_method_path || is_function_expression {
             return handler.value.clone();
         }
@@ -1718,7 +1724,17 @@ fn gen_handler(handler: &Vue2EventHandler) -> String {
     let mut code = String::new();
     let mut modifier_code = String::new();
     let mut keys = Vec::new();
-    for key in handler.modifiers.keys() {
+    let modifier_order = if handler.modifier_order.is_empty() {
+        handler.modifiers.keys().cloned().collect::<Vec<_>>()
+    } else {
+        handler
+            .modifier_order
+            .iter()
+            .filter(|key| handler.modifiers.contains_key(*key))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    for key in &modifier_order {
         match key.as_str() {
             "stop" => modifier_code.push_str("$event.stopPropagation();"),
             "prevent" => modifier_code.push_str("$event.preventDefault();"),
@@ -1729,6 +1745,15 @@ fn gen_handler(handler: &Vue2EventHandler) -> String {
             "shift" => modifier_code.push_str("if(!$event.shiftKey)return null;"),
             "alt" => modifier_code.push_str("if(!$event.altKey)return null;"),
             "meta" => modifier_code.push_str("if(!$event.metaKey)return null;"),
+            "left" => {
+                modifier_code.push_str("if('button' in $event && $event.button !== 0)return null;")
+            }
+            "middle" => {
+                modifier_code.push_str("if('button' in $event && $event.button !== 1)return null;")
+            }
+            "right" => {
+                modifier_code.push_str("if('button' in $event && $event.button !== 2)return null;")
+            }
             "exact" => {
                 let guards = ["ctrl", "shift", "alt", "meta"]
                     .into_iter()
@@ -2169,9 +2194,10 @@ fn directive_name_and_arg(raw: &str) -> (String, Option<String>, bool) {
     (name.to_string(), arg, is_dynamic)
 }
 
-fn split_modifiers(raw_name: &str) -> (String, BTreeMap<String, bool>) {
+fn split_modifiers(raw_name: &str) -> (String, BTreeMap<String, bool>, Vec<String>) {
     let mut base = String::new();
     let mut modifiers = BTreeMap::new();
+    let mut modifier_order = Vec::new();
     let mut in_dynamic = false;
     let mut modifier = String::new();
     let mut reading_modifier = false;
@@ -2196,6 +2222,7 @@ fn split_modifiers(raw_name: &str) -> (String, BTreeMap<String, bool>) {
             '.' if !in_dynamic => {
                 if reading_modifier && !modifier.is_empty() {
                     modifiers.insert(modifier.clone(), true);
+                    modifier_order.push(modifier.clone());
                     modifier.clear();
                 }
                 reading_modifier = true;
@@ -2205,9 +2232,10 @@ fn split_modifiers(raw_name: &str) -> (String, BTreeMap<String, bool>) {
         }
     }
     if reading_modifier && !modifier.is_empty() {
-        modifiers.insert(modifier, true);
+        modifiers.insert(modifier.clone(), true);
+        modifier_order.push(modifier);
     }
-    (base, modifiers)
+    (base, modifiers, modifier_order)
 }
 
 fn normalize_bound_name(name: &str, modifiers: &BTreeMap<String, bool>, dynamic: bool) -> String {
@@ -2241,12 +2269,15 @@ fn add_handler(
     mut name: String,
     value: String,
     mut modifiers: BTreeMap<String, bool>,
+    modifier_order: Vec<String>,
     dynamic: bool,
     span: Option<Span>,
 ) {
-    if modifiers.remove("right").is_some() && name == "click" {
+    let has_modifier_object = !modifiers.is_empty();
+    if modifiers.get("right").copied().unwrap_or(false) && name == "click" {
+        modifiers.remove("right");
         name = "contextmenu".into();
-    } else if modifiers.remove("middle").is_some() && name == "click" {
+    } else if modifiers.get("middle").copied().unwrap_or(false) && name == "click" {
         name = "mouseup".into();
     }
     if modifiers.remove("capture").is_some() {
@@ -2261,6 +2292,8 @@ fn add_handler(
     events.entry(name).or_default().push(Vue2EventHandler {
         value: value.trim().to_string(),
         modifiers,
+        modifier_order,
+        has_modifier_object,
         dynamic,
         span,
     });
@@ -2312,6 +2345,7 @@ fn gen_dom_model(
         "input".into(),
         handler,
         BTreeMap::new(),
+        Vec::new(),
         false,
         element.span,
     );
@@ -2601,12 +2635,83 @@ fn is_simple_path(value: &str) -> bool {
 
 fn is_function_expression(value: &str) -> bool {
     let value = value.trim_start();
-    value.starts_with("function") || value.starts_with("()=>") || value.contains("=>")
+    is_function_keyword_expression(value) || is_arrow_function_expression(value)
 }
 
 fn is_function_invocation(value: &str) -> bool {
     let value = value.trim();
-    value.ends_with(')') || value.ends_with(");")
+    let value = value.trim_end_matches(';');
+    if !value.ends_with(')') {
+        return false;
+    }
+    let Some(open) = value.rfind('(') else {
+        return false;
+    };
+    if value[open + 1..value.len() - 1].contains(')') {
+        return false;
+    }
+    is_simple_path(value[..open].trim())
+}
+
+fn is_function_keyword_expression(value: &str) -> bool {
+    let Some(rest) = value.strip_prefix("function") else {
+        return false;
+    };
+    if rest.starts_with('(') {
+        return true;
+    }
+    if !rest.starts_with(char::is_whitespace) {
+        return false;
+    }
+    let rest = rest.trim_start();
+    if rest.starts_with('(') {
+        return true;
+    }
+    let Some((ident, after_ident)) = split_identifier(rest) else {
+        return false;
+    };
+    !ident.is_empty() && after_ident.trim_start().starts_with('(')
+}
+
+fn is_arrow_function_expression(value: &str) -> bool {
+    let Some(arrow) = value.find("=>") else {
+        return false;
+    };
+    let params = value[..arrow].trim_end();
+    if is_simple_identifier(params.trim()) {
+        return true;
+    }
+    params.starts_with('(') && params.ends_with(')') && !params[1..params.len() - 1].contains(')')
+}
+
+fn split_identifier(value: &str) -> Option<(&str, &str)> {
+    let mut end = 0usize;
+    for (index, ch) in value.char_indices() {
+        if index == 0 {
+            if !is_identifier_start(ch) {
+                return None;
+            }
+        } else if !is_identifier_continue(ch) {
+            break;
+        }
+        end = index + ch.len_utf8();
+    }
+    (end > 0).then(|| (&value[..end], &value[end..]))
+}
+
+fn is_simple_identifier(value: &str) -> bool {
+    let Some((ident, rest)) = split_identifier(value) else {
+        return false;
+    };
+    ident.len() == value.len() && rest.is_empty()
+}
+
+fn is_identifier_start(ch: char) -> bool {
+    ch.is_ascii_alphabetic() || matches!(ch, '_' | '$')
+}
+
+fn is_identifier_continue(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$')
 }
 
 fn decode_basic_entities(value: &str) -> String {
@@ -2906,6 +3011,45 @@ mod tests {
         assert!(component_model
             .render
             .contains("callback:function ($$v) {\n test \n=$$v}"));
+    }
+
+    #[test]
+    fn generates_vue2_event_handlers_like_official_codegen() {
+        let method_call = compile(r#"<input @input="functionName()">"#, options());
+        assert_eq!(
+            method_call.render,
+            r#"with(this){return _c('input',{on:{"input":function($event){return functionName()}}})}"#
+        );
+
+        let tricky_call = compile(r#"<input @input="onInput(');[\'());');">"#, options());
+        assert_eq!(
+            tricky_call.render,
+            r#"with(this){return _c('input',{on:{"input":function($event){onInput(');[\'());');}}})}"#
+        );
+
+        let multiple_statements = compile(r#"<input @input="onInput1();onInput2()">"#, options());
+        assert_eq!(
+            multiple_statements.render,
+            r#"with(this){return _c('input',{on:{"input":function($event){onInput1();onInput2()}}})}"#
+        );
+
+        let ordered_keys = compile(r#"<input @keydown.enter.delete="onInput">"#, options());
+        assert_eq!(
+            ordered_keys.render,
+            r#"with(this){return _c('input',{on:{"keydown":function($event){if(!$event.type.indexOf('key')&&_k($event.keyCode,"enter",13,$event.key,"Enter")&&_k($event.keyCode,"delete",[8,46],$event.key,["Backspace","Delete","Del"]))return null;return onInput.apply(null, arguments)}}})}"#
+        );
+
+        let ordered_modifiers = compile(r#"<input @input.stop.prevent.self="onInput">"#, options());
+        assert_eq!(
+            ordered_modifiers.render,
+            r#"with(this){return _c('input',{on:{"input":function($event){$event.stopPropagation();$event.preventDefault();if($event.target !== $event.currentTarget)return null;return onInput.apply(null, arguments)}}})}"#
+        );
+
+        let capture_once = compile(r#"<input @input.capture.once="onInput">"#, options());
+        assert_eq!(
+            capture_once.render,
+            r#"with(this){return _c('input',{on:{"~!input":function($event){return onInput.apply(null, arguments)}}})}"#
+        );
     }
 
     #[test]
