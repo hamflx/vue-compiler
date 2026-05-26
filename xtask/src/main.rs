@@ -6,9 +6,9 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use compat::{
     audit_option_matrix, diff_api, export_api, generate_option_matrix, generate_output_contract,
-    run_conformance, run_napi_option_matrix, run_napi_output_contract, run_option_matrix,
-    run_output_contract, summarize_compat, sync_official_tests, verify_npm_alias,
-    verify_official_lock, ConformanceArgs, SelectionArgs,
+    run_conformance, run_napi_conformance, run_napi_option_matrix, run_napi_output_contract,
+    run_option_matrix, run_output_contract, summarize_compat, sync_official_tests,
+    verify_npm_alias, verify_official_lock, ConformanceArgs, SelectionArgs,
 };
 use serde_json::Value as JsonValue;
 use std::path::{Path, PathBuf};
@@ -67,6 +67,10 @@ enum Command {
         #[command(flatten)]
         args: ConformanceArgs,
     },
+    RunNapiConformance {
+        #[command(flatten)]
+        args: ConformanceArgs,
+    },
     GenerateOutputContract {
         #[command(flatten)]
         scope: SelectionArgs,
@@ -121,6 +125,7 @@ fn main() -> Result<()> {
         Command::RunOptionMatrix { scope } => run_option_matrix(&scope),
         Command::RunNapiOptionMatrix { scope } => run_napi_option_matrix(&scope),
         Command::RunConformance { args } => run_conformance(&args),
+        Command::RunNapiConformance { args } => run_napi_conformance(&args),
         Command::GenerateOutputContract { scope, out_dir } => {
             let report = generate_output_contract(&scope);
             ensure_dir(&out_dir)?;

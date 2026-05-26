@@ -1702,6 +1702,13 @@ impl AliasBackend {
         }
     }
 
+    fn conformance_command(self) -> &'static str {
+        match self {
+            AliasBackend::Generated => "run_conformance",
+            AliasBackend::Napi => "run_napi_conformance",
+        }
+    }
+
     fn option_report_name(self) -> &'static str {
         match self {
             AliasBackend::Generated => "option-matrix.json",
@@ -1713,6 +1720,13 @@ impl AliasBackend {
         match self {
             AliasBackend::Generated => "output-contract.json",
             AliasBackend::Napi => "napi-output-contract.json",
+        }
+    }
+
+    fn conformance_report_name(self, spec: ConformanceSuiteSpec) -> String {
+        match self {
+            AliasBackend::Generated => format!("{}.json", spec.name),
+            AliasBackend::Napi => format!("napi-{}.json", spec.name),
         }
     }
 
@@ -1741,6 +1755,17 @@ impl AliasBackend {
             }
             AliasBackend::Napi => {
                 "output contract executes official npm packages and NAPI-backed official package-name aliases against representative fixtures"
+            }
+        }
+    }
+
+    fn conformance_note(self) -> &'static str {
+        match self {
+            AliasBackend::Generated => {
+                "official conformance executes against generated Rust alias packages"
+            }
+            AliasBackend::Napi => {
+                "official conformance executes against NAPI-backed official package-name aliases; coverage still distinguishes rust-backed, shim-backed, and mixed paths"
             }
         }
     }
@@ -8886,6 +8911,14 @@ fn run_option_matrix_with_backend(scope: &SelectionArgs, backend: AliasBackend) 
 }
 
 pub fn run_conformance(args: &ConformanceArgs) -> JsonReport {
+    run_conformance_with_backend(args, AliasBackend::Generated)
+}
+
+pub fn run_napi_conformance(args: &ConformanceArgs) -> JsonReport {
+    run_conformance_with_backend(args, AliasBackend::Napi)
+}
+
+fn run_conformance_with_backend(args: &ConformanceArgs, backend: AliasBackend) -> JsonReport {
     let lock_hash = file_sha256(&args.lock).ok();
     let lock = load_official_lock(&args.lock).ok();
     let requested = select_conformance_suites(args);
@@ -8893,9 +8926,10 @@ pub fn run_conformance(args: &ConformanceArgs) -> JsonReport {
     let mut violations = Vec::new();
     let mut created = Vec::new();
     let conformance_targets = conformance_targets(&requested);
-    if let Err(err) = generate_rust_alias_packages(&conformance_targets) {
+    if let Err(err) = prepare_alias_backend(backend, &conformance_targets) {
         violations.push(format!(
-            "failed to generate Rust alias packages for conformance: {err:#}"
+            "failed to prepare {} alias packages for conformance: {err:#}",
+            backend.label()
         ));
     }
 
@@ -8951,8 +8985,8 @@ pub fn run_conformance(args: &ConformanceArgs) -> JsonReport {
             discover_test_files(&dir, &mut discovered);
         }
         discovered.sort();
-        let readiness = conformance_readiness(spec);
-        let smoke_results = run_conformance_smokes(spec);
+        let readiness = conformance_readiness(spec, backend);
+        let smoke_results = run_conformance_smokes(spec, backend);
         let smoke_failures = smoke_results
             .iter()
             .filter(|result| result.status == "fail")
@@ -8960,7 +8994,8 @@ pub fn run_conformance(args: &ConformanceArgs) -> JsonReport {
         let ready_to_execute =
             !discovered.is_empty() && readiness.alias_ready && readiness.runner_ready;
         let execution_result = if ready_to_execute {
-            match run_conformance_execution(spec, &root, &discovered, lock_hash.as_deref()) {
+            match run_conformance_execution(spec, &root, &discovered, lock_hash.as_deref(), backend)
+            {
                 Ok(result) => Some(result),
                 Err(err) => {
                     violations.push(format!(
@@ -8987,14 +9022,16 @@ pub fn run_conformance(args: &ConformanceArgs) -> JsonReport {
             .as_ref()
             .map(|result| result.status.as_str())
             .unwrap_or(if ready_to_execute { "ready" } else { "blocked" });
-        let coverage = conformance_coverage_report(spec, execution_result.as_ref());
+        let coverage = conformance_coverage_report(spec, backend, execution_result.as_ref());
         let report_path = PathBuf::from("target")
             .join("conformance")
             .join(lock_hash.as_deref().unwrap_or("unknown-lock"))
-            .join(format!("{}.json", spec.name));
+            .join(backend.conformance_report_name(spec));
         let report_body = serde_json::json!({
+            "command": backend.conformance_command(),
             "suite": spec.name,
             "version_line": spec.version_line,
+            "alias_backend": backend.name(),
             "lock_hash": lock_hash,
             "test_files": discovered,
             "counts": counts,
@@ -9054,12 +9091,13 @@ pub fn run_conformance(args: &ConformanceArgs) -> JsonReport {
         ));
     }
 
-    let mut report = JsonReport::new("run_conformance", ReportStatus::Pending);
+    let mut report = JsonReport::new(backend.conformance_command(), ReportStatus::Pending);
     report.metadata = report.metadata.with_lock_hash(lock_hash);
     report
         .with_items(items)
         .with_violations(violations)
         .with_created(created)
+        .with_note(backend.conformance_note())
 }
 
 pub fn generate_output_contract(scope: &SelectionArgs) -> JsonReport {
@@ -9765,12 +9803,15 @@ struct ConformanceCoverageFile {
     counts: ConformanceExecutionCounts,
 }
 
-fn run_conformance_smokes(spec: ConformanceSuiteSpec) -> Vec<ConformanceSmokeResult> {
+fn run_conformance_smokes(
+    spec: ConformanceSuiteSpec,
+    backend: AliasBackend,
+) -> Vec<ConformanceSmokeResult> {
     conformance_smoke_targets(spec)
         .into_iter()
         .map(|target| {
             let request = api_require_request(target);
-            match run_alias_smoke(target, &rust_alias_root(target.version_line)) {
+            match run_alias_smoke(target, &backend.root(target.version_line)) {
                 Ok(detail) => ConformanceSmokeResult {
                     request,
                     status: "pass".into(),
@@ -9805,19 +9846,24 @@ fn run_conformance_execution(
     official_root: &Path,
     discovered: &[String],
     lock_hash: Option<&str>,
+    backend: AliasBackend,
 ) -> Result<ConformanceExecutionResult> {
     match spec.name {
         "vue2-compiler" => {
-            run_vue2_compiler_conformance(spec, official_root, discovered, lock_hash)
+            run_vue2_compiler_conformance(spec, official_root, discovered, lock_hash, backend)
         }
         "vue27-compiler" => {
-            run_vue27_compiler_conformance(spec, official_root, discovered, lock_hash)
+            run_vue27_compiler_conformance(spec, official_root, discovered, lock_hash, backend)
         }
-        "vue27-sfc" => run_vue27_sfc_conformance(spec, official_root, discovered, lock_hash),
-        "vue3-core" => run_vue3_core_conformance(spec, official_root, discovered, lock_hash),
-        "vue3-dom" => run_vue3_dom_conformance(spec, official_root, discovered, lock_hash),
-        "vue3-sfc" => run_vue3_sfc_conformance(spec, official_root, discovered, lock_hash),
-        "vue3-ssr" => run_vue3_ssr_conformance(spec, official_root, discovered, lock_hash),
+        "vue27-sfc" => {
+            run_vue27_sfc_conformance(spec, official_root, discovered, lock_hash, backend)
+        }
+        "vue3-core" => {
+            run_vue3_core_conformance(spec, official_root, discovered, lock_hash, backend)
+        }
+        "vue3-dom" => run_vue3_dom_conformance(spec, official_root, discovered, lock_hash, backend),
+        "vue3-sfc" => run_vue3_sfc_conformance(spec, official_root, discovered, lock_hash, backend),
+        "vue3-ssr" => run_vue3_ssr_conformance(spec, official_root, discovered, lock_hash, backend),
         _ => Ok(ConformanceExecutionResult {
             status: "pending".into(),
             runner: "not-wired".into(),
@@ -9840,9 +9886,10 @@ fn run_vue2_compiler_conformance(
     official_root: &Path,
     discovered: &[String],
     lock_hash: Option<&str>,
+    backend: AliasBackend,
 ) -> Result<ConformanceExecutionResult> {
     let prepared_root = prepare_vue2_compiler_conformance_suite(spec, official_root, lock_hash)?;
-    run_jasmine_conformance(spec, prepared_root, discovered)
+    run_jasmine_conformance(spec, prepared_root, discovered, backend)
 }
 
 fn run_vue27_compiler_conformance(
@@ -9850,9 +9897,10 @@ fn run_vue27_compiler_conformance(
     official_root: &Path,
     discovered: &[String],
     lock_hash: Option<&str>,
+    backend: AliasBackend,
 ) -> Result<ConformanceExecutionResult> {
     let prepared_root = prepare_vue27_compiler_conformance_suite(spec, official_root, lock_hash)?;
-    run_vitest_conformance(spec, prepared_root, discovered)
+    run_vitest_conformance(spec, prepared_root, discovered, backend)
 }
 
 fn run_vue27_sfc_conformance(
@@ -9860,9 +9908,10 @@ fn run_vue27_sfc_conformance(
     official_root: &Path,
     discovered: &[String],
     lock_hash: Option<&str>,
+    backend: AliasBackend,
 ) -> Result<ConformanceExecutionResult> {
     let prepared_root = prepare_vue27_sfc_conformance_suite(spec, official_root, lock_hash)?;
-    run_vitest_conformance(spec, prepared_root, discovered)
+    run_vitest_conformance(spec, prepared_root, discovered, backend)
 }
 
 fn run_vue3_core_conformance(
@@ -9870,9 +9919,10 @@ fn run_vue3_core_conformance(
     official_root: &Path,
     discovered: &[String],
     lock_hash: Option<&str>,
+    backend: AliasBackend,
 ) -> Result<ConformanceExecutionResult> {
     let prepared_root = prepare_vue3_core_conformance_suite(spec, official_root, lock_hash)?;
-    run_vitest_conformance(spec, prepared_root, discovered)
+    run_vitest_conformance(spec, prepared_root, discovered, backend)
 }
 
 fn run_vue3_dom_conformance(
@@ -9880,9 +9930,10 @@ fn run_vue3_dom_conformance(
     official_root: &Path,
     discovered: &[String],
     lock_hash: Option<&str>,
+    backend: AliasBackend,
 ) -> Result<ConformanceExecutionResult> {
     let prepared_root = prepare_vue3_dom_conformance_suite(spec, official_root, lock_hash)?;
-    run_vitest_conformance(spec, prepared_root, discovered)
+    run_vitest_conformance(spec, prepared_root, discovered, backend)
 }
 
 fn run_vue3_sfc_conformance(
@@ -9890,9 +9941,10 @@ fn run_vue3_sfc_conformance(
     official_root: &Path,
     discovered: &[String],
     lock_hash: Option<&str>,
+    backend: AliasBackend,
 ) -> Result<ConformanceExecutionResult> {
     let prepared_root = prepare_vue3_sfc_conformance_suite(spec, official_root, lock_hash)?;
-    run_vitest_conformance(spec, prepared_root, discovered)
+    run_vitest_conformance(spec, prepared_root, discovered, backend)
 }
 
 fn run_vue3_ssr_conformance(
@@ -9900,22 +9952,24 @@ fn run_vue3_ssr_conformance(
     official_root: &Path,
     discovered: &[String],
     lock_hash: Option<&str>,
+    backend: AliasBackend,
 ) -> Result<ConformanceExecutionResult> {
     let prepared_root = prepare_vue3_ssr_conformance_suite(spec, official_root, lock_hash)?;
-    run_vitest_conformance(spec, prepared_root, discovered)
+    run_vitest_conformance(spec, prepared_root, discovered, backend)
 }
 
 fn run_vitest_conformance(
     spec: ConformanceSuiteSpec,
     prepared_root: PathBuf,
     discovered: &[String],
+    backend: AliasBackend,
 ) -> Result<ConformanceExecutionResult> {
     let output_file = prepared_root.join("vitest-report.json");
     let npm_root = PathBuf::from("target")
         .join("compat")
         .join("npm")
         .join(spec.version_line.as_str());
-    let alias_root = rust_alias_root(spec.version_line);
+    let alias_root = backend.root(spec.version_line);
     let absolute_npm_root = absolute_path(&npm_root);
     let absolute_alias_root = absolute_path(&alias_root);
     let absolute_prepared_root = absolute_path(&prepared_root);
@@ -9935,6 +9989,7 @@ fn run_vitest_conformance(
         .arg("--reporter=json")
         .arg(format!("--outputFile={}", absolute_output_file.display()))
         .env("VUEC_NODE_BRIDGE", &absolute_bridge_bin)
+        .env("VUEC_ALIAS_ROOT", &absolute_alias_root)
         .env("VUEC_RUST_ALIAS_ROOT", &absolute_alias_root)
         .env("VUEC_OFFICIAL_NPM_ROOT", &absolute_npm_root)
         .env(
@@ -9974,13 +10029,14 @@ fn run_jasmine_conformance(
     spec: ConformanceSuiteSpec,
     prepared_root: PathBuf,
     discovered: &[String],
+    backend: AliasBackend,
 ) -> Result<ConformanceExecutionResult> {
     let output_file = prepared_root.join("jasmine-report.json");
     let npm_root = PathBuf::from("target")
         .join("compat")
         .join("npm")
         .join(spec.version_line.as_str());
-    let alias_root = rust_alias_root(spec.version_line);
+    let alias_root = backend.root(spec.version_line);
     let absolute_npm_root = absolute_path(&npm_root);
     let absolute_alias_root = absolute_path(&alias_root);
     let absolute_prepared_root = absolute_path(&prepared_root);
@@ -9990,6 +10046,7 @@ fn run_jasmine_conformance(
     let output = Command::new(node)
         .arg("vuec-jasmine-runner.js")
         .env("VUEC_NODE_BRIDGE", &absolute_bridge_bin)
+        .env("VUEC_ALIAS_ROOT", &absolute_alias_root)
         .env("VUEC_RUST_ALIAS_ROOT", &absolute_alias_root)
         .env("VUEC_OFFICIAL_NPM_ROOT", &absolute_npm_root)
         .env("VUEC_JASMINE_REPORT", &absolute_output_file)
@@ -11968,10 +12025,11 @@ fn json_conformance_file_counts(result: &serde_json::Value) -> ConformanceExecut
 
 fn conformance_coverage_report(
     spec: ConformanceSuiteSpec,
+    backend: AliasBackend,
     execution: Option<&ConformanceExecutionResult>,
 ) -> ConformanceCoverageReport {
-    let source = conformance_coverage_kind(spec);
-    let reason = conformance_coverage_reason(spec).to_string();
+    let source = conformance_coverage_kind(spec, backend);
+    let reason = conformance_coverage_reason(spec, backend).to_string();
     let counts = execution.map(|result| result.counts).unwrap_or_default();
     let files = execution
         .and_then(|result| conformance_coverage_files(result, source, &reason).ok())
@@ -12031,37 +12089,69 @@ fn conformance_coverage_report_kind(
     }
 }
 
-fn conformance_coverage_kind(spec: ConformanceSuiteSpec) -> ConformanceCoverageKind {
-    match spec.name {
-        "vue3-core" | "vue3-dom" | "vue3-sfc" | "vue3-ssr" => ConformanceCoverageKind::Mixed,
-        _ => ConformanceCoverageKind::RustBacked,
+fn conformance_coverage_kind(
+    spec: ConformanceSuiteSpec,
+    backend: AliasBackend,
+) -> ConformanceCoverageKind {
+    match backend {
+        AliasBackend::Napi => ConformanceCoverageKind::Mixed,
+        AliasBackend::Generated => match spec.name {
+            "vue3-core" | "vue3-dom" | "vue3-sfc" | "vue3-ssr" => ConformanceCoverageKind::Mixed,
+            _ => ConformanceCoverageKind::RustBacked,
+        },
     }
 }
 
-fn conformance_coverage_reason(spec: ConformanceSuiteSpec) -> &'static str {
-    match spec.name {
-        "vue2-compiler" => {
-            "Vue 2.6 compiler official tests execute through a prepared Jasmine suite. Generated source-path import shims preserve official internal module requests and route compiler/codeframe calls into the Rust vue-template-compiler alias through vuec_node_bridge; these failures are real Rust compiler parity gaps, not not-wired pending status."
-        }
-        "vue27-compiler" => {
-            "Vue 2.7 compiler official tests execute through a prepared Vitest suite. Generated source-path import shims preserve official internal module requests and route compiler/codeframe calls into the Rust vue-template-compiler alias through vuec_node_bridge; these failures are real Rust compiler parity gaps, not not-wired pending status."
-        }
-        "vue27-sfc" => {
-            "Vue 2.7 compiler-sfc official tests execute through a prepared Vitest suite. Generated source-path import shims preserve official imports and route public vue/compiler-sfc calls into the Rust alias through vuec_node_bridge; compileStyle PostCSS plugin callbacks execute in the JavaScript API adapter because caller-provided plugins are JavaScript functions and cannot be serialized into Rust. Remaining failures are real Vue 2.7 SFC parity gaps, not not-wired pending status."
-        }
-        "vue3-core" => {
-            "Vue 3 compiler-core official tests run through generated import shims and the @vue/compiler-core alias runtime; public APIs call the Rust bridge, while many internal transform/codegen imports still execute JavaScript compatibility semantics in xtask/src/compat.rs."
-        }
-        "vue3-dom" => {
-            "Vue 3 compiler-dom official tests run through a prepared Vitest suite with official DOM source imports, generated compiler-core import shims, and the @vue/compiler-dom alias runtime. Public compile/parse exports call the Rust bridge, but internal DOM transform imports mostly execute official TypeScript source or compatibility adapter code; only explicitly bridged projections count as Rust-backed."
-        }
-        "vue3-sfc" => {
-            "Vue 3 compiler-sfc official tests run through a prepared Vitest suite with official SFC TypeScript source and generated aliases for @vue/compiler-core, @vue/compiler-dom, @vue/compiler-ssr, and @vue/compiler-sfc. The SFC source under test executes mixed official TypeScript logic plus Rust alias bridge calls for compiler dependencies; this runner is conformance harness coverage, not standalone Rust SFC parity."
-        }
-        "vue3-ssr" => {
-            "Vue 3 compiler-ssr official tests run through a prepared Vitest suite with official SSR and DOM source imports, generated compiler-core import shims, and the alias runtime. Public @vue/compiler-ssr exports call the Rust bridge, but prepared SSR source tests execute mixed official TypeScript source, alias adapter code, and Rust bridge projections."
-        }
-        _ => "Suite is routed through Rust alias package smoke/output paths.",
+fn conformance_coverage_reason(spec: ConformanceSuiteSpec, backend: AliasBackend) -> &'static str {
+    match backend {
+        AliasBackend::Napi => match spec.name {
+            "vue2-compiler" => {
+                "Vue 2.6 compiler official tests execute through a prepared Jasmine suite whose public vue-template-compiler package request resolves to the NAPI-backed official package-name alias. Prepared source shims still adapt official internal imports, so this report is mixed harness coverage; failures are real NAPI/Rust compiler parity gaps, not not-wired pending status."
+            }
+            "vue27-compiler" => {
+                "Vue 2.7 compiler official tests execute through a prepared Vitest suite whose public vue-template-compiler package request resolves to the NAPI-backed official package-name alias. Prepared source shims still adapt official internal imports, so this report is mixed harness coverage; failures are real NAPI/Rust compiler parity gaps, not not-wired pending status."
+            }
+            "vue27-sfc" => {
+                "Vue 2.7 compiler-sfc official tests execute through a prepared Vitest suite whose public vue/compiler-sfc package request resolves to the NAPI-backed official package-name alias. Prepared source shims and JavaScript-only callback adapters still participate, so this report is mixed harness coverage; failures are real NAPI/Rust SFC parity gaps, not not-wired pending status."
+            }
+            "vue3-core" => {
+                "Vue 3 compiler-core official tests execute through a prepared Vitest suite whose public @vue/compiler-core package request resolves to the NAPI-backed official package-name alias. Generated source-path shims and internal helper adapters still participate, so this report is mixed harness coverage rather than pure NAPI semantic coverage."
+            }
+            "vue3-dom" => {
+                "Vue 3 compiler-dom official tests execute through a prepared Vitest suite whose public @vue/compiler-dom and @vue/compiler-core package requests resolve to NAPI-backed official package-name aliases. Official TypeScript source, generated source-path shims, and helper adapters still participate, so this report is mixed harness coverage."
+            }
+            "vue3-sfc" => {
+                "Vue 3 compiler-sfc official tests execute through a prepared Vitest suite whose public compiler package requests resolve to NAPI-backed official package-name aliases. Official SFC TypeScript source, generated source-path shims, and JavaScript-only helper adapters still participate, so this report is mixed harness coverage rather than standalone Rust SFC parity."
+            }
+            "vue3-ssr" => {
+                "Vue 3 compiler-ssr official tests execute through a prepared Vitest suite whose public @vue/compiler-ssr and @vue/compiler-core package requests resolve to NAPI-backed official package-name aliases. Official SSR/DOM TypeScript source, generated source-path shims, and helper adapters still participate, so this report is mixed harness coverage."
+            }
+            _ => "Suite is routed through NAPI-backed official package-name aliases with prepared source shims.",
+        },
+        AliasBackend::Generated => match spec.name {
+            "vue2-compiler" => {
+                "Vue 2.6 compiler official tests execute through a prepared Jasmine suite. Generated source-path import shims preserve official internal module requests and route compiler/codeframe calls into the Rust vue-template-compiler alias through vuec_node_bridge; these failures are real Rust compiler parity gaps, not not-wired pending status."
+            }
+            "vue27-compiler" => {
+                "Vue 2.7 compiler official tests execute through a prepared Vitest suite. Generated source-path import shims preserve official internal module requests and route compiler/codeframe calls into the Rust vue-template-compiler alias through vuec_node_bridge; these failures are real Rust compiler parity gaps, not not-wired pending status."
+            }
+            "vue27-sfc" => {
+                "Vue 2.7 compiler-sfc official tests execute through a prepared Vitest suite. Generated source-path import shims preserve official imports and route public vue/compiler-sfc calls into the Rust alias through vuec_node_bridge; compileStyle PostCSS plugin callbacks execute in the JavaScript API adapter because caller-provided plugins are JavaScript functions and cannot be serialized into Rust. Remaining failures are real Vue 2.7 SFC parity gaps, not not-wired pending status."
+            }
+            "vue3-core" => {
+                "Vue 3 compiler-core official tests run through generated import shims and the @vue/compiler-core alias runtime; public APIs call the Rust bridge, while many internal transform/codegen imports still execute JavaScript compatibility semantics in xtask/src/compat.rs."
+            }
+            "vue3-dom" => {
+                "Vue 3 compiler-dom official tests run through a prepared Vitest suite with official DOM source imports, generated compiler-core import shims, and the @vue/compiler-dom alias runtime. Public compile/parse exports call the Rust bridge, but internal DOM transform imports mostly execute official TypeScript source or compatibility adapter code; only explicitly bridged projections count as Rust-backed."
+            }
+            "vue3-sfc" => {
+                "Vue 3 compiler-sfc official tests run through a prepared Vitest suite with official SFC TypeScript source and generated aliases for @vue/compiler-core, @vue/compiler-dom, @vue/compiler-ssr, and @vue/compiler-sfc. The SFC source under test executes mixed official TypeScript logic plus Rust alias bridge calls for compiler dependencies; this runner is conformance harness coverage, not standalone Rust SFC parity."
+            }
+            "vue3-ssr" => {
+                "Vue 3 compiler-ssr official tests run through a prepared Vitest suite with official SSR and DOM source imports, generated compiler-core import shims, and the alias runtime. Public @vue/compiler-ssr exports call the Rust bridge, but prepared SSR source tests execute mixed official TypeScript source, alias adapter code, and Rust bridge projections."
+            }
+            _ => "Suite is routed through Rust alias package smoke/output paths.",
+        },
     }
 }
 
@@ -12151,8 +12241,11 @@ fn conformance_targets(suites: &[ConformanceSuite]) -> Vec<TargetSpec> {
     targets
 }
 
-fn conformance_readiness(spec: ConformanceSuiteSpec) -> ConformanceReadiness {
-    let alias_root = rust_alias_root(spec.version_line);
+fn conformance_readiness(
+    spec: ConformanceSuiteSpec,
+    backend: AliasBackend,
+) -> ConformanceReadiness {
+    let alias_root = backend.root(spec.version_line);
     let npm_root = PathBuf::from("target")
         .join("compat")
         .join("npm")
@@ -12751,7 +12844,10 @@ mod tests {
 
     #[test]
     fn conformance_item_detail_uses_execution_counts() {
-        let readiness = conformance_readiness(suite_spec(ConformanceSuite::Vue3Core));
+        let readiness = conformance_readiness(
+            suite_spec(ConformanceSuite::Vue3Core),
+            AliasBackend::Generated,
+        );
         let execution = ConformanceExecutionResult {
             status: "failed".into(),
             runner: "vitest".into(),
@@ -12842,8 +12938,11 @@ mod tests {
             },
         };
 
-        let coverage =
-            conformance_coverage_report(suite_spec(ConformanceSuite::Vue3Core), Some(&execution));
+        let coverage = conformance_coverage_report(
+            suite_spec(ConformanceSuite::Vue3Core),
+            AliasBackend::Generated,
+            Some(&execution),
+        );
 
         assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
         assert_eq!(coverage.rust_backed_pass, 9);
@@ -12933,8 +13032,11 @@ mod tests {
             },
         };
 
-        let coverage =
-            conformance_coverage_report(suite_spec(ConformanceSuite::Vue27Sfc), Some(&execution));
+        let coverage = conformance_coverage_report(
+            suite_spec(ConformanceSuite::Vue27Sfc),
+            AliasBackend::Generated,
+            Some(&execution),
+        );
 
         assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
         assert_eq!(coverage.rust_backed_pass, 2);
@@ -13011,6 +13113,7 @@ mod tests {
 
         let coverage = conformance_coverage_report(
             suite_spec(ConformanceSuite::Vue2Compiler),
+            AliasBackend::Generated,
             Some(&execution),
         );
 
@@ -13021,6 +13124,21 @@ mod tests {
         assert!(coverage.reason.contains("prepared Jasmine suite"));
         assert!(coverage.reason.contains("not-wired pending status"));
         let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn napi_conformance_coverage_marks_mixed_alias_backend() {
+        let coverage = conformance_coverage_report(
+            suite_spec(ConformanceSuite::Vue2Compiler),
+            AliasBackend::Napi,
+            None,
+        );
+        assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
+        assert_eq!(coverage.rust_backed_total, 0);
+        assert!(coverage
+            .reason
+            .contains("NAPI-backed official package-name alias"));
+        assert!(coverage.reason.contains("mixed harness coverage"));
     }
 
     #[test]
@@ -13254,7 +13372,11 @@ mod tests {
 
     #[test]
     fn vue3_dom_conformance_coverage_is_mixed() {
-        let coverage = conformance_coverage_report(suite_spec(ConformanceSuite::Vue3Dom), None);
+        let coverage = conformance_coverage_report(
+            suite_spec(ConformanceSuite::Vue3Dom),
+            AliasBackend::Generated,
+            None,
+        );
         assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
         assert!(coverage.reason.contains("official DOM source imports"));
     }
@@ -13316,8 +13438,11 @@ mod tests {
             },
         };
 
-        let coverage =
-            conformance_coverage_report(suite_spec(ConformanceSuite::Vue3Dom), Some(&execution));
+        let coverage = conformance_coverage_report(
+            suite_spec(ConformanceSuite::Vue3Dom),
+            AliasBackend::Generated,
+            Some(&execution),
+        );
 
         assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
         assert_eq!(coverage.rust_backed_pass, 4);
@@ -13419,7 +13544,11 @@ mod tests {
 
     #[test]
     fn vue3_sfc_conformance_coverage_is_mixed() {
-        let coverage = conformance_coverage_report(suite_spec(ConformanceSuite::Vue3Sfc), None);
+        let coverage = conformance_coverage_report(
+            suite_spec(ConformanceSuite::Vue3Sfc),
+            AliasBackend::Generated,
+            None,
+        );
         assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
         assert!(coverage.reason.contains("official SFC TypeScript source"));
         assert!(coverage.reason.contains("not standalone Rust SFC parity"));
@@ -13458,7 +13587,11 @@ mod tests {
 
     #[test]
     fn vue3_ssr_conformance_coverage_is_mixed() {
-        let coverage = conformance_coverage_report(suite_spec(ConformanceSuite::Vue3Ssr), None);
+        let coverage = conformance_coverage_report(
+            suite_spec(ConformanceSuite::Vue3Ssr),
+            AliasBackend::Generated,
+            None,
+        );
         assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
         assert!(coverage
             .reason

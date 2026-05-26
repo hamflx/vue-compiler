@@ -1,5 +1,10 @@
 # Memory
 
+- Current round: added `cargo xtask run-napi-conformance` as the official-test execution backend for NAPI-backed official package-name aliases.
+- `run_conformance` now selects an alias backend internally: the existing command preserves generated Rust alias behavior and report names, while `run-napi-conformance` prepares version-isolated NAPI alias roots, runs the same prepared Jasmine/Vitest official suites against those package names, writes `napi-*.json` reports, and records `alias_backend: "napi"` in each report.
+- NAPI conformance reports are intentionally classified as `mixed` harness coverage because prepared source shims, official TypeScript source, and JavaScript-only adapters can still participate. The command does not add compiler semantics to `xtask/src/compat.rs` and does not claim pure Rust/NAPI semantic coverage.
+- Verification: `cargo fmt --all -- --check`, `cargo test -p xtask`, `cargo xtask --help` showing `run-napi-conformance`, `cargo xtask run-napi-conformance --suite vue2-compiler` (runner executes and honestly fails with `14/188` passed, `174` failed, writing `target/conformance/ee33465b421a58b83fac04aa850a6d250ee09ec169fa80ed8820794a0c9a2769/napi-vue2-compiler.json`), and `git diff --check`.
+
 - Current round: closed the remaining Vue 3 `@vue/compiler-sfc` NAPI public option gap and made the full NAPI public option matrix pass.
 - `vuec_napi` now exposes `compileSfcTemplateSource`, which routes Vue 3 SFC public `compileTemplate({ source, ...options })` through Rust `vuec_sfc::compile_template_source` with the official default source-map filename `template.vue.html`. This preserves whole-source compilation, side-effect `<script>` / `<style>` diagnostics, and full-source source maps in Rust instead of extracting the inner template in JavaScript.
 - The local `@vuec-rs/native` loader now uses `compileSfcTemplateSource` for the public `compileTemplate(options)` facade while keeping `compileSfcTemplate(source, options)` as the lower-level descriptor/template-block compiler entry.
