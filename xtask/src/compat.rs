@@ -1944,6 +1944,13 @@ fn alias_function_expression(
                 )
             };
             let is_vue3_generate = target.kind == TargetKind::Vue3Core && export_name == "generate";
+            let is_vue2_template_compile = matches!(
+                (target.kind, export_name),
+                (
+                    TargetKind::Vue26Template | TargetKind::Vue27Template,
+                    "compile" | "compileToFunctions" | "ssrCompile" | "ssrCompileToFunctions"
+                )
+            );
             let payload = if is_vue3_generate {
                 "Object.assign({}, __vuecPayload, { ast: vue3CoreRuntime.dehydrateForBridge(a0), source: '' })"
             } else {
@@ -1952,6 +1959,10 @@ fn alias_function_expression(
             let return_expr = if is_vue3_generate {
                 format!(
                     "(() => {{ const __vuecGenerateResult = {call}; __vuecGenerateResult.ast = a0; return __vuecGenerateResult; }})()"
+                )
+            } else if is_vue2_template_compile {
+                format!(
+                    "(() => {{ const __vuecVue2Result = {call}; emitVue2CompileWarnings(__vuecVue2Result, __vuecPayload.options); return __vuecVue2Result; }})()"
                 )
             } else {
                 call
@@ -6997,6 +7008,31 @@ function warnIgnoredDecodeEntities(options) {
   console.warn(message);
 }
 
+function emitVue2CompileWarnings(result, options) {
+  const suppressed = options && options.__vuecSuppressWarnings;
+  if (suppressed === true) return;
+  if (!result || typeof result !== 'object') return;
+  const warnings = [];
+  if (Array.isArray(result.errors)) warnings.push(...result.errors);
+  if (Array.isArray(result.tips)) warnings.push(...result.tips);
+  const suppressedMessages = Array.isArray(suppressed) ? suppressed.map(String) : [];
+  for (const warning of warnings) {
+    if (warning == null) continue;
+    const message = typeof warning === 'string'
+      ? warning
+      : typeof warning.msg === 'string'
+        ? warning.msg
+        : null;
+    if (message == null) continue;
+    if (suppressedMessages.some(suppressed => message.includes(suppressed))) continue;
+    if (typeof warning === 'string') {
+      console.error(message);
+    } else {
+      console.error(message);
+    }
+  }
+}
+
 function normalizeVue3OptionsForBridge(options, source) {
   if (!options || typeof options !== 'object') return {};
   const normalized = {};
@@ -9589,7 +9625,7 @@ fn write_vue2_compiler_source_shims(prepared_root: &Path, include_types: bool) -
 import { compile } from 'vue-template-compiler'
 
 export function parse(template, options = {}) {
-  const compiled = compile(template, { ...options, optimize: true })
+  const compiled = compile(template, { ...options, optimize: true, __vuecSuppressWarnings: ['Inline-template components must have exactly one child element.'] })
   const ast = compiled.element_ast || null
   if (ast && typeof ast === 'object') {
     Object.defineProperty(ast, '__vuecTemplate', { value: template, enumerable: false, configurable: true })
@@ -9893,6 +9929,7 @@ beforeEach(() => {
 console.warn = (...args: unknown[]) => {
   warnings.push(args.map(arg => String(arg)).join(' '))
 }
+console.error = console.warn
 
 expect.extend({
   toHaveBeenWarned(received) {
@@ -10000,8 +10037,18 @@ Module._resolveFilename = function(request, parent, isMain, options) {
 
 const warnings = []
 global.__VUEC_WARNINGS__ = warnings
-console.warn = (...args) => {
+console.error = (...args) => {
   warnings.push(args.map(String).join(' '))
+}
+console.warn = console.error
+console.error.calls = {
+  count() {
+    return warnings.length
+  },
+  argsFor(index) {
+    const warning = warnings[index]
+    return warning == null ? [] : [warning]
+  },
 }
 
 fs.writeFileSync(path.join(root, 'vuec-jasmine-helper.js'), `
@@ -11765,6 +11812,30 @@ mod tests {
         assert!(ALIAS_RUNTIME_JS.contains(
             "normalized.__vuecStringifyStatic = typeof options.transformHoist === 'function';"
         ));
+    }
+
+    #[test]
+    fn vue2_alias_runtime_emits_compile_warnings() {
+        assert!(ALIAS_RUNTIME_JS.contains("function emitVue2CompileWarnings(result, options)"));
+        assert!(ALIAS_RUNTIME_JS.contains("__vuecSuppressWarnings"));
+        assert!(ALIAS_RUNTIME_JS.contains("console.error(message)"));
+        let target = TargetSpec {
+            version_line: VersionLine::Vue26,
+            package: "vue-template-compiler",
+            entry: "index",
+            kind: TargetKind::Vue26Template,
+        };
+        let detail = ApiExportDetail {
+            kind: "function".into(),
+            tag: "[object Function]".into(),
+            name: Some("compile".into()),
+            function_arity: Some(2),
+            is_async_function: Some(false),
+            is_class_like: Some(false),
+            own_property_names: vec!["length".into(), "name".into(), "prototype".into()],
+        };
+        assert!(alias_export_expression(target, "compile", Some(&detail))
+            .contains("emitVue2CompileWarnings(__vuecVue2Result, __vuecPayload.options)"));
     }
 
     #[test]

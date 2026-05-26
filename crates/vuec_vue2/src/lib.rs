@@ -228,6 +228,7 @@ impl Vue2Compiler {
         let template = template.trim();
         let mut diagnostics = DiagnosticSink::default();
         let mut element_ast = parse_element_tree(&mut diagnostics, template, &options);
+        collect_element_warnings(element_ast.as_ref(), &mut diagnostics);
         if options.optimize {
             if let Some(root) = element_ast.as_mut() {
                 optimize(root);
@@ -689,6 +690,34 @@ fn cleanup_scoped_slot_children(element: &mut Vue2Element) {
         )
     });
     trim_ending_whitespace(element);
+}
+
+fn collect_element_warnings(element: Option<&Vue2Element>, diagnostics: &mut DiagnosticSink) {
+    let Some(element) = element else {
+        return;
+    };
+    collect_element_warning_node(element, diagnostics);
+}
+
+fn collect_element_warning_node(element: &Vue2Element, diagnostics: &mut DiagnosticSink) {
+    if element.inline_template && element.children.len() != 1 {
+        diagnostics.push(vue2_warning(
+            "W_VUE2_INLINE_TEMPLATE_CHILDREN",
+            "Inline-template components must have exactly one child element.",
+            element.span,
+        ));
+    }
+    for child in &element.children {
+        if let Vue2Node::Element(child) = child {
+            collect_element_warning_node(child, diagnostics);
+        }
+    }
+    for slot in element.scoped_slots.values() {
+        collect_element_warning_node(slot, diagnostics);
+    }
+    for condition in element.if_conditions.iter().skip(1) {
+        collect_element_warning_node(&condition.block, diagnostics);
+    }
 }
 
 fn process_pre(element: &mut Vue2Element) {
@@ -1623,12 +1652,7 @@ fn gen_component(
 }
 
 fn gen_inline_template(element: &mut Vue2Element, state: &mut CodegenState<'_>) -> Option<String> {
-    let Some(Vue2Node::Element(child)) = element.children.first().cloned() else {
-        return None;
-    };
-    if element.children.len() != 1 {
-        return None;
-    }
+    let child = inline_template_child_element(element)?.clone();
     let mut static_render_fns = Vec::new();
     let render = generate_render(Some(&child), state.options, &mut static_render_fns);
     let static_render_fns = static_render_fns
@@ -1639,6 +1663,13 @@ fn gen_inline_template(element: &mut Vue2Element, state: &mut CodegenState<'_>) 
     Some(format!(
         "inlineTemplate:{{render:function(){{{render}}},staticRenderFns:[{static_render_fns}]}}"
     ))
+}
+
+fn inline_template_child_element(element: &Vue2Element) -> Option<&Vue2Element> {
+    match element.children.first() {
+        Some(Vue2Node::Element(child)) => Some(child),
+        _ => None,
+    }
 }
 
 fn gen_scoped_slots(element: &mut Vue2Element, state: &mut CodegenState<'_>) -> String {
@@ -3187,6 +3218,38 @@ mod tests {
             new_syntax_if.render,
             r#"with(this){return _c('foo',{scopedSlots:_u([(show)?{key:"default",fn:function(bar){return [_v(_s(bar))]}}:null],null,true)})}"#
         );
+    }
+
+    #[test]
+    fn generates_vue2_inline_template_like_official_codegen() {
+        let single = compile(
+            r#"<my-component inline-template><p><span>hello world</span></p></my-component>"#,
+            options(),
+        );
+        assert_eq!(
+            single.render,
+            r#"with(this){return _c('my-component',{inlineTemplate:{render:function(){with(this){return _m(0)}},staticRenderFns:[function(){with(this){return _c('p',[_c('span',[_v("hello world")])])}}]}})}"#
+        );
+
+        let multiple = compile(
+            r#"<my-component inline-template><hr><hr></my-component>"#,
+            options(),
+        );
+        assert_eq!(
+            multiple.render,
+            r#"with(this){return _c('my-component',{inlineTemplate:{render:function(){with(this){return _c('hr')}},staticRenderFns:[]}})}"#
+        );
+        assert!(multiple
+            .errors
+            .iter()
+            .any(|error| error.msg
+                == "Inline-template components must have exactly one child element."));
+
+        let empty = compile(
+            r#"<my-component inline-template></my-component>"#,
+            options(),
+        );
+        assert_eq!(empty.render, r#"with(this){return _c('my-component',{})}"#);
     }
 
     #[test]

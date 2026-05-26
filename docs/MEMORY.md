@@ -1,5 +1,12 @@
 # Memory
 
+- Current round: completed a Vue 2 compiler Rust inline-template codegen and warning parity slice.
+- `vuec_vue2` now generates `inlineTemplate:{render,staticRenderFns}` from the first element child, matching official Vue 2 behavior even when an inline-template component has multiple children. Empty inline-template components still omit inlineTemplate data, while invalid child counts now produce the official `Inline-template components must have exactly one child element.` compiler warning through Rust diagnostics.
+- The Vue 2 official alias adapter in `xtask/src/compat.rs` now forwards Rust compile warnings to the official Vue 2 test warning channel (`console.error`) and exposes the Jasmine `console.error.calls` shape. This is API/runner warning adapter support only; compiler semantics remain in Rust, and parse-stage shims suppress only the codegen-stage inline-template warning to avoid double-emitting it during official `parse -> generate` tests.
+- No AST/HIR/MIR structure changed. `xtask/src/compat.rs` was touched only for warning forwarding/runner adapter behavior, not for compiler semantics.
+- Current Vue 2 conformance movement: `vue2-compiler` improved from `77/188` to `95/188`, and `vue27-compiler` improved from `75/190` to `92/190`. `vue27-sfc` remains `5/144`, unchanged by this template-compiler codegen/warning slice.
+- Verification for this Vue 2 inline-template slice: `cargo fmt --all --check`, `git diff --check`, `cargo test -p vuec_vue2 --lib` (`11/11`), `cargo test -p xtask` (`29/29`), `cargo build -p vuec_node_bridge`, `cargo xtask run-conformance --suite vue2-compiler` (expected fail, `95/188`), `cargo xtask run-conformance --suite vue27-compiler` (expected fail, `92/190`), and `cargo xtask run-conformance --suite vue27-sfc` (expected fail, unchanged `5/144`).
+
 - Current round: completed a Vue 2 compiler Rust scoped-slot codegen parity slice.
 - `vuec_vue2` now performs Vue 2 parser-style final cleanup for direct scoped-slot children: slot-scope nodes are registered under the parent `scopedSlots` map but no longer also render as normal children. Scoped-slot elements now force data object emission where official codegen requires `_c('div',{},...)`.
 - Scoped slot codegen now handles stable slots, dynamic slot names, force-update `_u(...,null,true)` metadata, legacy `slot-scope` + `v-if` function bodies, and new `v-slot` / `#` conditional slot object generation. Regression coverage was added for the official scoped-slot codegen cases.
