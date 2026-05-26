@@ -2226,21 +2226,27 @@ fn vue27_script_setup_content(
     } else {
         helper_import.to_string()
     };
-    let script_setup_import_separator =
-        if !normal_script.module_content.is_empty() && !analysis.module_content.is_empty() {
-            "\n"
-        } else {
-            ""
-        };
-    let content = format!(
-        "{}{}{}{}{}",
-        helper_import,
-        normal_script.module_content,
-        script_setup_import_separator,
-        analysis.module_content,
-        export_prefix
-    );
+    let mut content = helper_import;
+    append_vue27_module_chunk(&mut content, &analysis.hoisted_module_content);
+    append_vue27_module_chunk(&mut content, &normal_script.module_content);
+    append_vue27_module_chunk(&mut content, &analysis.module_content);
+    content.push_str(&export_prefix);
     content.trim().to_string()
+}
+
+fn append_vue27_module_chunk(output: &mut String, chunk: &str) {
+    if chunk.is_empty() {
+        return;
+    }
+    if !output.is_empty() && !output.ends_with('\n') {
+        output.push('\n');
+    }
+    let chunk = if output.ends_with('\n') {
+        chunk.strip_prefix('\n').unwrap_or(chunk)
+    } else {
+        chunk
+    };
+    output.push_str(chunk);
 }
 
 fn vue27_script_setup_runtime_options(
@@ -2517,6 +2523,7 @@ fn gen_vue27_css_vars_code(
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Vue27ScriptSetupAnalysis {
     module_content: String,
+    hoisted_module_content: String,
     setup_content: String,
     setup_prelude: String,
     return_bindings: Vec<String>,
@@ -2555,6 +2562,7 @@ struct Vue27NormalScriptAnalysis {
 
 fn analyze_vue27_script_setup(script_setup: &SfcBlock) -> Vue27ScriptSetupAnalysis {
     let source = script_setup.content.as_str();
+    let is_ts = script_is_typescript(&script_setup.attrs);
     let allocator = oxc_allocator::Allocator::default();
     let parsed = oxc_parser::Parser::new(
         &allocator,
@@ -2664,6 +2672,13 @@ fn analyze_vue27_script_setup(script_setup: &SfcBlock) -> Vue27ScriptSetupAnalys
                         .insert(id.name.to_string(), "setup-const".into());
                 }
             }
+            Statement::TSEnumDeclaration(declaration) if is_ts && !declaration.declare => {
+                hoist_vue27_setup_statement(source, statement, &mut edits, &mut analysis);
+                push_unique(&mut analysis.return_bindings, declaration.id.name.as_str());
+                analysis
+                    .setup_bindings
+                    .insert(declaration.id.name.to_string(), "setup-const".into());
+            }
             Statement::ExpressionStatement(statement) => {
                 if let Expression::CallExpression(call) = &statement.expression {
                     if is_call_named(call, "defineProps") {
@@ -2681,6 +2696,9 @@ fn analyze_vue27_script_setup(script_setup: &SfcBlock) -> Vue27ScriptSetupAnalys
                         );
                     }
                 }
+            }
+            _ if is_ts && vue27_statement_is_type_hoist(statement) => {
+                hoist_vue27_setup_statement(source, statement, &mut edits, &mut analysis);
             }
             _ => {}
         }
@@ -2740,6 +2758,43 @@ fn analyze_vue27_setup_variable_declaration(
         collect_pattern_bindings(&declarator.id, &mut analysis.return_bindings);
     }
     remove_vue27_macro_declarators(declaration, &macro_declarators, edits);
+}
+
+fn hoist_vue27_setup_statement(
+    source: &str,
+    statement: &Statement<'_>,
+    edits: &mut SourceEdits<'_>,
+    analysis: &mut Vue27ScriptSetupAnalysis,
+) {
+    let start = statement.span().start as usize;
+    let mut end = statement.span().end as usize;
+    while source
+        .get(end..)
+        .and_then(|tail| tail.chars().next())
+        .is_some_and(char::is_whitespace)
+    {
+        end += source[end..].chars().next().map_or(0, char::len_utf8);
+    }
+    let source_text = source.get(start..end).unwrap_or_default();
+    analysis.hoisted_module_content.push_str(source_text);
+    edits.remove(start, end);
+}
+
+fn vue27_statement_is_type_hoist(statement: &Statement<'_>) -> bool {
+    match statement {
+        Statement::TSTypeAliasDeclaration(_)
+        | Statement::TSInterfaceDeclaration(_)
+        | Statement::TSModuleDeclaration(_)
+        | Statement::TSGlobalDeclaration(_)
+        | Statement::TSImportEqualsDeclaration(_) => true,
+        Statement::VariableDeclaration(declaration) => declaration.declare,
+        Statement::FunctionDeclaration(function) => function.declare,
+        Statement::ClassDeclaration(class) => class.declare,
+        Statement::ExportNamedDeclaration(declaration) => {
+            declaration.export_kind == ImportOrExportKind::Type
+        }
+        _ => false,
+    }
 }
 
 fn vue27_setup_binding_type(
@@ -4919,6 +4974,63 @@ import { type Bar, Baz } from './main.ts'
         let script = compiler.compile_vue27_script(&descriptor, SfcScriptCompileOptions::default());
 
         assert!(script.content.contains("return { Baz }"));
+    }
+
+    #[test]
+    fn vue27_compile_script_hoists_ts_types_and_runtime_enums() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "foo.vue",
+            r#"<script setup lang="ts">
+export interface Foo {}
+type Bar = {}
+enum Baz { A = 1 }
+const enum Qux { A = 2 }
+</script>"#,
+        );
+        let script = compiler.compile_vue27_script(&descriptor, SfcScriptCompileOptions::default());
+
+        let setup_index = script.content.find("setup(__props)").unwrap();
+        assert!(script.content.find("export interface Foo {}").unwrap() < setup_index);
+        assert!(script.content.find("type Bar = {}").unwrap() < setup_index);
+        assert!(script.content.find("enum Baz { A = 1 }").unwrap() < setup_index);
+        assert!(script.content.find("const enum Qux { A = 2 }").unwrap() < setup_index);
+        assert!(script.content.contains("return { Baz, Qux }"));
+        assert_eq!(
+            script.bindings.get("Baz").map(String::as_str),
+            Some("setup-const")
+        );
+        assert_eq!(
+            script.bindings.get("Qux").map(String::as_str),
+            Some("setup-const")
+        );
+        assert!(!script.bindings.contains_key("Foo"));
+        assert!(!script.bindings.contains_key("Bar"));
+    }
+
+    #[test]
+    fn vue27_compile_script_returns_normal_script_runtime_enums() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "foo.vue",
+            r#"<script lang="ts">
+export enum D { D = "D" }
+const enum C { C = "C" }
+enum B { B = "B" }
+</script>
+<script setup lang="ts">
+enum Foo { A = 123 }
+</script>"#,
+        );
+        let script = compiler.compile_vue27_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.content.contains("return { D, C, B, Foo }"));
+        for name in ["D", "C", "B", "Foo"] {
+            assert_eq!(
+                script.bindings.get(name).map(String::as_str),
+                Some("setup-const")
+            );
+        }
     }
 
     #[test]
