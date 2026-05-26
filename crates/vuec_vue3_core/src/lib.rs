@@ -5170,12 +5170,59 @@ pub fn is_function_type_projection(payload: &Value) -> Value {
     })
 }
 
+pub fn advance_position_with_clone_projection(payload: &Value) -> Value {
+    let pos = payload.get("pos").unwrap_or(&Value::Null);
+    let source = json_str(payload, "source").unwrap_or("");
+    let count =
+        json_usize(payload, "numberOfCharacters").unwrap_or_else(|| source.encode_utf16().count());
+    advance_position_value(pos, source, count)
+}
+
+pub fn advance_position_with_mutation_projection(payload: &Value) -> Value {
+    advance_position_with_clone_projection(payload)
+}
+
+pub fn to_valid_asset_id_projection(payload: &Value) -> Value {
+    let name = json_str(payload, "name").unwrap_or("");
+    let asset_type = json_str(payload, "type").unwrap_or("");
+    json!({
+        "id": to_valid_asset_id(name, asset_type),
+    })
+}
+
 pub fn extract_identifiers_projection(payload: &Value) -> Value {
     let node = payload.get("node").unwrap_or(&Value::Null);
     let mut identifiers = Vec::new();
     js_ast_extract_identifiers(node, &mut Vec::new(), &mut identifiers);
     json!({
         "identifiers": identifiers,
+    })
+}
+
+fn advance_position_value(pos: &Value, source: &str, number_of_characters: usize) -> Value {
+    let mut offset = json_usize(pos, "offset").unwrap_or_default();
+    let mut line = json_usize(pos, "line").unwrap_or(1);
+    let mut column = json_usize(pos, "column").unwrap_or(1);
+    let utf16 = source.encode_utf16().collect::<Vec<_>>();
+    let count = number_of_characters.min(utf16.len());
+    let mut lines_count = 0usize;
+    let mut last_newline_pos = None;
+    for (index, unit) in utf16.iter().take(count).enumerate() {
+        if *unit == b'\n' as u16 {
+            lines_count += 1;
+            last_newline_pos = Some(index);
+        }
+    }
+    offset += number_of_characters;
+    line += lines_count;
+    column = match last_newline_pos {
+        Some(index) => number_of_characters - index,
+        None => column + number_of_characters,
+    };
+    json!({
+        "offset": offset,
+        "line": line,
+        "column": column,
     })
 }
 
@@ -10317,11 +10364,10 @@ fn process_expression_identifier_spans(
                 locals,
             )
         };
-        let (replacement_start, replacement_end) = if update_argument.is_some() && content != ident
+        let (replacement_start, replacement_end) = if let Some(update) =
+            update_argument.filter(|update| content != ident && content.contains(update.operator))
         {
-            update_argument
-                .and_then(|update| process_expression_update_range(raw, start, end, update))
-                .unwrap_or((start, end))
+            process_expression_update_range(raw, start, end, update).unwrap_or((start, end))
         } else {
             (start, end)
         };
@@ -10448,6 +10494,9 @@ fn process_expression_is_function_param(raw: &str, start: usize) -> bool {
     let Some(open) = prefix.rfind('(') else {
         return false;
     };
+    if prefix[open + 1..].contains(')') {
+        return false;
+    }
     let before_open = prefix[..open].trim_end();
     before_open.ends_with("function") || before_open.ends_with("function*")
 }
@@ -18515,21 +18564,23 @@ fn vue3_directive_needs_runtime_asset(name: &str) -> bool {
 }
 
 fn component_asset_id(tag: &str) -> String {
-    format!("_component_{}", to_valid_asset_part(tag))
+    to_valid_asset_id(tag, "component")
+}
+
+fn to_valid_asset_id(name: &str, asset_type: &str) -> String {
+    format!("_{asset_type}_{}", to_valid_asset_part(name))
 }
 
 fn to_valid_asset_part(value: &str) -> String {
     let mut output = String::new();
-    for (index, ch) in value.chars().enumerate() {
-        if ch.is_ascii_alphanumeric() || ch == '_' {
-            output.push(ch);
-        } else if ch == '-' {
-            output.push('_');
-        } else {
-            output.push_str(&(ch as u32).to_string());
-        }
-        if index == 0 && ch.is_ascii_digit() {
-            output.insert(0, '_');
+    for unit in value.encode_utf16() {
+        match unit {
+            65..=90 | 97..=122 | 48..=57 | 95 => {
+                let ch = char::from_u32(unit as u32).unwrap_or('_');
+                output.push(ch);
+            }
+            45 => output.push('_'),
+            _ => output.push_str(&unit.to_string()),
         }
     }
     output
@@ -23800,7 +23851,7 @@ fn public_asset_imports(root: &Value) -> Vec<(String, String)> {
 }
 
 fn directive_asset_id(name: &str) -> String {
-    format!("_directive_{}", to_valid_asset_part(name))
+    to_valid_asset_id(name, "directive")
 }
 
 fn nullable_args(args: Vec<Value>) -> Vec<Value> {
@@ -28435,6 +28486,37 @@ mod tests {
     }
 
     #[test]
+    fn vue3_utils_projection_advances_positions_with_utf16_offsets() {
+        let projection = advance_position_with_clone_projection(&json!({
+            "pos": { "offset": 2, "line": 3, "column": 4 },
+            "source": "a😏\nb",
+            "numberOfCharacters": 4,
+        }));
+
+        assert_eq!(projection["offset"], json!(6));
+        assert_eq!(projection["line"], json!(4));
+        assert_eq!(projection["column"], json!(1));
+    }
+
+    #[test]
+    fn vue3_utils_projection_generates_official_asset_ids() {
+        assert_eq!(
+            to_valid_asset_id_projection(&json!({
+                "name": "test-测试-1",
+                "type": "component",
+            }))["id"],
+            json!("_component_test_2797935797_1")
+        );
+        assert_eq!(
+            to_valid_asset_id_projection(&json!({
+                "name": "a😏-b",
+                "type": "directive",
+            }))["id"],
+            json!("_directive_a5535756847_b")
+        );
+    }
+
+    #[test]
     fn process_expression_projection_prefixes_object_shorthand_value() {
         let projection = process_expression_test_projection(
             "{ foo }",
@@ -31190,6 +31272,79 @@ mod tests {
             projection["props"][0]["value"]["children"][1]["helpers"],
             json!(["IS_REF"])
         );
+    }
+
+    #[test]
+    fn transform_on_projection_rewrites_function_expression_body_refs() {
+        let projection = transform_on_projection(&json!({
+            "dir": {
+                "arg": { "type": 4, "content": "click", "isStatic": true },
+                "exp": {
+                    "type": 4,
+                    "content": "async function () { await foo() } ",
+                    "loc": { "source": "async function () { await foo() } " }
+                },
+                "modifiers": []
+            },
+            "node": { "tagType": 0 },
+            "context": {
+                "prefixIdentifiers": true,
+                "cacheHandlers": true,
+                "identifiers": {},
+                "bindingMetadata": {}
+            }
+        }));
+
+        assert_eq!(projection["props"][0]["cache"], json!(true));
+        assert_eq!(
+            projection["props"][0]["value"]["children"][0],
+            json!("async function () { await ")
+        );
+        assert_eq!(
+            projection["props"][0]["value"]["children"][1]["content"],
+            json!("_ctx.foo")
+        );
+        assert_eq!(
+            projection["props"][0]["value"]["children"][2],
+            json!("() } ")
+        );
+    }
+
+    #[test]
+    fn transform_on_projection_keeps_update_operator_child() {
+        let projection = transform_on_projection(&json!({
+            "dir": {
+                "arg": { "type": 4, "content": "click", "isStatic": true },
+                "exp": {
+                    "type": 4,
+                    "content": "foo++",
+                    "loc": { "source": "foo++" }
+                },
+                "modifiers": []
+            },
+            "node": { "tagType": 0 },
+            "context": {
+                "prefixIdentifiers": true,
+                "cacheHandlers": true,
+                "identifiers": {},
+                "bindingMetadata": {}
+            }
+        }));
+
+        assert_eq!(projection["props"][0]["cache"], json!(true));
+        assert_eq!(
+            projection["props"][0]["value"]["children"][0],
+            json!("$event => (")
+        );
+        assert_eq!(
+            projection["props"][0]["value"]["children"][1]["children"][0]["content"],
+            json!("_ctx.foo")
+        );
+        assert_eq!(
+            projection["props"][0]["value"]["children"][1]["children"][1],
+            json!("++")
+        );
+        assert_eq!(projection["props"][0]["value"]["children"][2], json!(")"));
     }
 
     #[test]

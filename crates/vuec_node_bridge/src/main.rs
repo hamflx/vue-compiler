@@ -122,6 +122,13 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
             Ok(vuec_vue3_core::is_member_expression_projection(&payload))
         }
         "vue3.core.isFunctionType" => Ok(vuec_vue3_core::is_function_type_projection(&payload)),
+        "vue3.core.advancePositionWithClone" => Ok(
+            vuec_vue3_core::advance_position_with_clone_projection(&payload),
+        ),
+        "vue3.core.advancePositionWithMutation" => Ok(
+            vuec_vue3_core::advance_position_with_mutation_projection(&payload),
+        ),
+        "vue3.core.toValidAssetId" => Ok(vuec_vue3_core::to_valid_asset_id_projection(&payload)),
         "vue3.core.extractIdentifiers" => {
             Ok(vuec_vue3_core::extract_identifiers_projection(&payload))
         }
@@ -3817,6 +3824,30 @@ mod tests {
         );
         assert_eq!(script_setup["innerLoc"]["start"]["offset"], json!(66));
         assert_eq!(script_setup["innerLoc"]["end"]["offset"], json!(101));
+    }
+
+    #[test]
+    fn vue3_core_bridge_projects_public_utils() {
+        let position = dispatch(
+            "vue3.core.advancePositionWithClone",
+            json!({
+                "pos": { "offset": 0, "line": 1, "column": 1 },
+                "source": "foo\nbar",
+                "numberOfCharacters": 4,
+            }),
+        )
+        .expect("position projection");
+        assert_eq!(position, json!({ "offset": 4, "line": 2, "column": 1 }));
+
+        let asset = dispatch(
+            "vue3.core.toValidAssetId",
+            json!({
+                "name": "test-测试-1",
+                "type": "component",
+            }),
+        )
+        .expect("asset id projection");
+        assert_eq!(asset["id"], json!("_component_test_2797935797_1"));
     }
 
     #[test]

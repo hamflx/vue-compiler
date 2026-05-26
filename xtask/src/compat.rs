@@ -3334,26 +3334,21 @@ const vue3CoreRuntime = (() => {
   }
 
   runtime.advancePositionWithClone = function advancePositionWithClone(pos, source, numberOfCharacters) {
-    return runtime.advancePositionWithMutation(
-      { offset: pos.offset, line: pos.line, column: pos.column },
-      source,
-      numberOfCharacters === undefined ? String(source).length : numberOfCharacters,
-    );
+    return callBridge('vue3.core.advancePositionWithClone', {
+      pos: runtime.dehydrateForBridge(pos),
+      source: String(source || ''),
+      numberOfCharacters: numberOfCharacters === undefined ? undefined : numberOfCharacters,
+    });
   };
   runtime.advancePositionWithMutation = function advancePositionWithMutation(pos, source, numberOfCharacters) {
-    source = String(source || '');
-    const count = numberOfCharacters === undefined ? source.length : numberOfCharacters;
-    let linesCount = 0;
-    let lastNewLinePos = -1;
-    for (let i = 0; i < count; i++) {
-      if (source.charCodeAt(i) === 10) {
-        linesCount++;
-        lastNewLinePos = i;
-      }
-    }
-    pos.offset += count;
-    pos.line += linesCount;
-    pos.column = lastNewLinePos === -1 ? pos.column + count : count - lastNewLinePos;
+    const projection = callBridge('vue3.core.advancePositionWithMutation', {
+      pos: runtime.dehydrateForBridge(pos),
+      source: String(source || ''),
+      numberOfCharacters: numberOfCharacters === undefined ? undefined : numberOfCharacters,
+    });
+    pos.offset = projection.offset;
+    pos.line = projection.line;
+    pos.column = projection.column;
     return pos;
   };
   runtime.assert = function assert(condition, msg) {
@@ -3567,7 +3562,8 @@ const vue3CoreRuntime = (() => {
   runtime.isTemplateNode = function isTemplateNode(node) { return !!node && node.type === NodeTypes.ELEMENT && node.tagType === ElementTypes.TEMPLATE; };
   runtime.isSlotOutlet = function isSlotOutlet(node) { return !!node && node.type === NodeTypes.ELEMENT && node.tagType === ElementTypes.SLOT; };
   runtime.toValidAssetId = function toValidAssetId(name, type) {
-    return `_${type}_${String(name).replace(/[^\w]/g, (searchValue, replaceValue) => searchValue === '-' ? '_' : String(name).charCodeAt(replaceValue).toString())}`;
+    const projection = callBridge('vue3.core.toValidAssetId', { name: String(name), type: String(type) });
+    return projection && projection.id || '';
   };
   runtime.injectProp = function injectProp(node, prop) {
     let props = node.type === NodeTypes.VNODE_CALL ? node.props : node.arguments && node.arguments[2];
@@ -10151,6 +10147,7 @@ fn conformance_coverage_file_kind(
         || path.ends_with("packages/compiler-core/__tests__/codegen.spec.ts")
         || path.ends_with("packages/compiler-core/__tests__/parse.spec.ts")
         || path.ends_with("packages/compiler-core/__tests__/scopeId.spec.ts")
+        || path.ends_with("packages/compiler-core/__tests__/utils.spec.ts")
     {
         ConformanceCoverageKind::RustBacked
     } else {
@@ -10793,6 +10790,13 @@ mod tests {
                   ]
                 },
                 {
+                  "name": "F:/repo/prepared/vue3-core/packages/compiler-core/__tests__/utils.spec.ts",
+                  "assertionResults": [
+                    { "status": "passed" },
+                    { "status": "passed" }
+                  ]
+                },
+                {
                   "name": "F:/repo/prepared/vue3-core/packages/compiler-core/__tests__/transforms/vOn.spec.ts",
                   "assertionResults": [
                     { "status": "passed" },
@@ -10812,8 +10816,8 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             counts: ConformanceExecutionCounts {
-                total: 9,
-                pass: 8,
+                total: 11,
+                pass: 10,
                 fail: 1,
                 skip: 0,
                 pending: 0,
@@ -10824,8 +10828,8 @@ mod tests {
             conformance_coverage_report(suite_spec(ConformanceSuite::Vue3Core), Some(&execution));
 
         assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
-        assert_eq!(coverage.rust_backed_pass, 7);
-        assert_eq!(coverage.rust_backed_total, 7);
+        assert_eq!(coverage.rust_backed_pass, 9);
+        assert_eq!(coverage.rust_backed_total, 9);
         assert_eq!(
             coverage
                 .counts_by_source
@@ -10833,7 +10837,7 @@ mod tests {
                 .copied()
                 .unwrap_or_default()
                 .pass,
-            7
+            9
         );
         assert_eq!(
             coverage
@@ -10852,7 +10856,11 @@ mod tests {
             coverage.files[1].source,
             ConformanceCoverageKind::RustBacked
         );
-        assert_eq!(coverage.files[2].source, ConformanceCoverageKind::Mixed);
+        assert_eq!(
+            coverage.files[2].source,
+            ConformanceCoverageKind::RustBacked
+        );
+        assert_eq!(coverage.files[3].source, ConformanceCoverageKind::Mixed);
         assert!(coverage.reason.contains("xtask/src/compat.rs"));
         let _ = fs::remove_dir_all(temp);
     }
