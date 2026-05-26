@@ -2042,6 +2042,9 @@ fn alias_body_arity(target: TargetSpec, export_name: &str, arity: u32) -> u32 {
         | (TargetKind::Vue3Core | TargetKind::Vue3Dom | TargetKind::Vue3Ssr, "compile")
         | (TargetKind::Vue3Sfc, "parse")
         | (TargetKind::Vue27Sfc | TargetKind::Vue3Sfc, "compileScript") => arity.max(2),
+        (TargetKind::Vue26Template | TargetKind::Vue27Template, "generateCodeFrame") => {
+            arity.max(3)
+        }
         _ => arity,
     }
 }
@@ -10493,15 +10496,22 @@ fn write_vue2_vitest_setup(prepared_root: &Path) -> Result<()> {
 import { beforeEach, expect } from 'vitest'
 
 const warnings: string[] = []
+const warnMock = (...args: unknown[]) => {
+  warnings.push(args.map(arg => String(arg)).join(' '))
+}
+;(warnMock as any).mock = { calls: [] as unknown[][] }
 
 beforeEach(() => {
   warnings.length = 0
+  ;(warnMock as any).mock.calls.length = 0
 })
 
 console.warn = (...args: unknown[]) => {
-  warnings.push(args.map(arg => String(arg)).join(' '))
+  ;(warnMock as any).mock.calls.push(args)
+  warnMock(...args)
 }
 console.error = console.warn
+;(console.error as any).mock = (warnMock as any).mock
 
 expect.extend({
   toHaveBeenWarned(received) {
@@ -12323,6 +12333,9 @@ mod tests {
         assert!(optimizer.contains("callBridge('vue2.optimize'"));
         assert!(optimizer.contains("mergeVue2OptimizedAst(ast"));
         assert!(optimizer.contains("__vuecReservedTags"));
+        let codeframe =
+            fs::read_to_string(temp.join("src").join("compiler").join("codeframe.ts")).unwrap();
+        assert!(codeframe.contains("export { generateCodeFrame }"));
 
         write_vue27_sfc_conformance_shims(&temp).unwrap();
         let sfc_config = fs::read_to_string(temp.join("vitest.config.ts")).unwrap();
@@ -12345,6 +12358,10 @@ mod tests {
         assert!(runner.contains("compiler-options.spec.js"));
         let vue2_specs = suite_spec(ConformanceSuite::Vue2Compiler);
         assert!(vue2_specs.runner_dependencies.contains(&"jsdom"));
+        let setup = fs::read_to_string(temp.join("vuec-vitest-setup.ts")).unwrap();
+        assert!(setup.contains("warnMock"));
+        assert!(setup.contains("mock.calls"));
+        assert!(setup.contains("(console.error as any).mock"));
 
         let specs = suite_spec(ConformanceSuite::Vue27Compiler);
         assert!(specs.runner_dependencies.contains(&"jsdom"));
@@ -12457,6 +12474,29 @@ mod tests {
         };
         assert!(alias_export_expression(target, "compile", Some(&detail))
             .contains("emitVue2CompileWarnings(__vuecVue2Result, __vuecPayload.options)"));
+    }
+
+    #[test]
+    fn vue2_generate_code_frame_alias_reads_all_arguments() {
+        let target = TargetSpec {
+            version_line: VersionLine::Vue27,
+            package: "vue-template-compiler",
+            entry: "index",
+            kind: TargetKind::Vue27Template,
+        };
+        let detail = ApiExportDetail {
+            kind: "function".into(),
+            tag: "[object Function]".into(),
+            name: Some("generateCodeFrame".into()),
+            function_arity: Some(1),
+            is_async_function: Some(false),
+            is_class_like: Some(false),
+            own_property_names: vec!["length".into(), "name".into(), "prototype".into()],
+        };
+        let expression = alias_export_expression(target, "generateCodeFrame", Some(&detail));
+        assert!(expression.contains("const a1 = arguments[1];"));
+        assert!(expression.contains("const a2 = arguments[2];"));
+        assert!(expression.contains("callBridge(\"vue2.generateCodeFrame\""));
     }
 
     #[test]

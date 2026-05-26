@@ -1,5 +1,11 @@
 # Memory
 
+- Current round: completed the Vue 2.7 compiler conformance runner/API bridge support slice.
+- `xtask/src/compat.rs` now generates Vue 2 `generateCodeFrame` aliases with the three arguments used by official codeframe tests even though the public function length reports as one, and the Vue 2 Vitest setup now exposes a warning mock compatible with official `(console.error as any).mock.calls` assertions.
+- This `xtask/src/compat.rs` work is API/runner/import support only. No compiler semantics were added to the shim, and AST/HIR/MIR structures did not change.
+- Current Vue 2.7 conformance movement: `vue27-compiler` improved from `184/190` to `189/190`; the remaining failure is a real Rust codegen binding-metadata semantic gap, not a runner issue. Vue 2.6 compiler remains `188/188` as `rust-backed`.
+- Verification for this Vue 2.7 runner/API support slice: `cargo fmt --all --check`, `git diff --check`, `cargo test -p xtask`, and `cargo xtask run-conformance --suite vue27-compiler` (expected fail, `189/190`).
+
 - Current round: completed the Vue 2.6 compiler conformance runner/import support closure.
 - `xtask/src/compat.rs` now gives the Vue 2.6 Jasmine runner a deterministic `jsdom` DOM environment, disables Babel register cache for regenerated prepared suites, and uses a CommonJS default-import interop helper so `import Vue from 'vue'` binds to the Vue constructor when the official runtime exports via `module.exports`. Runner dependency resolution can now fall back to the same synced official vendor tree for runner infrastructure dependencies missing from the current baseline manifest; in this slice Vue 2.6 resolves `jsdom` from the Vue 2.7 official lock/manifest rather than from an unpinned latest version.
 - This `xtask/src/compat.rs` work is runner/import support only. No compiler semantics were added to the shim, and AST/HIR/MIR structures did not change.
