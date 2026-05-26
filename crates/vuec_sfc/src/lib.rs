@@ -1,11 +1,11 @@
 #![forbid(unsafe_code)]
 
 use oxc_ast::ast::{
-    Argument, ArrowFunctionExpression, AssignmentTarget, BindingPattern, ExportDefaultDeclaration,
-    ExportDefaultDeclarationKind, ExportNamedDeclaration, ExportSpecifier, Expression, Function,
-    ImportDeclarationSpecifier, ImportOrExportKind, ModuleExportName, ObjectExpression,
-    ObjectProperty, ObjectPropertyKind, PropertyKey, SimpleAssignmentTarget, Statement,
-    VariableDeclaration, VariableDeclarationKind, WithStatement,
+    Argument, ArrowFunctionExpression, AssignmentTarget, BindingPattern, Declaration,
+    ExportDefaultDeclaration, ExportDefaultDeclarationKind, ExportNamedDeclaration,
+    ExportSpecifier, Expression, Function, ImportDeclarationSpecifier, ImportOrExportKind,
+    ModuleExportName, ObjectExpression, ObjectProperty, ObjectPropertyKind, PropertyKey,
+    SimpleAssignmentTarget, Statement, VariableDeclaration, VariableDeclarationKind, WithStatement,
 };
 use oxc_span::GetSpan;
 use serde::{Deserialize, Serialize};
@@ -2186,6 +2186,7 @@ fn vue27_script_setup_content(
     let analysis = analyze_vue27_script_setup(script_setup);
     let normal_script = analyze_vue27_normal_script_for_setup(descriptor);
     let bindings = vue27_setup_binding_metadata(descriptor);
+    let is_ts = script_is_typescript(&script_setup.attrs);
     let css_vars_code = if css_vars.is_empty() {
         String::new()
     } else {
@@ -2194,17 +2195,7 @@ fn vue27_script_setup_content(
             gen_vue27_css_vars_code(css_vars, &bindings, &scope_id, options.is_prod)
         )
     };
-    let return_bindings = analysis
-        .return_bindings
-        .iter()
-        .filter(|name| {
-            !analysis
-                .removed_bindings
-                .iter()
-                .any(|removed| removed == *name)
-        })
-        .cloned()
-        .collect::<Vec<_>>();
+    let return_bindings = vue27_script_setup_return_bindings(descriptor, &analysis, is_ts);
     let returned = if return_bindings.is_empty() {
         "{  }".to_string()
     } else {
@@ -2215,7 +2206,6 @@ fn vue27_script_setup_content(
     } else {
         "import { useCssVars as _useCssVars } from 'vue'\n"
     };
-    let is_ts = script_is_typescript(&script_setup.attrs);
     let runtime_options = vue27_script_setup_runtime_options(descriptor, &analysis, &normal_script);
     let setup_params = vue27_script_setup_params(&analysis, is_ts);
     let setup_prefix = format!(
@@ -2236,9 +2226,19 @@ fn vue27_script_setup_content(
     } else {
         helper_import.to_string()
     };
+    let script_setup_import_separator =
+        if !normal_script.module_content.is_empty() && !analysis.module_content.is_empty() {
+            "\n"
+        } else {
+            ""
+        };
     let content = format!(
-        "{}{}{}{}",
-        helper_import, normal_script.module_content, analysis.module_content, export_prefix
+        "{}{}{}{}{}",
+        helper_import,
+        normal_script.module_content,
+        script_setup_import_separator,
+        analysis.module_content,
+        export_prefix
     );
     content.trim().to_string()
 }
@@ -2261,6 +2261,57 @@ fn vue27_script_setup_runtime_options(
         runtime_options.push_str(&format!("\n  emits: {},", emits.trim()));
     }
     runtime_options
+}
+
+fn vue27_script_setup_return_bindings(
+    descriptor: &SfcDescriptor,
+    analysis: &Vue27ScriptSetupAnalysis,
+    is_ts: bool,
+) -> Vec<String> {
+    let script_returns = vue27_script_setup_script_return_bindings(descriptor);
+    let mut bindings = script_returns.bindings;
+    for value in &analysis.return_bindings {
+        push_unique(&mut bindings, value);
+    }
+    for import in &script_returns.imports {
+        if import.is_type {
+            continue;
+        }
+        if vue27_script_setup_import_is_returned(descriptor, import, is_ts) {
+            push_unique(&mut bindings, &import.local);
+        }
+    }
+    for import in &analysis.imports {
+        if import.is_type {
+            continue;
+        }
+        if vue27_script_setup_import_is_returned(descriptor, import, is_ts) {
+            push_unique(&mut bindings, &import.local);
+        }
+    }
+    bindings
+        .into_iter()
+        .filter(|name| {
+            !analysis
+                .removed_bindings
+                .iter()
+                .any(|removed| removed == name)
+        })
+        .collect()
+}
+
+fn vue27_script_setup_import_is_returned(
+    descriptor: &SfcDescriptor,
+    import: &Vue27ScriptImport,
+    is_ts: bool,
+) -> bool {
+    let Some(template) = descriptor.template.as_ref() else {
+        return true;
+    };
+    if template.attrs.src.is_some() || template.attrs.lang.is_some() {
+        return true;
+    }
+    vue27_template_uses_identifier(&template.content, &import.local, is_ts)
 }
 
 fn vue27_script_setup_params(analysis: &Vue27ScriptSetupAnalysis, is_ts: bool) -> String {
@@ -2469,7 +2520,7 @@ struct Vue27ScriptSetupAnalysis {
     setup_content: String,
     setup_prelude: String,
     return_bindings: Vec<String>,
-    import_return_bindings: Vec<String>,
+    imports: Vec<Vue27ScriptImport>,
     removed_bindings: Vec<String>,
     setup_bindings: BTreeMap<String, String>,
     props_bindings: Vec<String>,
@@ -2479,6 +2530,20 @@ struct Vue27ScriptSetupAnalysis {
     emit_binding: Option<String>,
     needs_expose: bool,
     user_import_aliases: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Vue27ScriptImport {
+    local: String,
+    source: String,
+    imported: String,
+    is_type: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Vue27ScriptReturnBindings {
+    bindings: Vec<String>,
+    imports: Vec<Vue27ScriptImport>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -2543,8 +2608,13 @@ fn analyze_vue27_script_setup(script_setup: &SfcBlock) -> Vue27ScriptSetupAnalys
                                     .setup_bindings
                                     .insert(local.clone(), "setup-maybe-ref".into());
                             }
+                            analysis.imports.push(Vue27ScriptImport {
+                                local: local.clone(),
+                                source: source_value.to_string(),
+                                imported: imported.unwrap_or_else(|| "default".into()),
+                                is_type: vue27_import_specifier_is_type(import, specifier),
+                            });
                             kept_specifiers.push(import_specifier_source(source, specifier));
-                            push_unique(&mut analysis.import_return_bindings, &local);
                         }
                     }
                 }
@@ -2618,9 +2688,6 @@ fn analyze_vue27_script_setup(script_setup: &SfcBlock) -> Vue27ScriptSetupAnalys
     let content = edits.apply();
     let (module_content, setup_content) = split_vue27_setup_module_content(&content);
     analysis.module_content = module_content;
-    for value in analysis.import_return_bindings.clone() {
-        push_unique(&mut analysis.return_bindings, &value);
-    }
     analysis.setup_content = setup_content;
     if analysis.module_content.ends_with('\n') {
         if let Some(indent) = leading_blank_line_indent(&analysis.setup_content) {
@@ -2881,8 +2948,757 @@ fn import_specifier_imported(specifier: &ImportDeclarationSpecifier<'_>) -> Opti
     }
 }
 
+fn vue27_import_specifier_is_type(
+    import: &oxc_ast::ast::ImportDeclaration<'_>,
+    specifier: &ImportDeclarationSpecifier<'_>,
+) -> bool {
+    import.import_kind == ImportOrExportKind::Type
+        || matches!(
+            specifier,
+            ImportDeclarationSpecifier::ImportSpecifier(specifier)
+                if specifier.import_kind == ImportOrExportKind::Type
+        )
+}
+
 fn import_specifier_source(source: &str, specifier: &ImportDeclarationSpecifier<'_>) -> String {
     source[specifier.span().start as usize..specifier.span().end as usize].to_string()
+}
+
+fn vue27_template_uses_identifier(template: &str, local: &str, is_ts: bool) -> bool {
+    let usage = vue27_template_usage_check_string(template, is_ts);
+    identifier_usage_contains(&usage, local)
+}
+
+fn vue27_template_usage_check_string(template: &str, is_ts: bool) -> String {
+    let mut code = String::new();
+    for token in HtmlTokenizer::new(template).tokenize() {
+        match token.kind {
+            HtmlTokenKind::StartTag {
+                name, attributes, ..
+            } => {
+                if !vue27_template_is_builtin_tag(&name) && !vue27_template_is_reserved_tag(&name) {
+                    let camel = vue27_camelize(&name);
+                    code.push(',');
+                    code.push_str(&camel);
+                    code.push(',');
+                    code.push_str(&vue27_capitalize(&camel));
+                }
+                for attribute in attributes {
+                    collect_vue27_template_attribute_usage(&mut code, &attribute, is_ts);
+                }
+            }
+            HtmlTokenKind::Text(text) => {
+                collect_vue27_template_text_usage(&mut code, &text, is_ts);
+            }
+            _ => {}
+        }
+    }
+    code.push(';');
+    code
+}
+
+fn collect_vue27_template_attribute_usage(code: &mut String, attr: &HtmlAttribute, is_ts: bool) {
+    let name = attr.name.as_str();
+    if vue27_template_is_directive_attr(name) {
+        let base_name = vue27_template_directive_base_name(name);
+        if !vue27_template_is_builtin_dir(&base_name) {
+            code.push_str(",v");
+            code.push_str(&vue27_capitalize(&vue27_camelize(&base_name)));
+        }
+        if let Some(value) = attr.value.as_deref() {
+            code.push(',');
+            code.push_str(&vue27_process_template_exp(value, is_ts, Some(&base_name)));
+        }
+    } else if name == "ref" {
+        if let Some(value) = attr.value.as_deref() {
+            code.push(',');
+            code.push_str(value);
+        }
+    }
+}
+
+fn collect_vue27_template_text_usage(code: &mut String, text: &str, is_ts: bool) {
+    let mut rest = text;
+    while let Some(start) = rest.find("{{") {
+        let after_start = &rest[start + 2..];
+        let Some(end) = after_start.find("}}") else {
+            break;
+        };
+        let expression = after_start[..end].trim();
+        if !expression.is_empty() {
+            code.push(',');
+            code.push_str(&vue27_process_template_exp(expression, is_ts, None));
+        }
+        rest = &after_start[end + 2..];
+    }
+}
+
+fn vue27_template_directive_base_name(name: &str) -> String {
+    let body = if let Some(value) = name.strip_prefix("v-") {
+        value
+    } else if name.starts_with('@') {
+        return "on".into();
+    } else if name.starts_with('#') {
+        return "slot".into();
+    } else if name.starts_with(':') {
+        return "bind".into();
+    } else {
+        name
+    };
+    body.split([':', '.', '['])
+        .next()
+        .filter(|value| !value.is_empty())
+        .unwrap_or(body)
+        .to_string()
+}
+
+fn vue27_template_is_directive_attr(name: &str) -> bool {
+    name.starts_with("v-")
+        || name.starts_with(':')
+        || name.starts_with('@')
+        || name.starts_with('#')
+}
+
+fn vue27_template_is_builtin_dir(name: &str) -> bool {
+    matches!(
+        name,
+        "text"
+            | "html"
+            | "show"
+            | "if"
+            | "else"
+            | "else-if"
+            | "for"
+            | "on"
+            | "bind"
+            | "model"
+            | "slot"
+            | "pre"
+            | "cloak"
+            | "once"
+            | "memo"
+    )
+}
+
+fn vue27_template_is_builtin_tag(name: &str) -> bool {
+    matches!(name, "slot" | "component")
+}
+
+fn vue27_template_is_reserved_tag(name: &str) -> bool {
+    const RESERVED: &str = concat!(
+        "html,body,base,head,link,meta,style,title,address,article,aside,footer,header,h1,h2,h3,h4,h5,h6,",
+        "nav,section,div,dd,dl,dt,figcaption,figure,picture,hr,img,li,main,ol,p,pre,ul,a,b,abbr,bdi,bdo,",
+        "br,cite,code,data,dfn,em,i,kbd,mark,q,rp,rt,ruby,s,samp,small,span,strong,sub,sup,time,u,var,wbr,",
+        "area,audio,map,track,video,embed,object,param,source,canvas,script,noscript,del,ins,caption,col,",
+        "colgroup,table,thead,tbody,td,th,tr,button,datalist,fieldset,form,input,label,legend,meter,optgroup,",
+        "option,output,progress,select,textarea,details,dialog,menu,menuitem,summary,content,element,shadow,",
+        "template,blockquote,iframe,tfoot,svg,animate,circle,clippath,cursor,defs,desc,ellipse,filter,font-face,",
+        "foreignObject,g,glyph,image,line,marker,mask,missing-glyph,path,pattern,polygon,polyline,rect,switch,",
+        "symbol,text,textpath,tspan,use,view"
+    );
+    RESERVED
+        .split(',')
+        .any(|tag| tag.eq_ignore_ascii_case(name))
+}
+
+fn vue27_process_template_exp(exp: &str, is_ts: bool, directive: Option<&str>) -> String {
+    if is_ts && vue27_template_exp_has_ts_syntax(exp) {
+        if directive == Some("slot") {
+            return vue27_extract_js_identifiers(&format!("({exp})=>{{}}"));
+        }
+        if directive == Some("on") {
+            return vue27_extract_js_identifiers(&format!("()=>{{return {exp}}}"));
+        }
+        if directive == Some("for") {
+            if let Some((left, right)) = vue27_split_for_expression(exp) {
+                let mut value = vue27_extract_js_identifiers(&format!("({left})=>{{}}"));
+                value.push_str(&vue27_extract_js_identifiers(right));
+                return value;
+            }
+        }
+        return vue27_extract_js_identifiers(exp);
+    }
+    vue27_strip_template_expression_strings(exp)
+}
+
+fn vue27_template_exp_has_ts_syntax(exp: &str) -> bool {
+    exp.contains(':') || exp.contains('<') || exp.split_whitespace().any(|part| part == "as")
+}
+
+fn vue27_split_for_expression(exp: &str) -> Option<(&str, &str)> {
+    for keyword in [" in ", " of "] {
+        if let Some(index) = exp.find(keyword) {
+            let left = exp[..index].trim();
+            let right = exp[index + keyword.len()..].trim();
+            if !left.is_empty() && !right.is_empty() {
+                return Some((left, right));
+            }
+        }
+    }
+    None
+}
+
+fn vue27_extract_js_identifiers(exp: &str) -> String {
+    let allocator = oxc_allocator::Allocator::default();
+    let parse_options = oxc_parser::ParseOptions {
+        parse_regular_expression: true,
+        ..oxc_parser::ParseOptions::default()
+    };
+    if let Ok(expression) = oxc_parser::Parser::new(
+        &allocator,
+        exp,
+        oxc_span::SourceType::ts().with_module(false),
+    )
+    .with_options(parse_options)
+    .parse_expression()
+    {
+        let mut value = String::new();
+        collect_vue27_expression_identifier_usage(&expression, &mut value);
+        return value;
+    }
+    let parsed = oxc_parser::Parser::new(
+        &allocator,
+        exp,
+        oxc_span::SourceType::ts().with_module(false),
+    )
+    .with_options(parse_options)
+    .parse();
+    if parsed.panicked || !parsed.errors.is_empty() {
+        return String::new();
+    }
+    let mut value = String::new();
+    for statement in &parsed.program.body {
+        collect_vue27_statement_identifier_usage(statement, &mut value);
+    }
+    value
+}
+
+fn collect_vue27_statement_identifier_usage(statement: &Statement<'_>, value: &mut String) {
+    match statement {
+        Statement::BlockStatement(block) => {
+            for statement in &block.body {
+                collect_vue27_statement_identifier_usage(statement, value);
+            }
+        }
+        Statement::ExpressionStatement(statement) => {
+            collect_vue27_expression_identifier_usage(&statement.expression, value);
+        }
+        Statement::ReturnStatement(statement) => {
+            if let Some(argument) = &statement.argument {
+                collect_vue27_expression_identifier_usage(argument, value);
+            }
+        }
+        Statement::VariableDeclaration(declaration) => {
+            for declarator in &declaration.declarations {
+                if let Some(init) = &declarator.init {
+                    collect_vue27_expression_identifier_usage(init, value);
+                }
+            }
+        }
+        Statement::FunctionDeclaration(function) => {
+            collect_vue27_function_identifier_usage(function, value);
+        }
+        Statement::IfStatement(statement) => {
+            collect_vue27_expression_identifier_usage(&statement.test, value);
+            collect_vue27_statement_identifier_usage(&statement.consequent, value);
+            if let Some(alternate) = &statement.alternate {
+                collect_vue27_statement_identifier_usage(alternate, value);
+            }
+        }
+        Statement::ForStatement(statement) => {
+            if let Some(init) = &statement.init {
+                match init {
+                    oxc_ast::ast::ForStatementInit::VariableDeclaration(declaration) => {
+                        for declarator in &declaration.declarations {
+                            if let Some(init) = &declarator.init {
+                                collect_vue27_expression_identifier_usage(init, value);
+                            }
+                        }
+                    }
+                    _ => {
+                        if let Some(expression) = init.as_expression() {
+                            collect_vue27_expression_identifier_usage(expression, value);
+                        }
+                    }
+                }
+            }
+            if let Some(test) = &statement.test {
+                collect_vue27_expression_identifier_usage(test, value);
+            }
+            if let Some(update) = &statement.update {
+                collect_vue27_expression_identifier_usage(update, value);
+            }
+            collect_vue27_statement_identifier_usage(&statement.body, value);
+        }
+        Statement::ForInStatement(statement) => {
+            collect_vue27_expression_identifier_usage(&statement.right, value);
+            collect_vue27_statement_identifier_usage(&statement.body, value);
+        }
+        Statement::ForOfStatement(statement) => {
+            collect_vue27_expression_identifier_usage(&statement.right, value);
+            collect_vue27_statement_identifier_usage(&statement.body, value);
+        }
+        Statement::WhileStatement(statement) => {
+            collect_vue27_expression_identifier_usage(&statement.test, value);
+            collect_vue27_statement_identifier_usage(&statement.body, value);
+        }
+        Statement::DoWhileStatement(statement) => {
+            collect_vue27_statement_identifier_usage(&statement.body, value);
+            collect_vue27_expression_identifier_usage(&statement.test, value);
+        }
+        Statement::SwitchStatement(statement) => {
+            collect_vue27_expression_identifier_usage(&statement.discriminant, value);
+            for case in &statement.cases {
+                if let Some(test) = &case.test {
+                    collect_vue27_expression_identifier_usage(test, value);
+                }
+                for statement in &case.consequent {
+                    collect_vue27_statement_identifier_usage(statement, value);
+                }
+            }
+        }
+        Statement::ThrowStatement(statement) => {
+            collect_vue27_expression_identifier_usage(&statement.argument, value);
+        }
+        Statement::TryStatement(statement) => {
+            for statement in &statement.block.body {
+                collect_vue27_statement_identifier_usage(statement, value);
+            }
+            if let Some(handler) = &statement.handler {
+                for statement in &handler.body.body {
+                    collect_vue27_statement_identifier_usage(statement, value);
+                }
+            }
+            if let Some(finalizer) = &statement.finalizer {
+                for statement in &finalizer.body {
+                    collect_vue27_statement_identifier_usage(statement, value);
+                }
+            }
+        }
+        Statement::WithStatement(statement) => {
+            collect_vue27_expression_identifier_usage(&statement.object, value);
+            collect_vue27_statement_identifier_usage(&statement.body, value);
+        }
+        Statement::LabeledStatement(statement) => {
+            collect_vue27_statement_identifier_usage(&statement.body, value);
+        }
+        _ => {}
+    }
+}
+
+fn collect_vue27_expression_identifier_usage(expression: &Expression<'_>, value: &mut String) {
+    match expression {
+        Expression::Identifier(identifier) => {
+            push_vue27_identifier_usage(value, identifier.name.as_str())
+        }
+        Expression::ArrayExpression(array) => {
+            for element in &array.elements {
+                match element {
+                    oxc_ast::ast::ArrayExpressionElement::SpreadElement(spread) => {
+                        collect_vue27_expression_identifier_usage(&spread.argument, value);
+                    }
+                    oxc_ast::ast::ArrayExpressionElement::Elision(_) => {}
+                    element => {
+                        if let Some(expression) = element.as_expression() {
+                            collect_vue27_expression_identifier_usage(expression, value);
+                        }
+                    }
+                }
+            }
+        }
+        Expression::ObjectExpression(object) => {
+            for property in &object.properties {
+                match property {
+                    ObjectPropertyKind::ObjectProperty(property) => {
+                        if property.computed {
+                            collect_vue27_property_key_identifier_usage(&property.key, value);
+                        }
+                        collect_vue27_expression_identifier_usage(&property.value, value);
+                    }
+                    ObjectPropertyKind::SpreadProperty(spread) => {
+                        collect_vue27_expression_identifier_usage(&spread.argument, value);
+                    }
+                }
+            }
+        }
+        Expression::CallExpression(call) => {
+            collect_vue27_expression_identifier_usage(&call.callee, value);
+            for argument in &call.arguments {
+                collect_vue27_argument_identifier_usage(argument, value);
+            }
+        }
+        Expression::NewExpression(expression) => {
+            collect_vue27_expression_identifier_usage(&expression.callee, value);
+            for argument in &expression.arguments {
+                collect_vue27_argument_identifier_usage(argument, value);
+            }
+        }
+        Expression::StaticMemberExpression(member) => {
+            collect_vue27_expression_identifier_usage(&member.object, value);
+        }
+        Expression::ComputedMemberExpression(member) => {
+            collect_vue27_expression_identifier_usage(&member.object, value);
+            collect_vue27_expression_identifier_usage(&member.expression, value);
+        }
+        Expression::PrivateFieldExpression(member) => {
+            collect_vue27_expression_identifier_usage(&member.object, value);
+        }
+        Expression::FunctionExpression(function) => {
+            collect_vue27_function_identifier_usage(function, value);
+        }
+        Expression::ArrowFunctionExpression(function) => {
+            collect_vue27_arrow_function_identifier_usage(function, value);
+        }
+        Expression::AssignmentExpression(assignment) => {
+            collect_vue27_assignment_target_identifier_usage(&assignment.left, value);
+            collect_vue27_expression_identifier_usage(&assignment.right, value);
+        }
+        Expression::UpdateExpression(update) => {
+            collect_vue27_simple_assignment_target_identifier_usage(&update.argument, value);
+        }
+        Expression::UnaryExpression(unary) => {
+            collect_vue27_expression_identifier_usage(&unary.argument, value);
+        }
+        Expression::AwaitExpression(expression) => {
+            collect_vue27_expression_identifier_usage(&expression.argument, value);
+        }
+        Expression::BinaryExpression(binary) => {
+            collect_vue27_expression_identifier_usage(&binary.left, value);
+            collect_vue27_expression_identifier_usage(&binary.right, value);
+        }
+        Expression::PrivateInExpression(expression) => {
+            collect_vue27_expression_identifier_usage(&expression.right, value);
+        }
+        Expression::LogicalExpression(logical) => {
+            collect_vue27_expression_identifier_usage(&logical.left, value);
+            collect_vue27_expression_identifier_usage(&logical.right, value);
+        }
+        Expression::ConditionalExpression(conditional) => {
+            collect_vue27_expression_identifier_usage(&conditional.test, value);
+            collect_vue27_expression_identifier_usage(&conditional.consequent, value);
+            collect_vue27_expression_identifier_usage(&conditional.alternate, value);
+        }
+        Expression::SequenceExpression(sequence) => {
+            for expression in &sequence.expressions {
+                collect_vue27_expression_identifier_usage(expression, value);
+            }
+        }
+        Expression::TemplateLiteral(template) => {
+            for expression in &template.expressions {
+                collect_vue27_expression_identifier_usage(expression, value);
+            }
+        }
+        Expression::TaggedTemplateExpression(template) => {
+            collect_vue27_expression_identifier_usage(&template.tag, value);
+            for expression in &template.quasi.expressions {
+                collect_vue27_expression_identifier_usage(expression, value);
+            }
+        }
+        Expression::ParenthesizedExpression(parenthesized) => {
+            collect_vue27_expression_identifier_usage(&parenthesized.expression, value);
+        }
+        Expression::TSAsExpression(expression) => {
+            collect_vue27_expression_identifier_usage(&expression.expression, value);
+        }
+        Expression::TSSatisfiesExpression(expression) => {
+            collect_vue27_expression_identifier_usage(&expression.expression, value);
+        }
+        Expression::TSTypeAssertion(expression) => {
+            collect_vue27_expression_identifier_usage(&expression.expression, value);
+        }
+        Expression::TSNonNullExpression(expression) => {
+            collect_vue27_expression_identifier_usage(&expression.expression, value);
+        }
+        Expression::TSInstantiationExpression(expression) => {
+            collect_vue27_expression_identifier_usage(&expression.expression, value);
+        }
+        Expression::ChainExpression(chain) => match &chain.expression {
+            oxc_ast::ast::ChainElement::CallExpression(call) => {
+                collect_vue27_expression_identifier_usage(&call.callee, value);
+                for argument in &call.arguments {
+                    collect_vue27_argument_identifier_usage(argument, value);
+                }
+            }
+            oxc_ast::ast::ChainElement::TSNonNullExpression(expression) => {
+                collect_vue27_expression_identifier_usage(&expression.expression, value);
+            }
+            oxc_ast::ast::ChainElement::StaticMemberExpression(member) => {
+                collect_vue27_expression_identifier_usage(&member.object, value);
+            }
+            oxc_ast::ast::ChainElement::ComputedMemberExpression(member) => {
+                collect_vue27_expression_identifier_usage(&member.object, value);
+                collect_vue27_expression_identifier_usage(&member.expression, value);
+            }
+            oxc_ast::ast::ChainElement::PrivateFieldExpression(member) => {
+                collect_vue27_expression_identifier_usage(&member.object, value);
+            }
+        },
+        _ => {}
+    }
+}
+
+fn collect_vue27_argument_identifier_usage(argument: &Argument<'_>, value: &mut String) {
+    match argument {
+        Argument::SpreadElement(spread) => {
+            collect_vue27_expression_identifier_usage(&spread.argument, value);
+        }
+        _ => collect_vue27_expression_identifier_usage(argument.to_expression(), value),
+    }
+}
+
+fn collect_vue27_property_key_identifier_usage(key: &PropertyKey<'_>, value: &mut String) {
+    match key {
+        PropertyKey::StaticIdentifier(_) | PropertyKey::PrivateIdentifier(_) => {}
+        _ => collect_vue27_expression_identifier_usage(key.to_expression(), value),
+    }
+}
+
+fn collect_vue27_function_identifier_usage(function: &Function<'_>, value: &mut String) {
+    for param in &function.params.items {
+        if let Some(initializer) = &param.initializer {
+            collect_vue27_expression_identifier_usage(initializer, value);
+        }
+    }
+    if let Some(body) = &function.body {
+        for statement in &body.statements {
+            collect_vue27_statement_identifier_usage(statement, value);
+        }
+    }
+}
+
+fn collect_vue27_arrow_function_identifier_usage(
+    function: &ArrowFunctionExpression<'_>,
+    value: &mut String,
+) {
+    for param in &function.params.items {
+        if let Some(initializer) = &param.initializer {
+            collect_vue27_expression_identifier_usage(initializer, value);
+        }
+    }
+    for statement in &function.body.statements {
+        collect_vue27_statement_identifier_usage(statement, value);
+    }
+}
+
+fn collect_vue27_assignment_target_identifier_usage(
+    target: &AssignmentTarget<'_>,
+    value: &mut String,
+) {
+    match target {
+        AssignmentTarget::AssignmentTargetIdentifier(identifier) => {
+            push_vue27_identifier_usage(value, identifier.name.as_str());
+        }
+        AssignmentTarget::StaticMemberExpression(member) => {
+            collect_vue27_expression_identifier_usage(&member.object, value);
+        }
+        AssignmentTarget::ComputedMemberExpression(member) => {
+            collect_vue27_expression_identifier_usage(&member.object, value);
+            collect_vue27_expression_identifier_usage(&member.expression, value);
+        }
+        AssignmentTarget::PrivateFieldExpression(member) => {
+            collect_vue27_expression_identifier_usage(&member.object, value);
+        }
+        AssignmentTarget::TSAsExpression(expression) => {
+            collect_vue27_expression_identifier_usage(&expression.expression, value);
+        }
+        AssignmentTarget::TSSatisfiesExpression(expression) => {
+            collect_vue27_expression_identifier_usage(&expression.expression, value);
+        }
+        AssignmentTarget::TSNonNullExpression(expression) => {
+            collect_vue27_expression_identifier_usage(&expression.expression, value);
+        }
+        AssignmentTarget::TSTypeAssertion(expression) => {
+            collect_vue27_expression_identifier_usage(&expression.expression, value);
+        }
+        AssignmentTarget::ArrayAssignmentTarget(target) => {
+            for element in target.elements.iter().flatten() {
+                collect_vue27_assignment_target_maybe_default_identifier_usage(element, value);
+            }
+            if let Some(rest) = &target.rest {
+                collect_vue27_assignment_target_identifier_usage(&rest.target, value);
+            }
+        }
+        AssignmentTarget::ObjectAssignmentTarget(target) => {
+            for property in &target.properties {
+                match property {
+                    oxc_ast::ast::AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(
+                        property,
+                    ) => {
+                        push_vue27_identifier_usage(value, property.binding.name.as_str());
+                        if let Some(init) = &property.init {
+                            collect_vue27_expression_identifier_usage(init, value);
+                        }
+                    }
+                    oxc_ast::ast::AssignmentTargetProperty::AssignmentTargetPropertyProperty(
+                        property,
+                    ) => {
+                        if property.computed {
+                            collect_vue27_property_key_identifier_usage(&property.name, value);
+                        }
+                        collect_vue27_assignment_target_maybe_default_identifier_usage(
+                            &property.binding,
+                            value,
+                        );
+                    }
+                }
+            }
+            if let Some(rest) = &target.rest {
+                collect_vue27_assignment_target_identifier_usage(&rest.target, value);
+            }
+        }
+    }
+}
+
+fn collect_vue27_assignment_target_maybe_default_identifier_usage(
+    target: &oxc_ast::ast::AssignmentTargetMaybeDefault<'_>,
+    value: &mut String,
+) {
+    match target {
+        oxc_ast::ast::AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(target) => {
+            collect_vue27_assignment_target_identifier_usage(&target.binding, value);
+            collect_vue27_expression_identifier_usage(&target.init, value);
+        }
+        _ => {
+            if let Some(target) = target.as_assignment_target() {
+                collect_vue27_assignment_target_identifier_usage(target, value);
+            }
+        }
+    }
+}
+
+fn collect_vue27_simple_assignment_target_identifier_usage(
+    target: &SimpleAssignmentTarget<'_>,
+    value: &mut String,
+) {
+    match target {
+        SimpleAssignmentTarget::AssignmentTargetIdentifier(identifier) => {
+            push_vue27_identifier_usage(value, identifier.name.as_str());
+        }
+        SimpleAssignmentTarget::StaticMemberExpression(member) => {
+            collect_vue27_expression_identifier_usage(&member.object, value);
+        }
+        SimpleAssignmentTarget::ComputedMemberExpression(member) => {
+            collect_vue27_expression_identifier_usage(&member.object, value);
+            collect_vue27_expression_identifier_usage(&member.expression, value);
+        }
+        SimpleAssignmentTarget::PrivateFieldExpression(member) => {
+            collect_vue27_expression_identifier_usage(&member.object, value);
+        }
+        SimpleAssignmentTarget::TSAsExpression(expression) => {
+            collect_vue27_expression_identifier_usage(&expression.expression, value);
+        }
+        SimpleAssignmentTarget::TSSatisfiesExpression(expression) => {
+            collect_vue27_expression_identifier_usage(&expression.expression, value);
+        }
+        SimpleAssignmentTarget::TSNonNullExpression(expression) => {
+            collect_vue27_expression_identifier_usage(&expression.expression, value);
+        }
+        SimpleAssignmentTarget::TSTypeAssertion(expression) => {
+            collect_vue27_expression_identifier_usage(&expression.expression, value);
+        }
+    }
+}
+
+fn push_vue27_identifier_usage(value: &mut String, name: &str) {
+    value.push(',');
+    value.push_str(name);
+}
+
+fn vue27_strip_template_expression_strings(exp: &str) -> String {
+    let mut output = String::new();
+    let mut chars = exp.char_indices().peekable();
+    while let Some((_, ch)) = chars.next() {
+        match ch {
+            '\'' | '"' => {
+                while let Some((_, inner)) = chars.next() {
+                    if inner == '\\' {
+                        let _ = chars.next();
+                    } else if inner == ch {
+                        break;
+                    }
+                }
+            }
+            '`' => {
+                let mut template_expr = String::new();
+                while let Some((_, inner)) = chars.next() {
+                    if inner == '\\' {
+                        let _ = chars.next();
+                    } else if inner == '`' {
+                        break;
+                    } else if inner == '$' && chars.peek().is_some_and(|(_, next)| *next == '{') {
+                        let _ = chars.next();
+                        let mut depth = 1usize;
+                        while let Some((_, expr_ch)) = chars.next() {
+                            if expr_ch == '{' {
+                                depth += 1;
+                                template_expr.push(expr_ch);
+                            } else if expr_ch == '}' {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                                template_expr.push(expr_ch);
+                            } else {
+                                template_expr.push(expr_ch);
+                            }
+                        }
+                        template_expr.push(',');
+                    }
+                }
+                output.push_str(&template_expr);
+            }
+            _ => output.push(ch),
+        }
+    }
+    output
+}
+
+fn identifier_usage_contains(usage: &str, local: &str) -> bool {
+    if local.is_empty() {
+        return false;
+    }
+    let mut search_start = 0usize;
+    while let Some(index) = usage[search_start..].find(local) {
+        let start = search_start + index;
+        let end = start + local.len();
+        let before = usage[..start].chars().next_back();
+        let after = usage[end..].chars().next();
+        if !before.is_some_and(is_identifier_usage_char)
+            && !after.is_some_and(is_identifier_usage_char)
+        {
+            return true;
+        }
+        search_start = end;
+    }
+    false
+}
+
+fn is_identifier_usage_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$')
+}
+
+fn vue27_camelize(value: &str) -> String {
+    let mut output = String::new();
+    let mut uppercase_next = false;
+    for ch in value.chars() {
+        if ch == '-' {
+            uppercase_next = true;
+        } else if uppercase_next {
+            output.extend(ch.to_uppercase());
+            uppercase_next = false;
+        } else {
+            output.push(ch);
+        }
+    }
+    output
+}
+
+fn vue27_capitalize(value: &str) -> String {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    first.to_uppercase().chain(chars).collect()
 }
 
 fn split_vue27_setup_module_content(content: &str) -> (String, String) {
@@ -2896,7 +3712,11 @@ fn split_vue27_setup_module_content(content: &str) -> (String, String) {
             if !module.is_empty() && !module.ends_with('\n') {
                 module.push('\n');
             }
-            module.push_str(trimmed);
+            if module.is_empty() {
+                module.push_str(trimmed);
+            } else {
+                module.push_str(line_without_newline);
+            }
             module.push('\n');
             last_module_indent =
                 &line_without_newline[..line_without_newline.len() - trimmed.len()];
@@ -3019,6 +3839,111 @@ fn vue27_script_setup_script_bindings(descriptor: &SfcDescriptor) -> BTreeMap<St
     bindings
 }
 
+fn vue27_script_setup_script_return_bindings(
+    descriptor: &SfcDescriptor,
+) -> Vue27ScriptReturnBindings {
+    let Some(script) = descriptor.script.as_ref() else {
+        return Vue27ScriptReturnBindings::default();
+    };
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(
+        &allocator,
+        &script.content,
+        script_source_type_from_attrs(&script.attrs),
+    )
+    .with_options(oxc_parser::ParseOptions {
+        parse_regular_expression: true,
+        ..oxc_parser::ParseOptions::default()
+    })
+    .parse();
+    if parsed.panicked || !parsed.errors.is_empty() {
+        return Vue27ScriptReturnBindings::default();
+    }
+    let mut result = Vue27ScriptReturnBindings::default();
+    for statement in &parsed.program.body {
+        collect_vue27_top_level_script_return_binding(statement, &mut result);
+    }
+    result
+}
+
+fn collect_vue27_top_level_script_return_binding(
+    statement: &Statement<'_>,
+    result: &mut Vue27ScriptReturnBindings,
+) {
+    match statement {
+        Statement::ImportDeclaration(import) => {
+            collect_vue27_import_return_bindings(import, &mut result.imports);
+        }
+        Statement::VariableDeclaration(declaration) if !declaration.declare => {
+            collect_pattern_return_bindings_from_declaration(declaration, &mut result.bindings);
+        }
+        Statement::FunctionDeclaration(function) if !function.declare => {
+            if let Some(id) = &function.id {
+                push_unique(&mut result.bindings, id.name.as_str());
+            }
+        }
+        Statement::ClassDeclaration(class) if !class.declare => {
+            if let Some(id) = &class.id {
+                push_unique(&mut result.bindings, id.name.as_str());
+            }
+        }
+        Statement::TSEnumDeclaration(declaration) if !declaration.declare => {
+            push_unique(&mut result.bindings, declaration.id.name.as_str());
+        }
+        Statement::ExportNamedDeclaration(declaration)
+            if declaration.export_kind == ImportOrExportKind::Value =>
+        {
+            if let Some(declaration) = &declaration.declaration {
+                collect_vue27_declaration_return_bindings(declaration, &mut result.bindings);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_vue27_import_return_bindings(
+    import: &oxc_ast::ast::ImportDeclaration<'_>,
+    imports: &mut Vec<Vue27ScriptImport>,
+) {
+    let Some(specifiers) = &import.specifiers else {
+        return;
+    };
+    let source = import.source.value.as_str();
+    for specifier in specifiers {
+        imports.push(Vue27ScriptImport {
+            local: import_specifier_local(specifier),
+            source: source.to_string(),
+            imported: import_specifier_imported(specifier).unwrap_or_else(|| "default".into()),
+            is_type: vue27_import_specifier_is_type(import, specifier),
+        });
+    }
+}
+
+fn collect_vue27_declaration_return_bindings(
+    declaration: &Declaration<'_>,
+    bindings: &mut Vec<String>,
+) {
+    match declaration {
+        Declaration::VariableDeclaration(declaration) if !declaration.declare => {
+            collect_pattern_return_bindings_from_declaration(declaration, bindings);
+        }
+        Declaration::FunctionDeclaration(function) if !function.declare => {
+            if let Some(id) = &function.id {
+                push_unique(bindings, id.name.as_str());
+            }
+        }
+        Declaration::ClassDeclaration(class) if !class.declare => {
+            if let Some(id) = &class.id {
+                push_unique(bindings, id.name.as_str());
+            }
+        }
+        Declaration::TSEnumDeclaration(declaration) if !declaration.declare => {
+            push_unique(bindings, declaration.id.name.as_str());
+        }
+        _ => {}
+    }
+}
+
 fn collect_vue27_top_level_script_binding(
     statement: &Statement<'_>,
     bindings: &mut BTreeMap<String, String>,
@@ -3105,6 +4030,15 @@ fn collect_vue27_script_declaration_bindings(
     };
     for declarator in &declaration.declarations {
         collect_pattern_binding_types(&declarator.id, binding_type, bindings);
+    }
+}
+
+fn collect_pattern_return_bindings_from_declaration(
+    declaration: &VariableDeclaration<'_>,
+    bindings: &mut Vec<String>,
+) {
+    for declarator in &declaration.declarations {
+        collect_pattern_bindings(&declarator.id, bindings);
     }
 }
 
@@ -3902,6 +4836,89 @@ let b = 2
             script.bindings.get("__isScriptSetup").map(String::as_str),
             Some("true")
         );
+    }
+
+    #[test]
+    fn vue27_compile_script_returns_top_level_normal_and_setup_bindings() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "foo.vue",
+            r#"<script setup>
+import { x } from './x'
+let a = 1
+const b = 2
+function c() {}
+class d {}
+</script>
+<script>
+import { xx } from './x'
+let aa = 1
+const bb = 2
+function cc() {}
+class dd {}
+</script>"#,
+        );
+        let script = compiler.compile_vue27_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script
+            .content
+            .contains("return { aa, bb, cc, dd, a, b, c, d, xx, x }"));
+    }
+
+    #[test]
+    fn vue27_compile_script_filters_ts_template_import_usage() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "foo.vue",
+            r#"<script setup lang="ts">
+import { FooBar, FooBaz, FooQux, foo } from './x'
+const fooBar: FooBar = 1
+</script>
+<template>
+  <FooBaz></FooBaz>
+  <foo-qux/>
+  <foo/>
+  FooBar
+</template>"#,
+        );
+        let script = compiler.compile_vue27_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script
+            .content
+            .contains("return { fooBar, FooBaz, FooQux, foo }"));
+        assert!(!script.content.contains("return { fooBar, FooBar,"));
+    }
+
+    #[test]
+    fn vue27_compile_script_filters_template_string_import_usage() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "foo.vue",
+            r#"<script setup lang="ts">
+import { VAR, VAR2, VAR3 } from './x'
+</script>
+<template>
+  {{ `${VAR}VAR2${VAR3}` }}
+</template>"#,
+        );
+        let script = compiler.compile_vue27_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.content.contains("return { VAR, VAR3 }"));
+    }
+
+    #[test]
+    fn vue27_compile_script_filters_import_type_return_bindings() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "foo.vue",
+            r#"<script setup lang="ts">
+import type { Foo } from './main.ts'
+import { type Bar, Baz } from './main.ts'
+</script>"#,
+        );
+        let script = compiler.compile_vue27_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.content.contains("return { Baz }"));
     }
 
     #[test]
