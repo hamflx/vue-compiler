@@ -1,5 +1,10 @@
 # Memory
 
+- Current round: completed the M15 `vuec_runtime_tests` crate for generated runtime smoke validation.
+- Added a Node/jsdom runtime runner that loads the lock-provisioned official Vue runtimes from `target/compat/npm/<version>/node_modules`, evaluates generated Vue 2 render bodies, transforms generated Vue 3 module render/SSR output into an execution sandbox, captures runtime warnings, and reports normalized `{ kind, html, warnings }` smoke results.
+- The smoke helpers cover Vue 2.6 and Vue 2.7 DOM mounting, Vue 3 DOM mounting, Vue 3 SSR rendering, Vue 3 SSR output comparison against official `@vue/compiler-ssr` runtime HTML for the same fixture, and Vue 3 hydration warning capture. This crate is runtime execution validation only; it does not move compiler semantics into `xtask/src/compat.rs` and does not change official conformance coverage classification.
+- Verification for this runtime-smoke slice: `cargo fmt --all --check`, `git diff --check`, `cargo check -p vuec_runtime_tests`, `cargo test -p vuec_runtime_tests`, `cargo test --workspace`, and `cargo xtask summarize-compat --locked` (`7/7` pass).
+
 - Current round: completed the initial `vuec_cli` crate for development-plan M18.
 - Added a real `vuec` binary with `compile-template`, `compile-sfc`, `compile-ssr`, `parse-sfc`, `conformance`, and `bench` subcommands. The compile commands call existing Rust compiler APIs (`vuec_vue2`, `vuec_vue3_dom`, `vuec_vue3_ssr`, and `vuec_sfc`) and do not carry compiler semantics in the CLI layer. Vue 3 CLI template/SSR paths reuse DOM parser defaults to match bridge/SFC behavior.
 - CLI output supports human-readable code/render output, `--json` machine-readable result objects, `--diagnostics` stderr rendering, `--source-map` for Vue 3 template/SSR codegen, and `--map-out` for writing source-map JSON when the underlying Rust result provides one. `conformance` is a wrapper around `cargo xtask run-conformance`; `bench` is a local smoke benchmark loop, not a replacement for future M19 benchmark reporting.

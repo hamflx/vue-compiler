@@ -49,6 +49,7 @@
 - [x] Vue 3 compiler-dom Rust-backed public `compile` content-directive slice for `index.spec.ts`, emitting official `v-html` / `v-text` render props, patch flags, dynamic props, child suppression, helper ordering, and public import routing through the generated alias; full DOM suite remains `133/133`, now reported as `rust-backed 34/34`, `mixed 99/99`.
 - [x] Vue 3 compiler-ssr Rust public `compile` default-option normalization slice, forcing prefixed SSR output, disabling public `cacheHandlers` / `hoistStatic`, and matching default/module versus explicit `mode: "function"` `scopeId` semantics in the Rust facade and bridge; full SSR suite remains `129/129` with coverage `mixed 129/129`, `rust-backed 0/0`.
 - [x] Vue 3 compiler-ssr Rust MIR template-literal slice, merging root text/interpolation/static fragment runs and nested static SSR elements into template-literal `_push(...)` calls while preserving control-flow boundaries; full SSR suite remains `129/129` with coverage `mixed 129/129`, `rust-backed 0/0`, and no `xtask/src/compat.rs` changes.
+- [x] `vuec_runtime_tests` M15 runtime smoke crate, executing generated Vue 2.6 / Vue 2.7 render bodies and Vue 3 DOM/SSR/hydration output against lock-provisioned official Vue runtimes through Node/jsdom, including a Vue 3 SSR runtime HTML comparison against official `@vue/compiler-ssr`.
 - [x] Vue 3 compiler-dom mixed alias-runtime transform execution slice for official DOM `baseCompile` callers (`ignoreSideEffectTags` closed; full DOM suite currently `87/133`, `mixed` coverage).
 - [x] Vue 3 compiler-dom Rust-backed dynamic runtime directive helper projection for `vShow.spec.ts` (`2/2`; full DOM suite currently `88/133`, `mixed` coverage).
 - [x] Vue 3 compiler-dom Rust-backed dynamic built-in component helper projection for `Transition.spec.ts` (`14/14`; full DOM suite currently `91/133`, `mixed` coverage).
@@ -126,6 +127,13 @@
 - Implemented `compile-template` for Vue 2 and Vue 3 templates, `compile-sfc` for Vue 3 SFC descriptors/template/script/style output, `compile-ssr` for template or SFC SSR rendering, `parse-sfc`, `conformance` as an `xtask run-conformance` wrapper, and a smoke `bench` loop.
 - CLI outputs human-readable code by default and JSON result objects with `--json`. It can render diagnostics to stderr with `--diagnostics` and write source maps with `--map-out` when the underlying compiler result provides a map.
 - Verification this round: `cargo fmt --all --check`, `git diff --check`, `cargo check -p vuec_cli`, `cargo test -p vuec_cli`, direct `cargo run -p vuec_cli --bin vuec` smoke calls for Vue 2 template, Vue 3 template, Vue 3 SFC, SSR, parse-sfc, and bench JSON, `cargo test --workspace`, and `cargo xtask summarize-compat --locked`.
+
+## Current Runtime Smoke Slice
+
+- Added `crates/vuec_runtime_tests` for M15 runtime validation. It compiles representative templates through the Rust Vue 2, Vue 3 DOM, and Vue 3 SSR compiler crates, then executes the generated render functions in Node against the official runtimes already provisioned under `target/compat/npm`.
+- Runtime coverage includes Vue 2.6 DOM mount, Vue 2.7 DOM mount, Vue 3 DOM mount, Vue 3 SSR string rendering, Vue 3 SSR runtime HTML comparison against official `@vue/compiler-ssr`, and Vue 3 hydration warning capture through `jsdom`.
+- This crate is an execution harness and smoke-test surface, not a compiler semantics layer. It does not edit `xtask/src/compat.rs`, and it does not reclassify official conformance suites.
+- Verification this round: `cargo fmt --all --check`, `git diff --check`, `cargo check -p vuec_runtime_tests`, `cargo test -p vuec_runtime_tests`, `cargo test --workspace`, and `cargo xtask summarize-compat --locked`.
 
 - [x] Vue 2 official internal `generate(null)` API adapter parity slice, matching the official `_c("div")` fallback string in generated source shims; current official results improve to Vue 2.6 compiler `98/188` and Vue 2.7 compiler `94/190`, while Vue 2.7 SFC remains `5/144`.
 - [x] Vue 2 compiler Rust direct AST `generate(ast)` parity slice, routing official internal codegen shims to Rust AST codegen and supporting mutated empty event handlers; current official results improve to Vue 2.6 compiler `99/188` and Vue 2.7 compiler `95/190`, while Vue 2.7 SFC remains `5/144`.

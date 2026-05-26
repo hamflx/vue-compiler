@@ -1,0 +1,15 @@
+[package]
+name = "vuec_runtime_tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+vuec_source = { path = "../vuec_source" }
+vuec_vue2 = { path = "../vuec_vue2" }
+vuec_vue3_core = { path = "../vuec_vue3_core" }
+vuec_vue3_dom = { path = "../vuec_vue3_dom" }
+vuec_vue3_ssr = { path = "../vuec_vue3_ssr" }

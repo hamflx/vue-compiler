@@ -17,6 +17,7 @@ members = [
   "crates/vuec_source",
   "crates/vuec_node_bridge",
   "crates/vuec_cli",
+  "crates/vuec_runtime_tests",
   "xtask",
 ]
 
