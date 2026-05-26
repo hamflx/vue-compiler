@@ -21,6 +21,7 @@ pub struct Vue2CompileOptions {
     pub should_decode_newlines: bool,
     pub should_decode_newlines_for_href: bool,
     pub optimize: bool,
+    pub disable_default_must_use_prop: bool,
 }
 
 impl Default for Vue2CompileOptions {
@@ -37,6 +38,7 @@ impl Default for Vue2CompileOptions {
             should_decode_newlines: false,
             should_decode_newlines_for_href: false,
             optimize: true,
+            disable_default_must_use_prop: false,
         }
     }
 }
@@ -137,6 +139,8 @@ pub struct Vue2Text {
 pub struct Vue2Element {
     pub tag: String,
     pub attrs_list: Vec<Vue2Attribute>,
+    #[serde(default)]
+    pub raw_attrs_list: Vec<Vue2Attribute>,
     pub attrs_map: BTreeMap<String, String>,
     pub raw_attrs_map: BTreeMap<String, Vue2Attribute>,
     pub attrs: Vec<Vue2Attribute>,
@@ -559,6 +563,7 @@ fn create_element(
     }
     Vue2Element {
         tag,
+        raw_attrs_list: attrs_list.clone(),
         attrs_list,
         attrs_map,
         raw_attrs_map,
@@ -981,7 +986,7 @@ fn process_attrs(
                         span: attr.span,
                         dynamic: is_dynamic,
                     };
-                    if should_use_prop(element, &target_attr.name, &modifiers) {
+                    if should_use_prop(element, &target_attr.name, &modifiers, options) {
                         element.props.push(target_attr);
                     } else if is_dynamic {
                         element.dynamic_attrs.push(target_attr);
@@ -2407,12 +2412,22 @@ fn normalize_bound_name(name: &str, modifiers: &BTreeMap<String, bool>, dynamic:
     }
 }
 
-fn should_use_prop(element: &Vue2Element, name: &str, modifiers: &BTreeMap<String, bool>) -> bool {
-    modifiers.get("prop").copied().unwrap_or(false)
-        || matches!(
-            (element.tag.as_str(), name),
-            ("input", "value") | ("textarea", "value") | ("video", "muted")
-        )
+fn should_use_prop(
+    element: &Vue2Element,
+    name: &str,
+    modifiers: &BTreeMap<String, bool>,
+    options: &Vue2CompileOptions,
+) -> bool {
+    if modifiers.get("prop").copied().unwrap_or(false) {
+        return true;
+    }
+    if options.disable_default_must_use_prop {
+        return false;
+    }
+    matches!(
+        (element.tag.as_str(), name),
+        ("input", "value") | ("textarea", "value") | ("video", "muted")
+    )
 }
 
 fn add_handler(

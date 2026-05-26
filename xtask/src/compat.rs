@@ -9632,13 +9632,57 @@ fn write_vue2_compiler_source_shims(prepared_root: &Path, include_types: bool) -
 import { compile } from 'vue-template-compiler'
 
 export function parse(template, options = {}) {
-  const compiled = compile(template, { ...options, optimize: true, __vuecSuppressWarnings: ['Inline-template components must have exactly one child element.'] })
-  const ast = compiled.element_ast || null
+  const compiled = compile(template, vue2ParseBridgeOptions(options))
+  const ast = compiled.element_public_ast || compiled.ast_public || compiled.ast || null
   if (ast && typeof ast === 'object') {
     Object.defineProperty(ast, '__vuecTemplate', { value: template, enumerable: false, configurable: true })
     Object.defineProperty(ast, '__vuecOptions', { value: options, enumerable: false, configurable: true })
+    Object.defineProperty(ast, '__vuecInternal', { value: compiled.element_ast || null, enumerable: false, configurable: true })
+    hydrateVue2PublicAst(ast, null, compiled.element_ast || null)
   }
   return ast
+}
+
+function vue2ParseBridgeOptions(options) {
+  const hasMustUseProp = options && Object.prototype.hasOwnProperty.call(options, 'mustUseProp')
+  return {
+    ...options,
+    optimize: true,
+    __vuecDisableDefaultMustUseProp: !hasMustUseProp,
+    __vuecSuppressWarnings: ['Inline-template components must have exactly one child element.'],
+  }
+}
+
+function hydrateVue2PublicAst(node, parent, internal) {
+  if (!node || typeof node !== 'object') return node
+  if (parent) {
+    Object.defineProperty(node, 'parent', { value: parent, enumerable: false, configurable: true, writable: true })
+  }
+  if (internal) {
+    Object.defineProperty(node, '__vuecInternal', { value: internal, enumerable: false, configurable: true })
+  }
+  const internalChildren = Array.isArray(internal && internal.children) ? internal.children : []
+  if (Array.isArray(node.children)) {
+    node.children.forEach((child, index) => {
+      const internalChild = internalChildren[index]
+      hydrateVue2PublicAst(child, node, internalChild && (internalChild.Element || internalChild.Text))
+    })
+  }
+  const internalConditions = Array.isArray(internal && internal.if_conditions) ? internal.if_conditions : []
+  if (Array.isArray(node.ifConditions)) {
+    node.ifConditions.forEach((condition, index) => {
+      hydrateVue2PublicAst(condition && condition.block, parent, internalConditions[index] && internalConditions[index].block)
+    })
+  }
+  const internalSlots = internal && internal.scoped_slots && typeof internal.scoped_slots === 'object'
+    ? internal.scoped_slots
+    : {}
+  if (node.scopedSlots && typeof node.scopedSlots === 'object') {
+    for (const [name, slot] of Object.entries(node.scopedSlots)) {
+      hydrateVue2PublicAst(slot, node, internalSlots[name] || internalSlots[`"${name}"`] || null)
+    }
+  }
+  return node
 }
 "#,
     )?;
@@ -9669,11 +9713,30 @@ export function generate(ast, options = {}) {
 
 function normalizeVue2AstForBridge(node) {
   if (!node || typeof node !== 'object') return null
-  const copy = Array.isArray(node) ? node.map(normalizeVue2AstForBridge) : { ...node }
-  normalizeVue2EventsForBridge(copy.events)
-  normalizeVue2EventsForBridge(copy.native_events)
+  if ('Element' in node) return normalizeVue2AstForBridge(node.Element)
+  if (isInternalVue2ElementAst(node)) return normalizeVue2InternalAstForBridge(node)
+  return normalizeVue2PublicElementForBridge(node)
+}
+
+function isInternalVue2ElementAst(node) {
+  return !!(node && typeof node === 'object' && (
+    Object.prototype.hasOwnProperty.call(node, 'attrs_list') ||
+    Object.prototype.hasOwnProperty.call(node, 'static_node') ||
+    Object.prototype.hasOwnProperty.call(node, 'if_conditions')
+  ))
+}
+
+function normalizeVue2InternalAstForBridge(node) {
+  if (!node || typeof node !== 'object') return null
+  const copy = {}
+  for (const key of Object.keys(node)) {
+    if (key === 'parent' || key.startsWith('__vuec')) continue
+    copy[key] = node[key]
+  }
+  normalizeVue2InternalEventsForBridge(copy.events)
+  normalizeVue2InternalEventsForBridge(copy.native_events)
   if (Array.isArray(copy.children)) {
-    copy.children = copy.children.map(normalizeVue2NodeForBridge)
+    copy.children = copy.children.map(normalizeVue2InternalNodeForBridge)
   }
   if (copy.scoped_slots && typeof copy.scoped_slots === 'object') {
     copy.scoped_slots = Object.fromEntries(
@@ -9683,42 +9746,233 @@ function normalizeVue2AstForBridge(node) {
   if (Array.isArray(copy.if_conditions)) {
     copy.if_conditions = copy.if_conditions.map(condition => ({
       ...condition,
-      block: normalizeVue2AstForBridge(condition.block),
+      block: normalizeVue2AstForBridge(condition && condition.block),
     }))
   }
   return copy
 }
 
+function normalizeVue2InternalNodeForBridge(node) {
+  if (!node || typeof node !== 'object') return node
+  if ('Element' in node) return { Element: normalizeVue2AstForBridge(node.Element) }
+  if ('Text' in node) return { Text: normalizeVue2TextForBridge(node.Text) }
+  return normalizeVue2PublicNodeForBridge(node)
+}
+
+function normalizeVue2PublicElementForBridge(node) {
+  const scopedSlots = normalizeVue2ScopedSlotsForBridge(node.scopedSlots || node.scoped_slots)
+  return {
+    tag: String(node.tag || ''),
+    attrs_list: normalizeVue2RawAttrsForBridge(node.attrsList || node.attrs_list),
+    raw_attrs_list: normalizeVue2RawAttrsForBridge(node.attrsList || node.raw_attrs_list || node.attrs_list),
+    attrs_map: normalizeVue2AttrsMapForBridge(node.attrsMap || node.attrs_map, node.attrsList || node.attrs_list),
+    raw_attrs_map: normalizeVue2RawAttrsMapForBridge(node.rawAttrsMap || node.raw_attrs_map, node.attrsList || node.attrs_list),
+    attrs: normalizeVue2AttrsForBridge(node.attrs),
+    props: normalizeVue2AttrsForBridge(node.props),
+    dynamic_attrs: normalizeVue2AttrsForBridge(node.dynamicAttrs || node.dynamic_attrs),
+    directives: normalizeVue2DirectivesForBridge(node.directives),
+    events: normalizeVue2EventsForBridge(node.events),
+    native_events: normalizeVue2EventsForBridge(node.nativeEvents || node.native_events),
+    children: Array.isArray(node.children) ? node.children.map(normalizeVue2PublicNodeForBridge) : [],
+    ns: node.ns,
+    plain: Boolean(node.plain),
+    forbidden: Boolean(node.forbidden),
+    pre: Boolean(node.pre),
+    once: Boolean(node.once),
+    has_bindings: Boolean(node.hasBindings || node.has_bindings),
+    if_exp: node.if ?? node.if_exp,
+    elseif: node.elseif,
+    else_branch: Boolean(node.else || node.else_branch),
+    if_conditions: Array.isArray(node.ifConditions || node.if_conditions)
+      ? (node.ifConditions || node.if_conditions).map(condition => ({
+          exp: condition && condition.exp,
+          block: normalizeVue2AstForBridge(condition && condition.block),
+        }))
+      : [],
+    for_exp: node.for ?? node.for_exp,
+    alias: node.alias,
+    iterator1: node.iterator1,
+    iterator2: node.iterator2,
+    key: node.key,
+    ref_name: node.ref ?? node.ref_name,
+    ref_in_for: Boolean(node.refInFor || node.ref_in_for),
+    slot_name: node.slotName ?? node.slot_name,
+    slot_target: node.slotTarget ?? node.slot_target,
+    slot_target_dynamic: Boolean(node.slotTargetDynamic || node.slot_target_dynamic),
+    slot_scope: node.slotScope ?? node.slot_scope,
+    slot_new_syntax: Boolean(node.slotNewSyntax || node.slot_new_syntax),
+    scoped_slots: scopedSlots,
+    component: node.component,
+    inline_template: Boolean(node.inlineTemplate || node.inline_template),
+    static_class: node.staticClass ?? node.static_class,
+    class_binding: node.classBinding ?? node.class_binding,
+    static_style: node.staticStyle ?? node.static_style,
+    style_binding: node.styleBinding ?? node.style_binding,
+    model: node.model,
+    wrap_data: node.wrapData ?? node.wrap_data,
+    wrap_listeners: node.wrapListeners ?? node.wrap_listeners,
+    validate: node.validate,
+    validators: Array.isArray(node.validators) ? node.validators : [],
+    static_node: Boolean(node.static ?? node.static_node),
+    static_root: Boolean(node.staticRoot ?? node.static_root),
+    static_in_for: Boolean(node.staticInFor ?? node.static_in_for),
+  }
+}
+
 function normalizeVue2NodeForBridge(node) {
   if (!node || typeof node !== 'object') return node
   if ('Element' in node) return { Element: normalizeVue2AstForBridge(node.Element) }
-  return node
+  if ('Text' in node) return { Text: normalizeVue2TextForBridge(node.Text) }
+  return normalizeVue2PublicNodeForBridge(node)
 }
 
 function normalizeVue2EventsForBridge(events) {
-  if (!events || typeof events !== 'object') return
+  if (!events || typeof events !== 'object') return {}
+  const normalized = {}
   for (const key of Object.keys(events)) {
-    if (events[key] === undefined) {
-      events[key] = []
+    const value = events[key]
+    if (value === undefined) {
+      normalized[key] = []
+    } else if (Array.isArray(value)) {
+      normalized[key] = value.map(normalizeVue2EventHandlerForBridge)
+    } else {
+      normalized[key] = [normalizeVue2EventHandlerForBridge(value)]
     }
   }
+  return normalized
+}
+
+function normalizeVue2InternalEventsForBridge(events) {
+  if (!events || typeof events !== 'object') return
+  for (const key of Object.keys(events)) {
+    if (events[key] === undefined) events[key] = []
+  }
+}
+
+function normalizeVue2PublicNodeForBridge(node) {
+  if (!node || typeof node !== 'object') return node
+  if ('Element' in node) return { Element: normalizeVue2AstForBridge(node.Element) }
+  if ('Text' in node) return { Text: normalizeVue2TextForBridge(node.Text) }
+  if (node.type === 1 || typeof node.tag === 'string') {
+    return { Element: normalizeVue2AstForBridge(node) }
+  }
+  return { Text: normalizeVue2TextForBridge(node) }
+}
+
+function normalizeVue2TextForBridge(node) {
+  const expression = node && Object.prototype.hasOwnProperty.call(node, 'expression')
+    ? node.expression
+    : null
+  return {
+    text: String((node && node.text) || ''),
+    expression,
+    is_comment: Boolean(node && (node.isComment || node.is_comment)),
+    static_node: Boolean(node && (node.static ?? node.static_node)),
+  }
+}
+
+function normalizeVue2RawAttrsForBridge(attrs) {
+  if (!Array.isArray(attrs)) return []
+  return attrs.map(attr => ({
+    name: String((attr && attr.name) || ''),
+    value: String((attr && attr.value) || ''),
+    dynamic: Boolean(attr && attr.dynamic),
+  }))
+}
+
+function normalizeVue2AttrsForBridge(attrs) {
+  if (!Array.isArray(attrs)) return []
+  return attrs.map(attr => ({
+    name: String((attr && attr.name) || ''),
+    value: String((attr && attr.value) || ''),
+    dynamic: Boolean(attr && attr.dynamic),
+  }))
+}
+
+function normalizeVue2AttrsMapForBridge(attrsMap, attrsList) {
+  if (attrsMap && typeof attrsMap === 'object') return { ...attrsMap }
+  return Object.fromEntries(normalizeVue2RawAttrsForBridge(attrsList).map(attr => [attr.name, attr.value]))
+}
+
+function normalizeVue2RawAttrsMapForBridge(rawAttrsMap, attrsList) {
+  if (rawAttrsMap && typeof rawAttrsMap === 'object') {
+    return Object.fromEntries(
+      Object.entries(rawAttrsMap).map(([key, attr]) => [key, {
+        name: String((attr && attr.name) || key),
+        value: String((attr && attr.value) || ''),
+        dynamic: Boolean(attr && attr.dynamic),
+      }])
+    )
+  }
+  return Object.fromEntries(normalizeVue2RawAttrsForBridge(attrsList).map(attr => [attr.name, attr]))
+}
+
+function normalizeVue2DirectivesForBridge(directives) {
+  if (!Array.isArray(directives)) return []
+  return directives.map(directive => ({
+    name: String((directive && directive.name) || ''),
+    raw_name: String((directive && (directive.rawName || directive.raw_name)) || ''),
+    value: directive && directive.value,
+    arg: directive && directive.arg,
+    is_dynamic_arg: Boolean(directive && (directive.isDynamicArg || directive.is_dynamic_arg)),
+    modifiers: directive && directive.modifiers && typeof directive.modifiers === 'object' ? { ...directive.modifiers } : {},
+  }))
+}
+
+function normalizeVue2EventHandlerForBridge(handler) {
+  if (!handler || typeof handler !== 'object') {
+    return {
+      value: handler == null ? '' : String(handler),
+      modifiers: {},
+      modifier_order: [],
+      has_modifier_object: false,
+      dynamic: false,
+    }
+  }
+  const modifiers = handler.modifiers && typeof handler.modifiers === 'object' ? { ...handler.modifiers } : {}
+  return {
+    value: String(handler.value || ''),
+    modifiers,
+    modifier_order: Array.isArray(handler.modifierOrder || handler.modifier_order)
+      ? (handler.modifierOrder || handler.modifier_order).map(String)
+      : Object.keys(modifiers),
+    has_modifier_object: Boolean(handler.hasModifierObject || handler.has_modifier_object || Object.keys(modifiers).length > 0),
+    dynamic: Boolean(handler.dynamic),
+  }
+}
+
+function normalizeVue2ScopedSlotsForBridge(scopedSlots) {
+  if (!scopedSlots || typeof scopedSlots !== 'object') return {}
+  return Object.fromEntries(
+    Object.entries(scopedSlots).map(([key, slot]) => {
+      const normalized = normalizeVue2AstForBridge(slot)
+      return [normalized.slot_target || quoteVue2SlotKeyForBridge(key, normalized.slot_target_dynamic), normalized]
+    })
+  )
+}
+
+function quoteVue2SlotKeyForBridge(key, dynamic) {
+  if (dynamic || key.startsWith('"') || key.startsWith("'")) return key
+  return JSON.stringify(key)
 }
 
 function emitVue2InlineTemplateWarnings(node) {
   if (!node || typeof node !== 'object') return
-  if (node.inline_template && (!Array.isArray(node.children) || node.children.length !== 1)) {
+  if ((node.inline_template || node.inlineTemplate) && (!Array.isArray(node.children) || node.children.length !== 1)) {
     console.error('Inline-template components must have exactly one child element.')
   }
   if (Array.isArray(node.children)) {
     for (const child of node.children) {
-      if (child && child.Element) emitVue2InlineTemplateWarnings(child.Element)
+      emitVue2InlineTemplateWarnings(child && child.Element ? child.Element : child)
     }
   }
-  if (node.scoped_slots && typeof node.scoped_slots === 'object') {
-    for (const slot of Object.values(node.scoped_slots)) emitVue2InlineTemplateWarnings(slot)
+  const scopedSlots = node.scoped_slots || node.scopedSlots
+  if (scopedSlots && typeof scopedSlots === 'object') {
+    for (const slot of Object.values(scopedSlots)) emitVue2InlineTemplateWarnings(slot)
   }
-  if (Array.isArray(node.if_conditions)) {
-    for (const condition of node.if_conditions.slice(1)) {
+  const ifConditions = node.if_conditions || node.ifConditions
+  if (Array.isArray(ifConditions)) {
+    for (const condition of ifConditions.slice(1)) {
       emitVue2InlineTemplateWarnings(condition && condition.block)
     }
   }
@@ -11776,6 +12030,22 @@ mod tests {
             fs::read_to_string(temp.join("src").join("compiler").join("codegen.ts")).unwrap();
         assert!(codegen.contains("callBridge('vue2.generate'"));
         assert!(codegen.contains("events[key] = []"));
+        assert!(codegen.contains("function normalizeVue2PublicElementForBridge"));
+        assert!(codegen.contains("static_node: Boolean(node.static ?? node.static_node)"));
+        assert!(codegen.contains(
+            "modifier_order: Array.isArray(handler.modifierOrder || handler.modifier_order)"
+        ));
+        assert!(codegen.contains("has_modifier_object: Boolean(handler.hasModifierObject"));
+        let parser = fs::read_to_string(
+            temp.join("src")
+                .join("compiler")
+                .join("parser")
+                .join("index.ts"),
+        )
+        .unwrap();
+        assert!(parser.contains("compiled.element_public_ast"));
+        assert!(parser.contains("Object.defineProperty(ast, '__vuecInternal'"));
+        assert!(parser.contains("hydrateVue2PublicAst(ast, null"));
 
         write_vue27_sfc_conformance_shims(&temp).unwrap();
         let sfc_config = fs::read_to_string(temp.join("vitest.config.ts")).unwrap();
