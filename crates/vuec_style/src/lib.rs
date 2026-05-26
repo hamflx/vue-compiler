@@ -77,6 +77,7 @@ pub fn compile_style(source: &str, options: StyleCompileOptions) -> StyleCompile
 
 fn normalize_style_output(source: &str) -> String {
     source
+        .replace(" {", "{")
         .replace("; }", ";\n}")
         .lines()
         .map(|line| if line.trim() == "}" { "}" } else { line })
@@ -1562,6 +1563,22 @@ mod tests {
         let code = rewrite_scoped_selectors(".a, .b { color: red; }", "data-v-x");
         assert!(code.contains(".a[data-v-x]"));
         assert!(code.contains(".b[data-v-x]"));
+    }
+
+    #[test]
+    fn compile_style_matches_official_selector_brace_spacing() {
+        let result = compile_style(
+            ".a{ color: v-bind(color); }",
+            StyleCompileOptions {
+                id: Some("data-v-contract".into()),
+                scoped: true,
+                ..StyleCompileOptions::default()
+            },
+        );
+        assert_eq!(
+            result.code,
+            ".a[data-v-contract]{ color: var(--contract-color);\n}"
+        );
     }
 
     #[test]

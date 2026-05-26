@@ -54,6 +54,8 @@ export function compileVue3Ssr(source: string, options?: Record<string, unknown>
 export function parseSfc(source: string, options?: Record<string, unknown>): SfcDescriptor;
 export function compileSfcTemplate(source: string, options?: Record<string, unknown>): unknown;
 export function compileSfcScript(source: string, options?: Record<string, unknown>): unknown;
+export function compileVue27SfcTemplate(source: string, options?: Record<string, unknown>): unknown;
+export function compileVue27SfcScript(source: string, options?: Record<string, unknown>): unknown;
 export function compileSfcStyle(source: string, options?: Record<string, unknown>): unknown;
 
 export function compile(template: string, options?: Record<string, unknown>): Vue2CompileResult;

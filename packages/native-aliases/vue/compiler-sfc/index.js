@@ -5,50 +5,40 @@ const native = require('@vuec-rs/native');
 function parse(input) {
   const options = arguments.length > 1 ? arguments[1] : undefined;
   const opts = options || {};
+  let descriptor;
   if (input && typeof input === 'object') {
-    return native.parseSfc(String(input.source || ''), {
+    descriptor = native.parseSfc(String(input.source || ''), {
       ...opts,
       filename: input.filename || opts.filename,
     });
+  } else {
+    descriptor = native.parseSfc(String(input || ''), opts);
   }
-  return native.parseSfc(String(input || ''), opts);
+  return normalizeVue27Descriptor(descriptor);
 }
 
 function parseComponent(source) {
   const options = arguments.length > 1 ? arguments[1] : undefined;
-  return native.parseSfc(String(source || ''), options || {});
+  return normalizeVue27Descriptor(native.parseSfc(String(source || ''), options || {}));
 }
 
 function compileTemplate(options) {
   const opts = options || {};
   const source = String(opts.source || '');
-  const result = native.compileVue2(source, {
-    ...opts,
-    outputSourceRange: Boolean(opts.outputSourceRange),
-  });
-  return {
-    code: [
-      `var render = function render() {`,
-      `  ${result.render}`,
-      `}`,
-      `var staticRenderFns = [${(result.staticRenderFns || []).map(fn => `function render() { ${fn} }`).join(',')}]`,
-      `render._withStripped = true`,
-      '',
-    ].join('\n'),
-    ast: result.ast || result.element_ast || null,
-    errors: result.errors || [],
-    tips: result.tips || [],
-    source: source,
-  };
+  return native.compileVue27SfcTemplate(source, opts);
 }
 
 function compileScript(descriptor) {
   const options = arguments.length > 1 ? arguments[1] : undefined;
-  return native.compileScript(descriptor || {}, options || {});
+  const source = descriptor && typeof descriptor.source === 'string' ? descriptor.source : '';
+  return normalizeVue27ScriptResult(native.compileVue27SfcScript(source, {
+    filename: descriptor && descriptor.filename,
+    ...(options || {}),
+  }), descriptor || {});
 }
 
 function compileStyle(options) {
-  return native.compileStyle(options || {});
+  return normalizeVue27StyleResult(native.compileStyle(options || {}));
 }
 
 function compileStyleAsync(options) {
@@ -63,6 +53,143 @@ function generateCodeFrame(source) {
   const start = arguments.length > 1 ? arguments[1] : undefined;
   const end = arguments.length > 2 ? arguments[2] : undefined;
   return native.generateCodeFrameVue2(String(source || ''), start || 0, end || start || 0);
+}
+
+function normalizeVue27StyleResult(result) {
+  if (!result || typeof result !== 'object') return result;
+  const out = { ...result };
+  delete out.dependencies;
+  return out;
+}
+
+function normalizeVue27Descriptor(descriptor) {
+  if (!descriptor || typeof descriptor !== 'object') return descriptor;
+  return {
+    source: descriptor.source || '',
+    filename: descriptor.filename || 'anonymous.vue',
+    template: descriptor.template ? normalizeVue27Block(descriptor, descriptor.template, false) : null,
+    script: descriptor.script ? normalizeVue27Block(descriptor, descriptor.script, false) : null,
+    scriptSetup: descriptor.script_setup ? normalizeVue27Block(descriptor, descriptor.script_setup, false) : null,
+    styles: Array.isArray(descriptor.styles)
+      ? descriptor.styles.map(block => normalizeVue27Block(descriptor, block, true))
+      : [],
+    customBlocks: Array.isArray(descriptor.custom_blocks)
+      ? descriptor.custom_blocks.map(block => normalizeVue27Block(descriptor, block, false))
+      : [],
+    cssVars: vue27CssVars(descriptor),
+    errors: [],
+    shouldForceReload() {
+      return false;
+    },
+  };
+}
+
+function normalizeVue27Block(descriptor, block, style) {
+  const out = {
+    type: block.type_name || block.type || '',
+    content: block.content || '',
+    start: blockContentStart(block, descriptor),
+    end: blockContentEnd(block, descriptor),
+    attrs: vue27Attrs(block.attrs),
+  };
+  if (out.type === 'script' || out.type === 'style') {
+    out.map = vue27BlockMap(descriptor);
+  }
+  if (block.attrs && block.attrs.setup) out.setup = true;
+  if (block.attrs && block.attrs.lang) out.lang = block.attrs.lang;
+  if (block.attrs && block.attrs.src) out.src = block.attrs.src;
+  if (block.attrs && block.attrs.module != null) out.module = block.attrs.module === '' ? true : block.attrs.module;
+  if (style && block.attrs && block.attrs.scoped) out.scoped = true;
+  return out;
+}
+
+function vue27Attrs(attrs) {
+  const raw = attrs && attrs.raw && typeof attrs.raw === 'object' ? attrs.raw : {};
+  const out = {};
+  for (const key of Object.keys(raw)) {
+    out[key] = raw[key];
+  }
+  if (attrs && attrs.scoped) out.scoped = true;
+  if (attrs && attrs.setup) out.setup = true;
+  if (attrs && attrs.lang) out.lang = attrs.lang;
+  if (attrs && attrs.src) out.src = attrs.src;
+  if (attrs && attrs.module != null) out.module = attrs.module === '' ? true : attrs.module;
+  return out;
+}
+
+function blockContentStart(block, descriptor) {
+  if (typeof block.content_start === 'number') return block.content_start;
+  const source = descriptor && typeof descriptor.source === 'string' ? descriptor.source : '';
+  if (block && block.loc && typeof block.loc.start === 'number') {
+    const openEnd = source.indexOf('>', block.loc.start);
+    if (openEnd >= 0 && openEnd < block.loc.end) return openEnd + 1;
+    return block.loc.start;
+  }
+  return 0;
+}
+
+function blockContentEnd(block, descriptor) {
+  if (typeof block.content_end === 'number') return block.content_end;
+  const start = blockContentStart(block, descriptor);
+  if (block && typeof block.content === 'string') return start + block.content.length;
+  return block && block.loc && typeof block.loc.end === 'number' ? block.loc.end : 0;
+}
+
+function vue27BlockMap(descriptor) {
+  const filename = descriptor && descriptor.filename ? descriptor.filename : 'anonymous.vue';
+  const source = descriptor && descriptor.source ? descriptor.source : '';
+  return {
+    version: 3,
+    sources: [filename],
+    names: [],
+    mappings: 'AAAA',
+    file: filename,
+    sourceRoot: '',
+    sourcesContent: [source],
+  };
+}
+
+function vue27CssVars(descriptor) {
+  const vars = [];
+  const styles = Array.isArray(descriptor && descriptor.styles) ? descriptor.styles : [];
+  for (const style of styles) {
+    const content = String(style && style.content || '');
+    const pattern = /v-bind\s*\(\s*([^)]+?)\s*\)/g;
+    let match;
+    while ((match = pattern.exec(content))) {
+      const value = match[1].trim().replace(/^['"]|['"]$/g, '');
+      if (value && !vars.includes(value)) vars.push(value);
+    }
+  }
+  return vars;
+}
+
+function normalizeVue27ScriptResult(result, descriptor) {
+  if (!result || typeof result !== 'object') return result;
+  const out = { ...result };
+  delete out.errors;
+  delete out.deps;
+  const sourceBlock = descriptor && (descriptor.scriptSetup || descriptor.script_setup || descriptor.script);
+  if (sourceBlock) {
+    out.start = sourceBlock.start;
+    out.end = sourceBlock.end;
+  } else if (out.loc) {
+    out.start = blockContentStart({ loc: out.loc }, descriptor);
+    out.end = blockContentEnd({ loc: out.loc, content: '' }, descriptor);
+  }
+  delete out.loc;
+  out.attrs = vue27Attrs(out.attrs);
+  if (out.bindings && typeof out.bindings === 'object') {
+    const isScriptSetup = out.bindings.__isScriptSetup === true || out.bindings.__isScriptSetup === 'true';
+    delete out.bindings.__isScriptSetup;
+    Object.defineProperty(out.bindings, '__isScriptSetup', {
+      enumerable: false,
+      configurable: true,
+      value: isScriptSetup,
+    });
+  }
+  out.imports = {};
+  return out;
 }
 
 module.exports = {

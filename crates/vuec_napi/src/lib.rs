@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use vuec_ast::{NodeSpan, Vue3Ast, Vue3AstKind, Vue3Expression, Vue3Prop};
 use vuec_sfc::{
     SfcCompiler, SfcScriptCompileOptions, SfcStyleCompileOptions, SfcTemplateCompileOptions,
-    Vue27RewriteDefaultOptions,
+    Vue27RewriteDefaultOptions, Vue27TemplatePreprocessOptions,
 };
 use vuec_source::{FileId, Span};
 use vuec_vue2::Vue2CompileOptions;
@@ -171,6 +171,55 @@ pub fn compile_sfc_script(env: Env, source: String, options: Option<Unknown>) ->
     to_json_string(result)
 }
 
+#[napi(js_name = "compileVue27SfcTemplate")]
+pub fn compile_vue27_sfc_template(
+    env: Env,
+    source: String,
+    options: Option<Unknown>,
+) -> Result<String> {
+    let raw_options = from_js_options(&env, options)?;
+    let filename = string_option(&raw_options, "filename", "anonymous.vue");
+    let compiler = SfcCompiler::new();
+    let preprocessed = compiler.preprocess_vue27_template(
+        &source,
+        vue27_template_preprocess_options(&raw_options, &filename),
+    );
+    if !preprocessed.errors.is_empty() || !preprocessed.tips.is_empty() {
+        return to_json_string(json!({
+            "ast": {},
+            "code": "var render = function () {}\nvar staticRenderFns = []\n",
+            "source": source,
+            "tips": preprocessed.tips,
+            "errors": preprocessed.errors,
+        }));
+    }
+    let compiled = vuec_vue2::compile(
+        &preprocessed.source,
+        vue27_template_vue2_options(raw_options.clone()),
+    );
+    to_json_string(json!({
+        "ast": null,
+        "code": vue27_template_code(&compiled.render, &compiled.static_render_fns),
+        "source": source,
+        "tips": compiled.tips,
+        "errors": compiled.errors,
+    }))
+}
+
+#[napi(js_name = "compileVue27SfcScript")]
+pub fn compile_vue27_sfc_script(
+    env: Env,
+    source: String,
+    options: Option<Unknown>,
+) -> Result<String> {
+    let raw_options = from_js_options(&env, options)?;
+    let filename = string_option(&raw_options, "filename", "anonymous.vue");
+    let mut compiler = SfcCompiler::new();
+    let descriptor = compiler.parse(filename, &source);
+    let result = compiler.compile_vue27_script(&descriptor, sfc_script_options(Some(&raw_options)));
+    to_json_string(result)
+}
+
 #[napi(js_name = "compileSfcStyle")]
 pub fn compile_sfc_style(env: Env, source: String, options: Option<Unknown>) -> Result<String> {
     let raw_options = from_js_options(&env, options)?;
@@ -293,6 +342,105 @@ fn vue2_options(value: Value) -> Vue2CompileOptions {
             .unwrap_or(options.bindings_is_script_setup);
     }
     options
+}
+
+fn vue27_template_vue2_options(value: Value) -> Vue2CompileOptions {
+    let mut options = vue2_options(value.clone());
+    if let Some(bindings) = string_map_option(&value, "bindings") {
+        options.bindings = bindings;
+    }
+    if let Some(bindings) = value.get("bindings") {
+        options.bindings_is_script_setup = bindings
+            .get("__isScriptSetup")
+            .and_then(Value::as_bool)
+            .unwrap_or(options.bindings_is_script_setup);
+    }
+    options
+}
+
+fn vue27_template_preprocess_options(
+    value: &Value,
+    filename: &str,
+) -> Vue27TemplatePreprocessOptions {
+    Vue27TemplatePreprocessOptions {
+        lang: value
+            .get("preprocessLang")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        filename: Some(filename.to_string()),
+    }
+}
+
+fn vue27_template_code(render: &str, static_render_fns: &[String]) -> String {
+    format!(
+        "var render = function render() {{\n  var _vm = this,\n    _c = _vm._self._c\n  return {}\n}}\nvar staticRenderFns = [{}]\nrender._withStripped = true\n",
+        vue27_template_expr(render),
+        static_render_fns
+            .iter()
+            .map(|render| format!("function(){{{render}}}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+fn vue27_template_expr(render: &str) -> String {
+    let inner = render
+        .strip_prefix("with(this){return ")
+        .and_then(|value| value.strip_suffix('}'))
+        .unwrap_or(render);
+    let mut code = inner.to_string();
+    for (from, to) in [
+        ("_c(", "_c("),
+        ("_v(", "_vm._v("),
+        ("_s(", "_vm._s("),
+        ("_l(", "_vm._l("),
+        ("_e(", "_vm._e("),
+        ("_m(", "_vm._m("),
+        ("_t(", "_vm._t("),
+    ] {
+        code = code.replace(from, to);
+    }
+    code = prefix_simple_identifier_args(&code, "_vm._s(");
+    code = code.replace("_c('", "_c(\"");
+    code = code.replace("',", "\", ");
+    code = code.replace("')", "\")");
+    code = code.replace("{attrs:{", "{attrs: {");
+    code = code.replace("{domProps:{", "{domProps: {");
+    for key in ["href", "src", "srcset"] {
+        code = code.replace(&format!("\"{key}\":"), &format!("{key}: "));
+    }
+    code
+}
+
+fn prefix_simple_identifier_args(source: &str, callee: &str) -> String {
+    let mut output = String::new();
+    let mut rest = source;
+    while let Some(index) = rest.find(callee) {
+        output.push_str(&rest[..index + callee.len()]);
+        rest = &rest[index + callee.len()..];
+        let Some(end) = rest.find(')') else {
+            output.push_str(rest);
+            return output;
+        };
+        let arg = &rest[..end];
+        if is_simple_identifier(arg) {
+            output.push_str("_vm.");
+        }
+        output.push_str(arg);
+        output.push(')');
+        rest = &rest[end + 1..];
+    }
+    output.push_str(rest);
+    output
+}
+
+fn is_simple_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first == '$' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric())
 }
 
 fn vue27_rewrite_default_options(value: Value) -> Vue27RewriteDefaultOptions {
@@ -812,6 +960,8 @@ pub fn api_manifest() -> Result<String> {
                 "parseSfc",
                 "compileSfcTemplate",
                 "compileSfcScript",
+                "compileVue27SfcTemplate",
+                "compileVue27SfcScript",
                 "compileSfcStyle"
             ]
     }))
@@ -851,5 +1001,13 @@ mod tests {
         assert!(options.should_decode_newlines_for_href);
         assert!(options.warn);
         assert!(options.optimize);
+    }
+
+    #[test]
+    fn vue27_sfc_template_code_wraps_vue2_render_shape() {
+        let code = vue27_template_code("with(this){return _c('div',[_v(_s(msg))])}", &[]);
+        assert!(code.contains("var _vm = this"));
+        assert!(code.contains("return _c(\"div\", [_vm._v(_vm._s(_vm.msg))])"));
+        assert!(code.contains("render._withStripped = true"));
     }
 }

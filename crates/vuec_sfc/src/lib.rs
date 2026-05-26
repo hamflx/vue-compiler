@@ -2262,9 +2262,9 @@ fn vue27_script_setup_content(
     };
     let return_bindings = vue27_script_setup_return_bindings(descriptor, &analysis, is_ts);
     let returned = if return_bindings.is_empty() {
-        "{  }".to_string()
+        "{ __sfc: true, }".to_string()
     } else {
-        format!("{{ {} }}", return_bindings.join(", "))
+        format!("{{ __sfc: true,{} }}", return_bindings.join(", "))
     };
     let helper_import = if css_vars.is_empty() {
         ""
@@ -7131,7 +7131,9 @@ defineProps({ foo: String })
             .contains("\"xxxxxxxx-color\": (_setup.color)"));
         assert!(script.content.contains("\"xxxxxxxx-size\": (_setup.size)"));
         assert!(script.content.contains("\"xxxxxxxx-foo\": (_vm.foo)"));
-        assert!(script.content.contains("return { color, size, ref }"));
+        assert!(script
+            .content
+            .contains("return { __sfc: true,color, size, ref }"));
         assert!(!script.content.contains("defineProps"));
     }
 
@@ -7318,7 +7320,7 @@ x()
         assert!(script
             .content
             .contains("import { ref } from 'vue'\nimport 'foo/css'"));
-        assert!(script.content.contains("return { x, ref }"));
+        assert!(script.content.contains("return { __sfc: true,x, ref }"));
         assert!(script.errors.is_empty());
     }
 
@@ -7391,7 +7393,7 @@ class dd {}
 
         assert!(script
             .content
-            .contains("return { aa, bb, cc, dd, a, b, c, d, xx, x }"));
+            .contains("return { __sfc: true,aa, bb, cc, dd, a, b, c, d, xx, x }"));
     }
 
     #[test]
@@ -7414,7 +7416,7 @@ const fooBar: FooBar = 1
 
         assert!(script
             .content
-            .contains("return { fooBar, FooBaz, FooQux, foo }"));
+            .contains("return { __sfc: true,fooBar, FooBaz, FooQux, foo }"));
         assert!(!script.content.contains("return { fooBar, FooBar,"));
     }
 
@@ -7432,7 +7434,7 @@ import { VAR, VAR2, VAR3 } from './x'
         );
         let script = compiler.compile_vue27_script(&descriptor, SfcScriptCompileOptions::default());
 
-        assert!(script.content.contains("return { VAR, VAR3 }"));
+        assert!(script.content.contains("return { __sfc: true,VAR, VAR3 }"));
     }
 
     #[test]
@@ -7447,7 +7449,7 @@ import { type Bar, Baz } from './main.ts'
         );
         let script = compiler.compile_vue27_script(&descriptor, SfcScriptCompileOptions::default());
 
-        assert!(script.content.contains("return { Baz }"));
+        assert!(script.content.contains("return { __sfc: true,Baz }"));
     }
 
     #[test]
@@ -7469,7 +7471,7 @@ const enum Qux { A = 2 }
         assert!(script.content.find("type Bar = {}").unwrap() < setup_index);
         assert!(script.content.find("enum Baz { A = 1 }").unwrap() < setup_index);
         assert!(script.content.find("const enum Qux { A = 2 }").unwrap() < setup_index);
-        assert!(script.content.contains("return { Baz, Qux }"));
+        assert!(script.content.contains("return { __sfc: true,Baz, Qux }"));
         assert_eq!(
             script.bindings.get("Baz").map(String::as_str),
             Some("setup-const")
@@ -7498,7 +7500,9 @@ enum Foo { A = 123 }
         );
         let script = compiler.compile_vue27_script(&descriptor, SfcScriptCompileOptions::default());
 
-        assert!(script.content.contains("return { D, C, B, Foo }"));
+        assert!(script
+            .content
+            .contains("return { __sfc: true,D, C, B, Foo }"));
         for name in ["D", "C", "B", "Foo"] {
             assert_eq!(
                 script.bindings.get(name).map(String::as_str),
@@ -7519,7 +7523,7 @@ enum Foo { A = 123 }
         assert!(script
             .content
             .contains("export default {\n  __name: 'FooBar',"));
-        assert!(script.content.contains("return { a }"));
+        assert!(script.content.contains("return { __sfc: true,a }"));
     }
 
     #[test]
@@ -7588,7 +7592,9 @@ defineExpose({ reset() {} })
         assert!(script.content.contains("setup(__props, { emit, expose })"));
         assert!(script.content.contains("const props = __props;"));
         assert!(script.content.contains("expose({ reset() {} })"));
-        assert!(script.content.contains("return { props, emit }"));
+        assert!(script
+            .content
+            .contains("return { __sfc: true,props, emit }"));
         assert!(!script.content.contains("defineProps"));
         assert!(!script.content.contains("defineEmits"));
         assert!(!script.content.contains("defineExpose"));
@@ -7625,7 +7631,7 @@ const { foo, bar: baz } = defineProps({ foo: String, bar: Number })
         assert!(script
             .content
             .contains("const { foo, bar: baz } = __props;"));
-        assert!(script.content.contains("return { foo, baz }"));
+        assert!(script.content.contains("return { __sfc: true,foo, baz }"));
         assert!(!script.content.contains("defineProps"));
     }
 
@@ -7646,7 +7652,9 @@ const props = defineProps(['item']),
         assert!(script.content.contains("emits: ['save'],"));
         assert!(script.content.contains("const a = 1"));
         assert!(script.content.contains("const props = __props;"));
-        assert!(script.content.contains("return { props, a, emit }"));
+        assert!(script
+            .content
+            .contains("return { __sfc: true,props, a, emit }"));
         assert!(!script.content.contains("defineProps"));
         assert!(!script.content.contains("defineEmits"));
     }
