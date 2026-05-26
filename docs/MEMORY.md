@@ -1,5 +1,12 @@
 # Memory
 
+- Current round: completed a Vue 2 Rust parser raw-text and whitespace semantics slice.
+- `vuec_vue2` now parses `script` / `style` / `textarea` as raw-text elements instead of recursively tokenizing their bodies as child HTML, strips the first newline for `<textarea>` like `<pre>`, preserves whitespace inside `<pre>` descendants, and handles `whitespace: "condense"` inline spaces plus `&nbsp;` without collapsing away the official text node.
+- `vuec_html::HtmlTokenizer` now exposes its cursor so the Vue 2 parser can switch to raw-text consumption while keeping tokenizer ownership and source offsets deterministic.
+- No AST/HIR/MIR structure changed. `xtask/src/compat.rs` was not touched in this slice.
+- Current Vue 2 conformance movement: `vue2-compiler` improved from `165/188` to `171/188`, and `vue27-compiler` improved from `162/190` to `168/190`. Coverage remains `rust-backed`; the full suites still fail with real remaining parser/optimizer/compile-option/codeframe parity gaps.
+- Verification for this Vue 2 raw-text/whitespace slice: `cargo fmt --all --check`, `git diff --check`, `cargo test -p vuec_html -p vuec_vue2 --lib`, `cargo build -p vuec_node_bridge`, `cargo xtask run-conformance --suite vue2-compiler` (expected fail, `171/188`), and `cargo xtask run-conformance --suite vue27-compiler` (expected fail, `168/190`).
+
 - Current round: completed a Vue 2 official public AST projection and hydration adapter slice for internal parser/optimizer/codegen shims.
 - `vuec_node_bridge` now projects the Rust Vue 2 element AST into official camelCase AST objects (`type`, `attrsList`, `attrsMap`, `ifConditions`, `scopedSlots`, `static`, `staticRoot`, `staticInFor`, event handler metadata, etc.) while preserving the deterministic `Vue2Ast` document as `ast_document`. Public compile results now also expose `staticRenderFns`.
 - `vuec_vue2` now preserves `raw_attrs_list` for official `attrsList` projection after parser processing and has an internal bridge option for parse-shim cases where official `mustUseProp` is absent. No AST/HIR/MIR contract changed.

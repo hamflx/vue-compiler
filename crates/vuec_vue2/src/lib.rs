@@ -385,12 +385,46 @@ fn parse_element_tree(
     template: &str,
     options: &Vue2CompileOptions,
 ) -> Option<Vue2Element> {
-    let tokens = HtmlTokenizer::new(template).tokenize();
+    let mut tokenizer = HtmlTokenizer::new(template);
     let mut stack: Vec<Vue2Element> = Vec::new();
     let mut root: Option<Vue2Element> = None;
     let mut in_v_pre = false;
 
-    for token in tokens {
+    loop {
+        let in_pre_tag = stack.iter().any(|element| element.tag == "pre");
+        if let Some(parent) = stack.last_mut() {
+            if is_text_tag(&parent.tag) {
+                let tag = parent.tag.clone();
+                let raw = consume_raw_text(template, &mut tokenizer, &tag);
+                if !raw.text.is_empty() {
+                    push_text_node(
+                        parent,
+                        &raw.text,
+                        raw.start,
+                        raw.text_end,
+                        options,
+                        in_v_pre,
+                        in_pre_tag,
+                    );
+                }
+                if raw.has_end_tag {
+                    close_until_matching_end_tag(
+                        &tag,
+                        &mut stack,
+                        &mut root,
+                        diagnostics,
+                        options,
+                        &mut in_v_pre,
+                    );
+                }
+                if raw.reached_eof {
+                    break;
+                }
+                continue;
+            }
+        }
+
+        let token = tokenizer.next_token();
         match token.kind {
             HtmlTokenKind::StartTag {
                 name,
@@ -450,7 +484,15 @@ fn parse_element_tree(
             }
             HtmlTokenKind::Text(text) | HtmlTokenKind::Cdata(text) => {
                 if let Some(parent) = stack.last_mut() {
-                    push_text_node(parent, &text, token.start, token.end, options, in_v_pre);
+                    push_text_node(
+                        parent,
+                        &text,
+                        token.start,
+                        token.end,
+                        options,
+                        in_v_pre,
+                        in_pre_tag,
+                    );
                 } else if !text.trim().is_empty() {
                     let message = if text == template {
                         "Component template requires a root element, rather than just text."
@@ -481,8 +523,8 @@ fn parse_element_tree(
             }
             HtmlTokenKind::Comment(_)
             | HtmlTokenKind::BogusQuestionTag
-            | HtmlTokenKind::Doctype(_)
-            | HtmlTokenKind::Eof => {}
+            | HtmlTokenKind::Doctype(_) => {}
+            HtmlTokenKind::Eof => break,
         }
     }
 
@@ -503,6 +545,40 @@ fn parse_element_tree(
     }
 
     root
+}
+
+struct RawText {
+    text: String,
+    start: usize,
+    text_end: usize,
+    has_end_tag: bool,
+    reached_eof: bool,
+}
+
+fn consume_raw_text(template: &str, tokenizer: &mut HtmlTokenizer<'_>, tag: &str) -> RawText {
+    let start = tokenizer.cursor();
+    let close_tag = format!("</{tag}");
+    let lower = template[start..].to_ascii_lowercase();
+    let Some(relative_end) = lower.find(&close_tag) else {
+        tokenizer.set_cursor(template.len());
+        return RawText {
+            text: template[start..].to_string(),
+            start,
+            text_end: template.len(),
+            has_end_tag: false,
+            reached_eof: true,
+        };
+    };
+    let text_end = start + relative_end;
+    tokenizer.set_cursor(text_end);
+    let end_tag = tokenizer.next_token();
+    RawText {
+        text: template[start..text_end].to_string(),
+        start,
+        text_end,
+        has_end_tag: matches!(end_tag.kind, HtmlTokenKind::EndTag { ref name } if name.eq_ignore_ascii_case(tag)),
+        reached_eof: false,
+    }
 }
 
 fn close_until_matching_end_tag(
@@ -630,10 +706,14 @@ fn close_element(
     if element.pre {
         *in_v_pre = false;
     }
-    trim_ending_whitespace(&mut element);
-    cleanup_scoped_slot_children(&mut element);
+    let in_pre_tag = element.tag == "pre" || stack.iter().any(|ancestor| ancestor.tag == "pre");
+    if !in_pre_tag {
+        trim_ending_whitespace(&mut element);
+    }
+    cleanup_scoped_slot_children(&mut element, in_pre_tag);
     element.plain = element_generates_empty_data(&element);
 
+    let parent_in_pre_tag = stack.iter().any(|ancestor| ancestor.tag == "pre");
     if let Some(parent) = stack.last_mut() {
         if element.elseif.is_some() || element.else_branch {
             process_if_conditions(element, parent, diagnostics);
@@ -656,7 +736,9 @@ fn close_element(
             }
             parent.children.push(Vue2Node::Element(Box::new(element)));
         }
-        trim_ending_whitespace(parent);
+        if !parent_in_pre_tag {
+            trim_ending_whitespace(parent);
+        }
         return;
     }
 
@@ -714,14 +796,16 @@ fn is_ignorable_root_whitespace(_element: &Vue2Element) -> bool {
     false
 }
 
-fn cleanup_scoped_slot_children(element: &mut Vue2Element) {
+fn cleanup_scoped_slot_children(element: &mut Vue2Element, in_pre_tag: bool) {
     element.children.retain(|child| {
         !matches!(
             child,
             Vue2Node::Element(child_element) if child_element.slot_scope.is_some()
         )
     });
-    trim_ending_whitespace(element);
+    if !in_pre_tag {
+        trim_ending_whitespace(element);
+    }
 }
 
 fn collect_element_warnings(element: Option<&Vue2Element>, diagnostics: &mut DiagnosticSink) {
@@ -1186,31 +1270,42 @@ fn push_text_node(
     end: usize,
     options: &Vue2CompileOptions,
     in_v_pre: bool,
+    in_pre_tag: bool,
 ) {
     let mut text = if is_text_tag(&parent.tag) {
         text.to_string()
     } else {
         decode_basic_entities(text)
     };
-    if parent.tag == "pre" && text.starts_with('\n') && parent.children.is_empty() {
+    if matches!(parent.tag.as_str(), "pre" | "textarea")
+        && text.starts_with('\n')
+        && parent.children.is_empty()
+    {
         text.remove(0);
     }
-    if text.trim().is_empty() {
-        if parent.children.is_empty() || !options.preserve_whitespace {
-            return;
+    if text_is_collapsible_whitespace(&text) {
+        if !in_pre_tag {
+            if options.whitespace.as_deref() == Some("condense") {
+                if text.contains('\n') {
+                    return;
+                }
+            } else if parent.children.is_empty() || !options.preserve_whitespace {
+                return;
+            }
+            text = if options.whitespace.as_deref() == Some("condense") {
+                condense_whitespace(&text)
+            } else {
+                " ".into()
+            };
+            if parent
+                .children
+                .last()
+                .is_some_and(|child| matches!(child, Vue2Node::Text(t) if t.text == " "))
+            {
+                return;
+            }
         }
-        if options.whitespace.as_deref() == Some("condense") && text.contains('\n') {
-            return;
-        }
-        text = " ".into();
-        if parent
-            .children
-            .last()
-            .is_some_and(|child| matches!(child, Vue2Node::Text(t) if t.text == " "))
-        {
-            return;
-        }
-    } else if options.whitespace.as_deref() == Some("condense") && parent.tag != "pre" {
+    } else if options.whitespace.as_deref() == Some("condense") && !in_pre_tag {
         text = condense_whitespace(&text);
     }
     let expression = if parent.pre || in_v_pre {
@@ -1225,6 +1320,10 @@ fn push_text_node(
         span: Some(Span::new(FileId(0), start, end)),
         static_node: false,
     }));
+}
+
+fn text_is_collapsible_whitespace(value: &str) -> bool {
+    value.chars().all(|ch| ch.is_ascii_whitespace())
 }
 
 fn optimize(root: &mut Vue2Element) {
@@ -2894,7 +2993,7 @@ fn condense_whitespace(value: &str) -> String {
     let mut out = String::new();
     let mut previous_ws = false;
     for ch in value.chars() {
-        if ch.is_whitespace() {
+        if ch.is_ascii_whitespace() {
             if !previous_ws {
                 out.push(' ');
             }
@@ -3325,6 +3424,85 @@ mod tests {
                     .to_string()
             ]
         );
+    }
+
+    #[test]
+    fn parses_vue2_raw_text_elements_like_official_parser() {
+        let textarea = compile(
+            "<textarea>\n        <p>Test 1</p>\n        test2\n      </textarea>",
+            options(),
+        );
+        let textarea = textarea.element_ast.unwrap();
+        assert_eq!(textarea.tag, "textarea");
+        assert_eq!(textarea.children.len(), 1);
+        match &textarea.children[0] {
+            Vue2Node::Text(text) => {
+                assert_eq!(text.text, "        <p>Test 1</p>\n        test2\n      ");
+                assert!(text.expression.is_none());
+            }
+            Vue2Node::Element(_) => panic!("textarea content must stay raw text"),
+        }
+
+        let script = compile(
+            r#"<script type="x/template">&gt;<foo>&lt;</script>"#,
+            options(),
+        );
+        let script = script.element_ast.unwrap();
+        assert_eq!(script.tag, "script");
+        assert_eq!(script.children.len(), 1);
+        match &script.children[0] {
+            Vue2Node::Text(text) => assert_eq!(text.text, "&gt;<foo>&lt;"),
+            Vue2Node::Element(_) => panic!("script template content must stay raw text"),
+        }
+    }
+
+    #[test]
+    fn parses_vue2_pre_children_as_normal_elements_with_preserved_whitespace() {
+        let result = compile(
+            "<pre><code>  \n<span>hi</span>\n  </code><span> </span></pre>",
+            options(),
+        );
+        let root = result.element_ast.unwrap();
+        assert_eq!(root.tag, "pre");
+        assert_eq!(root.children.len(), 2);
+        let code = match &root.children[0] {
+            Vue2Node::Element(element) => element,
+            Vue2Node::Text(_) => panic!("expected code child element"),
+        };
+        assert_eq!(code.children.len(), 3);
+        match &code.children[0] {
+            Vue2Node::Text(text) => assert_eq!(text.text, "  \n"),
+            Vue2Node::Element(_) => panic!("expected preserved pre whitespace"),
+        }
+        match &code.children[2] {
+            Vue2Node::Text(text) => assert_eq!(text.text, "\n  "),
+            Vue2Node::Element(_) => panic!("expected preserved pre whitespace"),
+        }
+    }
+
+    #[test]
+    fn parses_vue2_condensed_whitespace_like_official_parser() {
+        let mut options = options();
+        options.whitespace = Some("condense".into());
+        options.preserve_whitespace = false;
+        let result = compile(
+            "<p>\n  Welcome to <b>Vue.js</b>    <i>world</i>  \n  <span>.\n  Have fun!\n</span></p>",
+            options.clone(),
+        );
+        let root = result.element_ast.unwrap();
+        assert_eq!(root.children.len(), 5);
+        match &root.children[2] {
+            Vue2Node::Text(text) => assert_eq!(text.text, " "),
+            Vue2Node::Element(_) => panic!("expected condensed inline space"),
+        }
+
+        let nbsp = compile("<span>&nbsp;</span>", options);
+        let root = nbsp.element_ast.unwrap();
+        assert_eq!(root.children.len(), 1);
+        match &root.children[0] {
+            Vue2Node::Text(text) => assert_eq!(text.text, "\u{00a0}"),
+            Vue2Node::Element(_) => panic!("expected non-breaking space text"),
+        }
     }
 
     #[test]

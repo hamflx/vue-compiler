@@ -97,6 +97,10 @@ impl<'a> HtmlTokenizer<'a> {
         self.cursor = cursor.min(self.source.len());
     }
 
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
     pub fn tokenize(mut self) -> Vec<HtmlToken> {
         let mut tokens = Vec::new();
         loop {
