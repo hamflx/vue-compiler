@@ -4,7 +4,7 @@
   "packageManager": "pnpm@9.0.0",
   "scripts": {
     "test": "cargo test --workspace",
-    "test:napi": "cargo xtask verify-official-lock",
+    "test:napi": "cargo xtask verify-napi",
     "conformance": "cargo xtask run-conformance --all"
   }
 }
