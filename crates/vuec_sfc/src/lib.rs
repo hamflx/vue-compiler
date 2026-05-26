@@ -283,7 +283,16 @@ impl SfcCompiler {
         source: &str,
         options: Vue27ParseComponentOptions,
     ) -> Vue27ParseComponentResult {
-        let filename = "anonymous.vue".to_string();
+        self.parse_vue27_component_with_filename("anonymous.vue", source, options)
+    }
+
+    pub fn parse_vue27_component_with_filename(
+        &mut self,
+        filename: impl Into<String>,
+        source: &str,
+        options: Vue27ParseComponentOptions,
+    ) -> Vue27ParseComponentResult {
+        let filename = filename.into();
         let source_file = self.sources.add_file(
             Some(std::path::PathBuf::from(&filename)),
             source.to_string(),
@@ -2175,6 +2184,7 @@ fn vue27_script_setup_content(
 ) -> String {
     let scope_id = vue27_scope_id(options.id.as_deref());
     let analysis = analyze_vue27_script_setup(script_setup);
+    let normal_script = analyze_vue27_normal_script_for_setup(descriptor);
     let bindings = vue27_setup_binding_metadata(descriptor);
     let css_vars_code = if css_vars.is_empty() {
         String::new()
@@ -2184,11 +2194,6 @@ fn vue27_script_setup_content(
             gen_vue27_css_vars_code(css_vars, &bindings, &scope_id, options.is_prod)
         )
     };
-    let props = analysis
-        .props_runtime
-        .as_ref()
-        .map(|props| format!("\n  props: {},", props.trim()))
-        .unwrap_or_default();
     let return_bindings = analysis
         .return_bindings
         .iter()
@@ -2210,15 +2215,153 @@ fn vue27_script_setup_content(
     } else {
         "import { useCssVars as _useCssVars } from 'vue'\n"
     };
-    format!(
-        "{}{}\nexport default {{{}\n  setup(__props) {{\n{}{}\nreturn {}\n}}\n\n}}",
-        helper_import,
-        analysis.module_content,
-        props,
-        css_vars_code,
-        analysis.setup_content,
-        returned
+    let is_ts = script_is_typescript(&script_setup.attrs);
+    let runtime_options = vue27_script_setup_runtime_options(descriptor, &analysis, &normal_script);
+    let setup_body = format!(
+        "{}{}\nreturn {}",
+        css_vars_code, analysis.setup_content, returned
+    );
+    let export_prefix =
+        vue27_script_setup_export_prefix(&normal_script, &runtime_options, is_ts, &setup_body);
+    let helper_import = if is_ts {
+        "import { defineComponent as _defineComponent } from 'vue'\n".to_string() + helper_import
+    } else {
+        helper_import.to_string()
+    };
+    let content = format!(
+        "{}{}{}{}",
+        helper_import, normal_script.module_content, analysis.module_content, export_prefix
+    );
+    content.trim().to_string()
+}
+
+fn vue27_script_setup_runtime_options(
+    descriptor: &SfcDescriptor,
+    analysis: &Vue27ScriptSetupAnalysis,
+    normal_script: &Vue27NormalScriptAnalysis,
+) -> String {
+    let mut runtime_options = String::new();
+    if !normal_script.has_default_export_name {
+        if let Some(name) = vue27_inferred_component_name(&descriptor.filename) {
+            runtime_options.push_str(&format!("\n  __name: '{}',", escape_js_single(&name)));
+        }
+    }
+    if let Some(props) = analysis.props_runtime.as_ref() {
+        runtime_options.push_str(&format!("\n  props: {},", props.trim()));
+    }
+    runtime_options
+}
+
+fn vue27_script_setup_export_prefix(
+    normal_script: &Vue27NormalScriptAnalysis,
+    runtime_options: &str,
+    is_ts: bool,
+    setup_body: &str,
+) -> String {
+    if is_ts {
+        let spread = if normal_script.has_default_export {
+            "\n  ...__default__,"
+        } else {
+            ""
+        };
+        return format!(
+            "\nexport default /*#__PURE__*/_defineComponent({{{spread}{runtime_options}\n  setup(__props) {{\n{setup_body}\n}}\n\n}})"
+        );
+    }
+    if normal_script.has_default_export {
+        format!(
+            "\nexport default /*#__PURE__*/Object.assign(__default__, {{{runtime_options}\n  setup(__props) {{\n{setup_body}\n}}\n\n}})"
+        )
+    } else {
+        format!("\nexport default {{{runtime_options}\n  setup(__props) {{\n{setup_body}\n}}\n\n}}")
+    }
+}
+
+fn vue27_inferred_component_name(filename: &str) -> Option<String> {
+    if filename.is_empty() || filename == "anonymous.vue" {
+        return None;
+    }
+    let name = filename
+        .rsplit(['/', '\\'])
+        .next()
+        .and_then(|file| file.rsplit_once('.').map(|(stem, _)| stem))
+        .filter(|stem| !stem.is_empty())?;
+    Some(name.to_string())
+}
+
+fn escape_js_single(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('\'', "\\'")
+}
+
+fn analyze_vue27_normal_script_for_setup(descriptor: &SfcDescriptor) -> Vue27NormalScriptAnalysis {
+    let Some(script) = descriptor.script.as_ref() else {
+        return Vue27NormalScriptAnalysis::default();
+    };
+    let source = script.content.as_str();
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(
+        &allocator,
+        source,
+        script_source_type_from_attrs(&script.attrs),
     )
+    .with_options(oxc_parser::ParseOptions {
+        parse_regular_expression: true,
+        ..oxc_parser::ParseOptions::default()
+    })
+    .parse();
+    if parsed.panicked || !parsed.errors.is_empty() {
+        return Vue27NormalScriptAnalysis {
+            module_content: source.to_string(),
+            ..Vue27NormalScriptAnalysis::default()
+        };
+    }
+
+    let mut edits = SourceEdits::new(source);
+    let mut analysis = Vue27NormalScriptAnalysis::default();
+    for statement in &parsed.program.body {
+        match statement {
+            Statement::ExportDefaultDeclaration(declaration) => {
+                analysis.has_default_export = true;
+                analysis.has_default_export_name = vue27_default_export_has_name(declaration);
+                edits.overwrite(
+                    declaration.span.start as usize,
+                    export_default_declaration_value_start(source, declaration),
+                    "const __default__ =",
+                );
+            }
+            Statement::ExportNamedDeclaration(declaration) => {
+                if rewrite_named_default_exports(source, "__default__", declaration, &mut edits) {
+                    analysis.has_default_export = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    analysis.module_content = trim_trailing_blank_lines(&edits.apply()).to_string();
+    analysis
+}
+
+fn vue27_default_export_has_name(declaration: &ExportDefaultDeclaration<'_>) -> bool {
+    match &declaration.declaration {
+        ExportDefaultDeclarationKind::ObjectExpression(object) => {
+            object_expression_has_static_key(object, "name")
+        }
+        ExportDefaultDeclarationKind::CallExpression(call) => {
+            call.arguments.first().is_some_and(|argument| {
+                matches!(argument.to_expression(), Expression::ObjectExpression(object) if object_expression_has_static_key(object, "name"))
+            })
+        }
+        _ => false,
+    }
+}
+
+fn object_expression_has_static_key(object: &ObjectExpression<'_>, key: &str) -> bool {
+    object
+        .properties
+        .iter()
+        .filter_map(|property| property.as_property())
+        .filter(|property| !property.computed)
+        .any(|property| property.key.static_name().as_deref() == Some(key))
 }
 
 fn vue27_scope_id(id: Option<&str>) -> String {
@@ -2273,6 +2416,13 @@ struct Vue27ScriptSetupAnalysis {
     props_bindings: Vec<String>,
     props_runtime: Option<String>,
     user_import_aliases: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Vue27NormalScriptAnalysis {
+    module_content: String,
+    has_default_export: bool,
+    has_default_export_name: bool,
 }
 
 fn analyze_vue27_script_setup(script_setup: &SfcBlock) -> Vue27ScriptSetupAnalysis {
@@ -3531,6 +3681,69 @@ let b = 2
             script.bindings.get("__isScriptSetup").map(String::as_str),
             Some("true")
         );
+    }
+
+    #[test]
+    fn vue27_compile_script_infers_setup_component_name_from_filename() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "FooBar.vue",
+            "<script setup>const a = 1</script><template>{{ a }}</template>",
+        );
+        let script = compiler.compile_vue27_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script
+            .content
+            .contains("export default {\n  __name: 'FooBar',"));
+        assert!(script.content.contains("return { a }"));
+    }
+
+    #[test]
+    fn vue27_compile_script_preserves_manual_default_export_name() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "FooBar.vue",
+            r#"<script>
+export default {
+  name: 'Baz'
+}
+</script>
+<script setup>const a = 1</script>"#,
+        );
+        let script = compiler.compile_vue27_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script
+            .content
+            .contains("const __default__ = {\n  name: 'Baz'"));
+        assert!(script
+            .content
+            .contains("export default /*#__PURE__*/Object.assign(__default__, {"));
+        assert!(!script.content.contains("__name: 'FooBar'"));
+    }
+
+    #[test]
+    fn vue27_compile_script_merges_ts_default_export_with_define_component() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "FooBar.vue",
+            r#"<script lang="ts">
+export default {
+  name: 'Baz'
+}
+</script>
+<script setup lang="ts">const a = 1</script>"#,
+        );
+        let script = compiler.compile_vue27_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script
+            .content
+            .contains("import { defineComponent as _defineComponent } from 'vue'"));
+        assert!(script
+            .content
+            .contains("const __default__ = {\n  name: 'Baz'"));
+        assert!(script
+            .content
+            .contains("export default /*#__PURE__*/_defineComponent({\n  ...__default__,"));
     }
 
     #[test]

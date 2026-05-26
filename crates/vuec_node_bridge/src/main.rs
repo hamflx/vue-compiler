@@ -402,7 +402,13 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
             let source = string_field(&payload, "source");
             let filename = string_field_or(&payload, "filename", "anonymous.vue");
             let mut compiler = SfcCompiler::new();
-            let descriptor = compiler.parse(filename, &source);
+            let descriptor = compiler
+                .parse_vue27_component_with_filename(
+                    filename,
+                    &source,
+                    Vue27ParseComponentOptions::default(),
+                )
+                .descriptor;
             let script = compiler
                 .compile_vue27_script(&descriptor, sfc_script_options(payload.get("options")));
             Ok(vue27_script_value(&script))
