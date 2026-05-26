@@ -1,5 +1,12 @@
 # Memory
 
+- Current round: completed a Vue 2 compiler Rust scoped-slot codegen parity slice.
+- `vuec_vue2` now performs Vue 2 parser-style final cleanup for direct scoped-slot children: slot-scope nodes are registered under the parent `scopedSlots` map but no longer also render as normal children. Scoped-slot elements now force data object emission where official codegen requires `_c('div',{},...)`.
+- Scoped slot codegen now handles stable slots, dynamic slot names, force-update `_u(...,null,true)` metadata, legacy `slot-scope` + `v-if` function bodies, and new `v-slot` / `#` conditional slot object generation. Regression coverage was added for the official scoped-slot codegen cases.
+- This is Rust compiler implementation work in `crates/vuec_vue2`; `xtask/src/compat.rs` was not changed, and no AST/HIR/MIR structure changed. The new `slot_new_syntax` field is an internal codegen marker skipped from serialization, not a public AST/HIR/MIR contract change.
+- Current Vue 2 conformance movement: `vue2-compiler` improved from `72/188` to `77/188`, and `vue27-compiler` improved from `70/190` to `75/190`. `vue27-sfc` remains `5/144`, unchanged by this compiler scoped-slot codegen slice.
+- Verification for this Vue 2 scoped-slot codegen slice: `cargo fmt --all --check`, `git diff --check`, `cargo test -p vuec_vue2 --lib` (`10/10`), `cargo build -p vuec_node_bridge`, `cargo xtask run-conformance --suite vue2-compiler` (expected fail, `77/188`), `cargo xtask run-conformance --suite vue27-compiler` (expected fail, `75/190`), and `cargo xtask run-conformance --suite vue27-sfc` (expected fail, unchanged `5/144`).
+
 - Current round: completed a Vue 2 compiler Rust event-handler codegen parity slice.
 - `vuec_vue2` now preserves source modifier order for Vue 2 event handlers, keeps a codegen-only marker for handlers that originally had a modifier object, and matches official wrapping behavior for `.capture`, `.once`, and `.passive` event-option modifiers. Event codegen now distinguishes method paths, function expressions, simple function invocations, and inline statements more closely to Vue 2 official `events.js`, so multi-statement handlers and string-heavy malformed calls no longer receive a spurious `return`.
 - Vue 2 key/generic/mouse modifier generation now follows official order and guard semantics, including ordered chained key filters, ordered `.stop.prevent.self`, `.exact`, and mouse button guards. Regression coverage was added for the official event handler failures.

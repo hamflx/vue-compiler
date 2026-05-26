@@ -162,6 +162,8 @@ pub struct Vue2Element {
     pub slot_target: Option<String>,
     pub slot_target_dynamic: bool,
     pub slot_scope: Option<String>,
+    #[serde(skip)]
+    pub slot_new_syntax: bool,
     pub scoped_slots: BTreeMap<String, Vue2Element>,
     pub component: Option<String>,
     pub inline_template: bool,
@@ -564,6 +566,7 @@ fn create_element(
         slot_target: None,
         slot_target_dynamic: false,
         slot_scope: None,
+        slot_new_syntax: false,
         scoped_slots: BTreeMap::new(),
         component: None,
         inline_template: false,
@@ -595,6 +598,7 @@ fn close_element(
     _in_v_pre: &mut bool,
 ) {
     trim_ending_whitespace(&mut element);
+    cleanup_scoped_slot_children(&mut element);
     element.plain = element_generates_empty_data(&element);
 
     if let Some(parent) = stack.last_mut() {
@@ -675,6 +679,16 @@ fn close_element(
 
 fn is_ignorable_root_whitespace(_element: &Vue2Element) -> bool {
     false
+}
+
+fn cleanup_scoped_slot_children(element: &mut Vue2Element) {
+    element.children.retain(|child| {
+        !matches!(
+            child,
+            Vue2Node::Element(child_element) if child_element.slot_scope.is_some()
+        )
+    });
+    trim_ending_whitespace(element);
 }
 
 fn process_pre(element: &mut Vue2Element) {
@@ -790,6 +804,7 @@ fn process_slot_content(element: &mut Vue2Element) {
         let (target, dynamic) = slot_name_from_binding(&name);
         element.slot_target = Some(target);
         element.slot_target_dynamic = dynamic;
+        element.slot_new_syntax = true;
         element.slot_scope = Some(if value.is_empty() {
             "_empty_".into()
         } else {
@@ -1092,6 +1107,7 @@ fn element_generates_empty_data(element: &Vue2Element) -> bool {
         && element.events.is_empty()
         && element.native_events.is_empty()
         && element.slot_target.is_none()
+        && element.slot_scope.is_none()
         && element.scoped_slots.is_empty()
         && element.model.is_none()
         && element.wrap_data.is_none()
@@ -1626,23 +1642,96 @@ fn gen_inline_template(element: &mut Vue2Element, state: &mut CodegenState<'_>) 
 }
 
 fn gen_scoped_slots(element: &mut Vue2Element, state: &mut CodegenState<'_>) -> String {
+    let needs_force_update = element.for_exp.is_some()
+        || element.scoped_slots.values().any(|slot| {
+            slot.slot_target_dynamic
+                || slot.if_exp.is_some()
+                || slot.for_exp.is_some()
+                || contains_slot_child(slot)
+        });
     let slots = element
         .scoped_slots
         .clone()
         .into_iter()
-        .map(|(key, mut slot)| {
-            let scope = slot.slot_scope.clone().unwrap_or_default();
-            let scope = if scope == "_empty_" { "" } else { &scope };
-            let body = if slot.tag == "template" {
-                gen_children(&mut slot, state, false).unwrap_or_else(|| "undefined".into())
-            } else {
-                gen_element(&mut slot, state)
-            };
-            format!("{{key:{key},fn:function({scope}){{return {body}}}}}")
-        })
+        .map(|(key, mut slot)| gen_scoped_slot(&key, &mut slot, state))
         .collect::<Vec<_>>()
         .join(",");
-    format!("scopedSlots:_u([{slots}])")
+    if needs_force_update {
+        format!("scopedSlots:_u([{slots}],null,true)")
+    } else {
+        format!("scopedSlots:_u([{slots}])")
+    }
+}
+
+fn gen_scoped_slot(key: &str, slot: &mut Vue2Element, state: &mut CodegenState<'_>) -> String {
+    if slot.if_exp.is_some() && !slot.if_processed && slot.slot_new_syntax {
+        return gen_if_scoped_slot(key, slot, state);
+    }
+    if slot.for_exp.is_some() && !slot.for_processed {
+        return gen_for(slot, state, Some(gen_scoped_slot_for));
+    }
+    let scope = slot.slot_scope.clone().unwrap_or_default();
+    let scope = if scope == "_empty_" { "" } else { &scope };
+    let body = gen_scoped_slot_body(slot, state);
+    let proxy = if scope.is_empty() { ",proxy:true" } else { "" };
+    let slot_key = slot.slot_target.as_deref().unwrap_or(key);
+    format!("{{key:{slot_key},fn:function({scope}){{return {body}}}{proxy}}}")
+}
+
+fn gen_if_scoped_slot(key: &str, slot: &mut Vue2Element, state: &mut CodegenState<'_>) -> String {
+    slot.if_processed = true;
+    gen_if_scoped_slot_conditions(key, slot.if_conditions.clone(), state)
+}
+
+fn gen_if_scoped_slot_conditions(
+    key: &str,
+    mut conditions: Vec<Vue2IfCondition>,
+    state: &mut CodegenState<'_>,
+) -> String {
+    if conditions.is_empty() {
+        return "null".into();
+    }
+    let condition = conditions.remove(0);
+    let mut block = *condition.block;
+    if let Some(exp) = condition.exp {
+        format!(
+            "({exp})?{}:{}",
+            gen_scoped_slot(key, &mut block, state),
+            gen_if_scoped_slot_conditions(key, conditions, state)
+        )
+    } else {
+        gen_scoped_slot(key, &mut block, state)
+    }
+}
+
+fn gen_scoped_slot_for(slot: &mut Vue2Element, state: &mut CodegenState<'_>) -> String {
+    let key = slot
+        .slot_target
+        .clone()
+        .unwrap_or_else(|| "\"default\"".into());
+    gen_scoped_slot(&key, slot, state)
+}
+
+fn gen_scoped_slot_body(slot: &mut Vue2Element, state: &mut CodegenState<'_>) -> String {
+    if slot.tag == "template" {
+        if slot.if_exp.is_some() && !slot.slot_new_syntax {
+            let children = gen_children(slot, state, false).unwrap_or_else(|| "undefined".into());
+            let if_exp = slot.if_exp.as_deref().unwrap_or_default();
+            format!("({if_exp})?{children}:undefined")
+        } else {
+            gen_children(slot, state, false).unwrap_or_else(|| "undefined".into())
+        }
+    } else {
+        gen_element(slot, state)
+    }
+}
+
+fn contains_slot_child(element: &Vue2Element) -> bool {
+    element.tag == "slot"
+        || element.children.iter().any(|child| match child {
+            Vue2Node::Element(child) => contains_slot_child(child),
+            Vue2Node::Text(_) => false,
+        })
 }
 
 #[derive(Clone, Copy)]
@@ -3049,6 +3138,54 @@ mod tests {
         assert_eq!(
             capture_once.render,
             r#"with(this){return _c('input',{on:{"~!input":function($event){return onInput.apply(null, arguments)}}})}"#
+        );
+    }
+
+    #[test]
+    fn generates_vue2_scoped_slots_like_official_codegen() {
+        let default_template = compile(
+            r#"<foo><template slot-scope="bar">{{ bar }}</template></foo>"#,
+            options(),
+        );
+        assert_eq!(
+            default_template.render,
+            r#"with(this){return _c('foo',{scopedSlots:_u([{key:"default",fn:function(bar){return [_v(_s(bar))]}}])})}"#
+        );
+
+        let default_element = compile(
+            r#"<foo><div slot-scope="bar">{{ bar }}</div></foo>"#,
+            options(),
+        );
+        assert_eq!(
+            default_element.render,
+            r#"with(this){return _c('foo',{scopedSlots:_u([{key:"default",fn:function(bar){return _c('div',{},[_v(_s(bar))])}}])})}"#
+        );
+
+        let dynamic_slot = compile(
+            r#"<foo><template :slot="foo" slot-scope="bar">{{ bar }}</template></foo>"#,
+            options(),
+        );
+        assert_eq!(
+            dynamic_slot.render,
+            r#"with(this){return _c('foo',{scopedSlots:_u([{key:foo,fn:function(bar){return [_v(_s(bar))]}}],null,true)})}"#
+        );
+
+        let legacy_if = compile(
+            "<foo><template v-if=\"\nshow\n\" slot-scope=\"bar\">{{ bar }}</template></foo>",
+            options(),
+        );
+        assert_eq!(
+            legacy_if.render,
+            "with(this){return _c('foo',{scopedSlots:_u([{key:\"default\",fn:function(bar){return (\nshow\n)?[_v(_s(bar))]:undefined}}],null,true)})}"
+        );
+
+        let new_syntax_if = compile(
+            r#"<foo><template v-if="show" #default="bar">{{ bar }}</template></foo>"#,
+            options(),
+        );
+        assert_eq!(
+            new_syntax_if.render,
+            r#"with(this){return _c('foo',{scopedSlots:_u([(show)?{key:"default",fn:function(bar){return [_v(_s(bar))]}}:null],null,true)})}"#
         );
     }
 
