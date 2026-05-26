@@ -1736,6 +1736,11 @@ fn write_alias_index(
     source.push('\n');
     if target.kind == TargetKind::Vue3Core {
         source.push_str("Object.defineProperty(exports, '__vuecRuntime', { value: vue3CoreRuntime, enumerable: false });\n");
+    } else if matches!(
+        target.kind,
+        TargetKind::Vue26Template | TargetKind::Vue27Template
+    ) {
+        source.push_str("Object.defineProperty(exports, '__vuecRuntime', { value: vuecBridgeRuntime, enumerable: false });\n");
     }
     for export_name in &manifest.exports {
         let detail = manifest.export_details.get(export_name);
@@ -6937,6 +6942,8 @@ function callBridge(command, payload) {
   return result.stdout.trim() ? JSON.parse(result.stdout) : undefined;
 }
 
+const vuecBridgeRuntime = { callBridge };
+
 function normalizeArgs(payload) {
   return payload || {};
 }
@@ -9646,19 +9653,74 @@ export function optimize(ast) {
     write_text(
         &compiler_root.join("codegen.ts"),
         r#"
-import { compile } from 'vue-template-compiler'
+import * as vueTemplateCompiler from 'vue-template-compiler'
 
 export function generate(ast, options = {}) {
-  if (ast && ast.__vuecTemplate) {
-    const compiled = compile(ast.__vuecTemplate, { ...(ast.__vuecOptions || {}), ...options, optimize: true })
-    return {
-      render: compiled.render,
-      staticRenderFns: compiled.staticRenderFns || compiled.static_render_fns || [],
+  const generated = vueTemplateCompiler.__vuecRuntime.callBridge('vue2.generate', {
+    ast: normalizeVue2AstForBridge(ast),
+    options,
+  })
+  emitVue2InlineTemplateWarnings(ast)
+  return {
+    render: generated.render,
+    staticRenderFns: generated.staticRenderFns || generated.static_render_fns || [],
+  }
+}
+
+function normalizeVue2AstForBridge(node) {
+  if (!node || typeof node !== 'object') return null
+  const copy = Array.isArray(node) ? node.map(normalizeVue2AstForBridge) : { ...node }
+  normalizeVue2EventsForBridge(copy.events)
+  normalizeVue2EventsForBridge(copy.native_events)
+  if (Array.isArray(copy.children)) {
+    copy.children = copy.children.map(normalizeVue2NodeForBridge)
+  }
+  if (copy.scoped_slots && typeof copy.scoped_slots === 'object') {
+    copy.scoped_slots = Object.fromEntries(
+      Object.entries(copy.scoped_slots).map(([key, value]) => [key, normalizeVue2AstForBridge(value)])
+    )
+  }
+  if (Array.isArray(copy.if_conditions)) {
+    copy.if_conditions = copy.if_conditions.map(condition => ({
+      ...condition,
+      block: normalizeVue2AstForBridge(condition.block),
+    }))
+  }
+  return copy
+}
+
+function normalizeVue2NodeForBridge(node) {
+  if (!node || typeof node !== 'object') return node
+  if ('Element' in node) return { Element: normalizeVue2AstForBridge(node.Element) }
+  return node
+}
+
+function normalizeVue2EventsForBridge(events) {
+  if (!events || typeof events !== 'object') return
+  for (const key of Object.keys(events)) {
+    if (events[key] === undefined) {
+      events[key] = []
     }
   }
-  return {
-    render: 'with(this){return _c("div")}',
-    staticRenderFns: [],
+}
+
+function emitVue2InlineTemplateWarnings(node) {
+  if (!node || typeof node !== 'object') return
+  if (node.inline_template && (!Array.isArray(node.children) || node.children.length !== 1)) {
+    console.error('Inline-template components must have exactly one child element.')
+  }
+  if (Array.isArray(node.children)) {
+    for (const child of node.children) {
+      if (child && child.Element) emitVue2InlineTemplateWarnings(child.Element)
+    }
+  }
+  if (node.scoped_slots && typeof node.scoped_slots === 'object') {
+    for (const slot of Object.values(node.scoped_slots)) emitVue2InlineTemplateWarnings(slot)
+  }
+  if (Array.isArray(node.if_conditions)) {
+    for (const condition of node.if_conditions.slice(1)) {
+      emitVue2InlineTemplateWarnings(condition && condition.block)
+    }
   }
 }
 "#,
@@ -11712,7 +11774,8 @@ mod tests {
         ));
         let codegen =
             fs::read_to_string(temp.join("src").join("compiler").join("codegen.ts")).unwrap();
-        assert!(codegen.contains("render: 'with(this){return _c(\"div\")}'"));
+        assert!(codegen.contains("callBridge('vue2.generate'"));
+        assert!(codegen.contains("events[key] = []"));
 
         write_vue27_sfc_conformance_shims(&temp).unwrap();
         let sfc_config = fs::read_to_string(temp.join("vitest.config.ts")).unwrap();

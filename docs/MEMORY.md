@@ -1,5 +1,12 @@
 # Memory
 
+- Current round: completed a Vue 2 Rust-backed internal `generate(ast)` codegen slice for mutated official AST input.
+- `vuec_vue2` now exposes `generate(Some(&Vue2Element), options)` returning `render` and `static_render_fns`, and Vue 2 event codegen now emits the official `function(){}` fallback for event keys whose handler list is empty. Vue2Element codegen-state fields now deserialize with defaults so bridge-supplied ASTs can be generated directly without reparsing the original template, and `slot_new_syntax` is preserved through serialization for direct AST codegen.
+- `vuec_node_bridge` now supports `vue2.generate`, and the Vue 2 official `compiler/codegen` source shim in `xtask/src/compat.rs` sends the current AST to Rust codegen instead of recompiling `__vuecTemplate`. The shim also maps JavaScript `events.foo = undefined` to an empty Rust handler list and emits inline-template child-count warnings during direct `generate(ast)` calls. This `xtask/src/compat.rs` work is API/runner bridge adapter support only; compiler semantics are in Rust.
+- No AST/HIR/MIR structure changed.
+- Current Vue 2 conformance movement: `vue2-compiler` improved from `98/188` to `99/188`, and `vue27-compiler` improved from `94/190` to `95/190`. `vue27-sfc` remains `5/144`.
+- Verification for this Vue 2 direct AST generate slice: `cargo test -p vuec_vue2 --lib` (`13/13`), `cargo build -p vuec_node_bridge`, `cargo test -p xtask` (`29/29`), `cargo xtask run-conformance --suite vue2-compiler` (expected fail, `99/188`), `cargo xtask run-conformance --suite vue27-compiler` (expected fail, `95/190`), and `cargo xtask run-conformance --suite vue27-sfc` (expected fail, unchanged `5/144`).
+
 - Current round: completed a Vue 2 official internal `generate(null)` API adapter parity slice.
 - `xtask/src/compat.rs` now emits the official Vue 2 `compiler/codegen` shim fallback render string `with(this){return _c("div")}` for null AST input, matching Vue 2's internal `generate(null, baseOptions)` API behavior. This is API adapter support only, not compiler semantics; Rust compile behavior was already producing the same empty-root default through `generate_render(None, ...)`.
 - No AST/HIR/MIR structure changed. `xtask/src/compat.rs` was touched only for Vue 2 official internal codegen API fallback adapter behavior, not temporary semantics.

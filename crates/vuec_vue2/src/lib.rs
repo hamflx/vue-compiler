@@ -76,6 +76,12 @@ pub struct Vue2FunctionResult {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue2CodegenResult {
+    pub render: String,
+    pub static_render_fns: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue2Attribute {
     pub name: String,
     pub value: String,
@@ -98,9 +104,9 @@ pub struct Vue2Directive {
 pub struct Vue2EventHandler {
     pub value: String,
     pub modifiers: BTreeMap<String, bool>,
-    #[serde(skip)]
+    #[serde(default)]
     pub modifier_order: Vec<String>,
-    #[serde(skip)]
+    #[serde(default)]
     pub has_modifier_object: bool,
     pub dynamic: bool,
     pub span: Option<Span>,
@@ -162,7 +168,7 @@ pub struct Vue2Element {
     pub slot_target: Option<String>,
     pub slot_target_dynamic: bool,
     pub slot_scope: Option<String>,
-    #[serde(skip)]
+    #[serde(default)]
     pub slot_new_syntax: bool,
     pub scoped_slots: BTreeMap<String, Vue2Element>,
     pub component: Option<String>,
@@ -179,9 +185,13 @@ pub struct Vue2Element {
     pub static_node: bool,
     pub static_root: bool,
     pub static_in_for: bool,
+    #[serde(default)]
     static_processed: bool,
+    #[serde(default)]
     once_processed: bool,
+    #[serde(default)]
     for_processed: bool,
+    #[serde(default)]
     if_processed: bool,
 }
 
@@ -278,6 +288,14 @@ impl Vue2Compiler {
         compiled
     }
 
+    pub fn generate(
+        &self,
+        element: Option<&Vue2Element>,
+        options: &Vue2CompileOptions,
+    ) -> Vue2CodegenResult {
+        generate(element, options)
+    }
+
     pub fn js(&self) -> &JsAstStore {
         &self.js
     }
@@ -299,6 +317,15 @@ pub fn compile_to_functions(template: &str, options: Vue2CompileOptions) -> Vue2
 
 pub fn compile_ssr(template: &str, options: Vue2CompileOptions) -> Vue2CompiledResult {
     Vue2Compiler::new().compile_ssr(template, options)
+}
+
+pub fn generate(element: Option<&Vue2Element>, options: &Vue2CompileOptions) -> Vue2CodegenResult {
+    let mut static_render_fns = Vec::new();
+    let render = generate_render(element, options, &mut static_render_fns);
+    Vue2CodegenResult {
+        render,
+        static_render_fns,
+    }
 }
 
 pub fn generate_code_frame(source: &str, start: usize, end: usize) -> String {
@@ -1809,7 +1836,9 @@ fn gen_handlers(events: &BTreeMap<String, Vec<Vue2EventHandler>>, native: bool) 
     let handlers = events
         .iter()
         .map(|(name, handlers)| {
-            let code = if handlers.len() == 1 {
+            let code = if handlers.is_empty() {
+                "function(){}".into()
+            } else if handlers.len() == 1 {
                 gen_handler(&handlers[0])
             } else {
                 format!(
@@ -1832,7 +1861,8 @@ fn gen_handler(handler: &Vue2EventHandler) -> String {
     let is_method_path = is_simple_path(&handler.value);
     let is_function_expression = is_function_expression(&handler.value);
     let is_function_invocation = is_function_invocation(&handler.value);
-    if !handler.has_modifier_object {
+    let has_modifier_object = handler.has_modifier_object || !handler.modifiers.is_empty();
+    if !has_modifier_object {
         if is_method_path || is_function_expression {
             return handler.value.clone();
         }
@@ -3171,6 +3201,19 @@ mod tests {
             capture_once.render,
             r#"with(this){return _c('input',{on:{"~!input":function($event){return onInput.apply(null, arguments)}}})}"#
         );
+    }
+
+    #[test]
+    fn generates_vue2_empty_event_handler_like_official_codegen() {
+        let parsed = compile(r#"<input @input="current++">"#, options());
+        let mut element = parsed.element_ast.unwrap();
+        element.events.insert("input".into(), Vec::new());
+        let generated = generate(Some(&element), &options());
+        assert_eq!(
+            generated.render,
+            r#"with(this){return _c('input',{on:{"input":function(){}}})}"#
+        );
+        assert!(generated.static_render_fns.is_empty());
     }
 
     #[test]

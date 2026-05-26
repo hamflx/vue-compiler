@@ -18,7 +18,9 @@ use vuec_sfc::{
 };
 use vuec_source::FileId;
 use vuec_style::{compile_style, StyleCompileOptions};
-use vuec_vue2::{self, Vue2CompileOptions, Vue2CompiledResult, Vue2Error, Vue2Warning};
+use vuec_vue2::{
+    self, Vue2CompileOptions, Vue2CompiledResult, Vue2Element, Vue2Error, Vue2Warning,
+};
 use vuec_vue3_core::{TemplateSource, Vue3CompilerOptions, Vue3Dialect};
 use vuec_vue3_dom::{self, AssetUrlOptions, DomCompilerOptions};
 use vuec_vue3_ssr::{self, SsrCompilerOptions};
@@ -86,6 +88,21 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
             let start = usize_field(&payload, "start");
             let end = usize_field(&payload, "end");
             Ok(json!(vuec_vue2::generate_code_frame(&source, start, end)))
+        }
+        "vue2.generate" => {
+            let options = vue2_options(payload.get("options"));
+            let element = payload
+                .get("ast")
+                .filter(|ast| !ast.is_null())
+                .map(|ast| serde_json::from_value::<Vue2Element>(ast.clone()))
+                .transpose()
+                .context("failed to deserialize Vue 2 AST element for codegen")?;
+            let generated = vuec_vue2::generate(element.as_ref(), &options);
+            Ok(json!({
+                "render": generated.render,
+                "staticRenderFns": generated.static_render_fns,
+                "static_render_fns": generated.static_render_fns,
+            }))
         }
         "vue3.core.baseCompile" => {
             let source = template_source(&payload);
