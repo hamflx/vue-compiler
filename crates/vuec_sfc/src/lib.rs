@@ -3,9 +3,11 @@
 use oxc_ast::ast::{
     Argument, ArrowFunctionExpression, AssignmentTarget, BindingPattern, Declaration,
     ExportDefaultDeclaration, ExportDefaultDeclarationKind, ExportNamedDeclaration,
-    ExportSpecifier, Expression, Function, ImportDeclarationSpecifier, ImportOrExportKind,
-    ModuleExportName, ObjectExpression, ObjectProperty, ObjectPropertyKind, PropertyKey,
-    SimpleAssignmentTarget, Statement, VariableDeclaration, VariableDeclarationKind, WithStatement,
+    ExportSpecifier, Expression, FormalParameter, Function, ImportDeclarationSpecifier,
+    ImportOrExportKind, ModuleExportName, ObjectExpression, ObjectProperty, ObjectPropertyKind,
+    PropertyKey, SimpleAssignmentTarget, Statement, TSFunctionType, TSInterfaceBody, TSLiteral,
+    TSSignature, TSType, TSTypeLiteral, TSTypeName, VariableDeclaration, VariableDeclarationKind,
+    WithStatement,
 };
 use oxc_span::GetSpan;
 use serde::{Deserialize, Serialize};
@@ -626,6 +628,7 @@ impl SfcCompiler {
         }
         let summary = self.js.summarize_program(&raw_content, source_type);
         let css_vars = descriptor_css_vars(descriptor);
+        let script_errors = vue27_script_compile_errors(descriptor);
         let content = vue27_script_content(descriptor, &options, &css_vars);
         let bindings = if descriptor.script_setup.is_some() {
             vue27_setup_binding_metadata(descriptor)
@@ -656,7 +659,11 @@ impl SfcCompiler {
                 .and_then(|block| block.attrs.lang.clone()),
             bindings,
             imports: summary.imports,
-            errors: summary.errors,
+            errors: if script_errors.is_empty() {
+                summary.errors
+            } else {
+                script_errors
+            },
             map: None,
             script_ast,
             script_setup_ast,
@@ -2176,6 +2183,14 @@ fn vue27_script_content(
     )
 }
 
+fn vue27_script_compile_errors(descriptor: &SfcDescriptor) -> Vec<String> {
+    let Some(script_setup) = descriptor.script_setup.as_ref() else {
+        return Vec::new();
+    };
+    let normal_type_context = vue27_normal_script_type_context(descriptor);
+    analyze_vue27_script_setup(script_setup, false, &normal_type_context).errors
+}
+
 fn vue27_script_setup_content(
     descriptor: &SfcDescriptor,
     script_setup: &SfcBlock,
@@ -2183,7 +2198,8 @@ fn vue27_script_setup_content(
     css_vars: &[String],
 ) -> String {
     let scope_id = vue27_scope_id(options.id.as_deref());
-    let analysis = analyze_vue27_script_setup(script_setup);
+    let normal_type_context = vue27_normal_script_type_context(descriptor);
+    let analysis = analyze_vue27_script_setup(script_setup, options.is_prod, &normal_type_context);
     let normal_script = analyze_vue27_normal_script_for_setup(descriptor);
     let bindings = vue27_setup_binding_metadata(descriptor);
     let is_ts = script_is_typescript(&script_setup.attrs);
@@ -2206,6 +2222,11 @@ fn vue27_script_setup_content(
     } else {
         "import { useCssVars as _useCssVars } from 'vue'\n"
     };
+    let helper_import = if analysis.needs_merge_defaults {
+        format!("import {{ mergeDefaults as _mergeDefaults }} from 'vue'\n{helper_import}")
+    } else {
+        helper_import.to_string()
+    };
     let runtime_options = vue27_script_setup_runtime_options(descriptor, &analysis, &normal_script);
     let setup_params = vue27_script_setup_params(&analysis, is_ts);
     let setup_prefix = format!(
@@ -2222,9 +2243,17 @@ fn vue27_script_setup_content(
         &setup_body,
     );
     let helper_import = if is_ts {
-        "import { defineComponent as _defineComponent } from 'vue'\n".to_string() + helper_import
+        if analysis.needs_merge_defaults {
+            helper_import.replace(
+                "import { mergeDefaults as _mergeDefaults } from 'vue'\n",
+                "import { mergeDefaults as _mergeDefaults, defineComponent as _defineComponent } from 'vue'\n",
+            )
+        } else {
+            "import { defineComponent as _defineComponent } from 'vue'\n".to_string()
+                + &helper_import
+        }
     } else {
-        helper_import.to_string()
+        helper_import
     };
     let mut content = helper_import;
     append_vue27_module_chunk(&mut content, &analysis.hoisted_module_content);
@@ -2339,6 +2368,15 @@ fn vue27_script_setup_params(analysis: &Vue27ScriptSetupAnalysis, is_ts: bool) -
     }
     if context_parts.is_empty() {
         props_param.to_string()
+    } else if is_ts {
+        if let Some(emit_type_source) = analysis.emit_type_source.as_deref() {
+            format!(
+                "{props_param}, {{ {} }}: {{ emit: ({emit_type_source}), expose: any, slots: any, attrs: any }}",
+                context_parts.join(", ")
+            )
+        } else {
+            format!("{props_param}, {{ {} }}", context_parts.join(", "))
+        }
     } else {
         format!("{props_param}, {{ {} }}", context_parts.join(", "))
     }
@@ -2453,6 +2491,9 @@ fn analyze_vue27_normal_script_for_setup(descriptor: &SfcDescriptor) -> Vue27Nor
         }
     }
     analysis.module_content = trim_trailing_blank_lines(&edits.apply()).to_string();
+    if analysis.module_content.starts_with('\n') {
+        analysis.module_content.insert(0, '\n');
+    }
     analysis
 }
 
@@ -2533,10 +2574,54 @@ struct Vue27ScriptSetupAnalysis {
     props_bindings: Vec<String>,
     props_runtime: Option<String>,
     props_type_runtime: bool,
+    errors: Vec<String>,
+    props_type_source: Option<String>,
+    props_runtime_defaults: Option<Vue27RuntimeDefaults>,
     emits_runtime: Option<String>,
     emit_binding: Option<String>,
+    emit_type_source: Option<String>,
     needs_expose: bool,
     user_import_aliases: BTreeMap<String, String>,
+    declared_types: BTreeMap<String, Vec<String>>,
+    props_type_declarations: BTreeMap<String, Vue27TypeMembers>,
+    emits_type_declarations: BTreeMap<String, Vue27EmitsType>,
+    needs_merge_defaults: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Vue27RuntimeProp {
+    key: String,
+    types: Vec<String>,
+    required: bool,
+    default: Option<String>,
+    is_method: bool,
+    type_annotation_source: Option<String>,
+    member_source: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Vue27RuntimeDefaults {
+    source: String,
+    static_defaults: Option<BTreeMap<String, String>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Vue27TypeMembers {
+    source: String,
+    members: Vec<Vue27RuntimeProp>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Vue27EmitsType {
+    source: String,
+    events: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Vue27TypeContext {
+    declared_types: BTreeMap<String, Vec<String>>,
+    props_type_declarations: BTreeMap<String, Vue27TypeMembers>,
+    emits_type_declarations: BTreeMap<String, Vue27EmitsType>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2560,7 +2645,11 @@ struct Vue27NormalScriptAnalysis {
     has_default_export_name: bool,
 }
 
-fn analyze_vue27_script_setup(script_setup: &SfcBlock) -> Vue27ScriptSetupAnalysis {
+fn analyze_vue27_script_setup(
+    script_setup: &SfcBlock,
+    is_prod: bool,
+    normal_type_context: &Vue27TypeContext,
+) -> Vue27ScriptSetupAnalysis {
     let source = script_setup.content.as_str();
     let is_ts = script_is_typescript(&script_setup.attrs);
     let allocator = oxc_allocator::Allocator::default();
@@ -2583,6 +2672,16 @@ fn analyze_vue27_script_setup(script_setup: &SfcBlock) -> Vue27ScriptSetupAnalys
 
     let mut edits = SourceEdits::new(source);
     let mut analysis = Vue27ScriptSetupAnalysis::default();
+    analysis
+        .declared_types
+        .extend(normal_type_context.declared_types.clone());
+    analysis
+        .props_type_declarations
+        .extend(normal_type_context.props_type_declarations.clone());
+    analysis
+        .emits_type_declarations
+        .extend(normal_type_context.emits_type_declarations.clone());
+    collect_vue27_declared_types_from_statements(source, &parsed.program.body, &mut analysis);
     for statement in &parsed.program.body {
         match statement {
             Statement::ImportDeclaration(import) => {
@@ -2654,6 +2753,7 @@ fn analyze_vue27_script_setup(script_setup: &SfcBlock) -> Vue27ScriptSetupAnalys
                     declaration,
                     &mut edits,
                     &mut analysis,
+                    is_prod,
                 );
             }
             Statement::FunctionDeclaration(function) => {
@@ -2682,7 +2782,11 @@ fn analyze_vue27_script_setup(script_setup: &SfcBlock) -> Vue27ScriptSetupAnalys
             Statement::ExpressionStatement(statement) => {
                 if let Expression::CallExpression(call) = &statement.expression {
                     if is_call_named(call, "defineProps") {
-                        collect_define_props_call(source, call, &mut analysis);
+                        collect_define_props_call(source, call, None, &mut analysis, is_prod);
+                        edits.remove(statement.span.start as usize, statement.span.end as usize);
+                    } else if is_call_named(call, "withDefaults")
+                        && collect_with_defaults_call(source, call, None, &mut analysis, is_prod)
+                    {
                         edits.remove(statement.span.start as usize, statement.span.end as usize);
                     } else if is_call_named(call, "defineEmits") {
                         collect_define_emits_call(source, call, None, &mut analysis);
@@ -2716,18 +2820,173 @@ fn analyze_vue27_script_setup(script_setup: &SfcBlock) -> Vue27ScriptSetupAnalys
     analysis
 }
 
+fn collect_vue27_declared_types_from_statements(
+    source: &str,
+    statements: &[Statement<'_>],
+    analysis: &mut Vue27ScriptSetupAnalysis,
+) {
+    for statement in statements {
+        collect_vue27_declared_type_from_statement(source, statement, analysis);
+    }
+}
+
+fn collect_vue27_declared_type_from_statement(
+    source: &str,
+    statement: &Statement<'_>,
+    analysis: &mut Vue27ScriptSetupAnalysis,
+) {
+    match statement {
+        Statement::TSInterfaceDeclaration(declaration) => {
+            analysis
+                .declared_types
+                .insert(declaration.id.name.to_string(), vec!["Object".into()]);
+            let props = vue27_type_members_from_interface_body(source, &declaration.body, analysis);
+            analysis
+                .props_type_declarations
+                .insert(declaration.id.name.to_string(), props);
+            let emits = vue27_emits_type_from_interface_body(source, &declaration.body);
+            if !emits.events.is_empty() {
+                analysis
+                    .emits_type_declarations
+                    .insert(declaration.id.name.to_string(), emits);
+            }
+        }
+        Statement::TSTypeAliasDeclaration(declaration) => {
+            let runtime = infer_vue27_runtime_type(&declaration.type_annotation, analysis);
+            analysis
+                .declared_types
+                .insert(declaration.id.name.to_string(), runtime);
+            match &declaration.type_annotation {
+                TSType::TSTypeLiteral(literal) => {
+                    let props = vue27_type_members_from_literal(source, literal, analysis);
+                    analysis
+                        .props_type_declarations
+                        .insert(declaration.id.name.to_string(), props);
+                    let emits = vue27_emits_type_from_literal(source, literal);
+                    if !emits.events.is_empty() {
+                        analysis
+                            .emits_type_declarations
+                            .insert(declaration.id.name.to_string(), emits);
+                    }
+                }
+                TSType::TSFunctionType(function) => {
+                    let emits = vue27_emits_type_from_function(source, function);
+                    if !emits.events.is_empty() {
+                        analysis
+                            .emits_type_declarations
+                            .insert(declaration.id.name.to_string(), emits);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Statement::ExportNamedDeclaration(declaration) => {
+            if let Some(declaration) = &declaration.declaration {
+                collect_vue27_declared_type_from_declaration(source, declaration, analysis);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_vue27_declared_type_from_declaration(
+    source: &str,
+    declaration: &Declaration<'_>,
+    analysis: &mut Vue27ScriptSetupAnalysis,
+) {
+    match declaration {
+        Declaration::TSInterfaceDeclaration(declaration) => {
+            analysis
+                .declared_types
+                .insert(declaration.id.name.to_string(), vec!["Object".into()]);
+            let props = vue27_type_members_from_interface_body(source, &declaration.body, analysis);
+            analysis
+                .props_type_declarations
+                .insert(declaration.id.name.to_string(), props);
+            let emits = vue27_emits_type_from_interface_body(source, &declaration.body);
+            if !emits.events.is_empty() {
+                analysis
+                    .emits_type_declarations
+                    .insert(declaration.id.name.to_string(), emits);
+            }
+        }
+        Declaration::TSTypeAliasDeclaration(declaration) => {
+            let runtime = infer_vue27_runtime_type(&declaration.type_annotation, analysis);
+            analysis
+                .declared_types
+                .insert(declaration.id.name.to_string(), runtime);
+            match &declaration.type_annotation {
+                TSType::TSTypeLiteral(literal) => {
+                    let props = vue27_type_members_from_literal(source, literal, analysis);
+                    analysis
+                        .props_type_declarations
+                        .insert(declaration.id.name.to_string(), props);
+                    let emits = vue27_emits_type_from_literal(source, literal);
+                    if !emits.events.is_empty() {
+                        analysis
+                            .emits_type_declarations
+                            .insert(declaration.id.name.to_string(), emits);
+                    }
+                }
+                TSType::TSFunctionType(function) => {
+                    let emits = vue27_emits_type_from_function(source, function);
+                    if !emits.events.is_empty() {
+                        analysis
+                            .emits_type_declarations
+                            .insert(declaration.id.name.to_string(), emits);
+                    }
+                }
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+}
+
+fn vue27_normal_script_type_context(descriptor: &SfcDescriptor) -> Vue27TypeContext {
+    let Some(script) = descriptor.script.as_ref() else {
+        return Vue27TypeContext::default();
+    };
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(
+        &allocator,
+        script.content.as_str(),
+        script_source_type_from_attrs(&script.attrs),
+    )
+    .with_options(oxc_parser::ParseOptions {
+        parse_regular_expression: true,
+        ..oxc_parser::ParseOptions::default()
+    })
+    .parse();
+    if parsed.panicked || !parsed.errors.is_empty() {
+        return Vue27TypeContext::default();
+    }
+    let mut analysis = Vue27ScriptSetupAnalysis::default();
+    collect_vue27_declared_types_from_statements(
+        script.content.as_str(),
+        &parsed.program.body,
+        &mut analysis,
+    );
+    Vue27TypeContext {
+        declared_types: analysis.declared_types,
+        props_type_declarations: analysis.props_type_declarations,
+        emits_type_declarations: analysis.emits_type_declarations,
+    }
+}
+
 fn analyze_vue27_setup_variable_declaration(
     source: &str,
     declaration: &VariableDeclaration<'_>,
     edits: &mut SourceEdits<'_>,
     analysis: &mut Vue27ScriptSetupAnalysis,
+    is_prod: bool,
 ) {
     let mut macro_declarators = Vec::new();
     for (index, declarator) in declaration.declarations.iter().enumerate() {
         if let Some(init) = &declarator.init {
             if let Expression::CallExpression(call) = init {
                 if is_call_named(call, "defineProps") {
-                    collect_define_props_call(source, call, analysis);
+                    collect_define_props_call(source, call, None, analysis, is_prod);
                     collect_pattern_bindings(&declarator.id, &mut analysis.return_bindings);
                     analysis.setup_bindings.insert(
                         first_pattern_binding(&declarator.id).unwrap_or_else(|| "props".into()),
@@ -2736,6 +2995,23 @@ fn analyze_vue27_setup_variable_declaration(
                     analysis
                         .setup_prelude
                         .push_str(&vue27_props_alias_declaration(source, &declarator.id));
+                    macro_declarators.push(index);
+                    continue;
+                }
+                if is_call_named(call, "withDefaults")
+                    && collect_with_defaults_call(
+                        source,
+                        call,
+                        Some(&declarator.id),
+                        analysis,
+                        is_prod,
+                    )
+                {
+                    collect_pattern_bindings(&declarator.id, &mut analysis.return_bindings);
+                    analysis.setup_bindings.insert(
+                        first_pattern_binding(&declarator.id).unwrap_or_else(|| "props".into()),
+                        "setup-const".into(),
+                    );
                     macro_declarators.push(index);
                     continue;
                 }
@@ -2848,20 +3124,71 @@ fn is_call_named(call: &oxc_ast::ast::CallExpression<'_>, name: &str) -> bool {
 fn collect_define_props_call(
     source: &str,
     call: &oxc_ast::ast::CallExpression<'_>,
+    binding: Option<&BindingPattern<'_>>,
     analysis: &mut Vue27ScriptSetupAnalysis,
+    is_prod: bool,
 ) {
-    let Some(argument) = call.arguments.first() else {
+    if let Some(type_argument) = call
+        .type_arguments
+        .as_ref()
+        .and_then(|arguments| arguments.params.first())
+    {
+        collect_define_props_type(source, type_argument, binding, None, analysis, is_prod);
         return;
-    };
-    let expression = argument.to_expression();
-    if let Expression::ObjectExpression(object) = expression {
-        for key in object_expression_keys(object) {
-            push_unique(&mut analysis.props_bindings, &key);
-        }
     }
-    let start = expression.span().start as usize;
-    let end = expression.span().end as usize;
-    analysis.props_runtime = source.get(start..end).map(ToOwned::to_owned);
+    if let Some(argument) = call.arguments.first() {
+        let expression = argument.to_expression();
+        if let Expression::ObjectExpression(object) = expression {
+            for key in object_expression_keys(object) {
+                push_unique(&mut analysis.props_bindings, &key);
+            }
+        }
+        let start = expression.span().start as usize;
+        let end = expression.span().end as usize;
+        analysis.props_runtime = source.get(start..end).map(ToOwned::to_owned);
+    }
+}
+
+fn collect_with_defaults_call(
+    source: &str,
+    call: &oxc_ast::ast::CallExpression<'_>,
+    binding: Option<&BindingPattern<'_>>,
+    analysis: &mut Vue27ScriptSetupAnalysis,
+    is_prod: bool,
+) -> bool {
+    let Some(define_props_call) =
+        call.arguments
+            .first()
+            .and_then(|argument| match argument.to_expression() {
+                Expression::CallExpression(call) if is_call_named(call, "defineProps") => {
+                    Some(call)
+                }
+                _ => None,
+            })
+    else {
+        return false;
+    };
+    let Some(type_argument) = define_props_call
+        .type_arguments
+        .as_ref()
+        .and_then(|arguments| arguments.params.first())
+    else {
+        collect_define_props_call(source, define_props_call, binding, analysis, is_prod);
+        return true;
+    };
+    let defaults = call
+        .arguments
+        .get(1)
+        .map(|argument| vue27_runtime_defaults_from_argument(source, argument));
+    collect_define_props_type(
+        source,
+        type_argument,
+        binding,
+        defaults.flatten(),
+        analysis,
+        is_prod,
+    );
+    true
 }
 
 fn collect_define_emits_call(
@@ -2875,6 +3202,14 @@ fn collect_define_emits_call(
             analysis.emit_binding = Some(binding.to_string());
         }
     }
+    if let Some(type_argument) = call
+        .type_arguments
+        .as_ref()
+        .and_then(|arguments| arguments.params.first())
+    {
+        collect_define_emits_type(source, type_argument, analysis);
+        return;
+    }
     let Some(argument) = call.arguments.first() else {
         return;
     };
@@ -2882,6 +3217,552 @@ fn collect_define_emits_call(
     let start = expression.span().start as usize;
     let end = expression.span().end as usize;
     analysis.emits_runtime = source.get(start..end).map(ToOwned::to_owned);
+}
+
+fn collect_define_props_type(
+    source: &str,
+    type_argument: &TSType<'_>,
+    binding: Option<&BindingPattern<'_>>,
+    defaults: Option<Vue27RuntimeDefaults>,
+    analysis: &mut Vue27ScriptSetupAnalysis,
+    is_prod: bool,
+) {
+    let Some(type_members) = vue27_resolve_props_type(source, type_argument, analysis) else {
+        return;
+    };
+    let default_map = defaults
+        .as_ref()
+        .and_then(|defaults| defaults.static_defaults.as_ref());
+    let mut props = Vec::new();
+    for member in &type_members.members {
+        let mut prop = member.clone();
+        if let Some(default) = default_map.and_then(|defaults| defaults.get(&prop.key)) {
+            prop.default = Some(default.clone());
+        }
+        push_unique(&mut analysis.props_bindings, &prop.key);
+        props.push(prop);
+    }
+    analysis.props_runtime_defaults = defaults;
+    analysis.needs_merge_defaults = analysis
+        .props_runtime_defaults
+        .as_ref()
+        .is_some_and(|defaults| defaults.static_defaults.is_none());
+    analysis.props_type_runtime = true;
+    analysis.props_type_source = Some(vue27_setup_props_type_source(
+        source,
+        type_argument,
+        &type_members,
+        analysis.props_runtime_defaults.as_ref(),
+    ));
+    analysis.props_runtime = Some(gen_vue27_runtime_props(
+        &props,
+        analysis.props_runtime_defaults.as_ref(),
+        is_prod,
+    ));
+    if let Some(binding) = binding {
+        analysis
+            .setup_prelude
+            .push_str(&vue27_props_type_assignment(
+                source,
+                binding,
+                analysis.props_type_source.as_deref(),
+            ));
+    }
+}
+
+fn collect_define_emits_type(
+    source: &str,
+    type_argument: &TSType<'_>,
+    analysis: &mut Vue27ScriptSetupAnalysis,
+) {
+    if !vue27_emits_type_argument_is_supported(type_argument, analysis) {
+        analysis.errors.push(
+            "type argument passed to defineEmits() must be a function type, a literal type with call signatures, or a reference to the above types."
+                .to_string(),
+        );
+        return;
+    }
+    let Some(emits_type) = vue27_resolve_emits_type(source, type_argument, analysis) else {
+        return;
+    };
+    if !emits_type.events.is_empty() {
+        analysis.emits_runtime = Some(format!(
+            "[{}]",
+            emits_type
+                .events
+                .iter()
+                .map(|name| format!("\"{}\"", escape_js_double(name)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    analysis.emit_type_source = Some(emits_type.source);
+}
+
+fn vue27_emits_type_argument_is_supported(
+    type_argument: &TSType<'_>,
+    analysis: &Vue27ScriptSetupAnalysis,
+) -> bool {
+    match type_argument {
+        TSType::TSFunctionType(_) | TSType::TSTypeLiteral(_) => true,
+        TSType::TSTypeReference(reference) => vue27_ts_type_name_identifier(&reference.type_name)
+            .is_some_and(|name| analysis.emits_type_declarations.contains_key(name)),
+        _ => false,
+    }
+}
+
+fn vue27_resolve_props_type<'a>(
+    source: &str,
+    type_argument: &'a TSType<'a>,
+    analysis: &Vue27ScriptSetupAnalysis,
+) -> Option<Vue27TypeMembers> {
+    match type_argument {
+        TSType::TSTypeLiteral(literal) => {
+            Some(vue27_type_members_from_literal(source, literal, analysis))
+        }
+        TSType::TSTypeReference(reference) => {
+            let name = vue27_ts_type_name_identifier(&reference.type_name)?;
+            analysis.props_type_declarations.get(name).cloned()
+        }
+        _ => None,
+    }
+}
+
+fn vue27_resolve_emits_type<'a>(
+    source: &str,
+    type_argument: &'a TSType<'a>,
+    analysis: &Vue27ScriptSetupAnalysis,
+) -> Option<Vue27EmitsType> {
+    match type_argument {
+        TSType::TSFunctionType(function) => Some(vue27_emits_type_from_function(source, function)),
+        TSType::TSTypeLiteral(literal) => Some(vue27_emits_type_from_literal(source, literal)),
+        TSType::TSTypeReference(reference) => {
+            let name = vue27_ts_type_name_identifier(&reference.type_name)?;
+            analysis.emits_type_declarations.get(name).cloned()
+        }
+        _ => None,
+    }
+}
+
+fn vue27_type_members_from_literal(
+    source: &str,
+    literal: &TSTypeLiteral<'_>,
+    analysis: &Vue27ScriptSetupAnalysis,
+) -> Vue27TypeMembers {
+    Vue27TypeMembers {
+        source: source
+            .get(literal.span.start as usize..literal.span.end as usize)
+            .unwrap_or_default()
+            .to_string(),
+        members: vue27_runtime_props_from_signatures(source, &literal.members, analysis),
+    }
+}
+
+fn vue27_type_members_from_interface_body(
+    source: &str,
+    body: &TSInterfaceBody<'_>,
+    analysis: &Vue27ScriptSetupAnalysis,
+) -> Vue27TypeMembers {
+    Vue27TypeMembers {
+        source: source
+            .get(body.span.start as usize..body.span.end as usize)
+            .unwrap_or_default()
+            .to_string(),
+        members: vue27_runtime_props_from_signatures(source, &body.body, analysis),
+    }
+}
+
+fn vue27_runtime_props_from_signatures(
+    source: &str,
+    signatures: &[TSSignature<'_>],
+    analysis: &Vue27ScriptSetupAnalysis,
+) -> Vec<Vue27RuntimeProp> {
+    let mut props = Vec::new();
+    for signature in signatures {
+        match signature {
+            TSSignature::TSPropertySignature(property) if !property.computed => {
+                if let Some(key) = vue27_property_key_static_name(&property.key) {
+                    let types = property
+                        .type_annotation
+                        .as_ref()
+                        .map(|annotation| {
+                            infer_vue27_runtime_type(&annotation.type_annotation, analysis)
+                        })
+                        .unwrap_or_else(|| vec!["null".into()]);
+                    props.push(Vue27RuntimeProp {
+                        key,
+                        types,
+                        required: !property.optional,
+                        default: None,
+                        is_method: false,
+                        type_annotation_source: property.type_annotation.as_ref().and_then(
+                            |annotation| {
+                                source
+                                    .get(
+                                        annotation.span.start as usize
+                                            ..annotation.span.end as usize,
+                                    )
+                                    .map(ToOwned::to_owned)
+                            },
+                        ),
+                        member_source: source
+                            .get(property.span.start as usize..property.span.end as usize)
+                            .map(ToOwned::to_owned),
+                    });
+                }
+            }
+            TSSignature::TSMethodSignature(method) if !method.computed => {
+                if let Some(key) = vue27_property_key_static_name(&method.key) {
+                    props.push(Vue27RuntimeProp {
+                        key,
+                        types: vec!["Function".into()],
+                        required: !method.optional,
+                        default: None,
+                        is_method: true,
+                        type_annotation_source: method.return_type.as_ref().and_then(
+                            |annotation| {
+                                source
+                                    .get(
+                                        annotation.span.start as usize
+                                            ..annotation.span.end as usize,
+                                    )
+                                    .map(ToOwned::to_owned)
+                            },
+                        ),
+                        member_source: source
+                            .get(method.span.start as usize..method.span.end as usize)
+                            .map(ToOwned::to_owned),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    props
+}
+
+fn infer_vue27_runtime_type(node: &TSType<'_>, analysis: &Vue27ScriptSetupAnalysis) -> Vec<String> {
+    match node {
+        TSType::TSStringKeyword(_) => vec!["String".into()],
+        TSType::TSNumberKeyword(_) => vec!["Number".into()],
+        TSType::TSBooleanKeyword(_) => vec!["Boolean".into()],
+        TSType::TSObjectKeyword(_) | TSType::TSTypeLiteral(_) | TSType::TSIntersectionType(_) => {
+            vec!["Object".into()]
+        }
+        TSType::TSFunctionType(_) => vec!["Function".into()],
+        TSType::TSArrayType(_) | TSType::TSTupleType(_) => vec!["Array".into()],
+        TSType::TSSymbolKeyword(_) => vec!["Symbol".into()],
+        TSType::TSLiteralType(literal) => match &literal.literal {
+            TSLiteral::StringLiteral(_) => vec!["String".into()],
+            TSLiteral::BooleanLiteral(_) => vec!["Boolean".into()],
+            TSLiteral::NumericLiteral(_) | TSLiteral::BigIntLiteral(_) => vec!["Number".into()],
+            _ => vec!["null".into()],
+        },
+        TSType::TSTypeReference(reference) => {
+            if let Some(name) = vue27_ts_type_name_identifier(&reference.type_name) {
+                if let Some(types) = analysis.declared_types.get(name) {
+                    return types.clone();
+                }
+                match name {
+                    "Array" | "Function" | "Object" | "Set" | "Map" | "WeakSet" | "WeakMap"
+                    | "Date" | "Promise" => return vec![name.to_string()],
+                    "Record" | "Partial" | "Readonly" | "Pick" | "Omit" | "Exclude" | "Extract"
+                    | "Required" | "InstanceType" => return vec!["Object".into()],
+                    _ => {}
+                }
+            }
+            vec!["null".into()]
+        }
+        TSType::TSParenthesizedType(parenthesized) => {
+            infer_vue27_runtime_type(&parenthesized.type_annotation, analysis)
+        }
+        TSType::TSUnionType(union) => {
+            let mut types = Vec::new();
+            for ty in &union.types {
+                for runtime_type in infer_vue27_runtime_type(ty, analysis) {
+                    push_unique(&mut types, &runtime_type);
+                }
+            }
+            types
+        }
+        _ => vec!["null".into()],
+    }
+}
+
+fn vue27_runtime_defaults_from_argument(
+    source: &str,
+    argument: &Argument<'_>,
+) -> Option<Vue27RuntimeDefaults> {
+    let expression = argument.to_expression();
+    let source_text = source
+        .get(expression.span().start as usize..expression.span().end as usize)?
+        .to_string();
+    let Expression::ObjectExpression(object) = expression else {
+        return Some(Vue27RuntimeDefaults {
+            source: source_text,
+            static_defaults: None,
+        });
+    };
+    let mut defaults = BTreeMap::new();
+    for property in &object.properties {
+        let ObjectPropertyKind::ObjectProperty(property) = property else {
+            return Some(Vue27RuntimeDefaults {
+                source: source_text,
+                static_defaults: None,
+            });
+        };
+        if property.computed {
+            return Some(Vue27RuntimeDefaults {
+                source: source_text,
+                static_defaults: None,
+            });
+        }
+        if let Some(key) = vue27_property_key_static_name(&property.key) {
+            let default_source = if property.method {
+                vue27_function_body_source(source, &property.value)
+                    .map(|body| format!("default() {body}"))
+            } else {
+                source
+                    .get(property.value.span().start as usize..property.value.span().end as usize)
+                    .map(|value| format!("default: {value}"))
+            };
+            if let Some(default_source) = default_source {
+                defaults.insert(key, default_source);
+            }
+        }
+    }
+    Some(Vue27RuntimeDefaults {
+        source: source_text,
+        static_defaults: Some(defaults),
+    })
+}
+
+fn vue27_function_body_source<'a>(source: &'a str, expression: &Expression<'_>) -> Option<&'a str> {
+    match expression {
+        Expression::FunctionExpression(function) => function
+            .body
+            .as_ref()
+            .and_then(|body| source.get(body.span.start as usize..body.span.end as usize)),
+        _ => source.get(expression.span().start as usize..expression.span().end as usize),
+    }
+}
+
+fn vue27_setup_props_type_source(
+    source: &str,
+    type_argument: &TSType<'_>,
+    type_members: &Vue27TypeMembers,
+    defaults: Option<&Vue27RuntimeDefaults>,
+) -> String {
+    let Some(defaults) = defaults.and_then(|defaults| defaults.static_defaults.as_ref()) else {
+        if !type_members.source.is_empty() {
+            return type_members.source.clone();
+        }
+        return source
+            .get(type_argument.span().start as usize..type_argument.span().end as usize)
+            .unwrap_or_default()
+            .to_string();
+    };
+    let mut parts = Vec::new();
+    for prop in &type_members.members {
+        if defaults.contains_key(&prop.key) {
+            if let Some(type_annotation) = &prop.type_annotation_source {
+                parts.push(format!(
+                    "{}{}{}",
+                    prop.key,
+                    if prop.is_method { "()" } else { "" },
+                    type_annotation
+                ));
+            }
+        } else if let Some(member_source) = vue27_prop_member_type_source(prop) {
+            parts.push(member_source);
+        }
+    }
+    format!("{{ {} }}", parts.join(", "))
+}
+
+fn vue27_prop_member_type_source(prop: &Vue27RuntimeProp) -> Option<String> {
+    let member_source = prop.member_source.as_deref()?;
+    let type_annotation = prop.type_annotation_source.as_deref()?;
+    let end = member_source.find(type_annotation)? + type_annotation.len();
+    Some(member_source[..end].trim().to_string())
+}
+
+fn gen_vue27_runtime_props(
+    props: &[Vue27RuntimeProp],
+    defaults: Option<&Vue27RuntimeDefaults>,
+    is_prod: bool,
+) -> String {
+    let mut entries = Vec::new();
+    for prop in props {
+        let type_string = vue27_runtime_type_string(&prop.types);
+        if !is_prod {
+            entries.push(format!(
+                "{}: {{ type: {}, required: {}{} }}",
+                prop.key,
+                type_string,
+                prop.required,
+                prop.default
+                    .as_ref()
+                    .map(|default| format!(", {default}"))
+                    .unwrap_or_default()
+            ));
+        } else if prop
+            .types
+            .iter()
+            .any(|ty| ty == "Boolean" || (prop.default.is_some() && ty == "Function"))
+        {
+            entries.push(format!(
+                "{}: {{ type: {}{} }}",
+                prop.key,
+                type_string,
+                prop.default
+                    .as_ref()
+                    .map(|default| format!(", {default}"))
+                    .unwrap_or_default()
+            ));
+        } else {
+            entries.push(format!(
+                "{}: {}",
+                prop.key,
+                prop.default
+                    .as_ref()
+                    .map(|default| format!("{{ {default} }}"))
+                    .unwrap_or_else(|| "null".into())
+            ));
+        }
+    }
+    let props_decl = format!("{{\n    {}\n  }}", entries.join(",\n    "));
+    if let Some(defaults) = defaults {
+        if defaults.static_defaults.is_none() {
+            return format!("_mergeDefaults({props_decl}, {})", defaults.source);
+        }
+    }
+    props_decl
+}
+
+fn vue27_runtime_type_string(types: &[String]) -> String {
+    if types.len() > 1 {
+        format!("[{}]", types.join(", "))
+    } else {
+        types.first().cloned().unwrap_or_else(|| "null".into())
+    }
+}
+
+fn vue27_props_type_assignment(
+    source: &str,
+    binding: &BindingPattern<'_>,
+    type_source: Option<&str>,
+) -> String {
+    let binding_source = source
+        .get(binding.span().start as usize..binding.span().end as usize)
+        .unwrap_or("props")
+        .trim();
+    let cast = type_source
+        .filter(|value| !value.is_empty())
+        .map(|value| format!(" as {value}"))
+        .unwrap_or_default();
+    format!("\nconst {binding_source} = __props{cast};\n")
+}
+
+fn vue27_emits_type_from_function(source: &str, function: &TSFunctionType<'_>) -> Vue27EmitsType {
+    let mut events = Vec::new();
+    collect_vue27_emits_from_parameters(&function.params.items, &mut events);
+    Vue27EmitsType {
+        source: source
+            .get(function.span.start as usize..function.span.end as usize)
+            .unwrap_or_default()
+            .to_string(),
+        events,
+    }
+}
+
+fn vue27_emits_type_from_literal(source: &str, literal: &TSTypeLiteral<'_>) -> Vue27EmitsType {
+    let mut events = Vec::new();
+    for member in &literal.members {
+        if let TSSignature::TSCallSignatureDeclaration(signature) = member {
+            collect_vue27_emits_from_parameters(&signature.params.items, &mut events);
+        }
+    }
+    Vue27EmitsType {
+        source: source
+            .get(literal.span.start as usize..literal.span.end as usize)
+            .unwrap_or_default()
+            .to_string(),
+        events,
+    }
+}
+
+fn vue27_emits_type_from_interface_body(
+    source: &str,
+    body: &TSInterfaceBody<'_>,
+) -> Vue27EmitsType {
+    let mut events = Vec::new();
+    for member in &body.body {
+        if let TSSignature::TSCallSignatureDeclaration(signature) = member {
+            collect_vue27_emits_from_parameters(&signature.params.items, &mut events);
+        }
+    }
+    Vue27EmitsType {
+        source: source
+            .get(body.span.start as usize..body.span.end as usize)
+            .unwrap_or_default()
+            .to_string(),
+        events,
+    }
+}
+
+fn collect_vue27_emits_from_parameters(
+    parameters: &[FormalParameter<'_>],
+    names: &mut Vec<String>,
+) {
+    let Some(parameter) = parameters.first() else {
+        return;
+    };
+    let Some(annotation) = parameter.type_annotation.as_ref() else {
+        return;
+    };
+    collect_vue27_emits_from_type(&annotation.type_annotation, names);
+}
+
+fn collect_vue27_emits_from_type(ty: &TSType<'_>, names: &mut Vec<String>) {
+    match ty {
+        TSType::TSLiteralType(literal) => {
+            if let Some(name) = vue27_literal_event_name(&literal.literal) {
+                push_unique(names, &name);
+            }
+        }
+        TSType::TSUnionType(union) => {
+            for ty in &union.types {
+                collect_vue27_emits_from_type(ty, names);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn vue27_literal_event_name(literal: &TSLiteral<'_>) -> Option<String> {
+    match literal {
+        TSLiteral::StringLiteral(literal) => Some(literal.value.to_string()),
+        TSLiteral::BooleanLiteral(literal) => Some(literal.value.to_string()),
+        TSLiteral::NumericLiteral(literal) => Some(literal.value.to_string()),
+        TSLiteral::BigIntLiteral(literal) => Some(literal.value.to_string()),
+        _ => None,
+    }
+}
+
+fn vue27_property_key_static_name(key: &PropertyKey<'_>) -> Option<String> {
+    key.static_name().map(|name| name.into_owned())
+}
+
+fn vue27_ts_type_name_identifier<'a>(name: &'a TSTypeName<'a>) -> Option<&'a str> {
+    match name {
+        TSTypeName::IdentifierReference(identifier) => Some(identifier.name.as_str()),
+        _ => None,
+    }
+}
+
+fn escape_js_double(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 fn first_pattern_binding(pattern: &BindingPattern<'_>) -> Option<String> {
@@ -3810,7 +4691,10 @@ fn vue27_setup_binding_metadata(descriptor: &SfcDescriptor) -> BTreeMap<String, 
     let mut bindings = descriptor
         .script_setup
         .as_ref()
-        .map(analyze_vue27_script_setup)
+        .map(|script_setup| {
+            let normal_type_context = vue27_normal_script_type_context(descriptor);
+            analyze_vue27_script_setup(script_setup, false, &normal_type_context)
+        })
         .map(|analysis| {
             let mut bindings = vue27_script_setup_script_bindings(descriptor);
             bindings.extend(analysis.setup_bindings);
@@ -5175,6 +6059,87 @@ const props = defineProps(['item']),
         assert!(script.content.contains("return { props, a, emit }"));
         assert!(!script.content.contains("defineProps"));
         assert!(!script.content.contains("defineEmits"));
+    }
+
+    #[test]
+    fn vue27_compile_script_infers_ts_define_props_from_normal_script() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "foo.vue",
+            r#"<script lang="ts">
+export interface Props { x?: number }
+</script>
+<script setup lang="ts">
+defineProps<Props>()
+</script>"#,
+        );
+        let script = compiler.compile_vue27_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script
+            .content
+            .contains("x: { type: Number, required: false }"));
+        assert_eq!(script.bindings.get("x").map(String::as_str), Some("props"));
+        assert!(script.errors.is_empty());
+    }
+
+    #[test]
+    fn vue27_compile_script_infers_with_defaults_runtime_props() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "foo.vue",
+            r#"<script setup lang="ts">
+const props = withDefaults(defineProps<{
+  foo?: string
+  bar?: number;
+  baz: boolean;
+  qux?(): number
+}>(), {
+  foo: 'hi',
+  qux() { return 1 }
+})
+</script>"#,
+        );
+        let script = compiler.compile_vue27_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script
+            .content
+            .contains("foo: { type: String, required: false, default: 'hi' }"));
+        assert!(script
+            .content
+            .contains("qux: { type: Function, required: false, default() { return 1 } }"));
+        assert!(script.content.contains(
+            "const props = __props as { foo: string, bar?: number, baz: boolean, qux(): number };"
+        ));
+        assert!(script.errors.is_empty());
+    }
+
+    #[test]
+    fn vue27_compile_script_infers_define_emits_type_and_rejects_union() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "foo.vue",
+            r#"<script setup lang="ts">
+const emit = defineEmits<{(e: 'foo' | 'bar'): void; (e: 'baz', id: number): void;}>()
+</script>"#,
+        );
+        let script = compiler.compile_vue27_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.content.contains(r#"emits: ["foo", "bar", "baz"],"#));
+        assert!(script
+            .content
+            .contains("emit: ({(e: 'foo' | 'bar'): void; (e: 'baz', id: number): void;})"));
+        assert!(script.errors.is_empty());
+
+        let descriptor = compiler.parse(
+            "foo.vue",
+            r#"<script setup lang="ts">
+const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
+</script>"#,
+        );
+        let script = compiler.compile_vue27_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert_eq!(script.errors.len(), 1);
+        assert!(script.errors[0].contains("type argument passed to defineEmits()"));
     }
 
     #[test]

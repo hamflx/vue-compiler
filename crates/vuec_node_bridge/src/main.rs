@@ -411,6 +411,9 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
                 .descriptor;
             let script = compiler
                 .compile_vue27_script(&descriptor, sfc_script_options(payload.get("options")));
+            if let Some(error) = script.errors.first() {
+                bail!("{error}");
+            }
             Ok(vue27_script_value(&script))
         }
         "sfc.compileStyle" | "sfc.compileStyleAsync" => {
