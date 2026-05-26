@@ -138,6 +138,11 @@
 
 ## Current NAPI Foundation Slice
 
+- Added an M16 NAPI Vue 3 `@vue/compiler-ssr` API manifest parity slice. The NAPI alias now exposes `compile` with the official one-argument public arity while preserving options forwarding through `arguments`.
+- Generalized `cargo xtask verify-napi-api` from a Vue 2 template-only probe into a package-target probe that prepares isolated NAPI package trees and compares official manifest fields for each covered target. It now verifies Vue 2.6 / Vue 2.7 `vue-template-compiler` plus Vue 3 `@vue/compiler-ssr`.
+- This is package/API adapter progress only: official conformance is still not routed through NAPI, Vue 2.7 `vue/compiler-sfc` and Vue 3 core/dom/sfc NAPI API parity remain open, and no compiler semantics or AST/HIR/MIR structures changed.
+- Verification this round: `cargo fmt --all --check`, `git diff --check`, `cargo check -p xtask -p vuec_napi`, `cargo test -p xtask`, `cargo test -p vuec_napi`, `cargo xtask verify-napi`, `cargo xtask verify-napi-alias`, `cargo xtask verify-napi-api` (`3/3`), `cargo xtask verify-napi-platform`, `pnpm test:napi`, `pnpm test:napi-alias`, `pnpm test:napi-api`, `pnpm test:napi-platform`, `cargo test --workspace`, and `cargo xtask summarize-compat --locked`.
+
 - Added an M16 NAPI Vue 2 `vue-template-compiler` API manifest parity slice. The `vue-template-compiler` alias now has version-specific Vue 2.6 and Vue 2.7 entry files so public export names, function names, arities, own function properties, package versions, and `types/index.d.ts` match the official API manifests for both version lines.
 - Added `cargo xtask verify-napi-api` and `pnpm test:napi-api`. The command builds `vuec_napi`, prepares `target/napi-api/vue2_6` and `target/napi-api/vue2_7`, installs the matching NAPI-backed alias package, and compares it against `compat/api/official/*/vue-template-compiler/index.json`.
 - This is package/API adapter progress only: official conformance is still not routed through NAPI, Vue 2.7 `vue/compiler-sfc` and Vue 3 compiler package NAPI API parity remain open, and no compiler semantics or AST/HIR/MIR structures changed.

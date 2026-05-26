@@ -137,13 +137,29 @@ fn verify_napi_api() -> Result<compat::JsonReport> {
             version_line: "vue2_6",
             package: "vue-template-compiler",
             entry: "index",
-            template_variant: "vue2_6",
+            alias: NapiApiAlias::Vue2TemplateCompiler {
+                template_variant: "vue2_6",
+            },
         },
         NapiApiTarget {
             version_line: "vue2_7",
             package: "vue-template-compiler",
             entry: "index",
-            template_variant: "vue2_7",
+            alias: NapiApiAlias::Vue2TemplateCompiler {
+                template_variant: "vue2_7",
+            },
+        },
+        NapiApiTarget {
+            version_line: "vue3",
+            package: "@vue/compiler-ssr",
+            entry: "index",
+            alias: NapiApiAlias::PackageTemplate {
+                source: "packages/native-aliases/@vue/compiler-ssr",
+                package_subpath: &["@vue", "compiler-ssr"],
+                manifest_package: "_vue_compiler-ssr",
+                package_json_subpath: &["@vue", "compiler-ssr"],
+                types_base_subpath: &["@vue", "compiler-ssr"],
+            },
         },
     ];
     let mut violations = Vec::new();
@@ -161,7 +177,8 @@ fn verify_napi_api() -> Result<compat::JsonReport> {
         let mut target_violations = Vec::new();
         let root = PathBuf::from("target")
             .join("napi-api")
-            .join(target.version_line);
+            .join(target.version_line)
+            .join(target.target_dir_name());
         let binding_path = root
             .join("node_modules")
             .join("@vuec-rs")
@@ -216,20 +233,18 @@ fn verify_napi_api() -> Result<compat::JsonReport> {
         ));
     }
 
-    Ok(
-        compat::JsonReport::new(
-            "verify_napi_api",
-            if violations.is_empty() {
-                compat::ReportStatus::Pass
-            } else {
-                compat::ReportStatus::Fail
-            },
-        )
-        .with_items(items)
-        .with_created(created)
-        .with_violations(violations)
-        .with_note("compares Vue 2 vue-template-compiler official API manifests against NAPI-backed official package-name aliases"),
+    Ok(compat::JsonReport::new(
+        "verify_napi_api",
+        if violations.is_empty() {
+            compat::ReportStatus::Pass
+        } else {
+            compat::ReportStatus::Fail
+        },
     )
+    .with_items(items)
+    .with_created(created)
+    .with_violations(violations)
+    .with_note("compares official API manifests against NAPI-backed official package-name aliases"))
 }
 
 #[derive(Clone, Copy)]
@@ -237,12 +252,87 @@ struct NapiApiTarget {
     version_line: &'static str,
     package: &'static str,
     entry: &'static str,
-    template_variant: &'static str,
+    alias: NapiApiAlias,
+}
+
+#[derive(Clone, Copy)]
+enum NapiApiAlias {
+    Vue2TemplateCompiler {
+        template_variant: &'static str,
+    },
+    PackageTemplate {
+        source: &'static str,
+        package_subpath: &'static [&'static str],
+        manifest_package: &'static str,
+        package_json_subpath: &'static [&'static str],
+        types_base_subpath: &'static [&'static str],
+    },
 }
 
 impl NapiApiTarget {
     fn display(self) -> String {
         format!("{}::{}/{}", self.version_line, self.package, self.entry)
+    }
+
+    fn target_dir_name(self) -> &'static str {
+        match self.alias {
+            NapiApiAlias::Vue2TemplateCompiler { .. } => "vue-template-compiler",
+            NapiApiAlias::PackageTemplate {
+                manifest_package, ..
+            } => manifest_package,
+        }
+    }
+
+    fn source_path(self) -> PathBuf {
+        match self.alias {
+            NapiApiAlias::Vue2TemplateCompiler { .. } => {
+                PathBuf::from("packages/native-aliases/vue-template-compiler")
+            }
+            NapiApiAlias::PackageTemplate { source, .. } => PathBuf::from(source),
+        }
+    }
+
+    fn package_subpath(self) -> &'static [&'static str] {
+        match self.alias {
+            NapiApiAlias::Vue2TemplateCompiler { .. } => &["vue-template-compiler"],
+            NapiApiAlias::PackageTemplate {
+                package_subpath, ..
+            } => package_subpath,
+        }
+    }
+
+    fn package_json_subpath(self) -> &'static [&'static str] {
+        match self.alias {
+            NapiApiAlias::Vue2TemplateCompiler { .. } => &["vue-template-compiler"],
+            NapiApiAlias::PackageTemplate {
+                package_json_subpath,
+                ..
+            } => package_json_subpath,
+        }
+    }
+
+    fn types_base_subpath(self) -> &'static [&'static str] {
+        match self.alias {
+            NapiApiAlias::Vue2TemplateCompiler { .. } => &["vue-template-compiler"],
+            NapiApiAlias::PackageTemplate {
+                types_base_subpath, ..
+            } => types_base_subpath,
+        }
+    }
+
+    fn official_manifest_path(self) -> PathBuf {
+        let manifest_package = match self.alias {
+            NapiApiAlias::Vue2TemplateCompiler { .. } => "vue-template-compiler",
+            NapiApiAlias::PackageTemplate {
+                manifest_package, ..
+            } => manifest_package,
+        };
+        PathBuf::from("compat")
+            .join("api")
+            .join("official")
+            .join(self.version_line)
+            .join(manifest_package)
+            .join("index.json")
     }
 }
 
@@ -519,7 +609,10 @@ fn prepare_napi_alias_tree(alias_root: &Path) -> Result<Vec<PathBuf>> {
 }
 
 fn prepare_napi_api_tree(root: &Path, target: NapiApiTarget) -> Result<Vec<PathBuf>> {
-    ensure_nested_target_child(root, &["napi-api", target.version_line])?;
+    ensure_nested_target_child(
+        root,
+        &["napi-api", target.version_line, target.target_dir_name()],
+    )?;
     let node_modules = root.join("node_modules");
     if root.exists() {
         std::fs::remove_dir_all(root)
@@ -533,21 +626,20 @@ fn prepare_napi_api_tree(root: &Path, target: NapiApiTarget) -> Result<Vec<PathB
     copy_dir_recursive(Path::new("packages/native"), &native_target)?;
     created.push(native_target);
 
-    let template_dir = Path::new("packages/native-aliases/vue-template-compiler");
-    let package_target = node_modules.join("vue-template-compiler");
-    copy_dir_recursive(template_dir, &package_target)?;
-    std::fs::copy(
-        package_target.join(format!("index-{}.js", target.template_variant)),
-        package_target.join("index.js"),
-    )
-    .with_context(|| {
-        format!(
-            "failed to select {} vue-template-compiler alias",
-            target.template_variant
+    let package_target = join_path_segments(&node_modules, target.package_subpath());
+    copy_dir_recursive(&target.source_path(), &package_target)?;
+    if let NapiApiAlias::Vue2TemplateCompiler { template_variant } = target.alias {
+        std::fs::copy(
+            package_target.join(format!("index-{template_variant}.js")),
+            package_target.join("index.js"),
         )
-    })?;
-    let official = read_json_file(&official_vue2_template_manifest_path(target.version_line))?;
-    let package_json_path = package_target.join("package.json");
+        .with_context(|| {
+            format!("failed to select {template_variant} vue-template-compiler alias")
+        })?;
+    }
+    let official = read_json_file(&target.official_manifest_path())?;
+    let package_json_path =
+        join_path_segments(&node_modules, target.package_json_subpath()).join("package.json");
     write_package_version(
         &package_json_path,
         official
@@ -667,6 +759,12 @@ fn copy_dir_recursive(source: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
+fn join_path_segments(base: &Path, segments: &[&str]) -> PathBuf {
+    segments
+        .iter()
+        .fold(base.to_path_buf(), |path, segment| path.join(segment))
+}
+
 fn read_json_file(path: &Path) -> Result<JsonValue> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
@@ -678,15 +776,6 @@ fn write_package_version(path: &Path, version: &str) -> Result<()> {
     value["version"] = JsonValue::String(version.to_string());
     std::fs::write(path, serde_json::to_string_pretty(&value)?)
         .with_context(|| format!("failed to write {}", path.display()))
-}
-
-fn official_vue2_template_manifest_path(version_line: &str) -> PathBuf {
-    PathBuf::from("compat")
-        .join("api")
-        .join("official")
-        .join(version_line)
-        .join("vue-template-compiler")
-        .join("index.json")
 }
 
 fn napi_library_path() -> PathBuf {
@@ -775,7 +864,12 @@ process.stdout.write(JSON.stringify({ status: 'pass', binding: info }));
 
 fn run_napi_api_probe(root: &Path, target: NapiApiTarget) -> Result<String> {
     let root = absolute_path(root);
-    let official_path = absolute_path(&official_vue2_template_manifest_path(target.version_line));
+    let official_path = absolute_path(&target.official_manifest_path());
+    let package_json_path =
+        join_path_segments(&root.join("node_modules"), target.package_json_subpath())
+            .join("package.json");
+    let types_base_path =
+        join_path_segments(&root.join("node_modules"), target.types_base_subpath());
     let script = r##"
 const fs = require('fs');
 const path = require('path');
@@ -787,7 +881,8 @@ const request = process.env.VUEC_NAPI_API_REQUEST;
 const rootRequire = createRequire(path.join(root, 'package.json'));
 const api = rootRequire(request);
 const resolved = rootRequire.resolve(request);
-const packageJson = JSON.parse(fs.readFileSync(path.join(root, 'node_modules/vue-template-compiler/package.json'), 'utf8'));
+const packageJson = JSON.parse(fs.readFileSync(process.env.VUEC_NAPI_API_PACKAGE_JSON, 'utf8'));
+const typesBase = process.env.VUEC_NAPI_API_TYPES_BASE;
 
 function describeExport(value) {
   const detail = {
@@ -819,7 +914,7 @@ const manifest = {
   },
   types: {
     package_types: packageJson.types || null,
-    exists: fs.existsSync(path.join(root, 'node_modules/vue-template-compiler', packageJson.types || '')),
+    exists: fs.existsSync(path.join(typesBase, packageJson.types || '')),
   },
 };
 for (const key of manifest.exports) {
@@ -854,6 +949,8 @@ process.stdout.write(JSON.stringify({ status: 'pass', exports: manifest.exports,
         .env("VUEC_NAPI_API_ROOT", &root)
         .env("VUEC_NAPI_API_OFFICIAL", &official_path)
         .env("VUEC_NAPI_API_REQUEST", target.package)
+        .env("VUEC_NAPI_API_PACKAGE_JSON", &package_json_path)
+        .env("VUEC_NAPI_API_TYPES_BASE", &types_base_path)
         .output()
         .with_context(|| {
             format!(
