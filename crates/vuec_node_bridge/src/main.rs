@@ -3265,6 +3265,10 @@ fn vue3_options(value: Option<&Value>) -> Vue3CompilerOptions {
         .get("__vuecSourceMapBaseOffset")
         .and_then(Value::as_u64)
         .unwrap_or(0) as usize;
+    options.ssr_css_vars = value
+        .get("ssrCssVars")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
     options.comments = bool_option(value, "comments", options.comments);
     if let Some(mode) = value.get("mode").and_then(Value::as_str) {
         options.mode = mode.to_string();
@@ -3741,7 +3745,7 @@ mod tests {
         .expect("ssr compile");
 
         let code = compiled["code"].as_str().unwrap_or("");
-        assert!(code.contains("_ssrInterpolate(msg)"));
+        assert!(code.contains("_ssrInterpolate(_ctx.msg)"));
         assert!(!code.contains("boom"));
         assert_eq!(compiled["map"]["sources"], json!(["anonymous.vue"]));
         assert_eq!(compiled["map"]["sourcesContent"][0], source);
@@ -4000,8 +4004,10 @@ mod tests {
 
         let code = compiled["code"].as_str().unwrap_or("");
         assert!(code.contains("import _imports_0 from './bar.png'"));
-        assert!(code.contains("_ssrRenderAttr(\"src\", _imports_0)"));
-        assert!(code.contains("_ssrRenderAttr(\"srcset\", _imports_0 + ' 2x')"));
+        assert!(code.contains("src: _imports_0"));
+        assert!(code.contains("srcset: _imports_0 + ' 2x'"));
+        assert!(code.contains("_ssrRenderAttrs(_mergeProps("));
+        assert!(code.contains("_attrs"));
         assert!(!code.contains("_ctx._imports_"));
 
         let disabled = dispatch(
@@ -4019,7 +4025,8 @@ mod tests {
 
         let disabled_code = disabled["code"].as_str().unwrap_or("");
         assert!(!disabled_code.contains("import _imports_0"));
-        assert!(disabled_code.contains(r#"src=\"./bar.png\""#));
+        assert!(disabled_code.contains(r#"src: "./bar.png""#));
+        assert!(disabled_code.contains("_attrs"));
     }
 
     #[test]
@@ -4039,7 +4046,7 @@ mod tests {
         let code = compiled["code"].as_str().unwrap_or("");
         assert!(code.contains("resolveComponent as _resolveComponent"));
         assert!(code.contains("const _component_router_link = _resolveComponent(\"router-link\")"));
-        assert!(code.contains("_push(_ssrRenderComponent(_component_router_link, null, {"));
+        assert!(code.contains("_push(_ssrRenderComponent(_component_router_link, _attrs, {"));
         assert!(code.contains("_createVNode(\"img\", { src: _imports_0 })"));
     }
 }

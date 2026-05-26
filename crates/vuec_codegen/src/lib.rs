@@ -33,6 +33,11 @@ impl CodeWriter {
         }
     }
 
+    pub fn push_raw(&mut self, text: &str) {
+        self.code.push_str(text);
+        self.at_line_start = text.ends_with('\n');
+    }
+
     pub fn push_line(&mut self, text: &str) {
         self.push_str(text);
         self.newline();

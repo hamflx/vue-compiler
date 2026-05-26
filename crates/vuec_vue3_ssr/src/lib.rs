@@ -1,8 +1,7 @@
 #![forbid(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
-use vuec_ast::{TemplateAttribute, Vue3Ast, Vue3AstKind, Vue3ImportItem, Vue3NodeKind};
-use vuec_codegen::CodeWriter;
+use vuec_ast::{Vue3Ast, Vue3AstKind, Vue3ImportItem, Vue3NodeKind};
 use vuec_diagnostics::Diagnostic;
 use vuec_vue3_asset::transform_asset_url_props;
 pub use vuec_vue3_asset::AssetUrlOptions;
@@ -52,62 +51,26 @@ pub struct SsrCompileResult {
 }
 
 pub fn compile(source: TemplateSource, options: SsrCompilerOptions) -> SsrCompileResult {
+    let mut options = options;
+    options.core.ssr = true;
+    if options.core.scope_id.is_none() {
+        options.core.scope_id = options.scope_id.clone();
+    }
+    if options.slotted {
+        options.core.slotted = true;
+    }
     let mut ast = Vue3Dialect::base_parse(source.clone(), &options.core);
     if options.transform_asset_urls {
         transform_ssr_asset_urls(&mut ast, &options);
     }
     let summary = summarize_ssr(&ast.nodes.iter().map(|node| &node.kind).collect::<Vec<_>>());
-    if ast_has_asset_imports(&ast) && options.core.mode == "module" {
-        let generated = generate_asset_import_ssr(&ast, &options);
-        return SsrCompileResult {
-            code: generated.code,
-            map: generated.map,
-            ast_summary: format!(
-                "ssr:elements={},interpolations={},components={},slots={},teleports={},suspenses={}",
-                summary.elements,
-                summary.interpolations,
-                summary.components,
-                summary.slots,
-                summary.teleports,
-                summary.suspenses
-            ),
-            diagnostics: generated.diagnostics,
-            preamble: generated.preamble,
-        };
+    let mut generated = generate_mir_ssr(&ast, &options);
+    if options.core.source_map {
+        generated.map = source_map_for_render(&generated.code, &ast, &source, &options.core);
     }
-    let has_slot = ast.nodes.iter().any(
-        |node| matches!(node.kind, Vue3AstKind::Element(ref element) if element.tag == "slot"),
-    );
-    let mut writer = CodeWriter::new();
-    if options.scope_id.is_some() {
-        writer.push_line("const { mergeProps: _mergeProps } = require(\"vue\")");
-        writer.push_line(
-            "const { ssrRenderAttrs: _ssrRenderAttrs } = require(\"vue/server-renderer\")",
-        );
-        writer.push_line("");
-    }
-    if has_slot {
-        writer.push_line(
-            "const { ssrRenderSlot: _ssrRenderSlot } = require(\"vue/server-renderer\")",
-        );
-        writer.push_line("");
-    }
-    writer.push_line("function ssrRender(_ctx, _push, _parent, _attrs) {");
-    writer.indent();
-    if let Some(root) = ast.root_node() {
-        render_ssr_children(&ast, &root.children, has_slot, &options, &mut writer);
-    }
-    writer.dedent();
-    writer.push_line("}");
-    let code = writer.finish();
-    let map = options
-        .core
-        .source_map
-        .then(|| source_map_for_render(&code, &ast, &source, &options.core))
-        .flatten();
     SsrCompileResult {
-        code,
-        map,
+        code: generated.code,
+        map: generated.map,
         ast_summary: format!(
             "ssr:elements={},interpolations={},components={},slots={},teleports={},suspenses={}",
             summary.elements,
@@ -117,8 +80,8 @@ pub fn compile(source: TemplateSource, options: SsrCompilerOptions) -> SsrCompil
             summary.teleports,
             summary.suspenses
         ),
-        diagnostics: Vec::new(),
-        preamble: String::new(),
+        diagnostics: generated.diagnostics,
+        preamble: generated.preamble,
     }
 }
 
@@ -145,16 +108,7 @@ fn transform_ssr_asset_urls(ast: &mut Vue3Ast, options: &SsrCompilerOptions) {
     }
 }
 
-fn ast_has_asset_imports(ast: &Vue3Ast) -> bool {
-    ast.root_node()
-        .and_then(|node| match &node.kind {
-            Vue3AstKind::Root(root) => Some(!root.imports.is_empty()),
-            _ => None,
-        })
-        .unwrap_or(false)
-}
-
-fn generate_asset_import_ssr(ast: &Vue3Ast, options: &SsrCompilerOptions) -> CodegenResult {
+fn generate_mir_ssr(ast: &Vue3Ast, options: &SsrCompilerOptions) -> CodegenResult {
     let lowering = lower_vue3_ast_to_ssr_mir(ast, &options.core);
     generate_vue3_ssr_mir(&lowering.mir, &lowering.js, &options.core)
 }
@@ -187,101 +141,6 @@ pub fn summarize_ssr(nodes: &[&Vue3NodeKind]) -> SsrTransformSummary {
         }
     }
     summary
-}
-
-fn render_start_tag(
-    tag: &str,
-    attributes: &[TemplateAttribute],
-    self_closing: bool,
-    options: &SsrCompilerOptions,
-) -> String {
-    let mut rendered = String::new();
-    rendered.push('<');
-    rendered.push_str(tag);
-    if options.slotted {
-        rendered.push_str(" data-vuec-slotted");
-    }
-    for attr in attributes {
-        if attr.name.starts_with("v-") || attr.name.starts_with('@') || attr.name.starts_with(':') {
-            continue;
-        }
-        rendered.push(' ');
-        rendered.push_str(&attr.name);
-        if let Some(value) = &attr.value {
-            rendered.push_str("=\"");
-            rendered.push_str(value);
-            rendered.push('"');
-        }
-    }
-    if let Some(scope_id) = &options.scope_id {
-        rendered.push(' ');
-        rendered.push_str(scope_id);
-    }
-    if self_closing {
-        rendered.push_str("/>");
-    } else {
-        rendered.push('>');
-    }
-    rendered
-}
-
-fn render_ssr_children(
-    ast: &vuec_ast::AstDocument<Vue3NodeKind>,
-    children: &[vuec_ast::NodeId],
-    has_slot: bool,
-    options: &SsrCompilerOptions,
-    writer: &mut CodeWriter,
-) {
-    for child_id in children {
-        render_ssr_node(ast, *child_id, has_slot, options, writer);
-    }
-}
-
-fn render_ssr_node(
-    ast: &vuec_ast::AstDocument<Vue3NodeKind>,
-    node_id: vuec_ast::NodeId,
-    has_slot: bool,
-    options: &SsrCompilerOptions,
-    writer: &mut CodeWriter,
-) {
-    let Some(node) = ast.node(node_id) else {
-        return;
-    };
-    match &node.kind {
-        Vue3AstKind::Element(element) => {
-            let tag = &element.tag;
-            let attributes = element.template_attributes();
-            if tag == "slot" && has_slot {
-                writer.push_line(
-                    "_ssrRenderSlot(_ctx.$slots, \"default\", {}, null, _push, _parent);",
-                );
-                return;
-            }
-            let rendered = render_start_tag(tag, &attributes, element.self_closing, options);
-            writer.push_line(&format!("_push({rendered:?});"));
-            if !element.self_closing {
-                render_ssr_children(ast, &node.children, has_slot, options, writer);
-                writer.push_line(&format!("_push({:?});", format!("</{tag}>")));
-            }
-        }
-        Vue3AstKind::Text(text) => {
-            writer.push_line(&format!("_push({:?});", text.value));
-        }
-        Vue3AstKind::Interpolation(interpolation) => {
-            let expression = interpolation.expression.source_string();
-            writer.push_line(&format!("_push(_ssrInterpolate({expression}));"));
-        }
-        Vue3AstKind::Comment(comment) => {
-            writer.push_line(&format!(
-                "_push({:?});",
-                format!("<!--{}-->", comment.value)
-            ));
-        }
-        Vue3AstKind::Root(_) => {
-            render_ssr_children(ast, &node.children, has_slot, options, writer);
-        }
-        _ => {}
-    }
 }
 
 fn is_component(tag: &str) -> bool {
@@ -348,10 +207,10 @@ mod tests {
         );
 
         assert!(result.code.contains("import _imports_0 from './logo.png'"));
-        assert!(result.code.contains("_ssrRenderAttr(\"src\", _imports_0)"));
-        assert!(result
-            .code
-            .contains("_ssrRenderAttr(\"srcset\", _imports_0 + ' 2x')"));
+        assert!(result.code.contains("src: _imports_0"));
+        assert!(result.code.contains("srcset: _imports_0 + ' 2x'"));
+        assert!(result.code.contains("_attrs"));
+        assert!(result.code.contains("_ssrRenderAttrs(_mergeProps("));
         assert!(!result.code.contains("_ctx._imports_"));
         assert!(result.ast_summary.contains("elements=1"));
     }
@@ -377,7 +236,8 @@ mod tests {
         );
 
         assert!(!result.code.contains("import _imports_0"));
-        assert!(result.code.contains(r#"src=\"./logo.png\""#));
+        assert!(result.code.contains(r#"src: "./logo.png""#));
+        assert!(result.code.contains("_attrs"));
     }
 
     #[test]
