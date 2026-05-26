@@ -6,6 +6,7 @@
     "test": "cargo test --workspace",
     "test:napi": "cargo xtask verify-napi",
     "test:napi-alias": "cargo xtask verify-napi-alias",
+    "test:napi-api": "cargo xtask verify-napi-api",
     "test:napi-platform": "cargo xtask verify-napi-platform",
     "conformance": "cargo xtask run-conformance --all"
   }

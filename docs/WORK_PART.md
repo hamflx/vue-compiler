@@ -138,6 +138,11 @@
 
 ## Current NAPI Foundation Slice
 
+- Added an M16 NAPI Vue 2 `vue-template-compiler` API manifest parity slice. The `vue-template-compiler` alias now has version-specific Vue 2.6 and Vue 2.7 entry files so public export names, function names, arities, own function properties, package versions, and `types/index.d.ts` match the official API manifests for both version lines.
+- Added `cargo xtask verify-napi-api` and `pnpm test:napi-api`. The command builds `vuec_napi`, prepares `target/napi-api/vue2_6` and `target/napi-api/vue2_7`, installs the matching NAPI-backed alias package, and compares it against `compat/api/official/*/vue-template-compiler/index.json`.
+- This is package/API adapter progress only: official conformance is still not routed through NAPI, Vue 2.7 `vue/compiler-sfc` and Vue 3 compiler package NAPI API parity remain open, and no compiler semantics or AST/HIR/MIR structures changed.
+- Verification this round: `cargo fmt --all --check`, `git diff --check`, `cargo check -p xtask -p vuec_napi`, `cargo test -p xtask`, `cargo test -p vuec_napi`, `cargo xtask verify-napi`, `cargo xtask verify-napi-alias`, `cargo xtask verify-napi-api`, `cargo xtask verify-napi-platform`, `pnpm test:napi`, `pnpm test:napi-alias`, `pnpm test:napi-api`, `pnpm test:napi-platform`, `cargo test --workspace`, and `cargo xtask summarize-compat --locked`.
+
 - Added an M16 NAPI platform-package smoke slice. The `@vuec-rs/native` loader now supports local development binding load plus optional platform package load, and exposes `bindingInfo()` so smoke tests can verify which path was used.
 - Added `packages/native-platforms/*` package metadata for Windows x64/arm64, macOS x64/arm64, and Linux x64/arm64 GNU/musl package names. The built native binding remains generated output and is not committed.
 - Added `cargo xtask verify-napi-platform` and `pnpm test:napi-platform`; the xtask command prepares `target/napi-platform`, installs the current platform package with `vuec_napi.node`, removes the main package local `.node`, and verifies Node loads from the platform package before compiling a representative Vue 3 DOM fixture.
