@@ -1147,6 +1147,7 @@ dependencies = [
  "napi-derive",
  "serde",
  "serde_json",
+ "vuec_ast",
  "vuec_sfc",
  "vuec_source",
  "vuec_vue2",

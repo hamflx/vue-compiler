@@ -164,6 +164,19 @@ fn verify_napi_api() -> Result<compat::JsonReport> {
         },
         NapiApiTarget {
             version_line: "vue3",
+            package: "@vue/compiler-core",
+            entry: "index",
+            alias: NapiApiAlias::PackageTemplate {
+                source: "packages/native-aliases/@vue/compiler-core",
+                package_subpath: &["@vue", "compiler-core"],
+                manifest_package: "_vue_compiler-core",
+                manifest_file: "index.json",
+                package_json_subpath: &["@vue", "compiler-core"],
+                types_base_subpath: &["@vue", "compiler-core"],
+            },
+        },
+        NapiApiTarget {
+            version_line: "vue3",
             package: "@vue/compiler-ssr",
             entry: "index",
             alias: NapiApiAlias::PackageTemplate {

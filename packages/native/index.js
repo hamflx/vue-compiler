@@ -113,6 +113,14 @@ function baseCompileVue3(source, options = {}) {
   return fromJson(binding.baseCompileVue3(source, options));
 }
 
+function baseParseVue3(source, options = {}) {
+  return fromJson(binding.baseParseVue3(source, options));
+}
+
+function generateVue3Core(ast, options = {}) {
+  return fromJson(binding.generateVue3Core(ast || {}, options));
+}
+
 function compileVue3Dom(source, options = {}) {
   return fromJson(binding.compileVue3Dom(source, options));
 }
@@ -233,6 +241,8 @@ module.exports = {
   generateCodeFrameVue2,
   rewriteDefaultVue27,
   baseCompileVue3,
+  baseParseVue3,
+  generateVue3Core,
   compileVue3Dom,
   compileVue3Ssr,
   parseSfc,

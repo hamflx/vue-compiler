@@ -33,6 +33,20 @@ const coreResult = core.baseCompile('<div>{{ msg }}</div>', {
 assert.match(coreResult.code, /export function render/);
 assert.match(coreResult.code, /_ctx\.msg/);
 
+const coreAst = core.baseParse('<div>{{ msg }}</div>');
+assert.strictEqual(coreAst.type, core.NodeTypes.ROOT);
+assert.strictEqual(coreAst.children[0].tag, 'div');
+
+const coreGenerated = core.generate(coreAst);
+assert.match(coreGenerated.code, /function render/);
+
+assert.deepStrictEqual(
+  core.advancePositionWithClone({ offset: 0, line: 1, column: 1 }, 'a\nb', 3),
+  { offset: 3, line: 2, column: 2 },
+);
+assert.ok(core.isSimpleIdentifier('msg'));
+assert.strictEqual(core.createSimpleExpression('msg').content, 'msg');
+
 const domResult = dom.compile('<input v-model="msg">', {
   mode: 'module',
   prefixIdentifiers: true,
