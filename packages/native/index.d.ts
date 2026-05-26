@@ -32,6 +32,13 @@ export function apiManifest(): {
   version: string;
   exports: string[];
 };
+export function bindingInfo(): {
+  source: string;
+  path: string;
+  package: string | null;
+  platform: string;
+  arch: string;
+};
 
 export function compileVue2(template: string, options?: Record<string, unknown>): Vue2CompileResult;
 export function compileToFunctionsVue2(template: string, options?: Record<string, unknown>): unknown;

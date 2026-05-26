@@ -6,9 +6,18 @@
   "types": "index.d.ts",
   "files": [
     "index.js",
-    "index.d.ts",
-    "vuec_napi.node"
+    "index.d.ts"
   ],
+  "optionalDependencies": {
+    "@vuec-rs/native-win32-x64": "0.1.0",
+    "@vuec-rs/native-win32-arm64": "0.1.0",
+    "@vuec-rs/native-darwin-x64": "0.1.0",
+    "@vuec-rs/native-darwin-arm64": "0.1.0",
+    "@vuec-rs/native-linux-x64-gnu": "0.1.0",
+    "@vuec-rs/native-linux-x64-musl": "0.1.0",
+    "@vuec-rs/native-linux-arm64-gnu": "0.1.0",
+    "@vuec-rs/native-linux-arm64-musl": "0.1.0"
+  },
   "scripts": {
     "smoke": "node smoke.js"
   }

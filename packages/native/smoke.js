@@ -4,6 +4,7 @@ const assert = require('assert');
 const native = require('./index.js');
 
 assert.strictEqual(typeof native.version(), 'string');
+assert.ok(['local', 'platform', 'env'].includes(native.bindingInfo().source));
 
 const vue2 = native.compile('<div>{{ msg }}</div>');
 assert.match(vue2.render, /with\(this\)\{return _c\(['"]div['"],\[_v\(_s\(msg\)\)\]\)\}/);
@@ -59,5 +60,6 @@ assert.ok(manifest.exports.includes('compileVue2'));
 
 process.stdout.write(JSON.stringify({
   status: 'pass',
+  binding: native.bindingInfo(),
   exports: Object.keys(native).sort(),
 }));

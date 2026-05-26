@@ -77,6 +77,7 @@ enum Command {
     },
     VerifyNapi,
     VerifyNapiAlias,
+    VerifyNapiPlatform,
     SummarizeCompat {
         #[arg(long)]
         locked: bool,
@@ -117,6 +118,7 @@ fn main() -> Result<()> {
         Command::VerifyNpmAlias { scope } => verify_npm_alias(&scope),
         Command::VerifyNapi => verify_napi()?,
         Command::VerifyNapiAlias => verify_napi_alias()?,
+        Command::VerifyNapiPlatform => verify_napi_platform()?,
         Command::SummarizeCompat { locked, lock } => summarize_compat(locked, &lock),
     };
     println!("{}", serde_json::to_string_pretty(&report)?);
@@ -124,6 +126,78 @@ fn main() -> Result<()> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+fn verify_napi_platform() -> Result<compat::JsonReport> {
+    let mut violations = Vec::new();
+    let mut created = Vec::new();
+    let platform_root = PathBuf::from("target").join("napi-platform");
+    let node_modules = platform_root.join("node_modules");
+    let native_package_dir = node_modules.join("@vuec-rs").join("native");
+    let platform_package = current_platform_package_name();
+    let platform_package_dir =
+        platform_package_path(&node_modules, platform_package.unwrap_or("unsupported"));
+
+    match build_napi_crate() {
+        Ok(()) => {}
+        Err(err) => violations.push(format!("failed to build vuec_napi: {err:#}")),
+    }
+
+    if platform_package.is_none() {
+        violations.push(format!(
+            "unsupported NAPI platform package for os={} arch={}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        ));
+    }
+
+    if violations.is_empty() {
+        match prepare_napi_platform_tree(&platform_root, platform_package.unwrap()) {
+            Ok(paths) => created.extend(paths.into_iter().map(|path| path.display().to_string())),
+            Err(err) => {
+                violations.push(format!("failed to prepare NAPI platform package: {err:#}"))
+            }
+        }
+    }
+
+    if violations.is_empty() {
+        match copy_napi_binding(&platform_package_dir.join("vuec_napi.node")) {
+            Ok(path) => created.push(path.display().to_string()),
+            Err(err) => {
+                violations.push(format!("failed to install platform NAPI binding: {err:#}"))
+            }
+        }
+    }
+
+    let smoke_output = if violations.is_empty() {
+        match run_napi_platform_smoke(&platform_root) {
+            Ok(output) => Some(output),
+            Err(err) => {
+                violations.push(format!("NAPI platform package smoke failed: {err:#}"));
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let item_status = if violations.is_empty() {
+        compat::ReportStatus::Pass
+    } else {
+        compat::ReportStatus::Fail
+    };
+    Ok(
+        compat::JsonReport::new("verify_napi_platform", item_status)
+            .with_items(vec![compat::ReportItem::new(
+                platform_package.unwrap_or("unsupported-platform"),
+                item_status,
+                smoke_output.unwrap_or_else(|| "NAPI platform package smoke did not run".into()),
+                Some(native_package_dir),
+            )])
+            .with_created(created)
+            .with_violations(violations)
+            .with_note("builds vuec_napi, installs the current optional platform package under target/napi-platform, and verifies @vuec-rs/native loads from that package instead of a local .node"),
+    )
 }
 
 fn verify_napi_alias() -> Result<compat::JsonReport> {
@@ -273,7 +347,7 @@ fn copy_napi_binding(target_path: &Path) -> Result<PathBuf> {
 }
 
 fn prepare_napi_alias_tree(alias_root: &Path) -> Result<Vec<PathBuf>> {
-    ensure_target_child(alias_root)?;
+    ensure_target_child(alias_root, "napi-alias")?;
     let node_modules = alias_root.join("node_modules");
     if alias_root.exists() {
         std::fs::remove_dir_all(alias_root)
@@ -326,7 +400,34 @@ fn prepare_napi_alias_tree(alias_root: &Path) -> Result<Vec<PathBuf>> {
     Ok(created)
 }
 
-fn ensure_target_child(path: &Path) -> Result<()> {
+fn prepare_napi_platform_tree(platform_root: &Path, package_name: &str) -> Result<Vec<PathBuf>> {
+    ensure_target_child(platform_root, "napi-platform")?;
+    let node_modules = platform_root.join("node_modules");
+    if platform_root.exists() {
+        std::fs::remove_dir_all(platform_root)
+            .with_context(|| format!("failed to remove {}", platform_root.display()))?;
+    }
+    std::fs::create_dir_all(&node_modules)
+        .with_context(|| format!("failed to create {}", node_modules.display()))?;
+
+    let mut created = Vec::new();
+    let native_target = node_modules.join("@vuec-rs").join("native");
+    copy_dir_recursive(Path::new("packages/native"), &native_target)?;
+    let local_binding = native_target.join("vuec_napi.node");
+    if local_binding.exists() {
+        std::fs::remove_file(&local_binding)
+            .with_context(|| format!("failed to remove {}", local_binding.display()))?;
+    }
+    created.push(native_target);
+
+    let package_source = platform_template_dir(package_name)?;
+    let package_target = platform_package_path(&node_modules, package_name);
+    copy_dir_recursive(&package_source, &package_target)?;
+    created.push(package_target);
+    Ok(created)
+}
+
+fn ensure_target_child(path: &Path, child: &str) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to resolve current directory")?;
     let target_root = cwd.join("target");
     let absolute = if path.is_absolute() {
@@ -334,7 +435,7 @@ fn ensure_target_child(path: &Path) -> Result<()> {
     } else {
         cwd.join(path)
     };
-    let expected = target_root.join("napi-alias");
+    let expected = target_root.join(child);
     if absolute != expected {
         anyhow::bail!(
             "refusing to recursively replace {}; expected {}",
@@ -343,6 +444,38 @@ fn ensure_target_child(path: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn current_platform_package_name() -> Option<&'static str> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("windows", "x86_64") => Some("@vuec-rs/native-win32-x64"),
+        ("windows", "aarch64") => Some("@vuec-rs/native-win32-arm64"),
+        ("macos", "x86_64") => Some("@vuec-rs/native-darwin-x64"),
+        ("macos", "aarch64") => Some("@vuec-rs/native-darwin-arm64"),
+        ("linux", "x86_64") if cfg!(target_env = "musl") => Some("@vuec-rs/native-linux-x64-musl"),
+        ("linux", "x86_64") => Some("@vuec-rs/native-linux-x64-gnu"),
+        ("linux", "aarch64") if cfg!(target_env = "musl") => {
+            Some("@vuec-rs/native-linux-arm64-musl")
+        }
+        ("linux", "aarch64") => Some("@vuec-rs/native-linux-arm64-gnu"),
+        _ => None,
+    }
+}
+
+fn platform_template_dir(package_name: &str) -> Result<PathBuf> {
+    let suffix = package_name
+        .strip_prefix("@vuec-rs/native-")
+        .with_context(|| format!("unsupported platform package name {package_name}"))?;
+    Ok(PathBuf::from("packages")
+        .join("native-platforms")
+        .join(suffix))
+}
+
+fn platform_package_path(node_modules: &Path, package_name: &str) -> PathBuf {
+    let Some((scope, name)) = package_name.split_once('/') else {
+        return node_modules.join(package_name);
+    };
+    node_modules.join(scope).join(name)
 }
 
 fn copy_dir_recursive(source: &Path, target: &Path) -> Result<()> {
@@ -412,4 +545,52 @@ fn run_napi_alias_smoke(alias_root: &Path) -> Result<String> {
         );
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn run_napi_platform_smoke(platform_root: &Path) -> Result<String> {
+    let platform_root = absolute_path(platform_root);
+    let script = r#"
+const path = require('path');
+const { createRequire } = require('module');
+const rootRequire = createRequire(path.join(process.env.VUEC_NAPI_PLATFORM_ROOT, 'package.json'));
+const native = rootRequire('@vuec-rs/native');
+const info = native.bindingInfo();
+if (info.source !== 'platform') {
+  throw new Error(`expected platform binding source, got ${JSON.stringify(info)}`);
+}
+const result = native.compileDom('<div>{{ msg }}</div>', { mode: 'module', prefixIdentifiers: true });
+if (!result || !/_ctx\.msg/.test(result.code)) {
+  throw new Error('platform package compile smoke failed');
+}
+process.stdout.write(JSON.stringify({ status: 'pass', binding: info }));
+"#;
+    let output = ProcessCommand::new("node")
+        .arg("-e")
+        .arg(script)
+        .env("VUEC_NAPI_PLATFORM_ROOT", &platform_root)
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to spawn node platform smoke in {}",
+                platform_root.display()
+            )
+        })?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "node NAPI platform smoke exited with {:?}\nstdout:\n{}\nstderr:\n{}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn absolute_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    std::env::current_dir()
+        .map(|cwd| cwd.join(path))
+        .unwrap_or_else(|_| path.to_path_buf())
 }

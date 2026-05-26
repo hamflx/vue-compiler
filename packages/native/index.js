@@ -1,11 +1,92 @@
 'use strict';
 
+const fs = require('fs');
 const path = require('path');
 
-const binding = require(path.join(__dirname, 'vuec_napi.node'));
+const loadedBinding = loadBinding();
+const binding = loadedBinding.binding;
 
 function fromJson(json) {
   return JSON.parse(json);
+}
+
+function loadBinding() {
+  const attempts = [];
+  const explicit = process.env.VUEC_NATIVE_BINDING_PATH;
+  if (explicit) {
+    return requireBindingPath(path.resolve(explicit), 'env', attempts);
+  }
+
+  const localPath = path.join(__dirname, 'vuec_napi.node');
+  if (fs.existsSync(localPath)) {
+    try {
+      return requireBindingPath(localPath, 'local', attempts);
+    } catch (_) {
+      // Keep trying the optional platform package below.
+    }
+  }
+
+  const packageName = platformPackageName();
+  if (packageName) {
+    try {
+      return {
+        binding: require(packageName),
+        source: 'platform',
+        path: require.resolve(packageName),
+        package: packageName,
+      };
+    } catch (error) {
+      attempts.push(`${packageName}: ${error.message}`);
+    }
+  }
+
+  const message = [
+    'Failed to load vuec_napi native binding.',
+    `platform=${process.platform}`,
+    `arch=${process.arch}`,
+    attempts.length ? `attempts=${attempts.join(' | ')}` : 'attempts=none',
+  ].join(' ');
+  throw new Error(message);
+}
+
+function requireBindingPath(bindingPath, source, attempts) {
+  try {
+    return {
+      binding: require(bindingPath),
+      source,
+      path: bindingPath,
+      package: null,
+    };
+  } catch (error) {
+    attempts.push(`${bindingPath}: ${error.message}`);
+    throw error;
+  }
+}
+
+function platformPackageName() {
+  const platform = process.platform;
+  const arch = process.arch;
+  if (platform === 'win32' && (arch === 'x64' || arch === 'arm64')) {
+    return `@vuec-rs/native-win32-${arch}`;
+  }
+  if (platform === 'darwin' && (arch === 'x64' || arch === 'arm64')) {
+    return `@vuec-rs/native-darwin-${arch}`;
+  }
+  if (platform === 'linux' && (arch === 'x64' || arch === 'arm64')) {
+    return `@vuec-rs/native-linux-${arch}-${isMusl() ? 'musl' : 'gnu'}`;
+  }
+  return null;
+}
+
+function isMusl() {
+  if (process.platform !== 'linux') {
+    return false;
+  }
+  const report = typeof process.report === 'object' && process.report
+    && typeof process.report.getReport === 'function'
+    ? process.report.getReport()
+    : null;
+  return !report || !report.header || !report.header.glibcVersionRuntime;
 }
 
 function compileVue2(template, options = {}) {
@@ -128,9 +209,20 @@ function escapeAttribute(value) {
   return String(value).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
 }
 
+function bindingInfo() {
+  return {
+    source: loadedBinding.source,
+    path: loadedBinding.path,
+    package: loadedBinding.package,
+    platform: process.platform,
+    arch: process.arch,
+  };
+}
+
 module.exports = {
   version: binding.version,
   apiManifest: () => fromJson(binding.apiManifest()),
+  bindingInfo,
   compileVue2,
   compileToFunctionsVue2,
   compileSsrVue2,

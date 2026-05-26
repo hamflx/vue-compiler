@@ -138,6 +138,12 @@
 
 ## Current NAPI Foundation Slice
 
+- Added an M16 NAPI platform-package smoke slice. The `@vuec-rs/native` loader now supports local development binding load plus optional platform package load, and exposes `bindingInfo()` so smoke tests can verify which path was used.
+- Added `packages/native-platforms/*` package metadata for Windows x64/arm64, macOS x64/arm64, and Linux x64/arm64 GNU/musl package names. The built native binding remains generated output and is not committed.
+- Added `cargo xtask verify-napi-platform` and `pnpm test:napi-platform`; the xtask command prepares `target/napi-platform`, installs the current platform package with `vuec_napi.node`, removes the main package local `.node`, and verifies Node loads from the platform package before compiling a representative Vue 3 DOM fixture.
+- This is packaging/product-boundary progress only; official conformance and API diff still are not routed through NAPI, and M16 remains incomplete until those gates use the NAPI packages.
+- Verification this round: `cargo fmt --all --check`, `git diff --check`, `cargo check -p xtask -p vuec_napi`, `cargo test -p xtask`, `cargo test -p vuec_napi`, `cargo xtask verify-napi`, `cargo xtask verify-napi-alias`, `cargo xtask verify-napi-platform`, `pnpm test:napi`, `pnpm test:napi-alias`, `pnpm test:napi-platform`, `cargo test --workspace`, and `cargo xtask summarize-compat --locked`.
+
 - Added an M16 NAPI official package-name alias smoke slice. `packages/native-aliases` now contains committed template packages for `vue-template-compiler`, `vue/compiler-sfc`, `@vue/compiler-core`, `@vue/compiler-dom`, `@vue/compiler-ssr`, and `@vue/compiler-sfc`.
 - Added `cargo xtask verify-napi-alias` and `pnpm test:napi-alias`. The command builds `vuec_napi`, prepares `target/napi-alias/node_modules`, copies the local `@vuec-rs/native` loader plus alias templates, installs the platform `.node` binding, and requires the official package names from Node.
 - The smoke covers representative NAPI-backed calls for Vue 2 compile/compileToFunctions/codeframe, Vue 2.7 SFC parse, Vue 3 core/dom/ssr compile, and Vue 3 SFC parse/template/script/style. This is package/API adapter progress only: official API diff and conformance are still not routed through NAPI, and M16 remains incomplete until those gates use the NAPI packages.

@@ -1,0 +1,15 @@
+{
+  "name": "@vuec-rs/native-win32-arm64",
+  "version": "0.1.0",
+  "private": true,
+  "main": "vuec_napi.node",
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "files": [
+    "vuec_napi.node"
+  ]
+}
