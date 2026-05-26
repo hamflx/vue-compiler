@@ -12,6 +12,16 @@ use vuec_vue3_dom::{apply_dom_parser_defaults, compile as compile_dom, DomCompil
 use vuec_vue3_ssr::{compile as compile_ssr, SsrCompilerOptions};
 use wasm_bindgen::prelude::*;
 
+#[cfg(target_arch = "wasm32")]
+#[global_allocator]
+static WASM_ALLOCATOR: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(start)]
+pub fn init_wasm_runtime() {
+    console_error_panic_hook::set_once();
+}
+
 #[wasm_bindgen(js_name = version)]
 pub fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()

@@ -34,6 +34,8 @@ clap = { version = "4", features = ["derive"] }
 napi = { version = "3.9.0", features = ["serde-json"] }
 napi-derive = "3.5.6"
 wasm-bindgen = "0.2"
+console_error_panic_hook = "0.1"
+wee_alloc = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

@@ -1,5 +1,9 @@
 # Memory
 
+- Current round: completed the M17 WASM runtime initialization slice.
+- `vuec_wasm` now configures a wasm32-only `wee_alloc` global allocator and installs `console_error_panic_hook` from a wasm-bindgen start function, so browser/Node instantiated wasm modules get JS-console panic diagnostics without moving compiler semantics into JS.
+- Verification: `cargo fmt --all -- --check`, `cargo check -p vuec_wasm -p xtask`, `cargo test -p vuec_wasm -p xtask`, `cargo xtask verify-wasm`, and `git diff --check`.
+
 - Current round: added the first M17 `vuec_wasm` delivery slice.
 - Added `crates/vuec_wasm` as a wasm-bindgen-compatible Rust crate that exposes JSON-string ABI functions for Vue 2 template compile, Vue 3 DOM/SSR template compile, SFC parse/template/script/style compile, diagnostics, and source-map carrying result objects. The crate delegates to existing Rust compiler crates; no compiler semantics were moved into JS or `xtask`.
 - Added the local `@vuec-rs/wasm` package with an async `init()` browser/Node loader, type declarations, and a smoke that exercises Vue 2, Vue 3 DOM with source maps, SSR, SFC parse/template/style, and diagnostic propagation. Generated wasm-bindgen output under `packages/wasm/pkg*` is ignored.
