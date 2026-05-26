@@ -1839,6 +1839,12 @@ fn alias_export_expression(
     {
         return alias_runtime_function_expression("vue3CoreRuntime", export_name, detail);
     }
+    if target.kind == TargetKind::Vue27Sfc
+        && matches!(export_name, "compileStyle" | "compileStyleAsync")
+        && detail.kind == "function"
+    {
+        return vue27_sfc_style_function_expression(export_name, detail);
+    }
     match detail.kind.as_str() {
         "function" => alias_function_expression(target, export_name, detail),
         "symbol" => "Symbol.for('vuec.alias')".into(),
@@ -1857,6 +1863,56 @@ fn alias_export_expression(
         "object" => object_from_property_names(&detail.own_property_names),
         _ => "undefined".into(),
     }
+}
+
+fn vue27_sfc_style_function_expression(export_name: &str, detail: &ApiExportDetail) -> String {
+    let name = detail.name.as_deref().unwrap_or(export_name);
+    let arity = detail.function_arity.unwrap_or(0);
+    let command = bridge_command(
+        TargetSpec {
+            version_line: VersionLine::Vue27,
+            package: "vue",
+            entry: "vue/compiler-sfc",
+            kind: TargetKind::Vue27Sfc,
+        },
+        export_name,
+    )
+    .unwrap_or("sfc.vue27.compileStyle");
+    let postcss_call = if export_name == "compileStyleAsync" {
+        "applyVue27StylePostcssAsync(__vuecBridgeResult, __vuecPayload.options)"
+    } else {
+        "applyVue27StylePostcssSync(__vuecBridgeResult, __vuecPayload.options)"
+    };
+    let body = format!(
+        "const __vuecPayload = normalizeArgs({}); preflightAliasCall({}, __vuecPayload); const __vuecBridgePayload = vue27StyleBridgePayload(__vuecPayload); const __vuecBridgeResult = callBridge({}, bridgePayloadForCall(__vuecBridgePayload)); return {postcss_call};",
+        alias_argument_object(
+            TargetSpec {
+                version_line: VersionLine::Vue27,
+                package: "vue",
+                entry: "vue/compiler-sfc",
+                kind: TargetKind::Vue27Sfc,
+            },
+            export_name,
+            arity,
+        ),
+        js_string_literal(alias_preflight_name(
+            TargetSpec {
+                version_line: VersionLine::Vue27,
+                package: "vue",
+                entry: "vue/compiler-sfc",
+                kind: TargetKind::Vue27Sfc,
+            },
+            export_name,
+        )),
+        js_string_literal(command),
+    );
+    let expression = format!("function {name}(a0) {{ {body} }}");
+    format!(
+        "namedArity({}, {}, {})",
+        js_string_literal(name),
+        arity,
+        expression
+    )
 }
 
 fn vue3_core_runtime_export(export_name: &str, detail: &ApiExportDetail) -> Option<()> {
@@ -7005,6 +7061,92 @@ function bridgePayloadForCall(payload) {
   return bridgePayload;
 }
 
+function vue27StyleBridgePayload(payload) {
+  if (!payload || !payload.options || typeof payload.options !== 'object') return payload;
+  const options = payload.options;
+  const bridgeOptions = {};
+  for (const key of Object.keys(options)) {
+    if (key !== 'postcssPlugins' && key !== 'postcssOptions') {
+      bridgeOptions[key] = options[key];
+    }
+  }
+  return Object.assign({}, payload, { options: bridgeOptions });
+}
+
+function vue27StylePostcssRequired(options) {
+  return !!(
+    options &&
+    (Array.isArray(options.postcssPlugins) || options.postcssOptions)
+  );
+}
+
+function vue27StylePostcssOptions(options) {
+  const postcssOptions = Object.assign({}, options && options.postcssOptions ? options.postcssOptions : {});
+  const filename = options && options.filename ? options.filename : undefined;
+  if (filename !== undefined) {
+    if (postcssOptions.to === undefined) postcssOptions.to = filename;
+    if (postcssOptions.from === undefined) postcssOptions.from = filename;
+  }
+  return postcssOptions;
+}
+
+function applyVue27StylePostcssSync(result, options) {
+  if (!vue27StylePostcssRequired(options)) return result;
+  const out = Object.assign({}, result);
+  const errors = Array.isArray(out.errors) ? out.errors.slice() : [];
+  let rawResult;
+  try {
+    const postcss = require('postcss');
+    rawResult = postcss((options && options.postcssPlugins) || []).process(
+      out.code || '',
+      vue27StylePostcssOptions(options)
+    );
+    out.code = rawResult.css || '';
+    out.map = rawResult.map && rawResult.map.toJSON ? rawResult.map.toJSON() : out.map;
+  } catch (error) {
+    errors.push(error);
+  }
+  out.errors = errors;
+  out.rawResult = rawResult;
+  return out;
+}
+
+function applyVue27StylePostcssAsync(result, options) {
+  const out = Object.assign({}, result);
+  const errors = Array.isArray(out.errors) ? out.errors.slice() : [];
+  if (!vue27StylePostcssRequired(options)) {
+    return Promise.resolve(out);
+  }
+  try {
+    const postcss = require('postcss');
+    const rawResult = postcss((options && options.postcssPlugins) || []).process(
+      out.code || '',
+      vue27StylePostcssOptions(options)
+    );
+    return Promise.resolve(rawResult)
+      .then(postcssResult => {
+        out.code = postcssResult.css || '';
+        out.map = postcssResult.map && postcssResult.map.toJSON ? postcssResult.map.toJSON() : out.map;
+        out.errors = errors;
+        out.rawResult = postcssResult;
+        return out;
+      })
+      .catch(error => ({
+        code: '',
+        map: undefined,
+        errors: errors.concat(error && error.message ? error.message : error),
+        rawResult: undefined,
+      }));
+  } catch (error) {
+    return Promise.resolve({
+      code: '',
+      map: undefined,
+      errors: errors.concat(error && error.message ? error.message : error),
+      rawResult: undefined,
+    });
+  }
+}
+
 function hydrateVue27CompileScriptResult(result) {
   if (!result || typeof result !== 'object') return result;
   const bindings = result.bindings;
@@ -11532,13 +11674,28 @@ fn conformance_coverage_report(
         .get(ConformanceCoverageKind::RustBacked.as_str())
         .copied()
         .unwrap_or_default();
+    let report_source = conformance_coverage_report_kind(source, &files);
     ConformanceCoverageReport {
-        source,
+        source: report_source,
         reason,
         counts_by_source,
         rust_backed_pass: rust_backed.pass,
         rust_backed_total: rust_backed.total,
         files,
+    }
+}
+
+fn conformance_coverage_report_kind(
+    default: ConformanceCoverageKind,
+    files: &[ConformanceCoverageFile],
+) -> ConformanceCoverageKind {
+    let Some(first) = files.first() else {
+        return default;
+    };
+    if files.iter().all(|file| file.source == first.source) {
+        first.source
+    } else {
+        ConformanceCoverageKind::Mixed
     }
 }
 
@@ -11558,7 +11715,7 @@ fn conformance_coverage_reason(spec: ConformanceSuiteSpec) -> &'static str {
             "Vue 2.7 compiler official tests execute through a prepared Vitest suite. Generated source-path import shims preserve official internal module requests and route compiler/codeframe calls into the Rust vue-template-compiler alias through vuec_node_bridge; these failures are real Rust compiler parity gaps, not not-wired pending status."
         }
         "vue27-sfc" => {
-            "Vue 2.7 compiler-sfc official tests execute through a prepared Vitest suite. Generated source-path import shims preserve official imports and route public vue/compiler-sfc calls into the Rust alias through vuec_node_bridge; these failures are real Vue 2.7 SFC parity gaps, not not-wired pending status."
+            "Vue 2.7 compiler-sfc official tests execute through a prepared Vitest suite. Generated source-path import shims preserve official imports and route public vue/compiler-sfc calls into the Rust alias through vuec_node_bridge; compileStyle PostCSS plugin callbacks execute in the JavaScript API adapter because caller-provided plugins are JavaScript functions and cannot be serialized into Rust. Remaining failures are real Vue 2.7 SFC parity gaps, not not-wired pending status."
         }
         "vue3-core" => {
             "Vue 3 compiler-core official tests run through generated import shims and the @vue/compiler-core alias runtime; public APIs call the Rust bridge, while many internal transform/codegen imports still execute JavaScript compatibility semantics in xtask/src/compat.rs."
@@ -11608,7 +11765,18 @@ fn conformance_coverage_file_kind(
     path: &str,
     default: ConformanceCoverageKind,
 ) -> ConformanceCoverageKind {
-    if path.ends_with("packages/compiler-core/__tests__/compile.spec.ts")
+    if path.ends_with("packages/compiler-sfc/test/compileStyle.spec.ts") {
+        ConformanceCoverageKind::Mixed
+    } else if path.ends_with("packages/compiler-sfc/test/compileScript.spec.ts")
+        || path.ends_with("packages/compiler-sfc/test/compileTemplate.spec.ts")
+        || path.ends_with("packages/compiler-sfc/test/cssVars.spec.ts")
+        || path.ends_with("packages/compiler-sfc/test/parseComponent.spec.ts")
+        || path.ends_with("packages/compiler-sfc/test/prefixIdentifiers.spec.ts")
+        || path.ends_with("packages/compiler-sfc/test/rewriteDefault.spec.ts")
+        || path.ends_with("packages/compiler-sfc/test/stylePluginScoped.spec.ts")
+    {
+        ConformanceCoverageKind::RustBacked
+    } else if path.ends_with("packages/compiler-core/__tests__/compile.spec.ts")
         || path.ends_with("packages/compiler-core/__tests__/codegen.spec.ts")
         || path.ends_with("packages/compiler-core/__tests__/parse.spec.ts")
         || path.ends_with("packages/compiler-core/__tests__/scopeId.spec.ts")
@@ -11629,9 +11797,11 @@ fn conformance_coverage_file_reason(
             "Official file exercises compiler behavior routed through vuec_node_bridge into Rust parser/transform/codegen or Rust-backed projection implementation; generated import shims only preserve official import paths and materialize Rust projection results."
                 .to_string()
         }
-        ConformanceCoverageKind::ShimBacked | ConformanceCoverageKind::Mixed => {
-            default_reason.to_string()
+        ConformanceCoverageKind::Mixed if default_reason.contains("Vue 2.7 compiler-sfc") => {
+            "Official file exercises a mixed path: Rust vuec_node_bridge performs SFC style parsing, preprocessing, scoped/CSS-var transforms, maps, and diagnostics, while the generated JavaScript alias adapter executes caller-provided PostCSS plugin callbacks/options and Promise/LazyResult API behavior that cannot cross the JSON bridge."
+                .to_string()
         }
+        ConformanceCoverageKind::ShimBacked | ConformanceCoverageKind::Mixed => default_reason.to_string(),
     }
 }
 
@@ -12122,6 +12292,57 @@ mod tests {
     }
 
     #[test]
+    fn vue27_sfc_compile_style_alias_keeps_postcss_callbacks_in_js_adapter() {
+        let target = TargetSpec {
+            version_line: VersionLine::Vue27,
+            package: "vue",
+            entry: "vue/compiler-sfc",
+            kind: TargetKind::Vue27Sfc,
+        };
+        let detail = ApiExportDetail {
+            kind: "function".into(),
+            tag: "[object Function]".into(),
+            name: Some("compileStyle".into()),
+            function_arity: Some(1),
+            is_async_function: Some(false),
+            is_class_like: Some(false),
+            own_property_names: vec!["length".into(), "name".into(), "prototype".into()],
+        };
+        let expression = alias_export_expression(target, "compileStyle", Some(&detail));
+
+        assert!(expression.contains("vue27StyleBridgePayload"));
+        assert!(expression.contains("applyVue27StylePostcssSync"));
+        assert!(expression.contains("sfc.vue27.compileStyle"));
+        assert!(ALIAS_RUNTIME_JS.contains("function applyVue27StylePostcssSync"));
+        assert!(ALIAS_RUNTIME_JS.contains("key !== 'postcssPlugins' && key !== 'postcssOptions'"));
+    }
+
+    #[test]
+    fn vue27_sfc_compile_style_async_alias_returns_postcss_promise_adapter() {
+        let target = TargetSpec {
+            version_line: VersionLine::Vue27,
+            package: "vue",
+            entry: "vue/compiler-sfc",
+            kind: TargetKind::Vue27Sfc,
+        };
+        let detail = ApiExportDetail {
+            kind: "function".into(),
+            tag: "[object Function]".into(),
+            name: Some("compileStyleAsync".into()),
+            function_arity: Some(1),
+            is_async_function: Some(false),
+            is_class_like: Some(false),
+            own_property_names: vec!["length".into(), "name".into(), "prototype".into()],
+        };
+        let expression = alias_export_expression(target, "compileStyleAsync", Some(&detail));
+
+        assert!(expression.contains("applyVue27StylePostcssAsync"));
+        assert!(expression.contains("sfc.vue27.compileStyleAsync"));
+        assert!(ALIAS_RUNTIME_JS.contains("function applyVue27StylePostcssAsync"));
+        assert!(ALIAS_RUNTIME_JS.contains("return Promise.resolve(out);"));
+    }
+
+    #[test]
     fn report_value_status_uses_counts_and_nested_rows() {
         let passed = serde_json::json!({
             "counts": { "total": 1, "pass": 1, "pending": 0, "fail": 0 },
@@ -12325,6 +12546,82 @@ mod tests {
         );
         assert_eq!(coverage.files[3].source, ConformanceCoverageKind::Mixed);
         assert!(coverage.reason.contains("xtask/src/compat.rs"));
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn vue27_sfc_coverage_marks_compile_style_mixed_postcss_boundary() {
+        let temp = std::env::temp_dir().join(format!(
+            "vuec-xtask-vue27-sfc-coverage-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp).unwrap();
+        let report = temp.join("vitest-report.json");
+        fs::write(
+            &report,
+            r#"{
+              "testResults": [
+                {
+                  "name": "F:/repo/prepared/vue27-sfc/packages/compiler-sfc/test/compileScript.spec.ts",
+                  "assertionResults": [
+                    { "status": "passed" },
+                    { "status": "passed" }
+                  ]
+                },
+                {
+                  "name": "F:/repo/prepared/vue27-sfc/packages/compiler-sfc/test/compileStyle.spec.ts",
+                  "assertionResults": [
+                    { "status": "passed" },
+                    { "status": "failed" }
+                  ]
+                }
+              ]
+            }"#,
+        )
+        .unwrap();
+        let execution = ConformanceExecutionResult {
+            status: "failed".into(),
+            runner: "vitest".into(),
+            prepared_root: "prepared".into(),
+            output_file: report.display().to_string(),
+            exit_code: Some(1),
+            stdout: String::new(),
+            stderr: String::new(),
+            counts: ConformanceExecutionCounts {
+                total: 4,
+                pass: 3,
+                fail: 1,
+                skip: 0,
+                pending: 0,
+            },
+        };
+
+        let coverage =
+            conformance_coverage_report(suite_spec(ConformanceSuite::Vue27Sfc), Some(&execution));
+
+        assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
+        assert_eq!(coverage.rust_backed_pass, 2);
+        assert_eq!(coverage.rust_backed_total, 2);
+        assert_eq!(
+            coverage
+                .counts_by_source
+                .get("mixed")
+                .copied()
+                .unwrap_or_default()
+                .total,
+            2
+        );
+        assert_eq!(
+            coverage.files[0].source,
+            ConformanceCoverageKind::RustBacked
+        );
+        assert_eq!(coverage.files[1].source, ConformanceCoverageKind::Mixed);
+        assert!(coverage.files[1]
+            .reason
+            .contains("PostCSS plugin callbacks"));
         let _ = fs::remove_dir_all(temp);
     }
 
