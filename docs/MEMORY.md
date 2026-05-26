@@ -1,5 +1,13 @@
 # Memory
 
+- Current round: completed a Vue 2 platform options and optimizer integration slice.
+- `vuec_vue2` now exposes a Rust `optimize(&mut Vue2Element, &Vue2CompileOptions)` entry point, makes static analysis respect platform `isReservedTag` data, makes namespace assignment respect `getTagNamespace` data, and fixes related parser/compiler warnings for forbidden raw-text elements, root `v-else` + `v-for`, and transition-group index keys.
+- `vuec_node_bridge` now supports `vue2.optimize` and deserializes sampled Vue 2 platform options (`__vuecTagNamespaces`, `__vuecReservedTags`, and default-platform toggles) into Rust compile options.
+- The Vue 2 official source shims in `xtask/src/compat.rs` now sample function-valued platform options against tags present in the template/AST, hydrate optimizer results back into official public AST objects, and invoke official module `preTransformNode` / `postTransformNode` hooks. This `xtask/src/compat.rs` work is API/hydration/option adapter support only; compiler/parser/optimizer semantics are in Rust, and no temporary compiler semantics were added to the shim.
+- No AST/HIR/MIR structure changed.
+- Current Vue 2 conformance movement: `vue2-compiler` improved from `177/188` to `185/188`, and `vue27-compiler` improved from `174/190` to `182/190`. Coverage remains `rust-backed`; the full suites still fail with real remaining compile-option source-range/runtime gaps, Vue 2.7 codeframe/codegen gaps, and no pending tests.
+- Verification for this Vue 2 platform/optimizer slice: `cargo fmt --all --check`, `git diff --check`, `cargo test -p vuec_vue2 --lib`, `cargo test -p xtask`, `cargo build -p vuec_node_bridge`, `cargo xtask run-conformance --suite vue2-compiler` (expected fail, `185/188`), and `cargo xtask run-conformance --suite vue27-compiler` (expected fail, `182/190`).
+
 - Current round: completed a Vue 2 Rust parser diagnostic slice for duplicate raw attributes and invalid dynamic arguments.
 - `vuec_vue2` now detects duplicate attributes against `raw_attrs_list` before parser transforms consume `attrsList`, so duplicate static attrs still warn after class/style/module processing.
 - Vue 2 dynamic directive arguments now emit the official invalid dynamic argument warning for malformed bind/on/slot argument names, including recovery cases where tokenizer splitting leaves an unterminated `[...]` directive name. This is implemented in Rust parser diagnostics, not in generated shims.

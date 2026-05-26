@@ -22,6 +22,10 @@ pub struct Vue2CompileOptions {
     pub should_decode_newlines_for_href: bool,
     pub optimize: bool,
     pub disable_default_must_use_prop: bool,
+    pub tag_namespaces: BTreeMap<String, String>,
+    pub use_default_tag_namespaces: bool,
+    pub reserved_tags: Option<Vec<String>>,
+    pub use_default_reserved_tags: bool,
 }
 
 impl Default for Vue2CompileOptions {
@@ -39,6 +43,10 @@ impl Default for Vue2CompileOptions {
             should_decode_newlines_for_href: false,
             optimize: true,
             disable_default_must_use_prop: false,
+            tag_namespaces: BTreeMap::new(),
+            use_default_tag_namespaces: true,
+            reserved_tags: None,
+            use_default_reserved_tags: true,
         }
     }
 }
@@ -245,7 +253,7 @@ impl Vue2Compiler {
         collect_element_warnings(element_ast.as_ref(), &mut diagnostics);
         if options.optimize {
             if let Some(root) = element_ast.as_mut() {
-                optimize(root);
+                optimize(root, &options);
             }
         }
         let mut static_render_fns = Vec::new();
@@ -330,6 +338,11 @@ pub fn generate(element: Option<&Vue2Element>, options: &Vue2CompileOptions) -> 
         render,
         static_render_fns,
     }
+}
+
+pub fn optimize(root: &mut Vue2Element, options: &Vue2CompileOptions) {
+    mark_static_element(root, options);
+    mark_static_roots(root, false, options);
 }
 
 pub fn generate_code_frame(source: &str, start: usize, end: usize) -> String {
@@ -432,8 +445,8 @@ fn parse_element_tree(
                 self_closing,
             } => {
                 let mut element = create_element(name, attributes, token.start, token.end);
-                if element.tag == "svg" {
-                    element.ns = Some("svg".into());
+                if let Some(namespace) = namespace_for_tag(&element.tag, options) {
+                    element.ns = Some(namespace);
                 } else if let Some(parent) = stack.last() {
                     element.ns = parent.ns.clone();
                 }
@@ -744,6 +757,13 @@ fn close_element(
 
     if let Some(existing) = root.as_mut() {
         if existing.if_exp.is_some() && (element.elseif.is_some() || element.else_branch) {
+            if element.for_exp.is_some() {
+                diagnostics.push(vue2_warning(
+                    "W_VUE2_FOR_ROOT",
+                    "Cannot use v-for on stateful component root element because it renders multiple elements.",
+                    element.span,
+                ));
+            }
             existing.if_conditions.push(Vue2IfCondition {
                 exp: element.elseif.clone(),
                 block: Box::new(element),
@@ -822,6 +842,26 @@ fn collect_element_warning_node(element: &Vue2Element, diagnostics: &mut Diagnos
             "Inline-template components must have exactly one child element.",
             element.span,
         ));
+    }
+    if element.tag == "transition-group" {
+        for child in &element.children {
+            let Vue2Node::Element(child) = child else {
+                continue;
+            };
+            let Some(key) = child.key.as_deref() else {
+                continue;
+            };
+            if child.for_exp.is_some()
+                && (child.iterator1.as_deref() == Some(key)
+                    || child.iterator2.as_deref() == Some(key))
+            {
+                diagnostics.push(vue2_warning(
+                    "W_VUE2_TRANSITION_GROUP_INDEX_KEY",
+                    "Do not use v-for index as key on <transition-group> children, this is the same as not using keys.",
+                    child.span,
+                ));
+            }
+        }
     }
     for child in &element.children {
         if let Vue2Node::Element(child) = child {
@@ -1138,7 +1178,7 @@ fn process_attrs(
                     }
                 }
                 if name == "model" {
-                    if is_component(element) {
+                    if is_component(element, options) {
                         gen_component_model(element, &value, &modifiers);
                     } else {
                         gen_dom_model(element, &raw_name, &value, &modifiers);
@@ -1273,7 +1313,6 @@ fn element_generates_empty_data(element: &Vue2Element) -> bool {
         && element.ref_name.is_none()
         && !element.ref_in_for
         && !element.pre
-        && !element.forbidden
         && element.component.is_none()
         && element.static_class.is_none()
         && element.class_binding.is_none()
@@ -1360,28 +1399,25 @@ fn text_is_collapsible_whitespace(value: &str) -> bool {
     value.chars().all(|ch| ch.is_ascii_whitespace())
 }
 
-fn optimize(root: &mut Vue2Element) {
-    mark_static_element(root);
-    mark_static_roots(root, false);
-}
-
-fn mark_static_node(node: &mut Vue2Node) -> bool {
+fn mark_static_node(node: &mut Vue2Node, options: &Vue2CompileOptions) -> bool {
     match node {
         Vue2Node::Text(text) => {
             text.static_node = text.expression.is_none();
             text.static_node
         }
-        Vue2Node::Element(element) => mark_static_element(element),
+        Vue2Node::Element(element) => mark_static_element(element, options),
     }
 }
 
-fn mark_static_element(element: &mut Vue2Element) -> bool {
+fn mark_static_element(element: &mut Vue2Element, options: &Vue2CompileOptions) -> bool {
     let mut static_node = element.pre
         || (!element.has_bindings
             && element.if_exp.is_none()
+            && element.elseif.is_none()
+            && !element.else_branch
             && element.for_exp.is_none()
             && !is_built_in_tag(&element.tag)
-            && is_reserved_tag(&element.tag)
+            && is_reserved_tag_with_options(&element.tag, options)
             && element.key.is_none()
             && element.ref_name.is_none()
             && element.slot_target.is_none()
@@ -1392,17 +1428,23 @@ fn mark_static_element(element: &mut Vue2Element) -> bool {
             && element.class_binding.is_none()
             && element.style_binding.is_none()
             && element.model.is_none());
-    if !is_reserved_tag(&element.tag) && element.tag != "slot" && !element.inline_template {
+    if !is_reserved_tag_with_options(&element.tag, options)
+        && element.tag != "slot"
+        && !element.inline_template
+    {
         element.static_node = false;
         return false;
     }
     for child in &mut element.children {
-        if !mark_static_node(child) {
+        if !mark_static_node(child, options) {
             static_node = false;
         }
     }
-    for condition in element.if_conditions.iter_mut().skip(1) {
-        if !mark_static_element(&mut condition.block) {
+    for (index, condition) in element.if_conditions.iter_mut().enumerate() {
+        let condition_static = mark_static_element(&mut condition.block, options);
+        if index == 0 && element.if_exp.is_some() {
+            condition.block.static_node = false;
+        } else if !condition_static {
             static_node = false;
         }
     }
@@ -1410,7 +1452,7 @@ fn mark_static_element(element: &mut Vue2Element) -> bool {
     static_node
 }
 
-fn mark_static_roots(element: &mut Vue2Element, in_for: bool) {
+fn mark_static_roots(element: &mut Vue2Element, in_for: bool, options: &Vue2CompileOptions) {
     if element.static_node || element.once {
         element.static_in_for = in_for;
     }
@@ -1425,11 +1467,11 @@ fn mark_static_roots(element: &mut Vue2Element, in_for: bool) {
     element.static_root = false;
     for child in &mut element.children {
         if let Vue2Node::Element(child) = child {
-            mark_static_roots(child, in_for || element.for_exp.is_some());
+            mark_static_roots(child, in_for || element.for_exp.is_some(), options);
         }
     }
-    for condition in element.if_conditions.iter_mut().skip(1) {
-        mark_static_roots(&mut condition.block, in_for);
+    for condition in &mut element.if_conditions {
+        mark_static_roots(&mut condition.block, in_for, options);
     }
 }
 
@@ -1480,7 +1522,7 @@ fn gen_element(element: &mut Vue2Element, state: &mut CodegenState<'_>) -> Strin
         let code = if let Some(component) = element.component.clone() {
             gen_component(&component, element, state)
         } else {
-            let data = if !element.plain || (element.pre && is_component(element)) {
+            let data = if !element.plain || (element.pre && is_component(element, state.options)) {
                 Some(gen_data(element, state))
             } else {
                 None
@@ -1742,7 +1784,7 @@ fn gen_children(
         if let Vue2Node::Element(child) = &mut element.children[0] {
             if child.for_exp.is_some() && child.tag != "template" && child.tag != "slot" {
                 let normalization = if check_skip {
-                    if is_component(child) {
+                    if is_component(child, state.options) {
                         ",1"
                     } else {
                         ",0"
@@ -1761,7 +1803,7 @@ fn gen_children(
         .map(|child| gen_node(child, state))
         .collect::<Vec<_>>();
     let normalization = if check_skip {
-        get_normalization_type(&element.children)
+        get_normalization_type(&element.children, state.options)
     } else {
         0
     };
@@ -2910,11 +2952,25 @@ fn is_built_in_tag(tag: &str) -> bool {
     matches!(tag, "slot" | "component")
 }
 
-fn is_component(element: &Vue2Element) -> bool {
-    element.component.is_some() || !is_reserved_tag(&element.tag)
+fn namespace_for_tag(tag: &str, options: &Vue2CompileOptions) -> Option<String> {
+    if let Some(namespace) = options.tag_namespaces.get(tag) {
+        return Some(namespace.clone());
+    }
+    (options.use_default_tag_namespaces && tag == "svg").then(|| "svg".into())
 }
 
-fn get_normalization_type(children: &[Vue2Node]) -> u8 {
+fn is_reserved_tag_with_options(tag: &str, options: &Vue2CompileOptions) -> bool {
+    if let Some(tags) = options.reserved_tags.as_ref() {
+        return tags.iter().any(|candidate| candidate == tag);
+    }
+    options.use_default_reserved_tags && is_reserved_tag(tag)
+}
+
+fn is_component(element: &Vue2Element, options: &Vue2CompileOptions) -> bool {
+    element.component.is_some() || !is_reserved_tag_with_options(&element.tag, options)
+}
+
+fn get_normalization_type(children: &[Vue2Node], options: &Vue2CompileOptions) -> u8 {
     let mut result = 0;
     for child in children {
         let Vue2Node::Element(child) = child else {
@@ -2923,7 +2979,7 @@ fn get_normalization_type(children: &[Vue2Node]) -> u8 {
         if child.for_exp.is_some() || child.tag == "template" || child.tag == "slot" {
             return 2;
         }
-        if is_component(child) {
+        if is_component(child, options) {
             result = 1;
         }
     }
@@ -3586,6 +3642,29 @@ mod tests {
         assert!(root.static_node);
         assert!(root.static_root);
         assert!(result.render.contains("_m(0)"));
+    }
+
+    #[test]
+    fn optimizer_honors_platform_reserved_tag_options() {
+        let mut parsed = compile("<h1 id=\"x\">hello</h1>", options())
+            .element_ast
+            .unwrap();
+        let mut optimizer_options = options();
+        optimizer_options.reserved_tags = Some(Vec::new());
+        optimizer_options.use_default_reserved_tags = false;
+        optimize(&mut parsed, &optimizer_options);
+        assert!(!parsed.static_node);
+    }
+
+    #[test]
+    fn parser_honors_platform_namespace_options() {
+        let mut parse_options = options();
+        parse_options.tag_namespaces = BTreeMap::new();
+        parse_options.use_default_tag_namespaces = false;
+        let root = compile("<svg><text>hello</text></svg>", parse_options)
+            .element_ast
+            .unwrap();
+        assert_eq!(root.ns, None);
     }
 
     #[test]

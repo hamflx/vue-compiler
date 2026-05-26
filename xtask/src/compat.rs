@@ -9632,24 +9632,116 @@ fn write_vue2_compiler_source_shims(prepared_root: &Path, include_types: bool) -
 import { compile } from 'vue-template-compiler'
 
 export function parse(template, options = {}) {
-  const compiled = compile(template, vue2ParseBridgeOptions(options))
+  const compiled = compile(template, vue2ParseBridgeOptions(options, template))
   const ast = compiled.element_public_ast || compiled.ast_public || compiled.ast || null
   if (ast && typeof ast === 'object') {
     Object.defineProperty(ast, '__vuecTemplate', { value: template, enumerable: false, configurable: true })
     Object.defineProperty(ast, '__vuecOptions', { value: options, enumerable: false, configurable: true })
     Object.defineProperty(ast, '__vuecInternal', { value: compiled.element_ast || null, enumerable: false, configurable: true })
     hydrateVue2PublicAst(ast, null, compiled.element_ast || null)
+    runVue2ModuleTransforms(ast, options, 'preTransformNode')
+    runVue2ModuleTransforms(ast, options, 'postTransformNode')
   }
   return ast
 }
 
-function vue2ParseBridgeOptions(options) {
+function vue2ParseBridgeOptions(options, template) {
   const hasMustUseProp = options && Object.prototype.hasOwnProperty.call(options, 'mustUseProp')
+  const tags = extractVue2TemplateTags(template)
   return {
-    ...options,
+    ...normalizeVue2OptionsForBridge(options, tags, true),
     optimize: true,
     __vuecDisableDefaultMustUseProp: !hasMustUseProp,
     __vuecSuppressWarnings: ['Inline-template components must have exactly one child element.'],
+  }
+}
+
+function normalizeVue2OptionsForBridge(options, tags, disableMissingPlatformOptions) {
+  const normalized = {}
+  if (options && typeof options === 'object') {
+    for (const key of Object.keys(options)) {
+      if (typeof options[key] !== 'function') normalized[key] = options[key]
+    }
+  }
+  if (hasVue2PredicateOption(options, 'getTagNamespace')) {
+    normalized.__vuecTagNamespaces = collectVue2NamespaceHits(options.getTagNamespace, tags)
+    normalized.__vuecUseDefaultTagNamespaces = false
+  } else if (disableMissingPlatformOptions) {
+    normalized.__vuecTagNamespaces = {}
+    normalized.__vuecUseDefaultTagNamespaces = false
+  }
+  if (hasVue2PredicateOption(options, 'isReservedTag')) {
+    normalized.__vuecReservedTags = collectVue2PredicateHits(options.isReservedTag, tags)
+    normalized.__vuecUseDefaultReservedTags = false
+  } else if (disableMissingPlatformOptions) {
+    normalized.__vuecReservedTags = []
+    normalized.__vuecUseDefaultReservedTags = false
+  }
+  return normalized
+}
+
+function hasVue2PredicateOption(options, name) {
+  return !!(options && Object.prototype.hasOwnProperty.call(options, name) &&
+    (typeof options[name] === 'function' || Array.isArray(options[name])))
+}
+
+function extractVue2TemplateTags(source) {
+  const tags = []
+  const seen = new Set()
+  const pattern = /<\/?\s*([A-Za-z][A-Za-z0-9._:-]*)/g
+  let match
+  while ((match = pattern.exec(String(source || '')))) {
+    const tag = match[1]
+    if (!seen.has(tag)) {
+      seen.add(tag)
+      tags.push(tag)
+    }
+  }
+  return tags
+}
+
+function collectVue2PredicateHits(predicate, values) {
+  if (Array.isArray(predicate)) return predicate.map(String)
+  if (typeof predicate !== 'function') return []
+  const hits = []
+  for (const value of values) {
+    try {
+      if (predicate(value)) hits.push(value)
+    } catch (_) {}
+  }
+  return hits
+}
+
+function collectVue2NamespaceHits(getNamespace, values) {
+  if (typeof getNamespace !== 'function') return {}
+  const namespaces = {}
+  for (const value of values) {
+    try {
+      const namespace = getNamespace(value)
+      if (namespace !== undefined && namespace !== null) namespaces[value] = String(namespace)
+    } catch (_) {}
+  }
+  return namespaces
+}
+
+function runVue2ModuleTransforms(ast, options, hook) {
+  if (!ast || !options || !Array.isArray(options.modules)) return
+  walkVue2PublicElements(ast, element => {
+    for (const module of options.modules) {
+      const transform = module && module[hook]
+      if (typeof transform === 'function') transform(element, options)
+    }
+  })
+}
+
+function walkVue2PublicElements(node, visit) {
+  if (!node || typeof node !== 'object' || typeof node.tag !== 'string') return
+  visit(node)
+  if (Array.isArray(node.children)) {
+    for (const child of node.children) walkVue2PublicElements(child, visit)
+  }
+  if (node.scopedSlots && typeof node.scopedSlots === 'object') {
+    for (const slot of Object.values(node.scopedSlots)) walkVue2PublicElements(slot, visit)
   }
 }
 
@@ -9689,8 +9781,150 @@ function hydrateVue2PublicAst(node, parent, internal) {
     write_text(
         &compiler_root.join("optimizer.ts"),
         r#"
-export function optimize(ast) {
+import * as vueTemplateCompiler from 'vue-template-compiler'
+import { normalizeVue2AstForBridge } from './codegen'
+
+export function optimize(ast, options = {}) {
+  if (!ast) return ast
+  const optimized = vueTemplateCompiler.__vuecRuntime.callBridge('vue2.optimize', {
+    ast: normalizeVue2AstForBridge(ast),
+    options: vue2OptimizeBridgeOptions(ast, options),
+  })
+  mergeVue2OptimizedAst(ast, optimized && (optimized.element_public_ast || optimized.ast_public || optimized.ast), optimized && optimized.element_ast)
   return ast
+}
+
+function vue2OptimizeBridgeOptions(ast, options) {
+  const tags = collectVue2AstTags(ast)
+  return normalizeVue2OptionsForBridge(options, tags, true)
+}
+
+function normalizeVue2OptionsForBridge(options, tags, disableMissingPlatformOptions) {
+  const normalized = {}
+  if (options && typeof options === 'object') {
+    for (const key of Object.keys(options)) {
+      if (typeof options[key] !== 'function') normalized[key] = options[key]
+    }
+  }
+  if (hasVue2PredicateOption(options, 'getTagNamespace')) {
+    normalized.__vuecTagNamespaces = collectVue2NamespaceHits(options.getTagNamespace, tags)
+    normalized.__vuecUseDefaultTagNamespaces = false
+  } else if (disableMissingPlatformOptions) {
+    normalized.__vuecTagNamespaces = {}
+    normalized.__vuecUseDefaultTagNamespaces = false
+  }
+  if (hasVue2PredicateOption(options, 'isReservedTag')) {
+    normalized.__vuecReservedTags = collectVue2PredicateHits(options.isReservedTag, tags)
+    normalized.__vuecUseDefaultReservedTags = false
+  } else if (disableMissingPlatformOptions) {
+    normalized.__vuecReservedTags = []
+    normalized.__vuecUseDefaultReservedTags = false
+  }
+  return normalized
+}
+
+function hasVue2PredicateOption(options, name) {
+  return !!(options && Object.prototype.hasOwnProperty.call(options, name) &&
+    (typeof options[name] === 'function' || Array.isArray(options[name])))
+}
+
+function collectVue2PredicateHits(predicate, values) {
+  if (Array.isArray(predicate)) return predicate.map(String)
+  if (typeof predicate !== 'function') return []
+  const hits = []
+  for (const value of values) {
+    try {
+      if (predicate(value)) hits.push(value)
+    } catch (_) {}
+  }
+  return hits
+}
+
+function collectVue2NamespaceHits(getNamespace, values) {
+  if (typeof getNamespace !== 'function') return {}
+  const namespaces = {}
+  for (const value of values) {
+    try {
+      const namespace = getNamespace(value)
+      if (namespace !== undefined && namespace !== null) namespaces[value] = String(namespace)
+    } catch (_) {}
+  }
+  return namespaces
+}
+
+function collectVue2AstTags(ast) {
+  const tags = []
+  const seen = new Set()
+  walkVue2AstElements(ast, element => {
+    const tag = String(element.tag || '')
+    if (tag && !seen.has(tag)) {
+      seen.add(tag)
+      tags.push(tag)
+    }
+  })
+  return tags
+}
+
+function walkVue2AstElements(node, visit) {
+  if (!node || typeof node !== 'object') return
+  if ('Element' in node) return walkVue2AstElements(node.Element, visit)
+  if (typeof node.tag === 'string') {
+    visit(node)
+    if (Array.isArray(node.children)) {
+      for (const child of node.children) walkVue2AstElements(child && (child.Element || child), visit)
+    }
+    const conditions = node.ifConditions || node.if_conditions
+    if (Array.isArray(conditions)) {
+      for (const condition of conditions) walkVue2AstElements(condition && condition.block, visit)
+    }
+    const scopedSlots = node.scopedSlots || node.scoped_slots
+    if (scopedSlots && typeof scopedSlots === 'object') {
+      for (const slot of Object.values(scopedSlots)) walkVue2AstElements(slot, visit)
+    }
+  }
+}
+
+function mergeVue2OptimizedAst(target, publicNode, internalNode) {
+  if (!target || typeof target !== 'object') return
+  if (internalNode) {
+    Object.defineProperty(target, '__vuecInternal', { value: internalNode, enumerable: false, configurable: true })
+  }
+  if (publicNode && typeof publicNode === 'object') {
+    target.static = Boolean(publicNode.static)
+    target.staticRoot = Boolean(publicNode.staticRoot)
+    target.staticInFor = Boolean(publicNode.staticInFor)
+  } else if (internalNode && typeof internalNode === 'object') {
+    target.static_node = Boolean(internalNode.static_node)
+    target.static_root = Boolean(internalNode.static_root)
+    target.static_in_for = Boolean(internalNode.static_in_for)
+  }
+  const targetChildren = Array.isArray(target.children) ? target.children : []
+  const publicChildren = Array.isArray(publicNode && publicNode.children) ? publicNode.children : []
+  const internalChildren = Array.isArray(internalNode && internalNode.children) ? internalNode.children : []
+  targetChildren.forEach((child, index) => {
+    const internalChild = internalChildren[index]
+    mergeVue2OptimizedAst(child && (child.Element || child), publicChildren[index], internalChild && (internalChild.Element || internalChild.Text))
+  })
+  const targetConditions = target.ifConditions || target.if_conditions
+  const publicConditions = publicNode && (publicNode.ifConditions || publicNode.if_conditions)
+  const internalConditions = internalNode && internalNode.if_conditions
+  if (Array.isArray(targetConditions)) {
+    targetConditions.forEach((condition, index) => {
+      mergeVue2OptimizedAst(
+        condition && condition.block,
+        publicConditions && publicConditions[index] && publicConditions[index].block,
+        internalConditions && internalConditions[index] && internalConditions[index].block,
+      )
+    })
+  }
+  const targetSlots = target.scopedSlots || target.scoped_slots
+  const publicSlots = publicNode && (publicNode.scopedSlots || publicNode.scoped_slots)
+  const internalSlots = internalNode && internalNode.scoped_slots
+  if (targetSlots && typeof targetSlots === 'object') {
+    for (const [key, slot] of Object.entries(targetSlots)) {
+      mergeVue2OptimizedAst(slot, publicSlots && (publicSlots[key] || publicSlots[`"${key}"`]), internalSlots && (internalSlots[key] || internalSlots[`"${key}"`]))
+    }
+  }
 }
 "#,
     )?;
@@ -9711,7 +9945,7 @@ export function generate(ast, options = {}) {
   }
 }
 
-function normalizeVue2AstForBridge(node) {
+export function normalizeVue2AstForBridge(node) {
   if (!node || typeof node !== 'object') return null
   if ('Element' in node) return normalizeVue2AstForBridge(node.Element)
   if (isInternalVue2ElementAst(node)) return normalizeVue2InternalAstForBridge(node)
@@ -12029,6 +12263,7 @@ mod tests {
         let codegen =
             fs::read_to_string(temp.join("src").join("compiler").join("codegen.ts")).unwrap();
         assert!(codegen.contains("callBridge('vue2.generate'"));
+        assert!(codegen.contains("export function normalizeVue2AstForBridge"));
         assert!(codegen.contains("events[key] = []"));
         assert!(codegen.contains("function normalizeVue2PublicElementForBridge"));
         assert!(codegen.contains("static_node: Boolean(node.static ?? node.static_node)"));
@@ -12046,6 +12281,14 @@ mod tests {
         assert!(parser.contains("compiled.element_public_ast"));
         assert!(parser.contains("Object.defineProperty(ast, '__vuecInternal'"));
         assert!(parser.contains("hydrateVue2PublicAst(ast, null"));
+        assert!(parser.contains("normalizeVue2OptionsForBridge(options, tags, true)"));
+        assert!(parser.contains("__vuecTagNamespaces"));
+        assert!(parser.contains("runVue2ModuleTransforms(ast, options, 'preTransformNode')"));
+        let optimizer =
+            fs::read_to_string(temp.join("src").join("compiler").join("optimizer.ts")).unwrap();
+        assert!(optimizer.contains("callBridge('vue2.optimize'"));
+        assert!(optimizer.contains("mergeVue2OptimizedAst(ast"));
+        assert!(optimizer.contains("__vuecReservedTags"));
 
         write_vue27_sfc_conformance_shims(&temp).unwrap();
         let sfc_config = fs::read_to_string(temp.join("vitest.config.ts")).unwrap();

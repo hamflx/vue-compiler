@@ -104,6 +104,28 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
                 "static_render_fns": generated.static_render_fns,
             }))
         }
+        "vue2.optimize" => {
+            let options = vue2_options(payload.get("options"));
+            let mut element = payload
+                .get("ast")
+                .filter(|ast| !ast.is_null())
+                .map(|ast| serde_json::from_value::<Vue2Element>(ast.clone()))
+                .transpose()
+                .context("failed to deserialize Vue 2 AST element for optimizer")?;
+            if let Some(element) = element.as_mut() {
+                vuec_vue2::optimize(element, &options);
+            }
+            let public = element
+                .as_ref()
+                .map(vue2_public_element_ast_value)
+                .unwrap_or(Value::Null);
+            Ok(json!({
+                "ast": public,
+                "ast_public": public,
+                "element_public_ast": public,
+                "element_ast": element,
+            }))
+        }
         "vue3.core.baseCompile" => {
             let source = template_source(&payload);
             let options = vue3_options(payload.get("options"));
@@ -3546,6 +3568,32 @@ fn vue2_options(value: Option<&Value>) -> Vue2CompileOptions {
         "__vuecDisableDefaultMustUseProp",
         bool_option(value, "disable_default_must_use_prop", false),
     );
+    if let Some(namespaces) = string_map_option(value, "__vuecTagNamespaces") {
+        options.tag_namespaces = namespaces;
+        options.use_default_tag_namespaces = false;
+    }
+    options.use_default_tag_namespaces = bool_option(
+        value,
+        "__vuecUseDefaultTagNamespaces",
+        bool_option(
+            value,
+            "use_default_tag_namespaces",
+            options.use_default_tag_namespaces,
+        ),
+    );
+    if value.get("__vuecReservedTags").is_some() {
+        options.reserved_tags = Some(string_array_option(value, "__vuecReservedTags"));
+        options.use_default_reserved_tags = false;
+    }
+    options.use_default_reserved_tags = bool_option(
+        value,
+        "__vuecUseDefaultReservedTags",
+        bool_option(
+            value,
+            "use_default_reserved_tags",
+            options.use_default_reserved_tags,
+        ),
+    );
     options
 }
 
@@ -3727,6 +3775,15 @@ fn string_array_option(value: &Value, name: &str) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn string_map_option(value: &Value, name: &str) -> Option<BTreeMap<String, String>> {
+    value.get(name).and_then(Value::as_object).map(|object| {
+        object
+            .iter()
+            .filter_map(|(key, value)| value.as_str().map(|value| (key.clone(), value.to_string())))
+            .collect()
+    })
 }
 
 fn transform_asset_urls_enabled(value: &Value, fallback: bool) -> bool {
