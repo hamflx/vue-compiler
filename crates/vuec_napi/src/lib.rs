@@ -11,7 +11,9 @@ use vuec_sfc::{
 use vuec_source::{FileId, Span};
 use vuec_vue2::Vue2CompileOptions;
 use vuec_vue3_core::{TemplateSource, Vue3CompilerOptions, Vue3Dialect};
-use vuec_vue3_dom::{apply_dom_parser_defaults, compile as compile_dom, DomCompilerOptions};
+use vuec_vue3_dom::{
+    apply_dom_parser_defaults, compile as compile_dom, parse as parse_dom, DomCompilerOptions,
+};
 use vuec_vue3_ssr::{compile as compile_ssr, SsrCompilerOptions};
 
 #[napi(js_name = "version")]
@@ -75,6 +77,24 @@ pub fn compile_vue3_dom(env: Env, source: String, options: Option<Unknown>) -> R
         ..DomCompilerOptions::default()
     };
     to_json_string(compile_dom(template, dom_options))
+}
+
+#[napi(js_name = "parseVue3Dom")]
+pub fn parse_vue3_dom(env: Env, source: String, options: Option<Unknown>) -> Result<String> {
+    let raw_options = from_js_options(&env, options)?;
+    let template = template_source(&source, &raw_options);
+    let mut core = vue3_options(Some(&raw_options));
+    apply_dom_parser_defaults(&mut core);
+    let dom_options = DomCompilerOptions {
+        core,
+        ..DomCompilerOptions::default()
+    };
+    let ast = parse_dom(template.clone(), &dom_options);
+    to_json_string(vue3_public_parse_ast(
+        &ast,
+        &template.source,
+        template.base_offset,
+    ))
 }
 
 #[napi(js_name = "baseCompileVue3")]
@@ -676,6 +696,7 @@ pub fn api_manifest() -> Result<String> {
                 "baseParseVue3",
                 "generateVue3Core",
                 "compileVue3Dom",
+                "parseVue3Dom",
                 "compileVue3Ssr",
                 "parseSfc",
                 "compileSfcTemplate",

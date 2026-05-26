@@ -201,6 +201,19 @@ fn verify_napi_api() -> Result<compat::JsonReport> {
                 types_base_subpath: &["@vue", "compiler-sfc"],
             },
         },
+        NapiApiTarget {
+            version_line: "vue3",
+            package: "@vue/compiler-dom",
+            entry: "index",
+            alias: NapiApiAlias::PackageTemplate {
+                source: "packages/native-aliases/@vue/compiler-dom",
+                package_subpath: &["@vue", "compiler-dom"],
+                manifest_package: "_vue_compiler-dom",
+                manifest_file: "index.json",
+                package_json_subpath: &["@vue", "compiler-dom"],
+                types_base_subpath: &["@vue", "compiler-dom"],
+            },
+        },
     ];
     let mut violations = Vec::new();
     let mut created = Vec::new();
@@ -676,6 +689,14 @@ fn prepare_napi_api_tree(root: &Path, target: NapiApiTarget) -> Result<Vec<PathB
 
     let package_target = join_path_segments(&node_modules, target.package_subpath());
     copy_dir_recursive(&target.source_path(), &package_target)?;
+    if target.package == "@vue/compiler-dom" {
+        let core_target = node_modules.join("@vue").join("compiler-core");
+        copy_dir_recursive(
+            Path::new("packages/native-aliases/@vue/compiler-core"),
+            &core_target,
+        )?;
+        created.push(core_target);
+    }
     if let NapiApiAlias::Vue2TemplateCompiler { template_variant } = target.alias {
         std::fs::copy(
             package_target.join(format!("index-{template_variant}.js")),

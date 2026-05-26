@@ -54,6 +54,10 @@ const domResult = dom.compile('<input v-model="msg">', {
 assert.match(domResult.code, /export function render/);
 assert.match(domResult.code, /modelValue/);
 
+const domAst = dom.parse('<textarea>{{ msg }}</textarea>');
+assert.strictEqual(domAst.type, dom.NodeTypes.ROOT);
+assert.strictEqual(domAst.children[0].tag, 'textarea');
+
 const ssrResult = ssr.compile('<div>{{ msg }}</div>', {
   mode: 'module',
   prefixIdentifiers: true,

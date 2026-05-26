@@ -22,6 +22,9 @@ assert.deepStrictEqual(dom.map.sources, ['anonymous.vue']);
 assert.strictEqual(typeof dom.map.mappings, 'string');
 assert.deepStrictEqual(dom.map.sourcesContent, ['<div>{{ msg }}</div>']);
 
+const domAst = native.parseVue3Dom('<div>{{ msg }}</div>');
+assert.strictEqual(domAst.children[0].tag, 'div');
+
 const ssr = native.compileSsr('<div>{{ msg }}</div>', {
   mode: 'module',
   prefixIdentifiers: true,

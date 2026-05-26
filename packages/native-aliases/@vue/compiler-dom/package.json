@@ -3,5 +3,23 @@
   "version": "0.0.0-vuec-napi",
   "private": true,
   "main": "index.js",
-  "types": "index.d.ts"
+  "module": "dist/compiler-dom.esm-bundler.js",
+  "types": "dist/compiler-dom.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/compiler-dom.d.ts",
+      "node": {
+        "production": "./index.js",
+        "development": "./index.js",
+        "default": "./index.js"
+      },
+      "module": "./index.js",
+      "import": "./index.js",
+      "require": "./index.js"
+    },
+    "./*": "./*"
+  },
+  "dependencies": {
+    "@vue/compiler-core": "0.0.0-vuec-napi"
+  }
 }

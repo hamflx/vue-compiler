@@ -125,6 +125,10 @@ function compileVue3Dom(source, options = {}) {
   return fromJson(binding.compileVue3Dom(source, options));
 }
 
+function parseVue3Dom(source, options = {}) {
+  return fromJson(binding.parseVue3Dom(source, options));
+}
+
 function compileVue3Ssr(source, options = {}) {
   return fromJson(binding.compileVue3Ssr(source, options));
 }
@@ -244,6 +248,7 @@ module.exports = {
   baseParseVue3,
   generateVue3Core,
   compileVue3Dom,
+  parseVue3Dom,
   compileVue3Ssr,
   parseSfc,
   compileSfcTemplate,
