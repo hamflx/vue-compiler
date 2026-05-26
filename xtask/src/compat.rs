@@ -9657,7 +9657,7 @@ export function generate(ast, options = {}) {
     }
   }
   return {
-    render: "with(this){return _c('div')}",
+    render: 'with(this){return _c("div")}',
     staticRenderFns: [],
   }
 }
@@ -11710,6 +11710,9 @@ mod tests {
         assert!(compiler_config.contains(
             "'vue-template-compiler': path.resolve(aliasRoot, 'node_modules/vue-template-compiler/index.js')"
         ));
+        let codegen =
+            fs::read_to_string(temp.join("src").join("compiler").join("codegen.ts")).unwrap();
+        assert!(codegen.contains("render: 'with(this){return _c(\"div\")}'"));
 
         write_vue27_sfc_conformance_shims(&temp).unwrap();
         let sfc_config = fs::read_to_string(temp.join("vitest.config.ts")).unwrap();

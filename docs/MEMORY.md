@@ -1,5 +1,11 @@
 # Memory
 
+- Current round: completed a Vue 2 official internal `generate(null)` API adapter parity slice.
+- `xtask/src/compat.rs` now emits the official Vue 2 `compiler/codegen` shim fallback render string `with(this){return _c("div")}` for null AST input, matching Vue 2's internal `generate(null, baseOptions)` API behavior. This is API adapter support only, not compiler semantics; Rust compile behavior was already producing the same empty-root default through `generate_render(None, ...)`.
+- No AST/HIR/MIR structure changed. `xtask/src/compat.rs` was touched only for Vue 2 official internal codegen API fallback adapter behavior, not temporary semantics.
+- Current Vue 2 conformance movement: `vue2-compiler` improved from `97/188` to `98/188`, and `vue27-compiler` improved from `93/190` to `94/190`. `vue27-sfc` remains `5/144`.
+- Verification for this Vue 2 `generate(null)` adapter slice: `cargo test -p xtask` (`29/29`), `cargo xtask run-conformance --suite vue2-compiler` (expected fail, `98/188`), `cargo xtask run-conformance --suite vue27-compiler` (expected fail, `94/190`), and `cargo xtask run-conformance --suite vue27-sfc` (expected fail, unchanged `5/144`).
+
 - Current round: completed a Vue 2 compiler Rust codeframe parity slice.
 - `vuec_vue2::generate_code_frame` now follows Vue 2's official line-window and multiline underline behavior, so multiline highlights stop at the actual highlighted end instead of also printing trailing context after the highlighted range.
 - No AST/HIR/MIR structure changed. `xtask/src/compat.rs` was not touched in this slice.
