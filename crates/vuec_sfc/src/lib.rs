@@ -1,5 +1,10 @@
 #![forbid(unsafe_code)]
 
+use oxc_ast::ast::{
+    ExportDefaultDeclaration, ExportDefaultDeclarationKind, ExportNamedDeclaration,
+    ExportSpecifier, ModuleExportName, Statement,
+};
+use oxc_span::GetSpan;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -223,6 +228,13 @@ pub struct SfcStyleCompileResult {
     pub dependencies: Vec<String>,
     #[serde(rename = "rawResult")]
     pub raw_result: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue27RewriteDefaultOptions {
+    pub typescript: bool,
+    #[serde(default)]
+    pub decorators: bool,
 }
 
 pub struct SfcCompiler {
@@ -595,6 +607,15 @@ impl SfcCompiler {
             dependencies,
             raw_result,
         }
+    }
+
+    pub fn rewrite_vue27_default(
+        &self,
+        input: &str,
+        variable: &str,
+        options: Vue27RewriteDefaultOptions,
+    ) -> String {
+        rewrite_vue27_default(input, variable, options)
     }
 
     pub fn js(&self) -> &JsAstStore {
@@ -1047,6 +1068,385 @@ fn find_ascii_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
         .find(&needle.to_ascii_lowercase())
 }
 
+fn rewrite_vue27_default(
+    input: &str,
+    variable: &str,
+    options: Vue27RewriteDefaultOptions,
+) -> String {
+    let allocator = oxc_allocator::Allocator::default();
+    let source_type = if options.typescript {
+        oxc_span::SourceType::ts()
+    } else {
+        oxc_span::SourceType::mjs()
+    };
+    let parsed = oxc_parser::Parser::new(&allocator, input, source_type)
+        .with_options(oxc_parser::ParseOptions {
+            parse_regular_expression: true,
+            ..oxc_parser::ParseOptions::default()
+        })
+        .parse();
+    if parsed.panicked || !parsed.errors.is_empty() {
+        if !options.typescript {
+            let ts_parsed = oxc_parser::Parser::new(&allocator, input, oxc_span::SourceType::ts())
+                .with_options(oxc_parser::ParseOptions {
+                    parse_regular_expression: true,
+                    ..oxc_parser::ParseOptions::default()
+                })
+                .parse();
+            if !ts_parsed.panicked && ts_parsed.errors.is_empty() {
+                return rewrite_vue27_default_from_program(
+                    input,
+                    variable,
+                    &ts_parsed.program.body,
+                );
+            }
+        }
+        return rewrite_vue27_default_lexical(input, variable);
+    }
+
+    rewrite_vue27_default_from_program(input, variable, &parsed.program.body)
+}
+
+fn rewrite_vue27_default_from_program(
+    input: &str,
+    variable: &str,
+    body: &[Statement<'_>],
+) -> String {
+    let mut edits = SourceEdits::new(input);
+    let mut found_default = false;
+    for statement in body {
+        match statement {
+            Statement::ExportDefaultDeclaration(declaration) => {
+                found_default = true;
+                rewrite_export_default(input, variable, declaration, &mut edits);
+            }
+            Statement::ExportNamedDeclaration(declaration) => {
+                if rewrite_named_default_exports(input, variable, declaration, &mut edits) {
+                    found_default = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    if !found_default {
+        edits.append(format!("\nconst {variable} = {{}}"));
+    }
+    edits.apply()
+}
+
+fn rewrite_export_default(
+    input: &str,
+    variable: &str,
+    declaration: &ExportDefaultDeclaration<'_>,
+    edits: &mut SourceEdits,
+) {
+    match &declaration.declaration {
+        ExportDefaultDeclarationKind::ClassDeclaration(class) => {
+            if let Some(id) = &class.id {
+                let fast_candidate = source_with_overwrite(
+                    input,
+                    declaration.span.start as usize,
+                    id.span.start as usize,
+                    "class ",
+                );
+                if has_vue27_default_export_like(input)
+                    && has_vue27_default_export_like(&fast_candidate)
+                {
+                    let replace_start = class
+                        .decorators
+                        .last()
+                        .map(|decorator| decorator.span.end as usize)
+                        .unwrap_or(declaration.span.start as usize);
+                    edits.overwrite(replace_start, id.span.start as usize, " class ");
+                } else {
+                    edits.overwrite(
+                        declaration.span.start as usize,
+                        id.span.start as usize,
+                        "class ",
+                    );
+                }
+                edits.append(format!("\nconst {variable} = {}", id.name));
+                return;
+            }
+        }
+        ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
+            if let Some(id) = &function.id {
+                edits.overwrite(
+                    declaration.span.start as usize,
+                    function.span.start as usize,
+                    "",
+                );
+                edits.append(format!("\nconst {variable} = {}", id.name));
+                return;
+            }
+        }
+        _ => {}
+    }
+
+    edits.overwrite(
+        declaration.span.start as usize,
+        export_default_declaration_value_start(input, declaration),
+        format!("const {variable} ="),
+    );
+}
+
+fn export_default_declaration_value_start(
+    input: &str,
+    declaration: &ExportDefaultDeclaration<'_>,
+) -> usize {
+    let start = declaration.span.start as usize;
+    let end = declaration.declaration.span().start as usize;
+    let segment = &input[start..end.min(input.len())];
+    segment
+        .find("default")
+        .map(|offset| start + offset + "default".len())
+        .unwrap_or(end)
+}
+
+fn rewrite_named_default_exports(
+    input: &str,
+    variable: &str,
+    declaration: &ExportNamedDeclaration<'_>,
+    edits: &mut SourceEdits,
+) -> bool {
+    let mut found = false;
+    for specifier in &declaration.specifiers {
+        if module_export_name(specifier.exported()) != Some("default") {
+            continue;
+        }
+        found = true;
+        let local_name = module_export_name(specifier.local()).unwrap_or("default");
+        if let Some(source) = declaration.source.as_ref() {
+            let source_value = source.value.to_string();
+            if local_name == "default" {
+                let end = specifier_end(
+                    input,
+                    specifier.local().span().end as usize,
+                    declaration.span.end as usize,
+                );
+                edits.prepend(format!(
+                    "import {{ default as __VUE_DEFAULT__ }} from '{}'\n",
+                    source_value
+                ));
+                edits.overwrite(specifier.span.start as usize, end, "");
+                edits.append(format!("\nconst {variable} = __VUE_DEFAULT__"));
+            } else {
+                let end = specifier_end(
+                    input,
+                    specifier.exported().span().end as usize,
+                    declaration.span.end as usize,
+                );
+                edits.prepend(format!("import {{ {local_name} }} from '{source_value}'\n"));
+                edits.overwrite(specifier.span.start as usize, end, "");
+                edits.append(format!("\nconst {variable} = {local_name}"));
+            }
+        } else {
+            let end = specifier_end(
+                input,
+                specifier.span.end as usize,
+                declaration.span.end as usize,
+            );
+            edits.overwrite(specifier.span.start as usize, end, "");
+            edits.append(format!("\nconst {variable} = {local_name}"));
+        }
+    }
+    found
+}
+
+trait ExportSpecifierAccess<'a> {
+    fn local(&self) -> &ModuleExportName<'a>;
+    fn exported(&self) -> &ModuleExportName<'a>;
+}
+
+impl<'a> ExportSpecifierAccess<'a> for ExportSpecifier<'a> {
+    fn local(&self) -> &ModuleExportName<'a> {
+        &self.local
+    }
+
+    fn exported(&self) -> &ModuleExportName<'a> {
+        &self.exported
+    }
+}
+
+fn module_export_name<'a>(name: &'a ModuleExportName<'a>) -> Option<&'a str> {
+    match name {
+        ModuleExportName::IdentifierName(identifier) => Some(identifier.name.as_str()),
+        ModuleExportName::IdentifierReference(identifier) => Some(identifier.name.as_str()),
+        ModuleExportName::StringLiteral(literal) => Some(literal.value.as_str()),
+    }
+}
+
+fn specifier_end(input: &str, mut end: usize, node_end: usize) -> usize {
+    let node_end = node_end.min(input.len());
+    let old_end = end;
+    let mut has_comma = false;
+    while end < node_end {
+        let Some(ch) = input[end..].chars().next() else {
+            break;
+        };
+        if ch.is_whitespace() {
+            end += ch.len_utf8();
+        } else if ch == ',' {
+            end += ch.len_utf8();
+            has_comma = true;
+            break;
+        } else if ch == '}' {
+            break;
+        } else {
+            break;
+        }
+    }
+    if has_comma {
+        end
+    } else {
+        old_end
+    }
+}
+
+fn rewrite_vue27_default_lexical(input: &str, variable: &str) -> String {
+    let Some(default_start) = find_export_default_keyword(input) else {
+        return format!("{input}\nconst {variable} = {{}}");
+    };
+    let value_start = default_start + "default".len();
+    let export_start = input[..default_start]
+        .rfind("export")
+        .unwrap_or(default_start);
+    let mut output = String::new();
+    output.push_str(&input[..export_start]);
+    output.push_str(&format!("const {variable} ="));
+    output.push_str(&input[value_start..]);
+    output
+}
+
+fn find_export_default_keyword(input: &str) -> Option<usize> {
+    let mut index = 0usize;
+    while index < input.len() {
+        let next = input[index..].find("export")? + index;
+        if is_word_boundary(input, next, "export")
+            && input[next + "export".len()..]
+                .trim_start()
+                .starts_with("default")
+        {
+            let default_start = next
+                + "export".len()
+                + input[next + "export".len()..]
+                    .len()
+                    .saturating_sub(input[next + "export".len()..].trim_start().len());
+            if is_word_boundary(input, default_start, "default") {
+                return Some(default_start);
+            }
+        }
+        index = next + "export".len();
+    }
+    None
+}
+
+fn is_word_boundary(input: &str, start: usize, word: &str) -> bool {
+    let before = input[..start].chars().next_back();
+    let after = input[start + word.len()..].chars().next();
+    !before.is_some_and(is_identifier_continue) && !after.is_some_and(is_identifier_continue)
+}
+
+fn is_identifier_continue(ch: char) -> bool {
+    ch == '_' || ch == '$' || ch.is_ascii_alphanumeric()
+}
+
+fn source_with_overwrite(input: &str, start: usize, end: usize, replacement: &str) -> String {
+    let start = start.min(input.len());
+    let end = end.min(input.len()).max(start);
+    let mut output = String::new();
+    output.push_str(&input[..start]);
+    output.push_str(replacement);
+    output.push_str(&input[end..]);
+    output
+}
+
+fn has_vue27_default_export_like(input: &str) -> bool {
+    let mut index = 0usize;
+    while let Some(offset) = input[index..].find("export") {
+        let export_start = index + offset;
+        if is_vue27_export_boundary(input, export_start)
+            && input[export_start..].contains("default")
+        {
+            return true;
+        }
+        index = export_start + "export".len();
+    }
+    false
+}
+
+fn is_vue27_export_boundary(input: &str, export_start: usize) -> bool {
+    let prefix = &input[..export_start];
+    let Some(non_space) = prefix
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| !matches!(ch, ' ' | '\t' | '\r'))
+    else {
+        return true;
+    };
+    matches!(non_space.1, '\n' | ';')
+}
+
+#[derive(Debug)]
+struct SourceEdits<'a> {
+    input: &'a str,
+    edits: Vec<SourceEdit>,
+    prepend: String,
+    append: String,
+}
+
+#[derive(Debug)]
+struct SourceEdit {
+    start: usize,
+    end: usize,
+    replacement: String,
+}
+
+impl<'a> SourceEdits<'a> {
+    fn new(input: &'a str) -> Self {
+        Self {
+            input,
+            edits: Vec::new(),
+            prepend: String::new(),
+            append: String::new(),
+        }
+    }
+
+    fn overwrite(&mut self, start: usize, end: usize, replacement: impl Into<String>) {
+        self.edits.push(SourceEdit {
+            start,
+            end,
+            replacement: replacement.into(),
+        });
+    }
+
+    fn prepend(&mut self, value: impl AsRef<str>) {
+        self.prepend.push_str(value.as_ref());
+    }
+
+    fn append(&mut self, value: impl AsRef<str>) {
+        self.append.push_str(value.as_ref());
+    }
+
+    fn apply(mut self) -> String {
+        self.edits.sort_by_key(|edit| (edit.start, edit.end));
+        let mut output = String::new();
+        output.push_str(&self.prepend);
+        let mut cursor = 0usize;
+        for edit in self.edits {
+            if edit.start < cursor {
+                continue;
+            }
+            output.push_str(&self.input[cursor..edit.start.min(self.input.len())]);
+            output.push_str(&edit.replacement);
+            cursor = edit.end.min(self.input.len());
+        }
+        output.push_str(&self.input[cursor..]);
+        output.push_str(&self.append);
+        output
+    }
+}
+
 fn style_dependencies(style: &SfcBlock) -> Vec<String> {
     let mut dependencies = Vec::new();
     if let Some(src) = style.attrs.src.as_ref() {
@@ -1436,6 +1836,72 @@ mod tests {
         assert_eq!(result.errors.len(), 1);
         assert_eq!(result.errors[0].start, Some(0));
         assert_eq!(result.errors[0].end, Some(10));
+    }
+
+    #[test]
+    fn vue27_rewrite_default_handles_default_declarations() {
+        let compiler = SfcCompiler::new();
+        assert_eq!(
+            compiler.rewrite_vue27_default(
+                "export  default {}",
+                "script",
+                Vue27RewriteDefaultOptions::default()
+            ),
+            "const script = {}"
+        );
+        assert_eq!(
+            compiler.rewrite_vue27_default(
+                "// export default\nexport default class Foo {}",
+                "script",
+                Vue27RewriteDefaultOptions::default()
+            ),
+            "// export default\nclass Foo {}\nconst script = Foo"
+        );
+    }
+
+    #[test]
+    fn vue27_rewrite_default_handles_named_default_exports() {
+        let compiler = SfcCompiler::new();
+        assert_eq!(
+            compiler.rewrite_vue27_default(
+                "const a = 1 \n export { a as b, a as default, a as c}",
+                "script",
+                Vue27RewriteDefaultOptions::default()
+            ),
+            "const a = 1 \n export { a as b,  a as c}\nconst script = a"
+        );
+        assert_eq!(
+            compiler.rewrite_vue27_default(
+                "export { default, foo } from './index.js'",
+                "script",
+                Vue27RewriteDefaultOptions::default()
+            ),
+            "import { default as __VUE_DEFAULT__ } from './index.js'\nexport {  foo } from './index.js'\nconst script = __VUE_DEFAULT__"
+        );
+        assert_eq!(
+            compiler.rewrite_vue27_default(
+                "export { foo as default, bar } from './index.js'",
+                "script",
+                Vue27RewriteDefaultOptions::default()
+            ),
+            "import { foo } from './index.js'\nexport {  bar } from './index.js'\nconst script = foo"
+        );
+    }
+
+    #[test]
+    fn vue27_rewrite_default_handles_typescript_decorated_classes() {
+        let compiler = SfcCompiler::new();
+        assert_eq!(
+            compiler.rewrite_vue27_default(
+                "@Component({})\nexport default class HelloWorld extends Vue {\n  test = \"\";\n}",
+                "script",
+                Vue27RewriteDefaultOptions {
+                    typescript: true,
+                    decorators: true,
+                },
+            ),
+            "@Component({})\nclass HelloWorld extends Vue {\n  test = \"\";\n}\nconst script = HelloWorld"
+        );
     }
 
     #[test]

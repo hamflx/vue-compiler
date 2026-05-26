@@ -15,7 +15,7 @@ use vuec_js::JsAstStore;
 use vuec_sfc::{
     SfcAttrValue, SfcBlock, SfcBlockAttrs, SfcCompiler, SfcDescriptor, SfcScriptBlock,
     SfcScriptCompileOptions, SfcStyleCompileOptions, SfcTemplateCompileOptions,
-    Vue27ParseComponentOptions, Vue27SfcPad,
+    Vue27ParseComponentOptions, Vue27RewriteDefaultOptions, Vue27SfcPad,
 };
 use vuec_source::FileId;
 use vuec_style::{compile_style, StyleCompileOptions};
@@ -346,6 +346,16 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
                 &result.descriptor,
                 &result.errors,
             ))
+        }
+        "sfc.vue27.rewriteDefault" => {
+            let source = string_field(&payload, "source");
+            let variable = string_field_or(&payload, "variable", "script");
+            let compiler = SfcCompiler::new();
+            Ok(json!(compiler.rewrite_vue27_default(
+                &source,
+                &variable,
+                vue27_rewrite_default_options(payload.get("plugins")),
+            )))
         }
         "sfc.compileTemplate" => {
             let source = string_field(&payload, "source");
@@ -3935,6 +3945,27 @@ fn vue27_parse_component_options(value: Option<&Value>) -> Vue27ParseComponentOp
         _ => Vue27SfcPad::False,
     };
     options
+}
+
+fn vue27_rewrite_default_options(value: Option<&Value>) -> Vue27RewriteDefaultOptions {
+    let Some(value) = value else {
+        return Vue27RewriteDefaultOptions::default();
+    };
+    let plugins = value
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_else(|| std::slice::from_ref(value));
+    Vue27RewriteDefaultOptions {
+        typescript: plugins
+            .iter()
+            .any(|plugin| plugin.as_str() == Some("typescript")),
+        decorators: plugins.iter().any(|plugin| {
+            matches!(
+                plugin.as_str(),
+                Some("decorators" | "decorators-legacy" | "decoratorAutoAccessors")
+            )
+        }),
+    }
 }
 
 fn bool_option(value: &Value, name: &str, fallback: bool) -> bool {
