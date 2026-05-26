@@ -2206,7 +2206,7 @@ fn vue27_script_setup_content(
         .cloned()
         .collect::<Vec<_>>();
     let returned = if return_bindings.is_empty() {
-        "{}".to_string()
+        "{  }".to_string()
     } else {
         format!("{{ {} }}", return_bindings.join(", "))
     };
@@ -2217,12 +2217,20 @@ fn vue27_script_setup_content(
     };
     let is_ts = script_is_typescript(&script_setup.attrs);
     let runtime_options = vue27_script_setup_runtime_options(descriptor, &analysis, &normal_script);
-    let setup_body = format!(
-        "{}{}\nreturn {}",
-        css_vars_code, analysis.setup_content, returned
+    let setup_params = vue27_script_setup_params(&analysis, is_ts);
+    let setup_prefix = format!(
+        "{}{}{}",
+        css_vars_code, analysis.setup_prelude, analysis.setup_content
     );
-    let export_prefix =
-        vue27_script_setup_export_prefix(&normal_script, &runtime_options, is_ts, &setup_body);
+    let return_separator = vue27_return_separator(&setup_prefix);
+    let setup_body = format!("{setup_prefix}{return_separator}return {returned}");
+    let export_prefix = vue27_script_setup_export_prefix(
+        &normal_script,
+        &runtime_options,
+        is_ts,
+        &setup_params,
+        &setup_body,
+    );
     let helper_import = if is_ts {
         "import { defineComponent as _defineComponent } from 'vue'\n".to_string() + helper_import
     } else {
@@ -2249,13 +2257,63 @@ fn vue27_script_setup_runtime_options(
     if let Some(props) = analysis.props_runtime.as_ref() {
         runtime_options.push_str(&format!("\n  props: {},", props.trim()));
     }
+    if let Some(emits) = analysis.emits_runtime.as_ref() {
+        runtime_options.push_str(&format!("\n  emits: {},", emits.trim()));
+    }
     runtime_options
+}
+
+fn vue27_script_setup_params(analysis: &Vue27ScriptSetupAnalysis, is_ts: bool) -> String {
+    let props_param = if is_ts && analysis.props_type_runtime {
+        "__props: any"
+    } else {
+        "__props"
+    };
+    let mut context_parts = Vec::new();
+    if let Some(binding) = analysis.emit_binding.as_deref() {
+        if binding == "emit" {
+            context_parts.push("emit".to_string());
+        } else {
+            context_parts.push(format!("emit: {binding}"));
+        }
+    }
+    if analysis.needs_expose {
+        context_parts.push("expose".to_string());
+    }
+    if context_parts.is_empty() {
+        props_param.to_string()
+    } else {
+        format!("{props_param}, {{ {} }}", context_parts.join(", "))
+    }
+}
+
+fn vue27_return_separator(setup_prefix: &str) -> &'static str {
+    if setup_prefix.is_empty() {
+        return "\n\n\n\n";
+    }
+    if setup_prefix.chars().all(|ch| matches!(ch, '\n' | '\r')) {
+        let newlines = setup_prefix.chars().filter(|ch| *ch == '\n').count();
+        return if newlines <= 1 { "\n\n" } else { "\n" };
+    }
+    if !setup_prefix.ends_with('\n') {
+        return "\n";
+    }
+    let without_trailing_newlines = setup_prefix.trim_end_matches(['\n', '\r']);
+    let Some(last_line) = without_trailing_newlines.rsplit('\n').next() else {
+        return "";
+    };
+    if last_line.trim().is_empty() {
+        ""
+    } else {
+        "\n"
+    }
 }
 
 fn vue27_script_setup_export_prefix(
     normal_script: &Vue27NormalScriptAnalysis,
     runtime_options: &str,
     is_ts: bool,
+    setup_params: &str,
     setup_body: &str,
 ) -> String {
     if is_ts {
@@ -2265,15 +2323,15 @@ fn vue27_script_setup_export_prefix(
             ""
         };
         return format!(
-            "\nexport default /*#__PURE__*/_defineComponent({{{spread}{runtime_options}\n  setup(__props) {{\n{setup_body}\n}}\n\n}})"
+            "\nexport default /*#__PURE__*/_defineComponent({{{spread}{runtime_options}\n  setup({setup_params}) {{\n{setup_body}\n}}\n\n}})"
         );
     }
     if normal_script.has_default_export {
         format!(
-            "\nexport default /*#__PURE__*/Object.assign(__default__, {{{runtime_options}\n  setup(__props) {{\n{setup_body}\n}}\n\n}})"
+            "\nexport default /*#__PURE__*/Object.assign(__default__, {{{runtime_options}\n  setup({setup_params}) {{\n{setup_body}\n}}\n\n}})"
         )
     } else {
-        format!("\nexport default {{{runtime_options}\n  setup(__props) {{\n{setup_body}\n}}\n\n}}")
+        format!("\nexport default {{{runtime_options}\n  setup({setup_params}) {{\n{setup_body}\n}}\n\n}}")
     }
 }
 
@@ -2409,12 +2467,17 @@ fn gen_vue27_css_vars_code(
 struct Vue27ScriptSetupAnalysis {
     module_content: String,
     setup_content: String,
+    setup_prelude: String,
     return_bindings: Vec<String>,
     import_return_bindings: Vec<String>,
     removed_bindings: Vec<String>,
     setup_bindings: BTreeMap<String, String>,
     props_bindings: Vec<String>,
     props_runtime: Option<String>,
+    props_type_runtime: bool,
+    emits_runtime: Option<String>,
+    emit_binding: Option<String>,
+    needs_expose: bool,
     user_import_aliases: BTreeMap<String, String>,
 }
 
@@ -2534,8 +2597,18 @@ fn analyze_vue27_script_setup(script_setup: &SfcBlock) -> Vue27ScriptSetupAnalys
             Statement::ExpressionStatement(statement) => {
                 if let Expression::CallExpression(call) = &statement.expression {
                     if is_call_named(call, "defineProps") {
-                        collect_define_props_argument(source, call, &mut analysis);
+                        collect_define_props_call(source, call, &mut analysis);
                         edits.remove(statement.span.start as usize, statement.span.end as usize);
+                    } else if is_call_named(call, "defineEmits") {
+                        collect_define_emits_call(source, call, None, &mut analysis);
+                        edits.remove(statement.span.start as usize, statement.span.end as usize);
+                    } else if is_call_named(call, "defineExpose") {
+                        analysis.needs_expose = true;
+                        edits.overwrite(
+                            call.span.start as usize,
+                            call.callee.span().end as usize,
+                            "expose",
+                        );
                     }
                 }
             }
@@ -2548,7 +2621,13 @@ fn analyze_vue27_script_setup(script_setup: &SfcBlock) -> Vue27ScriptSetupAnalys
     for value in analysis.import_return_bindings.clone() {
         push_unique(&mut analysis.return_bindings, &value);
     }
-    analysis.setup_content = trim_trailing_blank_lines(&setup_content).to_string();
+    analysis.setup_content = setup_content;
+    if analysis.module_content.ends_with('\n') {
+        if let Some(indent) = leading_blank_line_indent(&analysis.setup_content) {
+            analysis.module_content.push_str(indent);
+            analysis.setup_content = analysis.setup_content[indent.len()..].to_string();
+        }
+    }
     analysis
 }
 
@@ -2558,14 +2637,32 @@ fn analyze_vue27_setup_variable_declaration(
     edits: &mut SourceEdits<'_>,
     analysis: &mut Vue27ScriptSetupAnalysis,
 ) {
-    let mut remove_declaration = false;
-    for declarator in &declaration.declarations {
+    let mut macro_declarators = Vec::new();
+    for (index, declarator) in declaration.declarations.iter().enumerate() {
         if let Some(init) = &declarator.init {
             if let Expression::CallExpression(call) = init {
                 if is_call_named(call, "defineProps") {
-                    collect_define_props_argument(source, call, analysis);
-                    collect_pattern_bindings(&declarator.id, &mut analysis.removed_bindings);
-                    remove_declaration = true;
+                    collect_define_props_call(source, call, analysis);
+                    collect_pattern_bindings(&declarator.id, &mut analysis.return_bindings);
+                    analysis.setup_bindings.insert(
+                        first_pattern_binding(&declarator.id).unwrap_or_else(|| "props".into()),
+                        "setup-reactive-const".into(),
+                    );
+                    analysis
+                        .setup_prelude
+                        .push_str(&vue27_props_alias_declaration(source, &declarator.id));
+                    macro_declarators.push(index);
+                    continue;
+                }
+                if is_call_named(call, "defineEmits") {
+                    let emit_binding =
+                        first_pattern_binding(&declarator.id).unwrap_or_else(|| "emit".into());
+                    collect_define_emits_call(source, call, Some(&emit_binding), analysis);
+                    analysis
+                        .setup_bindings
+                        .insert(emit_binding.clone(), "setup-const".into());
+                    collect_pattern_bindings(&declarator.id, &mut analysis.return_bindings);
+                    macro_declarators.push(index);
                     continue;
                 }
             }
@@ -2575,12 +2672,7 @@ fn analyze_vue27_setup_variable_declaration(
         collect_pattern_binding_types(&declarator.id, binding_type, &mut analysis.setup_bindings);
         collect_pattern_bindings(&declarator.id, &mut analysis.return_bindings);
     }
-    if remove_declaration && declaration.declarations.len() == 1 {
-        edits.remove(
-            declaration.span.start as usize,
-            declaration.span.end as usize,
-        );
-    }
+    remove_vue27_macro_declarators(declaration, &macro_declarators, edits);
 }
 
 fn vue27_setup_binding_type(
@@ -2631,7 +2723,7 @@ fn is_call_named(call: &oxc_ast::ast::CallExpression<'_>, name: &str) -> bool {
     matches!(&call.callee, Expression::Identifier(identifier) if identifier.name == name)
 }
 
-fn collect_define_props_argument(
+fn collect_define_props_call(
     source: &str,
     call: &oxc_ast::ast::CallExpression<'_>,
     analysis: &mut Vue27ScriptSetupAnalysis,
@@ -2644,9 +2736,116 @@ fn collect_define_props_argument(
         for key in object_expression_keys(object) {
             push_unique(&mut analysis.props_bindings, &key);
         }
-        let start = expression.span().start as usize;
-        let end = expression.span().end as usize;
-        analysis.props_runtime = source.get(start..end).map(ToOwned::to_owned);
+    }
+    let start = expression.span().start as usize;
+    let end = expression.span().end as usize;
+    analysis.props_runtime = source.get(start..end).map(ToOwned::to_owned);
+}
+
+fn collect_define_emits_call(
+    source: &str,
+    call: &oxc_ast::ast::CallExpression<'_>,
+    binding: Option<&str>,
+    analysis: &mut Vue27ScriptSetupAnalysis,
+) {
+    if analysis.emit_binding.is_none() {
+        if let Some(binding) = binding {
+            analysis.emit_binding = Some(binding.to_string());
+        }
+    }
+    let Some(argument) = call.arguments.first() else {
+        return;
+    };
+    let expression = argument.to_expression();
+    let start = expression.span().start as usize;
+    let end = expression.span().end as usize;
+    analysis.emits_runtime = source.get(start..end).map(ToOwned::to_owned);
+}
+
+fn first_pattern_binding(pattern: &BindingPattern<'_>) -> Option<String> {
+    match pattern {
+        BindingPattern::BindingIdentifier(identifier) => Some(identifier.name.to_string()),
+        BindingPattern::ObjectPattern(pattern) => pattern
+            .properties
+            .iter()
+            .find_map(|property| first_pattern_binding(&property.value))
+            .or_else(|| {
+                pattern
+                    .rest
+                    .as_ref()
+                    .and_then(|rest| first_pattern_binding(&rest.argument))
+            }),
+        BindingPattern::ArrayPattern(pattern) => pattern
+            .elements
+            .iter()
+            .flatten()
+            .find_map(first_pattern_binding)
+            .or_else(|| {
+                pattern
+                    .rest
+                    .as_ref()
+                    .and_then(|rest| first_pattern_binding(&rest.argument))
+            }),
+        BindingPattern::AssignmentPattern(pattern) => first_pattern_binding(&pattern.left),
+    }
+}
+
+fn vue27_props_alias_declaration(source: &str, pattern: &BindingPattern<'_>) -> String {
+    let pattern_source = source
+        .get(pattern.span().start as usize..pattern.span().end as usize)
+        .map(str::trim)
+        .filter(|source| !source.is_empty());
+    if let Some(pattern_source) = pattern_source {
+        format!("\nconst {pattern_source} = __props;\n")
+    } else {
+        String::new()
+    }
+}
+
+fn remove_vue27_macro_declarators(
+    declaration: &VariableDeclaration<'_>,
+    macro_indices: &[usize],
+    edits: &mut SourceEdits<'_>,
+) {
+    if macro_indices.is_empty() {
+        return;
+    }
+    if macro_indices.len() == declaration.declarations.len() {
+        edits.remove(
+            declaration.span.start as usize,
+            declaration.span.end as usize,
+        );
+        return;
+    }
+    let mut spans = Vec::new();
+    for index in macro_indices {
+        let declarator = &declaration.declarations[*index];
+        let (start, end) = if *index == 0 {
+            (
+                declarator.span.start as usize,
+                declaration.declarations[index + 1].span.start as usize,
+            )
+        } else {
+            (
+                declaration.declarations[index - 1].span.end as usize,
+                declarator.span.end as usize,
+            )
+        };
+        spans.push((start, end));
+    }
+    spans.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (start, end) in spans {
+        if let Some((_, last_end)) = merged.last_mut() {
+            if start <= *last_end {
+                *last_end = (*last_end).max(end);
+                continue;
+            }
+        }
+        merged.push((start, end));
+    }
+    for (start, end) in merged {
+        edits.remove(start, end);
     }
 }
 
@@ -2690,24 +2889,46 @@ fn split_vue27_setup_module_content(content: &str) -> (String, String) {
     let mut module = String::new();
     let mut setup = String::new();
     let mut last_module_indent = "";
-    for line in content.lines() {
-        let trimmed = line.trim_start();
+    for line in split_inclusive_lines(content) {
+        let line_without_newline = line.trim_end_matches(['\n', '\r']);
+        let trimmed = line_without_newline.trim_start();
         if trimmed.starts_with("import ") {
             if !module.is_empty() && !module.ends_with('\n') {
                 module.push('\n');
             }
             module.push_str(trimmed);
             module.push('\n');
-            last_module_indent = &line[..line.len() - trimmed.len()];
+            last_module_indent =
+                &line_without_newline[..line_without_newline.len() - trimmed.len()];
         } else {
             setup.push_str(line);
-            setup.push('\n');
         }
     }
     if !last_module_indent.is_empty() {
         module.push_str(last_module_indent);
     }
     (module, setup)
+}
+
+fn split_inclusive_lines(value: &str) -> Vec<&str> {
+    if value.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = value.split_inclusive('\n').collect::<Vec<_>>();
+    if value.ends_with("\n\n") {
+        lines.push("");
+    }
+    lines
+}
+
+fn leading_blank_line_indent(value: &str) -> Option<&str> {
+    let line_end = value.find('\n').unwrap_or(value.len());
+    let first_line = &value[..line_end];
+    if first_line.is_empty() || first_line.trim().is_empty() {
+        Some(first_line)
+    } else {
+        None
+    }
 }
 
 fn vue27_setup_binding_metadata(descriptor: &SfcDescriptor) -> BTreeMap<String, String> {
@@ -3744,6 +3965,87 @@ export default {
         assert!(script
             .content
             .contains("export default /*#__PURE__*/_defineComponent({\n  ...__default__,"));
+    }
+
+    #[test]
+    fn vue27_compile_script_generates_runtime_macro_options() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "foo.vue",
+            r#"<script setup>
+const props = defineProps({ foo: String })
+const emit = defineEmits(['save'])
+defineExpose({ reset() {} })
+</script>"#,
+        );
+        let script = compiler.compile_vue27_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.content.contains("props: { foo: String },"));
+        assert!(script.content.contains("emits: ['save'],"));
+        assert!(script.content.contains("setup(__props, { emit, expose })"));
+        assert!(script.content.contains("const props = __props;"));
+        assert!(script.content.contains("expose({ reset() {} })"));
+        assert!(script.content.contains("return { props, emit }"));
+        assert!(!script.content.contains("defineProps"));
+        assert!(!script.content.contains("defineEmits"));
+        assert!(!script.content.contains("defineExpose"));
+    }
+
+    #[test]
+    fn vue27_compile_script_unbound_define_emits_only_generates_runtime_option() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "foo.vue",
+            r#"<script setup>
+defineEmits(['save'])
+</script>"#,
+        );
+        let script = compiler.compile_vue27_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.content.contains("emits: ['save'],"));
+        assert!(script.content.contains("setup(__props)"));
+        assert!(!script.content.contains("{ emit }"));
+        assert!(!script.content.contains("defineEmits"));
+    }
+
+    #[test]
+    fn vue27_compile_script_preserves_define_props_binding_pattern_alias() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "foo.vue",
+            r#"<script setup>
+const { foo, bar: baz } = defineProps({ foo: String, bar: Number })
+</script>"#,
+        );
+        let script = compiler.compile_vue27_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script
+            .content
+            .contains("const { foo, bar: baz } = __props;"));
+        assert!(script.content.contains("return { foo, baz }"));
+        assert!(!script.content.contains("defineProps"));
+    }
+
+    #[test]
+    fn vue27_compile_script_removes_runtime_macros_from_multi_declaration() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "foo.vue",
+            r#"<script setup>
+const props = defineProps(['item']),
+  a = 1,
+  emit = defineEmits(['save'])
+</script>"#,
+        );
+        let script = compiler.compile_vue27_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.content.contains("props: ['item'],"));
+        assert!(script.content.contains("emits: ['save'],"));
+        assert!(script.content.contains("const a = 1"));
+        assert!(script.content.contains("const props = __props;"));
+        assert!(script.content.contains("return { props, a, emit }"));
+        assert!(!script.content.contains("defineProps"));
+        assert!(!script.content.contains("defineEmits"));
     }
 
     #[test]
