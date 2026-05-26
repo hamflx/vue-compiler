@@ -1,5 +1,12 @@
 # Memory
 
+- Current round: completed an M16 NAPI Vue 3 `@vue/compiler-sfc` API manifest parity slice.
+- Added the official Vue 3 `@vue/compiler-sfc` manifest to `cargo xtask verify-napi-api`; the command now verifies five NAPI-backed official package-name targets: Vue 2.6 / Vue 2.7 `vue-template-compiler`, Vue 2.7 `vue/compiler-sfc`, Vue 3 `@vue/compiler-ssr`, and Vue 3 `@vue/compiler-sfc`.
+- Updated the NAPI `@vue/compiler-sfc` alias to expose the official 25-export surface, including Rust-backed parse/template/script/style entry adapters, `MagicString`, `babelParse`, `rewriteDefault`, identifier/type helper adapters, `parseCache`, `errorMessages`, and package `version`.
+- Extended the official package-name NAPI alias smoke so Vue 3 SFC exercises `rewriteDefault`, `MagicString`, `extractIdentifiers`, and `inferRuntimeType` in addition to the existing parse/template/script/style native calls.
+- This is product API adapter progress only. It does not route official conformance through NAPI, does not complete broad NAPI API diff for Vue 3 core/dom packages, does not change AST/HIR/MIR structures, and does not move compiler semantics into `xtask/src/compat.rs`. The lightweight JS helper adapters in the `@vue/compiler-sfc` alias are not counted as Rust SFC type-resolution/compiler semantics.
+- Verification for this NAPI Vue 3 SFC API manifest slice: `cargo fmt --all --check`, `git diff --check`, `cargo check -p xtask -p vuec_napi`, `cargo test -p xtask`, `cargo test -p vuec_napi`, `cargo xtask verify-napi`, `cargo xtask verify-napi-alias`, `cargo xtask verify-napi-api` (`5/5` pass), `cargo xtask verify-napi-platform`, `pnpm test:napi`, `pnpm test:napi-alias`, `pnpm test:napi-api`, `pnpm test:napi-platform`, `cargo test --workspace`, and `cargo xtask summarize-compat --locked` (`7/7` pass).
+
 - Current round: completed an M16 NAPI Vue 2.7 `vue/compiler-sfc` API manifest parity slice.
 - Added the official Vue 2.7 `vue/compiler-sfc` manifest to `cargo xtask verify-napi-api`; the command now verifies four NAPI-backed official package-name targets: Vue 2.6 / Vue 2.7 `vue-template-compiler`, Vue 2.7 `vue/compiler-sfc`, and Vue 3 `@vue/compiler-ssr`.
 - Updated the NAPI `vue/compiler-sfc` alias so the eight official exports (`parse`, `parseComponent`, `compileTemplate`, `compileScript`, `compileStyle`, `compileStyleAsync`, `rewriteDefault`, `generateCodeFrame`) expose official names/arities/types and call native Rust-backed SFC/template/style/script/rewrite/codeframe APIs instead of smoke-era unavailable stubs.

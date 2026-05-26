@@ -175,6 +175,19 @@ fn verify_napi_api() -> Result<compat::JsonReport> {
                 types_base_subpath: &["@vue", "compiler-ssr"],
             },
         },
+        NapiApiTarget {
+            version_line: "vue3",
+            package: "@vue/compiler-sfc",
+            entry: "index",
+            alias: NapiApiAlias::PackageTemplate {
+                source: "packages/native-aliases/@vue/compiler-sfc",
+                package_subpath: &["@vue", "compiler-sfc"],
+                manifest_package: "_vue_compiler-sfc",
+                manifest_file: "index.json",
+                package_json_subpath: &["@vue", "compiler-sfc"],
+                types_base_subpath: &["@vue", "compiler-sfc"],
+            },
+        },
     ];
     let mut violations = Vec::new();
     let mut created = Vec::new();

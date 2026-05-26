@@ -70,6 +70,33 @@ const style = sfc.compileStyle({
 });
 assert.match(style.code, /data-v-alias/);
 
+const rewritten = sfc.rewriteDefault('export default { name: "Alias" }', '__default__');
+assert.match(rewritten, /const __default__/);
+
+const magic = new sfc.MagicString('abc');
+magic.overwrite(1, 2, 'B').append('!');
+assert.strictEqual(magic.toString(), 'aBc!');
+
+const identifiers = sfc.extractIdentifiers({
+  type: 'ObjectPattern',
+  properties: [
+    {
+      type: 'ObjectProperty',
+      key: { type: 'Identifier', name: 'source' },
+      value: { type: 'Identifier', name: 'target' },
+    },
+  ],
+});
+assert.ok(identifiers.some(identifier => identifier.name === 'target'));
+
+assert.deepStrictEqual(
+  sfc.inferRuntimeType({}, {
+    type: 'TSUnionType',
+    types: [{ type: 'TSStringKeyword' }, { type: 'TSNumberKeyword' }],
+  }),
+  ['String', 'Number'],
+);
+
 process.stdout.write(JSON.stringify({
   status: 'pass',
   packages: [
