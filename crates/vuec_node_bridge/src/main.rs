@@ -15,7 +15,8 @@ use vuec_js::JsAstStore;
 use vuec_sfc::{
     SfcAttrValue, SfcBlock, SfcBlockAttrs, SfcCompiler, SfcDescriptor, SfcScriptBlock,
     SfcScriptCompileOptions, SfcStyleCompileOptions, SfcTemplateCompileOptions,
-    Vue27ParseComponentOptions, Vue27RewriteDefaultOptions, Vue27SfcPad,
+    Vue27ParseComponentOptions, Vue27PrefixIdentifiersOptions, Vue27RewriteDefaultOptions,
+    Vue27SfcPad,
 };
 use vuec_source::FileId;
 use vuec_style::{compile_style, StyleCompileOptions};
@@ -355,6 +356,14 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
                 &source,
                 &variable,
                 vue27_rewrite_default_options(payload.get("plugins")),
+            )))
+        }
+        "sfc.vue27.prefixIdentifiers" => {
+            let source = string_field(&payload, "source");
+            let compiler = SfcCompiler::new();
+            Ok(json!(compiler.prefix_vue27_identifiers(
+                &source,
+                vue27_prefix_identifiers_options(&payload),
             )))
         }
         "sfc.compileTemplate" => {
@@ -3968,8 +3977,29 @@ fn vue27_rewrite_default_options(value: Option<&Value>) -> Vue27RewriteDefaultOp
     }
 }
 
+fn vue27_prefix_identifiers_options(value: &Value) -> Vue27PrefixIdentifiersOptions {
+    Vue27PrefixIdentifiersOptions {
+        is_functional: bool_option(value, "isFunctional", false),
+        is_ts: bool_option(value, "isTS", false),
+        bindings: json_string_map_option(value, "bindings").unwrap_or_default(),
+    }
+}
+
 fn bool_option(value: &Value, name: &str, fallback: bool) -> bool {
     value.get(name).and_then(Value::as_bool).unwrap_or(fallback)
+}
+
+fn json_string_map_option(value: &Value, name: &str) -> Option<BTreeMap<String, String>> {
+    value.get(name).and_then(Value::as_object).map(|object| {
+        object
+            .iter()
+            .filter_map(|(key, value)| match value {
+                Value::String(value) => Some((key.clone(), value.clone())),
+                Value::Bool(value) => Some((key.clone(), value.to_string())),
+                _ => None,
+            })
+            .collect()
+    })
 }
 
 #[cfg(test)]

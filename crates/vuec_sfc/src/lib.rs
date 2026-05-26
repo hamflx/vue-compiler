@@ -1,8 +1,10 @@
 #![forbid(unsafe_code)]
 
 use oxc_ast::ast::{
-    ExportDefaultDeclaration, ExportDefaultDeclarationKind, ExportNamedDeclaration,
-    ExportSpecifier, ModuleExportName, Statement,
+    Argument, ArrowFunctionExpression, AssignmentTarget, BindingPattern, ExportDefaultDeclaration,
+    ExportDefaultDeclarationKind, ExportNamedDeclaration, ExportSpecifier, Expression, Function,
+    ModuleExportName, ObjectProperty, ObjectPropertyKind, PropertyKey, SimpleAssignmentTarget,
+    Statement, VariableDeclaration, WithStatement,
 };
 use oxc_span::GetSpan;
 use serde::{Deserialize, Serialize};
@@ -235,6 +237,13 @@ pub struct Vue27RewriteDefaultOptions {
     pub typescript: bool,
     #[serde(default)]
     pub decorators: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue27PrefixIdentifiersOptions {
+    pub is_functional: bool,
+    pub is_ts: bool,
+    pub bindings: BTreeMap<String, String>,
 }
 
 pub struct SfcCompiler {
@@ -616,6 +625,14 @@ impl SfcCompiler {
         options: Vue27RewriteDefaultOptions,
     ) -> String {
         rewrite_vue27_default(input, variable, options)
+    }
+
+    pub fn prefix_vue27_identifiers(
+        &self,
+        input: &str,
+        options: Vue27PrefixIdentifiersOptions,
+    ) -> String {
+        prefix_vue27_identifiers(input, options)
     }
 
     pub fn js(&self) -> &JsAstStore {
@@ -1351,6 +1368,555 @@ fn is_identifier_continue(ch: char) -> bool {
     ch == '_' || ch == '$' || ch.is_ascii_alphanumeric()
 }
 
+fn prefix_vue27_identifiers(input: &str, options: Vue27PrefixIdentifiersOptions) -> String {
+    let allocator = oxc_allocator::Allocator::default();
+    let source_type = if options.is_ts {
+        oxc_span::SourceType::ts()
+    } else {
+        oxc_span::SourceType::script()
+    };
+    let parsed = oxc_parser::Parser::new(&allocator, input, source_type)
+        .with_options(oxc_parser::ParseOptions {
+            parse_regular_expression: true,
+            ..oxc_parser::ParseOptions::default()
+        })
+        .parse();
+    if parsed.panicked || !parsed.errors.is_empty() {
+        return input.to_string();
+    }
+
+    let mut edits = SourceEdits::new(input);
+    let mut context = PrefixIdentifiersContext {
+        input,
+        options,
+        locals: Vec::new(),
+        edits: &mut edits,
+    };
+    for statement in &parsed.program.body {
+        context.walk_statement(statement);
+    }
+    edits.apply()
+}
+
+struct PrefixIdentifiersContext<'a, 'b> {
+    input: &'a str,
+    options: Vue27PrefixIdentifiersOptions,
+    locals: Vec<BTreeMap<String, usize>>,
+    edits: &'b mut SourceEdits<'a>,
+}
+
+impl PrefixIdentifiersContext<'_, '_> {
+    fn walk_statement(&mut self, statement: &Statement<'_>) {
+        match statement {
+            Statement::WithStatement(statement) => self.walk_with_statement(statement),
+            Statement::BlockStatement(block) => {
+                self.push_scope();
+                self.mark_block_declarations(&block.body);
+                for statement in &block.body {
+                    self.walk_statement(statement);
+                }
+                self.pop_scope();
+            }
+            Statement::ExpressionStatement(statement) => {
+                self.walk_expression(&statement.expression)
+            }
+            Statement::ReturnStatement(statement) => {
+                if let Some(argument) = &statement.argument {
+                    self.walk_expression(argument);
+                }
+            }
+            Statement::VariableDeclaration(declaration) => {
+                self.mark_variable_declaration(declaration);
+                for declarator in &declaration.declarations {
+                    if let Some(init) = &declarator.init {
+                        self.walk_expression(init);
+                    }
+                }
+            }
+            Statement::FunctionDeclaration(function) => self.walk_function(function),
+            Statement::IfStatement(statement) => {
+                self.walk_expression(&statement.test);
+                self.walk_statement(&statement.consequent);
+                if let Some(alternate) = &statement.alternate {
+                    self.walk_statement(alternate);
+                }
+            }
+            Statement::ForStatement(statement) => {
+                self.push_scope();
+                if let Some(init) = &statement.init {
+                    match init {
+                        oxc_ast::ast::ForStatementInit::VariableDeclaration(declaration) => {
+                            self.mark_variable_declaration(declaration);
+                            for declarator in &declaration.declarations {
+                                if let Some(init) = &declarator.init {
+                                    self.walk_expression(init);
+                                }
+                            }
+                        }
+                        _ => {
+                            if let Some(expression) = init.as_expression() {
+                                self.walk_expression(expression);
+                            }
+                        }
+                    }
+                }
+                if let Some(test) = &statement.test {
+                    self.walk_expression(test);
+                }
+                if let Some(update) = &statement.update {
+                    self.walk_expression(update);
+                }
+                self.walk_statement(&statement.body);
+                self.pop_scope();
+            }
+            Statement::ForInStatement(statement) => {
+                self.push_scope();
+                self.walk_for_iteration_left(&statement.left);
+                self.walk_expression(&statement.right);
+                self.walk_statement(&statement.body);
+                self.pop_scope();
+            }
+            Statement::ForOfStatement(statement) => {
+                self.push_scope();
+                self.walk_for_iteration_left(&statement.left);
+                self.walk_expression(&statement.right);
+                self.walk_statement(&statement.body);
+                self.pop_scope();
+            }
+            _ => {}
+        }
+    }
+
+    fn walk_with_statement(&mut self, statement: &WithStatement<'_>) {
+        if !self.options.is_functional {
+            self.edits.prepend_right(
+                statement.span.start as usize,
+                if self.is_script_setup() {
+                    "var _vm=this,_c=_vm._self._c,_setup=_vm._self._setupProxy;"
+                } else {
+                    "var _vm=this,_c=_vm._self._c;"
+                },
+            );
+        }
+        let Some(body_start) = self.with_body_content_start(statement) else {
+            self.walk_statement(&statement.body);
+            return;
+        };
+        self.edits.remove(statement.span.start as usize, body_start);
+        self.edits.remove(
+            statement.span.end.saturating_sub(1) as usize,
+            statement.span.end as usize,
+        );
+        self.walk_statement(&statement.body);
+    }
+
+    fn with_body_content_start(&self, statement: &WithStatement<'_>) -> Option<usize> {
+        let start = statement.body.span().start as usize;
+        let body_source = self.input.get(start..)?;
+        body_source.find('{').map(|offset| start + offset + 1)
+    }
+
+    fn walk_for_iteration_left(&mut self, left: &oxc_ast::ast::ForStatementLeft<'_>) {
+        match left {
+            oxc_ast::ast::ForStatementLeft::VariableDeclaration(declaration) => {
+                self.mark_variable_declaration(declaration);
+                for declarator in &declaration.declarations {
+                    if let Some(init) = &declarator.init {
+                        self.walk_expression(init);
+                    }
+                }
+            }
+            _ => {
+                if let Some(target) = left.as_assignment_target() {
+                    self.mark_assignment_target_as_local(target);
+                }
+            }
+        }
+    }
+
+    fn walk_expression(&mut self, expression: &Expression<'_>) {
+        match expression {
+            Expression::Identifier(identifier) => self.prefix_identifier(
+                identifier.name.as_str(),
+                identifier.span.start as usize,
+                PrefixParent::Reference,
+            ),
+            Expression::StaticMemberExpression(member) => {
+                self.walk_expression(&member.object);
+            }
+            Expression::ComputedMemberExpression(member) => {
+                self.walk_expression(&member.object);
+                self.walk_expression(&member.expression);
+            }
+            Expression::PrivateFieldExpression(member) => {
+                self.walk_expression(&member.object);
+            }
+            Expression::CallExpression(call) => {
+                self.walk_expression(&call.callee);
+                for argument in &call.arguments {
+                    self.walk_argument(argument);
+                }
+            }
+            Expression::ArrayExpression(array) => {
+                for element in &array.elements {
+                    match element {
+                        oxc_ast::ast::ArrayExpressionElement::SpreadElement(spread) => {
+                            self.walk_expression(&spread.argument)
+                        }
+                        oxc_ast::ast::ArrayExpressionElement::Elision(_) => {}
+                        element => {
+                            if let Some(expression) = element.as_expression() {
+                                self.walk_expression(expression);
+                            }
+                        }
+                    }
+                }
+            }
+            Expression::ObjectExpression(object) => {
+                for property in &object.properties {
+                    self.walk_object_property_kind(property);
+                }
+            }
+            Expression::FunctionExpression(function) => self.walk_function(function),
+            Expression::ArrowFunctionExpression(function) => self.walk_arrow_function(function),
+            Expression::AssignmentExpression(assignment) => {
+                self.walk_assignment_target(&assignment.left);
+                self.walk_expression(&assignment.right);
+            }
+            Expression::UpdateExpression(update) => {
+                self.walk_simple_assignment_target(&update.argument);
+            }
+            Expression::UnaryExpression(unary) => self.walk_expression(&unary.argument),
+            Expression::BinaryExpression(binary) => {
+                self.walk_expression(&binary.left);
+                self.walk_expression(&binary.right);
+            }
+            Expression::LogicalExpression(logical) => {
+                self.walk_expression(&logical.left);
+                self.walk_expression(&logical.right);
+            }
+            Expression::ConditionalExpression(conditional) => {
+                self.walk_expression(&conditional.test);
+                self.walk_expression(&conditional.consequent);
+                self.walk_expression(&conditional.alternate);
+            }
+            Expression::SequenceExpression(sequence) => {
+                for expression in &sequence.expressions {
+                    self.walk_expression(expression);
+                }
+            }
+            Expression::ParenthesizedExpression(parenthesized) => {
+                self.walk_expression(&parenthesized.expression);
+            }
+            Expression::TSAsExpression(expression) => self.walk_expression(&expression.expression),
+            Expression::TSSatisfiesExpression(expression) => {
+                self.walk_expression(&expression.expression)
+            }
+            Expression::TSNonNullExpression(expression) => {
+                self.walk_expression(&expression.expression)
+            }
+            Expression::ChainExpression(chain) => match &chain.expression {
+                oxc_ast::ast::ChainElement::CallExpression(call) => {
+                    self.walk_expression(&call.callee);
+                    for argument in &call.arguments {
+                        self.walk_argument(argument);
+                    }
+                }
+                oxc_ast::ast::ChainElement::StaticMemberExpression(member) => {
+                    self.walk_expression(&member.object)
+                }
+                oxc_ast::ast::ChainElement::ComputedMemberExpression(member) => {
+                    self.walk_expression(&member.object);
+                    self.walk_expression(&member.expression);
+                }
+                oxc_ast::ast::ChainElement::PrivateFieldExpression(member) => {
+                    self.walk_expression(&member.object)
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+
+    fn walk_argument(&mut self, argument: &Argument<'_>) {
+        match argument {
+            Argument::SpreadElement(spread) => self.walk_expression(&spread.argument),
+            _ => self.walk_expression(argument.to_expression()),
+        }
+    }
+
+    fn walk_object_property_kind(&mut self, property: &ObjectPropertyKind<'_>) {
+        if let ObjectPropertyKind::ObjectProperty(property) = property {
+            self.walk_object_property(property);
+        }
+    }
+
+    fn walk_object_property(&mut self, property: &ObjectProperty<'_>) {
+        if property.computed {
+            self.walk_property_key(&property.key);
+        }
+        if property.shorthand {
+            if let Expression::Identifier(identifier) = &property.value {
+                self.prefix_identifier(
+                    identifier.name.as_str(),
+                    identifier.span.end as usize,
+                    PrefixParent::ShorthandPropertyValue,
+                );
+                return;
+            }
+        }
+        self.walk_expression(&property.value);
+    }
+
+    fn walk_property_key(&mut self, key: &PropertyKey<'_>) {
+        match key {
+            PropertyKey::StaticIdentifier(_) | PropertyKey::PrivateIdentifier(_) => {}
+            _ => self.walk_expression(key.to_expression()),
+        }
+    }
+
+    fn walk_function(&mut self, function: &Function<'_>) {
+        self.push_scope();
+        if let Some(id) = &function.id {
+            self.mark_local(id.name.as_str());
+        }
+        for param in &function.params.items {
+            self.mark_binding_pattern(&param.pattern);
+            if let Some(initializer) = &param.initializer {
+                self.walk_expression(initializer);
+            }
+        }
+        if let Some(rest) = &function.params.rest {
+            self.mark_binding_pattern(&rest.rest.argument);
+        }
+        if let Some(body) = &function.body {
+            self.mark_block_declarations(&body.statements);
+            for statement in &body.statements {
+                self.walk_statement(statement);
+            }
+        }
+        self.pop_scope();
+    }
+
+    fn walk_arrow_function(&mut self, function: &ArrowFunctionExpression<'_>) {
+        self.push_scope();
+        for param in &function.params.items {
+            self.mark_binding_pattern(&param.pattern);
+            if let Some(initializer) = &param.initializer {
+                self.walk_expression(initializer);
+            }
+        }
+        if let Some(rest) = &function.params.rest {
+            self.mark_binding_pattern(&rest.rest.argument);
+        }
+        self.mark_block_declarations(&function.body.statements);
+        for statement in &function.body.statements {
+            self.walk_statement(statement);
+        }
+        self.pop_scope();
+    }
+
+    fn walk_assignment_target(&mut self, target: &AssignmentTarget<'_>) {
+        match target {
+            AssignmentTarget::AssignmentTargetIdentifier(identifier) => self.prefix_identifier(
+                identifier.name.as_str(),
+                identifier.span.start as usize,
+                PrefixParent::Reference,
+            ),
+            AssignmentTarget::StaticMemberExpression(member) => {
+                self.walk_expression(&member.object)
+            }
+            AssignmentTarget::ComputedMemberExpression(member) => {
+                self.walk_expression(&member.object);
+                self.walk_expression(&member.expression);
+            }
+            AssignmentTarget::PrivateFieldExpression(member) => {
+                self.walk_expression(&member.object)
+            }
+            _ => {}
+        }
+    }
+
+    fn walk_simple_assignment_target(&mut self, target: &SimpleAssignmentTarget<'_>) {
+        match target {
+            SimpleAssignmentTarget::AssignmentTargetIdentifier(identifier) => self
+                .prefix_identifier(
+                    identifier.name.as_str(),
+                    identifier.span.start as usize,
+                    PrefixParent::Reference,
+                ),
+            SimpleAssignmentTarget::StaticMemberExpression(member) => {
+                self.walk_expression(&member.object)
+            }
+            SimpleAssignmentTarget::ComputedMemberExpression(member) => {
+                self.walk_expression(&member.object);
+                self.walk_expression(&member.expression);
+            }
+            SimpleAssignmentTarget::PrivateFieldExpression(member) => {
+                self.walk_expression(&member.object)
+            }
+            _ => {}
+        }
+    }
+
+    fn mark_assignment_target_as_local(&mut self, target: &AssignmentTarget<'_>) {
+        if let AssignmentTarget::AssignmentTargetIdentifier(identifier) = target {
+            self.mark_local(identifier.name.as_str());
+        }
+    }
+
+    fn mark_block_declarations(&mut self, statements: &[Statement<'_>]) {
+        for statement in statements {
+            match statement {
+                Statement::VariableDeclaration(declaration) => {
+                    self.mark_variable_declaration(declaration);
+                }
+                Statement::FunctionDeclaration(function) => {
+                    if let Some(id) = &function.id {
+                        self.mark_local(id.name.as_str());
+                    }
+                }
+                Statement::ClassDeclaration(class) => {
+                    if let Some(id) = &class.id {
+                        self.mark_local(id.name.as_str());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn mark_variable_declaration(&mut self, declaration: &VariableDeclaration<'_>) {
+        for declarator in &declaration.declarations {
+            self.mark_binding_pattern(&declarator.id);
+        }
+    }
+
+    fn mark_binding_pattern(&mut self, pattern: &BindingPattern<'_>) {
+        match pattern {
+            BindingPattern::BindingIdentifier(identifier) => {
+                self.mark_local(identifier.name.as_str())
+            }
+            BindingPattern::ObjectPattern(pattern) => {
+                for property in &pattern.properties {
+                    self.mark_binding_pattern(&property.value);
+                }
+                if let Some(rest) = &pattern.rest {
+                    self.mark_binding_pattern(&rest.argument);
+                }
+            }
+            BindingPattern::ArrayPattern(pattern) => {
+                for element in pattern.elements.iter().flatten() {
+                    self.mark_binding_pattern(element);
+                }
+                if let Some(rest) = &pattern.rest {
+                    self.mark_binding_pattern(&rest.argument);
+                }
+            }
+            BindingPattern::AssignmentPattern(pattern) => {
+                self.mark_binding_pattern(&pattern.left);
+                self.walk_expression(&pattern.right);
+            }
+        }
+    }
+
+    fn prefix_identifier(&mut self, name: &str, offset: usize, parent: PrefixParent) {
+        if do_not_prefix_vue27(name) || self.is_local(name) {
+            return;
+        }
+        let prefix = self.prefix_for(name);
+        match parent {
+            PrefixParent::Reference => self.edits.prepend_right(offset, prefix),
+            PrefixParent::ShorthandPropertyValue => {
+                self.edits.append_left(offset, format!(": {prefix}{name}"))
+            }
+        }
+    }
+
+    fn prefix_for(&self, name: &str) -> &'static str {
+        if self.is_script_setup()
+            && self
+                .options
+                .bindings
+                .get(name)
+                .is_some_and(|binding| binding.starts_with("setup"))
+        {
+            "_setup."
+        } else {
+            "_vm."
+        }
+    }
+
+    fn is_script_setup(&self) -> bool {
+        !matches!(
+            self.options
+                .bindings
+                .get("__isScriptSetup")
+                .map(String::as_str),
+            Some("false")
+        ) && !self.options.bindings.is_empty()
+    }
+
+    fn push_scope(&mut self) {
+        self.locals.push(BTreeMap::new());
+    }
+
+    fn pop_scope(&mut self) {
+        self.locals.pop();
+    }
+
+    fn mark_local(&mut self, name: &str) {
+        if let Some(scope) = self.locals.last_mut() {
+            *scope.entry(name.to_string()).or_insert(0) += 1;
+        }
+    }
+
+    fn is_local(&self, name: &str) -> bool {
+        self.locals
+            .iter()
+            .rev()
+            .any(|scope| scope.get(name).is_some_and(|count| *count > 0))
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PrefixParent {
+    Reference,
+    ShorthandPropertyValue,
+}
+
+fn do_not_prefix_vue27(name: &str) -> bool {
+    matches!(
+        name,
+        "Infinity"
+            | "undefined"
+            | "NaN"
+            | "isFinite"
+            | "isNaN"
+            | "parseFloat"
+            | "parseInt"
+            | "decodeURI"
+            | "decodeURIComponent"
+            | "encodeURI"
+            | "encodeURIComponent"
+            | "Math"
+            | "Number"
+            | "Date"
+            | "Array"
+            | "Object"
+            | "Boolean"
+            | "String"
+            | "RegExp"
+            | "Map"
+            | "Set"
+            | "JSON"
+            | "Intl"
+            | "require"
+            | "arguments"
+            | "_c"
+    )
+}
+
 fn source_with_overwrite(input: &str, start: usize, end: usize, replacement: &str) -> String {
     let start = start.min(input.len());
     let end = end.min(input.len()).max(start);
@@ -1418,6 +1984,18 @@ impl<'a> SourceEdits<'a> {
             end,
             replacement: replacement.into(),
         });
+    }
+
+    fn remove(&mut self, start: usize, end: usize) {
+        self.overwrite(start, end, "");
+    }
+
+    fn prepend_right(&mut self, offset: usize, value: impl Into<String>) {
+        self.overwrite(offset, offset, value);
+    }
+
+    fn append_left(&mut self, offset: usize, value: impl Into<String>) {
+        self.overwrite(offset, offset, value);
     }
 
     fn prepend(&mut self, value: impl AsRef<str>) {
@@ -1901,6 +2479,35 @@ mod tests {
                 },
             ),
             "@Component({})\nclass HelloWorld extends Vue {\n  test = \"\";\n}\nconst script = HelloWorld"
+        );
+    }
+
+    #[test]
+    fn vue27_prefix_identifiers_rewrites_render_scope_references() {
+        let compiler = SfcCompiler::new();
+        let source = "function render(){with(this){return _c('div',{style:{color}},[_v(_s(foo)),_l(list,function(i){return _c('p',[_v(_s(i))])})])}}";
+
+        assert_eq!(
+            compiler.prefix_vue27_identifiers(
+                source,
+                Vue27PrefixIdentifiersOptions::default()
+            ),
+            "function render(){var _vm=this,_c=_vm._self._c;return _c('div',{style:{color: _vm.color}},[_vm._v(_vm._s(_vm.foo)),_vm._l(_vm.list,function(i){return _c('p',[_vm._v(_vm._s(i))])})])}"
+        );
+    }
+
+    #[test]
+    fn vue27_prefix_identifiers_uses_setup_proxy_for_setup_bindings() {
+        let compiler = SfcCompiler::new();
+        let source = "function render(){with(this){return _c('div',{on:{click:function($event){count++}}},[_v(_s(count))])}}";
+        let options = Vue27PrefixIdentifiersOptions {
+            bindings: BTreeMap::from([("count".into(), "setup-ref".into())]),
+            ..Vue27PrefixIdentifiersOptions::default()
+        };
+
+        assert_eq!(
+            compiler.prefix_vue27_identifiers(source, options),
+            "function render(){var _vm=this,_c=_vm._self._c,_setup=_vm._self._setupProxy;return _c('div',{on:{click:function($event){_setup.count++}}},[_vm._v(_vm._s(_setup.count))])}"
         );
     }
 

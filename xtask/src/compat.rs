@@ -2044,6 +2044,7 @@ fn alias_body_arity(target: TargetSpec, export_name: &str, arity: u32) -> u32 {
         | (TargetKind::Vue27Sfc, "parseComponent")
         | (TargetKind::Vue27Sfc, "rewriteDefault")
         | (TargetKind::Vue27Sfc | TargetKind::Vue3Sfc, "compileScript") => arity.max(2),
+        (TargetKind::Vue27Sfc, "prefixIdentifiers") => arity.max(5),
         (TargetKind::Vue26Template | TargetKind::Vue27Template, "generateCodeFrame") => {
             arity.max(3)
         }
@@ -2089,6 +2090,7 @@ fn bridge_command(target: TargetSpec, export_name: &str) -> Option<&'static str>
         (TargetKind::Vue27Sfc, "parse") => Some("sfc.vue27.parse"),
         (TargetKind::Vue27Sfc, "parseComponent") => Some("sfc.vue27.parseComponent"),
         (TargetKind::Vue27Sfc, "rewriteDefault") => Some("sfc.vue27.rewriteDefault"),
+        (TargetKind::Vue27Sfc, "prefixIdentifiers") => Some("sfc.vue27.prefixIdentifiers"),
         (TargetKind::Vue3Sfc, "parse") => Some("sfc.parse"),
         (TargetKind::Vue27Sfc, "compileTemplate") => Some("sfc.vue27.compileTemplate"),
         (TargetKind::Vue3Sfc, "compileTemplate") => Some("sfc.compileTemplate"),
@@ -2124,6 +2126,10 @@ fn alias_argument_object(target: TargetSpec, export_name: &str, _arity: u32) -> 
         }
         (TargetKind::Vue27Sfc, "rewriteDefault") => {
             "{ source: a0 == null ? '' : String(a0), variable: a1 || 'script', plugins: a2 }"
+                .into()
+        }
+        (TargetKind::Vue27Sfc, "prefixIdentifiers") => {
+            "{ source: a0 == null ? '' : String(a0), isFunctional: !!a1, isTS: !!a2, babelOptions: a3 || {}, bindings: a4 || {} }"
                 .into()
         }
         (TargetKind::Vue27Sfc, "compileTemplate") => {
@@ -9446,6 +9452,7 @@ fn run_vitest_conformance(
     let absolute_alias_root = absolute_path(&alias_root);
     let absolute_prepared_root = absolute_path(&prepared_root);
     let absolute_output_file = absolute_path(&output_file);
+    let absolute_bridge_bin = absolute_path(&ensure_node_bridge_binary()?);
     let node_modules = absolute_npm_root.join("node_modules");
     let vitest_bin = node_modules
         .join("vitest")
@@ -9459,6 +9466,7 @@ fn run_vitest_conformance(
         .arg("--globals")
         .arg("--reporter=json")
         .arg(format!("--outputFile={}", absolute_output_file.display()))
+        .env("VUEC_NODE_BRIDGE", &absolute_bridge_bin)
         .env("VUEC_RUST_ALIAS_ROOT", &absolute_alias_root)
         .env("VUEC_OFFICIAL_NPM_ROOT", &absolute_npm_root)
         .env(
@@ -9509,9 +9517,11 @@ fn run_jasmine_conformance(
     let absolute_alias_root = absolute_path(&alias_root);
     let absolute_prepared_root = absolute_path(&prepared_root);
     let absolute_output_file = absolute_path(&output_file);
+    let absolute_bridge_bin = absolute_path(&ensure_node_bridge_binary()?);
     let node = resolve_program("node");
     let output = Command::new(node)
         .arg("vuec-jasmine-runner.js")
+        .env("VUEC_NODE_BRIDGE", &absolute_bridge_bin)
         .env("VUEC_RUST_ALIAS_ROOT", &absolute_alias_root)
         .env("VUEC_OFFICIAL_NPM_ROOT", &absolute_npm_root)
         .env("VUEC_JASMINE_REPORT", &absolute_output_file)
@@ -10409,14 +10419,60 @@ fn write_vue27_sfc_source_shims(prepared_root: &Path) -> Result<()> {
         "compileStyle",
         "cssVars",
         "rewriteDefault",
-        "prefixIdentifiers",
     ] {
         write_text(
             &sfc_src.join(format!("{module}.ts")),
             "export * from 'vue/compiler-sfc'\n",
         )?;
     }
+    write_text(
+        &sfc_src.join("prefixIdentifiers.ts"),
+        &vue27_sfc_prefix_identifiers_source_shim(),
+    )?;
     Ok(())
+}
+
+fn vue27_sfc_prefix_identifiers_source_shim() -> String {
+    let bridge_path = PathBuf::from("target")
+        .join("debug")
+        .join(if cfg!(windows) {
+            "vuec_node_bridge.exe"
+        } else {
+            "vuec_node_bridge"
+        });
+    format!(
+        r#"
+import cp from 'node:child_process'
+import path from 'node:path'
+
+const bridgeBin = process.env.VUEC_NODE_BRIDGE || path.resolve(process.cwd(), {})
+
+function callBridge(command, payload) {{
+  const result = cp.spawnSync(bridgeBin, [command], {{
+    input: JSON.stringify(payload || {{}}),
+    encoding: 'utf8'
+  }})
+  if (result.error) throw result.error
+  if (result.status !== 0) {{
+    const error = new Error(result.stderr || result.stdout || `vuec bridge command failed: ${{command}}`)
+    ;(error as any).code = 'VUEC_BRIDGE_FAILED'
+    throw error
+  }}
+  return result.stdout.trim() ? JSON.parse(result.stdout) : undefined
+}}
+
+export function prefixIdentifiers(source, isFunctional = false, isTS = false, babelOptions = {{}}, bindings) {{
+  return callBridge('sfc.vue27.prefixIdentifiers', {{
+    source: source == null ? '' : String(source),
+    isFunctional: !!isFunctional,
+    isTS: !!isTS,
+    babelOptions: babelOptions || {{}},
+    bindings: bindings || {{}}
+  }})
+}}
+"#,
+        js_string_literal(&bridge_path.to_string_lossy())
+    )
 }
 
 fn write_vue27_compiler_conformance_shims(prepared_root: &Path) -> Result<()> {
@@ -10485,7 +10541,7 @@ export default {
       'vue-template-compiler': path.resolve(aliasRoot, 'node_modules/vue-template-compiler/index.js'),
       '@babel/parser': path.resolve(npmRoot, 'node_modules/@babel/parser/lib/index.js'),
       postcss: path.resolve(npmRoot, 'node_modules/postcss/lib/postcss.mjs'),
-      prettier: path.resolve(npmRoot, 'node_modules/prettier/standalone.js'),
+      prettier: path.resolve(npmRoot, 'node_modules/prettier/index.js'),
       typescript: path.resolve(npmRoot, 'node_modules/typescript/lib/typescript.js'),
     },
   },
