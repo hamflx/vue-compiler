@@ -1003,6 +1003,7 @@ fn verify_release_docs() -> Result<compat::JsonReport> {
         PathBuf::from("docs").join("RELEASE_CHECKLIST.md"),
         PathBuf::from("docs").join("CONFORMANCE_REPORT_TEMPLATE.md"),
         PathBuf::from("docs").join("ARCHITECTURE.md"),
+        PathBuf::from("docs").join("API.md"),
         PathBuf::from("docs").join("SECURITY_SUPPLY_CHAIN.md"),
     ] {
         match require_non_empty_file(&path) {
@@ -1103,6 +1104,40 @@ fn verify_release_docs() -> Result<compat::JsonReport> {
         }
     }
 
+    let api_path = PathBuf::from("docs").join("API.md");
+    let api_requirements = [
+        "## Rust Crate APIs",
+        "## CLI",
+        "## NAPI",
+        "## WASM",
+        "## Official Package-Name Aliases",
+        "## Verification",
+        "compileVue2",
+        "compileVue3Dom",
+        "compileSfcTemplate",
+        "baseCompileVue3",
+        "compile-template",
+        "verify-napi-api",
+        "diff-api",
+    ];
+    match require_file_contains_all(&api_path, &api_requirements) {
+        Ok(()) => items.push(compat::ReportItem::new(
+            "api-doc",
+            compat::ReportStatus::Pass,
+            "API document covers Rust crate, CLI, NAPI, WASM, official alias, and verification surfaces",
+            Some(api_path),
+        )),
+        Err(err) => {
+            violations.push(format!("{err:#}"));
+            items.push(compat::ReportItem::new(
+                "api-doc",
+                compat::ReportStatus::Fail,
+                format!("{err:#}"),
+                Some(api_path),
+            ));
+        }
+    }
+
     let security_path = PathBuf::from("docs").join("SECURITY_SUPPLY_CHAIN.md");
     let security_requirements = [
         "## Locked Inputs",
@@ -1180,7 +1215,7 @@ fn verify_release_docs() -> Result<compat::JsonReport> {
         compat::JsonReport::new("verify_release_docs", status)
             .with_items(items)
             .with_violations(violations)
-            .with_note("verifies M20 release documentation skeletons, package README coverage, and explicit README.md package file-list entries"),
+            .with_note("verifies M20 release documentation skeletons, API documentation, package README coverage, and explicit README.md package file-list entries"),
     )
 }
 

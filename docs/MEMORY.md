@@ -1,5 +1,9 @@
 # Memory
 
+- Current round: completed the M20 release-facing API documentation slice.
+- Added `docs/API.md`, documenting supported Rust crate compiler entry points, `vuec` CLI commands, `@vuec-rs/native` NAPI exports, `@vuec-rs/wasm` exports, official package-name aliases, and API verification gates.
+- Extended `cargo xtask verify-release-docs` to require the API document and its Rust crate, CLI, NAPI, WASM, alias, and verification sections. This is documentation/release verification only; it does not change compiler semantics, `xtask/src/compat.rs`, conformance classification, or AST/HIR/MIR structures.
+
 - Current round: completed the M20 security / supply-chain slice.
 - Added `docs/SECURITY_SUPPLY_CHAIN.md`, documenting locked inputs, npm/Rust metadata rules, external advisory audit commands, artifact provenance, and `xtask/src/compat.rs` compatibility-boundary handling for releases.
 - Added npm license metadata to maintained package manifests and `cargo xtask verify-supply-chain`, which checks `Cargo.lock`, `compat/official-revisions.lock`, pinned root `packageManager`, npm license metadata, exact npm dependency versions, native platform package file lists, and Cargo metadata resolution. This is release/security verification only; it does not change compiler semantics, `xtask/src/compat.rs`, or AST/HIR/MIR structures.

@@ -33,11 +33,13 @@ Conformance reports must preserve `rust-backed`, `mixed`, and `shim-backed` cove
 
 ## Release Documentation Coverage
 
-`cargo xtask verify-release-docs` verifies that the repository README, CHANGELOG, compatibility matrix, release checklist, conformance report template, architecture document, and every `packages/**/package.json` directory README are present and non-empty. If a package manifest has a `files` array, the gate also requires `README.md` to be listed explicitly.
+`cargo xtask verify-release-docs` verifies that the repository README, CHANGELOG, compatibility matrix, release checklist, conformance report template, architecture document, API reference, and every `packages/**/package.json` directory README are present and non-empty. If a package manifest has a `files` array, the gate also requires `README.md` to be listed explicitly.
 
 The conformance report template requires report identity, official baselines, execution scope, `rust-backed` / `mixed` / `shim-backed` coverage classification, file-level coverage, failure summary, `xtask/src/compat.rs` compatibility classification, and acceptance-decision sections.
 
 The architecture document requires release-facing coverage of compiler layering, workspace ownership, AST/HIR/MIR arena constraints, public projection, entry points, compatibility harness boundaries, conformance evidence, and release gates.
+
+The API reference requires release-facing coverage of Rust crate APIs, CLI commands, NAPI exports, WASM exports, official package-name aliases, and API verification gates such as `cargo xtask diff-api --all` and `cargo xtask verify-napi-api`.
 
 `cargo xtask verify-crate-metadata` verifies that every workspace crate has crates.io-facing package metadata and a non-empty crate README. Public crates must have versioned path dependencies; internal tooling and package-binding crates are explicitly marked `publish = false`.
 

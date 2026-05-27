@@ -52,4 +52,5 @@ cargo xtask verify-supply-chain
 - `docs/COMPATIBILITY_MATRIX.md`: current official compatibility matrix.
 - `docs/CONFORMANCE_REPORT_TEMPLATE.md`: release/stage conformance report template.
 - `docs/ARCHITECTURE.md`: release-facing compiler architecture map.
+- `docs/API.md`: release-facing Rust crate, CLI, NAPI, WASM, and alias API reference.
 - `docs/SECURITY_SUPPLY_CHAIN.md`: release security and supply-chain checks.
