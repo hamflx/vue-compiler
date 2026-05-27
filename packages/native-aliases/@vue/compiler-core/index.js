@@ -204,7 +204,7 @@ function normalizeOptions(options) {
 function baseCompile(source) {
   const options = normalizeOptions(arguments[1]);
   validateBaseCompileOptions(options);
-  return native.baseCompileVue3(String(source || ''), options);
+  return native.baseCompileVue3(String(source || ''), vue3NativeOptions(options, source));
 }
 
 function compile(source, options) {
@@ -212,7 +212,9 @@ function compile(source, options) {
 }
 
 function baseParse(content, options) {
-  return native.baseParseVue3(String(content || ''), normalizeOptions(options));
+  const source = String(content || '');
+  const opts = normalizeOptions(options);
+  return hydrateVue3Ast(native.baseParseVue3(source, vue3NativeOptions(opts, source)), opts);
 }
 
 function parse(content, options) {
@@ -220,7 +222,7 @@ function parse(content, options) {
 }
 
 function generate(ast) {
-  return native.generateVue3Core(ast || {}, normalizeOptions(arguments[1]));
+  return native.generateVue3Core(hydrateVue3Ast(ast || {}, normalizeOptions(arguments[1])), normalizeOptions(arguments[1]));
 }
 
 function generateCodeFrame(source) {
@@ -236,6 +238,114 @@ function validateBaseCompileOptions(options) {
   if (options.scopeId && !isModuleMode) {
     throw createCompilerError(ErrorCodes.X_SCOPE_ID_NOT_SUPPORTED);
   }
+}
+
+function vue3NativeOptions(options, source) {
+  if (!options || typeof options !== 'object') return {};
+  const out = {};
+  for (const key of Object.keys(options)) {
+    if (typeof options[key] !== 'function') out[key] = options[key];
+  }
+  const tags = extractVueTemplateTags(String(source || ''));
+  if (hasVuePredicateOption(options, 'isVoidTag')) {
+    out.__vuecVoidTags = collectVuePredicateHits(options.isVoidTag, tags);
+  }
+  if (hasVuePredicateOption(options, 'isPreTag')) {
+    out.__vuecPreTags = collectVuePredicateHits(options.isPreTag, tags);
+  }
+  if (hasVuePredicateOption(options, 'isIgnoreNewlineTag')) {
+    out.__vuecIgnoreNewlineTags = collectVuePredicateHits(options.isIgnoreNewlineTag, tags);
+  }
+  if (hasVuePredicateOption(options, 'isNativeTag')) {
+    out.__vuecNativeTags = collectVuePredicateHits(options.isNativeTag, tags);
+  }
+  out.__vuecCustomElements = collectVuePredicateHits(options.isCustomElement, tags);
+  out.__vuecBuiltInComponents = collectVuePredicateHits(options.isBuiltInComponent, tags);
+  return out;
+}
+
+function hasVuePredicateOption(options, name) {
+  return Object.prototype.hasOwnProperty.call(options, name) &&
+    (typeof options[name] === 'function' || Array.isArray(options[name]));
+}
+
+function extractVueTemplateTags(source) {
+  const tags = [];
+  const seen = new Set();
+  const pattern = /<\/?\s*([A-Za-z][A-Za-z0-9._:-]*)/g;
+  let match;
+  while ((match = pattern.exec(source))) {
+    const tag = match[1];
+    if (!seen.has(tag)) {
+      seen.add(tag);
+      tags.push(tag);
+    }
+  }
+  return tags;
+}
+
+function collectVuePredicateHits(predicate, values) {
+  if (Array.isArray(predicate)) return predicate.map(String);
+  if (typeof predicate !== 'function') return [];
+  const hits = [];
+  for (const value of values) {
+    try {
+      if (predicate(value)) hits.push(value);
+    } catch (_) {}
+  }
+  return hits;
+}
+
+function hydrateVue3Ast(ast, options) {
+  emitVue3ParseDiagnostics(ast, options);
+  hydrateVue3Node(ast);
+  return ast;
+}
+
+function emitVue3ParseDiagnostics(ast, options) {
+  if (!ast || !Array.isArray(ast.__vuecDiagnostics)) return;
+  const onError = options && typeof options.onError === 'function'
+    ? options.onError
+    : error => { throw error; };
+  for (const diagnostic of ast.__vuecDiagnostics) {
+    const error = new SyntaxError(errorMessages[diagnostic.code] || 'Vue compiler parse error');
+    error.code = diagnostic.code;
+    error.loc = diagnostic.loc;
+    onError(error);
+  }
+  delete ast.__vuecDiagnostics;
+}
+
+function hydrateVue3Node(node) {
+  if (!node || typeof node !== 'object') return node;
+  if (node.type === NodeTypes.ROOT) {
+    node.helpers = new Set(node.helpers || []);
+    node.components = node.components || [];
+    node.directives = node.directives || [];
+    node.hoists = node.hoists || [];
+    node.imports = node.imports || [];
+    node.cached = node.cached || [];
+    node.temps = node.temps || 0;
+    if (node.codegenNode === null) node.codegenNode = undefined;
+  }
+  if (node.type === NodeTypes.ELEMENT) {
+    if (node.codegenNode === null) node.codegenNode = undefined;
+    if (node.isSelfClosing === null) delete node.isSelfClosing;
+  }
+  if (node.type === NodeTypes.ATTRIBUTE) {
+    if (node.value === null) node.value = undefined;
+  }
+  if (node.type === NodeTypes.DIRECTIVE) {
+    if (node.exp === null) node.exp = undefined;
+    if (node.arg === null) node.arg = undefined;
+  }
+  if (Array.isArray(node.children)) node.children.forEach(hydrateVue3Node);
+  if (Array.isArray(node.props)) node.props.forEach(hydrateVue3Node);
+  if (Array.isArray(node.modifiers)) node.modifiers.forEach(hydrateVue3Node);
+  if (node.content && typeof node.content === 'object') hydrateVue3Node(node.content);
+  if (node.exp && typeof node.exp === 'object') hydrateVue3Node(node.exp);
+  if (node.arg && typeof node.arg === 'object') hydrateVue3Node(node.arg);
+  return node;
 }
 
 function advancePositionWithClone(pos, source) {

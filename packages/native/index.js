@@ -126,6 +126,22 @@ function dehydrateForNative(value, seen = new WeakSet()) {
       return dehydrated === undefined ? null : dehydrated;
     });
   }
+  if (value instanceof Set) {
+    return Array.from(value, item => {
+      const dehydrated = dehydrateForNative(item, seen);
+      return dehydrated === undefined ? null : dehydrated;
+    });
+  }
+  if (value instanceof Map) {
+    const out = {};
+    for (const [key, item] of value.entries()) {
+      const dehydrated = dehydrateForNative(item, seen);
+      if (dehydrated !== undefined) {
+        out[String(key)] = dehydrated;
+      }
+    }
+    return out;
+  }
   const out = {};
   for (const key of Object.keys(value)) {
     const dehydrated = dehydrateForNative(value[key], seen);
@@ -141,27 +157,27 @@ function rewriteDefaultVue27(source, variable, parserPlugins) {
 }
 
 function baseCompileVue3(source, options = {}) {
-  return fromJson(binding.baseCompileVue3(source, options));
+  return fromJson(binding.baseCompileVue3(source, dehydrateForNative(options || {})));
 }
 
 function baseParseVue3(source, options = {}) {
-  return fromJson(binding.baseParseVue3(source, options));
+  return fromJson(binding.baseParseVue3(source, dehydrateForNative(options || {})));
 }
 
 function generateVue3Core(ast, options = {}) {
-  return fromJson(binding.generateVue3Core(ast || {}, options));
+  return fromJson(binding.generateVue3Core(dehydrateForNative(ast || {}), dehydrateForNative(options || {})));
 }
 
 function compileVue3Dom(source, options = {}) {
-  return fromJson(binding.compileVue3Dom(source, options));
+  return fromJson(binding.compileVue3Dom(source, dehydrateForNative(options || {})));
 }
 
 function parseVue3Dom(source, options = {}) {
-  return fromJson(binding.parseVue3Dom(source, options));
+  return fromJson(binding.parseVue3Dom(source, dehydrateForNative(options || {})));
 }
 
 function compileVue3Ssr(source, options = {}) {
-  return fromJson(binding.compileVue3Ssr(source, options));
+  return fromJson(binding.compileVue3Ssr(source, dehydrateForNative(options || {})));
 }
 
 function parseSfc(source, options = {}) {
