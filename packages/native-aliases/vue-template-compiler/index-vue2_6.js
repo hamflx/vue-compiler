@@ -28,6 +28,10 @@ function generateCodeFrame(source, start, end) {
   return native.generateCodeFrameVue2(String(source || ''), start || 0, end || start || 0);
 }
 
+function callBridge(command, payload) {
+  return native.callVue2Bridge(command, payload || {});
+}
+
 function normalizeVue2PublicCompileResult(result, options) {
   if (!result || typeof result !== 'object') return result;
   const out = { ...result };
@@ -57,7 +61,7 @@ function normalizeIssues(issues, ranged) {
   });
 }
 
-module.exports = {
+const api = {
   compile,
   compileToFunctions,
   ssrCompile,
@@ -65,3 +69,11 @@ module.exports = {
   parseComponent,
   generateCodeFrame,
 };
+
+Object.defineProperty(api, '__vuecRuntime', {
+  value: { callBridge },
+  enumerable: false,
+  configurable: true,
+});
+
+module.exports = api;

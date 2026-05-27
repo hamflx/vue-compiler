@@ -10,6 +10,7 @@
 
 use napi::{bindgen_prelude::Unknown, Env, Result};
 use napi_derive::napi;
+use serde_json::Map;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use vuec_ast::{NodeSpan, Vue3Ast, Vue3AstKind, Vue3Expression, Vue3Prop};
@@ -18,7 +19,7 @@ use vuec_sfc::{
     Vue27RewriteDefaultOptions, Vue27TemplatePreprocessOptions,
 };
 use vuec_source::{FileId, Span};
-use vuec_vue2::Vue2CompileOptions;
+use vuec_vue2::{Vue2CompileOptions, Vue2CompiledResult, Vue2Element, Vue2Error, Vue2Warning};
 use vuec_vue3_core::{TemplateSource, Vue3CompilerOptions, Vue3Dialect};
 use vuec_vue3_dom::{
     apply_dom_parser_defaults, compile as compile_dom, parse as parse_dom, DomCompilerOptions,
@@ -34,10 +35,9 @@ pub fn version() -> &'static str {
 #[napi(js_name = "compileVue2")]
 /// Compiles a Vue 2 template and returns a JSON string result.
 pub fn compile_vue2(env: Env, template: String, options: Option<Unknown>) -> Result<String> {
-    to_json_string(vuec_vue2::compile(
-        &template,
-        vue2_options(from_js_options(&env, options)?),
-    ))
+    let options = vue2_options(from_js_options(&env, options)?);
+    let compiled = vuec_vue2::compile(&template, options.clone());
+    to_json_string(vue2_compile_value(&compiled, &options))
 }
 
 #[napi(js_name = "compileToFunctionsVue2")]
@@ -56,16 +56,83 @@ pub fn compile_to_functions_vue2(
 #[napi(js_name = "compileSsrVue2")]
 /// Compiles a Vue 2 template for SSR and returns a JSON string result.
 pub fn compile_ssr_vue2(env: Env, template: String, options: Option<Unknown>) -> Result<String> {
-    to_json_string(vuec_vue2::compile_ssr(
-        &template,
-        vue2_options(from_js_options(&env, options)?),
-    ))
+    let options = vue2_options(from_js_options(&env, options)?);
+    let compiled = vuec_vue2::compile_ssr(&template, options.clone());
+    to_json_string(vue2_compile_value(&compiled, &options))
 }
 
 #[napi(js_name = "generateCodeFrameVue2")]
 /// Generates a Vue 2 compiler code frame.
 pub fn generate_code_frame_vue2(source: String, start: u32, end: u32) -> String {
     vuec_vue2::generate_code_frame(&source, start as usize, end as usize)
+}
+
+#[napi(js_name = "callVue2Bridge")]
+/// Calls Vue 2 Rust compiler bridge operations used by official source tests.
+pub fn call_vue2_bridge(env: Env, command: String, payload: Unknown) -> Result<String> {
+    let payload = from_js_options(&env, Some(payload))?;
+    match command.as_str() {
+        "vue2.generate" => {
+            let options = vue2_options(payload.get("options").cloned().unwrap_or(Value::Null));
+            let element = payload
+                .get("ast")
+                .filter(|ast| !ast.is_null())
+                .map(|ast| serde_json::from_value::<Vue2Element>(ast.clone()))
+                .transpose()
+                .map_err(|err| {
+                    napi::Error::from_reason(format!(
+                        "failed to deserialize Vue 2 AST element for codegen: {err}"
+                    ))
+                })?;
+            let generated = vuec_vue2::generate(element.as_ref(), &options);
+            to_json_string(json!({
+                "render": generated.render,
+                "staticRenderFns": generated.static_render_fns,
+                "static_render_fns": generated.static_render_fns,
+            }))
+        }
+        "vue2.optimize" => {
+            let options = vue2_options(payload.get("options").cloned().unwrap_or(Value::Null));
+            let mut element = payload
+                .get("ast")
+                .filter(|ast| !ast.is_null())
+                .map(|ast| serde_json::from_value::<Vue2Element>(ast.clone()))
+                .transpose()
+                .map_err(|err| {
+                    napi::Error::from_reason(format!(
+                        "failed to deserialize Vue 2 AST element for optimizer: {err}"
+                    ))
+                })?;
+            if let Some(element) = element.as_mut() {
+                vuec_vue2::optimize(element, &options);
+            }
+            let public = element
+                .as_ref()
+                .map(vue2_public_element_ast_value)
+                .unwrap_or(Value::Null);
+            to_json_string(json!({
+                "ast": public,
+                "ast_public": public,
+                "element_public_ast": public,
+                "element_ast": element,
+            }))
+        }
+        "vue2.generateCodeFrame" => {
+            let source = payload
+                .get("source")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let start = payload.get("start").and_then(Value::as_u64).unwrap_or(0) as usize;
+            let end = payload
+                .get("end")
+                .and_then(Value::as_u64)
+                .unwrap_or(start as u64) as usize;
+            to_json_string(vuec_vue2::generate_code_frame(source, start, end))
+        }
+        other => Err(napi::Error::from_reason(format!(
+            "unsupported Vue 2 bridge command: {other}"
+        ))),
+    }
 }
 
 #[napi(js_name = "rewriteDefaultVue27")]
@@ -386,6 +453,344 @@ fn vue2_options(value: Value) -> Vue2CompileOptions {
             .unwrap_or(options.bindings_is_script_setup);
     }
     options
+}
+
+fn vue2_compile_value(compiled: &Vue2CompiledResult, options: &Vue2CompileOptions) -> Value {
+    json!({
+        "ast": vue2_public_ast_value(compiled),
+        "ast_document": compiled.ast,
+        "element_ast": compiled.element_ast,
+        "ast_public": vue2_public_ast_value(compiled),
+        "element_public_ast": vue2_public_ast_value(compiled),
+        "render": compiled.render,
+        "staticRenderFns": compiled.static_render_fns,
+        "static_render_fns": compiled.static_render_fns,
+        "errors": vue2_errors_value(&compiled.errors, options.output_source_range),
+        "tips": vue2_tips_value(&compiled.tips, options.output_source_range),
+        "diagnostics": compiled.diagnostics,
+    })
+}
+
+fn vue2_public_ast_value(compiled: &Vue2CompiledResult) -> Value {
+    compiled
+        .element_ast
+        .as_ref()
+        .map(vue2_public_element_ast_value)
+        .unwrap_or(Value::Null)
+}
+
+fn vue2_public_element_ast_value(element: &Vue2Element) -> Value {
+    let mut object = Map::new();
+    object.insert("type".into(), json!(1));
+    object.insert("tag".into(), json!(element.tag));
+    if let Some(ns) = element.ns.as_ref() {
+        object.insert("ns".into(), json!(ns));
+    }
+    object.insert(
+        "attrsList".into(),
+        Value::Array(
+            element
+                .raw_attrs_list
+                .iter()
+                .map(vue2_public_raw_attr_value)
+                .collect(),
+        ),
+    );
+    object.insert("attrsMap".into(), json!(element.attrs_map));
+    object.insert(
+        "rawAttrsMap".into(),
+        Value::Object(
+            element
+                .raw_attrs_map
+                .iter()
+                .map(|(name, attr)| (name.clone(), vue2_public_raw_attr_value(attr)))
+                .collect(),
+        ),
+    );
+    if !element.attrs.is_empty() {
+        object.insert(
+            "attrs".into(),
+            Value::Array(element.attrs.iter().map(vue2_public_attr_value).collect()),
+        );
+    }
+    if !element.props.is_empty() {
+        object.insert(
+            "props".into(),
+            Value::Array(element.props.iter().map(vue2_public_attr_value).collect()),
+        );
+    }
+    if !element.dynamic_attrs.is_empty() {
+        object.insert(
+            "dynamicAttrs".into(),
+            Value::Array(
+                element
+                    .dynamic_attrs
+                    .iter()
+                    .map(vue2_public_attr_value)
+                    .collect(),
+            ),
+        );
+    }
+    if !element.directives.is_empty() {
+        object.insert(
+            "directives".into(),
+            Value::Array(
+                element
+                    .directives
+                    .iter()
+                    .map(vue2_public_directive_value)
+                    .collect(),
+            ),
+        );
+    }
+    if !element.events.is_empty() {
+        object.insert("events".into(), vue2_public_events_value(&element.events));
+    }
+    if !element.native_events.is_empty() {
+        object.insert(
+            "nativeEvents".into(),
+            vue2_public_events_value(&element.native_events),
+        );
+    }
+    object.insert(
+        "children".into(),
+        Value::Array(
+            element
+                .children
+                .iter()
+                .map(vue2_public_node_ast_value)
+                .collect(),
+        ),
+    );
+    object.insert("plain".into(), json!(element.plain));
+    insert_true(&mut object, "forbidden", element.forbidden);
+    insert_true(&mut object, "pre", element.pre);
+    insert_true(&mut object, "once", element.once);
+    insert_true(&mut object, "hasBindings", element.has_bindings);
+    insert_optional_string(&mut object, "if", element.if_exp.as_ref());
+    insert_optional_string(&mut object, "elseif", element.elseif.as_ref());
+    insert_true(&mut object, "else", element.else_branch);
+    if !element.if_conditions.is_empty() {
+        object.insert(
+            "ifConditions".into(),
+            Value::Array(
+                element
+                    .if_conditions
+                    .iter()
+                    .map(vue2_public_if_condition_value)
+                    .collect(),
+            ),
+        );
+    }
+    insert_optional_string(&mut object, "for", element.for_exp.as_ref());
+    insert_optional_string(&mut object, "alias", element.alias.as_ref());
+    insert_optional_string(&mut object, "iterator1", element.iterator1.as_ref());
+    insert_optional_string(&mut object, "iterator2", element.iterator2.as_ref());
+    insert_optional_string(&mut object, "key", element.key.as_ref());
+    insert_optional_string(&mut object, "ref", element.ref_name.as_ref());
+    insert_true(&mut object, "refInFor", element.ref_in_for);
+    insert_optional_string(&mut object, "slotName", element.slot_name.as_ref());
+    insert_optional_string(&mut object, "slotTarget", element.slot_target.as_ref());
+    insert_true(
+        &mut object,
+        "slotTargetDynamic",
+        element.slot_target_dynamic,
+    );
+    insert_optional_string(&mut object, "slotScope", element.slot_scope.as_ref());
+    insert_true(&mut object, "slotNewSyntax", element.slot_new_syntax);
+    if !element.scoped_slots.is_empty() {
+        object.insert(
+            "scopedSlots".into(),
+            Value::Object(
+                element
+                    .scoped_slots
+                    .iter()
+                    .map(|(name, slot)| {
+                        (
+                            vue2_public_slot_key(name),
+                            vue2_public_element_ast_value(slot),
+                        )
+                    })
+                    .collect(),
+            ),
+        );
+    }
+    insert_optional_string(&mut object, "component", element.component.as_ref());
+    insert_true(&mut object, "inlineTemplate", element.inline_template);
+    insert_optional_string(&mut object, "staticClass", element.static_class.as_ref());
+    insert_optional_string(&mut object, "classBinding", element.class_binding.as_ref());
+    insert_optional_string(&mut object, "staticStyle", element.static_style.as_ref());
+    insert_optional_string(&mut object, "styleBinding", element.style_binding.as_ref());
+    if let Some(model) = element.model.as_ref() {
+        object.insert("model".into(), json!(model));
+    }
+    if let Some(wrap_data) = element.wrap_data.as_ref() {
+        object.insert("wrapData".into(), json!(wrap_data));
+    }
+    insert_optional_string(
+        &mut object,
+        "wrapListeners",
+        element.wrap_listeners.as_ref(),
+    );
+    if let Some(validate) = element.validate.as_ref() {
+        object.insert("validate".into(), json!(validate));
+    }
+    if !element.validators.is_empty() {
+        object.insert("validators".into(), json!(element.validators));
+    }
+    object.insert("static".into(), json!(element.static_node));
+    object.insert("staticRoot".into(), json!(element.static_root));
+    object.insert("staticInFor".into(), json!(element.static_in_for));
+    Value::Object(object)
+}
+
+fn vue2_public_node_ast_value(node: &vuec_vue2::Vue2Node) -> Value {
+    match node {
+        vuec_vue2::Vue2Node::Element(element) => vue2_public_element_ast_value(element),
+        vuec_vue2::Vue2Node::Text(text) => {
+            let mut object = Map::new();
+            if let Some(expression) = text.expression.as_ref() {
+                object.insert("type".into(), json!(2));
+                object.insert("expression".into(), json!(expression));
+                object.insert(
+                    "tokens".into(),
+                    json!([{ "@binding": vue27_binding_from_expression(expression) }]),
+                );
+            } else {
+                object.insert("type".into(), json!(3));
+            }
+            object.insert("text".into(), json!(text.text));
+            if text.is_comment {
+                object.insert("isComment".into(), json!(true));
+            }
+            object.insert("static".into(), json!(text.static_node));
+            Value::Object(object)
+        }
+    }
+}
+
+fn vue2_public_raw_attr_value(attr: &vuec_vue2::Vue2Attribute) -> Value {
+    json!({
+        "name": attr.name,
+        "value": attr.value,
+    })
+}
+
+fn vue2_public_attr_value(attr: &vuec_vue2::Vue2Attribute) -> Value {
+    json!({
+        "name": attr.name,
+        "value": attr.value,
+        "dynamic": attr.dynamic,
+    })
+}
+
+fn vue2_public_directive_value(directive: &vuec_vue2::Vue2Directive) -> Value {
+    let mut object = Map::new();
+    object.insert("name".into(), json!(directive.name));
+    object.insert("rawName".into(), json!(directive.raw_name));
+    if let Some(value) = directive.value.as_ref() {
+        object.insert("value".into(), json!(value));
+    }
+    if let Some(arg) = directive.arg.as_ref() {
+        object.insert("arg".into(), json!(arg));
+    }
+    insert_true(&mut object, "isDynamicArg", directive.is_dynamic_arg);
+    if !directive.modifiers.is_empty() {
+        object.insert("modifiers".into(), json!(directive.modifiers));
+    }
+    Value::Object(object)
+}
+
+fn vue2_public_events_value(events: &BTreeMap<String, Vec<vuec_vue2::Vue2EventHandler>>) -> Value {
+    Value::Object(
+        events
+            .iter()
+            .map(|(name, handlers)| {
+                let value = if handlers.len() == 1 {
+                    vue2_public_event_handler_value(&handlers[0])
+                } else {
+                    Value::Array(
+                        handlers
+                            .iter()
+                            .map(vue2_public_event_handler_value)
+                            .collect(),
+                    )
+                };
+                (name.clone(), value)
+            })
+            .collect(),
+    )
+}
+
+fn vue2_public_event_handler_value(handler: &vuec_vue2::Vue2EventHandler) -> Value {
+    let mut object = Map::new();
+    object.insert("value".into(), json!(handler.value));
+    insert_true(&mut object, "dynamic", handler.dynamic);
+    if !handler.modifier_order.is_empty() {
+        object.insert("modifierOrder".into(), json!(handler.modifier_order));
+    }
+    insert_true(
+        &mut object,
+        "hasModifierObject",
+        handler.has_modifier_object,
+    );
+    if !handler.modifiers.is_empty() {
+        object.insert("modifiers".into(), json!(handler.modifiers));
+    }
+    Value::Object(object)
+}
+
+fn vue2_public_if_condition_value(condition: &vuec_vue2::Vue2IfCondition) -> Value {
+    json!({
+        "exp": condition.exp,
+        "block": vue2_public_element_ast_value(&condition.block),
+    })
+}
+
+fn vue2_public_slot_key(name: &str) -> String {
+    name.strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .unwrap_or(name)
+        .to_string()
+}
+
+fn vue27_binding_from_expression(expression: &str) -> String {
+    let trimmed = expression.trim();
+    if is_simple_identifier(trimmed) {
+        return trimmed.to_string();
+    }
+    trimmed.to_string()
+}
+
+fn insert_optional_string(object: &mut Map<String, Value>, key: &str, value: Option<&String>) {
+    if let Some(value) = value {
+        object.insert(key.into(), json!(value));
+    }
+}
+
+fn insert_true(object: &mut Map<String, Value>, key: &str, value: bool) {
+    if value {
+        object.insert(key.into(), json!(true));
+    }
+}
+
+fn vue2_errors_value(errors: &[Vue2Error], output_source_range: bool) -> Value {
+    if output_source_range {
+        json!(errors)
+    } else {
+        json!(errors
+            .iter()
+            .map(|error| error.msg.clone())
+            .collect::<Vec<_>>())
+    }
+}
+
+fn vue2_tips_value(tips: &[Vue2Warning], output_source_range: bool) -> Value {
+    if output_source_range {
+        json!(tips)
+    } else {
+        json!(tips.iter().map(|tip| tip.msg.clone()).collect::<Vec<_>>())
+    }
 }
 
 fn vue27_template_vue2_options(value: Value) -> Vue2CompileOptions {
@@ -1004,6 +1409,7 @@ pub fn api_manifest() -> Result<String> {
                 "compileToFunctionsVue2",
                 "compileSsrVue2",
                 "generateCodeFrameVue2",
+                "callVue2Bridge",
                 "rewriteDefaultVue27",
                 "baseCompileVue3",
                 "baseParseVue3",

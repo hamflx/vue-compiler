@@ -49,7 +49,7 @@ is `packages/native/index.d.ts`.
 | Export group | Exports |
 | --- | --- |
 | Introspection | `version`, `apiManifest`, `bindingInfo` |
-| Vue 2 | `compileVue2`, `compileToFunctionsVue2`, `compileSsrVue2`, `generateCodeFrameVue2`, `rewriteDefaultVue27` |
+| Vue 2 | `compileVue2`, `compileToFunctionsVue2`, `compileSsrVue2`, `generateCodeFrameVue2`, `callVue2Bridge`, `rewriteDefaultVue27` |
 | Vue 3 core | `baseCompileVue3`, `baseParseVue3`, `generateVue3Core` |
 | Vue 3 DOM / SSR | `compileVue3Dom`, `parseVue3Dom`, `compileVue3Ssr` |
 | SFC / style | `parseSfc`, `compileSfcTemplate`, `compileSfcTemplateSource`, `compileSfcScript`, `compileVue27SfcTemplate`, `compileVue27SfcScript`, `compileSfcStyle` |

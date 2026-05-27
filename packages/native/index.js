@@ -90,19 +90,50 @@ function isMusl() {
 }
 
 function compileVue2(template, options = {}) {
-  return normalizeVue2CompileResult(fromJson(binding.compileVue2(template, options)));
+  return normalizeVue2CompileResult(fromJson(binding.compileVue2(template, dehydrateForNative(options || {}))));
 }
 
 function compileToFunctionsVue2(template, options = {}) {
-  return normalizeVue2CompileResult(fromJson(binding.compileToFunctionsVue2(template, options)));
+  return normalizeVue2CompileResult(fromJson(binding.compileToFunctionsVue2(template, dehydrateForNative(options || {}))));
 }
 
 function compileSsrVue2(template, options = {}) {
-  return normalizeVue2CompileResult(fromJson(binding.compileSsrVue2(template, options)));
+  return normalizeVue2CompileResult(fromJson(binding.compileSsrVue2(template, dehydrateForNative(options || {}))));
 }
 
 function generateCodeFrameVue2(source, start = 0, end = start) {
   return binding.generateCodeFrameVue2(String(source || ''), Number(start) || 0, Number(end) || 0);
+}
+
+function callVue2Bridge(command, payload = {}) {
+  return fromJson(binding.callVue2Bridge(String(command || ''), dehydrateForNative(payload || {})));
+}
+
+function dehydrateForNative(value, seen = new WeakSet()) {
+  if (value === undefined || typeof value === 'function' || typeof value === 'symbol') {
+    return undefined;
+  }
+  if (value === null || typeof value !== 'object') {
+    return value;
+  }
+  if (seen.has(value)) {
+    return undefined;
+  }
+  seen.add(value);
+  if (Array.isArray(value)) {
+    return value.map(item => {
+      const dehydrated = dehydrateForNative(item, seen);
+      return dehydrated === undefined ? null : dehydrated;
+    });
+  }
+  const out = {};
+  for (const key of Object.keys(value)) {
+    const dehydrated = dehydrateForNative(value[key], seen);
+    if (dehydrated !== undefined) {
+      out[key] = dehydrated;
+    }
+  }
+  return out;
 }
 
 function rewriteDefaultVue27(source, variable, parserPlugins) {
@@ -255,6 +286,7 @@ module.exports = {
   compileToFunctionsVue2,
   compileSsrVue2,
   generateCodeFrameVue2,
+  callVue2Bridge,
   rewriteDefaultVue27,
   baseCompileVue3,
   baseParseVue3,
