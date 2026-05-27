@@ -1026,6 +1026,27 @@ function vue3IfSiblingPayload(siblings) {
   }));
 }
 
+function materializeVue3ForErrors(projection, node, dir, context) {
+  if (!projection || !Array.isArray(projection.errors) || !context || typeof context.onError !== 'function') return;
+  for (const error of projection.errors) {
+    context.onError(createCompilerError(error.code, vue3ForErrorLoc(error, node, dir)));
+  }
+}
+
+function materializeVue3ForTemplateKeyErrors(projection, node, dir, context) {
+  if (!projection || !Array.isArray(projection.templateKeyErrors) || !context || typeof context.onError !== 'function') return;
+  for (const error of projection.templateKeyErrors) {
+    context.onError(createCompilerError(error.code, vue3ForErrorLoc(error, node, dir)));
+  }
+}
+
+function vue3ForErrorLoc(error, node, dir) {
+  if (!error) return dir && dir.loc || node && node.loc || locStub;
+  if (error.loc && typeof error.loc === 'object') return error.loc;
+  if (error.loc === 'node') return node && node.loc || dir && dir.loc || locStub;
+  return dir && dir.loc || node && node.loc || locStub;
+}
+
 function materializeVue3IfProjection(projection, node, dir) {
   if (!projection || projection.kind === 'undefined') return undefined;
   if (projection.kind === 'simple') {
@@ -1115,17 +1136,30 @@ function materializeVue3ForParseResult(parseResult, dir) {
   };
 }
 
-function materializeVue3ForProjectionNode(projection, dir) {
+function materializeVue3ForProjectionNode(projection, dir, context) {
   if (!projection || projection.kind === 'undefined') return undefined;
   if (projection.type) return projection;
-  if (projection.kind === 'simple') {
-    return createSimpleExpression(
-      projection.content || '',
-      !!projection.isStatic,
-      projection.loc || (dir && dir.exp && dir.exp.loc) || (dir && dir.loc) || locStub,
-    );
+  for (const name of projection.helpers || []) {
+    const symbol = helperSymbolFromProjection(name);
+    if (symbol && context && typeof context.helper === 'function') context.helper(symbol);
   }
-  return undefined;
+  switch (projection.kind) {
+    case 'simple':
+      return createSimpleExpression(
+        projection.content || '',
+        !!projection.isStatic,
+        projection.loc || (dir && dir.exp && dir.exp.loc) || (dir && dir.loc) || locStub,
+        projection.constType || 0,
+      );
+    case 'compound':
+      return createCompoundExpression(
+        (projection.children || []).map(child => materializeVue3ForProjectionNode(child, dir, context)),
+        projection.loc || (dir && dir.exp && dir.exp.loc) || (dir && dir.loc) || locStub,
+      );
+    default:
+      if (typeof projection === 'string') return projection;
+      throw new Error(`Unsupported Rust v-for projection: ${projection.kind}`);
+  }
 }
 
 function vue3ForNodePayload(forNode) {
@@ -1605,6 +1639,7 @@ function processFor(node, dir, context, processCodegen) {
     dir,
     context: vue3TransformContextPayload(context),
   });
+  materializeVue3ForErrors(projection, node, dir, context);
   if (!projection || !projection.parseResult) return undefined;
   const parsed = materializeVue3ForParseResult(projection.parseResult, dir, context);
   const aliases = projection.locals || [];
@@ -1630,9 +1665,11 @@ function processFor(node, dir, context, processCodegen) {
     context.scopes.vFor--;
     if (context.prefixIdentifiers) aliases.forEach(alias => context.removeIdentifiers(alias));
     if (onExit) {
+      materializeVue3ForTemplateKeyErrors(projection, node, dir, context);
       onExit();
       return;
     }
+    materializeVue3ForTemplateKeyErrors(projection, node, dir, context);
     const renderExp = createCallExpression(context.helper(RENDER_LIST), [forNode.source]);
     forNode.codegenNode = createVNodeCall(context, context.helper(FRAGMENT), undefined, renderExp, 256, undefined, undefined, true, true, false, node.loc);
     finalizeForCodegen(forNode, renderExp, context);
