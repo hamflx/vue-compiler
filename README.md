@@ -49,3 +49,4 @@ cargo xtask verify-crate-metadata
 - `docs/COMPATIBILITY_CONCERNS.md`: compatibility caveats and shim/mixed coverage concerns.
 - `docs/RELEASE_CHECKLIST.md`: release dry-run and publication checklist.
 - `docs/COMPATIBILITY_MATRIX.md`: current official compatibility matrix.
+- `docs/CONFORMANCE_REPORT_TEMPLATE.md`: release/stage conformance report template.

@@ -11,6 +11,7 @@ Use this checklist before publishing a release candidate.
 - [ ] `cargo xtask verify-crate-metadata`
 - [ ] `cargo xtask summarize-compat --locked`
 - [ ] `cargo xtask bench --iterations 1`
+- [ ] Fill `docs/CONFORMANCE_REPORT_TEMPLATE.md` for the release candidate report.
 
 ## Package Verification
 
@@ -30,7 +31,7 @@ Use this checklist before publishing a release candidate.
 - [ ] Run npm pack dry-runs for `packages/native`, all `packages/native-platforms/*`, and `packages/wasm`.
 - [ ] Run cargo publish dry-runs for published crates.
 - [ ] Install packed npm artifacts into a clean temp project and run Node smoke tests.
-- [ ] Record the conformance report path and lock hash in the release notes.
+- [ ] Record the conformance report path, lock hash, and coverage classification in the release notes.
 
 ## Rollback
 

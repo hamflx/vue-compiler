@@ -1,5 +1,9 @@
 # Memory
 
+- Current round: completed the M20 conformance report template slice.
+- Added `docs/CONFORMANCE_REPORT_TEMPLATE.md`, requiring report identity, official Vue baselines, execution scope, `rust-backed` / `mixed` / `shim-backed` coverage totals, file-level coverage, failure summary, compatibility concern classification, and acceptance decision sections.
+- Extended `cargo xtask verify-release-docs` to require the conformance report template and its key coverage/classification fields. This is release reporting infrastructure only; it does not change compiler semantics, `xtask/src/compat.rs`, or AST/HIR/MIR structures.
+
 - Current round: completed the M20 crates.io metadata slice.
 - Added workspace/crate package metadata for crates.io readiness: repository, homepage, keywords, categories, descriptions, docs.rs URLs, per-crate READMEs, and versioned local path dependencies for publishable crates.
 - Marked internal tooling and npm-distributed binding crates (`xtask`, `vuec_node_bridge`, `vuec_runtime_tests`, `vuec_napi`, `vuec_wasm`) with `publish = false` while still keeping release metadata and READMEs for documentation.

@@ -999,6 +999,7 @@ fn verify_release_docs() -> Result<compat::JsonReport> {
         PathBuf::from("CHANGELOG.md"),
         PathBuf::from("docs").join("COMPATIBILITY_MATRIX.md"),
         PathBuf::from("docs").join("RELEASE_CHECKLIST.md"),
+        PathBuf::from("docs").join("CONFORMANCE_REPORT_TEMPLATE.md"),
     ] {
         match require_non_empty_file(&path) {
             Ok(()) => items.push(compat::ReportItem::new(
@@ -1022,6 +1023,41 @@ fn verify_release_docs() -> Result<compat::JsonReport> {
     let package_dirs = collect_package_manifest_dirs(Path::new("packages"))?;
     if package_dirs.is_empty() {
         violations.push("no package.json files found under packages".into());
+    }
+
+    let template_path = PathBuf::from("docs").join("CONFORMANCE_REPORT_TEMPLATE.md");
+    let template_requirements = [
+        "## Report Identity",
+        "## Official Baselines",
+        "## Execution Scope",
+        "## Coverage Classification",
+        "## File-Level Coverage",
+        "## Failure Summary",
+        "## Compatibility Concerns",
+        "## Acceptance Decision",
+        "rust-backed",
+        "mixed",
+        "shim-backed",
+        "Lock hash",
+        "Official lock file",
+        "xtask/src/compat.rs",
+    ];
+    match require_file_contains_all(&template_path, &template_requirements) {
+        Ok(()) => items.push(compat::ReportItem::new(
+            "conformance-report-template",
+            compat::ReportStatus::Pass,
+            "template contains required report identity, baseline, scope, coverage, failure, compatibility, and acceptance sections",
+            Some(template_path),
+        )),
+        Err(err) => {
+            violations.push(format!("{err:#}"));
+            items.push(compat::ReportItem::new(
+                "conformance-report-template",
+                compat::ReportStatus::Fail,
+                format!("{err:#}"),
+                Some(template_path),
+            ));
+        }
     }
     for package_dir in package_dirs {
         let manifest_path = package_dir.join("package.json");
@@ -1078,6 +1114,24 @@ fn require_non_empty_file(path: &Path) -> Result<()> {
         fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
     if text.trim().is_empty() {
         anyhow::bail!("{} is empty", path.display());
+    }
+    Ok(())
+}
+
+fn require_file_contains_all(path: &Path, required: &[&str]) -> Result<()> {
+    let text =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let missing = required
+        .iter()
+        .copied()
+        .filter(|needle| !text.contains(needle))
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        anyhow::bail!(
+            "{} missing required text: {}",
+            path.display(),
+            missing.join(", ")
+        );
     }
     Ok(())
 }
