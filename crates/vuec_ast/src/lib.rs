@@ -2212,6 +2212,8 @@ pub struct Vue3SsrSlot {
     pub props: Vue3DomProps,
     /// Fallback child node ids.
     pub fallback: Vec<NodeId>,
+    /// Whether this slot must render with `ssrRenderSlotInner`.
+    pub inner: bool,
 }
 
 /// Vue 3 SSR attrs render payload.

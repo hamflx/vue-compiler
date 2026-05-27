@@ -81,6 +81,7 @@ pub fn compile_vue3_ssr(source: &str, options_json: Option<String>) -> String {
                 scope_id: string_option(&options, "scopeId")
                     .or_else(|| string_option(&options, "scope_id")),
                 slotted: bool_option(&options, "slotted", false),
+                slotted_is_explicit: options.get("slotted").is_some(),
                 mode_is_explicit: options.get("mode").is_some(),
                 core,
                 ..SsrCompilerOptions::default()

@@ -3734,6 +3734,7 @@ fn lower_vue3_plain_element_to_ssr_mir(
                     name: lower_hir_slot_outlet_name_to_dom_mir(slot),
                     props: lower_vue3_slot_outlet_props_to_ssr_mir(&slot.props),
                     fallback: Vec::new(),
+                    inner: false,
                 }),
                 ast_node.span.clone(),
             );
@@ -3813,6 +3814,12 @@ fn lower_vue3_builtin_component_to_ssr_mir(
     state: &mut Vue3SsrLoweringState,
 ) -> Option<NodeId> {
     match element.tag.as_str() {
+        "Transition" | "transition" => {
+            lower_vue3_transition_to_ssr_mir(element, ast, ast_node, hir_id, mir_parent, state)
+        }
+        "TransitionGroup" | "transition-group" => lower_vue3_transition_group_to_ssr_mir(
+            element, ast, ast_node, hir_id, mir_parent, state,
+        ),
         "Teleport" | "teleport" => {
             let target = vue3_ssr_teleport_target(element, ast_node, state)?;
             let disabled = vue3_ssr_teleport_disabled(element, ast_node, state);
@@ -3842,6 +3849,219 @@ fn lower_vue3_builtin_component_to_ssr_mir(
             Some(mir_id)
         }
         _ => None,
+    }
+}
+
+fn lower_vue3_transition_to_ssr_mir(
+    element: &Vue3Element,
+    ast: &Vue3Ast,
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    hir_id: NodeId,
+    mir_parent: NodeId,
+    state: &mut Vue3SsrLoweringState,
+) -> Option<NodeId> {
+    let generated_span =
+        NodeSpan::generated(ast_node.span.source(), vuec_ast::GeneratedReason::Lowering);
+    let first_output = state.mir.nodes.len();
+    let appear = vue3_ssr_has_static_attr(element, "appear");
+    if appear {
+        state.mir.push_child(
+            mir_parent,
+            Vue3SsrMirKind::PushString("<template".into()),
+            generated_span.clone(),
+        );
+        state.mir.push_child(
+            mir_parent,
+            Vue3SsrMirKind::PushString(">".into()),
+            generated_span.clone(),
+        );
+    }
+    lower_vue3_ssr_child_sequence(&ast_node.children, ast, hir_id, mir_parent, state);
+    mark_direct_ssr_slots_inner(&mut state.mir, mir_parent);
+    if appear {
+        state.mir.push_child(
+            mir_parent,
+            Vue3SsrMirKind::PushString("</template>".into()),
+            generated_span,
+        );
+    }
+    state.mir.nodes.get(first_output).map(|node| node.id)
+}
+
+fn lower_vue3_transition_group_to_ssr_mir(
+    element: &Vue3Element,
+    ast: &Vue3Ast,
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    hir_id: NodeId,
+    mir_parent: NodeId,
+    state: &mut Vue3SsrLoweringState,
+) -> Option<NodeId> {
+    let generated_span =
+        NodeSpan::generated(ast_node.span.source(), vuec_ast::GeneratedReason::Lowering);
+    let first_output = state.mir.nodes.len();
+    let tag = vue3_ssr_transition_group_tag(element, ast_node, state);
+    let attrs = vue3_ssr_transition_group_attrs(element, hir_id, state);
+    match &tag {
+        Some(tag) => {
+            state.mir.push_child(
+                mir_parent,
+                Vue3SsrMirKind::PushString(tag.open_start()),
+                generated_span.clone(),
+            );
+            if let Some(attrs) = attrs {
+                state.mir.push_child(
+                    mir_parent,
+                    Vue3SsrMirKind::RenderAttrs(attrs),
+                    generated_span.clone(),
+                );
+            }
+            state.mir.push_child(
+                mir_parent,
+                Vue3SsrMirKind::PushString(">".into()),
+                generated_span.clone(),
+            );
+        }
+        None => {
+            state.mir.push_child(
+                mir_parent,
+                Vue3SsrMirKind::PushString("<!--[-->".into()),
+                generated_span.clone(),
+            );
+        }
+    }
+    lower_vue3_ssr_child_sequence(&ast_node.children, ast, hir_id, mir_parent, state);
+    mark_direct_ssr_slots_inner(&mut state.mir, mir_parent);
+    match tag {
+        Some(tag) => {
+            state.mir.push_child(
+                mir_parent,
+                Vue3SsrMirKind::PushString(tag.close()),
+                generated_span,
+            );
+        }
+        None => {
+            state.mir.push_child(
+                mir_parent,
+                Vue3SsrMirKind::PushString("<!--]-->".into()),
+                generated_span,
+            );
+        }
+    }
+    state.mir.nodes.get(first_output).map(|node| node.id)
+}
+
+enum Vue3SsrTransitionGroupTag {
+    Static(String),
+    Dynamic(JsExprId),
+}
+
+impl Vue3SsrTransitionGroupTag {
+    fn open_start(&self) -> String {
+        match self {
+            Self::Static(tag) => format!("<{tag}"),
+            Self::Dynamic(id) => format!("<#expr{}", id.0),
+        }
+    }
+
+    fn close(&self) -> String {
+        match self {
+            Self::Static(tag) => format!("</{tag}>"),
+            Self::Dynamic(id) => format!("</#expr{}>", id.0),
+        }
+    }
+}
+
+fn vue3_ssr_transition_group_tag(
+    element: &Vue3Element,
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    state: &mut Vue3SsrLoweringState,
+) -> Option<Vue3SsrTransitionGroupTag> {
+    element.props.iter().find_map(|prop| match prop {
+        Vue3Prop::Attribute(attr) if attr.name == "tag" => Some(Vue3SsrTransitionGroupTag::Static(
+            attr.value.clone().unwrap_or_default(),
+        )),
+        Vue3Prop::Directive(dir)
+            if dir.name == "bind"
+                && !dir.is_dynamic_arg
+                && dir
+                    .arg
+                    .as_ref()
+                    .is_some_and(|arg| arg.source_string() == "tag") =>
+        {
+            let exp = dir.exp.as_ref().or(dir.arg.as_ref())?;
+            Some(Vue3SsrTransitionGroupTag::Dynamic(
+                register_or_reuse_vue3_expression_with_span(
+                    &mut state.js,
+                    exp,
+                    dir.exp_span
+                        .or(dir.arg_span)
+                        .or_else(|| ast_node.span.source()),
+                    state.source_type,
+                ),
+            ))
+        }
+        _ => None,
+    })
+}
+
+fn vue3_ssr_transition_group_attrs(
+    element: &Vue3Element,
+    hir_id: NodeId,
+    state: &Vue3SsrLoweringState,
+) -> Option<Vue3SsrAttrs> {
+    let mut attrs = match state.hir.node(hir_id).map(|node| &node.kind) {
+        Some(HirNodeKind::Component(component)) => component.props.clone(),
+        _ => HirProps::default(),
+    };
+    attrs.static_attrs.retain(|attr| attr.name != "tag");
+    attrs
+        .dynamic_bindings
+        .retain(|binding| binding.dynamic_arg || binding.name != "tag");
+    attrs.segments.retain(|segment| match segment {
+        HirPropSegment::StaticAttr(attr) => attr.name != "tag",
+        HirPropSegment::DynamicBinding(binding) => binding.dynamic_arg || binding.name != "tag",
+        HirPropSegment::Event(_)
+        | HirPropSegment::ObjectBinding(_)
+        | HirPropSegment::ObjectListeners(_) => true,
+    });
+    let props = lower_hir_props_to_dom_mir_without_event_cache(&attrs);
+    if props.static_attrs.is_empty()
+        && props.dynamic_bindings.is_empty()
+        && props.events.is_empty()
+        && props.object_bindings.is_empty()
+        && props.object_listeners.is_empty()
+        && props.segments.is_empty()
+        && element
+            .props
+            .iter()
+            .all(|prop| matches!(prop, Vue3Prop::Attribute(attr) if attr.name == "tag"))
+    {
+        return None;
+    }
+    Some(Vue3SsrAttrs {
+        props,
+        v_show: None,
+        v_model: None,
+    })
+}
+
+fn mark_direct_ssr_slots_inner(mir: &mut Vue3SsrMir, parent: NodeId) {
+    let children = mir
+        .node(parent)
+        .map(|node| node.children.clone())
+        .unwrap_or_default();
+    for child_id in children {
+        if let Some(node) = mir.node_mut(child_id) {
+            match &mut node.kind {
+                Vue3SsrMirKind::RenderSlot(slot) => {
+                    slot.inner = true;
+                }
+                Vue3SsrMirKind::If { .. } => {
+                    mark_direct_ssr_slots_inner(mir, child_id);
+                }
+                _ => {}
+            }
+        }
     }
 }
 
@@ -14331,7 +14551,9 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                         .is_some_and(|node| !node.children.is_empty())
                     {
                         push_unique_helper(&mut helpers, RuntimeHelper::Vue3WithCtx);
-                        push_unique_helper(&mut helpers, RuntimeHelper::Vue3CreateVNode);
+                        if self.vnode_fallback_uses_create_vnode(node.id) {
+                            push_unique_helper(&mut helpers, RuntimeHelper::Vue3CreateVNode);
+                        }
                         self.push_vnode_fallback_helpers(node.id, &mut helpers);
                     }
                     self.push_prop_helpers(&component.props, &mut helpers);
@@ -14377,6 +14599,15 @@ impl<'a> Vue3SsrMirCodegen<'a> {
             }
         }
         sort_helpers_by_order(&mut helpers, vue3_helper_order(false));
+        if helpers.contains(&RuntimeHelper::Vue3RenderSlot)
+            && helpers.contains(&RuntimeHelper::Vue3WithCtx)
+        {
+            move_helper_after(
+                &mut helpers,
+                RuntimeHelper::Vue3RenderSlot,
+                RuntimeHelper::Vue3WithCtx,
+            );
+        }
         helpers
     }
 
@@ -14482,12 +14713,35 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                     self.push_prop_helpers(&component.props, helpers);
                     self.push_vnode_fallback_helpers(*child_id, helpers);
                 }
+                Vue3SsrMirKind::RenderSlot(slot) => {
+                    if self.render_slot_as_vnode_fallback(slot) {
+                        push_unique_helper(helpers, RuntimeHelper::Vue3RenderSlot);
+                    }
+                }
                 Vue3SsrMirKind::If { .. } | Vue3SsrMirKind::For(_) => {
                     self.push_vnode_fallback_helpers(*child_id, helpers);
                 }
                 _ => {}
             }
         }
+    }
+
+    fn vnode_fallback_uses_create_vnode(&self, parent: NodeId) -> bool {
+        let Some(node) = self.mir.node(parent) else {
+            return false;
+        };
+        node.children.iter().any(|child_id| {
+            self.mir
+                .node(*child_id)
+                .is_some_and(|child| match &child.kind {
+                    Vue3SsrMirKind::PushString(value) => parse_ssr_open_tag_start(value).is_some(),
+                    Vue3SsrMirKind::RenderComponent(_) => true,
+                    Vue3SsrMirKind::If { .. } | Vue3SsrMirKind::For(_) => {
+                        self.vnode_fallback_uses_create_vnode(*child_id)
+                    }
+                    _ => false,
+                })
+        })
     }
 
     fn ssr_attrs_has_static_fallback_props(&self, attrs_id: NodeId) -> bool {
@@ -14559,8 +14813,15 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                         },
                     );
                 }
-                Vue3SsrMirKind::RenderSlot(_) => {
-                    push_unique_helper(&mut helpers, RuntimeHelper::Vue3SsrRenderSlot);
+                Vue3SsrMirKind::RenderSlot(slot) => {
+                    push_unique_helper(
+                        &mut helpers,
+                        if slot.inner {
+                            RuntimeHelper::Vue3SsrRenderSlotInner
+                        } else {
+                            RuntimeHelper::Vue3SsrRenderSlot
+                        },
+                    );
                 }
                 Vue3SsrMirKind::If { .. } => {}
                 Vue3SsrMirKind::For(_) => {
@@ -14575,7 +14836,9 @@ impl<'a> Vue3SsrMirCodegen<'a> {
             }
         }
         if let Some(root_attrs) = root_attrs {
-            if root_attrs.attrs.is_some() || root_attrs.css_vars.is_some() {
+            if (root_attrs.attrs.is_some() || root_attrs.css_vars.is_some())
+                && self.root_attrs_need_ssr_render_attrs(root_children, &root_spans)
+            {
                 push_unique_helper(&mut helpers, RuntimeHelper::Vue3SsrRenderAttrs);
             }
         }
@@ -14585,7 +14848,38 @@ impl<'a> Vue3SsrMirCodegen<'a> {
     }
 
     fn apply_ssr_helper_order_preferences(&self, helpers: &mut Vec<RuntimeHelper>) {
+        if helpers.contains(&RuntimeHelper::Vue3SsrRenderSlot) {
+            move_helper_before_if_present(
+                helpers,
+                RuntimeHelper::Vue3SsrRenderSlot,
+                RuntimeHelper::Vue3SsrInterpolate,
+            );
+            move_helper_before_if_present(
+                helpers,
+                RuntimeHelper::Vue3SsrRenderSlot,
+                RuntimeHelper::Vue3SsrRenderComponent,
+            );
+            move_helper_before_if_present(
+                helpers,
+                RuntimeHelper::Vue3SsrRenderSlot,
+                RuntimeHelper::Vue3SsrRenderAttrs,
+            );
+        }
+        if helpers.contains(&RuntimeHelper::Vue3SsrRenderSlotInner) {
+            move_helper_before_if_present(
+                helpers,
+                RuntimeHelper::Vue3SsrRenderSlotInner,
+                RuntimeHelper::Vue3SsrRenderAttrs,
+            );
+        }
         if !helpers.contains(&RuntimeHelper::Vue3SsrRenderAttrs) {
+            if helpers.contains(&RuntimeHelper::Vue3SsrRenderSlotInner) {
+                move_helper_before(
+                    helpers,
+                    RuntimeHelper::Vue3SsrRenderSlotInner,
+                    RuntimeHelper::Vue3SsrRenderSlot,
+                );
+            }
             return;
         }
         let has_dynamic_attrs = self.mir.nodes.iter().any(|node| {
@@ -14654,12 +14948,66 @@ impl<'a> Vue3SsrMirCodegen<'a> {
             );
         }
         if helpers.contains(&RuntimeHelper::Vue3SsrRenderSlot) {
-            move_helper_before(
+            move_helper_before_if_present(
                 helpers,
                 RuntimeHelper::Vue3SsrRenderSlot,
                 RuntimeHelper::Vue3SsrRenderAttrs,
             );
         }
+    }
+
+    fn root_attrs_need_ssr_render_attrs(
+        &self,
+        children: &[NodeId],
+        root_spans: &[SsrRootSpan],
+    ) -> bool {
+        root_spans.iter().any(|span| {
+            children
+                .get(span.start)
+                .is_some_and(|root| self.node_needs_root_attr_ssr_render_attrs(*root))
+        })
+    }
+
+    fn node_needs_root_attr_ssr_render_attrs(&self, node_id: NodeId) -> bool {
+        match self.mir.node(node_id).map(|node| &node.kind) {
+            Some(Vue3SsrMirKind::PushString(value)) => parse_ssr_open_tag_start(value).is_some(),
+            Some(Vue3SsrMirKind::If { .. }) => self.mir.node(node_id).is_some_and(|node| {
+                self.if_branches_need_root_attr_ssr_render_attrs(&node.children)
+            }),
+            Some(Vue3SsrMirKind::RenderComponent(_)) => false,
+            _ => false,
+        }
+    }
+
+    fn if_branches_need_root_attr_ssr_render_attrs(&self, branch_ids: &[NodeId]) -> bool {
+        let mut current = branch_ids;
+        loop {
+            let (primary, alternate) = self.split_if_children(current);
+            if self.children_need_root_attr_ssr_render_attrs(&primary) {
+                return true;
+            }
+            let Some(alternate) = alternate else {
+                return false;
+            };
+            let Some(alternate_node) = self.mir.node(alternate) else {
+                return false;
+            };
+            if matches!(alternate_node.kind, Vue3SsrMirKind::If { .. }) {
+                current = &alternate_node.children;
+                continue;
+            }
+            return self.node_needs_root_attr_ssr_render_attrs(alternate);
+        }
+    }
+
+    fn children_need_root_attr_ssr_render_attrs(&self, children: &[NodeId]) -> bool {
+        let spans = self.root_spans(children);
+        let [span] = spans.as_slice() else {
+            return false;
+        };
+        children
+            .get(span.start)
+            .is_some_and(|root| self.node_needs_root_attr_ssr_render_attrs(*root))
     }
 
     fn push_ssr_attr_helpers(
@@ -15437,12 +15785,16 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                     Vue3SsrMirKind::PushString(value) => parse_ssr_open_tag_start(value),
                     _ => None,
                 })?;
-        let open_start = if root_attrs.is_some() {
-            format!("<{tag}")
+        if root_attrs.is_some() && !tag.starts_with("#expr") {
+            parts.push(SsrTemplatePart::Static(format!("<{tag}")));
         } else {
-            self.ssr_push_string(children[index])?.to_string()
-        };
-        parts.push(SsrTemplatePart::Static(open_start));
+            self.push_ssr_open_tag_start_part(
+                self.ssr_push_string(children[index])?,
+                scope,
+                parts,
+                dynamic,
+            );
+        }
         let mut cursor = index + 1;
         if let Some(attrs) = children
             .get(cursor)
@@ -15516,7 +15868,12 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                 .ssr_push_string(children[cursor])
                 .is_some_and(|value| value == format!("</{tag}>"))
             {
-                parts.push(SsrTemplatePart::Static(format!("</{tag}>")));
+                self.push_ssr_close_tag_part(
+                    self.ssr_push_string(children[cursor])?,
+                    scope,
+                    parts,
+                    dynamic,
+                );
                 return Some(cursor + 1);
             }
             if self
@@ -15567,6 +15924,51 @@ impl<'a> Vue3SsrMirCodegen<'a> {
             cursor += 1;
         }
         None
+    }
+
+    fn push_ssr_open_tag_start_part(
+        &self,
+        raw: &str,
+        scope: &RenderScope,
+        parts: &mut Vec<SsrTemplatePart>,
+        dynamic: &mut bool,
+    ) {
+        if let Some(expression) = self.dynamic_tag_placeholder_expr(raw, "<#expr", scope) {
+            parts.push(SsrTemplatePart::Static("<".into()));
+            parts.push(SsrTemplatePart::Expr(expression));
+            *dynamic = true;
+        } else {
+            parts.push(SsrTemplatePart::Static(raw.to_string()));
+        }
+    }
+
+    fn push_ssr_close_tag_part(
+        &self,
+        raw: &str,
+        scope: &RenderScope,
+        parts: &mut Vec<SsrTemplatePart>,
+        dynamic: &mut bool,
+    ) {
+        if let Some(expression) = self.dynamic_tag_placeholder_expr(raw, "</#expr", scope) {
+            parts.push(SsrTemplatePart::Static("</".into()));
+            parts.push(SsrTemplatePart::Expr(expression));
+            parts.push(SsrTemplatePart::Static(">".into()));
+            *dynamic = true;
+        } else {
+            parts.push(SsrTemplatePart::Static(raw.to_string()));
+        }
+    }
+
+    fn dynamic_tag_placeholder_expr(
+        &self,
+        raw: &str,
+        prefix: &str,
+        scope: &RenderScope,
+    ) -> Option<String> {
+        let id = raw.strip_prefix(prefix)?;
+        let id = id.strip_suffix('>').unwrap_or(id);
+        let id = id.parse::<u32>().ok()?;
+        Some(self.render_js_expr(JsExprId(id), scope))
     }
 
     fn collect_ssr_template_attrs(
@@ -15944,21 +16346,44 @@ impl<'a> Vue3SsrMirCodegen<'a> {
     ) {
         writer.push_line("default: _withCtx((_, _push, _parent, _scopeId) => {");
         writer.indent();
+        let slot_scope = scope.with_locals(vec!["_scopeId".into()]);
         writer.push_line("if (_push) {");
         writer.indent();
         if let Some(node) = self.mir.node(node_id) {
-            self.render_child_slice(&node.children, scope, Some("_scopeId"), None, writer);
+            self.render_child_slice(&node.children, &slot_scope, Some("_scopeId"), None, writer);
         }
         writer.dedent();
         writer.push_line("} else {");
         writer.indent();
-        let fallback = self.render_vnode_fallback_children(node_id, scope);
+        let fallback = self.render_vnode_fallback_children(node_id, &slot_scope);
         writer.push_line(&format!("return {}", render_array(&fallback)));
         writer.dedent();
         writer.push_line("}");
         writer.dedent();
         writer.push_line("}),");
-        writer.push_line("_: 1 /* STABLE */");
+        let flag = if self.component_slot_is_forwarded(node_id) {
+            Vue3SlotFlag::Forwarded
+        } else {
+            Vue3SlotFlag::Stable
+        };
+        writer.push_line(&format!("_: {}", vue3_slot_flag_with_comment(flag)));
+    }
+
+    fn component_slot_is_forwarded(&self, node_id: NodeId) -> bool {
+        let Some(node) = self.mir.node(node_id) else {
+            return false;
+        };
+        node.children.iter().any(|child_id| {
+            self.mir
+                .node(*child_id)
+                .is_some_and(|child| match &child.kind {
+                    Vue3SsrMirKind::RenderSlot(slot) => self.render_slot_as_vnode_fallback(slot),
+                    Vue3SsrMirKind::If { .. } | Vue3SsrMirKind::For(_) => {
+                        self.component_slot_is_forwarded(*child_id)
+                    }
+                    _ => false,
+                })
+        })
     }
 
     fn render_vnode_fallback_children(&self, parent: NodeId, scope: &RenderScope) -> Vec<String> {
@@ -16076,6 +16501,9 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                 "_createTextVNode(_toDisplayString({}), 1 /* TEXT */)",
                 self.render_mir_expr(expr, scope)
             )),
+            Vue3SsrMirKind::RenderSlot(slot) if self.render_slot_as_vnode_fallback(slot) => {
+                Some(self.render_vnode_fallback_slot(slot, scope))
+            }
             Vue3SsrMirKind::RenderComponent(component) => {
                 let children = self.render_vnode_fallback_children(node_id, scope);
                 Some(self.render_vnode_fallback_call(
@@ -16097,6 +16525,44 @@ impl<'a> Vue3SsrMirCodegen<'a> {
             }
             _ => None,
         }
+    }
+
+    fn render_slot_as_vnode_fallback(&self, slot: &vuec_ast::Vue3SsrSlot) -> bool {
+        !slot.inner
+    }
+
+    fn render_vnode_fallback_slot(
+        &self,
+        slot: &vuec_ast::Vue3SsrSlot,
+        scope: &RenderScope,
+    ) -> String {
+        let slots = if uses_prefixed_identifiers(self.options) {
+            "_ctx.$slots"
+        } else {
+            "$slots"
+        };
+        let mut args = vec![slots.to_string(), self.render_slot_name(&slot.name, scope)];
+        let props = self.render_slot_props(&slot.props, scope);
+        if props != "{}" || !slot.fallback.is_empty() || !self.options.slotted {
+            args.push(props);
+        }
+        if !slot.fallback.is_empty() || !self.options.slotted {
+            let fallback = if slot.fallback.is_empty() {
+                "undefined".into()
+            } else {
+                let rendered = slot
+                    .fallback
+                    .iter()
+                    .filter_map(|child_id| self.render_vnode_fallback_node(*child_id, scope))
+                    .collect::<Vec<_>>();
+                format!("() => {}", render_array(&rendered))
+            };
+            args.push(fallback);
+        }
+        if !self.options.slotted {
+            args.push("true".into());
+        }
+        format!("_renderSlot({})", args.join(", "))
     }
 
     fn render_vnode_fallback_static_props(
@@ -16391,19 +16857,77 @@ impl<'a> Vue3SsrMirCodegen<'a> {
             let mut fallback = CodeWriter::new();
             fallback.push_line("() => {");
             fallback.indent();
-            for child_id in &slot.fallback {
-                self.render_node(*child_id, scope, None, &mut fallback);
+            let mut index = 0usize;
+            while index < slot.fallback.len() {
+                if let Some((html, next_index)) =
+                    self.render_ssr_template_literal_slice(&slot.fallback, index, scope, None, None)
+                {
+                    fallback.push_line(&format!("_push({html})"));
+                    index = next_index;
+                    continue;
+                }
+                self.render_node(slot.fallback[index], scope, None, &mut fallback);
+                index += 1;
             }
             fallback.dedent();
             fallback.push_line("}");
             fallback.finish().trim_end().to_string()
         };
-        writer.push_line(&format!(
-            "_ssrRenderSlot(_ctx.$slots, {}, {}, {}, _push, _parent)",
+        let scope_id = self.render_slot_scope_id_arg(slot, scope);
+        let helper = if slot.inner {
+            "_ssrRenderSlotInner"
+        } else {
+            "_ssrRenderSlot"
+        };
+        let mut args = vec![
+            "_ctx.$slots".to_string(),
             self.render_slot_name(&slot.name, scope),
             props,
-            fallback
-        ));
+            fallback,
+            "_push".into(),
+            "_parent".into(),
+        ];
+        if let Some(scope_id) = scope_id {
+            args.push(scope_id);
+        }
+        if slot.inner {
+            if args.len() == 6 {
+                args.push("null".into());
+            }
+            args.push("true".into());
+        }
+        writer.push_line(&format!("{}({})", helper, args.join(", ")));
+    }
+
+    fn render_slot_scope_id_arg(
+        &self,
+        slot: &vuec_ast::Vue3SsrSlot,
+        scope: &RenderScope,
+    ) -> Option<String> {
+        if !self.options.slotted {
+            return None;
+        }
+        let local_scope = scope
+            .locals
+            .iter()
+            .any(|local| local == "_scopeId")
+            .then_some("_scopeId");
+        let scope_id = self
+            .options
+            .scope_id
+            .as_ref()
+            .map(|scope_id| format!("{}-s", scope_id));
+        match (scope_id, local_scope) {
+            (Some(scope_id), Some(local_scope)) => {
+                Some(format!("{} + {}", quote_string(&scope_id), local_scope))
+            }
+            (Some(scope_id), None) => Some(quote_string(&scope_id)),
+            (None, Some(local_scope)) if self.render_slot_as_vnode_fallback(slot) => {
+                Some(local_scope.to_string())
+            }
+            (None, Some(local_scope)) if slot.inner => Some(local_scope.to_string()),
+            _ => None,
+        }
     }
 
     fn render_content(
@@ -17664,7 +18188,7 @@ fn parse_ssr_open_tag_start(value: &str) -> Option<(String, Vec<(String, Option<
     let rest = value.strip_prefix('<')?;
     let tag_end = rest
         .char_indices()
-        .find_map(|(index, ch)| is_vue3_html_whitespace(ch).then_some(index))
+        .find_map(|(index, ch)| (is_vue3_html_whitespace(ch) || ch == '>').then_some(index))
         .unwrap_or(rest.len());
     let tag = rest.get(..tag_end)?.to_string();
     if tag.is_empty() || tag.starts_with('/') || tag.starts_with('!') {
@@ -18319,6 +18843,16 @@ fn move_helper_before(
         helpers.insert(before_index, helper);
     } else {
         helpers.push(helper);
+    }
+}
+
+fn move_helper_before_if_present(
+    helpers: &mut Vec<RuntimeHelper>,
+    helper: RuntimeHelper,
+    before: RuntimeHelper,
+) {
+    if helpers.contains(&before) {
+        move_helper_before(helpers, helper, before);
     }
 }
 
@@ -30542,8 +31076,9 @@ mod tests {
         assert!(generated.code.contains("foo: \"bar\""));
         assert!(generated.code.contains("baz: _ctx.baz"));
         assert!(generated.code.contains("() => {"));
-        assert!(generated.code.contains("_push(\"fallback \");"));
-        assert!(generated.code.contains("_push(_ssrInterpolate(_ctx.msg));"));
+        assert!(generated
+            .code
+            .contains("_push(`fallback ${_ssrInterpolate(_ctx.msg)}`)"));
         assert!(!generated.code.contains("name: _ctx.active"));
     }
 

@@ -26,6 +26,8 @@ pub struct SsrCompilerOptions {
     pub scope_id: Option<String>,
     /// Whether slotted scope markers should be emitted.
     pub slotted: bool,
+    /// Whether `slotted` was explicitly provided by the caller.
+    pub slotted_is_explicit: bool,
     /// Whether `core.mode` was explicitly provided by the caller.
     pub mode_is_explicit: bool,
     /// Whether static asset URL attributes should be transformed.
@@ -40,6 +42,7 @@ impl Default for SsrCompilerOptions {
             core: Vue3CompilerOptions::default(),
             scope_id: None,
             slotted: false,
+            slotted_is_explicit: false,
             mode_is_explicit: false,
             transform_asset_urls: true,
             asset_url_options: AssetUrlOptions::default(),
@@ -119,8 +122,10 @@ fn normalize_public_ssr_compile_options(options: &mut SsrCompilerOptions) {
     } else if options.core.scope_id.is_none() {
         options.core.scope_id = options.scope_id.clone();
     }
-    if options.slotted {
+    if options.slotted || (options.scope_id.is_some() && !options.slotted_is_explicit) {
         options.core.slotted = true;
+    } else if options.slotted_is_explicit {
+        options.core.slotted = options.slotted;
     }
 }
 

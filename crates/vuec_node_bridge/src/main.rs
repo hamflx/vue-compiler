@@ -315,6 +315,7 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
                     .and_then(|options| options.get("slotted"))
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
+                slotted_is_explicit: bridge_option_has(payload.get("options"), "slotted"),
                 mode_is_explicit: bridge_option_has(payload.get("options"), "mode"),
                 transform_asset_urls: transform_asset_urls_enabled(
                     payload.get("options").unwrap_or(&Value::Null),

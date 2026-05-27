@@ -318,6 +318,7 @@ pub fn compile_vue3_ssr(env: Env, source: String, options: Option<Unknown>) -> R
             .and_then(Value::as_str)
             .map(ToOwned::to_owned),
         slotted: bool_option(&raw_options, "slotted", false),
+        slotted_is_explicit: raw_options.get("slotted").is_some(),
         mode_is_explicit: raw_options.get("mode").is_some(),
         ..SsrCompilerOptions::default()
     };
