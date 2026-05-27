@@ -554,7 +554,8 @@ function createCompoundExpression(children) {
 }
 
 function createConditionalExpression(test, consequent, alternate) {
-  return { type: 19, loc: locStub, test, consequent, alternate, newline: true };
+  const newline = arguments.length > 3 ? !!arguments[3] : true;
+  return { type: 19, loc: locStub, test, consequent, alternate, newline };
 }
 
 function createForLoopParams(value) {
@@ -3233,6 +3234,17 @@ function buildProps(node, context) {
     if (prop.name === 'slot') {
       if (node && node.tagType !== ElementTypes.COMPONENT && context && typeof context.onError === 'function') {
         context.onError(createCompilerError(ErrorCodes.X_V_SLOT_MISPLACED, prop.loc));
+      }
+      continue;
+    }
+    if (context && context.directiveTransforms && context.directiveTransforms[prop.name]) {
+      const result = context.directiveTransforms[prop.name](prop, node, context);
+      objectProps.push(...((result && result.props) || []));
+      if (result && result.props && result.props.some(prop => prop && prop.key && !isStaticExp(prop.key))) hasDynamicKey = true;
+      if (result && result.needRuntime) {
+        prop.__vuecNeedRuntime = result.needRuntime;
+        directives.push(prop);
+        if (node && node.children && node.children.length) shouldUseBlock = true;
       }
       continue;
     }
