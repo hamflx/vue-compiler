@@ -214,6 +214,7 @@ function compile(source, options) {
 function baseParse(content, options) {
   const source = String(content || '');
   const opts = normalizeOptions(options);
+  warnIgnoredDecodeEntities(opts);
   return hydrateVue3Ast(native.baseParseVue3(source, vue3NativeOptions(opts, source)), opts);
 }
 
@@ -269,6 +270,13 @@ function vue3NativeOptions(options, source) {
   if (hasVuePredicateOption(options, 'isIgnoreNewlineTag')) {
     out.__vuecIgnoreNewlineTags = collectVuePredicateHits(options.isIgnoreNewlineTag, tags);
   }
+  if (typeof options.getNamespace === 'function') {
+    out.__vuecNamespaces = collectVueNamespaceHits(options.getNamespace, tags);
+    out.__vuecDomNamespaces = true;
+  }
+  if (Object.prototype.hasOwnProperty.call(options, 'ns')) {
+    out.__vuecRootNamespace = options.ns;
+  }
   if (hasVuePredicateOption(options, 'isNativeTag')) {
     out.__vuecNativeTags = collectVuePredicateHits(options.isNativeTag, tags);
   }
@@ -307,6 +315,23 @@ function collectVuePredicateHits(predicate, values) {
     } catch (_) {}
   }
   return hits;
+}
+
+function collectVueNamespaceHits(getNamespace, values) {
+  if (!getNamespace || typeof getNamespace !== 'function') return {};
+  const namespaces = {};
+  for (const value of values) {
+    try {
+      const namespace = getNamespace(value);
+      if (namespace !== undefined && namespace !== null) namespaces[value] = namespace;
+    } catch (_) {}
+  }
+  return namespaces;
+}
+
+function warnIgnoredDecodeEntities(options) {
+  if (!options || typeof options.decodeEntities !== 'function') return;
+  console.warn('[Vue warn]: decodeEntities option is passed but will be ignored in non-browser builds.');
 }
 
 function hydrateVue3Ast(ast, options) {

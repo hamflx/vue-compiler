@@ -2250,21 +2250,27 @@ fn vue3_public_node(
             "codegenNode": Value::Null,
             "loc": vue3_loc_value(source, base_offset, &node.span),
         }),
-        Vue3AstKind::Element(element) => json!({
-            "type": 1,
-            "tag": element.tag,
-            "ns": vue3_namespace_value(element.ns),
-            "tagType": vue3_element_type_value(element.tag_type),
-            "props": element.props.iter().map(|prop| vue3_prop_value(source, base_offset, prop, options)).collect::<Vec<_>>(),
-            "children": vue3_public_children(ast, node_id, source, base_offset, options),
-            "loc": vue3_loc_value(source, base_offset, &node.span),
-            "codegenNode": Value::Null,
-            "isSelfClosing": if element.self_closing { json!(true) } else { Value::Null },
-        }),
+        Vue3AstKind::Element(element) => {
+            let mut value = json!({
+                "type": 1,
+                "tag": element.tag,
+                "ns": vue3_namespace_value(element.ns),
+                "tagType": vue3_element_type_value(element.tag_type),
+                "props": element.props.iter().map(|prop| vue3_prop_value(source, base_offset, prop, options)).collect::<Vec<_>>(),
+                "children": vue3_public_children(ast, node_id, source, base_offset, options),
+                "loc": vue3_loc_value(source, base_offset, &node.span),
+                "codegenNode": Value::Null,
+                "isSelfClosing": if element.self_closing { json!(true) } else { Value::Null },
+            });
+            if options.sfc_parse_mode {
+                value["innerLoc"] = vue3_inner_loc_value(ast, source, base_offset, node_id);
+            }
+            value
+        }
         Vue3AstKind::Text(text) => json!({
             "type": 2,
             "content": text.value,
-            "loc": vue3_loc_value(source, base_offset, &node.span),
+            "loc": vue3_text_loc_value(source, base_offset, &node.span),
         }),
         Vue3AstKind::Comment(comment) => json!({
             "type": 3,
@@ -2336,6 +2342,66 @@ fn vue3_prop_value(
             value
         }
     }
+}
+
+fn vue3_inner_loc_value(
+    ast: &Vue3Ast,
+    source: &str,
+    base_offset: usize,
+    node_id: vuec_ast::NodeId,
+) -> Value {
+    let Some(node) = ast.node(node_id) else {
+        return vue3_loc_stub_value();
+    };
+    let Some(span) = node.span.source() else {
+        return vue3_loc_stub_value();
+    };
+    let element_start = span.start.0.saturating_sub(base_offset);
+    let element_end = span.end.0.saturating_sub(base_offset).min(source.len());
+    let open_end = vue3_open_tag_end(source, element_start, element_end).unwrap_or(element_start);
+    let inner_end = vue3_close_tag_start(source, open_end, element_end).unwrap_or_else(|| {
+        node.children
+            .last()
+            .and_then(|child_id| ast.node(*child_id))
+            .and_then(|child| child.span.source())
+            .map(|child_span| {
+                child_span
+                    .end
+                    .0
+                    .saturating_sub(base_offset)
+                    .min(source.len())
+            })
+            .unwrap_or(open_end)
+    });
+    vue3_source_loc_value(source, open_end, inner_end)
+}
+
+fn vue3_open_tag_end(source: &str, start: usize, end: usize) -> Option<usize> {
+    let mut quote = None;
+    for (offset, ch) in source.get(start..end)?.char_indices() {
+        match (quote, ch) {
+            (Some(active), current) if current == active => quote = None,
+            (Some(_), _) => {}
+            (None, '"' | '\'') => quote = Some(ch),
+            (None, '>') => return Some(start + offset + 1),
+            (None, _) => {}
+        }
+    }
+    None
+}
+
+fn vue3_close_tag_start(source: &str, open_end: usize, element_end: usize) -> Option<usize> {
+    let mut cursor = open_end.min(source.len());
+    let end = element_end.min(source.len());
+    let mut close_start = None;
+    while cursor < end {
+        let Some(offset) = source.get(cursor..end)?.find("</") else {
+            break;
+        };
+        close_start = Some(cursor + offset);
+        cursor += offset + "</".len();
+    }
+    close_start
 }
 
 fn span_to_node_span(span: Option<Span>) -> NodeSpan {
@@ -3210,21 +3276,67 @@ fn vue3_expression_loc(
     source: &str,
     base_offset: usize,
     fallback_span: &NodeSpan,
-    trimmed: &str,
+    expression: &str,
 ) -> Value {
     let Some(span) = fallback_span.source() else {
         return vue3_loc_stub_value();
     };
-    let start = span.start.0.saturating_sub(base_offset);
-    let end = span.end.0.saturating_sub(base_offset).min(source.len());
-    let Some(slice) = source.get(start..end) else {
-        return vue3_loc_value(source, base_offset, fallback_span);
-    };
-    if let Some(offset) = slice.find(trimmed) {
-        let local_start = start + offset;
-        return vue3_source_loc_value(source, local_start, local_start + trimmed.len());
+    let local_span_start = span.start.0.saturating_sub(base_offset);
+    let local_span_end = span.end.0.saturating_sub(base_offset).min(source.len());
+    let node_source = source
+        .get(local_span_start..local_span_end)
+        .unwrap_or_default();
+    if let Some((inner_start, inner_end)) =
+        default_interpolation_inner_trimmed_span(source, local_span_start, local_span_end)
+    {
+        return vue3_source_loc_value(source, inner_start, inner_end);
+    }
+    let trimmed = expression.trim();
+    if trimmed.is_empty() {
+        let inner_start = if node_source.starts_with("{{") {
+            local_span_start + "{{".len()
+        } else {
+            local_span_start
+        };
+        return vue3_source_loc_value(source, inner_start, inner_start);
+    }
+    if let Some(local_start) = node_source.find(trimmed) {
+        let start = local_span_start + local_start;
+        return vue3_source_loc_value(source, start, start + trimmed.len());
     }
     vue3_loc_value(source, base_offset, fallback_span)
+}
+
+fn default_interpolation_inner_trimmed_span(
+    source: &str,
+    start: usize,
+    end: usize,
+) -> Option<(usize, usize)> {
+    let slice = source.get(start..end)?;
+    if !slice.starts_with("{{") || !slice.ends_with("}}") {
+        return None;
+    }
+    let mut inner_start = start + "{{".len();
+    let mut inner_end = end.saturating_sub("}}".len());
+    while inner_start < inner_end
+        && source
+            .get(inner_start..inner_end)
+            .and_then(|value| value.chars().next())
+            .is_some_and(char::is_whitespace)
+    {
+        let ch = source[inner_start..inner_end].chars().next()?;
+        inner_start += ch.len_utf8();
+    }
+    while inner_end > inner_start
+        && source
+            .get(inner_start..inner_end)
+            .and_then(|value| value.chars().next_back())
+            .is_some_and(char::is_whitespace)
+    {
+        let ch = source[inner_start..inner_end].chars().next_back()?;
+        inner_end -= ch.len_utf8();
+    }
+    Some((inner_start, inner_end))
 }
 
 fn vue3_loc_value(source: &str, base_offset: usize, span: &NodeSpan) -> Value {
@@ -3233,10 +3345,46 @@ fn vue3_loc_value(source: &str, base_offset: usize, span: &NodeSpan) -> Value {
         .unwrap_or_else(vue3_loc_stub_value)
 }
 
+fn vue3_text_loc_value(source: &str, base_offset: usize, span: &NodeSpan) -> Value {
+    let Some(source_span) = span.source() else {
+        return vue3_loc_stub_value();
+    };
+    let start = source_span.start.0.saturating_sub(base_offset);
+    let end = source_span.end.0.saturating_sub(base_offset);
+    if end == source.len()
+        && source_span.end.0 >= source_span.start.0
+        && source
+            .get(start..end)
+            .is_some_and(|slice| slice == "/" && source.ends_with('/'))
+        && source[..start].rfind('<').is_some_and(|tag_start| {
+            source
+                .get(tag_start..)
+                .is_some_and(|slice| slice.starts_with('<') && !slice.contains('>'))
+        })
+    {
+        return vue3_source_signed_start_loc_value(source, -1, end);
+    }
+    vue3_source_span_value(source, base_offset, source_span)
+}
+
 fn vue3_source_span_value(source: &str, base_offset: usize, span: Span) -> Value {
     let start = span.start.0.saturating_sub(base_offset);
     let end = span.end.0.saturating_sub(base_offset);
     vue3_source_loc_value(source, start, end)
+}
+
+fn vue3_source_signed_start_loc_value(source: &str, start: isize, end: usize) -> Value {
+    let local_start = if start < 0 && end <= source.len() {
+        end.saturating_sub(1)
+    } else {
+        start.max(0) as usize
+    };
+    let local_end = end.min(source.len()).max(local_start);
+    json!({
+        "start": vue3_signed_position(source, start),
+        "end": vue3_position(source, end),
+        "source": source.get(local_start..local_end).unwrap_or_default(),
+    })
 }
 
 fn vue3_source_loc_value(source: &str, start: usize, end: usize) -> Value {
@@ -3276,6 +3424,18 @@ fn vue3_position(source: &str, offset: usize) -> Value {
         "offset": utf16_offset,
         "line": line,
         "column": column,
+    })
+}
+
+fn vue3_signed_position(source: &str, offset: isize) -> Value {
+    if offset >= 0 {
+        return vue3_position(source, offset as usize);
+    }
+    let _ = source;
+    json!({
+        "offset": offset,
+        "line": 1,
+        "column": 1isize + offset,
     })
 }
 
