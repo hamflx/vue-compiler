@@ -1,5 +1,11 @@
 # Memory
 
+- Current round: completed the first M19 benchmark-report framework slice.
+- Added `cargo xtask bench`, which writes stable benchmark fixtures under `target/bench/fixtures`, runs the real `vuec` CLI benchmark path for Vue 2 template, Vue 3 template, Vue 3 SFC, and Vue 3 SSR cases, and writes `target/bench/bench-report.json` with fixture hashes, git commit/dirty state, OS/arch, Rust/Node/npm/pnpm versions, lock hash, iterations, and per-case timings.
+- The same gate prepares locked official npm compilers from `compat/official-revisions.lock` under `target/bench/official-js` and records official JS compiler timings for the same fixture set. On Windows the xtask program resolver now prefers spawnable `.exe/.cmd/.bat/.com` shims so npm-based probes do not accidentally select non-executable fnm shims.
+- This is benchmark/reporting infrastructure only. It does not change compiler semantics, AST/HIR/MIR structure, conformance classification, cache behavior, or `xtask/src/compat.rs`.
+- Verification: `cargo fmt --all -- --check`, `cargo test -p xtask`, `cargo xtask bench --iterations 1`, and `git diff --check`.
+
 - Current round: completed the M18 CLI verification closure slice.
 - Fixed `vuec --help` / clap display control flow so help exits with code 0 through the CLI's shared `RunOutput` path instead of being treated as a fatal parse error.
 - Added `cargo xtask verify-cli` / real-binary smoke coverage. The gate builds `vuec`, writes temporary fixtures, and runs the real CLI for help, Vue 2 template JSON, Vue 3 template JSON plus source map file, diagnostics stderr, Vue 3 SFC JSON, SSR JSON, parse-sfc JSON, and bench JSON. This is CLI command/packaging verification; compiler semantics remain delegated to the existing Rust compiler crates.

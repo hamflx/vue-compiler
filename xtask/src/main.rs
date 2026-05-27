@@ -10,11 +10,14 @@ use compat::{
     run_option_matrix, run_output_contract, summarize_compat, sync_official_tests,
     verify_npm_alias, verify_official_lock, ConformanceArgs, SelectionArgs,
 };
+use serde::Serialize;
 use serde_json::{json, Value as JsonValue};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Parser)]
 #[command(author, version, about)]
@@ -99,6 +102,16 @@ enum Command {
     VerifyWasmBrowser,
     VerifyWasmWasi,
     VerifyCli,
+    Bench {
+        #[arg(long, default_value_t = 10)]
+        iterations: usize,
+        #[arg(long, default_value = "target/bench")]
+        out_dir: PathBuf,
+        #[arg(long, default_value = "compat/official-revisions.lock")]
+        lock: PathBuf,
+        #[arg(long)]
+        skip_official_js: bool,
+    },
     SummarizeCompat {
         #[arg(long)]
         locked: bool,
@@ -148,6 +161,12 @@ fn main() -> Result<()> {
         Command::VerifyWasmBrowser => verify_wasm_browser()?,
         Command::VerifyWasmWasi => verify_wasm_wasi()?,
         Command::VerifyCli => verify_cli()?,
+        Command::Bench {
+            iterations,
+            out_dir,
+            lock,
+            skip_official_js,
+        } => bench(iterations, &out_dir, &lock, skip_official_js)?,
         Command::SummarizeCompat { locked, lock } => summarize_compat(locked, &lock),
     };
     println!("{}", serde_json::to_string_pretty(&report)?);
@@ -787,6 +806,135 @@ fn verify_cli() -> Result<compat::JsonReport> {
     )
 }
 
+fn bench(
+    iterations: usize,
+    out_dir: &Path,
+    lock: &Path,
+    skip_official_js: bool,
+) -> Result<compat::JsonReport> {
+    if iterations == 0 {
+        anyhow::bail!("--iterations must be greater than zero");
+    }
+    ensure_target_child(out_dir, "bench")?;
+    fs::create_dir_all(out_dir)
+        .with_context(|| format!("failed to create {}", out_dir.display()))?;
+    let fixture_dir = out_dir.join("fixtures");
+    fs::create_dir_all(&fixture_dir)
+        .with_context(|| format!("failed to create {}", fixture_dir.display()))?;
+
+    let fixtures = write_bench_fixtures(&fixture_dir)?;
+    let env = bench_environment(lock);
+    let mut items = Vec::new();
+    let mut violations = Vec::new();
+    let mut results = Vec::new();
+
+    build_cli_binary()?;
+    for fixture in &fixtures {
+        match run_rust_bench_case(fixture, iterations) {
+            Ok(result) => {
+                items.push(compat::ReportItem::new(
+                    format!("rust-{}", fixture.name),
+                    compat::ReportStatus::Pass,
+                    serde_json::to_string(&result)?,
+                    Some(fixture.path.clone()),
+                ));
+                results.push(result);
+            }
+            Err(err) => {
+                violations.push(format!("Rust benchmark {} failed: {err:#}", fixture.name));
+                items.push(compat::ReportItem::new(
+                    format!("rust-{}", fixture.name),
+                    compat::ReportStatus::Fail,
+                    format!("{err:#}"),
+                    Some(fixture.path.clone()),
+                ));
+            }
+        }
+    }
+
+    if skip_official_js {
+        let detail = json!({
+            "backend": "official-js",
+            "status": "pending",
+            "reason": "--skip-official-js was supplied"
+        })
+        .to_string();
+        items.push(compat::ReportItem::new(
+            "official-js",
+            compat::ReportStatus::Pending,
+            detail,
+            Some(out_dir.to_path_buf()),
+        ));
+    } else {
+        match prepare_official_js_bench_root(out_dir, lock) {
+            Ok(official_root) => {
+                for fixture in &fixtures {
+                    match run_official_js_bench_case(&official_root, fixture, iterations) {
+                        Ok(result) => {
+                            items.push(compat::ReportItem::new(
+                                format!("official-js-{}", fixture.name),
+                                compat::ReportStatus::Pass,
+                                serde_json::to_string(&result)?,
+                                Some(fixture.path.clone()),
+                            ));
+                            results.push(result);
+                        }
+                        Err(err) => {
+                            violations.push(format!(
+                                "official JS benchmark {} failed: {err:#}",
+                                fixture.name
+                            ));
+                            items.push(compat::ReportItem::new(
+                                format!("official-js-{}", fixture.name),
+                                compat::ReportStatus::Fail,
+                                format!("{err:#}"),
+                                Some(fixture.path.clone()),
+                            ));
+                        }
+                    }
+                }
+            }
+            Err(err) => {
+                let detail = json!({
+                    "backend": "official-js",
+                    "status": "pending",
+                    "reason": format!("{err:#}")
+                })
+                .to_string();
+                items.push(compat::ReportItem::new(
+                    "official-js",
+                    compat::ReportStatus::Pending,
+                    detail,
+                    Some(out_dir.to_path_buf()),
+                ));
+            }
+        }
+    }
+
+    let bench_report = BenchReport {
+        status: if violations.is_empty() {
+            "pass".into()
+        } else {
+            "fail".into()
+        },
+        iterations,
+        environment: env,
+        fixtures: fixtures.iter().map(BenchFixtureReport::from).collect(),
+        results,
+    };
+    let report_path = out_dir.join("bench-report.json");
+    fs::write(&report_path, serde_json::to_string_pretty(&bench_report)?)
+        .with_context(|| format!("failed to write {}", report_path.display()))?;
+
+    Ok(
+        compat::JsonReport::new("bench", compat::ReportStatus::Pass)
+            .with_items(items)
+            .with_violations(violations)
+            .with_created(vec![report_path.display().to_string()])
+            .with_note("generates a reproducible benchmark report with input hashes, environment, git commit, Rust CLI timings, and official JS compiler timings when the locked npm compilers are available"),
+    )
+}
+
 fn run_cargo(args: &[&str]) -> Result<String> {
     let output = ProcessCommand::new("cargo")
         .args(args)
@@ -972,18 +1120,7 @@ fn find_wasi_case<'a>(value: &'a JsonValue, name: &str) -> Result<&'a JsonValue>
 }
 
 fn run_cli_smoke_suite() -> Result<String> {
-    let build = ProcessCommand::new("cargo")
-        .args(["build", "-p", "vuec_cli", "--bin", "vuec"])
-        .output()
-        .context("failed to spawn cargo build -p vuec_cli --bin vuec")?;
-    if !build.status.success() {
-        anyhow::bail!(
-            "cargo build -p vuec_cli --bin vuec exited with {:?}\nstdout:\n{}\nstderr:\n{}",
-            build.status.code(),
-            String::from_utf8_lossy(&build.stdout),
-            String::from_utf8_lossy(&build.stderr)
-        );
-    }
+    build_cli_binary()?;
 
     let root = PathBuf::from("target").join("cli-smoke");
     if root.exists() {
@@ -1155,6 +1292,22 @@ fn run_cli_smoke_suite() -> Result<String> {
     .to_string())
 }
 
+fn build_cli_binary() -> Result<()> {
+    let build = ProcessCommand::new("cargo")
+        .args(["build", "-p", "vuec_cli", "--bin", "vuec"])
+        .output()
+        .context("failed to spawn cargo build -p vuec_cli --bin vuec")?;
+    if !build.status.success() {
+        anyhow::bail!(
+            "cargo build -p vuec_cli --bin vuec exited with {:?}\nstdout:\n{}\nstderr:\n{}",
+            build.status.code(),
+            String::from_utf8_lossy(&build.stdout),
+            String::from_utf8_lossy(&build.stderr)
+        );
+    }
+    Ok(())
+}
+
 fn write_cli_fixture(root: &Path, name: &str, source: &str) -> Result<PathBuf> {
     let path = root.join(name);
     fs::write(&path, source).with_context(|| format!("failed to write {}", path.display()))?;
@@ -1195,6 +1348,459 @@ fn parse_cli_json(label: &str, output: &CliProcessOutput) -> Result<JsonValue> {
     }
     serde_json::from_str(&output.stdout)
         .with_context(|| format!("{label} CLI stdout was not JSON:\n{}", output.stdout))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum BenchCaseKind {
+    Vue2Template,
+    Vue3Template,
+    Vue3Sfc,
+    Vue3Ssr,
+}
+
+impl BenchCaseKind {
+    const fn cli_target(self) -> &'static str {
+        match self {
+            BenchCaseKind::Vue2Template => "vue2-template",
+            BenchCaseKind::Vue3Template => "vue3-template",
+            BenchCaseKind::Vue3Sfc => "vue3-sfc",
+            BenchCaseKind::Vue3Ssr => "vue3-ssr",
+        }
+    }
+
+    const fn official_package(self) -> &'static str {
+        match self {
+            BenchCaseKind::Vue2Template => "vue-template-compiler",
+            BenchCaseKind::Vue3Template => "@vue/compiler-dom",
+            BenchCaseKind::Vue3Sfc => "@vue/compiler-sfc",
+            BenchCaseKind::Vue3Ssr => "@vue/compiler-ssr",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct BenchFixture {
+    name: &'static str,
+    kind: BenchCaseKind,
+    path: PathBuf,
+    bytes: u64,
+    sha256: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BenchFixtureReport {
+    name: String,
+    kind: BenchCaseKind,
+    path: String,
+    bytes: u64,
+    sha256: String,
+}
+
+impl From<&BenchFixture> for BenchFixtureReport {
+    fn from(value: &BenchFixture) -> Self {
+        Self {
+            name: value.name.into(),
+            kind: value.kind,
+            path: value.path.display().to_string(),
+            bytes: value.bytes,
+            sha256: value.sha256.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BenchResult {
+    name: String,
+    backend: String,
+    package: String,
+    iterations: usize,
+    elapsed_micros: u128,
+    micros_per_iteration: u128,
+    input_sha256: String,
+    output_bytes: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BenchEnvironment {
+    git_commit: Option<String>,
+    git_dirty: bool,
+    rustc: Option<String>,
+    node: Option<String>,
+    npm: Option<String>,
+    pnpm: Option<String>,
+    os: String,
+    arch: String,
+    lock_path: String,
+    lock_hash: Option<String>,
+    created_unix: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BenchReport {
+    status: String,
+    iterations: usize,
+    environment: BenchEnvironment,
+    fixtures: Vec<BenchFixtureReport>,
+    results: Vec<BenchResult>,
+}
+
+fn write_bench_fixtures(root: &Path) -> Result<Vec<BenchFixture>> {
+    let specs = [
+        (
+            "vue2-template",
+            BenchCaseKind::Vue2Template,
+            "vue2-template.html",
+            bench_template_source(),
+        ),
+        (
+            "vue3-template",
+            BenchCaseKind::Vue3Template,
+            "vue3-template.html",
+            bench_template_source(),
+        ),
+        (
+            "vue3-sfc",
+            BenchCaseKind::Vue3Sfc,
+            "App.vue",
+            bench_sfc_source(),
+        ),
+        (
+            "vue3-ssr",
+            BenchCaseKind::Vue3Ssr,
+            "vue3-ssr.html",
+            bench_template_source(),
+        ),
+    ];
+    specs
+        .into_iter()
+        .map(|(name, kind, file_name, source)| {
+            let path = root.join(file_name);
+            fs::write(&path, source)
+                .with_context(|| format!("failed to write {}", path.display()))?;
+            let bytes = source.len() as u64;
+            let sha256 = sha256_bytes(source.as_bytes());
+            Ok(BenchFixture {
+                name,
+                kind,
+                path,
+                bytes,
+                sha256,
+            })
+        })
+        .collect()
+}
+
+fn bench_template_source() -> &'static str {
+    r#"<section class="bench-root">
+  <header>
+    <h1>{{ title }}</h1>
+    <button @click="refresh">Refresh</button>
+  </header>
+  <ul>
+    <li v-for="item in items" :key="item.id" :class="{ active: item.active }">
+      <span>{{ item.name }}</span>
+      <strong v-if="item.count > 0">{{ item.count }}</strong>
+      <em v-else>empty</em>
+    </li>
+  </ul>
+  <footer v-show="ready" :data-total="items.length">{{ footer }}</footer>
+</section>"#
+}
+
+fn bench_sfc_source() -> &'static str {
+    r#"<template>
+  <section class="bench-root">
+    <header>
+      <h1>{{ title }}</h1>
+      <button @click="refresh">Refresh</button>
+    </header>
+    <ul>
+      <li v-for="item in items" :key="item.id" :class="{ active: item.active }">
+        <span>{{ item.name }}</span>
+        <strong v-if="item.count > 0">{{ item.count }}</strong>
+        <em v-else>empty</em>
+      </li>
+    </ul>
+    <footer v-show="ready" :data-total="items.length">{{ footer }}</footer>
+  </section>
+</template>
+<script setup>
+const title = 'Benchmark'
+const footer = 'done'
+const ready = true
+const items = []
+function refresh() {}
+</script>
+<style scoped>
+.bench-root { display: grid; gap: 8px; }
+.active { font-weight: 600; }
+</style>"#
+}
+
+fn run_rust_bench_case(fixture: &BenchFixture, iterations: usize) -> Result<BenchResult> {
+    let exe = cli_executable_path();
+    let output = run_cli_command(
+        &exe,
+        &[
+            "bench",
+            "--target",
+            fixture.kind.cli_target(),
+            "--iterations",
+            &iterations.to_string(),
+            "--json",
+            &fixture.path.display().to_string(),
+        ],
+    )?;
+    let value = parse_cli_json(fixture.name, &output)?;
+    let elapsed = value
+        .get("elapsedMicros")
+        .and_then(JsonValue::as_u64)
+        .context("Rust bench result missing elapsedMicros")? as u128;
+    let per_iter = value
+        .get("microsPerIteration")
+        .and_then(JsonValue::as_u64)
+        .context("Rust bench result missing microsPerIteration")? as u128;
+    Ok(BenchResult {
+        name: fixture.name.into(),
+        backend: "rust-cli".into(),
+        package: "vuec_cli".into(),
+        iterations,
+        elapsed_micros: elapsed,
+        micros_per_iteration: per_iter,
+        input_sha256: fixture.sha256.clone(),
+        output_bytes: None,
+    })
+}
+
+fn prepare_official_js_bench_root(out_dir: &Path, lock: &Path) -> Result<PathBuf> {
+    let root = out_dir.join("official-js");
+    fs::create_dir_all(&root).with_context(|| format!("failed to create {}", root.display()))?;
+    let package_json = root.join("package.json");
+    if !package_json.exists() {
+        let versions = official_npm_versions(lock)?;
+        let value = json!({
+            "private": true,
+            "type": "commonjs",
+            "dependencies": {
+                "vue": versions.vue2,
+                "vue-template-compiler": versions.vue_template_compiler,
+                "@vue/compiler-dom": versions.vue_compiler_dom,
+                "@vue/compiler-sfc": versions.vue_compiler_sfc,
+                "@vue/compiler-ssr": versions.vue_compiler_ssr
+            }
+        });
+        fs::write(&package_json, serde_json::to_string_pretty(&value)?)
+            .with_context(|| format!("failed to write {}", package_json.display()))?;
+    }
+    let node_modules = root.join("node_modules");
+    if !node_modules.exists() {
+        let npm = resolve_program("npm")?;
+        let output = ProcessCommand::new(npm)
+            .args(["install", "--ignore-scripts", "--no-audit", "--no-fund"])
+            .current_dir(&root)
+            .output()
+            .with_context(|| format!("failed to spawn npm install in {}", root.display()))?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "npm install for official JS benchmark exited with {:?}\nstdout:\n{}\nstderr:\n{}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+    Ok(root)
+}
+
+#[derive(Clone, Debug)]
+struct OfficialNpmVersions {
+    vue2: String,
+    vue_template_compiler: String,
+    vue_compiler_dom: String,
+    vue_compiler_sfc: String,
+    vue_compiler_ssr: String,
+}
+
+fn official_npm_versions(lock: &Path) -> Result<OfficialNpmVersions> {
+    let value: toml::Value = toml::from_str(
+        &fs::read_to_string(lock).with_context(|| format!("failed to read {}", lock.display()))?,
+    )
+    .with_context(|| format!("failed to parse {}", lock.display()))?;
+    Ok(OfficialNpmVersions {
+        vue2: toml_string(&value, &["vue2_7", "npm", "vue"])?,
+        vue_template_compiler: toml_string(&value, &["vue2_7", "npm", "vue-template-compiler"])?,
+        vue_compiler_dom: toml_string(&value, &["vue3", "npm", "@vue/compiler-dom"])?,
+        vue_compiler_sfc: toml_string(&value, &["vue3", "npm", "@vue/compiler-sfc"])?,
+        vue_compiler_ssr: toml_string(&value, &["vue3", "npm", "@vue/compiler-ssr"])?,
+    })
+}
+
+fn toml_string(value: &toml::Value, path: &[&str]) -> Result<String> {
+    let mut cursor = value;
+    for segment in path {
+        cursor = cursor
+            .get(*segment)
+            .with_context(|| format!("{} missing in official lock", path.join(".")))?;
+    }
+    cursor
+        .as_str()
+        .map(ToOwned::to_owned)
+        .with_context(|| format!("{} was not a string", path.join(".")))
+}
+
+fn run_official_js_bench_case(
+    root: &Path,
+    fixture: &BenchFixture,
+    iterations: usize,
+) -> Result<BenchResult> {
+    let script = r##"
+const fs = require('fs');
+const source = fs.readFileSync(process.env.VUEC_BENCH_INPUT, 'utf8');
+const iterations = Number(process.env.VUEC_BENCH_ITERATIONS);
+const kind = process.env.VUEC_BENCH_KIND;
+let output = null;
+const started = process.hrtime.bigint();
+for (let i = 0; i < iterations; i++) {
+  if (kind === 'vue2-template') {
+    output = require('vue-template-compiler').compile(source);
+  } else if (kind === 'vue3-template') {
+    output = require('@vue/compiler-dom').compile(source);
+  } else if (kind === 'vue3-sfc') {
+    const sfc = require('@vue/compiler-sfc');
+    const parsed = sfc.parse(source, { filename: process.env.VUEC_BENCH_INPUT }).descriptor;
+    output = sfc.compileTemplate({ source: parsed.template ? parsed.template.content : '', filename: process.env.VUEC_BENCH_INPUT, id: 'bench' });
+  } else if (kind === 'vue3-ssr') {
+    output = require('@vue/compiler-ssr').compile(source);
+  } else {
+    throw new Error(`unsupported benchmark kind ${kind}`);
+  }
+}
+const elapsedMicros = Number((process.hrtime.bigint() - started) / 1000n);
+function outputSize(value) {
+  if (!value) return 0;
+  if (typeof value.code === 'string') return Buffer.byteLength(value.code);
+  if (typeof value.render === 'string') return Buffer.byteLength(value.render);
+  try {
+    return Buffer.byteLength(JSON.stringify(value));
+  } catch {
+    return 0;
+  }
+}
+process.stdout.write(JSON.stringify({
+  elapsedMicros,
+  microsPerIteration: Math.floor(elapsedMicros / iterations),
+  outputBytes: outputSize(output)
+}));
+"##;
+    let output = ProcessCommand::new("node")
+        .arg("-e")
+        .arg(script)
+        .current_dir(root)
+        .env("VUEC_BENCH_INPUT", absolute_path(&fixture.path))
+        .env("VUEC_BENCH_ITERATIONS", iterations.to_string())
+        .env("VUEC_BENCH_KIND", fixture.kind.cli_target())
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to spawn official JS benchmark {} in {}",
+                fixture.name,
+                root.display()
+            )
+        })?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "official JS benchmark {} exited with {:?}\nstdout:\n{}\nstderr:\n{}",
+            fixture.name,
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let value: JsonValue = serde_json::from_slice(&output.stdout).with_context(|| {
+        format!(
+            "official JS benchmark {} stdout was not JSON:\n{}",
+            fixture.name,
+            String::from_utf8_lossy(&output.stdout)
+        )
+    })?;
+    Ok(BenchResult {
+        name: fixture.name.into(),
+        backend: "official-js".into(),
+        package: fixture.kind.official_package().into(),
+        iterations,
+        elapsed_micros: value
+            .get("elapsedMicros")
+            .and_then(JsonValue::as_u64)
+            .context("official bench result missing elapsedMicros")?
+            as u128,
+        micros_per_iteration: value
+            .get("microsPerIteration")
+            .and_then(JsonValue::as_u64)
+            .context("official bench result missing microsPerIteration")?
+            as u128,
+        input_sha256: fixture.sha256.clone(),
+        output_bytes: value.get("outputBytes").and_then(JsonValue::as_u64),
+    })
+}
+
+fn bench_environment(lock: &Path) -> BenchEnvironment {
+    BenchEnvironment {
+        git_commit: command_output("git", &["rev-parse", "HEAD"]),
+        git_dirty: git_dirty(),
+        rustc: command_output("rustc", &["--version"]),
+        node: command_output("node", &["--version"]),
+        npm: command_output_resolved("npm", &["--version"]),
+        pnpm: command_output_resolved("pnpm", &["--version"]),
+        os: std::env::consts::OS.into(),
+        arch: std::env::consts::ARCH.into(),
+        lock_path: lock.display().to_string(),
+        lock_hash: sha256_file(lock).ok(),
+        created_unix: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or_default(),
+    }
+}
+
+fn command_output(program: &str, args: &[&str]) -> Option<String> {
+    let output = ProcessCommand::new(program).args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+fn command_output_resolved(program: &str, args: &[&str]) -> Option<String> {
+    let program = resolve_program(program).ok()?;
+    command_output(&program, args)
+}
+
+fn git_dirty() -> bool {
+    ProcessCommand::new("git")
+        .args(["diff", "--quiet"])
+        .status()
+        .map(|status| !status.success())
+        .unwrap_or(true)
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    Ok(sha256_bytes(&bytes))
+}
+
+fn sha256_bytes(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    format!("{digest:x}")
 }
 
 fn write_wasm_webdriver_config(chrome_binary: Option<&Path>) -> Result<PathBuf> {
@@ -1390,12 +1996,32 @@ fn resolve_program(program: &str) -> Result<String> {
     if !output.status.success() {
         anyhow::bail!("required program `{program}` was not found on PATH");
     }
-    Ok(String::from_utf8_lossy(&output.stdout)
+    let candidates = String::from_utf8_lossy(&output.stdout)
         .lines()
         .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or(program)
-        .to_string())
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    if cfg!(windows) {
+        if let Some(path) = candidates.iter().find(|path| is_windows_executable(path)) {
+            return Ok(path.clone());
+        }
+    }
+    Ok(candidates
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| program.to_string()))
+}
+
+fn is_windows_executable(path: &str) -> bool {
+    matches!(
+        Path::new(path)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("exe" | "cmd" | "bat" | "com")
+    )
 }
 
 fn run_wasm_smoke() -> Result<String> {
@@ -1895,4 +2521,47 @@ fn absolute_path(path: &Path) -> PathBuf {
     std::env::current_dir()
         .map(|cwd| cwd.join(path))
         .unwrap_or_else(|_| path.to_path_buf())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bench_case_kind_uses_cli_targets() {
+        assert_eq!(BenchCaseKind::Vue2Template.cli_target(), "vue2-template");
+        assert_eq!(BenchCaseKind::Vue3Template.cli_target(), "vue3-template");
+        assert_eq!(BenchCaseKind::Vue3Sfc.cli_target(), "vue3-sfc");
+        assert_eq!(BenchCaseKind::Vue3Ssr.cli_target(), "vue3-ssr");
+    }
+
+    #[test]
+    fn windows_executable_detection_prefers_spawnable_shims() {
+        assert!(is_windows_executable(r"C:\node\npm.cmd"));
+        assert!(is_windows_executable(r"C:\node\pnpm.exe"));
+        assert!(!is_windows_executable(r"C:\node\npm"));
+    }
+
+    #[test]
+    fn official_npm_versions_read_locked_compilers() {
+        let lock = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+            .join("compat")
+            .join("official-revisions.lock");
+        let versions = official_npm_versions(&lock).expect("official versions");
+        assert_eq!(versions.vue2, "2.7.16");
+        assert_eq!(versions.vue_template_compiler, "2.7.16");
+        assert_eq!(versions.vue_compiler_dom, "3.5.34");
+        assert_eq!(versions.vue_compiler_sfc, "3.5.34");
+        assert_eq!(versions.vue_compiler_ssr, "3.5.34");
+    }
+
+    #[test]
+    fn sha256_bytes_is_stable() {
+        assert_eq!(
+            sha256_bytes(b"vuec"),
+            "1fc8cc70af7ec7c20b935e8970e8641a6acc9fd856788a44a68507e33c8d561d"
+        );
+    }
 }
