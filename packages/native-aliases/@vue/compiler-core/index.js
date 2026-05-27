@@ -2159,7 +2159,11 @@ function resolveComponentType(node, context) {
 
 function stringifyExpression(exp) {
   if (typeof exp === 'string') return exp;
-  if (exp && typeof exp.content === 'string') return exp.content;
+  if (!exp) return '';
+  if (typeof exp.content === 'string') return exp.content;
+  if (Array.isArray(exp.children)) {
+    return exp.children.map(stringifyExpression).join('');
+  }
   return '';
 }
 
@@ -3182,6 +3186,9 @@ function buildProps(node, context) {
   for (const prop of propList || node && node.props || []) {
     if (!prop) continue;
     if (prop.type === NodeTypes.ATTRIBUTE) {
+      if (prop.name === 'is' && shouldSkipComponentIsProp(node, context, prop)) {
+        continue;
+      }
       objectProps.push(createObjectProperty(
         createSimpleExpression(prop.name, true, prop.nameLoc || prop.loc),
         createSimpleExpression(prop.value ? prop.value.content : '', true, prop.value ? prop.value.loc : prop.loc),
@@ -3189,6 +3196,9 @@ function buildProps(node, context) {
       continue;
     }
     if (prop.name === 'bind' && prop.arg) {
+      if (isStaticArgOf(prop.arg, 'is') && shouldSkipComponentIsProp(node, context, prop)) {
+        continue;
+      }
       const transform = context && context.directiveTransforms && context.directiveTransforms.bind;
       const result = transform ? transform(prop, node, context) : transformBind(prop, node, context);
       objectProps.push(...((result && result.props) || []));
@@ -3287,6 +3297,15 @@ function buildProps(node, context) {
     dynamicPropNames,
     shouldUseBlock,
   };
+}
+
+function shouldSkipComponentIsProp(node, context, prop) {
+  const tag = node && node.tag;
+  if (tag === 'component' || tag === 'Component') return true;
+  if (prop && prop.type === NodeTypes.ATTRIBUTE && prop.value && String(prop.value.content || '').startsWith('vue:')) {
+    return true;
+  }
+  return checkCompatEnabled(CompilerDeprecationTypes.COMPILER_IS_ON_ELEMENT, context, prop && prop.loc);
 }
 
 function buildSlots(node, context) {
