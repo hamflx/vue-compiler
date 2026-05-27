@@ -211,13 +211,13 @@ function vue3BaseCompileTransformOptions(options) {
       transformOnce,
       transformIf,
       transformFor,
-      ...(options.nodeTransforms || []),
       ...(options.prefixIdentifiers ? [trackVForSlotScopes] : []),
       transformExpression,
       transformSlotOutlet,
       transformElement,
       trackSlotScopes,
       transformText,
+      ...(options.nodeTransforms || []),
     ],
     directiveTransforms: {
       ...baseDirectiveTransforms,
@@ -230,6 +230,9 @@ function baseCompile(source) {
   const options = normalizeOptions(arguments[1]);
   validateBaseCompileOptions(options);
   const template = String(source || '');
+  if (vue3ShouldCompileWithJsNodeTransforms(options)) {
+    return baseCompileVue3WithJsNodeTransforms(template, options);
+  }
   const result = native.baseCompileVue3(template, vue3NativeOptions(options, template));
   if (result && typeof result === 'object' && !result.ast) {
     const ast = baseParse(template, options);
@@ -237,6 +240,31 @@ function baseCompile(source) {
     result.ast = ast;
   }
   return result;
+}
+
+function baseCompileVue3WithJsNodeTransforms(template, options) {
+  const ast = baseParse(template, options);
+  transform(ast, vue3BaseCompileTransformOptions(options));
+  const result = generate(ast, vue3NativeOptions(options, template));
+  result.ast = ast;
+  return result;
+}
+
+function vue3ShouldCompileWithJsNodeTransforms(options) {
+  return !!(
+    options
+    && typeof options.transformHoist === 'function'
+    && Array.isArray(options.nodeTransforms)
+    && options.nodeTransforms.some(transform => !vue3KnownDomNodeTransform(transform))
+  );
+}
+
+function vue3KnownDomNodeTransform(transform) {
+  const name = transform && transform.name;
+  return name === 'ignoreSideEffectTags'
+    || name === 'transformStyle'
+    || name === 'transformTransition'
+    || name === 'validateHtmlNesting';
 }
 
 function compile(source, options) {
