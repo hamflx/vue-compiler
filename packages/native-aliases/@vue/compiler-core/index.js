@@ -671,6 +671,13 @@ function createTransformContext(root, options) {
         if (this.identifiers[name] <= 0) delete this.identifiers[name];
       }
     },
+    hoist(exp) {
+      const value = typeof exp === 'string' ? createSimpleExpression(exp) : exp;
+      this.hoists.push(value);
+      const identifier = createSimpleExpression(`_hoisted_${this.hoists.length}`, false, value && value.loc || locStub, ConstantTypes.CAN_CACHE);
+      identifier.hoisted = value;
+      return identifier;
+    },
     cache(exp, isVNode, inVOnce) {
       const cached = createCacheExpression(this.cached.length, exp, !!isVNode, !!inVOnce);
       this.cached.push(cached);
@@ -963,10 +970,25 @@ function setVue3NodeAtPath(node, path, value) {
 function getVue3NodeAtPath(node, path) {
   let target = node;
   for (const key of path || []) {
-    if (!target) return undefined;
-    target = target[key];
+    if (target == null) return undefined;
+    target = target[vue3PathKey(key)];
   }
   return target;
+}
+
+function getVue3HolderAtPath(node, path) {
+  let target = node;
+  const parts = path || [];
+  for (let index = 0; index + 1 < parts.length; index++) {
+    if (target == null) return undefined;
+    target = target[vue3PathKey(parts[index])];
+  }
+  if (target == null || !parts.length) return undefined;
+  return { owner: target, key: vue3PathKey(parts[parts.length - 1]) };
+}
+
+function vue3PathKey(part) {
+  return typeof part === 'number' || /^\d+$/.test(String(part)) ? Number(part) : part;
 }
 
 function vue3TransformOnceContextPayload(context) {
@@ -1056,7 +1078,7 @@ function createIfCodegenNodeForBranch(branch, keyIndex, context) {
 }
 
 function createIfBranchCodegen(branch, keyIndex, context) {
-  const keyProperty = createObjectProperty('key', createSimpleExpression(String(keyIndex), false, locStub));
+  const keyProperty = createObjectProperty('key', createSimpleExpression(String(keyIndex), false, locStub, ConstantTypes.CAN_CACHE));
   const children = branch.children || [];
   const firstChild = children[0];
   const projection = callVue3CoreProjection('vue3.core.transformIf', {
@@ -1159,11 +1181,12 @@ function finalizeVue3ForExitCodegen(node, forNode, renderExp, codegenProjection,
     context: vue3TransformContextPayload(context),
   });
   let childBlock;
+  const keyProperty = materializeVue3ForKeyProperty(codegenProjection && codegenProjection.keyProperty, node && findDir(node, 'for', true), context);
   if (exitProjection && exitProjection.kind === 'fragmentWrapper') {
     childBlock = createVNodeCall(
       context,
       context.helper(FRAGMENT),
-      undefined,
+      keyProperty ? createObjectExpression([keyProperty]) : undefined,
       forNode.children || [],
       exitProjection.patchFlag,
       undefined,
@@ -1175,11 +1198,19 @@ function finalizeVue3ForExitCodegen(node, forNode, renderExp, codegenProjection,
     );
   } else {
     childBlock = forNode.children && forNode.children[0] && forNode.children[0].codegenNode;
+    if (node && node.tagType === ElementTypes.TEMPLATE && keyProperty && childBlock) {
+      injectProp(childBlock, keyProperty, context);
+    }
     if (childBlock && exitProjection && exitProjection.kind === 'singleElement' && exitProjection.childBlockIsBlock && childBlock.type === NodeTypes.VNODE_CALL) {
       convertToBlock(childBlock, context);
     }
   }
   renderExp.arguments.push(createFunctionExpression(createForLoopParams(forNode.parseResult), childBlock, true));
+}
+
+function materializeVue3ForKeyProperty(projection, dir, context) {
+  if (!projection || !projection.value) return null;
+  return createObjectProperty('key', materializeVue3ForProjectionNode(projection.value, dir, context));
 }
 
 function getBaseTransformPreset(prefixIdentifiers) {
@@ -1199,13 +1230,11 @@ function getBaseTransformPreset(prefixIdentifiers) {
 
 function getConstantType(node, context) {
   if (!node) return ConstantTypes.NOT_CONSTANT;
-  if (node.constType != null) return node.constType;
-  if (node.type === NodeTypes.SIMPLE_EXPRESSION) {
-    return node.isStatic ? ConstantTypes.CAN_STRINGIFY : ConstantTypes.NOT_CONSTANT;
-  }
-  return context && context.constantCache && context.constantCache.get
-    ? context.constantCache.get(node) || ConstantTypes.NOT_CONSTANT
-    : ConstantTypes.NOT_CONSTANT;
+  const projection = callVue3CoreProjection('vue3.core.getConstantType', {
+    node,
+    context: vue3CacheStaticContextPayload(context),
+  });
+  return projection && projection.constantType || ConstantTypes.NOT_CONSTANT;
 }
 
 function getMemoedVNodeCall(node) {
@@ -2012,6 +2041,17 @@ function vue3TransformTextContextPayload(context) {
   };
 }
 
+function vue3CacheStaticContextPayload(context) {
+  context = context || {};
+  return {
+    prefixIdentifiers: !!context.prefixIdentifiers,
+    hmr: !!context.hmr,
+    inSSR: !!context.inSSR,
+    identifiers: context.identifiers || {},
+    bindingMetadata: context.bindingMetadata || {},
+  };
+}
+
 function materializeVue3TextProjection(projection, node, context) {
   if (!projection || !Array.isArray(projection.operations) || !node || !Array.isArray(node.children)) return;
   for (const operation of projection.operations) {
@@ -2276,6 +2316,178 @@ function transformText(node, context) {
   };
 }
 
+function cacheStatic(root, context) {
+  const projection = callVue3CoreProjection('vue3.core.cacheStatic', {
+    root,
+    context: vue3CacheStaticContextPayload(context),
+  });
+  for (const operation of projection && projection.operations || []) {
+    materializeVue3CacheStaticOperation(operation, root, context);
+  }
+  if (context && typeof context.transformHoist === 'function') {
+    applyVue3TransformHoist(root, context);
+  }
+}
+
+function materializeVue3CacheStaticOperation(operation, root, context) {
+  if (!operation || !operation.kind) return;
+  switch (operation.kind) {
+    case 'setPatchFlag': {
+      const target = getVue3NodeAtPath(root, operation.path);
+      if (target) target.patchFlag = operation.patchFlag;
+      return;
+    }
+    case 'appendTextCallPatchFlag': {
+      const target = getVue3NodeAtPath(root, operation.path);
+      if (target && target.type === NodeTypes.JS_CALL_EXPRESSION && target.arguments && target.arguments.length > 0 && target.arguments.length < 2) {
+        target.arguments.push(operation.patchFlag || '-1 /* CACHED */');
+      }
+      return;
+    }
+    case 'setBlock': {
+      const target = getVue3NodeAtPath(root, operation.path);
+      if (target && target.type === NodeTypes.VNODE_CALL && target.isBlock !== !!operation.isBlock) {
+        setVue3VNodeBlock(target, !!operation.isBlock, context);
+      }
+      return;
+    }
+    case 'cacheCodegen': {
+      const holder = getVue3HolderAtPath(root, operation.path);
+      if (holder && holder.owner) holder.owner[holder.key] = context.cache(holder.owner[holder.key]);
+      return;
+    }
+    case 'cacheChildrenArray': {
+      const holder = getVue3HolderAtPath(root, operation.path);
+      const children = getVue3NodeAtPath(root, operation.childrenPath);
+      if (holder && holder.owner && Array.isArray(children)) {
+        const cacheExp = context.cache(createArrayExpression(children));
+        cacheExp.needArraySpread = operation.needArraySpread !== false;
+        holder.owner[holder.key] = cacheExp;
+      }
+      return;
+    }
+    case 'cacheSlotReturns': {
+      const owner = getVue3NodeAtPath(root, operation.ownerPath);
+      const slot = findVue3SlotFunction(owner && owner.codegenNode, operation.slot);
+      if (slot && Array.isArray(slot.returns)) {
+        const cacheExp = context.cache(createArrayExpression(slot.returns));
+        cacheExp.needArraySpread = operation.needArraySpread !== false;
+        slot.returns = cacheExp;
+      }
+      return;
+    }
+    case 'hoistProps':
+    case 'hoistDynamicProps': {
+      const holder = getVue3HolderAtPath(root, operation.path);
+      if (holder && holder.owner && holder.owner[holder.key]) {
+        holder.owner[holder.key] = context.hoist(holder.owner[holder.key]);
+      }
+      return;
+    }
+    default:
+      throw new Error(`Unsupported Rust cacheStatic projection: ${operation.kind}`);
+  }
+}
+
+function applyVue3TransformHoist(root, context) {
+  applyVue3TransformHoistToNode(root, context);
+}
+
+function applyVue3TransformHoistToNode(node, context) {
+  if (!node || !Array.isArray(node.children)) return;
+  if (vue3NodeHasCachedChildrenArray(node) || vue3ChildrenHaveCachedNodes(node.children)) {
+    context.transformHoist(node.children, context, node);
+  }
+  for (const child of node.children.slice()) {
+    if (child && child.type === NodeTypes.ELEMENT && child.tagType === ElementTypes.COMPONENT) {
+      context.scopes.vSlot++;
+      applyVue3TransformHoistToNode(child, context);
+      context.scopes.vSlot--;
+    } else if (child && child.type === NodeTypes.IF) {
+      for (const branch of child.branches || []) applyVue3TransformHoistToNode(branch, context);
+    } else {
+      applyVue3TransformHoistToNode(child, context);
+    }
+  }
+}
+
+function vue3NodeHasCachedChildrenArray(node) {
+  return !!(
+    node
+    && node.type === NodeTypes.ELEMENT
+    && node.codegenNode
+    && node.codegenNode.type === NodeTypes.VNODE_CALL
+    && node.codegenNode.children
+    && node.codegenNode.children.type === NodeTypes.JS_CACHE_EXPRESSION
+  );
+}
+
+function vue3ChildrenHaveCachedNodes(children) {
+  return (children || []).some(child => child && (
+    (child.type === NodeTypes.ELEMENT
+      && child.tagType === ElementTypes.ELEMENT
+      && child.codegenNode
+      && child.codegenNode.type === NodeTypes.JS_CACHE_EXPRESSION)
+    || (child.type === NodeTypes.TEXT_CALL
+      && child.codegenNode
+      && child.codegenNode.type === NodeTypes.JS_CACHE_EXPRESSION)
+  ));
+}
+
+function setVue3VNodeBlock(node, isBlock, context) {
+  if (!context || !node || node.isBlock === isBlock) return;
+  if (isBlock) {
+    context.removeHelper(getVNodeHelper(context.inSSR, node.isComponent));
+    node.isBlock = true;
+    context.helper(OPEN_BLOCK);
+    context.helper(getVNodeBlockHelper(context.inSSR, node.isComponent));
+  } else {
+    context.removeHelper(OPEN_BLOCK);
+    context.removeHelper(getVNodeBlockHelper(context.inSSR, node.isComponent));
+    node.isBlock = false;
+    context.helper(getVNodeHelper(context.inSSR, node.isComponent));
+  }
+}
+
+function findVue3SlotFunction(codegenNode, slotProjection) {
+  if (!codegenNode || codegenNode.type !== NodeTypes.VNODE_CALL) return undefined;
+  const children = codegenNode.children;
+  if (!children || children.type !== NodeTypes.JS_OBJECT_EXPRESSION) return undefined;
+  const props = children.properties || [];
+  return (props.find(prop => vue3SlotKeyMatches(prop.key, slotProjection)) || {}).value;
+}
+
+function vue3SlotKeyMatches(key, slotProjection) {
+  if (!key || !slotProjection) return false;
+  if (slotProjection.kind === 'static') {
+    return key === slotProjection.name || (key.type === NodeTypes.SIMPLE_EXPRESSION && key.content === slotProjection.name);
+  }
+  if (slotProjection.kind === 'dynamic') {
+    const node = slotProjection.node;
+    return key === node || (
+      key.type === NodeTypes.COMPOUND_EXPRESSION
+      && node
+      && node.type === NodeTypes.COMPOUND_EXPRESSION
+      && vue3ProjectionSource(key) === vue3ProjectionSource(node)
+    ) || (
+      key.type === NodeTypes.SIMPLE_EXPRESSION
+      && node
+      && node.type === NodeTypes.SIMPLE_EXPRESSION
+      && key.content === node.content
+      && key.isStatic === node.isStatic
+    );
+  }
+  return false;
+}
+
+function vue3ProjectionSource(node) {
+  if (!node) return '';
+  if (typeof node === 'string') return node;
+  if (node.type === NodeTypes.SIMPLE_EXPRESSION) return String(node.content || '');
+  if (node.type === NodeTypes.COMPOUND_EXPRESSION) return (node.children || []).map(vue3ProjectionSource).join('');
+  return node.loc && node.loc.source || '';
+}
+
 function transform(root, options) {
   options = options || {};
   if (!options.nodeTransforms || !options.directiveTransforms) {
@@ -2288,6 +2500,7 @@ function transform(root, options) {
   }
   const context = createTransformContext(root, options || {});
   traverseNode(root, context);
+  if (options && options.hoistStatic) cacheStatic(root, context);
   if (!(options && options.ssr)) createRootCodegen(root, context);
   root.helpers = new Set([...context.helpers.keys()]);
   root.components = [...context.components];
