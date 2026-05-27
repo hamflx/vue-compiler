@@ -1,3 +1,11 @@
+//! Vue single-file component compiler implementation.
+//!
+//! This crate owns SFC descriptor parsing, Vue 2.7 `parseComponent`
+//! projection, Vue 3 template/script/style compile entry points, Vue 2.7
+//! SFC helper APIs, descriptor caching, and source-map/error shapes shared by
+//! the CLI, NAPI, WASM, and package-alias layers.
+
+#![deny(missing_docs)]
 #![forbid(unsafe_code)]
 
 use oxc_ast::ast::{
@@ -28,58 +36,93 @@ use vuec_vue3_dom::{
 use vuec_vue3_ssr::{compile as compile_ssr, SsrCompilerOptions};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Parsed SFC block such as `template`, `script`, `style`, or a custom block.
 pub struct SfcBlock {
+    /// Normalized block type name.
     pub type_name: String,
+    /// Block content after the selected SFC parse mode is applied.
     pub content: String,
+    /// Parsed block attributes.
     pub attrs: SfcBlockAttrs,
+    /// Source location for the block content.
     pub loc: SfcBlockLocation,
+    /// Raw content start byte offset in the full SFC source.
     #[serde(skip)]
     pub content_start: usize,
+    /// Raw content end byte offset in the full SFC source.
     #[serde(skip)]
     pub content_end: usize,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Parsed SFC block attributes.
 pub struct SfcBlockAttrs {
+    /// Optional `lang` attribute.
     pub lang: Option<String>,
+    /// Optional external `src` attribute.
     pub src: Option<String>,
+    /// Whether the block has the `scoped` attribute.
     pub scoped: bool,
+    /// Optional CSS modules attribute value.
     pub module: Option<String>,
+    /// Whether the script block is `setup`.
     pub setup: bool,
+    /// Optional Vue 3 generic attribute value.
     pub generic: Option<String>,
+    /// Raw attributes keyed by attribute name.
     pub raw: BTreeMap<String, SfcAttrValue>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
+/// Raw SFC attribute value.
 pub enum SfcAttrValue {
+    /// Boolean attribute value.
     Bool(bool),
+    /// String attribute value.
     String(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Byte-range location for an SFC block.
 pub struct SfcBlockLocation {
+    /// Start byte offset.
     pub start: usize,
+    /// End byte offset.
     pub end: usize,
+    /// Source file identity.
     pub source_file: FileId,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Parsed SFC descriptor.
 pub struct SfcDescriptor {
+    /// Logical filename.
     pub filename: String,
+    /// Full SFC source text.
     pub source: String,
+    /// Source file identity.
     pub source_file: FileId,
+    /// Optional template block.
     pub template: Option<SfcBlock>,
+    /// Optional normal script block.
     pub script: Option<SfcBlock>,
+    /// Optional script setup block.
     pub script_setup: Option<SfcBlock>,
+    /// Style blocks in source order.
     pub styles: Vec<SfcBlock>,
+    /// Custom blocks in source order.
     pub custom_blocks: Vec<SfcBlock>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Vue 2.7 `parseComponent` options.
 pub struct Vue27ParseComponentOptions {
+    /// Padding mode applied to block content.
     pub pad: Vue27SfcPad,
+    /// Optional deindent behavior override.
     pub deindent: Option<bool>,
+    /// Whether parse errors include source ranges.
     pub output_source_range: bool,
 }
 
@@ -94,35 +137,55 @@ impl Default for Vue27ParseComponentOptions {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+/// Vue 2.7 SFC block padding mode.
 pub enum Vue27SfcPad {
+    /// Do not pad block content.
     #[default]
     False,
+    /// Pad with line comments.
     True,
+    /// Pad with newlines.
     Line,
+    /// Pad with spaces.
     Space,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Vue 2.7 `parseComponent` result.
 pub struct Vue27ParseComponentResult {
+    /// Parsed SFC descriptor.
     pub descriptor: SfcDescriptor,
+    /// Parse errors in Vue 2.7 public shape.
     pub errors: Vec<Vue27SfcParseError>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Vue 2.7 SFC parse error.
 pub struct Vue27SfcParseError {
+    /// Error message.
     pub msg: String,
+    /// Optional start byte offset.
     pub start: Option<usize>,
+    /// Optional end byte offset.
     pub end: Option<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Options for compiling an SFC template block.
 pub struct SfcTemplateCompileOptions {
+    /// Optional SFC scope id base.
     pub id: Option<String>,
+    /// Whether SSR template output should be generated.
     pub ssr: bool,
+    /// Optional scoped-style scope id.
     pub scope_id: Option<String>,
+    /// Whether slotted scope markers should be emitted.
     pub slotted: bool,
+    /// Whether production compile behavior is requested.
     pub is_prod: bool,
+    /// Whether asset URLs should be transformed.
     pub transform_asset_urls: bool,
+    /// Asset URL transform options.
     pub asset_url_options: AssetUrlOptions,
 }
 
@@ -141,10 +204,15 @@ impl Default for SfcTemplateCompileOptions {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Options for compiling SFC script blocks.
 pub struct SfcScriptCompileOptions {
+    /// Optional SFC scope id base.
     pub id: Option<String>,
+    /// Whether inline template codegen should be folded into the script.
     pub inline_template: bool,
+    /// Legacy ref sugar option.
     pub ref_sugar: bool,
+    /// Whether production compile behavior is requested.
     pub is_prod: bool,
 }
 
@@ -160,12 +228,19 @@ impl Default for SfcScriptCompileOptions {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Options for compiling SFC style blocks.
 pub struct SfcStyleCompileOptions {
+    /// Optional SFC scope id base.
     pub id: Option<String>,
+    /// Whether scoped style rewriting should be applied.
     pub scoped: bool,
+    /// CSS vars to inject or rewrite.
     pub vars: Vec<String>,
+    /// Whether production compile behavior is requested.
     pub is_prod: bool,
+    /// Optional preprocessor language override.
     pub preprocess_lang: Option<String>,
+    /// Whether source maps should be generated.
     pub source_map: bool,
 }
 
@@ -183,95 +258,151 @@ impl Default for SfcStyleCompileOptions {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Result of compiling an SFC template block.
 pub struct SfcTemplateCompileResult {
+    /// Generated render code.
     pub code: String,
+    /// Optional source map artifact.
     pub map: Option<SourceMapArtifact>,
+    /// Template compile errors.
     pub errors: Vec<SfcTemplateError>,
+    /// Binding names visible to the template.
     pub bindings: Vec<String>,
+    /// Deterministic AST summary.
     pub ast_summary: String,
+    /// Serialized public AST or AST marker.
     pub ast: String,
+    /// Generated import/helper preamble.
     pub preamble: String,
+    /// Template source text used for compilation.
     pub source: String,
+    /// Template compile tips.
     pub tips: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Vue 2.7 template preprocessing options.
 pub struct Vue27TemplatePreprocessOptions {
+    /// Optional template language.
     pub lang: Option<String>,
+    /// Optional filename.
     pub filename: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Vue 2.7 template preprocessing result.
 pub struct Vue27TemplatePreprocessResult {
+    /// Preprocessed template source.
     pub source: String,
+    /// Preprocess errors.
     pub errors: Vec<String>,
+    /// Preprocess tips.
     pub tips: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// SFC template compile error.
 pub struct SfcTemplateError {
+    /// Numeric compiler error code.
     pub code: u32,
+    /// Source location for the error.
     pub loc: SfcSourceLocation,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// SFC source range.
 pub struct SfcSourceLocation {
+    /// Start position.
     pub start: SfcPosition,
+    /// End position.
     pub end: SfcPosition,
+    /// Source slice covered by this range.
     pub source: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// One-based line/column plus byte offset position.
 pub struct SfcPosition {
+    /// One-based UTF-16 column.
     pub column: usize,
+    /// One-based line number.
     pub line: usize,
+    /// Zero-based byte offset.
     pub offset: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Result of compiling SFC script blocks.
 pub struct SfcScriptBlock {
+    /// Public block type.
     #[serde(rename = "type")]
     pub type_name: String,
+    /// Generated or normalized script content.
     pub content: String,
+    /// Optional script block source location.
     pub loc: Option<SfcBlockLocation>,
+    /// Script block attributes.
     pub attrs: SfcBlockAttrs,
+    /// Whether this represents script setup output.
     pub setup: bool,
+    /// Optional script language.
     pub lang: Option<String>,
+    /// Binding metadata keyed by binding name.
     pub bindings: BTreeMap<String, String>,
+    /// Imported binding names.
     pub imports: Vec<String>,
+    /// Script compile errors.
     pub errors: Vec<String>,
+    /// Optional source map artifact.
     pub map: Option<SourceMapArtifact>,
+    /// Registered normal script AST ids.
     #[serde(rename = "scriptAst")]
     pub script_ast: Vec<String>,
+    /// Registered script setup AST ids.
     #[serde(rename = "scriptSetupAst")]
     pub script_setup_ast: Vec<String>,
+    /// External dependencies discovered by script compilation.
     pub deps: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Result of compiling SFC style blocks.
 pub struct SfcStyleCompileResult {
+    /// Generated CSS.
     pub code: String,
+    /// Optional source map artifact.
     pub map: Option<SourceMapArtifact>,
+    /// Style compile errors.
     pub errors: Vec<String>,
+    /// External style dependencies.
     pub dependencies: Vec<String>,
+    /// Raw PostCSS result marker data.
     #[serde(rename = "rawResult")]
     pub raw_result: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Vue 2.7 `rewriteDefault` options.
 pub struct Vue27RewriteDefaultOptions {
+    /// Whether input should be parsed as TypeScript.
     pub typescript: bool,
+    /// Whether decorator syntax is enabled.
     #[serde(default)]
     pub decorators: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Vue 2.7 template identifier prefixing options.
 pub struct Vue27PrefixIdentifiersOptions {
+    /// Whether the template belongs to a functional component.
     pub is_functional: bool,
+    /// Whether expressions should be parsed as TypeScript.
     pub is_ts: bool,
+    /// Binding metadata keyed by binding name.
     pub bindings: BTreeMap<String, String>,
 }
 
+/// Stateful SFC compiler facade.
 pub struct SfcCompiler {
     sources: SourceMap,
     js: JsAstStore,
@@ -280,9 +411,13 @@ pub struct SfcCompiler {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// SFC descriptor cache statistics.
 pub struct SfcCacheStats {
+    /// Number of descriptor cache hits.
     pub descriptor_hits: u64,
+    /// Number of descriptor cache misses.
     pub descriptor_misses: u64,
+    /// Number of stale descriptor cache entries invalidated.
     pub descriptor_invalidations: u64,
 }
 
@@ -326,6 +461,7 @@ fn source_hash(source: &str) -> u64 {
 }
 
 impl SfcCompiler {
+    /// Creates a new SFC compiler facade.
     pub fn new() -> Self {
         Self {
             sources: SourceMap::default(),
@@ -335,6 +471,7 @@ impl SfcCompiler {
         }
     }
 
+    /// Parses an SFC descriptor using Vue 3-style descriptor rules.
     pub fn parse(&mut self, filename: impl Into<String>, source: &str) -> SfcDescriptor {
         let filename = filename.into();
         let key = SfcCacheKey::new(filename.clone(), source, SfcParseCacheMode::Raw);
@@ -364,6 +501,7 @@ impl SfcCompiler {
         descriptor
     }
 
+    /// Parses an anonymous Vue 2.7 SFC component.
     pub fn parse_vue27_component(
         &mut self,
         source: &str,
@@ -372,6 +510,7 @@ impl SfcCompiler {
         self.parse_vue27_component_with_filename("anonymous.vue", source, options)
     }
 
+    /// Parses a named Vue 2.7 SFC component.
     pub fn parse_vue27_component_with_filename(
         &mut self,
         filename: impl Into<String>,
@@ -422,6 +561,7 @@ impl SfcCompiler {
         }
     }
 
+    /// Compiles the descriptor's template block.
     pub fn compile_template(
         &self,
         descriptor: &SfcDescriptor,
@@ -527,6 +667,7 @@ impl SfcCompiler {
         }
     }
 
+    /// Compiles standalone template source through the SFC template path.
     pub fn compile_template_source(
         &self,
         filename: impl Into<String>,
@@ -615,6 +756,7 @@ impl SfcCompiler {
         }
     }
 
+    /// Compiles Vue 3 SFC script blocks.
     pub fn compile_script(
         &mut self,
         descriptor: &SfcDescriptor,
@@ -690,6 +832,7 @@ impl SfcCompiler {
         }
     }
 
+    /// Compiles Vue 2.7 SFC script blocks.
     pub fn compile_vue27_script(
         &mut self,
         descriptor: &SfcDescriptor,
@@ -771,6 +914,7 @@ impl SfcCompiler {
         }
     }
 
+    /// Compiles all style blocks in a descriptor.
     pub fn compile_style(
         &self,
         descriptor: &SfcDescriptor,
@@ -821,6 +965,7 @@ impl SfcCompiler {
         }
     }
 
+    /// Rewrites Vue 2.7 default exports to an assigned variable.
     pub fn rewrite_vue27_default(
         &self,
         input: &str,
@@ -830,6 +975,7 @@ impl SfcCompiler {
         rewrite_vue27_default(input, variable, options)
     }
 
+    /// Prefixes Vue 2.7 template identifiers for render-function generation.
     pub fn prefix_vue27_identifiers(
         &self,
         input: &str,
@@ -838,6 +984,7 @@ impl SfcCompiler {
         prefix_vue27_identifiers(input, options)
     }
 
+    /// Preprocesses Vue 2.7 template source.
     pub fn preprocess_vue27_template(
         &self,
         source: &str,
@@ -846,14 +993,17 @@ impl SfcCompiler {
         preprocess_vue27_template(source, options)
     }
 
+    /// Returns the JavaScript side store used by SFC script compilation.
     pub fn js(&self) -> &JsAstStore {
         &self.js
     }
 
+    /// Returns descriptor cache statistics.
     pub fn cache_stats(&self) -> SfcCacheStats {
         self.cache_stats.clone()
     }
 
+    /// Returns the number of cached descriptors.
     pub fn descriptor_cache_len(&self) -> usize {
         self.descriptor_cache.len()
     }
