@@ -14370,6 +14370,9 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                         push_unique_helper(&mut helpers, RuntimeHelper::Vue3MergeProps);
                     }
                 }
+                Vue3SsrMirKind::Suspense(_) => {
+                    push_unique_helper(&mut helpers, RuntimeHelper::Vue3WithCtx);
+                }
                 _ => {}
             }
         }
@@ -16318,7 +16321,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         self.render_children(node_id, scope, writer);
         writer.dedent();
         writer.push_line(&format!(
-            "}}, {}, {}, _parent);",
+            "}}, {}, {}, _parent)",
             self.render_mir_expr(&teleport.target, scope),
             self.render_mir_expr(&teleport.disabled, scope)
         ));
@@ -16335,9 +16338,12 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         for slot in &suspense.slots.slots {
             self.render_suspense_slot(slot, scope, writer);
         }
-        writer.push_line(&format!("_: {}", vue3_slot_flag_value(suspense.slots.flag)));
+        writer.push_line(&format!(
+            "_: {}",
+            vue3_slot_flag_with_comment(suspense.slots.flag)
+        ));
         writer.dedent();
-        writer.push_line("});");
+        writer.push_line("})");
     }
 
     fn render_suspense_slot(
@@ -16352,8 +16358,21 @@ impl<'a> Vue3SsrMirCodegen<'a> {
             .unwrap_or_else(|| scope.clone());
         writer.push_line(&format!("{}: () => {{", json_key(&slot.name)));
         writer.indent();
-        for child_id in &slot.children {
-            self.render_node(*child_id, &child_scope, None, writer);
+        let mut index = 0usize;
+        while index < slot.children.len() {
+            if let Some((html, next_index)) = self.render_ssr_template_literal_slice(
+                &slot.children,
+                index,
+                &child_scope,
+                None,
+                None,
+            ) {
+                writer.push_line(&format!("_push({html})"));
+                index = next_index;
+                continue;
+            }
+            self.render_node(slot.children[index], &child_scope, None, writer);
+            index += 1;
         }
         writer.dedent();
         writer.push_line("},");
@@ -17841,6 +17860,14 @@ fn vue3_slot_flag_value(flag: Vue3SlotFlag) -> u8 {
         Vue3SlotFlag::Stable => 1,
         Vue3SlotFlag::Dynamic => 2,
         Vue3SlotFlag::Forwarded => 3,
+    }
+}
+
+fn vue3_slot_flag_with_comment(flag: Vue3SlotFlag) -> String {
+    match flag {
+        Vue3SlotFlag::Stable => "1 /* STABLE */".into(),
+        Vue3SlotFlag::Dynamic => "2 /* DYNAMIC */".into(),
+        Vue3SlotFlag::Forwarded => "3 /* FORWARDED */".into(),
     }
 }
 
@@ -30918,12 +30945,16 @@ mod tests {
         assert!(generated
             .code
             .contains("_ssrRenderTeleport(_push, (_push) => {"));
-        assert!(generated.code.contains("}, \"#modal\", true, _parent);"));
+        assert!(generated.code.contains("}, \"#modal\", true, _parent)"));
+        assert!(!generated.code.contains("}, \"#modal\", true, _parent);"));
+        assert!(generated.code.contains("withCtx as _withCtx"));
         assert!(generated.code.contains("_ssrRenderSuspense(_push, {"));
         assert!(generated.code.contains("default: () => {"));
         assert!(generated.code.contains("fallback: () => {"));
-        assert!(generated.code.contains("_: 1"));
-        assert!(generated.code.contains("_push(\"loading\");"));
+        assert!(generated.code.contains("_: 1 /* STABLE */"));
+        assert!(generated.code.contains("_push(`loading`)"));
+        assert!(!generated.code.contains("_push(\"loading\");"));
+        assert!(!generated.code.contains("});"));
         assert!(!generated.code.contains("_ssrRenderComponent(\"Teleport\""));
         assert!(!generated.code.contains("_ssrRenderComponent(\"Suspense\""));
     }
