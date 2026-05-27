@@ -7,7 +7,7 @@ use std::process::Command;
 use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
-use clap::{Parser, ValueEnum};
+use clap::{error::ErrorKind, Parser, ValueEnum};
 use serde::Serialize;
 use serde_json::{json, Value};
 use vuec_codegen::SourceMapArtifact;
@@ -192,7 +192,32 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
-    let cli = Cli::try_parse_from(args)?;
+    let cli = match Cli::try_parse_from(args) {
+        Ok(cli) => cli,
+        Err(error) => {
+            let code = if matches!(
+                error.kind(),
+                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+            ) {
+                0
+            } else {
+                2
+            };
+            return Ok(RunOutput {
+                stdout: if code == 0 {
+                    error.to_string()
+                } else {
+                    String::new()
+                },
+                stderr: if code == 0 {
+                    String::new()
+                } else {
+                    error.to_string()
+                },
+                code,
+            });
+        }
+    };
     match cli.command {
         CliCommand::CompileTemplate(args) => compile_template_command(args),
         CliCommand::CompileSfc(args) => compile_sfc_command(args),
@@ -713,6 +738,14 @@ fn ensure_trailing_newline(mut value: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn help_exits_successfully() {
+        let output = run_with_args(["vuec", "--help"]).expect("run");
+        assert_eq!(output.code, 0);
+        assert!(output.stdout.contains("compile-template"));
+        assert!(output.stderr.is_empty());
+    }
 
     #[test]
     fn compiles_vue2_template_json() {

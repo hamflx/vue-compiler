@@ -11,6 +11,7 @@ use compat::{
     verify_npm_alias, verify_official_lock, ConformanceArgs, SelectionArgs,
 };
 use serde_json::{json, Value as JsonValue};
+use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
@@ -97,6 +98,7 @@ enum Command {
     VerifyWasm,
     VerifyWasmBrowser,
     VerifyWasmWasi,
+    VerifyCli,
     SummarizeCompat {
         #[arg(long)]
         locked: bool,
@@ -145,6 +147,7 @@ fn main() -> Result<()> {
         Command::VerifyWasm => verify_wasm()?,
         Command::VerifyWasmBrowser => verify_wasm_browser()?,
         Command::VerifyWasmWasi => verify_wasm_wasi()?,
+        Command::VerifyCli => verify_cli()?,
         Command::SummarizeCompat { locked, lock } => summarize_compat(locked, &lock),
     };
     println!("{}", serde_json::to_string_pretty(&report)?);
@@ -750,6 +753,40 @@ fn verify_wasm_wasi() -> Result<compat::JsonReport> {
     )
 }
 
+fn verify_cli() -> Result<compat::JsonReport> {
+    let mut violations = Vec::new();
+    let mut items = Vec::new();
+
+    let status = match run_cli_smoke_suite() {
+        Ok(output) => {
+            items.push(compat::ReportItem::new(
+                "vuec-cli-smoke",
+                compat::ReportStatus::Pass,
+                output,
+                Some(PathBuf::from("crates/vuec_cli")),
+            ));
+            compat::ReportStatus::Pass
+        }
+        Err(err) => {
+            violations.push(format!("CLI smoke failed: {err:#}"));
+            items.push(compat::ReportItem::new(
+                "vuec-cli-smoke",
+                compat::ReportStatus::Fail,
+                format!("{err:#}"),
+                Some(PathBuf::from("crates/vuec_cli")),
+            ));
+            compat::ReportStatus::Fail
+        }
+    };
+
+    Ok(
+        compat::JsonReport::new("verify_cli", status)
+            .with_items(items)
+            .with_violations(violations)
+            .with_note("builds the vuec CLI and verifies real subcommand smoke coverage for Vue 2 template, Vue 3 template, Vue 3 SFC, SSR, parse-sfc, JSON output, diagnostics, source maps, and bench output"),
+    )
+}
+
 fn run_cargo(args: &[&str]) -> Result<String> {
     let output = ProcessCommand::new("cargo")
         .args(args)
@@ -932,6 +969,232 @@ fn find_wasi_case<'a>(value: &'a JsonValue, name: &str) -> Result<&'a JsonValue>
             })
         })
         .with_context(|| format!("WASI smoke case `{name}` was not found"))
+}
+
+fn run_cli_smoke_suite() -> Result<String> {
+    let build = ProcessCommand::new("cargo")
+        .args(["build", "-p", "vuec_cli", "--bin", "vuec"])
+        .output()
+        .context("failed to spawn cargo build -p vuec_cli --bin vuec")?;
+    if !build.status.success() {
+        anyhow::bail!(
+            "cargo build -p vuec_cli --bin vuec exited with {:?}\nstdout:\n{}\nstderr:\n{}",
+            build.status.code(),
+            String::from_utf8_lossy(&build.stdout),
+            String::from_utf8_lossy(&build.stderr)
+        );
+    }
+
+    let root = PathBuf::from("target").join("cli-smoke");
+    if root.exists() {
+        fs::remove_dir_all(&root)
+            .with_context(|| format!("failed to remove {}", root.display()))?;
+    }
+    fs::create_dir_all(&root).with_context(|| format!("failed to create {}", root.display()))?;
+    let vue2 = write_cli_fixture(&root, "vue2.html", "<div>{{ msg }}</div>")?;
+    let vue3 = write_cli_fixture(&root, "vue3.html", "<div>{{ msg }}</div>")?;
+    let sfc = write_cli_fixture(
+        &root,
+        "App.vue",
+        "<template><div>{{ msg }}</div></template><script setup>const msg = 'hi'</script>",
+    )?;
+    let invalid = write_cli_fixture(&root, "invalid.html", r#"<div v-model="baz"/>"#)?;
+    let map_path = root.join("vue3.map.json");
+    let exe = cli_executable_path();
+    let mut checks = Vec::new();
+
+    let help = run_cli_command(&exe, &["--help"])?;
+    if help.status != 0 || !help.stdout.contains("compile-template") {
+        anyhow::bail!("vuec --help did not exit successfully with command list");
+    }
+    checks.push("help");
+
+    let vue2_out = run_cli_command(
+        &exe,
+        &[
+            "compile-template",
+            "--target",
+            "vue2",
+            "--json",
+            &vue2.display().to_string(),
+        ],
+    )?;
+    let vue2_json = parse_cli_json("vue2 template", &vue2_out)?;
+    if vue2_json.get("kind").and_then(JsonValue::as_str) != Some("vue2-template") {
+        anyhow::bail!("vue2 template CLI kind mismatch: {vue2_json}");
+    }
+    if !vue2_json
+        .get("render")
+        .and_then(JsonValue::as_str)
+        .unwrap_or_default()
+        .contains("_s(msg)")
+    {
+        anyhow::bail!("vue2 template CLI render missing _s(msg): {vue2_json}");
+    }
+    checks.push("vue2-template");
+
+    let vue3_out = run_cli_command(
+        &exe,
+        &[
+            "compile-template",
+            "--target",
+            "vue3",
+            "--mode",
+            "module",
+            "--source-map",
+            "--map-out",
+            &map_path.display().to_string(),
+            "--json",
+            &vue3.display().to_string(),
+        ],
+    )?;
+    let vue3_json = parse_cli_json("vue3 template", &vue3_out)?;
+    if vue3_json.get("kind").and_then(JsonValue::as_str) != Some("vue3-template") {
+        anyhow::bail!("vue3 template CLI kind mismatch: {vue3_json}");
+    }
+    if !vue3_json
+        .get("code")
+        .and_then(JsonValue::as_str)
+        .unwrap_or_default()
+        .contains("export function render")
+    {
+        anyhow::bail!("vue3 template CLI code missing module render export: {vue3_json}");
+    }
+    let map: JsonValue = serde_json::from_str(
+        &fs::read_to_string(&map_path)
+            .with_context(|| format!("failed to read {}", map_path.display()))?,
+    )?;
+    if map.get("version").and_then(JsonValue::as_u64) != Some(3) {
+        anyhow::bail!("vue3 template CLI source map version was not 3: {map}");
+    }
+    checks.push("vue3-template-map");
+
+    let diagnostic_out = run_cli_command(
+        &exe,
+        &[
+            "compile-template",
+            "--target",
+            "vue3",
+            "--diagnostics",
+            &invalid.display().to_string(),
+        ],
+    )?;
+    if diagnostic_out.status != 0
+        || !diagnostic_out.stderr.contains("[error]")
+        || !diagnostic_out.stderr.contains("v-model")
+    {
+        anyhow::bail!("vue3 diagnostics CLI output missing expected v-model error");
+    }
+    checks.push("diagnostics");
+
+    let sfc_out = run_cli_command(&exe, &["compile-sfc", "--json", &sfc.display().to_string()])?;
+    let sfc_json = parse_cli_json("sfc", &sfc_out)?;
+    if sfc_json.get("kind").and_then(JsonValue::as_str) != Some("vue3-sfc") {
+        anyhow::bail!("SFC CLI kind mismatch: {sfc_json}");
+    }
+    if !sfc_json
+        .pointer("/template/code")
+        .and_then(JsonValue::as_str)
+        .unwrap_or_default()
+        .contains("function render")
+    {
+        anyhow::bail!("SFC CLI template output missing render: {sfc_json}");
+    }
+    checks.push("sfc");
+
+    let ssr_out = run_cli_command(
+        &exe,
+        &["compile-ssr", "--json", &vue3.display().to_string()],
+    )?;
+    let ssr_json = parse_cli_json("ssr", &ssr_out)?;
+    if ssr_json.get("kind").and_then(JsonValue::as_str) != Some("vue3-ssr-template") {
+        anyhow::bail!("SSR CLI kind mismatch: {ssr_json}");
+    }
+    if !ssr_json
+        .get("code")
+        .and_then(JsonValue::as_str)
+        .unwrap_or_default()
+        .contains("ssrRender")
+    {
+        anyhow::bail!("SSR CLI output missing ssrRender: {ssr_json}");
+    }
+    checks.push("ssr");
+
+    let parse_out = run_cli_command(&exe, &["parse-sfc", "--json", &sfc.display().to_string()])?;
+    let parse_json = parse_cli_json("parse-sfc", &parse_out)?;
+    if !parse_json.pointer("/descriptor/template").is_some() {
+        anyhow::bail!("parse-sfc CLI output missing descriptor template: {parse_json}");
+    }
+    checks.push("parse-sfc");
+
+    let bench_out = run_cli_command(
+        &exe,
+        &[
+            "bench",
+            "--target",
+            "vue3-template",
+            "--iterations",
+            "1",
+            "--json",
+            &vue3.display().to_string(),
+        ],
+    )?;
+    let bench_json = parse_cli_json("bench", &bench_out)?;
+    if bench_json.get("kind").and_then(JsonValue::as_str) != Some("bench")
+        || bench_json.get("iterations").and_then(JsonValue::as_u64) != Some(1)
+    {
+        anyhow::bail!("bench CLI output did not report one iteration: {bench_json}");
+    }
+    checks.push("bench");
+
+    Ok(json!({
+        "status": "pass",
+        "checks": checks,
+        "fixtureRoot": root,
+    })
+    .to_string())
+}
+
+fn write_cli_fixture(root: &Path, name: &str, source: &str) -> Result<PathBuf> {
+    let path = root.join(name);
+    fs::write(&path, source).with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(path)
+}
+
+fn cli_executable_path() -> PathBuf {
+    let exe = if cfg!(windows) { "vuec.exe" } else { "vuec" };
+    PathBuf::from("target").join("debug").join(exe)
+}
+
+struct CliProcessOutput {
+    status: i32,
+    stdout: String,
+    stderr: String,
+}
+
+fn run_cli_command(exe: &Path, args: &[&str]) -> Result<CliProcessOutput> {
+    let output = ProcessCommand::new(exe)
+        .args(args)
+        .output()
+        .with_context(|| format!("failed to run vuec {}", args.join(" ")))?;
+    Ok(CliProcessOutput {
+        status: output.status.code().unwrap_or(1),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    })
+}
+
+fn parse_cli_json(label: &str, output: &CliProcessOutput) -> Result<JsonValue> {
+    if output.status != 0 {
+        anyhow::bail!(
+            "{label} CLI command failed with {}\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            output.stdout,
+            output.stderr
+        );
+    }
+    serde_json::from_str(&output.stdout)
+        .with_context(|| format!("{label} CLI stdout was not JSON:\n{}", output.stdout))
 }
 
 fn write_wasm_webdriver_config(chrome_binary: Option<&Path>) -> Result<PathBuf> {

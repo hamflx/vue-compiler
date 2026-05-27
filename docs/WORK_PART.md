@@ -118,6 +118,7 @@
 - [x] M17 WASM browser smoke slice, adding `wasm-bindgen-test` browser tests and `cargo xtask verify-wasm-browser` / `pnpm test:wasm-browser`; headless Chrome now verifies Vue 3 DOM template compile, SFC template compile, and invalid-options error conversion.
 - [x] M17 WASI smoke slice, adding `vuec_wasm`'s `wasi_smoke` stdin/stdout JSON runner plus `cargo xtask verify-wasm-wasi` / `pnpm test:wasm-wasi`; wasmtime verifies Vue 2 template, Vue 3 DOM source-map output, and SFC template output.
 - [x] M17 `vuec_wasm` milestone complete against current gates: Node wasm-bindgen, headless Chrome browser, and WASI/wasmtime smoke reports pass separately.
+- [x] M18 CLI verification closure slice, adding `cargo xtask verify-cli` / real-binary smoke coverage for help, Vue 2 template, Vue 3 template + source map, diagnostics, Vue 3 SFC, SSR, parse-sfc, and bench JSON; fixed `vuec --help` to exit successfully.
 
 ## Current Vue 2.7 SFC compileStyle Slice
 
@@ -149,7 +150,8 @@
 - Added `crates/vuec_cli` as the first real `vuec` binary. The CLI delegates compiler behavior to existing Rust compiler crates and keeps command parsing/output formatting separate from compiler semantics.
 - Implemented `compile-template` for Vue 2 and Vue 3 templates, `compile-sfc` for Vue 3 SFC descriptors/template/script/style output, `compile-ssr` for template or SFC SSR rendering, `parse-sfc`, `conformance` as an `xtask run-conformance` wrapper, and a smoke `bench` loop.
 - CLI outputs human-readable code by default and JSON result objects with `--json`. It can render diagnostics to stderr with `--diagnostics` and write source maps with `--map-out` when the underlying compiler result provides a map.
-- Verification this round: `cargo fmt --all --check`, `git diff --check`, `cargo check -p vuec_cli`, `cargo test -p vuec_cli`, direct `cargo run -p vuec_cli --bin vuec` smoke calls for Vue 2 template, Vue 3 template, Vue 3 SFC, SSR, parse-sfc, and bench JSON, `cargo test --workspace`, and `cargo xtask summarize-compat --locked`.
+- Added `cargo xtask verify-cli`, which builds the real `vuec` binary, writes fixture files under `target/cli-smoke`, and verifies help, Vue 2 template JSON, Vue 3 template JSON plus source-map file, diagnostics stderr, Vue 3 SFC JSON, SSR JSON, parse-sfc JSON, and bench JSON. `vuec --help` now exits with code 0 via the shared CLI output path.
+- Verification this round: `cargo fmt --all -- --check`, `git diff --check`, `cargo check -p vuec_cli -p xtask`, `cargo test -p vuec_cli -p xtask`, and `cargo xtask verify-cli`.
 
 ## Current Runtime Smoke Slice
 

@@ -1,5 +1,11 @@
 # Memory
 
+- Current round: completed the M18 CLI verification closure slice.
+- Fixed `vuec --help` / clap display control flow so help exits with code 0 through the CLI's shared `RunOutput` path instead of being treated as a fatal parse error.
+- Added `cargo xtask verify-cli` / real-binary smoke coverage. The gate builds `vuec`, writes temporary fixtures, and runs the real CLI for help, Vue 2 template JSON, Vue 3 template JSON plus source map file, diagnostics stderr, Vue 3 SFC JSON, SSR JSON, parse-sfc JSON, and bench JSON. This is CLI command/packaging verification; compiler semantics remain delegated to the existing Rust compiler crates.
+- M18 is now complete against the current development-plan gates.
+- Verification: `cargo fmt --all -- --check`, `cargo check -p vuec_cli -p xtask`, `cargo test -p vuec_cli -p xtask`, and `cargo xtask verify-cli`.
+
 - Current round: completed the M17 WASI smoke slice.
 - Added `crates/vuec_wasm/src/bin/wasi_smoke.rs`, a minimal WASI JSON stdin/stdout runner that dispatches requests to `vuec_wasm` Rust JSON helpers for Vue 2 template, Vue 3 DOM template, and SFC template compilation. It performs I/O and command dispatch only; compiler semantics remain in the Rust compiler crates.
 - Added `cargo xtask verify-wasm-wasi` / `pnpm test:wasm-wasi`. The command builds `vuec_wasm --bin wasi_smoke --target wasm32-wasip1`, runs it with wasmtime, parses stdout JSON, and verifies Vue 2 render, Vue 3 source map, and SFC render output. `vuec_wasm` now keeps wasm-bindgen annotations out of `target_os = "wasi"` so the WASI binary can instantiate directly in wasmtime.
