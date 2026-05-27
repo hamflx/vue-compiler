@@ -708,6 +708,24 @@ function vue3TransformContextPayload(context) {
   };
 }
 
+function vue3TransformBindContextPayload(context) {
+  context = context || {};
+  return {
+    inSSR: !!context.inSSR,
+    browser: isBrowserBuild(),
+  };
+}
+
+function vue3TransformVBindShorthandContextPayload(context) {
+  return {
+    browser: isBrowserBuild(),
+  };
+}
+
+function isBrowserBuild() {
+  return typeof __BROWSER__ !== 'undefined' && !!__BROWSER__;
+}
+
 function materializeVue3ExpressionProjection(projection, fallback, context) {
   if (!projection || projection.kind === 'unchanged') return fallback;
   if (projection.kind === 'setConstType') {
@@ -753,6 +771,62 @@ function materializeVue3ExpressionChild(child, fallback) {
     return node;
   }
   return child;
+}
+
+function materializeVue3ProjectionNode(projection, refs, context) {
+  if (!projection || projection.kind === 'undefined') return undefined;
+  if (typeof projection === 'string') return projection;
+  if (projection.type) return projection;
+  refs = refs || {};
+  const dir = refs.dir;
+  switch (projection.kind) {
+    case 'node':
+      if (projection.path === 'dir.arg') return dir && dir.arg;
+      if (projection.path === 'dir.exp') return dir && dir.exp;
+      if (projection.path === 'dir.arg.children') return (dir && dir.arg && dir.arg.children) || [];
+      return undefined;
+    case 'children': {
+      const children = [];
+      for (const child of projection.children || []) {
+        const materialized = materializeVue3ProjectionNode(child, refs, context);
+        if (Array.isArray(materialized)) children.push(...materialized);
+        else children.push(materialized);
+      }
+      return children;
+    }
+    case 'helperString': {
+      const helper = helperSymbolFromProjection(projection.helper);
+      if (helper && context && typeof context.helperString === 'function') {
+        return `${context.helperString(helper)}(`;
+      }
+      return `_${helperNameMap[helper] || projection.helper || ''}(`;
+    }
+    case 'simple': {
+      registerVue3ProjectionHelpers(projection, context);
+      const node = createSimpleExpression(
+        projection.content || '',
+        !!projection.isStatic,
+        projection.loc || (dir && dir.exp && dir.exp.loc) || (dir && dir.arg && dir.arg.loc) || (dir && dir.loc) || locStub,
+      );
+      if (projection.constType !== undefined) node.constType = projection.constType;
+      return node;
+    }
+    case 'compound': {
+      registerVue3ProjectionHelpers(projection, context);
+      const children = [];
+      for (const child of projection.children || []) {
+        const materialized = materializeVue3ProjectionNode(child, refs, context);
+        if (Array.isArray(materialized)) children.push(...materialized);
+        else children.push(materialized);
+      }
+      const node = createCompoundExpression(children);
+      node.loc = projection.loc || (dir && dir.arg && dir.arg.loc) || (dir && dir.exp && dir.exp.loc) || (dir && dir.loc) || locStub;
+      if (projection.constType !== undefined) node.constType = projection.constType;
+      return node;
+    }
+    default:
+      throw new Error(`Unsupported Rust Vue 3 projection: ${projection.kind}`);
+  }
 }
 
 function registerVue3ProjectionHelpers(projection, context) {
@@ -978,6 +1052,7 @@ function finalizeVue3ForExitCodegen(node, forNode, renderExp, codegenProjection,
 
 function getBaseTransformPreset(prefixIdentifiers) {
   return [[
+    transformVBindShorthand,
     transformOnce,
     transformIf,
     transformFor,
@@ -1492,8 +1567,38 @@ function transform(root, options) {
   root.transformed = true;
 }
 
+function vue3ProjectionErrorLoc(error, dir) {
+  if (error && error.loc === 'arg') return dir && dir.arg && dir.arg.loc || dir && dir.loc || locStub;
+  return dir && dir.loc || locStub;
+}
+
+function emitVue3DirectiveProjectionErrors(projection, dir, context) {
+  if (!projection || !Array.isArray(projection.errors) || !context || typeof context.onError !== 'function') return;
+  for (const error of projection.errors) {
+    const code = typeof error === 'number' ? error : error && error.code;
+    if (code == null) continue;
+    context.onError(createCompilerError(code, vue3ProjectionErrorLoc(error, dir)));
+  }
+}
+
 const transformBind = (dir, node, context) => {
-  return { props: dir && dir.arg ? [createObjectProperty(dir.arg, dir.exp || createSimpleExpression('', true))] : [] };
+  context = context || {
+    helper: name => name,
+    helperString: name => `_${helperNameMap[name] || name}`,
+    inSSR: false,
+    onError: error => { throw error; },
+  };
+  const projection = callVue3CoreProjection('vue3.core.transformBind', {
+    dir,
+    context: vue3TransformBindContextPayload(context),
+  });
+  emitVue3DirectiveProjectionErrors(projection, dir, context);
+  return {
+    props: (projection && projection.props || []).map(prop => createObjectProperty(
+      materializeVue3ProjectionNode(prop.key, { dir, node }, context),
+      materializeVue3ProjectionNode(prop.value, { dir, node }, context),
+    )),
+  };
 };
 
 const transformElement = (node, context) => {
@@ -1549,8 +1654,23 @@ const transformOn = (dir, node, context, augmentor) => {
   return { props: dir && dir.arg ? [createObjectProperty(dir.arg, dir.exp || createSimpleExpression('() => {}', false))] : [] };
 };
 
-const transformVBindShorthand = (dir, context) => {
-  return transformBind(dir, null, context);
+const transformVBindShorthand = (node, context) => {
+  if (!node || node.type !== NodeTypes.ELEMENT) return undefined;
+  const projection = callVue3CoreProjection('vue3.core.transformVBindShorthand', {
+    node,
+    context: vue3TransformVBindShorthandContextPayload(context),
+  });
+  for (const operation of projection && projection.operations || []) {
+    const prop = node.props && node.props[operation.index];
+    if (!prop || operation.kind !== 'setExp') continue;
+    for (const error of operation.errors || []) {
+      if (context && typeof context.onError === 'function') {
+        context.onError(createCompilerError(error.code, vue3ProjectionErrorLoc(error, prop)));
+      }
+    }
+    prop.exp = materializeVue3ProjectionNode(operation.exp, { dir: prop, node }, context);
+  }
+  return undefined;
 };
 
 function traverseNode(node, context) {
@@ -1697,8 +1817,12 @@ function buildProps(node, context) {
     }
   }
   if (dynamicPropNames.length) patchFlag |= 8;
+  let props = objectProps.length ? createObjectExpression(objectProps) : undefined;
+  if (!context.inSSR && props && props.properties.some(prop => prop && prop.key && !prop.key.isStatic && !prop.key.isHandlerKey)) {
+    props = createCallExpression(context.helper(NORMALIZE_PROPS), [props]);
+  }
   return {
-    props: objectProps.length ? createObjectExpression(objectProps) : undefined,
+    props,
     directives,
     patchFlag,
     dynamicPropNames,

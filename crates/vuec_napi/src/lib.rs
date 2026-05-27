@@ -245,6 +245,10 @@ pub fn call_vue3_core_projection(env: Env, command: String, payload: Unknown) ->
             vuec_vue3_core::transform_expression_projection(&payload)
         }
         "vue3.core.processExpression" => vuec_vue3_core::process_expression_projection(&payload),
+        "vue3.core.transformBind" => vuec_vue3_core::transform_bind_projection(&payload),
+        "vue3.core.transformVBindShorthand" => {
+            vuec_vue3_core::transform_v_bind_shorthand_projection(&payload)
+        }
         "vue3.core.transformText" => vuec_vue3_core::transform_text_projection(&payload),
         "vue3.core.buildDirectiveArgs" => vuec_vue3_core::build_directive_args_projection(&payload),
         "vue3.core.isInDestructureAssignment" => {

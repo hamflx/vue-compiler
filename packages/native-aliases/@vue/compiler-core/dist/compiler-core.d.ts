@@ -141,7 +141,7 @@ export function transformElement(node: CompilerCompatValue, context: CompilerCom
 export function transformExpression(node: CompilerCompatValue, context: CompilerCompatValue): CompilerCompatValue;
 export function transformModel(dir: CompilerCompatValue, node: CompilerCompatValue, context: CompilerCompatValue): CompilerCompatValue;
 export function transformOn(dir: CompilerCompatValue, node: CompilerCompatValue, context: CompilerCompatValue, augmentor: CompilerCompatValue): CompilerCompatValue;
-export function transformVBindShorthand(dir: CompilerCompatValue, context: CompilerCompatValue): CompilerCompatValue;
+export function transformVBindShorthand(node: CompilerCompatValue, context: CompilerCompatValue): CompilerCompatValue;
 export function traverseNode(node: CompilerCompatValue, context: CompilerCompatValue): void;
 export function unwrapTSNode(node: CompilerCompatValue): CompilerCompatValue;
 export function walkBlockDeclarations(block: CompilerCompatValue, onIdent: CompilerCompatValue): void;
