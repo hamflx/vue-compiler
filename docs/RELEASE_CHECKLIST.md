@@ -11,6 +11,7 @@ Use this checklist before publishing a release candidate.
 - [ ] `cargo xtask verify-crate-metadata`
 - [ ] `cargo xtask verify-supply-chain`
 - [ ] `cargo xtask verify-release-dry-run`
+- [ ] `cargo xtask verify-release-install-smoke`
 - [ ] `cargo xtask summarize-compat --locked`
 - [ ] `cargo xtask bench --iterations 1`
 - [ ] Fill `docs/CONFORMANCE_REPORT_TEMPLATE.md` for the release candidate report.
@@ -34,7 +35,7 @@ Use this checklist before publishing a release candidate.
 - [ ] Run `cargo xtask verify-release-dry-run` and require no `fail` or `pending` rows before publication.
 - [ ] Run npm pack dry-runs for `packages/native`, all `packages/native-platforms/*`, and `packages/wasm`. Cross-platform native packages need release-built `vuec_napi.node` artifacts from their target platforms.
 - [ ] Run cargo publish dry-runs for published crates. On the first crates.io release, publish leaf crates first, then rerun dry-runs for crates that depend on already-published internal crates.
-- [ ] Install packed npm artifacts into a clean temp project and run Node smoke tests.
+- [ ] Install packed npm artifacts into a clean temp project and run Node smoke tests: `cargo xtask verify-release-install-smoke`. Require no `fail` or `pending` rows before publication.
 - [ ] Record the conformance report path, lock hash, and coverage classification in the release notes.
 
 ## Rollback

@@ -113,6 +113,7 @@ enum Command {
     VerifyCrateMetadata,
     VerifySupplyChain,
     VerifyReleaseDryRun,
+    VerifyReleaseInstallSmoke,
     Bench {
         #[arg(long, default_value_t = 10)]
         iterations: usize,
@@ -181,6 +182,7 @@ fn main() -> Result<()> {
         Command::VerifyCrateMetadata => verify_crate_metadata()?,
         Command::VerifySupplyChain => verify_supply_chain()?,
         Command::VerifyReleaseDryRun => verify_release_dry_run()?,
+        Command::VerifyReleaseInstallSmoke => verify_release_install_smoke()?,
         Command::Bench {
             iterations,
             out_dir,
@@ -1590,6 +1592,108 @@ fn verify_release_dry_run() -> Result<compat::JsonReport> {
     .with_note("runs real npm pack dry-runs from staged package directories, verifies staged package file lists, runs cargo publish dry-run where crates.io can resolve dependencies, and marks first-release or cross-platform artifact constraints as pending instead of counting them as passed"))
 }
 
+fn verify_release_install_smoke() -> Result<compat::JsonReport> {
+    let mut items = Vec::new();
+    let mut violations = Vec::new();
+    let mut created = Vec::new();
+    let root = PathBuf::from("target").join("release-install-smoke");
+    ensure_target_child(&root, "release-install-smoke")?;
+    if root.exists() {
+        fs::remove_dir_all(&root)
+            .with_context(|| format!("failed to remove {}", root.display()))?;
+    }
+    fs::create_dir_all(&root).with_context(|| format!("failed to create {}", root.display()))?;
+    created.push(root.display().to_string());
+
+    let package_root = root.join("packages");
+    fs::create_dir_all(&package_root)
+        .with_context(|| format!("failed to create {}", package_root.display()))?;
+
+    let mut package_items = Vec::new();
+    let mut package_violations = Vec::new();
+    let mut npm_created = Vec::new();
+    let current_platform = current_platform_package_name();
+    let package_result = prepare_release_install_packages(&package_root);
+    match package_result {
+        Ok(paths) => npm_created.extend(paths.into_iter().map(|path| path.display().to_string())),
+        Err(err) => package_violations.push(format!("{err:#}")),
+    }
+    created.extend(npm_created);
+
+    if package_violations.is_empty() {
+        match run_native_release_install_smoke(&root, current_platform) {
+            Ok(detail) => package_items.push(compat::ReportItem::new(
+                "install-smoke:@vuec-rs/native",
+                compat::ReportStatus::Pass,
+                detail,
+                Some(root.join("native-project")),
+            )),
+            Err(err) => package_items.push(compat::ReportItem::new(
+                "install-smoke:@vuec-rs/native",
+                compat::ReportStatus::Fail,
+                format!("{err:#}"),
+                Some(root.join("native-project")),
+            )),
+        }
+        match run_wasm_release_install_smoke(&root) {
+            Ok(detail) => package_items.push(compat::ReportItem::new(
+                "install-smoke:@vuec-rs/wasm",
+                compat::ReportStatus::Pass,
+                detail,
+                Some(root.join("wasm-project")),
+            )),
+            Err(err) => package_items.push(compat::ReportItem::new(
+                "install-smoke:@vuec-rs/wasm",
+                compat::ReportStatus::Fail,
+                format!("{err:#}"),
+                Some(root.join("wasm-project")),
+            )),
+        }
+    } else {
+        for violation in &package_violations {
+            package_items.push(compat::ReportItem::new(
+                "install-smoke:package-preparation",
+                compat::ReportStatus::Fail,
+                violation,
+                Some(package_root.clone()),
+            ));
+        }
+    }
+
+    let installed_platform = current_platform.unwrap_or("unsupported-platform");
+    for package_dir in collect_native_platform_package_dirs()? {
+        let package_name = read_package_display_name(&package_dir.join("package.json"))?;
+        if package_name != installed_platform {
+            package_items.push(compat::ReportItem::new(
+                format!("install-smoke:{package_name}"),
+                compat::ReportStatus::Pending,
+                "non-current platform package install smoke requires a matching target-platform release artifact",
+                Some(package_dir),
+            ));
+        }
+    }
+
+    for item in &package_items {
+        if item.status == compat::ReportStatus::Fail {
+            violations.push(format!("{}: {}", item.target, item.detail));
+        }
+    }
+    items.extend(package_items);
+
+    Ok(compat::JsonReport::new(
+        "verify_release_install_smoke",
+        if violations.is_empty() {
+            compat::ReportStatus::Pass
+        } else {
+            compat::ReportStatus::Fail
+        },
+    )
+    .with_items(items)
+    .with_created(created)
+    .with_violations(violations)
+    .with_note("packs release-built npm artifacts, installs them into clean projects, smoke-calls @vuec-rs/native through the current optional platform package and @vuec-rs/wasm through its published package entry, and marks non-current platform install smoke as pending"))
+}
+
 fn verify_release_npm_pack_dry_runs(
     staging_root: &Path,
 ) -> Result<(Vec<compat::ReportItem>, Vec<String>)> {
@@ -1710,6 +1814,113 @@ fn verify_release_npm_pack_dry_runs(
     }
 
     Ok((items, created))
+}
+
+fn prepare_release_install_packages(package_root: &Path) -> Result<Vec<PathBuf>> {
+    let mut created = Vec::new();
+    fs::create_dir_all(package_root)
+        .with_context(|| format!("failed to create {}", package_root.display()))?;
+
+    build_napi_crate_release()?;
+    build_wasm_release_packages()?;
+
+    let native_stage = package_root.join("native");
+    stage_package_dir(Path::new("packages/native"), &native_stage)?;
+    created.push(native_stage.clone());
+
+    let wasm_stage = package_root.join("wasm");
+    stage_package_dir(Path::new("packages/wasm"), &wasm_stage)?;
+    created.push(wasm_stage.clone());
+
+    let platform_name = current_platform_package_name().with_context(|| {
+        format!(
+            "unsupported NAPI platform package for os={} arch={}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )
+    })?;
+    let platform_stage = package_root
+        .join("native-platforms")
+        .join(native_platform_suffix(platform_name)?);
+    stage_package_dir(&platform_template_dir(platform_name)?, &platform_stage)?;
+    copy_napi_release_binding(&platform_stage.join("vuec_napi.node"))?;
+    created.push(platform_stage.clone());
+
+    for stage in [&native_stage, &wasm_stage, &platform_stage] {
+        let tarball = npm_pack(stage)?;
+        created.push(tarball);
+    }
+    Ok(created)
+}
+
+fn run_native_release_install_smoke(
+    root: &Path,
+    current_platform: Option<&'static str>,
+) -> Result<String> {
+    let platform_name = current_platform.context("current platform package is unsupported")?;
+    let project = root.join("native-project");
+    fs::create_dir_all(&project)
+        .with_context(|| format!("failed to create {}", project.display()))?;
+    write_clean_npm_project(&project, "vuec-release-native-install-smoke", None)?;
+    let native_tarball = find_single_tgz(&root.join("packages").join("native"))?;
+    let platform_tarball = find_single_tgz(
+        &root
+            .join("packages")
+            .join("native-platforms")
+            .join(native_platform_suffix(platform_name)?),
+    )?;
+    npm_install_tarballs(&project, &[&platform_tarball, &native_tarball])?;
+    let script = r#"
+const assert = require('node:assert/strict');
+const native = require('@vuec-rs/native');
+assert.equal(typeof native.version(), 'string');
+const info = native.bindingInfo();
+assert.equal(info.source, 'platform');
+assert.ok(info.package);
+const vue2 = native.compile('<div>{{ msg }}</div>');
+assert.match(vue2.render, /_s\(msg\)/);
+const dom = native.compileDom('<div>{{ msg }}</div>', { mode: 'module', prefixIdentifiers: true, sourceMap: true });
+assert.match(dom.code, /export function render/);
+assert.match(dom.code, /_toDisplayString\(_ctx\.msg\)/);
+assert.equal(dom.map.version, 3);
+const ssr = native.compileSsr('<div>{{ msg }}</div>', { mode: 'module', prefixIdentifiers: true });
+assert.match(ssr.code, /export function ssrRender/);
+const descriptor = native.parse('<template><p/></template>', { filename: 'smoke.vue' });
+assert.equal(descriptor.filename, 'smoke.vue');
+const style = native.compileStyle({ source: '.a{ color: v-bind(color); }', id: 'data-v-smoke', scoped: true });
+assert.match(style.code, /data-v-smoke/);
+process.stdout.write(JSON.stringify({ status: 'pass', binding: info, exports: Object.keys(native).sort() }));
+"#;
+    run_node_script(&project, script, NodeScriptMode::CommonJs)
+}
+
+fn run_wasm_release_install_smoke(root: &Path) -> Result<String> {
+    let project = root.join("wasm-project");
+    fs::create_dir_all(&project)
+        .with_context(|| format!("failed to create {}", project.display()))?;
+    write_clean_npm_project(&project, "vuec-release-wasm-install-smoke", Some("module"))?;
+    let wasm_tarball = find_single_tgz(&root.join("packages").join("wasm"))?;
+    npm_install_tarballs(&project, &[&wasm_tarball])?;
+    let script = r#"
+import assert from 'node:assert/strict';
+import { init } from '@vuec-rs/wasm';
+const wasm = await init();
+assert.equal(typeof wasm.version(), 'string');
+const vue2 = wasm.compile('<div>{{ msg }}</div>');
+assert.match(vue2.render, /_s\(msg\)/);
+const dom = wasm.compileDom('<div>{{ msg }}</div>', { mode: 'module', prefixIdentifiers: true, sourceMap: true });
+assert.match(dom.code, /export function render/);
+assert.match(dom.code, /_toDisplayString\(_ctx\.msg\)/);
+assert.equal(dom.map.version, 3);
+const ssr = wasm.compileSsr('<div>{{ msg }}</div>', { mode: 'module', prefixIdentifiers: true });
+assert.match(ssr.code, /export function ssrRender/);
+const descriptor = wasm.parse('<template><p/></template>', { filename: 'smoke.vue' });
+assert.equal(descriptor.filename, 'smoke.vue');
+const style = wasm.compileStyle({ source: '.a{ color: v-bind(color); }', id: 'data-v-smoke', scoped: true });
+assert.match(style.code, /data-v-smoke/);
+process.stdout.write(JSON.stringify({ status: 'pass', exports: Object.keys(wasm).sort() }));
+"#;
+    run_node_script(&project, script, NodeScriptMode::Module)
 }
 
 fn verify_release_cargo_dry_runs() -> Result<Vec<compat::ReportItem>> {
@@ -1911,6 +2122,125 @@ fn npm_pack_dry_run(package_dir: &Path) -> Result<NpmPackSummary> {
         size: entry.get("size").and_then(JsonValue::as_u64).unwrap_or(0),
         files,
     })
+}
+
+fn npm_pack(package_dir: &Path) -> Result<PathBuf> {
+    let npm = resolve_program("npm")?;
+    let output = ProcessCommand::new(npm)
+        .args(["pack", "--json"])
+        .current_dir(package_dir)
+        .output()
+        .with_context(|| format!("failed to spawn npm pack in {}", package_dir.display()))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "npm pack in {} exited with {:?}\nstdout:\n{}\nstderr:\n{}",
+            package_dir.display(),
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let value: JsonValue = serde_json::from_slice(&output.stdout).with_context(|| {
+        format!(
+            "npm pack stdout was not JSON in {}:\n{}",
+            package_dir.display(),
+            String::from_utf8_lossy(&output.stdout)
+        )
+    })?;
+    let filename = value
+        .as_array()
+        .and_then(|entries| entries.first())
+        .and_then(|entry| entry.get("filename"))
+        .and_then(JsonValue::as_str)
+        .context("npm pack JSON did not include filename")?;
+    Ok(package_dir.join(filename))
+}
+
+fn find_single_tgz(dir: &Path) -> Result<PathBuf> {
+    let mut tarballs = fs::read_dir(dir)
+        .with_context(|| format!("failed to read {}", dir.display()))?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("tgz"))
+        .collect::<Vec<_>>();
+    tarballs.sort();
+    match tarballs.as_slice() {
+        [path] => Ok(path.clone()),
+        [] => anyhow::bail!("no .tgz package found in {}", dir.display()),
+        _ => anyhow::bail!("multiple .tgz packages found in {}", dir.display()),
+    }
+}
+
+fn write_clean_npm_project(root: &Path, name: &str, package_type: Option<&str>) -> Result<()> {
+    let mut manifest = json!({
+        "name": name,
+        "version": "0.0.0",
+        "private": true,
+    });
+    if let Some(package_type) = package_type {
+        manifest["type"] = JsonValue::String(package_type.to_string());
+    }
+    fs::write(
+        root.join("package.json"),
+        serde_json::to_vec_pretty(&manifest)?,
+    )
+    .with_context(|| format!("failed to write {}", root.join("package.json").display()))
+}
+
+fn npm_install_tarballs(root: &Path, tarballs: &[&Path]) -> Result<()> {
+    let npm = resolve_program("npm")?;
+    let mut command = ProcessCommand::new(npm);
+    command
+        .arg("install")
+        .arg("--ignore-scripts")
+        .arg("--no-audit")
+        .arg("--no-fund")
+        .arg("--package-lock=false");
+    for tarball in tarballs {
+        command.arg(absolute_path(tarball));
+    }
+    let output = command
+        .current_dir(root)
+        .output()
+        .with_context(|| format!("failed to spawn npm install in {}", root.display()))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "npm install in {} exited with {:?}\nstdout:\n{}\nstderr:\n{}",
+            root.display(),
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum NodeScriptMode {
+    CommonJs,
+    Module,
+}
+
+fn run_node_script(root: &Path, script: &str, mode: NodeScriptMode) -> Result<String> {
+    let mut command = ProcessCommand::new("node");
+    if matches!(mode, NodeScriptMode::Module) {
+        command.arg("--input-type=module");
+    }
+    let output = command
+        .arg("-e")
+        .arg(script)
+        .current_dir(root)
+        .output()
+        .with_context(|| format!("failed to spawn node install smoke in {}", root.display()))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "node install smoke in {} exited with {:?}\nstdout:\n{}\nstderr:\n{}",
+            root.display(),
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 fn package_path_dependencies(package: &JsonValue) -> Vec<String> {

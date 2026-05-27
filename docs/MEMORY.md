@@ -1,5 +1,9 @@
 # Memory
 
+- Current round: added the M20 release install-smoke gate slice.
+- Added `cargo xtask verify-release-install-smoke`, which packs release-built npm artifacts, installs them into clean temporary projects, smoke-calls `@vuec-rs/native` via the current optional platform package, and smoke-calls `@vuec-rs/wasm` through the package default entry.
+- Fixed `packages/wasm/index.js` so installed Node consumers default to `pkg-node/vuec_wasm.js` while browser-like runtimes continue to default to `pkg/vuec_wasm.js`. The gate currently reports `pending` rather than `pass` because non-current native platform packages still need matching target-platform release artifacts and host install smoke runs. This is release/package verification only; it does not change compiler semantics, `xtask/src/compat.rs`, conformance classification, or AST/HIR/MIR structures.
+
 - Current round: added the M20 release dry-run gate slice.
 - Added `cargo xtask verify-release-dry-run`, which stages release package directories under `target/release-dry-run`, builds release NAPI/WASM artifacts, runs `npm pack --dry-run --json` for the main native package, WASM package, and current native platform package, verifies required tarball entries, and runs Cargo dry-run checks for publishable crates where registry dependency resolution permits it.
 - The gate currently reports `pending` rather than `pass`: non-current native platform npm packages need target-platform `vuec_napi.node` release artifacts, and first-time crates.io dry-runs for crates with internal path dependencies require their dependency crates to exist in the registry first. This is release verification infrastructure only; it does not change compiler semantics, `xtask/src/compat.rs`, conformance classification, or AST/HIR/MIR structures.

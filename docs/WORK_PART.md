@@ -133,9 +133,13 @@
 - [x] M20 security / supply-chain slice, adding `docs/SECURITY_SUPPLY_CHAIN.md`, npm license metadata, and `cargo xtask verify-supply-chain` for lock files, pinned package manager, exact npm dependency versions, native platform package file lists, and Cargo metadata resolution.
 - [x] M20 release-facing API documentation slice, adding `docs/API.md` and extending `cargo xtask verify-release-docs` to require Rust crate, CLI, NAPI, WASM, official alias, and API verification coverage.
 - [x] M20 release dry-run gate slice, adding `cargo xtask verify-release-dry-run` to run release-build npm pack dry-runs, current-platform native package staging, WASM package staging, Cargo publish dry-runs for registry-resolvable crates, and explicit pending rows for first-release/cross-platform constraints.
+- [x] M20 release install-smoke gate slice, adding `cargo xtask verify-release-install-smoke` to pack release-built npm artifacts, install them into clean projects, and smoke-call `@vuec-rs/native` through the current optional platform package plus `@vuec-rs/wasm` through its published package entry.
 
 ## Current Release Documentation Slice
 
+- Added the M20 release install-smoke gate. `cargo xtask verify-release-install-smoke` now creates tarballs from release-built packages, installs them into clean temporary npm projects, verifies `@vuec-rs/native` loads through the current optional platform package, and verifies `@vuec-rs/wasm` initializes through the package default entry after install.
+- Fixed the published WASM package loader so Node defaults to `pkg-node/vuec_wasm.js` while browser-like runtimes still default to `pkg/vuec_wasm.js`. This fixes installed-package behavior, not compiler semantics.
+- Current install-smoke status is honest `pending`, not complete: the current Windows package and WASM package pass, while non-current native platform package install smokes require matching target-platform release artifacts and host runs. This is recorded in `docs/PENDING_DECISIONS.md`; the M20 completion checkbox for published artifact install smoke remains open.
 - Added the M20 release dry-run gate. `cargo xtask verify-release-dry-run` now stages release package trees under `target/release-dry-run`, builds release NAPI/WASM artifacts, runs `npm pack --dry-run --json` for `@vuec-rs/native`, `@vuec-rs/wasm`, and the current native platform package, verifies required tarball file entries, and runs Cargo dry-run checks for publishable crates where crates.io can resolve dependencies.
 - Current dry-run status is honest `pending`, not complete: on this Windows host, non-current native platform packages cannot prove tarball contents without their own release-built `vuec_napi.node` artifacts, and first-time crates.io dry-runs for crates with internal path dependencies remain pending until dependency crates are published in release order. This is recorded in `docs/PENDING_DECISIONS.md`; the M20 completion checkbox for release dry-run remains open.
 - Added the M20 release-facing API documentation gate. `docs/API.md` now documents supported Rust crate entry points, `vuec` commands, `@vuec-rs/native` exports, `@vuec-rs/wasm` exports, official package-name aliases, and API verification commands.
@@ -152,7 +156,7 @@
 - Added README coverage for every current source-controlled `packages/**/package.json` directory, including the NAPI loader package, WASM package, native platform optional packages, and official package-name aliases. Ignored generated wasm-bindgen output directories remain outside this source-documentation gate.
 - Added `cargo xtask verify-release-docs`, which checks the release documentation skeleton files are non-empty, every source-controlled package manifest directory has a README, and package `files` arrays explicitly include `README.md` when present.
 - This slice is publication/documentation infrastructure only. It does not change compiler semantics, `xtask/src/compat.rs`, conformance classification, or AST/HIR/MIR structures.
-- Remaining M20 work: full per-public-API documentation coverage, fully passing release dry-runs, and install smoke verification.
+- Remaining M20 work: full per-public-API documentation coverage, fully passing release dry-runs, and fully passing cross-platform install smoke verification.
 
 ## Current Performance / Incremental Slice
 

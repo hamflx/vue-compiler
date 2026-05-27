@@ -10,13 +10,23 @@ function parseJson(value) {
 
 export async function init(input) {
   if (!wasm) {
-    const mod = await import(input || './pkg/vuec_wasm.js');
+    const mod = await import(input || defaultWasmModulePath());
     wasm = mod && mod.default && typeof mod.default === 'object' ? mod.default : mod;
   }
   if (typeof wasm.default === 'function') {
     await wasm.default();
   }
   return api;
+}
+
+function defaultWasmModulePath() {
+  return isNodeRuntime() ? './pkg-node/vuec_wasm.js' : './pkg/vuec_wasm.js';
+}
+
+function isNodeRuntime() {
+  return typeof process !== 'undefined'
+    && process.versions
+    && typeof process.versions.node === 'string';
 }
 
 function ensureWasm() {
