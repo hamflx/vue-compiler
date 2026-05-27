@@ -1266,6 +1266,7 @@ fn verify_public_api_docs() -> Result<compat::JsonReport> {
         "vuec_vue3_core",
         "vuec_vue3_dom",
         "vuec_vue3_ssr",
+        "vuec_vue2",
     ];
     let mut items = Vec::new();
     let mut violations = Vec::new();

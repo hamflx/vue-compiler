@@ -140,9 +140,14 @@
 - [x] M20 AST/HIR/MIR public API docs slice, adding rustdoc and `#![deny(missing_docs)]` coverage for `vuec_ast`, and expanding `cargo xtask verify-public-api-docs` to nine documented crates.
 - [x] M20 Vue 3 DOM/SSR backend public API docs slice, adding rustdoc and `#![deny(missing_docs)]` coverage for `vuec_vue3_dom` and `vuec_vue3_ssr`, and expanding `cargo xtask verify-public-api-docs` to eleven documented crates.
 - [x] M20 Vue 3 compiler-core public API docs slice, adding rustdoc and `#![deny(missing_docs)]` coverage for `vuec_vue3_core`, and expanding `cargo xtask verify-public-api-docs` to twelve documented crates.
+- [x] M20 Vue 2 public API docs slice, adding rustdoc and `#![deny(missing_docs)]` coverage for `vuec_vue2`, and expanding `cargo xtask verify-public-api-docs` to thirteen documented crates.
 
 ## Current Release Documentation Slice
 
+- Expanded the M20 rustdoc-enforced public API documentation gate to `vuec_vue2`. The crate now documents compile options, Vue 2.7 SFC asset URL transform options, warning/error/result shapes, compatibility element tree nodes, directives/events/slots/static markers, component model/codegen metadata, compiler facade methods, free compile/codegen/optimize entry points, and code-frame generation.
+- `cargo xtask verify-public-api-docs` now covers thirteen crates: `vuec_source`, `vuec_diagnostics`, `vuec_codegen`, `vuec_ast`, `vuec_html`, `vuec_js`, `vuec_pass`, `vuec_style`, `vuec_vue3_asset`, `vuec_vue3_core`, `vuec_vue3_dom`, `vuec_vue3_ssr`, and `vuec_vue2`.
+- Verification this round: `$env:RUSTDOCFLAGS='-D missing_docs'; cargo doc --no-deps -p vuec_vue2`, `cargo fmt --all -- --check`, `cargo test -p vuec_vue2 -p xtask`, `cargo xtask verify-public-api-docs`, `cargo xtask verify-release-docs`, and `git diff --check`.
+- This slice is documentation/gate coverage only. It does not change compiler semantics, `xtask/src/compat.rs`, conformance classification, or AST/HIR/MIR structures.
 - Expanded the M20 rustdoc-enforced public API documentation gate to `vuec_vue3_core`. The crate now documents compiler source/options/result types, parser/transform/codegen entry points, structural AST -> HIR -> target MIR lowering, source-map/raw-text helpers, patch flag utility, and Rust-backed public projection helper APIs used by the compatibility bridge.
 - `cargo xtask verify-public-api-docs` now covers twelve crates: `vuec_source`, `vuec_diagnostics`, `vuec_codegen`, `vuec_ast`, `vuec_html`, `vuec_js`, `vuec_pass`, `vuec_style`, `vuec_vue3_asset`, `vuec_vue3_core`, `vuec_vue3_dom`, and `vuec_vue3_ssr`.
 - Verification this round: `$env:RUSTDOCFLAGS='-D missing_docs'; cargo doc --no-deps -p vuec_vue3_core`, `cargo fmt --all -- --check`, `cargo test -p vuec_vue3_core -p xtask`, `cargo xtask verify-public-api-docs`, `cargo xtask verify-release-docs`, and `git diff --check`.
@@ -184,7 +189,7 @@
 - Added README coverage for every current source-controlled `packages/**/package.json` directory, including the NAPI loader package, WASM package, native platform optional packages, and official package-name aliases. Ignored generated wasm-bindgen output directories remain outside this source-documentation gate.
 - Added `cargo xtask verify-release-docs`, which checks the release documentation skeleton files are non-empty, every source-controlled package manifest directory has a README, and package `files` arrays explicitly include `README.md` when present.
 - This slice is publication/documentation infrastructure only. It does not change compiler semantics, `xtask/src/compat.rs`, conformance classification, or AST/HIR/MIR structures.
-- Remaining M20 work: full per-public-API rustdoc coverage beyond the twelve documented crates, fully passing release dry-runs, and fully passing cross-platform install smoke verification.
+- Remaining M20 work: full per-public-API rustdoc coverage beyond the thirteen documented crates, fully passing release dry-runs, and fully passing cross-platform install smoke verification.
 
 ## Current Performance / Incremental Slice
 
