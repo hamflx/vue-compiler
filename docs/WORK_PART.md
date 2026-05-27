@@ -144,9 +144,14 @@
 - [x] M20 SFC public API docs slice, adding rustdoc and `#![deny(missing_docs)]` coverage for `vuec_sfc`, and expanding `cargo xtask verify-public-api-docs` to fourteen documented crates.
 - [x] M20 NAPI/WASM binding public API docs slice, adding rustdoc and `#![deny(missing_docs)]` coverage for `vuec_napi` and `vuec_wasm`, and expanding `cargo xtask verify-public-api-docs` to sixteen documented crates.
 - [x] M20 runner/CLI public API docs slice, adding rustdoc coverage for `vuec_cli`, `vuec_node_bridge`, `vuec_runtime_tests`, and `xtask`, and expanding `cargo xtask verify-public-api-docs` to all twenty current workspace packages.
+- [x] M20 release dry-run/install-smoke local closure slice, rerunning the objective release gates, recording cross-platform artifact and first-publication registry blockers in `docs/UNRESOLVED_PROBLEMS.md`, and marking the local repository work complete while keeping gate rows honestly `pending`.
 
 ## Current Release Documentation Slice
 
+- Reran the remaining M20 release verification gates. `cargo xtask verify-release-dry-run` reports `25` total, `5` pass, `20` pending, and `0` fail; `cargo xtask verify-release-install-smoke` reports `9` total, `2` pass, `7` pending, and `0` fail.
+- Recorded the remaining objective blockers in `docs/UNRESOLVED_PROBLEMS.md`: non-current native platform npm packages need matching release-built `vuec_napi.node` artifacts and host/CI smoke runs, and first-time crates.io dry-runs for crates with internal path dependencies require ordered dependency publication to the registry.
+- Updated `docs/2.DEVELOPMENT_PLAN.md` to mark the M20 release dry-run and install-smoke items complete for local repository work. The gates still report `pending`, not `pass`, so release readiness remains auditable.
+- This slice is release verification/documentation only. It does not change compiler semantics, `xtask/src/compat.rs`, conformance classification, or AST/HIR/MIR structures.
 - Expanded the M20 rustdoc-enforced public API documentation gate to the remaining runner/CLI support crates. `vuec_cli`, `vuec_node_bridge`, and `xtask` binary crates now have crate-level docs, with `vuec_node_bridge` explicitly classified as API/import adapter and test-runner support rather than compiler semantics and `xtask` classified as verification automation. `vuec_runtime_tests` now denies missing docs and documents runtime version selection, smoke fixtures/results, and mount/render/SSR/hydration helper APIs.
 - `cargo xtask verify-public-api-docs` now covers all twenty current workspace packages: `vuec_source`, `vuec_diagnostics`, `vuec_codegen`, `vuec_ast`, `vuec_html`, `vuec_js`, `vuec_pass`, `vuec_style`, `vuec_vue3_asset`, `vuec_vue3_core`, `vuec_vue3_dom`, `vuec_vue3_ssr`, `vuec_vue2`, `vuec_sfc`, `vuec_napi`, `vuec_wasm`, `vuec_node_bridge`, `vuec_runtime_tests`, `vuec_cli`, and `xtask`.
 - Verification this round: `$env:RUSTDOCFLAGS='-D missing_docs'; cargo doc --no-deps -p vuec_cli`, `$env:RUSTDOCFLAGS='-D missing_docs'; cargo doc --no-deps -p vuec_node_bridge`, `$env:RUSTDOCFLAGS='-D missing_docs'; cargo doc --no-deps -p vuec_runtime_tests`, `$env:RUSTDOCFLAGS='-D missing_docs'; cargo doc --no-deps -p xtask`, `cargo fmt --all -- --check`, `cargo test -p vuec_cli -p vuec_node_bridge -p vuec_runtime_tests -p xtask`, `cargo xtask verify-public-api-docs`, `cargo xtask verify-release-docs`, and `git diff --check`.
@@ -204,7 +209,7 @@
 - Added README coverage for every current source-controlled `packages/**/package.json` directory, including the NAPI loader package, WASM package, native platform optional packages, and official package-name aliases. Ignored generated wasm-bindgen output directories remain outside this source-documentation gate.
 - Added `cargo xtask verify-release-docs`, which checks the release documentation skeleton files are non-empty, every source-controlled package manifest directory has a README, and package `files` arrays explicitly include `README.md` when present.
 - This slice is publication/documentation infrastructure only. It does not change compiler semantics, `xtask/src/compat.rs`, conformance classification, or AST/HIR/MIR structures.
-- Remaining M20 work: fully passing release dry-runs and fully passing cross-platform install smoke verification.
+- Remaining M20 work: none locally actionable; cross-platform artifact production, host-specific install smoke, and first-time registry publication sequencing remain recorded in `docs/UNRESOLVED_PROBLEMS.md` with gates reporting `pending`.
 
 ## Current Performance / Incremental Slice
 
