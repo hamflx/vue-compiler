@@ -24,6 +24,12 @@ assert.deepStrictEqual(dom.map.sourcesContent, ['<div>{{ msg }}</div>']);
 
 const domAst = native.parseVue3Dom('<div>{{ msg }}</div>');
 assert.strictEqual(domAst.children[0].tag, 'div');
+assert.deepStrictEqual(
+  native.callVue3DomProjection('vue3.dom.transformStyle', {
+    node: { props: [{ type: 6, name: 'style', value: { content: 'color: red' } }] },
+  }).replacements,
+  [{ index: 0, expression: '{"color":"red"}' }],
+);
 
 const ssr = native.compileSsr('<div>{{ msg }}</div>', {
   mode: 'module',

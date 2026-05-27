@@ -45,7 +45,33 @@ const DOMErrorMessages = {
   64: 'Tags with side effect (<script> and <style>) are ignored in client component templates.',
 };
 
-const transformStyle = (node) => node;
+function callVue3DomProjection(command, payload) {
+  return native.callVue3DomProjection(command, payload || {});
+}
+
+const transformStyle = (node) => {
+  if (!node || node.type !== core.NodeTypes.ELEMENT) return undefined;
+  const projection = callVue3DomProjection('vue3.dom.transformStyle', { node });
+  for (const replacement of projection && projection.replacements || []) {
+    const original = node.props && node.props[replacement.index];
+    if (!original || original.type !== core.NodeTypes.ATTRIBUTE) continue;
+    node.props[replacement.index] = {
+      type: core.NodeTypes.DIRECTIVE,
+      name: 'bind',
+      rawName: ':style',
+      arg: core.createSimpleExpression('style', true, original.loc),
+      exp: core.createSimpleExpression(
+        replacement.expression || '{}',
+        false,
+        original.loc,
+        core.ConstantTypes.CAN_STRINGIFY,
+      ),
+      modifiers: [],
+      loc: original.loc,
+    };
+  }
+  return undefined;
+};
 
 const DOMNodeTransforms = [
   transformStyle,

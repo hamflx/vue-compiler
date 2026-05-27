@@ -259,6 +259,15 @@ pub fn call_vue3_core_projection(env: Env, command: String, payload: Unknown) ->
         "vue3.core.transformSlotOutlet" => {
             vuec_vue3_core::transform_slot_outlet_projection(&payload)
         }
+        "vue3.core.resolveComponentType" => {
+            vuec_vue3_core::resolve_component_type_projection(&payload)
+        }
+        "vue3.core.transformElementProps" => {
+            vuec_vue3_core::transform_element_props_projection(&payload)
+        }
+        "vue3.core.transformElementChildren" => {
+            vuec_vue3_core::transform_element_children_projection(&payload)
+        }
         "vue3.core.transformText" => vuec_vue3_core::transform_text_projection(&payload),
         "vue3.core.buildDirectiveArgs" => vuec_vue3_core::build_directive_args_projection(&payload),
         "vue3.core.isInDestructureAssignment" => {
@@ -271,6 +280,21 @@ pub fn call_vue3_core_projection(env: Env, command: String, payload: Unknown) ->
         other => {
             return Err(napi::Error::from_reason(format!(
                 "unsupported Vue 3 compiler-core projection command: {other}"
+            )));
+        }
+    };
+    to_json_string(value)
+}
+
+#[napi(js_name = "callVue3DomProjection")]
+/// Calls Rust-backed Vue 3 compiler-dom public projection helpers.
+pub fn call_vue3_dom_projection(env: Env, command: String, payload: Unknown) -> Result<String> {
+    let payload = from_js_options(&env, Some(payload))?;
+    let value = match command.as_str() {
+        "vue3.dom.transformStyle" => vuec_vue3_dom::transform_style_projection(&payload),
+        other => {
+            return Err(napi::Error::from_reason(format!(
+                "unsupported Vue 3 compiler-dom projection command: {other}"
             )));
         }
     };
@@ -3616,6 +3640,7 @@ pub fn api_manifest() -> Result<String> {
                 "baseParseVue3",
                 "generateVue3Core",
                 "callVue3CoreProjection",
+                "callVue3DomProjection",
                 "compileVue3Dom",
                 "parseVue3Dom",
                 "compileVue3Ssr",

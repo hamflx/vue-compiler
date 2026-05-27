@@ -204,7 +204,14 @@ function normalizeOptions(options) {
 function baseCompile(source) {
   const options = normalizeOptions(arguments[1]);
   validateBaseCompileOptions(options);
-  return native.baseCompileVue3(String(source || ''), vue3NativeOptions(options, source));
+  const template = String(source || '');
+  const result = native.baseCompileVue3(template, vue3NativeOptions(options, template));
+  if (result && typeof result === 'object' && !result.ast) {
+    const ast = baseParse(template, options);
+    transform(ast, options);
+    result.ast = ast;
+  }
+  return result;
 }
 
 function compile(source, options) {
@@ -237,8 +244,16 @@ function callVue3CoreProjection(command, payload) {
 function helperSymbolFromProjection(name) {
   if (!name) return undefined;
   if (helperSymbols[name]) return helperSymbols[name];
+  if (module.exports && module.exports[name] && typeof module.exports[name] === 'symbol') return module.exports[name];
   for (const symbol of Object.values(helperSymbols)) {
     if (helperNameMap[symbol] === name) return symbol;
+  }
+  return helperSymbolFromHelperName(name);
+}
+
+function helperSymbolFromHelperName(name) {
+  for (const value of Object.values(module.exports || {})) {
+    if (typeof value === 'symbol' && helperNameMap[value] === name) return value;
   }
   return undefined;
 }
@@ -329,6 +344,12 @@ function collectVueNamespaceHits(getNamespace, values) {
   return namespaces;
 }
 
+function selfNameFromFilename(filename) {
+  const match = String(filename || '').replace(/\?.*$/, '').match(/([^/\\]+)\.\w+$/);
+  if (!match) return null;
+  return match[1].replace(/(^|[-_])(\w)/g, (_match, _separator, char) => char.toUpperCase());
+}
+
 function warnIgnoredDecodeEntities(options) {
   if (!options || typeof options.decodeEntities !== 'function') return;
   console.warn('[Vue warn]: decodeEntities option is passed but will be ignored in non-browser builds.');
@@ -416,7 +437,7 @@ function assert(condition, msg) {
 }
 
 function createArrayExpression(elements) {
-  return { type: 17, loc: locStub, elements: elements || [] };
+  return { type: 17, loc: arguments[1] || locStub, elements: elements || [] };
 }
 
 function createAssignmentExpression(left, right) {
@@ -496,7 +517,7 @@ function createInterpolation(content, loc) {
 }
 
 function createObjectExpression(properties) {
-  return { type: 15, loc: locStub, properties: properties || [] };
+  return { type: 15, loc: arguments[1] || locStub, properties: properties || [] };
 }
 
 function createObjectProperty(key, value) {
@@ -535,7 +556,7 @@ function createSimpleExpression(content) {
     loc: arguments[2] || locStub,
     content: String(content == null ? '' : content),
     isStatic,
-    constType: isStatic ? ConstantTypes.CAN_STRINGIFY : ConstantTypes.NOT_CONSTANT,
+    constType: isStatic ? ConstantTypes.CAN_STRINGIFY : (arguments.length > 3 ? arguments[3] : ConstantTypes.NOT_CONSTANT),
   };
 }
 
@@ -582,7 +603,10 @@ function createTransformContext(root, options) {
     grandParent: null,
     currentNode: root,
     childIndex: 0,
+    filename: (options || {}).filename || '',
+    selfName: (options || {}).filename ? selfNameFromFilename((options || {}).filename) : null,
     directiveTransforms: (options || {}).directiveTransforms || {},
+    nodeTransforms: (options || {}).nodeTransforms || [],
     compatConfig: (options || {}).compatConfig,
     inSSR: !!((options || {}).inSSR || (options || {}).ssr),
     ssr: !!((options || {}).ssr),
@@ -594,6 +618,9 @@ function createTransformContext(root, options) {
     inline: !!((options || {}).inline),
     isTS: !!((options || {}).isTS),
     expressionPlugins: (options || {}).expressionPlugins || [],
+    isBuiltInComponent: (options || {}).isBuiltInComponent || (() => false),
+    isCustomElement: (options || {}).isCustomElement || (() => false),
+    transformHoist: (options || {}).transformHoist || null,
     inVOnce: false,
     helper(name) {
       this.helpers.set(name, (this.helpers.get(name) || 0) + 1);
@@ -732,6 +759,54 @@ function vue3TransformBindContextPayload(context) {
     inSSR: !!context.inSSR,
     browser: isBrowserBuild(),
   };
+}
+
+function vue3TransformElementContextPayload(context) {
+  context = context || {};
+  return {
+    inSSR: !!context.inSSR,
+    inline: !!context.inline,
+    bindingMetadata: context.bindingMetadata || {},
+    vForDepth: context.scopes && context.scopes.vFor || 0,
+  };
+}
+
+function vue3ResolveComponentContextPayload(context) {
+  context = context || {};
+  return {
+    prefixIdentifiers: !!context.prefixIdentifiers,
+    inline: !!context.inline,
+    selfName: context.selfName || null,
+    bindingMetadata: context.bindingMetadata || {},
+    isScriptSetup: context.bindingMetadata && Object.prototype.hasOwnProperty.call(context.bindingMetadata, '__isScriptSetup')
+      ? context.bindingMetadata.__isScriptSetup
+      : undefined,
+    compatIsOnElement: false,
+    builtInComponents: vue3BuiltInComponentPayload(context),
+  };
+}
+
+function vue3BuiltInComponentPayload(context) {
+  const names = ['Transition', 'transition', 'TransitionGroup', 'transition-group'];
+  const out = [];
+  const seen = new Set();
+  for (const name of names) {
+    let helper;
+    try {
+      helper = context && typeof context.isBuiltInComponent === 'function'
+        ? context.isBuiltInComponent(name)
+        : undefined;
+    } catch (_error) {
+      helper = undefined;
+    }
+    if (!helper) helper = isCoreComponent(name);
+    const helperName = typeof helper === 'symbol' ? helperNameMap[helper] : undefined;
+    if (helperName && !seen.has(name)) {
+      seen.add(name);
+      out.push({ tag: name, helperName });
+    }
+  }
+  return out;
 }
 
 function vue3TransformVBindShorthandContextPayload(context) {
@@ -1210,6 +1285,121 @@ function injectProp(node, prop, context) {
   return node;
 }
 
+function getUnnormalizedProps(props, callPath) {
+  callPath = callPath || [];
+  if (props && typeof props !== 'string' && props.type === NodeTypes.JS_CALL_EXPRESSION) {
+    if (props.callee === NORMALIZE_PROPS || props.callee === GUARD_REACTIVE_PROPS) {
+      return getUnnormalizedProps(props.arguments && props.arguments[0], callPath.concat(props));
+    }
+  }
+  return [props, callPath];
+}
+
+function prependPropOnce(props, prop) {
+  const keyName = staticPropertyKeyName(prop);
+  if (!keyName || !(props.properties || []).some(existing => staticPropertyKeyName(existing) === keyName)) {
+    props.properties.unshift(prop);
+  }
+}
+
+function prependPropsExpressionProp(props, prop, loc) {
+  loc = loc || locStub;
+  if (!props || typeof props === 'string') return createObjectExpression([prop], loc);
+  if (props.type === NodeTypes.JS_OBJECT_EXPRESSION) {
+    prependPropOnce(props, prop);
+    return props;
+  }
+  const objectArg = createObjectExpression([prop], loc);
+  if (props.type === NodeTypes.JS_CALL_EXPRESSION && props.callee === MERGE_PROPS) {
+    const first = props.arguments && props.arguments[0];
+    if (first && typeof first !== 'string' && first.type === NodeTypes.JS_OBJECT_EXPRESSION) {
+      prependPropOnce(first, prop);
+    } else {
+      props.arguments.unshift(objectArg);
+    }
+    return props;
+  }
+  return createCallExpression(MERGE_PROPS, [objectArg, props], loc);
+}
+
+function applyInlineTemplateRefProjection(props, refs, loc) {
+  loc = loc || locStub;
+  for (const ref of refs || []) {
+    const content = ref && ref.content;
+    if (!content) continue;
+    props = prependPropsExpressionProp(
+      props,
+      createObjectProperty('ref_key', createSimpleExpression(content, true, loc)),
+      loc,
+    );
+    for (const object of propsExpressionObjects(props)) {
+      for (const prop of object.properties || []) {
+        if (staticPropertyKeyName(prop) === 'ref' && prop.value && prop.value.type === NodeTypes.SIMPLE_EXPRESSION && prop.value.content === content) {
+          prop.value.isStatic = false;
+          prop.value.constType = ConstantTypes.NOT_CONSTANT;
+        }
+      }
+    }
+  }
+  return props;
+}
+
+function propsExpressionObjects(props) {
+  if (!props || typeof props === 'string') return [];
+  if (props.type === NodeTypes.JS_OBJECT_EXPRESSION) return [props];
+  if (props.type === NodeTypes.JS_CALL_EXPRESSION) {
+    return (props.arguments || []).flatMap(propsExpressionObjects);
+  }
+  return [];
+}
+
+function dedupeProperties(properties) {
+  const known = new Map();
+  const deduped = [];
+  for (const prop of properties || []) {
+    const keyName = staticPropertyKeyName(prop);
+    if (!keyName) {
+      deduped.push(prop);
+      continue;
+    }
+    const existing = known.get(keyName);
+    if (existing) {
+      if (keyName === 'class' || keyName === 'style' || /^on[A-Z]/.test(keyName)) {
+        mergePropertyAsArray(existing, prop);
+      }
+    } else {
+      known.set(keyName, prop);
+      deduped.push(prop);
+    }
+  }
+  return deduped;
+}
+
+function mergePropertyAsArray(existing, incoming) {
+  if (existing.value && existing.value.type === NodeTypes.JS_ARRAY_EXPRESSION) {
+    existing.value.elements.push(incoming.value);
+  } else {
+    existing.value = createArrayExpression([existing.value, incoming.value], existing.loc || locStub);
+  }
+}
+
+function staticPropertyKeyName(prop) {
+  const key = prop && prop.key;
+  return key && key.type === NodeTypes.SIMPLE_EXPRESSION && key.isStatic ? key.content : undefined;
+}
+
+function normalizeObjectProp(props, name, helper) {
+  let target = props;
+  if (target && target.type === NodeTypes.JS_CALL_EXPRESSION && target.callee === NORMALIZE_PROPS) {
+    target = target.arguments && target.arguments[0];
+  }
+  if (!target || target.type !== NodeTypes.JS_OBJECT_EXPRESSION) return;
+  const prop = (target.properties || []).find(property => staticPropertyKeyName(property) === name);
+  if (prop && prop.value && !isStaticExp(prop.value) && !(prop.value.type === NodeTypes.JS_CALL_EXPRESSION && prop.value.callee === helper)) {
+    prop.value = createCallExpression(helper, [prop.value], prop.value.loc || prop.loc || locStub);
+  }
+}
+
 function isAllWhitespace(source) {
   return !/[^\t\r\n\f ]/.test(String(source || ''));
 }
@@ -1220,10 +1410,10 @@ function isCommentOrWhitespace(node) {
 
 function isCoreComponent(tag) {
   const name = String(tag || '');
-  if (name === 'Teleport') return TELEPORT;
-  if (name === 'Suspense') return SUSPENSE;
-  if (name === 'KeepAlive') return KEEP_ALIVE;
-  if (name === 'BaseTransition') return BASE_TRANSITION;
+  if (name === 'Teleport' || name === 'teleport') return TELEPORT;
+  if (name === 'Suspense' || name === 'suspense') return SUSPENSE;
+  if (name === 'KeepAlive' || name === 'keep-alive') return KEEP_ALIVE;
+  if (name === 'BaseTransition' || name === 'base-transition') return BASE_TRANSITION;
   return undefined;
 }
 
@@ -1297,6 +1487,17 @@ function isSlotOutlet(node) {
 
 function isStaticArgOf(arg, name) {
   return !!arg && arg.type === NodeTypes.SIMPLE_EXPRESSION && arg.isStatic && arg.content === name;
+}
+
+function hasModifier(dir, name) {
+  return (dir && dir.modifiers || []).some(modifier => {
+    if (typeof modifier === 'string') return modifier === name;
+    return modifier && modifier.content === name;
+  });
+}
+
+function isBuiltInDirective(name) {
+  return new Set(['bind', 'cloak', 'else-if', 'else', 'for', 'html', 'if', 'model', 'on', 'once', 'pre', 'show', 'slot', 'text', 'memo']).has(String(name || ''));
 }
 
 const isStaticExp = (p) => {
@@ -1738,7 +1939,12 @@ function registerRuntimeHelpers(helpers) {
 }
 
 function resolveComponentType(node, context) {
-  return node && node.tag;
+  const projection = callVue3CoreProjection('vue3.core.resolveComponentType', {
+    node,
+    context: vue3ResolveComponentContextPayload(context),
+    ssr: !!(arguments.length > 2 && arguments[2]),
+  });
+  return materializeVue3ComponentTypeProjection(projection, node, context);
 }
 
 function stringifyExpression(exp) {
@@ -1835,6 +2041,164 @@ function materializeVue3TextProjection(projection, node, context) {
         codegenNode: createCallExpression(context.helper(CREATE_TEXT), callArgs),
       };
     }
+  }
+}
+
+function vue3ElementDirectivePropSummaries(dir, result, extra) {
+  extra = extra || {};
+  return ((result && result.props) || []).map(prop => {
+    const key = prop && prop.key;
+    const value = prop && prop.value;
+    return {
+      kind: 'directiveProp',
+      name: key && key.type === NodeTypes.SIMPLE_EXPRESSION && key.isStatic ? key.content : undefined,
+      dynamicKey: !(key && key.type === NodeTypes.SIMPLE_EXPRESSION && key.isStatic),
+      ignoreDynamicKeyForNormalize: !!(prop && prop.__vuecOn && prop.__vuecOn.ignoreDynamicKeyForNormalize),
+      valueStartsWithArray: !!(value && value.type === NodeTypes.SIMPLE_EXPRESSION && String(value.content || '').trim().startsWith('[')),
+      valueStatic: !!(value && value.type === NodeTypes.SIMPLE_EXPRESSION && value.isStatic),
+      valueType: value && value.type,
+      valueConstant: vue3ElementPropValueIsConstant(value) || !!(prop && prop.__vuecOn && prop.__vuecOn.valueConstant),
+      valueCached: !!(value && value.type === NodeTypes.JS_CACHE_EXPRESSION),
+      propModifier: !!extra.propModifier,
+      forceBlock: !!extra.forceBlock,
+    };
+  });
+}
+
+function vue3ElementPropValueIsConstant(value) {
+  if (!value) return false;
+  if (value.__vuecOn && value.__vuecOn.cache) return true;
+  if (value.type === NodeTypes.JS_CACHE_EXPRESSION) return true;
+  if (value.type === NodeTypes.SIMPLE_EXPRESSION) {
+    return !!value.isStatic || Number(value.constType || 0) > 0;
+  }
+  if (value.type === NodeTypes.COMPOUND_EXPRESSION) {
+    return Number(value.constType || 0) > 0;
+  }
+  return false;
+}
+
+function vue3DirectiveRuntimePayload(needRuntime) {
+  if (typeof needRuntime === 'symbol') {
+    return {
+      kind: 'helper',
+      helper: projectionNameFromHelperSymbol(needRuntime),
+      helperName: helperNameMap[needRuntime],
+    };
+  }
+  if (needRuntime) return { kind: 'asset' };
+  return null;
+}
+
+function projectionNameFromHelperSymbol(symbol) {
+  const helperName = helperNameMap[symbol];
+  if (helperName) return helperName;
+  const entries = Object.entries(module.exports || {}).filter(([, value]) => value === symbol);
+  return entries.length ? entries[0][0] : undefined;
+}
+
+function materializeVue3ElementSlotsProjection(projection, node, context) {
+  const properties = [];
+  for (const slot of projection && projection.slots || []) {
+    const slotChildren = [];
+    for (const index of slot.indices || []) {
+      const child = node.children && node.children[index];
+      if (!child) continue;
+      if (slot.unwrapTemplate && child.type === NodeTypes.ELEMENT && child.tag === 'template') {
+        slotChildren.push(...(child.children || []));
+      } else {
+        slotChildren.push(child);
+      }
+    }
+    properties.push(createObjectProperty(
+      slot.name || 'default',
+      createFunctionExpression([], slotChildren, false, true, node.loc),
+    ));
+  }
+  properties.push(createObjectProperty(
+    '_',
+    createSimpleExpression(projection && projection.slotFlag || '1 /* STABLE */', false),
+  ));
+  if (context && typeof context.helper === 'function') context.helper(WITH_CTX);
+  return createObjectExpression(properties, node.loc);
+}
+
+function materializeVue3ComponentTypeProjection(projection, node, context) {
+  if (!projection) return toValidAssetId(node && node.tag || '', 'component');
+  const helper = helperSymbolFromProjection(projection.helper);
+  switch (projection.kind) {
+    case 'dynamic':
+      if (helper && context && typeof context.helper === 'function') context.helper(helper);
+      return createCallExpression(
+        helper || RESOLVE_DYNAMIC_COMPONENT,
+        [materializeVue3ComponentProjectionNode(projection.argument, node, context)],
+      );
+    case 'helper':
+      if (projection.helperName && context && typeof context.isBuiltInComponent === 'function') {
+        const contextHelper = vue3ContextBuiltInComponentSymbol(context, node, projection.helperName);
+        if (contextHelper) {
+          if (projection.registerHelper !== false && context && typeof context.helper === 'function') context.helper(contextHelper);
+          return contextHelper;
+        }
+      }
+      if (helper && projection.registerHelper !== false && context && typeof context.helper === 'function') context.helper(helper);
+      if (helper) return helper;
+      if (projection.helperName) {
+        const runtimeHelper = helperSymbolFromHelperName(projection.helperName);
+        if (runtimeHelper && projection.registerHelper !== false && context && typeof context.helper === 'function') context.helper(runtimeHelper);
+        return runtimeHelper || `_${projection.helperName}`;
+      }
+      return projection.helper;
+    case 'expression':
+      for (const name of projection.helpers || []) {
+        const symbol = helperSymbolFromProjection(name);
+        if (symbol && context && typeof context.helper === 'function') context.helper(symbol);
+      }
+      return projection.content || '';
+    case 'asset':
+      if (helper && context && typeof context.helper === 'function') context.helper(helper);
+      if (projection.component && context && context.components) context.components.add(projection.component);
+      return projection.assetId || toValidAssetId(node && node.tag || '', 'component');
+    default:
+      throw new Error(`Unsupported Rust component projection: ${projection.kind}`);
+  }
+}
+
+function vue3ContextBuiltInComponentSymbol(context, node, helperName) {
+  const tag = node && node.tag;
+  const names = [tag];
+  if (helperName === 'Transition') names.push('Transition', 'transition');
+  else if (helperName === 'TransitionGroup') names.push('TransitionGroup', 'transition-group');
+  else if (helperName === 'BaseTransition') names.push('BaseTransition', 'base-transition');
+  for (const name of names) {
+    if (!name) continue;
+    try {
+      const helper = context.isBuiltInComponent(name);
+      if (typeof helper === 'symbol' && helperNameMap[helper] === helperName) return helper;
+    } catch (_error) {}
+  }
+  return undefined;
+}
+
+function materializeVue3ComponentProjectionNode(projection, node, context) {
+  if (!projection || projection.kind === 'undefined') return undefined;
+  if (projection.type) return projection;
+  switch (projection.kind) {
+    case 'simple':
+      return createSimpleExpression(
+        projection.content || '',
+        !!projection.isStatic,
+        projection.loc || (node && node.loc) || locStub,
+        projection.constType || 0,
+      );
+    case 'expression':
+      for (const name of projection.helpers || []) {
+        const symbol = helperSymbolFromProjection(name);
+        if (symbol && context && typeof context.helper === 'function') context.helper(symbol);
+      }
+      return projection.content || '';
+    default:
+      return projection;
   }
 }
 
@@ -1976,27 +2340,211 @@ const transformElement = (node, context) => {
     if (node.tagType !== ElementTypes.ELEMENT && node.tagType !== ElementTypes.COMPONENT) return;
     const isComponent = node.tagType === ElementTypes.COMPONENT;
     const tag = isComponent ? resolveComponentType(node, context) : `"${node.tag}"`;
-    if (isComponent && typeof tag === 'string') {
-      context.components.add(node.tag);
-      context.helper(RESOLVE_COMPONENT);
+    const isDynamicComponent = isComponent && tag && typeof tag === 'object' && tag.type === NodeTypes.JS_CALL_EXPRESSION && tag.callee === RESOLVE_DYNAMIC_COMPONENT;
+    let patchFlag;
+    let props;
+    let hasHydrationEvent = false;
+    const dynamicProps = [];
+    const propSummaries = [];
+    let vnodeDirectives;
+    let shouldUseBlock = !!(
+      isDynamicComponent
+      || tag === TELEPORT
+      || tag === SUSPENSE
+      || (!isComponent && (node.tag === 'svg' || node.tag === 'foreignObject' || node.tag === 'math'))
+    );
+    if (node.props && node.props.length) {
+      const objectProps = [];
+      const mergeArgs = [];
+      const runtimeDirectives = [];
+      const pushMergeArg = arg => {
+        if (objectProps.length) {
+          mergeArgs.push(createObjectExpression(objectProps.splice(0), node.loc));
+        }
+        if (arg) mergeArgs.push(arg);
+      };
+      for (const prop of node.props) {
+        if (!prop) continue;
+        if (prop.type === NodeTypes.ATTRIBUTE) {
+          if (
+            prop.name === 'is'
+            && (
+              node.tag === 'component'
+              || node.tag === 'Component'
+              || (prop.value && String(prop.value.content || '').startsWith('vue:'))
+            )
+          ) {
+            continue;
+          }
+          objectProps.push(createObjectProperty(
+            prop.name,
+            createSimpleExpression(prop.value ? prop.value.content : '', true, prop.value ? prop.value.loc : prop.loc),
+          ));
+          propSummaries.push({ kind: 'attribute', name: prop.name, value: prop.value && prop.value.content });
+        } else if (prop.name === 'bind' && prop.arg) {
+          if (isStaticArgOf(prop.arg, 'is') && (node.tag === 'component' || node.tag === 'Component')) {
+            continue;
+          }
+          const transform = context.directiveTransforms && context.directiveTransforms.bind;
+          if (!transform) {
+            if (isStaticArgOf(prop.arg, 'key')) propSummaries.push({ kind: 'directiveProp', forceBlock: true });
+            continue;
+          }
+          const result = transform(prop, node, context);
+          objectProps.push(...((result && result.props) || []));
+          propSummaries.push(...vue3ElementDirectivePropSummaries(prop, result, {
+            forceBlock: isStaticArgOf(prop.arg, 'key'),
+            propModifier: hasModifier(prop, 'prop'),
+          }));
+        } else if (prop.name === 'on' && prop.arg) {
+          if (!prop.exp && node.children && node.children.length && isStaticArgOf(prop.arg, 'vue:before-update')) {
+            propSummaries.push({ kind: 'directiveProp', forceBlock: true });
+            continue;
+          }
+          const transform = context.directiveTransforms && context.directiveTransforms.on;
+          const result = transform ? transform(prop, node, context) : undefined;
+          objectProps.push(...((result && result.props) || []));
+          if (!result && node.children && node.children.length && isStaticArgOf(prop.arg, 'vue:before-update')) {
+            propSummaries.push({ kind: 'directiveProp', forceBlock: true });
+          }
+          propSummaries.push(...vue3ElementDirectivePropSummaries(prop, result, {
+            forceBlock: !!(node.children && node.children.length && isStaticArgOf(prop.arg, 'vue:before-update')),
+          }));
+        } else if (prop.name === 'bind' && !prop.arg) {
+          if (prop.exp) {
+            pushMergeArg(prop.exp);
+            propSummaries.push({ kind: 'objectBind' });
+          } else if (context && typeof context.onError === 'function') {
+            context.onError(createCompilerError(ErrorCodes.X_V_BIND_NO_EXPRESSION, prop.loc));
+          }
+        } else if (prop.name === 'on' && !prop.arg) {
+          if (prop.exp) {
+            pushMergeArg(createCallExpression(context.helper(TO_HANDLERS), isComponent ? [prop.exp] : [prop.exp, 'true'], prop.loc));
+            propSummaries.push({ kind: 'objectOn' });
+          } else if (context && typeof context.onError === 'function') {
+            context.onError(createCompilerError(ErrorCodes.X_V_ON_NO_EXPRESSION, prop.loc));
+          }
+        } else if (prop.name === 'model' && context && context.directiveTransforms && context.directiveTransforms.model) {
+          const result = context.directiveTransforms.model(prop, node, context);
+          const modelProps = (result && result.props) || [];
+          objectProps.push(...modelProps);
+          propSummaries.push(...vue3ElementDirectivePropSummaries(prop, result));
+          for (const modelProp of modelProps) {
+            if (modelProp.__vuecModel && modelProp.__vuecModel.dynamic && isStaticExp(modelProp.key)) {
+              dynamicProps.push(modelProp.key.content);
+            }
+            if (modelProp.__vuecModel && modelProp.__vuecModel.hydrate) {
+              hasHydrationEvent = true;
+            }
+          }
+          if (result && result.needRuntime) {
+            prop.__vuecNeedRuntime = result.needRuntime;
+            runtimeDirectives.push(prop);
+            propSummaries.push({ kind: 'runtimeDirective' });
+          }
+        } else if (prop.name === 'once' || prop.name === 'memo') {
+          continue;
+        } else if (prop.name === 'slot') {
+          if (!isComponent && context && typeof context.onError === 'function') {
+            context.onError(createCompilerError(ErrorCodes.X_V_SLOT_MISPLACED, prop.loc));
+          }
+        } else if (context.directiveTransforms && context.directiveTransforms[prop.name]) {
+          const result = context.directiveTransforms[prop.name](prop, node, context);
+          objectProps.push(...((result && result.props) || []));
+          propSummaries.push(...vue3ElementDirectivePropSummaries(prop, result));
+          if (result && result.needRuntime) {
+            prop.__vuecNeedRuntime = result.needRuntime;
+            runtimeDirectives.push(prop);
+            propSummaries.push({ kind: 'runtimeDirective' });
+          }
+        } else {
+          runtimeDirectives.push(prop);
+          if (!isBuiltInDirective(prop.name)) propSummaries.push({ kind: 'runtimeDirective' });
+        }
+      }
+      if (mergeArgs.length) {
+        pushMergeArg();
+        props = mergeArgs.length > 1
+          ? createCallExpression(context.helper(MERGE_PROPS), mergeArgs, node.loc)
+          : mergeArgs[0];
+      } else if (objectProps.length) {
+        props = createObjectExpression(dedupeProperties(objectProps), node.loc);
+      }
+      const propsProjection = callVue3CoreProjection('vue3.core.transformElementProps', {
+        props: propSummaries,
+        hasChildren: !!(node.children && node.children.length),
+        isComponent,
+        isDynamicComponent,
+        context: vue3TransformElementContextPayload(context),
+      });
+      if (propsProjection && propsProjection.refForMarker) {
+        props = prependPropsExpressionProp(
+          props,
+          createObjectProperty('ref_for', createSimpleExpression('true')),
+          node.loc,
+        );
+      }
+      if (props && propsProjection && propsProjection.inlineTemplateRefs) {
+        props = applyInlineTemplateRefProjection(props, propsProjection.inlineTemplateRefs, node.loc);
+      }
+      if (props && propsProjection && propsProjection.normalizeClass) {
+        normalizeObjectProp(props, 'class', context.helper(NORMALIZE_CLASS));
+      }
+      if (props && propsProjection && propsProjection.normalizeStyle) {
+        normalizeObjectProp(props, 'style', context.helper(NORMALIZE_STYLE));
+      }
+      if (props && propsProjection && propsProjection.normalizeProps) {
+        if (!(props.type === NodeTypes.JS_CALL_EXPRESSION && (props.callee === MERGE_PROPS || props.callee === TO_HANDLERS))) {
+          const argument = propsProjection.guardReactiveProps
+            ? createCallExpression(context.helper(GUARD_REACTIVE_PROPS), [props], node.loc)
+            : props;
+          props = createCallExpression(context.helper(NORMALIZE_PROPS), [argument], node.loc);
+        }
+      }
+      patchFlag = propsProjection && propsProjection.patchFlag || undefined;
+      dynamicProps.splice(0, dynamicProps.length, ...((propsProjection && propsProjection.dynamicPropNames) || dynamicProps));
+      if (propsProjection && propsProjection.shouldUseBlock) shouldUseBlock = true;
+      if (hasHydrationEvent) patchFlag = (patchFlag || 0) | 32;
+      if (runtimeDirectives.length) {
+        vnodeDirectives = createArrayExpression(runtimeDirectives.map(dir => buildDirectiveArgs(dir, context)));
+        if (!shouldUseBlock && (!patchFlag || patchFlag === 32)) patchFlag = (patchFlag || 0) | 512;
+      }
     }
-    const built = buildProps(node, context);
-    let children = node.children && node.children.length ? node.children : undefined;
-    let patchFlag = built.patchFlag || undefined;
-    if (isComponent && children) {
+    const onlyChild = node.children && node.children.length === 1 ? node.children[0] : undefined;
+    let children = onlyChild && [NodeTypes.TEXT, NodeTypes.INTERPOLATION, NodeTypes.COMPOUND_EXPRESSION].includes(onlyChild.type)
+      ? onlyChild
+      : node.children && node.children.length
+        ? node.children
+        : undefined;
+    if (isComponent && node.children && node.children.length && tag !== TELEPORT && tag !== KEEP_ALIVE) {
       const builtSlots = buildSlots(node, context);
       children = builtSlots.slots;
       if (builtSlots.hasDynamicSlots) patchFlag = (patchFlag || 0) | 1024;
+    } else {
+      const childrenProjection = callVue3CoreProjection('vue3.core.transformElementChildren', {
+        tag: projectionNameFromHelperSymbol(tag),
+        children: node.children || [],
+      });
+      if (childrenProjection && childrenProjection.kind === 'slots') {
+        children = materializeVue3ElementSlotsProjection(childrenProjection, node, context);
+        if (childrenProjection.shouldUseBlock) shouldUseBlock = true;
+      } else if (childrenProjection && childrenProjection.kind === 'children') {
+        if (childrenProjection.shouldUseBlock) shouldUseBlock = true;
+        if (childrenProjection.patchFlag) patchFlag = (patchFlag || 0) | childrenProjection.patchFlag;
+      }
+    }
+    if (!patchFlag && children && (children.type === NodeTypes.INTERPOLATION || children.type === NodeTypes.COMPOUND_EXPRESSION) && getConstantType(children, context) === ConstantTypes.NOT_CONSTANT) {
+      patchFlag = 1;
     }
     node.codegenNode = createVNodeCall(
       context,
-      isComponent ? `_component_${node.tag}` : tag,
-      built.props,
+      tag,
+      props,
       children,
       patchFlag,
-      built.dynamicPropNames && built.dynamicPropNames.length ? stringifyDynamicPropNames(built.dynamicPropNames) : undefined,
-      built.directives && built.directives.length ? createArrayExpression(built.directives.map(dir => buildDirectiveArgs(dir, context))) : undefined,
-      !!built.shouldUseBlock,
+      dynamicProps.length ? stringifyDynamicPropNames(dynamicProps) : undefined,
+      vnodeDirectives,
+      shouldUseBlock,
       false,
       isComponent,
       node.loc,
@@ -2189,7 +2737,10 @@ function checkCompatEnabled(key, context, loc) {
 
 function buildDirectiveArgs(dir, context) {
   if (!dir) return createArrayExpression([]);
-  const projection = callVue3CoreProjection('vue3.core.buildDirectiveArgs', { dir });
+  const projection = callVue3CoreProjection('vue3.core.buildDirectiveArgs', {
+    dir,
+    needRuntime: vue3DirectiveRuntimePayload(dir && dir.__vuecNeedRuntime),
+  });
   const args = [];
   const runtime = projection && projection.runtime;
   if (!runtime || runtime.kind === 'asset') {

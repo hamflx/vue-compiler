@@ -182,6 +182,10 @@ function callVue3CoreProjection(command, payload = {}) {
   return fromJson(binding.callVue3CoreProjection(String(command || ''), dehydrateForNative(payload || {})));
 }
 
+function callVue3DomProjection(command, payload = {}) {
+  return fromJson(binding.callVue3DomProjection(String(command || ''), dehydrateForNative(payload || {})));
+}
+
 function compileVue3Dom(source, options = {}) {
   return fromJson(binding.compileVue3Dom(source, dehydrateForNative(options || {})));
 }
@@ -326,6 +330,7 @@ module.exports = {
   baseParseVue3,
   generateVue3Core,
   callVue3CoreProjection,
+  callVue3DomProjection,
   compileVue3Dom,
   parseVue3Dom,
   compileVue3Ssr,
