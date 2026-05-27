@@ -3568,7 +3568,7 @@ fn lower_vue3_ast_node_to_ssr_mir(
             );
             let mir_id = state.mir.push_child(
                 mir_parent,
-                Vue3SsrMirKind::PushString(text.value.clone()),
+                Vue3SsrMirKind::PushString(escape_static_html_text(&text.value)),
                 ast_node.span.clone(),
             );
             state.map.record_ast_to_hir(ast_id, hir_id);
@@ -16354,15 +16354,22 @@ enum SsrTemplatePart {
 
 fn render_ssr_template_literal(parts: &[SsrTemplatePart]) -> String {
     let mut output = String::from("`");
+    let multiline_exprs = parts.len() > 3;
     for part in parts {
         match part {
             SsrTemplatePart::Static(value) => {
                 output.push_str(&escape_template_literal_static(value));
             }
             SsrTemplatePart::Expr(value) => {
-                output.push_str("${\n");
-                output.push_str(&indent_lines(value, 2));
-                output.push_str("\n}");
+                if multiline_exprs {
+                    output.push_str("${\n");
+                    output.push_str(&indent_lines(value, 2));
+                    output.push_str("\n}");
+                } else {
+                    output.push_str("${");
+                    output.push_str(value);
+                    output.push('}');
+                }
             }
         }
     }
@@ -16384,7 +16391,7 @@ fn escape_template_literal_static(value: &str) -> String {
     value
         .replace('\\', "\\\\")
         .replace('`', "\\`")
-        .replace("${", "\\${")
+        .replace('$', "\\$")
 }
 
 fn parse_ssr_open_tag_start(value: &str) -> Option<(String, Vec<(String, Option<String>)>)> {
@@ -28585,9 +28592,36 @@ mod tests {
         assert!(generated.code.contains("_push(`foo ${"));
         assert!(generated.code.contains("_ssrInterpolate(_ctx.bar)"));
         assert!(generated.code.contains("} baz`)"));
+        assert!(generated
+            .code
+            .contains(r#"_push(`foo ${_ssrInterpolate(_ctx.bar)} baz`)"#));
         assert!(!generated.code.contains("<!--[-->"));
         assert!(!generated.code.contains("_push(\"foo \")"));
         assert!(!generated.code.contains("_push(_ssrInterpolate(_ctx.bar));"));
+    }
+
+    #[test]
+    fn generate_vue3_ssr_mir_escapes_text_for_static_html_and_template_literals() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div>&lt;foo&gt;\$bar</div>"#.into(),
+            file_id: FileId(43),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_ssr_mir(&ast, &Vue3CompilerOptions::default());
+        let generated = generate_vue3_ssr_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated.code.contains("&lt;foo&gt;\\\\\\$bar</div>`"));
+        assert!(generated.code.contains("_ssrRenderAttrs(_attrs)"));
+        assert!(!generated.code.contains("<foo>"));
     }
 
     #[test]
