@@ -8,7 +8,7 @@
 
 当前项目已经不是早期玩具项目。它具备 Rust workspace、方言 crate、AST/HIR/MIR 设计文档、Vue 2 模板编译器较强兼容性、Vue 3 core 的 Rust-backed 官方测试覆盖、API/alias/output contract 工具链，以及可运行的官方测试 harness。
 
-但它还不能被判断为产品成熟的 Vue 编译器，也不能被判断为架构已经成熟的完整 Rust Vue 编译器。更准确的定位是：高级兼容性原型加局部成熟编译器实现。Vue 2 模板编译器部分相对最接近可产品化；Vue 2.7 SFC 仍有真实 Rust-backed 官方失败；Vue 3 DOM、SSR、SFC 的官方通过主要来自 mixed harness，不能等同于纯 Rust 编译器闭环。
+但它还不能被判断为产品成熟的 Vue 编译器，也不能被判断为架构已经成熟的完整 Rust Vue 编译器。更准确的定位是：高级兼容性原型加局部成熟编译器实现。Vue 2 模板编译器和 Vue 2.7 SFC 的 generated-alias 官方兼容门禁已关闭；Vue 3 DOM、SSR、SFC 的官方通过主要来自 mixed harness，不能等同于纯 Rust 编译器闭环。
 
 距离产品成熟主要差在：纯 Rust conformance 覆盖闭环、SFC/script/style 生态完整性、最终 NAPI/WASM/CLI 包装、稳定诊断与 sourcemap、性能与增量体系、CI/发布流程、模糊测试和安全鲁棒性。
 
@@ -56,7 +56,7 @@ rg --files --hidden -g '!target/**' -g '!node_modules/**' -g '!vendor/**' -g '!.
 
 ## 本地验证结果
 
-以下命令已在本地执行。通过项只能说明当前静态构建和既有单元测试健康，不能替代产品级 conformance。
+以下命令已在本地执行。通过项只能说明当前静态构建、代表性 public contract 和官方 generated-alias conformance 健康；mixed 覆盖项不能替代纯 Rust conformance。
 
 | 命令 | 结果 | 解释 |
 | --- | --- | --- |
@@ -66,16 +66,11 @@ rg --files --hidden -g '!target/**' -g '!node_modules/**' -g '!vendor/**' -g '!.
 | `cargo xtask diff-api --all` | 通过 | 7 个 API manifest 与官方基线字段匹配，`compat/api/allowed-diff.json` 当前为空 |
 | `cargo xtask verify-npm-alias --all` | 通过 | 7 个 alias smoke 通过 |
 | `cargo xtask run-output-contract --all` | 通过 | 7 个 target 的代表性输出契约通过，每个 target 5 项检查 |
-| `cargo xtask run-option-matrix --all` | 失败 | 5/7 target 通过，2 个 target 失败，合计 3 条 SFC option row 失败 |
-| `cargo xtask summarize-compat --locked` | 失败 | 受 option matrix 失败和 Vue 2.7 SFC conformance 失败影响 |
+| `cargo xtask run-option-matrix --all` | 通过 | 7/7 target 通过，所有当前 option rows 无 fail/pending |
+| `cargo xtask run-conformance --all` | 通过 | 7 个官方 suite generated-alias 运行通过 |
+| `cargo xtask summarize-compat --locked` | 通过 | 7/7 target 聚合为 pass |
 
-option matrix 的失败项是当前必须优先处理的产品兼容缺口：
-
-| 包 | API | fixture | 差异 |
-| --- | --- | --- | --- |
-| `vue` | `vue/compiler-sfc compileScript` | `vue27-sfc-script` | 官方生成 `return { __sfc: true,msg }`，Rust 生成 `return { msg }`；`start/end`、`loc`、`scriptAst` 等结构也不同 |
-| `vue` | `vue/compiler-sfc compileStyle` | `vue27-sfc-style` | 官方输出 `.a[data-v-contract]{...}`，Rust 输出 `.a[data-v-contract] {...}`，selector 后多空格 |
-| `@vue/compiler-sfc` | `compileStyle` | `vue3-sfc-style` | 同样存在 scoped style 输出空格差异 |
+上一版审计记录的 SFC option matrix 和 Vue 2.7 SFC 官方失败已经关闭。关闭方式包括 Rust style scanner 保留 selector 到 `{` 的原始空白、Vue 2.7 script setup test-build marker/empty-return parity、以及 generated alias API shape 修复。当前仍不能把这些结果扩展解释为“所有 Vue 3 编译器语义已纯 Rust 化”。
 
 当前 conformance 产物位于：
 
@@ -89,31 +84,23 @@ target/conformance/ee33465b421a58b83fac04aa850a6d250ee09ec169fa80ed8820794a0c9a2
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
 | `vue2-compiler` | 188 | 0 | 188 | 188/188 | 0/0 | Vue 2.6 模板编译器兼容度强 |
 | `vue27-compiler` | 190 | 0 | 190 | 190/190 | 0/0 | Vue 2.7 模板编译器兼容度强 |
-| `vue27-sfc` | 123 | 21 | 144 | 123/144 | 0/0 | 真实 Rust-backed SFC 缺口，不能发布为完整兼容 |
+| `vue27-sfc` | 144 | 0 | 144 | 134/134 | 10/10 | 官方 suite 关闭；`compileStyle.spec.ts` 因 PostCSS callback 边界为 mixed |
 | `vue3-core` | 652 | 0 | 652 | 199/199 | 453/453 | core 有 Rust-backed 子集，但大部分仍是 mixed |
-| `vue3-dom` | 133 | 0 | 133 | 0/0 | 133/133 | 不能作为纯 Rust DOM compiler parity 证明 |
+| `vue3-dom` | 133 | 0 | 133 | 34/34 | 99/99 | 不能作为纯 Rust DOM compiler parity 证明 |
 | `vue3-sfc` | 461 | 0 | 461 | 0/0 | 461/461 | 不能作为纯 Rust SFC parity 证明 |
 | `vue3-ssr` | 129 | 0 | 129 | 0/0 | 129/129 | 不能作为纯 Rust SSR compiler parity 证明 |
-
-`vue27-sfc` 的失败分布：
-
-| 官方 spec | 通过 | 失败 | 总计 |
-| --- | ---: | ---: | ---: |
-| `compileScript.spec.ts` | 66 | 11 | 77 |
-| `compileStyle.spec.ts` | 2 | 8 | 10 |
-| `compileTemplate.spec.ts` | 7 | 2 | 9 |
 
 ## 成熟度分级
 
 | 模块 | 当前成熟度 | 主要证据 | 产品化结论 |
 | --- | --- | --- | --- |
 | Vue 2 模板编译 | 高，接近可产品化 | Vue 2.6/2.7 rust-backed 官方测试全部通过；option/output/API 检查通过 | 仍需补完整发布包、性能、fuzz、诊断契约后才能产品化 |
-| Vue 2.7 SFC | 中低 | rust-backed 官方测试 123/144；option matrix 有 compileScript/compileStyle 差异 | 不能宣称完整 Vue 2.7 SFC 兼容 |
+| Vue 2.7 SFC | 中到高 | generated-alias 官方测试 144/144；coverage 为 rust-backed 134/134、mixed 10/10 | public conformance 已关闭；PostCSS callback 边界仍不是纯 Rust |
 | Vue 3 compiler-core | 中 | 199/199 rust-backed 通过，另有 453 mixed 通过；源码已有 AST/HIR/MIR lowering 入口 | core 子集进展明显，但完整 transform/codegen parity 仍需纯 Rust 覆盖 |
-| Vue 3 compiler-dom | 低到中 | 官方 suite 133/133 全为 mixed，rust-backed 0/0 | 不能宣称纯 Rust DOM compiler 成熟 |
+| Vue 3 compiler-dom | 低到中 | 官方 suite 133/133；coverage 为 rust-backed 34/34、mixed 99/99 | 不能宣称纯 Rust DOM compiler 成熟 |
 | Vue 3 compiler-ssr | 低到中 | 官方 suite 129/129 全为 mixed，rust-backed 0/0 | 不能宣称纯 Rust SSR compiler 成熟 |
-| Vue 3 compiler-sfc | 低 | 官方 suite 461/461 全为 mixed，rust-backed 0/0；style option 仍有差异 | 不能宣称纯 Rust SFC compiler 成熟 |
-| Style compiler | 中低 | scoped/css vars 有实现，但 option matrix 暴露输出差异；缺 PostCSS/preprocessor/plugin 级生态闭环 | 产品风险高 |
+| Vue 3 compiler-sfc | 低 | 官方 suite 461/461 全为 mixed，rust-backed 0/0 | 不能宣称纯 Rust SFC compiler 成熟 |
+| Style compiler | 中 | scoped/css vars/preprocessor 当前 option 与 Vue 2.7 SFC 官方 suite 通过；PostCSS callbacks 仍在 JS API adapter | 产品风险集中在 CSS 生态完整性和 mixed API 边界 |
 | Source/diagnostics/sourcemap | 基础可用 | 有 `vuec_source`、`vuec_diagnostics`、`SourceMapBuilder`，output contract 代表性通过 | 距离完整 source map 和诊断 parity 还有明显距离 |
 | Pass pipeline | 早期骨架 | `vuec_pass` 约 148 行，具备 scheduler/context 基础 | 还不是成熟 compiler pipeline |
 | Node bridge/API 包装 | 测试桥接可用 | `vuec_node_bridge` 是 JSON CLI bridge，alias runtime 通过 | 还不是最终 NAPI/WASM/CLI 产品边界 |
@@ -136,15 +123,16 @@ target/conformance/ee33465b421a58b83fac04aa850a6d250ee09ec169fa80ed8820794a0c9a2
 
 因此：
 
-1. Vue 3 DOM 133/133、SFC 461/461、SSR 129/129 的通过，不能计入纯 Rust 编译器完成度。
+1. Vue 3 DOM 133/133、SFC 461/461、SSR 129/129 的通过，不能整体计入纯 Rust 编译器完成度。
 2. Vue 3 core 的 652/652 总通过中，只有 199/199 是 rust-backed，453/453 是 mixed。
-3. 产品成熟的验收必须把 mixed 视为 harness 健康度，而不是编译器 parity。
+3. Vue 3 DOM 的 133/133 总通过中，只有 34/34 是 rust-backed，99/99 是 mixed。
+4. 产品成熟的验收必须把 mixed 视为 harness 健康度，而不是编译器 parity。
 
-### 2. Vue 2.7 SFC 仍有真实失败
+### 2. Vue 2.7 SFC public conformance 已关闭，但仍有 mixed API 边界
 
-`vue27-sfc` 是 rust-backed，并且 21 个官方失败是真实产品缺口。失败集中在 compileScript、compileStyle、compileTemplate。它们影响的不是内部实现细节，而是 public API 的可观察输出、返回字段、源码位置、AST shape、style 字符串和 template 编译结果。
+`vue27-sfc` 当前 generated-alias 官方 suite 为 144/144。覆盖分类为 `rust-backed 134/134`、`mixed 10/10`、`shim-backed 0/0`。mixed 部分集中在 `compileStyle.spec.ts`，原因是调用者提供的 PostCSS plugin callbacks/options 和 LazyResult/Promise 行为无法通过 JSON bridge 直接进入 Rust，需要由 generated JavaScript API adapter 执行。
 
-这部分没有修完之前，项目不能发布为 Vue 2.7 SFC 的兼容替代品。
+因此 Vue 2.7 SFC 的 public conformance 已经关闭，但不能把 PostCSS callback API 边界描述为纯 Rust style compiler 完成度。
 
 ### 3. SFC 能力还未产品化
 
@@ -156,13 +144,13 @@ SFC 产品级能力至少应覆盖：
 4. `compileStyle`、`compileStyleAsync`、scoped、CSS vars、modules、preprocessors、PostCSS plugin、source map、dependencies、errors。
 5. Vue 2.7 与 Vue 3 的行为差异隔离。
 
-当前 `vuec_sfc` 具备大量实现，但 7139 行集中在单文件，且 conformance 已显示仍有真实差异，因此还没有达到产品级。
+当前 `vuec_sfc` 具备大量实现，Vue 2.7 public conformance 已关闭；但文件职责仍高度集中，Vue 3 SFC conformance 仍为 mixed，产品级还需要把 SFC script/template/style 的核心路径继续迁移为 Rust-backed 覆盖并拆分模块边界。
 
 ### 4. Style compiler 生态不完整
 
 `vuec_style` 当前更接近 scanner/string rewrite 型实现。它可以支撑 scoped selector、CSS vars 等核心路径，但产品级 style compiler 需要处理真实 CSS parser、PostCSS AST、插件链、preprocessor 异步依赖、source map、warning/error 形态、CSS modules 和复杂 selector 语义。
 
-option matrix 中仅 selector 空格差异就已经导致失败，说明当前输出规范化仍未对齐官方。更复杂的 PostCSS/preprocessor 场景风险更高。
+上一轮 option matrix 暴露的 selector 空格差异已经通过保留原始 brace 前空白修复。剩余风险不在该 fixture，而在真实 CSS parser、PostCSS AST、插件链、异步依赖和复杂 source map 生态闭环。
 
 ### 5. 诊断和 source map 尚未达到稳定契约
 
@@ -416,7 +404,7 @@ Vue 2、Vue 2.7、Vue 3 DOM、Vue 3 SSR、Vue 3 SFC 之间有大量相似概念�
 
 ### `vuec_vue3_dom`
 
-1. facade crate 较薄，官方 DOM suite 当前 133/133 全是 mixed，rust-backed 0/0。
+1. facade crate 较薄，官方 DOM suite 当前 133/133，其中 rust-backed 34/34、mixed 99/99。
 2. 不能把当前 DOM official 通过视为纯 Rust DOM compiler 成熟。
 3. DOM transform、directive transform、runtime helper、patch flag、static stringify、asset URL、namespace 需要 Rust-backed suite。
 4. 需要确认 DOM codegen 不通过 compiler-core mixed adapter 获得隐性语义。
@@ -435,7 +423,7 @@ Vue 2、Vue 2.7、Vue 3 DOM、Vue 3 SSR、Vue 3 SFC 之间有大量相似概念�
 
 ### `vuec_style`
 
-1. 当前 style 实现可以覆盖部分 scoped/css vars，但 option matrix 已暴露官方输出差异。
+1. 当前 style 实现覆盖 scoped/css vars/preprocessor 的代表性 public contract，上一版 option matrix 暴露的 selector brace 空白差异已经关闭。
 2. 缺成熟 CSS parser/PostCSS AST/plugin/preprocessor 体系。
 3. 需要支持 async dependency、CSS modules、source map、errors/warnings、trim/format parity。
 4. 需要明确 Vue 2.7 和 Vue 3 style API 差异。
@@ -443,10 +431,10 @@ Vue 2、Vue 2.7、Vue 3 DOM、Vue 3 SSR、Vue 3 SFC 之间有大量相似概念�
 ### `vuec_sfc`
 
 1. 7139 行单文件职责过重，混合 parse、compileScript、compileTemplate、compileStyle、Vue 2.7 compatibility。
-2. `vue27-sfc` rust-backed 官方失败 21 个，说明 SFC 还不是兼容替代品。
-3. compileScript 的返回字段、loc、scriptAst、bindings、helper import、default export rewrite 仍有差异。
-4. compileStyle 与 scoped output 仍有差异。
-5. compileTemplate 与 descriptor、binding metadata、asset、SSR、source map 的组合需要纯 Rust conformance。
+2. `vue27-sfc` generated-alias 官方 conformance 已关闭为 144/144，但 `compileStyle.spec.ts` 仍按 mixed API 边界统计。
+3. Vue 3 SFC 官方 suite 461/461 仍全部是 mixed，不能作为纯 Rust SFC parity 证明。
+4. compileScript、compileTemplate、compileStyle 与 descriptor、binding metadata、asset、SSR、source map 的组合仍需要更多 Rust-backed conformance。
+5. PostCSS callback、async style dependency 与 complex source map 仍需要更清晰的产品 API 边界。
 6. 建议拆分为 `parse.rs`、`descriptor.rs`、`script/`、`template.rs`、`style.rs`、`css_vars.rs`、`rewrite_default.rs`、`errors.rs`。
 
 ### `vuec_node_bridge`
@@ -478,17 +466,17 @@ Vue 2、Vue 2.7、Vue 3 DOM、Vue 3 SSR、Vue 3 SFC 之间有大量相似概念�
 
 ## 优先级路线
 
-### P0：先修真实失败和口径问题
+### P0：已关闭的真实失败和口径问题
 
-1. 修复 `cargo xtask run-option-matrix --all` 的 3 条 SFC option row。
-2. 修复 `vue27-sfc` 的 21 个 rust-backed 官方失败。
-3. 在所有进度报告中继续区分 rust-backed、mixed、shim-backed。
-4. 将 `cargo xtask summarize-compat --locked` 恢复为通过。
+1. `cargo xtask run-option-matrix --all` 的 SFC option row 已恢复为 7/7 target 通过。
+2. `vue27-sfc` generated-alias 官方 suite 已恢复为 144/144。
+3. 所有 conformance 进度报告继续区分 rust-backed、mixed、shim-backed。
+4. `cargo xtask summarize-compat --locked` 已恢复为通过。
 
 完成标准：
 
 1. option matrix 7/7 target 通过。
-2. Vue 2.7 SFC rust-backed 官方测试 144/144 通过。
+2. Vue 2.7 SFC generated-alias 官方测试 144/144 通过，并明确记录 mixed PostCSS 边界。
 3. summarize compat 通过。
 
 ### P1：把 Vue 3 mixed 覆盖迁移为 Rust-backed 覆盖
@@ -595,9 +583,9 @@ Vue 2、Vue 2.7、Vue 3 DOM、Vue 3 SSR、Vue 3 SFC 之间有大量相似概念�
 ## 当前最关键的风险排序
 
 1. Vue 3 DOM/SFC/SSR 通过率主要是 mixed，容易被误读成 Rust compiler 已完成。
-2. Vue 2.7 SFC 有真实 rust-backed 官方失败，阻断完整兼容发布。
+2. Vue 2.7 SFC public conformance 已关闭，但 PostCSS callback 等 mixed API 边界不能算作纯 Rust style compiler 完成度。
 3. `vuec_vue3_core`、`vuec_sfc`、`xtask/compat.rs` 的单文件体量过大，阻碍阶段边界和长期维护。
-4. Style compiler 缺完整 PostCSS/preprocessor 生态，且已经有输出差异。
+4. Style compiler 缺完整 PostCSS/preprocessor 生态，当前通过仍依赖部分 JS API adapter 边界。
 5. AST/HIR/MIR 设计正确但尚未完全制度化为不可绕过的代码路径。
 6. 产品 binding/package/CI/release 缺失，当前更多是测试桥接和本地工具链。
 7. 诊断/source map/fuzz/performance 没有完整产品级证据。
@@ -610,4 +598,4 @@ Vue 2、Vue 2.7、Vue 3 DOM、Vue 3 SSR、Vue 3 SFC 之间有大量相似概念�
 
 当前项目有坚实基础，尤其是 Vue 2 模板编译器和兼容性工具链。但从专业编译器开发架构角度，成熟度判断必须以纯 Rust 编译路径、阶段边界、可观察行为 parity、产品发布能力和长期维护性为准。
 
-下一阶段不应继续用 mixed harness 的通过率包装完成度，而应优先修复 Vue 2.7 SFC 真实失败，随后把 Vue 3 DOM/SSR/SFC 的 mixed 覆盖逐步迁移成 Rust-backed 覆盖，并同步拆分巨型模块，让 AST/HIR/MIR 设计从文档约束变成代码结构约束。
+下一阶段不应继续用 mixed harness 的通过率包装完成度，而应把 Vue 3 DOM/SSR/SFC 的 mixed 覆盖逐步迁移成 Rust-backed 覆盖，并同步拆分巨型模块，让 AST/HIR/MIR 设计从文档约束变成代码结构约束。

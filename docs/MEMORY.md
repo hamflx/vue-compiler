@@ -1,5 +1,9 @@
 # Memory
 
+- Current round: aligned the development plan and compiler maturity audit with the current compatibility evidence.
+- `docs/2.DEVELOPMENT_PLAN.md` now marks current command-level evidence complete for official lock validation, API manifest export/diff, option matrix generation/audit/run, output contract, AST/HIR/MIR base contract tests, generated-alias official conformance, Vue 2.6/Vue 2.7 compiler/SFC gates, and `summarize-compat --locked`. It also records that Vue 3 core/dom/sfc/ssr official passes include mixed coverage and must not be described as pure Rust compiler completion.
+- `docs/COMPILER_MATURITY_AUDIT.md` was updated from the older failing state: SFC option matrix rows and Vue 2.7 SFC generated-alias conformance are now closed, while the remaining maturity risks are Vue 3 mixed coverage migration, PostCSS/style API boundaries, NAPI full official conformance, module splitting, and AST/HIR/MIR main-path hardening.
+
 - Current round: fixed generated alias API shape drift exposed by regenerating API manifests.
 - `xtask/src/compat.rs` now preserves the official `prototype` own-property shape for Vue 2.7 SFC `compileStyle` / `compileStyleAsync` generated alias functions when the official API manifest requires it, and registers Vue 3 DOM runtime helper exports (`V_MODEL_*`, `V_ON_WITH_*`, `V_SHOW`) as symbols in the generated alias runtime. This is package/API adapter work for the compatibility harness; it does not add compiler semantics to `xtask/src/compat.rs`.
 - Verification for this API adapter slice: `cargo fmt --all -- --check`, `cargo test -p xtask`, `cargo xtask export-api --all` (`14/14` manifest probes), and `cargo xtask diff-api --all` (`7/7`).

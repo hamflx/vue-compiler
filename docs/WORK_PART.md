@@ -43,6 +43,7 @@
 - [x] Vue 3 compiler-core Rust-backed `transformOn` projection bridge for `vOn.spec.ts`.
 - [x] Vue 3 compiler-core Rust-backed `cacheStatic` / `getConstantType` projection bridge for `cacheStatic.spec.ts`.
 - [x] Vue 3 compiler-core official conformance closure (`652/652`) with Rust-backed `isMemberExpression` utility projection.
+- [x] Compatibility evidence alignment slice: `docs/2.DEVELOPMENT_PLAN.md` and `docs/COMPILER_MATURITY_AUDIT.md` now reflect the current green generated-alias conformance/API/option/output gates while preserving the mixed coverage caveat for Vue 3 core/dom/sfc/ssr and Vue 2.7 SFC PostCSS callbacks.
 - [x] Generated alias API shape drift closure: `xtask/src/compat.rs` now keeps Vue 2.7 SFC `compileStyle` / `compileStyleAsync` prototype shape and Vue 3 DOM helper exports as symbols in the generated package alias; this is API/package adapter work only, and `cargo xtask export-api --all` plus `cargo xtask diff-api --all` are green again.
 - [x] SFC scoped style selector-brace spacing regression closure: Rust `vuec_style` preserves original selector-to-`{` whitespace for both compact `.a{...}` option fixtures and spaced `.a {...}` official scoped-style snapshots; Vue 2.7 SFC and Vue 3 SFC `compileStyle` option rows are back to `4/4`, full option matrix is `7/7`, and Vue 2.7 SFC official conformance remains `144/144`.
 - [x] Vue 3 compiler-dom official conformance execution wiring (real Vitest run; currently `45/133`, `mixed` coverage).
