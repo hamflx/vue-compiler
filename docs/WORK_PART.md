@@ -230,10 +230,11 @@
 
 - Vue 2.7 SFC style compilation now has a Rust style compiler/SFC wrapper path for preprocessing, scoped/CSS-var transforms, maps, and diagnostics, plus a narrow generated JavaScript API adapter for PostCSS plugin callbacks/options. The adapter strips non-serializable PostCSS callback fields from the bridge payload, runs them with the local PostCSS runtime after Rust returns CSS, preserves `rawResult.opts`, records sync-mode async plugin errors, and makes `compileStyleAsync` return a real `Promise`.
 - This PostCSS callback execution is API-boundary support, not Rust compiler semantics. Coverage reports classify `compileStyle.spec.ts` as `mixed`; the full `vue27-sfc` suite is therefore top-level `mixed` even though the non-PostCSS SFC files remain `rust-backed`.
-- Focused official result: `packages/compiler-sfc/test/compileStyle.spec.ts` passes `10/10`.
-- Full official result: `cargo xtask run-conformance --suite vue27-sfc` passes `144/144`, with coverage `rust-backed: 134/134`, `mixed: 10/10`, `shim-backed: 0/0`.
-- Verification this round: `cargo fmt --all --check`, `git diff --check`, `cargo check -p xtask -p vuec_node_bridge -p vuec_style -p vuec_sfc`, `cargo test -p xtask`, `cargo test -p vuec_style --lib`, `cargo test -p vuec_sfc --lib`, `cargo test -p vuec_node_bridge`, `cargo build -p vuec_node_bridge`, focused official `compileStyle.spec.ts` (`10/10`), `cargo xtask verify-npm-alias --version-line vue2_7 --package vue/compiler-sfc`, `cargo xtask diff-api --version-line vue2_7 --package vue/compiler-sfc`, `cargo xtask run-output-contract --version-line vue2_7 --package vue/compiler-sfc`, and full `vue27-sfc` conformance (`144/144`).
-- Remaining Vue 2.7 SFC work is broader product hardening outside the current official SFC conformance failures. Progress reports must keep the PostCSS callback path marked `mixed`.
+- The current scoped/style formatting pass preserves official spaces before rule braces for plain scoped rules, deep selectors, pseudo elements, and nested `@media` / `@supports` blocks.
+- Focused official result: `packages/compiler-sfc/test/compileStyle.spec.ts` passes `10/10`; `packages/compiler-sfc/test/stylePluginScoped.spec.ts` passes `5/5`.
+- Full official result: `cargo xtask run-conformance --suite vue27-sfc` currently fails honestly at `82/144`, with coverage `mixed: 10/10`, `rust-backed: 72 pass / 62 fail / 134 total`, `shim-backed: 0/0`. Remaining failures are `compileScript.spec.ts` (`57`) and script-setup `cssVars.spec.ts` (`5`).
+- Verification this round: `cargo test -p vuec_style --lib`, focused `cargo test -p vuec_sfc vue27_compile_style --lib` (0 matching tests), `cargo xtask run-conformance --suite vue27-sfc` as expected fail (`82/144`), and `git diff --check`.
+- Remaining Vue 2.7 SFC work is compileScript/script-setup CSS var parity. Progress reports must keep the PostCSS callback path marked `mixed`.
 
 ## Current WASM Slice
 

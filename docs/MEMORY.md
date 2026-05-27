@@ -1,5 +1,10 @@
 # Memory
 
+- Current round: completed the Vue 2.7 SFC style/scoped CSS brace-spacing regression slice.
+- `vuec_style` now preserves the official space before rule braces after scoped selector and CSS variable rewrites instead of normalizing ` {` to `{`. This fixes scoped selector output for plain rules, deep selectors, pseudo elements, `@media`, and `@supports` while keeping compiler semantics in Rust. No `xtask/src/compat.rs` changes were made.
+- Current Vue 2.7 SFC conformance movement: `compileStyle.spec.ts` now passes `10/10`, `stylePluginScoped.spec.ts` passes `5/5`, and full `cargo xtask run-conformance --suite vue27-sfc` improves from `73/144` to `82/144`. The suite remains expected-failing with `62` failures: `compileScript.spec.ts` `57` failures and `cssVars.spec.ts` `5` failures. Coverage reports `mixed: 10 pass / 10 total`, `rust-backed: 72 pass / 62 fail / 134 total`, `shim-backed: 0`.
+- Verification for this style formatting slice: `cargo test -p vuec_style --lib`, focused `cargo test -p vuec_sfc vue27_compile_style --lib` (0 matching tests), and `cargo xtask run-conformance --suite vue27-sfc` as expected fail (`82/144`).
+
 - Current round: closed the remaining local M20 release verification items by recording external release blockers.
 - Reran `cargo xtask verify-release-dry-run`; it executes real npm pack dry-runs and Cargo package/publish dry-run checks, currently reporting `25` total, `5` pass, `20` pending, `0` fail. Passing rows cover `@vuec-rs/native`, `@vuec-rs/wasm`, `@vuec-rs/native-win32-x64`, `vuec_source`, and `vuec_html`; pending rows require non-current platform `vuec_napi.node` artifacts or first-time crates.io dependency publication order.
 - Reran `cargo xtask verify-release-install-smoke`; it packs and installs release-built artifacts into clean projects, currently reporting `9` total, `2` pass, `7` pending, `0` fail. Passing rows cover `@vuec-rs/native` through the current `win32-x64` optional platform package and `@vuec-rs/wasm`; pending rows require non-current platform artifacts and matching host/CI smoke runs.

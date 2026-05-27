@@ -99,7 +99,6 @@ pub fn compile_style(source: &str, options: StyleCompileOptions) -> StyleCompile
 
 fn normalize_style_output(source: &str) -> String {
     source
-        .replace(" {", "{")
         .replace("; }", ";\n}")
         .lines()
         .map(|line| if line.trim() == "}" { "}" } else { line })
@@ -1603,7 +1602,7 @@ mod tests {
         );
         assert_eq!(
             result.code,
-            ".a[data-v-contract]{ color: var(--contract-color);\n}"
+            ".a[data-v-contract] { color: var(--contract-color);\n}"
         );
     }
 
