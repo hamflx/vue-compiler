@@ -12,7 +12,9 @@ serde_json.workspace = true
 sha2.workspace = true
 sysinfo.workspace = true
 toml.workspace = true
+vuec_ast = { path = "../crates/vuec_ast" }
 vuec_sfc = { path = "../crates/vuec_sfc" }
 vuec_source = { path = "../crates/vuec_source" }
+vuec_vue2 = { path = "../crates/vuec_vue2" }
 vuec_vue3_core = { path = "../crates/vuec_vue3_core" }
 vuec_vue3_dom = { path = "../crates/vuec_vue3_dom" }

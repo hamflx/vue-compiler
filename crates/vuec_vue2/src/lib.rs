@@ -2666,9 +2666,10 @@ fn valid_division_before(exp: &str, slash_index: usize) -> bool {
 }
 
 fn project_public_ast(template: &str, element_ast: Option<&Vue2Element>) -> Vue2Ast {
-    let mut ast = Vue2Ast::new(
+    let mut ast = Vue2Ast::with_capacity(
         Vue2NodeKind::root(),
         Some(Span::new(FileId(0), 0, template.len())),
+        vuec_ast::template_node_capacity_hint(template),
     );
     let root = ast.root;
     if let Some(element) = element_ast {

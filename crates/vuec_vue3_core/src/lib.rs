@@ -180,13 +180,23 @@ pub struct Vue3Dialect;
 
 impl Vue3Dialect {
     pub fn base_parse(source: TemplateSource, options: &Vue3CompilerOptions) -> Vue3Ast {
-        let mut ast = Vue3Ast::new(
+        let interpolation_open = options
+            .delimiters
+            .as_ref()
+            .map(|[open, _]| open.as_str())
+            .unwrap_or("{{");
+        let node_capacity = vuec_ast::template_node_capacity_hint_with_interpolation(
+            &source.source,
+            interpolation_open,
+        );
+        let mut ast = Vue3Ast::with_capacity(
             Vue3NodeKind::root(),
             Some(Span::new(
                 source.file_id,
                 source.base_offset,
                 source.base_offset + source.source.len(),
             )),
+            node_capacity,
         );
         let root = ast.root;
         let mut stack = vec![root];

@@ -1828,8 +1828,10 @@ dependencies = [
  "sha2",
  "sysinfo",
  "toml",
+ "vuec_ast",
  "vuec_sfc",
  "vuec_source",
+ "vuec_vue2",
  "vuec_vue3_core",
  "vuec_vue3_dom",
 ]

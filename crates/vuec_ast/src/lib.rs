@@ -23,14 +23,83 @@ pub struct AstDocument<K> {
     pub nodes: Vec<Node<K>>,
 }
 
+pub fn template_node_capacity_hint(source: &str) -> usize {
+    template_node_capacity_hint_with_interpolation(source, "{{")
+}
+
+pub fn template_node_capacity_hint_with_interpolation(
+    source: &str,
+    interpolation_open: &str,
+) -> usize {
+    let bytes = source.as_bytes();
+    let open = interpolation_open.as_bytes();
+    let mut nodes = 1usize;
+    let mut index = 0usize;
+    let mut in_tag = false;
+    let mut text_has_content = false;
+
+    while index < bytes.len() {
+        if !in_tag && !open.is_empty() && bytes[index..].starts_with(open) {
+            if text_has_content {
+                nodes += 1;
+                text_has_content = false;
+            }
+            nodes += 1;
+            index += open.len();
+            continue;
+        }
+
+        match bytes[index] {
+            b'<' if !in_tag => {
+                if text_has_content {
+                    nodes += 1;
+                    text_has_content = false;
+                }
+                if template_open_bracket_starts_node(bytes, index) {
+                    nodes += 1;
+                }
+                in_tag = true;
+            }
+            b'>' if in_tag => {
+                in_tag = false;
+            }
+            byte if !in_tag && !byte.is_ascii_whitespace() => {
+                text_has_content = true;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+
+    if text_has_content {
+        nodes += 1;
+    }
+
+    nodes + nodes / 4 + 4
+}
+
+fn template_open_bracket_starts_node(bytes: &[u8], index: usize) -> bool {
+    match bytes.get(index + 1).copied() {
+        Some(b'/') | None => false,
+        Some(byte) => byte.is_ascii_alphabetic() || matches!(byte, b'!' | b'?'),
+    }
+}
+
 impl<K> AstDocument<K> {
     pub fn new<S>(root_kind: K, span: S) -> Self
     where
         S: Into<NodeSpan>,
     {
+        Self::with_capacity(root_kind, span, 1)
+    }
+
+    pub fn with_capacity<S>(root_kind: K, span: S, node_capacity: usize) -> Self
+    where
+        S: Into<NodeSpan>,
+    {
         let mut document = Self {
             root: NodeId(0),
-            nodes: Vec::new(),
+            nodes: Vec::with_capacity(node_capacity.max(1)),
         };
         let root = document.push(root_kind, span);
         document.root = root;
@@ -137,6 +206,14 @@ impl<K> AstDocument<K> {
 
     pub fn len(&self) -> usize {
         self.nodes.len()
+    }
+
+    pub fn node_capacity(&self) -> usize {
+        self.nodes.capacity()
+    }
+
+    pub fn reserve_nodes(&mut self, additional: usize) {
+        self.nodes.reserve(additional);
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1656,6 +1733,20 @@ mod tests {
         let decoded: Vue2Ast = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.root, root);
         assert_eq!(decoded.len(), 1);
+    }
+
+    #[test]
+    fn document_capacity_can_be_reserved_without_changing_tree_shape() {
+        let mut doc = Vue3Ast::with_capacity(Vue3NodeKind::root(), None, 16);
+        assert_eq!(doc.root, NodeId(0));
+        assert_eq!(doc.len(), 1);
+        assert!(doc.node_capacity() >= 16);
+        doc.reserve_nodes(32);
+        assert!(doc.node_capacity() >= 33);
+
+        let child = doc.push_child(doc.root, Vue3NodeKind::text("hello"), None);
+        assert_eq!(child, NodeId(1));
+        assert_eq!(doc.validate_tree(), Ok(()));
     }
 
     #[test]

@@ -107,6 +107,7 @@ enum Command {
     VerifyIncremental,
     VerifyParallel,
     VerifyAstCache,
+    VerifyArena,
     Bench {
         #[arg(long, default_value_t = 10)]
         iterations: usize,
@@ -169,6 +170,7 @@ fn main() -> Result<()> {
         Command::VerifyIncremental => verify_incremental()?,
         Command::VerifyParallel => verify_parallel()?,
         Command::VerifyAstCache => verify_ast_cache()?,
+        Command::VerifyArena => verify_arena()?,
         Command::Bench {
             iterations,
             out_dir,
@@ -911,6 +913,40 @@ fn verify_ast_cache() -> Result<compat::JsonReport> {
             .with_items(items)
             .with_violations(violations)
             .with_note("verifies the Vue3 DOM compiler AST cache reuses parse/DOM-normalize results for unchanged inputs, invalidates changed same-file inputs, and keeps compile output stable"),
+    )
+}
+
+fn verify_arena() -> Result<compat::JsonReport> {
+    let mut violations = Vec::new();
+    let mut items = Vec::new();
+
+    let status = match run_arena_smoke_suite() {
+        Ok(output) => {
+            items.push(compat::ReportItem::new(
+                "ast-document-arena-preallocation",
+                compat::ReportStatus::Pass,
+                output,
+                Some(PathBuf::from("crates/vuec_ast")),
+            ));
+            compat::ReportStatus::Pass
+        }
+        Err(err) => {
+            violations.push(format!("arena allocation smoke failed: {err:#}"));
+            items.push(compat::ReportItem::new(
+                "ast-document-arena-preallocation",
+                compat::ReportStatus::Fail,
+                format!("{err:#}"),
+                Some(PathBuf::from("crates/vuec_ast")),
+            ));
+            compat::ReportStatus::Fail
+        }
+    };
+
+    Ok(
+        compat::JsonReport::new("verify_arena", status)
+            .with_items(items)
+            .with_violations(violations)
+            .with_note("verifies AstDocument node preallocation APIs plus Vue 2 and Vue 3 parser entrypoints use arena capacity hints without changing tree invariants"),
     )
 }
 
@@ -1972,6 +2008,106 @@ fn dom_cache_template_source(filename: &str, source: &str) -> vuec_vue3_core::Te
         file_id: vuec_source::FileId(0),
         base_offset: 0,
     }
+}
+
+fn run_arena_smoke_suite() -> Result<String> {
+    let manual_hint = 64usize;
+    let mut manual = vuec_ast::Vue3Ast::with_capacity(
+        vuec_ast::Vue3NodeKind::root(),
+        vuec_ast::NodeSpan::missing(vuec_ast::MissingSpanReason::Synthetic),
+        manual_hint,
+    );
+    let child = manual.push_child(manual.root, vuec_ast::Vue3NodeKind::text("arena"), None);
+    manual.validate_tree().map_err(|err| {
+        anyhow::anyhow!(
+            "AstDocument::with_capacity produced invalid root/child metadata after push_child: {err:?}"
+        )
+    })?;
+    if manual.root != vuec_ast::NodeId(0) || child != vuec_ast::NodeId(1) {
+        anyhow::bail!(
+            "AstDocument::with_capacity changed deterministic NodeId allocation: root={:?}, child={:?}",
+            manual.root,
+            child
+        );
+    }
+    if manual.node_capacity() < manual_hint {
+        anyhow::bail!(
+            "AstDocument::with_capacity did not reserve requested node capacity: capacity={}, requested={manual_hint}",
+            manual.node_capacity()
+        );
+    }
+
+    let vue3_source = repeated_arena_template("section", "item", 80);
+    let vue3_hint = vuec_ast::template_node_capacity_hint(&vue3_source);
+    let vue3_ast = vuec_vue3_core::Vue3Dialect::base_parse(
+        vuec_vue3_core::TemplateSource {
+            filename: "Arena.vue".into(),
+            source: vue3_source.clone(),
+            file_id: vuec_source::FileId(0),
+            base_offset: 0,
+        },
+        &vuec_vue3_core::Vue3CompilerOptions::default(),
+    );
+    vue3_ast.validate_tree().map_err(|err| {
+        anyhow::anyhow!("Vue3 base_parse returned an invalid arena tree: {err:?}")
+    })?;
+    if vue3_ast.node_capacity() < vue3_hint {
+        anyhow::bail!(
+            "Vue3 base_parse did not apply template node capacity hint: capacity={}, hint={vue3_hint}, len={}",
+            vue3_ast.node_capacity(),
+            vue3_ast.len()
+        );
+    }
+
+    let vue2_source = repeated_arena_template("p", "entry", 80);
+    let vue2_hint = vuec_ast::template_node_capacity_hint(&vue2_source);
+    let vue2 = vuec_vue2::compile(&vue2_source, vuec_vue2::Vue2CompileOptions::default());
+    vue2.ast.validate_tree().map_err(|err| {
+        anyhow::anyhow!("Vue2 public AST projection returned an invalid arena tree: {err:?}")
+    })?;
+    if vue2.ast.node_capacity() < vue2_hint {
+        anyhow::bail!(
+            "Vue2 public AST projection did not apply template node capacity hint: capacity={}, hint={vue2_hint}, len={}",
+            vue2.ast.node_capacity(),
+            vue2.ast.len()
+        );
+    }
+
+    Ok(json!({
+        "status": "pass",
+        "checks": [
+            "ast-document-with-capacity-preserves-node-ids",
+            "vue3-base-parse-preallocates-arena",
+            "vue2-public-projection-preallocates-arena"
+        ],
+        "manual": {
+            "requestedCapacity": manual_hint,
+            "capacity": manual.node_capacity(),
+            "nodes": manual.len()
+        },
+        "vue3": {
+            "hint": vue3_hint,
+            "capacity": vue3_ast.node_capacity(),
+            "nodes": vue3_ast.len()
+        },
+        "vue2": {
+            "hint": vue2_hint,
+            "capacity": vue2.ast.node_capacity(),
+            "nodes": vue2.ast.len()
+        }
+    })
+    .to_string())
+}
+
+fn repeated_arena_template(tag: &str, prefix: &str, count: usize) -> String {
+    let mut source = String::from("<div>");
+    for index in 0..count {
+        source.push_str(&format!(
+            "<{tag} data-index=\"{index}\">{{{{ {prefix}{index} }}}}</{tag}>text{index}"
+        ));
+    }
+    source.push_str("</div>");
+    source
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
