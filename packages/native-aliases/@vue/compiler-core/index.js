@@ -233,6 +233,15 @@ function callVue3CoreProjection(command, payload) {
   return native.callVue3CoreProjection(command, payload || {});
 }
 
+function helperSymbolFromProjection(name) {
+  if (!name) return undefined;
+  if (helperSymbols[name]) return helperSymbols[name];
+  for (const symbol of Object.values(helperSymbols)) {
+    if (helperNameMap[symbol] === name) return symbol;
+  }
+  return undefined;
+}
+
 function validateBaseCompileOptions(options) {
   const isModuleMode = options.mode === 'module';
   const prefixIdentifiers = options.prefixIdentifiers === true || isModuleMode;
@@ -394,11 +403,24 @@ function createBlockStatement(body) {
 }
 
 function createCacheExpression(index, value) {
-  return { type: 20, loc: locStub, index, value, isVNode: false };
+  return {
+    type: 20,
+    loc: locStub,
+    index,
+    value,
+    needPauseTracking: !!(arguments.length > 2 && arguments[2]),
+    inVOnce: !!(arguments.length > 3 && arguments[3]),
+    needArraySpread: false,
+  };
 }
 
 function createCallExpression(callee) {
-  return { type: 14, loc: locStub, callee, arguments: Array.prototype.slice.call(arguments, 1).flat() };
+  let args = Array.prototype.slice.call(arguments, 1);
+  let loc = locStub;
+  if (args.length > 1 && args[args.length - 1] && args[args.length - 1].start && args[args.length - 1].end) {
+    loc = args.pop();
+  }
+  return { type: 14, loc, callee, arguments: args.flat() };
 }
 
 function createCompilerError(code, loc, messages, additionalMessage) {
@@ -425,7 +447,15 @@ function createForLoopParams(value) {
 }
 
 function createFunctionExpression(params) {
-  return { type: 18, loc: locStub, params: params || [], returns: undefined, body: undefined, newline: false, isSlot: false };
+  return {
+    type: 18,
+    loc: arguments[4] || locStub,
+    params: params || [],
+    returns: arguments.length > 1 ? arguments[1] : undefined,
+    body: undefined,
+    newline: !!(arguments.length > 2 && arguments[2]),
+    isSlot: !!(arguments.length > 3 && arguments[3]),
+  };
 }
 
 function createIfStatement(test, consequent, alternate) {
@@ -489,8 +519,11 @@ function createStructuralDirectiveTransform(name, fn) {
   return (node, context) => {
     const props = node && Array.isArray(node.props) ? node.props : [];
     const exits = [];
-    for (const prop of props) {
+    for (let index = 0; index < props.length; index++) {
+      const prop = props[index];
       if (prop && prop.type === NodeTypes.DIRECTIVE && matches(prop)) {
+        props.splice(index, 1);
+        index--;
         const onExit = fn(node, prop, context);
         if (onExit) exits.push(onExit);
       }
@@ -513,9 +546,21 @@ function createTransformContext(root, options) {
     hoists: [],
     imports: [],
     temps: 0,
-    cached: 0,
+    cached: [],
+    constantCache: new WeakMap(),
     identifiers: Object.create(null),
     scopes: { vFor: 0, vSlot: 0, vPre: 0, vOnce: 0 },
+    parent: null,
+    grandParent: null,
+    currentNode: root,
+    childIndex: 0,
+    inSSR: !!((options || {}).inSSR || (options || {}).ssr),
+    ssr: !!((options || {}).ssr),
+    prefixIdentifiers: !!((options || {}).prefixIdentifiers),
+    bindingMetadata: (options || {}).bindingMetadata || {},
+    inline: !!((options || {}).inline),
+    isTS: !!((options || {}).isTS),
+    inVOnce: false,
     helper(name) {
       this.helpers.set(name, (this.helpers.get(name) || 0) + 1);
       return name;
@@ -529,10 +574,36 @@ function createTransformContext(root, options) {
       return `_${helperNameMap[name] || String(name).replace(/^Symbol\((.*)\)$/, '$1')}`;
     },
     replaceNode(node) {
-      this.currentNode = node;
+      if (!this.parent) {
+        this.currentNode = node;
+      } else {
+        this.parent.children[this.childIndex] = this.currentNode = node;
+      }
     },
-    removeNode() {
-      this.currentNode = null;
+    removeNode(node) {
+      if (!this.parent) {
+        this.currentNode = null;
+        return;
+      }
+      const list = this.parent.children || [];
+      const removalIndex = node ? list.indexOf(node) : this.currentNode ? this.childIndex : -1;
+      if (removalIndex < 0) return;
+      if (!node || node === this.currentNode) {
+        this.currentNode = null;
+        this.onNodeRemoved();
+      } else if (this.childIndex > removalIndex) {
+        this.childIndex--;
+        this.onNodeRemoved();
+      }
+      list.splice(removalIndex, 1);
+    },
+    onNodeRemoved() {},
+    addIdentifiers() {},
+    removeIdentifiers() {},
+    cache(exp, isVNode, inVOnce) {
+      const cached = createCacheExpression(this.cached.length, exp, !!isVNode, !!inVOnce);
+      this.cached.push(cached);
+      return cached;
     },
     onError(error) {
       if (options && typeof options.onError === 'function') options.onError(error);
@@ -546,7 +617,15 @@ function createTransformContext(root, options) {
 
 function createVNodeCall(context, tag, props, children, patchFlag, dynamicProps, directives) {
   if (context && typeof context.helper === 'function') {
-    context.helper(arguments.length > 7 && arguments[7] ? CREATE_BLOCK : CREATE_VNODE);
+    const isBlock = !!(arguments.length > 7 && arguments[7]);
+    const isComponent = !!(arguments.length > 9 && arguments[9]);
+    if (isBlock) {
+      context.helper(OPEN_BLOCK);
+      context.helper(getVNodeBlockHelper(context.inSSR, isComponent));
+    } else {
+      context.helper(getVNodeHelper(context.inSSR, isComponent));
+    }
+    if (directives) context.helper(WITH_DIRECTIVES);
   }
   return {
     type: 13,
@@ -589,8 +668,188 @@ function findProp(node, name) {
   return undefined;
 }
 
+function vue3TransformContextPayload(context) {
+  context = context || {};
+  return {
+    prefixIdentifiers: !!context.prefixIdentifiers,
+    inline: !!context.inline,
+    isTS: !!context.isTS,
+    identifiers: context.identifiers || {},
+    bindingMetadata: context.bindingMetadata || {},
+  };
+}
+
+function vue3TransformOnceContextPayload(context) {
+  context = context || {};
+  return {
+    inVOnce: !!context.inVOnce,
+    inSSR: !!context.inSSR,
+  };
+}
+
+function vue3IfSiblingPayload(siblings) {
+  return (siblings || []).map(sibling => ({
+    type: sibling && sibling.type,
+    content: sibling && sibling.content,
+    locSource: sibling && sibling.loc && sibling.loc.source,
+    tagType: sibling && sibling.tagType,
+    branches: sibling && sibling.branches ? sibling.branches.map(branch => ({
+      hasCondition: !!branch.condition,
+      userKey: branch.userKey || null,
+    })) : undefined,
+  }));
+}
+
+function materializeVue3IfProjection(projection, node, dir) {
+  if (!projection || projection.kind === 'undefined') return undefined;
+  if (projection.kind === 'simple') {
+    return createSimpleExpression(
+      projection.content || '',
+      !!projection.isStatic,
+      projection.loc || (dir && dir.exp && dir.exp.loc) || (node && node.loc) || locStub,
+    );
+  }
+  throw new Error(`Unsupported Rust v-if projection: ${projection.kind}`);
+}
+
+function vue3IfBranchCodegenPayload(branch) {
+  return {
+    isTemplateIf: !!(branch && branch.isTemplateIf),
+    children: (branch && branch.children || []).map(child => ({
+      type: child && child.type,
+      memoedCodegenType: getMemoedVNodeCall(child && child.codegenNode) && getMemoedVNodeCall(child && child.codegenNode).type,
+    })),
+  };
+}
+
+function getParentCondition(node) {
+  while (node) {
+    if (node.type === NodeTypes.JS_CONDITIONAL_EXPRESSION) {
+      if (node.alternate && node.alternate.type === NodeTypes.JS_CONDITIONAL_EXPRESSION) {
+        node = node.alternate;
+      } else {
+        return node;
+      }
+    } else if (node.type === NodeTypes.JS_CACHE_EXPRESSION) {
+      node = node.value;
+    } else {
+      return node;
+    }
+  }
+  return node;
+}
+
+function createIfCodegenNodeForBranch(branch, keyIndex, context) {
+  const childCodegen = createIfBranchCodegen(branch, keyIndex, context);
+  if (branch.condition) {
+    return createConditionalExpression(
+      branch.condition,
+      childCodegen,
+      createCallExpression(context.helper(CREATE_COMMENT), ['"v-if"', 'true']),
+    );
+  }
+  return childCodegen;
+}
+
+function createIfBranchCodegen(branch, keyIndex, context) {
+  const keyProperty = createObjectProperty('key', createSimpleExpression(String(keyIndex), false, locStub));
+  const children = branch.children || [];
+  const firstChild = children[0];
+  const projection = callVue3CoreProjection('vue3.core.transformIf', {
+    phase: 'branchCodegen',
+    branch: vue3IfBranchCodegenPayload(branch),
+    keyIndex,
+  });
+  if (projection.kind === 'for') {
+    const vnodeCall = firstChild && firstChild.codegenNode;
+    injectProp(vnodeCall, keyProperty, context);
+    return vnodeCall;
+  }
+  if (projection.kind === 'fragment') {
+    return createVNodeCall(context, context.helper(FRAGMENT), createObjectExpression([keyProperty]), children, projection.patchFlag, undefined, undefined, true, false, false, branch.loc);
+  }
+  const ret = firstChild && firstChild.codegenNode;
+  const vnodeCall = getMemoedVNodeCall(ret);
+  if (vnodeCall) {
+    if (vnodeCall.type === NodeTypes.VNODE_CALL) {
+      convertToBlock(vnodeCall, context);
+    }
+    injectProp(vnodeCall, keyProperty, context);
+  }
+  return ret;
+}
+
+function materializeVue3ForParseResult(parseResult, dir) {
+  return {
+    source: materializeVue3ForProjectionNode(parseResult && parseResult.source, dir),
+    value: materializeVue3ForProjectionNode(parseResult && parseResult.value, dir),
+    key: materializeVue3ForProjectionNode(parseResult && parseResult.key, dir),
+    index: materializeVue3ForProjectionNode(parseResult && parseResult.index, dir),
+    finalized: parseResult && parseResult.finalized !== undefined ? !!parseResult.finalized : true,
+  };
+}
+
+function materializeVue3ForProjectionNode(projection, dir) {
+  if (!projection || projection.kind === 'undefined') return undefined;
+  if (projection.type) return projection;
+  if (projection.kind === 'simple') {
+    return createSimpleExpression(
+      projection.content || '',
+      !!projection.isStatic,
+      projection.loc || (dir && dir.exp && dir.exp.loc) || (dir && dir.loc) || locStub,
+    );
+  }
+  return undefined;
+}
+
+function vue3ForNodePayload(forNode) {
+  return {
+    source: forNode && forNode.source,
+    children: (forNode && forNode.children || []).map(child => ({
+      type: child && child.type,
+      tagType: child && child.tagType,
+      codegenNode: child && child.codegenNode ? {
+        type: child.codegenNode.type,
+        isBlock: !!child.codegenNode.isBlock,
+        isComponent: !!child.codegenNode.isComponent,
+      } : null,
+    })),
+  };
+}
+
+function createForLoopParams(parseResult) {
+  const args = [parseResult && parseResult.value, parseResult && parseResult.key, parseResult && parseResult.index];
+  let end = args.length;
+  while (end > 0 && !args[end - 1]) end--;
+  return args.slice(0, end).map((arg, index) => arg || createSimpleExpression('_'.repeat(index + 1), false));
+}
+
+function finalizeForCodegen(forNode, renderExp, context) {
+  if (!renderExp || renderExp.arguments.length > 1) return;
+  const children = forNode.children || [];
+  let childBlock;
+  if (children.length === 1 && children[0].type === NodeTypes.ELEMENT) {
+    childBlock = children[0].codegenNode;
+    if (childBlock && childBlock.type === NodeTypes.VNODE_CALL && !childBlock.isBlock) {
+      context.removeHelper(getVNodeHelper(context.inSSR, childBlock.isComponent));
+      childBlock.isBlock = true;
+      context.helper(OPEN_BLOCK);
+      context.helper(getVNodeBlockHelper(context.inSSR, childBlock.isComponent));
+    }
+  } else {
+    childBlock = createVNodeCall(context, context.helper(FRAGMENT), undefined, children, 64, undefined, undefined, true, false, false, forNode.loc);
+  }
+  renderExp.arguments.push(createFunctionExpression(createForLoopParams(forNode.parseResult), childBlock, true));
+}
+
 function getBaseTransformPreset(prefixIdentifiers) {
-  return [[], {}];
+  return [[
+    transformOnce,
+    transformIf,
+    transformFor,
+    transformSlotOutlet,
+    transformElement,
+  ], { on: transformOn, bind: transformBind, model: transformModel }];
 }
 
 function getConstantType(node, context) {
@@ -614,6 +873,38 @@ function getVNodeBlockHelper(ssr, isComponent) {
 
 function getVNodeHelper(ssr, isComponent) {
   return isComponent ? CREATE_VNODE : CREATE_ELEMENT_VNODE;
+}
+
+function createRootCodegen(root, context) {
+  const projection = callVue3CoreProjection('vue3.core.rootCodegen', { root });
+  if (!projection || projection.kind === 'none') return;
+  if (projection.kind === 'child') {
+    root.codegenNode = (root.children || [])[projection.index || 0];
+    return;
+  }
+  if (projection.kind === 'childCodegen') {
+    const child = (root.children || [])[projection.index || 0];
+    const codegenNode = child && child.codegenNode;
+    if (codegenNode && projection.asBlock) {
+      convertToBlock(codegenNode, context);
+    }
+    root.codegenNode = codegenNode;
+    return;
+  }
+  if (projection.kind === 'fragment') {
+    root.codegenNode = createVNodeCall(
+      context,
+      context.helper(FRAGMENT),
+      undefined,
+      root.children || [],
+      projection.patchFlag,
+      undefined,
+      undefined,
+      true,
+      false,
+      false,
+    );
+  }
 }
 
 function hasDynamicKeyVBind(node) {
@@ -768,17 +1059,117 @@ function processExpression(node, context) {
 }
 
 function processFor(node, dir, context, processCodegen) {
-  if (typeof processCodegen === 'function') return processCodegen(node);
-  return undefined;
+  const projection = callVue3CoreProjection('vue3.core.transformFor', {
+    node,
+    dir,
+    context: vue3TransformContextPayload(context),
+  });
+  if (!projection || !projection.parseResult) return undefined;
+  const parsed = materializeVue3ForParseResult(projection.parseResult, dir, context);
+  const children = node.tagType === ElementTypes.TEMPLATE ? node.children || [] : [node];
+  const forNode = {
+    type: NodeTypes.FOR,
+    loc: dir.loc,
+    source: parsed.source,
+    valueAlias: parsed.value,
+    keyAlias: parsed.key,
+    objectIndexAlias: parsed.index,
+    parseResult: parsed,
+    children,
+    codegenNode: undefined,
+    __vuecProjection: projection,
+  };
+  context.replaceNode(forNode);
+  context.scopes.vFor++;
+  const onExit = typeof processCodegen === 'function' ? processCodegen(forNode) : undefined;
+  return () => {
+    context.scopes.vFor--;
+    if (onExit) {
+      onExit();
+      return;
+    }
+    const renderExp = createCallExpression(context.helper(RENDER_LIST), [forNode.source]);
+    forNode.codegenNode = createVNodeCall(context, context.helper(FRAGMENT), undefined, renderExp, 256, undefined, undefined, true, true, false, node.loc);
+    finalizeForCodegen(forNode, renderExp, context);
+  };
 }
 
 function processIf(node, dir, context, processCodegen) {
-  if (typeof processCodegen === 'function') return processCodegen(node, dir);
-  return undefined;
+  const siblings = context.parent && context.parent.children || [];
+  const nodeIndex = siblings.indexOf(node);
+  const projection = callVue3CoreProjection('vue3.core.transformIf', {
+    phase: 'process',
+    node,
+    dir,
+    parent: context.parent,
+    siblings: vue3IfSiblingPayload(siblings),
+    nodeIndex,
+    currentUserKey: findProp(node, 'key'),
+    context: vue3TransformContextPayload(context),
+  });
+  if (projection && projection.branch && projection.branch.condition) {
+    dir.exp = materializeVue3IfProjection(projection.branch.condition, node, dir);
+  }
+  const branch = {
+    type: NodeTypes.IF_BRANCH,
+    loc: node.loc,
+    condition: dir.name === 'else' ? undefined : dir.exp,
+    children: projection && projection.branch && projection.branch.children === 'template' ? (node.children || []) : [node],
+    userKey: findProp(node, 'key'),
+    isTemplateIf: node.tagType === ElementTypes.TEMPLATE,
+  };
+  const action = projection && projection.action || { kind: 'noop' };
+  const finalizeBranch = (ifNode, targetBranch, isRoot) => {
+    if (processCodegen) return processCodegen(ifNode, targetBranch, isRoot);
+    if (context && context.ssr) return undefined;
+    return () => {
+      if (isRoot) {
+        ifNode.codegenNode = createIfCodegenNodeForBranch(targetBranch, action.keyBase || 0, context);
+      } else {
+        const parentCondition = getParentCondition(ifNode.codegenNode);
+        parentCondition.alternate = createIfCodegenNodeForBranch(targetBranch, (ifNode.__vuecKeyBase || 0) + ifNode.branches.length - 1, context);
+      }
+    };
+  };
+  if (dir.name !== 'if') {
+    if (action.kind === 'append') {
+      const comments = (action.commentIndices || []).map(index => siblings[index]).filter(Boolean);
+      for (const index of [...(action.removeIndices || [])].sort((a, b) => b - a)) {
+        const sibling = siblings[index];
+        if (sibling) context.removeNode(sibling);
+      }
+      const target = siblings[action.targetIndex];
+      context.removeNode();
+      if (comments.length) branch.children = [...comments, ...branch.children];
+      target.branches.push(branch);
+      const onExit = finalizeBranch(target, branch, false);
+      traverseNode(branch, context);
+      if (onExit) onExit();
+      context.currentNode = null;
+    }
+    return undefined;
+  }
+  const ifNode = { type: NodeTypes.IF, loc: node.loc, branches: [branch], codegenNode: undefined };
+  ifNode.__vuecKeyBase = action.keyBase || 0;
+  context.replaceNode(ifNode);
+  const onExit = finalizeBranch(ifNode, branch, true);
+  return () => {
+    if (onExit) onExit();
+  };
 }
 
 function processSlotOutlet(node, context) {
   return { slotName: '"default"', slotProps: undefined };
+}
+
+function transformSlotOutlet(node, context) {
+  if (!isSlotOutlet(node)) return undefined;
+  return () => {
+    node.codegenNode = createCallExpression(context.helper(RENDER_SLOT), [
+      context.prefixIdentifiers ? '_ctx.$slots' : '$slots',
+      '"default"',
+    ]);
+  };
 }
 
 function registerRuntimeHelpers(helpers) {
@@ -813,14 +1204,85 @@ const trackVForSlotScopes = (node, context) => {
   return undefined;
 };
 
+function transformOnce(node, context) {
+  const projection = callVue3CoreProjection('vue3.core.transformOnce', {
+    node,
+    context: vue3TransformOnceContextPayload(context),
+    seen: !!(node && node.__vuecOnceSeen),
+  });
+  if (!projection || projection.kind !== 'enter') return undefined;
+  if (projection.markSeen) {
+    Object.defineProperty(node, '__vuecOnceSeen', { value: true, configurable: true });
+  }
+  if (projection.enterInVOnce) context.inVOnce = true;
+  const helper = helperSymbolFromProjection(projection.helper);
+  if (helper) context.helper(helper);
+  return () => {
+    if (projection.exit && Object.prototype.hasOwnProperty.call(projection.exit, 'restoreInVOnce')) {
+      context.inVOnce = !!projection.exit.restoreInVOnce;
+    }
+    const current = context.currentNode || node;
+    if (projection.exit && projection.exit.cacheCodegen && current && current.codegenNode) {
+      current.codegenNode = context.cache(
+        current.codegenNode,
+        projection.exit.isVNode !== false,
+        projection.exit.inVOnce !== false,
+      );
+    }
+  };
+}
+
+const transformIf = createStructuralDirectiveTransform(/^(if|else|else-if)$/, processIf);
+
+const transformFor = createStructuralDirectiveTransform('for', (node, dir, context) => {
+  return processFor(node, dir, context, forNode => {
+    const renderExp = createCallExpression(context.helper(RENDER_LIST), [forNode.source]);
+    const codegenProjection = callVue3CoreProjection('vue3.core.transformFor', {
+      phase: 'codegen',
+      node,
+      forNode: vue3ForNodePayload(forNode),
+      context: vue3TransformContextPayload(context),
+    });
+    forNode.codegenNode = createVNodeCall(
+      context,
+      context.helper(FRAGMENT),
+      undefined,
+      renderExp,
+      codegenProjection && codegenProjection.fragmentFlag || 256,
+      undefined,
+      undefined,
+      true,
+      codegenProjection ? !!codegenProjection.disableTracking : true,
+      false,
+      node.loc,
+    );
+    return () => {
+      const childBlock = forNode.children && forNode.children[0] && forNode.children[0].codegenNode;
+      renderExp.arguments.push(createFunctionExpression(createForLoopParams(forNode.parseResult), childBlock, true));
+    };
+  });
+});
+
 function transform(root, options) {
-  root.helpers = root.helpers || new Set();
-  root.components = root.components || [];
-  root.directives = root.directives || [];
-  root.hoists = root.hoists || [];
-  root.imports = root.imports || [];
-  root.cached = root.cached || [];
-  root.temps = root.temps || 0;
+  options = options || {};
+  if (!options.nodeTransforms || !options.directiveTransforms) {
+    const [nodeTransforms, directiveTransforms] = getBaseTransformPreset(options.prefixIdentifiers);
+    options = {
+      ...options,
+      nodeTransforms: options.nodeTransforms || nodeTransforms,
+      directiveTransforms: options.directiveTransforms || directiveTransforms,
+    };
+  }
+  const context = createTransformContext(root, options || {});
+  traverseNode(root, context);
+  if (!(options && options.ssr)) createRootCodegen(root, context);
+  root.helpers = new Set([...context.helpers.keys()]);
+  root.components = [...context.components];
+  root.directives = [...context.directives];
+  root.hoists = context.hoists;
+  root.imports = context.imports;
+  root.cached = context.cached;
+  root.temps = context.temps;
   root.transformed = true;
 }
 
@@ -829,7 +1291,31 @@ const transformBind = (dir, node, context) => {
 };
 
 const transformElement = (node, context) => {
-  return undefined;
+  return () => {
+    node = context.currentNode || node;
+    if (!node || node.type !== NodeTypes.ELEMENT) return;
+    if (node.tagType !== ElementTypes.ELEMENT && node.tagType !== ElementTypes.COMPONENT) return;
+    const isComponent = node.tagType === ElementTypes.COMPONENT;
+    const tag = isComponent ? resolveComponentType(node, context) : `"${node.tag}"`;
+    if (isComponent && typeof tag === 'string') {
+      context.components.add(node.tag);
+      context.helper(RESOLVE_COMPONENT);
+    }
+    const built = buildProps(node, context);
+    node.codegenNode = createVNodeCall(
+      context,
+      isComponent ? `_component_${node.tag}` : tag,
+      built.props,
+      node.children && node.children.length ? node.children : undefined,
+      built.patchFlag || undefined,
+      built.dynamicPropNames && built.dynamicPropNames.length ? JSON.stringify(built.dynamicPropNames) : undefined,
+      built.directives && built.directives.length ? createArrayExpression(built.directives.map(dir => buildDirectiveArgs(dir, context))) : undefined,
+      !!built.shouldUseBlock,
+      false,
+      isComponent,
+      node.loc,
+    );
+  };
 };
 
 const transformExpression = (node, context) => {
@@ -850,7 +1336,48 @@ const transformVBindShorthand = (dir, context) => {
 
 function traverseNode(node, context) {
   if (!node) return;
-  for (const child of node.children || []) traverseNode(child, context);
+  context.currentNode = node;
+  const exitFns = [];
+  for (const transform of context.options.nodeTransforms || []) {
+    const onExit = transform(node, context);
+    if (Array.isArray(onExit)) exitFns.push(...onExit);
+    else if (onExit) exitFns.push(onExit);
+    if (!context.currentNode) return;
+    node = context.currentNode;
+  }
+  switch (node.type) {
+    case NodeTypes.IF:
+      for (const branch of node.branches || []) traverseNode(branch, context);
+      break;
+    case NodeTypes.IF_BRANCH:
+    case NodeTypes.FOR:
+    case NodeTypes.ELEMENT:
+    case NodeTypes.ROOT:
+      traverseChildren(node, context);
+      break;
+    case NodeTypes.INTERPOLATION:
+      if (!context.ssr) context.helper(TO_DISPLAY_STRING);
+      break;
+    case NodeTypes.COMMENT:
+      if (!context.ssr) context.helper(CREATE_COMMENT);
+      break;
+  }
+  context.currentNode = node;
+  for (let index = exitFns.length - 1; index >= 0; index--) exitFns[index]();
+}
+
+function traverseChildren(parent, context) {
+  let index = 0;
+  const nodeRemoved = () => { index--; };
+  for (; index < (parent.children || []).length; index++) {
+    const child = parent.children[index];
+    if (typeof child === 'string') continue;
+    context.grandParent = context.parent;
+    context.parent = parent;
+    context.childIndex = index;
+    context.onNodeRemoved = nodeRemoved;
+    traverseNode(child, context);
+  }
 }
 
 function unwrapTSNode(node) {
@@ -891,7 +1418,44 @@ function buildDirectiveArgs(dir, context) {
 }
 
 function buildProps(node, context) {
-  return { props: undefined, directives: [], patchFlag: 0, dynamicPropNames: [], shouldUseBlock: false };
+  const objectProps = [];
+  const directives = [];
+  const dynamicPropNames = [];
+  let patchFlag = 0;
+  for (const prop of node && node.props || []) {
+    if (!prop) continue;
+    if (prop.type === NodeTypes.ATTRIBUTE) {
+      objectProps.push(createObjectProperty(
+        createSimpleExpression(prop.name, true, prop.nameLoc || prop.loc),
+        createSimpleExpression(prop.value ? prop.value.content : '', true, prop.value ? prop.value.loc : prop.loc),
+      ));
+      continue;
+    }
+    if (prop.name === 'bind' && prop.arg) {
+      const transform = context && context.directiveTransforms && context.directiveTransforms.bind;
+      const result = transform ? transform(prop, node, context) : transformBind(prop, node, context);
+      objectProps.push(...((result && result.props) || []));
+      if (prop.arg.isStatic) dynamicPropNames.push(prop.arg.content);
+      continue;
+    }
+    if (prop.name === 'on' && prop.arg) {
+      const transform = context && context.directiveTransforms && context.directiveTransforms.on;
+      const result = transform ? transform(prop, node, context) : transformOn(prop, node, context);
+      objectProps.push(...((result && result.props) || []));
+      continue;
+    }
+    if (prop.name !== 'once' && prop.name !== 'memo') {
+      directives.push(prop);
+    }
+  }
+  if (dynamicPropNames.length) patchFlag |= 8;
+  return {
+    props: objectProps.length ? createObjectExpression(objectProps) : undefined,
+    directives,
+    patchFlag,
+    dynamicPropNames,
+    shouldUseBlock: false,
+  };
 }
 
 function buildSlots(node, context) {
@@ -899,7 +1463,15 @@ function buildSlots(node, context) {
 }
 
 function convertToBlock(node, context) {
-  if (node) node.isBlock = true;
+  if (!node) return node;
+  if (!node.isBlock) {
+    node.isBlock = true;
+    if (context && typeof context.helper === 'function') {
+      context.removeHelper(getVNodeHelper(context.inSSR, node.isComponent));
+      context.helper(OPEN_BLOCK);
+      context.helper(getVNodeBlockHelper(context.inSSR, node.isComponent));
+    }
+  }
   return node;
 }
 
@@ -1145,3 +1717,14 @@ module.exports = {
   walkIdentifiers,
   warnDeprecation,
 };
+
+Object.defineProperty(module.exports, '__vuecRuntime', {
+  value: {
+    ...module.exports,
+    transformFor,
+    transformIf,
+    transformOnce,
+    transformSlotOutlet,
+  },
+  enumerable: false,
+});

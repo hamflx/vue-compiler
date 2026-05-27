@@ -40,6 +40,16 @@ assert.strictEqual(coreAst.children[0].tag, 'div');
 const coreGenerated = core.generate(coreAst);
 assert.match(coreGenerated.code, /function render/);
 
+const onceAst = core.baseParse('<div :id="foo" v-once />');
+const [onceNodeTransforms, onceDirectiveTransforms] = core.getBaseTransformPreset();
+core.transform(onceAst, {
+  nodeTransforms: onceNodeTransforms,
+  directiveTransforms: onceDirectiveTransforms,
+});
+assert.strictEqual(onceAst.cached.length, 1);
+assert.ok(onceAst.helpers.has(core.SET_BLOCK_TRACKING));
+assert.match(core.generate(onceAst).code, /_setBlockTracking\(-1, true\)/);
+
 assert.deepStrictEqual(
   core.advancePositionWithClone({ offset: 0, line: 1, column: 1 }, 'a\nb', 3),
   { offset: 3, line: 2, column: 2 },

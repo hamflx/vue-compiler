@@ -235,6 +235,12 @@ pub fn call_vue3_core_projection(env: Env, command: String, payload: Unknown) ->
             vuec_vue3_core::advance_position_with_mutation_projection(&payload)
         }
         "vue3.core.toValidAssetId" => vuec_vue3_core::to_valid_asset_id_projection(&payload),
+        "vue3.core.rootCodegen" => {
+            vuec_vue3_core::root_codegen_projection(payload.get("root").unwrap_or(&payload))
+        }
+        "vue3.core.transformOnce" => vuec_vue3_core::transform_once_projection(&payload),
+        "vue3.core.transformIf" => vuec_vue3_core::transform_if_projection(&payload),
+        "vue3.core.transformFor" => vuec_vue3_core::transform_for_projection(&payload),
         "vue3.core.isInDestructureAssignment" => {
             vuec_vue3_core::is_in_destructure_assignment_projection(&payload)
         }

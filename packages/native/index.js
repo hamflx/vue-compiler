@@ -110,7 +110,10 @@ function callVue2Bridge(command, payload = {}) {
 }
 
 function dehydrateForNative(value, seen = new WeakSet()) {
-  if (value === undefined || typeof value === 'function' || typeof value === 'symbol') {
+  if (typeof value === 'symbol') {
+    return String(value).replace(/^Symbol\((.*)\)$/, '$1');
+  }
+  if (value === undefined || typeof value === 'function') {
     return undefined;
   }
   if (value === null || typeof value !== 'object') {
