@@ -1803,6 +1803,7 @@ function processFor(node, dir, context, processCodegen) {
       return;
     }
     materializeVue3ForTemplateKeyErrors(projection, node, dir, context);
+    if (context && (context.inSSR || context.ssr)) return;
     const renderExp = createCallExpression(context.helper(RENDER_LIST), [forNode.source]);
     forNode.codegenNode = createVNodeCall(context, context.helper(FRAGMENT), undefined, renderExp, 256, undefined, undefined, true, true, false, node.loc);
     finalizeForCodegen(forNode, renderExp, context);
