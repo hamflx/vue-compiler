@@ -275,6 +275,10 @@ function vue27CssVars(descriptor) {
 
 function normalizeVue27ScriptResult(result, descriptor) {
   if (!result || typeof result !== 'object') return result;
+  if (Array.isArray(result.errors) && result.errors.length > 0) {
+    const message = result.errors.map(error => String(error)).join('\n');
+    throw new Error(message);
+  }
   const out = { ...result };
   delete out.errors;
   delete out.deps;
