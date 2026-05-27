@@ -16,8 +16,10 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command as ProcessCommand, Stdio};
+use std::process::{Command as ProcessCommand, ExitStatus, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::{thread, time::Duration};
+use sysinfo::{Pid, ProcessesToUpdate, System};
 
 #[derive(Parser)]
 #[command(author, version, about)]
@@ -965,7 +967,7 @@ fn bench(
             .with_items(items)
             .with_violations(violations)
             .with_created(vec![report_path.display().to_string()])
-            .with_note("generates a reproducible benchmark report with input hashes, environment, git commit, Rust CLI timings, and official JS compiler timings when the locked npm compilers are available"),
+            .with_note("generates a reproducible benchmark report with input hashes, environment, git commit, Rust CLI timings, best-effort peak RSS, and official JS compiler timings when the locked npm compilers are available"),
     )
 }
 
@@ -1384,6 +1386,115 @@ fn parse_cli_json(label: &str, output: &CliProcessOutput) -> Result<JsonValue> {
         .with_context(|| format!("{label} CLI stdout was not JSON:\n{}", output.stdout))
 }
 
+struct MonitoredOutput {
+    status: ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    peak_rss_bytes: Option<u64>,
+}
+
+fn run_monitored_command(mut command: ProcessCommand) -> Result<MonitoredOutput> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .context("failed to spawn monitored command")?;
+    let pid = child.id();
+    let mut sampler = ProcessMemorySampler::new(pid);
+    let mut peak = sampler.sample_peak_rss_bytes();
+    loop {
+        if child
+            .try_wait()
+            .context("failed to poll monitored command")?
+            .is_some()
+        {
+            break;
+        }
+        peak = max_optional_u64(peak, sampler.sample_peak_rss_bytes());
+        thread::sleep(Duration::from_millis(5));
+    }
+    peak = max_optional_u64(peak, sampler.sample_peak_rss_bytes());
+    let output = child
+        .wait_with_output()
+        .context("failed to collect monitored command output")?;
+    Ok(MonitoredOutput {
+        status: output.status,
+        stdout: output.stdout,
+        stderr: output.stderr,
+        peak_rss_bytes: peak,
+    })
+}
+
+struct ProcessMemorySampler {
+    system: System,
+    pid: Pid,
+}
+
+impl ProcessMemorySampler {
+    fn new(pid: u32) -> Self {
+        Self {
+            system: System::new(),
+            pid: Pid::from_u32(pid),
+        }
+    }
+
+    fn sample_peak_rss_bytes(&mut self) -> Option<u64> {
+        self.system
+            .refresh_processes(ProcessesToUpdate::Some(&[self.pid]), false);
+        self.system
+            .process(self.pid)
+            .map(|process| process.memory())
+    }
+}
+
+fn max_optional_u64(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (Some(left), None) => Some(left),
+        (None, Some(right)) => Some(right),
+        (None, None) => None,
+    }
+}
+
+#[cfg(test)]
+fn parse_proc_status_rss_bytes(status: &str) -> Option<u64> {
+    let mut rss = None;
+    for key in ["VmHWM:", "VmRSS:"] {
+        if let Some(bytes) = status
+            .lines()
+            .find_map(|line| line.strip_prefix(key).and_then(parse_proc_status_kb_line))
+        {
+            rss = Some(bytes);
+            if key == "VmHWM:" {
+                break;
+            }
+        }
+    }
+    rss
+}
+
+#[cfg(test)]
+fn parse_proc_status_kb_line(value: &str) -> Option<u64> {
+    let kb = value.split_whitespace().next()?.parse::<u64>().ok()?;
+    kb.checked_mul(1024)
+}
+
+fn parse_monitored_json(label: &str, output: &MonitoredOutput) -> Result<JsonValue> {
+    if !output.status.success() {
+        anyhow::bail!(
+            "{label} command failed with {:?}\nstdout:\n{}\nstderr:\n{}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    serde_json::from_slice(&output.stdout).with_context(|| {
+        format!(
+            "{label} stdout was not JSON:\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        )
+    })
+}
+
 fn run_incremental_smoke_suite() -> Result<String> {
     let mut compiler = vuec_sfc::SfcCompiler::new();
     let source_one = incremental_source("one");
@@ -1535,6 +1646,7 @@ struct BenchResult {
     iterations: usize,
     elapsed_micros: u128,
     micros_per_iteration: u128,
+    peak_rss_bytes: Option<u64>,
     input_sha256: String,
     output_bytes: Option<u64>,
 }
@@ -1660,9 +1772,9 @@ function refresh() {}
 
 fn run_rust_bench_case(fixture: &BenchFixture, iterations: usize) -> Result<BenchResult> {
     let exe = cli_executable_path();
-    let output = run_cli_command(
-        &exe,
-        &[
+    let output = run_monitored_command({
+        let mut command = ProcessCommand::new(&exe);
+        command.args([
             "bench",
             "--target",
             fixture.kind.cli_target(),
@@ -1670,9 +1782,11 @@ fn run_rust_bench_case(fixture: &BenchFixture, iterations: usize) -> Result<Benc
             &iterations.to_string(),
             "--json",
             &fixture.path.display().to_string(),
-        ],
-    )?;
-    let value = parse_cli_json(fixture.name, &output)?;
+        ]);
+        command
+    })
+    .with_context(|| format!("failed to run vuec bench {}", fixture.name))?;
+    let value = parse_monitored_json(fixture.name, &output)?;
     let elapsed = value
         .get("elapsedMicros")
         .and_then(JsonValue::as_u64)
@@ -1688,6 +1802,7 @@ fn run_rust_bench_case(fixture: &BenchFixture, iterations: usize) -> Result<Benc
         iterations,
         elapsed_micros: elapsed,
         micros_per_iteration: per_iter,
+        peak_rss_bytes: output.peak_rss_bytes,
         input_sha256: fixture.sha256.clone(),
         output_bytes: None,
     })
@@ -1813,21 +1928,24 @@ process.stdout.write(JSON.stringify({
   outputBytes: outputSize(output)
 }));
 "##;
-    let output = ProcessCommand::new("node")
-        .arg("-e")
-        .arg(script)
-        .current_dir(root)
-        .env("VUEC_BENCH_INPUT", absolute_path(&fixture.path))
-        .env("VUEC_BENCH_ITERATIONS", iterations.to_string())
-        .env("VUEC_BENCH_KIND", fixture.kind.cli_target())
-        .output()
-        .with_context(|| {
-            format!(
-                "failed to spawn official JS benchmark {} in {}",
-                fixture.name,
-                root.display()
-            )
-        })?;
+    let output = run_monitored_command({
+        let mut command = ProcessCommand::new("node");
+        command
+            .arg("-e")
+            .arg(script)
+            .current_dir(root)
+            .env("VUEC_BENCH_INPUT", absolute_path(&fixture.path))
+            .env("VUEC_BENCH_ITERATIONS", iterations.to_string())
+            .env("VUEC_BENCH_KIND", fixture.kind.cli_target());
+        command
+    })
+    .with_context(|| {
+        format!(
+            "failed to spawn official JS benchmark {} in {}",
+            fixture.name,
+            root.display()
+        )
+    })?;
     if !output.status.success() {
         anyhow::bail!(
             "official JS benchmark {} exited with {:?}\nstdout:\n{}\nstderr:\n{}",
@@ -1859,6 +1977,7 @@ process.stdout.write(JSON.stringify({
             .and_then(JsonValue::as_u64)
             .context("official bench result missing microsPerIteration")?
             as u128,
+        peak_rss_bytes: output.peak_rss_bytes,
         input_sha256: fixture.sha256.clone(),
         output_bytes: value.get("outputBytes").and_then(JsonValue::as_u64),
     })
@@ -2656,6 +2775,18 @@ mod tests {
         assert!(is_windows_executable(r"C:\node\npm.cmd"));
         assert!(is_windows_executable(r"C:\node\pnpm.exe"));
         assert!(!is_windows_executable(r"C:\node\npm"));
+    }
+
+    #[test]
+    fn proc_status_rss_parser_prefers_high_water_mark() {
+        let status = "Name:\tnode\nVmRSS:\t 100 kB\nVmHWM:\t 256 kB\n";
+        assert_eq!(parse_proc_status_rss_bytes(status), Some(256 * 1024));
+    }
+
+    #[test]
+    fn proc_status_rss_parser_falls_back_to_current_rss() {
+        let status = "Name:\tnode\nVmRSS:\t 64 kB\n";
+        assert_eq!(parse_proc_status_rss_bytes(status), Some(64 * 1024));
     }
 
     #[test]

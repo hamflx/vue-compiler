@@ -1,5 +1,10 @@
 # Memory
 
+- Current round: completed the M19 benchmark memory-peak reporting and conformance-regression evidence slice.
+- `cargo xtask bench` now records a best-effort `peakRssBytes` field for Rust CLI and locked official JS benchmark child processes using `sysinfo` process sampling. The report keeps the field nullable for very short-lived processes or unsupported sampling windows, but the gate now captures real RSS values on this Windows environment for the representative benchmark cases.
+- Verified current M19 cache/reporting changes against compatibility summary with `cargo xtask summarize-compat --locked` (`7/7` pass). This is regression evidence for the completed M19 performance/incremental infrastructure; arena/string/AST-cache optimization and parallel compilation remain open.
+- Verification: `cargo fmt --all -- --check`, `cargo check -p xtask`, `cargo test -p xtask`, `cargo xtask bench --iterations 1`, `cargo xtask summarize-compat --locked`, and `git diff --check`.
+
 - Current round: completed the M19 SFC descriptor-cache / incremental invalidation slice.
 - Added an in-memory SFC descriptor cache inside `vuec_sfc::SfcCompiler`, keyed by filename, source hash, and parse mode. Repeated same-file/same-source parses reuse the descriptor; same-file changed-source parses invalidate stale entries before rebuilding the descriptor. Cache stats expose descriptor hits, misses, and invalidations for tests and gates.
 - Added `cargo xtask verify-incremental`, which verifies same-file unchanged input hits the SFC descriptor cache, changed same-file input invalidates it, and the Vue 2.7 parse mode has its own cache hit path. This gate calls `vuec_sfc` public APIs directly; no compiler semantics were moved into `xtask/src/compat.rs`, and AST/HIR/MIR structures were not changed.
