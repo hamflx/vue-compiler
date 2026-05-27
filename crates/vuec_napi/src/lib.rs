@@ -1177,6 +1177,15 @@ fn vue3_options(value: Option<&Value>) -> Vue3CompilerOptions {
         "stringifyStatic",
         bool_option(value, "stringify_static", options.stringify_static),
     );
+    options.stringify_static_preserve_helpers = bool_option(
+        value,
+        "__vuecStringifyStaticPreserveHelpers",
+        bool_option(
+            value,
+            "stringify_static_preserve_helpers",
+            options.stringify_static_preserve_helpers,
+        ),
+    );
     options.slotted = bool_option(value, "slotted", options.slotted);
     options.inline = bool_option(value, "inline", options.inline);
     options.ssr = bool_option(value, "ssr", options.ssr);

@@ -3753,6 +3753,15 @@ fn vue3_options(value: Option<&Value>) -> Vue3CompilerOptions {
             bool_option(value, "stringify_static", options.stringify_static),
         ),
     );
+    options.stringify_static_preserve_helpers = bool_option(
+        value,
+        "__vuecStringifyStaticPreserveHelpers",
+        bool_option(
+            value,
+            "stringify_static_preserve_helpers",
+            options.stringify_static_preserve_helpers,
+        ),
+    );
     options.cache_handlers = bool_option(
         value,
         "cacheHandlers",

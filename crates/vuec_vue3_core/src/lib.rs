@@ -61,6 +61,10 @@ pub struct Vue3CompilerOptions {
     pub hoist_static: bool,
     /// Whether eligible static DOM trees should be stringified.
     pub stringify_static: bool,
+    /// Whether stringify-static codegen should preserve helpers registered by
+    /// the public transformHoist pipeline for official snapshot parity.
+    #[serde(default)]
+    pub stringify_static_preserve_helpers: bool,
     /// Whether event handlers should be cached.
     pub cache_handlers: bool,
     /// Optional scope id for scoped styles.
@@ -126,6 +130,7 @@ impl Default for Vue3CompilerOptions {
             mode: "function".into(),
             hoist_static: false,
             stringify_static: false,
+            stringify_static_preserve_helpers: false,
             cache_handlers: false,
             scope_id: None,
             slotted: false,
@@ -810,8 +815,14 @@ impl Vue3Dialect {
                 .chain(directive_declarations.iter())
                 .cloned()
                 .collect::<Vec<_>>();
-            let mut helpers =
-                vue3_codegen_helpers(ast, ctx, &declarations, &expr, !components.is_empty());
+            let mut helpers = vue3_codegen_helpers(
+                ast,
+                ctx,
+                &declarations,
+                &expr,
+                !components.is_empty(),
+                options.stringify_static_preserve_helpers,
+            );
             let static_props_hoist_declarations =
                 stringify_static_props_hoist_declarations(ast, &static_props_hoists);
             if options.inline {
@@ -16660,6 +16671,7 @@ fn vue3_codegen_helpers(
     declarations: &[String],
     expr: &str,
     has_components: bool,
+    preserve_stringify_static_helpers: bool,
 ) -> Vec<RuntimeHelper> {
     let helper_probe = format!("{}\n{}", declarations.join("\n"), expr);
     let mut stringify_static_source_helpers = Vec::new();
@@ -16692,6 +16704,7 @@ fn vue3_codegen_helpers(
         &mut helpers,
         &helper_probe,
         &stringify_static_source_helpers,
+        preserve_stringify_static_helpers,
     );
     apply_vue3_memo_helper_order(&mut helpers);
     apply_vue3_plain_child_helper_order(&mut helpers);
@@ -16799,6 +16812,7 @@ fn apply_vue3_stringify_static_helper_order(
     helpers: &mut Vec<RuntimeHelper>,
     helper_probe: &str,
     source_helpers: &[RuntimeHelper],
+    preserve_source_helpers: bool,
 ) {
     if !helpers.contains(&RuntimeHelper::Vue3CreateStaticVNode)
         || !helper_probe.contains("_createStaticVNode(")
@@ -16823,13 +16837,18 @@ fn apply_vue3_stringify_static_helper_order(
     let keep_source_helpers = [
         RuntimeHelper::Vue3SetBlockTracking,
         RuntimeHelper::Vue3ToDisplayString,
-        RuntimeHelper::Vue3NormalizeClass,
         RuntimeHelper::Vue3CreateCommentVNode,
     ];
     for helper in keep_source_helpers {
         if source_helpers.contains(&helper) && !helpers.contains(&helper) {
             helpers.push(helper);
         }
+    }
+    if preserve_source_helpers
+        && source_helpers.contains(&RuntimeHelper::Vue3NormalizeClass)
+        && !helpers.contains(&RuntimeHelper::Vue3NormalizeClass)
+    {
+        helpers.push(RuntimeHelper::Vue3NormalizeClass);
     }
     reorder_helpers_by_preference(helpers, &preference);
 }
@@ -18128,7 +18147,9 @@ fn render_plain_element(
         scope.clone()
     };
     let element_scope =
-        if select_children_include_unstringifiable_option_value(ast, node_id, element) {
+        if select_children_include_unstringifiable_option_value(ast, node_id, element)
+            || p_children_include_invalid_html_descendant(ast, node_id, element)
+        {
             element_scope.without_stringify_static_chunks()
         } else {
             element_scope
@@ -19234,7 +19255,7 @@ fn render_element_children(
         && should_stringify_static_children(&child_nodes)
     {
         if let Some(static_call) = render_static_vnode_cache(ast, &child_nodes, options) {
-            return render_cached_children_array(vec![static_call], memo_index.alloc());
+            return render_cached_children_array(vec![static_call], memo_index.alloc(), false);
         }
     }
     if options.hoist_static
@@ -19246,7 +19267,7 @@ fn render_element_children(
     {
         if options.stringify_static && !scope.disable_stringify_static_chunks {
             if let Some(static_call) = render_static_vnode_cache(ast, &child_nodes, options) {
-                return render_cached_children_array(vec![static_call], memo_index.alloc());
+                return render_cached_children_array(vec![static_call], memo_index.alloc(), false);
             }
             if let Some(rendered) = render_static_vnode_chunked_children(
                 ast,
@@ -19256,7 +19277,11 @@ fn render_element_children(
                 NodeRenderMode::Cached,
                 memo_index,
             ) {
-                return render_cached_children_array(rendered, memo_index.alloc());
+                return render_cached_children_array(
+                    rendered,
+                    memo_index.alloc(),
+                    !options.stringify_static,
+                );
             }
         }
         let rendered = child_nodes
@@ -19273,7 +19298,11 @@ fn render_element_children(
             })
             .collect::<Vec<_>>();
         if !rendered.is_empty() {
-            return render_cached_children_array(rendered, memo_index.alloc());
+            return render_cached_children_array(
+                rendered,
+                memo_index.alloc(),
+                !options.stringify_static,
+            );
         }
     }
     if !scope.disable_stringify_static_chunks
@@ -19402,7 +19431,20 @@ fn render_child_sequence_or_static_cache(
     render_child_sequence(ast, children, options, mode, scope, memo_index)
 }
 
-fn render_cached_children_array(rendered: Vec<String>, cache_index: usize) -> String {
+fn render_cached_children_array(
+    rendered: Vec<String>,
+    cache_index: usize,
+    compact_single_vnode: bool,
+) -> String {
+    if compact_single_vnode
+        && rendered
+            .first()
+            .is_some_and(|item| !item.contains("_createStaticVNode("))
+    {
+        if let [single] = rendered.as_slice() {
+            return format!("[...(_cache[{cache_index}] || (_cache[{cache_index}] = [{single}]))]");
+        }
+    }
     if rendered
         .iter()
         .any(|item| item.contains("_createStaticVNode("))
@@ -19585,6 +19627,20 @@ fn select_children_include_unstringifiable_option_value(
                 ast.node(*child_id)
                     .is_some_and(|child| option_has_unstringifiable_value_binding(child))
             })
+        })
+}
+
+fn p_children_include_invalid_html_descendant(
+    ast: &Vue3Ast,
+    node_id: vuec_ast::NodeId,
+    element: &Vue3Element,
+) -> bool {
+    element.tag.eq_ignore_ascii_case("p")
+        && element.ns == vuec_ast::HtmlNamespace::Html
+        && ast.node(node_id).is_some_and(|node| {
+            node.children
+                .iter()
+                .any(|child_id| static_html_contains_invalid_p_descendant(ast, *child_id))
         })
 }
 

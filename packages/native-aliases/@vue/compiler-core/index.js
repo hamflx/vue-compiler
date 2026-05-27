@@ -339,6 +339,7 @@ function vue3NativeOptions(options, source) {
   }
   if (typeof options.transformHoist === 'function') {
     out.stringifyStatic = true;
+    out.__vuecStringifyStaticPreserveHelpers = true;
   }
   const tags = extractVueTemplateTags(String(source || ''));
   if (hasVuePredicateOption(options, 'isVoidTag')) {

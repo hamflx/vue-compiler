@@ -158,6 +158,7 @@ function vue3DomNativeOptions(options) {
   return {
     ...options,
     stringifyStatic: true,
+    __vuecStringifyStaticPreserveHelpers: true,
   };
 }
 

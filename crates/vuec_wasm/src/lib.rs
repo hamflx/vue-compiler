@@ -340,6 +340,15 @@ fn vue3_options(value: &Value) -> Vue3CompilerOptions {
         "stringifyStatic",
         bool_option(value, "stringify_static", options.stringify_static),
     );
+    options.stringify_static_preserve_helpers = bool_option(
+        value,
+        "__vuecStringifyStaticPreserveHelpers",
+        bool_option(
+            value,
+            "stringify_static_preserve_helpers",
+            options.stringify_static_preserve_helpers,
+        ),
+    );
     options.comments = bool_option(value, "comments", options.comments);
     options.scope_id = string_option(value, "scopeId").or_else(|| string_option(value, "scope_id"));
     if let Some(mode) = string_option(value, "mode") {
