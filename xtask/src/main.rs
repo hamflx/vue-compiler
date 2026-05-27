@@ -1000,6 +1000,7 @@ fn verify_release_docs() -> Result<compat::JsonReport> {
         PathBuf::from("docs").join("COMPATIBILITY_MATRIX.md"),
         PathBuf::from("docs").join("RELEASE_CHECKLIST.md"),
         PathBuf::from("docs").join("CONFORMANCE_REPORT_TEMPLATE.md"),
+        PathBuf::from("docs").join("ARCHITECTURE.md"),
     ] {
         match require_non_empty_file(&path) {
             Ok(()) => items.push(compat::ReportItem::new(
@@ -1056,6 +1057,45 @@ fn verify_release_docs() -> Result<compat::JsonReport> {
                 compat::ReportStatus::Fail,
                 format!("{err:#}"),
                 Some(template_path),
+            ));
+        }
+    }
+
+    let architecture_path = PathBuf::from("docs").join("ARCHITECTURE.md");
+    let architecture_requirements = [
+        "## Layering",
+        "## Workspace Map",
+        "## AST / HIR / MIR Contract",
+        "## Public Projection",
+        "## Entry Points",
+        "## Compatibility Harness Boundary",
+        "## Conformance Evidence",
+        "## Release Gates",
+        "AstDocument<K>",
+        "LoweringMap",
+        "Vue2Ast",
+        "Vue3Ast",
+        "Vue3DomMir",
+        "Vue3SsrMir",
+        "xtask/src/compat.rs",
+        "rust-backed",
+        "mixed",
+        "shim-backed",
+    ];
+    match require_file_contains_all(&architecture_path, &architecture_requirements) {
+        Ok(()) => items.push(compat::ReportItem::new(
+            "architecture-doc",
+            compat::ReportStatus::Pass,
+            "architecture document covers layering, workspace map, AST/HIR/MIR contract, public projection, entry points, harness boundaries, conformance evidence, and release gates",
+            Some(architecture_path),
+        )),
+        Err(err) => {
+            violations.push(format!("{err:#}"));
+            items.push(compat::ReportItem::new(
+                "architecture-doc",
+                compat::ReportStatus::Fail,
+                format!("{err:#}"),
+                Some(architecture_path),
             ));
         }
     }

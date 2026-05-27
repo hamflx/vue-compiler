@@ -50,3 +50,4 @@ cargo xtask verify-crate-metadata
 - `docs/RELEASE_CHECKLIST.md`: release dry-run and publication checklist.
 - `docs/COMPATIBILITY_MATRIX.md`: current official compatibility matrix.
 - `docs/CONFORMANCE_REPORT_TEMPLATE.md`: release/stage conformance report template.
+- `docs/ARCHITECTURE.md`: release-facing compiler architecture map.

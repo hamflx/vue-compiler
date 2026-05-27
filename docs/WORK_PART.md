@@ -129,9 +129,12 @@
 - [x] M20 release documentation skeleton slice, adding repository/package release READMEs, CHANGELOG, compatibility matrix, release checklist, and `cargo xtask verify-release-docs`.
 - [x] M20 crates.io metadata slice, adding workspace/crate package metadata, crate READMEs, explicit `publish = false` internal crate boundaries, versioned path dependencies for publishable crates, and `cargo xtask verify-crate-metadata`.
 - [x] M20 conformance report template slice, adding `docs/CONFORMANCE_REPORT_TEMPLATE.md` and extending `cargo xtask verify-release-docs` to require report identity, official baselines, execution scope, coverage classification, file-level coverage, failure summary, compatibility concerns, and acceptance decision sections.
+- [x] M20 release architecture documentation slice, adding `docs/ARCHITECTURE.md` and extending `cargo xtask verify-release-docs` to require compiler layering, workspace ownership, AST/HIR/MIR contract, public projection, entry points, compatibility harness boundary, conformance evidence, and release gates.
 
 ## Current Release Documentation Slice
 
+- Added the M20 release-facing architecture document. It summarizes crate ownership, source/tokenizer/AST/HIR/MIR/codegen layering, `AstDocument<K>` arena constraints, target-split MIR documents, public projection requirements, CLI/NAPI/WASM entry points, `xtask/src/compat.rs` boundaries, conformance evidence classification, and release gates.
+- Extended `cargo xtask verify-release-docs` so the architecture document is checked for those core sections and vocabulary. This documents existing architecture and release boundaries only; it does not change compiler semantics or AST/HIR/MIR structures.
 - Added the M20 conformance report template. It requires report path, command, lock hash, official baselines, runner environment, suite/package/backend scope, `rust-backed` / `mixed` / `shim-backed` totals, file-level coverage, failure classes, `xtask/src/compat.rs` change classification, Rust migration plan for temporary semantic shims, and final acceptance decision.
 - Extended `cargo xtask verify-release-docs` so the report template is a release-doc gate, including the coverage labels and compatibility-classification language needed by the project completion criteria.
 - Added the M20 crates.io metadata gate. Workspace package metadata now carries repository/homepage/keywords/categories, public compiler crates have descriptions, docs.rs URLs, crate READMEs, and versioned local path dependencies, while internal tooling or npm-distributed binding crates are explicitly `publish = false`.
@@ -140,7 +143,7 @@
 - Added README coverage for every current source-controlled `packages/**/package.json` directory, including the NAPI loader package, WASM package, native platform optional packages, and official package-name aliases. Ignored generated wasm-bindgen output directories remain outside this source-documentation gate.
 - Added `cargo xtask verify-release-docs`, which checks the release documentation skeleton files are non-empty, every source-controlled package manifest directory has a README, and package `files` arrays explicitly include `README.md` when present.
 - This slice is publication/documentation infrastructure only. It does not change compiler semantics, `xtask/src/compat.rs`, conformance classification, or AST/HIR/MIR structures.
-- Remaining M20 work: public API documentation, architecture docs, security/supply-chain checks, release dry-runs, and install smoke verification.
+- Remaining M20 work: public API documentation, security/supply-chain checks, release dry-runs, and install smoke verification.
 
 ## Current Performance / Incremental Slice
 

@@ -1,5 +1,9 @@
 # Memory
 
+- Current round: completed the M20 release architecture documentation slice.
+- Added `docs/ARCHITECTURE.md`, a release-facing architecture map covering crate ownership, source/tokenizer/AST/HIR/MIR/codegen layering, `AstDocument<K>` arena constraints, target-split MIR, public projection, CLI/NAPI/WASM entry points, compatibility harness boundaries, conformance evidence classification, and release gates.
+- Extended `cargo xtask verify-release-docs` to require the architecture document and its key sections/terms. This is documentation and release verification only; it does not change compiler semantics, `xtask/src/compat.rs`, or AST/HIR/MIR structures.
+
 - Current round: completed the M20 conformance report template slice.
 - Added `docs/CONFORMANCE_REPORT_TEMPLATE.md`, requiring report identity, official Vue baselines, execution scope, `rust-backed` / `mixed` / `shim-backed` coverage totals, file-level coverage, failure summary, compatibility concern classification, and acceptance decision sections.
 - Extended `cargo xtask verify-release-docs` to require the conformance report template and its key coverage/classification fields. This is release reporting infrastructure only; it does not change compiler semantics, `xtask/src/compat.rs`, or AST/HIR/MIR structures.
