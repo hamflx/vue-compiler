@@ -111,6 +111,7 @@ enum Command {
     VerifyStringInterning,
     VerifyReleaseDocs,
     VerifyCrateMetadata,
+    VerifySupplyChain,
     Bench {
         #[arg(long, default_value_t = 10)]
         iterations: usize,
@@ -177,6 +178,7 @@ fn main() -> Result<()> {
         Command::VerifyStringInterning => verify_string_interning()?,
         Command::VerifyReleaseDocs => verify_release_docs()?,
         Command::VerifyCrateMetadata => verify_crate_metadata()?,
+        Command::VerifySupplyChain => verify_supply_chain()?,
         Command::Bench {
             iterations,
             out_dir,
@@ -1001,6 +1003,7 @@ fn verify_release_docs() -> Result<compat::JsonReport> {
         PathBuf::from("docs").join("RELEASE_CHECKLIST.md"),
         PathBuf::from("docs").join("CONFORMANCE_REPORT_TEMPLATE.md"),
         PathBuf::from("docs").join("ARCHITECTURE.md"),
+        PathBuf::from("docs").join("SECURITY_SUPPLY_CHAIN.md"),
     ] {
         match require_non_empty_file(&path) {
             Ok(()) => items.push(compat::ReportItem::new(
@@ -1096,6 +1099,38 @@ fn verify_release_docs() -> Result<compat::JsonReport> {
                 compat::ReportStatus::Fail,
                 format!("{err:#}"),
                 Some(architecture_path),
+            ));
+        }
+    }
+
+    let security_path = PathBuf::from("docs").join("SECURITY_SUPPLY_CHAIN.md");
+    let security_requirements = [
+        "## Locked Inputs",
+        "## Package Metadata",
+        "## Audit Commands",
+        "## Artifact Provenance",
+        "## Compatibility Boundary",
+        "Cargo.lock",
+        "pnpm@9.0.0",
+        "compat/official-revisions.lock",
+        "cargo audit",
+        "pnpm audit --prod",
+        "xtask/src/compat.rs",
+    ];
+    match require_file_contains_all(&security_path, &security_requirements) {
+        Ok(()) => items.push(compat::ReportItem::new(
+            "security-supply-chain-doc",
+            compat::ReportStatus::Pass,
+            "security and supply-chain document covers locked inputs, metadata, audits, provenance, and compatibility boundaries",
+            Some(security_path),
+        )),
+        Err(err) => {
+            violations.push(format!("{err:#}"));
+            items.push(compat::ReportItem::new(
+                "security-supply-chain-doc",
+                compat::ReportStatus::Fail,
+                format!("{err:#}"),
+                Some(security_path),
             ));
         }
     }
@@ -1357,6 +1392,233 @@ fn verify_crate_metadata() -> Result<compat::JsonReport> {
             .with_violations(violations)
             .with_note("verifies M20 crates.io metadata, crate READMEs, publish=false internal crate boundaries, and versioned path dependencies for publishable crates"),
     )
+}
+
+fn verify_supply_chain() -> Result<compat::JsonReport> {
+    let mut violations = Vec::new();
+    let mut items = Vec::new();
+
+    for path in [
+        PathBuf::from("Cargo.lock"),
+        PathBuf::from("compat").join("official-revisions.lock"),
+        PathBuf::from("docs").join("SECURITY_SUPPLY_CHAIN.md"),
+    ] {
+        push_file_check_item(&mut items, &mut violations, path);
+    }
+
+    match root_package_manager_is_pinned(Path::new("package.json")) {
+        Ok(detail) => items.push(compat::ReportItem::new(
+            "root-package-manager",
+            compat::ReportStatus::Pass,
+            detail,
+            Some(PathBuf::from("package.json")),
+        )),
+        Err(err) => {
+            violations.push(format!("{err:#}"));
+            items.push(compat::ReportItem::new(
+                "root-package-manager",
+                compat::ReportStatus::Fail,
+                format!("{err:#}"),
+                Some(PathBuf::from("package.json")),
+            ));
+        }
+    }
+
+    let package_dirs = collect_package_manifest_dirs(Path::new("packages"))?;
+    for package_dir in package_dirs {
+        let manifest_path = package_dir.join("package.json");
+        let name = read_package_display_name(&manifest_path)
+            .unwrap_or_else(|_| package_dir.display().to_string());
+        let mut package_violations = Vec::new();
+        match verify_npm_manifest_supply_chain(&manifest_path) {
+            Ok(()) => {}
+            Err(err) => package_violations.push(format!("{err:#}")),
+        }
+        let status = if package_violations.is_empty() {
+            compat::ReportStatus::Pass
+        } else {
+            violations.extend(package_violations.iter().cloned());
+            compat::ReportStatus::Fail
+        };
+        let detail = if package_violations.is_empty() {
+            "npm manifest has license metadata, exact dependency versions, and stable package file metadata where required".into()
+        } else {
+            package_violations.join("; ")
+        };
+        items.push(compat::ReportItem::new(
+            format!("npm-package:{name}"),
+            status,
+            detail,
+            Some(manifest_path),
+        ));
+    }
+
+    match cargo_metadata_json() {
+        Ok(metadata) => {
+            let package_count = metadata
+                .get("packages")
+                .and_then(JsonValue::as_array)
+                .map_or(0, Vec::len);
+            items.push(compat::ReportItem::new(
+                "cargo-metadata",
+                compat::ReportStatus::Pass,
+                format!("cargo metadata resolved {package_count} workspace packages"),
+                Some(PathBuf::from("Cargo.toml")),
+            ));
+        }
+        Err(err) => {
+            violations.push(format!("{err:#}"));
+            items.push(compat::ReportItem::new(
+                "cargo-metadata",
+                compat::ReportStatus::Fail,
+                format!("{err:#}"),
+                Some(PathBuf::from("Cargo.toml")),
+            ));
+        }
+    }
+
+    let status = if violations.is_empty() {
+        compat::ReportStatus::Pass
+    } else {
+        compat::ReportStatus::Fail
+    };
+    Ok(
+        compat::JsonReport::new("verify_supply_chain", status)
+            .with_items(items)
+            .with_violations(violations)
+            .with_note("verifies M20 security/supply-chain release controls: lock files, pinned package manager, npm license metadata, exact dependency versions, stable package files, and Cargo metadata resolution"),
+    )
+}
+
+fn push_file_check_item(
+    items: &mut Vec<compat::ReportItem>,
+    violations: &mut Vec<String>,
+    path: PathBuf,
+) {
+    match require_non_empty_file(&path) {
+        Ok(()) => items.push(compat::ReportItem::new(
+            format!("file:{}", path.display()),
+            compat::ReportStatus::Pass,
+            "file exists and is non-empty",
+            Some(path),
+        )),
+        Err(err) => {
+            violations.push(format!("{err:#}"));
+            items.push(compat::ReportItem::new(
+                format!("file:{}", path.display()),
+                compat::ReportStatus::Fail,
+                format!("{err:#}"),
+                Some(path),
+            ));
+        }
+    }
+}
+
+fn root_package_manager_is_pinned(path: &Path) -> Result<String> {
+    let manifest = read_json_file(path)?;
+    let package_manager = manifest
+        .get("packageManager")
+        .and_then(JsonValue::as_str)
+        .with_context(|| format!("{} missing packageManager", path.display()))?;
+    if package_manager != "pnpm@9.0.0" {
+        anyhow::bail!(
+            "{} packageManager must be pnpm@9.0.0, got {package_manager}",
+            path.display()
+        );
+    }
+    if manifest
+        .get("license")
+        .and_then(JsonValue::as_str)
+        .is_none_or(str::is_empty)
+    {
+        anyhow::bail!("{} missing license metadata", path.display());
+    }
+    Ok(format!("packageManager pinned to {package_manager}"))
+}
+
+fn verify_npm_manifest_supply_chain(path: &Path) -> Result<()> {
+    let manifest = read_json_file(path)?;
+    let name = manifest
+        .get("name")
+        .and_then(JsonValue::as_str)
+        .with_context(|| format!("{} missing package name", path.display()))?;
+    if manifest
+        .get("license")
+        .and_then(JsonValue::as_str)
+        .is_none_or(str::is_empty)
+    {
+        anyhow::bail!("{name} missing license metadata");
+    }
+    for field in [
+        "dependencies",
+        "optionalDependencies",
+        "peerDependencies",
+        "devDependencies",
+    ] {
+        verify_exact_npm_dependency_versions(path, name, field, &manifest)?;
+    }
+    if name.starts_with("@vuec-rs/native-") {
+        verify_platform_package_files(path, name, &manifest)?;
+    }
+    Ok(())
+}
+
+fn verify_exact_npm_dependency_versions(
+    path: &Path,
+    package_name: &str,
+    field: &str,
+    manifest: &JsonValue,
+) -> Result<()> {
+    let Some(dependencies) = manifest.get(field) else {
+        return Ok(());
+    };
+    let Some(dependencies) = dependencies.as_object() else {
+        anyhow::bail!("{} {field} field is not an object", path.display());
+    };
+    for (name, version) in dependencies {
+        let Some(version) = version.as_str() else {
+            anyhow::bail!("{package_name} dependency {name} in {field} is not a string");
+        };
+        if !is_exact_npm_version(version) {
+            anyhow::bail!(
+                "{package_name} dependency {name} in {field} must use an exact version, got {version}"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn is_exact_npm_version(version: &str) -> bool {
+    !version.is_empty()
+        && !version.starts_with(['^', '~', '>', '<', '=', '*'])
+        && !version.contains("||")
+        && !version.contains(" - ")
+        && version != "latest"
+}
+
+fn verify_platform_package_files(
+    path: &Path,
+    package_name: &str,
+    manifest: &JsonValue,
+) -> Result<()> {
+    let files = manifest
+        .get("files")
+        .and_then(JsonValue::as_array)
+        .with_context(|| format!("{package_name} missing files array"))?;
+    let entries = files
+        .iter()
+        .filter_map(JsonValue::as_str)
+        .collect::<Vec<_>>();
+    let expected = ["vuec_napi.node", "README.md"];
+    if entries != expected {
+        anyhow::bail!(
+            "{} files must be {:?}, got {:?}",
+            path.display(),
+            expected,
+            entries
+        );
+    }
+    Ok(())
 }
 
 fn package_is_publishable(package: &JsonValue) -> bool {

@@ -25,6 +25,7 @@ This matrix records the pinned official compiler baselines and the current Rust 
 | Performance | `cargo xtask bench`, `cargo xtask verify-arena`, `cargo xtask verify-string-interning`, `cargo xtask verify-ast-cache`, `cargo xtask verify-parallel`, `cargo xtask verify-incremental` |
 | Release docs | `cargo xtask verify-release-docs` |
 | Crate metadata | `cargo xtask verify-crate-metadata` |
+| Security / supply chain | `cargo xtask verify-supply-chain` |
 
 ## Coverage Rule
 
@@ -39,3 +40,5 @@ The conformance report template requires report identity, official baselines, ex
 The architecture document requires release-facing coverage of compiler layering, workspace ownership, AST/HIR/MIR arena constraints, public projection, entry points, compatibility harness boundaries, conformance evidence, and release gates.
 
 `cargo xtask verify-crate-metadata` verifies that every workspace crate has crates.io-facing package metadata and a non-empty crate README. Public crates must have versioned path dependencies; internal tooling and package-binding crates are explicitly marked `publish = false`.
+
+`cargo xtask verify-supply-chain` verifies release security controls: lock files, pinned package manager, npm license metadata, exact npm dependency versions, native platform package file lists, and Cargo metadata resolution.

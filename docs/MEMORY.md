@@ -1,5 +1,9 @@
 # Memory
 
+- Current round: completed the M20 security / supply-chain slice.
+- Added `docs/SECURITY_SUPPLY_CHAIN.md`, documenting locked inputs, npm/Rust metadata rules, external advisory audit commands, artifact provenance, and `xtask/src/compat.rs` compatibility-boundary handling for releases.
+- Added npm license metadata to maintained package manifests and `cargo xtask verify-supply-chain`, which checks `Cargo.lock`, `compat/official-revisions.lock`, pinned root `packageManager`, npm license metadata, exact npm dependency versions, native platform package file lists, and Cargo metadata resolution. This is release/security verification only; it does not change compiler semantics, `xtask/src/compat.rs`, or AST/HIR/MIR structures.
+
 - Current round: completed the M20 release architecture documentation slice.
 - Added `docs/ARCHITECTURE.md`, a release-facing architecture map covering crate ownership, source/tokenizer/AST/HIR/MIR/codegen layering, `AstDocument<K>` arena constraints, target-split MIR, public projection, CLI/NAPI/WASM entry points, compatibility harness boundaries, conformance evidence classification, and release gates.
 - Extended `cargo xtask verify-release-docs` to require the architecture document and its key sections/terms. This is documentation and release verification only; it does not change compiler semantics, `xtask/src/compat.rs`, or AST/HIR/MIR structures.

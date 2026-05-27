@@ -2,6 +2,7 @@
   "name": "@vuec-rs/native-darwin-x64",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT OR Apache-2.0",
   "main": "vuec_napi.node",
   "os": [
     "darwin"

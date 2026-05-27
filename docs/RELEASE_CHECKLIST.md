@@ -9,6 +9,7 @@ Use this checklist before publishing a release candidate.
 - [ ] `cargo xtask verify-official-lock`
 - [ ] `cargo xtask verify-release-docs`
 - [ ] `cargo xtask verify-crate-metadata`
+- [ ] `cargo xtask verify-supply-chain`
 - [ ] `cargo xtask summarize-compat --locked`
 - [ ] `cargo xtask bench --iterations 1`
 - [ ] Fill `docs/CONFORMANCE_REPORT_TEMPLATE.md` for the release candidate report.
@@ -27,6 +28,7 @@ Use this checklist before publishing a release candidate.
 ## Publication
 
 - [ ] Confirm every npm package has `README.md`, `package.json`, license metadata, and a stable file list.
+- [ ] Run external advisory audits from `docs/SECURITY_SUPPLY_CHAIN.md` where the release environment has the tools and advisory databases.
 - [ ] Confirm every published crate has package metadata (`cargo xtask verify-crate-metadata`) and public API docs.
 - [ ] Run npm pack dry-runs for `packages/native`, all `packages/native-platforms/*`, and `packages/wasm`.
 - [ ] Run cargo publish dry-runs for published crates.

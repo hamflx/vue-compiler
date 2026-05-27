@@ -32,6 +32,7 @@ cargo xtask verify-arena
 cargo xtask verify-string-interning
 cargo xtask verify-release-docs
 cargo xtask verify-crate-metadata
+cargo xtask verify-supply-chain
 ```
 
 ## Packages
@@ -51,3 +52,4 @@ cargo xtask verify-crate-metadata
 - `docs/COMPATIBILITY_MATRIX.md`: current official compatibility matrix.
 - `docs/CONFORMANCE_REPORT_TEMPLATE.md`: release/stage conformance report template.
 - `docs/ARCHITECTURE.md`: release-facing compiler architecture map.
+- `docs/SECURITY_SUPPLY_CHAIN.md`: release security and supply-chain checks.

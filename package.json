@@ -1,6 +1,7 @@
 {
   "name": "vue-compiler",
   "private": true,
+  "license": "MIT OR Apache-2.0",
   "packageManager": "pnpm@9.0.0",
   "scripts": {
     "test": "cargo test --workspace",

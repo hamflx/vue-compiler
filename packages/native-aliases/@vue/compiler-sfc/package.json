@@ -2,6 +2,7 @@
   "name": "@vue/compiler-sfc",
   "version": "0.0.0-vuec-napi",
   "private": true,
+  "license": "MIT OR Apache-2.0",
   "main": "dist/compiler-sfc.cjs.js",
   "types": "dist/compiler-sfc.d.ts"
 }
