@@ -548,7 +548,10 @@ fn rewrite_css_items(
             output.push_str(&source[cursor..]);
             break;
         };
-        let prelude = source[cursor..delimiter].trim();
+        let raw_prelude = &source[cursor..delimiter];
+        let prelude_end = raw_prelude.trim_end().len();
+        let prelude = raw_prelude[..prelude_end].trim();
+        let brace_spacing = &raw_prelude[prelude_end..];
         if delimiter_ch == ';' {
             output.push_str(prelude);
             output.push(';');
@@ -564,7 +567,8 @@ fn rewrite_css_items(
         if prelude.starts_with('@') {
             let rewritten_prelude = rewrite_at_rule_prelude(prelude, keyframes);
             output.push_str(&rewritten_prelude);
-            output.push_str(" {");
+            output.push_str(brace_spacing);
+            output.push('{');
             let next_context = if is_keyframes_at_rule(prelude) {
                 CssBlockContext::Keyframes
             } else {
@@ -579,7 +583,8 @@ fn rewrite_css_items(
                 rewrite_selector_list(prelude, scope_id)
             };
             output.push_str(&selector);
-            output.push_str(" {");
+            output.push_str(brace_spacing);
+            output.push('{');
             if context == CssBlockContext::Keyframes {
                 output.push_str(&rewrite_css_items(
                     body,
@@ -1602,6 +1607,19 @@ mod tests {
         );
         assert_eq!(
             result.code,
+            ".a[data-v-contract]{ color: var(--contract-color);\n}"
+        );
+
+        let spaced = compile_style(
+            ".a { color: v-bind(color); }",
+            StyleCompileOptions {
+                id: Some("data-v-contract".into()),
+                scoped: true,
+                ..StyleCompileOptions::default()
+            },
+        );
+        assert_eq!(
+            spaced.code,
             ".a[data-v-contract] { color: var(--contract-color);\n}"
         );
     }
