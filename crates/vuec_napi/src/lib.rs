@@ -20,7 +20,10 @@ use vuec_sfc::{
     Vue27TemplatePreprocessOptions,
 };
 use vuec_source::{FileId, Span};
-use vuec_vue2::{Vue2CompileOptions, Vue2CompiledResult, Vue2Element, Vue2Error, Vue2Warning};
+use vuec_vue2::{
+    Vue2CompileOptions, Vue2CompiledResult, Vue2Element, Vue2Error,
+    Vue2SfcAssetUrlTransformOptions, Vue2Warning,
+};
 use vuec_vue3_core::{TemplateSource, Vue3CompilerOptions, Vue3Dialect};
 use vuec_vue3_dom::{
     apply_dom_parser_defaults, compile as compile_dom, parse as parse_dom, DomCompilerOptions,
@@ -823,7 +826,86 @@ fn vue27_template_vue2_options(value: Value) -> Vue2CompileOptions {
             .and_then(Value::as_bool)
             .unwrap_or(options.bindings_is_script_setup);
     }
+    if vue27_transform_asset_urls_enabled(&value, false) {
+        options.sfc_asset_url_transform = Some(vue27_sfc_asset_url_options(&value));
+    }
     options
+}
+
+fn vue27_transform_asset_urls_enabled(value: &Value, fallback: bool) -> bool {
+    match value.get("transformAssetUrls") {
+        Some(Value::Bool(enabled)) => *enabled,
+        Some(Value::Object(_)) => true,
+        _ => fallback,
+    }
+}
+
+fn vue27_sfc_asset_url_options(value: &Value) -> Vue2SfcAssetUrlTransformOptions {
+    let mut options = Vue2SfcAssetUrlTransformOptions::default();
+    if let Some(extra) = value.get("transformAssetUrlsOptions") {
+        if let Some(base) = extra.get("base") {
+            options.base = if base.is_null() {
+                None
+            } else {
+                base.as_str().map(ToOwned::to_owned)
+            };
+        }
+        options.include_absolute = bool_option(extra, "includeAbsolute", options.include_absolute);
+    }
+    match value.get("transformAssetUrls") {
+        Some(Value::Object(object)) => {
+            if !object.contains_key("base")
+                && !object.contains_key("includeAbsolute")
+                && !object.contains_key("tags")
+            {
+                let tags = vue27_sfc_asset_url_tags(object);
+                if !tags.is_empty() {
+                    let mut merged = vuec_vue2::vue2_sfc_default_asset_url_tags();
+                    for (tag, attrs) in tags {
+                        merged.insert(tag, attrs);
+                    }
+                    options.tags = merged;
+                }
+            } else if let Some(tags) = object.get("tags").and_then(Value::as_object) {
+                let parsed = vue27_sfc_asset_url_tags(tags);
+                if !parsed.is_empty() {
+                    options.tags = parsed;
+                }
+            }
+            if let Some(base) = object.get("base") {
+                options.base = if base.is_null() {
+                    None
+                } else {
+                    base.as_str().map(ToOwned::to_owned)
+                };
+            }
+            options.include_absolute = object
+                .get("includeAbsolute")
+                .and_then(Value::as_bool)
+                .unwrap_or(options.include_absolute);
+        }
+        Some(Value::Bool(_)) | None => {}
+        _ => {}
+    }
+    options
+}
+
+fn vue27_sfc_asset_url_tags(object: &Map<String, Value>) -> BTreeMap<String, Vec<String>> {
+    object
+        .iter()
+        .filter_map(|(tag, attrs)| match attrs {
+            Value::String(attr) => Some((tag.clone(), vec![attr.clone()])),
+            Value::Array(items) => {
+                let attrs = items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .collect::<Vec<_>>();
+                (!attrs.is_empty()).then_some((tag.clone(), attrs))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 fn vue27_parse_component_options(value: &Value) -> Vue27ParseComponentOptions {

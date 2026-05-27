@@ -1,5 +1,9 @@
 # Memory
 
+- Current round: closed the NAPI-backed Vue 2.7 SFC `compileTemplate` asset URL/srcset conformance slice.
+- `vuec_napi` now maps Vue 2.7 SFC `compileTemplate` `transformAssetUrls` and `transformAssetUrlsOptions` into Rust `Vue2SfcAssetUrlTransformOptions`, including default/custom tag maps, `base`, `includeAbsolute`, URI fragments, empty `~`, and `srcset` handling through the existing Rust Vue 2 template compiler path.
+- Focused `cargo xtask run-napi-conformance --suite vue27-sfc` improves from `57/144` to `63/144`; `compileTemplate.spec.ts` is now `9/9`. This is NAPI option parsing/routing only; template asset semantics remain in Rust `vuec_vue2`, and `xtask/src/compat.rs` was not changed.
+
 - Current round: closed the NAPI-backed Vue 2.7 SFC `parseComponent` official conformance slice.
 - `vuec_napi` now exposes `parseVue27SfcComponent`, routing public Vue 2.7 SFC parsing through Rust `SfcCompiler::parse_vue27_component_with_filename` so `pad`, `deindent`, source-range errors, special text template blocks, custom blocks, and top-level block projection use the Vue 2.7 parseComponent semantics instead of the generic Vue 3-style SFC parser.
 - The local `@vuec-rs/native` loader and `vue/compiler-sfc` NAPI alias now use this Rust-backed entry for `parseComponent(source, options)`. Focused `cargo xtask run-napi-conformance --suite vue27-sfc` improves from `51/144` to `57/144`; `parseComponent.spec.ts` is now `11/11`. This is NAPI ABI and package/API routing for an existing Rust parser path; no `xtask/src/compat.rs` changes were made.
