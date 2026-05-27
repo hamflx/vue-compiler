@@ -1,3 +1,10 @@
+//! Vue 3 DOM compiler facade and DOM-specific template normalization.
+//!
+//! This crate wraps `vuec_vue3_core` with browser DOM defaults, asset URL
+//! handling, directive summaries, entity decoding, and an incremental parsed AST
+//! cache. It does not own the canonical AST/HIR/MIR schema.
+
+#![deny(missing_docs)]
 #![forbid(unsafe_code)]
 
 use std::collections::hash_map::DefaultHasher;
@@ -13,15 +20,22 @@ use vuec_ast::{
 use vuec_diagnostics::{Diagnostic, Severity};
 use vuec_pass::TransformContext;
 use vuec_vue3_asset::transform_asset_url_props;
+/// Asset URL transform options re-exported for DOM compiler callers.
 pub use vuec_vue3_asset::AssetUrlOptions;
 use vuec_vue3_core::{CodegenResult, TemplateSource, Vue3CompilerOptions, Vue3Dialect};
 
+/// Options for the Vue 3 DOM compiler facade.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DomCompilerOptions {
+    /// Shared Vue 3 compiler-core options.
     pub core: Vue3CompilerOptions,
+    /// Tag names treated as custom elements by the DOM parser facade.
     pub is_custom_element: Vec<String>,
+    /// Whether static asset URL attributes should be transformed.
     pub transform_asset_urls: bool,
+    /// Asset URL transform options.
     pub asset_url_options: AssetUrlOptions,
+    /// Whether basic HTML entities in text nodes should be decoded.
     pub decode_entities: bool,
 }
 
@@ -40,6 +54,7 @@ impl Default for DomCompilerOptions {
     }
 }
 
+/// Applies Vue 3 DOM parser defaults to compiler-core options.
 pub fn apply_dom_parser_defaults(core: &mut Vue3CompilerOptions) {
     if core.void_tags.is_empty() {
         core.void_tags = DOM_VOID_TAGS.iter().map(|tag| (*tag).to_string()).collect();
@@ -311,23 +326,33 @@ const DOM_MATH_TAGS: &[&str] = &[
     "semantics",
 ];
 
+/// DOM directive summary used by compatibility reports and probes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DomDirective {
+    /// Directive name without `v-`.
     pub name: String,
+    /// Static directive argument.
     pub argument: Option<String>,
+    /// Directive modifiers.
     pub modifiers: Vec<String>,
+    /// Directive expression source.
     pub expression: Option<String>,
 }
 
+/// Incremental Vue 3 DOM compiler facade.
 pub struct DomCompiler {
     ast_cache: BTreeMap<DomAstCacheKey, Vue3Ast>,
     cache_stats: DomAstCacheStats,
 }
 
+/// DOM AST cache counters.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DomAstCacheStats {
+    /// Number of parsed AST cache hits.
     pub ast_hits: u64,
+    /// Number of parsed AST cache misses.
     pub ast_misses: u64,
+    /// Number of stale cache entries invalidated.
     pub ast_invalidations: u64,
 }
 
@@ -361,6 +386,7 @@ struct DomAstCacheOptions {
 }
 
 impl DomCompiler {
+    /// Creates an empty DOM compiler with no cached ASTs.
     pub fn new() -> Self {
         Self {
             ast_cache: BTreeMap::new(),
@@ -368,6 +394,7 @@ impl DomCompiler {
         }
     }
 
+    /// Parses a template through the incremental DOM AST cache.
     pub fn parse(&mut self, source: TemplateSource, options: &DomCompilerOptions) -> Vue3Ast {
         let key = DomAstCacheKey::new(&source, options);
         if let Some(ast) = self.ast_cache.get(&key) {
@@ -381,6 +408,7 @@ impl DomCompiler {
         ast
     }
 
+    /// Compiles a template through the incremental DOM AST cache.
     pub fn compile(
         &mut self,
         source: TemplateSource,
@@ -390,10 +418,12 @@ impl DomCompiler {
         compile_parsed_ast(source, options, ast)
     }
 
+    /// Returns current cache counters.
     pub fn cache_stats(&self) -> DomAstCacheStats {
         self.cache_stats.clone()
     }
 
+    /// Returns the number of cached parsed AST entries.
     pub fn ast_cache_len(&self) -> usize {
         self.ast_cache.len()
     }
@@ -471,12 +501,14 @@ fn namespace_key(namespace: HtmlNamespace) -> u8 {
     }
 }
 
+/// Parses a Vue 3 template with DOM parser defaults and DOM normalization.
 pub fn parse(source: TemplateSource, options: &DomCompilerOptions) -> Vue3Ast {
     let mut ast = Vue3Dialect::base_parse(source, &options.core);
     normalize_dom_ast(&mut ast, options);
     ast
 }
 
+/// Compiles a Vue 3 template for DOM render output.
 pub fn compile(source: TemplateSource, options: DomCompilerOptions) -> CodegenResult {
     let ast = parse(source.clone(), &options);
     compile_parsed_ast(source, options, ast)
@@ -551,6 +583,7 @@ fn dom_directive_summary(ast: &Vue3Ast) -> Vec<String> {
         .collect()
 }
 
+/// Applies DOM-specific AST normalization in-place.
 pub fn normalize_dom_ast(ast: &mut Vue3Ast, options: &DomCompilerOptions) {
     for node in &mut ast.nodes {
         match &mut node.kind {
@@ -576,6 +609,7 @@ pub fn normalize_dom_ast(ast: &mut Vue3Ast, options: &DomCompilerOptions) {
     }
 }
 
+/// Projects static `style` attributes for the public DOM `transformStyle` helper.
 pub fn transform_style_projection(payload: &Value) -> Value {
     let props = payload
         .get("node")
@@ -607,6 +641,7 @@ pub fn transform_style_projection(payload: &Value) -> Value {
     json!({ "replacements": replacements })
 }
 
+/// Extracts DOM directive summaries from compatibility template attributes.
 pub fn extract_directives(attributes: &[TemplateAttribute]) -> Vec<DomDirective> {
     attributes
         .iter()

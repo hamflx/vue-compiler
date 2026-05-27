@@ -1,5 +1,10 @@
 # Memory
 
+- Current round: completed the M20 Vue 3 DOM/SSR backend public API docs slice.
+- Added rustdoc coverage and crate-level `#![deny(missing_docs)]` for `vuec_vue3_dom` and `vuec_vue3_ssr`, covering DOM compiler options/defaults/cache stats, DOM parse/compile/normalization/style-projection/directive extraction APIs, SSR compiler options, compile result, transform summary, public compile defaults, and SSR summarization.
+- Extended `cargo xtask verify-public-api-docs` to cover eleven crates: `vuec_source`, `vuec_diagnostics`, `vuec_codegen`, `vuec_ast`, `vuec_html`, `vuec_js`, `vuec_pass`, `vuec_style`, `vuec_vue3_asset`, `vuec_vue3_dom`, and `vuec_vue3_ssr`. This remains partial public API documentation progress; the global M20 "every public API has docs" criterion stays open until the remaining compiler, SFC, Vue 2, binding, CLI, and runtime-test public crates are covered.
+- Verification: `cargo fmt --all -- --check`, `cargo test -p vuec_vue3_dom -p vuec_vue3_ssr -p xtask`, and `cargo xtask verify-public-api-docs`. This was documentation/gate coverage only; it did not change compiler semantics, `xtask/src/compat.rs`, conformance classification, or AST/HIR/MIR structures.
+
 - Current round: completed the M20 AST/HIR/MIR public API docs slice.
 - Added rustdoc coverage and crate-level `#![deny(missing_docs)]` for `vuec_ast`, covering `AstDocument<K>` arena invariants, node spans, lowering maps, public projection, JS side-store ids, CST, Vue 2 AST, Vue 3 AST, HIR, Vue 2 MIR, Vue 3 DOM MIR, Vue 3 SSR MIR, Vapor MIR, shared MIR expressions/children/slots, runtime helpers, target discriminators, and document type aliases.
 - Extended `cargo xtask verify-public-api-docs` to cover nine crates: `vuec_source`, `vuec_diagnostics`, `vuec_codegen`, `vuec_ast`, `vuec_html`, `vuec_js`, `vuec_pass`, `vuec_style`, and `vuec_vue3_asset`. This remains partial public API documentation progress; the global M20 "every public API has docs" criterion stays open until the remaining compiler, binding, CLI, and runtime-test public crates are covered.

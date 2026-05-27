@@ -1,22 +1,36 @@
+//! Vue 3 SSR compiler facade.
+//!
+//! This crate wraps the Vue 3 core parser/lowering/codegen path with public SSR
+//! defaults, asset URL handling, source maps, and compact transform summaries.
+
+#![deny(missing_docs)]
 #![forbid(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
 use vuec_ast::{Vue3Ast, Vue3AstKind, Vue3ImportItem, Vue3NodeKind};
 use vuec_diagnostics::Diagnostic;
 use vuec_vue3_asset::transform_asset_url_props;
+/// Asset URL transform options re-exported for SSR compiler callers.
 pub use vuec_vue3_asset::AssetUrlOptions;
 use vuec_vue3_core::{
     generate_vue3_ssr_mir, lower_vue3_ast_to_ssr_mir, source_map_for_render, CodegenResult,
     TemplateSource, Vue3CompilerOptions, Vue3Dialect,
 };
 
+/// Options for the Vue 3 SSR compiler facade.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SsrCompilerOptions {
+    /// Shared Vue 3 compiler-core options.
     pub core: Vue3CompilerOptions,
+    /// Optional scope id used by public SSR compile defaults.
     pub scope_id: Option<String>,
+    /// Whether slotted scope markers should be emitted.
     pub slotted: bool,
+    /// Whether `core.mode` was explicitly provided by the caller.
     pub mode_is_explicit: bool,
+    /// Whether static asset URL attributes should be transformed.
     pub transform_asset_urls: bool,
+    /// Asset URL transform options.
     pub asset_url_options: AssetUrlOptions,
 }
 
@@ -33,25 +47,39 @@ impl Default for SsrCompilerOptions {
     }
 }
 
+/// Compact summary of SSR-relevant template nodes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SsrTransformSummary {
+    /// Number of element nodes.
     pub elements: usize,
+    /// Number of interpolation nodes.
     pub interpolations: usize,
+    /// Number of component-like element nodes.
     pub components: usize,
+    /// Number of slot outlet nodes.
     pub slots: usize,
+    /// Number of teleport nodes.
     pub teleports: usize,
+    /// Number of suspense nodes.
     pub suspenses: usize,
 }
 
+/// Public SSR compile result.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SsrCompileResult {
+    /// Generated SSR render code.
     pub code: String,
+    /// Optional source map.
     pub map: Option<vuec_codegen::SourceMapArtifact>,
+    /// Compact AST/SSR transform summary.
     pub ast_summary: String,
+    /// Diagnostics produced during compilation.
     pub diagnostics: Vec<Diagnostic>,
+    /// Generated helper/import preamble.
     pub preamble: String,
 }
 
+/// Compiles a Vue 3 template into an SSR render function.
 pub fn compile(source: TemplateSource, options: SsrCompilerOptions) -> SsrCompileResult {
     let mut options = options;
     normalize_public_ssr_compile_options(&mut options);
@@ -124,6 +152,7 @@ fn generate_mir_ssr(ast: &Vue3Ast, options: &SsrCompilerOptions) -> CodegenResul
     generate_vue3_ssr_mir(&lowering.mir, &lowering.js, &options.core)
 }
 
+/// Summarizes SSR-relevant nodes from a Vue 3 AST node-kind slice.
 pub fn summarize_ssr(nodes: &[&Vue3NodeKind]) -> SsrTransformSummary {
     let mut summary = SsrTransformSummary {
         elements: 0,
