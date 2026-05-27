@@ -201,6 +201,31 @@ function normalizeOptions(options) {
   return options || {};
 }
 
+function vue3BaseCompileTransformOptions(options) {
+  options = options || {};
+  const [, baseDirectiveTransforms] = getBaseTransformPreset(options.prefixIdentifiers);
+  return {
+    ...options,
+    nodeTransforms: [
+      transformVBindShorthand,
+      transformOnce,
+      transformIf,
+      transformFor,
+      ...(options.nodeTransforms || []),
+      ...(options.prefixIdentifiers ? [trackVForSlotScopes] : []),
+      transformExpression,
+      transformSlotOutlet,
+      transformElement,
+      trackSlotScopes,
+      transformText,
+    ],
+    directiveTransforms: {
+      ...baseDirectiveTransforms,
+      ...(options.directiveTransforms || {}),
+    },
+  };
+}
+
 function baseCompile(source) {
   const options = normalizeOptions(arguments[1]);
   validateBaseCompileOptions(options);
@@ -208,7 +233,7 @@ function baseCompile(source) {
   const result = native.baseCompileVue3(template, vue3NativeOptions(options, template));
   if (result && typeof result === 'object' && !result.ast) {
     const ast = baseParse(template, options);
-    transform(ast, options);
+    transform(ast, vue3BaseCompileTransformOptions(options));
     result.ast = ast;
   }
   return result;

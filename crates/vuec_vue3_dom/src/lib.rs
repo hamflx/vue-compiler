@@ -14,8 +14,8 @@ use std::hash::{Hash, Hasher};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use vuec_ast::{
-    HtmlNamespace, NodeId, TemplateAttribute, Vue3Ast, Vue3AstKind, Vue3Element, Vue3ElementType,
-    Vue3ImportItem, Vue3Prop, Vue3Root,
+    HtmlNamespace, NodeId, RuntimeHelper, TemplateAttribute, Vue3Ast, Vue3AstKind, Vue3Element,
+    Vue3ElementType, Vue3ImportItem, Vue3Prop, Vue3Root,
 };
 use vuec_diagnostics::{Diagnostic, Severity};
 use vuec_pass::TransformContext;
@@ -522,6 +522,7 @@ fn compile_parsed_ast(
     let mut ctx = TransformContext::default();
     remove_side_effect_nodes(&mut ast, &mut ctx);
     report_transition_invalid_children(&ast, &mut ctx);
+    transform_transition_children(&mut ast, &mut ctx);
     report_invalid_native_v_model(&ast, &options.core, &mut ctx);
     let mut asset_imports = Vec::<Vue3ImportItem>::new();
     for node_index in 0..ast.nodes.len() {
@@ -581,6 +582,68 @@ fn dom_directive_summary(ast: &Vue3Ast) -> Vec<String> {
             (!summaries.is_empty()).then(|| summaries.join(","))
         })
         .collect()
+}
+
+fn transform_transition_children(ast: &mut Vue3Ast, ctx: &mut TransformContext) {
+    let transition_ids = ast
+        .nodes
+        .iter()
+        .filter_map(|node| match &node.kind {
+            Vue3AstKind::Element(element)
+                if element.tag_type == Vue3ElementType::Component
+                    && matches!(element.tag.as_str(), "Transition" | "transition") =>
+            {
+                Some(node.id)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    for node_id in transition_ids {
+        let had_ignored_comments = ast.node(node_id).is_some_and(|node| {
+            node.children.iter().any(|child_id| {
+                ast.node(*child_id)
+                    .is_some_and(|child| matches!(child.kind, Vue3AstKind::Comment(_)))
+            })
+        });
+        let visible_children = ast
+            .node(node_id)
+            .map(|node| transition_visible_child_ids(ast, &node.children))
+            .unwrap_or_default();
+        if let Some(node) = ast.node_mut(node_id) {
+            node.children = visible_children.clone();
+        }
+        if had_ignored_comments {
+            ctx.add_helper(RuntimeHelper::Vue3CreateCommentVNode);
+        }
+        if transition_single_child_has_v_show(ast, &visible_children) {
+            if let Some(node) = ast.node_mut(node_id) {
+                if let Vue3AstKind::Element(element) = &mut node.kind {
+                    if !element.props.iter().any(|prop| {
+                        matches!(prop, Vue3Prop::Attribute(attr) if attr.name == "persisted")
+                    }) {
+                        element.props.push(Vue3Prop::from(TemplateAttribute {
+                            name: "persisted".into(),
+                            value: None,
+                        }));
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn transition_single_child_has_v_show(ast: &Vue3Ast, children: &[NodeId]) -> bool {
+    let [child_id] = children else {
+        return false;
+    };
+    let Some(child) = ast.node(*child_id) else {
+        return false;
+    };
+    let Vue3AstKind::Element(element) = &child.kind else {
+        return false;
+    };
+    element_has_directive(element, "show")
 }
 
 /// Applies DOM-specific AST normalization in-place.

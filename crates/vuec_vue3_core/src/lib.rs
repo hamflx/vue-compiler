@@ -586,7 +586,7 @@ impl Vue3Dialect {
     /// Runs Vue 3 transform passes over a parsed AST.
     pub fn transform(ast: &mut Vue3Ast, ctx: &mut TransformContext, options: &Vue3CompilerOptions) {
         let root_id = ast.root;
-        let mut helpers = BTreeSet::new();
+        let mut helpers = ctx.helpers.clone();
         let mut components = BTreeSet::new();
         let mut directives = BTreeSet::new();
         let mut has_element = false;
@@ -16556,6 +16556,7 @@ fn vue3_codegen_helpers(
     sort_helpers_by_order(&mut helpers, vue3_helper_order(has_components));
     apply_vue3_memo_helper_order(&mut helpers);
     apply_vue3_plain_child_helper_order(&mut helpers);
+    apply_vue3_transition_helper_order(&mut helpers, &helper_probe);
     apply_vue3_dynamic_event_helper_order(&mut helpers, &helper_probe);
     helpers
 }
@@ -16566,9 +16567,13 @@ fn prune_helpers_to_rendered_code(
     has_components: bool,
 ) -> Vec<RuntimeHelper> {
     let mut pruned = render_helpers_from_code(vue3_helper_order(has_components), helper_probe);
+    let keep_transition_comment_helper = helpers.contains(&RuntimeHelper::Vue3CreateCommentVNode)
+        && helpers.contains(&RuntimeHelper::Vue3Transition)
+        && helper_probe.contains("_Transition");
     let needs_comment_helper = helper_probe.contains("_createCommentVNode(")
         || helper_probe.contains("? (_openBlock()")
-        || helper_probe.contains("? _withMemo(");
+        || helper_probe.contains("? _withMemo(")
+        || keep_transition_comment_helper;
     for helper in helpers {
         if pruned.contains(&helper) {
             continue;
@@ -16682,6 +16687,59 @@ fn apply_vue3_plain_child_helper_order(helpers: &mut Vec<RuntimeHelper>) {
     {
         helpers.clear();
         helpers.extend(plain_child_order);
+    }
+}
+
+fn apply_vue3_transition_helper_order(helpers: &mut Vec<RuntimeHelper>, helper_probe: &str) {
+    if !helpers.contains(&RuntimeHelper::Vue3Transition) {
+        return;
+    }
+    if helpers.contains(&RuntimeHelper::Vue3CreateCommentVNode)
+        && helpers.contains(&RuntimeHelper::Vue3CreateElementVNode)
+        && !helper_probe.contains("_Fragment")
+    {
+        reorder_helpers_by_preference(
+            helpers,
+            &[
+                RuntimeHelper::Vue3CreateCommentVNode,
+                RuntimeHelper::Vue3CreateElementVNode,
+                RuntimeHelper::Vue3Transition,
+                RuntimeHelper::Vue3WithCtx,
+                RuntimeHelper::Vue3OpenBlock,
+                RuntimeHelper::Vue3CreateBlock,
+            ],
+        );
+        return;
+    }
+    if helpers.contains(&RuntimeHelper::Vue3VShow) {
+        reorder_helpers_by_preference(
+            helpers,
+            &[
+                RuntimeHelper::Vue3VShow,
+                RuntimeHelper::Vue3CreateElementVNode,
+                RuntimeHelper::Vue3WithDirectives,
+                RuntimeHelper::Vue3Transition,
+                RuntimeHelper::Vue3WithCtx,
+                RuntimeHelper::Vue3OpenBlock,
+                RuntimeHelper::Vue3CreateBlock,
+            ],
+        );
+        return;
+    }
+    if helper_probe.contains("_Fragment") && helper_probe.contains("_createCommentVNode(") {
+        reorder_helpers_by_preference(
+            helpers,
+            &[
+                RuntimeHelper::Vue3OpenBlock,
+                RuntimeHelper::Vue3CreateElementBlock,
+                RuntimeHelper::Vue3CreateCommentVNode,
+                RuntimeHelper::Vue3CreateElementVNode,
+                RuntimeHelper::Vue3Fragment,
+                RuntimeHelper::Vue3Transition,
+                RuntimeHelper::Vue3WithCtx,
+                RuntimeHelper::Vue3CreateBlock,
+            ],
+        );
     }
 }
 
@@ -17750,7 +17808,9 @@ fn render_node_expr_scoped(
                 )
             )
         }
-        Vue3AstKind::Comment(comment) => format!("/*{}*/", comment.value),
+        Vue3AstKind::Comment(comment) => {
+            format!("_createCommentVNode({})", quote_string(&comment.value))
+        }
         Vue3AstKind::Element(element) => {
             if let Some(for_dir) = directive_by_name(element, "for") {
                 return render_for_node(
@@ -17761,6 +17821,7 @@ fn render_node_expr_scoped(
                 return render_maybe_once_if_chain(
                     ast,
                     &[node_id],
+                    &[Vec::new()],
                     options,
                     mode,
                     scope,
@@ -18876,7 +18937,6 @@ fn render_element_children(
     let child_nodes = children
         .iter()
         .filter_map(|child_id| ast.node(*child_id))
-        .filter(|child| !matches!(child.kind, Vue3AstKind::Comment(_)))
         .collect::<Vec<_>>();
     if options.hoist_static
         && once_children_mode(parent_mode)
@@ -19008,10 +19068,6 @@ fn render_child_sequence(
             index += 1;
             continue;
         };
-        if matches!(child.kind, Vue3AstKind::Comment(_)) {
-            index += 1;
-            continue;
-        }
         if options.hoist_static
             && mode == NodeRenderMode::RootChild
             && is_static_element_tree_for_cache(ast, child)
@@ -19043,6 +19099,8 @@ fn render_child_sequence(
         if let Vue3AstKind::Element(element) = &child.kind {
             if directive_by_name(element, "if").is_some() {
                 let mut branch_ids = vec![child_id];
+                let mut branch_comment_ids: Vec<Vec<vuec_ast::NodeId>> = vec![Vec::new()];
+                let mut pending_comment_ids = Vec::new();
                 index += 1;
                 while index < children.len() {
                     let Some(candidate) = ast.node(children[index]) else {
@@ -19050,12 +19108,14 @@ fn render_child_sequence(
                         continue;
                     };
                     if matches!(candidate.kind, Vue3AstKind::Comment(_)) {
+                        pending_comment_ids.push(children[index]);
                         index += 1;
                         continue;
                     }
                     if let Vue3AstKind::Element(candidate_element) = &candidate.kind {
                         if is_else_branch(candidate_element) {
                             branch_ids.push(children[index]);
+                            branch_comment_ids.push(std::mem::take(&mut pending_comment_ids));
                             index += 1;
                             continue;
                         }
@@ -19065,6 +19125,7 @@ fn render_child_sequence(
                 rendered.push(render_maybe_once_if_chain(
                     ast,
                     &branch_ids,
+                    &branch_comment_ids,
                     options,
                     mode,
                     scope,
@@ -19178,6 +19239,7 @@ fn render_text_vnode(
 fn render_if_chain(
     ast: &Vue3Ast,
     branch_ids: &[vuec_ast::NodeId],
+    branch_comment_ids: &[Vec<vuec_ast::NodeId>],
     options: &Vue3CompilerOptions,
     mode: NodeRenderMode,
     scope: &RenderScope,
@@ -19186,6 +19248,7 @@ fn render_if_chain(
     fn render_branch(
         ast: &Vue3Ast,
         branch_ids: &[vuec_ast::NodeId],
+        branch_comment_ids: &[Vec<vuec_ast::NodeId>],
         index: usize,
         options: &Vue3CompilerOptions,
         mode: NodeRenderMode,
@@ -19205,7 +19268,18 @@ fn render_if_chain(
             return render_node_expr_scoped(ast, branch_id, options, mode, scope, memo_index);
         };
         let branch_expr = render_if_branch_expr(
-            ast, branch_id, element, options, mode, scope, index, memo_index,
+            ast,
+            branch_id,
+            element,
+            branch_comment_ids
+                .get(index)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]),
+            options,
+            mode,
+            scope,
+            index,
+            memo_index,
         );
         let condition = if index == 0 {
             directive_by_name(element, "if")
@@ -19217,30 +19291,64 @@ fn render_if_chain(
                 &rewrite_expression_with_scope(&condition.source_string(), options, scope),
                 options,
             );
-            let alternate =
-                render_branch(ast, branch_ids, index + 1, options, mode, scope, memo_index);
+            let next_is_else_if = branch_ids
+                .get(index + 1)
+                .and_then(|branch_id| ast.node(*branch_id))
+                .and_then(|node| match &node.kind {
+                    Vue3AstKind::Element(element) => Some(element),
+                    _ => None,
+                })
+                .is_some_and(|element| directive_by_name(element, "else-if").is_some());
+            let alternate = render_branch(
+                ast,
+                branch_ids,
+                branch_comment_ids,
+                index + 1,
+                options,
+                mode,
+                scope,
+                memo_index,
+            );
             format!(
                 "{condition}\n  ? {}\n  : {}",
                 indent_after_first_line(&branch_expr, 4),
-                indent_after_first_line(&alternate, 4)
+                indent_after_first_line(&alternate, if next_is_else_if { 2 } else { 4 })
             )
         } else {
             branch_expr
         }
     }
-    render_branch(ast, branch_ids, 0, options, mode, scope, memo_index)
+    render_branch(
+        ast,
+        branch_ids,
+        branch_comment_ids,
+        0,
+        options,
+        mode,
+        scope,
+        memo_index,
+    )
 }
 
 fn render_maybe_once_if_chain(
     ast: &Vue3Ast,
     branch_ids: &[vuec_ast::NodeId],
+    branch_comment_ids: &[Vec<vuec_ast::NodeId>],
     options: &Vue3CompilerOptions,
     mode: NodeRenderMode,
     scope: &RenderScope,
     memo_index: &mut MemoIndex,
 ) -> String {
     if scope.in_v_once {
-        return render_if_chain(ast, branch_ids, options, mode, scope, memo_index);
+        return render_if_chain(
+            ast,
+            branch_ids,
+            branch_comment_ids,
+            options,
+            mode,
+            scope,
+            memo_index,
+        );
     }
     let Some(first_element) = branch_ids
         .first()
@@ -19250,10 +19358,26 @@ fn render_maybe_once_if_chain(
             _ => None,
         })
     else {
-        return render_if_chain(ast, branch_ids, options, mode, scope, memo_index);
+        return render_if_chain(
+            ast,
+            branch_ids,
+            branch_comment_ids,
+            options,
+            mode,
+            scope,
+            memo_index,
+        );
     };
     if directive_by_name(first_element, "once").is_none() {
-        return render_if_chain(ast, branch_ids, options, mode, scope, memo_index);
+        return render_if_chain(
+            ast,
+            branch_ids,
+            branch_comment_ids,
+            options,
+            mode,
+            scope,
+            memo_index,
+        );
     }
     let (once_index, scoped) = if directive_by_name(first_element, "memo").is_some() {
         let memo_slot = memo_index.alloc();
@@ -19267,7 +19391,15 @@ fn render_maybe_once_if_chain(
     } else {
         (memo_index.alloc(), scope.with_v_once())
     };
-    let rendered = render_if_chain(ast, branch_ids, options, mode, &scoped, memo_index);
+    let rendered = render_if_chain(
+        ast,
+        branch_ids,
+        branch_comment_ids,
+        options,
+        mode,
+        &scoped,
+        memo_index,
+    );
     render_with_v_once(rendered, once_index)
 }
 
@@ -19275,6 +19407,7 @@ fn render_if_branch_expr(
     ast: &Vue3Ast,
     node_id: vuec_ast::NodeId,
     element: &Vue3Element,
+    leading_comment_ids: &[vuec_ast::NodeId],
     options: &Vue3CompilerOptions,
     _mode: NodeRenderMode,
     scope: &RenderScope,
@@ -19284,10 +19417,47 @@ fn render_if_branch_expr(
     if element.tag == "template" {
         let children = ast
             .node(node_id)
-            .map(|node| render_fragment_children(ast, &node.children, options, scope, memo_index))
+            .map(|node| {
+                render_fragment_children(
+                    ast,
+                    &prefixed_child_ids(leading_comment_ids, &node.children),
+                    options,
+                    scope,
+                    memo_index,
+                )
+            })
             .unwrap_or_else(|| "[]".into());
         return format!(
             "(_openBlock(), _createElementBlock(_Fragment, {{ key: {branch_key} }}, {children}, 64 /* STABLE_FRAGMENT */))"
+        );
+    }
+    if !leading_comment_ids.is_empty() {
+        let mut rendered = leading_comment_ids
+            .iter()
+            .map(|comment_id| {
+                render_node_expr_scoped(
+                    ast,
+                    *comment_id,
+                    options,
+                    NodeRenderMode::Child,
+                    scope,
+                    memo_index,
+                )
+            })
+            .collect::<Vec<_>>();
+        rendered.push(render_maybe_memo_element(
+            ast,
+            node_id,
+            element,
+            options,
+            NodeRenderMode::Child,
+            scope,
+            None,
+            memo_index,
+        ));
+        let children = render_array(&rendered);
+        return format!(
+            "(_openBlock(), _createElementBlock(_Fragment, {{ key: {branch_key} }}, {children}, 2112 /* STABLE_FRAGMENT, DEV_ROOT_FRAGMENT */))"
         );
     }
     render_maybe_memo_element(
@@ -19300,6 +19470,13 @@ fn render_if_branch_expr(
         Some(branch_key),
         memo_index,
     )
+}
+
+fn prefixed_child_ids(
+    prefix: &[vuec_ast::NodeId],
+    children: &[vuec_ast::NodeId],
+) -> Vec<vuec_ast::NodeId> {
+    prefix.iter().chain(children.iter()).copied().collect()
 }
 
 fn render_fragment_children(
@@ -21025,7 +21202,10 @@ fn render_attribute_prop(element: &Vue3Element, attr: &vuec_ast::Vue3Attribute) 
             format!("style: {}", vue3_static_style_object_expr(value))
         }
         Some(value) => format!("{}: {}", json_key(&attr.name), quote_string(value)),
-        None => format!("{}: true", json_key(&attr.name)),
+        None if element.tag_type == Vue3ElementType::Element => {
+            format!("{}: true", json_key(&attr.name))
+        }
+        None => format!("{}: {}", json_key(&attr.name), quote_string("")),
     }
 }
 
@@ -25009,6 +25189,41 @@ mod tests {
             .static_attrs
             .iter()
             .all(|attr| attr.name != "persisted"));
+    }
+
+    #[test]
+    fn lower_vue3_ast_to_dom_mir_projects_lowercase_transition_persisted_prop() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<transition><div v-show="ok"/></transition>"#.into(),
+            file_id: FileId(71),
+            base_offset: 0,
+        };
+        let mut options = Vue3CompilerOptions::default();
+        options.built_in_components = vec!["transition".into()];
+        let ast = Vue3Dialect::base_parse(source, &options);
+        let result = lower_vue3_ast_to_dom_mir(&ast, &options);
+
+        assert_eq!(result.hir.validate_tree(), Ok(()));
+        assert_eq!(result.mir.validate_tree(), Ok(()));
+        let transition = result
+            .mir
+            .nodes
+            .iter()
+            .find_map(|node| match &node.kind {
+                Vue3DomMirKind::VNodeCall(call)
+                    if call.tag == Vue3DomTag::RuntimeHelper(RuntimeHelper::Vue3Transition) =>
+                {
+                    Some(call)
+                }
+                _ => None,
+            })
+            .expect("transition");
+        assert!(transition
+            .props
+            .static_attrs
+            .iter()
+            .any(|attr| attr.name == "persisted" && attr.value.is_empty()));
     }
 
     #[test]
