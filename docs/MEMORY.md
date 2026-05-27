@@ -1,5 +1,10 @@
 # Memory
 
+- Current round: completed the M19 SFC descriptor-cache / incremental invalidation slice.
+- Added an in-memory SFC descriptor cache inside `vuec_sfc::SfcCompiler`, keyed by filename, source hash, and parse mode. Repeated same-file/same-source parses reuse the descriptor; same-file changed-source parses invalidate stale entries before rebuilding the descriptor. Cache stats expose descriptor hits, misses, and invalidations for tests and gates.
+- Added `cargo xtask verify-incremental`, which verifies same-file unchanged input hits the SFC descriptor cache, changed same-file input invalidates it, and the Vue 2.7 parse mode has its own cache hit path. This gate calls `vuec_sfc` public APIs directly; no compiler semantics were moved into `xtask/src/compat.rs`, and AST/HIR/MIR structures were not changed.
+- Verification: `cargo fmt --all -- --check`, `cargo check -p vuec_sfc -p xtask`, `cargo test -p vuec_sfc --lib`, `cargo test -p xtask`, `cargo xtask verify-incremental`, and `git diff --check`.
+
 - Current round: completed the first M19 benchmark-report framework slice.
 - Added `cargo xtask bench`, which writes stable benchmark fixtures under `target/bench/fixtures`, runs the real `vuec` CLI benchmark path for Vue 2 template, Vue 3 template, Vue 3 SFC, and Vue 3 SSR cases, and writes `target/bench/bench-report.json` with fixture hashes, git commit/dirty state, OS/arch, Rust/Node/npm/pnpm versions, lock hash, iterations, and per-case timings.
 - The same gate prepares locked official npm compilers from `compat/official-revisions.lock` under `target/bench/official-js` and records official JS compiler timings for the same fixture set. On Windows the xtask program resolver now prefers spawnable `.exe/.cmd/.bat/.com` shims so npm-based probes do not accidentally select non-executable fnm shims.

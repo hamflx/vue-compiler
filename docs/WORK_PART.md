@@ -120,14 +120,16 @@
 - [x] M17 `vuec_wasm` milestone complete against current gates: Node wasm-bindgen, headless Chrome browser, and WASI/wasmtime smoke reports pass separately.
 - [x] M18 CLI verification closure slice, adding `cargo xtask verify-cli` / real-binary smoke coverage for help, Vue 2 template, Vue 3 template + source map, diagnostics, Vue 3 SFC, SSR, parse-sfc, and bench JSON; fixed `vuec --help` to exit successfully.
 - [x] M19 benchmark-report framework slice, adding `cargo xtask bench` with reproducible fixture hashes, git/environment/lock metadata, Rust CLI timings, locked official JS compiler timings, and `target/bench/bench-report.json`.
+- [x] M19 SFC descriptor-cache / incremental invalidation slice, adding `SfcCompiler` descriptor cache stats and `cargo xtask verify-incremental` coverage for unchanged-input reuse and changed-input invalidation.
 
 ## Current Performance / Incremental Slice
 
 - Added the first M19 benchmark framework gate. `cargo xtask bench` writes stable fixtures for Vue 2 template, Vue 3 template, Vue 3 SFC, and Vue 3 SSR under `target/bench/fixtures`, runs the real `vuec` CLI benchmark target for each, and writes `target/bench/bench-report.json`.
 - The report records input bytes/hashes, git commit and dirty state, OS/arch, Rust/Node/npm/pnpm versions, lock hash, iterations, elapsed microseconds, and per-iteration timings.
 - The gate also prepares locked official npm compiler packages under `target/bench/official-js` from `compat/official-revisions.lock` and records official JS compiler timings for the same fixture set. This is benchmark/reporting infrastructure only; it does not change compiler semantics, AST/HIR/MIR structures, cache behavior, or conformance classification.
-- Verification this round: `cargo fmt --all -- --check`, `cargo test -p xtask`, `cargo xtask bench --iterations 1`, and `git diff --check`.
-- Remaining M19 work: arena/string/cache optimization, SFC block cache, parallel compilation, incremental invalidation fixture coverage, memory peak statistics, and conformance-regression proof after optimization.
+- Added an in-memory `vuec_sfc::SfcCompiler` descriptor cache keyed by filename, source hash, and parse mode. `cargo xtask verify-incremental` verifies same-file/same-source descriptor reuse, same-file changed-source invalidation, and Vue 2.7 parse-mode cache reuse.
+- Verification this round: `cargo fmt --all -- --check`, `cargo check -p vuec_sfc -p xtask`, `cargo test -p vuec_sfc --lib`, `cargo test -p xtask`, `cargo xtask verify-incremental`, `cargo xtask bench --iterations 1`, and `git diff --check`.
+- Remaining M19 work: arena/string/AST cache optimization, parallel compilation, memory peak statistics, and conformance-regression proof after optimization.
 
 ## Current Vue 2.7 SFC compileStyle Slice
 

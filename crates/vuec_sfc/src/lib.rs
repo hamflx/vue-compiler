@@ -12,7 +12,9 @@ use oxc_ast::ast::{
 use oxc_span::GetSpan;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet};
+use std::hash::{Hash, Hasher};
 use vuec_codegen::SourceMapArtifact;
 use vuec_diagnostics::{Diagnostic, Severity};
 use vuec_html::{HtmlAttribute, HtmlTokenKind, HtmlTokenizer};
@@ -91,7 +93,7 @@ impl Default for Vue27ParseComponentOptions {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Vue27SfcPad {
     #[default]
     False,
@@ -273,6 +275,54 @@ pub struct Vue27PrefixIdentifiersOptions {
 pub struct SfcCompiler {
     sources: SourceMap,
     js: JsAstStore,
+    descriptor_cache: BTreeMap<SfcCacheKey, SfcDescriptorCacheEntry>,
+    cache_stats: SfcCacheStats,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SfcCacheStats {
+    pub descriptor_hits: u64,
+    pub descriptor_misses: u64,
+    pub descriptor_invalidations: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct SfcCacheKey {
+    filename: String,
+    source_hash: u64,
+    mode: SfcParseCacheMode,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SfcDescriptorCacheEntry {
+    descriptor: SfcDescriptor,
+    vue27_errors: Vec<Vue27SfcParseError>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum SfcParseCacheMode {
+    Raw,
+    Vue27 {
+        pad: Vue27SfcPad,
+        deindent: Option<bool>,
+        output_source_range: bool,
+    },
+}
+
+impl SfcCacheKey {
+    fn new(filename: String, source: &str, mode: SfcParseCacheMode) -> Self {
+        Self {
+            filename,
+            source_hash: source_hash(source),
+            mode,
+        }
+    }
+}
+
+fn source_hash(source: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    source.hash(&mut hasher);
+    hasher.finish()
 }
 
 impl SfcCompiler {
@@ -280,21 +330,38 @@ impl SfcCompiler {
         Self {
             sources: SourceMap::default(),
             js: JsAstStore::new(),
+            descriptor_cache: BTreeMap::new(),
+            cache_stats: SfcCacheStats::default(),
         }
     }
 
     pub fn parse(&mut self, filename: impl Into<String>, source: &str) -> SfcDescriptor {
         let filename = filename.into();
+        let key = SfcCacheKey::new(filename.clone(), source, SfcParseCacheMode::Raw);
+        if let Some(entry) = self.descriptor_cache.get(&key) {
+            self.cache_stats.descriptor_hits += 1;
+            return entry.descriptor.clone();
+        }
+        self.invalidate_stale_descriptor_entries(&filename, &key.mode);
+        self.cache_stats.descriptor_misses += 1;
         let source_file = self.sources.add_file(
             Some(std::path::PathBuf::from(&filename)),
             source.to_string(),
         );
-        descriptor_from_blocks(
+        let descriptor = descriptor_from_blocks(
             filename,
             source,
             source_file,
             extract_sfc_blocks(source, source_file, SfcBlockContentMode::Raw).blocks,
-        )
+        );
+        self.descriptor_cache.insert(
+            key,
+            SfcDescriptorCacheEntry {
+                descriptor: descriptor.clone(),
+                vue27_errors: Vec::new(),
+            },
+        );
+        descriptor
     }
 
     pub fn parse_vue27_component(
@@ -312,6 +379,24 @@ impl SfcCompiler {
         options: Vue27ParseComponentOptions,
     ) -> Vue27ParseComponentResult {
         let filename = filename.into();
+        let mode = SfcParseCacheMode::Vue27 {
+            pad: options.pad.clone(),
+            deindent: options.deindent,
+            output_source_range: options.output_source_range,
+        };
+        let key = SfcCacheKey::new(filename.clone(), source, mode);
+        if let Some(entry) = self.descriptor_cache.get(&key) {
+            self.cache_stats.descriptor_hits += 1;
+            return Vue27ParseComponentResult {
+                descriptor: entry.descriptor.clone(),
+                errors: project_vue27_errors(
+                    entry.vue27_errors.clone(),
+                    options.output_source_range,
+                ),
+            };
+        }
+        self.invalidate_stale_descriptor_entries(&filename, &key.mode);
+        self.cache_stats.descriptor_misses += 1;
         let source_file = self.sources.add_file(
             Some(std::path::PathBuf::from(&filename)),
             source.to_string(),
@@ -322,22 +407,18 @@ impl SfcCompiler {
             SfcBlockContentMode::Vue27 { options: &options },
         );
         let descriptor = descriptor_from_blocks(filename, source, source_file, extracted.blocks);
+        let cached_errors = extracted.errors.clone();
+        self.descriptor_cache.insert(
+            key,
+            SfcDescriptorCacheEntry {
+                descriptor: descriptor.clone(),
+                vue27_errors: cached_errors,
+            },
+        );
 
         Vue27ParseComponentResult {
             descriptor,
-            errors: if options.output_source_range {
-                extracted.errors
-            } else {
-                extracted
-                    .errors
-                    .into_iter()
-                    .map(|error| Vue27SfcParseError {
-                        msg: error.msg,
-                        start: None,
-                        end: None,
-                    })
-                    .collect()
-            },
+            errors: project_vue27_errors(extracted.errors, options.output_source_range),
         }
     }
 
@@ -768,6 +849,22 @@ impl SfcCompiler {
     pub fn js(&self) -> &JsAstStore {
         &self.js
     }
+
+    pub fn cache_stats(&self) -> SfcCacheStats {
+        self.cache_stats.clone()
+    }
+
+    pub fn descriptor_cache_len(&self) -> usize {
+        self.descriptor_cache.len()
+    }
+
+    fn invalidate_stale_descriptor_entries(&mut self, filename: &str, mode: &SfcParseCacheMode) {
+        let before = self.descriptor_cache.len();
+        self.descriptor_cache
+            .retain(|key, _| key.filename != filename || &key.mode != mode);
+        let removed = before.saturating_sub(self.descriptor_cache.len());
+        self.cache_stats.descriptor_invalidations += removed as u64;
+    }
 }
 
 impl Default for SfcCompiler {
@@ -831,6 +928,23 @@ fn descriptor_from_blocks(
     }
 
     descriptor
+}
+
+fn project_vue27_errors(
+    errors: Vec<Vue27SfcParseError>,
+    output_source_range: bool,
+) -> Vec<Vue27SfcParseError> {
+    if output_source_range {
+        return errors;
+    }
+    errors
+        .into_iter()
+        .map(|error| Vue27SfcParseError {
+            msg: error.msg,
+            start: None,
+            end: None,
+        })
+        .collect()
 }
 
 fn extract_sfc_blocks(
@@ -6839,6 +6953,69 @@ mod tests {
         assert!(descriptor.template.is_some());
         assert!(descriptor.script_setup.is_some());
         assert_eq!(descriptor.styles.len(), 1);
+    }
+
+    #[test]
+    fn parse_descriptor_cache_hits_and_invalidates_by_source_hash() {
+        let mut compiler = SfcCompiler::new();
+        let first = compiler.parse("foo.vue", r#"<template><div>{{ a }}</div></template>"#);
+        let second = compiler.parse("foo.vue", r#"<template><div>{{ a }}</div></template>"#);
+        assert_eq!(first, second);
+        assert_eq!(compiler.descriptor_cache_len(), 1);
+        assert_eq!(
+            compiler.cache_stats(),
+            SfcCacheStats {
+                descriptor_hits: 1,
+                descriptor_misses: 1,
+                descriptor_invalidations: 0,
+            }
+        );
+
+        let changed = compiler.parse("foo.vue", r#"<template><span>{{ b }}</span></template>"#);
+        assert_ne!(
+            first.template.as_ref().unwrap().content,
+            changed.template.as_ref().unwrap().content
+        );
+        assert_eq!(compiler.descriptor_cache_len(), 1);
+        assert_eq!(
+            compiler.cache_stats(),
+            SfcCacheStats {
+                descriptor_hits: 1,
+                descriptor_misses: 2,
+                descriptor_invalidations: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn vue27_parse_cache_preserves_error_projection() {
+        let mut compiler = SfcCompiler::new();
+        let source = "<template><div></template>";
+        let options = Vue27ParseComponentOptions {
+            output_source_range: true,
+            ..Vue27ParseComponentOptions::default()
+        };
+        let first =
+            compiler.parse_vue27_component_with_filename("bad.vue", source, options.clone());
+        let second = compiler.parse_vue27_component_with_filename("bad.vue", source, options);
+        assert_eq!(first.errors, second.errors);
+        assert!(second.errors.iter().any(|error| error.start.is_some()));
+
+        let masked = compiler.parse_vue27_component_with_filename(
+            "bad-masked.vue",
+            source,
+            Vue27ParseComponentOptions::default(),
+        );
+        let masked_hit = compiler.parse_vue27_component_with_filename(
+            "bad-masked.vue",
+            source,
+            Vue27ParseComponentOptions::default(),
+        );
+        assert_eq!(masked.errors, masked_hit.errors);
+        assert!(masked_hit
+            .errors
+            .iter()
+            .all(|error| error.start.is_none() && error.end.is_none()));
     }
 
     #[test]

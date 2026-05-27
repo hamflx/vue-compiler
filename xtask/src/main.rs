@@ -102,6 +102,7 @@ enum Command {
     VerifyWasmBrowser,
     VerifyWasmWasi,
     VerifyCli,
+    VerifyIncremental,
     Bench {
         #[arg(long, default_value_t = 10)]
         iterations: usize,
@@ -161,6 +162,7 @@ fn main() -> Result<()> {
         Command::VerifyWasmBrowser => verify_wasm_browser()?,
         Command::VerifyWasmWasi => verify_wasm_wasi()?,
         Command::VerifyCli => verify_cli()?,
+        Command::VerifyIncremental => verify_incremental()?,
         Command::Bench {
             iterations,
             out_dir,
@@ -806,6 +808,38 @@ fn verify_cli() -> Result<compat::JsonReport> {
     )
 }
 
+fn verify_incremental() -> Result<compat::JsonReport> {
+    let mut violations = Vec::new();
+    let mut items = Vec::new();
+
+    match run_incremental_smoke_suite() {
+        Ok(output) => {
+            items.push(compat::ReportItem::new(
+                "sfc-descriptor-cache",
+                compat::ReportStatus::Pass,
+                output,
+                Some(PathBuf::from("crates/vuec_sfc")),
+            ));
+        }
+        Err(err) => {
+            violations.push(format!("SFC incremental cache smoke failed: {err:#}"));
+            items.push(compat::ReportItem::new(
+                "sfc-descriptor-cache",
+                compat::ReportStatus::Fail,
+                format!("{err:#}"),
+                Some(PathBuf::from("crates/vuec_sfc")),
+            ));
+        }
+    }
+
+    Ok(
+        compat::JsonReport::new("verify_incremental", compat::ReportStatus::Pass)
+            .with_items(items)
+            .with_violations(violations)
+            .with_note("verifies SFC descriptor cache reuse for unchanged input and invalidation for changed same-file input; compiler semantics remain in vuec_sfc"),
+    )
+}
+
 fn bench(
     iterations: usize,
     out_dir: &Path,
@@ -1348,6 +1382,88 @@ fn parse_cli_json(label: &str, output: &CliProcessOutput) -> Result<JsonValue> {
     }
     serde_json::from_str(&output.stdout)
         .with_context(|| format!("{label} CLI stdout was not JSON:\n{}", output.stdout))
+}
+
+fn run_incremental_smoke_suite() -> Result<String> {
+    let mut compiler = vuec_sfc::SfcCompiler::new();
+    let source_one = incremental_source("one");
+    let first = compiler.parse("Incremental.vue", &source_one);
+    let second = compiler.parse("Incremental.vue", &source_one);
+    if first != second {
+        anyhow::bail!("SFC descriptor cache returned a different descriptor for unchanged input");
+    }
+    let hit_stats = compiler.cache_stats();
+    if hit_stats.descriptor_hits != 1
+        || hit_stats.descriptor_misses != 1
+        || hit_stats.descriptor_invalidations != 0
+        || compiler.descriptor_cache_len() != 1
+    {
+        anyhow::bail!(
+            "SFC descriptor cache did not record one hit and one miss for unchanged input: {:?}, cache_len={}",
+            hit_stats,
+            compiler.descriptor_cache_len()
+        );
+    }
+
+    let source_two = incremental_source("two");
+    let changed = compiler.parse("Incremental.vue", &source_two);
+    let changed_content = changed
+        .template
+        .as_ref()
+        .map(|template| template.content.as_str())
+        .unwrap_or_default();
+    if !changed_content.contains("two") {
+        anyhow::bail!("SFC descriptor cache did not return changed template content");
+    }
+    let invalidated_stats = compiler.cache_stats();
+    if invalidated_stats.descriptor_hits != 1
+        || invalidated_stats.descriptor_misses != 2
+        || invalidated_stats.descriptor_invalidations != 1
+        || compiler.descriptor_cache_len() != 1
+    {
+        anyhow::bail!(
+            "SFC descriptor cache did not invalidate changed same-file input: {:?}, cache_len={}",
+            invalidated_stats,
+            compiler.descriptor_cache_len()
+        );
+    }
+
+    let source_legacy = incremental_source("legacy");
+    let vue27_first = compiler.parse_vue27_component_with_filename(
+        "IncrementalVue27.vue",
+        &source_legacy,
+        vuec_sfc::Vue27ParseComponentOptions::default(),
+    );
+    let vue27_second = compiler.parse_vue27_component_with_filename(
+        "IncrementalVue27.vue",
+        &source_legacy,
+        vuec_sfc::Vue27ParseComponentOptions::default(),
+    );
+    if vue27_first.descriptor != vue27_second.descriptor {
+        anyhow::bail!("Vue 2.7 SFC descriptor cache returned different descriptors");
+    }
+    let vue27_stats = compiler.cache_stats();
+    if vue27_stats.descriptor_hits != 2 || vue27_stats.descriptor_misses != 3 {
+        anyhow::bail!("Vue 2.7 SFC descriptor cache did not record reuse: {vue27_stats:?}");
+    }
+
+    Ok(json!({
+        "status": "pass",
+        "checks": [
+            "same-file-same-source-hit",
+            "same-file-changed-source-invalidates",
+            "vue27-mode-cache-hit"
+        ],
+        "stats": vue27_stats,
+        "cacheEntries": compiler.descriptor_cache_len(),
+    })
+    .to_string())
+}
+
+fn incremental_source(value: &str) -> String {
+    format!(
+        r#"<template><div>{{{{ {value} }}}}</div></template><script setup>const {value} = "{value}"</script>"#
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
