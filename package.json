@@ -10,6 +10,7 @@
     "test:napi-platform": "cargo xtask verify-napi-platform",
     "test:wasm": "cargo xtask verify-wasm",
     "test:wasm-browser": "cargo xtask verify-wasm-browser",
+    "test:wasm-wasi": "cargo xtask verify-wasm-wasi",
     "conformance": "cargo xtask run-conformance --all"
   }
 }

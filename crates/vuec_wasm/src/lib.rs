@@ -12,24 +12,25 @@ use vuec_vue2::Vue2CompileOptions;
 use vuec_vue3_core::{TemplateSource, Vue3CompilerOptions};
 use vuec_vue3_dom::{apply_dom_parser_defaults, compile as compile_dom, DomCompilerOptions};
 use vuec_vue3_ssr::{compile as compile_ssr, SsrCompilerOptions};
+#[cfg(not(target_os = "wasi"))]
 use wasm_bindgen::prelude::*;
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
 #[global_allocator]
 static WASM_ALLOCATOR: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
 #[wasm_bindgen(start)]
 pub fn init_wasm_runtime() {
     console_error_panic_hook::set_once();
 }
 
-#[wasm_bindgen(js_name = version)]
+#[cfg_attr(not(target_os = "wasi"), wasm_bindgen(js_name = version))]
 pub fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
-#[wasm_bindgen(js_name = compileVue2)]
+#[cfg_attr(not(target_os = "wasi"), wasm_bindgen(js_name = compileVue2))]
 pub fn compile_vue2(template: &str, options_json: Option<String>) -> String {
     wasm_json_boundary(|| {
         let options = parse_options(options_json)?;
@@ -37,7 +38,7 @@ pub fn compile_vue2(template: &str, options_json: Option<String>) -> String {
     })
 }
 
-#[wasm_bindgen(js_name = compileVue3Dom)]
+#[cfg_attr(not(target_os = "wasi"), wasm_bindgen(js_name = compileVue3Dom))]
 pub fn compile_vue3_dom(source: &str, options_json: Option<String>) -> String {
     wasm_json_boundary(|| {
         let options = parse_options(options_json)?;
@@ -54,7 +55,7 @@ pub fn compile_vue3_dom(source: &str, options_json: Option<String>) -> String {
     })
 }
 
-#[wasm_bindgen(js_name = compileVue3Ssr)]
+#[cfg_attr(not(target_os = "wasi"), wasm_bindgen(js_name = compileVue3Ssr))]
 pub fn compile_vue3_ssr(source: &str, options_json: Option<String>) -> String {
     wasm_json_boundary(|| {
         let options = parse_options(options_json)?;
@@ -75,7 +76,7 @@ pub fn compile_vue3_ssr(source: &str, options_json: Option<String>) -> String {
     })
 }
 
-#[wasm_bindgen(js_name = parseSfc)]
+#[cfg_attr(not(target_os = "wasi"), wasm_bindgen(js_name = parseSfc))]
 pub fn parse_sfc(source: &str, options_json: Option<String>) -> String {
     wasm_json_boundary(|| {
         let options = parse_options(options_json)?;
@@ -86,7 +87,7 @@ pub fn parse_sfc(source: &str, options_json: Option<String>) -> String {
     })
 }
 
-#[wasm_bindgen(js_name = compileSfcTemplate)]
+#[cfg_attr(not(target_os = "wasi"), wasm_bindgen(js_name = compileSfcTemplate))]
 pub fn compile_sfc_template(source: &str, options_json: Option<String>) -> String {
     wasm_json_boundary(|| {
         let options = parse_options(options_json)?;
@@ -98,7 +99,7 @@ pub fn compile_sfc_template(source: &str, options_json: Option<String>) -> Strin
     })
 }
 
-#[wasm_bindgen(js_name = compileSfcTemplateSource)]
+#[cfg_attr(not(target_os = "wasi"), wasm_bindgen(js_name = compileSfcTemplateSource))]
 pub fn compile_sfc_template_source(source: &str, options_json: Option<String>) -> String {
     wasm_json_boundary(|| {
         let options = parse_options(options_json)?;
@@ -109,7 +110,7 @@ pub fn compile_sfc_template_source(source: &str, options_json: Option<String>) -
     })
 }
 
-#[wasm_bindgen(js_name = compileSfcScript)]
+#[cfg_attr(not(target_os = "wasi"), wasm_bindgen(js_name = compileSfcScript))]
 pub fn compile_sfc_script(source: &str, options_json: Option<String>) -> String {
     wasm_json_boundary(|| {
         let options = parse_options(options_json)?;
@@ -121,7 +122,7 @@ pub fn compile_sfc_script(source: &str, options_json: Option<String>) -> String 
     })
 }
 
-#[wasm_bindgen(js_name = compileSfcStyle)]
+#[cfg_attr(not(target_os = "wasi"), wasm_bindgen(js_name = compileSfcStyle))]
 pub fn compile_sfc_style(source: &str, options_json: Option<String>) -> String {
     wasm_json_boundary(|| {
         let options = parse_options(options_json)?;

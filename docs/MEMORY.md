@@ -1,5 +1,11 @@
 # Memory
 
+- Current round: completed the M17 WASI smoke slice.
+- Added `crates/vuec_wasm/src/bin/wasi_smoke.rs`, a minimal WASI JSON stdin/stdout runner that dispatches requests to `vuec_wasm` Rust JSON helpers for Vue 2 template, Vue 3 DOM template, and SFC template compilation. It performs I/O and command dispatch only; compiler semantics remain in the Rust compiler crates.
+- Added `cargo xtask verify-wasm-wasi` / `pnpm test:wasm-wasi`. The command builds `vuec_wasm --bin wasi_smoke --target wasm32-wasip1`, runs it with wasmtime, parses stdout JSON, and verifies Vue 2 render, Vue 3 source map, and SFC render output. `vuec_wasm` now keeps wasm-bindgen annotations out of `target_os = "wasi"` so the WASI binary can instantiate directly in wasmtime.
+- M17 is now complete against the current plan gates: Node wasm-bindgen smoke, headless Chrome browser smoke, and WASI/wasmtime smoke all pass through separate xtask reports.
+- Verification: `rustup target add wasm32-wasip1`, `cargo install wasmtime-cli --version 45.0.0`, `cargo fmt --all -- --check`, `cargo check -p vuec_wasm -p xtask`, `cargo check -p vuec_wasm --bin wasi_smoke --target wasm32-wasip1`, and `cargo xtask verify-wasm-wasi`.
+
 - Current round: completed the M17 WASM browser smoke slice.
 - Added `wasm-bindgen-test` browser tests inside `vuec_wasm` for Vue 3 DOM template compile, SFC template compile, and invalid-options error conversion in a real browser wasm target. Added `cargo xtask verify-wasm-browser` / `pnpm test:wasm-browser`, which runs `wasm-pack test --headless --chrome crates/vuec_wasm`.
 - `verify-wasm-browser` writes a temporary webdriver capabilities file under `target/wasm-browser`, pins a real Chrome binary when found, and supports `VUEC_WASM_CHROMEDRIVER` for environments where wasm-pack's downloaded ChromeDriver does not match the installed Chrome.

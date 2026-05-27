@@ -11,8 +11,9 @@ use compat::{
     verify_npm_alias, verify_official_lock, ConformanceArgs, SelectionArgs,
 };
 use serde_json::{json, Value as JsonValue};
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command as ProcessCommand;
+use std::process::{Command as ProcessCommand, Stdio};
 
 #[derive(Parser)]
 #[command(author, version, about)]
@@ -95,6 +96,7 @@ enum Command {
     VerifyNapiPlatform,
     VerifyWasm,
     VerifyWasmBrowser,
+    VerifyWasmWasi,
     SummarizeCompat {
         #[arg(long)]
         locked: bool,
@@ -142,6 +144,7 @@ fn main() -> Result<()> {
         Command::VerifyNapiPlatform => verify_napi_platform()?,
         Command::VerifyWasm => verify_wasm()?,
         Command::VerifyWasmBrowser => verify_wasm_browser()?,
+        Command::VerifyWasmWasi => verify_wasm_wasi()?,
         Command::SummarizeCompat { locked, lock } => summarize_compat(locked, &lock),
     };
     println!("{}", serde_json::to_string_pretty(&report)?);
@@ -714,6 +717,39 @@ fn verify_wasm_browser() -> Result<compat::JsonReport> {
     )
 }
 
+fn verify_wasm_wasi() -> Result<compat::JsonReport> {
+    let mut violations = Vec::new();
+    let mut items = Vec::new();
+    let status = match run_wasi_smoke() {
+        Ok(output) => {
+            items.push(compat::ReportItem::new(
+                "vuec_wasm-wasi-smoke",
+                compat::ReportStatus::Pass,
+                output,
+                Some(PathBuf::from("crates/vuec_wasm/src/bin/wasi_smoke.rs")),
+            ));
+            compat::ReportStatus::Pass
+        }
+        Err(err) => {
+            violations.push(format!("WASI smoke failed: {err:#}"));
+            items.push(compat::ReportItem::new(
+                "vuec_wasm-wasi-smoke",
+                compat::ReportStatus::Fail,
+                format!("{err:#}"),
+                Some(PathBuf::from("crates/vuec_wasm/src/bin/wasi_smoke.rs")),
+            ));
+            compat::ReportStatus::Fail
+        }
+    };
+
+    Ok(
+        compat::JsonReport::new("verify_wasm_wasi", status)
+            .with_items(items)
+            .with_violations(violations)
+            .with_note("builds vuec_wasm's WASI smoke binary for wasm32-wasip1 and runs it with wasmtime; requires rust target wasm32-wasip1 and wasmtime on PATH"),
+    )
+}
+
 fn run_cargo(args: &[&str]) -> Result<String> {
     let output = ProcessCommand::new("cargo")
         .args(args)
@@ -756,6 +792,146 @@ fn run_wasm_pack_browser_test() -> Result<String> {
         );
     }
     Ok(normalize_command_output(&output.stdout, &output.stderr))
+}
+
+fn run_wasi_smoke() -> Result<String> {
+    let installed = installed_rust_targets()?;
+    if !installed.iter().any(|target| target == "wasm32-wasip1") {
+        anyhow::bail!(
+            "rust target wasm32-wasip1 is not installed; run `rustup target add wasm32-wasip1`"
+        );
+    }
+    let wasmtime = resolve_program("wasmtime")?;
+    let output = ProcessCommand::new("cargo")
+        .args([
+            "build",
+            "-p",
+            "vuec_wasm",
+            "--bin",
+            "wasi_smoke",
+            "--target",
+            "wasm32-wasip1",
+        ])
+        .output()
+        .context(
+            "failed to spawn cargo build -p vuec_wasm --bin wasi_smoke --target wasm32-wasip1",
+        )?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "cargo build -p vuec_wasm --bin wasi_smoke --target wasm32-wasip1 exited with {:?}\nstdout:\n{}\nstderr:\n{}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let smoke_path = PathBuf::from("target")
+        .join("wasm32-wasip1")
+        .join("debug")
+        .join("wasi_smoke.wasm");
+    let request = json!({
+        "cases": [
+            {
+                "name": "vue2-template",
+                "command": "compileVue2",
+                "source": "<div>{{ msg }}</div>"
+            },
+            {
+                "name": "vue3-dom",
+                "command": "compileVue3Dom",
+                "source": "<div>{{ msg }}</div>",
+                "options": {
+                    "mode": "module",
+                    "prefixIdentifiers": true,
+                    "sourceMap": true
+                }
+            },
+            {
+                "name": "sfc-template",
+                "command": "compileSfcTemplate",
+                "source": "<template><div>{{ msg }}</div></template>",
+                "options": {
+                    "filename": "Wasi.vue"
+                }
+            }
+        ]
+    });
+    let mut child = ProcessCommand::new(wasmtime)
+        .arg(smoke_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("failed to spawn wasmtime for vuec_wasm WASI smoke")?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(serde_json::to_string(&request)?.as_bytes())
+            .context("failed to write WASI smoke request")?;
+    }
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "wasmtime WASI smoke exited with {:?}\nstdout:\n{}\nstderr:\n{}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    verify_wasi_smoke_output(&stdout)?;
+    Ok(stdout)
+}
+
+fn verify_wasi_smoke_output(stdout: &str) -> Result<()> {
+    let value: JsonValue = serde_json::from_str(stdout.trim())
+        .with_context(|| format!("WASI smoke stdout was not JSON: {stdout}"))?;
+    if value.get("status").and_then(JsonValue::as_str) != Some("pass") {
+        anyhow::bail!("WASI smoke reported non-pass status: {value}");
+    }
+    let vue2 = find_wasi_case(&value, "vue2-template")?;
+    let vue2_render = vue2
+        .get("render")
+        .and_then(JsonValue::as_str)
+        .context("WASI vue2-template result missing render")?;
+    if !vue2_render.contains("_s(msg)") {
+        anyhow::bail!("WASI vue2-template render did not contain _s(msg): {vue2_render}");
+    }
+    let dom = find_wasi_case(&value, "vue3-dom")?;
+    let dom_code = dom
+        .get("code")
+        .and_then(JsonValue::as_str)
+        .context("WASI vue3-dom result missing code")?;
+    if !dom_code.contains("_toDisplayString(_ctx.msg)") {
+        anyhow::bail!("WASI vue3-dom code did not contain _ctx msg display: {dom_code}");
+    }
+    if dom.pointer("/map/version").and_then(JsonValue::as_u64) != Some(3) {
+        anyhow::bail!("WASI vue3-dom source map version was not 3: {dom}");
+    }
+    let sfc = find_wasi_case(&value, "sfc-template")?;
+    let sfc_code = sfc
+        .get("code")
+        .and_then(JsonValue::as_str)
+        .context("WASI sfc-template result missing code")?;
+    if !sfc_code.contains("export function render") {
+        anyhow::bail!("WASI sfc-template code did not contain render export: {sfc_code}");
+    }
+    Ok(())
+}
+
+fn find_wasi_case<'a>(value: &'a JsonValue, name: &str) -> Result<&'a JsonValue> {
+    value
+        .get("cases")
+        .and_then(JsonValue::as_array)
+        .and_then(|cases| {
+            cases.iter().find_map(|case| {
+                if case.get("name").and_then(JsonValue::as_str) == Some(name) {
+                    case.get("result")
+                } else {
+                    None
+                }
+            })
+        })
+        .with_context(|| format!("WASI smoke case `{name}` was not found"))
 }
 
 fn write_wasm_webdriver_config(chrome_binary: Option<&Path>) -> Result<PathBuf> {
