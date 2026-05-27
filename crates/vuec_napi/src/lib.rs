@@ -251,6 +251,11 @@ pub fn call_vue3_core_projection(env: Env, command: String, payload: Unknown) ->
         }
         "vue3.core.transformOn" => vuec_vue3_core::transform_on_projection(&payload),
         "vue3.core.transformModel" => vuec_vue3_core::transform_model_projection(&payload),
+        "vue3.core.trackSlotScopes" => vuec_vue3_core::track_slot_scopes_projection(&payload),
+        "vue3.core.trackVForSlotScopes" => {
+            vuec_vue3_core::track_v_for_slot_scopes_projection(&payload)
+        }
+        "vue3.core.buildSlots" => vuec_vue3_core::build_slots_projection(&payload),
         "vue3.core.transformSlotOutlet" => {
             vuec_vue3_core::transform_slot_outlet_projection(&payload)
         }
