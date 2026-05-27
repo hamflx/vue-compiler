@@ -1,5 +1,9 @@
 # Memory
 
+- Current round: closed the NAPI-backed Vue 2.7 SFC scoped-style default slice.
+- The Vue 2.7 `vue/compiler-sfc` NAPI alias now applies the official `compileStyle` default of `scoped: true` when callers omit the option, while still preserving an explicit `scoped: false`. `vuec_napi` also treats a provided `map` option as a source-map request for style compilation.
+- Focused `cargo xtask run-napi-conformance --suite vue27-sfc` improves from `63/144` to `73/144`; `stylePluginScoped.spec.ts` is now `5/5`, `compileStyle.spec.ts` is `6/10`, and CSS vars coverage improves to `8/13`. This is package/API option projection plus NAPI option parsing; scoped selector rewriting remains in Rust `vuec_style`, and `xtask/src/compat.rs` was not changed.
+
 - Current round: closed the NAPI-backed Vue 2.7 SFC `compileTemplate` asset URL/srcset conformance slice.
 - `vuec_napi` now maps Vue 2.7 SFC `compileTemplate` `transformAssetUrls` and `transformAssetUrlsOptions` into Rust `Vue2SfcAssetUrlTransformOptions`, including default/custom tag maps, `base`, `includeAbsolute`, URI fragments, empty `~`, and `srcset` handling through the existing Rust Vue 2 template compiler path.
 - Focused `cargo xtask run-napi-conformance --suite vue27-sfc` improves from `57/144` to `63/144`; `compileTemplate.spec.ts` is now `9/9`. This is NAPI option parsing/routing only; template asset semantics remain in Rust `vuec_vue2`, and `xtask/src/compat.rs` was not changed.

@@ -38,7 +38,7 @@ function compileScript(descriptor) {
 }
 
 function compileStyle(options) {
-  return normalizeVue27StyleResult(native.compileStyle(options || {}));
+  return normalizeVue27StyleResult(native.compileStyle(vue27StyleOptions(options || {})));
 }
 
 function compileStyleAsync(options) {
@@ -59,6 +59,12 @@ function normalizeVue27StyleResult(result) {
   if (!result || typeof result !== 'object') return result;
   const out = { ...result };
   delete out.dependencies;
+  return out;
+}
+
+function vue27StyleOptions(options) {
+  const out = { ...options };
+  if (!Object.prototype.hasOwnProperty.call(out, 'scoped')) out.scoped = true;
   return out;
 }
 

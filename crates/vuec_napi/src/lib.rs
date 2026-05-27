@@ -1458,11 +1458,12 @@ fn sfc_style_options(value: Option<&Value>) -> SfcStyleCompileOptions {
         "isProd",
         bool_option(value, "is_prod", options.is_prod),
     );
-    options.source_map = bool_option(
-        value,
-        "sourceMap",
-        bool_option(value, "source_map", options.source_map),
-    );
+    options.source_map = value.get("map").is_some_and(|map| !map.is_null())
+        || bool_option(
+            value,
+            "sourceMap",
+            bool_option(value, "source_map", options.source_map),
+        );
     options.preprocess_lang = value
         .get("preprocessLang")
         .or_else(|| value.get("preprocess_lang"))
