@@ -1,5 +1,9 @@
 # Memory
 
+- Current round: closed the NAPI-backed Vue 2.7 compiler codeframe conformance gap.
+- The Vue 2.7 `vue-template-compiler` NAPI alias now keeps the official one-argument `generateCodeFrame.length` API shape while reading optional `start` / `end` from `arguments` and forwarding them to the Rust-backed NAPI codeframe implementation.
+- Focused `cargo xtask run-napi-conformance --suite vue27-compiler` now passes `190/190` official tests. `cargo xtask verify-napi-api` remains `7/7`, confirming the public function arity did not drift. This is package/API adapter argument forwarding only; codeframe formatting remains in Rust, and `xtask/src/compat.rs` was not changed.
+
 - Current round: closed the NAPI-backed Vue 2.6 compiler official conformance warning-emission gap.
 - The NAPI `vue-template-compiler` aliases for Vue 2.6 and Vue 2.7 now emit normalized Rust compile `errors` and `tips` through `console.error` for `compile`, `compileToFunctions`, `ssrCompile`, and `ssrCompileToFunctions`, matching the official package warning side effect while preserving `__vuecSuppressWarnings` for prepared internal probes.
 - Focused `cargo xtask run-napi-conformance --suite vue2-compiler` now passes `188/188` official tests through the NAPI-backed official package-name alias. This is package/API adapter warning emission at the NAPI boundary; compiler diagnostics and parser semantics remain in Rust `vuec_vue2`, with no `xtask/src/compat.rs` changes.

@@ -33,7 +33,9 @@ function parseComponent(source) {
 }
 
 function generateCodeFrame(source) {
-  return native.generateCodeFrameVue2(String(source || ''), 0, String(source || '').length);
+  const start = arguments.length > 1 ? arguments[1] : 0;
+  const end = arguments.length > 2 ? arguments[2] : start;
+  return native.generateCodeFrameVue2(String(source || ''), start || 0, end || start || 0);
 }
 
 function callBridge(command, payload) {
