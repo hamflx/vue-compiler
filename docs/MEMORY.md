@@ -1,5 +1,9 @@
 # Memory
 
+- Current round: closed the NAPI-backed Vue 2.6 compiler official conformance warning-emission gap.
+- The NAPI `vue-template-compiler` aliases for Vue 2.6 and Vue 2.7 now emit normalized Rust compile `errors` and `tips` through `console.error` for `compile`, `compileToFunctions`, `ssrCompile`, and `ssrCompileToFunctions`, matching the official package warning side effect while preserving `__vuecSuppressWarnings` for prepared internal probes.
+- Focused `cargo xtask run-napi-conformance --suite vue2-compiler` now passes `188/188` official tests through the NAPI-backed official package-name alias. This is package/API adapter warning emission at the NAPI boundary; compiler diagnostics and parser semantics remain in Rust `vuec_vue2`, with no `xtask/src/compat.rs` changes.
+
 - Current round: improved the NAPI-backed Vue 2.6 official conformance runner path.
 - `vuec_napi` now exposes `callVue2Bridge` for Vue 2 official source-test bridge operations (`vue2.generate`, `vue2.optimize`, and `vue2.generateCodeFrame`) while still executing semantics in Rust `vuec_vue2`. The `@vuec-rs/native` loader JSON-dehydrates payloads/options before crossing NAPI, and the NAPI `vue-template-compiler` aliases expose a non-enumerable `__vuecRuntime.callBridge` only for prepared official source shims.
 - NAPI Vue 2 compile results now include the official public element AST compatibility fields (`ast`, `ast_public`, `element_public_ast`, `element_ast`) needed by prepared parser/optimizer/codegen tests. Focused `cargo xtask run-napi-conformance --suite vue2-compiler` moved from `14/188` to `159/188`; codeframe, codegen, compiler-options, and optimizer files pass, with the remaining `29` failures isolated to Vue 2 parser warning parity. This is NAPI runner/package support and public projection work, not a JavaScript semantic shim.

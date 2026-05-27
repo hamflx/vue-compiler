@@ -3,21 +3,29 @@
 const native = require('@vuec-rs/native');
 
 function compile(template, options) {
-  return normalizeVue2PublicCompileResult(native.compileVue2(String(template || ''), options || {}), options || {});
+  const result = normalizeVue2PublicCompileResult(native.compileVue2(String(template || ''), options || {}), options || {});
+  emitVue2CompileWarnings(result, options || {});
+  return result;
 }
 
 function compileToFunctions(template, options, vm) {
   void vm;
-  return normalizeVue2PublicCompileResult(native.compileToFunctionsVue2(String(template || ''), options || {}), options || {});
+  const result = normalizeVue2PublicCompileResult(native.compileToFunctionsVue2(String(template || ''), options || {}), options || {});
+  emitVue2CompileWarnings(result, options || {});
+  return result;
 }
 
 const ssrCompile = function compile(template, options) {
-  return normalizeVue2PublicCompileResult(native.compileSsrVue2(String(template || ''), options || {}), options || {});
+  const result = normalizeVue2PublicCompileResult(native.compileSsrVue2(String(template || ''), options || {}), options || {});
+  emitVue2CompileWarnings(result, options || {});
+  return result;
 };
 
 const ssrCompileToFunctions = function compileToFunctions(template, options, vm) {
   void vm;
-  return normalizeVue2PublicCompileResult(native.compileSsrVue2(String(template || ''), options || {}), options || {});
+  const result = normalizeVue2PublicCompileResult(native.compileSsrVue2(String(template || ''), options || {}), options || {});
+  emitVue2CompileWarnings(result, options || {});
+  return result;
 };
 
 function parseComponent(source, options) {
@@ -59,6 +67,22 @@ function normalizeIssues(issues, ranged) {
     if (issue.end != null) out.end = issue.end;
     return out;
   });
+}
+
+function emitVue2CompileWarnings(result, options) {
+  const suppressed = options && options.__vuecSuppressWarnings;
+  if (suppressed === true || !result || typeof result !== 'object') return;
+  const suppressedMessages = Array.isArray(suppressed) ? suppressed.map(String) : [];
+  for (const warning of [...(result.errors || []), ...(result.tips || [])]) {
+    const message = typeof warning === 'string'
+      ? warning
+      : warning && typeof warning.msg === 'string'
+        ? warning.msg
+        : null;
+    if (message == null) continue;
+    if (suppressedMessages.some(suppressedMessage => message.includes(suppressedMessage))) continue;
+    console.error(message);
+  }
 }
 
 const api = {
