@@ -3801,7 +3801,7 @@ fn vue3_ssr_template_children_need_fragment(ast: &Vue3Ast, children: &[NodeId]) 
     let Vue3AstKind::Element(element) = &child.kind else {
         return true;
     };
-    element.tag_type == Vue3ElementType::Template || directive_by_name(element, "for").is_some()
+    element.tag_type == Vue3ElementType::Template
 }
 
 fn lower_vue3_builtin_component_to_ssr_mir(
@@ -14779,9 +14779,59 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                 index = next_index;
                 continue;
             }
+            if let Some(next_index) = self.render_ssr_element_with_single_for_child(
+                children,
+                index,
+                scope,
+                scope_id_expr,
+                current_root_attrs,
+                writer,
+            ) {
+                index = next_index;
+                continue;
+            }
             self.render_node(children[index], scope, current_root_attrs, writer);
             index += 1;
         }
+    }
+
+    fn render_ssr_element_with_single_for_child(
+        &self,
+        children: &[NodeId],
+        index: usize,
+        scope: &RenderScope,
+        scope_id_expr: Option<&str>,
+        root_attrs: Option<&SsrRootAttrs>,
+        writer: &mut CodeWriter,
+    ) -> Option<usize> {
+        if scope_id_expr.is_some() || root_attrs.is_some() {
+            return None;
+        }
+        let open_start = self.ssr_push_string(*children.get(index)?)?;
+        parse_ssr_open_tag_start(open_start)?;
+        let open_end = index + 1;
+        if self.ssr_push_string(*children.get(open_end)?)? != ">" {
+            return None;
+        }
+        let (_, end_index) = self.collect_ssr_static_element_span(children, index)?;
+        let close_index = end_index.checked_sub(1)?;
+        let [for_id] = children.get(open_end + 1..close_index)? else {
+            return None;
+        };
+        let Some(Vue3SsrMirKind::For(for_mir)) = self.mir.node(*for_id).map(|node| &node.kind)
+        else {
+            return None;
+        };
+        let close = self.ssr_push_string(*children.get(close_index)?)?;
+        let open = render_ssr_template_literal(&[SsrTemplatePart::Static(format!(
+            "{open_start}><!--[-->"
+        ))]);
+        writer.push_line(&format!("_push({open})"));
+        self.render_for_list(*for_id, for_mir, scope, writer);
+        let close =
+            render_ssr_template_literal(&[SsrTemplatePart::Static(format!("<!--]-->{close}"))]);
+        writer.push_line(&format!("_push({close})"));
+        Some(end_index)
     }
 
     fn render_ssr_template_literal_slice(
@@ -16204,6 +16254,18 @@ impl<'a> Vue3SsrMirCodegen<'a> {
     }
 
     fn render_for(
+        &self,
+        node_id: NodeId,
+        for_mir: &Vue3SsrFor,
+        scope: &RenderScope,
+        writer: &mut CodeWriter,
+    ) {
+        writer.push_line("_push(`<!--[-->`)");
+        self.render_for_list(node_id, for_mir, scope, writer);
+        writer.push_line("_push(`<!--]-->`)");
+    }
+
+    fn render_for_list(
         &self,
         node_id: NodeId,
         for_mir: &Vue3SsrFor,
@@ -29774,6 +29836,45 @@ mod tests {
         assert!(!generated.code.contains("_ctx.key"));
         assert!(!generated.code.contains("_ctx.index"));
         assert!(!generated.code.contains("_ctx.item"));
+    }
+
+    #[test]
+    fn generate_vue3_ssr_mir_wraps_v_for_fragments_from_mir() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div v-for="row, i in list"><div v-for="j in row">{{ i }},{{ j }}</div></div><template v-for="item in items"><span>{{ item }}</span></template>"#.into(),
+            file_id: FileId(85),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_ssr_mir(&ast, &Vue3CompilerOptions::default());
+        let generated = generate_vue3_ssr_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated
+            .code
+            .contains("_push(`<!--[-->`)\n  _ssrRenderList(_ctx.list, (row, i) => {"));
+        assert!(generated
+            .code
+            .contains("_push(`<div><!--[-->`)\n    _ssrRenderList(row, (j) => {"));
+        assert!(generated.code.contains("_push(`<!--]--></div>`)"));
+        assert!(generated
+            .code
+            .contains("_push(`<!--[-->`)\n  _ssrRenderList(_ctx.items, (item) => {"));
+        assert!(generated
+            .code
+            .contains("_push(`<span>${_ssrInterpolate(item)}</span>`)"));
+        assert!(!generated.code.contains("<template"));
+        assert!(!generated.code.contains("_ctx.row"));
+        assert!(!generated.code.contains("_ctx.j"));
+        assert!(!generated.code.contains("_ssrInterpolate(_ctx.item)"));
     }
 
     #[test]
