@@ -1,5 +1,10 @@
 # Memory
 
+- Current round: completed the M20 JavaScript side-store public API docs slice.
+- Added rustdoc coverage and crate-level `#![deny(missing_docs)]` for `vuec_js`, covering parse modes/source types, interned source entries, interner stats, parsed params/`v-for` result shapes, parse errors, program summaries, `JsAstStore` registration/lookup/parse APIs, and `JsParseResult`.
+- Extended `cargo xtask verify-public-api-docs` to cover eight crates: `vuec_source`, `vuec_diagnostics`, `vuec_codegen`, `vuec_html`, `vuec_js`, `vuec_pass`, `vuec_style`, and `vuec_vue3_asset`. This remains partial public API documentation progress; the global M20 "every public API has docs" criterion stays open until the remaining public crates and bindings are covered.
+- Verification: `cargo fmt --all -- --check`, `cargo test -p vuec_js -p xtask`, and `cargo xtask verify-public-api-docs`. This was documentation/gate coverage only; it did not change compiler semantics, `xtask/src/compat.rs`, conformance classification, or AST/HIR/MIR structures.
+
 - Current round: completed the M20 template-support public API docs slice.
 - Added rustdoc coverage and crate-level `#![deny(missing_docs)]` for `vuec_html`, `vuec_pass`, `vuec_style`, and `vuec_vue3_asset`, covering tokenizer tokens/spans, transform pass scheduling/walking, style compile/scoped/CSS-var APIs, and Vue 3 asset URL transform APIs.
 - Extended `cargo xtask verify-public-api-docs` to cover seven crates: `vuec_source`, `vuec_diagnostics`, `vuec_codegen`, `vuec_html`, `vuec_pass`, `vuec_style`, and `vuec_vue3_asset`. This remains partial public API documentation progress; the global M20 "every public API has docs" criterion stays open until the remaining public crates and bindings are covered.

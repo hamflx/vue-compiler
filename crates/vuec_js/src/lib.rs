@@ -1,3 +1,10 @@
+//! JavaScript parsing and side-store support for Vue compiler ASTs.
+//!
+//! Vue AST/HIR/MIR nodes store JavaScript handles instead of embedding parser
+//! trees directly. This crate owns the source registry, Oxc parser entry
+//! points, and small summary helpers used by SFC and template compilation.
+
+#![deny(missing_docs)]
 #![forbid(unsafe_code)]
 
 use oxc_allocator::Allocator;
@@ -17,29 +24,46 @@ use thiserror::Error;
 use vuec_ast::{JsExprId, JsPatternId, JsProgramId, JsStmtId};
 use vuec_source::Span;
 
+/// Parsing modes used for registered JavaScript snippets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum JsParseMode {
+    /// Parse a single JavaScript expression.
     Expression,
+    /// Parse one or more JavaScript statements.
     Statements,
+    /// Parse a comma-separated parameter or binding pattern list.
     Params,
+    /// Parse a Vue `v-for` expression with aliases and iterable.
     ForExpression,
+    /// Parse a JavaScript module program.
     ScriptModule,
+    /// Parse a classic script program.
     ScriptClassic,
+    /// Parse a TypeScript program.
     TypeScript,
 }
 
+/// Serializable representation of an Oxc [`SourceType`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum JsSourceType {
+    /// Classic JavaScript script source.
     Script,
+    /// ECMAScript module source.
     Module,
+    /// CommonJS source.
     CommonJs,
+    /// Oxc unambiguous source detection.
     Unambiguous,
+    /// JavaScript source with JSX enabled.
     Jsx,
+    /// TypeScript source.
     TypeScript,
+    /// TypeScript source with JSX enabled.
     Tsx,
 }
 
 impl JsSourceType {
+    /// Converts an Oxc source type into the serializable Vue compiler form.
     pub fn from_oxc(source_type: SourceType) -> Self {
         if source_type.is_typescript() {
             if source_type.is_jsx() {
@@ -60,6 +84,7 @@ impl JsSourceType {
         }
     }
 
+    /// Converts this value back to an Oxc source type.
     pub fn to_oxc(self) -> SourceType {
         match self {
             Self::Script => SourceType::script(),
@@ -73,26 +98,35 @@ impl JsSourceType {
     }
 }
 
+/// Registered JavaScript source plus span and parse metadata.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JsEntry {
+    /// Interned source text.
     pub source: JsSource,
+    /// Source span in the owning Vue file.
     pub span: Span,
+    /// Parse mode used for this entry.
     pub mode: JsParseMode,
+    /// Source type used for Oxc parsing.
     pub source_type: JsSourceType,
 }
 
+/// Interned JavaScript source text.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialOrd)]
 pub struct JsSource(Arc<str>);
 
 impl JsSource {
+    /// Returns the source text as a string slice.
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
+    /// Returns whether two sources share the same interned allocation.
     pub fn ptr_eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }
 
+    /// Returns the current strong reference count for the interned source.
     pub fn strong_count(&self) -> usize {
         Arc::strong_count(&self.0)
     }
@@ -208,27 +242,40 @@ impl<'de> Deserialize<'de> for JsSource {
     }
 }
 
+/// Statistics for the JavaScript source interner.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JsStringInternerStats {
+    /// Number of source interning hits.
     pub hits: usize,
+    /// Number of source interning misses.
     pub misses: usize,
+    /// Number of unique interned source strings.
     pub entries: usize,
 }
 
+/// Parsed parameter list used by Vue directive aliases and slot params.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ParsedParams<'a> {
+    /// Original parameter-list source text.
     pub raw: &'a str,
+    /// Top-level comma-separated items.
     pub items: Vec<&'a str>,
 }
 
+/// Parsed Vue `v-for` expression.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ParsedForExpression<'a> {
+    /// Original `v-for` expression source text.
     pub raw: &'a str,
+    /// Alias side before the `in` or `of` separator.
     pub aliases: &'a str,
+    /// Iterable expression after the `in` or `of` separator.
     pub iterable: &'a str,
+    /// Top-level comma-separated alias items.
     pub items: Vec<&'a str>,
 }
 
+/// Error returned by JavaScript parsing helpers.
 #[derive(Debug, Error)]
 #[error("{message}")]
 pub struct JsParseError {
@@ -248,20 +295,28 @@ impl JsParseError {
         }
     }
 
+    /// Returns the formatted parser error message.
     pub fn message(&self) -> &str {
         &self.message
     }
 }
 
+/// Lightweight summary of declarations, imports, exports, and parser errors.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JsProgramSummary {
+    /// Top-level binding names discovered in the program.
     pub bindings: Vec<String>,
+    /// Import source strings discovered in the program.
     pub imports: Vec<String>,
+    /// Export names discovered in the program.
     pub exports: Vec<String>,
+    /// Oxc parser errors rendered as strings.
     pub errors: Vec<String>,
+    /// Whether Oxc reported a parser panic.
     pub panicked: bool,
 }
 
+/// Registry for JavaScript snippets referenced by AST/HIR/MIR nodes.
 pub struct JsAstStore {
     allocator: Allocator,
     sources: BTreeMap<String, Arc<str>>,
@@ -274,6 +329,7 @@ pub struct JsAstStore {
 }
 
 impl JsAstStore {
+    /// Creates an empty JavaScript AST store.
     pub fn new() -> Self {
         Self {
             allocator: Allocator::default(),
@@ -287,6 +343,7 @@ impl JsAstStore {
         }
     }
 
+    /// Registers a JavaScript expression and returns its stable expression id.
     pub fn register_expr(
         &mut self,
         source: impl Into<String>,
@@ -296,6 +353,7 @@ impl JsAstStore {
         self.push_expr(source, span, JsParseMode::Expression, source_type)
     }
 
+    /// Registers a Vue `v-for` expression and returns its stable expression id.
     pub fn register_for_expression(
         &mut self,
         source: impl Into<String>,
@@ -305,6 +363,7 @@ impl JsAstStore {
         self.push_expr(source, span, JsParseMode::ForExpression, source_type)
     }
 
+    /// Registers JavaScript statement source and returns its stable statement id.
     pub fn register_stmt(
         &mut self,
         source: impl Into<String>,
@@ -322,6 +381,7 @@ impl JsAstStore {
         id
     }
 
+    /// Registers a parameter or binding pattern list and returns its stable id.
     pub fn register_pattern(
         &mut self,
         source: impl Into<String>,
@@ -339,6 +399,7 @@ impl JsAstStore {
         id
     }
 
+    /// Registers a full JavaScript or TypeScript program and returns its id.
     pub fn register_program(
         &mut self,
         source: impl Into<String>,
@@ -375,6 +436,7 @@ impl JsAstStore {
         id
     }
 
+    /// Returns source interning statistics for registered entries.
     pub fn string_interner_stats(&self) -> JsStringInternerStats {
         JsStringInternerStats {
             hits: self.interner_hits,
@@ -383,6 +445,7 @@ impl JsAstStore {
         }
     }
 
+    /// Returns whether two entries share the same interned source allocation.
     pub fn interned_source_ptr_eq(&self, left: &JsEntry, right: &JsEntry) -> bool {
         left.source.ptr_eq(&right.source)
     }
@@ -399,38 +462,47 @@ impl JsAstStore {
         JsSource::from(interned)
     }
 
+    /// Looks up a registered expression entry.
     pub fn expr_entry(&self, id: JsExprId) -> Option<&JsEntry> {
         self.expressions.get(id.0 as usize)
     }
 
+    /// Looks up a registered statement entry.
     pub fn stmt_entry(&self, id: JsStmtId) -> Option<&JsEntry> {
         self.statements.get(id.0 as usize)
     }
 
+    /// Looks up a registered pattern entry.
     pub fn pattern_entry(&self, id: JsPatternId) -> Option<&JsEntry> {
         self.patterns.get(id.0 as usize)
     }
 
+    /// Looks up a registered program entry.
     pub fn program_entry(&self, id: JsProgramId) -> Option<&JsEntry> {
         self.programs.get(id.0 as usize)
     }
 
+    /// Returns all registered expression entries.
     pub fn expressions(&self) -> &[JsEntry] {
         &self.expressions
     }
 
+    /// Returns all registered statement entries.
     pub fn statements(&self) -> &[JsEntry] {
         &self.statements
     }
 
+    /// Returns all registered pattern entries.
     pub fn patterns(&self) -> &[JsEntry] {
         &self.patterns
     }
 
+    /// Returns all registered program entries.
     pub fn programs(&self) -> &[JsEntry] {
         &self.programs
     }
 
+    /// Parses a full program with Oxc and returns the raw parser result.
     pub fn parse_program<'a>(
         &'a self,
         source_text: &'a str,
@@ -444,6 +516,7 @@ impl JsAstStore {
             .parse()
     }
 
+    /// Parses a single JavaScript expression with Oxc.
     pub fn parse_expression<'a>(
         &'a self,
         source_text: &'a str,
@@ -462,6 +535,7 @@ impl JsAstStore {
             })
     }
 
+    /// Parses a registered expression by id.
     pub fn parse_expr(&self, id: JsExprId) -> Result<Expression<'_>, JsParseError> {
         let entry = self
             .expr_entry(id)
@@ -482,6 +556,7 @@ impl JsAstStore {
         }
     }
 
+    /// Parses a registered statement by id.
     pub fn parse_stmt(&self, id: JsStmtId) -> Result<Statement<'_>, JsParseError> {
         let entry = self
             .stmt_entry(id)
@@ -498,6 +573,7 @@ impl JsAstStore {
         Ok(body.pop().expect("checked one statement"))
     }
 
+    /// Parses a registered parameter or binding pattern list by id.
     pub fn parse_pattern(&self, id: JsPatternId) -> Result<ParsedParams<'_>, JsParseError> {
         let entry = self
             .pattern_entry(id)
@@ -505,6 +581,7 @@ impl JsAstStore {
         self.parse_params(&entry.source)
     }
 
+    /// Parses a registered program by id.
     pub fn parse_registered_program(
         &self,
         id: JsProgramId,
@@ -529,6 +606,7 @@ impl JsAstStore {
         Ok(ret)
     }
 
+    /// Parses source text according to a Vue compiler parse mode.
     pub fn parse_mode<'a>(
         &'a self,
         source_text: &'a str,
@@ -552,6 +630,7 @@ impl JsAstStore {
         }
     }
 
+    /// Parses a parameter or binding pattern list.
     pub fn parse_params<'a>(
         &'a self,
         source_text: &'a str,
@@ -570,6 +649,7 @@ impl JsAstStore {
         })
     }
 
+    /// Parses a Vue `v-for` expression and validates its iterable expression.
     pub fn parse_for_expression<'a>(
         &'a self,
         source_text: &'a str,
@@ -588,6 +668,7 @@ impl JsAstStore {
         })
     }
 
+    /// Summarizes top-level program bindings, imports, exports, and parse errors.
     pub fn summarize_program(
         &self,
         source_text: &str,
@@ -618,10 +699,15 @@ impl Default for JsAstStore {
     }
 }
 
+/// Result of parsing source through a selected [`JsParseMode`].
 pub enum JsParseResult<'a> {
+    /// Parsed program result.
     Program(ParserReturn<'a>),
+    /// Parsed expression node.
     Expression(Expression<'a>),
+    /// Parsed parameter list.
     Params(ParsedParams<'a>),
+    /// Parsed Vue `v-for` expression.
     ForExpression(ParsedForExpression<'a>),
 }
 

@@ -1258,6 +1258,7 @@ fn verify_public_api_docs() -> Result<compat::JsonReport> {
         "vuec_diagnostics",
         "vuec_codegen",
         "vuec_html",
+        "vuec_js",
         "vuec_pass",
         "vuec_style",
         "vuec_vue3_asset",
