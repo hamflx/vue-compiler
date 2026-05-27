@@ -110,6 +110,7 @@ enum Command {
     VerifyArena,
     VerifyStringInterning,
     VerifyReleaseDocs,
+    VerifyCrateMetadata,
     Bench {
         #[arg(long, default_value_t = 10)]
         iterations: usize,
@@ -175,6 +176,7 @@ fn main() -> Result<()> {
         Command::VerifyArena => verify_arena()?,
         Command::VerifyStringInterning => verify_string_interning()?,
         Command::VerifyReleaseDocs => verify_release_docs()?,
+        Command::VerifyCrateMetadata => verify_crate_metadata()?,
         Command::Bench {
             iterations,
             out_dir,
@@ -1131,6 +1133,161 @@ fn package_files_array_includes_readme(manifest_path: &Path) -> Result<bool> {
         .iter()
         .filter_map(JsonValue::as_str)
         .any(|entry| entry == "README.md" || entry == "./README.md"))
+}
+
+fn verify_crate_metadata() -> Result<compat::JsonReport> {
+    let metadata = cargo_metadata_json()?;
+    let packages = metadata
+        .get("packages")
+        .and_then(JsonValue::as_array)
+        .context("cargo metadata output did not include packages array")?;
+    let mut items = Vec::new();
+    let mut violations = Vec::new();
+
+    for package in packages {
+        let name = package
+            .get("name")
+            .and_then(JsonValue::as_str)
+            .unwrap_or("<unknown>");
+        let manifest_path = package
+            .get("manifest_path")
+            .and_then(JsonValue::as_str)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("<unknown>"));
+        let publishable = package_is_publishable(package);
+        let mut package_violations = Vec::new();
+
+        for field in [
+            "description",
+            "repository",
+            "homepage",
+            "documentation",
+            "readme",
+        ] {
+            if package
+                .get(field)
+                .and_then(JsonValue::as_str)
+                .is_none_or(str::is_empty)
+            {
+                package_violations.push(format!("{name} missing package.{field}"));
+            }
+        }
+        if package
+            .get("license")
+            .and_then(JsonValue::as_str)
+            .is_none_or(str::is_empty)
+        {
+            package_violations.push(format!("{name} missing package.license"));
+        }
+        if package
+            .get("keywords")
+            .and_then(JsonValue::as_array)
+            .is_none_or(|array| array.is_empty())
+        {
+            package_violations.push(format!("{name} missing package.keywords"));
+        }
+        if package
+            .get("categories")
+            .and_then(JsonValue::as_array)
+            .is_none_or(|array| array.is_empty())
+        {
+            package_violations.push(format!("{name} missing package.categories"));
+        }
+
+        if let Some(readme) = package.get("readme").and_then(JsonValue::as_str) {
+            let readme_path = manifest_path
+                .parent()
+                .map(|path| path.join(readme))
+                .unwrap_or_else(|| PathBuf::from(readme));
+            if let Err(err) = require_non_empty_file(&readme_path) {
+                package_violations.push(format!("{err:#}"));
+            }
+        }
+
+        if publishable {
+            for dependency in package
+                .get("dependencies")
+                .and_then(JsonValue::as_array)
+                .into_iter()
+                .flatten()
+                .filter(|dependency| dependency.get("path").is_some())
+            {
+                let dep_name = dependency
+                    .get("name")
+                    .and_then(JsonValue::as_str)
+                    .unwrap_or("<unknown>");
+                let version_req = dependency
+                    .get("req")
+                    .and_then(JsonValue::as_str)
+                    .unwrap_or("*");
+                if version_req == "*" {
+                    package_violations.push(format!(
+                        "{name} path dependency {dep_name} must include a crates.io version requirement"
+                    ));
+                }
+            }
+        }
+
+        let status = if package_violations.is_empty() {
+            compat::ReportStatus::Pass
+        } else {
+            violations.extend(package_violations.iter().cloned());
+            compat::ReportStatus::Fail
+        };
+        let detail = if package_violations.is_empty() {
+            if publishable {
+                "crate metadata is publish-ready; path dependencies include version requirements"
+                    .into()
+            } else {
+                "internal crate metadata is present and publish=false".into()
+            }
+        } else {
+            package_violations.join("; ")
+        };
+        items.push(compat::ReportItem::new(
+            format!("crate:{name}"),
+            status,
+            detail,
+            Some(manifest_path),
+        ));
+    }
+
+    let status = if violations.is_empty() {
+        compat::ReportStatus::Pass
+    } else {
+        compat::ReportStatus::Fail
+    };
+    Ok(
+        compat::JsonReport::new("verify_crate_metadata", status)
+            .with_items(items)
+            .with_violations(violations)
+            .with_note("verifies M20 crates.io metadata, crate READMEs, publish=false internal crate boundaries, and versioned path dependencies for publishable crates"),
+    )
+}
+
+fn package_is_publishable(package: &JsonValue) -> bool {
+    match package.get("publish") {
+        None | Some(JsonValue::Null) => true,
+        Some(JsonValue::Array(registries)) => !registries.is_empty(),
+        Some(JsonValue::Bool(value)) => *value,
+        _ => true,
+    }
+}
+
+fn cargo_metadata_json() -> Result<JsonValue> {
+    let output = ProcessCommand::new("cargo")
+        .args(["metadata", "--no-deps", "--format-version", "1"])
+        .output()
+        .context("failed to spawn cargo metadata")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "cargo metadata exited with {:?}\nstdout:\n{}\nstderr:\n{}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    serde_json::from_slice(&output.stdout).context("failed to parse cargo metadata JSON")
 }
 
 fn bench(

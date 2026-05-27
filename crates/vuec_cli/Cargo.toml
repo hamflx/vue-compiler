@@ -3,6 +3,13 @@ name = "vuec_cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Command-line interface for the vuec Rust Vue compiler."
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/vuec_cli"
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
 
 [[bin]]
 name = "vuec"
@@ -13,11 +20,11 @@ anyhow.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-vuec_codegen = { path = "../vuec_codegen" }
-vuec_diagnostics = { path = "../vuec_diagnostics" }
-vuec_sfc = { path = "../vuec_sfc" }
-vuec_source = { path = "../vuec_source" }
-vuec_vue2 = { path = "../vuec_vue2" }
-vuec_vue3_core = { path = "../vuec_vue3_core" }
-vuec_vue3_dom = { path = "../vuec_vue3_dom" }
-vuec_vue3_ssr = { path = "../vuec_vue3_ssr" }
+vuec_codegen = { path = "../vuec_codegen", version = "0.1.0" }
+vuec_diagnostics = { path = "../vuec_diagnostics", version = "0.1.0" }
+vuec_sfc = { path = "../vuec_sfc", version = "0.1.0" }
+vuec_source = { path = "../vuec_source", version = "0.1.0" }
+vuec_vue2 = { path = "../vuec_vue2", version = "0.1.0" }
+vuec_vue3_core = { path = "../vuec_vue3_core", version = "0.1.0" }
+vuec_vue3_dom = { path = "../vuec_vue3_dom", version = "0.1.0" }
+vuec_vue3_ssr = { path = "../vuec_vue3_ssr", version = "0.1.0" }

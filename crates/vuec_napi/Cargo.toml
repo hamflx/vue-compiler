@@ -3,6 +3,14 @@ name = "vuec_napi"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "NAPI binding crate for the vuec Rust Vue compiler."
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://github.com/hamflx/vue-compiler/tree/main/crates/vuec_napi"
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+publish = false
 
 [lib]
 crate-type = ["cdylib"]
@@ -12,13 +20,13 @@ napi.workspace = true
 napi-derive.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-vuec_ast = { path = "../vuec_ast" }
-vuec_sfc = { path = "../vuec_sfc" }
-vuec_source = { path = "../vuec_source" }
-vuec_vue2 = { path = "../vuec_vue2" }
-vuec_vue3_core = { path = "../vuec_vue3_core" }
-vuec_vue3_dom = { path = "../vuec_vue3_dom" }
-vuec_vue3_ssr = { path = "../vuec_vue3_ssr" }
+vuec_ast = { path = "../vuec_ast", version = "0.1.0" }
+vuec_sfc = { path = "../vuec_sfc", version = "0.1.0" }
+vuec_source = { path = "../vuec_source", version = "0.1.0" }
+vuec_vue2 = { path = "../vuec_vue2", version = "0.1.0" }
+vuec_vue3_core = { path = "../vuec_vue3_core", version = "0.1.0" }
+vuec_vue3_dom = { path = "../vuec_vue3_dom", version = "0.1.0" }
+vuec_vue3_ssr = { path = "../vuec_vue3_ssr", version = "0.1.0" }
 
 [build-dependencies]
 napi-build = "2.3.2"

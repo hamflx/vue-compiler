@@ -3,16 +3,23 @@ name = "vuec_vue3_core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Vue 3 compiler-core parser, transform, and codegen implementation for vuec."
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/vuec_vue3_core"
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
-vuec_ast = { path = "../vuec_ast" }
-vuec_codegen = { path = "../vuec_codegen" }
-vuec_diagnostics = { path = "../vuec_diagnostics" }
-vuec_html = { path = "../vuec_html" }
-vuec_js = { path = "../vuec_js" }
-vuec_pass = { path = "../vuec_pass" }
-vuec_source = { path = "../vuec_source" }
+vuec_ast = { path = "../vuec_ast", version = "0.1.0" }
+vuec_codegen = { path = "../vuec_codegen", version = "0.1.0" }
+vuec_diagnostics = { path = "../vuec_diagnostics", version = "0.1.0" }
+vuec_html = { path = "../vuec_html", version = "0.1.0" }
+vuec_js = { path = "../vuec_js", version = "0.1.0" }
+vuec_pass = { path = "../vuec_pass", version = "0.1.0" }
+vuec_source = { path = "../vuec_source", version = "0.1.0" }
 oxc_ast.workspace = true
 oxc_span.workspace = true

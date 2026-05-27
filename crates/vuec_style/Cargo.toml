@@ -3,8 +3,15 @@ name = "vuec_style"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Vue SFC style compilation, scoped CSS, and CSS variable helpers for vuec."
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/vuec_style"
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 serde.workspace = true
-vuec_codegen = { path = "../vuec_codegen" }
-vuec_source = { path = "../vuec_source" }
+vuec_codegen = { path = "../vuec_codegen", version = "0.1.0" }
+vuec_source = { path = "../vuec_source", version = "0.1.0" }

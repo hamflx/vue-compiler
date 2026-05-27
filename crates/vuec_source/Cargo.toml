@@ -3,6 +3,13 @@ name = "vuec_source"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Source text, span, and source identity types for the vuec Rust Vue compiler."
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/vuec_source"
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 serde.workspace = true

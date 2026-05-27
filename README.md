@@ -31,6 +31,7 @@ cargo xtask verify-wasm
 cargo xtask verify-arena
 cargo xtask verify-string-interning
 cargo xtask verify-release-docs
+cargo xtask verify-crate-metadata
 ```
 
 ## Packages

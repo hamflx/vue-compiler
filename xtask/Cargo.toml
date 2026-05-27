@@ -3,6 +3,14 @@ name = "xtask"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Internal development, conformance, and release verification tasks for vuec."
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://github.com/hamflx/vue-compiler/tree/main/xtask"
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+publish = false
 
 [dependencies]
 anyhow.workspace = true
@@ -13,11 +21,11 @@ serde_json.workspace = true
 sha2.workspace = true
 sysinfo.workspace = true
 toml.workspace = true
-vuec_ast = { path = "../crates/vuec_ast" }
-vuec_js = { path = "../crates/vuec_js" }
-vuec_pass = { path = "../crates/vuec_pass" }
-vuec_sfc = { path = "../crates/vuec_sfc" }
-vuec_source = { path = "../crates/vuec_source" }
-vuec_vue2 = { path = "../crates/vuec_vue2" }
-vuec_vue3_core = { path = "../crates/vuec_vue3_core" }
-vuec_vue3_dom = { path = "../crates/vuec_vue3_dom" }
+vuec_ast = { path = "../crates/vuec_ast", version = "0.1.0" }
+vuec_js = { path = "../crates/vuec_js", version = "0.1.0" }
+vuec_pass = { path = "../crates/vuec_pass", version = "0.1.0" }
+vuec_sfc = { path = "../crates/vuec_sfc", version = "0.1.0" }
+vuec_source = { path = "../crates/vuec_source", version = "0.1.0" }
+vuec_vue2 = { path = "../crates/vuec_vue2", version = "0.1.0" }
+vuec_vue3_core = { path = "../crates/vuec_vue3_core", version = "0.1.0" }
+vuec_vue3_dom = { path = "../crates/vuec_vue3_dom", version = "0.1.0" }

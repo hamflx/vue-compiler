@@ -27,6 +27,10 @@ members = [
 edition = "2021"
 license = "MIT OR Apache-2.0"
 version = "0.1.0"
+repository = "https://github.com/hamflx/vue-compiler"
+homepage = "https://github.com/hamflx/vue-compiler"
+keywords = ["vue", "compiler", "sfc", "template", "rust"]
+categories = ["compilers", "development-tools", "web-programming"]
 
 [workspace.dependencies]
 anyhow = "1"

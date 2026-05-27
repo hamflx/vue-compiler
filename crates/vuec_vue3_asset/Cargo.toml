@@ -3,9 +3,16 @@ name = "vuec_vue3_asset"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Vue 3 asset URL and srcset transform helpers for the vuec Rust Vue compiler."
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/vuec_vue3_asset"
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
-vuec_ast = { path = "../vuec_ast" }
-vuec_source = { path = "../vuec_source" }
+vuec_ast = { path = "../vuec_ast", version = "0.1.0" }
+vuec_source = { path = "../vuec_source", version = "0.1.0" }

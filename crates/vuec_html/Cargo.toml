@@ -3,6 +3,13 @@ name = "vuec_html"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "HTML tokenizer and template parsing primitives for the vuec Rust Vue compiler."
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/vuec_html"
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 serde.workspace = true

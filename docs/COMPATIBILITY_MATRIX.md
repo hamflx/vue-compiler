@@ -24,6 +24,7 @@ This matrix records the pinned official compiler baselines and the current Rust 
 | WASM smoke | `cargo xtask verify-wasm`, `cargo xtask verify-wasm-browser`, `cargo xtask verify-wasm-wasi` |
 | Performance | `cargo xtask bench`, `cargo xtask verify-arena`, `cargo xtask verify-string-interning`, `cargo xtask verify-ast-cache`, `cargo xtask verify-parallel`, `cargo xtask verify-incremental` |
 | Release docs | `cargo xtask verify-release-docs` |
+| Crate metadata | `cargo xtask verify-crate-metadata` |
 
 ## Coverage Rule
 
@@ -32,3 +33,5 @@ Conformance reports must preserve `rust-backed`, `mixed`, and `shim-backed` cove
 ## Release Documentation Coverage
 
 `cargo xtask verify-release-docs` verifies that the repository README, CHANGELOG, compatibility matrix, release checklist, and every `packages/**/package.json` directory README are present and non-empty. If a package manifest has a `files` array, the gate also requires `README.md` to be listed explicitly.
+
+`cargo xtask verify-crate-metadata` verifies that every workspace crate has crates.io-facing package metadata and a non-empty crate README. Public crates must have versioned path dependencies; internal tooling and package-binding crates are explicitly marked `publish = false`.

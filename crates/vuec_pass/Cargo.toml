@@ -3,8 +3,15 @@ name = "vuec_pass"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Shared transform pass types for the vuec Rust Vue compiler."
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/vuec_pass"
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
-vuec_ast = { path = "../vuec_ast" }
+vuec_ast = { path = "../vuec_ast", version = "0.1.0" }
 serde.workspace = true
-vuec_diagnostics = { path = "../vuec_diagnostics" }
+vuec_diagnostics = { path = "../vuec_diagnostics", version = "0.1.0" }

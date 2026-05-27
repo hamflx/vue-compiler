@@ -3,6 +3,13 @@ name = "vuec_sfc"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Vue single-file component parser and compiler implementation for vuec."
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/vuec_sfc"
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 serde.workspace = true
@@ -11,13 +18,13 @@ oxc_allocator.workspace = true
 oxc_ast.workspace = true
 oxc_parser.workspace = true
 oxc_span.workspace = true
-vuec_codegen = { path = "../vuec_codegen" }
-vuec_ast = { path = "../vuec_ast" }
-vuec_diagnostics = { path = "../vuec_diagnostics" }
-vuec_html = { path = "../vuec_html" }
-vuec_js = { path = "../vuec_js" }
-vuec_source = { path = "../vuec_source" }
-vuec_style = { path = "../vuec_style" }
-vuec_vue3_dom = { path = "../vuec_vue3_dom" }
-vuec_vue3_ssr = { path = "../vuec_vue3_ssr" }
-vuec_vue3_core = { path = "../vuec_vue3_core" }
+vuec_codegen = { path = "../vuec_codegen", version = "0.1.0" }
+vuec_ast = { path = "../vuec_ast", version = "0.1.0" }
+vuec_diagnostics = { path = "../vuec_diagnostics", version = "0.1.0" }
+vuec_html = { path = "../vuec_html", version = "0.1.0" }
+vuec_js = { path = "../vuec_js", version = "0.1.0" }
+vuec_source = { path = "../vuec_source", version = "0.1.0" }
+vuec_style = { path = "../vuec_style", version = "0.1.0" }
+vuec_vue3_dom = { path = "../vuec_vue3_dom", version = "0.1.0" }
+vuec_vue3_ssr = { path = "../vuec_vue3_ssr", version = "0.1.0" }
+vuec_vue3_core = { path = "../vuec_vue3_core", version = "0.1.0" }

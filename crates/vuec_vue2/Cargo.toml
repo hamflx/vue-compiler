@@ -3,12 +3,19 @@ name = "vuec_vue2"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Vue 2.6 and Vue 2.7 template compiler implementation for the vuec Rust Vue compiler."
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/vuec_vue2"
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
-vuec_ast = { path = "../vuec_ast" }
-vuec_diagnostics = { path = "../vuec_diagnostics" }
-vuec_html = { path = "../vuec_html" }
-vuec_js = { path = "../vuec_js" }
-vuec_source = { path = "../vuec_source" }
+vuec_ast = { path = "../vuec_ast", version = "0.1.0" }
+vuec_diagnostics = { path = "../vuec_diagnostics", version = "0.1.0" }
+vuec_html = { path = "../vuec_html", version = "0.1.0" }
+vuec_js = { path = "../vuec_js", version = "0.1.0" }
+vuec_source = { path = "../vuec_source", version = "0.1.0" }

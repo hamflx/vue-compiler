@@ -3,13 +3,20 @@ name = "vuec_vue3_dom"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Vue 3 compiler-dom facade and DOM transform implementation for vuec."
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/vuec_vue3_dom"
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
-vuec_ast = { path = "../vuec_ast" }
-vuec_diagnostics = { path = "../vuec_diagnostics" }
-vuec_pass = { path = "../vuec_pass" }
-vuec_source = { path = "../vuec_source" }
-vuec_vue3_asset = { path = "../vuec_vue3_asset" }
-vuec_vue3_core = { path = "../vuec_vue3_core" }
+vuec_ast = { path = "../vuec_ast", version = "0.1.0" }
+vuec_diagnostics = { path = "../vuec_diagnostics", version = "0.1.0" }
+vuec_pass = { path = "../vuec_pass", version = "0.1.0" }
+vuec_source = { path = "../vuec_source", version = "0.1.0" }
+vuec_vue3_asset = { path = "../vuec_vue3_asset", version = "0.1.0" }
+vuec_vue3_core = { path = "../vuec_vue3_core", version = "0.1.0" }

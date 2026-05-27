@@ -1,5 +1,10 @@
 # Memory
 
+- Current round: completed the M20 crates.io metadata slice.
+- Added workspace/crate package metadata for crates.io readiness: repository, homepage, keywords, categories, descriptions, docs.rs URLs, per-crate READMEs, and versioned local path dependencies for publishable crates.
+- Marked internal tooling and npm-distributed binding crates (`xtask`, `vuec_node_bridge`, `vuec_runtime_tests`, `vuec_napi`, `vuec_wasm`) with `publish = false` while still keeping release metadata and READMEs for documentation.
+- Added `cargo xtask verify-crate-metadata`, which runs `cargo metadata` and verifies metadata/readme coverage plus versioned path dependencies for publishable crates. This is release metadata only; it does not change compiler semantics, `xtask/src/compat.rs`, or AST/HIR/MIR structures.
+
 - Current round: completed the first M20 release documentation skeleton slice.
 - Added root release docs (`README.md`, `CHANGELOG.md`, `docs/COMPATIBILITY_MATRIX.md`, `docs/RELEASE_CHECKLIST.md`) covering pinned official Vue baselines, compatibility coverage labels, common verification commands, and release preflight steps.
 - Added README coverage for every current source-controlled `packages/**/package.json` directory and included `README.md` in package `files` arrays where those arrays exist. Ignored generated wasm-bindgen output directories remain outside this source-documentation gate.

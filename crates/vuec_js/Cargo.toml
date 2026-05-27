@@ -3,6 +3,13 @@ name = "vuec_js"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "JavaScript expression parsing and Oxc projection helpers for the vuec Rust Vue compiler."
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/vuec_js"
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 anyhow.workspace = true
@@ -14,5 +21,5 @@ oxc_span.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-vuec_ast = { path = "../vuec_ast" }
-vuec_source = { path = "../vuec_source" }
+vuec_ast = { path = "../vuec_ast", version = "0.1.0" }
+vuec_source = { path = "../vuec_source", version = "0.1.0" }

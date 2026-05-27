@@ -3,13 +3,21 @@ name = "vuec_runtime_tests"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Internal runtime smoke helpers for vuec generated render output."
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://github.com/hamflx/vue-compiler/tree/main/crates/vuec_runtime_tests"
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+publish = false
 
 [dependencies]
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-vuec_source = { path = "../vuec_source" }
-vuec_vue2 = { path = "../vuec_vue2" }
-vuec_vue3_core = { path = "../vuec_vue3_core" }
-vuec_vue3_dom = { path = "../vuec_vue3_dom" }
-vuec_vue3_ssr = { path = "../vuec_vue3_ssr" }
+vuec_source = { path = "../vuec_source", version = "0.1.0" }
+vuec_vue2 = { path = "../vuec_vue2", version = "0.1.0" }
+vuec_vue3_core = { path = "../vuec_vue3_core", version = "0.1.0" }
+vuec_vue3_dom = { path = "../vuec_vue3_dom", version = "0.1.0" }
+vuec_vue3_ssr = { path = "../vuec_vue3_ssr", version = "0.1.0" }
