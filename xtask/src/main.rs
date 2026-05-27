@@ -1263,6 +1263,7 @@ fn verify_public_api_docs() -> Result<compat::JsonReport> {
         "vuec_pass",
         "vuec_style",
         "vuec_vue3_asset",
+        "vuec_vue3_core",
         "vuec_vue3_dom",
         "vuec_vue3_ssr",
     ];

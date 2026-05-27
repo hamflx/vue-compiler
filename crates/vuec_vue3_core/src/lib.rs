@@ -1,3 +1,10 @@
+//! Vue 3 compiler-core implementation.
+//!
+//! This crate owns Vue 3 template parsing, transform orchestration, exact
+//! render-code generation, structural AST -> HIR -> target MIR lowering, and
+//! Rust-backed public projection helpers used by the compatibility bridge.
+
+#![deny(missing_docs)]
 #![forbid(unsafe_code)]
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -30,47 +37,85 @@ use vuec_js::JsAstStore;
 use vuec_pass::TransformContext;
 use vuec_source::{FileId, Span};
 
+/// Template source plus location metadata.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TemplateSource {
+    /// Logical filename used for diagnostics and source maps.
     pub filename: String,
+    /// Template source text.
     pub source: String,
+    /// Source file id used by spans.
     pub file_id: FileId,
+    /// Byte offset of `source` inside the original file.
     pub base_offset: usize,
 }
 
+/// Options shared by Vue 3 parser, transform, lowering, and codegen stages.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3CompilerOptions {
+    /// Whether identifiers should be prefixed with render context bindings.
     pub prefix_identifiers: bool,
+    /// Codegen mode, usually `function` or `module`.
     pub mode: String,
+    /// Whether static trees should be hoisted.
     pub hoist_static: bool,
+    /// Whether eligible static DOM trees should be stringified.
     pub stringify_static: bool,
+    /// Whether event handlers should be cached.
     pub cache_handlers: bool,
+    /// Optional scope id for scoped styles.
     pub scope_id: Option<String>,
+    /// Whether slotted scope markers should be emitted.
     pub slotted: bool,
+    /// Whether expressions should be parsed as TypeScript.
     pub is_ts: bool,
+    /// Additional expression parser plugin names.
     pub expression_plugins: Vec<String>,
+    /// Whether source maps should be generated.
     pub source_map: bool,
+    /// Whether comments should be retained.
     pub comments: bool,
+    /// Custom interpolation delimiters.
     pub delimiters: Option<[String; 2]>,
+    /// Tags treated as void tags by the parser.
     pub void_tags: Vec<String>,
+    /// Optional native tag allow-list.
     pub native_tags: Option<Vec<String>>,
+    /// Tags treated as custom elements.
     pub custom_elements: Vec<String>,
+    /// Tags treated as built-in components.
     pub built_in_components: Vec<String>,
+    /// Per-tag namespace overrides.
     pub namespaces: BTreeMap<String, vuec_ast::HtmlNamespace>,
+    /// Initial parser namespace.
     pub root_namespace: vuec_ast::HtmlNamespace,
+    /// Whether DOM namespace transition rules are enabled.
     pub dom_namespaces: bool,
+    /// Whitespace handling mode.
     pub whitespace: String,
+    /// Tags that enable `v-pre`-like raw text preservation.
     pub pre_tags: Vec<String>,
+    /// Tags whose leading newline should be ignored.
     pub ignore_newline_tags: Vec<String>,
+    /// Whether parser behavior is for an SFC template block.
     pub sfc_parse_mode: bool,
+    /// Plain template languages accepted by SFC parsing.
     pub sfc_plain_template_langs: Vec<String>,
+    /// Binding metadata used by expression transforms.
     pub binding_metadata: BTreeMap<String, String>,
+    /// Public props alias metadata used by inline template codegen.
     pub props_aliases: BTreeMap<String, String>,
+    /// Whether compilation targets inline render setup output.
     pub inline: bool,
+    /// Whether SSR codegen/lowering is enabled.
     pub ssr: bool,
+    /// Whether module imports should be optimized.
     pub optimize_imports: bool,
+    /// Original source text used for source-map generation.
     pub source_map_source: Option<String>,
+    /// Base offset for source-map mappings.
     pub source_map_base_offset: usize,
+    /// SSR CSS vars expression, when compiling inline SSR templates.
     pub ssr_css_vars: Option<String>,
 }
 
@@ -113,12 +158,18 @@ impl Default for Vue3CompilerOptions {
     }
 }
 
+/// Generated render output and compiler metadata.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CodegenResult {
+    /// Generated JavaScript render code.
     pub code: String,
+    /// Optional source map artifact.
     pub map: Option<SourceMapArtifact>,
+    /// Deterministic AST or transform summary string.
     pub ast_summary: String,
+    /// Diagnostics produced during parsing or transforms.
     pub diagnostics: Vec<Diagnostic>,
+    /// Generated import/helper preamble.
     pub preamble: String,
 }
 
@@ -128,9 +179,13 @@ pub struct CodegenResult {
 /// HIR / MIR structure can be verified without changing current official
 /// conformance behavior.
 pub struct Vue3DomLoweringResult {
+    /// Lowered shared HIR document.
     pub hir: Hir,
+    /// Lowered Vue 3 DOM target MIR document.
     pub mir: Vue3DomMir,
+    /// AST-to-HIR and HIR-to-MIR edge map.
     pub map: LoweringMap,
+    /// JavaScript side store used by HIR/MIR expression ids.
     pub js: JsAstStore,
 }
 
@@ -164,21 +219,30 @@ pub fn generate_vue3_ssr_mir(
 ///
 /// SSR lowering has its own target MIR and must not be derived from DOM MIR.
 pub struct Vue3SsrLoweringResult {
+    /// Lowered shared HIR document.
     pub hir: Hir,
+    /// Lowered Vue 3 SSR target MIR document.
     pub mir: Vue3SsrMir,
+    /// AST-to-HIR and HIR-to-MIR edge map.
     pub map: LoweringMap,
+    /// JavaScript side store used by HIR/MIR expression ids.
     pub js: JsAstStore,
 }
 
+/// Raw-text parsing mode for Vue 3 element content.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Vue3RawTextKind {
+    /// RCDATA mode, where character references and interpolation may be parsed.
     RcData,
+    /// Raw text mode.
     RawText,
 }
 
+/// Vue 3 compiler-core dialect entry point.
 pub struct Vue3Dialect;
 
 impl Vue3Dialect {
+    /// Parses a Vue 3 template into the canonical arena AST.
     pub fn base_parse(source: TemplateSource, options: &Vue3CompilerOptions) -> Vue3Ast {
         let interpolation_open = options
             .delimiters
@@ -519,6 +583,7 @@ impl Vue3Dialect {
         ast
     }
 
+    /// Runs Vue 3 transform passes over a parsed AST.
     pub fn transform(ast: &mut Vue3Ast, ctx: &mut TransformContext, options: &Vue3CompilerOptions) {
         let root_id = ast.root;
         let mut helpers = BTreeSet::new();
@@ -720,6 +785,7 @@ impl Vue3Dialect {
         }
     }
 
+    /// Generates render code from a transformed Vue 3 AST.
     pub fn generate(
         ast: &Vue3Ast,
         options: &Vue3CompilerOptions,
@@ -826,6 +892,7 @@ impl Vue3Dialect {
         }
     }
 
+    /// Parses, transforms, and generates Vue 3 compiler-core output.
     pub fn base_compile(source: TemplateSource, options: Vue3CompilerOptions) -> CodegenResult {
         let mut ast = Self::base_parse(source.clone(), &options);
         let mut ctx = TransformContext::default();
@@ -833,6 +900,7 @@ impl Vue3Dialect {
         Self::finish_compile(ast, source, options, ctx)
     }
 
+    /// Finishes compilation from an already parsed/transformed AST.
     pub fn finish_compile(
         ast: Vue3Ast,
         source: TemplateSource,
@@ -848,6 +916,7 @@ impl Vue3Dialect {
         result
     }
 
+    /// Compiles a template with Vue 3 DOM output conventions.
     pub fn compile_dom(source: TemplateSource, options: Vue3CompilerOptions) -> CodegenResult {
         let mut result = Self::base_compile(source, options);
         if result.code.is_empty() {
@@ -856,6 +925,7 @@ impl Vue3Dialect {
         result
     }
 
+    /// Compiles a template with Vue 3 SSR output conventions.
     pub fn compile_ssr(source: TemplateSource, options: Vue3CompilerOptions) -> CodegenResult {
         let mut result = Self::base_compile(source, options);
         if !result.code.starts_with("/* ssr */") {
@@ -864,10 +934,12 @@ impl Vue3Dialect {
         result
     }
 
+    /// Lowers a Vue 3 AST to shared HIR and Vue 3 DOM MIR.
     pub fn lower_to_dom_mir(ast: &Vue3Ast, options: &Vue3CompilerOptions) -> Vue3DomLoweringResult {
         lower_vue3_ast_to_dom_mir(ast, options)
     }
 
+    /// Lowers a Vue 3 AST to shared HIR and Vue 3 SSR MIR.
     pub fn lower_to_ssr_mir(ast: &Vue3Ast, options: &Vue3CompilerOptions) -> Vue3SsrLoweringResult {
         lower_vue3_ast_to_ssr_mir(ast, options)
     }
@@ -977,6 +1049,7 @@ fn inline_preamble_helpers(helpers: &mut Vec<RuntimeHelper>, expr: &str) {
 ///
 /// The lowering records explicit AST -> HIR and HIR -> MIR edges in
 /// `LoweringMap`, and registers template expressions into `JsAstStore`.
+/// Lowers a Vue 3 AST into shared HIR plus DOM target MIR.
 pub fn lower_vue3_ast_to_dom_mir(
     ast: &Vue3Ast,
     options: &Vue3CompilerOptions,
@@ -1033,6 +1106,7 @@ pub fn lower_vue3_ast_to_dom_mir(
 /// This is a structural contract entry for SSR. It records explicit AST -> HIR
 /// and HIR -> MIR edges and keeps SSR output in `Vue3SsrMir` instead of
 /// deriving it from DOM MIR.
+/// Lowers a Vue 3 AST into shared HIR plus SSR target MIR.
 pub fn lower_vue3_ast_to_ssr_mir(
     ast: &Vue3Ast,
     options: &Vue3CompilerOptions,
@@ -1078,6 +1152,7 @@ pub fn lower_vue3_ast_to_ssr_mir(
     }
 }
 
+/// Projects a public AST root codegen node into bridge JSON.
 pub fn root_codegen_projection(root: &Value) -> Value {
     let children = root
         .get("children")
@@ -5151,6 +5226,7 @@ const VUE3_CONSTANT_CAN_SKIP_PATCH: u8 = 1;
 const VUE3_CONSTANT_CAN_CACHE: u8 = 2;
 const VUE3_CONSTANT_CAN_STRINGIFY: u8 = 3;
 
+/// Projects Vue 3 `getConstantType` behavior for public bridge callers.
 pub fn get_constant_type_projection(payload: &Value) -> Value {
     let node = payload.get("node").unwrap_or(&Value::Null);
     let context = payload.get("context").unwrap_or(&Value::Null);
@@ -5159,6 +5235,7 @@ pub fn get_constant_type_projection(payload: &Value) -> Value {
     })
 }
 
+/// Projects Vue 3 `isMemberExpression` behavior for public bridge callers.
 pub fn is_member_expression_projection(payload: &Value) -> Value {
     let node = payload.get("node").unwrap_or(&Value::Null);
     let context = payload.get("context").unwrap_or(&Value::Null);
@@ -5174,6 +5251,7 @@ pub fn is_member_expression_projection(payload: &Value) -> Value {
     })
 }
 
+/// Projects function-type detection for public bridge callers.
 pub fn is_function_type_projection(payload: &Value) -> Value {
     let node = payload.get("node").unwrap_or(&Value::Null);
     let is_function_type = js_ast_type(node).is_some_and(js_ast_is_function_type);
@@ -5182,6 +5260,7 @@ pub fn is_function_type_projection(payload: &Value) -> Value {
     })
 }
 
+/// Projects `advancePositionWithClone` source-location behavior.
 pub fn advance_position_with_clone_projection(payload: &Value) -> Value {
     let pos = payload.get("pos").unwrap_or(&Value::Null);
     let source = json_str(payload, "source").unwrap_or("");
@@ -5190,10 +5269,12 @@ pub fn advance_position_with_clone_projection(payload: &Value) -> Value {
     advance_position_value(pos, source, count)
 }
 
+/// Projects `advancePositionWithMutation` source-location behavior.
 pub fn advance_position_with_mutation_projection(payload: &Value) -> Value {
     advance_position_with_clone_projection(payload)
 }
 
+/// Projects Vue 3 `toValidAssetId` behavior.
 pub fn to_valid_asset_id_projection(payload: &Value) -> Value {
     let name = json_str(payload, "name").unwrap_or("");
     let asset_type = json_str(payload, "type").unwrap_or("");
@@ -5202,6 +5283,7 @@ pub fn to_valid_asset_id_projection(payload: &Value) -> Value {
     })
 }
 
+/// Projects identifier extraction for public AST utility callers.
 pub fn extract_identifiers_projection(payload: &Value) -> Value {
     let node = payload.get("node").unwrap_or(&Value::Null);
     let mut identifiers = Vec::new();
@@ -5238,6 +5320,7 @@ fn advance_position_value(pos: &Value, source: &str, number_of_characters: usize
     })
 }
 
+/// Projects static-property detection for public AST utility callers.
 pub fn is_static_property_projection(payload: &Value) -> Value {
     let node = payload.get("node").unwrap_or(&Value::Null);
     json!({
@@ -5245,6 +5328,7 @@ pub fn is_static_property_projection(payload: &Value) -> Value {
     })
 }
 
+/// Projects destructure-assignment detection for public AST utility callers.
 pub fn is_in_destructure_assignment_projection(payload: &Value) -> Value {
     let parent = payload.get("parent").unwrap_or(&Value::Null);
     let parent_stack = payload
@@ -5257,6 +5341,7 @@ pub fn is_in_destructure_assignment_projection(payload: &Value) -> Value {
     })
 }
 
+/// Projects referenced-identifier detection for public AST utility callers.
 pub fn is_referenced_identifier_projection(payload: &Value) -> Value {
     let node = payload.get("node").unwrap_or(&Value::Null);
     let parent = payload.get("parent").unwrap_or(&Value::Null);
@@ -5276,6 +5361,7 @@ pub fn is_referenced_identifier_projection(payload: &Value) -> Value {
     })
 }
 
+/// Projects identifier walking for public AST utility callers.
 pub fn walk_identifiers_projection(payload: &Value) -> Value {
     let root = payload.get("root").unwrap_or(&Value::Null);
     let include_all = json_bool(payload, "includeAll");
@@ -5833,6 +5919,7 @@ fn js_ast_is_function_type(kind: &str) -> bool {
         || kind.ends_with("Method")
 }
 
+/// Projects Rust-backed `processExpression` behavior for bridge callers.
 pub fn process_expression_projection(payload: &Value) -> Value {
     let node = payload.get("node").unwrap_or(&Value::Null);
     let context = payload.get("context").unwrap_or(&Value::Null);
@@ -5953,6 +6040,7 @@ pub fn process_expression_projection(payload: &Value) -> Value {
     })
 }
 
+/// Projects Rust-backed `transformExpression` behavior for bridge callers.
 pub fn transform_expression_projection(payload: &Value) -> Value {
     let node = payload.get("node").unwrap_or(&Value::Null);
     let context = payload.get("context").unwrap_or(&Value::Null);
@@ -6026,6 +6114,7 @@ pub fn transform_expression_projection(payload: &Value) -> Value {
     json!({ "operations": operations })
 }
 
+/// Projects Rust-backed `transformOnce` behavior for bridge callers.
 pub fn transform_once_projection(payload: &Value) -> Value {
     let node = payload.get("node").unwrap_or(&Value::Null);
     let context = payload.get("context").unwrap_or(&Value::Null);
@@ -6051,6 +6140,7 @@ pub fn transform_once_projection(payload: &Value) -> Value {
     })
 }
 
+/// Projects Rust-backed `transformMemo` behavior for bridge callers.
 pub fn transform_memo_projection(payload: &Value) -> Value {
     let node = payload.get("node").unwrap_or(&Value::Null);
     let context = payload.get("context").unwrap_or(&Value::Null);
@@ -6074,6 +6164,7 @@ pub fn transform_memo_projection(payload: &Value) -> Value {
     })
 }
 
+/// Projects Rust-backed static-cache analysis for bridge callers.
 pub fn cache_static_projection(payload: &Value) -> Value {
     let root = payload.get("root").unwrap_or(&Value::Null);
     let context = payload.get("context").unwrap_or(&Value::Null);
@@ -6634,6 +6725,7 @@ fn vue3_slot_property_matches(property: &Value, slot: &Value) -> bool {
     false
 }
 
+/// Projects Rust-backed `transformModel` behavior for bridge callers.
 pub fn transform_model_projection(payload: &Value) -> Value {
     let dir = payload.get("dir").unwrap_or(&Value::Null);
     let node = payload.get("node").unwrap_or(&Value::Null);
@@ -6720,6 +6812,7 @@ pub fn transform_model_projection(payload: &Value) -> Value {
     })
 }
 
+/// Projects Rust-backed `transformBind` behavior for bridge callers.
 pub fn transform_bind_projection(payload: &Value) -> Value {
     let dir = payload.get("dir").unwrap_or(&Value::Null);
     let context = payload.get("context").unwrap_or(&Value::Null);
@@ -6757,6 +6850,7 @@ pub fn transform_bind_projection(payload: &Value) -> Value {
     })
 }
 
+/// Projects Rust-backed v-bind shorthand behavior for bridge callers.
 pub fn transform_v_bind_shorthand_projection(payload: &Value) -> Value {
     let node = payload.get("node").unwrap_or(&Value::Null);
     if json_node_type(node) != Some(1) {
@@ -6777,6 +6871,7 @@ pub fn transform_v_bind_shorthand_projection(payload: &Value) -> Value {
     json!({ "operations": operations })
 }
 
+/// Projects Rust-backed `transformOn` behavior for bridge callers.
 pub fn transform_on_projection(payload: &Value) -> Value {
     let dir = payload.get("dir").unwrap_or(&Value::Null);
     let node = payload.get("node").unwrap_or(&Value::Null);
@@ -6815,6 +6910,7 @@ pub fn transform_on_projection(payload: &Value) -> Value {
     })
 }
 
+/// Projects Rust-backed `transformIf` behavior for bridge callers.
 pub fn transform_if_projection(payload: &Value) -> Value {
     if json_str(payload, "phase") == Some("branchCodegen") {
         return transform_if_branch_codegen_projection(payload);
@@ -6822,6 +6918,7 @@ pub fn transform_if_projection(payload: &Value) -> Value {
     transform_if_process_projection(payload)
 }
 
+/// Projects Rust-backed `transformFor` behavior for bridge callers.
 pub fn transform_for_projection(payload: &Value) -> Value {
     if json_str(payload, "phase") == Some("codegen") {
         return transform_for_codegen_projection(payload);
@@ -6958,6 +7055,7 @@ pub fn transform_for_projection(payload: &Value) -> Value {
     })
 }
 
+/// Projects Rust-backed slot-scope tracking for bridge callers.
 pub fn track_slot_scopes_projection(payload: &Value) -> Value {
     let node = payload.get("node").unwrap_or(&Value::Null);
     let Some(slot) = vue3_slot_directive(node, false) else {
@@ -6975,6 +7073,7 @@ pub fn track_slot_scopes_projection(payload: &Value) -> Value {
     })
 }
 
+/// Projects Rust-backed `v-for` slot-scope tracking for bridge callers.
 pub fn track_v_for_slot_scopes_projection(payload: &Value) -> Value {
     let node = payload.get("node").unwrap_or(&Value::Null);
     if json_node_type(node) != Some(1)
@@ -6999,6 +7098,7 @@ pub fn track_v_for_slot_scopes_projection(payload: &Value) -> Value {
     })
 }
 
+/// Projects Rust-backed slot outlet transforms for bridge callers.
 pub fn transform_slot_outlet_projection(payload: &Value) -> Value {
     let node = payload.get("node").unwrap_or(&Value::Null);
     if json_node_type(node) != Some(1) || json_u64(node, "tagType") != Some(2) {
@@ -7156,6 +7256,7 @@ fn process_slot_outlet_maybe_process_expression(node: Value, context: &Value) ->
     }
 }
 
+/// Projects Rust-backed `buildSlots` behavior for bridge callers.
 pub fn build_slots_projection(payload: &Value) -> Value {
     let node = payload.get("node").unwrap_or(&Value::Null);
     let context = payload.get("context").unwrap_or(&Value::Null);
@@ -8348,6 +8449,7 @@ fn vue3_for_child_key_loc(node: &Value) -> Option<Value> {
         .and_then(|prop| prop.get("loc").cloned())
 }
 
+/// Projects Rust-backed component type resolution for bridge callers.
 pub fn resolve_component_type_projection(payload: &Value) -> Value {
     let node = payload.get("node").unwrap_or(&Value::Null);
     let context = payload.get("context").unwrap_or(&Value::Null);
@@ -8442,6 +8544,7 @@ pub fn resolve_component_type_projection(payload: &Value) -> Value {
     })
 }
 
+/// Projects Rust-backed element prop transform behavior for bridge callers.
 pub fn transform_element_props_projection(payload: &Value) -> Value {
     let props = payload
         .get("props")
@@ -8612,6 +8715,7 @@ pub fn transform_element_props_projection(payload: &Value) -> Value {
     })
 }
 
+/// Projects Rust-backed directive argument building for bridge callers.
 pub fn build_directive_args_projection(payload: &Value) -> Value {
     let dir = payload.get("dir").unwrap_or(&Value::Null);
     let need_runtime = payload.get("needRuntime").unwrap_or(&Value::Null);
@@ -8646,6 +8750,7 @@ pub fn build_directive_args_projection(payload: &Value) -> Value {
     })
 }
 
+/// Projects Rust-backed built-in element child transform behavior.
 pub fn transform_element_children_projection(payload: &Value) -> Value {
     let tag = json_str(payload, "tag").unwrap_or("");
     let children = payload
@@ -8673,6 +8778,7 @@ pub fn transform_element_children_projection(payload: &Value) -> Value {
     }
 }
 
+/// Projects Rust-backed text transform behavior for bridge callers.
 pub fn transform_text_projection(payload: &Value) -> Value {
     let node = payload.get("node").unwrap_or(&Value::Null);
     let context = payload.get("context").unwrap_or(&Value::Null);
@@ -11402,6 +11508,7 @@ fn normalize_member_expression_whitespace(expression: &str) -> String {
     output
 }
 
+/// Returns whether a `v-model` expression is assignable as a member expression.
 pub fn model_is_member_expression(expression: &str) -> bool {
     let store = JsAstStore::new();
     store
@@ -11983,6 +12090,7 @@ fn incomplete_start_tag_recovery_text_start(slice: &str) -> Option<usize> {
     })
 }
 
+/// Returns the Vue 3 raw-text parsing mode for a tag and namespace.
 pub fn vue3_raw_text_kind(
     tag: &str,
     namespace: vuec_ast::HtmlNamespace,
@@ -11998,6 +12106,7 @@ pub fn vue3_raw_text_kind(
     }
 }
 
+/// Finds the matching raw-text closing tag range for an opening tag.
 pub fn find_matching_raw_text_end(
     source: &str,
     content_start: usize,
@@ -16870,6 +16979,7 @@ fn helper_name(helper: RuntimeHelper) -> &'static str {
     }
 }
 
+/// Builds a render source map for generated code and a Vue 3 AST.
 pub fn source_map_for_render(
     code: &str,
     ast: &Vue3Ast,
@@ -20653,6 +20763,7 @@ fn render_patch_flag_text(flag: Option<i32>) -> String {
     }
 }
 
+/// Computes the public codegen patch flag for a Vue 3 element node.
 pub fn vue3_element_codegen_patch_flag(
     ast: &Vue3Ast,
     node_id: vuec_ast::NodeId,
@@ -23031,18 +23142,22 @@ fn html_numeric_entity_char(value: u32) -> char {
     }
 }
 
+/// Parses, transforms, and generates Vue 3 compiler-core output.
 pub fn base_compile(source: TemplateSource, options: Vue3CompilerOptions) -> CodegenResult {
     Vue3Dialect::base_compile(source, options)
 }
 
+/// Compiles a Vue 3 template for DOM render output.
 pub fn compile_dom(source: TemplateSource, options: Vue3CompilerOptions) -> CodegenResult {
     Vue3Dialect::compile_dom(source, options)
 }
 
+/// Compiles a Vue 3 template for SSR render output.
 pub fn compile_ssr(source: TemplateSource, options: Vue3CompilerOptions) -> CodegenResult {
     Vue3Dialect::compile_ssr(source, options)
 }
 
+/// Generates render code from a hydrated public AST JSON value.
 pub fn generate_public_ast(ast: &Value, options: &Vue3CompilerOptions) -> CodegenResult {
     PublicAstCodegen::new(ast, options).generate()
 }
