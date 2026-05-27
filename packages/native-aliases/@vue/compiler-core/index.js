@@ -584,6 +584,7 @@ function createTransformContext(root, options) {
     inSSR: !!((options || {}).inSSR || (options || {}).ssr),
     ssr: !!((options || {}).ssr),
     prefixIdentifiers: !!((options || {}).prefixIdentifiers),
+    cacheHandlers: !!((options || {}).cacheHandlers),
     bindingMetadata: (options || {}).bindingMetadata || {},
     inline: !!((options || {}).inline),
     isTS: !!((options || {}).isTS),
@@ -599,7 +600,7 @@ function createTransformContext(root, options) {
       else this.helpers.delete(name);
     },
     helperString(name) {
-      return `_${helperNameMap[name] || String(name).replace(/^Symbol\((.*)\)$/, '$1')}`;
+      return `_${helperNameMap[this.helper(name)] || String(name).replace(/^Symbol\((.*)\)$/, '$1')}`;
     },
     replaceNode(node) {
       if (!this.parent) {
@@ -626,8 +627,18 @@ function createTransformContext(root, options) {
       list.splice(removalIndex, 1);
     },
     onNodeRemoved() {},
-    addIdentifiers() {},
-    removeIdentifiers() {},
+    addIdentifiers(exp) {
+      for (const name of expressionIdentifierNames(exp)) {
+        this.identifiers[name] = (this.identifiers[name] || 0) + 1;
+      }
+    },
+    removeIdentifiers(exp) {
+      for (const name of expressionIdentifierNames(exp)) {
+        if (!this.identifiers[name]) continue;
+        this.identifiers[name]--;
+        if (this.identifiers[name] <= 0) delete this.identifiers[name];
+      }
+    },
     cache(exp, isVNode, inVOnce) {
       const cached = createCacheExpression(this.cached.length, exp, !!isVNode, !!inVOnce);
       this.cached.push(cached);
@@ -700,6 +711,8 @@ function vue3TransformContextPayload(context) {
   context = context || {};
   return {
     prefixIdentifiers: !!context.prefixIdentifiers,
+    cacheHandlers: !!context.cacheHandlers,
+    inVOnce: !!context.inVOnce,
     inline: !!context.inline,
     isTS: !!context.isTS,
     identifiers: context.identifiers || {},
@@ -1132,6 +1145,14 @@ function hasScopeRef(node, ids) {
   return found;
 }
 
+function expressionIdentifierNames(exp) {
+  if (!exp) return [];
+  if (typeof exp === 'string') return exp ? [exp] : [];
+  if (Array.isArray(exp.identifiers)) return exp.identifiers.filter(Boolean);
+  if (exp.type === NodeTypes.SIMPLE_EXPRESSION && exp.content) return [exp.content];
+  return [];
+}
+
 function injectProp(node, prop, context) {
   if (!node) return node;
   if (!node.props) node.props = createObjectExpression([]);
@@ -1289,6 +1310,8 @@ function processFor(node, dir, context, processCodegen) {
   });
   if (!projection || !projection.parseResult) return undefined;
   const parsed = materializeVue3ForParseResult(projection.parseResult, dir, context);
+  const aliases = projection.locals || [];
+  if (context.prefixIdentifiers) aliases.forEach(alias => context.addIdentifiers(alias));
   const children = node.tagType === ElementTypes.TEMPLATE ? node.children || [] : [node];
   const forNode = {
     type: NodeTypes.FOR,
@@ -1307,6 +1330,7 @@ function processFor(node, dir, context, processCodegen) {
   const onExit = typeof processCodegen === 'function' ? processCodegen(forNode) : undefined;
   return () => {
     context.scopes.vFor--;
+    if (context.prefixIdentifiers) aliases.forEach(alias => context.removeIdentifiers(alias));
     if (onExit) {
       onExit();
       return;
@@ -1651,7 +1675,39 @@ const transformModel = (dir, node, context) => {
 };
 
 const transformOn = (dir, node, context, augmentor) => {
-  return { props: dir && dir.arg ? [createObjectProperty(dir.arg, dir.exp || createSimpleExpression('() => {}', false))] : [] };
+  context = context || {
+    helper: name => name,
+    helperString: name => `_${helperNameMap[name] || name}`,
+    cache: value => value,
+    onError: error => { throw error; },
+  };
+  const projection = callVue3CoreProjection('vue3.core.transformOn', {
+    dir,
+    node,
+    context: vue3TransformContextPayload(context),
+  });
+  emitVue3DirectiveProjectionErrors(projection, dir, context);
+  const onMeta = (projection && projection.props || []).map(prop => ({
+    cache: !!prop.cache,
+    handlerKey: !!prop.handlerKey,
+    dynamicKey: !!prop.dynamicKey,
+    ignoreDynamicKeyForNormalize: !!prop.ignoreDynamicKeyForNormalize,
+    valueConstant: !!prop.valueConstant,
+  }));
+  let result = {
+    props: (projection && projection.props || []).map(prop => createObjectProperty(
+      materializeVue3ProjectionNode(prop.key, { dir, node }, context),
+      materializeVue3ProjectionNode(prop.value, { dir, node }, context) || createSimpleExpression('() => {}', false, dir && dir.loc || locStub),
+    )),
+  };
+  if (typeof augmentor === 'function') result = augmentor(result) || result;
+  for (const [index, prop] of (result.props || []).entries()) {
+    const meta = onMeta[index] || onMeta[0] || {};
+    if (prop.key && meta.handlerKey) prop.key.isHandlerKey = true;
+    if (meta.cache && context && typeof context.cache === 'function') prop.value = context.cache(prop.value);
+    prop.__vuecOn = meta;
+  }
+  return result;
 };
 
 const transformVBindShorthand = (node, context) => {
