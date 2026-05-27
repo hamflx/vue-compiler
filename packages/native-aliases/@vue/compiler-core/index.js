@@ -283,7 +283,13 @@ function parse(content, options) {
 }
 
 function generate(ast) {
-  return native.generateVue3Core(hydrateVue3Ast(ast || {}, normalizeOptions(arguments[1])), normalizeOptions(arguments[1]));
+  const options = normalizeOptions(arguments[1]);
+  const hydrated = hydrateVue3Ast(ast || {}, options);
+  const result = native.generateVue3Core(hydrated, options);
+  if (result && typeof result === 'object' && !Object.prototype.hasOwnProperty.call(result, 'ast')) {
+    result.ast = hydrated;
+  }
+  return result;
 }
 
 function generateCodeFrame(source) {
@@ -684,11 +690,14 @@ function createTransformContext(root, options) {
     compatConfig: (options || {}).compatConfig,
     inSSR: !!((options || {}).inSSR || (options || {}).ssr),
     ssr: !!((options || {}).ssr),
+    ssrCssVars: (options || {}).ssrCssVars || '',
     prefixIdentifiers: !!((options || {}).prefixIdentifiers),
     cacheHandlers: !!((options || {}).cacheHandlers),
     bindingMetadata: (options || {}).bindingMetadata || {},
     scopeId: (options || {}).scopeId,
-    slotted: !!((options || {}).slotted),
+    slotted: Object.prototype.hasOwnProperty.call(options || {}, 'slotted')
+      ? !!((options || {}).slotted)
+      : true,
     inline: !!((options || {}).inline),
     isTS: !!((options || {}).isTS),
     expressionPlugins: (options || {}).expressionPlugins || [],
@@ -1369,11 +1378,11 @@ function getMemoedVNodeCall(node) {
 }
 
 function getVNodeBlockHelper(ssr, isComponent) {
-  return isComponent ? CREATE_BLOCK : CREATE_ELEMENT_BLOCK;
+  return ssr || isComponent ? CREATE_BLOCK : CREATE_ELEMENT_BLOCK;
 }
 
 function getVNodeHelper(ssr, isComponent) {
-  return isComponent ? CREATE_VNODE : CREATE_ELEMENT_VNODE;
+  return ssr || isComponent ? CREATE_VNODE : CREATE_ELEMENT_VNODE;
 }
 
 function createRootCodegen(root, context) {
