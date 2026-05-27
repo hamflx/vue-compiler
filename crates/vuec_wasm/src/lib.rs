@@ -1,3 +1,11 @@
+//! WebAssembly bindings for the Rust Vue compiler.
+//!
+//! This crate exposes the `@vuec-rs/wasm` JSON-string ABI plus Rust JSON helper
+//! functions used by WASI and Node smoke tests. Public entry points delegate to
+//! the Rust compiler crates and convert recoverable ABI errors into structured
+//! JSON values.
+
+#![deny(missing_docs)]
 #![forbid(unsafe_code)]
 
 use serde::Serialize;
@@ -21,16 +29,19 @@ static WASM_ALLOCATOR: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
 
 #[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
 #[wasm_bindgen(start)]
+/// Initializes browser/Node WASM runtime panic hooks.
 pub fn init_wasm_runtime() {
     console_error_panic_hook::set_once();
 }
 
 #[cfg_attr(not(target_os = "wasi"), wasm_bindgen(js_name = version))]
+/// Returns the WASM package version.
 pub fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
 #[cfg_attr(not(target_os = "wasi"), wasm_bindgen(js_name = compileVue2))]
+/// Compiles a Vue 2 template and returns a JSON string result.
 pub fn compile_vue2(template: &str, options_json: Option<String>) -> String {
     wasm_json_boundary(|| {
         let options = parse_options(options_json)?;
@@ -39,6 +50,7 @@ pub fn compile_vue2(template: &str, options_json: Option<String>) -> String {
 }
 
 #[cfg_attr(not(target_os = "wasi"), wasm_bindgen(js_name = compileVue3Dom))]
+/// Compiles a Vue 3 template for DOM rendering and returns a JSON string result.
 pub fn compile_vue3_dom(source: &str, options_json: Option<String>) -> String {
     wasm_json_boundary(|| {
         let options = parse_options(options_json)?;
@@ -56,6 +68,7 @@ pub fn compile_vue3_dom(source: &str, options_json: Option<String>) -> String {
 }
 
 #[cfg_attr(not(target_os = "wasi"), wasm_bindgen(js_name = compileVue3Ssr))]
+/// Compiles a Vue 3 template for SSR and returns a JSON string result.
 pub fn compile_vue3_ssr(source: &str, options_json: Option<String>) -> String {
     wasm_json_boundary(|| {
         let options = parse_options(options_json)?;
@@ -77,6 +90,7 @@ pub fn compile_vue3_ssr(source: &str, options_json: Option<String>) -> String {
 }
 
 #[cfg_attr(not(target_os = "wasi"), wasm_bindgen(js_name = parseSfc))]
+/// Parses a Vue SFC descriptor and returns it as a JSON string.
 pub fn parse_sfc(source: &str, options_json: Option<String>) -> String {
     wasm_json_boundary(|| {
         let options = parse_options(options_json)?;
@@ -88,6 +102,7 @@ pub fn parse_sfc(source: &str, options_json: Option<String>) -> String {
 }
 
 #[cfg_attr(not(target_os = "wasi"), wasm_bindgen(js_name = compileSfcTemplate))]
+/// Compiles the template block from a full SFC source.
 pub fn compile_sfc_template(source: &str, options_json: Option<String>) -> String {
     wasm_json_boundary(|| {
         let options = parse_options(options_json)?;
@@ -100,6 +115,7 @@ pub fn compile_sfc_template(source: &str, options_json: Option<String>) -> Strin
 }
 
 #[cfg_attr(not(target_os = "wasi"), wasm_bindgen(js_name = compileSfcTemplateSource))]
+/// Compiles standalone SFC template source.
 pub fn compile_sfc_template_source(source: &str, options_json: Option<String>) -> String {
     wasm_json_boundary(|| {
         let options = parse_options(options_json)?;
@@ -111,6 +127,7 @@ pub fn compile_sfc_template_source(source: &str, options_json: Option<String>) -
 }
 
 #[cfg_attr(not(target_os = "wasi"), wasm_bindgen(js_name = compileSfcScript))]
+/// Compiles script blocks from a full SFC source.
 pub fn compile_sfc_script(source: &str, options_json: Option<String>) -> String {
     wasm_json_boundary(|| {
         let options = parse_options(options_json)?;
@@ -123,6 +140,7 @@ pub fn compile_sfc_script(source: &str, options_json: Option<String>) -> String 
 }
 
 #[cfg_attr(not(target_os = "wasi"), wasm_bindgen(js_name = compileSfcStyle))]
+/// Compiles style blocks from a full SFC source.
 pub fn compile_sfc_style(source: &str, options_json: Option<String>) -> String {
     wasm_json_boundary(|| {
         let options = parse_options(options_json)?;
@@ -134,11 +152,13 @@ pub fn compile_sfc_style(source: &str, options_json: Option<String>) -> String {
     })
 }
 
+/// Compiles a Vue 2 template and returns a JSON value for Rust-side callers.
 pub fn compile_vue2_json(template: &str, options: Value) -> Value {
     serde_json::to_value(vuec_vue2::compile(template, vue2_options(&options)))
         .unwrap_or_else(serialization_error_value)
 }
 
+/// Compiles a Vue 3 DOM template and returns a JSON value for Rust-side callers.
 pub fn compile_vue3_dom_json(source: &str, options: Value) -> Value {
     let template = template_source(source, &options);
     let mut core = vue3_options(&options);
@@ -153,6 +173,7 @@ pub fn compile_vue3_dom_json(source: &str, options: Value) -> Value {
     .unwrap_or_else(serialization_error_value)
 }
 
+/// Compiles an SFC template and returns a JSON value for Rust-side callers.
 pub fn compile_sfc_template_json(source: &str, options: Value) -> Value {
     let filename = string_option(&options, "filename").unwrap_or_else(|| "anonymous.vue".into());
     let mut compiler = SfcCompiler::new();

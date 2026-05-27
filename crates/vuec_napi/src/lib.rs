@@ -1,3 +1,11 @@
+//! Native Node.js bindings for the Rust Vue compiler.
+//!
+//! This crate exposes the release-facing NAPI ABI used by `@vuec-rs/native`
+//! and the official package-name aliases. Public functions serialize compiler
+//! results as JSON strings so the JavaScript loader can project them into the
+//! expected package API shapes.
+
+#![deny(missing_docs)]
 #![deny(unsafe_code)]
 
 use napi::{bindgen_prelude::Unknown, Env, Result};
@@ -18,11 +26,13 @@ use vuec_vue3_dom::{
 use vuec_vue3_ssr::{compile as compile_ssr, SsrCompilerOptions};
 
 #[napi(js_name = "version")]
+/// Returns the native package version.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
 #[napi(js_name = "compileVue2")]
+/// Compiles a Vue 2 template and returns a JSON string result.
 pub fn compile_vue2(env: Env, template: String, options: Option<Unknown>) -> Result<String> {
     to_json_string(vuec_vue2::compile(
         &template,
@@ -31,6 +41,7 @@ pub fn compile_vue2(env: Env, template: String, options: Option<Unknown>) -> Res
 }
 
 #[napi(js_name = "compileToFunctionsVue2")]
+/// Compiles a Vue 2 template to function-result fields as a JSON string.
 pub fn compile_to_functions_vue2(
     env: Env,
     template: String,
@@ -43,6 +54,7 @@ pub fn compile_to_functions_vue2(
 }
 
 #[napi(js_name = "compileSsrVue2")]
+/// Compiles a Vue 2 template for SSR and returns a JSON string result.
 pub fn compile_ssr_vue2(env: Env, template: String, options: Option<Unknown>) -> Result<String> {
     to_json_string(vuec_vue2::compile_ssr(
         &template,
@@ -51,11 +63,13 @@ pub fn compile_ssr_vue2(env: Env, template: String, options: Option<Unknown>) ->
 }
 
 #[napi(js_name = "generateCodeFrameVue2")]
+/// Generates a Vue 2 compiler code frame.
 pub fn generate_code_frame_vue2(source: String, start: u32, end: u32) -> String {
     vuec_vue2::generate_code_frame(&source, start as usize, end as usize)
 }
 
 #[napi(js_name = "rewriteDefaultVue27")]
+/// Rewrites a Vue 2.7 default export to an assigned variable.
 pub fn rewrite_default_vue27(
     env: Env,
     source: String,
@@ -68,6 +82,7 @@ pub fn rewrite_default_vue27(
 }
 
 #[napi(js_name = "compileVue3Dom")]
+/// Compiles a Vue 3 template for DOM rendering and returns a JSON string result.
 pub fn compile_vue3_dom(env: Env, source: String, options: Option<Unknown>) -> Result<String> {
     let raw_options = from_js_options(&env, options)?;
     let template = template_source(&source, &raw_options);
@@ -81,6 +96,7 @@ pub fn compile_vue3_dom(env: Env, source: String, options: Option<Unknown>) -> R
 }
 
 #[napi(js_name = "parseVue3Dom")]
+/// Parses a Vue 3 DOM template and returns public AST JSON.
 pub fn parse_vue3_dom(env: Env, source: String, options: Option<Unknown>) -> Result<String> {
     let raw_options = from_js_options(&env, options)?;
     let template = template_source(&source, &raw_options);
@@ -99,11 +115,13 @@ pub fn parse_vue3_dom(env: Env, source: String, options: Option<Unknown>) -> Res
 }
 
 #[napi(js_name = "baseCompileVue3")]
+/// Runs the Vue 3 compiler-core `baseCompile` compatible DOM path.
 pub fn base_compile_vue3(env: Env, source: String, options: Option<Unknown>) -> Result<String> {
     compile_vue3_dom(env, source, options)
 }
 
 #[napi(js_name = "baseParseVue3")]
+/// Parses a Vue 3 template through compiler-core and returns public AST JSON.
 pub fn base_parse_vue3(env: Env, source: String, options: Option<Unknown>) -> Result<String> {
     let raw_options = from_js_options(&env, options)?;
     let template = template_source(&source, &raw_options);
@@ -117,6 +135,7 @@ pub fn base_parse_vue3(env: Env, source: String, options: Option<Unknown>) -> Re
 }
 
 #[napi(js_name = "generateVue3Core")]
+/// Generates Vue 3 render code from a hydrated public AST value.
 pub fn generate_vue3_core(env: Env, ast: Unknown, options: Option<Unknown>) -> Result<String> {
     let ast = from_js_options(&env, Some(ast))?;
     let options = vue3_options(Some(&from_js_options(&env, options)?));
@@ -124,6 +143,7 @@ pub fn generate_vue3_core(env: Env, ast: Unknown, options: Option<Unknown>) -> R
 }
 
 #[napi(js_name = "compileVue3Ssr")]
+/// Compiles a Vue 3 template for SSR and returns a JSON string result.
 pub fn compile_vue3_ssr(env: Env, source: String, options: Option<Unknown>) -> Result<String> {
     let raw_options = from_js_options(&env, options)?;
     let template = template_source(&source, &raw_options);
@@ -144,6 +164,7 @@ pub fn compile_vue3_ssr(env: Env, source: String, options: Option<Unknown>) -> R
 }
 
 #[napi(js_name = "parseSfc")]
+/// Parses a Vue SFC descriptor and returns it as JSON.
 pub fn parse_sfc(env: Env, source: String, options: Option<Unknown>) -> Result<String> {
     let raw_options = from_js_options(&env, options)?;
     let filename = string_option(&raw_options, "filename", "anonymous.vue");
@@ -152,6 +173,7 @@ pub fn parse_sfc(env: Env, source: String, options: Option<Unknown>) -> Result<S
 }
 
 #[napi(js_name = "compileSfcTemplate")]
+/// Compiles the template block from a full SFC source.
 pub fn compile_sfc_template(env: Env, source: String, options: Option<Unknown>) -> Result<String> {
     let raw_options = from_js_options(&env, options)?;
     let filename = string_option(&raw_options, "filename", "anonymous.vue");
@@ -162,6 +184,7 @@ pub fn compile_sfc_template(env: Env, source: String, options: Option<Unknown>) 
 }
 
 #[napi(js_name = "compileSfcTemplateSource")]
+/// Compiles standalone SFC template source.
 pub fn compile_sfc_template_source(
     env: Env,
     source: String,
@@ -179,6 +202,7 @@ pub fn compile_sfc_template_source(
 }
 
 #[napi(js_name = "compileSfcScript")]
+/// Compiles script blocks from a full Vue 3 SFC source.
 pub fn compile_sfc_script(env: Env, source: String, options: Option<Unknown>) -> Result<String> {
     let raw_options = from_js_options(&env, options)?;
     let filename = string_option(&raw_options, "filename", "anonymous.vue");
@@ -189,6 +213,7 @@ pub fn compile_sfc_script(env: Env, source: String, options: Option<Unknown>) ->
 }
 
 #[napi(js_name = "compileVue27SfcTemplate")]
+/// Compiles a Vue 2.7 SFC template source and returns official-style JSON.
 pub fn compile_vue27_sfc_template(
     env: Env,
     source: String,
@@ -224,6 +249,7 @@ pub fn compile_vue27_sfc_template(
 }
 
 #[napi(js_name = "compileVue27SfcScript")]
+/// Compiles script blocks from a Vue 2.7 SFC source.
 pub fn compile_vue27_sfc_script(
     env: Env,
     source: String,
@@ -238,6 +264,7 @@ pub fn compile_vue27_sfc_script(
 }
 
 #[napi(js_name = "compileSfcStyle")]
+/// Compiles style blocks from a full SFC source.
 pub fn compile_sfc_style(env: Env, source: String, options: Option<Unknown>) -> Result<String> {
     let raw_options = from_js_options(&env, options)?;
     let filename = string_option(&raw_options, "filename", "anonymous.vue");
@@ -957,6 +984,7 @@ fn string_array_option(value: &Value, name: &str) -> Vec<String> {
 }
 
 #[napi(js_name = "apiManifest")]
+/// Returns the native binding API manifest as JSON.
 pub fn api_manifest() -> Result<String> {
     to_json_string(json!({
             "package": "@vuec-rs/native",

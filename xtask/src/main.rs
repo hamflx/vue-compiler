@@ -1268,6 +1268,8 @@ fn verify_public_api_docs() -> Result<compat::JsonReport> {
         "vuec_vue3_ssr",
         "vuec_vue2",
         "vuec_sfc",
+        "vuec_napi",
+        "vuec_wasm",
     ];
     let mut items = Vec::new();
     let mut violations = Vec::new();

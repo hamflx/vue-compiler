@@ -1,3 +1,8 @@
+//! WASI smoke runner for the `@vuec-rs/wasm` compiler ABI.
+//!
+//! The binary reads optional JSON cases from stdin, executes the Rust-side
+//! JSON helper functions, and prints a deterministic JSON smoke report.
+
 #![forbid(unsafe_code)]
 
 use serde_json::{json, Value};
