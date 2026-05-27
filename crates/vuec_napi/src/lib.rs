@@ -222,6 +222,35 @@ pub fn generate_vue3_core(env: Env, ast: Unknown, options: Option<Unknown>) -> R
     to_json_string(vuec_vue3_core::generate_public_ast(&ast, &options))
 }
 
+#[napi(js_name = "callVue3CoreProjection")]
+/// Calls Rust-backed Vue 3 compiler-core public projection helpers.
+pub fn call_vue3_core_projection(env: Env, command: String, payload: Unknown) -> Result<String> {
+    let payload = from_js_options(&env, Some(payload))?;
+    let value = match command.as_str() {
+        "vue3.core.isMemberExpression" => vuec_vue3_core::is_member_expression_projection(&payload),
+        "vue3.core.advancePositionWithClone" => {
+            vuec_vue3_core::advance_position_with_clone_projection(&payload)
+        }
+        "vue3.core.advancePositionWithMutation" => {
+            vuec_vue3_core::advance_position_with_mutation_projection(&payload)
+        }
+        "vue3.core.toValidAssetId" => vuec_vue3_core::to_valid_asset_id_projection(&payload),
+        "vue3.core.isInDestructureAssignment" => {
+            vuec_vue3_core::is_in_destructure_assignment_projection(&payload)
+        }
+        "vue3.core.isReferencedIdentifier" => {
+            vuec_vue3_core::is_referenced_identifier_projection(&payload)
+        }
+        "vue3.core.walkIdentifiers" => vuec_vue3_core::walk_identifiers_projection(&payload),
+        other => {
+            return Err(napi::Error::from_reason(format!(
+                "unsupported Vue 3 compiler-core projection command: {other}"
+            )));
+        }
+    };
+    to_json_string(value)
+}
+
 #[napi(js_name = "compileVue3Ssr")]
 /// Compiles a Vue 3 template for SSR and returns a JSON string result.
 pub fn compile_vue3_ssr(env: Env, source: String, options: Option<Unknown>) -> Result<String> {
@@ -3400,6 +3429,7 @@ pub fn api_manifest() -> Result<String> {
                 "baseCompileVue3",
                 "baseParseVue3",
                 "generateVue3Core",
+                "callVue3CoreProjection",
                 "compileVue3Dom",
                 "parseVue3Dom",
                 "compileVue3Ssr",

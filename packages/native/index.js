@@ -120,35 +120,42 @@ function dehydrateForNative(value, seen = new WeakSet()) {
     return undefined;
   }
   seen.add(value);
+  let out;
   if (Array.isArray(value)) {
-    return value.map(item => {
+    out = value.map(item => {
       const dehydrated = dehydrateForNative(item, seen);
       return dehydrated === undefined ? null : dehydrated;
     });
+    seen.delete(value);
+    return out;
   }
   if (value instanceof Set) {
-    return Array.from(value, item => {
+    out = Array.from(value, item => {
       const dehydrated = dehydrateForNative(item, seen);
       return dehydrated === undefined ? null : dehydrated;
     });
+    seen.delete(value);
+    return out;
   }
   if (value instanceof Map) {
-    const out = {};
+    out = {};
     for (const [key, item] of value.entries()) {
       const dehydrated = dehydrateForNative(item, seen);
       if (dehydrated !== undefined) {
         out[String(key)] = dehydrated;
       }
     }
+    seen.delete(value);
     return out;
   }
-  const out = {};
+  out = {};
   for (const key of Object.keys(value)) {
     const dehydrated = dehydrateForNative(value[key], seen);
     if (dehydrated !== undefined) {
       out[key] = dehydrated;
     }
   }
+  seen.delete(value);
   return out;
 }
 
@@ -166,6 +173,10 @@ function baseParseVue3(source, options = {}) {
 
 function generateVue3Core(ast, options = {}) {
   return fromJson(binding.generateVue3Core(dehydrateForNative(ast || {}), dehydrateForNative(options || {})));
+}
+
+function callVue3CoreProjection(command, payload = {}) {
+  return fromJson(binding.callVue3CoreProjection(String(command || ''), dehydrateForNative(payload || {})));
 }
 
 function compileVue3Dom(source, options = {}) {
@@ -311,6 +322,7 @@ module.exports = {
   baseCompileVue3,
   baseParseVue3,
   generateVue3Core,
+  callVue3CoreProjection,
   compileVue3Dom,
   parseVue3Dom,
   compileVue3Ssr,

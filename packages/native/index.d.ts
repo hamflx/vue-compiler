@@ -49,6 +49,7 @@ export function rewriteDefaultVue27(source: string, variable: string, parserPlug
 export function baseCompileVue3(source: string, options?: Record<string, unknown>): Vue3CodegenResult;
 export function baseParseVue3(source: string, options?: Record<string, unknown>): unknown;
 export function generateVue3Core(ast: unknown, options?: Record<string, unknown>): Vue3CodegenResult;
+export function callVue3CoreProjection(command: string, payload?: Record<string, unknown>): unknown;
 export function compileVue3Dom(source: string, options?: Record<string, unknown>): Vue3CodegenResult;
 export function parseVue3Dom(source: string, options?: Record<string, unknown>): unknown;
 export function compileVue3Ssr(source: string, options?: Record<string, unknown>): Vue3CodegenResult;

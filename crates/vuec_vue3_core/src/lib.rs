@@ -5793,9 +5793,9 @@ fn js_ast_is_referenced_identifier(
         return false;
     }
     let grandparent = parent_stack
-        .len()
-        .checked_sub(2)
-        .and_then(|index| parent_stack.get(index));
+        .iter()
+        .rev()
+        .find(|ancestor| *ancestor != parent);
     if js_ast_is_referenced(parent, grandparent, relation) {
         return true;
     }
@@ -29115,6 +29115,51 @@ mod tests {
             &function,
             &[],
             Some("params")
+        ));
+    }
+
+    #[test]
+    fn js_ast_reference_projection_excludes_destructured_function_params() {
+        let id = json!({ "type": "Identifier", "name": "title" });
+        let property = json!({
+            "type": "ObjectProperty",
+            "key": { "type": "Identifier", "name": "title" },
+            "value": id,
+            "computed": false,
+            "shorthand": true
+        });
+        let pattern = json!({
+            "type": "ObjectPattern",
+            "properties": [property]
+        });
+        let function = json!({
+            "type": "ArrowFunctionExpression",
+            "params": [pattern],
+            "body": { "type": "ArrayExpression", "elements": [] }
+        });
+        let statement = json!({
+            "type": "ExpressionStatement",
+            "expression": function
+        });
+        let parent = &statement["expression"]["params"][0]["properties"][0];
+        let parent_stack = vec![
+            statement.clone(),
+            statement["expression"].clone(),
+            statement["expression"]["params"][0].clone(),
+            parent.clone(),
+        ];
+
+        assert!(!js_ast_is_referenced_identifier(
+            &statement["expression"]["params"][0]["properties"][0]["key"],
+            parent,
+            &parent_stack,
+            Some("key")
+        ));
+        assert!(!js_ast_is_referenced_identifier(
+            &statement["expression"]["params"][0]["properties"][0]["value"],
+            parent,
+            &parent_stack,
+            Some("value")
         ));
     }
 

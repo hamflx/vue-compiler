@@ -46,6 +46,9 @@ assert.deepStrictEqual(
 );
 assert.ok(core.isSimpleIdentifier('msg'));
 assert.strictEqual(core.createSimpleExpression('msg').content, 'msg');
+assert.strictEqual(core.isMemberExpressionBrowser(core.createSimpleExpression('obj.foo')), true);
+assert.strictEqual(core.isMemberExpressionBrowser(core.createSimpleExpression('a + b')), false);
+assert.strictEqual(core.toValidAssetId('test-测试-1', 'component'), '_component_test_2797935797_1');
 
 const domResult = dom.compile('<input v-model="msg">', {
   mode: 'module',
@@ -106,6 +109,36 @@ const identifiers = sfc.extractIdentifiers({
   ],
 });
 assert.ok(identifiers.some(identifier => identifier.name === 'target'));
+
+const destructuredParam = {
+  type: 'ExpressionStatement',
+  expression: {
+    type: 'ArrowFunctionExpression',
+    params: [{
+      type: 'ObjectPattern',
+      properties: [{
+        type: 'ObjectProperty',
+        key: { type: 'Identifier', name: 'title' },
+        value: { type: 'Identifier', name: 'title' },
+        computed: false,
+        shorthand: true,
+      }],
+    }],
+    body: { type: 'ArrayExpression', elements: [] },
+  },
+};
+const walked = [];
+sfc.walkIdentifiers(destructuredParam, (node, parent, parentStack, isReference) => {
+  walked.push({
+    name: node.name,
+    parent: parent && parent.type,
+    isReference,
+    coreReference: core.isReferencedIdentifier(node, parent, parentStack),
+  });
+}, true);
+assert.ok(walked.length >= 2);
+assert.ok(walked.every(event => event.isReference === false));
+assert.ok(walked.every(event => event.coreReference === false));
 
 assert.deepStrictEqual(
   sfc.inferRuntimeType({}, {

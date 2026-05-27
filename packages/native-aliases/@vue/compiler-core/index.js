@@ -229,6 +229,10 @@ function generateCodeFrame(source) {
   return native.generateCodeFrameVue2(String(source || ''), Number(arguments[1]) || 0, Number(arguments[2]) || 0);
 }
 
+function callVue3CoreProjection(command, payload) {
+  return native.callVue3CoreProjection(command, payload || {});
+}
+
 function validateBaseCompileOptions(options) {
   const isModuleMode = options.mode === 'module';
   const prefixIdentifiers = options.prefixIdentifiers === true || isModuleMode;
@@ -349,27 +353,26 @@ function hydrateVue3Node(node) {
 }
 
 function advancePositionWithClone(pos, source) {
-  const next = { ...(pos || {}) };
-  return advancePositionWithMutation(next, source, arguments.length > 2 ? arguments[2] : undefined);
+  return callVue3CoreProjection('vue3.core.advancePositionWithClone', {
+    pos: pos || {},
+    source: String(source || ''),
+    numberOfCharacters: arguments.length > 2 ? Number(arguments[2]) : undefined,
+  });
 }
 
 function advancePositionWithMutation(pos, source) {
-  const target = pos || { offset: 0, line: 1, column: 1 };
-  const text = String(source || '');
-  const count = arguments.length > 2 && arguments[2] != null ? Number(arguments[2]) : text.length;
-  const slice = Array.from(text).slice(0, count).join('');
-  target.offset = Number(target.offset || 0) + count;
-  for (const ch of slice) {
-    if (ch === '\n') {
-      target.line = Number(target.line || 1) + 1;
-      target.column = 1;
-    } else {
-      target.column = Number(target.column || 1) + 1;
-    }
+  const next = callVue3CoreProjection('vue3.core.advancePositionWithMutation', {
+    pos: pos || {},
+    source: String(source || ''),
+    numberOfCharacters: arguments.length > 2 ? Number(arguments[2]) : undefined,
+  });
+  if (pos && typeof pos === 'object') {
+    pos.offset = next.offset;
+    pos.line = next.line;
+    pos.column = next.column;
+    return pos;
   }
-  if (!target.line) target.line = 1;
-  if (!target.column) target.column = 1;
-  return target;
+  return next;
 }
 
 function assert(condition, msg) {
@@ -670,8 +673,11 @@ const isFunctionType = (node) => {
 };
 
 function isInDestructureAssignment(parent, parentStack) {
-  return Array.isArray(parentStack) && parentStack.some(node => node && node.type === 'AssignmentExpression')
-    && !!parent && /(?:Property|Pattern)$/.test(String(parent.type || ''));
+  const projection = callVue3CoreProjection('vue3.core.isInDestructureAssignment', {
+    parent,
+    parentStack: parentStack || [],
+  });
+  return !!(projection && projection.isInDestructureAssignment);
 }
 
 function isInNewExpression(parentStack) {
@@ -679,22 +685,34 @@ function isInNewExpression(parentStack) {
 }
 
 const isMemberExpressionNode = (path, context) => {
-  return isMemberExpressionSource(typeof path === 'string' ? path : path && path.content);
+  const projection = callVue3CoreProjection('vue3.core.isMemberExpression', {
+    node: typeof path === 'string' ? createSimpleExpression(path) : path,
+    context: context || {},
+    mode: 'node',
+  });
+  return !!(projection && projection.isMemberExpression);
 };
 
 const isMemberExpressionBrowser = (path) => {
-  return isMemberExpressionNode(path, null);
+  const projection = callVue3CoreProjection('vue3.core.isMemberExpression', {
+    node: typeof path === 'string' ? createSimpleExpression(path) : path,
+    context: {},
+    mode: 'browser',
+  });
+  return !!(projection && projection.isMemberExpression);
 };
 
 const isMemberExpression = isMemberExpressionNode;
 
 function isReferencedIdentifier(id, parent, parentStack) {
-  if (!id || id.type !== 'Identifier') return false;
-  if (!parent) return true;
   const relation = arguments.length > 3 ? arguments[3] : undefined;
-  if (parent.type === 'MemberExpression') return relation === 'object' || !!parent.computed;
-  if (parent.type === 'ObjectProperty' || parent.type === 'Property') return relation !== 'key' || !!parent.computed;
-  return !/^(FunctionDeclaration|FunctionExpression|ImportSpecifier|ImportDefaultSpecifier|ImportNamespaceSpecifier)$/.test(parent.type);
+  const projection = callVue3CoreProjection('vue3.core.isReferencedIdentifier', {
+    node: id,
+    parent: parent || null,
+    parentStack: parentStack || [],
+    relation: relation || nodeRelation(parent, id),
+  });
+  return !!(projection && projection.isReferencedIdentifier);
 }
 
 const isSimpleIdentifier = (name) => {
@@ -780,7 +798,11 @@ function stringifyExpression(exp) {
 }
 
 function toValidAssetId(name, type) {
-  return `_${type}_${String(name || '').replace(/[^\w$]/g, '_')}`;
+  const projection = callVue3CoreProjection('vue3.core.toValidAssetId', {
+    name: String(name || ''),
+    type: String(type || ''),
+  });
+  return projection && typeof projection.id === 'string' ? projection.id : `_${type}_`;
 }
 
 const trackSlotScopes = (node, context) => {
@@ -923,8 +945,15 @@ function walkNode(node, enter, parent) {
   }
 }
 
-function isMemberExpressionSource(source) {
-  return /^[A-Za-z_$][\w$]*(?:\s*(?:\.|\[).+)?$/.test(String(source || '').trim());
+function nodeRelation(parent, child) {
+  if (!parent || !child || typeof parent !== 'object') return undefined;
+  for (const key of Object.keys(parent)) {
+    if (key === 'loc' || key === 'parent') continue;
+    const value = parent[key];
+    if (value === child) return key;
+    if (Array.isArray(value) && value.includes(child)) return key;
+  }
+  return undefined;
 }
 
 const {

@@ -153,15 +153,19 @@ function extractIdentifiers(param) {
 
 function walkIdentifiers(root, onIdentifier) {
   const includeAll = arguments.length > 2 ? arguments[2] : false;
-  walkAst(root, (node, parent, stack) => {
-    if (node && node.type === 'Identifier') {
-      const isLocal = isBindingIdentifier(node, parent);
-      const isReferenced = includeAll || !isLocal;
-      if (includeAll || isReferenced) {
-        onIdentifier(node, parent || null, stack.slice(), isReferenced, isLocal);
-      }
-    }
+  const projection = native.callVue3CoreProjection('vue3.core.walkIdentifiers', {
+    root,
+    includeAll,
   });
+  for (const event of projection.identifiers || []) {
+    const node = nodeAtPath(root, event.path);
+    if (!node) continue;
+    const parent = event.parentPath ? nodeAtPath(root, event.parentPath) : null;
+    const stack = (event.parentStackPaths || [])
+      .map(path => nodeAtPath(root, path))
+      .filter(Boolean);
+    onIdentifier(node, parent, stack, !!event.isReferenced, !!event.isLocal);
+  }
 }
 
 function walk(root, enter) {
@@ -468,6 +472,15 @@ function walkAst(root, enter, leave, parent, stack) {
   }
   if (leave) leave(root, parent || null, parents);
   return root;
+}
+
+function nodeAtPath(root, path) {
+  let node = root;
+  for (const segment of path || []) {
+    if (node == null) return null;
+    node = node[segment];
+  }
+  return node || null;
 }
 
 function isBindingIdentifier(node, parent) {
