@@ -1,5 +1,9 @@
 # Memory
 
+- Current round: added the M20 release dry-run gate slice.
+- Added `cargo xtask verify-release-dry-run`, which stages release package directories under `target/release-dry-run`, builds release NAPI/WASM artifacts, runs `npm pack --dry-run --json` for the main native package, WASM package, and current native platform package, verifies required tarball entries, and runs Cargo dry-run checks for publishable crates where registry dependency resolution permits it.
+- The gate currently reports `pending` rather than `pass`: non-current native platform npm packages need target-platform `vuec_napi.node` release artifacts, and first-time crates.io dry-runs for crates with internal path dependencies require their dependency crates to exist in the registry first. This is release verification infrastructure only; it does not change compiler semantics, `xtask/src/compat.rs`, conformance classification, or AST/HIR/MIR structures.
+
 - Current round: completed the M20 release-facing API documentation slice.
 - Added `docs/API.md`, documenting supported Rust crate compiler entry points, `vuec` CLI commands, `@vuec-rs/native` NAPI exports, `@vuec-rs/wasm` exports, official package-name aliases, and API verification gates.
 - Extended `cargo xtask verify-release-docs` to require the API document and its Rust crate, CLI, NAPI, WASM, alias, and verification sections. This is documentation/release verification only; it does not change compiler semantics, `xtask/src/compat.rs`, conformance classification, or AST/HIR/MIR structures.

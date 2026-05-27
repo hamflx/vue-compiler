@@ -10,6 +10,7 @@ Use this checklist before publishing a release candidate.
 - [ ] `cargo xtask verify-release-docs`
 - [ ] `cargo xtask verify-crate-metadata`
 - [ ] `cargo xtask verify-supply-chain`
+- [ ] `cargo xtask verify-release-dry-run`
 - [ ] `cargo xtask summarize-compat --locked`
 - [ ] `cargo xtask bench --iterations 1`
 - [ ] Fill `docs/CONFORMANCE_REPORT_TEMPLATE.md` for the release candidate report.
@@ -30,8 +31,9 @@ Use this checklist before publishing a release candidate.
 - [ ] Confirm every npm package has `README.md`, `package.json`, license metadata, and a stable file list.
 - [ ] Run external advisory audits from `docs/SECURITY_SUPPLY_CHAIN.md` where the release environment has the tools and advisory databases.
 - [ ] Confirm every published crate has package metadata (`cargo xtask verify-crate-metadata`) and public API docs.
-- [ ] Run npm pack dry-runs for `packages/native`, all `packages/native-platforms/*`, and `packages/wasm`.
-- [ ] Run cargo publish dry-runs for published crates.
+- [ ] Run `cargo xtask verify-release-dry-run` and require no `fail` or `pending` rows before publication.
+- [ ] Run npm pack dry-runs for `packages/native`, all `packages/native-platforms/*`, and `packages/wasm`. Cross-platform native packages need release-built `vuec_napi.node` artifacts from their target platforms.
+- [ ] Run cargo publish dry-runs for published crates. On the first crates.io release, publish leaf crates first, then rerun dry-runs for crates that depend on already-published internal crates.
 - [ ] Install packed npm artifacts into a clean temp project and run Node smoke tests.
 - [ ] Record the conformance report path, lock hash, and coverage classification in the release notes.
 

@@ -112,6 +112,7 @@ enum Command {
     VerifyReleaseDocs,
     VerifyCrateMetadata,
     VerifySupplyChain,
+    VerifyReleaseDryRun,
     Bench {
         #[arg(long, default_value_t = 10)]
         iterations: usize,
@@ -179,6 +180,7 @@ fn main() -> Result<()> {
         Command::VerifyReleaseDocs => verify_release_docs()?,
         Command::VerifyCrateMetadata => verify_crate_metadata()?,
         Command::VerifySupplyChain => verify_supply_chain()?,
+        Command::VerifyReleaseDryRun => verify_release_dry_run()?,
         Command::Bench {
             iterations,
             out_dir,
@@ -1523,6 +1525,486 @@ fn verify_supply_chain() -> Result<compat::JsonReport> {
             .with_violations(violations)
             .with_note("verifies M20 security/supply-chain release controls: lock files, pinned package manager, npm license metadata, exact dependency versions, stable package files, and Cargo metadata resolution"),
     )
+}
+
+fn verify_release_dry_run() -> Result<compat::JsonReport> {
+    let mut items = Vec::new();
+    let mut violations = Vec::new();
+    let mut created = Vec::new();
+    let staging_root = PathBuf::from("target").join("release-dry-run");
+    ensure_target_child(&staging_root, "release-dry-run")?;
+    if staging_root.exists() {
+        fs::remove_dir_all(&staging_root)
+            .with_context(|| format!("failed to remove {}", staging_root.display()))?;
+    }
+    fs::create_dir_all(&staging_root)
+        .with_context(|| format!("failed to create {}", staging_root.display()))?;
+    created.push(staging_root.display().to_string());
+
+    match verify_release_npm_pack_dry_runs(&staging_root) {
+        Ok((mut npm_items, mut npm_created)) => {
+            items.append(&mut npm_items);
+            created.append(&mut npm_created);
+        }
+        Err(err) => {
+            violations.push(format!("npm release dry-run setup failed: {err:#}"));
+            items.push(compat::ReportItem::new(
+                "npm-release-dry-run",
+                compat::ReportStatus::Fail,
+                format!("{err:#}"),
+                Some(staging_root.join("npm")),
+            ));
+        }
+    }
+
+    match verify_release_cargo_dry_runs() {
+        Ok(mut cargo_items) => items.append(&mut cargo_items),
+        Err(err) => {
+            violations.push(format!("cargo release dry-run setup failed: {err:#}"));
+            items.push(compat::ReportItem::new(
+                "cargo-release-dry-run",
+                compat::ReportStatus::Fail,
+                format!("{err:#}"),
+                Some(PathBuf::from("Cargo.toml")),
+            ));
+        }
+    }
+
+    for item in &items {
+        if item.status == compat::ReportStatus::Fail {
+            violations.push(format!("{}: {}", item.target, item.detail));
+        }
+    }
+
+    Ok(compat::JsonReport::new(
+        "verify_release_dry_run",
+        if violations.is_empty() {
+            compat::ReportStatus::Pass
+        } else {
+            compat::ReportStatus::Fail
+        },
+    )
+    .with_items(items)
+    .with_created(created)
+    .with_violations(violations)
+    .with_note("runs real npm pack dry-runs from staged package directories, verifies staged package file lists, runs cargo publish dry-run where crates.io can resolve dependencies, and marks first-release or cross-platform artifact constraints as pending instead of counting them as passed"))
+}
+
+fn verify_release_npm_pack_dry_runs(
+    staging_root: &Path,
+) -> Result<(Vec<compat::ReportItem>, Vec<String>)> {
+    let mut items = Vec::new();
+    let mut created = Vec::new();
+    let npm_root = staging_root.join("npm");
+    fs::create_dir_all(&npm_root)
+        .with_context(|| format!("failed to create {}", npm_root.display()))?;
+
+    let napi_release_ready = match build_napi_crate_release() {
+        Ok(()) => true,
+        Err(err) => {
+            items.push(compat::ReportItem::new(
+                "npm:@vuec-rs/native-current-platform-build",
+                compat::ReportStatus::Fail,
+                format!("failed to build current platform NAPI binding: {err:#}"),
+                Some(PathBuf::from("crates/vuec_napi")),
+            ));
+            false
+        }
+    };
+
+    let wasm_release_ready = match build_wasm_release_packages() {
+        Ok(paths) => {
+            created.extend(paths.into_iter().map(|path| path.display().to_string()));
+            true
+        }
+        Err(err) => {
+            items.push(compat::ReportItem::new(
+                "npm:@vuec-rs/wasm-build",
+                compat::ReportStatus::Fail,
+                format!("failed to build wasm-bindgen release packages: {err:#}"),
+                Some(PathBuf::from("crates/vuec_wasm")),
+            ));
+            false
+        }
+    };
+
+    let native_stage = npm_root.join("native");
+    stage_package_dir(Path::new("packages/native"), &native_stage)?;
+    created.push(native_stage.display().to_string());
+    items.push(run_npm_pack_check(
+        "@vuec-rs/native",
+        &native_stage,
+        &["README.md", "index.d.ts", "index.js", "package.json"],
+    ));
+
+    if wasm_release_ready {
+        let wasm_stage = npm_root.join("wasm");
+        stage_package_dir(Path::new("packages/wasm"), &wasm_stage)?;
+        created.push(wasm_stage.display().to_string());
+        items.push(run_npm_pack_check(
+            "@vuec-rs/wasm",
+            &wasm_stage,
+            &[
+                "README.md",
+                "index.d.ts",
+                "index.js",
+                "package.json",
+                "pkg/vuec_wasm.js",
+                "pkg/vuec_wasm_bg.wasm",
+                "pkg-node/vuec_wasm.js",
+                "pkg-node/vuec_wasm_bg.wasm",
+            ],
+        ));
+    } else {
+        items.push(compat::ReportItem::new(
+            "npm:@vuec-rs/wasm",
+            compat::ReportStatus::Fail,
+            "release wasm-bindgen packages were not rebuilt, so npm pack dry-run was not run",
+            Some(PathBuf::from("packages/wasm")),
+        ));
+    }
+
+    let current_platform = current_platform_package_name();
+    for package_dir in collect_native_platform_package_dirs()? {
+        let manifest_path = package_dir.join("package.json");
+        let package_name = read_package_display_name(&manifest_path)?;
+        if Some(package_name.as_str()) == current_platform {
+            if napi_release_ready {
+                let stage_dir = npm_root
+                    .join("native-platforms")
+                    .join(native_platform_suffix(&package_name)?);
+                stage_package_dir(&package_dir, &stage_dir)?;
+                match copy_napi_release_binding(&stage_dir.join("vuec_napi.node")) {
+                    Ok(path) => {
+                        created.push(stage_dir.display().to_string());
+                        created.push(path.display().to_string());
+                        items.push(run_npm_pack_check(
+                            &package_name,
+                            &stage_dir,
+                            &["README.md", "package.json", "vuec_napi.node"],
+                        ));
+                    }
+                    Err(err) => items.push(compat::ReportItem::new(
+                        format!("npm:{package_name}"),
+                        compat::ReportStatus::Fail,
+                        format!("failed to stage release NAPI binding: {err:#}"),
+                        Some(package_dir),
+                    )),
+                }
+            } else {
+                items.push(compat::ReportItem::new(
+                    format!("npm:{package_name}"),
+                    compat::ReportStatus::Fail,
+                    "release NAPI binding was not rebuilt, so current platform npm pack dry-run was not run",
+                    Some(package_dir),
+                ));
+            }
+        } else {
+            items.push(compat::ReportItem::new(
+                format!("npm:{package_name}"),
+                compat::ReportStatus::Pending,
+                "non-current platform package requires its own release-build vuec_napi.node artifact before npm pack dry-run can prove publishability",
+                Some(package_dir),
+            ));
+        }
+    }
+
+    Ok((items, created))
+}
+
+fn verify_release_cargo_dry_runs() -> Result<Vec<compat::ReportItem>> {
+    let metadata = cargo_metadata_json()?;
+    let packages = metadata
+        .get("packages")
+        .and_then(JsonValue::as_array)
+        .context("cargo metadata output did not include packages array")?;
+    let mut items = Vec::new();
+    for package in packages
+        .iter()
+        .filter(|package| package_is_publishable(package))
+    {
+        let name = package
+            .get("name")
+            .and_then(JsonValue::as_str)
+            .unwrap_or("<unknown>");
+        let manifest_path = package
+            .get("manifest_path")
+            .and_then(JsonValue::as_str)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("Cargo.toml"));
+
+        let package_list = run_cargo(&["package", "--list", "--allow-dirty", "-p", name]);
+        if let Err(err) = package_list {
+            items.push(compat::ReportItem::new(
+                format!("cargo-package-list:{name}"),
+                compat::ReportStatus::Fail,
+                format!("{err:#}"),
+                Some(manifest_path),
+            ));
+            continue;
+        }
+
+        let path_dependencies = package_path_dependencies(package);
+        if !path_dependencies.is_empty() {
+            items.push(compat::ReportItem::new(
+                format!("cargo-publish-dry-run:{name}"),
+                compat::ReportStatus::Pending,
+                format!(
+                    "cargo package file list resolved; cargo publish --dry-run requires internal dependencies to exist in the registry first: {}",
+                    path_dependencies.join(", ")
+                ),
+                Some(manifest_path),
+            ));
+            continue;
+        }
+
+        match run_cargo(&["publish", "--dry-run", "--allow-dirty", "-p", name]) {
+            Ok(output) => items.push(compat::ReportItem::new(
+                format!("cargo-publish-dry-run:{name}"),
+                compat::ReportStatus::Pass,
+                output,
+                Some(manifest_path),
+            )),
+            Err(err) => items.push(compat::ReportItem::new(
+                format!("cargo-publish-dry-run:{name}"),
+                compat::ReportStatus::Fail,
+                format!("{err:#}"),
+                Some(manifest_path),
+            )),
+        }
+    }
+    Ok(items)
+}
+
+fn stage_package_dir(source: &Path, target: &Path) -> Result<()> {
+    if target.exists() {
+        fs::remove_dir_all(target)
+            .with_context(|| format!("failed to remove {}", target.display()))?;
+    }
+    copy_dir_recursive(source, target)
+}
+
+fn collect_native_platform_package_dirs() -> Result<Vec<PathBuf>> {
+    let root = Path::new("packages").join("native-platforms");
+    let mut dirs = Vec::new();
+    for entry in
+        fs::read_dir(&root).with_context(|| format!("failed to read {}", root.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() && path.join("package.json").exists() {
+            dirs.push(path);
+        }
+    }
+    dirs.sort();
+    Ok(dirs)
+}
+
+fn native_platform_suffix(package_name: &str) -> Result<&str> {
+    package_name
+        .strip_prefix("@vuec-rs/native-")
+        .with_context(|| format!("unsupported platform package name {package_name}"))
+}
+
+fn run_npm_pack_check(
+    package_name: &str,
+    package_dir: &Path,
+    required_files: &[&str],
+) -> compat::ReportItem {
+    match npm_pack_dry_run(package_dir) {
+        Ok(summary) => {
+            let mut missing = required_files
+                .iter()
+                .copied()
+                .filter(|file| !summary.files.iter().any(|packed| packed == file))
+                .collect::<Vec<_>>();
+            missing.sort();
+            if missing.is_empty() {
+                compat::ReportItem::new(
+                    format!("npm:{package_name}"),
+                    compat::ReportStatus::Pass,
+                    format!(
+                        "npm pack --dry-run produced {} with {} files ({} bytes packed)",
+                        summary.filename, summary.entry_count, summary.size
+                    ),
+                    Some(package_dir.to_path_buf()),
+                )
+            } else {
+                compat::ReportItem::new(
+                    format!("npm:{package_name}"),
+                    compat::ReportStatus::Fail,
+                    format!(
+                        "npm pack --dry-run omitted required files: {}; packed files: {}",
+                        missing.join(", "),
+                        summary.files.join(", ")
+                    ),
+                    Some(package_dir.to_path_buf()),
+                )
+            }
+        }
+        Err(err) => compat::ReportItem::new(
+            format!("npm:{package_name}"),
+            compat::ReportStatus::Fail,
+            format!("{err:#}"),
+            Some(package_dir.to_path_buf()),
+        ),
+    }
+}
+
+struct NpmPackSummary {
+    filename: String,
+    entry_count: usize,
+    size: u64,
+    files: Vec<String>,
+}
+
+fn npm_pack_dry_run(package_dir: &Path) -> Result<NpmPackSummary> {
+    let npm = resolve_program("npm")?;
+    let output = ProcessCommand::new(npm)
+        .args(["pack", "--dry-run", "--json"])
+        .current_dir(package_dir)
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to spawn npm pack --dry-run in {}",
+                package_dir.display()
+            )
+        })?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "npm pack --dry-run in {} exited with {:?}\nstdout:\n{}\nstderr:\n{}",
+            package_dir.display(),
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let value: JsonValue = serde_json::from_slice(&output.stdout).with_context(|| {
+        format!(
+            "npm pack --dry-run stdout was not JSON in {}:\n{}",
+            package_dir.display(),
+            String::from_utf8_lossy(&output.stdout)
+        )
+    })?;
+    let entry = value
+        .as_array()
+        .and_then(|entries| entries.first())
+        .context("npm pack --dry-run JSON did not include a package entry")?;
+    let files = entry
+        .get("files")
+        .and_then(JsonValue::as_array)
+        .context("npm pack --dry-run JSON did not include files")?
+        .iter()
+        .filter_map(|file| file.get("path").and_then(JsonValue::as_str))
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    Ok(NpmPackSummary {
+        filename: entry
+            .get("filename")
+            .and_then(JsonValue::as_str)
+            .unwrap_or("<unknown>")
+            .to_string(),
+        entry_count: entry
+            .get("entryCount")
+            .and_then(JsonValue::as_u64)
+            .unwrap_or(files.len() as u64) as usize,
+        size: entry.get("size").and_then(JsonValue::as_u64).unwrap_or(0),
+        files,
+    })
+}
+
+fn package_path_dependencies(package: &JsonValue) -> Vec<String> {
+    let mut dependencies = package
+        .get("dependencies")
+        .and_then(JsonValue::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|dependency| dependency.get("path").is_some())
+        .filter_map(|dependency| dependency.get("name").and_then(JsonValue::as_str))
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    dependencies.sort();
+    dependencies
+}
+
+fn build_wasm_release_packages() -> Result<Vec<PathBuf>> {
+    let installed = installed_rust_targets()?;
+    if !installed
+        .iter()
+        .any(|target| target == "wasm32-unknown-unknown")
+    {
+        anyhow::bail!(
+            "rust target wasm32-unknown-unknown is not installed; run `rustup target add wasm32-unknown-unknown`"
+        );
+    }
+    let wasm_bindgen = resolve_program("wasm-bindgen")?;
+    let output = ProcessCommand::new("cargo")
+        .args([
+            "build",
+            "-p",
+            "vuec_wasm",
+            "--release",
+            "--target",
+            "wasm32-unknown-unknown",
+        ])
+        .output()
+        .context(
+            "failed to spawn cargo build -p vuec_wasm --release --target wasm32-unknown-unknown",
+        )?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "cargo build -p vuec_wasm --release --target wasm32-unknown-unknown exited with {:?}\nstdout:\n{}\nstderr:\n{}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let wasm_path = PathBuf::from("target")
+        .join("wasm32-unknown-unknown")
+        .join("release")
+        .join("vuec_wasm.wasm");
+    let specs = [
+        ("web", PathBuf::from("packages").join("wasm").join("pkg")),
+        (
+            "nodejs",
+            PathBuf::from("packages").join("wasm").join("pkg-node"),
+        ),
+    ];
+    let mut created = Vec::new();
+    for (target, pkg_dir) in specs {
+        if pkg_dir.exists() {
+            fs::remove_dir_all(&pkg_dir)
+                .with_context(|| format!("failed to remove {}", pkg_dir.display()))?;
+        }
+        fs::create_dir_all(&pkg_dir)
+            .with_context(|| format!("failed to create {}", pkg_dir.display()))?;
+        let output = ProcessCommand::new(&wasm_bindgen)
+            .args([
+                "--target",
+                target,
+                "--out-dir",
+                &pkg_dir.display().to_string(),
+                &wasm_path.display().to_string(),
+            ])
+            .output()
+            .with_context(|| format!("failed to spawn wasm-bindgen --target {target}"))?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "wasm-bindgen --target {target} exited with {:?}\nstdout:\n{}\nstderr:\n{}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        if target == "nodejs" {
+            fs::write(pkg_dir.join("package.json"), r#"{"type":"commonjs"}"#).with_context(
+                || format!("failed to write {}", pkg_dir.join("package.json").display()),
+            )?;
+        }
+        created.push(pkg_dir);
+    }
+    Ok(created)
 }
 
 fn push_file_check_item(
@@ -3657,8 +4139,33 @@ fn build_napi_crate() -> Result<()> {
     Ok(())
 }
 
+fn build_napi_crate_release() -> Result<()> {
+    let output = ProcessCommand::new("cargo")
+        .args(["build", "-p", "vuec_napi", "--release"])
+        .output()
+        .context("failed to spawn cargo build -p vuec_napi --release")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "cargo build -p vuec_napi --release exited with {:?}\nstdout:\n{}\nstderr:\n{}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
+}
+
 fn copy_napi_binding(target_path: &Path) -> Result<PathBuf> {
     let source_path = napi_library_path();
+    copy_napi_binding_from(&source_path, target_path)
+}
+
+fn copy_napi_release_binding(target_path: &Path) -> Result<PathBuf> {
+    let source_path = napi_release_library_path();
+    copy_napi_binding_from(&source_path, target_path)
+}
+
+fn copy_napi_binding_from(source_path: &Path, target_path: &Path) -> Result<PathBuf> {
     let parent = target_path
         .parent()
         .context("NAPI target path has no parent directory")?;
@@ -3907,13 +4414,21 @@ fn write_package_version(path: &Path, version: &str) -> Result<()> {
 }
 
 fn napi_library_path() -> PathBuf {
+    napi_library_path_for_profile("debug")
+}
+
+fn napi_release_library_path() -> PathBuf {
+    napi_library_path_for_profile("release")
+}
+
+fn napi_library_path_for_profile(profile: &str) -> PathBuf {
     let (prefix, suffix) = match std::env::consts::OS {
         "windows" => ("", ".dll"),
         "macos" => ("lib", ".dylib"),
         _ => ("lib", ".so"),
     };
     PathBuf::from("target")
-        .join("debug")
+        .join(profile)
         .join(format!("{prefix}vuec_napi{suffix}"))
 }
 
