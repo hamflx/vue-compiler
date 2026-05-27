@@ -1047,6 +1047,24 @@ function vue3ForErrorLoc(error, node, dir) {
   return dir && dir.loc || node && node.loc || locStub;
 }
 
+function materializeVue3IfErrors(projection, node, dir, context) {
+  if (!projection || !Array.isArray(projection.errors) || !context || typeof context.onError !== 'function') return;
+  for (const error of projection.errors) {
+    context.onError(createCompilerError(error.code, vue3IfErrorLoc(error, node, dir)));
+  }
+}
+
+function vue3IfErrorLoc(error, node, dir) {
+  if (!error) return node && node.loc || dir && dir.loc || locStub;
+  if (error.loc && typeof error.loc === 'object') return error.loc;
+  if (error.loc === 'userKey') {
+    const key = findProp(node, 'key');
+    return key && key.loc || dir && dir.loc || node && node.loc || locStub;
+  }
+  if (error.loc === 'dir') return dir && dir.loc || node && node.loc || locStub;
+  return node && node.loc || dir && dir.loc || locStub;
+}
+
 function materializeVue3IfProjection(projection, node, dir) {
   if (!projection || projection.kind === 'undefined') return undefined;
   if (projection.kind === 'simple') {
@@ -1054,6 +1072,7 @@ function materializeVue3IfProjection(projection, node, dir) {
       projection.content || '',
       !!projection.isStatic,
       projection.loc || (dir && dir.exp && dir.exp.loc) || (node && node.loc) || locStub,
+      projection.constType || 0,
     );
   }
   throw new Error(`Unsupported Rust v-if projection: ${projection.kind}`);
@@ -1343,8 +1362,48 @@ function expressionIdentifierNames(exp) {
 
 function injectProp(node, prop, context) {
   if (!node) return node;
-  if (!node.props) node.props = createObjectExpression([]);
-  if (Array.isArray(node.props.properties)) node.props.properties.unshift(prop);
+  let props = node.type === NodeTypes.VNODE_CALL ? node.props : node.arguments && node.arguments[2];
+  let callPath = [];
+  let parentCall;
+  if (props && typeof props !== 'string' && props.type === NodeTypes.JS_CALL_EXPRESSION) {
+    const ret = getUnnormalizedProps(props);
+    props = ret[0];
+    callPath = ret[1];
+    parentCall = callPath[callPath.length - 1];
+  }
+  let propsWithInjection;
+  if (!props || typeof props === 'string') {
+    propsWithInjection = createObjectExpression([prop]);
+  } else if (props.type === NodeTypes.JS_CALL_EXPRESSION) {
+    const first = props.arguments && props.arguments[0];
+    if (first && typeof first !== 'string' && first.type === NodeTypes.JS_OBJECT_EXPRESSION) {
+      prependPropOnce(first, prop);
+    } else if (props.callee === TO_HANDLERS) {
+      if (context && typeof context.helper === 'function') context.helper(MERGE_PROPS);
+      propsWithInjection = createCallExpression(MERGE_PROPS, [createObjectExpression([prop]), props]);
+    } else {
+      props.arguments.unshift(createObjectExpression([prop]));
+    }
+    if (!propsWithInjection) propsWithInjection = props;
+  } else if (props.type === NodeTypes.JS_OBJECT_EXPRESSION) {
+    prependPropOnce(props, prop);
+    propsWithInjection = props;
+  } else {
+    if (context && typeof context.helper === 'function') context.helper(MERGE_PROPS);
+    propsWithInjection = createCallExpression(MERGE_PROPS, [createObjectExpression([prop]), props]);
+    if (parentCall && parentCall.callee === GUARD_REACTIVE_PROPS) {
+      parentCall = callPath[callPath.length - 2];
+    }
+  }
+  if (node.type === NodeTypes.JS_CALL_EXPRESSION && node.callee === RENDER_SLOT && node.arguments) {
+    node.arguments[2] = propsWithInjection;
+  } else if (node.type === NodeTypes.VNODE_CALL) {
+    if (parentCall) parentCall.arguments[0] = propsWithInjection;
+    else node.props = propsWithInjection;
+  } else if (node.arguments) {
+    if (parentCall) parentCall.arguments[0] = propsWithInjection;
+    else node.arguments[2] = propsWithInjection;
+  }
   return node;
 }
 
@@ -1692,6 +1751,7 @@ function processIf(node, dir, context, processCodegen) {
     currentUserKey: findProp(node, 'key'),
     context: vue3TransformContextPayload(context),
   });
+  materializeVue3IfErrors(projection, node, dir, context);
   if (projection && projection.branch && projection.branch.condition) {
     dir.exp = materializeVue3IfProjection(projection.branch.condition, node, dir);
   }
