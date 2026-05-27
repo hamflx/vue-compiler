@@ -798,6 +798,8 @@ function materializeVue3ProjectionNode(projection, refs, context) {
       if (projection.path === 'dir.exp') return dir && dir.exp;
       if (projection.path === 'dir.arg.children') return (dir && dir.arg && dir.arg.children) || [];
       return undefined;
+    case 'static':
+      return createSimpleExpression(projection.content || '', true, projection.loc || (dir && dir.arg && dir.arg.loc) || (dir && dir.loc) || locStub);
     case 'children': {
       const children = [];
       for (const child of projection.children || []) {
@@ -1029,6 +1031,10 @@ function finalizeForCodegen(forNode, renderExp, context) {
     childBlock = createVNodeCall(context, context.helper(FRAGMENT), undefined, children, 64, undefined, undefined, true, false, false, forNode.loc);
   }
   renderExp.arguments.push(createFunctionExpression(createForLoopParams(forNode.parseResult), childBlock, true));
+}
+
+function stringifyDynamicPropNames(props) {
+  return `[${(props || []).map(prop => JSON.stringify(prop)).join(', ')}]`;
 }
 
 function finalizeVue3ForExitCodegen(node, forNode, renderExp, codegenProjection, context) {
@@ -1643,7 +1649,7 @@ const transformElement = (node, context) => {
       built.props,
       node.children && node.children.length ? node.children : undefined,
       built.patchFlag || undefined,
-      built.dynamicPropNames && built.dynamicPropNames.length ? JSON.stringify(built.dynamicPropNames) : undefined,
+      built.dynamicPropNames && built.dynamicPropNames.length ? stringifyDynamicPropNames(built.dynamicPropNames) : undefined,
       built.directives && built.directives.length ? createArrayExpression(built.directives.map(dir => buildDirectiveArgs(dir, context))) : undefined,
       !!built.shouldUseBlock,
       false,
@@ -1671,7 +1677,35 @@ const transformExpression = (node, context) => {
 };
 
 const transformModel = (dir, node, context) => {
-  return { props: dir && dir.exp ? [createObjectProperty('modelValue', dir.exp)] : [] };
+  context = context || {
+    helper: name => name,
+    cache: value => value,
+    onError: error => { throw error; },
+  };
+  const projection = callVue3CoreProjection('vue3.core.transformModel', {
+    dir,
+    node,
+    context: vue3TransformContextPayload(context),
+  });
+  for (const code of projection && projection.errors || []) {
+    const loc = code === ErrorCodes.X_V_MODEL_NO_EXPRESSION ? dir && dir.loc : dir && dir.exp && dir.exp.loc || dir && dir.loc || locStub;
+    if (context && typeof context.onError === 'function') context.onError(createCompilerError(code, loc));
+  }
+  return {
+    props: (projection && projection.props || []).map(prop => {
+      const key = materializeVue3ProjectionNode(prop.key, { dir, node }, context);
+      const value = materializeVue3ProjectionNode(prop.value, { dir, node }, context);
+      const objectProp = createObjectProperty(key, value);
+      objectProp.__vuecModel = {
+        dynamic: !!prop.dynamic,
+        cache: !!prop.cache,
+        hydrate: !!prop.hydrate,
+        kind: prop.kind,
+      };
+      if (prop.cache && context && typeof context.cache === 'function') objectProp.value = context.cache(objectProp.value);
+      return objectProp;
+    }),
+  };
 };
 
 const transformOn = (dir, node, context, augmentor) => {
@@ -1845,6 +1879,8 @@ function buildProps(node, context) {
   const dynamicPropNames = [];
   let patchFlag = 0;
   let shouldUseBlock = false;
+  let hasDynamicKey = false;
+  let hasHydrationEvent = false;
   for (const prop of node && node.props || []) {
     if (!prop) continue;
     if (prop.type === NodeTypes.ATTRIBUTE) {
@@ -1859,6 +1895,7 @@ function buildProps(node, context) {
       const result = transform ? transform(prop, node, context) : transformBind(prop, node, context);
       objectProps.push(...((result && result.props) || []));
       if (prop.arg.isStatic) dynamicPropNames.push(prop.arg.content);
+      if (result && result.props && result.props.some(prop => prop && prop.key && !isStaticExp(prop.key))) hasDynamicKey = true;
       continue;
     }
     if (prop.name === 'on' && prop.arg) {
@@ -1867,12 +1904,33 @@ function buildProps(node, context) {
       objectProps.push(...((result && result.props) || []));
       continue;
     }
+    if (prop.name === 'model' && context && context.directiveTransforms && context.directiveTransforms.model) {
+      const result = context.directiveTransforms.model(prop, node, context);
+      const modelProps = (result && result.props) || [];
+      objectProps.push(...modelProps);
+      for (const modelProp of modelProps) {
+        if (modelProp.__vuecModel && modelProp.__vuecModel.dynamic && isStaticExp(modelProp.key)) {
+          dynamicPropNames.push(modelProp.key.content);
+        }
+        if (modelProp.__vuecModel && modelProp.__vuecModel.dynamic && !isStaticExp(modelProp.key)) {
+          hasDynamicKey = true;
+        }
+        if (modelProp.__vuecModel && modelProp.__vuecModel.hydrate) {
+          hasHydrationEvent = true;
+        }
+      }
+      continue;
+    }
     if (prop.name !== 'once' && prop.name !== 'memo') {
       directives.push(prop);
       if (node && node.children && node.children.length) shouldUseBlock = true;
     }
   }
-  if (dynamicPropNames.length) patchFlag |= 8;
+  if (hasDynamicKey) patchFlag |= 16;
+  else {
+    if (dynamicPropNames.length) patchFlag |= 8;
+    if (hasHydrationEvent) patchFlag |= 32;
+  }
   let props = objectProps.length ? createObjectExpression(objectProps) : undefined;
   if (!context.inSSR && props && props.properties.some(prop => prop && prop.key && !prop.key.isStatic && !prop.key.isHandlerKey)) {
     props = createCallExpression(context.helper(NORMALIZE_PROPS), [props]);
