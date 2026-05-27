@@ -3690,14 +3690,23 @@ fn lower_vue3_plain_element_to_ssr_mir(
             }
             let props = match state.hir.node(hir_id).map(|node| &node.kind) {
                 Some(HirNodeKind::Component(component)) => {
-                    lower_hir_props_to_dom_mir_without_event_cache(&component.props)
+                    let props = if vue3_ssr_component_is_dynamic(element) {
+                        filter_vue3_dynamic_component_is_props(&component.props)
+                    } else {
+                        component.props.clone()
+                    };
+                    lower_hir_props_to_dom_mir_without_event_cache(&props)
                 }
                 _ => Vue3DomProps::default(),
             };
-            let tag = vue3_ssr_component_tag(element, ast_node, state);
+            let (tag, dynamic) = vue3_ssr_component_tag(element, ast_node, state);
             let mir_id = state.mir.push_child(
                 mir_parent,
-                Vue3SsrMirKind::RenderComponent(Vue3SsrComponent { tag, props }),
+                Vue3SsrMirKind::RenderComponent(Vue3SsrComponent {
+                    tag,
+                    props,
+                    dynamic,
+                }),
                 ast_node.span.clone(),
             );
             state.map.record_hir_to_mir(hir_id, mir_id);
@@ -3783,19 +3792,58 @@ fn vue3_ssr_component_tag(
     element: &Vue3Element,
     ast_node: &vuec_ast::Node<Vue3NodeKind>,
     state: &mut Vue3SsrLoweringState,
-) -> MirExpr {
+) -> (MirExpr, bool) {
+    if let Some(value) = vue3_dynamic_component_is_static_value(element) {
+        return (MirExpr::String(value), true);
+    }
     if let Some(expression) = vue3_dynamic_component_is_expression(element) {
-        return MirExpr::JsExpr(register_vue3_expression_with_span(
-            &mut state.js,
-            expression,
-            ast_node.span.source(),
-            state.source_type,
-        ));
+        return (
+            MirExpr::JsExpr(register_vue3_expression_with_span(
+                &mut state.js,
+                expression,
+                ast_node.span.source(),
+                state.source_type,
+            )),
+            true,
+        );
     }
     if let Some(helper) = vue3_core_component_runtime_helper(&element.tag) {
-        return MirExpr::Helper(helper);
+        return (MirExpr::Helper(helper), false);
     }
-    MirExpr::String(element.tag.clone())
+    (MirExpr::String(element.tag.clone()), false)
+}
+
+fn vue3_ssr_component_is_dynamic(element: &Vue3Element) -> bool {
+    vue3_dynamic_component_is_static_value(element).is_some()
+        || vue3_dynamic_component_is_expression(element).is_some()
+}
+
+fn vue3_dynamic_component_is_static_value(element: &Vue3Element) -> Option<String> {
+    if element.tag != "component" && element.tag != "Component" {
+        return None;
+    }
+    element.props.iter().find_map(|prop| match prop {
+        Vue3Prop::Attribute(attr) if attr.name == "is" => {
+            attr.value.clone().or_else(|| Some(String::new()))
+        }
+        _ => None,
+    })
+}
+
+fn filter_vue3_dynamic_component_is_props(props: &HirProps) -> HirProps {
+    let mut filtered = props.clone();
+    filtered.static_attrs.retain(|attr| attr.name != "is");
+    filtered
+        .dynamic_bindings
+        .retain(|binding| binding.dynamic_arg || binding.name != "is");
+    filtered.segments.retain(|segment| match segment {
+        HirPropSegment::StaticAttr(attr) => attr.name != "is",
+        HirPropSegment::DynamicBinding(binding) => binding.dynamic_arg || binding.name != "is",
+        HirPropSegment::Event(_)
+        | HirPropSegment::ObjectBinding(_)
+        | HirPropSegment::ObjectListeners(_) => true,
+    });
+    filtered
 }
 
 fn vue3_ssr_teleport_target(
@@ -14032,6 +14080,9 @@ impl<'a> Vue3SsrMirCodegen<'a> {
             let Vue3SsrMirKind::RenderComponent(component) = &node.kind else {
                 continue;
             };
+            if component.dynamic {
+                continue;
+            }
             let MirExpr::String(tag) = &component.tag else {
                 continue;
             };
@@ -14149,7 +14200,13 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         for node in &self.mir.nodes {
             match &node.kind {
                 Vue3SsrMirKind::RenderComponent(component) => {
-                    if matches!(&component.tag, MirExpr::String(_)) {
+                    if component.dynamic {
+                        push_unique_helper(
+                            &mut helpers,
+                            RuntimeHelper::Vue3ResolveDynamicComponent,
+                        );
+                        push_unique_helper(&mut helpers, RuntimeHelper::Vue3CreateVNode);
+                    } else if matches!(&component.tag, MirExpr::String(_)) {
                         push_unique_helper(&mut helpers, RuntimeHelper::Vue3ResolveComponent);
                     }
                     if self
@@ -14287,7 +14344,9 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                 }
                 Vue3SsrMirKind::RenderComponent(component) => {
                     push_unique_helper(helpers, RuntimeHelper::Vue3CreateVNode);
-                    if matches!(&component.tag, MirExpr::String(_)) {
+                    if component.dynamic {
+                        push_unique_helper(helpers, RuntimeHelper::Vue3ResolveDynamicComponent);
+                    } else if matches!(&component.tag, MirExpr::String(_)) {
                         push_unique_helper(helpers, RuntimeHelper::Vue3ResolveComponent);
                     }
                     self.push_prop_helpers(&component.props, helpers);
@@ -14360,8 +14419,15 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                         push_unique_helper(&mut helpers, RuntimeHelper::Vue3SsrRenderStyle);
                     }
                 }
-                Vue3SsrMirKind::RenderComponent(_) => {
-                    push_unique_helper(&mut helpers, RuntimeHelper::Vue3SsrRenderComponent);
+                Vue3SsrMirKind::RenderComponent(component) => {
+                    push_unique_helper(
+                        &mut helpers,
+                        if component.dynamic {
+                            RuntimeHelper::Vue3SsrRenderVNode
+                        } else {
+                            RuntimeHelper::Vue3SsrRenderComponent
+                        },
+                    );
                 }
                 Vue3SsrMirKind::RenderSlot(_) => {
                     push_unique_helper(&mut helpers, RuntimeHelper::Vue3SsrRenderSlot);
@@ -14991,6 +15057,23 @@ impl<'a> Vue3SsrMirCodegen<'a> {
     ) {
         let props =
             self.render_component_props_with_root_attrs(&component.props, scope, root_attrs);
+        if component.dynamic {
+            let tag = self.render_dynamic_component_tag(&component.tag, scope);
+            let slots = if self
+                .mir
+                .node(node_id)
+                .is_some_and(|node| node.children.is_empty())
+            {
+                "null".to_string()
+            } else {
+                self.render_component_slots_object(node_id, scope)
+            };
+            writer.push_line(&format!(
+                "_ssrRenderVNode(_push, _createVNode({}, {}, {}), _parent)",
+                tag, props, slots
+            ));
+            return;
+        }
         let tag = self.render_component_tag(&component.tag, scope);
         if self
             .mir
@@ -15015,6 +15098,35 @@ impl<'a> Vue3SsrMirCodegen<'a> {
             MirExpr::String(name) => component_asset_id(name),
             _ => self.render_mir_expr(tag, scope),
         }
+    }
+
+    fn render_dynamic_component_tag(&self, tag: &MirExpr, scope: &RenderScope) -> String {
+        format!(
+            "_resolveDynamicComponent({})",
+            self.render_mir_expr(tag, scope)
+        )
+    }
+
+    fn render_component_vnode_tag(
+        &self,
+        component: &Vue3SsrComponent,
+        scope: &RenderScope,
+    ) -> String {
+        if component.dynamic {
+            self.render_dynamic_component_tag(&component.tag, scope)
+        } else {
+            self.render_component_tag(&component.tag, scope)
+        }
+    }
+
+    fn render_component_slots_object(&self, node_id: NodeId, scope: &RenderScope) -> String {
+        let mut writer = CodeWriter::new();
+        writer.push_line("{");
+        writer.indent();
+        self.render_component_default_slot(node_id, scope, &mut writer);
+        writer.dedent();
+        writer.push_line("}");
+        writer.finish().trim_end().to_string()
     }
 
     fn render_component_default_slot(
@@ -15160,7 +15272,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
             Vue3SsrMirKind::RenderComponent(component) => {
                 let children = self.render_vnode_fallback_children(node_id, scope);
                 Some(self.render_vnode_fallback_call(
-                    &self.render_component_tag(&component.tag, scope),
+                    &self.render_component_vnode_tag(component, scope),
                     Some(self.render_component_props(&component.props, scope)),
                     children,
                 ))
@@ -16215,6 +16327,7 @@ fn vue3_ssr_helper_order() -> &'static [RuntimeHelper] {
         RuntimeHelper::Vue3SsrLooseEqual,
         RuntimeHelper::Vue3SsrRenderDynamicModel,
         RuntimeHelper::Vue3SsrGetDynamicModelProps,
+        RuntimeHelper::Vue3SsrRenderVNode,
         RuntimeHelper::Vue3SsrRenderComponent,
         RuntimeHelper::Vue3SsrRenderSlot,
         RuntimeHelper::Vue3SsrRenderList,
@@ -29101,6 +29214,68 @@ mod tests {
         assert!(generated.code.contains("foo: _ctx.value"));
         assert!(!generated.code.contains("_ssrRenderAttrs(_ctx.slotProps)"));
         assert!(!generated.code.contains("ssrRenderAttrs as _ssrRenderAttrs"));
+    }
+
+    #[test]
+    fn generate_vue3_ssr_mir_emits_dynamic_component_vnode_path() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<component :is="view" prop="b" v-bind="attrs"><span>hi</span></component><component is="plain" />"#.into(),
+            file_id: FileId(78),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_ssr_mir(&ast, &Vue3CompilerOptions::default());
+        let components = result
+            .mir
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.kind {
+                Vue3SsrMirKind::RenderComponent(component) => Some(component),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(components.len(), 2);
+        assert!(components.iter().all(|component| component.dynamic));
+        assert!(components.iter().all(|component| component
+            .props
+            .static_attrs
+            .iter()
+            .all(|attr| attr.name != "is")));
+        assert!(components.iter().all(|component| component
+            .props
+            .dynamic_bindings
+            .iter()
+            .all(|binding| binding.name != "is")));
+
+        let generated = generate_vue3_ssr_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated
+            .code
+            .contains("resolveDynamicComponent as _resolveDynamicComponent"));
+        assert!(generated.code.contains("createVNode as _createVNode"));
+        assert!(generated.code.contains("ssrRenderVNode as _ssrRenderVNode"));
+        assert!(!generated
+            .code
+            .contains("ssrRenderComponent as _ssrRenderComponent"));
+        assert!(generated
+            .code
+            .contains("_ssrRenderVNode(_push, _createVNode(_resolveDynamicComponent(_ctx.view),"));
+        assert!(generated
+            .code
+            .contains("_createVNode(_resolveDynamicComponent(\"plain\"), null, null)"));
+        assert!(generated.code.contains("prop: \"b\""));
+        assert!(generated.code.contains("_ctx.attrs"));
+        assert!(!generated.code.contains("is: _ctx.view"));
+        assert!(!generated.code.contains("is: \"plain\""));
     }
 
     #[test]

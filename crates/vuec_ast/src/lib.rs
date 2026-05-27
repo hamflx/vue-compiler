@@ -2294,6 +2294,8 @@ pub struct Vue3SsrComponent {
     pub tag: MirExpr,
     /// Component props.
     pub props: Vue3DomProps,
+    /// Whether the component tag is resolved with `resolveDynamicComponent`.
+    pub dynamic: bool,
 }
 
 /// Vue 3 SSR loop payload.
