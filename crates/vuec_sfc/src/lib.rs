@@ -2532,7 +2532,7 @@ fn vue27_script_setup_content(
         if options.emit_script_setup_marker {
             "{ __sfc: true, }".to_string()
         } else {
-            "{}".to_string()
+            "{  }".to_string()
         }
     } else if options.emit_script_setup_marker {
         format!("{{ __sfc: true,{} }}", return_bindings.join(", "))
@@ -7491,6 +7491,23 @@ defineProps({ foo: String })
             script.bindings.get("__isScriptSetup").map(String::as_str),
             Some("true")
         );
+    }
+
+    #[test]
+    fn vue27_compile_script_preserves_official_empty_test_return_spacing() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor =
+            compiler.parse("foo.vue", "<script setup>defineExpose({ foo: 1 })</script>");
+        let script = compiler.compile_vue27_script(
+            &descriptor,
+            SfcScriptCompileOptions {
+                emit_script_setup_marker: false,
+                ..SfcScriptCompileOptions::default()
+            },
+        );
+
+        assert!(script.content.contains("return {  }"));
+        assert!(!script.content.contains("return {}"));
     }
 
     #[test]
