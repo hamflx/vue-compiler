@@ -16,7 +16,8 @@ use std::collections::BTreeMap;
 use vuec_ast::{NodeSpan, Vue3Ast, Vue3AstKind, Vue3Expression, Vue3Prop};
 use vuec_sfc::{
     SfcCompiler, SfcScriptCompileOptions, SfcStyleCompileOptions, SfcTemplateCompileOptions,
-    Vue27RewriteDefaultOptions, Vue27TemplatePreprocessOptions,
+    Vue27ParseComponentOptions, Vue27RewriteDefaultOptions, Vue27SfcPad,
+    Vue27TemplatePreprocessOptions,
 };
 use vuec_source::{FileId, Span};
 use vuec_vue2::{Vue2CompileOptions, Vue2CompiledResult, Vue2Element, Vue2Error, Vue2Warning};
@@ -237,6 +238,24 @@ pub fn parse_sfc(env: Env, source: String, options: Option<Unknown>) -> Result<S
     let filename = string_option(&raw_options, "filename", "anonymous.vue");
     let mut compiler = SfcCompiler::new();
     to_json_string(compiler.parse(filename, &source))
+}
+
+#[napi(js_name = "parseVue27SfcComponent")]
+/// Parses a Vue 2.7 SFC through `parseComponent` semantics and returns JSON.
+pub fn parse_vue27_sfc_component(
+    env: Env,
+    source: String,
+    options: Option<Unknown>,
+) -> Result<String> {
+    let raw_options = from_js_options(&env, options)?;
+    let filename = string_option(&raw_options, "filename", "anonymous.vue");
+    let mut compiler = SfcCompiler::new();
+    let result = compiler.parse_vue27_component_with_filename(
+        filename,
+        &source,
+        vue27_parse_component_options(&raw_options),
+    );
+    to_json_string(result)
 }
 
 #[napi(js_name = "compileSfcTemplate")]
@@ -804,6 +823,21 @@ fn vue27_template_vue2_options(value: Value) -> Vue2CompileOptions {
             .and_then(Value::as_bool)
             .unwrap_or(options.bindings_is_script_setup);
     }
+    options
+}
+
+fn vue27_parse_component_options(value: &Value) -> Vue27ParseComponentOptions {
+    let mut options = Vue27ParseComponentOptions::default();
+    options.output_source_range = bool_option(value, "outputSourceRange", false);
+    if let Some(deindent) = value.get("deindent").and_then(Value::as_bool) {
+        options.deindent = Some(deindent);
+    }
+    options.pad = match value.get("pad") {
+        Some(Value::Bool(true)) => Vue27SfcPad::True,
+        Some(Value::String(value)) if value == "line" => Vue27SfcPad::Line,
+        Some(Value::String(value)) if value == "space" => Vue27SfcPad::Space,
+        _ => Vue27SfcPad::False,
+    };
     options
 }
 
@@ -1418,6 +1452,7 @@ pub fn api_manifest() -> Result<String> {
                 "parseVue3Dom",
                 "compileVue3Ssr",
                 "parseSfc",
+                "parseVue27SfcComponent",
                 "compileSfcTemplate",
                 "compileSfcTemplateSource",
                 "compileSfcScript",

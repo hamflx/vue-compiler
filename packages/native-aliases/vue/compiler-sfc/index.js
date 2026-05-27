@@ -19,7 +19,7 @@ function parse(input) {
 
 function parseComponent(source) {
   const options = arguments.length > 1 ? arguments[1] : undefined;
-  return normalizeVue27Descriptor(native.parseSfc(String(source || ''), options || {}));
+  return normalizeVue27ParseComponentResult(native.parseVue27SfcComponent(String(source || ''), options || {}));
 }
 
 function compileTemplate(options) {
@@ -82,6 +82,13 @@ function normalizeVue27Descriptor(descriptor) {
       return false;
     },
   };
+}
+
+function normalizeVue27ParseComponentResult(result) {
+  if (!result || typeof result !== 'object') return result;
+  const descriptor = normalizeVue27Descriptor(result.descriptor || result);
+  descriptor.errors = Array.isArray(result.errors) ? result.errors : [];
+  return descriptor;
 }
 
 function normalizeVue27Block(descriptor, block, style) {

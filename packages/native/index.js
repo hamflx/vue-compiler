@@ -168,6 +168,10 @@ function parseSfc(source, options = {}) {
   return fromJson(binding.parseSfc(source, options));
 }
 
+function parseVue27SfcComponent(source, options = {}) {
+  return fromJson(binding.parseVue27SfcComponent(source, options));
+}
+
 function compileSfcTemplate(source, options = {}) {
   return fromJson(binding.compileSfcTemplate(source, options));
 }
@@ -295,6 +299,7 @@ module.exports = {
   parseVue3Dom,
   compileVue3Ssr,
   parseSfc,
+  parseVue27SfcComponent,
   compileSfcTemplate,
   compileSfcTemplateSource,
   compileSfcScript,

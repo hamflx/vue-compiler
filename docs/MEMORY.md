@@ -1,5 +1,9 @@
 # Memory
 
+- Current round: closed the NAPI-backed Vue 2.7 SFC `parseComponent` official conformance slice.
+- `vuec_napi` now exposes `parseVue27SfcComponent`, routing public Vue 2.7 SFC parsing through Rust `SfcCompiler::parse_vue27_component_with_filename` so `pad`, `deindent`, source-range errors, special text template blocks, custom blocks, and top-level block projection use the Vue 2.7 parseComponent semantics instead of the generic Vue 3-style SFC parser.
+- The local `@vuec-rs/native` loader and `vue/compiler-sfc` NAPI alias now use this Rust-backed entry for `parseComponent(source, options)`. Focused `cargo xtask run-napi-conformance --suite vue27-sfc` improves from `51/144` to `57/144`; `parseComponent.spec.ts` is now `11/11`. This is NAPI ABI and package/API routing for an existing Rust parser path; no `xtask/src/compat.rs` changes were made.
+
 - Current round: closed the NAPI-backed Vue 2.7 compiler codeframe conformance gap.
 - The Vue 2.7 `vue-template-compiler` NAPI alias now keeps the official one-argument `generateCodeFrame.length` API shape while reading optional `start` / `end` from `arguments` and forwarding them to the Rust-backed NAPI codeframe implementation.
 - Focused `cargo xtask run-napi-conformance --suite vue27-compiler` now passes `190/190` official tests. `cargo xtask verify-napi-api` remains `7/7`, confirming the public function arity did not drift. This is package/API adapter argument forwarding only; codeframe formatting remains in Rust, and `xtask/src/compat.rs` was not changed.

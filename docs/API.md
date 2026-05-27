@@ -52,7 +52,7 @@ is `packages/native/index.d.ts`.
 | Vue 2 | `compileVue2`, `compileToFunctionsVue2`, `compileSsrVue2`, `generateCodeFrameVue2`, `callVue2Bridge`, `rewriteDefaultVue27` |
 | Vue 3 core | `baseCompileVue3`, `baseParseVue3`, `generateVue3Core` |
 | Vue 3 DOM / SSR | `compileVue3Dom`, `parseVue3Dom`, `compileVue3Ssr` |
-| SFC / style | `parseSfc`, `compileSfcTemplate`, `compileSfcTemplateSource`, `compileSfcScript`, `compileVue27SfcTemplate`, `compileVue27SfcScript`, `compileSfcStyle` |
+| SFC / style | `parseSfc`, `parseVue27SfcComponent`, `compileSfcTemplate`, `compileSfcTemplateSource`, `compileSfcScript`, `compileVue27SfcTemplate`, `compileVue27SfcScript`, `compileSfcStyle` |
 | Official-like aliases | `compile`, `compileToFunctions`, `baseCompile`, `compileDom`, `compileSsr`, `parse`, `compileTemplate`, `compileScript`, `compileStyle` |
 
 NAPI options are passed as JavaScript records and converted at the Rust boundary
