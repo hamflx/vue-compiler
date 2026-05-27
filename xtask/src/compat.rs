@@ -2198,12 +2198,20 @@ fn vue27_sfc_style_function_expression(export_name: &str, detail: &ApiExportDeta
         js_string_literal(command),
     );
     let expression = format!("function {name}(a0) {{ {body} }}");
-    format!(
-        "namedArity({}, {}, {})",
-        js_string_literal(name),
-        arity,
+    if detail
+        .own_property_names
+        .iter()
+        .any(|prop| prop == "prototype")
+    {
         expression
-    )
+    } else {
+        format!(
+            "namedArity({}, {}, {})",
+            js_string_literal(name),
+            arity,
+            expression
+        )
+    }
 }
 
 fn vue3_core_runtime_export(export_name: &str, detail: &ApiExportDetail) -> Option<()> {
@@ -3696,6 +3704,14 @@ const vue3CoreRuntime = (() => {
     ['IS_REF', 'isRef'],
     ['WITH_MEMO', 'withMemo'],
     ['IS_MEMO_SAME', 'isMemoSame'],
+    ['V_MODEL_RADIO', 'vModelRadio'],
+    ['V_MODEL_CHECKBOX', 'vModelCheckbox'],
+    ['V_MODEL_TEXT', 'vModelText'],
+    ['V_MODEL_SELECT', 'vModelSelect'],
+    ['V_MODEL_DYNAMIC', 'vModelDynamic'],
+    ['V_ON_WITH_MODIFIERS', 'withModifiers'],
+    ['V_ON_WITH_KEYS', 'withKeys'],
+    ['V_SHOW', 'vShow'],
   ];
   const runtime = {
     NodeTypes,

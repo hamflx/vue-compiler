@@ -1,5 +1,9 @@
 # Memory
 
+- Current round: fixed generated alias API shape drift exposed by regenerating API manifests.
+- `xtask/src/compat.rs` now preserves the official `prototype` own-property shape for Vue 2.7 SFC `compileStyle` / `compileStyleAsync` generated alias functions when the official API manifest requires it, and registers Vue 3 DOM runtime helper exports (`V_MODEL_*`, `V_ON_WITH_*`, `V_SHOW`) as symbols in the generated alias runtime. This is package/API adapter work for the compatibility harness; it does not add compiler semantics to `xtask/src/compat.rs`.
+- Verification for this API adapter slice: `cargo fmt --all -- --check`, `cargo test -p xtask`, `cargo xtask export-api --all` (`14/14` manifest probes), and `cargo xtask diff-api --all` (`7/7`).
+
 - Current round: fixed the SFC scoped style brace-spacing option-matrix regression.
 - `vuec_style` now preserves the original whitespace between a rewritten scoped selector and its `{` delimiter instead of forcing a space. Compact CSS such as `.a{...}` now stays compact as `.a[data-v-...]{...}`, while `.a {...}` keeps the selector-space form required by the Vue 2.7 official scoped-style specs. The fix is in the Rust style scanner; no `xtask/src/compat.rs` shim or JS post-processing was added.
 - Verification for this style spacing regression: `cargo fmt --all -- --check`, `cargo test -p vuec_style --lib`, `cargo test -p vuec_sfc --lib`, `cargo xtask run-option-matrix --version-line vue2_7 --package vue --entry vue/compiler-sfc` (`4/4`), `cargo xtask run-option-matrix --version-line vue3 --package @vue/compiler-sfc` (`4/4`), `cargo xtask run-option-matrix --all` (`7/7`), `cargo xtask run-output-contract --version-line vue2_7 --package vue --entry vue/compiler-sfc` (`5/5`), `cargo xtask run-output-contract --version-line vue3 --package @vue/compiler-sfc` (`5/5`), and `cargo xtask run-conformance --suite vue27-sfc` (`144/144`).
