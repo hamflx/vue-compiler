@@ -214,6 +214,8 @@ pub struct SfcScriptCompileOptions {
     pub ref_sugar: bool,
     /// Whether production compile behavior is requested.
     pub is_prod: bool,
+    /// Whether Vue 2.7 script setup returns should include the internal `__sfc` marker.
+    pub emit_script_setup_marker: bool,
 }
 
 impl Default for SfcScriptCompileOptions {
@@ -223,6 +225,7 @@ impl Default for SfcScriptCompileOptions {
             inline_template: false,
             ref_sugar: false,
             is_prod: false,
+            emit_script_setup_marker: true,
         }
     }
 }
@@ -2526,9 +2529,15 @@ fn vue27_script_setup_content(
     };
     let return_bindings = vue27_script_setup_return_bindings(descriptor, &analysis, is_ts);
     let returned = if return_bindings.is_empty() {
-        "{ __sfc: true, }".to_string()
-    } else {
+        if options.emit_script_setup_marker {
+            "{ __sfc: true, }".to_string()
+        } else {
+            "{}".to_string()
+        }
+    } else if options.emit_script_setup_marker {
         format!("{{ __sfc: true,{} }}", return_bindings.join(", "))
+    } else {
+        format!("{{ {} }}", return_bindings.join(", "))
     };
     let helper_import = if css_vars.is_empty() {
         ""
@@ -7462,6 +7471,26 @@ defineProps({ foo: String })
             .content
             .contains("return { __sfc: true,color, size, ref }"));
         assert!(!script.content.contains("defineProps"));
+    }
+
+    #[test]
+    fn vue27_compile_script_can_omit_script_setup_marker_for_official_tests() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse("foo.vue", "<script setup>const color = 'red'</script>");
+        let script = compiler.compile_vue27_script(
+            &descriptor,
+            SfcScriptCompileOptions {
+                emit_script_setup_marker: false,
+                ..SfcScriptCompileOptions::default()
+            },
+        );
+
+        assert!(script.content.contains("return { color }"));
+        assert!(!script.content.contains("__sfc: true"));
+        assert_eq!(
+            script.bindings.get("__isScriptSetup").map(String::as_str),
+            Some("true")
+        );
     }
 
     #[test]

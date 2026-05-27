@@ -910,6 +910,15 @@ fn sfc_script_options(value: Option<&Value>) -> SfcScriptCompileOptions {
         "isProd",
         bool_option(value, "is_prod", options.is_prod),
     );
+    options.emit_script_setup_marker = bool_option(
+        value,
+        "__vuecEmitScriptSetupMarker",
+        bool_option(
+            value,
+            "emit_script_setup_marker",
+            options.emit_script_setup_marker,
+        ),
+    );
     options
 }
 

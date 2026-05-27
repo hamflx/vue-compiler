@@ -2303,8 +2303,12 @@ fn alias_function_expression(
                     "compile" | "compileToFunctions" | "ssrCompile" | "ssrCompileToFunctions"
                 )
             );
+            let is_vue27_sfc_compile_script =
+                target.kind == TargetKind::Vue27Sfc && export_name == "compileScript";
             let payload = if is_vue3_generate {
                 "Object.assign({}, __vuecPayload, { ast: vue3CoreRuntime.dehydrateForBridge(a0), source: '' })"
+            } else if is_vue27_sfc_compile_script {
+                "vue27CompileScriptBridgePayload(__vuecPayload)"
             } else {
                 "__vuecPayload"
             };
@@ -2312,7 +2316,7 @@ fn alias_function_expression(
                 format!(
                     "(() => {{ const __vuecGenerateResult = {call}; __vuecGenerateResult.ast = a0; return __vuecGenerateResult; }})()"
                 )
-            } else if target.kind == TargetKind::Vue27Sfc && export_name == "compileScript" {
+            } else if is_vue27_sfc_compile_script {
                 format!("hydrateVue27CompileScriptResult({call})")
             } else if is_vue2_template_compile {
                 format!(
@@ -7451,6 +7455,16 @@ function hydrateVue27CompileScriptResult(result) {
     });
   }
   return result;
+}
+
+function vue27CompileScriptBridgePayload(payload) {
+  const out = Object.assign({}, payload || {});
+  const options = Object.assign({}, out.options || {});
+  if (typeof __TEST__ !== 'undefined' && __TEST__ === true) {
+    options.__vuecEmitScriptSetupMarker = false;
+  }
+  out.options = options;
+  return out;
 }
 
 function vue3BridgePayload(source, filename, options) {
@@ -12714,7 +12728,10 @@ mod tests {
         let expression = alias_export_expression(target, "compileScript", Some(&detail));
 
         assert!(expression.contains("hydrateVue27CompileScriptResult"));
+        assert!(expression.contains("vue27CompileScriptBridgePayload"));
         assert!(ALIAS_RUNTIME_JS.contains("function hydrateVue27CompileScriptResult"));
+        assert!(ALIAS_RUNTIME_JS.contains("function vue27CompileScriptBridgePayload"));
+        assert!(ALIAS_RUNTIME_JS.contains("__vuecEmitScriptSetupMarker = false"));
         assert!(ALIAS_RUNTIME_JS.contains("Object.defineProperty(bindings, '__isScriptSetup'"));
     }
 
