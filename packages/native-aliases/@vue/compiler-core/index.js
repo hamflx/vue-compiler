@@ -252,6 +252,9 @@ function helperSymbolFromProjection(name) {
 }
 
 function helperSymbolFromHelperName(name) {
+  for (const key of Reflect.ownKeys(helperNameMap)) {
+    if (typeof key === 'symbol' && helperNameMap[key] === name) return key;
+  }
   for (const value of Object.values(module.exports || {})) {
     if (typeof value === 'symbol' && helperNameMap[value] === name) return value;
   }
@@ -1335,7 +1338,7 @@ function createRootCodegen(root, context) {
 }
 
 function hasDynamicKeyVBind(node) {
-  return !!(node && node.props || []).find(prop => prop && prop.type === 7 && prop.name === 'bind' && prop.arg && !prop.arg.isStatic);
+  return !!(node && node.props || []).find(prop => prop && prop.type === 7 && prop.name === 'bind' && (!prop.arg || !prop.arg.isStatic));
 }
 
 function hasScopeRef(node, ids) {
@@ -2059,7 +2062,7 @@ function emitVue3SlotOutletDirectiveError(built, context) {
 }
 
 function registerRuntimeHelpers(helpers) {
-  for (const key of Object.keys(helpers || {})) {
+  for (const key of Reflect.ownKeys(helpers || {})) {
     helperNameMap[key] = helpers[key];
   }
 }
