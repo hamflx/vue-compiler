@@ -1,5 +1,9 @@
 # Memory
 
+- Current round: completed the M20 foundation public API docs slice.
+- Added rustdoc coverage and crate-level `#![deny(missing_docs)]` for `vuec_source`, `vuec_diagnostics`, and `vuec_codegen`, covering source identity/span APIs, diagnostic rendering APIs, and codegen/source-map helper APIs.
+- Added `cargo xtask verify-public-api-docs`, which currently runs rustdoc with `RUSTDOCFLAGS=-D missing_docs` for those documented foundation crates. This is partial public API documentation progress only; the global M20 "every public API has docs" criterion remains open until the rest of the public crates are covered.
+
 - Current round: added the M20 release install-smoke gate slice.
 - Added `cargo xtask verify-release-install-smoke`, which packs release-built npm artifacts, installs them into clean temporary projects, smoke-calls `@vuec-rs/native` via the current optional platform package, and smoke-calls `@vuec-rs/wasm` through the package default entry.
 - Fixed `packages/wasm/index.js` so installed Node consumers default to `pkg-node/vuec_wasm.js` while browser-like runtimes continue to default to `pkg/vuec_wasm.js`. The gate currently reports `pending` rather than `pass` because non-current native platform packages still need matching target-platform release artifacts and host install smoke runs. This is release/package verification only; it does not change compiler semantics, `xtask/src/compat.rs`, conformance classification, or AST/HIR/MIR structures.

@@ -110,6 +110,7 @@ enum Command {
     VerifyArena,
     VerifyStringInterning,
     VerifyReleaseDocs,
+    VerifyPublicApiDocs,
     VerifyCrateMetadata,
     VerifySupplyChain,
     VerifyReleaseDryRun,
@@ -179,6 +180,7 @@ fn main() -> Result<()> {
         Command::VerifyArena => verify_arena()?,
         Command::VerifyStringInterning => verify_string_interning()?,
         Command::VerifyReleaseDocs => verify_release_docs()?,
+        Command::VerifyPublicApiDocs => verify_public_api_docs()?,
         Command::VerifyCrateMetadata => verify_crate_metadata()?,
         Command::VerifySupplyChain => verify_supply_chain()?,
         Command::VerifyReleaseDryRun => verify_release_dry_run()?,
@@ -1248,6 +1250,75 @@ fn require_file_contains_all(path: &Path, required: &[&str]) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn verify_public_api_docs() -> Result<compat::JsonReport> {
+    let documented_crates = ["vuec_source", "vuec_diagnostics", "vuec_codegen"];
+    let mut items = Vec::new();
+    let mut violations = Vec::new();
+
+    for crate_name in documented_crates {
+        match verify_crate_missing_docs(crate_name) {
+            Ok(output) => items.push(compat::ReportItem::new(
+                format!("rustdoc:{crate_name}"),
+                compat::ReportStatus::Pass,
+                output,
+                Some(crate_manifest_path(crate_name)?),
+            )),
+            Err(err) => {
+                violations.push(format!("{crate_name}: {err:#}"));
+                items.push(compat::ReportItem::new(
+                    format!("rustdoc:{crate_name}"),
+                    compat::ReportStatus::Fail,
+                    format!("{err:#}"),
+                    Some(crate_manifest_path(crate_name)?),
+                ));
+            }
+        }
+    }
+
+    let status = if violations.is_empty() {
+        compat::ReportStatus::Pass
+    } else {
+        compat::ReportStatus::Fail
+    };
+    Ok(
+        compat::JsonReport::new("verify_public_api_docs", status)
+            .with_items(items)
+            .with_violations(violations)
+            .with_note("verifies missing-docs rustdoc coverage for the documented public API crate set; expand this gate as additional public crates are documented"),
+    )
+}
+
+fn verify_crate_missing_docs(crate_name: &str) -> Result<String> {
+    let output = ProcessCommand::new("cargo")
+        .args(["doc", "--no-deps", "-p", crate_name])
+        .env("RUSTDOCFLAGS", "-D missing_docs")
+        .output()
+        .with_context(|| format!("failed to spawn cargo doc -p {crate_name}"))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "cargo doc -p {crate_name} exited with {:?}\nstdout:\n{}\nstderr:\n{}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(normalize_command_output(&output.stdout, &output.stderr))
+}
+
+fn crate_manifest_path(crate_name: &str) -> Result<PathBuf> {
+    let metadata = cargo_metadata_json()?;
+    let packages = metadata
+        .get("packages")
+        .and_then(JsonValue::as_array)
+        .context("cargo metadata output did not include packages array")?;
+    packages
+        .iter()
+        .find(|package| package.get("name").and_then(JsonValue::as_str) == Some(crate_name))
+        .and_then(|package| package.get("manifest_path").and_then(JsonValue::as_str))
+        .map(PathBuf::from)
+        .with_context(|| format!("failed to find manifest for crate {crate_name}"))
 }
 
 fn collect_package_manifest_dirs(root: &Path) -> Result<Vec<PathBuf>> {

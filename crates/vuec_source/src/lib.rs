@@ -1,28 +1,46 @@
 #![forbid(unsafe_code)]
+#![deny(missing_docs)]
+
+//! Source identity, byte span, and source-location utilities shared by the
+//! compiler crates.
+//!
+//! The compiler keeps spans as byte offsets into a `SourceFile`, while public
+//! diagnostics and code frames can project those offsets to one-based line and
+//! UTF-16 column locations compatible with Vue and JavaScript tooling.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Stable identifier for a file registered in a `SourceMap`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct FileId(pub u32);
 
+/// UTF-8 byte offset into a source file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct BytePos(pub usize);
 
+/// One-based line and UTF-16 column location.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Loc {
+    /// One-based line number.
     pub line: usize,
+    /// One-based UTF-16 column number.
     pub column: usize,
 }
 
+/// Half-open byte span inside a source file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Span {
+    /// File that owns this span.
     pub file_id: FileId,
+    /// Inclusive start byte offset.
     pub start: BytePos,
+    /// Exclusive end byte offset.
     pub end: BytePos,
 }
 
 impl Span {
+    /// Creates a span from raw byte offsets in the given file.
     pub const fn new(file_id: FileId, start: usize, end: usize) -> Self {
         Self {
             file_id,
@@ -32,15 +50,20 @@ impl Span {
     }
 }
 
+/// Source text plus cached line-start offsets for location projection.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SourceFile {
+    /// File id assigned by the owning `SourceMap`.
     pub id: FileId,
+    /// Optional display path for diagnostics and source maps.
     pub path: Option<PathBuf>,
+    /// Original source text.
     pub text: String,
     line_starts: Vec<usize>,
 }
 
 impl SourceFile {
+    /// Creates a source file and computes its line-start table.
     pub fn new(id: FileId, path: Option<PathBuf>, text: impl Into<String>) -> Self {
         let text = text.into();
         let line_starts = compute_line_starts(&text);
@@ -52,14 +75,17 @@ impl SourceFile {
         }
     }
 
+    /// Returns the source text length in bytes.
     pub fn len(&self) -> usize {
         self.text.len()
     }
 
+    /// Returns `true` when this file contains no source text.
     pub fn is_empty(&self) -> bool {
         self.text.is_empty()
     }
 
+    /// Converts a byte position to a one-based line and UTF-16 column.
     pub fn loc_at(&self, pos: BytePos) -> Option<Loc> {
         let offset = pos.0;
         if offset > self.text.len() || !self.text.is_char_boundary(offset) {
@@ -78,6 +104,7 @@ impl SourceFile {
         })
     }
 
+    /// Returns a UTF-8 boundary-checked slice for the given byte range.
     pub fn slice(&self, start: BytePos, end: BytePos) -> Option<&str> {
         if start.0 > end.0 || end.0 > self.text.len() {
             return None;
@@ -88,6 +115,7 @@ impl SourceFile {
         Some(&self.text[start.0..end.0])
     }
 
+    /// Renders a single-line code frame for the given byte range.
     pub fn code_frame(
         &self,
         start: BytePos,
@@ -125,30 +153,36 @@ impl SourceFile {
     }
 }
 
+/// Collection of source files used for span lookup and diagnostic rendering.
 #[derive(Default, Clone, Debug)]
 pub struct SourceMap {
     files: Vec<SourceFile>,
 }
 
 impl SourceMap {
+    /// Adds a file and returns its assigned id.
     pub fn add_file(&mut self, path: Option<PathBuf>, text: impl Into<String>) -> FileId {
         let id = FileId(self.files.len() as u32);
         self.files.push(SourceFile::new(id, path, text));
         id
     }
 
+    /// Returns a registered source file by id.
     pub fn file(&self, id: FileId) -> Option<&SourceFile> {
         self.files.get(id.0 as usize)
     }
 
+    /// Converts a byte position in a registered file to a source location.
     pub fn loc_at(&self, id: FileId, pos: BytePos) -> Option<Loc> {
         self.file(id)?.loc_at(pos)
     }
 
+    /// Returns a UTF-8 boundary-checked slice in a registered file.
     pub fn slice(&self, id: FileId, start: BytePos, end: BytePos) -> Option<&str> {
         self.file(id)?.slice(start, end)
     }
 
+    /// Renders a code frame for a byte range in a registered file.
     pub fn code_frame(
         &self,
         id: FileId,
