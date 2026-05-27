@@ -38,11 +38,15 @@ function compileScript(descriptor) {
 }
 
 function compileStyle(options) {
-  return normalizeVue27StyleResult(native.compileStyle(vue27StyleOptions(options || {})));
+  const opts = vue27StyleOptions(options || {});
+  const result = normalizeVue27StyleResult(native.compileStyle(vue27StyleNativeOptions(opts)));
+  return applyVue27StylePostcssSync(result, opts);
 }
 
 function compileStyleAsync(options) {
-  return Promise.resolve(compileStyle(options || {}));
+  const opts = vue27StyleOptions(options || {});
+  const result = normalizeVue27StyleResult(native.compileStyle(vue27StyleNativeOptions(opts)));
+  return applyVue27StylePostcssAsync(result, opts);
 }
 
 function rewriteDefault(source, variable, parserPlugins) {
@@ -66,6 +70,90 @@ function vue27StyleOptions(options) {
   const out = { ...options };
   if (!Object.prototype.hasOwnProperty.call(out, 'scoped')) out.scoped = true;
   return out;
+}
+
+function vue27StyleNativeOptions(options) {
+  const out = {};
+  for (const key of Object.keys(options || {})) {
+    if (key !== 'postcssPlugins' && key !== 'postcssOptions') {
+      out[key] = options[key];
+    }
+  }
+  return out;
+}
+
+function vue27StylePostcssRequired(options) {
+  return !!(
+    options &&
+    (Array.isArray(options.postcssPlugins) || options.postcssOptions)
+  );
+}
+
+function vue27StylePostcssOptions(options) {
+  const postcssOptions = Object.assign({}, options && options.postcssOptions ? options.postcssOptions : {});
+  const filename = options && options.filename ? options.filename : undefined;
+  if (filename !== undefined) {
+    if (postcssOptions.to === undefined) postcssOptions.to = filename;
+    if (postcssOptions.from === undefined) postcssOptions.from = filename;
+  }
+  return postcssOptions;
+}
+
+function applyVue27StylePostcssSync(result, options) {
+  if (!vue27StylePostcssRequired(options)) return result;
+  const out = Object.assign({}, result);
+  const errors = Array.isArray(out.errors) ? out.errors.slice() : [];
+  let rawResult;
+  try {
+    const postcss = require('postcss');
+    rawResult = postcss((options && options.postcssPlugins) || []).process(
+      out.code || '',
+      vue27StylePostcssOptions(options)
+    );
+    out.code = rawResult.css || '';
+    out.map = rawResult.map && rawResult.map.toJSON ? rawResult.map.toJSON() : out.map;
+  } catch (error) {
+    errors.push(error);
+  }
+  out.errors = errors;
+  out.rawResult = rawResult;
+  return out;
+}
+
+function applyVue27StylePostcssAsync(result, options) {
+  const out = Object.assign({}, result);
+  const errors = Array.isArray(out.errors) ? out.errors.slice() : [];
+  if (!vue27StylePostcssRequired(options)) {
+    return Promise.resolve(out);
+  }
+  try {
+    const postcss = require('postcss');
+    const rawResult = postcss((options && options.postcssPlugins) || []).process(
+      out.code || '',
+      vue27StylePostcssOptions(options)
+    );
+    return Promise.resolve(rawResult)
+      .then(postcssResult => {
+        out.code = postcssResult.css || '';
+        out.map = postcssResult.map && postcssResult.map.toJSON ? postcssResult.map.toJSON() : out.map;
+        out.errors = errors;
+        out.rawResult = postcssResult;
+        return out;
+      })
+      .catch(error => ({
+        code: '',
+        map: undefined,
+        errors: errors.concat(error && error.message ? error.message : error),
+        rawResult: undefined,
+      }));
+  } catch (error) {
+    return Promise.resolve({
+      code: '',
+      map: undefined,
+      errors: errors.concat(error && error.message ? error.message : error),
+      rawResult: undefined,
+    });
+  }
 }
 
 function normalizeVue27Descriptor(descriptor) {

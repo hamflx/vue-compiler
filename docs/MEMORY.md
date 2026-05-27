@@ -1,5 +1,9 @@
 # Memory
 
+- Current round: closed the NAPI-backed Vue 2.7 SFC compileStyle PostCSS callback boundary slice.
+- The Vue 2.7 `vue/compiler-sfc` NAPI alias now strips caller-provided `postcssPlugins` / `postcssOptions` before crossing NAPI, runs Rust-backed style compilation first, then applies PostCSS in the JavaScript package adapter for sync and async public APIs. This preserves function-valued plugin callbacks/options that cannot be serialized into Rust.
+- Focused `cargo xtask run-napi-conformance --suite vue27-sfc` improves from `73/144` to `77/144`; `compileStyle.spec.ts` is now `10/10` and remains correctly classified as `mixed`. `xtask/src/compat.rs` was not changed.
+
 - Current round: closed the NAPI-backed Vue 2.7 SFC scoped-style default slice.
 - The Vue 2.7 `vue/compiler-sfc` NAPI alias now applies the official `compileStyle` default of `scoped: true` when callers omit the option, while still preserving an explicit `scoped: false`. `vuec_napi` also treats a provided `map` option as a source-map request for style compilation.
 - Focused `cargo xtask run-napi-conformance --suite vue27-sfc` improves from `63/144` to `73/144`; `stylePluginScoped.spec.ts` is now `5/5`, `compileStyle.spec.ts` is `6/10`, and CSS vars coverage improves to `8/13`. This is package/API option projection plus NAPI option parsing; scoped selector rewriting remains in Rust `vuec_style`, and `xtask/src/compat.rs` was not changed.
