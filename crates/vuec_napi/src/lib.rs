@@ -10,11 +10,17 @@
 
 use napi::{bindgen_prelude::Unknown, Env, Result};
 use napi_derive::napi;
+use oxc_ast::ast::{
+    Argument, ArrayExpressionElement, AssignmentTarget, BindingPattern, ChainElement, Expression,
+    FormalParameter, ObjectPropertyKind, PropertyKey, SimpleAssignmentTarget, Statement,
+};
+use oxc_span::SourceType;
 use serde_json::Map;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use vuec_ast::{NodeSpan, Vue3Ast, Vue3AstKind, Vue3Expression, Vue3Prop};
 use vuec_html::{HtmlTokenKind, HtmlTokenizer};
+use vuec_js::JsAstStore;
 use vuec_sfc::{
     SfcCompiler, SfcScriptCompileOptions, SfcStyleCompileOptions, SfcTemplateCompileOptions,
     Vue27ParseComponentOptions, Vue27RewriteDefaultOptions, Vue27SfcPad,
@@ -1219,7 +1225,7 @@ fn vue3_public_parse_ast(
     json!({
         "type": 0,
         "source": source,
-        "children": vue3_public_children(ast, ast.root, source, base_offset),
+        "children": vue3_public_children(ast, ast.root, source, base_offset, options),
         "helpers": [],
         "components": [],
         "directives": [],
@@ -2171,12 +2177,13 @@ fn vue3_public_children(
     parent: vuec_ast::NodeId,
     source: &str,
     base_offset: usize,
+    options: &Vue3CompilerOptions,
 ) -> Vec<Value> {
     ast.node(parent)
         .map(|node| {
             node.children
                 .iter()
-                .filter_map(|child| vue3_public_node(ast, *child, source, base_offset))
+                .filter_map(|child| vue3_public_node(ast, *child, source, base_offset, options))
                 .collect()
         })
         .unwrap_or_default()
@@ -2187,13 +2194,14 @@ fn vue3_public_node(
     node_id: vuec_ast::NodeId,
     source: &str,
     base_offset: usize,
+    options: &Vue3CompilerOptions,
 ) -> Option<Value> {
     let node = ast.node(node_id)?;
     Some(match &node.kind {
         Vue3AstKind::Root(root) => json!({
             "type": 0,
             "source": source,
-            "children": vue3_public_children(ast, node_id, source, base_offset),
+            "children": vue3_public_children(ast, node_id, source, base_offset, options),
             "helpers": [],
             "components": [],
             "directives": [],
@@ -2212,8 +2220,8 @@ fn vue3_public_node(
             "tag": element.tag,
             "ns": vue3_namespace_value(element.ns),
             "tagType": vue3_element_type_value(element.tag_type),
-            "props": element.props.iter().map(|prop| vue3_prop_value(source, base_offset, prop)).collect::<Vec<_>>(),
-            "children": vue3_public_children(ast, node_id, source, base_offset),
+            "props": element.props.iter().map(|prop| vue3_prop_value(source, base_offset, prop, options)).collect::<Vec<_>>(),
+            "children": vue3_public_children(ast, node_id, source, base_offset, options),
             "loc": vue3_loc_value(source, base_offset, &node.span),
             "codegenNode": Value::Null,
             "isSelfClosing": if element.self_closing { json!(true) } else { Value::Null },
@@ -2230,7 +2238,7 @@ fn vue3_public_node(
         }),
         Vue3AstKind::Interpolation(interpolation) => json!({
             "type": 5,
-            "content": vue3_expression_value(source, base_offset, &interpolation.expression, &node.span, false),
+            "content": vue3_expression_value(source, base_offset, &interpolation.expression, &node.span, false, options, Vue3ExpressionAstMode::Expression),
             "loc": vue3_loc_value(source, base_offset, &node.span),
         }),
         _ => json!({
@@ -2242,7 +2250,12 @@ fn vue3_public_node(
     })
 }
 
-fn vue3_prop_value(source: &str, base_offset: usize, prop: &Vue3Prop) -> Value {
+fn vue3_prop_value(
+    source: &str,
+    base_offset: usize,
+    prop: &Vue3Prop,
+    options: &Vue3CompilerOptions,
+) -> Value {
     match prop {
         Vue3Prop::Attribute(attr) => json!({
             "type": 6,
@@ -2255,22 +2268,38 @@ fn vue3_prop_value(source: &str, base_offset: usize, prop: &Vue3Prop) -> Value {
             })),
             "loc": attr.span.map(|span| vue3_source_span_value(source, base_offset, span)).unwrap_or_else(vue3_loc_stub_value),
         }),
-        Vue3Prop::Directive(dir) => json!({
-            "type": 7,
-            "name": dir.name,
-            "rawName": dir.raw_name,
-            "exp": dir.exp.as_ref().map(|exp| vue3_expression_value(source, base_offset, exp, &span_to_node_span(dir.exp_span), false)),
-            "arg": dir.arg.as_ref().map(|arg| vue3_expression_value(source, base_offset, arg, &span_to_node_span(dir.arg_span), !dir.is_dynamic_arg)),
-            "modifiers": dir.modifiers.iter().enumerate().map(|(index, modifier)| {
-                let loc = dir
-                    .modifier_spans
-                    .get(index)
-                    .map(|span| vue3_loc_value(source, base_offset, span))
-                    .unwrap_or_else(vue3_loc_stub_value);
-                vue3_simple_expression_value(modifier, true, loc)
-            }).collect::<Vec<_>>(),
-            "loc": dir.span.map(|span| vue3_source_span_value(source, base_offset, span)).unwrap_or_else(vue3_loc_stub_value),
-        }),
+        Vue3Prop::Directive(dir) => {
+            let exp_mode = match dir.name.as_str() {
+                "on" => Vue3ExpressionAstMode::Statements,
+                "slot" => Vue3ExpressionAstMode::Params,
+                _ => Vue3ExpressionAstMode::Expression,
+            };
+            let mut value = json!({
+                "type": 7,
+                "name": dir.name,
+                "rawName": dir.raw_name,
+                "exp": dir.exp.as_ref().map(|exp| vue3_expression_value_with_mode(source, base_offset, exp, &span_to_node_span(dir.exp_span), false, Vue3ExpressionProjectionMode::Exact, options, exp_mode)),
+                "arg": dir.arg.as_ref().map(|arg| vue3_expression_value_with_mode(source, base_offset, arg, &span_to_node_span(dir.arg_span), !dir.is_dynamic_arg, Vue3ExpressionProjectionMode::ExactLocTrimContent, options, Vue3ExpressionAstMode::Expression)),
+                "modifiers": dir.modifiers.iter().enumerate().map(|(index, modifier)| {
+                    let loc = dir
+                        .modifier_spans
+                        .get(index)
+                        .map(|span| vue3_loc_value(source, base_offset, span))
+                        .unwrap_or_else(vue3_loc_stub_value);
+                    vue3_simple_expression_value(
+                        modifier,
+                        !matches!(dir.modifier_spans.get(index), Some(NodeSpan::Missing { .. })),
+                        loc,
+                    )
+                }).collect::<Vec<_>>(),
+                "loc": dir.span.map(|span| vue3_source_span_value(source, base_offset, span)).unwrap_or_else(vue3_loc_stub_value),
+            });
+            if dir.name == "for" {
+                value["forParseResult"] =
+                    vue3_for_parse_result_value(source, base_offset, dir, options);
+            }
+            value
+        }
     }
 }
 
@@ -2287,11 +2316,65 @@ fn vue3_expression_value(
     expression: &Vue3Expression,
     fallback_span: &NodeSpan,
     is_static: bool,
+    options: &Vue3CompilerOptions,
+    ast_mode: Vue3ExpressionAstMode,
 ) -> Value {
-    let raw = expression.source_string();
-    let content = raw.trim();
-    let loc = vue3_expression_loc(source, base_offset, fallback_span, content);
-    vue3_simple_expression_value(content, is_static, loc)
+    vue3_expression_value_with_mode(
+        source,
+        base_offset,
+        expression,
+        fallback_span,
+        is_static,
+        Vue3ExpressionProjectionMode::Trim,
+        options,
+        ast_mode,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum Vue3ExpressionProjectionMode {
+    Trim,
+    ExactLocTrimContent,
+    Exact,
+}
+
+#[derive(Clone, Copy)]
+enum Vue3ExpressionAstMode {
+    Expression,
+    Params,
+    Statements,
+}
+
+fn vue3_expression_value_with_mode(
+    source_text: &str,
+    base_offset: usize,
+    expression: &Vue3Expression,
+    fallback_span: &NodeSpan,
+    is_static: bool,
+    mode: Vue3ExpressionProjectionMode,
+    options: &Vue3CompilerOptions,
+    ast_mode: Vue3ExpressionAstMode,
+) -> Value {
+    let source = expression.source_string();
+    let loc = match mode {
+        Vue3ExpressionProjectionMode::Trim => {
+            vue3_expression_loc(source_text, base_offset, fallback_span, &source)
+        }
+        Vue3ExpressionProjectionMode::ExactLocTrimContent | Vue3ExpressionProjectionMode::Exact => {
+            vue3_loc_value(source_text, base_offset, fallback_span)
+        }
+    };
+    let content = match mode {
+        Vue3ExpressionProjectionMode::Exact => source,
+        Vue3ExpressionProjectionMode::Trim | Vue3ExpressionProjectionMode::ExactLocTrimContent => {
+            source.trim().to_string()
+        }
+    };
+    let mut value = vue3_simple_expression_value(&content, is_static, loc);
+    if let Some(ast_value) = vue3_expression_ast_value(&content, is_static, options, ast_mode) {
+        value["ast"] = ast_value;
+    }
+    value
 }
 
 fn vue3_simple_expression_value(content: &str, is_static: bool, loc: Value) -> Value {
@@ -2302,6 +2385,773 @@ fn vue3_simple_expression_value(content: &str, is_static: bool, loc: Value) -> V
         "constType": if is_static { 3 } else { 0 },
         "loc": loc,
     })
+}
+
+fn vue3_expression_ast_value(
+    source: &str,
+    is_static: bool,
+    options: &Vue3CompilerOptions,
+    mode: Vue3ExpressionAstMode,
+) -> Option<Value> {
+    if is_static || !options.prefix_identifiers || source.trim().is_empty() {
+        return None;
+    }
+    let trimmed = source.trim();
+    if is_simple_identifier(trimmed) {
+        return Some(Value::Null);
+    }
+    let store = JsAstStore::new();
+    let source_type = vue3_expression_source_type(options);
+    match mode {
+        Vue3ExpressionAstMode::Expression => {
+            let expression_source = format!("({trimmed})");
+            store
+                .parse_expression(&expression_source, source_type)
+                .ok()
+                .map(|expression| expression_ast_value(&expression))
+        }
+        Vue3ExpressionAstMode::Params => {
+            let expression_source = format!("({trimmed})=>{{}}");
+            store
+                .parse_expression(&expression_source, source_type)
+                .ok()
+                .map(|expression| expression_ast_value(&expression))
+        }
+        Vue3ExpressionAstMode::Statements => {
+            let program_source = format!(" {trimmed} ");
+            let program = store.parse_program(&program_source, source_type);
+            Some(json!({
+                "type": "Program",
+                "body": program.program.body.iter().map(statement_ast_value).collect::<Vec<_>>(),
+            }))
+        }
+    }
+}
+
+fn vue3_for_parse_result_value(
+    source: &str,
+    base_offset: usize,
+    dir: &vuec_ast::Vue3Directive,
+    options: &Vue3CompilerOptions,
+) -> Value {
+    let expression = dir
+        .exp
+        .as_ref()
+        .map(Vue3Expression::source_string)
+        .unwrap_or_default();
+    let Some((aliases, iterable)) = split_v_for_expression(&expression) else {
+        return Value::Null;
+    };
+    let source_loc = dir
+        .exp_span
+        .and_then(|span| {
+            let local_start = span.start.0.saturating_sub(base_offset);
+            let local_end = span.end.0.saturating_sub(base_offset).min(source.len());
+            source
+                .get(local_start..local_end)
+                .and_then(|slice| slice.find(iterable).map(|offset| local_start + offset))
+                .map(|start| vue3_source_loc_value(source, start, start + iterable.len()))
+        })
+        .unwrap_or_else(vue3_loc_stub_value);
+    let parts = split_v_for_aliases(aliases);
+    json!({
+        "source": vue3_simple_expression_with_ast_value(iterable, false, source_loc, options, Vue3ExpressionAstMode::Expression),
+        "value": parts.first().map(|value| {
+            vue3_simple_expression_with_ast_value(value, false, vue3_loc_stub_value(), options, Vue3ExpressionAstMode::Params)
+        }),
+        "key": parts.get(1).map(|value| {
+            vue3_simple_expression_with_ast_value(value, false, vue3_loc_stub_value(), options, Vue3ExpressionAstMode::Expression)
+        }),
+        "index": parts.get(2).map(|value| {
+            vue3_simple_expression_with_ast_value(value, false, vue3_loc_stub_value(), options, Vue3ExpressionAstMode::Expression)
+        }),
+        "finalized": false,
+    })
+}
+
+fn vue3_simple_expression_with_ast_value(
+    source: &str,
+    is_static: bool,
+    loc: Value,
+    options: &Vue3CompilerOptions,
+    ast_mode: Vue3ExpressionAstMode,
+) -> Value {
+    let mut value = vue3_simple_expression_value(source, is_static, loc);
+    if let Some(ast_value) = vue3_expression_ast_value(source, is_static, options, ast_mode) {
+        value["ast"] = ast_value;
+    }
+    value
+}
+
+fn vue3_expression_source_type(options: &Vue3CompilerOptions) -> SourceType {
+    if options.is_ts
+        || options
+            .expression_plugins
+            .iter()
+            .any(|plugin| plugin == "typescript")
+    {
+        SourceType::ts()
+    } else {
+        SourceType::mjs()
+    }
+}
+
+fn expression_ast_value(expression: &Expression<'_>) -> Value {
+    match expression {
+        Expression::ArrayExpression(array) => json!({
+            "type": "ArrayExpression",
+            "elements": array.elements.iter().map(array_element_ast_value).collect::<Vec<_>>(),
+        }),
+        Expression::ArrowFunctionExpression(function) => json!({
+            "type": "ArrowFunctionExpression",
+            "params": formal_parameters_ast_values(&function.params),
+            "body": function_body_ast_value(&function.body),
+        }),
+        Expression::AssignmentExpression(assignment) => json!({
+            "type": "AssignmentExpression",
+            "left": assignment_target_ast_value(&assignment.left),
+            "right": expression_ast_value(&assignment.right),
+        }),
+        Expression::AwaitExpression(await_expression) => json!({
+            "type": "AwaitExpression",
+            "argument": expression_ast_value(&await_expression.argument),
+        }),
+        Expression::BinaryExpression(binary) => json!({
+            "type": "BinaryExpression",
+            "left": expression_ast_value(&binary.left),
+            "right": expression_ast_value(&binary.right),
+        }),
+        Expression::CallExpression(call) => json!({
+            "type": "CallExpression",
+            "callee": expression_ast_value(&call.callee),
+            "arguments": call.arguments.iter().map(argument_ast_value).collect::<Vec<_>>(),
+            "optional": call.optional,
+        }),
+        Expression::ChainExpression(chain) => json!({
+            "type": "ChainExpression",
+            "expression": chain_element_ast_value(&chain.expression),
+        }),
+        Expression::ConditionalExpression(conditional) => json!({
+            "type": "ConditionalExpression",
+            "test": expression_ast_value(&conditional.test),
+            "consequent": expression_ast_value(&conditional.consequent),
+            "alternate": expression_ast_value(&conditional.alternate),
+        }),
+        Expression::FunctionExpression(function) => json!({
+            "type": "FunctionExpression",
+            "params": formal_parameters_ast_values(&function.params),
+            "body": function.body.as_ref().map(|body| function_body_ast_value(body)),
+        }),
+        Expression::Identifier(identifier) => identifier_reference_ast_value(identifier),
+        Expression::ImportExpression(import_expression) => json!({
+            "type": "ImportExpression",
+            "source": expression_ast_value(&import_expression.source),
+            "options": import_expression.options.as_ref().map(expression_ast_value),
+        }),
+        Expression::LogicalExpression(logical) => json!({
+            "type": "LogicalExpression",
+            "left": expression_ast_value(&logical.left),
+            "right": expression_ast_value(&logical.right),
+        }),
+        Expression::ComputedMemberExpression(member) => computed_member_ast_value(member),
+        Expression::StaticMemberExpression(member) => static_member_ast_value(member),
+        Expression::PrivateFieldExpression(member) => private_field_ast_value(member),
+        Expression::NewExpression(new_expression) => json!({
+            "type": "NewExpression",
+            "callee": expression_ast_value(&new_expression.callee),
+            "arguments": new_expression.arguments.iter().map(argument_ast_value).collect::<Vec<_>>(),
+        }),
+        Expression::ObjectExpression(object) => json!({
+            "type": "ObjectExpression",
+            "properties": object.properties.iter().map(object_property_kind_ast_value).collect::<Vec<_>>(),
+        }),
+        Expression::ParenthesizedExpression(parenthesized) => {
+            expression_ast_value(&parenthesized.expression)
+        }
+        Expression::PrivateInExpression(private_in) => json!({
+            "type": "BinaryExpression",
+            "right": expression_ast_value(&private_in.right),
+        }),
+        Expression::SequenceExpression(sequence) => json!({
+            "type": "SequenceExpression",
+            "expressions": sequence.expressions.iter().map(expression_ast_value).collect::<Vec<_>>(),
+        }),
+        Expression::TaggedTemplateExpression(tagged) => json!({
+            "type": "TaggedTemplateExpression",
+            "tag": expression_ast_value(&tagged.tag),
+            "quasi": template_literal_ast_value(&tagged.quasi),
+        }),
+        Expression::TemplateLiteral(template) => template_literal_ast_value(template),
+        Expression::ThisExpression(_) => json!({ "type": "ThisExpression" }),
+        Expression::UnaryExpression(unary) => json!({
+            "type": "UnaryExpression",
+            "argument": expression_ast_value(&unary.argument),
+        }),
+        Expression::UpdateExpression(update) => json!({
+            "type": "UpdateExpression",
+            "argument": simple_assignment_target_ast_value(&update.argument),
+        }),
+        Expression::YieldExpression(yield_expression) => json!({
+            "type": "YieldExpression",
+            "argument": yield_expression.argument.as_ref().map(expression_ast_value),
+        }),
+        Expression::BooleanLiteral(literal) => json!({
+            "type": "Literal",
+            "value": literal.value,
+        }),
+        Expression::NullLiteral(_) => json!({
+            "type": "Literal",
+            "value": Value::Null,
+        }),
+        Expression::NumericLiteral(literal) => json!({
+            "type": "Literal",
+            "value": literal.value,
+        }),
+        Expression::StringLiteral(literal) => json!({
+            "type": "Literal",
+            "value": literal.value.as_str(),
+        }),
+        Expression::BigIntLiteral(literal) => json!({
+            "type": "Literal",
+            "value": literal.value.as_str(),
+        }),
+        Expression::RegExpLiteral(_) => json!({ "type": "Literal" }),
+        Expression::TSAsExpression(expression) => {
+            ts_expression_ast_value("TSAsExpression", &expression.expression)
+        }
+        Expression::TSSatisfiesExpression(expression) => {
+            ts_expression_ast_value("TSSatisfiesExpression", &expression.expression)
+        }
+        Expression::TSTypeAssertion(expression) => {
+            ts_expression_ast_value("TSTypeAssertion", &expression.expression)
+        }
+        Expression::TSNonNullExpression(expression) => {
+            ts_expression_ast_value("TSNonNullExpression", &expression.expression)
+        }
+        Expression::TSInstantiationExpression(expression) => {
+            ts_expression_ast_value("TSInstantiationExpression", &expression.expression)
+        }
+        _ => json!({ "type": "Expression" }),
+    }
+}
+
+fn statement_ast_value(statement: &Statement<'_>) -> Value {
+    match statement {
+        Statement::BlockStatement(block) => json!({
+            "type": "BlockStatement",
+            "body": block.body.iter().map(statement_ast_value).collect::<Vec<_>>(),
+        }),
+        Statement::DoWhileStatement(statement) => json!({
+            "type": "DoWhileStatement",
+            "body": statement_ast_value(&statement.body),
+            "test": expression_ast_value(&statement.test),
+        }),
+        Statement::ExpressionStatement(statement) => json!({
+            "type": "ExpressionStatement",
+            "expression": expression_ast_value(&statement.expression),
+        }),
+        Statement::ForStatement(statement) => json!({
+            "type": "ForStatement",
+            "test": statement.test.as_ref().map(expression_ast_value),
+            "update": statement.update.as_ref().map(expression_ast_value),
+            "body": statement_ast_value(&statement.body),
+        }),
+        Statement::IfStatement(statement) => json!({
+            "type": "IfStatement",
+            "test": expression_ast_value(&statement.test),
+            "consequent": statement_ast_value(&statement.consequent),
+            "alternate": statement.alternate.as_ref().map(statement_ast_value),
+        }),
+        Statement::ReturnStatement(statement) => json!({
+            "type": "ReturnStatement",
+            "argument": statement.argument.as_ref().map(expression_ast_value),
+        }),
+        Statement::ThrowStatement(statement) => json!({
+            "type": "ThrowStatement",
+            "argument": expression_ast_value(&statement.argument),
+        }),
+        Statement::VariableDeclaration(declaration) => json!({
+            "type": "VariableDeclaration",
+            "declarations": declaration.declarations.iter().map(|declarator| json!({
+                "type": "VariableDeclarator",
+                "id": binding_pattern_ast_value(&declarator.id),
+                "init": declarator.init.as_ref().map(expression_ast_value),
+            })).collect::<Vec<_>>(),
+        }),
+        Statement::WhileStatement(statement) => json!({
+            "type": "WhileStatement",
+            "test": expression_ast_value(&statement.test),
+            "body": statement_ast_value(&statement.body),
+        }),
+        _ => json!({ "type": statement_type_name(statement) }),
+    }
+}
+
+fn statement_type_name(statement: &Statement<'_>) -> &'static str {
+    match statement {
+        Statement::BlockStatement(_) => "BlockStatement",
+        Statement::BreakStatement(_) => "BreakStatement",
+        Statement::ContinueStatement(_) => "ContinueStatement",
+        Statement::DebuggerStatement(_) => "DebuggerStatement",
+        Statement::DoWhileStatement(_) => "DoWhileStatement",
+        Statement::EmptyStatement(_) => "EmptyStatement",
+        Statement::ForInStatement(_) => "ForInStatement",
+        Statement::ForOfStatement(_) => "ForOfStatement",
+        Statement::ForStatement(_) => "ForStatement",
+        Statement::IfStatement(_) => "IfStatement",
+        Statement::ReturnStatement(_) => "ReturnStatement",
+        Statement::SwitchStatement(_) => "SwitchStatement",
+        Statement::ThrowStatement(_) => "ThrowStatement",
+        Statement::TryStatement(_) => "TryStatement",
+        Statement::VariableDeclaration(_) => "VariableDeclaration",
+        Statement::WhileStatement(_) => "WhileStatement",
+        _ => "Statement",
+    }
+}
+
+fn identifier_reference_ast_value(identifier: &oxc_ast::ast::IdentifierReference<'_>) -> Value {
+    json!({
+        "type": "Identifier",
+        "name": identifier.name.as_str(),
+    })
+}
+
+fn identifier_name_ast_value(identifier: &oxc_ast::ast::IdentifierName<'_>) -> Value {
+    json!({
+        "type": "Identifier",
+        "name": identifier.name.as_str(),
+    })
+}
+
+fn private_identifier_ast_value(identifier: &oxc_ast::ast::PrivateIdentifier<'_>) -> Value {
+    json!({
+        "type": "PrivateName",
+        "name": identifier.name.as_str(),
+    })
+}
+
+fn computed_member_ast_value(member: &oxc_ast::ast::ComputedMemberExpression<'_>) -> Value {
+    json!({
+        "type": "MemberExpression",
+        "object": expression_ast_value(&member.object),
+        "property": expression_ast_value(&member.expression),
+        "computed": true,
+        "optional": member.optional,
+    })
+}
+
+fn static_member_ast_value(member: &oxc_ast::ast::StaticMemberExpression<'_>) -> Value {
+    json!({
+        "type": "MemberExpression",
+        "object": expression_ast_value(&member.object),
+        "property": identifier_name_ast_value(&member.property),
+        "computed": false,
+        "optional": member.optional,
+    })
+}
+
+fn private_field_ast_value(member: &oxc_ast::ast::PrivateFieldExpression<'_>) -> Value {
+    json!({
+        "type": "MemberExpression",
+        "object": expression_ast_value(&member.object),
+        "property": private_identifier_ast_value(&member.field),
+        "computed": false,
+        "optional": member.optional,
+    })
+}
+
+fn template_literal_ast_value(template: &oxc_ast::ast::TemplateLiteral<'_>) -> Value {
+    json!({
+        "type": "TemplateLiteral",
+        "expressions": template.expressions.iter().map(expression_ast_value).collect::<Vec<_>>(),
+    })
+}
+
+fn ts_expression_ast_value(kind: &str, expression: &Expression<'_>) -> Value {
+    json!({
+        "type": kind,
+        "expression": expression_ast_value(expression),
+    })
+}
+
+fn array_element_ast_value(element: &ArrayExpressionElement<'_>) -> Value {
+    match element {
+        ArrayExpressionElement::SpreadElement(spread) => json!({
+            "type": "SpreadElement",
+            "argument": expression_ast_value(&spread.argument),
+        }),
+        ArrayExpressionElement::Elision(_) => Value::Null,
+        _ => element
+            .as_expression()
+            .map(expression_ast_value)
+            .unwrap_or_else(|| json!({ "type": "Expression" })),
+    }
+}
+
+fn argument_ast_value(argument: &Argument<'_>) -> Value {
+    match argument {
+        Argument::SpreadElement(spread) => json!({
+            "type": "SpreadElement",
+            "argument": expression_ast_value(&spread.argument),
+        }),
+        _ => argument
+            .as_expression()
+            .map(expression_ast_value)
+            .unwrap_or_else(|| json!({ "type": "Expression" })),
+    }
+}
+
+fn object_property_kind_ast_value(property: &ObjectPropertyKind<'_>) -> Value {
+    match property {
+        ObjectPropertyKind::ObjectProperty(property) => json!({
+            "type": "ObjectProperty",
+            "key": property_key_ast_value(&property.key),
+            "value": expression_ast_value(&property.value),
+            "computed": property.computed,
+            "shorthand": property.shorthand,
+        }),
+        ObjectPropertyKind::SpreadProperty(spread) => json!({
+            "type": "SpreadElement",
+            "argument": expression_ast_value(&spread.argument),
+        }),
+    }
+}
+
+fn property_key_ast_value(key: &PropertyKey<'_>) -> Value {
+    match key {
+        PropertyKey::StaticIdentifier(identifier) => identifier_name_ast_value(identifier),
+        PropertyKey::PrivateIdentifier(identifier) => private_identifier_ast_value(identifier),
+        _ => key
+            .as_expression()
+            .map(expression_ast_value)
+            .unwrap_or_else(|| json!({ "type": "Identifier", "name": "" })),
+    }
+}
+
+fn chain_element_ast_value(element: &ChainElement<'_>) -> Value {
+    match element {
+        ChainElement::CallExpression(call) => json!({
+            "type": "CallExpression",
+            "callee": expression_ast_value(&call.callee),
+            "arguments": call.arguments.iter().map(argument_ast_value).collect::<Vec<_>>(),
+            "optional": call.optional,
+        }),
+        ChainElement::ComputedMemberExpression(member) => computed_member_ast_value(member),
+        ChainElement::StaticMemberExpression(member) => static_member_ast_value(member),
+        ChainElement::PrivateFieldExpression(member) => private_field_ast_value(member),
+        ChainElement::TSNonNullExpression(expression) => {
+            ts_expression_ast_value("TSNonNullExpression", &expression.expression)
+        }
+    }
+}
+
+fn assignment_target_ast_value(target: &AssignmentTarget<'_>) -> Value {
+    match target {
+        AssignmentTarget::AssignmentTargetIdentifier(identifier) => {
+            identifier_reference_ast_value(identifier)
+        }
+        AssignmentTarget::ComputedMemberExpression(member) => computed_member_ast_value(member),
+        AssignmentTarget::StaticMemberExpression(member) => static_member_ast_value(member),
+        AssignmentTarget::PrivateFieldExpression(member) => private_field_ast_value(member),
+        AssignmentTarget::TSAsExpression(expression) => {
+            ts_expression_ast_value("TSAsExpression", &expression.expression)
+        }
+        AssignmentTarget::TSSatisfiesExpression(expression) => {
+            ts_expression_ast_value("TSSatisfiesExpression", &expression.expression)
+        }
+        AssignmentTarget::TSNonNullExpression(expression) => {
+            ts_expression_ast_value("TSNonNullExpression", &expression.expression)
+        }
+        AssignmentTarget::TSTypeAssertion(expression) => {
+            ts_expression_ast_value("TSTypeAssertion", &expression.expression)
+        }
+        AssignmentTarget::ArrayAssignmentTarget(target) => json!({
+            "type": "ArrayPattern",
+            "elements": target.elements.iter().map(|element| {
+                element
+                    .as_ref()
+                    .map(assignment_target_maybe_default_ast_value)
+                    .unwrap_or(Value::Null)
+            }).collect::<Vec<_>>(),
+            "rest": target.rest.as_ref().map(|rest| json!({
+                "type": "RestElement",
+                "argument": assignment_target_ast_value(&rest.target),
+            })),
+        }),
+        AssignmentTarget::ObjectAssignmentTarget(target) => json!({
+            "type": "ObjectPattern",
+            "properties": target.properties.iter().map(assignment_target_property_ast_value).collect::<Vec<_>>(),
+            "rest": target.rest.as_ref().map(|rest| json!({
+                "type": "RestElement",
+                "argument": assignment_target_ast_value(&rest.target),
+            })),
+        }),
+    }
+}
+
+fn simple_assignment_target_ast_value(target: &SimpleAssignmentTarget<'_>) -> Value {
+    match target {
+        SimpleAssignmentTarget::AssignmentTargetIdentifier(identifier) => {
+            identifier_reference_ast_value(identifier)
+        }
+        SimpleAssignmentTarget::ComputedMemberExpression(member) => {
+            computed_member_ast_value(member)
+        }
+        SimpleAssignmentTarget::StaticMemberExpression(member) => static_member_ast_value(member),
+        SimpleAssignmentTarget::PrivateFieldExpression(member) => private_field_ast_value(member),
+        SimpleAssignmentTarget::TSAsExpression(expression) => {
+            ts_expression_ast_value("TSAsExpression", &expression.expression)
+        }
+        SimpleAssignmentTarget::TSSatisfiesExpression(expression) => {
+            ts_expression_ast_value("TSSatisfiesExpression", &expression.expression)
+        }
+        SimpleAssignmentTarget::TSNonNullExpression(expression) => {
+            ts_expression_ast_value("TSNonNullExpression", &expression.expression)
+        }
+        SimpleAssignmentTarget::TSTypeAssertion(expression) => {
+            ts_expression_ast_value("TSTypeAssertion", &expression.expression)
+        }
+    }
+}
+
+fn assignment_target_maybe_default_ast_value(
+    target: &oxc_ast::ast::AssignmentTargetMaybeDefault<'_>,
+) -> Value {
+    match target {
+        oxc_ast::ast::AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(target) => json!({
+            "type": "AssignmentPattern",
+            "left": assignment_target_ast_value(&target.binding),
+            "right": expression_ast_value(&target.init),
+        }),
+        oxc_ast::ast::AssignmentTargetMaybeDefault::AssignmentTargetIdentifier(identifier) => {
+            identifier_reference_ast_value(identifier)
+        }
+        oxc_ast::ast::AssignmentTargetMaybeDefault::ComputedMemberExpression(member) => {
+            computed_member_ast_value(member)
+        }
+        oxc_ast::ast::AssignmentTargetMaybeDefault::StaticMemberExpression(member) => {
+            static_member_ast_value(member)
+        }
+        oxc_ast::ast::AssignmentTargetMaybeDefault::PrivateFieldExpression(member) => {
+            private_field_ast_value(member)
+        }
+        oxc_ast::ast::AssignmentTargetMaybeDefault::TSAsExpression(expression) => {
+            ts_expression_ast_value("TSAsExpression", &expression.expression)
+        }
+        oxc_ast::ast::AssignmentTargetMaybeDefault::TSSatisfiesExpression(expression) => {
+            ts_expression_ast_value("TSSatisfiesExpression", &expression.expression)
+        }
+        oxc_ast::ast::AssignmentTargetMaybeDefault::TSNonNullExpression(expression) => {
+            ts_expression_ast_value("TSNonNullExpression", &expression.expression)
+        }
+        oxc_ast::ast::AssignmentTargetMaybeDefault::TSTypeAssertion(expression) => {
+            ts_expression_ast_value("TSTypeAssertion", &expression.expression)
+        }
+        oxc_ast::ast::AssignmentTargetMaybeDefault::ArrayAssignmentTarget(target) => json!({
+            "type": "ArrayPattern",
+            "elements": target.elements.iter().map(|element| {
+                element
+                    .as_ref()
+                    .map(assignment_target_maybe_default_ast_value)
+                    .unwrap_or(Value::Null)
+            }).collect::<Vec<_>>(),
+        }),
+        oxc_ast::ast::AssignmentTargetMaybeDefault::ObjectAssignmentTarget(target) => json!({
+            "type": "ObjectPattern",
+            "properties": target.properties.iter().map(assignment_target_property_ast_value).collect::<Vec<_>>(),
+        }),
+    }
+}
+
+fn assignment_target_property_ast_value(
+    property: &oxc_ast::ast::AssignmentTargetProperty<'_>,
+) -> Value {
+    match property {
+        oxc_ast::ast::AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(property) => {
+            let mut value = json!({
+                "type": "ObjectProperty",
+                "key": identifier_reference_ast_value(&property.binding),
+                "value": identifier_reference_ast_value(&property.binding),
+                "computed": false,
+                "shorthand": true,
+            });
+            if let Some(init) = &property.init {
+                value["value"] = json!({
+                    "type": "AssignmentPattern",
+                    "left": identifier_reference_ast_value(&property.binding),
+                    "right": expression_ast_value(init),
+                });
+            }
+            value
+        }
+        oxc_ast::ast::AssignmentTargetProperty::AssignmentTargetPropertyProperty(property) => {
+            json!({
+                "type": "ObjectProperty",
+                "key": property_key_ast_value(&property.name),
+                "value": assignment_target_maybe_default_ast_value(&property.binding),
+                "computed": property.computed,
+                "shorthand": false,
+            })
+        }
+    }
+}
+
+fn formal_parameters_ast_values(parameters: &oxc_ast::ast::FormalParameters<'_>) -> Vec<Value> {
+    let mut params = parameters
+        .items
+        .iter()
+        .map(formal_parameter_ast_value)
+        .collect::<Vec<_>>();
+    if let Some(rest) = &parameters.rest {
+        params.push(json!({
+            "type": "RestElement",
+            "argument": binding_pattern_ast_value(&rest.rest.argument),
+        }));
+    }
+    params
+}
+
+fn formal_parameter_ast_value(parameter: &FormalParameter<'_>) -> Value {
+    let pattern = binding_pattern_ast_value(&parameter.pattern);
+    match &parameter.initializer {
+        Some(initializer) => json!({
+            "type": "AssignmentPattern",
+            "left": pattern,
+            "right": expression_ast_value(initializer),
+        }),
+        None => pattern,
+    }
+}
+
+fn function_body_ast_value(body: &oxc_ast::ast::FunctionBody<'_>) -> Value {
+    json!({
+        "type": "BlockStatement",
+        "body": body.statements.iter().map(statement_ast_value).collect::<Vec<_>>(),
+    })
+}
+
+fn binding_pattern_ast_value(pattern: &BindingPattern<'_>) -> Value {
+    match pattern {
+        BindingPattern::BindingIdentifier(identifier) => json!({
+            "type": "Identifier",
+            "name": identifier.name.as_str(),
+        }),
+        BindingPattern::ObjectPattern(pattern) => {
+            let mut properties = pattern
+                .properties
+                .iter()
+                .map(binding_property_ast_value)
+                .collect::<Vec<_>>();
+            if let Some(rest) = &pattern.rest {
+                properties.push(json!({
+                    "type": "RestElement",
+                    "argument": binding_pattern_ast_value(&rest.argument),
+                }));
+            }
+            json!({
+                "type": "ObjectPattern",
+                "properties": properties,
+            })
+        }
+        BindingPattern::ArrayPattern(pattern) => {
+            let mut elements = pattern
+                .elements
+                .iter()
+                .map(|element| {
+                    element
+                        .as_ref()
+                        .map(binding_pattern_ast_value)
+                        .unwrap_or(Value::Null)
+                })
+                .collect::<Vec<_>>();
+            if let Some(rest) = &pattern.rest {
+                elements.push(json!({
+                    "type": "RestElement",
+                    "argument": binding_pattern_ast_value(&rest.argument),
+                }));
+            }
+            json!({
+                "type": "ArrayPattern",
+                "elements": elements,
+            })
+        }
+        BindingPattern::AssignmentPattern(pattern) => json!({
+            "type": "AssignmentPattern",
+            "left": binding_pattern_ast_value(&pattern.left),
+            "right": expression_ast_value(&pattern.right),
+        }),
+    }
+}
+
+fn binding_property_ast_value(property: &oxc_ast::ast::BindingProperty<'_>) -> Value {
+    json!({
+        "type": "ObjectProperty",
+        "key": property_key_ast_value(&property.key),
+        "value": binding_pattern_ast_value(&property.value),
+        "computed": property.computed,
+        "shorthand": property.shorthand,
+    })
+}
+
+fn split_v_for_expression(source: &str) -> Option<(&str, &str)> {
+    let mut depth = 0usize;
+    let mut index = 0usize;
+    while index < source.len() {
+        let ch = source[index..].chars().next()?;
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            ' ' if depth == 0 => {
+                let rest = &source[index..];
+                if rest.starts_with(" in ") {
+                    return Some((source[..index].trim(), source[index + 4..].trim()));
+                }
+                if rest.starts_with(" of ") {
+                    return Some((source[..index].trim(), source[index + 4..].trim()));
+                }
+            }
+            _ => {}
+        }
+        index += ch.len_utf8();
+    }
+    None
+}
+
+fn split_v_for_aliases(source: &str) -> Vec<String> {
+    let aliases = source
+        .trim()
+        .strip_prefix('(')
+        .and_then(|value| value.strip_suffix(')'))
+        .unwrap_or_else(|| source.trim());
+    split_top_level_csv(aliases)
+        .into_iter()
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn split_top_level_csv(source: &str) -> Vec<&str> {
+    let mut items = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    for (index, ch) in source.char_indices() {
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                let item = source[start..index].trim();
+                if !item.is_empty() {
+                    items.push(item);
+                }
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    let tail = source[start..].trim();
+    if !tail.is_empty() {
+        items.push(tail);
+    }
+    items
 }
 
 fn vue3_namespace_value(namespace: vuec_ast::HtmlNamespace) -> u8 {
@@ -2615,6 +3465,66 @@ mod tests {
     }
 
     #[test]
+    fn vue3_parse_projects_interpolation_expression_ast() {
+        let options = vue3_prefix_identifier_options();
+        let ast = vue3_public_parse_for_test("{{ a + b }}", &options);
+
+        assert_eq!(
+            ast["children"][0]["content"]["ast"]["type"],
+            json!("BinaryExpression")
+        );
+    }
+
+    #[test]
+    fn vue3_parse_projects_directive_expression_ast() {
+        let options = vue3_prefix_identifier_options();
+        let ast =
+            vue3_public_parse_for_test(r#"<div :[key+1]="foo()" @click="a++;b++" />"#, &options);
+
+        let props = &ast["children"][0]["props"];
+        assert_eq!(props[0]["arg"]["ast"]["type"], json!("BinaryExpression"));
+        assert_eq!(props[0]["exp"]["ast"]["type"], json!("CallExpression"));
+        assert_eq!(props[1]["exp"]["ast"]["type"], json!("Program"));
+        assert_eq!(
+            props[1]["exp"]["ast"]["body"][0]["type"],
+            json!("ExpressionStatement")
+        );
+        assert_eq!(
+            props[1]["exp"]["ast"]["body"][1]["type"],
+            json!("ExpressionStatement")
+        );
+    }
+
+    #[test]
+    fn vue3_parse_projects_slot_params_ast() {
+        let options = vue3_prefix_identifier_options();
+        let ast = vue3_public_parse_for_test(r#"<Comp #foo="{ a, b }" />"#, &options);
+
+        assert_eq!(
+            ast["children"][0]["props"][0]["exp"]["ast"]["type"],
+            json!("ArrowFunctionExpression")
+        );
+    }
+
+    #[test]
+    fn vue3_parse_projects_v_for_parse_result_ast() {
+        let options = vue3_prefix_identifier_options();
+        let ast = vue3_public_parse_for_test(
+            r#"<div v-for="({ a, b }, key, index) of a.b" />"#,
+            &options,
+        );
+
+        let result = &ast["children"][0]["props"][0]["forParseResult"];
+        assert_eq!(result["source"]["ast"]["type"], json!("MemberExpression"));
+        assert_eq!(
+            result["value"]["ast"]["type"],
+            json!("ArrowFunctionExpression")
+        );
+        assert!(result["key"]["ast"].is_null());
+        assert!(result["index"]["ast"].is_null());
+    }
+
+    #[test]
     fn vue2_options_accepts_sparse_public_keys() {
         let options = vue2_options(json!({
             "comments": true,
@@ -2638,5 +3548,18 @@ mod tests {
         assert!(code.contains("var _vm = this"));
         assert!(code.contains("return _c(\"div\", [_vm._v(_vm._s(_vm.msg))])"));
         assert!(code.contains("render._withStripped = true"));
+    }
+
+    fn vue3_prefix_identifier_options() -> Vue3CompilerOptions {
+        Vue3CompilerOptions {
+            prefix_identifiers: true,
+            ..Vue3CompilerOptions::default()
+        }
+    }
+
+    fn vue3_public_parse_for_test(source: &str, options: &Vue3CompilerOptions) -> Value {
+        let template = template_source(source, &Value::Null);
+        let ast = Vue3Dialect::base_parse(template.clone(), options);
+        vue3_public_parse_ast(&ast, &template.source, template.base_offset, options)
     }
 }
