@@ -7,7 +7,12 @@ use oxc_ast::ast::{
 use oxc_diagnostics::OxcDiagnostic;
 use oxc_parser::{ParseOptions, Parser, ParserReturn};
 use oxc_span::SourceType;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::borrow::Borrow;
+use std::collections::BTreeMap;
+use std::fmt;
+use std::ops::Deref;
+use std::sync::Arc;
 use thiserror::Error;
 use vuec_ast::{JsExprId, JsPatternId, JsProgramId, JsStmtId};
 use vuec_source::Span;
@@ -70,10 +75,144 @@ impl JsSourceType {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JsEntry {
-    pub source: String,
+    pub source: JsSource,
     pub span: Span,
     pub mode: JsParseMode,
     pub source_type: JsSourceType,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialOrd)]
+pub struct JsSource(Arc<str>);
+
+impl JsSource {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
+    pub fn strong_count(&self) -> usize {
+        Arc::strong_count(&self.0)
+    }
+}
+
+impl Default for JsSource {
+    fn default() -> Self {
+        Self(Arc::from(""))
+    }
+}
+
+impl From<Arc<str>> for JsSource {
+    fn from(value: Arc<str>) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&str> for JsSource {
+    fn from(value: &str) -> Self {
+        Self(Arc::from(value))
+    }
+}
+
+impl From<String> for JsSource {
+    fn from(value: String) -> Self {
+        Self(Arc::from(value))
+    }
+}
+
+impl AsRef<str> for JsSource {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl Borrow<str> for JsSource {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl Deref for JsSource {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for JsSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl PartialEq for JsSource {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl PartialEq<str> for JsSource {
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
+    }
+}
+
+impl PartialEq<JsSource> for str {
+    fn eq(&self, other: &JsSource) -> bool {
+        self == other.as_str()
+    }
+}
+
+impl PartialEq<&str> for JsSource {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl PartialEq<JsSource> for &str {
+    fn eq(&self, other: &JsSource) -> bool {
+        *self == other.as_str()
+    }
+}
+
+impl PartialEq<String> for JsSource {
+    fn eq(&self, other: &String) -> bool {
+        self.as_str() == other
+    }
+}
+
+impl PartialEq<JsSource> for String {
+    fn eq(&self, other: &JsSource) -> bool {
+        self == other.as_str()
+    }
+}
+
+impl Serialize for JsSource {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for JsSource {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        String::deserialize(deserializer).map(Self::from)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JsStringInternerStats {
+    pub hits: usize,
+    pub misses: usize,
+    pub entries: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,6 +264,9 @@ pub struct JsProgramSummary {
 
 pub struct JsAstStore {
     allocator: Allocator,
+    sources: BTreeMap<String, Arc<str>>,
+    interner_hits: usize,
+    interner_misses: usize,
     expressions: Vec<JsEntry>,
     statements: Vec<JsEntry>,
     patterns: Vec<JsEntry>,
@@ -135,6 +277,9 @@ impl JsAstStore {
     pub fn new() -> Self {
         Self {
             allocator: Allocator::default(),
+            sources: BTreeMap::new(),
+            interner_hits: 0,
+            interner_misses: 0,
             expressions: Vec::new(),
             statements: Vec::new(),
             patterns: Vec::new(),
@@ -167,8 +312,9 @@ impl JsAstStore {
         source_type: SourceType,
     ) -> JsStmtId {
         let id = JsStmtId(self.statements.len() as u32);
+        let source = self.intern_source(source);
         self.statements.push(JsEntry {
-            source: source.into(),
+            source,
             span,
             mode: JsParseMode::Statements,
             source_type: JsSourceType::from_oxc(source_type),
@@ -183,8 +329,9 @@ impl JsAstStore {
         source_type: SourceType,
     ) -> JsPatternId {
         let id = JsPatternId(self.patterns.len() as u32);
+        let source = self.intern_source(source);
         self.patterns.push(JsEntry {
-            source: source.into(),
+            source,
             span,
             mode: JsParseMode::Params,
             source_type: JsSourceType::from_oxc(source_type),
@@ -200,8 +347,9 @@ impl JsAstStore {
         source_type: SourceType,
     ) -> JsProgramId {
         let id = JsProgramId(self.programs.len() as u32);
+        let source = self.intern_source(source);
         self.programs.push(JsEntry {
-            source: source.into(),
+            source,
             span,
             mode,
             source_type: JsSourceType::from_oxc(source_type),
@@ -217,13 +365,38 @@ impl JsAstStore {
         source_type: SourceType,
     ) -> JsExprId {
         let id = JsExprId(self.expressions.len() as u32);
+        let source = self.intern_source(source);
         self.expressions.push(JsEntry {
-            source: source.into(),
+            source,
             span,
             mode,
             source_type: JsSourceType::from_oxc(source_type),
         });
         id
+    }
+
+    pub fn string_interner_stats(&self) -> JsStringInternerStats {
+        JsStringInternerStats {
+            hits: self.interner_hits,
+            misses: self.interner_misses,
+            entries: self.sources.len(),
+        }
+    }
+
+    pub fn interned_source_ptr_eq(&self, left: &JsEntry, right: &JsEntry) -> bool {
+        left.source.ptr_eq(&right.source)
+    }
+
+    fn intern_source(&mut self, source: impl Into<String>) -> JsSource {
+        let source = source.into();
+        if let Some(existing) = self.sources.get(source.as_str()) {
+            self.interner_hits += 1;
+            return JsSource::from(existing.clone());
+        }
+        let interned = Arc::<str>::from(source.as_str());
+        self.sources.insert(source, interned.clone());
+        self.interner_misses += 1;
+        JsSource::from(interned)
     }
 
     pub fn expr_entry(&self, id: JsExprId) -> Option<&JsEntry> {
@@ -664,6 +837,40 @@ mod tests {
 
         let expr = store.parse_expr(id).expect("registered expression");
         assert!(matches!(expr, Expression::BinaryExpression(_)));
+    }
+
+    #[test]
+    fn repeated_js_sources_are_interned_without_changing_serialized_shape() {
+        let mut store = JsAstStore::new();
+        let first = store.register_expr(
+            "item.count",
+            Span::new(FileId(0), 0, 10),
+            SourceType::script(),
+        );
+        let second = store.register_stmt(
+            "item.count",
+            Span::new(FileId(0), 20, 30),
+            SourceType::script(),
+        );
+        let distinct =
+            store.register_pattern("item", Span::new(FileId(0), 40, 44), SourceType::script());
+
+        let first_entry = store.expr_entry(first).unwrap();
+        let second_entry = store.stmt_entry(second).unwrap();
+        let distinct_entry = store.pattern_entry(distinct).unwrap();
+        assert!(store.interned_source_ptr_eq(first_entry, second_entry));
+        assert!(!store.interned_source_ptr_eq(first_entry, distinct_entry));
+        assert_eq!(
+            store.string_interner_stats(),
+            JsStringInternerStats {
+                hits: 1,
+                misses: 2,
+                entries: 2,
+            }
+        );
+
+        let serialized = serde_json::to_value(first_entry).unwrap();
+        assert_eq!(serialized["source"], "item.count");
     }
 
     #[test]

@@ -13542,7 +13542,7 @@ impl<'a> Vue3DomMirCodegen<'a> {
         self.js
             .patterns()
             .get(id.0 as usize)
-            .map(|entry| entry.source.clone())
+            .map(|entry| entry.source.to_string())
             .unwrap_or_else(|| "_item".into())
     }
 
@@ -16049,7 +16049,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         self.js
             .patterns()
             .get(id.0 as usize)
-            .map(|entry| entry.source.clone())
+            .map(|entry| entry.source.to_string())
             .unwrap_or_else(|| "_item".into())
     }
 

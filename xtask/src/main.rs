@@ -108,6 +108,7 @@ enum Command {
     VerifyParallel,
     VerifyAstCache,
     VerifyArena,
+    VerifyStringInterning,
     Bench {
         #[arg(long, default_value_t = 10)]
         iterations: usize,
@@ -171,6 +172,7 @@ fn main() -> Result<()> {
         Command::VerifyParallel => verify_parallel()?,
         Command::VerifyAstCache => verify_ast_cache()?,
         Command::VerifyArena => verify_arena()?,
+        Command::VerifyStringInterning => verify_string_interning()?,
         Command::Bench {
             iterations,
             out_dir,
@@ -947,6 +949,40 @@ fn verify_arena() -> Result<compat::JsonReport> {
             .with_items(items)
             .with_violations(violations)
             .with_note("verifies AstDocument node preallocation APIs plus Vue 2 and Vue 3 parser entrypoints use arena capacity hints without changing tree invariants"),
+    )
+}
+
+fn verify_string_interning() -> Result<compat::JsonReport> {
+    let mut violations = Vec::new();
+    let mut items = Vec::new();
+
+    let status = match run_string_interning_smoke_suite() {
+        Ok(output) => {
+            items.push(compat::ReportItem::new(
+                "js-source-string-interner",
+                compat::ReportStatus::Pass,
+                output,
+                Some(PathBuf::from("crates/vuec_js")),
+            ));
+            compat::ReportStatus::Pass
+        }
+        Err(err) => {
+            violations.push(format!("string interning smoke failed: {err:#}"));
+            items.push(compat::ReportItem::new(
+                "js-source-string-interner",
+                compat::ReportStatus::Fail,
+                format!("{err:#}"),
+                Some(PathBuf::from("crates/vuec_js")),
+            ));
+            compat::ReportStatus::Fail
+        }
+    };
+
+    Ok(
+        compat::JsonReport::new("verify_string_interning", status)
+            .with_items(items)
+            .with_violations(violations)
+            .with_note("verifies JS expression side-store string interning reuses repeated source text while preserving serialized string output and AST/HIR/MIR structure boundaries"),
     )
 }
 
@@ -2108,6 +2144,91 @@ fn repeated_arena_template(tag: &str, prefix: &str, count: usize) -> String {
     }
     source.push_str("</div>");
     source
+}
+
+fn run_string_interning_smoke_suite() -> Result<String> {
+    let mut store = vuec_js::JsAstStore::new();
+    let expr = store.register_expr(
+        "item.count",
+        vuec_source::Span::new(vuec_source::FileId(0), 0, 10),
+        oxc_span::SourceType::script(),
+    );
+    let stmt = store.register_stmt(
+        "item.count",
+        vuec_source::Span::new(vuec_source::FileId(0), 20, 30),
+        oxc_span::SourceType::script(),
+    );
+    let pattern = store.register_pattern(
+        "item",
+        vuec_source::Span::new(vuec_source::FileId(0), 40, 44),
+        oxc_span::SourceType::script(),
+    );
+    let program = store.register_program(
+        "item.count",
+        vuec_source::Span::new(vuec_source::FileId(0), 50, 60),
+        vuec_js::JsParseMode::ScriptModule,
+        oxc_span::SourceType::mjs(),
+    );
+
+    let expr_entry = store.expr_entry(expr).context("missing interned expr")?;
+    let stmt_entry = store.stmt_entry(stmt).context("missing interned stmt")?;
+    let pattern_entry = store
+        .pattern_entry(pattern)
+        .context("missing interned pattern")?;
+    let program_entry = store
+        .program_entry(program)
+        .context("missing interned program")?;
+    if !store.interned_source_ptr_eq(expr_entry, stmt_entry)
+        || !store.interned_source_ptr_eq(expr_entry, program_entry)
+    {
+        anyhow::bail!("repeated JS source text did not share interned storage");
+    }
+    if store.interned_source_ptr_eq(expr_entry, pattern_entry) {
+        anyhow::bail!("distinct JS source text unexpectedly shared interned storage");
+    }
+    let stats = store.string_interner_stats();
+    if stats.hits != 2 || stats.misses != 2 || stats.entries != 2 {
+        anyhow::bail!("JS source interner stats mismatch: {stats:?}");
+    }
+    let serialized = serde_json::to_value(expr_entry)?;
+    if serialized.get("source").and_then(JsonValue::as_str) != Some("item.count") {
+        anyhow::bail!("interned JS source did not serialize as a plain string: {serialized}");
+    }
+
+    let mut lowering_options = vuec_vue3_core::Vue3CompilerOptions::default();
+    lowering_options.prefix_identifiers = true;
+    lowering_options.mode = "module".into();
+    let source = vuec_vue3_core::TemplateSource {
+        filename: "Interned.vue".into(),
+        source: "<div>{{ item.count }}</div>".into(),
+        file_id: vuec_source::FileId(0),
+        base_offset: 0,
+    };
+    let mut ast = vuec_vue3_core::Vue3Dialect::base_parse(source, &lowering_options);
+    let mut ctx = vuec_pass::TransformContext::default();
+    vuec_vue3_core::Vue3Dialect::transform(&mut ast, &mut ctx, &lowering_options);
+    let lowered = vuec_vue3_core::lower_vue3_ast_to_dom_mir(&ast, &lowering_options);
+    let generated =
+        vuec_vue3_core::generate_vue3_dom_mir(&lowered.mir, &lowered.js, &lowering_options);
+    if !generated.code.contains("_ctx.item.count") {
+        anyhow::bail!(
+            "Vue3 DOM MIR codegen did not consume interned JS source: {}",
+            generated.code
+        );
+    }
+
+    Ok(json!({
+        "status": "pass",
+        "checks": [
+            "repeated-js-source-shares-interned-storage",
+            "distinct-js-source-keeps-distinct-storage",
+            "interned-source-serializes-as-string",
+            "vue3-dom-mir-codegen-consumes-interned-js-store"
+        ],
+        "stats": stats,
+        "serializedSource": serialized["source"],
+    })
+    .to_string())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

@@ -1,5 +1,10 @@
 # Memory
 
+- Current round: completed the M19 string interning slice.
+- Added internal string interning to `vuec_js::JsAstStore` for registered JS expression / statement / pattern / program source text. Repeated JS source text shares an `Arc<str>` backing inside the side store, while `JsEntry` still serializes `source` as a plain JSON string and AST/HIR/MIR nodes still carry the `JsExprId` / `JsStmtId` / `JsPatternId` handles required by `docs/3.AST_HIR_MIR_DESIGN.md`.
+- Added `JsStringInternerStats` and `cargo xtask verify-string-interning`, which verifies cross-bucket reuse, distinct-source separation, serialized string output, and Vue3 DOM MIR codegen consuming the interned `JsAstStore`.
+- Verification: `cargo fmt --all -- --check`, `git diff --check`, `cargo check -p vuec_js -p vuec_vue3_core -p xtask`, `cargo test -p vuec_js --lib`, `cargo test -p vuec_vue3_core --lib`, `cargo test -p xtask`, `cargo xtask verify-string-interning`, `cargo xtask run-conformance --suite vue3-dom` (`133/133`), `cargo xtask run-output-contract --version-line vue3 --package @vue/compiler-dom` (`5/5`), and `cargo xtask bench --iterations 1 --skip-official-js` (Rust benchmark cases pass; official JS is pending because it was skipped).
+
 - Current round: completed the M19 arena allocation optimization slice.
 - Added `AstDocument::with_capacity`, `reserve_nodes`, and `node_capacity`, plus shared template node-capacity hinting used by Vue 3 `base_parse` and Vue 2 public AST projection. This keeps `AstDocument<K>` as the single internal arena tree container and does not change AST/HIR/MIR node schemas, public projection, lowering, or target-split MIR semantics.
 - Added `cargo xtask verify-arena`, which verifies requested arena capacity preserves deterministic `NodeId` allocation and tree invariants, and that representative Vue 2 / Vue 3 parser entrypoints preallocate from the shared hint while `validate_tree` still passes.
