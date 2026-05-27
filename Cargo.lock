@@ -1366,6 +1366,7 @@ dependencies = [
  "serde",
  "serde_json",
  "vuec_ast",
+ "vuec_html",
  "vuec_sfc",
  "vuec_source",
  "vuec_vue2",

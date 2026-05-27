@@ -308,7 +308,7 @@ function emitVue3ParseDiagnostics(ast, options) {
     ? options.onError
     : error => { throw error; };
   for (const diagnostic of ast.__vuecDiagnostics) {
-    const error = new SyntaxError(errorMessages[diagnostic.code] || 'Vue compiler parse error');
+    const error = new SyntaxError(diagnostic.message || errorMessages[diagnostic.code] || 'Vue compiler parse error');
     error.code = diagnostic.code;
     error.loc = diagnostic.loc;
     onError(error);
