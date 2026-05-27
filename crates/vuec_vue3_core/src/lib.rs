@@ -3750,12 +3750,58 @@ fn lower_vue3_plain_element_to_ssr_mir(
                 }
             }
         }
-        Vue3ElementType::Element | Vue3ElementType::Template => {
+        Vue3ElementType::Element => {
             lower_vue3_native_element_to_ssr_mir(element, ast_node, ast, hir_id, mir_parent, state);
+        }
+        Vue3ElementType::Template => {
+            lower_vue3_template_element_to_ssr_mir(ast_node, ast, hir_id, mir_parent, state);
         }
     }
 
     Some(hir_id)
+}
+
+fn lower_vue3_template_element_to_ssr_mir(
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    ast: &Vue3Ast,
+    hir_id: NodeId,
+    mir_parent: NodeId,
+    state: &mut Vue3SsrLoweringState,
+) {
+    let generated_span =
+        NodeSpan::generated(ast_node.span.source(), vuec_ast::GeneratedReason::Lowering);
+    let wrap_fragment = vue3_ssr_template_children_need_fragment(ast, &ast_node.children);
+    if wrap_fragment {
+        let open_id = state.mir.push_child(
+            mir_parent,
+            Vue3SsrMirKind::PushString("<!--[-->".into()),
+            generated_span.clone(),
+        );
+        state.map.record_hir_to_mir(hir_id, open_id);
+    }
+    lower_vue3_ssr_child_sequence(&ast_node.children, ast, hir_id, mir_parent, state);
+    if wrap_fragment {
+        let close_id = state.mir.push_child(
+            mir_parent,
+            Vue3SsrMirKind::PushString("<!--]-->".into()),
+            generated_span,
+        );
+        state.map.record_hir_to_mir(hir_id, close_id);
+    }
+}
+
+fn vue3_ssr_template_children_need_fragment(ast: &Vue3Ast, children: &[NodeId]) -> bool {
+    let visible = visible_child_ids(ast, children);
+    let [single] = visible.as_slice() else {
+        return !visible.is_empty();
+    };
+    let Some(child) = ast.node(*single) else {
+        return true;
+    };
+    let Vue3AstKind::Element(element) = &child.kind else {
+        return true;
+    };
+    element.tag_type == Vue3ElementType::Template || directive_by_name(element, "for").is_some()
 }
 
 fn lower_vue3_builtin_component_to_ssr_mir(
@@ -13834,11 +13880,20 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         writer.dedent();
         writer.push_line("}");
         CodegenResult {
-            code: writer.finish().trim_end().to_string(),
+            code: self.finish_code(writer),
             map: None,
             ast_summary: format!("vue3-ssr-mir-nodes={}", self.mir.len()),
             diagnostics: Vec::new(),
             preamble,
+        }
+    }
+
+    fn finish_code(&self, writer: CodeWriter) -> String {
+        let code = writer.finish().trim_end().to_string();
+        if self.options.inline || self.options.mode == "module" || code.starts_with("const ") {
+            code
+        } else {
+            format!("\n{code}")
         }
     }
 
@@ -14176,18 +14231,57 @@ impl<'a> Vue3SsrMirCodegen<'a> {
             });
         }
         let root = *children.get(root_spans.first()?.start)?;
-        let accepts_attrs = match self.mir.node(root).map(|node| &node.kind) {
-            Some(Vue3SsrMirKind::RenderComponent(_)) => true,
-            Some(Vue3SsrMirKind::PushString(value)) => parse_ssr_open_tag_start(value).is_some(),
-            _ => false,
-        };
-        if accepts_attrs {
+        if self.node_accepts_root_attrs(root) {
             return Some(SsrRootAttrs {
                 attrs: Some("_attrs".to_string()),
                 css_vars,
             });
         }
         None
+    }
+
+    fn node_accepts_root_attrs(&self, node_id: NodeId) -> bool {
+        match self.mir.node(node_id).map(|node| &node.kind) {
+            Some(Vue3SsrMirKind::RenderComponent(_)) => true,
+            Some(Vue3SsrMirKind::PushString(value)) => parse_ssr_open_tag_start(value).is_some(),
+            Some(Vue3SsrMirKind::If { .. }) => self
+                .mir
+                .node(node_id)
+                .is_some_and(|node| self.if_branches_accept_root_attrs(&node.children)),
+            _ => false,
+        }
+    }
+
+    fn if_branches_accept_root_attrs(&self, branch_ids: &[NodeId]) -> bool {
+        let mut current = branch_ids;
+        let mut accepts = false;
+        loop {
+            let (primary, alternate) = self.split_if_children(current);
+            if !primary.is_empty() && self.children_accept_root_attrs(&primary) {
+                accepts = true;
+            }
+            let Some(alternate) = alternate else {
+                return accepts;
+            };
+            let Some(alternate_node) = self.mir.node(alternate) else {
+                return accepts;
+            };
+            if matches!(alternate_node.kind, Vue3SsrMirKind::If { .. }) {
+                current = &alternate_node.children;
+                continue;
+            }
+            return accepts || self.node_accepts_root_attrs(alternate);
+        }
+    }
+
+    fn children_accept_root_attrs(&self, children: &[NodeId]) -> bool {
+        let spans = self.root_spans(children);
+        let [span] = spans.as_slice() else {
+            return false;
+        };
+        children
+            .get(span.start)
+            .is_some_and(|root| self.node_accepts_root_attrs(*root))
     }
 
     fn vue_helpers(&self) -> Vec<RuntimeHelper> {
@@ -15044,7 +15138,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                 self.render_slot(slot, scope, writer);
             }
             Vue3SsrMirKind::If { condition } => {
-                self.render_if(node_id, *condition, scope, writer);
+                self.render_if(node_id, *condition, scope, root_attrs, writer);
             }
             Vue3SsrMirKind::For(for_mir) => {
                 self.render_for(node_id, for_mir, scope, writer);
@@ -15998,42 +16092,104 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         node_id: NodeId,
         condition: Option<JsExprId>,
         scope: &RenderScope,
+        root_attrs: Option<&SsrRootAttrs>,
         writer: &mut CodeWriter,
     ) {
         let Some(condition) = condition else {
-            self.render_children(node_id, scope, writer);
+            self.render_if_branch_children(node_id, scope, root_attrs, writer);
             return;
         };
         writer.push_line(&format!(
             "if ({}) {{",
-            render_condition(&self.render_js_expr(condition, scope), self.options)
+            self.render_js_expr(condition, scope)
         ));
         writer.indent();
-        let alternate = self.render_primary_if_children(node_id, scope, writer);
+        let alternate = self.render_if_branch_children(node_id, scope, root_attrs, writer);
         writer.dedent();
         if let Some(alternate) = alternate {
+            self.render_if_alternate(alternate, scope, root_attrs, writer);
+        } else {
             writer.push_line("} else {");
             writer.indent();
-            self.render_node(alternate, scope, None, writer);
+            writer.push_line("_push(`<!---->`)");
             writer.dedent();
-            writer.push_line("}");
-        } else {
             writer.push_line("}");
         }
     }
 
-    fn render_primary_if_children(
+    fn render_if_branch_children(
         &self,
         node_id: NodeId,
         scope: &RenderScope,
+        root_attrs: Option<&SsrRootAttrs>,
         writer: &mut CodeWriter,
     ) -> Option<NodeId> {
         let Some(node) = self.mir.node(node_id) else {
             return None;
         };
+        let (primary_children, alternate) = self.split_if_children(&node.children);
+        self.render_child_slice(&primary_children, scope, None, root_attrs, writer);
+        alternate
+    }
+
+    fn render_if_alternate(
+        &self,
+        alternate: NodeId,
+        scope: &RenderScope,
+        root_attrs: Option<&SsrRootAttrs>,
+        writer: &mut CodeWriter,
+    ) {
+        let Some(node) = self.mir.node(alternate) else {
+            writer.push_line("} else {");
+            writer.indent();
+            writer.push_line("_push(`<!---->`)");
+            writer.dedent();
+            writer.push_line("}");
+            return;
+        };
+        match node.kind {
+            Vue3SsrMirKind::If {
+                condition: Some(condition),
+            } => {
+                writer.push_line(&format!(
+                    "}} else if ({}) {{",
+                    self.render_js_expr(condition, scope)
+                ));
+                writer.indent();
+                let nested_alternate =
+                    self.render_if_branch_children(alternate, scope, root_attrs, writer);
+                writer.dedent();
+                if let Some(nested_alternate) = nested_alternate {
+                    self.render_if_alternate(nested_alternate, scope, root_attrs, writer);
+                } else {
+                    writer.push_line("} else {");
+                    writer.indent();
+                    writer.push_line("_push(`<!---->`)");
+                    writer.dedent();
+                    writer.push_line("}");
+                }
+            }
+            Vue3SsrMirKind::If { condition: None } => {
+                writer.push_line("} else {");
+                writer.indent();
+                self.render_if_branch_children(alternate, scope, root_attrs, writer);
+                writer.dedent();
+                writer.push_line("}");
+            }
+            _ => {
+                writer.push_line("} else {");
+                writer.indent();
+                self.render_node(alternate, scope, root_attrs, writer);
+                writer.dedent();
+                writer.push_line("}");
+            }
+        }
+    }
+
+    fn split_if_children(&self, children: &[NodeId]) -> (Vec<NodeId>, Option<NodeId>) {
         let mut alternate = None;
         let mut primary_children = Vec::new();
-        for child_id in &node.children {
+        for child_id in children {
             if matches!(
                 self.mir.node(*child_id).map(|child| &child.kind),
                 Some(Vue3SsrMirKind::If { .. })
@@ -16044,8 +16200,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
             }
             primary_children.push(*child_id);
         }
-        self.render_child_slice(&primary_children, scope, None, None, writer);
-        alternate
+        (primary_children, alternate)
     }
 
     fn render_for(
@@ -16062,7 +16217,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         writer.indent();
         self.render_children(node_id, &child_scope, writer);
         writer.dedent();
-        writer.push_line("});");
+        writer.push_line("})");
     }
 
     fn render_for_params(&self, for_mir: &Vue3SsrFor) -> String {
@@ -16353,9 +16508,10 @@ enum SsrTemplatePart {
 }
 
 fn render_ssr_template_literal(parts: &[SsrTemplatePart]) -> String {
+    let parts = merge_adjacent_ssr_template_static_parts(parts);
     let mut output = String::from("`");
     let multiline_exprs = parts.len() > 3;
-    for part in parts {
+    for part in &parts {
         match part {
             SsrTemplatePart::Static(value) => {
                 output.push_str(&escape_template_literal_static(value));
@@ -16375,6 +16531,24 @@ fn render_ssr_template_literal(parts: &[SsrTemplatePart]) -> String {
     }
     output.push('`');
     output
+}
+
+fn merge_adjacent_ssr_template_static_parts(parts: &[SsrTemplatePart]) -> Vec<SsrTemplatePart> {
+    let mut merged = Vec::new();
+    for part in parts {
+        match (merged.last_mut(), part) {
+            (Some(SsrTemplatePart::Static(previous)), SsrTemplatePart::Static(value)) => {
+                previous.push_str(value);
+            }
+            (_, SsrTemplatePart::Static(value)) => {
+                merged.push(SsrTemplatePart::Static(value.clone()));
+            }
+            (_, SsrTemplatePart::Expr(value)) => {
+                merged.push(SsrTemplatePart::Expr(value.clone()));
+            }
+        }
+    }
+    merged
 }
 
 fn append_static_to_ssr_template_literal(mut literal: String, value: &str) -> String {
@@ -29424,13 +29598,13 @@ mod tests {
         assert!(generated.code.contains("foo: \"bar\""));
         assert!(generated.code.contains("baz: _ctx.baz"));
         assert!(generated.code.contains("_ctx.extra"));
-        assert!(generated.code.contains("if ((_ctx.ok)) {"));
-        assert!(generated.code.contains("} else {"));
-        assert!(generated.code.contains("if ((_ctx.maybe)) {"));
-        let ok_offset = generated.code.find("if ((_ctx.ok))").expect("ok branch");
+        assert!(generated.code.contains("if (_ctx.ok) {"));
+        assert!(generated.code.contains("} else if (_ctx.maybe) {"));
+        assert!(!generated.code.contains("} else {\n        if (_ctx.maybe)"));
+        let ok_offset = generated.code.find("if (_ctx.ok)").expect("ok branch");
         let maybe_offset = generated
             .code
-            .find("if ((_ctx.maybe))")
+            .find("} else if (_ctx.maybe)")
             .expect("maybe branch");
         let yes_offset = generated
             .code
@@ -29453,6 +29627,72 @@ mod tests {
             .contains("_ssrRenderList(_ctx.list, (item) => {"));
         assert!(generated.code.contains("_ssrInterpolate(item.name)"));
         assert!(!generated.code.contains("_ctx.item"));
+    }
+
+    #[test]
+    fn generate_vue3_ssr_mir_emits_template_v_if_fragments_and_root_attrs() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<template v-if="foo"><div>hi</div><div>ho</div></template><div v-else/>"#
+                .into(),
+            file_id: FileId(82),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_ssr_mir(&ast, &Vue3CompilerOptions::default());
+        let generated = generate_vue3_ssr_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated.code.contains("if (_ctx.foo) {"));
+        assert!(generated
+            .code
+            .contains("_push(`<!--[--><div>hi</div><div>ho</div><!--]-->`)"));
+        assert!(generated.code.contains("} else {"));
+        assert!(generated
+            .code
+            .contains("_push(`<div${_ssrRenderAttrs(_attrs)}></div>`)"));
+        assert!(!generated.code.contains("<template"));
+    }
+
+    #[test]
+    fn generate_vue3_ssr_mir_injects_root_attrs_through_if_branches() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div v-if="foo"></div><span v-else-if="bar"></span><p v-else></p>"#.into(),
+            file_id: FileId(83),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_ssr_mir(&ast, &Vue3CompilerOptions::default());
+        let generated = generate_vue3_ssr_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated.code.contains("ssrRenderAttrs as _ssrRenderAttrs"));
+        assert!(generated.code.contains("if (_ctx.foo) {"));
+        assert!(generated.code.contains("} else if (_ctx.bar) {"));
+        assert!(generated
+            .code
+            .contains("_push(`<div${_ssrRenderAttrs(_attrs)}></div>`)"));
+        assert!(generated
+            .code
+            .contains("_push(`<span${_ssrRenderAttrs(_attrs)}></span>`)"));
+        assert!(generated
+            .code
+            .contains("_push(`<p${_ssrRenderAttrs(_attrs)}></p>`)"));
     }
 
     #[test]

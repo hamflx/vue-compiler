@@ -11822,12 +11822,12 @@ fn prepare_vue3_ssr_conformance_suite(
         .join("compiler-dom")
         .join("src");
     copy_dir_recursive(&official_dom_src, &prepared_dom_src)?;
-    rewrite_vue3_ssr_text_spec_public_compile_imports(&prepared_root)?;
+    rewrite_vue3_ssr_rust_backed_public_compile_imports(&prepared_root)?;
     write_vue3_ssr_conformance_shims(&prepared_root)?;
     Ok(prepared_root)
 }
 
-fn rewrite_vue3_ssr_text_spec_public_compile_imports(prepared_root: &Path) -> Result<()> {
+fn rewrite_vue3_ssr_rust_backed_public_compile_imports(prepared_root: &Path) -> Result<()> {
     let tests = prepared_root
         .join("packages")
         .join("compiler-ssr")
@@ -11850,6 +11850,8 @@ fn rewrite_vue3_ssr_text_spec_public_compile_imports(prepared_root: &Path) -> Re
         }
     }
 
+    rewrite_vue3_ssr_spec_compile_import(&tests.join("ssrVIf.spec.ts"))?;
+
     let utils = tests.join("utils.ts");
     if utils.exists() {
         let original = fs::read_to_string(&utils)
@@ -11859,6 +11861,22 @@ fn rewrite_vue3_ssr_text_spec_public_compile_imports(prepared_root: &Path) -> Re
             "import { compile } from '@vue/compiler-ssr'",
         );
         write_text(&tests.join("utils.rust-ssr-text.ts"), &rewritten)?;
+    }
+    Ok(())
+}
+
+fn rewrite_vue3_ssr_spec_compile_import(path: &Path) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let original =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let rewritten = original.replace(
+        "import { compile } from '../src'",
+        "import { compile } from '@vue/compiler-ssr'",
+    );
+    if rewritten != original {
+        write_text(path, &rewritten)?;
     }
     Ok(())
 }
@@ -12273,6 +12291,7 @@ fn conformance_coverage_file_kind(
         || path.ends_with("packages/compiler-dom/__tests__/index.spec.ts")
         || path.ends_with("packages/compiler-dom/__tests__/parse.spec.ts")
         || path.ends_with("packages/compiler-ssr/__tests__/ssrText.spec.ts")
+        || path.ends_with("packages/compiler-ssr/__tests__/ssrVIf.spec.ts")
     {
         ConformanceCoverageKind::RustBacked
     } else {
@@ -13660,9 +13679,9 @@ mod tests {
     }
 
     #[test]
-    fn vue3_ssr_text_spec_routes_compile_to_public_alias() {
+    fn vue3_ssr_rust_backed_specs_route_compile_to_public_alias() {
         let temp = std::env::temp_dir().join(format!(
-            "vuec-xtask-vue3-ssr-text-routing-{}",
+            "vuec-xtask-vue3-ssr-rust-backed-routing-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
@@ -13675,15 +13694,22 @@ mod tests {
             "import { compile } from '../src'\nimport { getCompiledString } from './utils'\n",
         )
         .unwrap();
+        fs::write(
+            tests.join("ssrVIf.spec.ts"),
+            "import { compile } from '../src'\n",
+        )
+        .unwrap();
         fs::write(tests.join("utils.ts"), "import { compile } from '../src'\n").unwrap();
 
-        rewrite_vue3_ssr_text_spec_public_compile_imports(&temp).unwrap();
+        rewrite_vue3_ssr_rust_backed_public_compile_imports(&temp).unwrap();
 
         let spec = fs::read_to_string(tests.join("ssrText.spec.ts")).unwrap();
+        let vif_spec = fs::read_to_string(tests.join("ssrVIf.spec.ts")).unwrap();
         let utils = fs::read_to_string(tests.join("utils.ts")).unwrap();
         let rust_text_utils = fs::read_to_string(tests.join("utils.rust-ssr-text.ts")).unwrap();
         assert!(spec.contains("from '@vue/compiler-ssr'"));
         assert!(spec.contains("from './utils.rust-ssr-text'"));
+        assert!(vif_spec.contains("from '@vue/compiler-ssr'"));
         assert!(utils.contains("from '../src'"));
         assert!(!utils.contains("from '@vue/compiler-ssr'"));
         assert!(rust_text_utils.contains("from '@vue/compiler-ssr'"));
