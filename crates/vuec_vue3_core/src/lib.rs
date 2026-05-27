@@ -801,7 +801,9 @@ impl Vue3Dialect {
             let directive_declarations = render_directive_declarations(&directives);
             let imports = vue3_codegen_imports(ast);
             let mut memo_index = MemoIndex::default();
-            let scope = RenderScope::default();
+            let static_props_hoists = collect_stringify_static_props_hoists(ast, options);
+            let scope =
+                RenderScope::default().with_static_props_hoists(static_props_hoists.clone());
             let expr = render_root_expr(ast, &root.children, options, &scope, &mut memo_index);
             let declarations = component_declarations
                 .iter()
@@ -810,6 +812,8 @@ impl Vue3Dialect {
                 .collect::<Vec<_>>();
             let mut helpers =
                 vue3_codegen_helpers(ast, ctx, &declarations, &expr, !components.is_empty());
+            let static_props_hoist_declarations =
+                stringify_static_props_hoist_declarations(ast, &static_props_hoists);
             if options.inline {
                 inline_preamble_helpers(&mut helpers, &expr);
                 if !helpers.is_empty() {
@@ -833,10 +837,22 @@ impl Vue3Dialect {
                 if !imports.is_empty() {
                     writer.newline();
                 }
+                for hoist in &static_props_hoist_declarations {
+                    writer.push_line(hoist);
+                }
+                if !static_props_hoist_declarations.is_empty() {
+                    writer.newline();
+                }
                 writer.push_line("export function render(_ctx, _cache) {");
             } else if options.prefix_identifiers {
                 if !helpers.is_empty() {
                     writer.push_line(&format!("const {{ {} }} = Vue", helper_aliases(&helpers)));
+                    writer.newline();
+                }
+                for hoist in &static_props_hoist_declarations {
+                    writer.push_line(hoist);
+                }
+                if !static_props_hoist_declarations.is_empty() {
                     writer.newline();
                 }
                 writer.push_line(&format!(
@@ -872,6 +888,14 @@ impl Vue3Dialect {
                 writer.push_line(declaration);
             }
             if !component_declarations.is_empty() || !directive_declarations.is_empty() {
+                writer.newline();
+            }
+            if (options.inline || (!options.prefix_identifiers && options.mode != "module"))
+                && !static_props_hoist_declarations.is_empty()
+            {
+                for hoist in &static_props_hoist_declarations {
+                    writer.push_line(hoist);
+                }
                 writer.newline();
             }
             writer.push_line(&format!("return {}", expr));
@@ -16525,19 +16549,16 @@ fn vue3_codegen_helpers(
     has_components: bool,
 ) -> Vec<RuntimeHelper> {
     let helper_probe = format!("{}\n{}", declarations.join("\n"), expr);
+    let mut stringify_static_source_helpers = Vec::new();
     let mut helpers =
         if let Some(root) = vue3_codegen_root(ast).filter(|root| !root.helpers.is_empty()) {
-            prune_helpers_to_rendered_code(
-                root.helpers.iter().copied().collect(),
-                &helper_probe,
-                has_components,
-            )
+            let helpers = root.helpers.iter().copied().collect::<Vec<_>>();
+            stringify_static_source_helpers = helpers.clone();
+            prune_helpers_to_rendered_code(helpers, &helper_probe, has_components)
         } else if !ctx.helpers.is_empty() {
-            prune_helpers_to_rendered_code(
-                ctx.helpers.iter().copied().collect(),
-                &helper_probe,
-                has_components,
-            )
+            let helpers = ctx.helpers.iter().copied().collect::<Vec<_>>();
+            stringify_static_source_helpers = helpers.clone();
+            prune_helpers_to_rendered_code(helpers, &helper_probe, has_components)
         } else {
             let mut helpers =
                 render_helpers_from_code(vue3_helper_order(has_components), &helper_probe);
@@ -16554,8 +16575,14 @@ fn vue3_codegen_helpers(
     }
     helpers.dedup();
     sort_helpers_by_order(&mut helpers, vue3_helper_order(has_components));
+    apply_vue3_stringify_static_helper_order(
+        &mut helpers,
+        &helper_probe,
+        &stringify_static_source_helpers,
+    );
     apply_vue3_memo_helper_order(&mut helpers);
     apply_vue3_plain_child_helper_order(&mut helpers);
+    apply_vue3_cached_children_helper_order(&mut helpers, &helper_probe);
     apply_vue3_transition_helper_order(&mut helpers, &helper_probe);
     apply_vue3_dynamic_event_helper_order(&mut helpers, &helper_probe);
     helpers
@@ -16655,6 +16682,45 @@ fn apply_vue3_memo_helper_order(helpers: &mut Vec<RuntimeHelper>) {
     }
 }
 
+fn apply_vue3_stringify_static_helper_order(
+    helpers: &mut Vec<RuntimeHelper>,
+    helper_probe: &str,
+    source_helpers: &[RuntimeHelper],
+) {
+    if !helpers.contains(&RuntimeHelper::Vue3CreateStaticVNode)
+        || !helper_probe.contains("_createStaticVNode(")
+    {
+        return;
+    }
+    if !helpers.contains(&RuntimeHelper::Vue3CreateElementVNode) {
+        helpers.push(RuntimeHelper::Vue3CreateElementVNode);
+    }
+    let preference = [
+        RuntimeHelper::Vue3SetBlockTracking,
+        RuntimeHelper::Vue3ToDisplayString,
+        RuntimeHelper::Vue3NormalizeClass,
+        RuntimeHelper::Vue3CreateCommentVNode,
+        RuntimeHelper::Vue3CreateTextVNode,
+        RuntimeHelper::Vue3CreateElementVNode,
+        RuntimeHelper::Vue3CreateStaticVNode,
+        RuntimeHelper::Vue3Fragment,
+        RuntimeHelper::Vue3OpenBlock,
+        RuntimeHelper::Vue3CreateElementBlock,
+    ];
+    let keep_source_helpers = [
+        RuntimeHelper::Vue3SetBlockTracking,
+        RuntimeHelper::Vue3ToDisplayString,
+        RuntimeHelper::Vue3NormalizeClass,
+        RuntimeHelper::Vue3CreateCommentVNode,
+    ];
+    for helper in keep_source_helpers {
+        if source_helpers.contains(&helper) && !helpers.contains(&helper) {
+            helpers.push(helper);
+        }
+    }
+    reorder_helpers_by_preference(helpers, &preference);
+}
+
 fn apply_vue3_plain_child_helper_order(helpers: &mut Vec<RuntimeHelper>) {
     let fragment_content_prop_order = [
         RuntimeHelper::Vue3ToDisplayString,
@@ -16688,6 +16754,25 @@ fn apply_vue3_plain_child_helper_order(helpers: &mut Vec<RuntimeHelper>) {
         helpers.clear();
         helpers.extend(plain_child_order);
     }
+}
+
+fn apply_vue3_cached_children_helper_order(helpers: &mut Vec<RuntimeHelper>, helper_probe: &str) {
+    if helpers.contains(&RuntimeHelper::Vue3CreateStaticVNode)
+        || !helper_probe.contains("_cache[")
+        || !helper_probe.contains("/* CACHED */")
+    {
+        return;
+    }
+    reorder_helpers_by_preference(
+        helpers,
+        &[
+            RuntimeHelper::Vue3CreateCommentVNode,
+            RuntimeHelper::Vue3CreateElementVNode,
+            RuntimeHelper::Vue3Fragment,
+            RuntimeHelper::Vue3OpenBlock,
+            RuntimeHelper::Vue3CreateElementBlock,
+        ],
+    );
 }
 
 fn apply_vue3_transition_helper_order(helpers: &mut Vec<RuntimeHelper>, helper_probe: &str) {
@@ -17635,6 +17720,11 @@ fn render_root_expr(
     scope: &RenderScope,
     memo_index: &mut MemoIndex,
 ) -> String {
+    if options.hoist_static && options.stringify_static {
+        if let Some(root_static_call) = render_root_static_vnode_cache(ast, children, options) {
+            return render_cached_single_child(root_static_call, memo_index.alloc());
+        }
+    }
     let visible = visible_child_ids(ast, children);
     match visible.as_slice() {
         [] => "null".into(),
@@ -17652,14 +17742,7 @@ fn render_root_expr(
             )
         }
         _ => {
-            let rendered = render_child_sequence(
-                ast,
-                children,
-                options,
-                NodeRenderMode::RootChild,
-                scope,
-                memo_index,
-            );
+            let rendered = render_root_child_sequence(ast, children, options, scope, memo_index);
             format!(
                 "(_openBlock(), _createElementBlock(_Fragment, null, {}, {}))",
                 render_array(&rendered),
@@ -17667,6 +17750,48 @@ fn render_root_expr(
             )
         }
     }
+}
+
+fn render_root_child_sequence(
+    ast: &Vue3Ast,
+    children: &[vuec_ast::NodeId],
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+    memo_index: &mut MemoIndex,
+) -> Vec<String> {
+    let child_nodes = children
+        .iter()
+        .filter_map(|child_id| ast.node(*child_id))
+        .collect::<Vec<_>>();
+    if !scope.disable_stringify_static_chunks && options.hoist_static && options.stringify_static {
+        if let Some(rendered) = render_static_vnode_chunked_children(
+            ast,
+            &child_nodes,
+            options,
+            scope,
+            NodeRenderMode::RootChild,
+            memo_index,
+        ) {
+            return rendered
+                .into_iter()
+                .map(|item| {
+                    if item.contains("_createStaticVNode(") {
+                        render_cached_single_child(item, memo_index.alloc())
+                    } else {
+                        item
+                    }
+                })
+                .collect();
+        }
+    }
+    render_child_sequence(
+        ast,
+        children,
+        options,
+        NodeRenderMode::RootChild,
+        scope,
+        memo_index,
+    )
 }
 
 fn root_single_visible_child_uses_direct_codegen(
@@ -17731,6 +17856,8 @@ struct RenderScope {
     locals: Vec<String>,
     in_v_once: bool,
     memo_index_overrides: BTreeMap<vuec_ast::NodeId, usize>,
+    static_props_hoists: BTreeMap<vuec_ast::NodeId, usize>,
+    disable_stringify_static_chunks: bool,
 }
 
 impl RenderScope {
@@ -17753,6 +17880,18 @@ impl RenderScope {
     fn with_memo_index_override(&self, node_id: vuec_ast::NodeId, index: usize) -> Self {
         let mut next = self.clone();
         next.memo_index_overrides.insert(node_id, index);
+        next
+    }
+
+    fn with_static_props_hoists(&self, hoists: BTreeMap<vuec_ast::NodeId, usize>) -> Self {
+        let mut next = self.clone();
+        next.static_props_hoists = hoists;
+        next
+    }
+
+    fn without_stringify_static_chunks(&self) -> Self {
+        let mut next = self.clone();
+        next.disable_stringify_static_chunks = true;
         next
     }
 }
@@ -17875,9 +18014,28 @@ fn render_plain_element(
     } else {
         scope.clone()
     };
-    let props = render_props(element, options, &element_scope, branch_key, memo_index);
-    let children = if exact_content_directive(element).is_some() {
-        String::new()
+    let element_scope =
+        if select_children_include_unstringifiable_option_value(ast, node_id, element) {
+            element_scope.without_stringify_static_chunks()
+        } else {
+            element_scope
+        };
+    let props = if branch_key.is_none() {
+        element_scope
+            .static_props_hoists
+            .get(&node_id)
+            .map(|index| format!("_hoisted_{index}"))
+            .unwrap_or_else(|| {
+                render_props(element, options, &element_scope, branch_key, memo_index)
+            })
+    } else {
+        render_props(element, options, &element_scope, branch_key, memo_index)
+    };
+    let static_content = render_static_content_directive_child(element, options);
+    let children = if let Some(content) = static_content.as_ref() {
+        Some(content.clone())
+    } else if exact_content_directive(element).is_some() {
+        None
     } else {
         ast.node(node_id)
             .map(|node| {
@@ -17890,7 +18048,7 @@ fn render_plain_element(
                     memo_index,
                 )
             })
-            .unwrap_or_default()
+            .filter(|children| !children.is_empty())
     };
     let patch_flag = render_patch_flag_text(render_patch_flag_kind(
         ast,
@@ -17904,7 +18062,7 @@ fn render_plain_element(
     let args = render_call_args(
         quote_string(tag),
         attrs.as_deref(),
-        (!children.is_empty()).then_some(children.as_str()),
+        children.as_deref(),
         patch_flag.as_str(),
         dynamic_props_arg(element, options, &element_scope).as_str(),
     );
@@ -18955,7 +19113,8 @@ fn render_element_children(
         );
         return render_array(&[render_cached_single_child(rendered, memo_index.alloc())]);
     }
-    if options.hoist_static
+    if !scope.disable_stringify_static_chunks
+        && options.hoist_static
         && options.stringify_static
         && root_like_render_mode(parent_mode)
         && !should_cache_children(ast, &child_nodes)
@@ -18968,8 +19127,11 @@ fn render_element_children(
     if options.hoist_static
         && root_like_render_mode(parent_mode)
         && should_cache_children(ast, &child_nodes)
+        && !child_nodes
+            .iter()
+            .any(|child| static_tree_contains_comment(ast, child))
     {
-        if options.stringify_static {
+        if options.stringify_static && !scope.disable_stringify_static_chunks {
             if let Some(static_call) = render_static_vnode_cache(ast, &child_nodes, options) {
                 return render_cached_children_array(vec![static_call], memo_index.alloc());
             }
@@ -19001,7 +19163,11 @@ fn render_element_children(
             return render_cached_children_array(rendered, memo_index.alloc());
         }
     }
-    if options.hoist_static && options.stringify_static && root_like_render_mode(parent_mode) {
+    if !scope.disable_stringify_static_chunks
+        && options.hoist_static
+        && options.stringify_static
+        && (root_like_render_mode(parent_mode) || once_children_mode(parent_mode))
+    {
         if let Some(rendered) = render_static_vnode_chunked_children(
             ast,
             &child_nodes,
@@ -19010,6 +19176,48 @@ fn render_element_children(
             NodeRenderMode::Child,
             memo_index,
         ) {
+            let cache_static_chunks = once_children_mode(parent_mode)
+                || rendered
+                    .iter()
+                    .any(|item| item.contains("_setBlockTracking(-1, true)"));
+            let rendered = if cache_static_chunks {
+                rendered
+                    .into_iter()
+                    .map(|item| {
+                        if item.contains("_createStaticVNode(") {
+                            render_cached_single_child(item, memo_index.alloc())
+                        } else {
+                            item
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                rendered
+            };
+            return render_array(&rendered);
+        }
+    }
+    if !scope.disable_stringify_static_chunks
+        && options.hoist_static
+        && options.stringify_static
+        && once_children_mode(parent_mode)
+        && !child_nodes.iter().all(|child| {
+            matches!(
+                child.kind,
+                Vue3AstKind::Text(_) | Vue3AstKind::Interpolation(_)
+            )
+        })
+    {
+        let rendered = render_child_sequence_or_static_cache(
+            ast,
+            children,
+            options,
+            NodeRenderMode::Child,
+            scope,
+            memo_index,
+            true,
+        );
+        if !rendered.is_empty() {
             return render_array(&rendered);
         }
     }
@@ -19019,6 +19227,9 @@ fn render_element_children(
             Vue3AstKind::Text(_) | Vue3AstKind::Interpolation(_)
         )
     }) {
+        if once_children_mode(parent_mode) {
+            return render_array(&[render_text_vnode(ast, children, options, scope)]);
+        }
         return render_text_sequence_expr(ast, children, options, scope);
     }
     let rendered = render_child_sequence(
@@ -19041,10 +19252,56 @@ fn render_element_children(
     }
 }
 
+fn render_child_sequence_or_static_cache(
+    ast: &Vue3Ast,
+    children: &[vuec_ast::NodeId],
+    options: &Vue3CompilerOptions,
+    mode: NodeRenderMode,
+    scope: &RenderScope,
+    memo_index: &mut MemoIndex,
+    cache_static_chunks: bool,
+) -> Vec<String> {
+    let child_nodes = children
+        .iter()
+        .filter_map(|child_id| ast.node(*child_id))
+        .collect::<Vec<_>>();
+    if options.hoist_static && options.stringify_static {
+        if let Some(rendered) = render_static_vnode_chunked_children(
+            ast,
+            &child_nodes,
+            options,
+            scope,
+            mode,
+            memo_index,
+        ) {
+            return rendered
+                .into_iter()
+                .map(|item| {
+                    if cache_static_chunks && item.contains("_createStaticVNode(") {
+                        render_cached_single_child(item, memo_index.alloc())
+                    } else {
+                        item
+                    }
+                })
+                .collect();
+        }
+    }
+    render_child_sequence(ast, children, options, mode, scope, memo_index)
+}
+
 fn render_cached_children_array(rendered: Vec<String>, cache_index: usize) -> String {
+    if rendered
+        .iter()
+        .any(|item| item.contains("_createStaticVNode("))
+    {
+        return format!(
+            "[...(_cache[{cache_index}] || (_cache[{cache_index}] = {}))]",
+            render_array(&rendered)
+        );
+    }
     format!(
-        "[...(_cache[{cache_index}] || (_cache[{cache_index}] = [{}]))]",
-        rendered.join(", ")
+        "[...(_cache[{cache_index}] || (_cache[{cache_index}] = {}))]",
+        render_array(&rendered)
     )
 }
 
@@ -19063,6 +19320,32 @@ fn render_child_sequence(
     let mut rendered = Vec::new();
     let mut index = 0usize;
     while index < children.len() {
+        if !scope.disable_stringify_static_chunks
+            && options.hoist_static
+            && options.stringify_static
+        {
+            let remaining_nodes = children[index..]
+                .iter()
+                .filter_map(|child_id| ast.node(*child_id))
+                .collect::<Vec<_>>();
+            if let Some(chunks) = render_static_vnode_chunked_children(
+                ast,
+                &remaining_nodes,
+                options,
+                scope,
+                mode,
+                memo_index,
+            ) {
+                for item in chunks {
+                    rendered.push(if item.contains("_createStaticVNode(") {
+                        render_cached_single_child(item, memo_index.alloc())
+                    } else {
+                        item
+                    });
+                }
+                break;
+            }
+        }
         let child_id = children[index];
         let Some(child) = ast.node(child_id) else {
             index += 1;
@@ -19071,6 +19354,7 @@ fn render_child_sequence(
         if options.hoist_static
             && mode == NodeRenderMode::RootChild
             && is_static_element_tree_for_cache(ast, child)
+            && !static_tree_contains_comment(ast, child)
         {
             rendered.push(render_static_element_cache(
                 ast, child.id, options, scope, memo_index,
@@ -19166,6 +19450,44 @@ fn is_static_element_tree_for_cache(ast: &Vue3Ast, node: &vuec_ast::Node<Vue3Nod
             _ => false,
         })
     })
+}
+
+fn static_tree_contains_comment(ast: &Vue3Ast, node: &vuec_ast::Node<Vue3NodeKind>) -> bool {
+    matches!(node.kind, Vue3AstKind::Comment(_))
+        || node.children.iter().any(|child_id| {
+            ast.node(*child_id)
+                .is_some_and(|child| static_tree_contains_comment(ast, child))
+        })
+}
+
+fn select_children_include_unstringifiable_option_value(
+    ast: &Vue3Ast,
+    node_id: vuec_ast::NodeId,
+    element: &Vue3Element,
+) -> bool {
+    element.tag == "select"
+        && element.ns == vuec_ast::HtmlNamespace::Html
+        && ast.node(node_id).is_some_and(|node| {
+            node.children.iter().any(|child_id| {
+                ast.node(*child_id)
+                    .is_some_and(|child| option_has_unstringifiable_value_binding(child))
+            })
+        })
+}
+
+fn option_has_unstringifiable_value_binding(node: &vuec_ast::Node<Vue3NodeKind>) -> bool {
+    let Vue3AstKind::Element(element) = &node.kind else {
+        return false;
+    };
+    element.tag == "option"
+        && element.ns == vuec_ast::HtmlNamespace::Html
+        && element.props.iter().any(|prop| match prop {
+            Vue3Prop::Directive(dir) if dir.name == "bind" => dir
+                .arg
+                .as_ref()
+                .is_some_and(|arg| arg.source_string() == "value"),
+            _ => false,
+        })
 }
 
 fn render_static_element_cache(
@@ -19458,6 +19780,18 @@ fn render_if_branch_expr(
         let children = render_array(&rendered);
         return format!(
             "(_openBlock(), _createElementBlock(_Fragment, {{ key: {branch_key} }}, {children}, 2112 /* STABLE_FRAGMENT, DEV_ROOT_FRAGMENT */))"
+        );
+    }
+    if directive_by_name(element, "once").is_some() {
+        return render_maybe_memo_element(
+            ast,
+            node_id,
+            element,
+            options,
+            NodeRenderMode::OnceBlockRoot,
+            scope,
+            Some(branch_key),
+            memo_index,
         );
     }
     render_maybe_memo_element(
@@ -20002,6 +20336,22 @@ fn render_static_vnode_cache(
     }
 }
 
+fn render_root_static_vnode_cache(
+    ast: &Vue3Ast,
+    children: &[vuec_ast::NodeId],
+    options: &Vue3CompilerOptions,
+) -> Option<String> {
+    if visible_child_ids(ast, children).len() < 2 {
+        return None;
+    }
+    let child_nodes = children
+        .iter()
+        .filter_map(|child_id| ast.node(*child_id))
+        .collect::<Vec<_>>();
+    let analysis = analyze_static_html_chunk(ast, &child_nodes, options)?;
+    (analysis.dom_nodes > 1 || analysis.meets_threshold()).then(|| analysis.render_static_call())
+}
+
 fn render_static_vnode_chunked_children(
     ast: &Vue3Ast,
     children: &[&vuec_ast::Node<Vue3NodeKind>],
@@ -20046,6 +20396,89 @@ fn render_static_vnode_chunked_children(
     Some(rendered)
 }
 
+fn collect_stringify_static_props_hoists(
+    ast: &Vue3Ast,
+    options: &Vue3CompilerOptions,
+) -> BTreeMap<vuec_ast::NodeId, usize> {
+    let mut hoists = BTreeMap::new();
+    if options.hoist_static && options.stringify_static {
+        let mut next_index = 1usize;
+        collect_stringify_static_props_hoists_for_node(
+            ast,
+            ast.root,
+            options,
+            &mut next_index,
+            &mut hoists,
+        );
+    }
+    hoists
+}
+
+fn collect_stringify_static_props_hoists_for_node(
+    ast: &Vue3Ast,
+    node_id: vuec_ast::NodeId,
+    options: &Vue3CompilerOptions,
+    next_index: &mut usize,
+    hoists: &mut BTreeMap<vuec_ast::NodeId, usize>,
+) {
+    let Some(node) = ast.node(node_id) else {
+        return;
+    };
+    if let Vue3AstKind::Element(element) = &node.kind {
+        if stringify_static_should_hoist_element_props(ast, node, element, options) {
+            let index = *next_index;
+            *next_index += 1;
+            hoists.insert(node_id, index);
+        }
+    }
+    for child_id in &node.children {
+        collect_stringify_static_props_hoists_for_node(ast, *child_id, options, next_index, hoists);
+    }
+}
+
+fn stringify_static_should_hoist_element_props(
+    ast: &Vue3Ast,
+    node: &vuec_ast::Node<Vue3NodeKind>,
+    element: &Vue3Element,
+    options: &Vue3CompilerOptions,
+) -> bool {
+    if element.props.is_empty()
+        || element.tag_type != Vue3ElementType::Element
+        || !element
+            .props
+            .iter()
+            .all(vue3_prop_is_static_cacheable_for_hoist)
+    {
+        return false;
+    }
+    if static_tree_contains_comment(ast, node) {
+        let children = node
+            .children
+            .iter()
+            .filter_map(|child_id| ast.node(*child_id))
+            .collect::<Vec<_>>();
+        return !static_vnode_chunks(ast, &children, options).is_empty();
+    }
+    false
+}
+
+fn stringify_static_props_hoist_declarations(
+    ast: &Vue3Ast,
+    hoists: &BTreeMap<vuec_ast::NodeId, usize>,
+) -> Vec<String> {
+    hoists
+        .iter()
+        .filter_map(|(node_id, index)| {
+            let node = ast.node(*node_id)?;
+            let Vue3AstKind::Element(element) = &node.kind else {
+                return None;
+            };
+            let props = render_static_props_hoist_object(element)?;
+            Some(format!("const _hoisted_{index} = {props}"))
+        })
+        .collect()
+}
+
 #[derive(Clone, Debug)]
 struct StaticVNodeChunk {
     start: usize,
@@ -20061,8 +20494,12 @@ fn static_vnode_chunks(
     let mut chunks = Vec::new();
     let mut start = 0usize;
     let mut chunk_analysis = None::<StaticHtmlAnalysis>;
+    let mut blocked_by_comment = false;
 
     for (index, child) in children.iter().enumerate() {
+        if matches!(child.kind, Vue3AstKind::Comment(_)) {
+            blocked_by_comment = true;
+        }
         if let Some(analysis) = analyze_static_html_chunk(ast, &[*child], options) {
             if chunk_analysis.is_none() {
                 start = index;
@@ -20073,9 +20510,22 @@ fn static_vnode_chunks(
             }
             continue;
         }
-        push_static_vnode_chunk(&mut chunks, start, index, &mut chunk_analysis);
+        push_static_vnode_chunk(
+            &mut chunks,
+            start,
+            index,
+            &mut chunk_analysis,
+            blocked_by_comment,
+        );
+        blocked_by_comment = false;
     }
-    push_static_vnode_chunk(&mut chunks, start, children.len(), &mut chunk_analysis);
+    push_static_vnode_chunk(
+        &mut chunks,
+        start,
+        children.len(),
+        &mut chunk_analysis,
+        blocked_by_comment,
+    );
     chunks
 }
 
@@ -20084,11 +20534,12 @@ fn push_static_vnode_chunk(
     start: usize,
     end: usize,
     chunk_analysis: &mut Option<StaticHtmlAnalysis>,
+    blocked_by_comment: bool,
 ) {
     let Some(analysis) = chunk_analysis.take() else {
         return;
     };
-    if analysis.meets_threshold() {
+    if analysis.meets_threshold() && !blocked_by_comment {
         chunks.push(StaticVNodeChunk {
             start,
             end,
@@ -20203,7 +20654,7 @@ fn static_html_for_element(
             Vue3Prop::Directive(dir) if dir.name == "html" => {
                 let source = dir.exp.as_ref()?.source_string();
                 let value = static_const_eval_source(&source)?;
-                inner_html = Some(value.to_display_string()?);
+                inner_html = Some(decode_static_html_entities(&value.to_display_string()?));
             }
             Vue3Prop::Directive(dir) if dir.name == "text" => {
                 let source = dir.exp.as_ref()?.source_string();
@@ -20468,6 +20919,15 @@ fn escape_static_html_text(value: &str) -> String {
 
 fn escape_static_html_attr(value: &str) -> String {
     escape_static_html(value, true)
+}
+
+fn decode_static_html_entities(value: &str) -> String {
+    value
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
 }
 
 fn escape_static_html(value: &str, attr: bool) -> String {
@@ -20914,10 +21374,13 @@ fn render_patch_flag_kind(
         if element.tag_type == Vue3ElementType::Element && has_style_binding(element) {
             flag |= 4;
         }
-        if has_dynamic_non_key_props(element, options, scope) {
+        if has_dynamic_non_key_props(element, options, scope)
+            && !(mode == NodeRenderMode::Cached && static_cached_bindings_are_constant(element))
+        {
             flag |= 8;
         }
-        if element.tag != "template"
+        if !once_children_mode(mode)
+            && element.tag != "template"
             && child_sequence_is_direct_dynamic_text(ast, children, options)
         {
             flag |= 1;
@@ -21188,6 +21651,19 @@ fn render_plain_props(entries: &[String]) -> Option<String> {
     }
 }
 
+fn render_static_props_hoist_object(element: &Vue3Element) -> Option<String> {
+    let entries = element
+        .props
+        .iter()
+        .filter_map(|prop| match prop {
+            Vue3Prop::Attribute(attr) => Some(render_attribute_prop(element, attr)),
+            Vue3Prop::Directive(dir) if dir.name == "bind" => render_static_binding_hoist_prop(dir),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    render_plain_props(&entries)
+}
+
 fn exact_single_prop_prefers_multiline(entry: &str) -> bool {
     entry.contains('\n')
         || entry.contains("_cache[")
@@ -21263,6 +21739,23 @@ fn render_binding_prop(
     } else {
         Some(format!("{}: {}", json_key(&key), expression))
     }
+}
+
+fn render_static_binding_hoist_prop(dir: &Vue3Directive) -> Option<String> {
+    if dir.is_dynamic_arg || !dir.modifiers.is_empty() {
+        return None;
+    }
+    let key = render_static_binding_prop_key(dir);
+    let source = dir.exp.as_ref()?.source_string();
+    let value = static_const_eval_source(&source)?;
+    let rendered = match value {
+        StaticConstValue::String(value) => quote_string(&value),
+        StaticConstValue::Number(value) => value,
+        StaticConstValue::Bool(value) => value.to_string(),
+        StaticConstValue::Null => "null".into(),
+        StaticConstValue::Array(_) | StaticConstValue::Object(_) => return None,
+    };
+    Some(format!("{}: {}", json_key(&key), rendered))
 }
 
 fn render_content_directive_prop(
@@ -21660,6 +22153,9 @@ fn prop_requires_dynamic_patch(
     options: &Vue3CompilerOptions,
     scope: &RenderScope,
 ) -> bool {
+    if static_cached_binding_is_constant(dir) {
+        return false;
+    }
     if dir.name == "model" && element.tag_type == Vue3ElementType::Component {
         return true;
     }
@@ -21685,6 +22181,37 @@ fn prop_requires_dynamic_patch(
         return false;
     }
     true
+}
+
+fn static_cached_binding_is_constant(dir: &Vue3Directive) -> bool {
+    dir.name == "bind"
+        && !dir.is_dynamic_arg
+        && dir
+            .arg
+            .as_ref()
+            .is_some_and(|arg| arg.source_string() != "key")
+        && dir
+            .exp
+            .as_ref()
+            .is_some_and(|exp| static_const_eval_source(&exp.source_string()).is_some())
+}
+
+fn static_cached_bindings_are_constant(element: &Vue3Element) -> bool {
+    element.props.iter().all(|prop| match prop {
+        Vue3Prop::Attribute(_) => true,
+        Vue3Prop::Directive(dir) if dir.name == "bind" => {
+            !dir.is_dynamic_arg
+                && dir
+                    .arg
+                    .as_ref()
+                    .is_some_and(|arg| arg.source_string() != "key")
+                && dir
+                    .exp
+                    .as_ref()
+                    .is_some_and(|exp| static_const_eval_source(&exp.source_string()).is_some())
+        }
+        Vue3Prop::Directive(dir) => matches!(dir.name.as_str(), "once" | "memo"),
+    })
 }
 
 fn event_handler_can_skip_patch(
@@ -21787,6 +22314,9 @@ fn dynamic_props_arg(
                 if is_asset_import_binding(dir) || dir.is_dynamic_arg {
                     return None;
                 }
+                if static_cached_binding_is_constant(dir) {
+                    return None;
+                }
                 let arg = dir.arg.as_ref()?.source_string();
                 if arg.is_empty()
                     || element.tag_type == Vue3ElementType::Element
@@ -21830,6 +22360,23 @@ fn exact_content_directive(element: &Vue3Element) -> Option<&Vue3Directive> {
     element.props.iter().find_map(|prop| match prop {
         Vue3Prop::Directive(dir) if dir.name == "html" || dir.name == "text" => Some(dir),
         _ => None,
+    })
+}
+
+fn render_static_content_directive_child(
+    element: &Vue3Element,
+    options: &Vue3CompilerOptions,
+) -> Option<String> {
+    let dir = exact_content_directive(element)?;
+    if !content_directive_text_is_static(dir, options) {
+        return None;
+    }
+    let source = dir.exp.as_ref()?.source_string();
+    let value = static_const_eval_source(&source)?.to_display_string()?;
+    Some(if dir.name == "text" {
+        quote_string(&value)
+    } else {
+        quote_string(&decode_static_html_entities(&value))
     })
 }
 
@@ -21907,6 +22454,22 @@ fn vue3_prop_is_vnode_cacheable_static(prop: &Vue3Prop) -> bool {
                         .exp
                         .as_ref()
                         .is_some_and(|exp| static_const_eval_source(&exp.source_string()).is_some())
+        }
+    }
+}
+
+fn vue3_prop_is_static_cacheable_for_hoist(prop: &Vue3Prop) -> bool {
+    match prop {
+        Vue3Prop::Attribute(_) => true,
+        Vue3Prop::Directive(dir) => {
+            dir.name == "bind"
+                && !dir.is_dynamic_arg
+                && dir.modifiers.is_empty()
+                && dir.arg.is_some()
+                && dir
+                    .exp
+                    .as_ref()
+                    .is_some_and(|exp| static_const_eval_source(&exp.source_string()).is_some())
         }
     }
 }

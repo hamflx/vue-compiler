@@ -303,6 +303,9 @@ function vue3NativeOptions(options, source) {
   for (const key of Object.keys(options)) {
     if (typeof options[key] !== 'function') out[key] = options[key];
   }
+  if (typeof options.transformHoist === 'function') {
+    out.stringifyStatic = true;
+  }
   const tags = extractVueTemplateTags(String(source || ''));
   if (hasVuePredicateOption(options, 'isVoidTag')) {
     out.__vuecVoidTags = collectVuePredicateHits(options.isVoidTag, tags);
@@ -406,7 +409,7 @@ function emitVue3ParseDiagnostics(ast, options) {
 function hydrateVue3Node(node) {
   if (!node || typeof node !== 'object') return node;
   if (node.type === NodeTypes.ROOT) {
-    node.helpers = new Set(node.helpers || []);
+    node.helpers = new Set(Array.from(node.helpers || [], helper => helperSymbolFromProjection(helper) || helper));
     node.components = node.components || [];
     node.directives = node.directives || [];
     node.hoists = node.hoists || [];
@@ -426,10 +429,24 @@ function hydrateVue3Node(node) {
     if (node.exp === null) node.exp = undefined;
     if (node.arg === null) node.arg = undefined;
   }
+  if (node.type === NodeTypes.JS_CALL_EXPRESSION && typeof node.callee === 'string') {
+    node.callee = helperSymbolFromProjection(node.callee) || node.callee;
+  }
   if (Array.isArray(node.children)) node.children.forEach(hydrateVue3Node);
   if (Array.isArray(node.props)) node.props.forEach(hydrateVue3Node);
   if (Array.isArray(node.modifiers)) node.modifiers.forEach(hydrateVue3Node);
+  if (Array.isArray(node.arguments)) node.arguments.forEach(hydrateVue3Node);
+  if (Array.isArray(node.elements)) node.elements.forEach(hydrateVue3Node);
+  if (Array.isArray(node.properties)) node.properties.forEach(hydrateVue3Node);
+  if (Array.isArray(node.params)) node.params.forEach(hydrateVue3Node);
+  if (Array.isArray(node.returns)) node.returns.forEach(hydrateVue3Node);
+  if (Array.isArray(node.hoists)) node.hoists.forEach(hydrateVue3Node);
+  if (Array.isArray(node.imports)) node.imports.forEach(hydrateVue3Node);
+  if (Array.isArray(node.cached)) node.cached.forEach(hydrateVue3Node);
   if (node.content && typeof node.content === 'object') hydrateVue3Node(node.content);
+  if (node.codegenNode && typeof node.codegenNode === 'object') hydrateVue3Node(node.codegenNode);
+  if (node.value && typeof node.value === 'object') hydrateVue3Node(node.value);
+  if (node.key && typeof node.key === 'object') hydrateVue3Node(node.key);
   if (node.exp && typeof node.exp === 'object') hydrateVue3Node(node.exp);
   if (node.arg && typeof node.arg === 'object') hydrateVue3Node(node.arg);
   return node;

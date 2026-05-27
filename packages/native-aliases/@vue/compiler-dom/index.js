@@ -145,11 +145,20 @@ const parserOptions = {
 };
 
 function compile(src) {
-  return native.compileVue3Dom(String(src || ''), arguments[1] || {});
+  return native.compileVue3Dom(String(src || ''), vue3DomNativeOptions(arguments[1]));
 }
 
 function parse(template) {
   return native.parseVue3Dom(String(template || ''), arguments[1] || {});
+}
+
+function vue3DomNativeOptions(options) {
+  options = options || {};
+  if (typeof options.transformHoist !== 'function') return options;
+  return {
+    ...options,
+    stringifyStatic: true,
+  };
 }
 
 function createDOMCompilerError(code, loc) {
