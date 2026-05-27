@@ -31,10 +31,10 @@ function compileTemplate(options) {
 function compileScript(descriptor) {
   const options = arguments.length > 1 ? arguments[1] : undefined;
   const source = descriptor && typeof descriptor.source === 'string' ? descriptor.source : '';
-  return normalizeVue27ScriptResult(native.compileVue27SfcScript(source, {
+  return normalizeVue27ScriptResult(native.compileVue27SfcScript(source, vue27ScriptOptions({
     filename: descriptor && descriptor.filename,
     ...(options || {}),
-  }), descriptor || {});
+  })), descriptor || {});
 }
 
 function compileStyle(options) {
@@ -63,6 +63,14 @@ function normalizeVue27StyleResult(result) {
   if (!result || typeof result !== 'object') return result;
   const out = { ...result };
   delete out.dependencies;
+  return out;
+}
+
+function vue27ScriptOptions(options) {
+  const out = { ...(options || {}) };
+  if (typeof __TEST__ !== 'undefined' && __TEST__ === true) {
+    out.__vuecEmitScriptSetupMarker = false;
+  }
   return out;
 }
 

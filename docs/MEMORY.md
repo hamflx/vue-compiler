@@ -1,5 +1,9 @@
 # Memory
 
+- Current round: closed the NAPI-backed Vue 2.7 SFC public script-setup marker projection slice.
+- The Vue 2.7 `vue/compiler-sfc` NAPI alias now mirrors the generated public conformance adapter by setting `__vuecEmitScriptSetupMarker: false` when the official test environment defines `__TEST__ === true`, while leaving the Rust compiler default internal `__sfc` marker intact outside that public test projection.
+- Focused `cargo xtask run-napi-conformance --suite vue27-sfc` improves from `77/144` to `139/144`; `compileScript.spec.ts` improves to `72/77`, `cssVars.spec.ts` is now `13/13`, and the remaining 5 Vue 2.7 SFC NAPI failures are isolated to `compileScript` error throwing. This is package/API option projection around Rust-backed script compilation; `xtask/src/compat.rs` was not changed.
+
 - Current round: closed the NAPI-backed Vue 2.7 SFC compileStyle PostCSS callback boundary slice.
 - The Vue 2.7 `vue/compiler-sfc` NAPI alias now strips caller-provided `postcssPlugins` / `postcssOptions` before crossing NAPI, runs Rust-backed style compilation first, then applies PostCSS in the JavaScript package adapter for sync and async public APIs. This preserves function-valued plugin callbacks/options that cannot be serialized into Rust.
 - Focused `cargo xtask run-napi-conformance --suite vue27-sfc` improves from `73/144` to `77/144`; `compileStyle.spec.ts` is now `10/10` and remains correctly classified as `mixed`. `xtask/src/compat.rs` was not changed.
