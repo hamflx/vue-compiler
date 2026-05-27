@@ -1,61 +1,105 @@
+//! HTML tokenization primitives shared by Vue parser frontends.
+//!
+//! The tokenizer keeps byte offsets for tags and attributes so higher layers can
+//! build deterministic public AST locations without re-scanning the source.
+
+#![deny(missing_docs)]
 #![forbid(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
 
+/// HTML integration namespace for parsed elements.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HtmlNamespace {
+    /// The normal HTML namespace.
     Html,
+    /// The SVG namespace.
     Svg,
+    /// The MathML namespace.
     MathMl,
 }
 
+/// The quote style used by an HTML attribute value.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HtmlQuoteKind {
+    /// A double-quoted value such as `id="app"`.
     Double,
+    /// A single-quoted value such as `id='app'`.
     Single,
+    /// An unquoted value such as `id=app`.
     Unquoted,
 }
 
+/// A tokenized HTML attribute with source offsets.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HtmlAttribute {
+    /// The raw attribute name as it appears in source.
     pub name: String,
+    /// The decoded attribute value text, if the attribute has an assignment.
     pub value: Option<String>,
+    /// The quote kind for assigned values.
     pub quote: Option<HtmlQuoteKind>,
+    /// Byte offset where the attribute starts.
     pub start: usize,
+    /// Byte offset where the attribute ends.
     pub end: usize,
+    /// Byte offset where the attribute name starts.
     pub name_start: usize,
+    /// Byte offset where the attribute name ends.
     pub name_end: usize,
+    /// Byte offset where the full value token starts, including quotes.
     pub value_start: Option<usize>,
+    /// Byte offset where the full value token ends, including quotes.
     pub value_end: Option<usize>,
+    /// Byte offset where the value content starts, excluding quotes.
     pub value_content_start: Option<usize>,
+    /// Byte offset where the value content ends, excluding quotes.
     pub value_content_end: Option<usize>,
 }
 
+/// A token emitted by [`HtmlTokenizer`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HtmlTokenKind {
+    /// Plain text content.
     Text(String),
+    /// An HTML comment body without `<!--` and `-->`.
     Comment(String),
+    /// A CDATA body without the CDATA delimiters.
     Cdata(String),
+    /// A doctype declaration body.
     Doctype(String),
+    /// A recoverable bogus `<?...>` tag.
     BogusQuestionTag,
+    /// An opening tag.
     StartTag {
+        /// The lower-layer raw tag name.
         name: String,
+        /// Attributes parsed from the tag.
         attributes: Vec<HtmlAttribute>,
+        /// Whether the tag ended with `/>`.
         self_closing: bool,
     },
+    /// A closing tag.
     EndTag {
+        /// The closing tag name, or an empty string for invalid recovery tags.
         name: String,
     },
+    /// End-of-file marker.
     Eof,
 }
 
+/// A token plus its byte span in the source template.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HtmlToken {
+    /// The token payload.
     pub kind: HtmlTokenKind,
+    /// Byte offset where the token starts.
     pub start: usize,
+    /// Byte offset where the token ends.
     pub end: usize,
 }
 
+/// Streaming HTML tokenizer used by Vue template parsers.
 #[derive(Clone, Debug)]
 pub struct HtmlTokenizer<'a> {
     source: &'a str,
@@ -65,6 +109,8 @@ pub struct HtmlTokenizer<'a> {
 }
 
 impl<'a> HtmlTokenizer<'a> {
+    /// Creates a tokenizer for `source` with Vue's default `{{` / `}}`
+    /// interpolation delimiters.
     pub fn new(source: &'a str) -> Self {
         Self {
             source,
@@ -74,6 +120,7 @@ impl<'a> HtmlTokenizer<'a> {
         }
     }
 
+    /// Returns a tokenizer using custom interpolation delimiters.
     pub fn with_interpolation_delimiters(
         mut self,
         open: impl Into<String>,
@@ -84,6 +131,7 @@ impl<'a> HtmlTokenizer<'a> {
         self
     }
 
+    /// Updates the interpolation delimiters used when finding text boundaries.
     pub fn set_interpolation_delimiters(
         &mut self,
         open: impl Into<String>,
@@ -93,14 +141,17 @@ impl<'a> HtmlTokenizer<'a> {
         self.interpolation_close = close.into();
     }
 
+    /// Moves the tokenizer cursor to `cursor`, clamped to the source length.
     pub fn set_cursor(&mut self, cursor: usize) {
         self.cursor = cursor.min(self.source.len());
     }
 
+    /// Returns the current byte cursor.
     pub fn cursor(&self) -> usize {
         self.cursor
     }
 
+    /// Tokenizes the full remaining source, including the final EOF token.
     pub fn tokenize(mut self) -> Vec<HtmlToken> {
         let mut tokens = Vec::new();
         loop {
@@ -114,6 +165,7 @@ impl<'a> HtmlTokenizer<'a> {
         tokens
     }
 
+    /// Reads and returns the next token from the current cursor.
     pub fn next_token(&mut self) -> HtmlToken {
         if self.cursor >= self.source.len() {
             return HtmlToken {

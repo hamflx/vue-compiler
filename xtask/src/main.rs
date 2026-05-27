@@ -1253,7 +1253,15 @@ fn require_file_contains_all(path: &Path, required: &[&str]) -> Result<()> {
 }
 
 fn verify_public_api_docs() -> Result<compat::JsonReport> {
-    let documented_crates = ["vuec_source", "vuec_diagnostics", "vuec_codegen"];
+    let documented_crates = [
+        "vuec_source",
+        "vuec_diagnostics",
+        "vuec_codegen",
+        "vuec_html",
+        "vuec_pass",
+        "vuec_style",
+        "vuec_vue3_asset",
+    ];
     let mut items = Vec::new();
     let mut violations = Vec::new();
 

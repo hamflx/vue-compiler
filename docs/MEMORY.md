@@ -1,5 +1,10 @@
 # Memory
 
+- Current round: completed the M20 template-support public API docs slice.
+- Added rustdoc coverage and crate-level `#![deny(missing_docs)]` for `vuec_html`, `vuec_pass`, `vuec_style`, and `vuec_vue3_asset`, covering tokenizer tokens/spans, transform pass scheduling/walking, style compile/scoped/CSS-var APIs, and Vue 3 asset URL transform APIs.
+- Extended `cargo xtask verify-public-api-docs` to cover seven crates: `vuec_source`, `vuec_diagnostics`, `vuec_codegen`, `vuec_html`, `vuec_pass`, `vuec_style`, and `vuec_vue3_asset`. This remains partial public API documentation progress; the global M20 "every public API has docs" criterion stays open until the remaining public crates and bindings are covered.
+- Verification: `cargo fmt --all -- --check`, `cargo test -p vuec_html -p vuec_pass -p vuec_style -p vuec_vue3_asset -p xtask`, `cargo xtask verify-public-api-docs`, `cargo xtask verify-release-docs`, and `git diff --check`. This was documentation/gate coverage only; it did not change compiler semantics, `xtask/src/compat.rs`, conformance classification, or AST/HIR/MIR structures.
+
 - Current round: completed the M20 foundation public API docs slice.
 - Added rustdoc coverage and crate-level `#![deny(missing_docs)]` for `vuec_source`, `vuec_diagnostics`, and `vuec_codegen`, covering source identity/span APIs, diagnostic rendering APIs, and codegen/source-map helper APIs.
 - Added `cargo xtask verify-public-api-docs`, which currently runs rustdoc with `RUSTDOCFLAGS=-D missing_docs` for those documented foundation crates. This is partial public API documentation progress only; the global M20 "every public API has docs" criterion remains open until the rest of the public crates are covered.

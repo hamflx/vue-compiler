@@ -1,29 +1,51 @@
+//! Vue SFC style compilation support.
+//!
+//! The crate owns scoped selector rewriting, CSS variable collection and
+//! rewriting, lightweight preprocessor support, and source-map result shaping.
+
+#![deny(missing_docs)]
 #![forbid(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
 use vuec_codegen::{SourceMapArtifact, SourceMapBuilder};
 
+/// Options controlling SFC style compilation.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StyleCompileOptions {
+    /// Scope id such as `data-v-xxxx`, when the caller has one.
     pub id: Option<String>,
+    /// Whether scoped selector rewriting is enabled.
     pub scoped: bool,
+    /// Whether CSS module class names should be collected.
     pub modules: bool,
+    /// Explicit CSS variable expressions; when empty they are collected from source.
     pub vars: Vec<String>,
+    /// Whether production CSS variable names should use hashed names.
     pub is_prod: bool,
+    /// Optional filename used for generated source-map metadata.
     pub filename: Option<String>,
+    /// Whether a source-map artifact should be returned.
     pub source_map: bool,
+    /// Optional preprocessor language, for example `scss`, `sass`, `less`, or `styl`.
     pub preprocess_lang: Option<String>,
 }
 
+/// Result returned from style compilation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StyleCompileResult {
+    /// Generated CSS code.
     pub code: String,
+    /// Optional source map.
     pub map: Option<SourceMapArtifact>,
+    /// Non-fatal style compilation errors.
     pub errors: Vec<String>,
+    /// Collected CSS module class names.
     pub modules: Vec<String>,
+    /// CSS variable expressions referenced by `v-bind(...)`.
     pub vars: Vec<String>,
 }
 
+/// Compiles SFC style source according to `options`.
 pub fn compile_style(source: &str, options: StyleCompileOptions) -> StyleCompileResult {
     let mut errors = Vec::new();
     let mut code = match preprocess_style(source, options.preprocess_lang.as_deref()) {
@@ -274,12 +296,14 @@ fn is_style_identifier_char(ch: char) -> bool {
     ch == '_' || ch == '-' || ch.is_ascii_alphanumeric()
 }
 
+/// Rewrites selectors in `source` to include `scope_id`.
 pub fn rewrite_scoped_selectors(source: &str, scope_id: &str) -> String {
     let short_id = scope_id.strip_prefix("data-v-").unwrap_or(scope_id);
     let keyframes = collect_scoped_keyframes(source, short_id);
     rewrite_css_items(source, scope_id, &keyframes, CssBlockContext::Root)
 }
 
+/// Collects unique CSS variable expressions from `v-bind(...)` calls.
 pub fn collect_css_vars(source: &str) -> Vec<String> {
     let mut vars = Vec::new();
     for binding in css_var_bindings(source) {
@@ -292,6 +316,7 @@ pub fn collect_css_vars(source: &str) -> Vec<String> {
     vars
 }
 
+/// Generates the CSS custom property name for a Vue style variable binding.
 pub fn gen_css_var_name(id: &str, raw: &str, is_prod: bool) -> String {
     if is_prod {
         hash_sum_string(&format!("{id}{raw}"))
@@ -312,6 +337,7 @@ pub fn gen_css_var_name(id: &str, raw: &str, is_prod: bool) -> String {
     }
 }
 
+/// Rewrites `v-bind(...)` CSS expressions to `var(--...)` custom properties.
 pub fn rewrite_css_vars(source: &str, id: &str, is_prod: bool) -> String {
     let bindings = css_var_bindings(source);
     if bindings.is_empty() {

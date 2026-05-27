@@ -1,13 +1,23 @@
+//! Vue 3 template asset URL transformation helpers.
+//!
+//! These functions rewrite static asset attributes into import-backed `v-bind`
+//! props or base-prefixed URLs, matching the compiler-core transform boundary.
+
+#![deny(missing_docs)]
 #![forbid(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use vuec_ast::{TemplateAttribute, Vue3Expression, Vue3ImportItem, Vue3Prop};
 
+/// Options controlling Vue 3 asset URL transforms.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssetUrlOptions {
+    /// Optional public base used to rewrite dot-relative URLs.
     pub base: Option<String>,
+    /// Whether root-absolute URLs should be eligible for import transforms.
     pub include_absolute: bool,
+    /// Map of tag name to asset-bearing attribute names.
     pub tags: BTreeMap<String, Vec<String>>,
 }
 
@@ -21,6 +31,7 @@ impl Default for AssetUrlOptions {
     }
 }
 
+/// Returns Vue 3's default tag-to-asset-attribute map.
 pub fn default_asset_url_tags() -> BTreeMap<String, Vec<String>> {
     [
         ("video", vec!["src", "poster"]),
@@ -39,6 +50,11 @@ pub fn default_asset_url_tags() -> BTreeMap<String, Vec<String>> {
     .collect()
 }
 
+/// Rewrites asset URL attributes in-place and registers generated imports.
+///
+/// When `enable_imports` is true, eligible static URLs are converted into
+/// `v-bind` directives whose expressions reference entries pushed into
+/// `imports`. Dot-relative URLs can instead be prefixed by `options.base`.
 pub fn transform_asset_url_props(
     tag: &str,
     props: &mut [Vue3Prop],
@@ -110,6 +126,10 @@ pub fn transform_asset_url_props(
     }
 }
 
+/// Returns asset attribute markers present on a template element.
+///
+/// The result uses the `asset:<attribute>` marker form consumed by higher-level
+/// summaries and conformance probes.
 pub fn asset_url_attributes(
     tag: &str,
     attributes: &[TemplateAttribute],
