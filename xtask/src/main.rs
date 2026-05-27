@@ -109,6 +109,7 @@ enum Command {
     VerifyAstCache,
     VerifyArena,
     VerifyStringInterning,
+    VerifyReleaseDocs,
     Bench {
         #[arg(long, default_value_t = 10)]
         iterations: usize,
@@ -173,6 +174,7 @@ fn main() -> Result<()> {
         Command::VerifyAstCache => verify_ast_cache()?,
         Command::VerifyArena => verify_arena()?,
         Command::VerifyStringInterning => verify_string_interning()?,
+        Command::VerifyReleaseDocs => verify_release_docs()?,
         Command::Bench {
             iterations,
             out_dir,
@@ -984,6 +986,151 @@ fn verify_string_interning() -> Result<compat::JsonReport> {
             .with_violations(violations)
             .with_note("verifies JS expression side-store string interning reuses repeated source text while preserving serialized string output and AST/HIR/MIR structure boundaries"),
     )
+}
+
+fn verify_release_docs() -> Result<compat::JsonReport> {
+    let mut violations = Vec::new();
+    let mut items = Vec::new();
+
+    for path in [
+        PathBuf::from("README.md"),
+        PathBuf::from("CHANGELOG.md"),
+        PathBuf::from("docs").join("COMPATIBILITY_MATRIX.md"),
+        PathBuf::from("docs").join("RELEASE_CHECKLIST.md"),
+    ] {
+        match require_non_empty_file(&path) {
+            Ok(()) => items.push(compat::ReportItem::new(
+                format!("doc:{}", path.display()),
+                compat::ReportStatus::Pass,
+                "release documentation file exists and is non-empty",
+                Some(path),
+            )),
+            Err(err) => {
+                violations.push(format!("{err:#}"));
+                items.push(compat::ReportItem::new(
+                    format!("doc:{}", path.display()),
+                    compat::ReportStatus::Fail,
+                    format!("{err:#}"),
+                    Some(path),
+                ));
+            }
+        }
+    }
+
+    let package_dirs = collect_package_manifest_dirs(Path::new("packages"))?;
+    if package_dirs.is_empty() {
+        violations.push("no package.json files found under packages".into());
+    }
+    for package_dir in package_dirs {
+        let manifest_path = package_dir.join("package.json");
+        let name = read_package_display_name(&manifest_path)
+            .unwrap_or_else(|_| package_dir.display().to_string());
+        let readme_path = package_dir.join("README.md");
+        let mut package_violations = Vec::new();
+        if let Err(err) = require_non_empty_file(&readme_path) {
+            package_violations.push(format!("{err:#}"));
+        }
+        match package_files_array_includes_readme(&manifest_path) {
+            Ok(true) => {}
+            Ok(false) => package_violations.push(format!(
+                "{} has a files array that does not include README.md",
+                manifest_path.display()
+            )),
+            Err(err) => package_violations.push(format!("{err:#}")),
+        }
+
+        let status = if package_violations.is_empty() {
+            compat::ReportStatus::Pass
+        } else {
+            violations.extend(package_violations.iter().cloned());
+            compat::ReportStatus::Fail
+        };
+        let detail = if package_violations.is_empty() {
+            "package README exists; files array includes README.md when present".into()
+        } else {
+            package_violations.join("; ")
+        };
+        items.push(compat::ReportItem::new(
+            format!("package:{name}"),
+            status,
+            detail,
+            Some(package_dir),
+        ));
+    }
+
+    let status = if violations.is_empty() {
+        compat::ReportStatus::Pass
+    } else {
+        compat::ReportStatus::Fail
+    };
+    Ok(
+        compat::JsonReport::new("verify_release_docs", status)
+            .with_items(items)
+            .with_violations(violations)
+            .with_note("verifies M20 release documentation skeletons, package README coverage, and explicit README.md package file-list entries"),
+    )
+}
+
+fn require_non_empty_file(path: &Path) -> Result<()> {
+    let text =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    if text.trim().is_empty() {
+        anyhow::bail!("{} is empty", path.display());
+    }
+    Ok(())
+}
+
+fn collect_package_manifest_dirs(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut dirs = Vec::new();
+    collect_package_manifest_dirs_inner(root, &mut dirs)?;
+    dirs.sort();
+    Ok(dirs)
+}
+
+fn collect_package_manifest_dirs_inner(path: &Path, dirs: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in fs::read_dir(path).with_context(|| format!("failed to read {}", path.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            if is_generated_package_output_dir(&path) {
+                continue;
+            }
+            let manifest_path = path.join("package.json");
+            if manifest_path.exists() {
+                dirs.push(path.clone());
+            }
+            collect_package_manifest_dirs_inner(&path, dirs)?;
+        }
+    }
+    Ok(())
+}
+
+fn is_generated_package_output_dir(path: &Path) -> bool {
+    path == Path::new("packages").join("wasm").join("pkg")
+        || path == Path::new("packages").join("wasm").join("pkg-node")
+}
+
+fn read_package_display_name(manifest_path: &Path) -> Result<String> {
+    let manifest = read_json_file(manifest_path)?;
+    manifest
+        .get("name")
+        .and_then(JsonValue::as_str)
+        .map(ToOwned::to_owned)
+        .with_context(|| format!("{} has no package name", manifest_path.display()))
+}
+
+fn package_files_array_includes_readme(manifest_path: &Path) -> Result<bool> {
+    let manifest = read_json_file(manifest_path)?;
+    let Some(files) = manifest.get("files") else {
+        return Ok(true);
+    };
+    let Some(files) = files.as_array() else {
+        anyhow::bail!("{} files field is not an array", manifest_path.display());
+    };
+    Ok(files
+        .iter()
+        .filter_map(JsonValue::as_str)
+        .any(|entry| entry == "README.md" || entry == "./README.md"))
 }
 
 fn bench(

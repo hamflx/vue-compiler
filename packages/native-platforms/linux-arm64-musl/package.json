@@ -13,6 +13,7 @@
     "musl"
   ],
   "files": [
-    "vuec_napi.node"
+    "vuec_napi.node",
+    "README.md"
   ]
 }

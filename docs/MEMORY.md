@@ -1,5 +1,10 @@
 # Memory
 
+- Current round: completed the first M20 release documentation skeleton slice.
+- Added root release docs (`README.md`, `CHANGELOG.md`, `docs/COMPATIBILITY_MATRIX.md`, `docs/RELEASE_CHECKLIST.md`) covering pinned official Vue baselines, compatibility coverage labels, common verification commands, and release preflight steps.
+- Added README coverage for every current source-controlled `packages/**/package.json` directory and included `README.md` in package `files` arrays where those arrays exist. Ignored generated wasm-bindgen output directories remain outside this source-documentation gate.
+- Added `cargo xtask verify-release-docs`, which verifies non-empty release docs, source-controlled package README coverage, and package README file-list inclusion. This is documentation/package verification only; it does not change compiler semantics, `xtask/src/compat.rs`, or AST/HIR/MIR structures.
+
 - Current round: completed the M19 string interning slice.
 - Added internal string interning to `vuec_js::JsAstStore` for registered JS expression / statement / pattern / program source text. Repeated JS source text shares an `Arc<str>` backing inside the side store, while `JsEntry` still serializes `source` as a plain JSON string and AST/HIR/MIR nodes still carry the `JsExprId` / `JsStmtId` / `JsPatternId` handles required by `docs/3.AST_HIR_MIR_DESIGN.md`.
 - Added `JsStringInternerStats` and `cargo xtask verify-string-interning`, which verifies cross-bucket reuse, distinct-source separation, serialized string output, and Vue3 DOM MIR codegen consuming the interned `JsAstStore`.

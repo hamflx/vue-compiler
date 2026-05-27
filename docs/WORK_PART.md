@@ -126,6 +126,15 @@
 - [x] M19 Vue3 DOM AST-cache slice, adding `vuec_vue3_dom::DomCompiler` parse/DOM-normalize AST caching with hit/miss/invalidation stats and `cargo xtask verify-ast-cache`.
 - [x] M19 arena allocation slice, adding `AstDocument::with_capacity` / `reserve_nodes` / `node_capacity`, shared template node-capacity hints, Vue 2 / Vue 3 parser preallocation, and `cargo xtask verify-arena`.
 - [x] M19 string interning slice, adding `vuec_js::JsAstStore` source-text interning with stats and `cargo xtask verify-string-interning`.
+- [x] M20 release documentation skeleton slice, adding repository/package release READMEs, CHANGELOG, compatibility matrix, release checklist, and `cargo xtask verify-release-docs`.
+
+## Current Release Documentation Slice
+
+- Added the first M20 release documentation skeleton: root `README.md`, `CHANGELOG.md`, `docs/COMPATIBILITY_MATRIX.md`, and `docs/RELEASE_CHECKLIST.md`.
+- Added README coverage for every current source-controlled `packages/**/package.json` directory, including the NAPI loader package, WASM package, native platform optional packages, and official package-name aliases. Ignored generated wasm-bindgen output directories remain outside this source-documentation gate.
+- Added `cargo xtask verify-release-docs`, which checks the release documentation skeleton files are non-empty, every source-controlled package manifest directory has a README, and package `files` arrays explicitly include `README.md` when present.
+- This slice is publication/documentation infrastructure only. It does not change compiler semantics, `xtask/src/compat.rs`, conformance classification, or AST/HIR/MIR structures.
+- Remaining M20 work: public API documentation, architecture docs, conformance report template, crates.io package metadata, security/supply-chain checks, release dry-runs, and install smoke verification.
 
 ## Current Performance / Incremental Slice
 
