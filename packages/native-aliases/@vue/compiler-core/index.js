@@ -3155,12 +3155,19 @@ function buildDirectiveArgs(dir, context) {
 function buildProps(node, context) {
   const propList = arguments.length > 2 ? arguments[2] : undefined;
   const objectProps = [];
+  const mergeArgs = [];
   const directives = [];
   const dynamicPropNames = [];
   let patchFlag = 0;
   let shouldUseBlock = false;
   let hasDynamicKey = false;
   let hasHydrationEvent = false;
+  const pushMergeArg = arg => {
+    if (objectProps.length) {
+      mergeArgs.push(createObjectExpression(dedupeProperties(objectProps.splice(0)), node && node.loc || locStub));
+    }
+    if (arg) mergeArgs.push(arg);
+  };
   for (const prop of propList || node && node.props || []) {
     if (!prop) continue;
     if (prop.type === NodeTypes.ATTRIBUTE) {
@@ -3178,10 +3185,32 @@ function buildProps(node, context) {
       if (result && result.props && result.props.some(prop => prop && prop.key && !isStaticExp(prop.key))) hasDynamicKey = true;
       continue;
     }
+    if (prop.name === 'bind' && !prop.arg) {
+      if (prop.exp) {
+        pushMergeArg(prop.exp);
+        hasDynamicKey = true;
+      } else if (context && typeof context.onError === 'function') {
+        context.onError(createCompilerError(ErrorCodes.X_V_BIND_NO_EXPRESSION, prop.loc));
+      }
+      continue;
+    }
     if (prop.name === 'on' && prop.arg) {
       const transform = context && context.directiveTransforms && context.directiveTransforms.on;
       const result = transform ? transform(prop, node, context) : transformOn(prop, node, context);
       objectProps.push(...((result && result.props) || []));
+      continue;
+    }
+    if (prop.name === 'on' && !prop.arg) {
+      if (context && context.inSSR) {
+        continue;
+      }
+      if (prop.exp) {
+        const isComponent = node && node.tagType === ElementTypes.COMPONENT;
+        const callee = context && typeof context.helper === 'function' ? context.helper(TO_HANDLERS) : TO_HANDLERS;
+        pushMergeArg(createCallExpression(callee, isComponent ? [prop.exp] : [prop.exp, 'true'], prop.loc));
+      } else if (context && typeof context.onError === 'function') {
+        context.onError(createCompilerError(ErrorCodes.X_V_ON_NO_EXPRESSION, prop.loc));
+      }
       continue;
     }
     if (prop.name === 'model' && context && context.directiveTransforms && context.directiveTransforms.model) {
@@ -3217,9 +3246,17 @@ function buildProps(node, context) {
     if (dynamicPropNames.length) patchFlag |= 8;
     if (hasHydrationEvent) patchFlag |= 32;
   }
-  let props = objectProps.length ? createObjectExpression(objectProps) : undefined;
-  if (!context.inSSR && props && props.properties.some(prop => prop && prop.key && !prop.key.isStatic && !prop.key.isHandlerKey)) {
-    props = createCallExpression(context.helper(NORMALIZE_PROPS), [props]);
+  let props;
+  if (mergeArgs.length) {
+    pushMergeArg();
+    props = mergeArgs.length > 1
+      ? createCallExpression(context && typeof context.helper === 'function' ? context.helper(MERGE_PROPS) : MERGE_PROPS, mergeArgs, node && node.loc || locStub)
+      : mergeArgs[0];
+  } else if (objectProps.length) {
+    props = createObjectExpression(dedupeProperties(objectProps), node && node.loc || locStub);
+  }
+  if (props && hasDynamicKey && context && !context.inSSR) {
+    props = createCallExpression(context.helper(NORMALIZE_PROPS), [props], node && node.loc || locStub);
   }
   return {
     props,
