@@ -4809,6 +4809,10 @@ fn vue3_ssr_should_omit_static_attr(
     if matches!(
         v_model.map(|model| &model.kind),
         Some(Vue3SsrModelKind::InputValue)
+            | Some(Vue3SsrModelKind::InputDynamicType {
+                type_expr: _,
+                value: _
+            })
     ) && name == "value"
     {
         return true;
@@ -4907,6 +4911,13 @@ fn vue3_ssr_should_keep_static_attr_in_payload(
         v_model.map(|model| &model.kind),
         Some(Vue3SsrModelKind::InputDynamicProps)
     ) && !matches!(attr.name.as_str(), "true-value" | "false-value")
+        || matches!(
+            v_model.map(|model| &model.kind),
+            Some(Vue3SsrModelKind::InputDynamicType {
+                type_expr: _,
+                value: _
+            })
+        ) && attr.name == "value"
 }
 
 fn vue3_ssr_should_skip_dynamic_binding(
@@ -13852,7 +13863,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         self.render_function_start(&mut writer);
         writer.indent();
         if self.needs_dynamic_model_temp() {
-            writer.push_line("let _temp0;");
+            writer.push_line("let _temp0");
             writer.newline();
         }
         let use_with = self.use_with_block();
@@ -14330,7 +14341,16 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                 }
                 Vue3SsrMirKind::RenderAttrs(attrs) => {
                     if root_attr_node == Some(node.id) {
-                        self.push_prop_helpers(&attrs.props, &mut helpers);
+                        if matches!(
+                            attrs.v_model.as_ref().map(|model| &model.kind),
+                            Some(Vue3SsrModelKind::InputDynamicProps)
+                        ) {
+                            self.push_dynamic_model_props_vue_helpers(&attrs.props, &mut helpers);
+                        } else if attrs.v_show.is_some() {
+                            self.push_v_show_merged_props_vue_helpers(&attrs.props, &mut helpers);
+                        } else {
+                            self.push_prop_helpers(&attrs.props, &mut helpers);
+                        }
                     }
                     if ((attrs.v_show.is_some() && ssr_attrs_has_object_binding(&attrs.props))
                         || matches!(
@@ -14343,7 +14363,9 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                             attrs.v_model.as_ref().map(|model| &model.kind),
                             Some(Vue3SsrModelKind::InputDynamicProps)
                         ) {
-                            self.push_prop_helpers(&attrs.props, &mut helpers);
+                            self.push_dynamic_model_props_vue_helpers(&attrs.props, &mut helpers);
+                        } else {
+                            self.push_v_show_merged_props_vue_helpers(&attrs.props, &mut helpers);
                         }
                         push_unique_helper(&mut helpers, RuntimeHelper::Vue3MergeProps);
                     }
@@ -14555,7 +14577,86 @@ impl<'a> Vue3SsrMirCodegen<'a> {
             }
         }
         sort_helpers_by_order(&mut helpers, vue3_ssr_helper_order());
+        self.apply_ssr_helper_order_preferences(&mut helpers);
         helpers
+    }
+
+    fn apply_ssr_helper_order_preferences(&self, helpers: &mut Vec<RuntimeHelper>) {
+        if !helpers.contains(&RuntimeHelper::Vue3SsrRenderAttrs) {
+            return;
+        }
+        let has_dynamic_attrs = self.mir.nodes.iter().any(|node| {
+            matches!(
+                &node.kind,
+                Vue3SsrMirKind::RenderAttrs(attrs)
+                    if attrs.props.dynamic_bindings.iter().any(|binding| {
+                        !binding.dynamic_arg
+                            && !matches!(binding.name.as_str(), "class" | "style")
+                    })
+            )
+        });
+        let has_radio_or_true_value = self.mir.nodes.iter().any(|node| {
+            matches!(
+                &node.kind,
+                Vue3SsrMirKind::RenderAttrs(attrs)
+                    if matches!(
+                        attrs.v_model.as_ref().map(|model| &model.kind),
+                        Some(Vue3SsrModelKind::InputRadio { .. })
+                            | Some(Vue3SsrModelKind::InputCheckboxTrueValue { .. })
+                    )
+            )
+        });
+        let has_checkbox = self.mir.nodes.iter().any(|node| {
+            matches!(
+                &node.kind,
+                Vue3SsrMirKind::RenderAttrs(attrs)
+                    if matches!(
+                        attrs.v_model.as_ref().map(|model| &model.kind),
+                        Some(Vue3SsrModelKind::InputCheckbox { .. })
+                    )
+            )
+        });
+        if !has_dynamic_attrs && has_radio_or_true_value {
+            move_helper_before(
+                helpers,
+                RuntimeHelper::Vue3SsrLooseEqual,
+                RuntimeHelper::Vue3SsrIncludeBooleanAttr,
+            );
+        } else if !has_dynamic_attrs && has_checkbox {
+            move_helper_before(
+                helpers,
+                RuntimeHelper::Vue3SsrLooseContain,
+                RuntimeHelper::Vue3SsrIncludeBooleanAttr,
+            );
+        }
+        if helpers.contains(&RuntimeHelper::Vue3SsrInterpolate) {
+            move_helper_before(
+                helpers,
+                RuntimeHelper::Vue3SsrInterpolate,
+                RuntimeHelper::Vue3SsrRenderList,
+            );
+        }
+        if !has_dynamic_attrs {
+            move_helper_before(
+                helpers,
+                RuntimeHelper::Vue3SsrRenderAttrs,
+                RuntimeHelper::Vue3SsrInterpolate,
+            );
+        }
+        if helpers.contains(&RuntimeHelper::Vue3SsrGetDynamicModelProps) {
+            move_helper_before(
+                helpers,
+                RuntimeHelper::Vue3SsrRenderAttrs,
+                RuntimeHelper::Vue3SsrGetDynamicModelProps,
+            );
+        }
+        if helpers.contains(&RuntimeHelper::Vue3SsrRenderSlot) {
+            move_helper_before(
+                helpers,
+                RuntimeHelper::Vue3SsrRenderSlot,
+                RuntimeHelper::Vue3SsrRenderAttrs,
+            );
+        }
     }
 
     fn push_ssr_attr_helpers(
@@ -14569,6 +14670,12 @@ impl<'a> Vue3SsrMirCodegen<'a> {
             return;
         }
         let props = &attrs.props;
+        if matches!(
+            attrs.v_model.as_ref().map(|model| &model.kind),
+            Some(Vue3SsrModelKind::InputDynamicProps)
+        ) {
+            return;
+        }
         if (attrs.v_show.is_some()
             || matches!(
                 attrs.v_model.as_ref().map(|model| &model.kind),
@@ -14700,6 +14807,55 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         }
     }
 
+    fn push_dynamic_model_props_vue_helpers(
+        &self,
+        props: &Vue3DomProps,
+        helpers: &mut Vec<RuntimeHelper>,
+    ) {
+        for binding in &props.dynamic_bindings {
+            if binding.dynamic_arg && binding.camel {
+                push_unique_helper(helpers, RuntimeHelper::Vue3Camelize);
+            }
+        }
+        for segment in &props.segments {
+            if let Vue3DomPropSegment::DynamicBinding(binding) = segment {
+                if binding.dynamic_arg && binding.camel {
+                    push_unique_helper(helpers, RuntimeHelper::Vue3Camelize);
+                }
+            }
+        }
+        if props_requires_merge_call(props) {
+            push_unique_helper(helpers, RuntimeHelper::Vue3MergeProps);
+        }
+        if !self.props_base_only_feed_dynamic_model_temp(props) {
+            if props.normalize.guard_reactive_props {
+                push_unique_helper(helpers, RuntimeHelper::Vue3GuardReactiveProps);
+            }
+            if props.normalize.normalize_props {
+                push_unique_helper(helpers, RuntimeHelper::Vue3NormalizeProps);
+            }
+        }
+    }
+
+    fn push_v_show_merged_props_vue_helpers(
+        &self,
+        props: &Vue3DomProps,
+        helpers: &mut Vec<RuntimeHelper>,
+    ) {
+        for binding in &props.dynamic_bindings {
+            if binding.dynamic_arg && binding.camel {
+                push_unique_helper(helpers, RuntimeHelper::Vue3Camelize);
+            }
+        }
+        for segment in &props.segments {
+            if let Vue3DomPropSegment::DynamicBinding(binding) = segment {
+                if binding.dynamic_arg && binding.camel {
+                    push_unique_helper(helpers, RuntimeHelper::Vue3Camelize);
+                }
+            }
+        }
+    }
+
     fn render_children(&self, parent: NodeId, scope: &RenderScope, writer: &mut CodeWriter) {
         let Some(node) = self.mir.node(parent) else {
             return;
@@ -14779,7 +14935,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                 index = next_index;
                 continue;
             }
-            if let Some(next_index) = self.render_ssr_element_with_single_for_child(
+            if let Some(next_index) = self.render_ssr_static_shell_with_dynamic_descendant(
                 children,
                 index,
                 scope,
@@ -14795,7 +14951,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         }
     }
 
-    fn render_ssr_element_with_single_for_child(
+    fn render_ssr_static_shell_with_dynamic_descendant(
         &self,
         children: &[NodeId],
         index: usize,
@@ -14804,34 +14960,336 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         root_attrs: Option<&SsrRootAttrs>,
         writer: &mut CodeWriter,
     ) -> Option<usize> {
-        if scope_id_expr.is_some() || root_attrs.is_some() {
+        if let Some(next_index) = self.render_ssr_static_shell_with_single_dynamic_child(
+            children,
+            index,
+            scope,
+            scope_id_expr,
+            root_attrs,
+            writer,
+        ) {
+            return Some(next_index);
+        }
+        self.render_ssr_static_shell_around_nested_dynamic(
+            children, index, scope, root_attrs, writer,
+        )
+    }
+
+    fn render_ssr_static_shell_with_single_dynamic_child(
+        &self,
+        children: &[NodeId],
+        index: usize,
+        scope: &RenderScope,
+        scope_id_expr: Option<&str>,
+        root_attrs: Option<&SsrRootAttrs>,
+        writer: &mut CodeWriter,
+    ) -> Option<usize> {
+        if scope_id_expr.is_some() {
             return None;
         }
         let open_start = self.ssr_push_string(*children.get(index)?)?;
-        parse_ssr_open_tag_start(open_start)?;
-        let open_end = index + 1;
+        let (open_tag, static_entries) = parse_ssr_open_tag_start(open_start)?;
+        let mut open_end = index + 1;
+        let attrs = children
+            .get(open_end)
+            .and_then(|id| self.mir.node(*id))
+            .and_then(|node| match &node.kind {
+                Vue3SsrMirKind::RenderAttrs(attrs) => Some(attrs),
+                _ => None,
+            });
+        if attrs.is_some() {
+            open_end += 1;
+        }
         if self.ssr_push_string(*children.get(open_end)?)? != ">" {
             return None;
         }
         let (_, end_index) = self.collect_ssr_static_element_span(children, index)?;
         let close_index = end_index.checked_sub(1)?;
-        let [for_id] = children.get(open_end + 1..close_index)? else {
+        let [dynamic_id] = children.get(open_end + 1..close_index)? else {
             return None;
         };
-        let Some(Vue3SsrMirKind::For(for_mir)) = self.mir.node(*for_id).map(|node| &node.kind)
-        else {
+        if !matches!(
+            self.mir.node(*dynamic_id).map(|node| &node.kind),
+            Some(Vue3SsrMirKind::For(_))
+                | Some(Vue3SsrMirKind::If { .. })
+                | Some(Vue3SsrMirKind::RenderSlot(_))
+        ) {
             return None;
+        }
+        let open_static = if root_attrs.is_some() {
+            format!("<{open_tag}")
+        } else {
+            open_start.to_string()
         };
+        let mut open_parts = vec![SsrTemplatePart::Static(open_static)];
+        if let Some(attrs) = attrs {
+            let root_attrs = root_attrs
+                .filter(|root_attrs| root_attrs.attrs.is_some() || root_attrs.css_vars.is_some());
+            if let Some(root_attrs) = root_attrs {
+                if matches!(
+                    attrs.v_model.as_ref().map(|model| &model.kind),
+                    Some(Vue3SsrModelKind::InputDynamicProps)
+                ) {
+                    return None;
+                }
+                if attrs.v_show.is_some() {
+                    open_parts.push(SsrTemplatePart::Expr(
+                        self.render_root_element_v_show_attrs_expr_with_static(
+                            attrs,
+                            root_attrs,
+                            scope,
+                            &static_entries,
+                        ),
+                    ));
+                } else {
+                    open_parts.push(SsrTemplatePart::Expr(
+                        self.render_root_element_attrs_expr_with_static(
+                            attrs,
+                            root_attrs,
+                            scope,
+                            &static_entries,
+                        ),
+                    ));
+                }
+            } else {
+                self.collect_ssr_template_attrs(attrs, scope, &mut open_parts)?;
+            }
+        } else if let Some(root_attrs) = root_attrs {
+            let rendered = self.render_root_attrs_expr_with_static(root_attrs, &static_entries);
+            if !rendered.is_empty() {
+                open_parts.push(SsrTemplatePart::Expr(rendered));
+            }
+        }
+        if root_attrs.is_some() {
+            let tail =
+                self.render_static_attr_tail(&self.root_static_tail_entries(&static_entries));
+            if !tail.is_empty() {
+                open_parts.push(SsrTemplatePart::Static(tail));
+            }
+        }
         let close = self.ssr_push_string(*children.get(close_index)?)?;
-        let open = render_ssr_template_literal(&[SsrTemplatePart::Static(format!(
-            "{open_start}><!--[-->"
-        ))]);
+        open_parts.push(SsrTemplatePart::Static(">".into()));
+        if matches!(
+            self.mir.node(*dynamic_id).map(|node| &node.kind),
+            Some(Vue3SsrMirKind::For(_))
+        ) {
+            open_parts.push(SsrTemplatePart::Static("<!--[-->".into()));
+        }
+        let open = render_ssr_template_literal(&open_parts);
         writer.push_line(&format!("_push({open})"));
-        self.render_for_list(*for_id, for_mir, scope, writer);
-        let close =
-            render_ssr_template_literal(&[SsrTemplatePart::Static(format!("<!--]-->{close}"))]);
+        match self.mir.node(*dynamic_id).map(|node| &node.kind)? {
+            Vue3SsrMirKind::For(for_mir) => {
+                self.render_for_list(*dynamic_id, for_mir, scope, writer)
+            }
+            Vue3SsrMirKind::If { condition } => {
+                self.render_if(*dynamic_id, *condition, scope, None, writer)
+            }
+            Vue3SsrMirKind::RenderSlot(slot) => self.render_slot(slot, scope, writer),
+            _ => return None,
+        }
+        let close_prefix = if matches!(
+            self.mir.node(*dynamic_id).map(|node| &node.kind),
+            Some(Vue3SsrMirKind::For(_))
+        ) {
+            "<!--]-->"
+        } else {
+            ""
+        };
+        let close = render_ssr_template_literal(&[SsrTemplatePart::Static(format!(
+            "{close_prefix}{close}"
+        ))]);
         writer.push_line(&format!("_push({close})"));
         Some(end_index)
+    }
+
+    fn render_ssr_static_shell_around_nested_dynamic(
+        &self,
+        children: &[NodeId],
+        index: usize,
+        scope: &RenderScope,
+        root_attrs: Option<&SsrRootAttrs>,
+        writer: &mut CodeWriter,
+    ) -> Option<usize> {
+        let (_, end_index) = self.collect_ssr_static_element_span(children, index)?;
+        let close_index = end_index.checked_sub(1)?;
+        let (dynamic_index, dynamic_id) =
+            self.find_dynamic_descendant_in_static_shell(children.get(index..close_index)?, index)?;
+        let mut prefix_parts = Vec::new();
+        let prefix_end = self.collect_ssr_linear_template_parts(
+            children,
+            index,
+            dynamic_index,
+            scope,
+            root_attrs,
+            &mut prefix_parts,
+        )?;
+        if prefix_end != dynamic_index || prefix_parts.is_empty() {
+            return None;
+        }
+        if matches!(
+            self.mir.node(dynamic_id).map(|node| &node.kind),
+            Some(Vue3SsrMirKind::For(_))
+        ) {
+            prefix_parts.push(SsrTemplatePart::Static("<!--[-->".into()));
+        }
+        writer.push_line(&format!(
+            "_push({})",
+            render_ssr_template_literal(&prefix_parts)
+        ));
+        match self.mir.node(dynamic_id).map(|node| &node.kind)? {
+            Vue3SsrMirKind::For(for_mir) => {
+                self.render_for_list_with_optional_fragment(dynamic_id, for_mir, scope, writer)
+            }
+            Vue3SsrMirKind::If { condition } => {
+                self.render_if(dynamic_id, *condition, scope, None, writer)
+            }
+            Vue3SsrMirKind::RenderSlot(slot) => self.render_slot(slot, scope, writer),
+            _ => return None,
+        }
+        let mut suffix_parts = Vec::new();
+        if matches!(
+            self.mir.node(dynamic_id).map(|node| &node.kind),
+            Some(Vue3SsrMirKind::For(_))
+        ) {
+            suffix_parts.push(SsrTemplatePart::Static("<!--]-->".into()));
+        }
+        let suffix_start = dynamic_index + 1;
+        if suffix_start < end_index {
+            let suffix_end = self.collect_ssr_linear_template_parts(
+                children,
+                suffix_start,
+                end_index,
+                scope,
+                None,
+                &mut suffix_parts,
+            )?;
+            if suffix_end != end_index {
+                return None;
+            }
+        }
+        writer.push_line(&format!(
+            "_push({})",
+            render_ssr_template_literal(&suffix_parts)
+        ));
+        Some(end_index)
+    }
+
+    fn find_dynamic_descendant_in_static_shell(
+        &self,
+        slice: &[NodeId],
+        base_index: usize,
+    ) -> Option<(usize, NodeId)> {
+        let mut found = None;
+        for (offset, node_id) in slice.iter().copied().enumerate() {
+            if matches!(
+                self.mir.node(node_id).map(|node| &node.kind),
+                Some(Vue3SsrMirKind::For(_))
+                    | Some(Vue3SsrMirKind::If { .. })
+                    | Some(Vue3SsrMirKind::RenderSlot(_))
+            ) {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some((base_index + offset, node_id));
+            }
+        }
+        found
+    }
+
+    fn collect_ssr_linear_template_parts(
+        &self,
+        children: &[NodeId],
+        index: usize,
+        end_index: usize,
+        scope: &RenderScope,
+        root_attrs: Option<&SsrRootAttrs>,
+        parts: &mut Vec<SsrTemplatePart>,
+    ) -> Option<usize> {
+        let mut cursor = index;
+        while cursor < end_index {
+            match self.mir.node(*children.get(cursor)?)?.kind.clone() {
+                Vue3SsrMirKind::PushString(value) => {
+                    if let Some((tag, static_entries)) = parse_ssr_open_tag_start(&value) {
+                        if let Some(root_attrs) = root_attrs.filter(|_| cursor == index) {
+                            parts.push(SsrTemplatePart::Static(format!("<{tag}")));
+                            if let Some(attrs) = children
+                                .get(cursor + 1)
+                                .and_then(|id| self.mir.node(*id))
+                                .and_then(|node| match &node.kind {
+                                    Vue3SsrMirKind::RenderAttrs(attrs) => Some(attrs),
+                                    _ => None,
+                                })
+                            {
+                                if attrs.v_show.is_some() {
+                                    parts.push(SsrTemplatePart::Expr(
+                                        self.render_root_element_v_show_attrs_expr_with_static(
+                                            attrs,
+                                            root_attrs,
+                                            scope,
+                                            &static_entries,
+                                        ),
+                                    ));
+                                } else {
+                                    parts.push(SsrTemplatePart::Expr(
+                                        self.render_root_element_attrs_expr_with_static(
+                                            attrs,
+                                            root_attrs,
+                                            scope,
+                                            &static_entries,
+                                        ),
+                                    ));
+                                }
+                                cursor += 1;
+                            } else {
+                                let rendered = self.render_root_attrs_expr_with_static(
+                                    root_attrs,
+                                    &static_entries,
+                                );
+                                if !rendered.is_empty() {
+                                    parts.push(SsrTemplatePart::Expr(rendered));
+                                }
+                            }
+                            let tail = self.render_static_attr_tail(
+                                &self.root_static_tail_entries(&static_entries),
+                            );
+                            if !tail.is_empty() {
+                                parts.push(SsrTemplatePart::Static(tail));
+                            }
+                        } else {
+                            parts.push(SsrTemplatePart::Static(value));
+                        }
+                    } else if value == "/>" {
+                        parts.push(SsrTemplatePart::Static(">".into()));
+                    } else {
+                        parts.push(SsrTemplatePart::Static(value));
+                    }
+                }
+                Vue3SsrMirKind::RenderAttrs(attrs) => {
+                    self.collect_ssr_template_attrs(&attrs, scope, parts)?;
+                }
+                Vue3SsrMirKind::PushInterpolated(expr) => {
+                    parts.push(SsrTemplatePart::Expr(format!(
+                        "_ssrInterpolate({})",
+                        self.render_mir_expr(&expr, scope)
+                    )));
+                }
+                Vue3SsrMirKind::RenderContent(Vue3SsrContent::Html { expression }) => {
+                    parts.push(SsrTemplatePart::Expr(format!(
+                        "({}) ?? \"\"",
+                        self.render_js_expr(expression, scope)
+                    )));
+                }
+                Vue3SsrMirKind::RenderContent(Vue3SsrContent::Text { expression }) => {
+                    parts.push(SsrTemplatePart::Expr(format!(
+                        "_ssrInterpolate({})",
+                        self.render_js_expr(expression, scope)
+                    )));
+                }
+                _ => return None,
+            }
+            cursor += 1;
+        }
+        Some(cursor)
     }
 
     fn render_ssr_template_literal_slice(
@@ -15115,7 +15573,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         parts: &mut Vec<SsrTemplatePart>,
     ) -> Option<()> {
         if attrs.v_model.is_some() {
-            return None;
+            return self.collect_ssr_template_attrs_with_v_model(attrs, scope, parts);
         }
         if attrs.v_show.is_some() {
             if ssr_attrs_has_object_binding(&attrs.props) {
@@ -15152,6 +15610,9 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         }
         for segment in &props.segments {
             match segment {
+                Vue3DomPropSegment::StaticAttr(attr) => {
+                    self.collect_ssr_template_static_attr_for_v_model(attr, parts);
+                }
                 Vue3DomPropSegment::DynamicBinding(binding) => {
                     parts.push(SsrTemplatePart::Expr(
                         self.render_ssr_binding(binding, scope),
@@ -15163,14 +15624,147 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                         self.render_js_expr(binding.value, scope)
                     )));
                 }
-                Vue3DomPropSegment::StaticAttr(_)
-                | Vue3DomPropSegment::Content(_)
+                Vue3DomPropSegment::Content(_)
                 | Vue3DomPropSegment::Model(_)
                 | Vue3DomPropSegment::Event(_)
                 | Vue3DomPropSegment::ObjectListeners(_) => {}
             }
         }
         Some(())
+    }
+
+    fn collect_ssr_template_attrs_with_v_model(
+        &self,
+        attrs: &Vue3SsrAttrs,
+        scope: &RenderScope,
+        parts: &mut Vec<SsrTemplatePart>,
+    ) -> Option<()> {
+        let Some(model) = &attrs.v_model else {
+            return Some(());
+        };
+        if matches!(model.kind, Vue3SsrModelKind::Textarea) {
+            return Some(());
+        }
+        if attrs.v_show.is_some() {
+            return None;
+        }
+        if matches!(model.kind, Vue3SsrModelKind::InputDynamicProps) {
+            parts.push(SsrTemplatePart::Expr(format!(
+                "_ssrRenderAttrs({})",
+                self.render_dynamic_model_props_expr(attrs, scope, None)
+            )));
+            return Some(());
+        }
+        let mut model_rendered = false;
+        if attrs.props.segments.is_empty() {
+            for binding in &attrs.props.dynamic_bindings {
+                parts.push(SsrTemplatePart::Expr(
+                    self.render_ssr_binding(binding, scope),
+                ));
+                if self.v_model_should_render_after_binding(model, binding) {
+                    self.collect_ssr_template_v_model_attr(model, scope, parts)?;
+                    model_rendered = true;
+                }
+            }
+            for binding in &attrs.props.object_bindings {
+                parts.push(SsrTemplatePart::Expr(format!(
+                    "_ssrRenderAttrs({})",
+                    self.render_js_expr(binding.value, scope)
+                )));
+            }
+            if !model_rendered {
+                self.collect_ssr_template_v_model_attr(model, scope, parts)?;
+            }
+            if matches!(
+                model.kind,
+                Vue3SsrModelKind::InputDynamicType {
+                    type_expr: _,
+                    value: _
+                }
+            ) {
+                for attr in &attrs.props.static_attrs {
+                    self.collect_ssr_template_static_attr_for_v_model(attr, parts);
+                }
+            }
+            return Some(());
+        }
+        for segment in &attrs.props.segments {
+            match segment {
+                Vue3DomPropSegment::DynamicBinding(binding) => {
+                    parts.push(SsrTemplatePart::Expr(
+                        self.render_ssr_binding(binding, scope),
+                    ));
+                    if self.v_model_should_render_after_binding(model, binding) {
+                        self.collect_ssr_template_v_model_attr(model, scope, parts)?;
+                        model_rendered = true;
+                    }
+                }
+                Vue3DomPropSegment::ObjectBinding(binding) => {
+                    parts.push(SsrTemplatePart::Expr(format!(
+                        "_ssrRenderAttrs({})",
+                        self.render_js_expr(binding.value, scope)
+                    )));
+                }
+                Vue3DomPropSegment::StaticAttr(attr) => {
+                    if matches!(
+                        model.kind,
+                        Vue3SsrModelKind::InputDynamicType {
+                            type_expr: _,
+                            value: _
+                        }
+                    ) {
+                        self.collect_ssr_template_static_attr_for_v_model(attr, parts);
+                    }
+                }
+                Vue3DomPropSegment::Content(_)
+                | Vue3DomPropSegment::Model(_)
+                | Vue3DomPropSegment::Event(_)
+                | Vue3DomPropSegment::ObjectListeners(_) => {}
+            }
+        }
+        if !model_rendered {
+            self.collect_ssr_template_v_model_attr(model, scope, parts)?;
+        }
+        Some(())
+    }
+
+    fn collect_ssr_template_v_model_attr(
+        &self,
+        model: &Vue3SsrModel,
+        scope: &RenderScope,
+        parts: &mut Vec<SsrTemplatePart>,
+    ) -> Option<()> {
+        parts.push(SsrTemplatePart::Expr(
+            self.render_v_model_attr_expr(model, scope)?,
+        ));
+        Some(())
+    }
+
+    fn collect_ssr_template_static_attr_for_v_model(
+        &self,
+        attr: &Vue3DomStaticAttr,
+        parts: &mut Vec<SsrTemplatePart>,
+    ) {
+        parts.push(SsrTemplatePart::Static(format!(
+            " {}=\"{}\"",
+            attr.name,
+            vue3_ssr_escape_attr(&attr.value)
+        )));
+    }
+
+    fn v_model_should_render_after_binding(
+        &self,
+        model: &Vue3SsrModel,
+        binding: &Vue3DomBinding,
+    ) -> bool {
+        matches!(
+            model.kind,
+            Vue3SsrModelKind::InputDynamicType {
+                type_expr: _,
+                value: _
+            }
+        ) && !binding.dynamic_arg
+            && binding.name == "type"
     }
 
     fn collect_ssr_template_attrs_without_v_show_style(
@@ -15786,7 +16380,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
             fallback.finish().trim_end().to_string()
         };
         writer.push_line(&format!(
-            "_ssrRenderSlot(_ctx.$slots, {}, {}, {}, _push, _parent);",
+            "_ssrRenderSlot(_ctx.$slots, {}, {}, {}, _push, _parent)",
             self.render_slot_name(&slot.name, scope),
             props,
             fallback
@@ -15843,6 +16437,17 @@ impl<'a> Vue3SsrMirCodegen<'a> {
             return;
         }
         if let Some(root_attrs) = root_attrs {
+            if matches!(
+                attrs.v_model.as_ref().map(|model| &model.kind),
+                Some(Vue3SsrModelKind::InputDynamicProps)
+            ) {
+                let rendered = format!(
+                    "_ssrRenderAttrs({})",
+                    self.render_dynamic_model_props_expr(attrs, scope, Some(root_attrs))
+                );
+                writer.push_line(&format!("_push({rendered});"));
+                return;
+            }
             let rendered =
                 self.render_root_element_attrs_expr_with_static(attrs, root_attrs, scope, &[]);
             writer.push_line(&format!("_push({rendered});"));
@@ -15894,6 +16499,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
 
         for segment in &props.segments {
             match segment {
+                Vue3DomPropSegment::StaticAttr(_) => {}
                 Vue3DomPropSegment::DynamicBinding(binding) => {
                     writer.push_line(&format!(
                         "_push({});",
@@ -15908,9 +16514,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                         self.render_js_expr(binding.value, scope)
                     ));
                 }
-                Vue3DomPropSegment::StaticAttr(_)
-                | Vue3DomPropSegment::Event(_)
-                | Vue3DomPropSegment::ObjectListeners(_) => {}
+                Vue3DomPropSegment::Event(_) | Vue3DomPropSegment::ObjectListeners(_) => {}
             }
         }
         if let Some(model) = &attrs.v_model {
@@ -15925,15 +16529,24 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         root_attrs: Option<&SsrRootAttrs>,
         writer: &mut CodeWriter,
     ) {
+        let rendered = self.render_dynamic_model_props_expr(attrs, scope, root_attrs);
+        writer.push_line(&format!("_push(_ssrRenderAttrs({rendered}));"));
+    }
+
+    fn render_dynamic_model_props_expr(
+        &self,
+        attrs: &Vue3SsrAttrs,
+        scope: &RenderScope,
+        root_attrs: Option<&SsrRootAttrs>,
+    ) -> String {
         let Some(model) = &attrs.v_model else {
-            return;
+            return "{}".into();
         };
         let model_expr = self.render_js_expr(model.expression, scope);
         let props_expr = self.render_dynamic_model_props_base(&attrs.props, scope, root_attrs);
-        let rendered = format!(
+        format!(
             "(_temp0 = {props_expr}, _mergeProps(_temp0, _ssrGetDynamicModelProps(_temp0, {model_expr})))"
-        );
-        writer.push_line(&format!("_push(_ssrRenderAttrs({rendered}));"));
+        )
     }
 
     fn render_dynamic_model_props_base(
@@ -15942,15 +16555,107 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         scope: &RenderScope,
         root_attrs: Option<&SsrRootAttrs>,
     ) -> String {
-        let rendered = self
-            .render_ordered_props(props, scope)
-            .map(|rendered| self.render_normalized_props(props, rendered))
+        let ordered = if self.props_base_only_feed_dynamic_model_temp(props) {
+            self.render_ordered_props_without_normalization(props, scope)
+        } else {
+            self.render_ordered_props(props, scope)
+        };
+        let rendered = ordered
+            .map(|rendered| {
+                if self.props_base_only_feed_dynamic_model_temp(props) {
+                    rendered
+                } else {
+                    self.render_normalized_props(props, rendered)
+                }
+            })
             .unwrap_or_else(|| "{}".into());
         root_attrs
             .and_then(|root_attrs| {
                 self.merge_root_attrs_with_props(Some(rendered.clone()), root_attrs)
             })
             .unwrap_or(rendered)
+    }
+
+    fn render_ordered_props_without_normalization(
+        &self,
+        props: &Vue3DomProps,
+        scope: &RenderScope,
+    ) -> Option<String> {
+        let mut merge_args = Vec::new();
+        let mut object_entries = Vec::new();
+        if props.segments.is_empty() {
+            for attr in &props.static_attrs {
+                object_entries.push(self.render_static_attr(attr));
+            }
+            for binding in &props.dynamic_bindings {
+                object_entries.push(self.render_dynamic_binding(binding, scope));
+            }
+            return self.render_plain_props(&object_entries);
+        }
+        for segment in &props.segments {
+            match segment {
+                Vue3DomPropSegment::StaticAttr(attr) => {
+                    object_entries.push(self.render_static_attr(attr));
+                }
+                Vue3DomPropSegment::DynamicBinding(binding) => {
+                    object_entries.push(
+                        self.render_dynamic_model_base_binding_without_normalization(
+                            binding, scope,
+                        ),
+                    );
+                }
+                Vue3DomPropSegment::ObjectBinding(binding) => {
+                    self.push_merge_object_arg(&mut merge_args, &mut object_entries);
+                    merge_args.push(self.render_js_expr(binding.value, scope));
+                }
+                Vue3DomPropSegment::Content(_)
+                | Vue3DomPropSegment::Model(_)
+                | Vue3DomPropSegment::Event(_)
+                | Vue3DomPropSegment::ObjectListeners(_) => {}
+            }
+        }
+        self.push_merge_object_arg(&mut merge_args, &mut object_entries);
+        if merge_args.is_empty() {
+            None
+        } else if merge_args.len() == 1 {
+            merge_args.into_iter().next()
+        } else {
+            Some(format!("_mergeProps({})", merge_args.join(", ")))
+        }
+    }
+
+    fn props_base_only_feed_dynamic_model_temp(&self, props: &Vue3DomProps) -> bool {
+        props.object_listeners.is_empty() && props.events.is_empty()
+    }
+
+    fn render_dynamic_model_base_binding_without_normalization(
+        &self,
+        binding: &Vue3DomBinding,
+        scope: &RenderScope,
+    ) -> String {
+        let value = self.render_js_expr(binding.value, scope);
+        if binding.dynamic_arg {
+            let key = binding
+                .dynamic_name
+                .map(|id| self.render_js_expr(id, scope))
+                .unwrap_or_else(|| binding.name.clone());
+            let key = if binding.camel {
+                format!("_camelize({})", render_dynamic_prop_key(&key))
+            } else {
+                render_dynamic_prop_key(&key)
+            };
+            format!("[{key}]: {value}")
+        } else if binding.name == "class" {
+            format!("class: {}", value)
+        } else if binding.name == "style" {
+            format!("style: {}", value)
+        } else {
+            format!(
+                "{}: {}",
+                json_key(&render_vue3_dom_binding_static_key(binding, false)),
+                value
+            )
+        }
     }
 
     fn render_attrs_with_v_show_and_dynamic_model_props(
@@ -15998,7 +16703,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                 self.render_mir_expr(value, scope)
             )),
             Vue3SsrModelKind::InputCheckbox { value } => Some(format!(
-                "(_ssrIncludeBooleanAttr((Array.isArray({expression})) ? _ssrLooseContain({expression}, {}) : {expression})) ? \" checked\" : \"\"",
+                "(_ssrIncludeBooleanAttr((Array.isArray({expression}))\n  ? _ssrLooseContain({expression}, {})\n  : {expression})) ? \" checked\" : \"\"",
                 self.render_mir_expr(value, scope)
             )),
             Vue3SsrModelKind::InputCheckboxTrueValue { true_value } => Some(format!(
@@ -16013,7 +16718,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
             Vue3SsrModelKind::SelectOption { value } => {
                 let value = self.render_mir_expr(value, scope);
                 Some(format!(
-                    "(_ssrIncludeBooleanAttr((Array.isArray({expression})) ? _ssrLooseContain({expression}, {value}) : _ssrLooseEqual({expression}, {value}))) ? \" selected\" : \"\""
+                    "(_ssrIncludeBooleanAttr((Array.isArray({expression}))\n  ? _ssrLooseContain({expression}, {value})\n  : _ssrLooseEqual({expression}, {value}))) ? \" selected\" : \"\""
                 ))
             }
             Vue3SsrModelKind::InputDynamicProps | Vue3SsrModelKind::Textarea => None,
@@ -16524,8 +17229,51 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         writer: &mut CodeWriter,
     ) {
         writer.push_line("_push(`<!--[-->`)");
-        self.render_for_list(node_id, for_mir, scope, writer);
+        self.render_for_list_with_optional_fragment(node_id, for_mir, scope, writer);
         writer.push_line("_push(`<!--]-->`)");
+    }
+
+    fn render_for_list_with_optional_fragment(
+        &self,
+        node_id: NodeId,
+        for_mir: &Vue3SsrFor,
+        scope: &RenderScope,
+        writer: &mut CodeWriter,
+    ) {
+        let Some(node) = self.mir.node(node_id) else {
+            return;
+        };
+        if matches!(
+            node.children.as_slice(),
+            [child]
+                if matches!(
+                    self.mir.node(*child).map(|node| &node.kind),
+                    Some(Vue3SsrMirKind::If { .. })
+                )
+        ) {
+            self.render_for_list_with_fragment(node_id, for_mir, scope, writer);
+        } else {
+            self.render_for_list(node_id, for_mir, scope, writer);
+        }
+    }
+
+    fn render_for_list_with_fragment(
+        &self,
+        node_id: NodeId,
+        for_mir: &Vue3SsrFor,
+        scope: &RenderScope,
+        writer: &mut CodeWriter,
+    ) {
+        let source = self.render_js_expr(for_mir.source, scope);
+        let params = self.render_for_params(for_mir);
+        let child_scope = self.scope_with_for_mir(scope, for_mir);
+        writer.push_line(&format!("_ssrRenderList({source}, ({params}) => {{"));
+        writer.indent();
+        writer.push_line("_push(`<!--[-->`)");
+        self.render_children(node_id, &child_scope, writer);
+        writer.push_line("_push(`<!--]-->`)");
+        writer.dedent();
+        writer.push_line("})");
     }
 
     fn render_for_list(
@@ -16809,7 +17557,6 @@ fn vue3_ssr_helper_order() -> &'static [RuntimeHelper] {
     &[
         RuntimeHelper::Vue3SsrRenderClass,
         RuntimeHelper::Vue3SsrRenderStyle,
-        RuntimeHelper::Vue3SsrRenderAttrs,
         RuntimeHelper::Vue3SsrInterpolate,
         RuntimeHelper::Vue3SsrRenderAttr,
         RuntimeHelper::Vue3SsrRenderDynamicAttr,
@@ -16817,6 +17564,7 @@ fn vue3_ssr_helper_order() -> &'static [RuntimeHelper] {
         RuntimeHelper::Vue3SsrLooseContain,
         RuntimeHelper::Vue3SsrLooseEqual,
         RuntimeHelper::Vue3SsrRenderDynamicModel,
+        RuntimeHelper::Vue3SsrRenderAttrs,
         RuntimeHelper::Vue3SsrGetDynamicModelProps,
         RuntimeHelper::Vue3SsrRenderVNode,
         RuntimeHelper::Vue3SsrRenderComponent,
@@ -29506,6 +30254,10 @@ mod tests {
 
         assert!(generated.code.contains("mergeProps as _mergeProps"));
         assert!(generated.code.contains("ssrRenderAttrs as _ssrRenderAttrs"));
+        assert!(!generated
+            .code
+            .contains("guardReactiveProps as _guardReactiveProps"));
+        assert!(!generated.code.contains("_guardReactiveProps("));
         assert!(!generated.code.contains("ssrRenderStyle as _ssrRenderStyle"));
         assert!(!generated.code.contains("ssrRenderAttr as _ssrRenderAttr"));
         assert!(!generated.code.contains("style=\\\"display:flex\\\""));
@@ -29543,19 +30295,19 @@ mod tests {
             .contains("ssrRenderDynamicModel as _ssrRenderDynamicModel"));
         assert!(generated
             .code
-            .contains("_push(_ssrRenderAttr(\"value\", _ctx.bar));"));
+            .contains("_ssrRenderAttr(\"value\", _ctx.bar)"));
         assert!(generated.code.contains(
-            "_push((_ssrIncludeBooleanAttr(_ssrLooseEqual(_ctx.bar, \"foo\"))) ? \" checked\" : \"\");"
+            "(_ssrIncludeBooleanAttr(_ssrLooseEqual(_ctx.bar, \"foo\"))) ? \" checked\" : \"\""
         ));
         assert!(generated.code.contains(
-            "_push((_ssrIncludeBooleanAttr(_ssrLooseEqual(_ctx.baz, _ctx.foo))) ? \" checked\" : \"\");"
+            "(_ssrIncludeBooleanAttr(_ssrLooseEqual(_ctx.baz, _ctx.foo))) ? \" checked\" : \"\""
         ));
         assert!(generated
             .code
-            .contains("_push(_ssrRenderDynamicModel(_ctx.kind, _ctx.foo, _ctx.value));"));
+            .contains("_ssrRenderDynamicModel(_ctx.kind, _ctx.foo, _ctx.value)"));
         assert!(generated
             .code
-            .contains("_push(_ssrRenderAttr(\"value\", _ctx.value));"));
+            .contains("_ssrRenderAttr(\"value\", _ctx.value)"));
         assert!(!generated.code.contains("true-value"));
     }
 
@@ -29587,20 +30339,20 @@ mod tests {
             .code
             .contains("ssrLooseContain as _ssrLooseContain"));
         assert!(generated.code.contains("ssrLooseEqual as _ssrLooseEqual"));
-        assert!(generated.code.contains("_push(`${"));
+        assert!(generated.code.contains("_push(`<div${"));
         assert!(generated.code.contains("_ssrInterpolate(_ctx.text)"));
         assert!(!generated
             .code
             .contains("_push(_ssrInterpolate(_ctx.text));"));
         assert!(!generated.code.contains("_push(\"old\");"));
         assert!(generated.code.contains(
-            "_push((_ssrIncludeBooleanAttr((Array.isArray(_ctx.model)) ? _ssrLooseContain(_ctx.model, \"1\") : _ssrLooseEqual(_ctx.model, \"1\"))) ? \" selected\" : \"\");"
+            "(_ssrIncludeBooleanAttr((Array.isArray(_ctx.model))\n      ? _ssrLooseContain(_ctx.model, \"1\")\n      : _ssrLooseEqual(_ctx.model, \"1\"))) ? \" selected\" : \"\""
         ));
         assert!(generated
             .code
             .contains("_ssrRenderList(_ctx.items, (item) => {"));
         assert!(generated.code.contains(
-            "_push((_ssrIncludeBooleanAttr((Array.isArray(_ctx.model)) ? _ssrLooseContain(_ctx.model, item) : _ssrLooseEqual(_ctx.model, item))) ? \" selected\" : \"\");"
+            "(_ssrIncludeBooleanAttr((Array.isArray(_ctx.model))\n        ? _ssrLooseContain(_ctx.model, item)\n        : _ssrLooseEqual(_ctx.model, item))) ? \" selected\" : \"\""
         ));
         assert!(!generated.code.contains("_ctx.item)"));
         assert!(!generated.code.contains("_ctx.item,"));
@@ -29630,7 +30382,7 @@ mod tests {
         assert!(generated
             .code
             .contains("ssrGetDynamicModelProps as _ssrGetDynamicModelProps"));
-        assert!(generated.code.contains("let _temp0;"));
+        assert!(generated.code.contains("let _temp0"));
         assert!(!generated
             .code
             .contains("_push(\"<input id=\\\"x\\\" class=\\\"y\\\"\");"));
@@ -29660,16 +30412,16 @@ mod tests {
         );
 
         assert!(generated.code.contains("mergeProps as _mergeProps"));
-        assert!(generated.code.contains("normalizeProps as _normalizeProps"));
+        assert!(!generated.code.contains("normalizeProps as _normalizeProps"));
         assert!(generated
             .code
             .contains("ssrGetDynamicModelProps as _ssrGetDynamicModelProps"));
         assert!(generated
             .code
-            .contains("_temp0 = _mergeProps(_normalizeProps("));
+            .contains("_temp0 = _mergeProps({ [_ctx.name || \"\"]: _ctx.value }, _attrs)"));
         assert!(generated
             .code
-            .contains("_normalizeProps({ [_ctx.name || \"\"]: _ctx.value })"));
+            .contains("{ [_ctx.name || \"\"]: _ctx.value }"));
         assert!(generated.code.contains(", _attrs)"));
         assert!(generated
             .code
