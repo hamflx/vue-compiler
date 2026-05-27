@@ -579,12 +579,15 @@ function createTransformContext(root, options) {
     grandParent: null,
     currentNode: root,
     childIndex: 0,
+    directiveTransforms: (options || {}).directiveTransforms || {},
+    compatConfig: (options || {}).compatConfig,
     inSSR: !!((options || {}).inSSR || (options || {}).ssr),
     ssr: !!((options || {}).ssr),
     prefixIdentifiers: !!((options || {}).prefixIdentifiers),
     bindingMetadata: (options || {}).bindingMetadata || {},
     inline: !!((options || {}).inline),
     isTS: !!((options || {}).isTS),
+    expressionPlugins: (options || {}).expressionPlugins || [],
     inVOnce: false,
     helper(name) {
       this.helpers.set(name, (this.helpers.get(name) || 0) + 1);
@@ -701,7 +704,81 @@ function vue3TransformContextPayload(context) {
     isTS: !!context.isTS,
     identifiers: context.identifiers || {},
     bindingMetadata: context.bindingMetadata || {},
+    expressionPlugins: context.expressionPlugins || [],
   };
+}
+
+function materializeVue3ExpressionProjection(projection, fallback, context) {
+  if (!projection || projection.kind === 'unchanged') return fallback;
+  if (projection.kind === 'setConstType') {
+    if (fallback && typeof fallback === 'object') fallback.constType = projection.constType;
+    return fallback;
+  }
+  if (projection.kind === 'simple') {
+    const node = createSimpleExpression(
+      projection.content || '',
+      !!projection.isStatic,
+      projection.loc || (fallback && fallback.loc) || locStub,
+    );
+    if (projection.constType !== undefined) node.constType = projection.constType;
+    registerVue3ProjectionHelpers(projection, context);
+    return node;
+  }
+  if (projection.kind === 'compound') {
+    const children = (projection.children || []).map(child => materializeVue3ExpressionChild(child, fallback));
+    const node = createCompoundExpression(children);
+    node.loc = projection.loc || (fallback && fallback.loc) || locStub;
+    node.identifiers = projection.identifiers || [];
+    registerVue3ProjectionHelpers(projection, context);
+    return node;
+  }
+  if (projection.kind === 'error') {
+    const error = createCompilerError(projection.code || ErrorCodes.X_INVALID_EXPRESSION, projection.loc || (fallback && fallback.loc) || locStub);
+    error.message = projection.message || error.message;
+    if (context && typeof context.onError === 'function') context.onError(error);
+    return fallback;
+  }
+  return fallback;
+}
+
+function materializeVue3ExpressionChild(child, fallback) {
+  if (!child || typeof child !== 'object' || !child.kind) return child;
+  if (child.kind === 'simple') {
+    const node = createSimpleExpression(
+      child.content || '',
+      !!child.isStatic,
+      child.loc || (fallback && fallback.loc) || locStub,
+    );
+    if (child.constType !== undefined) node.constType = child.constType;
+    return node;
+  }
+  return child;
+}
+
+function registerVue3ProjectionHelpers(projection, context) {
+  if (!context || typeof context.helper !== 'function') return;
+  for (const helperName of projection.helpers || []) {
+    const helper = helperSymbolFromProjection(helperName);
+    if (helper) context.helper(helper);
+  }
+}
+
+function setVue3NodeAtPath(node, path, value) {
+  let target = node;
+  for (let index = 0; index + 1 < path.length; index++) {
+    if (!target) return;
+    target = target[path[index]];
+  }
+  if (target) target[path[path.length - 1]] = value;
+}
+
+function getVue3NodeAtPath(node, path) {
+  let target = node;
+  for (const key of path || []) {
+    if (!target) return undefined;
+    target = target[key];
+  }
+  return target;
 }
 
 function vue3TransformOnceContextPayload(context) {
@@ -867,6 +944,38 @@ function finalizeForCodegen(forNode, renderExp, context) {
   renderExp.arguments.push(createFunctionExpression(createForLoopParams(forNode.parseResult), childBlock, true));
 }
 
+function finalizeVue3ForExitCodegen(node, forNode, renderExp, codegenProjection, context) {
+  const exitProjection = callVue3CoreProjection('vue3.core.transformFor', {
+    phase: 'exitCodegen',
+    node,
+    forNode: vue3ForNodePayload(forNode),
+    isStableFragment: !!(codegenProjection && codegenProjection.isStableFragment),
+    context: vue3TransformContextPayload(context),
+  });
+  let childBlock;
+  if (exitProjection && exitProjection.kind === 'fragmentWrapper') {
+    childBlock = createVNodeCall(
+      context,
+      context.helper(FRAGMENT),
+      undefined,
+      forNode.children || [],
+      exitProjection.patchFlag,
+      undefined,
+      undefined,
+      true,
+      false,
+      false,
+      node.loc,
+    );
+  } else {
+    childBlock = forNode.children && forNode.children[0] && forNode.children[0].codegenNode;
+    if (childBlock && exitProjection && exitProjection.kind === 'singleElement' && exitProjection.childBlockIsBlock && childBlock.type === NodeTypes.VNODE_CALL) {
+      convertToBlock(childBlock, context);
+    }
+  }
+  renderExp.arguments.push(createFunctionExpression(createForLoopParams(forNode.parseResult), childBlock, true));
+}
+
 function getBaseTransformPreset(prefixIdentifiers) {
   return [[
     transformOnce,
@@ -874,6 +983,7 @@ function getBaseTransformPreset(prefixIdentifiers) {
     transformFor,
     transformSlotOutlet,
     transformElement,
+    transformText,
   ], { on: transformOn, bind: transformBind, model: transformModel }];
 }
 
@@ -1072,7 +1182,10 @@ function isVSlot(prop) {
 }
 
 function isWhitespaceText(node) {
-  return !!node && node.type === NodeTypes.TEXT && isAllWhitespace(node.content);
+  return !!node && (
+    (node.type === NodeTypes.TEXT && isAllWhitespace(node.content)) ||
+    (node.type === NodeTypes.TEXT_CALL && isWhitespaceText(node.content))
+  );
 }
 
 const noopDirectiveTransform = () => {
@@ -1080,7 +1193,17 @@ const noopDirectiveTransform = () => {
 };
 
 function processExpression(node, context) {
-  return node;
+  return materializeVue3ExpressionProjection(
+    callVue3CoreProjection('vue3.core.processExpression', {
+      node,
+      context: vue3TransformContextPayload(context),
+      asParams: !!(arguments.length > 2 && arguments[2]),
+      asRawStatements: !!(arguments.length > 3 && arguments[3]),
+      localVars: context && context.identifiers,
+    }),
+    node,
+    context,
+  );
 }
 
 function processFor(node, dir, context, processCodegen) {
@@ -1229,6 +1352,49 @@ const trackVForSlotScopes = (node, context) => {
   return undefined;
 };
 
+function vue3TransformTextContextPayload(context) {
+  context = context || {};
+  return {
+    ssr: !!context.ssr,
+    inSSR: !!context.inSSR,
+    compat: !!(context.compatConfig),
+    directiveTransforms: Object.keys(context.directiveTransforms || {}),
+    constantCache: context.constantCache || undefined,
+  };
+}
+
+function materializeVue3TextProjection(projection, node, context) {
+  if (!projection || !Array.isArray(projection.operations) || !node || !Array.isArray(node.children)) return;
+  for (const operation of projection.operations) {
+    if (!operation || operation.kind === 'mergeText') {
+      if (!operation) continue;
+      const start = operation.start || 0;
+      const end = operation.end || start;
+      const merged = node.children.slice(start, end + 1);
+      const children = [];
+      for (let index = 0; index < merged.length; index++) {
+        if (index > 0) children.push(' + ');
+        children.push(merged[index]);
+      }
+      const compound = createCompoundExpression(children);
+      compound.loc = merged[0] && merged[0].loc || locStub;
+      node.children.splice(start, end - start + 1, compound);
+    } else if (operation.kind === 'wrapTextCall') {
+      const child = node.children[operation.index || 0];
+      if (!child) continue;
+      const callArgs = [];
+      if (operation.includeContent !== false) callArgs.push(child);
+      if (operation.patchFlag) callArgs.push(operation.patchFlag);
+      node.children[operation.index || 0] = {
+        type: NodeTypes.TEXT_CALL,
+        content: child,
+        loc: child.loc,
+        codegenNode: createCallExpression(context.helper(CREATE_TEXT), callArgs),
+      };
+    }
+  }
+}
+
 function transformOnce(node, context) {
   const projection = callVue3CoreProjection('vue3.core.transformOnce', {
     node,
@@ -1282,11 +1448,26 @@ const transformFor = createStructuralDirectiveTransform('for', (node, dir, conte
       node.loc,
     );
     return () => {
-      const childBlock = forNode.children && forNode.children[0] && forNode.children[0].codegenNode;
-      renderExp.arguments.push(createFunctionExpression(createForLoopParams(forNode.parseResult), childBlock, true));
+      finalizeVue3ForExitCodegen(node, forNode, renderExp, codegenProjection, context);
     };
   });
 });
+
+function transformText(node, context) {
+  if (!node || (node.type !== NodeTypes.ROOT && node.type !== NodeTypes.ELEMENT && node.type !== NodeTypes.FOR && node.type !== NodeTypes.IF_BRANCH)) {
+    return undefined;
+  }
+  return () => {
+    materializeVue3TextProjection(
+      callVue3CoreProjection('vue3.core.transformText', {
+        node,
+        context: vue3TransformTextContextPayload(context),
+      }),
+      node,
+      context,
+    );
+  };
+}
 
 function transform(root, options) {
   options = options || {};
@@ -1344,7 +1525,20 @@ const transformElement = (node, context) => {
 };
 
 const transformExpression = (node, context) => {
-  return node;
+  const projection = callVue3CoreProjection('vue3.core.transformExpression', {
+    node,
+    context: vue3TransformContextPayload(context),
+  });
+  for (const operation of projection && projection.operations || []) {
+    if (!operation || operation.kind !== 'process' || !operation.path) continue;
+    const current = getVue3NodeAtPath(node, operation.path);
+    setVue3NodeAtPath(
+      node,
+      operation.path,
+      materializeVue3ExpressionProjection(operation.projection, current, context),
+    );
+  }
+  return undefined;
 };
 
 const transformModel = (dir, node, context) => {
@@ -1439,7 +1633,34 @@ function checkCompatEnabled(key, context, loc) {
 }
 
 function buildDirectiveArgs(dir, context) {
-  return [dir && dir.exp, dir && dir.arg, dir && dir.modifiers].filter(Boolean);
+  if (!dir) return createArrayExpression([]);
+  const projection = callVue3CoreProjection('vue3.core.buildDirectiveArgs', { dir });
+  const args = [];
+  const runtime = projection && projection.runtime;
+  if (!runtime || runtime.kind === 'asset') {
+    context.helper(RESOLVE_DIRECTIVE);
+    context.directives.add(runtime && runtime.name || dir.name);
+    args.push(toValidAssetId(runtime && runtime.name || dir.name, 'directive'));
+  } else {
+    const helper = helperSymbolFromProjection(runtime.helper || runtime.helperName);
+    args.push(helper ? context.helperString(helper) : runtime.helperName || runtime.helper);
+  }
+  if (projection && projection.includeExp) args.push(dir.exp);
+  if (projection && projection.includeArg) {
+    if (!projection.includeExp) args.push('void 0');
+    args.push(dir.arg);
+  }
+  const modifiers = projection && projection.modifiers || [];
+  if (modifiers.length) {
+    if (!(projection && projection.includeArg)) {
+      if (!(projection && projection.includeExp)) args.push('void 0');
+      args.push('void 0');
+    }
+    args.push(createObjectExpression(modifiers.map(modifier =>
+      createObjectProperty(modifier.name, createSimpleExpression('true', false, dir.loc || locStub)),
+    )));
+  }
+  return createArrayExpression(args);
 }
 
 function buildProps(node, context) {
@@ -1447,6 +1668,7 @@ function buildProps(node, context) {
   const directives = [];
   const dynamicPropNames = [];
   let patchFlag = 0;
+  let shouldUseBlock = false;
   for (const prop of node && node.props || []) {
     if (!prop) continue;
     if (prop.type === NodeTypes.ATTRIBUTE) {
@@ -1471,6 +1693,7 @@ function buildProps(node, context) {
     }
     if (prop.name !== 'once' && prop.name !== 'memo') {
       directives.push(prop);
+      if (node && node.children && node.children.length) shouldUseBlock = true;
     }
   }
   if (dynamicPropNames.length) patchFlag |= 8;
@@ -1479,7 +1702,7 @@ function buildProps(node, context) {
     directives,
     patchFlag,
     dynamicPropNames,
-    shouldUseBlock: false,
+    shouldUseBlock,
   };
 }
 
@@ -1750,6 +1973,7 @@ Object.defineProperty(module.exports, '__vuecRuntime', {
     transformIf,
     transformOnce,
     transformSlotOutlet,
+    transformText,
   },
   enumerable: false,
 });
