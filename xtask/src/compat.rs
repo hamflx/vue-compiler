@@ -11852,6 +11852,7 @@ fn rewrite_vue3_ssr_rust_backed_public_compile_imports(prepared_root: &Path) -> 
 
     rewrite_vue3_ssr_spec_compile_import(&tests.join("ssrVIf.spec.ts"))?;
     rewrite_vue3_ssr_spec_compile_import(&tests.join("ssrVFor.spec.ts"))?;
+    rewrite_vue3_ssr_spec_compile_import(&tests.join("ssrVShow.spec.ts"))?;
 
     let utils = tests.join("utils.ts");
     if utils.exists() {
@@ -12294,6 +12295,7 @@ fn conformance_coverage_file_kind(
         || path.ends_with("packages/compiler-ssr/__tests__/ssrText.spec.ts")
         || path.ends_with("packages/compiler-ssr/__tests__/ssrVFor.spec.ts")
         || path.ends_with("packages/compiler-ssr/__tests__/ssrVIf.spec.ts")
+        || path.ends_with("packages/compiler-ssr/__tests__/ssrVShow.spec.ts")
     {
         ConformanceCoverageKind::RustBacked
     } else {
@@ -13706,6 +13708,11 @@ mod tests {
             "import { compile } from '../src'\n",
         )
         .unwrap();
+        fs::write(
+            tests.join("ssrVShow.spec.ts"),
+            "import { compile } from '../src'\n",
+        )
+        .unwrap();
         fs::write(tests.join("utils.ts"), "import { compile } from '../src'\n").unwrap();
 
         rewrite_vue3_ssr_rust_backed_public_compile_imports(&temp).unwrap();
@@ -13713,12 +13720,14 @@ mod tests {
         let spec = fs::read_to_string(tests.join("ssrText.spec.ts")).unwrap();
         let vif_spec = fs::read_to_string(tests.join("ssrVIf.spec.ts")).unwrap();
         let vfor_spec = fs::read_to_string(tests.join("ssrVFor.spec.ts")).unwrap();
+        let vshow_spec = fs::read_to_string(tests.join("ssrVShow.spec.ts")).unwrap();
         let utils = fs::read_to_string(tests.join("utils.ts")).unwrap();
         let rust_text_utils = fs::read_to_string(tests.join("utils.rust-ssr-text.ts")).unwrap();
         assert!(spec.contains("from '@vue/compiler-ssr'"));
         assert!(spec.contains("from './utils.rust-ssr-text'"));
         assert!(vif_spec.contains("from '@vue/compiler-ssr'"));
         assert!(vfor_spec.contains("from '@vue/compiler-ssr'"));
+        assert!(vshow_spec.contains("from '@vue/compiler-ssr'"));
         assert!(utils.contains("from '../src'"));
         assert!(!utils.contains("from '@vue/compiler-ssr'"));
         assert!(rust_text_utils.contains("from '@vue/compiler-ssr'"));
