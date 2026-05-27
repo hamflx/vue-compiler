@@ -586,6 +586,8 @@ function createTransformContext(root, options) {
     prefixIdentifiers: !!((options || {}).prefixIdentifiers),
     cacheHandlers: !!((options || {}).cacheHandlers),
     bindingMetadata: (options || {}).bindingMetadata || {},
+    scopeId: (options || {}).scopeId,
+    slotted: !!((options || {}).slotted),
     inline: !!((options || {}).inline),
     isTS: !!((options || {}).isTS),
     expressionPlugins: (options || {}).expressionPlugins || [],
@@ -797,6 +799,10 @@ function materializeVue3ProjectionNode(projection, refs, context) {
       if (projection.path === 'dir.arg') return dir && dir.arg;
       if (projection.path === 'dir.exp') return dir && dir.exp;
       if (projection.path === 'dir.arg.children') return (dir && dir.arg && dir.arg.children) || [];
+      if (projection.path === 'props') {
+        const prop = refs.node && refs.node.props && refs.node.props[projection.index];
+        return prop && prop[projection.field || 'exp'];
+      }
       return undefined;
     case 'static':
       return createSimpleExpression(projection.content || '', true, projection.loc || (dir && dir.arg && dir.arg.loc) || (dir && dir.loc) || locStub);
@@ -875,6 +881,20 @@ function vue3TransformOnceContextPayload(context) {
   return {
     inVOnce: !!context.inVOnce,
     inSSR: !!context.inSSR,
+  };
+}
+
+function vue3TransformSlotOutletContextPayload(context) {
+  context = context || {};
+  return {
+    prefixIdentifiers: !!context.prefixIdentifiers,
+    inline: !!context.inline,
+    isTS: !!context.isTS,
+    identifiers: context.identifiers || {},
+    bindingMetadata: context.bindingMetadata || {},
+    expressionPlugins: context.expressionPlugins || [],
+    scopeId: context.scopeId,
+    slotted: !!context.slotted,
   };
 }
 
@@ -1412,17 +1432,86 @@ function processIf(node, dir, context, processCodegen) {
 }
 
 function processSlotOutlet(node, context) {
-  return { slotName: '"default"', slotProps: undefined };
+  const projection = callVue3CoreProjection('vue3.core.transformSlotOutlet', {
+    node,
+    context: vue3TransformSlotOutletContextPayload(context),
+  });
+  const process = projection && projection.process || {};
+  materializeVue3SlotOutletMutations(process, node, context);
+  const nonNameProps = (process.nonNameProps || [])
+    .map(index => node && node.props && node.props[index])
+    .filter(Boolean);
+  const slotName = materializeVue3SlotOutletName(process.slotName, node, context);
+  let slotProps;
+  if (nonNameProps.length) {
+    const built = buildProps(node, context, nonNameProps);
+    slotProps = built.props;
+    emitVue3SlotOutletDirectiveError(built, context);
+  }
+  return { slotName, slotProps };
 }
 
 function transformSlotOutlet(node, context) {
   if (!isSlotOutlet(node)) return undefined;
   return () => {
-    node.codegenNode = createCallExpression(context.helper(RENDER_SLOT), [
-      context.prefixIdentifiers ? '_ctx.$slots' : '$slots',
-      '"default"',
-    ]);
+    const projection = callVue3CoreProjection('vue3.core.transformSlotOutlet', {
+      node,
+      context: vue3TransformSlotOutletContextPayload(context),
+    });
+    if (!projection || !projection.transform) return;
+    const process = projection.process || {};
+    materializeVue3SlotOutletMutations(process, node, context);
+    const nonNameProps = (process.nonNameProps || [])
+      .map(index => node && node.props && node.props[index])
+      .filter(Boolean);
+    const slotName = materializeVue3SlotOutletName(process.slotName, node, context);
+    let slotProps;
+    if (nonNameProps.length) {
+      const built = buildProps(node, context, nonNameProps);
+      slotProps = built.props;
+      emitVue3SlotOutletDirectiveError(built, context);
+    }
+    const codegen = projection.codegen || {};
+    const args = [codegen.slots || (context.prefixIdentifiers ? '_ctx.$slots' : '$slots'), slotName, '{}', 'undefined', 'true'];
+    let expectedLen = codegen.expectedLen == null ? 2 : codegen.expectedLen;
+    if (slotProps) {
+      args[2] = slotProps;
+      expectedLen = Math.max(expectedLen, 3);
+    }
+    if (node.children && node.children.length) {
+      args[3] = createFunctionExpression([], node.children, false, false, node.loc);
+      expectedLen = Math.max(expectedLen, 4);
+    }
+    args.splice(expectedLen);
+    node.codegenNode = createCallExpression(context.helper(RENDER_SLOT), args);
   };
+}
+
+function materializeVue3SlotOutletMutations(process, node, context) {
+  for (const mutation of process && process.mutations || []) {
+    const prop = node && node.props && node.props[mutation.index];
+    if (!prop) continue;
+    if (mutation.kind === 'setPropName') {
+      prop.name = mutation.name || prop.name;
+    } else if (mutation.kind === 'setDirectiveArgContent' && prop.arg) {
+      prop.arg.content = mutation.content || '';
+    } else if (mutation.kind === 'setDirectiveExp') {
+      prop.exp = materializeVue3ProjectionNode(mutation.value, { node }, context);
+    }
+  }
+}
+
+function materializeVue3SlotOutletName(projection, node, context) {
+  if (!projection) return '"default"';
+  if (projection.kind === 'literal') return projection.value || '"default"';
+  return materializeVue3ProjectionNode(projection, { node }, context);
+}
+
+function emitVue3SlotOutletDirectiveError(built, context) {
+  const directive = built && built.directives && built.directives[0];
+  if (directive && context && typeof context.onError === 'function') {
+    context.onError(createCompilerError(ErrorCodes.X_V_SLOT_UNEXPECTED_DIRECTIVE_ON_SLOT_OUTLET, directive.loc));
+  }
 }
 
 function registerRuntimeHelpers(helpers) {
@@ -1874,6 +1963,7 @@ function buildDirectiveArgs(dir, context) {
 }
 
 function buildProps(node, context) {
+  const propList = arguments.length > 2 ? arguments[2] : undefined;
   const objectProps = [];
   const directives = [];
   const dynamicPropNames = [];
@@ -1881,7 +1971,7 @@ function buildProps(node, context) {
   let shouldUseBlock = false;
   let hasDynamicKey = false;
   let hasHydrationEvent = false;
-  for (const prop of node && node.props || []) {
+  for (const prop of propList || node && node.props || []) {
     if (!prop) continue;
     if (prop.type === NodeTypes.ATTRIBUTE) {
       objectProps.push(createObjectProperty(
