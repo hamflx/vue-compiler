@@ -1,10 +1,14 @@
 #![forbid(unsafe_code)]
 
+use std::collections::hash_map::DefaultHasher;
+use std::collections::BTreeMap;
+use std::hash::{Hash, Hasher};
+
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use vuec_ast::{
-    NodeId, TemplateAttribute, Vue3Ast, Vue3AstKind, Vue3Element, Vue3ElementType, Vue3ImportItem,
-    Vue3Prop, Vue3Root,
+    HtmlNamespace, NodeId, TemplateAttribute, Vue3Ast, Vue3AstKind, Vue3Element, Vue3ElementType,
+    Vue3ImportItem, Vue3Prop, Vue3Root,
 };
 use vuec_diagnostics::{Diagnostic, Severity};
 use vuec_pass::TransformContext;
@@ -315,6 +319,158 @@ pub struct DomDirective {
     pub expression: Option<String>,
 }
 
+pub struct DomCompiler {
+    ast_cache: BTreeMap<DomAstCacheKey, Vue3Ast>,
+    cache_stats: DomAstCacheStats,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DomAstCacheStats {
+    pub ast_hits: u64,
+    pub ast_misses: u64,
+    pub ast_invalidations: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct DomAstCacheKey {
+    filename: String,
+    source_hash: u64,
+    file_id: u32,
+    base_offset: usize,
+    parse_options: DomAstCacheOptions,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct DomAstCacheOptions {
+    comments: bool,
+    delimiters: Option<[String; 2]>,
+    void_tags: Vec<String>,
+    native_tags: Option<Vec<String>>,
+    custom_elements: Vec<String>,
+    built_in_components: Vec<String>,
+    namespaces: Vec<(String, u8)>,
+    root_namespace: u8,
+    dom_namespaces: bool,
+    whitespace: String,
+    pre_tags: Vec<String>,
+    ignore_newline_tags: Vec<String>,
+    sfc_parse_mode: bool,
+    sfc_plain_template_langs: Vec<String>,
+    decode_entities: bool,
+    is_custom_element: Vec<String>,
+}
+
+impl DomCompiler {
+    pub fn new() -> Self {
+        Self {
+            ast_cache: BTreeMap::new(),
+            cache_stats: DomAstCacheStats::default(),
+        }
+    }
+
+    pub fn parse(&mut self, source: TemplateSource, options: &DomCompilerOptions) -> Vue3Ast {
+        let key = DomAstCacheKey::new(&source, options);
+        if let Some(ast) = self.ast_cache.get(&key) {
+            self.cache_stats.ast_hits += 1;
+            return ast.clone();
+        }
+        self.invalidate_stale_ast_entries(&key);
+        self.cache_stats.ast_misses += 1;
+        let ast = parse(source, options);
+        self.ast_cache.insert(key, ast.clone());
+        ast
+    }
+
+    pub fn compile(
+        &mut self,
+        source: TemplateSource,
+        options: DomCompilerOptions,
+    ) -> CodegenResult {
+        let ast = self.parse(source.clone(), &options);
+        compile_parsed_ast(source, options, ast)
+    }
+
+    pub fn cache_stats(&self) -> DomAstCacheStats {
+        self.cache_stats.clone()
+    }
+
+    pub fn ast_cache_len(&self) -> usize {
+        self.ast_cache.len()
+    }
+
+    fn invalidate_stale_ast_entries(&mut self, key: &DomAstCacheKey) {
+        let before = self.ast_cache.len();
+        self.ast_cache.retain(|existing, _| {
+            existing.filename != key.filename
+                || existing.file_id != key.file_id
+                || existing.base_offset != key.base_offset
+                || existing.parse_options != key.parse_options
+        });
+        let removed = before.saturating_sub(self.ast_cache.len());
+        self.cache_stats.ast_invalidations += removed as u64;
+    }
+}
+
+impl Default for DomCompiler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DomAstCacheKey {
+    fn new(source: &TemplateSource, options: &DomCompilerOptions) -> Self {
+        Self {
+            filename: source.filename.clone(),
+            source_hash: source_hash(&source.source),
+            file_id: source.file_id.0,
+            base_offset: source.base_offset,
+            parse_options: DomAstCacheOptions::new(options),
+        }
+    }
+}
+
+impl DomAstCacheOptions {
+    fn new(options: &DomCompilerOptions) -> Self {
+        Self {
+            comments: options.core.comments,
+            delimiters: options.core.delimiters.clone(),
+            void_tags: options.core.void_tags.clone(),
+            native_tags: options.core.native_tags.clone(),
+            custom_elements: options.core.custom_elements.clone(),
+            built_in_components: options.core.built_in_components.clone(),
+            namespaces: options
+                .core
+                .namespaces
+                .iter()
+                .map(|(tag, namespace)| (tag.clone(), namespace_key(*namespace)))
+                .collect(),
+            root_namespace: namespace_key(options.core.root_namespace),
+            dom_namespaces: options.core.dom_namespaces,
+            whitespace: options.core.whitespace.clone(),
+            pre_tags: options.core.pre_tags.clone(),
+            ignore_newline_tags: options.core.ignore_newline_tags.clone(),
+            sfc_parse_mode: options.core.sfc_parse_mode,
+            sfc_plain_template_langs: options.core.sfc_plain_template_langs.clone(),
+            decode_entities: options.decode_entities,
+            is_custom_element: options.is_custom_element.clone(),
+        }
+    }
+}
+
+fn source_hash(source: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    source.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn namespace_key(namespace: HtmlNamespace) -> u8 {
+    match namespace {
+        HtmlNamespace::Html => 0,
+        HtmlNamespace::Svg => 1,
+        HtmlNamespace::MathMl => 2,
+    }
+}
+
 pub fn parse(source: TemplateSource, options: &DomCompilerOptions) -> Vue3Ast {
     let mut ast = Vue3Dialect::base_parse(source, &options.core);
     normalize_dom_ast(&mut ast, options);
@@ -322,7 +478,15 @@ pub fn parse(source: TemplateSource, options: &DomCompilerOptions) -> Vue3Ast {
 }
 
 pub fn compile(source: TemplateSource, options: DomCompilerOptions) -> CodegenResult {
-    let mut ast = parse(source.clone(), &options);
+    let ast = parse(source.clone(), &options);
+    compile_parsed_ast(source, options, ast)
+}
+
+fn compile_parsed_ast(
+    source: TemplateSource,
+    options: DomCompilerOptions,
+    mut ast: Vue3Ast,
+) -> CodegenResult {
     let mut ctx = TransformContext::default();
     remove_side_effect_nodes(&mut ast, &mut ctx);
     report_transition_invalid_children(&ast, &mut ctx);
@@ -841,6 +1005,87 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
     use vuec_source::FileId;
+
+    fn template_source(name: &str, source: &str) -> TemplateSource {
+        TemplateSource {
+            filename: name.into(),
+            source: source.into(),
+            file_id: FileId(0),
+            base_offset: 0,
+        }
+    }
+
+    #[test]
+    fn dom_compiler_ast_cache_hits_for_same_parse_input() {
+        let mut compiler = DomCompiler::new();
+        let mut options = DomCompilerOptions::default();
+        options.core.prefix_identifiers = true;
+        options.core.mode = "module".into();
+        let source = template_source("cached.vue", "<div>{{ msg }}</div>");
+
+        let first = compiler.compile(source.clone(), options.clone());
+        let second = compiler.compile(source, options);
+
+        assert_eq!(first.code, second.code);
+        assert_eq!(
+            compiler.cache_stats(),
+            DomAstCacheStats {
+                ast_hits: 1,
+                ast_misses: 1,
+                ast_invalidations: 0,
+            }
+        );
+        assert_eq!(compiler.ast_cache_len(), 1);
+    }
+
+    #[test]
+    fn dom_compiler_ast_cache_invalidates_changed_same_file_source() {
+        let mut compiler = DomCompiler::new();
+        let options = DomCompilerOptions::default();
+        let first = template_source("cached.vue", "<div>{{ one }}</div>");
+        let second = template_source("cached.vue", "<section>{{ two }}</section>");
+
+        let first_result = compiler.compile(first, options.clone());
+        let second_result = compiler.compile(second, options);
+
+        assert_ne!(first_result.code, second_result.code);
+        assert!(second_result.code.contains("section"));
+        assert_eq!(
+            compiler.cache_stats(),
+            DomAstCacheStats {
+                ast_hits: 0,
+                ast_misses: 2,
+                ast_invalidations: 1,
+            }
+        );
+        assert_eq!(compiler.ast_cache_len(), 1);
+    }
+
+    #[test]
+    fn dom_compiler_ast_cache_key_separates_parse_options() {
+        let mut compiler = DomCompiler::new();
+        let source = template_source("cached.vue", "<div><!--x-->{{ msg }}</div>");
+        let with_comments = DomCompilerOptions::default();
+        let mut without_comments = DomCompilerOptions::default();
+        without_comments.core.comments = false;
+
+        let with_comments_result = compiler.compile(source.clone(), with_comments);
+        let without_comments_result = compiler.compile(source, without_comments);
+
+        assert_ne!(
+            with_comments_result.ast_summary,
+            without_comments_result.ast_summary
+        );
+        assert_eq!(
+            compiler.cache_stats(),
+            DomAstCacheStats {
+                ast_hits: 0,
+                ast_misses: 2,
+                ast_invalidations: 0,
+            }
+        );
+        assert_eq!(compiler.ast_cache_len(), 2);
+    }
 
     #[test]
     fn extracts_dom_directives() {

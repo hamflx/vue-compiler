@@ -106,6 +106,7 @@ enum Command {
     VerifyCli,
     VerifyIncremental,
     VerifyParallel,
+    VerifyAstCache,
     Bench {
         #[arg(long, default_value_t = 10)]
         iterations: usize,
@@ -167,6 +168,7 @@ fn main() -> Result<()> {
         Command::VerifyCli => verify_cli()?,
         Command::VerifyIncremental => verify_incremental()?,
         Command::VerifyParallel => verify_parallel()?,
+        Command::VerifyAstCache => verify_ast_cache()?,
         Command::Bench {
             iterations,
             out_dir,
@@ -875,6 +877,40 @@ fn verify_parallel() -> Result<compat::JsonReport> {
             .with_items(items)
             .with_violations(violations)
             .with_note("builds the vuec CLI and verifies compile-batch runs independent inputs concurrently while preserving deterministic input-order JSON results"),
+    )
+}
+
+fn verify_ast_cache() -> Result<compat::JsonReport> {
+    let mut violations = Vec::new();
+    let mut items = Vec::new();
+
+    let status = match run_ast_cache_smoke_suite() {
+        Ok(output) => {
+            items.push(compat::ReportItem::new(
+                "vue3-dom-ast-cache",
+                compat::ReportStatus::Pass,
+                output,
+                Some(PathBuf::from("crates/vuec_vue3_dom")),
+            ));
+            compat::ReportStatus::Pass
+        }
+        Err(err) => {
+            violations.push(format!("Vue3 DOM AST cache smoke failed: {err:#}"));
+            items.push(compat::ReportItem::new(
+                "vue3-dom-ast-cache",
+                compat::ReportStatus::Fail,
+                format!("{err:#}"),
+                Some(PathBuf::from("crates/vuec_vue3_dom")),
+            ));
+            compat::ReportStatus::Fail
+        }
+    };
+
+    Ok(
+        compat::JsonReport::new("verify_ast_cache", status)
+            .with_items(items)
+            .with_violations(violations)
+            .with_note("verifies the Vue3 DOM compiler AST cache reuses parse/DOM-normalize results for unchanged inputs, invalidates changed same-file inputs, and keeps compile output stable"),
     )
 }
 
@@ -1849,6 +1885,93 @@ fn incremental_source(value: &str) -> String {
     format!(
         r#"<template><div>{{{{ {value} }}}}</div></template><script setup>const {value} = "{value}"</script>"#
     )
+}
+
+fn run_ast_cache_smoke_suite() -> Result<String> {
+    let mut compiler = vuec_vue3_dom::DomCompiler::new();
+    let mut options = vuec_vue3_dom::DomCompilerOptions::default();
+    options.core.prefix_identifiers = true;
+    options.core.mode = "module".into();
+
+    let source_one = dom_cache_template_source("Cached.vue", "<div>{{ one }}</div>");
+    let first = compiler.compile(source_one.clone(), options.clone());
+    let second = compiler.compile(source_one, options.clone());
+    if first.code != second.code || first.ast_summary != second.ast_summary {
+        anyhow::bail!("Vue3 DOM AST cache changed output for unchanged input");
+    }
+    let hit_stats = compiler.cache_stats();
+    if hit_stats.ast_hits != 1
+        || hit_stats.ast_misses != 1
+        || hit_stats.ast_invalidations != 0
+        || compiler.ast_cache_len() != 1
+    {
+        anyhow::bail!(
+            "Vue3 DOM AST cache did not record one hit and one miss for unchanged input: {:?}, cache_len={}",
+            hit_stats,
+            compiler.ast_cache_len()
+        );
+    }
+
+    let source_two = dom_cache_template_source("Cached.vue", "<section>{{ two }}</section>");
+    let changed = compiler.compile(source_two, options.clone());
+    if !changed.code.contains("section") || changed.code == first.code {
+        anyhow::bail!("Vue3 DOM AST cache did not return changed same-file output");
+    }
+    let invalidated_stats = compiler.cache_stats();
+    if invalidated_stats.ast_hits != 1
+        || invalidated_stats.ast_misses != 2
+        || invalidated_stats.ast_invalidations != 1
+        || compiler.ast_cache_len() != 1
+    {
+        anyhow::bail!(
+            "Vue3 DOM AST cache did not invalidate changed same-file input: {:?}, cache_len={}",
+            invalidated_stats,
+            compiler.ast_cache_len()
+        );
+    }
+
+    let mut without_comments = options.clone();
+    without_comments.core.comments = false;
+    let source_with_comment =
+        dom_cache_template_source("OptionCached.vue", "<div><!--x-->{{ one }}</div>");
+    let with_comments = compiler.compile(source_with_comment.clone(), options);
+    let without_comments = compiler.compile(source_with_comment, without_comments);
+    if with_comments.ast_summary == without_comments.ast_summary {
+        anyhow::bail!("Vue3 DOM AST cache did not separate parse options");
+    }
+    let option_stats = compiler.cache_stats();
+    if option_stats.ast_hits != 1
+        || option_stats.ast_misses != 4
+        || option_stats.ast_invalidations != 1
+        || compiler.ast_cache_len() != 3
+    {
+        anyhow::bail!(
+            "Vue3 DOM AST cache option-key stats mismatch: {:?}, cache_len={}",
+            option_stats,
+            compiler.ast_cache_len()
+        );
+    }
+
+    Ok(json!({
+        "status": "pass",
+        "checks": [
+            "same-file-same-source-hit",
+            "same-file-changed-source-invalidates",
+            "parse-options-separate-cache-entry"
+        ],
+        "stats": option_stats,
+        "cacheEntries": compiler.ast_cache_len(),
+    })
+    .to_string())
+}
+
+fn dom_cache_template_source(filename: &str, source: &str) -> vuec_vue3_core::TemplateSource {
+    vuec_vue3_core::TemplateSource {
+        filename: filename.into(),
+        source: source.into(),
+        file_id: vuec_source::FileId(0),
+        base_offset: 0,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

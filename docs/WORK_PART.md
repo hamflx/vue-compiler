@@ -123,6 +123,7 @@
 - [x] M19 SFC descriptor-cache / incremental invalidation slice, adding `SfcCompiler` descriptor cache stats and `cargo xtask verify-incremental` coverage for unchanged-input reuse and changed-input invalidation.
 - [x] M19 benchmark memory-peak / regression-evidence slice, adding best-effort `peakRssBytes` benchmark reporting and validating current compatibility summary with `cargo xtask summarize-compat --locked`.
 - [x] M19 parallel compilation slice, adding `vuec compile-batch` with deterministic input-order JSON results and `cargo xtask verify-parallel` coverage for Vue 2 template, Vue 3 template, Vue 3 SFC, and Vue 3 SSR batch targets.
+- [x] M19 Vue3 DOM AST-cache slice, adding `vuec_vue3_dom::DomCompiler` parse/DOM-normalize AST caching with hit/miss/invalidation stats and `cargo xtask verify-ast-cache`.
 
 ## Current Performance / Incremental Slice
 
@@ -132,8 +133,10 @@
 - Added an in-memory `vuec_sfc::SfcCompiler` descriptor cache keyed by filename, source hash, and parse mode. `cargo xtask verify-incremental` verifies same-file/same-source descriptor reuse, same-file changed-source invalidation, and Vue 2.7 parse-mode cache reuse.
 - `cargo xtask bench` now records best-effort `peakRssBytes` per Rust CLI and official JS compiler child process using `sysinfo` process sampling. The field is nullable for very short-lived processes or unsupported sampling windows, but the current Windows benchmark run records non-null RSS values for representative cases.
 - Added `vuec compile-batch`, which compiles independent inputs concurrently with a bounded worker count and returns stable input-order JSON results. The new `cargo xtask verify-parallel` gate builds the real CLI and verifies Vue 2 template, Vue 3 template, Vue 3 SFC, and Vue 3 SSR batch targets.
-- Verification this round: `cargo fmt --all -- --check`, `cargo check -p vuec_cli -p xtask`, `cargo test -p vuec_cli`, `cargo test -p xtask`, `cargo xtask verify-parallel`, and `git diff --check`.
-- Remaining M19 work: arena/string/AST cache optimization.
+- Added `vuec_vue3_dom::DomCompiler`, which caches the parsed and DOM-normalized `Vue3Ast` for unchanged template inputs, invalidates changed same-file sources, and separates parse-option cache entries. Transform/codegen still runs on a cloned AST per compile, so cached AST state is not polluted by later transforms.
+- Verification this round: `cargo fmt --all -- --check`, `cargo check -p vuec_vue3_dom -p vuec_sfc -p xtask`, `cargo test -p vuec_vue3_dom --lib`, `cargo test -p xtask`, `cargo xtask verify-ast-cache`, `cargo xtask run-conformance --suite vue3-dom` (`133/133`), `cargo xtask run-output-contract --version-line vue3 --package @vue/compiler-dom` (`5/5`), `cargo xtask bench --iterations 1 --skip-official-js`, and `git diff --check`.
+- Broader `cargo xtask summarize-compat --locked` was attempted during this slice, but the current workspace artifacts fail on `vue2_7::vue/compiler-sfc` conformance (`73/144`, with failures concentrated in existing Vue2.7 SFC compileScript/cssVars/stylePluginScoped areas). That suite is outside this Vue3 DOM AST-cache impact area; the focused Vue3 DOM official conformance and output contract above are the validation evidence for this slice.
+- Remaining M19 work: arena allocation optimization and string interning.
 
 ## Current Vue 2.7 SFC compileStyle Slice
 

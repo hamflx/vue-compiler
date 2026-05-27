@@ -1,5 +1,11 @@
 # Memory
 
+- Current round: completed the M19 Vue3 DOM AST-cache slice.
+- Added `vuec_vue3_dom::DomCompiler`, an incremental DOM compiler facade that caches parsed and DOM-normalized `Vue3Ast` values by filename, source hash, source identity, base offset, and parse/DOM-normalization options. The cache returns a cloned AST per compile before transform/codegen, so AST mutations from transform/codegen do not leak back into cached state.
+- Added `DomAstCacheStats` and `cargo xtask verify-ast-cache`, which verifies unchanged-input hits, changed same-file invalidation, and separate parse-option cache entries through public Rust APIs. This does not change AST/HIR/MIR structures, public projection rules, lowering rules, or target-split MIR semantics.
+- Verification: `cargo fmt --all -- --check`, `cargo check -p vuec_vue3_dom -p vuec_sfc -p xtask`, `cargo test -p vuec_vue3_dom --lib`, `cargo test -p xtask`, `cargo xtask verify-ast-cache`, `cargo xtask run-conformance --suite vue3-dom` (`133/133`), `cargo xtask run-output-contract --version-line vue3 --package @vue/compiler-dom` (`5/5`), `cargo xtask bench --iterations 1 --skip-official-js`, and `git diff --check`.
+- Broader `cargo xtask summarize-compat --locked` currently fails because the `vue2_7::vue/compiler-sfc` conformance artifact reports `73/144` passing tests, concentrated in existing Vue2.7 SFC compileScript/cssVars/stylePluginScoped areas. This was not used as AST-cache validation evidence; focused Vue3 DOM conformance/output-contract passed for this slice.
+
 - Current round: completed the M19 parallel compilation slice.
 - Added `vuec compile-batch`, which accepts multiple inputs for Vue 2 template, Vue 3 template, Vue 3 SFC, or Vue 3 SSR compilation, runs independent files through a bounded worker pool, and preserves deterministic input-order JSON results. Each worker uses the existing compiler crates directly; no compiler semantics were moved into `xtask/src/compat.rs`, and AST/HIR/MIR structures were not changed.
 - Added `cargo xtask verify-parallel`, which builds the real `vuec` binary and verifies batch compilation for Vue 2 template, Vue 3 template, Vue 3 SFC, and Vue 3 SSR targets.
