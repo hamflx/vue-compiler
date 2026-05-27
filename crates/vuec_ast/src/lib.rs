@@ -1,32 +1,53 @@
+//! Canonical AST, HIR, and target-split MIR data structures.
+//!
+//! This crate is the structural authority for compiler documents. Internal
+//! trees use [`AstDocument`] arenas with stable [`NodeId`] handles, public
+//! projection is explicit, and MIR is split by output target instead of using a
+//! single generic runtime-call IR.
+
+#![deny(missing_docs)]
 #![forbid(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use vuec_source::{FileId, Span};
 
+/// Stable arena node identifier.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct NodeId(pub u32);
 
+/// A single arena node in an [`AstDocument`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Node<K> {
+    /// Stable id equal to the node's arena index.
     pub id: NodeId,
+    /// Dialect-specific node payload.
     pub kind: K,
+    /// Source, generated, or missing span metadata.
     pub span: NodeSpan,
+    /// Parent node id, absent only for the document root.
     pub parent: Option<NodeId>,
+    /// Child node ids in source/tree order.
     pub children: Vec<NodeId>,
+    /// Position inside the parent's child list.
     pub index_in_parent: u32,
 }
 
+/// Arena-backed compiler document.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AstDocument<K> {
+    /// Required root node id.
     pub root: NodeId,
+    /// Contiguous node arena.
     pub nodes: Vec<Node<K>>,
 }
 
+/// Estimates a node capacity hint for a Vue template using default delimiters.
 pub fn template_node_capacity_hint(source: &str) -> usize {
     template_node_capacity_hint_with_interpolation(source, "{{")
 }
 
+/// Estimates a node capacity hint for a Vue template with custom interpolation.
 pub fn template_node_capacity_hint_with_interpolation(
     source: &str,
     interpolation_open: &str,
@@ -86,6 +107,7 @@ fn template_open_bracket_starts_node(bytes: &[u8], index: usize) -> bool {
 }
 
 impl<K> AstDocument<K> {
+    /// Creates a document with a root node.
     pub fn new<S>(root_kind: K, span: S) -> Self
     where
         S: Into<NodeSpan>,
@@ -93,6 +115,7 @@ impl<K> AstDocument<K> {
         Self::with_capacity(root_kind, span, 1)
     }
 
+    /// Creates a document with at least `node_capacity` node slots reserved.
     pub fn with_capacity<S>(root_kind: K, span: S, node_capacity: usize) -> Self
     where
         S: Into<NodeSpan>,
@@ -106,6 +129,7 @@ impl<K> AstDocument<K> {
         document
     }
 
+    /// Pushes a detached node into the arena.
     pub fn push<S>(&mut self, kind: K, span: S) -> NodeId
     where
         S: Into<NodeSpan>,
@@ -122,6 +146,7 @@ impl<K> AstDocument<K> {
         id
     }
 
+    /// Pushes a node and attaches it as the last child of `parent`.
     pub fn push_child<S>(&mut self, parent: NodeId, kind: K, span: S) -> NodeId
     where
         S: Into<NodeSpan>,
@@ -131,6 +156,7 @@ impl<K> AstDocument<K> {
         child
     }
 
+    /// Attaches an existing node as the last child of `parent`.
     pub fn attach_child(&mut self, parent: NodeId, child: NodeId) {
         if parent == child {
             return;
@@ -156,6 +182,7 @@ impl<K> AstDocument<K> {
         }
     }
 
+    /// Replaces the full child list of `parent`.
     pub fn replace_children(&mut self, parent: NodeId, children: Vec<NodeId>) {
         if self.node(parent).is_none() {
             return;
@@ -188,6 +215,7 @@ impl<K> AstDocument<K> {
         self.refresh_child_indexes(parent);
     }
 
+    /// Sets the document root node.
     pub fn set_root(&mut self, id: NodeId) {
         self.root = id;
         if let Some(root_node) = self.node_mut(id) {
@@ -196,38 +224,47 @@ impl<K> AstDocument<K> {
         }
     }
 
+    /// Returns a node by id.
     pub fn node(&self, id: NodeId) -> Option<&Node<K>> {
         self.nodes.get(id.0 as usize)
     }
 
+    /// Returns a mutable node by id.
     pub fn node_mut(&mut self, id: NodeId) -> Option<&mut Node<K>> {
         self.nodes.get_mut(id.0 as usize)
     }
 
+    /// Returns the number of nodes in the arena.
     pub fn len(&self) -> usize {
         self.nodes.len()
     }
 
+    /// Returns the current node arena capacity.
     pub fn node_capacity(&self) -> usize {
         self.nodes.capacity()
     }
 
+    /// Reserves additional node slots.
     pub fn reserve_nodes(&mut self, additional: usize) {
         self.nodes.reserve(additional);
     }
 
+    /// Returns whether the arena has no nodes.
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
     }
 
+    /// Returns the root node.
     pub fn root_node(&self) -> Option<&Node<K>> {
         self.node(self.root)
     }
 
+    /// Returns the mutable root node.
     pub fn root_node_mut(&mut self) -> Option<&mut Node<K>> {
         self.node_mut(self.root)
     }
 
+    /// Validates parent, child, root, and node-id invariants.
     pub fn validate_tree(&self) -> Result<(), AstInvariantError> {
         let root_index = self.root.0 as usize;
         if root_index >= self.nodes.len() {
@@ -279,6 +316,7 @@ impl<K> AstDocument<K> {
 }
 
 impl NodeSpan {
+    /// Returns the source span if one is available.
     pub fn source(&self) -> Option<Span> {
         match self {
             NodeSpan::Source(span) => Some(*span),
@@ -287,6 +325,7 @@ impl NodeSpan {
         }
     }
 
+    /// Returns a mutable source span if one is available.
     pub fn source_mut(&mut self) -> Option<&mut Span> {
         match self {
             NodeSpan::Source(span) => Some(span),
@@ -313,107 +352,154 @@ impl From<Option<Span>> for NodeSpan {
     }
 }
 
+/// JavaScript side-store id types used by AST/HIR/MIR nodes.
 pub mod ids {
     use serde::{Deserialize, Serialize};
 
+    /// Identifier for a registered JavaScript expression.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
     pub struct JsExprId(pub u32);
 
+    /// Identifier for a registered JavaScript statement.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
     pub struct JsStmtId(pub u32);
 
+    /// Identifier for a registered JavaScript pattern.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
     pub struct JsPatternId(pub u32);
 
+    /// Identifier for a registered JavaScript program.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
     pub struct JsProgramId(pub u32);
 }
 
+/// Re-exported JavaScript side-store ids.
 pub use ids::{JsExprId, JsPatternId, JsProgramId, JsStmtId};
 
+/// Reason a node span was generated rather than parsed directly from source.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GeneratedReason {
+    /// Span was introduced while recovering from parse errors.
     ParseRecovery,
+    /// Span was introduced during AST-to-HIR or HIR-to-MIR lowering.
     Lowering,
+    /// Span was introduced by code generation metadata.
     Codegen,
 }
 
+/// Reason source span metadata is missing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MissingSpanReason {
+    /// Source was unavailable because of parse recovery.
     ParseRecovery,
+    /// Source was unavailable at a lowering boundary.
     LoweringGap,
+    /// Node was synthetic and has no source origin.
     Synthetic,
 }
 
+/// Span metadata carried by every arena node.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NodeSpan {
+    /// Node was parsed directly from this source span.
     Source(Span),
+    /// Node was generated, optionally from an original source span.
     Generated {
+        /// Optional source origin for generated content.
         origin: Option<Span>,
+        /// Reason the span was generated.
         reason: GeneratedReason,
     },
+    /// Node intentionally has no source span.
     Missing {
+        /// Reason the span is missing.
         reason: MissingSpanReason,
     },
 }
 
+/// Tree invariant validation failure.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AstInvariantError {
+    /// The root id does not reference an arena node.
     MissingRoot {
+        /// Invalid root id.
         root: NodeId,
     },
+    /// A node id does not match its arena index.
     MismatchedNodeId {
+        /// Expected id for this arena position.
         expected: NodeId,
+        /// Actual id stored in the node.
         actual: NodeId,
     },
+    /// The root has parent or index metadata.
     InvalidRootMetadata {
+        /// Root node with invalid metadata.
         root: NodeId,
     },
+    /// A non-root node has no parent.
     DetachedNode {
+        /// Detached node id.
         node: NodeId,
     },
+    /// A child reference does not point to an arena node.
     MissingChild {
+        /// Parent containing the child reference.
         parent: NodeId,
+        /// Missing child id.
         child: NodeId,
     },
+    /// Child parent/index metadata does not match its parent list position.
     InvalidChildMetadata {
+        /// Parent containing the child reference.
         parent: NodeId,
+        /// Child with mismatched metadata.
         child: NodeId,
+        /// Expected index inside the parent child list.
         expected_index: u32,
     },
 }
 
 impl NodeSpan {
+    /// Creates generated span metadata.
     pub fn generated(origin: Option<Span>, reason: GeneratedReason) -> Self {
         Self::Generated { origin, reason }
     }
 
+    /// Creates missing span metadata.
     pub fn missing(reason: MissingSpanReason) -> Self {
         Self::Missing { reason }
     }
 }
 
+/// Mapping edges recorded during AST to HIR and HIR to MIR lowering.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoweringMap {
+    /// Recorded AST node to HIR node edges.
     pub ast_to_hir: Vec<(NodeId, NodeId)>,
+    /// Recorded HIR node to MIR node edges.
     pub hir_to_mir: Vec<(NodeId, NodeId)>,
 }
 
 impl LoweringMap {
+    /// Records an AST to HIR lowering edge.
     pub fn record_ast_to_hir(&mut self, ast: NodeId, hir: NodeId) {
         self.ast_to_hir.push((ast, hir));
     }
 
+    /// Records a HIR to MIR lowering edge.
     pub fn record_hir_to_mir(&mut self, hir: NodeId, mir: NodeId) {
         self.hir_to_mir.push((hir, mir));
     }
 
+    /// Returns HIR nodes lowered from an AST node.
     pub fn hir_for_ast(&self, ast: NodeId) -> impl Iterator<Item = NodeId> + '_ {
         self.ast_to_hir
             .iter()
             .filter_map(move |(from, to)| (*from == ast).then_some(*to))
     }
 
+    /// Returns MIR nodes lowered from a HIR node.
     pub fn mir_for_hir(&self, hir: NodeId) -> impl Iterator<Item = NodeId> + '_ {
         self.hir_to_mir
             .iter()
@@ -421,16 +507,23 @@ impl LoweringMap {
     }
 }
 
+/// Produces the deterministic public projection of an internal structure.
 pub trait PublicProjection {
+    /// Public projection result type.
     type Output;
 
+    /// Projects the internal structure to its public representation.
     fn project_public(&self) -> Self::Output;
 }
 
+/// Nested public tree node produced from an arena document.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublicNode<K> {
+    /// Projected node payload.
     pub kind: K,
+    /// Projected node span.
     pub span: NodeSpan,
+    /// Projected child nodes.
     pub children: Vec<PublicNode<K>>,
 }
 
@@ -438,6 +531,7 @@ impl<K> AstDocument<K>
 where
     K: Clone,
 {
+    /// Projects the arena tree into a nested public tree.
     pub fn project_nested(&self) -> Option<PublicNode<K>> {
         self.project_nested_node(self.root)
     }
@@ -468,159 +562,290 @@ where
     }
 }
 
+/// Runtime helper symbols referenced by transforms and target MIR.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum RuntimeHelper {
+    /// Vue 2 `_c` / create element helper.
     Vue2CreateElement,
+    /// Vue 2 create text VNode helper.
     Vue2CreateTextVNode,
+    /// Vue 2 stringify helper.
     Vue2ToString,
+    /// Vue 2 render-list helper.
     Vue2RenderList,
+    /// Vue 2 filter resolver helper.
     Vue2ResolveFilter,
+    /// Vue 3 directive resolver helper.
     Vue3ResolveDirective,
+    /// Vue 3 `withDirectives` helper.
     Vue3WithDirectives,
+    /// Vue 3 block tracking helper.
     Vue3SetBlockTracking,
+    /// Vue 3 `openBlock` helper.
     Vue3OpenBlock,
+    /// Vue 3 element VNode helper.
     Vue3CreateElementVNode,
+    /// Vue 3 element block helper.
     Vue3CreateElementBlock,
+    /// Vue 3 comment VNode helper.
     Vue3CreateCommentVNode,
+    /// Vue 3 text VNode helper.
     Vue3CreateTextVNode,
+    /// Vue 3 Fragment symbol helper.
     Vue3Fragment,
+    /// Vue 3 display string helper.
     Vue3ToDisplayString,
+    /// Vue 3 render-list helper.
     Vue3RenderList,
+    /// Vue 3 render-slot helper.
     Vue3RenderSlot,
+    /// Vue 3 class normalizer helper.
     Vue3NormalizeClass,
+    /// Vue 3 props normalizer helper.
     Vue3NormalizeProps,
+    /// Vue 3 style normalizer helper.
     Vue3NormalizeStyle,
+    /// Vue 3 reactive props guard helper.
     Vue3GuardReactiveProps,
+    /// Vue 3 merge props helper.
     Vue3MergeProps,
+    /// Vue 3 component resolver helper.
     Vue3ResolveComponent,
+    /// Vue 3 dynamic component resolver helper.
     Vue3ResolveDynamicComponent,
+    /// Vue 3 base transition helper.
     Vue3BaseTransition,
+    /// Vue 3 Transition component helper.
     Vue3Transition,
+    /// Vue 3 TransitionGroup component helper.
     Vue3TransitionGroup,
+    /// Vue 3 Teleport component helper.
     Vue3Teleport,
+    /// Vue 3 Suspense component helper.
     Vue3Suspense,
+    /// Vue 3 KeepAlive component helper.
     Vue3KeepAlive,
+    /// Vue 3 `withCtx` helper.
     Vue3WithCtx,
+    /// Vue 3 create block helper.
     Vue3CreateBlock,
+    /// Vue 3 create VNode helper.
     Vue3CreateVNode,
+    /// Vue 3 dynamic slots helper.
     Vue3CreateSlots,
+    /// Vue 3 static VNode helper.
     Vue3CreateStaticVNode,
+    /// Vue 3 memo comparison helper.
     Vue3IsMemoSame,
+    /// Vue 3 memo helper.
     Vue3WithMemo,
+    /// Vue 3 object listeners helper.
     Vue3ToHandlers,
+    /// Vue 3 camelize helper.
     Vue3Camelize,
+    /// Vue 3 capitalize helper.
     Vue3Capitalize,
+    /// Vue 3 event handler key helper.
     Vue3ToHandlerKey,
+    /// Vue 3 scope id push helper.
     Vue3PushScopeId,
+    /// Vue 3 scope id pop helper.
     Vue3PopScopeId,
+    /// Vue 3 unref helper.
     Vue3Unref,
+    /// Vue 3 ref test helper.
     Vue3IsRef,
+    /// Vue 3 radio model runtime directive helper.
     Vue3VModelRadio,
+    /// Vue 3 checkbox model runtime directive helper.
     Vue3VModelCheckbox,
+    /// Vue 3 text model runtime directive helper.
     Vue3VModelText,
+    /// Vue 3 select model runtime directive helper.
     Vue3VModelSelect,
+    /// Vue 3 dynamic model runtime directive helper.
     Vue3VModelDynamic,
+    /// Vue 3 event modifier helper.
     Vue3WithModifiers,
+    /// Vue 3 key modifier helper.
     Vue3WithKeys,
+    /// Vue 3 show runtime directive helper.
     Vue3VShow,
+    /// Vue 3 SSR interpolation helper.
     Vue3SsrInterpolate,
+    /// Vue 3 SSR VNode render helper.
     Vue3SsrRenderVNode,
+    /// Vue 3 SSR component render helper.
     Vue3SsrRenderComponent,
+    /// Vue 3 SSR slot render helper.
     Vue3SsrRenderSlot,
+    /// Vue 3 SSR inner slot render helper.
     Vue3SsrRenderSlotInner,
+    /// Vue 3 SSR class render helper.
     Vue3SsrRenderClass,
+    /// Vue 3 SSR style render helper.
     Vue3SsrRenderStyle,
+    /// Vue 3 SSR attrs render helper.
     Vue3SsrRenderAttrs,
+    /// Vue 3 SSR attr render helper.
     Vue3SsrRenderAttr,
+    /// Vue 3 SSR dynamic attr render helper.
     Vue3SsrRenderDynamicAttr,
+    /// Vue 3 SSR render-list helper.
     Vue3SsrRenderList,
+    /// Vue 3 SSR boolean attr inclusion helper.
     Vue3SsrIncludeBooleanAttr,
+    /// Vue 3 SSR loose equality helper.
     Vue3SsrLooseEqual,
+    /// Vue 3 SSR loose containment helper.
     Vue3SsrLooseContain,
+    /// Vue 3 SSR dynamic model render helper.
     Vue3SsrRenderDynamicModel,
+    /// Vue 3 SSR dynamic model props helper.
     Vue3SsrGetDynamicModelProps,
+    /// Vue 3 SSR teleport render helper.
     Vue3SsrRenderTeleport,
+    /// Vue 3 SSR suspense render helper.
     Vue3SsrRenderSuspense,
+    /// Vue 3 SSR directive props helper.
     Vue3SsrGetDirectiveProps,
 }
 
+/// Concrete syntax tree document.
 pub type Cst = AstDocument<CstNodeKind>;
 
+/// CST node kinds preserving raw source structure.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CstNodeKind {
+    /// Top-level CST document node.
     Document,
+    /// SFC block such as `template`, `script`, or `style`.
     SfcBlock(CstSfcBlock),
+    /// Raw element node.
     Element(CstElement),
+    /// Raw attribute node.
     Attribute(CstAttribute),
-    Text { raw: String },
-    Comment { raw: String },
-    Cdata { raw: String },
-    Doctype { raw: String },
+    /// Raw text node.
+    Text {
+        /// Raw text content.
+        raw: String,
+    },
+    /// Raw comment node.
+    Comment {
+        /// Raw comment content.
+        raw: String,
+    },
+    /// Raw CDATA node.
+    Cdata {
+        /// Raw CDATA content.
+        raw: String,
+    },
+    /// Raw doctype node.
+    Doctype {
+        /// Raw doctype content.
+        raw: String,
+    },
+    /// Raw interpolation node.
     Interpolation(CstInterpolation),
 }
 
+/// CST SFC block payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CstSfcBlock {
+    /// Block type, for example `template`, `script`, or `style`.
     pub block_type: String,
+    /// Raw tag text.
     pub raw_tag: String,
 }
 
+/// CST element payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CstElement {
+    /// Raw tag name.
     pub raw_tag: String,
+    /// Whether the element used self-closing syntax.
     pub self_closing: bool,
+    /// Source span of the opening tag.
     pub open_span: Span,
+    /// Source span of the closing tag, if present.
     pub close_span: Option<Span>,
 }
 
+/// CST attribute payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CstAttribute {
+    /// Raw attribute name.
     pub raw_name: String,
+    /// Raw attribute value, if present.
     pub raw_value: Option<String>,
+    /// Quote kind used by the attribute value.
     pub quote: Option<QuoteKind>,
+    /// Source span of the attribute name.
     pub name_span: Span,
+    /// Source span of the attribute value.
     pub value_span: Option<Span>,
 }
 
+/// Attribute quote kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum QuoteKind {
+    /// Double-quoted attribute value.
     Double,
+    /// Single-quoted attribute value.
     Single,
+    /// Unquoted attribute value.
     Unquoted,
 }
 
+/// CST interpolation payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CstInterpolation {
+    /// Raw interpolation text.
     pub raw: String,
+    /// Source span of the opening delimiter.
     pub open_span: Span,
+    /// Source span of the inner expression.
     pub inner_span: Span,
+    /// Source span of the closing delimiter.
     pub close_span: Span,
 }
 
+/// Compatibility template attribute used by parser-facing constructors.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TemplateAttribute {
+    /// Attribute or directive name.
     pub name: String,
+    /// Attribute or directive value.
     pub value: Option<String>,
 }
 
+/// Vue 2 AST node kinds.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Vue2AstKind {
+    /// Vue 2 root node.
     Root(Vue2Root),
+    /// Vue 2 element node.
     Element(Vue2Element),
+    /// Plain text node.
     Text(Vue2Text),
+    /// Interpolated text node.
     ExpressionText(Vue2ExpressionText),
+    /// Comment node.
     Comment(Vue2Comment),
 }
 
 impl Vue2AstKind {
+    /// Creates a Vue 2 root node kind.
     pub fn root() -> Self {
         Self::Root(Vue2Root::default())
     }
 
+    /// Creates a Vue 2 element node kind.
     pub fn element(tag: impl Into<String>) -> Self {
         Self::Element(Vue2Element::new(tag))
     }
 
+    /// Creates a Vue 2 text node kind.
     pub fn text(value: impl Into<String>) -> Self {
         Self::Text(Vue2Text {
             value: value.into(),
@@ -628,6 +853,7 @@ impl Vue2AstKind {
         })
     }
 
+    /// Creates a Vue 2 expression text node kind.
     pub fn expression_text(raw: impl Into<String>) -> Self {
         Self::ExpressionText(Vue2ExpressionText {
             raw: raw.into(),
@@ -636,6 +862,7 @@ impl Vue2AstKind {
         })
     }
 
+    /// Creates a Vue 2 comment node kind.
     pub fn comment(value: impl Into<String>) -> Self {
         Self::Comment(Vue2Comment {
             value: value.into(),
@@ -643,60 +870,108 @@ impl Vue2AstKind {
     }
 }
 
+/// Vue 2 root node payload.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue2Root {
+    /// Source file id for this template, when known.
     pub source_id: Option<FileId>,
 }
 
+/// Vue 2 element node payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue2Element {
+    /// Element tag name.
     pub tag: String,
+    /// Attributes in source order.
     pub attrs_list: Vec<Vue2Attribute>,
+    /// Attribute name to value map.
     pub attrs_map: BTreeMap<String, String>,
+    /// Raw attribute map preserving attribute payloads.
     pub raw_attrs_map: BTreeMap<String, Vue2Attribute>,
+    /// Static attributes used for data object generation.
     pub attrs: Vec<Vue2Attribute>,
+    /// DOM props used for data object generation.
     pub props: Vec<Vue2Attribute>,
+    /// Dynamic attribute bindings.
     pub dynamic_attrs: Vec<Vue2Attribute>,
+    /// Custom and built-in directive records.
     pub directives: Vec<Vue2Directive>,
+    /// Component or DOM event handlers.
     pub events: BTreeMap<String, Vec<Vue2EventHandler>>,
+    /// Native event handlers on component nodes.
     pub native_events: BTreeMap<String, Vec<Vue2EventHandler>>,
+    /// Element namespace.
     pub ns: Option<String>,
+    /// Whether the element has no generated data object.
     pub plain: bool,
+    /// Whether the element is forbidden by parser rules.
     pub forbidden: bool,
+    /// Whether `v-pre` applies.
     pub pre: bool,
+    /// Whether `v-once` applies.
     pub once: bool,
+    /// Whether the element has dynamic bindings.
     pub has_bindings: bool,
+    /// `v-if` expression id.
     pub if_exp: Option<JsExprId>,
+    /// `v-else-if` expression id.
     pub elseif: Option<JsExprId>,
+    /// Whether this is a `v-else` branch.
     pub else_branch: bool,
+    /// Linked Vue 2 if conditions.
     pub if_conditions: Vec<Vue2IfCondition>,
+    /// `v-for` source expression id.
     pub for_exp: Option<JsExprId>,
+    /// `v-for` value alias pattern id.
     pub alias: Option<JsPatternId>,
+    /// `v-for` first iterator alias pattern id.
     pub iterator1: Option<JsPatternId>,
+    /// `v-for` second iterator alias pattern id.
     pub iterator2: Option<JsPatternId>,
+    /// Key binding expression id.
     pub key: Option<JsExprId>,
+    /// Template ref name.
     pub ref_name: Option<String>,
+    /// Whether the ref appears inside `v-for`.
     pub ref_in_for: bool,
+    /// Legacy slot name.
     pub slot_name: Option<String>,
+    /// Slot target name.
     pub slot_target: Option<String>,
+    /// Whether the slot target is dynamic.
     pub slot_target_dynamic: bool,
+    /// Slot scope pattern id.
     pub slot_scope: Option<JsPatternId>,
+    /// Scoped slot entries keyed by slot name.
     pub scoped_slots: BTreeMap<String, NodeId>,
+    /// Component expression or tag target.
     pub component: Option<String>,
+    /// Whether the element carries inline-template content.
     pub inline_template: bool,
+    /// Static class attribute value.
     pub static_class: Option<String>,
+    /// Dynamic class binding expression id.
     pub class_binding: Option<JsExprId>,
+    /// Static style attribute value.
     pub static_style: Option<String>,
+    /// Dynamic style binding expression id.
     pub style_binding: Option<JsExprId>,
+    /// Component model metadata.
     pub model: Option<Vue2ComponentModel>,
+    /// Data object wrapping metadata.
     pub wrap_data: Option<Vue2DataWrap>,
+    /// Listener wrapping expression.
     pub wrap_listeners: Option<String>,
+    /// Whether the node is static.
     pub static_node: bool,
+    /// Whether the node is a static root.
     pub static_root: bool,
+    /// Whether a static node appears inside `v-for`.
     pub static_in_for: bool,
 }
 
 impl Vue2Element {
+    /// Creates a Vue 2 element payload with default metadata.
     pub fn new(tag: impl Into<String>) -> Self {
         Self {
             tag: tag.into(),
@@ -747,102 +1022,158 @@ impl Vue2Element {
     }
 }
 
+/// Vue 2 text node payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue2Text {
+    /// Text content.
     pub value: String,
+    /// Whether the text is static.
     pub static_node: bool,
 }
 
+/// Vue 2 interpolation text payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue2ExpressionText {
+    /// Raw interpolation source.
     pub raw: String,
+    /// Parsed expression id.
     pub expr: Option<JsExprId>,
+    /// Filter-aware expression payload.
     pub filter_expr: Option<Vue2FilterExpr>,
 }
 
+/// Vue 2 comment payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue2Comment {
+    /// Comment text.
     pub value: String,
 }
 
+/// Vue 2 attribute payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue2Attribute {
+    /// Attribute name.
     pub name: String,
+    /// Attribute value.
     pub value: String,
+    /// Whether the name or value is dynamic.
     pub dynamic: bool,
 }
 
+/// Vue 2 directive payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue2Directive {
+    /// Normalized directive name.
     pub name: String,
+    /// Raw directive name.
     pub raw_name: String,
+    /// Optional directive expression id.
     pub value: Option<JsExprId>,
+    /// Optional directive argument.
     pub arg: Option<String>,
+    /// Whether the argument is dynamic.
     pub is_dynamic_arg: bool,
+    /// Directive modifiers.
     pub modifiers: BTreeMap<String, bool>,
 }
 
+/// Vue 2 event handler payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue2EventHandler {
+    /// Handler statement id.
     pub value: JsStmtId,
+    /// Event modifiers.
     pub modifiers: BTreeMap<String, bool>,
+    /// Whether the event name is dynamic.
     pub dynamic: bool,
 }
 
+/// Vue 2 `v-if` branch condition.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue2IfCondition {
+    /// Optional branch condition expression id.
     pub exp: Option<JsExprId>,
+    /// Branch root node id.
     pub block: NodeId,
 }
 
+/// Vue 2 component `v-model` metadata.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue2ComponentModel {
+    /// Model value expression id.
     pub value: JsExprId,
+    /// Model assignment callback statement id.
     pub callback: JsStmtId,
+    /// Raw expression string.
     pub expression: String,
 }
 
+/// Vue 2 data-object wrapping metadata.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Vue2DataWrap {
+    /// Wrapper produced for object `v-bind`.
     Bind {
+        /// Bound object expression id.
         value: JsExprId,
+        /// Whether `.prop` is present.
         prop: bool,
+        /// Whether `.sync` is present.
         sync: bool,
     },
 }
 
+/// Vue 2 filter expression payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue2FilterExpr {
+    /// Raw filter expression.
     pub raw: String,
+    /// Base expression before filters are applied.
     pub base: JsExprId,
+    /// Ordered filter calls.
     pub filters: Vec<Vue2FilterCall>,
 }
 
+/// Vue 2 filter call payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue2FilterCall {
+    /// Filter name.
     pub name: String,
+    /// Filter argument expression ids.
     pub args: Vec<JsExprId>,
 }
 
+/// Vue 3 AST node kinds.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Vue3AstKind {
+    /// Vue 3 root node.
     Root(Vue3Root),
+    /// Vue 3 element node.
     Element(Vue3Element),
+    /// Plain text node.
     Text(Vue3Text),
+    /// Comment node.
     Comment(Vue3Comment),
+    /// Interpolation node.
     Interpolation(Vue3Interpolation),
+    /// Compound expression node.
     CompoundExpression(Vue3CompoundExpression),
+    /// `v-if` node.
     If(Vue3If),
+    /// `v-if` branch node.
     IfBranch(Vue3IfBranch),
+    /// `v-for` node.
     For(Vue3For),
+    /// Text-call wrapper node.
     TextCall(Vue3TextCall),
 }
 
 impl Vue3AstKind {
+    /// Creates a Vue 3 root node kind.
     pub fn root() -> Self {
         Self::Root(Vue3Root::default())
     }
 
+    /// Creates a Vue 3 element node kind from compatibility attributes.
     pub fn element(
         tag: impl Into<String>,
         attributes: Vec<TemplateAttribute>,
@@ -862,24 +1193,28 @@ impl Vue3AstKind {
         })
     }
 
+    /// Creates a Vue 3 text node kind.
     pub fn text(value: impl Into<String>) -> Self {
         Self::Text(Vue3Text {
             value: value.into(),
         })
     }
 
+    /// Creates a Vue 3 interpolation node kind.
     pub fn interpolation(expression: impl Into<String>) -> Self {
         Self::Interpolation(Vue3Interpolation {
             expression: Vue3Expression::Raw(expression.into()),
         })
     }
 
+    /// Creates a Vue 3 comment node kind.
     pub fn comment(value: impl Into<String>) -> Self {
         Self::Comment(Vue3Comment {
             value: value.into(),
         })
     }
 
+    /// Creates a compatibility directive node on a synthetic template element.
     pub fn directive(name: impl Into<String>, expression: Option<String>) -> Self {
         let name = name.into();
         Self::Element(Vue3Element {
@@ -905,16 +1240,26 @@ impl Vue3AstKind {
     }
 }
 
+/// Vue 3 root node payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3Root {
+    /// Source file id for this template, when known.
     pub source_id: Option<FileId>,
+    /// Runtime helpers requested by transforms.
     pub helpers: BTreeSet<RuntimeHelper>,
+    /// Component asset names referenced by the template.
     pub components: BTreeSet<String>,
+    /// Directive asset names referenced by the template.
     pub directives: BTreeSet<String>,
+    /// Import items generated from template assets.
     pub imports: Vec<Vue3ImportItem>,
+    /// Hoisted node references.
     pub hoists: Vec<Vue3HoistSlot>,
+    /// Temporary variable count.
     pub temps: u32,
+    /// Cached expression count.
     pub cached: u32,
+    /// Root codegen node reference.
     pub codegen_node: Option<Vue3CodegenRef>,
 }
 
@@ -934,18 +1279,27 @@ impl Default for Vue3Root {
     }
 }
 
+/// Vue 3 element node payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3Element {
+    /// Element tag source.
     pub tag: String,
+    /// Element category.
     pub tag_type: Vue3ElementType,
+    /// Element namespace.
     pub ns: HtmlNamespace,
+    /// Element props and directives.
     pub props: Vec<Vue3Prop>,
+    /// Whether the element is self closing.
     pub self_closing: bool,
+    /// DOM codegen node reference.
     pub codegen_node: Option<Vue3CodegenRef>,
+    /// SSR codegen node reference.
     pub ssr_codegen_node: Option<Vue3SsrCodegenRef>,
 }
 
 impl Vue3Element {
+    /// Projects props back to compatibility template attributes.
     pub fn template_attributes(&self) -> Vec<TemplateAttribute> {
         self.props
             .iter()
@@ -963,24 +1317,36 @@ impl Vue3Element {
     }
 }
 
+/// HTML namespace used by Vue 3 AST/HIR nodes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HtmlNamespace {
+    /// HTML namespace.
     Html,
+    /// SVG namespace.
     Svg,
+    /// MathML namespace.
     MathMl,
 }
 
+/// Vue 3 element category.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Vue3ElementType {
+    /// Native element.
     Element,
+    /// Component element.
     Component,
+    /// Slot outlet element.
     SlotOutlet,
+    /// Template container element.
     Template,
 }
 
+/// Vue 3 element prop.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Vue3Prop {
+    /// Static attribute.
     Attribute(Vue3Attribute),
+    /// Directive attribute.
     Directive(Vue3Directive),
 }
 
@@ -1003,37 +1369,59 @@ impl From<TemplateAttribute> for Vue3Prop {
     }
 }
 
+/// Vue 3 static attribute payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3Attribute {
+    /// Attribute name.
     pub name: String,
+    /// Attribute value.
     pub value: Option<String>,
+    /// Full attribute span.
     pub span: Option<Span>,
+    /// Attribute name span.
     pub name_span: Option<Span>,
+    /// Attribute value span.
     pub value_span: Option<Span>,
+    /// Attribute quote kind.
     pub quote: Option<QuoteKind>,
 }
 
+/// Vue 3 directive payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3Directive {
+    /// Normalized directive name.
     pub name: String,
+    /// Raw directive name.
     pub raw_name: String,
+    /// Directive argument expression.
     pub arg: Option<Vue3Expression>,
+    /// Directive value expression.
     pub exp: Option<Vue3Expression>,
+    /// Directive modifiers.
     pub modifiers: Vec<String>,
+    /// Whether the directive argument is dynamic.
     pub is_dynamic_arg: bool,
+    /// Full directive span.
     pub span: Option<Span>,
+    /// Directive argument span.
     pub arg_span: Option<Span>,
+    /// Directive expression span.
     pub exp_span: Option<Span>,
+    /// Directive modifier spans.
     pub modifier_spans: Vec<NodeSpan>,
 }
 
+/// Vue 3 expression reference.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Vue3Expression {
+    /// Raw source expression.
     Raw(String),
+    /// Registered JavaScript expression id.
     JsExpr(JsExprId),
 }
 
 impl Vue3Expression {
+    /// Returns a displayable source string for compatibility projections.
     pub fn source_string(&self) -> String {
         match self {
             Self::Raw(value) => value.clone(),
@@ -1042,656 +1430,1094 @@ impl Vue3Expression {
     }
 }
 
+/// Vue 3 text node payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3Text {
+    /// Text content.
     pub value: String,
 }
 
+/// Vue 3 comment node payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3Comment {
+    /// Comment text.
     pub value: String,
 }
 
+/// Vue 3 interpolation node payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3Interpolation {
+    /// Interpolation expression.
     pub expression: Vue3Expression,
 }
 
+/// Vue 3 compound expression payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3CompoundExpression {
+    /// Ordered expression fragments.
     pub children: Vec<Vue3Expression>,
 }
 
+/// Vue 3 `v-if` node payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3If {
+    /// Branch node ids.
     pub branches: Vec<NodeId>,
 }
 
+/// Vue 3 `v-if` branch payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3IfBranch {
+    /// Optional branch condition.
     pub condition: Option<Vue3Expression>,
+    /// Whether the branch originated from a template node.
     pub is_template_if: bool,
+    /// Optional user-provided key expression.
     pub user_key: Option<Vue3Expression>,
 }
 
+/// Vue 3 `v-for` node payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3For {
+    /// Iterable source expression.
     pub source: Vue3Expression,
+    /// Value alias pattern id.
     pub value_alias: Option<JsPatternId>,
+    /// Key alias pattern id.
     pub key_alias: Option<JsPatternId>,
+    /// Object index alias pattern id.
     pub object_index_alias: Option<JsPatternId>,
 }
 
+/// Vue 3 text-call wrapper payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3TextCall {
+    /// Content node id.
     pub content: NodeId,
+    /// Optional generated codegen node reference.
     pub codegen_node: Option<Vue3CodegenRef>,
 }
 
+/// Vue 3 hoist slot payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3HoistSlot {
+    /// Hoisted node id.
     pub node: NodeId,
 }
 
+/// Vue 3 generated import item.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3ImportItem {
+    /// Local import binding name.
     pub name: String,
+    /// Import source path.
     pub path: String,
 }
 
+/// Reference to a DOM codegen node.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3CodegenRef {
+    /// Referenced node id.
     pub node: NodeId,
 }
 
+/// Reference to an SSR codegen node.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3SsrCodegenRef {
+    /// Referenced node id.
     pub node: NodeId,
 }
 
+/// Compatibility alias for Vue 2 AST node kinds.
 pub type Vue2NodeKind = Vue2AstKind;
+/// Compatibility alias for Vue 3 AST node kinds.
 pub type Vue3NodeKind = Vue3AstKind;
 
+/// Returns the default Vue 2 root kind.
 pub fn vue2_root_kind() -> Vue2NodeKind {
     Vue2AstKind::root()
 }
 
+/// Returns the default Vue 3 root kind.
 pub fn vue3_root_kind() -> Vue3NodeKind {
     Vue3AstKind::root()
 }
 
+/// HIR node kinds shared before target-specific MIR lowering.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HirNodeKind {
+    /// HIR root node.
     Root(HirRoot),
+    /// Native element node.
     Element(HirElement),
+    /// Component node.
     Component(HirComponent),
+    /// Text node.
     Text(HirText),
+    /// Interpolation node.
     Interpolation(HirInterpolation),
+    /// Conditional node.
     If(HirIf),
+    /// Loop node.
     For(HirFor),
+    /// Slot outlet node.
     SlotOutlet(HirSlotOutlet),
+    /// Slot declaration node.
     SlotDecl(HirSlotDecl),
+    /// Fragment node.
     Fragment(HirFragment),
 }
 
+/// HIR root payload.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HirRoot;
 
+/// HIR native element payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HirElement {
+    /// Element tag.
     pub tag: HirTag,
+    /// Element namespace.
     pub namespace: HtmlNamespace,
+    /// Lowered props.
     pub props: HirProps,
+    /// Directive uses not lowered to built-in props.
     pub directives: Vec<HirDirectiveUse>,
+    /// Static analysis result.
     pub constness: HirConstness,
 }
 
+/// HIR component payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HirComponent {
+    /// Component name.
     pub name: String,
+    /// Lowered props.
     pub props: HirProps,
 }
 
+/// HIR text payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HirText {
+    /// Text content.
     pub value: String,
 }
 
+/// HIR interpolation payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HirInterpolation {
+    /// Interpolation expression.
     pub expression: HirExpr,
 }
 
+/// HIR conditional payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HirIf {
+    /// Conditional branches.
     pub branches: Vec<HirIfBranch>,
 }
 
+/// HIR slot outlet payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HirSlotOutlet {
+    /// Optional slot name.
     pub name: Option<String>,
+    /// Slot outlet props.
     pub props: HirProps,
 }
 
+/// HIR slot declaration payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HirSlotDecl {
+    /// Slot name.
     pub name: String,
+    /// Optional slot parameter pattern id.
     pub params: Option<JsPatternId>,
 }
 
+/// HIR fragment payload.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HirFragment;
 
+/// HIR tag representation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HirTag {
+    /// Native tag name.
     Native(String),
+    /// Dynamic tag expression id.
     Dynamic(JsExprId),
 }
 
+/// HIR prop collection.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HirProps {
+    /// Ordered prop segments preserving lowering order.
     pub segments: Vec<HirPropSegment>,
+    /// Static attributes.
     pub static_attrs: Vec<HirStaticAttr>,
+    /// Dynamic bindings.
     pub dynamic_bindings: Vec<HirBinding>,
+    /// Event handlers.
     pub events: Vec<HirEvent>,
+    /// Object `v-bind` entries.
     pub object_bindings: Vec<HirObjectBinding>,
+    /// Object `v-on` entries.
     pub object_listeners: Vec<HirObjectListeners>,
+    /// Key expression id.
     pub key: Option<JsExprId>,
+    /// Ref metadata.
     pub ref_name: Option<HirRef>,
 }
 
+/// Ordered HIR prop segment.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HirPropSegment {
+    /// Static attribute segment.
     StaticAttr(HirStaticAttr),
+    /// Dynamic binding segment.
     DynamicBinding(HirBinding),
+    /// Event segment.
     Event(HirEvent),
+    /// Object binding segment.
     ObjectBinding(HirObjectBinding),
+    /// Object listeners segment.
     ObjectListeners(HirObjectListeners),
 }
 
+/// HIR static attribute.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HirStaticAttr {
+    /// Attribute name.
     pub name: String,
+    /// Attribute value.
     pub value: String,
 }
 
+/// HIR dynamic binding.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HirBinding {
+    /// Static binding name.
     pub name: String,
+    /// Dynamic name expression id.
     pub dynamic_name: Option<JsExprId>,
+    /// Bound value expression id.
     pub value: JsExprId,
+    /// Whether the argument is dynamic.
     pub dynamic_arg: bool,
+    /// Binding modifiers.
     pub modifiers: Vec<String>,
 }
 
+/// HIR event handler.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HirEvent {
+    /// Static event name.
     pub name: String,
+    /// Dynamic event name expression id.
     pub dynamic_name: Option<JsExprId>,
+    /// Handler statement id.
     pub handler: JsStmtId,
+    /// Whether the argument is dynamic.
     pub dynamic_arg: bool,
+    /// Event modifiers.
     pub modifiers: Vec<String>,
 }
 
+/// HIR object binding payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HirObjectBinding {
+    /// Object expression id.
     pub value: JsExprId,
 }
 
+/// HIR object listeners payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HirObjectListeners {
+    /// Object expression id.
     pub value: JsExprId,
 }
 
+/// HIR ref metadata.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HirRef {
+    /// Ref name.
     pub name: String,
+    /// Whether the ref is inside a loop.
     pub in_for: bool,
 }
 
+/// HIR directive use that remains after built-in lowering.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HirDirectiveUse {
+    /// Directive name.
     pub name: String,
+    /// Static argument.
     pub argument: Option<String>,
+    /// Dynamic argument expression id.
     pub dynamic_argument: Option<JsExprId>,
+    /// Optional directive expression id.
     pub expression: Option<JsExprId>,
+    /// Directive modifiers.
     pub modifiers: Vec<String>,
 }
 
+/// HIR constness classification.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HirConstness {
+    /// Runtime-dynamic content.
     Dynamic,
+    /// Static but not fully constant content.
     Static,
+    /// Fully constant content.
     Constant,
 }
 
+/// HIR expression payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HirExpr {
+    /// Registered JavaScript expression id.
     Js(JsExprId),
+    /// Vue 2 filter expression.
     Vue2Filter(Vue2FilterExpr),
 }
 
+/// HIR conditional branch.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HirIfBranch {
+    /// Optional branch condition expression id.
     pub condition: Option<JsExprId>,
+    /// Branch body node id.
     pub body: NodeId,
 }
 
+/// HIR loop payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HirFor {
+    /// Iterable source expression id.
     pub source: JsExprId,
+    /// Value alias pattern id.
     pub value_alias: JsPatternId,
+    /// Key alias pattern id.
     pub key_alias: Option<JsPatternId>,
+    /// Index alias pattern id.
     pub index_alias: Option<JsPatternId>,
+    /// Loop body node id.
     pub body: NodeId,
 }
 
+/// Vue 2 target-specific MIR node kinds.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Vue2MirKind {
+    /// Vue 2 MIR root node.
     Root,
+    /// Create-element call.
     CreateElement(Vue2CreateElement),
+    /// Text call.
     Text(Vue2TextCall),
+    /// Comment node.
     Comment {
+        /// Comment text.
         value: String,
     },
+    /// Conditional branch.
     If {
+        /// Branch condition expression id.
         condition: JsExprId,
     },
+    /// Render-list loop.
     For {
+        /// Iterable source expression id.
         source: JsExprId,
+        /// Value alias pattern id.
         alias: JsPatternId,
     },
+    /// Static render function reference.
     RenderStatic {
+        /// Static render function index.
         index: u32,
     },
+    /// Scoped slot function.
     ScopedSlot {
+        /// Slot name.
         name: String,
+        /// Slot parameter pattern id.
         params: Option<JsPatternId>,
     },
+    /// Filter call.
     FilterCall {
+        /// Filter name.
         name: String,
     },
+    /// Runtime directive record.
     Directive {
+        /// Directive name.
         name: String,
     },
 }
 
+/// Vue 2 create-element MIR payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue2CreateElement {
+    /// Element tag expression.
     pub tag: MirExpr,
+    /// Children normalization mode.
     pub normalization_type: Vue2NormalizationType,
 }
 
+/// Vue 2 text-call MIR payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue2TextCall {
+    /// Text value expression.
     pub value: MirExpr,
 }
 
+/// Vue 2 children normalization mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Vue2NormalizationType {
+    /// No children normalization.
     None,
+    /// Simple one-level normalization.
     Simple,
+    /// Always normalize children deeply.
     Always,
 }
 
+/// Vue 3 DOM target-specific MIR node kinds.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Vue3DomMirKind {
+    /// DOM MIR root node.
     Root(Vue3DomRoot),
+    /// VNode call node.
     VNodeCall(Vue3VNodeCall),
-    TextCall { value: MirExpr },
-    Interpolation { expression: JsExprId },
-    If { condition: Option<JsExprId> },
+    /// Text VNode call node.
+    TextCall {
+        /// Text value expression.
+        value: MirExpr,
+    },
+    /// Interpolation node.
+    Interpolation {
+        /// Interpolation expression id.
+        expression: JsExprId,
+    },
+    /// Conditional node.
+    If {
+        /// Optional condition expression id.
+        condition: Option<JsExprId>,
+    },
+    /// Render-list loop node.
     For(Vue3ForMir),
+    /// Render-slot call node.
     RenderSlot(Vue3RenderSlot),
+    /// Directive wrapper node.
     WithDirectives,
-    Cache { index: u32 },
-    Memo { expression: JsExprId, index: u32 },
-    Hoisted { index: u32 },
+    /// Cache expression node.
+    Cache {
+        /// Cache index.
+        index: u32,
+    },
+    /// Memo expression node.
+    Memo {
+        /// Memo expression id.
+        expression: JsExprId,
+        /// Cache index.
+        index: u32,
+    },
+    /// Hoisted expression node.
+    Hoisted {
+        /// Hoist index.
+        index: u32,
+    },
+    /// Fragment node.
     Fragment,
 }
 
+/// Vue 3 DOM MIR root payload.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3DomRoot {
+    /// Import items needed by generated DOM render code.
     pub imports: Vec<Vue3ImportItem>,
 }
 
+/// Vue 3 DOM `v-for` MIR payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3ForMir {
+    /// Iterable source expression id.
     pub source: JsExprId,
+    /// Value alias pattern id.
     pub value_alias: JsPatternId,
+    /// Key alias pattern id.
     pub key_alias: Option<JsPatternId>,
+    /// Index alias pattern id.
     pub index_alias: Option<JsPatternId>,
+    /// Optional key expression.
     pub key: Option<MirExpr>,
+    /// Optional memo metadata.
     pub memo: Option<Vue3ForMemo>,
 }
 
+/// Vue 3 DOM `v-memo` metadata for `v-for`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3ForMemo {
+    /// Memo expression id.
     pub expression: JsExprId,
+    /// Cache index.
     pub index: u32,
 }
 
+/// Vue 3 DOM VNode call payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3VNodeCall {
+    /// VNode tag.
     pub tag: Vue3DomTag,
+    /// VNode props.
     pub props: Vue3DomProps,
+    /// Optional `v-show` expression.
     pub v_show: Option<JsExprId>,
+    /// Runtime directives.
     pub directives: Vec<Vue3DomDirective>,
+    /// Model directives.
     pub models: Vec<Vue3DomModel>,
+    /// Content directive payload.
     pub content: Option<Vue3DomContent>,
+    /// VNode children.
     pub children: MirChildren,
+    /// Patch flags.
     pub patch_flag: Vue3PatchFlags,
+    /// Dynamic prop names.
     pub dynamic_props: Vec<String>,
+    /// Whether this call opens a block.
     pub is_block: bool,
+    /// Whether block tracking is disabled.
     pub disable_tracking: bool,
+    /// Whether this VNode targets a component.
     pub is_component: bool,
 }
 
+/// Vue 3 DOM VNode tag payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Vue3DomTag {
+    /// Native tag name.
     Native(String),
+    /// Resolved component asset name.
     ComponentAsset(String),
+    /// Dynamic component expression id.
     DynamicComponent(JsExprId),
+    /// Runtime helper symbol used as the tag.
     RuntimeHelper(RuntimeHelper),
 }
 
+/// Vue 3 DOM prop collection.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3DomProps {
+    /// Ordered prop segments preserving codegen order.
     pub segments: Vec<Vue3DomPropSegment>,
+    /// Static attributes.
     pub static_attrs: Vec<Vue3DomStaticAttr>,
+    /// Dynamic bindings.
     pub dynamic_bindings: Vec<Vue3DomBinding>,
+    /// Event handlers.
     pub events: Vec<Vue3DomEvent>,
+    /// Object `v-bind` entries.
     pub object_bindings: Vec<Vue3DomObjectBinding>,
+    /// Object `v-on` entries.
     pub object_listeners: Vec<Vue3DomObjectListeners>,
+    /// Prop normalization flags.
     pub normalize: Vue3DomPropsNormalize,
 }
 
+/// Ordered Vue 3 DOM prop segment.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Vue3DomPropSegment {
+    /// Static attribute segment.
     StaticAttr(Vue3DomStaticAttr),
+    /// Dynamic binding segment.
     DynamicBinding(Vue3DomBinding),
+    /// Content directive segment.
     Content(Vue3DomContent),
+    /// Model segment.
     Model(Vue3DomModel),
+    /// Event segment.
     Event(Vue3DomEvent),
+    /// Object binding segment.
     ObjectBinding(Vue3DomObjectBinding),
+    /// Object listeners segment.
     ObjectListeners(Vue3DomObjectListeners),
 }
 
+/// Vue 3 DOM static attribute.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3DomStaticAttr {
+    /// Attribute name.
     pub name: String,
+    /// Attribute value.
     pub value: String,
 }
 
+/// Vue 3 DOM dynamic binding.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3DomBinding {
+    /// Static binding name.
     pub name: String,
+    /// Dynamic binding name expression id.
     pub dynamic_name: Option<JsExprId>,
+    /// Bound value expression id.
     pub value: JsExprId,
+    /// Whether the argument is dynamic.
     pub dynamic_arg: bool,
+    /// Whether `.camel` is present.
     pub camel: bool,
+    /// Whether `.prop` is present.
     pub force_prop: bool,
+    /// Whether `.attr` is present.
     pub force_attr: bool,
 }
 
+/// Vue 3 DOM content directive payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Vue3DomContent {
-    Html { expression: Option<JsExprId> },
-    Text { expression: Option<JsExprId> },
+    /// `v-html` expression.
+    Html {
+        /// Optional raw HTML expression id.
+        expression: Option<JsExprId>,
+    },
+    /// `v-text` expression.
+    Text {
+        /// Optional text expression id.
+        expression: Option<JsExprId>,
+    },
 }
 
+/// Vue 3 DOM model directive payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3DomModel {
+    /// Model expression id.
     pub expression: JsExprId,
+    /// Runtime model kind.
     pub kind: Vue3DomModelKind,
+    /// Model modifiers.
     pub modifiers: Vec<String>,
 }
 
+/// Vue 3 DOM model runtime kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Vue3DomModelKind {
+    /// Text input model.
     Text,
+    /// Radio input model.
     Radio,
+    /// Checkbox input model.
     Checkbox,
+    /// Select model.
     Select,
+    /// Dynamic model.
     Dynamic,
 }
 
+/// Vue 3 DOM event handler payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3DomEvent {
+    /// Static event name.
     pub name: String,
+    /// Dynamic event name expression id.
     pub dynamic_name: Option<JsExprId>,
+    /// Handler statement id.
     pub handler: JsStmtId,
+    /// Whether the argument is dynamic.
     pub dynamic_arg: bool,
+    /// Runtime event modifiers.
     pub runtime_modifiers: Vec<String>,
+    /// Key modifiers.
     pub key_modifiers: Vec<String>,
+    /// Event option modifiers.
     pub option_modifiers: Vec<String>,
+    /// Rewritten click event target.
     pub click_event: Option<Vue3DomClickEvent>,
+    /// Optional handler cache metadata.
     pub cache: Option<Vue3DomEventCache>,
 }
 
+/// Vue 3 DOM rewritten click event target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Vue3DomClickEvent {
+    /// Context-menu event.
     ContextMenu,
+    /// Mouse-up event.
     MouseUp,
 }
 
+/// Vue 3 DOM event handler cache metadata.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3DomEventCache {
+    /// Cache index.
     pub index: u32,
 }
 
+/// Vue 3 DOM object binding payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3DomObjectBinding {
+    /// Object expression id.
     pub value: JsExprId,
 }
 
+/// Vue 3 DOM object listeners payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3DomObjectListeners {
+    /// Object expression id.
     pub value: JsExprId,
+    /// Whether listener key case must be preserved.
     pub preserve_case: bool,
 }
 
+/// Vue 3 DOM prop normalization flags.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3DomPropsNormalize {
+    /// Whether `normalizeProps` is needed.
     pub normalize_props: bool,
+    /// Whether `guardReactiveProps` is needed.
     pub guard_reactive_props: bool,
 }
 
+/// Vue 3 DOM runtime directive payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3DomDirective {
+    /// Directive name.
     pub name: String,
+    /// Static directive argument.
     pub argument: Option<String>,
+    /// Dynamic argument expression id.
     pub dynamic_argument: Option<JsExprId>,
+    /// Optional directive expression id.
     pub expression: Option<JsExprId>,
+    /// Directive modifiers.
     pub modifiers: Vec<String>,
 }
 
+/// Vue 3 DOM render-slot call payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3RenderSlot {
+    /// Slot name.
     pub name: Vue3DomSlotName,
+    /// Slot props.
     pub props: Vue3DomProps,
+    /// Fallback child node ids.
     pub fallback: Vec<NodeId>,
 }
 
+/// Vue 3 SSR slot render payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3SsrSlot {
+    /// Slot name.
     pub name: Vue3DomSlotName,
+    /// Slot props.
     pub props: Vue3DomProps,
+    /// Fallback child node ids.
     pub fallback: Vec<NodeId>,
 }
 
+/// Vue 3 SSR attrs render payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3SsrAttrs {
+    /// Props to render as SSR attrs.
     pub props: Vue3DomProps,
+    /// Optional `v-show` expression id.
     pub v_show: Option<JsExprId>,
+    /// Optional SSR model metadata.
     pub v_model: Option<Vue3SsrModel>,
 }
 
+/// Vue 3 SSR model payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3SsrModel {
+    /// Model expression id.
     pub expression: JsExprId,
+    /// SSR model kind.
     pub kind: Vue3SsrModelKind,
 }
 
+/// Vue 3 SSR model rendering kind.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Vue3SsrModelKind {
+    /// Input value binding.
     InputValue,
-    InputRadio { value: MirExpr },
-    InputCheckbox { value: MirExpr },
-    InputCheckboxTrueValue { true_value: MirExpr },
-    InputDynamicType { type_expr: JsExprId, value: MirExpr },
+    /// Radio input binding.
+    InputRadio {
+        /// Radio value expression.
+        value: MirExpr,
+    },
+    /// Checkbox input binding.
+    InputCheckbox {
+        /// Checkbox value expression.
+        value: MirExpr,
+    },
+    /// Checkbox true-value binding.
+    InputCheckboxTrueValue {
+        /// Checkbox true-value expression.
+        true_value: MirExpr,
+    },
+    /// Dynamic input type binding.
+    InputDynamicType {
+        /// Input type expression id.
+        type_expr: JsExprId,
+        /// Model value expression.
+        value: MirExpr,
+    },
+    /// Dynamic input props binding.
     InputDynamicProps,
+    /// Textarea binding.
     Textarea,
-    SelectOption { value: MirExpr },
+    /// Select option binding.
+    SelectOption {
+        /// Option value expression.
+        value: MirExpr,
+    },
 }
 
+/// Vue 3 SSR content directive payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Vue3SsrContent {
-    Html { expression: JsExprId },
-    Text { expression: JsExprId },
+    /// Raw HTML content expression.
+    Html {
+        /// Raw HTML expression id.
+        expression: JsExprId,
+    },
+    /// Text content expression.
+    Text {
+        /// Text expression id.
+        expression: JsExprId,
+    },
 }
 
+/// Vue 3 SSR component render payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3SsrComponent {
+    /// Component tag expression.
     pub tag: MirExpr,
+    /// Component props.
     pub props: Vue3DomProps,
 }
 
+/// Vue 3 SSR loop payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3SsrFor {
+    /// Iterable source expression id.
     pub source: JsExprId,
+    /// Value alias pattern id.
     pub value_alias: JsPatternId,
+    /// Key alias pattern id.
     pub key_alias: Option<JsPatternId>,
+    /// Index alias pattern id.
     pub index_alias: Option<JsPatternId>,
 }
 
+/// Vue 3 SSR teleport payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3SsrTeleport {
+    /// Teleport target expression.
     pub target: MirExpr,
+    /// Teleport disabled expression.
     pub disabled: MirExpr,
 }
 
+/// Vue 3 SSR suspense payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3SsrSuspense {
+    /// Suspense slots.
     pub slots: Vue3DomSlots,
 }
 
+/// Vue 3 SSR target-specific MIR node kinds.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Vue3SsrMirKind {
+    /// SSR MIR root node.
     Root(Vue3SsrRoot),
+    /// Pushes a static string into the SSR buffer.
     PushString(String),
+    /// Pushes an interpolated expression into the SSR buffer.
     PushInterpolated(MirExpr),
+    /// Renders content directive output.
     RenderContent(Vue3SsrContent),
+    /// Renders attributes.
     RenderAttrs(Vue3SsrAttrs),
+    /// Renders a component.
     RenderComponent(Vue3SsrComponent),
+    /// Renders a slot.
     RenderSlot(Vue3SsrSlot),
-    If { condition: Option<JsExprId> },
+    /// Conditional branch.
+    If {
+        /// Optional condition expression id.
+        condition: Option<JsExprId>,
+    },
+    /// Loop node.
     For(Vue3SsrFor),
+    /// Teleport node.
     Teleport(Vue3SsrTeleport),
+    /// Suspense node.
     Suspense(Vue3SsrSuspense),
 }
 
+/// Vue 3 SSR MIR root payload.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3SsrRoot {
+    /// Import items needed by generated SSR code.
     pub imports: Vec<Vue3ImportItem>,
 }
 
+/// Vapor target-specific MIR node kinds.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VaporMirKind {
+    /// Vapor MIR root node.
     Root,
+    /// Static template fragment.
     Template(String),
-    Effect { expression: JsExprId },
+    /// Reactive effect expression.
+    Effect {
+        /// Reactive effect expression id.
+        expression: JsExprId,
+    },
 }
 
+/// Target-independent MIR expression payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MirExpr {
+    /// String literal.
     String(String),
+    /// Boolean literal.
     Bool(bool),
+    /// Null literal.
     Null,
+    /// Registered JavaScript expression id.
     JsExpr(JsExprId),
+    /// Runtime helper reference.
     Helper(RuntimeHelper),
 }
 
+/// Target-independent MIR children payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MirChildren {
+    /// No children.
     None,
+    /// Text children.
     Text(String),
+    /// Child node ids.
     Nodes(Vec<NodeId>),
+    /// Slot children.
     Slots(Vue3DomSlots),
 }
 
+/// Vue 3 DOM slot collection.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3DomSlots {
+    /// Static slots.
     pub slots: Vec<Vue3DomSlot>,
+    /// Dynamic slot entries.
     pub dynamic_slots: Vec<Vue3DomDynamicSlot>,
+    /// Slot stability flag.
     pub flag: Vue3SlotFlag,
 }
 
+/// Vue 3 DOM static slot payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3DomSlot {
+    /// Slot name.
     pub name: String,
+    /// Optional slot parameter pattern id.
     pub params: Option<JsPatternId>,
+    /// Slot child node ids.
     pub children: Vec<NodeId>,
 }
 
+/// Vue 3 DOM dynamic slot payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Vue3DomDynamicSlot {
+    /// Plain dynamic slot.
     Slot(Vue3DomDynamicSlotObject),
+    /// Conditional dynamic slot.
     Conditional(Vue3DomConditionalSlot),
+    /// Loop-generated dynamic slot.
     For(Vue3DomForSlot),
 }
 
+/// Vue 3 DOM dynamic slot object.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3DomDynamicSlotObject {
+    /// Slot name.
     pub name: Vue3DomSlotName,
+    /// Optional slot parameter pattern id.
     pub params: Option<JsPatternId>,
+    /// Slot child node ids.
     pub children: Vec<NodeId>,
+    /// Optional branch key.
     pub key: Option<String>,
 }
 
+/// Vue 3 DOM conditional dynamic slot.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3DomConditionalSlot {
+    /// Optional condition expression id.
     pub condition: Option<JsExprId>,
+    /// Slot object for the truthy branch.
     pub slot: Vue3DomDynamicSlotObject,
+    /// Alternate dynamic slot branch.
     pub alternate: Option<Box<Vue3DomDynamicSlot>>,
 }
 
+/// Vue 3 DOM loop-generated dynamic slot.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3DomForSlot {
+    /// Iterable source expression id.
     pub source: JsExprId,
+    /// Value alias pattern id.
     pub value_alias: JsPatternId,
+    /// Key alias pattern id.
     pub key_alias: Option<JsPatternId>,
+    /// Index alias pattern id.
     pub index_alias: Option<JsPatternId>,
+    /// Slot object generated for each item.
     pub slot: Vue3DomDynamicSlotObject,
 }
 
+/// Vue 3 DOM slot name.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Vue3DomSlotName {
+    /// Static slot name.
     Static(String),
+    /// Dynamic slot name expression id.
     Dynamic(JsExprId),
 }
 
+/// Vue 3 slot stability flag.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Vue3SlotFlag {
+    /// Stable slots.
     Stable,
+    /// Dynamic slots.
     Dynamic,
+    /// Forwarded slots.
     Forwarded,
 }
 
+/// Vue 3 patch flag bitset.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3PatchFlags {
+    /// Numeric patch flag bits.
     pub bits: i32,
 }
 
+/// Target-discriminated MIR document wrapper.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Mir {
+    /// Vue 2 render-function MIR.
     Vue2(Vue2Mir),
+    /// Vue 3 DOM render-function MIR.
     Vue3Dom(Vue3DomMir),
+    /// Vue 3 SSR render-function MIR.
     Vue3Ssr(Vue3SsrMir),
+    /// Vapor MIR.
     Vapor(VaporMir),
 }
 
 impl Mir {
+    /// Returns the target represented by this MIR document.
     pub fn target(&self) -> MirTarget {
         match self {
             Self::Vue2(_) => MirTarget::Vue2,
@@ -1702,22 +2528,36 @@ impl Mir {
     }
 }
 
+/// MIR target discriminator.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MirTarget {
+    /// Vue 2 render-function target.
     Vue2,
+    /// Vue 3 DOM render-function target.
     Vue3Dom,
+    /// Vue 3 SSR render-function target.
     Vue3Ssr,
+    /// Vue Vapor target.
     Vapor,
 }
 
+/// Vue 2 AST document.
 pub type Vue2Ast = AstDocument<Vue2NodeKind>;
+/// Vue 3 AST document.
 pub type Vue3Ast = AstDocument<Vue3NodeKind>;
+/// Shared HIR document.
 pub type Hir = AstDocument<HirNodeKind>;
+/// Vue 2 target MIR document.
 pub type Vue2Mir = AstDocument<Vue2MirKind>;
+/// Vue 3 DOM target MIR document.
 pub type Vue3DomMir = AstDocument<Vue3DomMirKind>;
+/// Vue 3 SSR target MIR document.
 pub type Vue3SsrMir = AstDocument<Vue3SsrMirKind>;
+/// Vapor target MIR document.
 pub type VaporMir = AstDocument<VaporMirKind>;
+/// Compatibility alias for [`Hir`].
 pub type HIR = Hir;
+/// Compatibility alias for [`Mir`].
 pub type MIR = Mir;
 
 #[cfg(test)]
