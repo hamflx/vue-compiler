@@ -1,3 +1,10 @@
+//! Project automation for compatibility, release, benchmark, and verification gates.
+//!
+//! The binary hosts deterministic `cargo xtask ...` commands used by the
+//! development plan. It orchestrates official fixture sync, API/option/output
+//! contract checks, conformance reports, release documentation gates, and
+//! targeted verification helpers without owning compiler semantics.
+
 #![forbid(unsafe_code)]
 
 mod compat;
@@ -1270,6 +1277,10 @@ fn verify_public_api_docs() -> Result<compat::JsonReport> {
         "vuec_sfc",
         "vuec_napi",
         "vuec_wasm",
+        "vuec_node_bridge",
+        "vuec_runtime_tests",
+        "vuec_cli",
+        "xtask",
     ];
     let mut items = Vec::new();
     let mut violations = Vec::new();

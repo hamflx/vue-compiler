@@ -1,3 +1,10 @@
+//! JSON stdin/stdout bridge used by generated Node package aliases.
+//!
+//! This binary is an API/import adapter and test-runner support boundary. It
+//! hydrates JSON requests from generated JavaScript aliases, calls Rust compiler
+//! crates, and serializes public projection results back to Node without making
+//! the bridge itself the source of compiler semantics.
+
 #![forbid(unsafe_code)]
 
 use anyhow::{bail, Context, Result};

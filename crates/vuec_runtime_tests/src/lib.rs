@@ -1,3 +1,10 @@
+//! Runtime smoke tests for generated Vue compiler output.
+//!
+//! This crate compiles representative Vue 2 and Vue 3 templates, executes the
+//! generated render/SSR/hydration output against lock-provisioned official Vue
+//! runtimes through Node/jsdom, and returns deterministic smoke evidence.
+
+#![deny(missing_docs)]
 #![forbid(unsafe_code)]
 
 use std::path::{Path, PathBuf};
@@ -12,13 +19,18 @@ use vuec_vue3_dom::{apply_dom_parser_defaults, compile as compile_dom, DomCompil
 use vuec_vue3_ssr::{compile as compile_ssr, SsrCompileResult, SsrCompilerOptions};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Official Vue runtime version used by smoke execution.
 pub enum RuntimeVersion {
+    /// Vue 2.6 runtime.
     Vue2_6,
+    /// Vue 2.7 runtime.
     Vue2_7,
+    /// Vue 3 runtime.
     Vue3,
 }
 
 impl RuntimeVersion {
+    /// Returns the lock-provisioned npm root for this runtime version.
     pub fn npm_root(self) -> PathBuf {
         let version = match self {
             Self::Vue2_6 => "vue2_6",
@@ -35,22 +47,34 @@ impl RuntimeVersion {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Result of executing generated output against a Vue runtime.
 pub struct RuntimeSmokeResult {
+    /// Runtime smoke kind.
     pub kind: String,
+    /// Rendered or hydrated HTML.
     pub html: String,
+    /// Runtime warnings captured during execution.
     pub warnings: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Representative runtime smoke fixture.
 pub struct RuntimeSmokeFixture {
+    /// Fixture name.
     pub name: &'static str,
+    /// Template source.
     pub template: &'static str,
+    /// Expected Vue 2 DOM-rendered HTML.
     pub vue2_dom_html: &'static str,
+    /// Expected Vue 3 DOM-rendered HTML.
     pub vue3_dom_html: &'static str,
+    /// Expected Vue 3 SSR HTML.
     pub vue3_ssr_html: &'static str,
+    /// Expected Vue 3 hydrated DOM HTML.
     pub vue3_hydrated_html: &'static str,
 }
 
+/// Built-in runtime smoke fixtures.
 pub const RUNTIME_SMOKE_FIXTURES: &[RuntimeSmokeFixture] = &[RuntimeSmokeFixture {
     name: "basic-interpolation",
     template: "<div>{{ msg }}</div>",
@@ -60,21 +84,25 @@ pub const RUNTIME_SMOKE_FIXTURES: &[RuntimeSmokeFixture] = &[RuntimeSmokeFixture
     vue3_hydrated_html: r#"<div id="app"><div>hello</div></div>"#,
 }];
 
+/// Compiles a Vue 2 template and mounts it with the Vue 2.6 runtime.
 pub fn compile_vue2_and_mount(template: &str) -> Result<RuntimeSmokeResult> {
     let compiled = vuec_vue2::compile(template, Vue2CompileOptions::default());
     mount_vue2(&compiled, RuntimeVersion::Vue2_6)
 }
 
+/// Compiles a Vue 3 template and mounts it with the Vue 3 runtime.
 pub fn compile_vue3_and_mount(template: &str) -> Result<RuntimeSmokeResult> {
     let compiled = compile_vue3_dom_template(template);
     mount_vue3(&compiled, RuntimeVersion::Vue3)
 }
 
+/// Compiles a Vue 3 template for SSR and renders it with the Vue 3 runtime.
 pub fn compile_vue3_and_render_ssr(template: &str) -> Result<RuntimeSmokeResult> {
     let compiled = compile_vue3_ssr_template(template);
     render_vue3_ssr(&compiled, RuntimeVersion::Vue3)
 }
 
+/// Renders a Vue 3 template with the official Vue 3 SSR compiler/runtime.
 pub fn render_vue3_official_ssr(template: &str) -> Result<RuntimeSmokeResult> {
     run_node(RuntimeJob::Vue3OfficialSsr {
         root: RuntimeVersion::Vue3.npm_root(),
@@ -82,12 +110,14 @@ pub fn render_vue3_official_ssr(template: &str) -> Result<RuntimeSmokeResult> {
     })
 }
 
+/// Compiles a Vue 3 DOM/SSR pair and hydrates the SSR output.
 pub fn compile_vue3_and_hydrate(template: &str) -> Result<RuntimeSmokeResult> {
     let dom = compile_vue3_dom_template(template);
     let ssr = compile_vue3_ssr_template(template);
     hydrate_vue3(&dom, &ssr, RuntimeVersion::Vue3)
 }
 
+/// Mounts an already compiled Vue 2 render result.
 pub fn mount_vue2(
     compiled: &Vue2CompiledResult,
     version: RuntimeVersion,
@@ -99,6 +129,7 @@ pub fn mount_vue2(
     })
 }
 
+/// Mounts an already compiled Vue 3 DOM render result.
 pub fn mount_vue3(compiled: &CodegenResult, version: RuntimeVersion) -> Result<RuntimeSmokeResult> {
     run_node(RuntimeJob::Vue3Mount {
         root: version.npm_root(),
@@ -106,6 +137,7 @@ pub fn mount_vue3(compiled: &CodegenResult, version: RuntimeVersion) -> Result<R
     })
 }
 
+/// Renders an already compiled Vue 3 SSR result.
 pub fn render_vue3_ssr(
     compiled: &SsrCompileResult,
     version: RuntimeVersion,
@@ -116,6 +148,7 @@ pub fn render_vue3_ssr(
     })
 }
 
+/// Hydrates already compiled Vue 3 DOM and SSR results.
 pub fn hydrate_vue3(
     dom: &CodegenResult,
     ssr: &SsrCompileResult,

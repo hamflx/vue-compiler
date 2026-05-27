@@ -1,3 +1,9 @@
+//! Command line interface for the Rust Vue compiler.
+//!
+//! The binary exposes release-facing commands for Vue 2 template compilation,
+//! Vue 3 DOM/SSR template compilation, SFC parsing and compilation, batch
+//! compilation, conformance summaries, and benchmark execution.
+
 #![forbid(unsafe_code)]
 
 use std::ffi::OsString;
