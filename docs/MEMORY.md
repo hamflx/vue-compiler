@@ -1,8 +1,13 @@
 # Memory
 
+- Current round: completed the M19 parallel compilation slice.
+- Added `vuec compile-batch`, which accepts multiple inputs for Vue 2 template, Vue 3 template, Vue 3 SFC, or Vue 3 SSR compilation, runs independent files through a bounded worker pool, and preserves deterministic input-order JSON results. Each worker uses the existing compiler crates directly; no compiler semantics were moved into `xtask/src/compat.rs`, and AST/HIR/MIR structures were not changed.
+- Added `cargo xtask verify-parallel`, which builds the real `vuec` binary and verifies batch compilation for Vue 2 template, Vue 3 template, Vue 3 SFC, and Vue 3 SSR targets.
+- Verification: `cargo fmt --all -- --check`, `cargo check -p vuec_cli -p xtask`, `cargo test -p vuec_cli`, `cargo test -p xtask`, `cargo xtask verify-parallel`, and `git diff --check`.
+
 - Current round: completed the M19 benchmark memory-peak reporting and conformance-regression evidence slice.
 - `cargo xtask bench` now records a best-effort `peakRssBytes` field for Rust CLI and locked official JS benchmark child processes using `sysinfo` process sampling. The report keeps the field nullable for very short-lived processes or unsupported sampling windows, but the gate now captures real RSS values on this Windows environment for the representative benchmark cases.
-- Verified current M19 cache/reporting changes against compatibility summary with `cargo xtask summarize-compat --locked` (`7/7` pass). This is regression evidence for the completed M19 performance/incremental infrastructure; arena/string/AST-cache optimization and parallel compilation remain open.
+- Verified current M19 cache/reporting changes against compatibility summary with `cargo xtask summarize-compat --locked` (`7/7` pass). This is regression evidence for the completed M19 performance/incremental infrastructure; arena/string/AST-cache optimization remained open at that point.
 - Verification: `cargo fmt --all -- --check`, `cargo check -p xtask`, `cargo test -p xtask`, `cargo xtask bench --iterations 1`, `cargo xtask summarize-compat --locked`, and `git diff --check`.
 
 - Current round: completed the M19 SFC descriptor-cache / incremental invalidation slice.

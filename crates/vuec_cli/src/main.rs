@@ -4,6 +4,9 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
+use std::thread;
 use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
@@ -34,6 +37,7 @@ enum CliCommand {
     CompileTemplate(CompileTemplateArgs),
     CompileSfc(CompileSfcArgs),
     CompileSsr(CompileSsrArgs),
+    CompileBatch(CompileBatchArgs),
     ParseSfc(ParseSfcArgs),
     Conformance(ConformanceArgs),
     Bench(BenchArgs),
@@ -96,6 +100,18 @@ struct CompileSsrArgs {
 }
 
 #[derive(clap::Args, Debug)]
+struct CompileBatchArgs {
+    #[arg(value_name = "INPUT", required = true)]
+    inputs: Vec<PathBuf>,
+    #[arg(long, value_enum, default_value_t = CompileBatchTarget::Vue3Template)]
+    target: CompileBatchTarget,
+    #[arg(long, default_value_t = 0)]
+    jobs: usize,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args, Debug)]
 struct ParseSfcArgs {
     #[arg(value_name = "INPUT")]
     input: PathBuf,
@@ -152,6 +168,25 @@ enum BenchTarget {
     Vue3Ssr,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum CompileBatchTarget {
+    Vue2Template,
+    Vue3Template,
+    Vue3Sfc,
+    Vue3Ssr,
+}
+
+impl CompileBatchTarget {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Vue2Template => "vue2-template",
+            Self::Vue3Template => "vue3-template",
+            Self::Vue3Sfc => "vue3-sfc",
+            Self::Vue3Ssr => "vue3-ssr",
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct RunOutput {
     stdout: String,
@@ -167,6 +202,22 @@ struct CliDiagnostic {
     message: String,
     start: Option<usize>,
     end: Option<usize>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BatchCompileItem {
+    index: usize,
+    input: String,
+    status: &'static str,
+    result: Option<Value>,
+    error: Option<String>,
+}
+
+#[derive(Debug)]
+struct BatchCompiled {
+    item: BatchCompileItem,
+    text: String,
 }
 
 fn main() {
@@ -222,6 +273,7 @@ where
         CliCommand::CompileTemplate(args) => compile_template_command(args),
         CliCommand::CompileSfc(args) => compile_sfc_command(args),
         CliCommand::CompileSsr(args) => compile_ssr_command(args),
+        CliCommand::CompileBatch(args) => compile_batch_command(args),
         CliCommand::ParseSfc(args) => parse_sfc_command(args),
         CliCommand::Conformance(args) => conformance_command(args),
         CliCommand::Bench(args) => bench_command(args),
@@ -388,6 +440,31 @@ fn compile_ssr_command(args: CompileSsrArgs) -> Result<RunOutput> {
     )
 }
 
+fn compile_batch_command(args: CompileBatchArgs) -> Result<RunOutput> {
+    let worker_count = batch_worker_count(args.jobs, args.inputs.len());
+    let started = Instant::now();
+    let results = compile_batch_parallel(args.inputs, args.target, worker_count)?;
+    let has_errors = results.iter().any(|result| result.item.status == "error");
+    let payload = json!({
+        "kind": "compile-batch",
+        "target": args.target.as_str(),
+        "jobs": worker_count,
+        "inputs": results.len(),
+        "elapsedMicros": started.elapsed().as_micros(),
+        "results": results.iter().map(|result| result.item.clone()).collect::<Vec<_>>(),
+    });
+    let stdout = if args.json {
+        format!("{}\n", serde_json::to_string_pretty(&payload)?)
+    } else {
+        render_batch_text(&results)
+    };
+    Ok(RunOutput {
+        stdout,
+        stderr: String::new(),
+        code: if has_errors { 1 } else { 0 },
+    })
+}
+
 fn parse_sfc_command(args: ParseSfcArgs) -> Result<RunOutput> {
     let input = read_input(&args.input)?;
     let mut compiler = SfcCompiler::new();
@@ -480,6 +557,196 @@ fn bench_command(args: BenchArgs) -> Result<RunOutput> {
         stderr: String::new(),
         code: 0,
     })
+}
+
+fn compile_batch_parallel(
+    inputs: Vec<PathBuf>,
+    target: CompileBatchTarget,
+    worker_count: usize,
+) -> Result<Vec<BatchCompiled>> {
+    if inputs.is_empty() {
+        bail!("compile-batch requires at least one input");
+    }
+
+    let worker_count = worker_count.max(1).min(inputs.len());
+    let next = AtomicUsize::new(0);
+    let (sender, receiver) = mpsc::channel();
+
+    thread::scope(|scope| {
+        for _ in 0..worker_count {
+            let sender = sender.clone();
+            let inputs = &inputs;
+            let next = &next;
+            scope.spawn(move || loop {
+                let index = next.fetch_add(1, Ordering::Relaxed);
+                if index >= inputs.len() {
+                    break;
+                }
+                let path = &inputs[index];
+                let compiled = compile_batch_input(index, path, target)
+                    .unwrap_or_else(|err| batch_compile_error(index, path, err));
+                if sender.send((index, compiled)).is_err() {
+                    break;
+                }
+            });
+        }
+    });
+    drop(sender);
+
+    let mut results = (0..inputs.len()).map(|_| None).collect::<Vec<_>>();
+    for _ in 0..inputs.len() {
+        let (index, compiled) = receiver
+            .recv()
+            .context("compile-batch worker stopped before reporting all inputs")?;
+        results[index] = Some(compiled);
+    }
+    results
+        .into_iter()
+        .enumerate()
+        .map(|(index, result)| {
+            result.with_context(|| format!("compile-batch missing result for input {index}"))
+        })
+        .collect()
+}
+
+fn compile_batch_input(
+    index: usize,
+    path: &Path,
+    target: CompileBatchTarget,
+) -> Result<BatchCompiled> {
+    let input = read_input(path)?;
+    let (payload, text) = match target {
+        CompileBatchTarget::Vue2Template => {
+            let result = vuec_vue2::compile(&input.source, Vue2CompileOptions::default());
+            let diagnostics = vue2_diagnostics(&result);
+            let payload = json!({
+                "kind": "vue2-template",
+                "input": input.path,
+                "render": result.render,
+                "staticRenderFns": result.static_render_fns,
+                "errors": result.errors,
+                "tips": result.tips,
+                "diagnostics": diagnostics,
+            });
+            let text = format!(
+                "{}\n{}",
+                result.render,
+                render_static_fns_text(&result.static_render_fns)
+            );
+            (payload, text)
+        }
+        CompileBatchTarget::Vue3Template => {
+            let result = compile_vue3_template(&input, false, Vue3Mode::Function, false);
+            let diagnostics = diagnostics_from_core(&result.diagnostics);
+            let payload = json!({
+                "kind": "vue3-template",
+                "input": input.path,
+                "code": result.code,
+                "map": result.map,
+                "astSummary": result.ast_summary,
+                "preamble": result.preamble,
+                "diagnostics": diagnostics,
+            });
+            (payload, result.code)
+        }
+        CompileBatchTarget::Vue3Sfc => {
+            let mut compiler = SfcCompiler::new();
+            let descriptor = compiler.parse(input.path.clone(), &input.source);
+            let template = descriptor.template.as_ref().map(|_| {
+                compiler.compile_template(&descriptor, SfcTemplateCompileOptions::default())
+            });
+            let script = if descriptor.script.is_some() || descriptor.script_setup.is_some() {
+                Some(compiler.compile_script(&descriptor, SfcScriptCompileOptions::default()))
+            } else {
+                None
+            };
+            let styles = if descriptor.styles.is_empty() {
+                Vec::new()
+            } else {
+                vec![compiler.compile_style(&descriptor, SfcStyleCompileOptions::default())]
+            };
+            let diagnostics = sfc_diagnostics(template.as_ref(), script.as_ref(), &styles);
+            let text = render_sfc_text(template.as_ref(), script.as_ref(), &styles);
+            let payload = json!({
+                "kind": "vue3-sfc",
+                "input": input.path,
+                "descriptor": descriptor,
+                "template": template,
+                "script": script,
+                "styles": styles,
+                "diagnostics": diagnostics,
+            });
+            (payload, text)
+        }
+        CompileBatchTarget::Vue3Ssr => {
+            let result = compile_vue3_ssr_template(&input, false);
+            let diagnostics = diagnostics_from_core(&result.diagnostics);
+            let payload = json!({
+                "kind": "vue3-ssr-template",
+                "input": input.path,
+                "code": result.code,
+                "map": result.map,
+                "astSummary": result.ast_summary,
+                "preamble": result.preamble,
+                "diagnostics": diagnostics,
+            });
+            (payload, result.code)
+        }
+    };
+    Ok(BatchCompiled {
+        item: BatchCompileItem {
+            index,
+            input: input.path,
+            status: "ok",
+            result: Some(payload),
+            error: None,
+        },
+        text,
+    })
+}
+
+fn batch_compile_error(index: usize, path: &Path, err: anyhow::Error) -> BatchCompiled {
+    BatchCompiled {
+        item: BatchCompileItem {
+            index,
+            input: path.display().to_string(),
+            status: "error",
+            result: None,
+            error: Some(format!("{err:#}")),
+        },
+        text: String::new(),
+    }
+}
+
+fn batch_worker_count(requested_jobs: usize, input_count: usize) -> usize {
+    if input_count == 0 {
+        return 0;
+    }
+    let requested_jobs = if requested_jobs == 0 {
+        thread::available_parallelism()
+            .map(|count| count.get())
+            .unwrap_or(1)
+    } else {
+        requested_jobs
+    };
+    requested_jobs.max(1).min(input_count)
+}
+
+fn render_batch_text(results: &[BatchCompiled]) -> String {
+    let mut output = String::new();
+    for result in results {
+        output.push_str("== ");
+        output.push_str(&result.item.input);
+        output.push_str(" ==\n");
+        if let Some(error) = &result.item.error {
+            output.push_str("error: ");
+            output.push_str(error);
+            output.push('\n');
+        } else {
+            output.push_str(&ensure_trailing_newline(result.text.clone()));
+        }
+    }
+    output
 }
 
 fn compile_vue3_template(
@@ -838,6 +1105,80 @@ mod tests {
         let value: Value = serde_json::from_str(&output.stdout).expect("json");
         assert_eq!(value["kind"], json!("bench"));
         assert_eq!(value["iterations"], json!(1));
+    }
+
+    #[test]
+    fn compiles_batch_in_input_order() {
+        let first = write_temp("vuec-cli-batch-first.html", "<div>{{ first }}</div>");
+        let second = write_temp(
+            "vuec-cli-batch-second.html",
+            "<section>{{ second }}</section>",
+        );
+        let output = run_with_args([
+            "vuec",
+            "compile-batch",
+            "--target",
+            "vue3-template",
+            "--jobs",
+            "2",
+            "--json",
+            first.to_str().unwrap(),
+            second.to_str().unwrap(),
+        ])
+        .expect("run");
+        assert_eq!(output.code, 0);
+        let value: Value = serde_json::from_str(&output.stdout).expect("json");
+        assert_eq!(value["kind"], json!("compile-batch"));
+        assert_eq!(value["target"], json!("vue3-template"));
+        assert_eq!(value["jobs"], json!(2));
+        let results = value["results"].as_array().expect("results");
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0]["index"], json!(0));
+        assert_eq!(results[1]["index"], json!(1));
+        assert!(results[0]["input"]
+            .as_str()
+            .unwrap()
+            .contains("vuec-cli-batch-first.html"));
+        assert!(results[1]["input"]
+            .as_str()
+            .unwrap()
+            .contains("vuec-cli-batch-second.html"));
+        assert!(results[0]["result"]["code"]
+            .as_str()
+            .unwrap()
+            .contains("first"));
+        assert!(results[1]["result"]["code"]
+            .as_str()
+            .unwrap()
+            .contains("second"));
+    }
+
+    #[test]
+    fn compile_batch_reports_read_errors() {
+        let missing = std::env::temp_dir().join(format!(
+            "vuec-cli-batch-missing-{}-{}",
+            std::process::id(),
+            Instant::now().elapsed().as_nanos()
+        ));
+        let output = run_with_args([
+            "vuec",
+            "compile-batch",
+            "--target",
+            "vue3-template",
+            "--jobs",
+            "8",
+            "--json",
+            missing.to_str().unwrap(),
+        ])
+        .expect("run");
+        assert_eq!(output.code, 1);
+        let value: Value = serde_json::from_str(&output.stdout).expect("json");
+        assert_eq!(value["jobs"], json!(1));
+        assert_eq!(value["results"][0]["status"], json!("error"));
+        assert!(value["results"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("failed to read"));
     }
 
     #[test]

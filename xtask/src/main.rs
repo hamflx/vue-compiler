@@ -105,6 +105,7 @@ enum Command {
     VerifyWasmWasi,
     VerifyCli,
     VerifyIncremental,
+    VerifyParallel,
     Bench {
         #[arg(long, default_value_t = 10)]
         iterations: usize,
@@ -165,6 +166,7 @@ fn main() -> Result<()> {
         Command::VerifyWasmWasi => verify_wasm_wasi()?,
         Command::VerifyCli => verify_cli()?,
         Command::VerifyIncremental => verify_incremental()?,
+        Command::VerifyParallel => verify_parallel()?,
         Command::Bench {
             iterations,
             out_dir,
@@ -842,6 +844,40 @@ fn verify_incremental() -> Result<compat::JsonReport> {
     )
 }
 
+fn verify_parallel() -> Result<compat::JsonReport> {
+    let mut violations = Vec::new();
+    let mut items = Vec::new();
+
+    let status = match run_parallel_smoke_suite() {
+        Ok(output) => {
+            items.push(compat::ReportItem::new(
+                "vuec-cli-compile-batch",
+                compat::ReportStatus::Pass,
+                output,
+                Some(PathBuf::from("crates/vuec_cli")),
+            ));
+            compat::ReportStatus::Pass
+        }
+        Err(err) => {
+            violations.push(format!("parallel compile smoke failed: {err:#}"));
+            items.push(compat::ReportItem::new(
+                "vuec-cli-compile-batch",
+                compat::ReportStatus::Fail,
+                format!("{err:#}"),
+                Some(PathBuf::from("crates/vuec_cli")),
+            ));
+            compat::ReportStatus::Fail
+        }
+    };
+
+    Ok(
+        compat::JsonReport::new("verify_parallel", status)
+            .with_items(items)
+            .with_violations(violations)
+            .with_note("builds the vuec CLI and verifies compile-batch runs independent inputs concurrently while preserving deterministic input-order JSON results"),
+    )
+}
+
 fn bench(
     iterations: usize,
     out_dir: &Path,
@@ -1326,6 +1362,244 @@ fn run_cli_smoke_suite() -> Result<String> {
         "fixtureRoot": root,
     })
     .to_string())
+}
+
+fn run_parallel_smoke_suite() -> Result<String> {
+    build_cli_binary()?;
+
+    let root = PathBuf::from("target").join("parallel-smoke");
+    if root.exists() {
+        fs::remove_dir_all(&root)
+            .with_context(|| format!("failed to remove {}", root.display()))?;
+    }
+    fs::create_dir_all(&root).with_context(|| format!("failed to create {}", root.display()))?;
+    let first = write_cli_fixture(&root, "first.html", "<div>{{ first }}</div>")?;
+    let second = write_cli_fixture(&root, "second.html", "<section>{{ second }}</section>")?;
+    let vue2_first = write_cli_fixture(&root, "vue2-first.html", "<p>{{ first }}</p>")?;
+    let vue2_second = write_cli_fixture(&root, "vue2-second.html", "<p>{{ second }}</p>")?;
+    let sfc_first = write_cli_fixture(
+        &root,
+        "First.vue",
+        "<template><div>{{ first }}</div></template><script setup>const first = 'one'</script>",
+    )?;
+    let sfc_second = write_cli_fixture(
+        &root,
+        "Second.vue",
+        "<template><section>{{ second }}</section></template><script setup>const second = 'two'</script>",
+    )?;
+    let exe = cli_executable_path();
+    let mut checks = Vec::new();
+
+    let template_out = run_cli_command(
+        &exe,
+        &[
+            "compile-batch",
+            "--target",
+            "vue3-template",
+            "--jobs",
+            "2",
+            "--json",
+            &first.display().to_string(),
+            &second.display().to_string(),
+        ],
+    )?;
+    let template_json = parse_cli_json("parallel vue3 template", &template_out)?;
+    assert_parallel_batch_result(
+        &template_json,
+        "vue3-template",
+        2,
+        &[
+            ParallelExpectation {
+                path_fragment: "first.html",
+                result_kind: "vue3-template",
+                output_pointer: "/result/code",
+                output_fragment: "first",
+            },
+            ParallelExpectation {
+                path_fragment: "second.html",
+                result_kind: "vue3-template",
+                output_pointer: "/result/code",
+                output_fragment: "second",
+            },
+        ],
+    )?;
+    checks.push("vue3-template-order");
+
+    let vue2_out = run_cli_command(
+        &exe,
+        &[
+            "compile-batch",
+            "--target",
+            "vue2-template",
+            "--jobs",
+            "2",
+            "--json",
+            &vue2_first.display().to_string(),
+            &vue2_second.display().to_string(),
+        ],
+    )?;
+    let vue2_json = parse_cli_json("parallel vue2 template", &vue2_out)?;
+    assert_parallel_batch_result(
+        &vue2_json,
+        "vue2-template",
+        2,
+        &[
+            ParallelExpectation {
+                path_fragment: "vue2-first.html",
+                result_kind: "vue2-template",
+                output_pointer: "/result/render",
+                output_fragment: "first",
+            },
+            ParallelExpectation {
+                path_fragment: "vue2-second.html",
+                result_kind: "vue2-template",
+                output_pointer: "/result/render",
+                output_fragment: "second",
+            },
+        ],
+    )?;
+    checks.push("vue2-template-order");
+
+    let sfc_out = run_cli_command(
+        &exe,
+        &[
+            "compile-batch",
+            "--target",
+            "vue3-sfc",
+            "--jobs",
+            "2",
+            "--json",
+            &sfc_first.display().to_string(),
+            &sfc_second.display().to_string(),
+        ],
+    )?;
+    let sfc_json = parse_cli_json("parallel sfc", &sfc_out)?;
+    assert_parallel_batch_result(
+        &sfc_json,
+        "vue3-sfc",
+        2,
+        &[
+            ParallelExpectation {
+                path_fragment: "First.vue",
+                result_kind: "vue3-sfc",
+                output_pointer: "/result/template/code",
+                output_fragment: "first",
+            },
+            ParallelExpectation {
+                path_fragment: "Second.vue",
+                result_kind: "vue3-sfc",
+                output_pointer: "/result/template/code",
+                output_fragment: "second",
+            },
+        ],
+    )?;
+    checks.push("sfc-order");
+
+    let ssr_out = run_cli_command(
+        &exe,
+        &[
+            "compile-batch",
+            "--target",
+            "vue3-ssr",
+            "--jobs",
+            "2",
+            "--json",
+            &first.display().to_string(),
+            &second.display().to_string(),
+        ],
+    )?;
+    let ssr_json = parse_cli_json("parallel ssr", &ssr_out)?;
+    assert_parallel_batch_result(
+        &ssr_json,
+        "vue3-ssr",
+        2,
+        &[
+            ParallelExpectation {
+                path_fragment: "first.html",
+                result_kind: "vue3-ssr-template",
+                output_pointer: "/result/code",
+                output_fragment: "ssrRender",
+            },
+            ParallelExpectation {
+                path_fragment: "second.html",
+                result_kind: "vue3-ssr-template",
+                output_pointer: "/result/code",
+                output_fragment: "ssrRender",
+            },
+        ],
+    )?;
+    checks.push("ssr-order");
+
+    Ok(json!({
+        "status": "pass",
+        "checks": checks,
+        "fixtureRoot": root,
+    })
+    .to_string())
+}
+
+struct ParallelExpectation {
+    path_fragment: &'static str,
+    result_kind: &'static str,
+    output_pointer: &'static str,
+    output_fragment: &'static str,
+}
+
+fn assert_parallel_batch_result(
+    value: &JsonValue,
+    target: &str,
+    jobs: u64,
+    expected: &[ParallelExpectation],
+) -> Result<()> {
+    if value.get("kind").and_then(JsonValue::as_str) != Some("compile-batch") {
+        anyhow::bail!("parallel batch kind mismatch: {value}");
+    }
+    if value.get("target").and_then(JsonValue::as_str) != Some(target) {
+        anyhow::bail!("parallel batch target mismatch for {target}: {value}");
+    }
+    if value.get("jobs").and_then(JsonValue::as_u64) != Some(jobs) {
+        anyhow::bail!("parallel batch jobs mismatch for {target}: {value}");
+    }
+    let results = value
+        .get("results")
+        .and_then(JsonValue::as_array)
+        .with_context(|| format!("parallel batch {target} missing results array"))?;
+    if results.len() != expected.len() {
+        anyhow::bail!(
+            "parallel batch {target} result length mismatch: expected {}, got {} in {value}",
+            expected.len(),
+            results.len()
+        );
+    }
+    for (index, (result, expected)) in results.iter().zip(expected).enumerate() {
+        if result.get("index").and_then(JsonValue::as_u64) != Some(index as u64) {
+            anyhow::bail!("parallel batch {target} result index mismatch at {index}: {result}");
+        }
+        if result.get("status").and_then(JsonValue::as_str) != Some("ok") {
+            anyhow::bail!("parallel batch {target} result did not pass at {index}: {result}");
+        }
+        if !result
+            .get("input")
+            .and_then(JsonValue::as_str)
+            .unwrap_or_default()
+            .contains(expected.path_fragment)
+        {
+            anyhow::bail!("parallel batch {target} input order mismatch at {index}: {result}");
+        }
+        if result.pointer("/result/kind").and_then(JsonValue::as_str) != Some(expected.result_kind)
+        {
+            anyhow::bail!("parallel batch {target} result kind mismatch at {index}: {result}");
+        }
+        if !result
+            .pointer(expected.output_pointer)
+            .and_then(JsonValue::as_str)
+            .unwrap_or_default()
+            .contains(expected.output_fragment)
+        {
+            anyhow::bail!("parallel batch {target} output mismatch at {index}: {result}");
+        }
+    }
+    Ok(())
 }
 
 fn build_cli_binary() -> Result<()> {

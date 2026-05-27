@@ -122,6 +122,7 @@
 - [x] M19 benchmark-report framework slice, adding `cargo xtask bench` with reproducible fixture hashes, git/environment/lock metadata, Rust CLI timings, locked official JS compiler timings, and `target/bench/bench-report.json`.
 - [x] M19 SFC descriptor-cache / incremental invalidation slice, adding `SfcCompiler` descriptor cache stats and `cargo xtask verify-incremental` coverage for unchanged-input reuse and changed-input invalidation.
 - [x] M19 benchmark memory-peak / regression-evidence slice, adding best-effort `peakRssBytes` benchmark reporting and validating current compatibility summary with `cargo xtask summarize-compat --locked`.
+- [x] M19 parallel compilation slice, adding `vuec compile-batch` with deterministic input-order JSON results and `cargo xtask verify-parallel` coverage for Vue 2 template, Vue 3 template, Vue 3 SFC, and Vue 3 SSR batch targets.
 
 ## Current Performance / Incremental Slice
 
@@ -130,8 +131,9 @@
 - The gate also prepares locked official npm compiler packages under `target/bench/official-js` from `compat/official-revisions.lock` and records official JS compiler timings for the same fixture set. This is benchmark/reporting infrastructure only; it does not change compiler semantics, AST/HIR/MIR structures, cache behavior, or conformance classification.
 - Added an in-memory `vuec_sfc::SfcCompiler` descriptor cache keyed by filename, source hash, and parse mode. `cargo xtask verify-incremental` verifies same-file/same-source descriptor reuse, same-file changed-source invalidation, and Vue 2.7 parse-mode cache reuse.
 - `cargo xtask bench` now records best-effort `peakRssBytes` per Rust CLI and official JS compiler child process using `sysinfo` process sampling. The field is nullable for very short-lived processes or unsupported sampling windows, but the current Windows benchmark run records non-null RSS values for representative cases.
-- Verification this round: `cargo fmt --all -- --check`, `cargo check -p xtask`, `cargo test -p xtask`, `cargo xtask bench --iterations 1`, `cargo xtask summarize-compat --locked` (`7/7`), and `git diff --check`.
-- Remaining M19 work: arena/string/AST cache optimization and parallel compilation.
+- Added `vuec compile-batch`, which compiles independent inputs concurrently with a bounded worker count and returns stable input-order JSON results. The new `cargo xtask verify-parallel` gate builds the real CLI and verifies Vue 2 template, Vue 3 template, Vue 3 SFC, and Vue 3 SSR batch targets.
+- Verification this round: `cargo fmt --all -- --check`, `cargo check -p vuec_cli -p xtask`, `cargo test -p vuec_cli`, `cargo test -p xtask`, `cargo xtask verify-parallel`, and `git diff --check`.
+- Remaining M19 work: arena/string/AST cache optimization.
 
 ## Current Vue 2.7 SFC compileStyle Slice
 
