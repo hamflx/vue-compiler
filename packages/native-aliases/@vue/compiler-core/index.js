@@ -3249,7 +3249,7 @@ function buildProps(node, context) {
       }
       continue;
     }
-    if (prop.name !== 'once' && prop.name !== 'memo') {
+    if (!isBuiltInDirective(prop.name)) {
       directives.push(prop);
       if (node && node.children && node.children.length) shouldUseBlock = true;
     }
