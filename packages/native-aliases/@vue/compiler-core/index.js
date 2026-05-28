@@ -704,6 +704,7 @@ function createTransformContext(root, options) {
     expressionPlugins: (options || {}).expressionPlugins || [],
     isBuiltInComponent: (options || {}).isBuiltInComponent || (() => false),
     isCustomElement: (options || {}).isCustomElement || (() => false),
+    hoistStatic: !!((options || {}).hoistStatic),
     transformHoist: (options || {}).transformHoist || null,
     inVOnce: false,
     helper(name) {

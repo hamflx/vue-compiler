@@ -37,6 +37,11 @@ const coreAst = core.baseParse('<div>{{ msg }}</div>');
 assert.strictEqual(coreAst.type, core.NodeTypes.ROOT);
 assert.strictEqual(coreAst.children[0].tag, 'div');
 
+const defaultTransformContext = core.createTransformContext(core.createRoot([]), {});
+assert.strictEqual(defaultTransformContext.hoistStatic, false);
+const hoistTransformContext = core.createTransformContext(core.createRoot([]), { hoistStatic: true });
+assert.strictEqual(hoistTransformContext.hoistStatic, true);
+
 const coreGenerated = core.generate(coreAst);
 assert.match(coreGenerated.code, /function render/);
 
