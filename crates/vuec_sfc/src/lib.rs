@@ -8390,6 +8390,47 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
     }
 
     #[test]
+    fn compile_style_forwards_stylus_preprocess_options_and_dependencies() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let filename = dir.path().join("component.vue");
+        let import = dir.path().join("tokens.styl");
+        std::fs::write(&import, "space = 6px\n.imported\n  margin space\n").expect("write import");
+        let source = r#"<style lang="stylus">
+@import "./tokens"
+.card
+  color brand
+  .title
+    padding space
+</style>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let result = compiler.compile_style(
+            &descriptor,
+            SfcStyleCompileOptions {
+                preprocess_options: StylePreprocessOptions {
+                    additional_data: Some("brand = red".into()),
+                    ..StylePreprocessOptions::default()
+                },
+                ..SfcStyleCompileOptions::default()
+            },
+        );
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert!(result.code.contains(".imported"));
+        assert!(result.code.contains("margin: 6px;"));
+        assert!(result.code.contains(".card .title"));
+        assert!(result.code.contains("padding: 6px;"));
+        assert!(result.code.contains("color: red;"));
+        let resolved_import = std::fs::canonicalize(import)
+            .expect("canonical import")
+            .to_string_lossy()
+            .replace('\\', "/")
+            .trim_start_matches("//?/")
+            .to_string();
+        assert_eq!(result.dependencies, vec![resolved_import]);
+    }
+
+    #[test]
     fn compile_style_uses_vue3_css_var_names_by_default() {
         let mut compiler = SfcCompiler::new();
         let descriptor = compiler.parse(

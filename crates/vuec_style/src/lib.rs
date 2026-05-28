@@ -373,10 +373,7 @@ fn preprocess_style(
                     dependencies: sass_dependencies(source, options),
                 },
             ),
-            "styl" | "stylus" => preprocess_stylus(&prepared).map(|code| PreprocessResult {
-                code,
-                dependencies: Vec::new(),
-            }),
+            "styl" | "stylus" => preprocess_stylus(&prepared, options),
             _ => Err(format!("unsupported style preprocessor `{lang}`")),
         }?;
     Ok(result)
@@ -580,7 +577,7 @@ fn preprocess_less(
     let inlined = inline_less_imports(source, base_dir.as_deref(), &mut context)?;
     let nodes = parse_less_nodes(&inlined)?;
     Ok(PreprocessResult {
-        code: render_less_nodes(&nodes, None, &[]),
+        code: render_less_nodes(&nodes, None, &[], StyleVariableSyntax::LessAt),
         dependencies: context.dependencies(),
     })
 }
@@ -611,6 +608,12 @@ enum LessNode {
 struct LessVariable {
     name: String,
     value: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StyleVariableSyntax {
+    LessAt,
+    StylusBare,
 }
 
 #[derive(Debug)]
@@ -866,22 +869,25 @@ fn render_less_nodes(
     nodes: &[LessNode],
     parent_selector: Option<&str>,
     inherited_variables: &[LessVariable],
+    variable_syntax: StyleVariableSyntax,
 ) -> String {
-    let variables = less_scope_variables(nodes, inherited_variables);
+    let variables = less_scope_variables(nodes, inherited_variables, variable_syntax);
     let mut output = String::new();
     if let Some(selector) = parent_selector {
-        let rendered = render_less_declarations(selector, nodes, &variables);
+        let rendered = render_less_declarations(selector, nodes, &variables, variable_syntax);
         push_less_rendered(&mut output, &rendered);
     }
     for node in nodes {
         match node {
             LessNode::Rule { selector, children } => {
                 let full_selector = combine_less_selectors(parent_selector, selector);
-                let rendered = render_less_rule(&full_selector, children, &variables);
+                let rendered =
+                    render_less_rule(&full_selector, children, &variables, variable_syntax);
                 push_less_rendered(&mut output, &rendered);
             }
             LessNode::AtRuleBlock { prelude, children } => {
-                let rendered_children = render_less_nodes(children, parent_selector, &variables);
+                let rendered_children =
+                    render_less_nodes(children, parent_selector, &variables, variable_syntax);
                 if !rendered_children.trim().is_empty() {
                     push_less_rendered(
                         &mut output,
@@ -902,6 +908,7 @@ fn render_less_nodes(
 fn less_scope_variables(
     nodes: &[LessNode],
     inherited_variables: &[LessVariable],
+    variable_syntax: StyleVariableSyntax,
 ) -> Vec<LessVariable> {
     let mut variables = inherited_variables.to_vec();
     for node in nodes {
@@ -911,7 +918,8 @@ fn less_scope_variables(
     }
     let snapshot = variables.clone();
     for variable in &mut variables {
-        variable.value = resolve_less_value(&variable.value, &snapshot);
+        variable.value =
+            resolve_style_preprocess_value(&variable.value, &snapshot, variable_syntax);
     }
     variables
 }
@@ -920,12 +928,13 @@ fn render_less_declarations(
     selector: &str,
     children: &[LessNode],
     variables: &[LessVariable],
+    variable_syntax: StyleVariableSyntax,
 ) -> String {
     let declarations = children
         .iter()
         .filter_map(|node| match node {
             LessNode::Declaration { name, value } => {
-                let value = resolve_less_value(value, variables);
+                let value = resolve_style_preprocess_value(value, variables, variable_syntax);
                 Some((name.as_str(), normalize_preprocessor_color(&value)))
             }
             _ => None,
@@ -950,10 +959,15 @@ fn render_less_declarations(
     output
 }
 
-fn render_less_rule(selector: &str, children: &[LessNode], variables: &[LessVariable]) -> String {
-    let variables = less_scope_variables(children, variables);
+fn render_less_rule(
+    selector: &str,
+    children: &[LessNode],
+    variables: &[LessVariable],
+    variable_syntax: StyleVariableSyntax,
+) -> String {
+    let variables = less_scope_variables(children, variables, variable_syntax);
     let mut output = String::new();
-    let declarations = render_less_declarations(selector, children, &variables);
+    let declarations = render_less_declarations(selector, children, &variables, variable_syntax);
     push_less_rendered(&mut output, &declarations);
 
     for child in children {
@@ -963,11 +977,13 @@ fn render_less_rule(selector: &str, children: &[LessNode], variables: &[LessVari
                 children,
             } => {
                 let nested_selector = combine_less_selectors(Some(selector), child_selector);
-                let rendered = render_less_rule(&nested_selector, children, &variables);
+                let rendered =
+                    render_less_rule(&nested_selector, children, &variables, variable_syntax);
                 push_less_rendered(&mut output, &rendered);
             }
             LessNode::AtRuleBlock { prelude, children } => {
-                let rendered_children = render_less_nodes(children, Some(selector), &variables);
+                let rendered_children =
+                    render_less_nodes(children, Some(selector), &variables, variable_syntax);
                 if !rendered_children.trim().is_empty() {
                     push_less_rendered(
                         &mut output,
@@ -1004,15 +1020,52 @@ fn combine_less_selectors(parent: Option<&str>, selector: &str) -> String {
     selectors.join(", ")
 }
 
-fn resolve_less_value(value: &str, variables: &[LessVariable]) -> String {
+fn resolve_style_preprocess_value(
+    value: &str,
+    variables: &[LessVariable],
+    variable_syntax: StyleVariableSyntax,
+) -> String {
     let mut output = value.to_string();
     for _ in 0..8 {
-        let rewritten = replace_less_variables_once(&output, variables);
+        let rewritten = match variable_syntax {
+            StyleVariableSyntax::LessAt => replace_less_variables_once(&output, variables),
+            StyleVariableSyntax::StylusBare => replace_stylus_variables_once(&output, variables),
+        };
         if rewritten == output {
             return rewritten;
         }
         output = rewritten;
     }
+    output
+}
+
+fn replace_stylus_variables_once(source: &str, variables: &[LessVariable]) -> String {
+    let mut output = source.to_string();
+    for variable in variables {
+        output = replace_style_identifier(&output, &variable.name, &variable.value);
+        output = replace_style_dollar_identifier(&output, &variable.name, &variable.value);
+    }
+    output
+}
+
+fn replace_style_dollar_identifier(source: &str, name: &str, value: &str) -> String {
+    let needle = format!("${name}");
+    let mut output = String::new();
+    let mut cursor = 0usize;
+    while let Some(relative) = source[cursor..].find(&needle) {
+        let start = cursor + relative;
+        let end = start + needle.len();
+        let after = source[end..].chars().next();
+        if after.is_none_or(|ch| !is_style_identifier_char(ch)) {
+            output.push_str(&source[cursor..start]);
+            output.push_str(value);
+            cursor = end;
+        } else {
+            output.push_str(&source[cursor..end]);
+            cursor = end;
+        }
+    }
+    output.push_str(&source[cursor..]);
     output
 }
 
@@ -1107,37 +1160,248 @@ fn indent_less_css(source: &str) -> String {
         .join("\n")
 }
 
-fn preprocess_stylus(source: &str) -> Result<String, String> {
-    let (variables, body) = collect_stylus_variables(source);
-    let body = replace_bare_style_variables(&body, &variables);
-    Ok(compile_indented_style_rules(&body).replace("#ff0000", "#f00"))
+fn preprocess_stylus(
+    source: &str,
+    options: &StyleCompileOptions,
+) -> Result<PreprocessResult, String> {
+    let mut context = LessImportContext::new(options);
+    let base_dir = options
+        .filename
+        .as_deref()
+        .and_then(|filename| Path::new(filename).parent())
+        .map(Path::to_path_buf);
+    let inlined = inline_stylus_imports(source, base_dir.as_deref(), &mut context)?;
+    let nodes = parse_stylus_nodes(&inlined)?;
+    Ok(PreprocessResult {
+        code: render_less_nodes(&nodes, None, &[], StyleVariableSyntax::StylusBare)
+            .replace("#ff0000", "#f00"),
+        dependencies: context.dependencies(),
+    })
 }
 
-fn collect_stylus_variables(source: &str) -> (Vec<(String, String)>, String) {
-    let mut variables = Vec::new();
-    let mut body = Vec::new();
+fn inline_stylus_imports(
+    source: &str,
+    base_dir: Option<&Path>,
+    context: &mut LessImportContext,
+) -> Result<String, String> {
+    let mut output = String::new();
     for line in source.lines() {
-        let trimmed = line.trim();
-        if !trimmed.starts_with('.') {
-            if let Some((name, value)) = trimmed.split_once('=') {
-                let name = name.trim();
-                if is_style_identifier(name) {
-                    variables.push((name.to_string(), trim_style_value(value.trim()).to_string()));
-                    continue;
-                }
+        let Some(import) = parse_stylus_import_statement(line) else {
+            output.push_str(line);
+            output.push('\n');
+            continue;
+        };
+        if is_css_import(&import) {
+            output.push_str(line);
+            output.push('\n');
+            continue;
+        }
+        let Some(resolved) = resolve_stylus_import(&import, base_dir, context) else {
+            return Err(format!("Stylus import could not be resolved: {import}"));
+        };
+        let canonical = std::fs::canonicalize(&resolved).unwrap_or(resolved);
+        context.push_dependency(&canonical);
+        if context.is_active(&canonical) {
+            continue;
+        }
+        context.active_paths.push(canonical.clone());
+        let imported = std::fs::read_to_string(&canonical)
+            .map_err(|error| format!("Stylus import could not be read: {import}: {error}"))?;
+        let imported_base = canonical.parent();
+        let inlined = inline_stylus_imports(&imported, imported_base, context)?;
+        context.active_paths.pop();
+        output.push_str(&inlined);
+        if !output.ends_with('\n') {
+            output.push('\n');
+        }
+    }
+    Ok(output)
+}
+
+fn parse_stylus_import_statement(line: &str) -> Option<String> {
+    let trimmed = line.trim_start();
+    if !trimmed.starts_with("@import") || !less_at_keyword_boundary(trimmed, "@import".len()) {
+        return None;
+    }
+    if let Some(path) = quoted_style_import_path(trimmed) {
+        return Some(path);
+    }
+    let rest = trimmed["@import".len()..].trim();
+    if rest.is_empty() {
+        return None;
+    }
+    Some(rest.trim_end_matches(';').trim().to_string())
+}
+
+fn resolve_stylus_import(
+    import: &str,
+    base_dir: Option<&Path>,
+    context: &LessImportContext,
+) -> Option<PathBuf> {
+    let import_path = Path::new(import);
+    let mut bases = Vec::new();
+    if import_path.is_absolute() {
+        bases.push(PathBuf::from(import_path));
+    } else {
+        if let Some(base_dir) = base_dir {
+            bases.push(base_dir.join(import_path));
+        }
+        bases.extend(context.load_paths.iter().map(|base| base.join(import_path)));
+    }
+    for base in bases {
+        for candidate in stylus_import_candidates(&base) {
+            if candidate.is_file() {
+                return Some(candidate);
             }
         }
-        body.push(line);
     }
-    (variables, body.join("\n"))
+    None
 }
 
-fn replace_bare_style_variables(source: &str, variables: &[(String, String)]) -> String {
-    let mut output = source.to_string();
-    for (name, value) in variables {
-        output = replace_style_identifier(&output, name, value);
+fn stylus_import_candidates(base: &Path) -> Vec<PathBuf> {
+    if base.extension().is_some() {
+        return vec![base.to_path_buf()];
     }
-    output
+    vec![
+        base.with_extension("styl"),
+        base.with_extension("stylus"),
+        base.to_path_buf(),
+    ]
+}
+
+fn parse_stylus_nodes(source: &str) -> Result<Vec<LessNode>, String> {
+    let lines = source
+        .lines()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with("//") {
+                return None;
+            }
+            Some(StylusLine {
+                number: index + 1,
+                indent: stylus_indent_width(line),
+                text: trimmed.trim_end_matches(';').trim().to_string(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut cursor = 0usize;
+    parse_stylus_block(&lines, &mut cursor, 0)
+}
+
+#[derive(Debug)]
+struct StylusLine {
+    number: usize,
+    indent: usize,
+    text: String,
+}
+
+fn parse_stylus_block(
+    lines: &[StylusLine],
+    cursor: &mut usize,
+    indent: usize,
+) -> Result<Vec<LessNode>, String> {
+    let mut nodes = Vec::new();
+    while *cursor < lines.len() {
+        let line = &lines[*cursor];
+        if line.indent < indent {
+            break;
+        }
+        if line.indent > indent {
+            return Err(format!(
+                "unexpected Stylus indentation on line {}",
+                line.number
+            ));
+        }
+        let text = line.text.trim();
+        *cursor += 1;
+        if let Some((name, value)) = parse_stylus_variable(text) {
+            nodes.push(LessNode::Variable { name, value });
+            continue;
+        }
+        let has_children = *cursor < lines.len() && lines[*cursor].indent > line.indent;
+        if has_children {
+            let children = parse_stylus_block(lines, cursor, lines[*cursor].indent)?;
+            if text.starts_with('@') {
+                nodes.push(LessNode::AtRuleBlock {
+                    prelude: text.to_string(),
+                    children,
+                });
+            } else {
+                nodes.push(LessNode::Rule {
+                    selector: text.to_string(),
+                    children,
+                });
+            }
+            continue;
+        }
+        if let Some((name, value)) = parse_stylus_declaration(text) {
+            nodes.push(LessNode::Declaration { name, value });
+            continue;
+        }
+        if text.starts_with('@') && !text.starts_with("@media") && !text.starts_with("@supports") {
+            nodes.push(LessNode::AtRuleStatement(text.to_string()));
+            continue;
+        }
+        if text.starts_with('@') {
+            nodes.push(LessNode::AtRuleStatement(text.to_string()));
+        } else {
+            nodes.push(LessNode::Rule {
+                selector: text.to_string(),
+                children: Vec::new(),
+            });
+        }
+    }
+    Ok(nodes)
+}
+
+fn parse_stylus_variable(text: &str) -> Option<(String, String)> {
+    let (raw_name, raw_value) = text.split_once('=')?;
+    let name = raw_name.trim().trim_start_matches('$');
+    if !is_style_identifier(name) {
+        return None;
+    }
+    Some((
+        name.to_string(),
+        trim_style_value(raw_value.trim()).to_string(),
+    ))
+}
+
+fn parse_stylus_declaration(text: &str) -> Option<(String, String)> {
+    if let Some((name, value)) = text.split_once(':') {
+        let name = name.trim();
+        if is_style_property_name(name) {
+            return Some((name.to_string(), trim_style_value(value.trim()).to_string()));
+        }
+    }
+    let mut parts = text.splitn(2, char::is_whitespace);
+    let name = parts.next()?.trim();
+    let value = parts.next()?.trim();
+    if is_style_property_name(name) && !value.is_empty() {
+        return Some((name.to_string(), trim_style_value(value).to_string()));
+    }
+    None
+}
+
+fn stylus_indent_width(line: &str) -> usize {
+    let mut width = 0usize;
+    for ch in line.chars() {
+        match ch {
+            ' ' => width += 1,
+            '\t' => width += 2,
+            _ => break,
+        }
+    }
+    width
+}
+
+fn is_style_property_name(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '-' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '-' || ch.is_ascii_alphanumeric())
 }
 
 fn replace_style_identifier(source: &str, name: &str, value: &str) -> String {
@@ -1165,56 +1429,6 @@ fn replace_style_identifier(source: &str, name: &str, value: &str) -> String {
 
 fn trim_style_value(value: &str) -> &str {
     value.trim_end_matches(';').trim()
-}
-
-fn compile_indented_style_rules(source: &str) -> String {
-    let mut output = String::new();
-    let mut current_selector: Option<String> = None;
-    let mut declarations = Vec::new();
-    for line in source.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if trimmed.starts_with('.') || trimmed.starts_with('#') || trimmed.starts_with('&') {
-            flush_indented_rule(&mut output, current_selector.take(), &mut declarations);
-            current_selector = Some(trimmed.to_string());
-        } else if let Some((name, value)) = trimmed.split_once(':') {
-            declarations.push((
-                name.trim().to_string(),
-                trim_style_value(value.trim()).to_string(),
-            ));
-        }
-    }
-    flush_indented_rule(&mut output, current_selector, &mut declarations);
-    output
-}
-
-fn flush_indented_rule(
-    output: &mut String,
-    selector: Option<String>,
-    declarations: &mut Vec<(String, String)>,
-) {
-    let Some(selector) = selector else {
-        declarations.clear();
-        return;
-    };
-    if declarations.is_empty() {
-        return;
-    }
-    if !output.is_empty() {
-        output.push('\n');
-    }
-    output.push_str(&selector);
-    output.push_str(" {\n");
-    for (name, value) in declarations.drain(..) {
-        output.push_str("  ");
-        output.push_str(&name);
-        output.push_str(": ");
-        output.push_str(&normalize_preprocessor_color(&value));
-        output.push_str(";\n");
-    }
-    output.push('}');
 }
 
 fn normalize_preprocessor_color(value: &str) -> String {
@@ -3737,6 +3951,120 @@ mod tests {
                 preprocess_lang: Some("less".into()),
                 preprocess_options: StylePreprocessOptions {
                     additional_data: Some("@brand: red;".into()),
+                    load_paths: vec![shared_dir.to_string_lossy().into_owned()],
+                },
+                ..StyleCompileOptions::default()
+            },
+        );
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert!(result
+            .code
+            .contains("@import \"https://example.com/reset.css\";"));
+        assert!(result.code.contains(".imported {"));
+        assert!(result.code.contains("border-color: red;"));
+        assert!(result.code.contains(".shared {"));
+        assert!(result.code.contains("margin: 12px;"));
+        assert!(result.code.contains("padding: 12px;"));
+        let mut expected = vec![
+            std::fs::canonicalize(local_import)
+                .expect("canonical local import")
+                .to_string_lossy()
+                .replace('\\', "/")
+                .trim_start_matches("//?/")
+                .to_string(),
+            std::fs::canonicalize(load_path_import)
+                .expect("canonical load path import")
+                .to_string_lossy()
+                .replace('\\', "/")
+                .trim_start_matches("//?/")
+                .to_string(),
+        ];
+        expected.sort();
+        assert_eq!(result.dependencies, expected);
+    }
+
+    #[test]
+    fn preprocesses_stylus_variables_nested_selectors_and_media() {
+        let result = compile_style(
+            r#"
+red-color = rgb(255, 0, 0)
+gap = 8px
+.card, .panel
+  color red-color
+  padding: gap
+  &:hover
+    color blue
+  .title
+    margin gap
+  @media (min-width: 600px)
+    display block
+    .title
+      color red-color
+.other
+  color red-color
+"#,
+            StyleCompileOptions {
+                preprocess_lang: Some("styl".into()),
+                ..StyleCompileOptions::default()
+            },
+        );
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert!(result.code.contains(".card, .panel {"));
+        assert!(result.code.contains("color: #f00;"));
+        assert!(result.code.contains("padding: 8px;"));
+        assert!(result.code.contains(".card:hover, .panel:hover {"));
+        assert!(result.code.contains(".card .title, .panel .title {"));
+        assert!(result.code.contains("@media (min-width: 600px) {"));
+        assert!(result.code.contains("display: block;"));
+        assert!(result.code.contains(".other {"));
+        assert!(!result.code.contains("red-color"));
+        assert!(!result.code.contains("gap"));
+    }
+
+    #[test]
+    fn preprocesses_stylus_additional_data_imports_and_load_paths() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let src_dir = dir.path().join("src");
+        let shared_dir = dir.path().join("shared");
+        std::fs::create_dir_all(&src_dir).expect("src dir");
+        std::fs::create_dir_all(&shared_dir).expect("shared dir");
+        let base = src_dir.join("component.styl");
+        let local_import = src_dir.join("local.styl");
+        let load_path_import = shared_dir.join("tokens.styl");
+        std::fs::write(
+            &local_import,
+            r#"
+.imported
+  border-color brand
+"#,
+        )
+        .expect("write local import");
+        std::fs::write(
+            &load_path_import,
+            r#"
+space = 12px
+.shared
+  margin space
+"#,
+        )
+        .expect("write load path import");
+
+        let result = compile_style(
+            r#"
+@import "./local"
+@import "tokens"
+@import "https://example.com/reset.css"
+.root
+  color brand
+  padding space
+"#,
+            StyleCompileOptions {
+                filename: Some(base.to_string_lossy().into_owned()),
+                preprocess_lang: Some("stylus".into()),
+                preprocess_options: StylePreprocessOptions {
+                    additional_data: Some("brand = red".into()),
                     load_paths: vec![shared_dir.to_string_lossy().into_owned()],
                 },
                 ..StyleCompileOptions::default()
