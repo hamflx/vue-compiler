@@ -2138,6 +2138,11 @@ fn rewrite_css_modules_items(
         };
         let body = &source[delimiter + 1..close];
         let compose_local_names = css_module_composable_local_names(prelude, context);
+        if prelude == ":export" {
+            register_css_module_icss_exports(body, context);
+            cursor = close + 1;
+            continue;
+        }
         output.push_str(&rewrite_css_modules_prelude(
             prelude,
             context,
@@ -2267,6 +2272,27 @@ fn register_css_module_globals(segment: &str, context: &mut CssModulesContext<'_
         context.register_global(name);
         cursor = end;
     }
+}
+
+fn register_css_module_icss_exports(body: &str, context: &mut CssModulesContext<'_>) {
+    let mut segment_start = 0usize;
+    for semicolon in top_level_semicolons(body) {
+        register_css_module_icss_export_segment(&body[segment_start..semicolon], context);
+        segment_start = semicolon + 1;
+    }
+    register_css_module_icss_export_segment(&body[segment_start..], context);
+}
+
+fn register_css_module_icss_export_segment(segment: &str, context: &mut CssModulesContext<'_>) {
+    let Some(colon) = find_top_level_colon(segment) else {
+        return;
+    };
+    let key = segment[..colon].trim();
+    let value = segment[colon + 1..].trim();
+    if key.is_empty() {
+        return;
+    }
+    context.set_raw_export_values(key, vec![value.to_string()]);
 }
 
 fn rewrite_css_module_declarations(
@@ -4228,6 +4254,52 @@ mod tests {
 
         assert!(result.code.contains("composes: base"));
         assert!(result.code.contains("composes: next"));
+    }
+
+    #[test]
+    fn compiles_css_modules_icss_exports() {
+        let result = compile_style(
+            ":export { primary: red; spacing: 1px; }\n.button { color: primary; }",
+            StyleCompileOptions {
+                id: Some("test".into()),
+                filename: Some("test.css".into()),
+                modules: true,
+                ..StyleCompileOptions::default()
+            },
+        );
+        let modules = result.modules.expect("css modules map");
+
+        assert_eq!(modules.get("primary").map(String::as_str), Some("red"));
+        assert_eq!(modules.get("spacing").map(String::as_str), Some("1px"));
+        assert!(modules
+            .get("button")
+            .is_some_and(|value| value.contains("_button_")));
+        assert!(!result.code.contains(":export"));
+        assert!(result.code.contains("color: primary"));
+    }
+
+    #[test]
+    fn compiles_css_modules_icss_exports_with_locals_convention() {
+        let result = compile_style(
+            ":export { theme-color: red; }\n.button { color: red; }",
+            StyleCompileOptions {
+                id: Some("test".into()),
+                filename: Some("test.css".into()),
+                modules: true,
+                modules_options: CssModulesOptions {
+                    locals_convention: "dashesOnly".into(),
+                    ..CssModulesOptions::default()
+                },
+                ..StyleCompileOptions::default()
+            },
+        );
+        let modules = result.modules.expect("css modules map");
+
+        assert_eq!(modules.get("themeColor").map(String::as_str), Some("red"));
+        assert!(!modules.contains_key("theme-color"));
+        assert!(modules
+            .get("button")
+            .is_some_and(|value| value.contains("_button_")));
     }
 
     #[test]
