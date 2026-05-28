@@ -354,19 +354,32 @@ fn preprocess_style(
         });
     };
     let prepared = apply_additional_style_data(source, &options.preprocess_options);
-    let code = match lang.to_ascii_lowercase().as_str() {
-        "css" => Ok(prepared.clone()),
-        "less" => preprocess_less(&prepared),
-        "scss" => preprocess_sass_with_grass(&prepared, options, grass::InputSyntax::Scss),
-        "sass" => preprocess_sass_with_grass(&prepared, options, grass::InputSyntax::Sass),
-        "styl" | "stylus" => preprocess_stylus(&prepared),
-        _ => Err(format!("unsupported style preprocessor `{lang}`")),
-    }?;
-    let dependencies = match lang.to_ascii_lowercase().as_str() {
-        "scss" | "sass" => sass_dependencies(source, options),
-        _ => Vec::new(),
-    };
-    Ok(PreprocessResult { code, dependencies })
+    let result =
+        match lang.to_ascii_lowercase().as_str() {
+            "css" => Ok(PreprocessResult {
+                code: prepared.clone(),
+                dependencies: Vec::new(),
+            }),
+            "less" => preprocess_less(&prepared, options),
+            "scss" => preprocess_sass_with_grass(&prepared, options, grass::InputSyntax::Scss).map(
+                |code| PreprocessResult {
+                    code,
+                    dependencies: sass_dependencies(source, options),
+                },
+            ),
+            "sass" => preprocess_sass_with_grass(&prepared, options, grass::InputSyntax::Sass).map(
+                |code| PreprocessResult {
+                    code,
+                    dependencies: sass_dependencies(source, options),
+                },
+            ),
+            "styl" | "stylus" => preprocess_stylus(&prepared).map(|code| PreprocessResult {
+                code,
+                dependencies: Vec::new(),
+            }),
+            _ => Err(format!("unsupported style preprocessor `{lang}`")),
+        }?;
+    Ok(result)
 }
 
 fn apply_additional_style_data(source: &str, options: &StylePreprocessOptions) -> String {
@@ -554,35 +567,550 @@ fn normalize_dependency_path(path: &Path) -> String {
     value
 }
 
-fn preprocess_less(source: &str) -> Result<String, String> {
-    let (variables, body) = collect_style_variables(source, '@');
-    Ok(replace_style_variables(&body, '@', &variables).replace("rgb(255, 0, 0)", "#ff0000"))
+fn preprocess_less(
+    source: &str,
+    options: &StyleCompileOptions,
+) -> Result<PreprocessResult, String> {
+    let mut context = LessImportContext::new(options);
+    let base_dir = options
+        .filename
+        .as_deref()
+        .and_then(|filename| Path::new(filename).parent())
+        .map(Path::to_path_buf);
+    let inlined = inline_less_imports(source, base_dir.as_deref(), &mut context)?;
+    let nodes = parse_less_nodes(&inlined)?;
+    Ok(PreprocessResult {
+        code: render_less_nodes(&nodes, None, &[]),
+        dependencies: context.dependencies(),
+    })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum LessNode {
+    Rule {
+        selector: String,
+        children: Vec<LessNode>,
+    },
+    AtRuleBlock {
+        prelude: String,
+        children: Vec<LessNode>,
+    },
+    AtRuleStatement(String),
+    Declaration {
+        name: String,
+        value: String,
+    },
+    Variable {
+        name: String,
+        value: String,
+    },
+    Comment,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LessVariable {
+    name: String,
+    value: String,
+}
+
+#[derive(Debug)]
+struct LessImportContext {
+    load_paths: Vec<PathBuf>,
+    dependencies: Vec<String>,
+    active_paths: Vec<PathBuf>,
+}
+
+impl LessImportContext {
+    fn new(options: &StyleCompileOptions) -> Self {
+        Self {
+            load_paths: options
+                .preprocess_options
+                .load_paths
+                .iter()
+                .map(PathBuf::from)
+                .collect(),
+            dependencies: Vec::new(),
+            active_paths: Vec::new(),
+        }
+    }
+
+    fn dependencies(mut self) -> Vec<String> {
+        self.dependencies.sort();
+        self.dependencies.dedup();
+        self.dependencies
+    }
+
+    fn push_dependency(&mut self, path: &Path) {
+        let normalized = normalize_dependency_path(path);
+        if !self
+            .dependencies
+            .iter()
+            .any(|existing| existing == &normalized)
+        {
+            self.dependencies.push(normalized);
+        }
+    }
+
+    fn is_active(&self, path: &Path) -> bool {
+        self.active_paths.iter().any(|active| active == path)
+    }
+}
+
+fn inline_less_imports(
+    source: &str,
+    base_dir: Option<&Path>,
+    context: &mut LessImportContext,
+) -> Result<String, String> {
+    let mut output = String::new();
+    let mut cursor = 0usize;
+    while cursor < source.len() {
+        let Some((delimiter, delimiter_ch)) = find_next_css_delimiter(source, cursor) else {
+            output.push_str(&source[cursor..]);
+            break;
+        };
+        if delimiter_ch == '{' {
+            let Some(close) = find_matching_brace(source, delimiter) else {
+                output.push_str(&source[cursor..]);
+                break;
+            };
+            output.push_str(&source[cursor..=close]);
+            cursor = close + 1;
+            continue;
+        }
+
+        let statement = &source[cursor..=delimiter];
+        let prelude = &source[cursor..delimiter];
+        let Some(import) = parse_less_import_statement(prelude) else {
+            output.push_str(statement);
+            cursor = delimiter + 1;
+            continue;
+        };
+        if is_css_import(&import) {
+            output.push_str(statement);
+            cursor = delimiter + 1;
+            continue;
+        }
+
+        let leading_whitespace_len = prelude.len() - prelude.trim_start().len();
+        output.push_str(&prelude[..leading_whitespace_len]);
+        let Some(resolved) = resolve_less_import(&import, base_dir, context) else {
+            return Err(format!("Less import could not be resolved: {import}"));
+        };
+        let canonical = std::fs::canonicalize(&resolved).unwrap_or(resolved);
+        context.push_dependency(&canonical);
+        if context.is_active(&canonical) {
+            cursor = delimiter + 1;
+            continue;
+        }
+        context.active_paths.push(canonical.clone());
+        let imported = std::fs::read_to_string(&canonical)
+            .map_err(|error| format!("Less import could not be read: {import}: {error}"))?;
+        let imported_base = canonical.parent();
+        let inlined = inline_less_imports(&imported, imported_base, context)?;
+        context.active_paths.pop();
+        output.push_str(&inlined);
+        if !output.ends_with('\n') {
+            output.push('\n');
+        }
+        cursor = delimiter + 1;
+    }
+    Ok(output)
+}
+
+fn parse_less_import_statement(statement: &str) -> Option<String> {
+    let trimmed = statement.trim_start();
+    if !trimmed.starts_with("@import") || !less_at_keyword_boundary(trimmed, "@import".len()) {
+        return None;
+    }
+    quoted_style_import_path(trimmed)
+}
+
+fn less_at_keyword_boundary(source: &str, index: usize) -> bool {
+    source[index..]
+        .chars()
+        .next()
+        .is_none_or(|ch| ch.is_whitespace() || ch == '(' || ch == '"' || ch == '\'')
+}
+
+fn resolve_less_import(
+    import: &str,
+    base_dir: Option<&Path>,
+    context: &LessImportContext,
+) -> Option<PathBuf> {
+    let import_path = Path::new(import);
+    let mut bases = Vec::new();
+    if import_path.is_absolute() {
+        bases.push(PathBuf::from(import_path));
+    } else {
+        if let Some(base_dir) = base_dir {
+            bases.push(base_dir.join(import_path));
+        }
+        bases.extend(context.load_paths.iter().map(|base| base.join(import_path)));
+    }
+    for base in bases {
+        for candidate in less_import_candidates(&base) {
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+fn less_import_candidates(base: &Path) -> Vec<PathBuf> {
+    if base.extension().is_some() {
+        return vec![base.to_path_buf()];
+    }
+    vec![base.with_extension("less"), base.to_path_buf()]
+}
+
+fn parse_less_nodes(source: &str) -> Result<Vec<LessNode>, String> {
+    let mut nodes = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < source.len() {
+        let whitespace_start = cursor;
+        cursor = skip_css_whitespace(source, cursor);
+        if cursor >= source.len() {
+            break;
+        }
+        if source[cursor..].starts_with("//") {
+            cursor = skip_css_line_comment(source, cursor);
+            continue;
+        }
+        if source[cursor..].starts_with("/*") {
+            let Some(end_offset) = source[cursor + 2..].find("*/") else {
+                nodes.push(LessNode::Comment);
+                break;
+            };
+            let end = cursor + 2 + end_offset + 2;
+            nodes.push(LessNode::Comment);
+            cursor = end;
+            continue;
+        }
+        if cursor > whitespace_start && source[whitespace_start..cursor].contains('\n') {
+            nodes.push(LessNode::Comment);
+        }
+
+        let Some((delimiter, delimiter_ch)) = find_next_css_delimiter(source, cursor) else {
+            let tail = source[cursor..].trim();
+            if !tail.is_empty() {
+                return Err(format!("invalid Less statement `{tail}`"));
+            }
+            break;
+        };
+        let raw_prelude = &source[cursor..delimiter];
+        let prelude = raw_prelude.trim();
+        if delimiter_ch == ';' {
+            if !prelude.is_empty() {
+                nodes.push(parse_less_statement(prelude));
+            }
+            cursor = delimiter + 1;
+            continue;
+        }
+
+        let Some(close) = find_matching_brace(source, delimiter) else {
+            return Err(format!("unclosed Less block `{prelude}`"));
+        };
+        let body = &source[delimiter + 1..close];
+        let children = parse_less_nodes(body)?;
+        if prelude.starts_with('@') {
+            nodes.push(LessNode::AtRuleBlock {
+                prelude: prelude.to_string(),
+                children,
+            });
+        } else {
+            nodes.push(LessNode::Rule {
+                selector: prelude.to_string(),
+                children,
+            });
+        }
+        cursor = close + 1;
+    }
+    Ok(nodes)
+}
+
+fn parse_less_statement(statement: &str) -> LessNode {
+    if let Some((name, value)) = parse_less_variable(statement) {
+        return LessNode::Variable { name, value };
+    }
+    if statement.starts_with('@') {
+        return LessNode::AtRuleStatement(statement.to_string());
+    }
+    if let Some(colon) = find_top_level_colon(statement) {
+        return LessNode::Declaration {
+            name: statement[..colon].trim().to_string(),
+            value: statement[colon + 1..].trim().to_string(),
+        };
+    }
+    LessNode::AtRuleStatement(statement.to_string())
+}
+
+fn parse_less_variable(statement: &str) -> Option<(String, String)> {
+    let trimmed = statement.trim();
+    let rest = trimmed.strip_prefix('@')?;
+    let colon = find_top_level_colon(trimmed)?;
+    let name = &trimmed['@'.len_utf8()..colon];
+    if name.is_empty() || !is_style_identifier(name.trim()) {
+        return None;
+    }
+    if rest[..name.len()].chars().any(char::is_whitespace) {
+        return None;
+    }
+    Some((
+        name.trim().to_string(),
+        trim_style_value(trimmed[colon + 1..].trim()).to_string(),
+    ))
+}
+
+fn render_less_nodes(
+    nodes: &[LessNode],
+    parent_selector: Option<&str>,
+    inherited_variables: &[LessVariable],
+) -> String {
+    let variables = less_scope_variables(nodes, inherited_variables);
+    let mut output = String::new();
+    if let Some(selector) = parent_selector {
+        let rendered = render_less_declarations(selector, nodes, &variables);
+        push_less_rendered(&mut output, &rendered);
+    }
+    for node in nodes {
+        match node {
+            LessNode::Rule { selector, children } => {
+                let full_selector = combine_less_selectors(parent_selector, selector);
+                let rendered = render_less_rule(&full_selector, children, &variables);
+                push_less_rendered(&mut output, &rendered);
+            }
+            LessNode::AtRuleBlock { prelude, children } => {
+                let rendered_children = render_less_nodes(children, parent_selector, &variables);
+                if !rendered_children.trim().is_empty() {
+                    push_less_rendered(
+                        &mut output,
+                        &format!("{prelude} {{\n{}\n}}", indent_less_css(&rendered_children)),
+                    );
+                }
+            }
+            LessNode::AtRuleStatement(statement) if parent_selector.is_none() => {
+                push_less_rendered(&mut output, &format!("{statement};"));
+            }
+            LessNode::Declaration { .. } | LessNode::Variable { .. } | LessNode::Comment => {}
+            LessNode::AtRuleStatement(_) => {}
+        }
+    }
+    output
+}
+
+fn less_scope_variables(
+    nodes: &[LessNode],
+    inherited_variables: &[LessVariable],
+) -> Vec<LessVariable> {
+    let mut variables = inherited_variables.to_vec();
+    for node in nodes {
+        if let LessNode::Variable { name, value } = node {
+            upsert_less_variable(&mut variables, name, value.clone());
+        }
+    }
+    let snapshot = variables.clone();
+    for variable in &mut variables {
+        variable.value = resolve_less_value(&variable.value, &snapshot);
+    }
+    variables
+}
+
+fn render_less_declarations(
+    selector: &str,
+    children: &[LessNode],
+    variables: &[LessVariable],
+) -> String {
+    let declarations = children
+        .iter()
+        .filter_map(|node| match node {
+            LessNode::Declaration { name, value } => {
+                let value = resolve_less_value(value, variables);
+                Some((name.as_str(), normalize_preprocessor_color(&value)))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    if declarations.is_empty() {
+        return String::new();
+    }
+
+    let mut output = String::new();
+    output.push_str(selector);
+    output.push_str(" {\n");
+    for (name, value) in declarations {
+        output.push_str("  ");
+        output.push_str(name);
+        output.push_str(": ");
+        output.push_str(&value);
+        output.push_str(";\n");
+    }
+    output.push('}');
+    output
+}
+
+fn render_less_rule(selector: &str, children: &[LessNode], variables: &[LessVariable]) -> String {
+    let variables = less_scope_variables(children, variables);
+    let mut output = String::new();
+    let declarations = render_less_declarations(selector, children, &variables);
+    push_less_rendered(&mut output, &declarations);
+
+    for child in children {
+        match child {
+            LessNode::Rule {
+                selector: child_selector,
+                children,
+            } => {
+                let nested_selector = combine_less_selectors(Some(selector), child_selector);
+                let rendered = render_less_rule(&nested_selector, children, &variables);
+                push_less_rendered(&mut output, &rendered);
+            }
+            LessNode::AtRuleBlock { prelude, children } => {
+                let rendered_children = render_less_nodes(children, Some(selector), &variables);
+                if !rendered_children.trim().is_empty() {
+                    push_less_rendered(
+                        &mut output,
+                        &format!("{prelude} {{\n{}\n}}", indent_less_css(&rendered_children)),
+                    );
+                }
+            }
+            LessNode::AtRuleStatement(statement) => {
+                push_less_rendered(&mut output, &format!("{statement};"));
+            }
+            LessNode::Declaration { .. } | LessNode::Variable { .. } | LessNode::Comment => {}
+        }
+    }
+    output
+}
+
+fn combine_less_selectors(parent: Option<&str>, selector: &str) -> String {
+    let selector = selector.trim();
+    let Some(parent) = parent.map(str::trim).filter(|parent| !parent.is_empty()) else {
+        return selector.to_string();
+    };
+    let mut selectors = Vec::new();
+    for parent_branch in split_selector_list(parent) {
+        let parent_branch = parent_branch.trim();
+        for child_branch in split_selector_list(selector) {
+            let child_branch = child_branch.trim();
+            if child_branch.contains('&') {
+                selectors.push(child_branch.replace('&', parent_branch));
+            } else {
+                selectors.push(format!("{parent_branch} {child_branch}"));
+            }
+        }
+    }
+    selectors.join(", ")
+}
+
+fn resolve_less_value(value: &str, variables: &[LessVariable]) -> String {
+    let mut output = value.to_string();
+    for _ in 0..8 {
+        let rewritten = replace_less_variables_once(&output, variables);
+        if rewritten == output {
+            return rewritten;
+        }
+        output = rewritten;
+    }
+    output
+}
+
+fn replace_less_variables_once(source: &str, variables: &[LessVariable]) -> String {
+    let mut output = String::new();
+    let mut cursor = 0usize;
+    while cursor < source.len() {
+        let Some(relative) = source[cursor..].find('@') else {
+            output.push_str(&source[cursor..]);
+            break;
+        };
+        let start = cursor + relative;
+        output.push_str(&source[cursor..start]);
+        let name_start = start + '@'.len_utf8();
+        let name_end = consume_less_variable_name(source, name_start);
+        if name_end == name_start {
+            output.push('@');
+            cursor = name_start;
+            continue;
+        }
+        let name = &source[name_start..name_end];
+        if let Some(value) = lookup_less_variable(name, variables) {
+            output.push_str(value);
+        } else {
+            output.push_str(&source[start..name_end]);
+        }
+        cursor = name_end;
+    }
+    output
+}
+
+fn consume_less_variable_name(source: &str, mut index: usize) -> usize {
+    while index < source.len() {
+        let Some(ch) = source[index..].chars().next() else {
+            break;
+        };
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+            index += ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    index
+}
+
+fn lookup_less_variable<'a>(name: &str, variables: &'a [LessVariable]) -> Option<&'a str> {
+    variables
+        .iter()
+        .rev()
+        .find_map(|variable| (variable.name == name).then_some(variable.value.as_str()))
+}
+
+fn upsert_less_variable(variables: &mut Vec<LessVariable>, name: &str, value: String) {
+    if let Some(variable) = variables
+        .iter_mut()
+        .rev()
+        .find(|variable| variable.name == name)
+    {
+        variable.value = value;
+    } else {
+        variables.push(LessVariable {
+            name: name.to_string(),
+            value,
+        });
+    }
+}
+
+fn push_less_rendered(output: &mut String, rendered: &str) {
+    if rendered.trim().is_empty() {
+        return;
+    }
+    if !output.is_empty() && !output.ends_with('\n') {
+        output.push('\n');
+    }
+    if !output.is_empty() {
+        output.push('\n');
+    }
+    output.push_str(rendered.trim());
+}
+
+fn indent_less_css(source: &str) -> String {
+    source
+        .lines()
+        .map(|line| {
+            if line.trim().is_empty() {
+                String::new()
+            } else {
+                format!("  {line}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn preprocess_stylus(source: &str) -> Result<String, String> {
     let (variables, body) = collect_stylus_variables(source);
     let body = replace_bare_style_variables(&body, &variables);
     Ok(compile_indented_style_rules(&body).replace("#ff0000", "#f00"))
-}
-
-fn collect_style_variables(source: &str, prefix: char) -> (Vec<(String, String)>, String) {
-    let mut variables = Vec::new();
-    let mut body = Vec::new();
-    for line in source.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with(prefix) {
-            let without_prefix = &trimmed[prefix.len_utf8()..];
-            if let Some((name, value)) = without_prefix.split_once(':') {
-                variables.push((
-                    name.trim().to_string(),
-                    trim_style_value(value.trim()).to_string(),
-                ));
-                continue;
-            }
-        }
-        body.push(line);
-    }
-    (variables, body.join("\n"))
 }
 
 fn collect_stylus_variables(source: &str) -> (Vec<(String, String)>, String) {
@@ -602,14 +1130,6 @@ fn collect_stylus_variables(source: &str) -> (Vec<(String, String)>, String) {
         body.push(line);
     }
     (variables, body.join("\n"))
-}
-
-fn replace_style_variables(source: &str, prefix: char, variables: &[(String, String)]) -> String {
-    let mut output = source.to_string();
-    for (name, value) in variables {
-        output = output.replace(&format!("{prefix}{name}"), value);
-    }
-    output
 }
 
 fn replace_bare_style_variables(source: &str, variables: &[(String, String)]) -> String {
@@ -3125,6 +3645,129 @@ mod tests {
             },
         );
         assert!(stylus.code.contains("color: #f00;"));
+    }
+
+    #[test]
+    fn preprocesses_less_variables_nested_selectors_and_media() {
+        let result = compile_style(
+            r#"
+@red: rgb(255, 0, 0);
+.card, .panel {
+  @gap: 8px;
+  color: @red;
+  padding: @gap;
+  &:hover {
+    color: blue;
+  }
+  .title {
+    margin: @gap;
+  }
+  @media (min-width: 600px) {
+    display: block;
+    .title {
+      color: @red;
+    }
+  }
+}
+.other {
+  color: @red;
+}
+"#,
+            StyleCompileOptions {
+                preprocess_lang: Some("less".into()),
+                ..StyleCompileOptions::default()
+            },
+        );
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert!(result.code.contains(".card, .panel {"));
+        assert!(result.code.contains("color: #ff0000;"));
+        assert!(result.code.contains("padding: 8px;"));
+        assert!(result.code.contains(".card:hover, .panel:hover {"));
+        assert!(result.code.contains(".card .title, .panel .title {"));
+        assert!(result.code.contains("@media (min-width: 600px) {"));
+        assert!(result.code.contains("display: block;"));
+        assert!(result.code.contains(".other {"));
+        assert!(!result.code.contains("@red"));
+        assert!(!result.code.contains("@gap"));
+    }
+
+    #[test]
+    fn preprocesses_less_additional_data_imports_and_load_paths() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let src_dir = dir.path().join("src");
+        let shared_dir = dir.path().join("shared");
+        std::fs::create_dir_all(&src_dir).expect("src dir");
+        std::fs::create_dir_all(&shared_dir).expect("shared dir");
+        let base = src_dir.join("component.less");
+        let local_import = src_dir.join("local.less");
+        let load_path_import = shared_dir.join("tokens.less");
+        std::fs::write(
+            &local_import,
+            r#"
+.imported {
+  border-color: @brand;
+}
+"#,
+        )
+        .expect("write local import");
+        std::fs::write(
+            &load_path_import,
+            r#"
+@space: 12px;
+.shared {
+  margin: @space;
+}
+"#,
+        )
+        .expect("write load path import");
+
+        let result = compile_style(
+            r#"
+@import "./local.less";
+@import "tokens";
+@import "https://example.com/reset.css";
+.root {
+  color: @brand;
+  padding: @space;
+}
+"#,
+            StyleCompileOptions {
+                filename: Some(base.to_string_lossy().into_owned()),
+                preprocess_lang: Some("less".into()),
+                preprocess_options: StylePreprocessOptions {
+                    additional_data: Some("@brand: red;".into()),
+                    load_paths: vec![shared_dir.to_string_lossy().into_owned()],
+                },
+                ..StyleCompileOptions::default()
+            },
+        );
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert!(result
+            .code
+            .contains("@import \"https://example.com/reset.css\";"));
+        assert!(result.code.contains(".imported {"));
+        assert!(result.code.contains("border-color: red;"));
+        assert!(result.code.contains(".shared {"));
+        assert!(result.code.contains("margin: 12px;"));
+        assert!(result.code.contains("padding: 12px;"));
+        let mut expected = vec![
+            std::fs::canonicalize(local_import)
+                .expect("canonical local import")
+                .to_string_lossy()
+                .replace('\\', "/")
+                .trim_start_matches("//?/")
+                .to_string(),
+            std::fs::canonicalize(load_path_import)
+                .expect("canonical load path import")
+                .to_string_lossy()
+                .replace('\\', "/")
+                .trim_start_matches("//?/")
+                .to_string(),
+        ];
+        expected.sort();
+        assert_eq!(result.dependencies, expected);
     }
 
     #[test]
