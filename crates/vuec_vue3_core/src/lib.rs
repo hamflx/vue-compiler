@@ -32,7 +32,10 @@ use vuec_ast::{
 };
 use vuec_codegen::{CodeWriter, SourceMapArtifact, SourceMapSegment};
 use vuec_diagnostics::{Diagnostic, Vue3ErrorCode};
-use vuec_html::{HtmlTokenKind, HtmlTokenizer};
+use vuec_html::{
+    decode_html_attr_entities, decode_html_text_entities, find_matching_raw_text_end,
+    raw_text_mode_for_tag, resolve_html_namespace, HtmlTextMode, HtmlTokenKind, HtmlTokenizer,
+};
 use vuec_js::JsAstStore;
 use vuec_pass::TransformContext;
 use vuec_source::{FileId, Span};
@@ -232,15 +235,6 @@ pub struct Vue3SsrLoweringResult {
     pub map: LoweringMap,
     /// JavaScript side store used by HIR/MIR expression ids.
     pub js: JsAstStore,
-}
-
-/// Raw-text parsing mode for Vue 3 element content.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Vue3RawTextKind {
-    /// RCDATA mode, where character references and interpolation may be parsed.
-    RcData,
-    /// Raw text mode.
-    RawText,
 }
 
 /// Vue 3 compiler-core dialect entry point.
@@ -443,7 +437,7 @@ impl Vue3Dialect {
                             {
                                 let text = &source.source[token.end..text_end];
                                 match kind {
-                                    Vue3RawTextKind::RcData => push_text_and_interpolations(
+                                    HtmlTextMode::Data => push_text_and_interpolations(
                                         &mut ast,
                                         id,
                                         source.file_id,
@@ -451,7 +445,15 @@ impl Vue3Dialect {
                                         text,
                                         options,
                                     ),
-                                    Vue3RawTextKind::RawText => push_raw_text(
+                                    HtmlTextMode::RcData => push_text_and_interpolations(
+                                        &mut ast,
+                                        id,
+                                        source.file_id,
+                                        source.base_offset + token.end,
+                                        text,
+                                        options,
+                                    ),
+                                    HtmlTextMode::RawText => push_raw_text(
                                         &mut ast,
                                         id,
                                         source.file_id,
@@ -12136,53 +12138,24 @@ fn vue3_element_namespace(
     if let Some(namespace) = options.namespaces.get(tag).copied() {
         return namespace;
     }
-    let mut namespace = parent;
-    if options.dom_namespaces {
-        if let Some(parent_element) = ast.node(parent_id).and_then(|node| match &node.kind {
-            Vue3AstKind::Element(element) => Some(element),
-            _ => None,
-        }) {
-            if namespace == vuec_ast::HtmlNamespace::MathMl {
-                if parent_element.tag == "annotation-xml" {
-                    if tag == "svg" {
-                        return vuec_ast::HtmlNamespace::Svg;
-                    }
-                    if vue3_element_has_attr_value(
-                        parent_element,
-                        "encoding",
-                        &["text/html", "application/xhtml+xml"],
-                    ) {
-                        namespace = vuec_ast::HtmlNamespace::Html;
-                    }
-                } else if vue3_mathml_text_integration_point(&parent_element.tag)
-                    && tag != "mglyph"
-                    && tag != "malignmark"
-                {
-                    namespace = vuec_ast::HtmlNamespace::Html;
-                }
-            } else if namespace == vuec_ast::HtmlNamespace::Svg
-                && matches!(
-                    parent_element.tag.as_str(),
-                    "foreignObject" | "desc" | "title"
-                )
-            {
-                namespace = vuec_ast::HtmlNamespace::Html;
-            }
-        }
-        if namespace == vuec_ast::HtmlNamespace::Html {
-            if tag == "svg" {
-                return vuec_ast::HtmlNamespace::Svg;
-            }
-            if tag == "math" {
-                return vuec_ast::HtmlNamespace::MathMl;
-            }
-        }
-    }
-    namespace
-}
-
-fn vue3_mathml_text_integration_point(tag: &str) -> bool {
-    matches!(tag, "mi" | "mo" | "mn" | "ms" | "mtext")
+    let parent_element = ast.node(parent_id).and_then(|node| match &node.kind {
+        Vue3AstKind::Element(element) => Some(element),
+        _ => None,
+    });
+    let namespace = resolve_html_namespace(
+        tag,
+        html_namespace_to_html(parent),
+        parent_element.map(|element| element.tag.as_str()),
+        parent_element.is_some_and(|element| {
+            vue3_element_has_attr_value(
+                element,
+                "encoding",
+                &["text/html", "application/xhtml+xml"],
+            )
+        }),
+        options.dom_namespaces,
+    );
+    html_namespace_from_html(namespace)
 }
 
 fn vue3_element_has_attr_value(
@@ -12201,6 +12174,22 @@ fn vue3_element_has_attr_value(
                         .is_some_and(|value| values.iter().any(|candidate| *candidate == value))
         )
     })
+}
+
+fn html_namespace_to_html(namespace: vuec_ast::HtmlNamespace) -> vuec_html::HtmlNamespace {
+    match namespace {
+        vuec_ast::HtmlNamespace::Html => vuec_html::HtmlNamespace::Html,
+        vuec_ast::HtmlNamespace::Svg => vuec_html::HtmlNamespace::Svg,
+        vuec_ast::HtmlNamespace::MathMl => vuec_html::HtmlNamespace::MathMl,
+    }
+}
+
+fn html_namespace_from_html(namespace: vuec_html::HtmlNamespace) -> vuec_ast::HtmlNamespace {
+    match namespace {
+        vuec_html::HtmlNamespace::Html => vuec_ast::HtmlNamespace::Html,
+        vuec_html::HtmlNamespace::Svg => vuec_ast::HtmlNamespace::Svg,
+        vuec_html::HtmlNamespace::MathMl => vuec_ast::HtmlNamespace::MathMl,
+    }
 }
 
 fn vue3_tag_type(tag: &str, props: &[Vue3Prop], options: &Vue3CompilerOptions) -> Vue3ElementType {
@@ -12568,37 +12557,15 @@ fn incomplete_start_tag_recovery_text_start(slice: &str) -> Option<usize> {
 }
 
 /// Returns the Vue 3 raw-text parsing mode for a tag and namespace.
-pub fn vue3_raw_text_kind(
+fn vue3_raw_text_kind(
     tag: &str,
     namespace: vuec_ast::HtmlNamespace,
     in_v_pre: bool,
-) -> Option<Vue3RawTextKind> {
-    if in_v_pre || namespace != vuec_ast::HtmlNamespace::Html {
-        return None;
+) -> Option<HtmlTextMode> {
+    match raw_text_mode_for_tag(tag, html_namespace_to_html(namespace), in_v_pre) {
+        HtmlTextMode::Data => None,
+        mode => Some(mode),
     }
-    match tag {
-        "textarea" | "title" => Some(Vue3RawTextKind::RcData),
-        "script" | "style" => Some(Vue3RawTextKind::RawText),
-        _ => None,
-    }
-}
-
-/// Finds the matching raw-text closing tag range for an opening tag.
-pub fn find_matching_raw_text_end(
-    source: &str,
-    content_start: usize,
-    tag: &str,
-) -> Option<(usize, usize)> {
-    let mut cursor = content_start;
-    while cursor < source.len() {
-        let offset = source.get(cursor..)?.find("</")?;
-        let candidate = cursor + offset;
-        if let Some(end_tag_end) = matching_raw_text_end_tag_end(source, candidate, tag) {
-            return Some((candidate, end_tag_end));
-        }
-        cursor = candidate + "</".len();
-    }
-    None
 }
 
 fn vue3_is_sfc_plain_template(
@@ -12628,28 +12595,6 @@ fn vue3_is_sfc_custom_block(
     options: &Vue3CompilerOptions,
 ) -> bool {
     options.sfc_parse_mode && parent == root && tag != "template"
-}
-
-fn matching_raw_text_end_tag_end(source: &str, start: usize, tag: &str) -> Option<usize> {
-    let after_slash = start.checked_add("</".len())?;
-    let tag_end = after_slash.checked_add(tag.len())?;
-    let raw_tag = source.get(after_slash..tag_end)?;
-    if !raw_tag.eq_ignore_ascii_case(tag) {
-        return None;
-    }
-    let mut cursor = tag_end;
-    loop {
-        let Some(ch) = source.get(cursor..).and_then(|rest| rest.chars().next()) else {
-            return None;
-        };
-        if ch == '>' {
-            return Some(cursor + ch.len_utf8());
-        }
-        if !ch.is_whitespace() {
-            return None;
-        }
-        cursor += ch.len_utf8();
-    }
 }
 
 fn current_parent_raw_text_ignores_end_tag(
@@ -26283,145 +26228,6 @@ fn push_raw_text(
         Vue3NodeKind::text(text),
         Some(Span::new(file_id, start, start + text.len())),
     );
-}
-
-fn decode_html_text_entities(text: &str) -> String {
-    if !text.contains('&') {
-        return text.to_string();
-    }
-    decode_html_entities(text, HtmlEntityDecodeMode::Text)
-}
-
-fn decode_html_attr_entities(text: &str) -> String {
-    if !text.contains('&') {
-        return text.to_string();
-    }
-    decode_html_entities(text, HtmlEntityDecodeMode::Attribute)
-}
-
-#[derive(Clone, Copy)]
-enum HtmlEntityDecodeMode {
-    Text,
-    Attribute,
-}
-
-fn decode_html_entities(text: &str, mode: HtmlEntityDecodeMode) -> String {
-    let mut output = String::with_capacity(text.len());
-    let mut cursor = 0usize;
-    while cursor < text.len() {
-        let Some(offset) = text[cursor..].find('&') else {
-            output.push_str(&text[cursor..]);
-            break;
-        };
-        let amp = cursor + offset;
-        output.push_str(&text[cursor..amp]);
-        if let Some((decoded, consumed)) = decode_html_entity_at(&text[amp..], mode) {
-            output.push(decoded);
-            cursor = amp + consumed;
-        } else {
-            output.push('&');
-            cursor = amp + 1;
-        }
-    }
-    output
-}
-
-fn decode_html_entity_at(value: &str, mode: HtmlEntityDecodeMode) -> Option<(char, usize)> {
-    if let Some(decoded) = decode_numeric_html_entity_at(value) {
-        return Some(decoded);
-    }
-    const NAMED: [(&str, char); 7] = [
-        ("amp", '&'),
-        ("lt", '<'),
-        ("gt", '>'),
-        ("nbsp", '\u{00a0}'),
-        ("apos", '\''),
-        ("quot", '"'),
-        ("Eacute", '\u{00c9}'),
-    ];
-    for (name, decoded) in NAMED {
-        let prefix = format!("&{name}");
-        if !value.starts_with(&prefix) {
-            continue;
-        }
-        let after_name = prefix.len();
-        if value.as_bytes().get(after_name) == Some(&b';') {
-            return Some((decoded, after_name + 1));
-        }
-        if matches!(mode, HtmlEntityDecodeMode::Text) && matches!(name, "amp" | "lt" | "gt") {
-            return Some((decoded, after_name));
-        }
-        if matches!(mode, HtmlEntityDecodeMode::Attribute)
-            && name == "amp"
-            && value
-                .as_bytes()
-                .get(after_name)
-                .is_some_and(|byte| !byte.is_ascii_alphanumeric() && *byte != b'=')
-        {
-            return Some((decoded, after_name));
-        }
-    }
-    None
-}
-
-fn decode_numeric_html_entity_at(value: &str) -> Option<(char, usize)> {
-    let rest = value.strip_prefix("&#")?;
-    let (radix, digits_start) = match rest.as_bytes().first().copied() {
-        Some(b'x' | b'X') => (16, "&#x".len()),
-        _ => (10, "&#".len()),
-    };
-    let mut digits_end = digits_start;
-    while let Some(byte) = value.as_bytes().get(digits_end).copied() {
-        let is_digit = if radix == 16 {
-            byte.is_ascii_hexdigit()
-        } else {
-            byte.is_ascii_digit()
-        };
-        if !is_digit {
-            break;
-        }
-        digits_end += 1;
-    }
-    if digits_end == digits_start {
-        return None;
-    }
-    let raw = u32::from_str_radix(&value[digits_start..digits_end], radix).ok()?;
-    let consumed = digits_end + usize::from(value.as_bytes().get(digits_end) == Some(&b';'));
-    Some((html_numeric_entity_char(raw), consumed))
-}
-
-fn html_numeric_entity_char(value: u32) -> char {
-    match value {
-        0x00 => '\u{fffd}',
-        0x80 => '\u{20ac}',
-        0x82 => '\u{201a}',
-        0x83 => '\u{0192}',
-        0x84 => '\u{201e}',
-        0x85 => '\u{2026}',
-        0x86 => '\u{2020}',
-        0x87 => '\u{2021}',
-        0x88 => '\u{02c6}',
-        0x89 => '\u{2030}',
-        0x8a => '\u{0160}',
-        0x8b => '\u{2039}',
-        0x8c => '\u{0152}',
-        0x8e => '\u{017d}',
-        0x91 => '\u{2018}',
-        0x92 => '\u{2019}',
-        0x93 => '\u{201c}',
-        0x94 => '\u{201d}',
-        0x95 => '\u{2022}',
-        0x96 => '\u{2013}',
-        0x97 => '\u{2014}',
-        0x98 => '\u{02dc}',
-        0x99 => '\u{2122}',
-        0x9a => '\u{0161}',
-        0x9b => '\u{203a}',
-        0x9c => '\u{0153}',
-        0x9e => '\u{017e}',
-        0x9f => '\u{0178}',
-        value => char::from_u32(value).unwrap_or('\u{fffd}'),
-    }
 }
 
 /// Parses, transforms, and generates Vue 3 compiler-core output.

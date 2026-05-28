@@ -19,6 +19,26 @@ pub enum HtmlNamespace {
     MathMl,
 }
 
+/// HTML text parsing mode for element children.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HtmlTextMode {
+    /// Normal data mode where markup and interpolation are recognized.
+    Data,
+    /// RCDATA mode, used by tags such as `textarea` and `title`.
+    RcData,
+    /// Raw text mode, used by tags such as `script` and `style`.
+    RawText,
+}
+
+/// HTML entity decoding context.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HtmlEntityDecodeMode {
+    /// Text-node entity decoding.
+    Text,
+    /// Attribute-value entity decoding.
+    Attribute,
+}
+
 /// The quote style used by an HTML attribute value.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HtmlQuoteKind {
@@ -97,6 +117,164 @@ pub struct HtmlToken {
     pub start: usize,
     /// Byte offset where the token ends.
     pub end: usize,
+}
+
+/// Decodes HTML entities in text-node context.
+pub fn decode_html_text_entities(text: &str) -> String {
+    decode_html_entities(text, HtmlEntityDecodeMode::Text)
+}
+
+/// Decodes HTML entities in attribute-value context.
+pub fn decode_html_attr_entities(text: &str) -> String {
+    decode_html_entities(text, HtmlEntityDecodeMode::Attribute)
+}
+
+/// Decodes HTML entities in the requested context.
+pub fn decode_html_entities(text: &str, mode: HtmlEntityDecodeMode) -> String {
+    if !text.contains('&') {
+        return text.to_string();
+    }
+    let mut output = String::with_capacity(text.len());
+    let mut cursor = 0usize;
+    while cursor < text.len() {
+        let Some(offset) = text[cursor..].find('&') else {
+            output.push_str(&text[cursor..]);
+            break;
+        };
+        let amp = cursor + offset;
+        output.push_str(&text[cursor..amp]);
+        if let Some((decoded, consumed)) = decode_html_entity_at(&text[amp..], mode) {
+            output.push(decoded);
+            cursor = amp + consumed;
+        } else {
+            output.push('&');
+            cursor = amp + 1;
+        }
+    }
+    output
+}
+
+/// Returns whether `tag` is a void / unary HTML element.
+pub fn is_html_void_tag(tag: &str) -> bool {
+    matches!(
+        tag,
+        "area"
+            | "base"
+            | "br"
+            | "col"
+            | "embed"
+            | "hr"
+            | "img"
+            | "input"
+            | "link"
+            | "meta"
+            | "param"
+            | "source"
+            | "track"
+            | "wbr"
+    )
+}
+
+/// Returns whether `tag` can be implicitly closed by following content.
+pub fn can_be_left_open_tag(tag: &str) -> bool {
+    matches!(
+        tag,
+        "colgroup"
+            | "dd"
+            | "dt"
+            | "li"
+            | "options"
+            | "p"
+            | "td"
+            | "tfoot"
+            | "th"
+            | "thead"
+            | "tr"
+            | "source"
+    )
+}
+
+/// Returns the raw-text mode used by an HTML tag in the given namespace.
+pub fn raw_text_mode_for_tag(
+    tag: &str,
+    namespace: HtmlNamespace,
+    preserve_raw_text: bool,
+) -> HtmlTextMode {
+    if preserve_raw_text || namespace != HtmlNamespace::Html {
+        return HtmlTextMode::Data;
+    }
+    match tag {
+        "textarea" | "title" => HtmlTextMode::RcData,
+        "script" | "style" => HtmlTextMode::RawText,
+        _ => HtmlTextMode::Data,
+    }
+}
+
+/// Finds the matching raw-text end tag and returns `(text_end, end_tag_end)`.
+pub fn find_matching_raw_text_end(
+    source: &str,
+    content_start: usize,
+    tag: &str,
+) -> Option<(usize, usize)> {
+    let mut cursor = content_start;
+    while cursor < source.len() {
+        let offset = source.get(cursor..)?.find("</")?;
+        let candidate = cursor + offset;
+        if let Some(end_tag_end) = matching_raw_text_end_tag_end(source, candidate, tag) {
+            return Some((candidate, end_tag_end));
+        }
+        cursor = candidate + "</".len();
+    }
+    None
+}
+
+/// Resolves an element namespace using HTML integration point rules.
+pub fn resolve_html_namespace(
+    tag: &str,
+    parent_namespace: HtmlNamespace,
+    parent_tag: Option<&str>,
+    parent_has_annotation_xml_html_encoding: bool,
+    dom_namespaces: bool,
+) -> HtmlNamespace {
+    if !dom_namespaces {
+        return parent_namespace;
+    }
+    let mut namespace = parent_namespace;
+    if let Some(parent_tag) = parent_tag {
+        if namespace == HtmlNamespace::MathMl {
+            if parent_tag == "annotation-xml" {
+                if tag == "svg" {
+                    return HtmlNamespace::Svg;
+                }
+                if parent_has_annotation_xml_html_encoding {
+                    namespace = HtmlNamespace::Html;
+                }
+            } else if mathml_text_integration_point(parent_tag)
+                && tag != "mglyph"
+                && tag != "malignmark"
+            {
+                namespace = HtmlNamespace::Html;
+            }
+        } else if namespace == HtmlNamespace::Svg
+            && matches!(parent_tag, "foreignObject" | "desc" | "title")
+        {
+            namespace = HtmlNamespace::Html;
+        }
+    }
+    if namespace == HtmlNamespace::Html {
+        if tag == "svg" {
+            return HtmlNamespace::Svg;
+        }
+        if tag == "math" {
+            return HtmlNamespace::MathMl;
+        }
+    }
+    namespace
+}
+
+/// Returns whether a MathML tag is a text integration point.
+pub fn mathml_text_integration_point(tag: &str) -> bool {
+    matches!(tag, "mi" | "mo" | "mn" | "ms" | "mtext")
 }
 
 /// Streaming HTML tokenizer used by Vue template parsers.
@@ -574,6 +752,126 @@ impl<'a> HtmlTokenizer<'a> {
     }
 }
 
+fn decode_html_entity_at(value: &str, mode: HtmlEntityDecodeMode) -> Option<(char, usize)> {
+    if let Some(decoded) = decode_numeric_html_entity_at(value) {
+        return Some(decoded);
+    }
+    const NAMED: [(&str, char); 7] = [
+        ("amp", '&'),
+        ("lt", '<'),
+        ("gt", '>'),
+        ("nbsp", '\u{00a0}'),
+        ("apos", '\''),
+        ("quot", '"'),
+        ("Eacute", '\u{00c9}'),
+    ];
+    for (name, decoded) in NAMED {
+        let prefix = format!("&{name}");
+        if !value.starts_with(&prefix) {
+            continue;
+        }
+        let after_name = prefix.len();
+        if value.as_bytes().get(after_name) == Some(&b';') {
+            return Some((decoded, after_name + 1));
+        }
+        if matches!(mode, HtmlEntityDecodeMode::Text) && matches!(name, "amp" | "lt" | "gt") {
+            return Some((decoded, after_name));
+        }
+        if matches!(mode, HtmlEntityDecodeMode::Attribute)
+            && name == "amp"
+            && value
+                .as_bytes()
+                .get(after_name)
+                .is_some_and(|byte| !byte.is_ascii_alphanumeric() && *byte != b'=')
+        {
+            return Some((decoded, after_name));
+        }
+    }
+    None
+}
+
+fn decode_numeric_html_entity_at(value: &str) -> Option<(char, usize)> {
+    let rest = value.strip_prefix("&#")?;
+    let (radix, digits_start) = match rest.as_bytes().first().copied() {
+        Some(b'x' | b'X') => (16, "&#x".len()),
+        _ => (10, "&#".len()),
+    };
+    let mut digits_end = digits_start;
+    while let Some(byte) = value.as_bytes().get(digits_end).copied() {
+        let is_digit = if radix == 16 {
+            byte.is_ascii_hexdigit()
+        } else {
+            byte.is_ascii_digit()
+        };
+        if !is_digit {
+            break;
+        }
+        digits_end += 1;
+    }
+    if digits_end == digits_start {
+        return None;
+    }
+    let raw = u32::from_str_radix(&value[digits_start..digits_end], radix).ok()?;
+    let consumed = digits_end + usize::from(value.as_bytes().get(digits_end) == Some(&b';'));
+    Some((html_numeric_entity_char(raw), consumed))
+}
+
+fn html_numeric_entity_char(value: u32) -> char {
+    match value {
+        0x00 => '\u{fffd}',
+        0x80 => '\u{20ac}',
+        0x82 => '\u{201a}',
+        0x83 => '\u{0192}',
+        0x84 => '\u{201e}',
+        0x85 => '\u{2026}',
+        0x86 => '\u{2020}',
+        0x87 => '\u{2021}',
+        0x88 => '\u{02c6}',
+        0x89 => '\u{2030}',
+        0x8a => '\u{0160}',
+        0x8b => '\u{2039}',
+        0x8c => '\u{0152}',
+        0x8e => '\u{017d}',
+        0x91 => '\u{2018}',
+        0x92 => '\u{2019}',
+        0x93 => '\u{201c}',
+        0x94 => '\u{201d}',
+        0x95 => '\u{2022}',
+        0x96 => '\u{2013}',
+        0x97 => '\u{2014}',
+        0x98 => '\u{02dc}',
+        0x99 => '\u{2122}',
+        0x9a => '\u{0161}',
+        0x9b => '\u{203a}',
+        0x9c => '\u{0153}',
+        0x9e => '\u{017e}',
+        0x9f => '\u{0178}',
+        value => char::from_u32(value).unwrap_or('\u{fffd}'),
+    }
+}
+
+fn matching_raw_text_end_tag_end(source: &str, start: usize, tag: &str) -> Option<usize> {
+    let after_slash = start.checked_add("</".len())?;
+    let tag_end = after_slash.checked_add(tag.len())?;
+    let raw_tag = source.get(after_slash..tag_end)?;
+    if !raw_tag.eq_ignore_ascii_case(tag) {
+        return None;
+    }
+    let mut cursor = tag_end;
+    loop {
+        let Some(ch) = source.get(cursor..).and_then(|rest| rest.chars().next()) else {
+            return None;
+        };
+        if ch == '>' {
+            return Some(cursor + ch.len_utf8());
+        }
+        if !ch.is_whitespace() {
+            return None;
+        }
+        cursor += ch.len_utf8();
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ConsumedAttrValue {
     value: String,
@@ -714,5 +1012,95 @@ mod tests {
         );
         assert!(matches!(tokens[1].kind, HtmlTokenKind::BogusQuestionTag));
         assert!(matches!(tokens[2].kind, HtmlTokenKind::EndTag { ref name } if name == "template"));
+    }
+
+    #[test]
+    fn decodes_text_and_attribute_entities_like_vue_modes() {
+        assert_eq!(
+            decode_html_text_entities("&ampersand;&Eacute;&#x80;&#0;"),
+            "&ersand;É€�"
+        );
+        assert_eq!(decode_html_attr_entities("&amp;&amp=&amp!"), "&&amp=&!");
+        assert_eq!(decode_html_attr_entities("&lt;"), "<");
+    }
+
+    #[test]
+    fn classifies_void_left_open_and_raw_text_tags() {
+        assert!(is_html_void_tag("img"));
+        assert!(is_html_void_tag("source"));
+        assert!(can_be_left_open_tag("p"));
+        assert!(can_be_left_open_tag("li"));
+        assert_eq!(
+            raw_text_mode_for_tag("textarea", HtmlNamespace::Html, false),
+            HtmlTextMode::RcData
+        );
+        assert_eq!(
+            raw_text_mode_for_tag("script", HtmlNamespace::Html, false),
+            HtmlTextMode::RawText
+        );
+        assert_eq!(
+            raw_text_mode_for_tag("script", HtmlNamespace::Svg, false),
+            HtmlTextMode::Data
+        );
+    }
+
+    #[test]
+    fn finds_matching_raw_text_end_tag_case_insensitively() {
+        assert_eq!(
+            find_matching_raw_text_end("<textarea>a</TEXTAREA> tail", 10, "textarea"),
+            Some((11, 22))
+        );
+        assert_eq!(
+            find_matching_raw_text_end("<script>x</script type=x>", 8, "script"),
+            None
+        );
+    }
+
+    #[test]
+    fn resolves_dom_namespace_integration_points() {
+        assert_eq!(
+            resolve_html_namespace("svg", HtmlNamespace::Html, None, false, true),
+            HtmlNamespace::Svg
+        );
+        assert_eq!(
+            resolve_html_namespace(
+                "foreignObject",
+                HtmlNamespace::Svg,
+                Some("svg"),
+                false,
+                true
+            ),
+            HtmlNamespace::Svg
+        );
+        assert_eq!(
+            resolve_html_namespace(
+                "div",
+                HtmlNamespace::Svg,
+                Some("foreignObject"),
+                false,
+                true
+            ),
+            HtmlNamespace::Html
+        );
+        assert_eq!(
+            resolve_html_namespace(
+                "span",
+                HtmlNamespace::MathMl,
+                Some("annotation-xml"),
+                true,
+                true
+            ),
+            HtmlNamespace::Html
+        );
+        assert_eq!(
+            resolve_html_namespace(
+                "div",
+                HtmlNamespace::Svg,
+                Some("foreignObject"),
+                false,
+                false
+            ),
+            HtmlNamespace::Svg
+        );
     }
 }

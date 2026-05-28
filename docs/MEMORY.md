@@ -1,5 +1,9 @@
 # Memory
 
+- Current round: closed the `vuec_html` tokenizer/foundation slice.
+- `vuec_html` now owns shared HTML entity decoding, raw-text/RCDATA mode classification and end-tag search, void/unary tag and can-be-left-open tag predicates, DOM namespace integration rules for HTML/SVG/MathML, and existing lossless token/attribute span support. Vue 3 core parser now reuses these shared `vuec_html` APIs instead of carrying duplicate private entity/raw-text/namespace implementations. This is HTML/parser infrastructure only; no `xtask/src/compat.rs` alias/shim code or compiler conformance classification changed.
+- Verification for this slice passes: `cargo test -p vuec_html -- --nocapture`, `cargo check -p vuec_html -p vuec_vue3_core -p vuec_vue3_dom`, focused Vue 3 parser entity/namespace/textarea tests, and `cargo test -p vuec_vue2 --lib -- --nocapture`.
+
 - Current round: closed the `vuec_diagnostics` foundation slice.
 - `vuec_diagnostics` now owns the unified `Diagnostic` model with severity, notes, related information, suggestions, stable snapshot serialization, code-frame rendering, Vue 2 warning/error/tip constructors, and Vue 3 official numeric compiler error-code constructors for compiler-core/compiler-dom observable diagnostics. Existing Vue 2 and Vue 3 core/dom diagnostic creation points were migrated to the shared constructors. This is diagnostic infrastructure only; no compiler semantics, conformance runner logic, or JavaScript alias shims changed.
 - Verification for this slice passes: `cargo test -p vuec_diagnostics -- --nocapture`, `cargo check -p vuec_diagnostics -p vuec_pass -p vuec_vue2 -p vuec_vue3_core -p vuec_vue3_dom`, `cargo test -p vuec_vue3_dom v_model -- --nocapture`, `cargo test -p vuec_vue3_core expression_parse_error -- --nocapture`, and `cargo test -p vuec_vue2 code_frame -- --nocapture`.
