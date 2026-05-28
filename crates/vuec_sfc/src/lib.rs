@@ -23,7 +23,7 @@ use serde_json::json;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
-use vuec_codegen::SourceMapArtifact;
+use vuec_codegen::{SourceMapArtifact, SourceMapBuilder};
 use vuec_diagnostics::{Diagnostic, Severity};
 use vuec_html::{HtmlAttribute, HtmlTokenKind, HtmlTokenizer};
 use vuec_js::{JsAstStore, JsParseMode};
@@ -929,7 +929,12 @@ impl SfcCompiler {
         let mut errors = Vec::new();
         let mut dependencies = Vec::new();
         let mut raw_result = Vec::new();
-        let mut map = None;
+        let mut map_builder = options.source_map.then(|| {
+            let mut builder = SourceMapBuilder::new().file(descriptor.filename.clone());
+            builder.add_source_content(descriptor.filename.clone(), descriptor.source.clone());
+            builder
+        });
+        let mut generated_line_offset = 0u32;
         for style in &descriptor.styles {
             let result = compile_style(
                 &style.content,
@@ -940,6 +945,9 @@ impl SfcCompiler {
                     vars: options.vars.clone(),
                     is_prod: options.is_prod,
                     filename: Some(descriptor.filename.clone()),
+                    source_map_source: Some(descriptor.source.clone()),
+                    source_map_file_id: Some(descriptor.source_file),
+                    source_map_base_offset: style.content_start,
                     source_map: options.source_map,
                     preprocess_lang: style
                         .attrs
@@ -948,19 +956,33 @@ impl SfcCompiler {
                         .or_else(|| options.preprocess_lang.clone()),
                 },
             );
-            if !code.is_empty() && !result.code.is_empty() {
+            let needs_join_newline = !code.is_empty() && !result.code.is_empty();
+            if needs_join_newline {
                 code.push('\n');
             }
             code.push_str(&result.code);
             errors.extend(result.errors);
-            if map.is_none() {
-                map = result.map;
+            if let Some(builder) = map_builder.as_mut() {
+                add_style_block_mappings(
+                    builder,
+                    descriptor,
+                    style,
+                    &result.code,
+                    generated_line_offset,
+                );
+            }
+            if !result.code.is_empty() {
+                generated_line_offset += generated_line_count(&result.code);
+            }
+            if needs_join_newline {
+                generated_line_offset += 1;
             }
             dependencies.extend(style_dependencies(style));
             raw_result.push("postcss-result".to_string());
         }
         dependencies.sort();
         dependencies.dedup();
+        let map = map_builder.map(SourceMapBuilder::build);
         SfcStyleCompileResult {
             code,
             map,
@@ -2461,6 +2483,47 @@ fn descriptor_css_vars(descriptor: &SfcDescriptor) -> Vec<String> {
         }
     }
     vars
+}
+
+fn add_style_block_mappings(
+    builder: &mut SourceMapBuilder,
+    descriptor: &SfcDescriptor,
+    style: &SfcBlock,
+    generated_code: &str,
+    generated_line_offset: u32,
+) {
+    if generated_code.is_empty() {
+        return;
+    }
+    let original_line_starts = style_line_starts(&style.content);
+    let generated_lines = generated_line_count(generated_code).max(1);
+    for generated_line in 0..generated_lines {
+        let local_start = original_line_starts
+            .get(generated_line as usize)
+            .copied()
+            .unwrap_or_else(|| *original_line_starts.last().unwrap_or(&0));
+        let absolute = style.content_start + local_start;
+        builder.add_mapping(
+            generated_line_offset as usize + generated_line as usize + 1,
+            0,
+            Some(Span::new(descriptor.source_file, absolute, absolute)),
+            Some(descriptor.filename.clone()),
+        );
+    }
+}
+
+fn style_line_starts(source: &str) -> Vec<usize> {
+    let mut starts = vec![0];
+    for (index, ch) in source.char_indices() {
+        if ch == '\n' {
+            starts.push(index + ch.len_utf8());
+        }
+    }
+    starts
+}
+
+fn generated_line_count(source: &str) -> u32 {
+    source.lines().count().max(1) as u32
 }
 
 fn vue27_script_content(
@@ -8152,6 +8215,71 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
         assert_eq!(style.raw_result.len(), 1);
         let style_json = serde_json::to_value(&style).expect("style json");
         assert!(style_json.get("rawResult").is_some());
+    }
+
+    #[test]
+    fn compile_style_source_map_merges_style_blocks_to_vue_source() {
+        let mut compiler = SfcCompiler::new();
+        let source = "<style>.a { color: red; }</style>\n<style>.b { color: blue; }</style>";
+        let descriptor = compiler.parse("multi.vue", source);
+        let result = compiler.compile_style(
+            &descriptor,
+            SfcStyleCompileOptions {
+                source_map: true,
+                ..SfcStyleCompileOptions::default()
+            },
+        );
+        let map = result.map.expect("merged style source map");
+
+        assert_eq!(map.sources, vec!["multi.vue"]);
+        assert_eq!(
+            map.sources_content
+                .as_ref()
+                .and_then(|sources| sources[0].as_ref()),
+            Some(&source.to_string())
+        );
+        let first = map
+            .original_position(vuec_source::GeneratedPosition::new(0, 0))
+            .unwrap()
+            .expect("first style mapping");
+        assert_eq!(first.source, "multi.vue");
+        assert_eq!(first.line, 0);
+        assert_eq!(first.column, "<style>".len() as u32);
+        let second_generated_line = result.code.lines().count().saturating_sub(1) as u32;
+        let second = map
+            .original_position(vuec_source::GeneratedPosition::new(
+                second_generated_line,
+                0,
+            ))
+            .unwrap()
+            .expect("second style mapping");
+        assert_eq!(second.source, "multi.vue");
+        assert_eq!(second.line, 1);
+        assert_eq!(second.column, "<style>".len() as u32);
+    }
+
+    #[test]
+    fn compile_style_source_map_skips_empty_style_blocks() {
+        let mut compiler = SfcCompiler::new();
+        let source = "<style></style>\n<style>.b { color: blue; }</style>";
+        let descriptor = compiler.parse("multi.vue", source);
+        let result = compiler.compile_style(
+            &descriptor,
+            SfcStyleCompileOptions {
+                source_map: true,
+                ..SfcStyleCompileOptions::default()
+            },
+        );
+        let map = result.map.expect("merged style source map");
+
+        assert_eq!(result.code, ".b { color: blue;\n}");
+        let first = map
+            .original_position(vuec_source::GeneratedPosition::new(0, 0))
+            .unwrap()
+            .expect("non-empty style mapping");
+        assert_eq!(first.source, "multi.vue");
+        assert_eq!(first.line, 1);
+        assert_eq!(first.column, "<style>".len() as u32);
     }
 
     #[test]

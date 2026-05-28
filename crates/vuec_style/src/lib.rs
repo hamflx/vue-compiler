@@ -8,6 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 use vuec_codegen::{SourceMapArtifact, SourceMapBuilder};
+use vuec_source::{FileId, Span};
 
 /// Options controlling SFC style compilation.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,6 +25,15 @@ pub struct StyleCompileOptions {
     pub is_prod: bool,
     /// Optional filename used for generated source-map metadata.
     pub filename: Option<String>,
+    /// Original source text used for source-map `sourcesContent`.
+    #[serde(default)]
+    pub source_map_source: Option<String>,
+    /// Original source file id for source-map spans.
+    #[serde(default)]
+    pub source_map_file_id: Option<FileId>,
+    /// Byte offset where this style source starts in its original file.
+    #[serde(default)]
+    pub source_map_base_offset: usize,
     /// Whether a source-map artifact should be returned.
     pub source_map: bool,
     /// Optional preprocessor language, for example `scss`, `sass`, `less`, or `styl`.
@@ -60,7 +70,7 @@ pub fn compile_style(source: &str, options: StyleCompileOptions) -> StyleCompile
     let vars = if options.vars.is_empty() {
         collect_css_vars(&code)
     } else {
-        options.vars
+        options.vars.clone()
     };
 
     if options.scoped {
@@ -80,10 +90,7 @@ pub fn compile_style(source: &str, options: StyleCompileOptions) -> StyleCompile
         errors.push("style import could not be resolved".into());
     }
     let map = if options.source_map {
-        let mut builder =
-            SourceMapBuilder::new().file(options.filename.unwrap_or_else(|| "style.css".into()));
-        builder.add_mapping(1, 0, None, Some("source.vue".into()));
-        Some(builder.build())
+        Some(style_source_map(&code, source, &options))
     } else {
         None
     };
@@ -95,6 +102,55 @@ pub fn compile_style(source: &str, options: StyleCompileOptions) -> StyleCompile
         modules,
         vars,
     }
+}
+
+fn style_source_map(
+    generated: &str,
+    original_style_source: &str,
+    options: &StyleCompileOptions,
+) -> SourceMapArtifact {
+    let filename = options
+        .filename
+        .clone()
+        .unwrap_or_else(|| "style.css".into());
+    let source_content = options
+        .source_map_source
+        .clone()
+        .unwrap_or_else(|| original_style_source.to_string());
+    let source_name = filename.clone();
+    let file_id = options.source_map_file_id.unwrap_or(FileId(0));
+    let mut builder = SourceMapBuilder::new().file(filename);
+    builder.add_source_content(source_name.clone(), source_content);
+
+    let mut original_line_starts = line_starts(original_style_source);
+    if original_line_starts.is_empty() {
+        original_line_starts.push(0);
+    }
+    let generated_line_count = generated.lines().count().max(1);
+    for generated_line in 0..generated_line_count {
+        let local_start = original_line_starts
+            .get(generated_line)
+            .copied()
+            .unwrap_or_else(|| *original_line_starts.last().unwrap_or(&0));
+        let absolute = options.source_map_base_offset + local_start;
+        builder.add_mapping(
+            generated_line + 1,
+            0,
+            Some(Span::new(file_id, absolute, absolute)),
+            Some(source_name.clone()),
+        );
+    }
+    builder.build()
+}
+
+fn line_starts(source: &str) -> Vec<usize> {
+    let mut starts = vec![0];
+    for (index, ch) in source.char_indices() {
+        if ch == '\n' {
+            starts.push(index + ch.len_utf8());
+        }
+    }
+    starts
 }
 
 fn normalize_style_output(source: &str) -> String {
@@ -1671,6 +1727,44 @@ mod tests {
         assert_eq!(result.modules, vec!["a"]);
         assert_eq!(result.vars, vec!["color"]);
         assert!(result.map.is_some());
+    }
+
+    #[test]
+    fn source_map_tracks_original_style_source_lines() {
+        let source = ".a { color: red; }\n.b { color: blue; }";
+        let result = compile_style(
+            source,
+            StyleCompileOptions {
+                filename: Some("component.vue".into()),
+                source_map_source: Some(format!("<style>\n{source}\n</style>")),
+                source_map_file_id: Some(FileId(7)),
+                source_map_base_offset: "<style>\n".len(),
+                source_map: true,
+                ..StyleCompileOptions::default()
+            },
+        );
+        let map = result.map.expect("style source map");
+
+        assert_eq!(map.sources, vec!["component.vue"]);
+        assert_eq!(
+            map.sources_content
+                .as_ref()
+                .and_then(|sources| sources[0].as_ref()),
+            Some(&format!("<style>\n{source}\n</style>"))
+        );
+        let first = map
+            .original_position(vuec_source::GeneratedPosition::new(0, 0))
+            .unwrap()
+            .expect("first mapping");
+        assert_eq!(first.source, "component.vue");
+        assert_eq!(first.line, 1);
+        assert_eq!(first.column, 0);
+        let second = map
+            .original_position(vuec_source::GeneratedPosition::new(1, 0))
+            .unwrap()
+            .expect("second mapping");
+        assert_eq!(second.line, 2);
+        assert_eq!(second.column, 0);
     }
 
     #[test]
