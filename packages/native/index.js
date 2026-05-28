@@ -199,35 +199,35 @@ function compileVue3Ssr(source, options = {}) {
 }
 
 function parseSfc(source, options = {}) {
-  return fromJson(binding.parseSfc(source, options));
+  return fromJson(binding.parseSfc(source, dehydrateForNative(options || {})));
 }
 
 function parseVue27SfcComponent(source, options = {}) {
-  return fromJson(binding.parseVue27SfcComponent(source, options));
+  return fromJson(binding.parseVue27SfcComponent(source, dehydrateForNative(options || {})));
 }
 
 function compileSfcTemplate(source, options = {}) {
-  return fromJson(binding.compileSfcTemplate(source, options));
+  return fromJson(binding.compileSfcTemplate(source, dehydrateForNative(options || {})));
 }
 
 function compileSfcTemplateSource(source, options = {}) {
-  return fromJson(binding.compileSfcTemplateSource(source, options));
+  return fromJson(binding.compileSfcTemplateSource(source, dehydrateForNative(options || {})));
 }
 
 function compileSfcScript(source, options = {}) {
-  return fromJson(binding.compileSfcScript(source, options));
+  return fromJson(binding.compileSfcScript(source, dehydrateForNative(options || {})));
 }
 
 function compileVue27SfcTemplate(source, options = {}) {
-  return fromJson(binding.compileVue27SfcTemplate(source, options));
+  return fromJson(binding.compileVue27SfcTemplate(source, dehydrateForNative(options || {})));
 }
 
 function compileVue27SfcScript(source, options = {}) {
-  return fromJson(binding.compileVue27SfcScript(source, options));
+  return fromJson(binding.compileVue27SfcScript(source, dehydrateForNative(options || {})));
 }
 
 function compileSfcStyle(source, options = {}) {
-  return fromJson(binding.compileSfcStyle(source, options));
+  return fromJson(binding.compileSfcStyle(source, dehydrateForNative(options || {})));
 }
 
 function compile(template, options = {}) {

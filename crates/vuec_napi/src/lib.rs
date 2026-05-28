@@ -33,7 +33,8 @@ use vuec_vue2::{
 };
 use vuec_vue3_core::{TemplateSource, Vue3CompilerOptions, Vue3Dialect};
 use vuec_vue3_dom::{
-    apply_dom_parser_defaults, compile as compile_dom, parse as parse_dom, DomCompilerOptions,
+    apply_dom_parser_defaults, compile as compile_dom, parse as parse_dom, AssetUrlOptions,
+    DomCompilerOptions,
 };
 use vuec_vue3_ssr::{compile as compile_ssr, SsrCompilerOptions};
 
@@ -166,9 +167,18 @@ pub fn compile_vue3_dom(env: Env, source: String, options: Option<Unknown>) -> R
     let template = template_source(&source, &raw_options);
     let mut core = vue3_options(Some(&raw_options));
     apply_napi_dom_parser_defaults(&mut core, Some(&raw_options));
+    let default_options = DomCompilerOptions::default();
     let dom_options = DomCompilerOptions {
         core,
-        ..DomCompilerOptions::default()
+        transform_asset_urls: transform_asset_urls_enabled(
+            &raw_options,
+            default_options.transform_asset_urls,
+        ),
+        asset_url_options: asset_url_options(
+            &raw_options,
+            default_options.asset_url_options.clone(),
+        ),
+        ..default_options
     };
     to_json_string(compile_dom(template, dom_options))
 }
@@ -180,9 +190,18 @@ pub fn parse_vue3_dom(env: Env, source: String, options: Option<Unknown>) -> Res
     let template = template_source(&source, &raw_options);
     let mut core = vue3_options(Some(&raw_options));
     apply_napi_dom_parser_defaults(&mut core, Some(&raw_options));
+    let default_options = DomCompilerOptions::default();
     let dom_options = DomCompilerOptions {
         core,
-        ..DomCompilerOptions::default()
+        transform_asset_urls: transform_asset_urls_enabled(
+            &raw_options,
+            default_options.transform_asset_urls,
+        ),
+        asset_url_options: asset_url_options(
+            &raw_options,
+            default_options.asset_url_options.clone(),
+        ),
+        ..default_options
     };
     let ast = parse_dom(template.clone(), &dom_options);
     to_json_string(vue3_public_parse_ast(
@@ -310,6 +329,7 @@ pub fn compile_vue3_ssr(env: Env, source: String, options: Option<Unknown>) -> R
     let template = template_source(&source, &raw_options);
     let mut core = vue3_options(Some(&raw_options));
     apply_napi_dom_parser_defaults(&mut core, Some(&raw_options));
+    let default_options = SsrCompilerOptions::default();
     let ssr_options = SsrCompilerOptions {
         core,
         scope_id: raw_options
@@ -320,7 +340,15 @@ pub fn compile_vue3_ssr(env: Env, source: String, options: Option<Unknown>) -> R
         slotted: bool_option(&raw_options, "slotted", false),
         slotted_is_explicit: raw_options.get("slotted").is_some(),
         mode_is_explicit: raw_options.get("mode").is_some(),
-        ..SsrCompilerOptions::default()
+        transform_asset_urls: transform_asset_urls_enabled(
+            &raw_options,
+            default_options.transform_asset_urls,
+        ),
+        asset_url_options: asset_url_options(
+            &raw_options,
+            default_options.asset_url_options.clone(),
+        ),
+        ..default_options
     };
     to_json_string(compile_ssr(template, ssr_options))
 }
@@ -1012,6 +1040,103 @@ fn vue27_sfc_asset_url_options(value: &Value) -> Vue2SfcAssetUrlTransformOptions
 }
 
 fn vue27_sfc_asset_url_tags(object: &Map<String, Value>) -> BTreeMap<String, Vec<String>> {
+    object
+        .iter()
+        .filter_map(|(tag, attrs)| match attrs {
+            Value::String(attr) => Some((tag.clone(), vec![attr.clone()])),
+            Value::Array(items) => {
+                let attrs = items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .collect::<Vec<_>>();
+                (!attrs.is_empty()).then_some((tag.clone(), attrs))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn transform_asset_urls_enabled(value: &Value, fallback: bool) -> bool {
+    transform_asset_urls_enabled_from(transform_asset_urls_value(value), fallback)
+}
+
+fn transform_asset_urls_enabled_with_compiler_fallback(value: &Value, fallback: bool) -> bool {
+    transform_asset_urls_enabled_from(
+        transform_asset_urls_value_with_compiler_fallback(value),
+        fallback,
+    )
+}
+
+fn transform_asset_urls_enabled_from(value: Option<&Value>, fallback: bool) -> bool {
+    match value {
+        Some(Value::Bool(enabled)) => *enabled,
+        Some(Value::Object(_)) => true,
+        _ => fallback,
+    }
+}
+
+fn asset_url_options(value: &Value, mut options: AssetUrlOptions) -> AssetUrlOptions {
+    let Some(raw) = transform_asset_urls_value(value) else {
+        return options;
+    };
+    parse_asset_url_options(raw, &mut options);
+    options
+}
+
+fn asset_url_options_with_compiler_fallback(
+    value: &Value,
+    mut options: AssetUrlOptions,
+) -> AssetUrlOptions {
+    let Some(raw) = transform_asset_urls_value_with_compiler_fallback(value) else {
+        return options;
+    };
+    parse_asset_url_options(raw, &mut options);
+    options
+}
+
+fn parse_asset_url_options(raw: &Value, options: &mut AssetUrlOptions) {
+    match raw {
+        Value::Bool(_) => {}
+        Value::Object(object) => {
+            if let Some(base) = object.get("base") {
+                options.base = if base.is_null() {
+                    None
+                } else {
+                    base.as_str().map(ToOwned::to_owned)
+                };
+            }
+            options.include_absolute =
+                bool_option(raw, "includeAbsolute", options.include_absolute);
+            if let Some(tags) = object.get("tags").and_then(Value::as_object) {
+                options.tags = asset_url_tags(tags);
+            } else if !object.contains_key("base")
+                && !object.contains_key("includeAbsolute")
+                && !object.contains_key("tags")
+                && object
+                    .iter()
+                    .any(|(_, value)| matches!(value, Value::String(_) | Value::Array(_)))
+            {
+                options.tags = asset_url_tags(object);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn transform_asset_urls_value(value: &Value) -> Option<&Value> {
+    value.get("transformAssetUrls")
+}
+
+fn transform_asset_urls_value_with_compiler_fallback(value: &Value) -> Option<&Value> {
+    value.get("transformAssetUrls").or_else(|| {
+        value
+            .get("compilerOptions")
+            .and_then(|compiler_options| compiler_options.get("transformAssetUrls"))
+    })
+}
+
+fn asset_url_tags(object: &Map<String, Value>) -> BTreeMap<String, Vec<String>> {
     object
         .iter()
         .filter_map(|(tag, attrs)| match attrs {
@@ -3519,6 +3644,10 @@ fn sfc_template_options(value: Option<&Value>) -> SfcTemplateCompileOptions {
         "isProd",
         bool_option(value, "is_prod", options.is_prod),
     );
+    options.transform_asset_urls =
+        transform_asset_urls_enabled_with_compiler_fallback(value, options.transform_asset_urls);
+    options.asset_url_options =
+        asset_url_options_with_compiler_fallback(value, options.asset_url_options);
     options.scope_id = value
         .get("scopeId")
         .or_else(|| value.get("scope_id"))
@@ -3701,6 +3830,72 @@ mod tests {
         assert_eq!(options.built_in_components, vec!["Transition"]);
         assert!(options.sfc_parse_mode);
         assert_eq!(options.sfc_plain_template_langs, vec!["pug"]);
+    }
+
+    #[test]
+    fn vue3_dom_options_accept_asset_url_projection_keys() {
+        let default_options = DomCompilerOptions::default();
+        let options = json!({
+            "transformAssetUrls": {
+                "base": "/cdn",
+                "includeAbsolute": true,
+                "tags": {
+                    "foo": ["bar"],
+                    "picture": "srcset"
+                }
+            }
+        });
+
+        assert!(transform_asset_urls_enabled(
+            &options,
+            default_options.transform_asset_urls
+        ));
+        let parsed = asset_url_options(&options, default_options.asset_url_options);
+        assert_eq!(parsed.base.as_deref(), Some("/cdn"));
+        assert!(parsed.include_absolute);
+        assert_eq!(parsed.tags.get("foo"), Some(&vec!["bar".to_string()]));
+        assert_eq!(
+            parsed.tags.get("picture"),
+            Some(&vec!["srcset".to_string()])
+        );
+    }
+
+    #[test]
+    fn vue3_sfc_template_options_accept_asset_url_projection_keys() {
+        let options = sfc_template_options(Some(&json!({
+            "transformAssetUrls": {
+                "foo": ["bar"]
+            }
+        })));
+
+        assert!(options.transform_asset_urls);
+        assert_eq!(
+            options.asset_url_options.tags.get("foo"),
+            Some(&vec!["bar".to_string()])
+        );
+    }
+
+    #[test]
+    fn vue3_sfc_template_options_use_compiler_asset_fallback() {
+        let options = sfc_template_options(Some(&json!({
+            "compilerOptions": {
+                "transformAssetUrls": false
+            }
+        })));
+
+        assert!(!options.transform_asset_urls);
+    }
+
+    #[test]
+    fn vue3_dom_options_ignore_compiler_asset_fallback() {
+        let fallback = DomCompilerOptions::default().transform_asset_urls;
+        let options = json!({
+            "compilerOptions": {
+                "transformAssetUrls": false
+            }
+        });
+
+        assert_eq!(transform_asset_urls_enabled(&options, fallback), fallback);
     }
 
     #[test]
