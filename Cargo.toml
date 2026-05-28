@@ -47,6 +47,8 @@ sha2 = "0.10"
 sysinfo = "0.39.2"
 thiserror = "2"
 toml = "0.8"
+grass = { version = "0.13.4", default-features = false }
+tempfile = "3"
 oxc_allocator = "0.132.0"
 oxc_ast = "0.132.0"
 oxc_diagnostics = "0.132.0"

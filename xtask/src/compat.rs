@@ -2224,7 +2224,7 @@ fn vue27_sfc_style_function_expression(export_name: &str, detail: &ApiExportDeta
         "applyVue27StylePostcssSync(__vuecBridgeResult, __vuecPayload.options)"
     };
     let body = format!(
-        "const __vuecPayload = normalizeArgs({}); preflightAliasCall({}, __vuecPayload); const __vuecBridgePayload = vue27StyleBridgePayload(__vuecPayload); const __vuecBridgeResult = callBridge({}, bridgePayloadForCall(__vuecBridgePayload)); return {postcss_call};",
+        "const __vuecPayload = resolveStylePreprocessPayload(normalizeArgs({})); preflightAliasCall({}, __vuecPayload); const __vuecBridgePayload = vue27StyleBridgePayload(__vuecPayload); const __vuecBridgeResult = callBridge({}, bridgePayloadForCall(__vuecBridgePayload)); return {postcss_call};",
         alias_argument_object(
             TargetSpec {
                 version_line: VersionLine::Vue27,
@@ -2362,12 +2362,30 @@ fn alias_function_expression(
             );
             let is_vue27_sfc_compile_script =
                 target.kind == TargetKind::Vue27Sfc && export_name == "compileScript";
+            let is_sfc_compile_style = matches!(
+                (target.kind, export_name),
+                (
+                    TargetKind::Vue3Sfc | TargetKind::Vue27Sfc,
+                    "compileStyle" | "compileStyleAsync"
+                )
+            );
             let payload = if is_vue3_generate {
                 "Object.assign({}, __vuecPayload, { ast: vue3CoreRuntime.dehydrateForBridge(a0), source: '' })"
             } else if is_vue27_sfc_compile_script {
                 "vue27CompileScriptBridgePayload(__vuecPayload)"
             } else {
                 "__vuecPayload"
+            };
+            let payload_init = if is_sfc_compile_style {
+                format!(
+                    "resolveStylePreprocessPayload(normalizeArgs({}))",
+                    alias_argument_object(target, export_name, body_arity)
+                )
+            } else {
+                format!(
+                    "normalizeArgs({})",
+                    alias_argument_object(target, export_name, body_arity)
+                )
             };
             let return_expr = if is_vue3_generate {
                 format!(
@@ -2383,8 +2401,7 @@ fn alias_function_expression(
                 call
             };
             format!(
-                "{argument_bindings} const __vuecPayload = normalizeArgs({}); preflightAliasCall({}, __vuecPayload); const __vuecBridgePayload = {payload}; return {return_expr};",
-                alias_argument_object(target, export_name, body_arity),
+                "{argument_bindings} const __vuecPayload = {payload_init}; preflightAliasCall({}, __vuecPayload); const __vuecBridgePayload = {payload}; return {return_expr};",
                 js_string_literal(alias_preflight_name(target, export_name)),
             )
         }
@@ -7415,6 +7432,21 @@ const vuecBridgeRuntime = { callBridge };
 
 function normalizeArgs(payload) {
   return payload || {};
+}
+
+function resolveStylePreprocessPayload(payload) {
+  if (!payload || !payload.options || typeof payload.options !== 'object') return payload;
+  const options = payload.options;
+  const preprocessOptions = options.preprocessOptions;
+  if (!preprocessOptions || typeof preprocessOptions !== 'object') return payload;
+  if (typeof preprocessOptions.additionalData !== 'function') return payload;
+  const source = payload.source == null ? '' : String(payload.source);
+  const resolvedOptions = Object.assign({}, options, {
+    preprocessOptions: Object.assign({}, preprocessOptions, {
+      additionalData: preprocessOptions.additionalData(source, options.filename)
+    })
+  });
+  return Object.assign({}, payload, { options: resolvedOptions });
 }
 
 function bridgePayloadForCall(payload) {

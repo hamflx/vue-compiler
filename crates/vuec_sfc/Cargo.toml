@@ -28,3 +28,6 @@ vuec_style = { path = "../vuec_style", version = "0.1.0" }
 vuec_vue3_dom = { path = "../vuec_vue3_dom", version = "0.1.0" }
 vuec_vue3_ssr = { path = "../vuec_vue3_ssr", version = "0.1.0" }
 vuec_vue3_core = { path = "../vuec_vue3_core", version = "0.1.0" }
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -31,7 +31,7 @@ use vuec_source::{FileId, SourceMap, Span};
 pub use vuec_style::CssVarNameStyle as SfcCssVarNameStyle;
 use vuec_style::{
     collect_css_vars_with_options, compile_style, gen_css_var_name_with_style, CssModulesOptions,
-    CssVarCollectOptions, CssVarNameStyle, StyleCompileOptions,
+    CssVarCollectOptions, CssVarNameStyle, StyleCompileOptions, StylePreprocessOptions,
 };
 use vuec_vue3_core::{TemplateSource, Vue3CompilerOptions};
 use vuec_vue3_dom::{
@@ -255,6 +255,9 @@ pub struct SfcStyleCompileOptions {
     pub css_var_ignore_line_comments: bool,
     /// Optional preprocessor language override.
     pub preprocess_lang: Option<String>,
+    /// Preprocessor option surface forwarded to style compilation.
+    #[serde(default)]
+    pub preprocess_options: StylePreprocessOptions,
     /// Whether source maps should be generated.
     pub source_map: bool,
 }
@@ -271,6 +274,7 @@ impl Default for SfcStyleCompileOptions {
             css_var_name_style: CssVarNameStyle::Vue3Escaped,
             css_var_ignore_line_comments: true,
             preprocess_lang: None,
+            preprocess_options: StylePreprocessOptions::default(),
             source_map: false,
         }
     }
@@ -986,6 +990,7 @@ impl SfcCompiler {
                         .lang
                         .clone()
                         .or_else(|| options.preprocess_lang.clone()),
+                    preprocess_options: options.preprocess_options.clone(),
                 },
             );
             let needs_join_newline = !code.is_empty() && !result.code.is_empty();
@@ -1013,7 +1018,11 @@ impl SfcCompiler {
             if needs_join_newline {
                 generated_line_offset += 1;
             }
-            dependencies.extend(style_dependencies(style));
+            dependencies.extend(style_src_dependency(style));
+            if result.dependencies.is_empty() {
+                dependencies.extend(style_import_dependencies(style));
+            }
+            dependencies.extend(result.dependencies);
             raw_result.push("postcss-result".to_string());
         }
         dependencies.sort();
@@ -2495,11 +2504,12 @@ impl<'a> SourceEdits<'a> {
     }
 }
 
-fn style_dependencies(style: &SfcBlock) -> Vec<String> {
+fn style_src_dependency(style: &SfcBlock) -> Vec<String> {
+    style.attrs.src.iter().cloned().collect()
+}
+
+fn style_import_dependencies(style: &SfcBlock) -> Vec<String> {
     let mut dependencies = Vec::new();
-    if let Some(src) = style.attrs.src.as_ref() {
-        dependencies.push(src.clone());
-    }
     for line in style.content.lines() {
         let trimmed = line.trim();
         if !trimmed.starts_with("@import") {
@@ -8296,6 +8306,43 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
             .is_some_and(|value| value.contains("_red_")));
         assert!(!modules.contains_key("blue"));
         assert!(result.code.contains(".blue { color: blue }"));
+    }
+
+    #[test]
+    fn compile_style_forwards_scss_preprocess_options_and_dependencies() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let filename = dir.path().join("component.vue");
+        let import = dir.path().join("import.scss");
+        std::fs::write(&import, ".imported { color: $red; }\n").expect("write import");
+        let source = r#"<style lang="scss">
+@import "./import.scss";
+.square { @include square(10px); }
+</style>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let result = compiler.compile_style(
+            &descriptor,
+            SfcStyleCompileOptions {
+                preprocess_options: StylePreprocessOptions {
+                    additional_data: Some(
+                        "$red: red;\n@mixin square($size) { width: $size; height: $size; }".into(),
+                    ),
+                    ..StylePreprocessOptions::default()
+                },
+                ..SfcStyleCompileOptions::default()
+            },
+        );
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert!(result.code.contains(".imported"));
+        assert!(result.code.contains("width: 10px;"));
+        let resolved_import = std::fs::canonicalize(import)
+            .expect("canonical import")
+            .to_string_lossy()
+            .replace('\\', "/")
+            .trim_start_matches("//?/")
+            .to_string();
+        assert_eq!(result.dependencies, vec![resolved_import]);
     }
 
     #[test]

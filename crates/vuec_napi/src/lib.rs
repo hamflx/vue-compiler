@@ -3771,6 +3771,14 @@ fn sfc_style_options(value: Option<&Value>) -> SfcStyleCompileOptions {
         .or_else(|| value.get("preprocess_lang"))
         .and_then(Value::as_str)
         .map(ToOwned::to_owned);
+    if let Some(preprocess_options) = value
+        .get("preprocessOptions")
+        .or_else(|| value.get("preprocess_options"))
+    {
+        if let Ok(parsed) = serde_json::from_value(preprocess_options.clone()) {
+            options.preprocess_options = parsed;
+        }
+    }
     options.vars = value
         .get("vars")
         .and_then(Value::as_array)

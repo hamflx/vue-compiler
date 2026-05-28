@@ -90,11 +90,29 @@ function compileScript(descriptor, options) {
 }
 
 function compileStyle(options) {
-  return native.compileStyle(options || {});
+  const opts = options || {};
+  return native.compileStyle(resolveStylePreprocessOptions(String(opts.source || ''), opts));
 }
 
 function compileStyleAsync(options) {
   return Promise.resolve(compileStyle(options || {}));
+}
+
+function resolveStylePreprocessOptions(source, options) {
+  if (!options || !options.preprocessOptions || typeof options.preprocessOptions !== 'object') {
+    return options;
+  }
+  const preprocessOptions = options.preprocessOptions;
+  if (typeof preprocessOptions.additionalData !== 'function') {
+    return options;
+  }
+  return {
+    ...options,
+    preprocessOptions: {
+      ...preprocessOptions,
+      additionalData: preprocessOptions.additionalData(source, options.filename),
+    },
+  };
 }
 
 function generateCodeFrame(source) {

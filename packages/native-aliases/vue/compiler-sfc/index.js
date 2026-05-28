@@ -38,13 +38,15 @@ function compileScript(descriptor) {
 }
 
 function compileStyle(options) {
-  const opts = vue27StyleOptions(options || {});
+  const raw = options || {};
+  const opts = vue27StyleOptions(resolveStylePreprocessOptions(String(raw.source || ''), raw));
   const result = normalizeVue27StyleResult(native.compileStyle(vue27StyleNativeOptions(opts)));
   return applyVue27StylePostcssSync(result, opts);
 }
 
 function compileStyleAsync(options) {
-  const opts = vue27StyleOptions(options || {});
+  const raw = options || {};
+  const opts = vue27StyleOptions(resolveStylePreprocessOptions(String(raw.source || ''), raw));
   const result = normalizeVue27StyleResult(native.compileStyle(vue27StyleNativeOptions(opts)));
   return applyVue27StylePostcssAsync(result, opts);
 }
@@ -78,6 +80,23 @@ function vue27StyleOptions(options) {
   const out = { ...options };
   if (!Object.prototype.hasOwnProperty.call(out, 'scoped')) out.scoped = true;
   return out;
+}
+
+function resolveStylePreprocessOptions(source, options) {
+  if (!options || !options.preprocessOptions || typeof options.preprocessOptions !== 'object') {
+    return options;
+  }
+  const preprocessOptions = options.preprocessOptions;
+  if (typeof preprocessOptions.additionalData !== 'function') {
+    return options;
+  }
+  return {
+    ...options,
+    preprocessOptions: {
+      ...preprocessOptions,
+      additionalData: preprocessOptions.additionalData(source, options.filename),
+    },
+  };
 }
 
 function vue27StyleNativeOptions(options) {

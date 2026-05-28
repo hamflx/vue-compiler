@@ -227,7 +227,7 @@ function compileVue27SfcScript(source, options = {}) {
 }
 
 function compileSfcStyle(source, options = {}) {
-  return fromJson(binding.compileSfcStyle(source, dehydrateForNative(options || {})));
+  return fromJson(binding.compileSfcStyle(source, dehydrateForNative(resolveStylePreprocessOptions(source, options || {}))));
 }
 
 function compile(template, options = {}) {
@@ -270,7 +270,25 @@ function compileScript(descriptor, options = {}) {
 
 function compileStyle(options) {
   const opts = options || {};
-  return compileSfcStyle(styleSfcSource(String(opts.source || ''), opts), opts);
+  const source = String(opts.source || '');
+  return compileSfcStyle(styleSfcSource(source, opts), resolveStylePreprocessOptions(source, opts));
+}
+
+function resolveStylePreprocessOptions(source, options) {
+  if (!options || !options.preprocessOptions || typeof options.preprocessOptions !== 'object') {
+    return options;
+  }
+  const preprocessOptions = options.preprocessOptions;
+  if (typeof preprocessOptions.additionalData !== 'function') {
+    return options;
+  }
+  return {
+    ...options,
+    preprocessOptions: {
+      ...preprocessOptions,
+      additionalData: preprocessOptions.additionalData(source, options.filename),
+    },
+  };
 }
 
 function normalizeVue2CompileResult(result) {

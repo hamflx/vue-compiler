@@ -8,7 +8,8 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::io;
+use std::path::{Path, PathBuf};
 use vuec_codegen::{SourceMapArtifact, SourceMapBuilder};
 use vuec_diagnostics::Diagnostic;
 use vuec_source::{FileId, Span};
@@ -51,6 +52,26 @@ pub struct StyleCompileOptions {
     pub source_map: bool,
     /// Optional preprocessor language, for example `scss`, `sass`, `less`, or `styl`.
     pub preprocess_lang: Option<String>,
+    /// Preprocessor option surface forwarded from SFC `preprocessOptions`.
+    #[serde(default)]
+    pub preprocess_options: StylePreprocessOptions,
+}
+
+/// Options for SFC style preprocessing.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StylePreprocessOptions {
+    /// Additional source prepended before preprocessing. Function-valued public
+    /// options are evaluated by the JavaScript API boundary before reaching Rust.
+    #[serde(default, rename = "additionalData", alias = "additional_data")]
+    pub additional_data: Option<String>,
+    /// Optional load paths used by Sass imports.
+    #[serde(
+        default,
+        rename = "loadPaths",
+        alias = "load_paths",
+        alias = "includePaths"
+    )]
+    pub load_paths: Vec<String>,
 }
 
 /// CSS variable custom property naming behavior.
@@ -105,14 +126,21 @@ pub struct StyleCompileResult {
     pub modules: Option<BTreeMap<String, String>>,
     /// CSS variable expressions referenced by `v-bind(...)`.
     pub vars: Vec<String>,
+    /// Preprocessor dependencies discovered during compilation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<String>,
 }
 
 /// Compiles SFC style source according to `options`.
 pub fn compile_style(source: &str, options: StyleCompileOptions) -> StyleCompileResult {
     let mut errors = Vec::new();
     let mut diagnostics = Vec::new();
-    let mut code = match preprocess_style(source, options.preprocess_lang.as_deref()) {
-        Ok(code) => code,
+    let mut dependencies = Vec::new();
+    let mut code = match preprocess_style(source, &options) {
+        Ok(result) => {
+            dependencies.extend(result.dependencies);
+            result.code
+        }
         Err(error) => {
             diagnostics.push(unsupported_preprocessor_diagnostic(
                 &error, source, &options,
@@ -174,6 +202,7 @@ pub fn compile_style(source: &str, options: StyleCompileOptions) -> StyleCompile
         diagnostics,
         modules,
         vars,
+        dependencies,
     }
 }
 
@@ -307,34 +336,227 @@ fn normalize_style_output(source: &str) -> String {
         .join("\n")
 }
 
-fn preprocess_style(source: &str, lang: Option<&str>) -> Result<String, String> {
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct PreprocessResult {
+    code: String,
+    dependencies: Vec<String>,
+}
+
+fn preprocess_style(
+    source: &str,
+    options: &StyleCompileOptions,
+) -> Result<PreprocessResult, String> {
+    let lang = options.preprocess_lang.as_deref();
     let Some(lang) = lang.filter(|lang| !lang.is_empty()) else {
-        return Ok(source.to_string());
+        return Ok(PreprocessResult {
+            code: source.to_string(),
+            dependencies: Vec::new(),
+        });
     };
-    match lang.to_ascii_lowercase().as_str() {
-        "css" => Ok(source.to_string()),
-        "less" => preprocess_less(source),
-        "scss" => preprocess_scss(source),
-        "sass" => preprocess_indented_sass(source),
-        "styl" | "stylus" => preprocess_stylus(source),
+    let prepared = apply_additional_style_data(source, &options.preprocess_options);
+    let code = match lang.to_ascii_lowercase().as_str() {
+        "css" => Ok(prepared.clone()),
+        "less" => preprocess_less(&prepared),
+        "scss" => preprocess_sass_with_grass(&prepared, options, grass::InputSyntax::Scss),
+        "sass" => preprocess_sass_with_grass(&prepared, options, grass::InputSyntax::Sass),
+        "styl" | "stylus" => preprocess_stylus(&prepared),
         _ => Err(format!("unsupported style preprocessor `{lang}`")),
+    }?;
+    let dependencies = match lang.to_ascii_lowercase().as_str() {
+        "scss" | "sass" => sass_dependencies(source, options),
+        _ => Vec::new(),
+    };
+    Ok(PreprocessResult { code, dependencies })
+}
+
+fn apply_additional_style_data(source: &str, options: &StylePreprocessOptions) -> String {
+    let Some(additional_data) = options
+        .additional_data
+        .as_deref()
+        .filter(|data| !data.is_empty())
+    else {
+        return source.to_string();
+    };
+    let mut prepared = String::with_capacity(additional_data.len() + 1 + source.len());
+    prepared.push_str(additional_data);
+    if !additional_data.ends_with('\n') {
+        prepared.push('\n');
     }
+    prepared.push_str(source);
+    prepared
+}
+
+fn preprocess_sass_with_grass(
+    source: &str,
+    options: &StyleCompileOptions,
+    syntax: grass::InputSyntax,
+) -> Result<String, String> {
+    let entry_path = options.filename.as_deref().map(PathBuf::from);
+    let virtual_fs = entry_path
+        .as_ref()
+        .map(|path| VirtualSassFs::new(path.clone(), source.as_bytes().to_vec()));
+    let mut grass_options = grass::Options::default()
+        .input_syntax(syntax)
+        .quiet(true)
+        .allows_charset(false);
+    if let Some(virtual_fs) = virtual_fs.as_ref() {
+        grass_options = grass_options.fs(virtual_fs);
+    }
+    if let Some(filename) = options.filename.as_deref() {
+        if let Some(parent) = Path::new(filename).parent() {
+            grass_options = grass_options.load_path(parent);
+        }
+    }
+    for load_path in &options.preprocess_options.load_paths {
+        grass_options = grass_options.load_path(load_path);
+    }
+    if let Some(path) = entry_path {
+        grass::from_path(path, &grass_options).map_err(|error| error.to_string())
+    } else {
+        grass::from_string(source.to_string(), &grass_options).map_err(|error| error.to_string())
+    }
+}
+
+#[derive(Debug)]
+struct VirtualSassFs {
+    entry_path: PathBuf,
+    entry_source: Vec<u8>,
+}
+
+impl VirtualSassFs {
+    fn new(entry_path: PathBuf, entry_source: Vec<u8>) -> Self {
+        Self {
+            entry_path,
+            entry_source,
+        }
+    }
+
+    fn is_entry(&self, path: &Path) -> bool {
+        path == self.entry_path
+    }
+}
+
+impl grass::Fs for VirtualSassFs {
+    fn is_dir(&self, path: &Path) -> bool {
+        path.is_dir()
+    }
+
+    fn is_file(&self, path: &Path) -> bool {
+        self.is_entry(path) || path.is_file()
+    }
+
+    fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+        if self.is_entry(path) {
+            Ok(self.entry_source.clone())
+        } else {
+            std::fs::read(path)
+        }
+    }
+
+    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+        if self.is_entry(path) {
+            Ok(self.entry_path.clone())
+        } else {
+            std::fs::canonicalize(path)
+        }
+    }
+}
+
+fn sass_dependencies(source: &str, options: &StyleCompileOptions) -> Vec<String> {
+    let Some(filename) = options.filename.as_deref() else {
+        return Vec::new();
+    };
+    let base_dir = Path::new(filename)
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
+    let mut dependencies = Vec::new();
+    for import in sass_imports(source) {
+        for candidate in sass_import_candidates(&base_dir, &import) {
+            if candidate.exists() {
+                dependencies.push(normalize_dependency_path(
+                    &std::fs::canonicalize(&candidate).unwrap_or(candidate),
+                ));
+                break;
+            }
+        }
+    }
+    dependencies.sort();
+    dependencies.dedup();
+    dependencies
+}
+
+fn sass_imports(source: &str) -> Vec<String> {
+    let mut imports = Vec::new();
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with("@import")
+            && !trimmed.starts_with("@use")
+            && !trimmed.starts_with("@forward")
+        {
+            continue;
+        }
+        if let Some(path) = quoted_style_import_path(trimmed) {
+            if !is_css_import(&path) {
+                imports.push(path);
+            }
+        }
+    }
+    imports
+}
+
+fn quoted_style_import_path(source: &str) -> Option<String> {
+    let start = source.find(['"', '\''])?;
+    let quote = source[start..].chars().next()?;
+    let rest = &source[start + quote.len_utf8()..];
+    let end = rest.find(quote)?;
+    Some(rest[..end].to_string())
+}
+
+fn is_css_import(path: &str) -> bool {
+    path.starts_with("http://")
+        || path.starts_with("https://")
+        || path.ends_with(".css")
+        || path.starts_with("url(")
+}
+
+fn sass_import_candidates(base_dir: &Path, import: &str) -> Vec<PathBuf> {
+    let import_path = Path::new(import);
+    let base = if import_path.is_absolute() {
+        PathBuf::from(import_path)
+    } else {
+        base_dir.join(import_path)
+    };
+    let mut candidates = Vec::new();
+    let has_extension = base.extension().is_some();
+    if has_extension {
+        candidates.push(base.clone());
+        if let (Some(parent), Some(file_name)) = (base.parent(), base.file_name()) {
+            candidates.push(parent.join(format!("_{}", file_name.to_string_lossy())));
+        }
+        return candidates;
+    }
+    for extension in ["scss", "sass", "css"] {
+        candidates.push(base.with_extension(extension));
+        if let (Some(parent), Some(file_name)) = (base.parent(), base.file_name()) {
+            let partial = parent.join(format!("_{}.{}", file_name.to_string_lossy(), extension));
+            candidates.push(partial);
+        }
+    }
+    candidates
+}
+
+fn normalize_dependency_path(path: &Path) -> String {
+    let mut value = path.to_string_lossy().replace('\\', "/");
+    if let Some(stripped) = value.strip_prefix("//?/") {
+        value = stripped.to_string();
+    }
+    value
 }
 
 fn preprocess_less(source: &str) -> Result<String, String> {
     let (variables, body) = collect_style_variables(source, '@');
     Ok(replace_style_variables(&body, '@', &variables).replace("rgb(255, 0, 0)", "#ff0000"))
-}
-
-fn preprocess_scss(source: &str) -> Result<String, String> {
-    let (variables, body) = collect_style_variables(source, '$');
-    Ok(replace_style_variables(&body, '$', &variables))
-}
-
-fn preprocess_indented_sass(source: &str) -> Result<String, String> {
-    let (variables, body) = collect_style_variables(source, '$');
-    let body = replace_style_variables(&body, '$', &variables);
-    Ok(compile_indented_style_rules(&body))
 }
 
 fn preprocess_stylus(source: &str) -> Result<String, String> {
@@ -2877,13 +3099,14 @@ mod tests {
         assert!(less.map.is_some());
 
         let scss = compile_style(
-            "$red: red;\n.color { color: $red; }",
+            "$red: red;\n.color { color: $red; .child { width: 1px; } }",
             StyleCompileOptions {
                 preprocess_lang: Some("scss".into()),
                 ..StyleCompileOptions::default()
             },
         );
         assert!(scss.code.contains("color: red;"));
+        assert!(scss.code.contains(".color .child"));
 
         let sass = compile_style(
             "$red: red\n.color\n  color: $red",
@@ -2902,6 +3125,53 @@ mod tests {
             },
         );
         assert!(stylus.code.contains("color: #f00;"));
+    }
+
+    #[test]
+    fn preprocesses_scss_additional_data_and_import_dependencies() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let base = dir.path().join("test.scss");
+        let import = dir.path().join("import.scss");
+        std::fs::write(&import, ".imported { color: $red; }\n").expect("write import");
+
+        let result = compile_style(
+            r#"
+@import "./import.scss";
+.square {
+  @include square(100px);
+}
+"#,
+            StyleCompileOptions {
+                filename: Some(base.to_string_lossy().into_owned()),
+                preprocess_lang: Some("scss".into()),
+                preprocess_options: StylePreprocessOptions {
+                    additional_data: Some(
+                        r#"
+$red: red;
+@mixin square($size) {
+  width: $size;
+  height: $size;
+}
+"#
+                        .into(),
+                    ),
+                    ..StylePreprocessOptions::default()
+                },
+                ..StyleCompileOptions::default()
+            },
+        );
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert!(result.code.contains(".imported"));
+        assert!(result.code.contains("color: red;"));
+        assert!(result.code.contains("width: 100px;"));
+        let resolved_import = std::fs::canonicalize(import)
+            .expect("canonical import")
+            .to_string_lossy()
+            .replace('\\', "/")
+            .trim_start_matches("//?/")
+            .to_string();
+        assert_eq!(result.dependencies, vec![resolved_import]);
     }
 
     #[test]
