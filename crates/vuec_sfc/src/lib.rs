@@ -8309,6 +8309,32 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
     }
 
     #[test]
+    fn compile_style_forwards_css_modules_dashes_convention() {
+        let mut compiler = SfcCompiler::new();
+        let source = r#"<style module>.foo-bar { color: red }\n.foo_bar { color: blue }</style>"#;
+        let descriptor = compiler.parse("modules.vue", source);
+        let result = compiler.compile_style(
+            &descriptor,
+            SfcStyleCompileOptions {
+                modules_options: CssModulesOptions {
+                    locals_convention: "dashesOnly".into(),
+                    ..CssModulesOptions::default()
+                },
+                ..SfcStyleCompileOptions::default()
+            },
+        );
+        let modules = result.modules.expect("css modules");
+
+        assert!(modules
+            .get("fooBar")
+            .is_some_and(|value| value.contains("_foo-bar_")));
+        assert!(!modules.contains_key("foo-bar"));
+        assert!(modules
+            .get("foo_bar")
+            .is_some_and(|value| value.contains("_foo_bar_")));
+    }
+
+    #[test]
     fn compile_style_forwards_scss_preprocess_options_and_dependencies() {
         let dir = tempfile::tempdir().expect("temp dir");
         let filename = dir.path().join("component.vue");

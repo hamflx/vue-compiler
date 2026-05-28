@@ -1954,22 +1954,25 @@ impl<'a> CssModulesContext<'a> {
     fn register(&mut self, local: &str, scoped: &str) {
         match self.locals_convention {
             CssModulesLocalsConvention::AsIs => {
-                self.modules
-                    .entry(local.to_string())
-                    .or_insert_with(|| scoped.to_string());
+                self.modules.insert(local.to_string(), scoped.to_string());
             }
             CssModulesLocalsConvention::CamelCase => {
+                self.modules.insert(local.to_string(), scoped.to_string());
                 self.modules
-                    .entry(local.to_string())
-                    .or_insert_with(|| scoped.to_string());
-                self.modules
-                    .entry(camel_case_css_module_key(local))
-                    .or_insert_with(|| scoped.to_string());
+                    .insert(camel_case_css_module_key(local), scoped.to_string());
             }
             CssModulesLocalsConvention::CamelCaseOnly => {
                 self.modules
-                    .entry(camel_case_css_module_key(local))
-                    .or_insert_with(|| scoped.to_string());
+                    .insert(camel_case_css_module_key(local), scoped.to_string());
+            }
+            CssModulesLocalsConvention::Dashes => {
+                self.modules.insert(local.to_string(), scoped.to_string());
+                self.modules
+                    .insert(dashes_css_module_key(local), scoped.to_string());
+            }
+            CssModulesLocalsConvention::DashesOnly => {
+                self.modules
+                    .insert(dashes_css_module_key(local), scoped.to_string());
             }
         }
     }
@@ -1996,15 +1999,17 @@ enum CssModulesLocalsConvention {
     AsIs,
     CamelCase,
     CamelCaseOnly,
+    Dashes,
+    DashesOnly,
 }
 
 impl CssModulesLocalsConvention {
     fn from_option(value: &str) -> Self {
         match value {
             "camelCase" | "camel-case" => Self::CamelCase,
-            "camelCaseOnly" | "camel-case-only" | "dashesOnly" | "dashes-only" => {
-                Self::CamelCaseOnly
-            }
+            "camelCaseOnly" | "camel-case-only" => Self::CamelCaseOnly,
+            "dashes" => Self::Dashes,
+            "dashesOnly" | "dashes-only" => Self::DashesOnly,
             _ => Self::AsIs,
         }
     }
@@ -2286,6 +2291,30 @@ fn camel_case_css_module_key(value: &str) -> String {
             uppercase_next = false;
         } else {
             output.push(ch);
+        }
+    }
+    output
+}
+
+fn dashes_css_module_key(value: &str) -> String {
+    let mut output = String::new();
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '-' {
+            output.push(ch);
+            continue;
+        }
+
+        let mut dashes = String::from("-");
+        while chars.next_if_eq(&'-').is_some() {
+            dashes.push('-');
+        }
+        if let Some(next) = chars.next_if(|next| next.is_ascii_alphanumeric() || *next == '_') {
+            for upper in next.to_uppercase() {
+                output.push(upper);
+            }
+        } else {
+            output.push_str(&dashes);
         }
     }
     output
@@ -3754,6 +3783,89 @@ mod tests {
         assert!(!modules.contains_key("foo-bar"));
         assert!(!modules.contains_key("bazQux"));
         assert!(result.code.contains(".baz-qux { color: green }"));
+    }
+
+    #[test]
+    fn compiles_css_modules_dashes_locals_convention() {
+        let result = compile_style(
+            ".foo-bar { color: red }\n.foo_bar { color: blue }",
+            StyleCompileOptions {
+                id: Some("test".into()),
+                filename: Some("test.css".into()),
+                modules: true,
+                modules_options: CssModulesOptions {
+                    locals_convention: "dashes".into(),
+                    ..CssModulesOptions::default()
+                },
+                ..StyleCompileOptions::default()
+            },
+        );
+        let modules = result.modules.expect("css modules map");
+        let foo_bar_scoped = modules.get("foo-bar").expect("original dashed export");
+
+        assert_eq!(modules.get("fooBar"), Some(foo_bar_scoped));
+        assert!(modules
+            .get("foo_bar")
+            .is_some_and(|value| value.contains("_foo_bar_")));
+        assert_ne!(modules.get("fooBar"), modules.get("foo_bar"));
+        assert!(result.code.contains("._foo-bar_"));
+        assert!(result.code.contains("._foo_bar_"));
+    }
+
+    #[test]
+    fn compiles_css_modules_dashes_only_locals_convention() {
+        let result = compile_style(
+            ".foo-bar { color: red }\n.foo_bar { color: blue }",
+            StyleCompileOptions {
+                id: Some("test".into()),
+                filename: Some("test.css".into()),
+                modules: true,
+                modules_options: CssModulesOptions {
+                    locals_convention: "dashesOnly".into(),
+                    ..CssModulesOptions::default()
+                },
+                ..StyleCompileOptions::default()
+            },
+        );
+        let modules = result.modules.expect("css modules map");
+
+        assert!(modules
+            .get("fooBar")
+            .is_some_and(|value| value.contains("_foo-bar_")));
+        assert!(!modules.contains_key("foo-bar"));
+        assert!(modules
+            .get("foo_bar")
+            .is_some_and(|value| value.contains("_foo_bar_")));
+        assert_ne!(modules.get("fooBar"), modules.get("foo_bar"));
+        assert!(result.code.contains("._foo-bar_"));
+        assert!(result.code.contains("._foo_bar_"));
+    }
+
+    #[test]
+    fn compiles_css_modules_locals_convention_alias_collisions_like_official() {
+        for locals_convention in ["camelCase", "dashes"] {
+            let result = compile_style(
+                ".foo-bar { color: red }\n.fooBar { color: blue }",
+                StyleCompileOptions {
+                    id: Some("test".into()),
+                    filename: Some("test.css".into()),
+                    modules: true,
+                    modules_options: CssModulesOptions {
+                        locals_convention: locals_convention.into(),
+                        ..CssModulesOptions::default()
+                    },
+                    ..StyleCompileOptions::default()
+                },
+            );
+            let modules = result.modules.expect("css modules map");
+
+            assert!(modules
+                .get("foo-bar")
+                .is_some_and(|value| value.contains("_foo-bar_")));
+            assert!(modules
+                .get("fooBar")
+                .is_some_and(|value| value.contains("_fooBar_")));
+        }
     }
 
     #[test]
