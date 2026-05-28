@@ -185,6 +185,13 @@ pub fn compile_style(source: &str, options: StyleCompileOptions) -> StyleCompile
     let modules = if options.modules {
         let result = compile_css_modules(&code, &options);
         code = result.code;
+        errors.extend(
+            result
+                .diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.message.clone()),
+        );
+        diagnostics.extend(result.diagnostics);
         Some(result.modules)
     } else {
         None
@@ -1932,6 +1939,7 @@ fn compile_css_modules_file(
         code,
         raw_modules,
         modules,
+        diagnostics: context.diagnostics.clone(),
     }
 }
 
@@ -1940,6 +1948,7 @@ struct CssModulesCompileResult {
     code: String,
     raw_modules: BTreeMap<String, String>,
     modules: BTreeMap<String, String>,
+    diagnostics: Vec<Diagnostic>,
 }
 
 #[derive(Debug)]
@@ -1957,6 +1966,7 @@ struct CssModulesContext<'a> {
     imported_modules: BTreeMap<String, CssModulesCompileResult>,
     prepended_paths: BTreeSet<String>,
     prepended_css: Vec<String>,
+    diagnostics: Vec<Diagnostic>,
     active_paths: &'a mut Vec<PathBuf>,
 }
 
@@ -1984,6 +1994,7 @@ impl<'a> CssModulesContext<'a> {
             imported_modules: BTreeMap::new(),
             prepended_paths: BTreeSet::new(),
             prepended_css: Vec::new(),
+            diagnostics: Vec::new(),
             active_paths,
         }
     }
@@ -2116,6 +2127,13 @@ impl<'a> CssModulesContext<'a> {
         }
         self.imported_modules.insert(normalized, result.clone());
         Some(result)
+    }
+
+    fn push_compose_diagnostic(&mut self, message: String, start: usize, end: usize) {
+        self.diagnostics.push(
+            Diagnostic::error("VUEC_STYLE_MODULE_COMPOSE", message)
+                .with_span(Some(style_source_span(self.options, start, end))),
+        );
     }
 
     fn register_module_export(
@@ -2267,6 +2285,7 @@ fn rewrite_css_modules_items(
                 context,
                 block_context,
                 &compose_local_names,
+                delimiter + 1,
             ));
         }
         output.push('}');
@@ -2445,6 +2464,7 @@ fn rewrite_css_module_declarations(
     context: &mut CssModulesContext<'_>,
     block_context: CssBlockContext,
     compose_local_names: &[String],
+    body_offset: usize,
 ) -> String {
     if matches!(block_context, CssBlockContext::Keyframes) {
         return body.to_string();
@@ -2457,6 +2477,7 @@ fn rewrite_css_module_declarations(
             &body[segment_start..semicolon],
             context,
             compose_local_names,
+            body_offset + segment_start,
             true,
             &mut output,
         );
@@ -2466,6 +2487,7 @@ fn rewrite_css_module_declarations(
         &body[segment_start..],
         context,
         compose_local_names,
+        body_offset + segment_start,
         false,
         &mut output,
     );
@@ -2476,6 +2498,7 @@ fn rewrite_css_module_declaration_segment(
     segment: &str,
     context: &mut CssModulesContext<'_>,
     compose_local_names: &[String],
+    segment_offset: usize,
     has_semicolon: bool,
     output: &mut String,
 ) {
@@ -2502,18 +2525,155 @@ fn rewrite_css_module_declaration_segment(
         }
         return;
     }
-    let composed_values = css_module_composed_values(&segment[colon + 1..], context);
-    if composed_values.is_empty() {
-        output.push_str(segment);
-        if has_semicolon {
-            output.push(';');
-        }
-        return;
-    }
+    match css_module_composed_values(&segment[colon + 1..], context, segment_offset + colon + 1) {
+        CssModuleComposeResolution::Values(composed_values) => {
+            if composed_values.is_empty() {
+                output.push_str(segment);
+                if has_semicolon {
+                    output.push(';');
+                }
+                return;
+            }
 
-    for local_name in compose_local_names {
-        context.compose(local_name, composed_values.clone());
+            for local_name in compose_local_names {
+                context.compose(local_name, composed_values.clone());
+            }
+        }
+        CssModuleComposeResolution::Unsupported => {
+            output.push_str(segment);
+            if has_semicolon {
+                output.push(';');
+            }
+        }
+        CssModuleComposeResolution::Invalid {
+            class_name,
+            start,
+            end,
+        } => {
+            context.push_compose_diagnostic(
+                format!("referenced class name \"{class_name}\" in {prop} not found"),
+                start,
+                end,
+            );
+        }
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum CssModuleComposeResolution {
+    Values(Vec<String>),
+    Unsupported,
+    Invalid {
+        class_name: String,
+        start: usize,
+        end: usize,
+    },
+}
+
+fn unsupported_css_module_compose() -> CssModuleComposeResolution {
+    CssModuleComposeResolution::Unsupported
+}
+
+fn invalid_css_module_compose(
+    class_name: &str,
+    start: usize,
+    end: usize,
+) -> CssModuleComposeResolution {
+    CssModuleComposeResolution::Invalid {
+        class_name: class_name.to_string(),
+        start,
+        end,
+    }
+}
+
+fn css_module_composed_values(
+    value: &str,
+    context: &mut CssModulesContext<'_>,
+    value_offset: usize,
+) -> CssModuleComposeResolution {
+    let mut composed = Vec::new();
+    for part in value.split(',') {
+        let tokens = css_module_compose_tokens(part, value, value_offset);
+        if let Some(from_index) = tokens.iter().position(|token| token.value == "from") {
+            if from_index == 0 || from_index + 2 != tokens.len() {
+                return unsupported_css_module_compose();
+            }
+            let import = tokens[from_index + 1].value;
+            if import == "global" {
+                for token in &tokens[..from_index] {
+                    push_unique_css_module_value(&mut composed, token.value.to_string());
+                }
+            } else {
+                for token in &tokens[..from_index] {
+                    let Some(values) =
+                        css_module_external_composed_values(token.value, import, context)
+                    else {
+                        return unsupported_css_module_compose();
+                    };
+                    for value in values {
+                        push_unique_css_module_value(&mut composed, value);
+                    }
+                }
+            }
+            continue;
+        }
+        for token in tokens {
+            let class_name = token.value;
+            if let Some(global) = parse_css_module_global_compose(class_name) {
+                push_unique_css_module_value(&mut composed, global);
+            } else if let Some(values) = context.raw_export_values(class_name) {
+                for value in values {
+                    push_unique_css_module_value(&mut composed, value);
+                }
+            } else if let Some(value) = context.import_symbol_value(class_name) {
+                push_unique_css_module_value(&mut composed, value);
+            } else if class_name.starts_with('"') || class_name.starts_with('\'') {
+                return unsupported_css_module_compose();
+            } else {
+                return invalid_css_module_compose(class_name, token.start, token.end);
+            }
+        }
+    }
+    CssModuleComposeResolution::Values(composed)
+}
+
+#[derive(Debug)]
+struct CssModuleComposeToken<'a> {
+    value: &'a str,
+    start: usize,
+    end: usize,
+}
+
+fn css_module_compose_tokens<'a>(
+    part: &'a str,
+    value: &'a str,
+    value_offset: usize,
+) -> Vec<CssModuleComposeToken<'a>> {
+    let part_offset = part.as_ptr() as usize - value.as_ptr() as usize;
+    let mut tokens = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < part.len() {
+        cursor = skip_css_whitespace(part, cursor);
+        if cursor >= part.len() {
+            break;
+        }
+        let start = cursor;
+        while cursor < part.len() {
+            let Some(ch) = part[cursor..].chars().next() else {
+                break;
+            };
+            if ch.is_whitespace() {
+                break;
+            }
+            cursor += ch.len_utf8();
+        }
+        tokens.push(CssModuleComposeToken {
+            value: &part[start..cursor],
+            start: value_offset + part_offset + start,
+            end: value_offset + part_offset + cursor,
+        });
+    }
+    tokens
 }
 
 fn css_module_composable_local_names(
@@ -2554,65 +2714,19 @@ fn css_module_single_class_selector_name(selector: &str) -> Option<String> {
     (start == 0 && end == selector.len()).then(|| name.to_string())
 }
 
-fn css_module_composed_values(value: &str, context: &mut CssModulesContext<'_>) -> Vec<String> {
-    let mut composed = Vec::new();
-    for part in value.split(',') {
-        let tokens = part.split_whitespace().collect::<Vec<_>>();
-        if let Some(from_index) = tokens.iter().position(|token| *token == "from") {
-            if from_index == 0 || from_index + 2 != tokens.len() {
-                return Vec::new();
-            }
-            let import = tokens[from_index + 1];
-            if import == "global" {
-                for class_name in &tokens[..from_index] {
-                    push_unique_css_module_value(&mut composed, (*class_name).to_string());
-                }
-            } else {
-                for class_name in &tokens[..from_index] {
-                    let Some(values) =
-                        css_module_external_composed_values(class_name, import, context)
-                    else {
-                        return Vec::new();
-                    };
-                    for value in values {
-                        push_unique_css_module_value(&mut composed, value);
-                    }
-                }
-            }
-            continue;
-        }
-        for class_name in tokens {
-            if let Some(global) = parse_css_module_global_compose(class_name) {
-                push_unique_css_module_value(&mut composed, global);
-            } else if let Some(values) = context.raw_export_values(class_name) {
-                for value in values {
-                    push_unique_css_module_value(&mut composed, value);
-                }
-            } else if let Some(value) = context.import_symbol_value(class_name) {
-                push_unique_css_module_value(&mut composed, value);
-            } else if class_name == "from"
-                || class_name.starts_with('"')
-                || class_name.starts_with('\'')
-            {
-                return Vec::new();
-            } else {
-                return Vec::new();
-            }
-        }
-    }
-    composed
-}
-
 fn css_module_external_composed_values(
     class_name: &str,
     import: &str,
     context: &mut CssModulesContext<'_>,
 ) -> Option<Vec<String>> {
     let result = context.load_imported_module(import)?;
-    result
-        .raw_modules
-        .get(class_name)
-        .map(|value| value.split_whitespace().map(ToOwned::to_owned).collect())
+    Some(
+        result
+            .raw_modules
+            .get(class_name)
+            .map(|value| value.split_whitespace().map(ToOwned::to_owned).collect())
+            .unwrap_or_else(|| vec!["undefined".to_string()]),
+    )
 }
 
 fn parse_css_module_global_compose(value: &str) -> Option<String> {
@@ -4515,7 +4629,7 @@ mod tests {
     #[test]
     fn leaves_css_modules_unsupported_composes_declarations() {
         let result = compile_style(
-            ".button.extra { composes: base; }\n.late { composes: next; }\n.next { color: blue }",
+            ".button.extra { composes: base; }\n.next { color: blue }",
             StyleCompileOptions {
                 id: Some("test".into()),
                 filename: Some("test.css".into()),
@@ -4525,7 +4639,86 @@ mod tests {
         );
 
         assert!(result.code.contains("composes: base"));
-        assert!(result.code.contains("composes: next"));
+        assert!(result.errors.is_empty());
+        assert!(result.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn reports_css_modules_missing_composes_class() {
+        let result = compile_style(
+            ".button { composes: missing; color: red; }",
+            StyleCompileOptions {
+                id: Some("test".into()),
+                filename: Some("test.css".into()),
+                modules: true,
+                source_map_file_id: Some(FileId(11)),
+                source_map_base_offset: 20,
+                ..StyleCompileOptions::default()
+            },
+        );
+
+        assert_eq!(
+            result.errors,
+            vec!["referenced class name \"missing\" in composes not found"]
+        );
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(result.diagnostics[0].code, "VUEC_STYLE_MODULE_COMPOSE");
+        let start = ".button { composes: ".len();
+        assert_eq!(
+            result.diagnostics[0].span,
+            Some(Span::new(
+                FileId(11),
+                20 + start,
+                20 + start + "missing".len()
+            ))
+        );
+        assert!(!result.code.contains("composes"));
+        assert!(result.code.contains("color: red"));
+    }
+
+    #[test]
+    fn reports_css_modules_late_composes_class() {
+        let result = compile_style(
+            ".button { composes: next; }\n.next { color: blue }",
+            StyleCompileOptions {
+                id: Some("test".into()),
+                filename: Some("test.css".into()),
+                modules: true,
+                ..StyleCompileOptions::default()
+            },
+        );
+
+        assert_eq!(
+            result.errors,
+            vec!["referenced class name \"next\" in composes not found"]
+        );
+        assert!(!result.code.contains("composes"));
+        assert!(result.code.contains("._next_"));
+    }
+
+    #[test]
+    fn compiles_css_modules_missing_external_composes_class_like_official() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let filename = dir.path().join("component.vue");
+        let dep = dir.path().join("dep.css");
+        std::fs::write(&dep, ".dep { color: blue; }").expect("write dep");
+
+        let result = compile_style(
+            ".button { composes: missing from \"./dep.css\"; }",
+            StyleCompileOptions {
+                id: Some("test".into()),
+                filename: Some(filename.to_string_lossy().to_string()),
+                modules: true,
+                ..StyleCompileOptions::default()
+            },
+        );
+        let modules = result.modules.expect("css modules map");
+        let button = modules.get("button").expect("button export");
+
+        assert!(result.errors.is_empty());
+        assert!(result.diagnostics.is_empty());
+        assert!(button.contains("undefined"));
+        assert!(!result.code.contains("composes"));
     }
 
     #[test]
