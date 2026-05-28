@@ -38,6 +38,10 @@
 - [x] Vue 3 compiler-core Rust-backed `buildDirectiveArgs` projection slice inside `transformElement.spec.ts`.
 - [x] Vue 3 compiler-core Rust-backed `transformElement` built-in component children projection slice.
 - [x] Vue 3 compiler-core Rust-backed public `baseCompile` vnode-hook / `NEED_PATCH` AST codegen slice.
+- [x] Vue 2 MIR codegen migration slice: `vuec_vue2::compile` and `generate` now emit `render` / `staticRenderFns` from `Vue2Mir` plus `JsAstStore` after public AST projection and HIR/MIR lowering. The old compatibility `Vue2Element` codegen path was removed.
+- [x] Vue 2 target payload expansion: `Vue2Mir` now carries create-element data objects, static render wrappers, `v-once`, slot outlets, scoped slots, filter args, inline-template data, validation data, component model data, runtime directives, events, attrs, refs, `_b` wrappers, and `_g` listener wrappers.
+- [x] AST/HIR/MIR contract alignment: `docs/3.AST_HIR_MIR_DESIGN.md` now records the richer Vue 2 AST and MIR payloads and the rule that Vue 2 codegen cannot recover codegen state from `Vue2Element` or `Vue2Ast`.
+- [x] Vue 2 MIR codegen verification: `cargo fmt --all --check`; `cargo test -p vuec_vue2 --lib -- --nocapture` (`29/29`); `cargo check -p vuec_ast -p vuec_vue2 -p vuec_js -p vuec_codegen -p vuec_napi`; Vue 2.6 option/output gates (`10/10`, `5/5`); Vue 2.7 option/output gates (`3/3`, `5/5`); generated-alias conformance `vue2-compiler 188/188` and `vue27-compiler 190/190`; `git diff --check`; focused TODO search.
 - [x] Vue 3 compiler-core Rust-backed `processFor` / `transformFor` projection bridge for `vFor.spec.ts`.
 - [x] Vue 3 compiler-core Rust-backed `buildSlots` / slot-scope projection bridge for `vSlot.spec.ts`.
 - [x] Vue 3 compiler-core Rust-backed `transformOn` projection bridge for `vOn.spec.ts`.

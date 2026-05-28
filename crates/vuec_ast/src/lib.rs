@@ -1221,6 +1221,8 @@ pub struct Vue2Element {
     pub slot_target_dynamic: bool,
     /// Slot scope pattern id.
     pub slot_scope: Option<JsPatternId>,
+    /// Whether this element used Vue 2.6+ `v-slot` / `#` syntax.
+    pub slot_new_syntax: bool,
     /// Scoped slot entries keyed by slot name.
     pub scoped_slots: BTreeMap<String, NodeId>,
     /// Component expression or tag target.
@@ -1241,6 +1243,10 @@ pub struct Vue2Element {
     pub wrap_data: Option<Vue2DataWrap>,
     /// Listener wrapping expression.
     pub wrap_listeners: Option<String>,
+    /// Validation directive metadata.
+    pub validate: Option<Vue2Validation>,
+    /// Validation rules attached to the element.
+    pub validators: Vec<Vue2Validator>,
     /// Whether the node is static.
     pub static_node: bool,
     /// Whether the node is a static root.
@@ -1289,6 +1295,7 @@ impl Vue2Element {
             slot_target: None,
             slot_target_dynamic: false,
             slot_scope: None,
+            slot_new_syntax: false,
             scoped_slots: BTreeMap::new(),
             component: None,
             inline_template: false,
@@ -1299,6 +1306,8 @@ impl Vue2Element {
             model: None,
             wrap_data: None,
             wrap_listeners: None,
+            validate: None,
+            validators: Vec::new(),
             static_node: false,
             static_root: false,
             static_in_for: false,
@@ -1370,6 +1379,10 @@ pub struct Vue2EventHandler {
     pub value: JsStmtId,
     /// Event modifiers.
     pub modifiers: BTreeMap<String, bool>,
+    /// Original source modifier order.
+    pub modifier_order: Vec<String>,
+    /// Whether object-style modifier syntax was present.
+    pub has_modifier_object: bool,
     /// Whether the event name is dynamic.
     pub dynamic: bool,
     /// Source span for this handler.
@@ -1410,6 +1423,24 @@ pub enum Vue2DataWrap {
         /// Whether `.sync` is present.
         sync: bool,
     },
+}
+
+/// Vue 2 validation directive metadata.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue2Validation {
+    /// Field expression being validated.
+    pub field: String,
+    /// Validation groups.
+    pub groups: Vec<String>,
+}
+
+/// Vue 2 validation rule metadata.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue2Validator {
+    /// Validator name.
+    pub name: String,
+    /// Validator rule expression.
+    pub rule: String,
 }
 
 /// Vue 2 filter expression payload.
@@ -2251,7 +2282,7 @@ pub struct HirFor {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Vue2MirKind {
     /// Vue 2 MIR root node.
-    Root,
+    Root(Vue2MirRoot),
     /// Create-element call.
     CreateElement(Vue2CreateElement),
     /// Text call.
@@ -2262,48 +2293,257 @@ pub enum Vue2MirKind {
         value: String,
     },
     /// Conditional branch.
-    If {
-        /// Branch condition expression id.
-        condition: JsExprId,
-    },
+    If(Vue2IfMir),
     /// Render-list loop.
-    For {
-        /// Iterable source expression id.
-        source: JsExprId,
-        /// Value alias pattern id.
-        alias: JsPatternId,
-    },
+    For(Vue2ForMir),
     /// Static render function reference.
-    RenderStatic {
-        /// Static render function index.
-        index: u32,
-    },
+    RenderStatic(Vue2RenderStatic),
+    /// `v-once` render-once wrapper used inside `v-for`.
+    Once(Vue2Once),
+    /// `<slot>` outlet call.
+    SlotOutlet(Vue2SlotOutlet),
     /// Scoped slot function.
-    ScopedSlot {
-        /// Slot name.
-        name: String,
-        /// Slot parameter pattern id.
-        params: Option<JsPatternId>,
-    },
+    ScopedSlot(Vue2ScopedSlot),
     /// Filter call.
     FilterCall {
         /// Filter name.
         name: String,
+        /// Filter argument expression ids.
+        args: Vec<JsExprId>,
     },
     /// Runtime directive record.
-    Directive {
-        /// Directive name.
-        name: String,
-    },
+    Directive(Vue2DirectiveRuntime),
 }
+
+/// Vue 2 MIR root payload.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue2MirRoot;
 
 /// Vue 2 create-element MIR payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue2CreateElement {
     /// Element tag expression.
     pub tag: MirExpr,
+    /// Element data object payload.
+    pub data: Option<Vue2DataObject>,
+    /// Whether this call targets a component.
+    pub is_component: bool,
+    /// Whether the element renders a `<template>` container.
+    pub is_template: bool,
+    /// Whether this call should render a validation wrapper around its VNode.
+    pub validation: Option<Vue2ValidationData>,
     /// Children normalization mode.
     pub normalization_type: Vue2NormalizationType,
+}
+
+/// Vue 2 data object payload.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue2DataObject {
+    /// Runtime directive records.
+    pub directives: Vec<Vue2DirectiveRuntime>,
+    /// Key binding.
+    pub key: Option<MirExpr>,
+    /// Ref binding.
+    pub ref_name: Option<MirExpr>,
+    /// Whether the ref is inside a `v-for`.
+    pub ref_in_for: bool,
+    /// Whether this VNode carries `pre:true`.
+    pub pre: bool,
+    /// Original tag for component data.
+    pub tag: Option<String>,
+    /// Static class expression.
+    pub static_class: Option<MirExpr>,
+    /// Dynamic class expression.
+    pub class_binding: Option<MirExpr>,
+    /// Static style expression.
+    pub static_style: Option<MirExpr>,
+    /// Dynamic style expression.
+    pub style_binding: Option<MirExpr>,
+    /// Static attrs payload.
+    pub attrs: Vec<Vue2DataProp>,
+    /// DOM props payload.
+    pub dom_props: Vec<Vue2DataProp>,
+    /// Dynamic attrs payload wrapped by `_b`.
+    pub dynamic_attrs: Vec<Vue2DataProp>,
+    /// Component or DOM listeners.
+    pub events: BTreeMap<String, Vec<Vue2EventHandler>>,
+    /// Native component listeners.
+    pub native_events: BTreeMap<String, Vec<Vue2EventHandler>>,
+    /// Legacy slot target expression.
+    pub slot: Option<MirExpr>,
+    /// Scoped slots object.
+    pub scoped_slots: Vec<Vue2ScopedSlot>,
+    /// Component model payload.
+    pub model: Option<Vue2ComponentModelMir>,
+    /// Inline-template payload.
+    pub inline_template: Option<Vue2InlineTemplate>,
+    /// Validation directive data.
+    pub validate: Option<Vue2Validation>,
+    /// Validation rules.
+    pub validators: Vec<Vue2Validator>,
+    /// Object `v-bind` wrapper.
+    pub wrap_data: Option<Vue2BindWrap>,
+    /// Object `v-on` wrapper expression.
+    pub wrap_listeners: Option<MirExpr>,
+}
+
+/// Vue 2 runtime directive record.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue2DirectiveRuntime {
+    /// Normalized directive name.
+    pub name: String,
+    /// Raw directive name.
+    pub raw_name: String,
+    /// Optional directive value expression.
+    pub value: Option<MirExpr>,
+    /// Optional directive argument expression.
+    pub arg: Option<MirExpr>,
+    /// Whether the argument is dynamic.
+    pub is_dynamic_arg: bool,
+    /// Directive modifiers.
+    pub modifiers: BTreeMap<String, bool>,
+}
+
+/// Vue 2 data object prop.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue2DataProp {
+    /// Prop or attr name.
+    pub name: String,
+    /// Prop or attr value expression.
+    pub value: MirExpr,
+    /// Whether the prop name is dynamic.
+    pub dynamic: bool,
+    /// Whether the value came from a static attribute and needs attr newline decoding.
+    pub static_attribute: bool,
+}
+
+/// Vue 2 object `v-bind` wrapper payload.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue2BindWrap {
+    /// Bound object expression.
+    pub value: MirExpr,
+    /// Whether `.prop` applies.
+    pub prop: bool,
+    /// Whether `.sync` applies.
+    pub sync: bool,
+}
+
+/// Vue 2 component model MIR payload.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue2ComponentModelMir {
+    /// Model value expression.
+    pub value: MirExpr,
+    /// Model callback statement.
+    pub callback: JsStmtId,
+    /// Original model expression string.
+    pub expression: String,
+}
+
+/// Vue 2 inline-template payload.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue2InlineTemplate {
+    /// Inline template root node.
+    pub body: Option<NodeId>,
+}
+
+/// Vue 2 validation wrapper payload.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue2ValidationData {
+    /// Validation directive metadata.
+    pub validate: Option<Vue2Validation>,
+    /// Validation rules.
+    pub validators: Vec<Vue2Validator>,
+}
+
+/// Vue 2 conditional MIR payload.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue2IfMir {
+    /// Ordered branch conditions and bodies.
+    pub branches: Vec<Vue2IfMirBranch>,
+}
+
+/// Vue 2 conditional branch MIR payload.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue2IfMirBranch {
+    /// Optional branch condition expression.
+    pub condition: Option<JsExprId>,
+    /// Branch body MIR node.
+    pub body: NodeId,
+}
+
+/// Vue 2 render-list MIR payload.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue2ForMir {
+    /// Iterable source expression id.
+    pub source: JsExprId,
+    /// Value alias pattern id.
+    pub alias: JsPatternId,
+    /// First iterator alias pattern id.
+    pub iterator1: Option<JsPatternId>,
+    /// Second iterator alias pattern id.
+    pub iterator2: Option<JsPatternId>,
+    /// Loop body MIR node.
+    pub body: NodeId,
+}
+
+/// Vue 2 static render call payload.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue2RenderStatic {
+    /// Static render function index.
+    pub index: u32,
+    /// Static root body MIR node.
+    pub body: Option<NodeId>,
+    /// Whether this static render function appears inside `v-for`.
+    pub in_for: bool,
+}
+
+/// Vue 2 render-once wrapper payload.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue2Once {
+    /// Wrapped VNode body.
+    pub body: NodeId,
+    /// Stable once id allocated during lowering.
+    pub once_id: u32,
+    /// Optional key expression.
+    pub key: Option<MirExpr>,
+}
+
+/// Vue 2 `<slot>` outlet payload.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue2SlotOutlet {
+    /// Slot name expression.
+    pub name: MirExpr,
+}
+
+/// Vue 2 scoped slot payload.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue2ScopedSlot {
+    /// Slot name expression.
+    pub name: MirExpr,
+    /// Slot parameter pattern id.
+    pub params: Option<JsPatternId>,
+    /// Slot body MIR node ids.
+    pub body: Vec<NodeId>,
+    /// Whether an empty slot scope proxies normal slots.
+    pub proxy: bool,
+    /// Whether this slot was generated from new `v-slot` syntax.
+    pub new_syntax: bool,
+    /// Whether this slot body represents a `<template>` fragment.
+    pub body_is_fragment: bool,
+    /// New `v-slot` syntax condition that wraps the whole slot object.
+    pub condition: Option<JsExprId>,
+    /// Legacy `slot-scope` condition that wraps the returned fragment body.
+    pub legacy_condition: Option<JsExprId>,
+    /// Optional scoped slot `v-for` source.
+    pub for_source: Option<JsExprId>,
+    /// Optional scoped slot `v-for` value alias.
+    pub for_alias: Option<JsPatternId>,
+    /// Optional scoped slot `v-for` first iterator alias.
+    pub for_iterator1: Option<JsPatternId>,
+    /// Optional scoped slot `v-for` second iterator alias.
+    pub for_iterator2: Option<JsPatternId>,
+    /// Whether the scoped slot collection needs force update.
+    pub force_update: bool,
 }
 
 /// Vue 2 text-call MIR payload.

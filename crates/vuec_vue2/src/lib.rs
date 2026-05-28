@@ -15,8 +15,10 @@ use vuec_ast::{
     HirFor, HirFragment, HirIf, HirIfBranch, HirInterpolation, HirNodeKind, HirObjectBinding,
     HirObjectListeners, HirPropSegment, HirProps, HirRef, HirSlotOutlet, HirStaticAttr, HirTag,
     HtmlNamespace, JsExprId, JsPatternId, JsStmtId, LoweringMap, MirExpr, MissingSpanReason,
-    NodeId, NodeSpan, Vue2Ast, Vue2AstKind, Vue2CreateElement, Vue2Mir, Vue2MirKind, Vue2NodeKind,
-    Vue2NormalizationType, Vue2TextCall,
+    NodeId, NodeSpan, Vue2Ast, Vue2AstKind, Vue2BindWrap, Vue2ComponentModelMir, Vue2CreateElement,
+    Vue2DataObject, Vue2DataProp, Vue2DirectiveRuntime, Vue2ForMir, Vue2IfMir, Vue2IfMirBranch,
+    Vue2InlineTemplate, Vue2Mir, Vue2MirKind, Vue2NodeKind, Vue2NormalizationType, Vue2Once,
+    Vue2RenderStatic, Vue2ScopedSlot, Vue2SlotOutlet, Vue2TextCall, Vue2ValidationData,
 };
 use vuec_diagnostics::{Diagnostic, DiagnosticSink, Severity};
 use vuec_html::{HtmlAttribute, HtmlTokenKind, HtmlTokenizer};
@@ -507,9 +509,12 @@ impl Vue2Compiler {
             }
         }
         let mut static_render_fns = Vec::new();
-        let render = generate_render(element_ast.as_ref(), &options, &mut static_render_fns);
         validate_expressions(element_ast.as_ref(), &mut diagnostics);
-        let ast = project_public_ast(template, element_ast.as_ref()).ast;
+        let projection = project_public_ast(template, element_ast.as_ref());
+        let lowered = lower_vue2_ast_to_mir(&projection.ast, projection.js);
+        let render =
+            generate_render_mir(&lowered.mir, &lowered.js, &options, &mut static_render_fns);
+        let ast = projection.ast;
         let diagnostics_messages = diagnostics
             .as_slice()
             .iter()
@@ -605,7 +610,9 @@ pub fn compile_ssr(template: &str, options: Vue2CompileOptions) -> Vue2CompiledR
 /// Generates render code from an existing Vue 2 element tree.
 pub fn generate(element: Option<&Vue2Element>, options: &Vue2CompileOptions) -> Vue2CodegenResult {
     let mut static_render_fns = Vec::new();
-    let render = generate_render(element, options, &mut static_render_fns);
+    let projected = project_public_ast("", element);
+    let lowered = lower_vue2_ast_to_mir(&projected.ast, projected.js);
+    let render = generate_render_mir(&lowered.mir, &lowered.js, options, &mut static_render_fns);
     Vue2CodegenResult {
         render,
         static_render_fns,
@@ -628,9 +635,11 @@ pub fn lower_vue2_ast_to_mir(ast: &Vue2Ast, js: JsAstStore) -> Vue2LoweringResul
         .unwrap_or_else(|| NodeSpan::missing(MissingSpanReason::LoweringGap));
     let mut state = Vue2LoweringState {
         hir: Hir::new(HirNodeKind::Root(vuec_ast::HirRoot), root_span.clone()),
-        mir: Vue2Mir::new(Vue2MirKind::Root, root_span),
+        mir: Vue2Mir::new(Vue2MirKind::Root(vuec_ast::Vue2MirRoot), root_span),
         map: LoweringMap::default(),
         js,
+        static_render_index: 0,
+        once_id: 0,
     };
     state.map.record_ast_to_hir(ast.root, state.hir.root);
     state.map.record_hir_to_mir(state.hir.root, state.mir.root);
@@ -2000,527 +2009,411 @@ fn mark_static_roots(element: &mut Vue2Element, in_for: bool, options: &Vue2Comp
     }
 }
 
-fn generate_render(
-    root: Option<&Vue2Element>,
+fn generate_render_mir(
+    mir: &Vue2Mir,
+    js: &JsAstStore,
     options: &Vue2CompileOptions,
     static_render_fns: &mut Vec<String>,
 ) -> String {
-    let mut state = CodegenState {
-        static_render_fns,
+    let mut state = Vue2MirCodegenState {
+        mir,
+        js,
         options,
+        static_render_fns,
         pre: false,
-        once_id: 0,
     };
-    let code = root
+    let code = mir
+        .root_node()
+        .and_then(|root| root.children.first().copied())
         .map(|root| {
-            if root.tag == "script" {
+            if mir_node_tag(mir, root).as_deref() == Some("script") {
                 "null".into()
             } else {
-                gen_element(&mut root.clone(), &mut state)
+                gen_mir_node(root, &mut state)
             }
         })
         .unwrap_or_else(|| "_c(\"div\")".into());
     format!("with(this){{return {code}}}")
 }
 
-struct CodegenState<'a> {
-    static_render_fns: &'a mut Vec<String>,
+struct Vue2MirCodegenState<'a> {
+    mir: &'a Vue2Mir,
+    js: &'a JsAstStore,
     options: &'a Vue2CompileOptions,
+    static_render_fns: &'a mut Vec<String>,
     pre: bool,
-    once_id: usize,
 }
 
-fn gen_element(element: &mut Vue2Element, state: &mut CodegenState<'_>) -> String {
-    if element.static_root && !element.static_processed {
-        gen_static(element, state)
-    } else if element.once && !element.once_processed {
-        gen_once(element, state)
-    } else if element.for_exp.is_some() && !element.for_processed {
-        gen_for(element, state, None)
-    } else if element.if_exp.is_some() && !element.if_processed {
-        gen_if(element, state)
-    } else if element.tag == "template" && element.slot_target.is_none() && !state.pre {
-        gen_children(element, state, false).unwrap_or_else(|| "void 0".into())
-    } else if element.tag == "slot" {
-        gen_slot(element, state)
+fn gen_mir_node(id: NodeId, state: &mut Vue2MirCodegenState<'_>) -> String {
+    let Some(node) = state.mir.node(id) else {
+        return "_e()".into();
+    };
+    match &node.kind {
+        Vue2MirKind::Root(_) => node
+            .children
+            .first()
+            .map(|child| gen_mir_node(*child, state))
+            .unwrap_or_else(|| "_c(\"div\")".into()),
+        Vue2MirKind::CreateElement(create) => gen_mir_create_element(id, create, state),
+        Vue2MirKind::Text(text) => gen_mir_text(id, text, state),
+        Vue2MirKind::Comment { value } => format!("_e({})", js_string(value)),
+        Vue2MirKind::If(if_node) => gen_mir_if_conditions(&if_node.branches, state),
+        Vue2MirKind::For(for_node) => gen_mir_for(for_node, state),
+        Vue2MirKind::RenderStatic(render_static) => gen_mir_static(render_static, state),
+        Vue2MirKind::Once(once) => {
+            let code = gen_mir_node(once.body, state);
+            let key = once
+                .key
+                .as_ref()
+                .map(|key| render_mir_expr(key, state))
+                .unwrap_or_else(|| "null".into());
+            format!("_o({code},{},{key})", once.once_id)
+        }
+        Vue2MirKind::SlotOutlet(slot) => gen_mir_slot_outlet(id, slot, state),
+        Vue2MirKind::ScopedSlot(slot) => gen_mir_scoped_slot(slot, state),
+        Vue2MirKind::FilterCall { .. } | Vue2MirKind::Directive(_) => "_e()".into(),
+    }
+}
+
+fn gen_mir_create_element(
+    id: NodeId,
+    create: &Vue2CreateElement,
+    state: &mut Vue2MirCodegenState<'_>,
+) -> String {
+    if create.is_template && !state.pre {
+        return gen_mir_children(id, state, false).unwrap_or_else(|| "void 0".into());
+    }
+
+    let data = create
+        .data
+        .as_ref()
+        .map(|data| gen_mir_data(data, mir_create_tag_literal(create), state));
+    let children = if create
+        .data
+        .as_ref()
+        .and_then(|data| data.inline_template.as_ref())
+        .is_some()
+    {
+        None
     } else {
-        let code = if let Some(component) = element.component.clone() {
-            gen_component(&component, element, state)
-        } else {
-            let maybe_component = is_component(element, state.options);
-            let data = if !element.plain || (element.pre && maybe_component) {
-                Some(gen_data(element, state))
-            } else {
-                None
-            };
-            let children = if element.inline_template {
-                None
-            } else {
-                gen_children(element, state, true)
-            };
-            let tag = binding_component_tag(element, state.options, maybe_component)
-                .unwrap_or_else(|| js_string_single(&element.tag));
-            match (data, children) {
-                (Some(data), Some(children)) => format!("_c({tag},{data},{children})"),
-                (Some(data), None) => format!("_c({tag},{data})"),
-                (None, Some(children)) => format!("_c({tag},{children})"),
-                (None, None) => format!("_c({tag})"),
+        gen_mir_children(id, state, true)
+    };
+    let tag = gen_mir_create_tag(create, state);
+    let code = match (data, children) {
+        (Some(data), Some(children)) => format!("_c({tag},{data},{children})"),
+        (Some(data), None) => format!("_c({tag},{data})"),
+        (None, Some(children)) => format!("_c({tag},{children})"),
+        (None, None) => format!("_c({tag})"),
+    };
+    create
+        .validation
+        .as_ref()
+        .map(|validation| wrap_validation_mir(validation, &code))
+        .unwrap_or(code)
+}
+
+fn gen_mir_create_tag(create: &Vue2CreateElement, state: &Vue2MirCodegenState<'_>) -> String {
+    match &create.tag {
+        MirExpr::String(tag) => {
+            let maybe_component =
+                create.is_component || !is_reserved_tag_with_options(tag, state.options);
+            if maybe_component {
+                if let Some(binding) = binding_component_tag_name(tag, state.options) {
+                    return binding;
+                }
             }
-        };
-        if element.validate.is_some() || !element.validators.is_empty() {
-            wrap_validation(element, &code)
-        } else {
-            code
+            js_string_single(tag)
+        }
+        _ => render_mir_expr(&create.tag, state),
+    }
+}
+
+fn mir_create_tag_literal(create: &Vue2CreateElement) -> Option<&str> {
+    create
+        .data
+        .as_ref()
+        .and_then(|data| data.tag.as_deref())
+        .or_else(|| match &create.tag {
+            MirExpr::String(tag) => Some(tag.as_str()),
+            _ => None,
+        })
+}
+
+fn gen_mir_text(id: NodeId, text: &Vue2TextCall, state: &Vue2MirCodegenState<'_>) -> String {
+    let mut expression = render_mir_expr(&text.value, state);
+    let mut filtered = false;
+    if let Some(node) = state.mir.node(id) {
+        for child in &node.children {
+            if let Some(Vue2MirKind::FilterCall { name, args }) =
+                state.mir.node(*child).map(|node| &node.kind)
+            {
+                let args = args
+                    .iter()
+                    .map(|arg| render_js_expr(state.js, *arg))
+                    .collect::<Vec<_>>();
+                expression = if args.is_empty() {
+                    format!("_f({})({expression})", js_string(name))
+                } else {
+                    format!("_f({})({expression},{})", js_string(name), args.join(","))
+                };
+                filtered = true;
+            }
         }
     }
+    if filtered {
+        format!("_v(_s({expression}))")
+    } else {
+        format!("_v({expression})")
+    }
 }
 
-fn gen_static(element: &mut Vue2Element, state: &mut CodegenState<'_>) -> String {
-    element.static_processed = true;
+fn gen_mir_static(render_static: &Vue2RenderStatic, state: &mut Vue2MirCodegenState<'_>) -> String {
+    let Some(body) = render_static.body else {
+        return format!("_m({})", render_static.index);
+    };
     let original_pre = state.pre;
-    if element.pre {
+    if mir_node_pre(state.mir, body) {
         state.pre = true;
     }
-    let code = gen_element(element, state);
-    state
-        .static_render_fns
-        .push(format!("with(this){{return {code}}}"));
+    let code = gen_mir_node(body, state);
     state.pre = original_pre;
-    if element.static_in_for {
-        format!("_m({},true)", state.static_render_fns.len() - 1)
+    let index = render_static.index as usize;
+    while state.static_render_fns.len() <= index {
+        state.static_render_fns.push(String::new());
+    }
+    state.static_render_fns[index] = format!("with(this){{return {code}}}");
+    if render_static.in_for {
+        format!("_m({},true)", render_static.index)
     } else {
-        format!("_m({})", state.static_render_fns.len() - 1)
+        format!("_m({})", render_static.index)
     }
 }
 
-fn gen_once(element: &mut Vue2Element, state: &mut CodegenState<'_>) -> String {
-    element.once_processed = true;
-    if element.if_exp.is_some() && !element.if_processed {
-        gen_if(element, state)
-    } else if element.static_in_for {
-        let code = gen_element(element, state);
-        let key = element.key.clone().unwrap_or_else(|| "null".into());
-        let id = state.once_id;
-        state.once_id += 1;
-        format!("_o({code},{id},{key})")
-    } else {
-        gen_static(element, state)
-    }
-}
-
-fn gen_if(element: &mut Vue2Element, state: &mut CodegenState<'_>) -> String {
-    element.if_processed = true;
-    gen_if_conditions(element.if_conditions.clone(), state)
-}
-
-fn gen_if_conditions(mut conditions: Vec<Vue2IfCondition>, state: &mut CodegenState<'_>) -> String {
-    if conditions.is_empty() {
+fn gen_mir_if_conditions(
+    conditions: &[Vue2IfMirBranch],
+    state: &mut Vue2MirCodegenState<'_>,
+) -> String {
+    let Some((condition, rest)) = conditions.split_first() else {
         return "_e()".into();
-    }
-    let condition = conditions.remove(0);
-    let mut block = *condition.block;
-    if let Some(exp) = condition.exp {
+    };
+    if let Some(exp) = condition.condition {
         format!(
-            "({exp})?{}:{}",
-            gen_element(&mut block, state),
-            gen_if_conditions(conditions, state)
+            "({})?{}:{}",
+            render_js_expr(state.js, exp),
+            gen_mir_node(condition.body, state),
+            gen_mir_if_conditions(rest, state)
         )
     } else {
-        gen_element(&mut block, state)
+        gen_mir_node(condition.body, state)
     }
 }
 
-fn gen_for(
-    element: &mut Vue2Element,
-    state: &mut CodegenState<'_>,
-    alt_gen: Option<fn(&mut Vue2Element, &mut CodegenState<'_>) -> String>,
-) -> String {
-    let exp = element.for_exp.clone().unwrap_or_default();
-    let alias = element.alias.clone().unwrap_or_else(|| "item".into());
-    let iterator1 = element
+fn gen_mir_for(for_node: &Vue2ForMir, state: &mut Vue2MirCodegenState<'_>) -> String {
+    let source = render_js_expr(state.js, for_node.source);
+    let alias = render_js_pattern(state.js, for_node.alias);
+    let iterator1 = for_node
         .iterator1
-        .as_ref()
-        .map(|value| format!(",{value}"))
+        .map(|value| format!(",{}", render_js_pattern(state.js, value)))
         .unwrap_or_default();
-    let iterator2 = element
+    let iterator2 = for_node
         .iterator2
-        .as_ref()
-        .map(|value| format!(",{value}"))
+        .map(|value| format!(",{}", render_js_pattern(state.js, value)))
         .unwrap_or_default();
-    element.for_processed = true;
-    let body = alt_gen
-        .map(|gen| gen(element, state))
-        .unwrap_or_else(|| gen_element(element, state));
-    format!("_l(({exp}),function({alias}{iterator1}{iterator2}){{return {body}}})")
+    let body = gen_mir_node(for_node.body, state);
+    format!("_l(({source}),function({alias}{iterator1}{iterator2}){{return {body}}})")
 }
 
-fn gen_data(element: &mut Vue2Element, state: &mut CodegenState<'_>) -> String {
+fn gen_mir_data(
+    data: &Vue2DataObject,
+    tag_literal: Option<&str>,
+    state: &mut Vue2MirCodegenState<'_>,
+) -> String {
     let mut parts = Vec::new();
-    if let Some(dirs) = gen_directives(element) {
+    if let Some(dirs) = gen_mir_directives(&data.directives, state) {
         parts.push(dirs);
     }
-    if let Some(key) = &element.key {
-        parts.push(format!("key:{key}"));
+    if let Some(key) = &data.key {
+        parts.push(format!("key:{}", render_mir_expr(key, state)));
     }
-    if let Some(ref_name) = &element.ref_name {
-        parts.push(format!("ref:{ref_name}"));
+    if let Some(ref_name) = &data.ref_name {
+        parts.push(format!("ref:{}", render_mir_expr(ref_name, state)));
     }
-    if element.ref_in_for {
+    if data.ref_in_for {
         parts.push("refInFor:true".into());
     }
-    if element.pre {
+    if data.pre {
         parts.push("pre:true".into());
     }
-    if element.component.is_some() {
-        parts.push(format!("tag:{}", js_string(&element.tag)));
+    if let Some(tag) = &data.tag {
+        parts.push(format!("tag:{}", js_string(tag)));
     }
-    if let Some(static_class) = &element.static_class {
-        parts.push(format!("staticClass:{static_class}"));
+    if let Some(static_class) = &data.static_class {
+        parts.push(format!(
+            "staticClass:{}",
+            render_mir_expr(static_class, state)
+        ));
     }
-    if let Some(class_binding) = &element.class_binding {
-        parts.push(format!("class:{class_binding}"));
+    if let Some(class_binding) = &data.class_binding {
+        parts.push(format!("class:{}", render_mir_expr(class_binding, state)));
     }
-    if let Some(static_style) = &element.static_style {
-        parts.push(format!("staticStyle:{static_style}"));
+    if let Some(static_style) = &data.static_style {
+        parts.push(format!(
+            "staticStyle:{}",
+            render_mir_expr(static_style, state)
+        ));
     }
-    if let Some(style_binding) = &element.style_binding {
-        parts.push(format!("style:({style_binding})"));
+    if let Some(style_binding) = &data.style_binding {
+        parts.push(format!("style:({})", render_mir_expr(style_binding, state)));
     }
-    if !element.attrs.is_empty() {
+    if !data.attrs.is_empty() {
         parts.push(format!(
             "attrs:{}",
-            gen_props(
-                &element.attrs,
+            gen_mir_props(
+                &data.attrs,
                 state.options,
-                PropValueKind::StaticAttribute
+                PropValueKind::StaticAttribute,
+                state
             )
         ));
     }
-    if !element.props.is_empty() {
+    if !data.dom_props.is_empty() {
         parts.push(format!(
             "domProps:{}",
-            gen_props(&element.props, state.options, PropValueKind::Expression)
+            gen_mir_props(
+                &data.dom_props,
+                state.options,
+                PropValueKind::Expression,
+                state
+            )
         ));
     }
-    if !element.events.is_empty() {
-        parts.push(gen_handlers(&element.events, false));
+    if !data.events.is_empty() {
+        parts.push(gen_mir_handlers(&data.events, false, state));
     }
-    if !element.native_events.is_empty() {
-        parts.push(gen_handlers(&element.native_events, true));
+    if !data.native_events.is_empty() {
+        parts.push(gen_mir_handlers(&data.native_events, true, state));
     }
-    if let Some(slot_target) = &element.slot_target {
-        if element.slot_scope.is_none() {
-            parts.push(format!("slot:{slot_target}"));
-        }
+    if let Some(slot) = &data.slot {
+        parts.push(format!("slot:{}", render_mir_expr(slot, state)));
     }
-    if !element.scoped_slots.is_empty() {
-        parts.push(gen_scoped_slots(element, state));
+    if !data.scoped_slots.is_empty() {
+        parts.push(gen_mir_scoped_slots(&data.scoped_slots, state));
     }
-    if let Some(model) = &element.model {
+    if let Some(model) = &data.model {
         parts.push(format!(
             "model:{{value:{},callback:{},expression:{}}}",
-            model.value, model.callback, model.expression
+            render_mir_expr(&model.value, state),
+            render_js_stmt(state.js, model.callback),
+            model.expression
         ));
     }
-    if element.inline_template {
-        if let Some(inline) = gen_inline_template(element, state) {
+    if let Some(inline) = &data.inline_template {
+        if let Some(inline) = gen_mir_inline_template(inline, state) {
             parts.push(inline);
         }
     }
-    if let Some(validate) = &element.validate {
+    if let Some(validate) = &data.validate {
         parts.push(format!(
             "validate:{{\"field\":{},\"groups\":{}}}",
             js_string(&validate.field),
             json_string_array(&validate.groups)
         ));
     }
-    if !element.validators.is_empty() {
+    if !data.validators.is_empty() {
         parts.push(format!(
             "validators:{}",
-            validators_json(&element.validators)
+            ast_validators_json(&data.validators)
         ));
     }
 
-    let mut data = format!("{{{}}}", parts.join(","));
-    if !element.dynamic_attrs.is_empty() {
-        data = format!(
-            "_b({data},{},{} )",
-            js_string(&element.tag),
-            gen_props(
-                &element.dynamic_attrs,
+    let mut rendered = format!("{{{}}}", parts.join(","));
+    let tag = tag_literal.unwrap_or("");
+    if !data.dynamic_attrs.is_empty() {
+        rendered = format!(
+            "_b({rendered},{},{} )",
+            js_string(tag),
+            gen_mir_props(
+                &data.dynamic_attrs,
                 state.options,
-                PropValueKind::Expression
+                PropValueKind::Expression,
+                state
             )
         )
         .replace("} )", "})");
     }
-    if let Some(Vue2DataWrap::Bind { value, prop, sync }) = &element.wrap_data {
-        data = format!(
-            "_b({data},{},{value},{prop}{})",
-            js_string_single(&element.tag),
-            if *sync { ",true" } else { "" }
+    if let Some(wrap) = &data.wrap_data {
+        rendered = format!(
+            "_b({rendered},{},{},{prop}{sync})",
+            js_string_single(tag),
+            render_mir_expr(&wrap.value, state),
+            prop = wrap.prop,
+            sync = if wrap.sync { ",true" } else { "" }
         );
     }
-    if let Some(listeners) = &element.wrap_listeners {
-        data = format!("_g({data},{listeners})");
+    if let Some(listeners) = &data.wrap_listeners {
+        rendered = format!("_g({rendered},{})", render_mir_expr(listeners, state));
     }
-    data
+    rendered
 }
 
-fn gen_directives(element: &Vue2Element) -> Option<String> {
-    if element.directives.is_empty() {
+fn gen_mir_directives(
+    directives: &[Vue2DirectiveRuntime],
+    state: &Vue2MirCodegenState<'_>,
+) -> Option<String> {
+    if directives.is_empty() {
         return None;
     }
-    let mut rendered = Vec::new();
-    for directive in &element.directives {
-        let mut fields = vec![
-            format!("name:{}", js_string(&directive.name)),
-            format!("rawName:{}", js_string(&directive.raw_name)),
-        ];
-        if let Some(value) = &directive.value {
-            fields.push(format!("value:({value})"));
-            fields.push(format!("expression:{}", js_string(value)));
-        }
-        if let Some(arg) = &directive.arg {
-            if directive.is_dynamic_arg {
-                fields.push(format!("arg:{arg}"));
-            } else {
-                fields.push(format!("arg:{}", js_string(arg)));
+    let rendered = directives
+        .iter()
+        .map(|directive| {
+            let mut fields = vec![
+                format!("name:{}", js_string(&directive.name)),
+                format!("rawName:{}", js_string(&directive.raw_name)),
+            ];
+            if let Some(value) = &directive.value {
+                let value = render_mir_expr(value, state);
+                fields.push(format!("value:({value})"));
+                fields.push(format!("expression:{}", js_string(&value)));
             }
-        }
-        if !directive.modifiers.is_empty() {
-            fields.push(format!(
-                "modifiers:{}",
-                modifiers_json(&directive.modifiers)
-            ));
-        }
-        rendered.push(format!("{{{}}}", fields.join(",")));
-    }
+            if let Some(arg) = &directive.arg {
+                if directive.is_dynamic_arg {
+                    fields.push(format!("arg:{}", render_mir_expr(arg, state)));
+                } else {
+                    fields.push(format!(
+                        "arg:{}",
+                        js_string(&render_mir_string_arg(arg, state))
+                    ));
+                }
+            }
+            if !directive.modifiers.is_empty() {
+                fields.push(format!(
+                    "modifiers:{}",
+                    modifiers_json(&directive.modifiers)
+                ));
+            }
+            format!("{{{}}}", fields.join(","))
+        })
+        .collect::<Vec<_>>();
     Some(format!("directives:[{}]", rendered.join(",")))
 }
 
-fn gen_children(
-    element: &mut Vue2Element,
-    state: &mut CodegenState<'_>,
-    check_skip: bool,
-) -> Option<String> {
-    if element.children.is_empty() {
-        return None;
-    }
-    if element.children.len() == 1 {
-        if let Vue2Node::Element(child) = &mut element.children[0] {
-            if child.for_exp.is_some() && child.tag != "template" && child.tag != "slot" {
-                let normalization = if check_skip {
-                    if is_component(child, state.options) {
-                        ",1"
-                    } else {
-                        ",0"
-                    }
-                } else {
-                    ""
-                };
-                let generated = gen_element(child, state);
-                return Some(format!("{generated}{normalization}"));
-            }
-        }
-    }
-    let nodes = element
-        .children
-        .iter_mut()
-        .map(|child| gen_node(child, state))
-        .collect::<Vec<_>>();
-    let normalization = if check_skip {
-        get_normalization_type(&element.children, state.options)
-    } else {
-        0
-    };
-    if normalization > 0 {
-        Some(format!("[{}],{}", nodes.join(","), normalization))
-    } else {
-        Some(format!("[{}]", nodes.join(",")))
-    }
-}
-
-fn gen_node(node: &mut Vue2Node, state: &mut CodegenState<'_>) -> String {
-    match node {
-        Vue2Node::Element(element) => gen_element(element, state),
-        Vue2Node::Text(text) if text.is_comment => format!("_e({})", js_string(&text.text)),
-        Vue2Node::Text(text) => {
-            if let Some(expression) = &text.expression {
-                format!("_v({expression})")
-            } else {
-                format!("_v({})", js_string(&text.text))
-            }
-        }
-    }
-}
-
-fn gen_slot(element: &mut Vue2Element, state: &mut CodegenState<'_>) -> String {
-    let slot_name = element
-        .slot_name
-        .clone()
-        .unwrap_or_else(|| "\"default\"".into());
-    let children = gen_children(element, state, false);
-    if let Some(children) = children {
-        format!("_t({slot_name},function(){{return {children}}})")
-    } else {
-        format!("_t({slot_name})")
-    }
-}
-
-fn gen_component(
-    component_name: &str,
-    element: &mut Vue2Element,
-    state: &mut CodegenState<'_>,
-) -> String {
-    let data = gen_data(element, state);
-    let children = if element.inline_template {
-        None
-    } else {
-        gen_children(element, state, true)
-    };
-    if let Some(children) = children {
-        format!("_c({component_name},{data},{children})")
-    } else {
-        format!("_c({component_name},{data})")
-    }
-}
-
-fn gen_inline_template(element: &mut Vue2Element, state: &mut CodegenState<'_>) -> Option<String> {
-    let child = inline_template_child_element(element)?.clone();
-    let mut static_render_fns = Vec::new();
-    let render = generate_render(Some(&child), state.options, &mut static_render_fns);
-    let static_render_fns = static_render_fns
-        .into_iter()
-        .map(|code| format!("function(){{{code}}}"))
-        .collect::<Vec<_>>()
-        .join(",");
-    Some(format!(
-        "inlineTemplate:{{render:function(){{{render}}},staticRenderFns:[{static_render_fns}]}}"
-    ))
-}
-
-fn inline_template_child_element(element: &Vue2Element) -> Option<&Vue2Element> {
-    match element.children.first() {
-        Some(Vue2Node::Element(child)) => Some(child),
-        _ => None,
-    }
-}
-
-fn gen_scoped_slots(element: &mut Vue2Element, state: &mut CodegenState<'_>) -> String {
-    let needs_force_update = element.for_exp.is_some()
-        || element.scoped_slots.values().any(|slot| {
-            slot.slot_target_dynamic
-                || slot.if_exp.is_some()
-                || slot.for_exp.is_some()
-                || contains_slot_child(slot)
-        });
-    let slots = element
-        .scoped_slots
-        .clone()
-        .into_iter()
-        .map(|(key, mut slot)| gen_scoped_slot(&key, &mut slot, state))
-        .collect::<Vec<_>>()
-        .join(",");
-    if needs_force_update {
-        format!("scopedSlots:_u([{slots}],null,true)")
-    } else {
-        format!("scopedSlots:_u([{slots}])")
-    }
-}
-
-fn gen_scoped_slot(key: &str, slot: &mut Vue2Element, state: &mut CodegenState<'_>) -> String {
-    if slot.if_exp.is_some() && !slot.if_processed && slot.slot_new_syntax {
-        return gen_if_scoped_slot(key, slot, state);
-    }
-    if slot.for_exp.is_some() && !slot.for_processed {
-        return gen_for(slot, state, Some(gen_scoped_slot_for));
-    }
-    let scope = slot.slot_scope.clone().unwrap_or_default();
-    let scope = if scope == "_empty_" { "" } else { &scope };
-    let body = gen_scoped_slot_body(slot, state);
-    let proxy = if scope.is_empty() { ",proxy:true" } else { "" };
-    let slot_key = slot.slot_target.as_deref().unwrap_or(key);
-    format!("{{key:{slot_key},fn:function({scope}){{return {body}}}{proxy}}}")
-}
-
-fn gen_if_scoped_slot(key: &str, slot: &mut Vue2Element, state: &mut CodegenState<'_>) -> String {
-    slot.if_processed = true;
-    gen_if_scoped_slot_conditions(key, slot.if_conditions.clone(), state)
-}
-
-fn gen_if_scoped_slot_conditions(
-    key: &str,
-    mut conditions: Vec<Vue2IfCondition>,
-    state: &mut CodegenState<'_>,
-) -> String {
-    if conditions.is_empty() {
-        return "null".into();
-    }
-    let condition = conditions.remove(0);
-    let mut block = *condition.block;
-    if let Some(exp) = condition.exp {
-        format!(
-            "({exp})?{}:{}",
-            gen_scoped_slot(key, &mut block, state),
-            gen_if_scoped_slot_conditions(key, conditions, state)
-        )
-    } else {
-        gen_scoped_slot(key, &mut block, state)
-    }
-}
-
-fn gen_scoped_slot_for(slot: &mut Vue2Element, state: &mut CodegenState<'_>) -> String {
-    let key = slot
-        .slot_target
-        .clone()
-        .unwrap_or_else(|| "\"default\"".into());
-    gen_scoped_slot(&key, slot, state)
-}
-
-fn gen_scoped_slot_body(slot: &mut Vue2Element, state: &mut CodegenState<'_>) -> String {
-    if slot.tag == "template" {
-        if slot.if_exp.is_some() && !slot.slot_new_syntax {
-            let children = gen_children(slot, state, false).unwrap_or_else(|| "undefined".into());
-            let if_exp = slot.if_exp.as_deref().unwrap_or_default();
-            format!("({if_exp})?{children}:undefined")
-        } else {
-            gen_children(slot, state, false).unwrap_or_else(|| "undefined".into())
-        }
-    } else {
-        gen_element(slot, state)
-    }
-}
-
-fn contains_slot_child(element: &Vue2Element) -> bool {
-    element.tag == "slot"
-        || element.children.iter().any(|child| match child {
-            Vue2Node::Element(child) => contains_slot_child(child),
-            Vue2Node::Text(_) => false,
-        })
-}
-
-#[derive(Clone, Copy)]
-enum PropValueKind {
-    StaticAttribute,
-    Expression,
-}
-
-fn gen_props(
-    attrs: &[Vue2Attribute],
+fn gen_mir_props(
+    attrs: &[Vue2DataProp],
     options: &Vue2CompileOptions,
     value_kind: PropValueKind,
+    state: &Vue2MirCodegenState<'_>,
 ) -> String {
     let static_props = attrs
         .iter()
         .filter(|attr| !attr.dynamic)
         .map(|attr| {
+            let value = render_mir_expr(&attr.value, state);
             let value = match value_kind {
                 PropValueKind::StaticAttribute => {
-                    let value = decode_newline_entities_for_attr(&attr.name, &attr.value, options);
+                    let value = decode_newline_entities_for_attr(&attr.name, &value, options);
                     transform_special_newlines(&value)
                 }
-                PropValueKind::Expression => attr.value.clone(),
+                PropValueKind::Expression => value,
             };
             format!("{}:{value}", js_string(&attr.name))
         })
@@ -2529,7 +2422,7 @@ fn gen_props(
     let dynamic_props = attrs
         .iter()
         .filter(|attr| attr.dynamic)
-        .flat_map(|attr| [attr.name.clone(), attr.value.clone()])
+        .flat_map(|attr| [attr.name.clone(), render_mir_expr(&attr.value, state)])
         .collect::<Vec<_>>();
     if dynamic_props.is_empty() {
         format!("{{{static_props}}}")
@@ -2538,7 +2431,11 @@ fn gen_props(
     }
 }
 
-fn gen_handlers(events: &BTreeMap<String, Vec<Vue2EventHandler>>, native: bool) -> String {
+fn gen_mir_handlers(
+    events: &BTreeMap<String, Vec<vuec_ast::Vue2EventHandler>>,
+    native: bool,
+    state: &Vue2MirCodegenState<'_>,
+) -> String {
     let prefix = if native { "nativeOn" } else { "on" };
     let handlers = events
         .iter()
@@ -2546,13 +2443,13 @@ fn gen_handlers(events: &BTreeMap<String, Vec<Vue2EventHandler>>, native: bool) 
             let code = if handlers.is_empty() {
                 "function(){}".into()
             } else if handlers.len() == 1 {
-                gen_handler(&handlers[0])
+                gen_mir_handler(&handlers[0], state)
             } else {
                 format!(
                     "[{}]",
                     handlers
                         .iter()
-                        .map(gen_handler)
+                        .map(|handler| gen_mir_handler(handler, state))
                         .collect::<Vec<_>>()
                         .join(",")
                 )
@@ -2564,19 +2461,23 @@ fn gen_handlers(events: &BTreeMap<String, Vec<Vue2EventHandler>>, native: bool) 
     format!("{prefix}:{{{handlers}}}")
 }
 
-fn gen_handler(handler: &Vue2EventHandler) -> String {
-    let is_method_path = is_simple_path(&handler.value);
-    let is_function_expression = is_function_expression(&handler.value);
-    let is_function_invocation = is_function_invocation(&handler.value);
+fn gen_mir_handler(
+    handler: &vuec_ast::Vue2EventHandler,
+    state: &Vue2MirCodegenState<'_>,
+) -> String {
+    let value = render_js_stmt(state.js, handler.value);
+    let is_method_path = is_simple_path(&value);
+    let is_function_expression = is_function_expression(&value);
+    let is_function_invocation = is_function_invocation(&value);
     let has_modifier_object = handler.has_modifier_object || !handler.modifiers.is_empty();
     if !has_modifier_object {
         if is_method_path || is_function_expression {
-            return handler.value.clone();
+            return value;
         }
         if is_function_invocation {
-            return format!("function($event){{return {}}}", handler.value);
+            return format!("function($event){{return {value}}}");
         }
-        return format!("function($event){{{}}}", handler.value);
+        return format!("function($event){{{value}}}");
     }
 
     let mut code = String::new();
@@ -2631,15 +2532,407 @@ fn gen_handler(handler: &Vue2EventHandler) -> String {
     }
     code.push_str(&modifier_code);
     let handler_code = if is_method_path {
-        format!("return {}.apply(null, arguments)", handler.value)
+        format!("return {value}.apply(null, arguments)")
     } else if is_function_expression {
-        format!("return ({}).apply(null, arguments)", handler.value)
+        format!("return ({value}).apply(null, arguments)")
     } else if is_function_invocation {
-        format!("return {}", handler.value)
+        format!("return {value}")
     } else {
-        handler.value.clone()
+        value
     };
     format!("function($event){{{code}{handler_code}}}")
+}
+
+fn gen_mir_children(
+    parent: NodeId,
+    state: &mut Vue2MirCodegenState<'_>,
+    check_skip: bool,
+) -> Option<String> {
+    let children = renderable_mir_children(parent, state.mir);
+    gen_mir_children_from_ids(&children, state, check_skip)
+}
+
+fn gen_mir_children_from_ids(
+    children: &[NodeId],
+    state: &mut Vue2MirCodegenState<'_>,
+    check_skip: bool,
+) -> Option<String> {
+    if children.is_empty() {
+        return None;
+    }
+    if children.len() == 1 && mir_for_child_can_skip_array(state.mir, children[0]) {
+        let normalization = if check_skip {
+            if mir_node_is_component(
+                state.mir,
+                mir_for_body_node(state.mir, children[0]).unwrap_or(children[0]),
+                state.options,
+            ) {
+                ",1"
+            } else {
+                ",0"
+            }
+        } else {
+            ""
+        };
+        let generated = gen_mir_node(children[0], state);
+        return Some(format!("{generated}{normalization}"));
+    }
+    let nodes = children
+        .iter()
+        .map(|child| gen_mir_node(*child, state))
+        .collect::<Vec<_>>();
+    let normalization = if check_skip {
+        get_mir_normalization_type(children, state.mir, state.options)
+    } else {
+        0
+    };
+    if normalization > 0 {
+        Some(format!("[{}],{}", nodes.join(","), normalization))
+    } else {
+        Some(format!("[{}]", nodes.join(",")))
+    }
+}
+
+fn gen_mir_slot_outlet(
+    id: NodeId,
+    slot: &Vue2SlotOutlet,
+    state: &mut Vue2MirCodegenState<'_>,
+) -> String {
+    let name = render_mir_expr(&slot.name, state);
+    let children = gen_mir_children(id, state, false);
+    if let Some(children) = children {
+        format!("_t({name},function(){{return {children}}})")
+    } else {
+        format!("_t({name})")
+    }
+}
+
+fn gen_mir_inline_template(
+    inline: &Vue2InlineTemplate,
+    state: &Vue2MirCodegenState<'_>,
+) -> Option<String> {
+    let body = inline.body?;
+    let mut static_render_fns = Vec::new();
+    let mut nested = Vue2MirCodegenState {
+        mir: state.mir,
+        js: state.js,
+        options: state.options,
+        static_render_fns: &mut static_render_fns,
+        pre: false,
+    };
+    let code = gen_mir_node(body, &mut nested);
+    let render = format!("with(this){{return {code}}}");
+    let static_render_fns = static_render_fns
+        .into_iter()
+        .map(|code| format!("function(){{{code}}}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    Some(format!(
+        "inlineTemplate:{{render:function(){{{render}}},staticRenderFns:[{static_render_fns}]}}"
+    ))
+}
+
+fn gen_mir_scoped_slots(slots: &[Vue2ScopedSlot], state: &mut Vue2MirCodegenState<'_>) -> String {
+    let rendered = slots
+        .iter()
+        .map(|slot| gen_mir_scoped_slot(slot, state))
+        .collect::<Vec<_>>()
+        .join(",");
+    if slots.iter().any(|slot| slot.force_update) {
+        format!("scopedSlots:_u([{rendered}],null,true)")
+    } else {
+        format!("scopedSlots:_u([{rendered}])")
+    }
+}
+
+fn gen_mir_scoped_slot(slot: &Vue2ScopedSlot, state: &mut Vue2MirCodegenState<'_>) -> String {
+    if let Some(condition) = slot.condition {
+        return format!(
+            "({})?{}:null",
+            render_js_expr(state.js, condition),
+            gen_mir_scoped_slot_object(slot, state)
+        );
+    }
+    if let Some(source) = slot.for_source {
+        let alias = slot
+            .for_alias
+            .map(|alias| render_js_pattern(state.js, alias))
+            .unwrap_or_else(|| "item".into());
+        let iterator1 = slot
+            .for_iterator1
+            .map(|value| format!(",{}", render_js_pattern(state.js, value)))
+            .unwrap_or_default();
+        let iterator2 = slot
+            .for_iterator2
+            .map(|value| format!(",{}", render_js_pattern(state.js, value)))
+            .unwrap_or_default();
+        let body = gen_mir_scoped_slot_object(slot, state);
+        return format!(
+            "_l(({}),function({alias}{iterator1}{iterator2}){{return {body}}})",
+            render_js_expr(state.js, source)
+        );
+    }
+    gen_mir_scoped_slot_object(slot, state)
+}
+
+fn gen_mir_scoped_slot_object(
+    slot: &Vue2ScopedSlot,
+    state: &mut Vue2MirCodegenState<'_>,
+) -> String {
+    let scope = slot
+        .params
+        .map(|params| render_js_pattern(state.js, params))
+        .unwrap_or_default();
+    let scope = if scope == "_empty_" {
+        ""
+    } else {
+        scope.as_str()
+    };
+    let body = gen_mir_scoped_slot_body(slot, state);
+    let proxy = if scope.is_empty() { ",proxy:true" } else { "" };
+    format!(
+        "{{key:{},fn:function({scope}){{return {body}}}{proxy}}}",
+        render_mir_expr(&slot.name, state)
+    )
+}
+
+fn gen_mir_scoped_slot_body(slot: &Vue2ScopedSlot, state: &mut Vue2MirCodegenState<'_>) -> String {
+    if slot.body_is_fragment {
+        let children = gen_mir_children_from_ids(&slot.body, state, false)
+            .unwrap_or_else(|| "undefined".into());
+        if let Some(condition) = slot.legacy_condition {
+            format!(
+                "({})?{children}:undefined",
+                render_js_expr(state.js, condition)
+            )
+        } else {
+            children
+        }
+    } else {
+        slot.body
+            .first()
+            .map(|body| gen_mir_node(*body, state))
+            .unwrap_or_else(|| "undefined".into())
+    }
+}
+
+fn renderable_mir_children(parent: NodeId, mir: &Vue2Mir) -> Vec<NodeId> {
+    mir.node(parent)
+        .map(|node| {
+            node.children
+                .iter()
+                .copied()
+                .filter(|child| {
+                    !matches!(
+                        mir.node(*child).map(|node| &node.kind),
+                        Some(Vue2MirKind::ScopedSlot(_))
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn mir_for_child_can_skip_array(mir: &Vue2Mir, child: NodeId) -> bool {
+    match mir.node(child).map(|node| &node.kind) {
+        Some(Vue2MirKind::For(for_node)) => {
+            mir_for_body_node(mir, for_node.body).is_some_and(|body| {
+                !mir_node_is_template(mir, body) && !mir_node_is_slot_outlet(mir, body)
+            })
+        }
+        _ => false,
+    }
+}
+
+fn mir_for_body_node(mir: &Vue2Mir, child: NodeId) -> Option<NodeId> {
+    match mir.node(child).map(|node| &node.kind) {
+        Some(Vue2MirKind::For(for_node)) => Some(for_node.body),
+        Some(Vue2MirKind::RenderStatic(render_static)) => render_static.body,
+        Some(Vue2MirKind::Once(once)) => Some(once.body),
+        _ => Some(child),
+    }
+}
+
+fn get_mir_normalization_type(
+    children: &[NodeId],
+    mir: &Vue2Mir,
+    options: &Vue2CompileOptions,
+) -> u8 {
+    let mut result = 0;
+    for child in children {
+        if mir_node_contains_for(mir, *child)
+            || mir_node_is_template(mir, *child)
+            || mir_node_is_slot_outlet(mir, *child)
+        {
+            return 2;
+        }
+        if mir_node_is_component(mir, *child, options) {
+            result = 1;
+        }
+    }
+    result
+}
+
+fn mir_node_contains_for(mir: &Vue2Mir, id: NodeId) -> bool {
+    match mir.node(id).map(|node| &node.kind) {
+        Some(Vue2MirKind::For(_)) => true,
+        Some(Vue2MirKind::If(if_node)) => if_node
+            .branches
+            .iter()
+            .any(|branch| mir_node_contains_for(mir, branch.body)),
+        Some(Vue2MirKind::RenderStatic(render_static)) => render_static
+            .body
+            .is_some_and(|body| mir_node_contains_for(mir, body)),
+        Some(Vue2MirKind::Once(once)) => mir_node_contains_for(mir, once.body),
+        _ => false,
+    }
+}
+
+fn mir_node_tag(mir: &Vue2Mir, id: NodeId) -> Option<String> {
+    match mir.node(id).map(|node| &node.kind)? {
+        Vue2MirKind::CreateElement(create) => match &create.tag {
+            MirExpr::String(tag) => Some(tag.clone()),
+            _ => None,
+        },
+        Vue2MirKind::RenderStatic(render_static) => {
+            render_static.body.and_then(|body| mir_node_tag(mir, body))
+        }
+        Vue2MirKind::Once(once) => mir_node_tag(mir, once.body),
+        Vue2MirKind::For(for_node) => mir_node_tag(mir, for_node.body),
+        _ => None,
+    }
+}
+
+fn mir_node_pre(mir: &Vue2Mir, id: NodeId) -> bool {
+    matches!(
+        mir.node(id).map(|node| &node.kind),
+        Some(Vue2MirKind::CreateElement(Vue2CreateElement {
+            data: Some(Vue2DataObject { pre: true, .. }),
+            ..
+        }))
+    )
+}
+
+fn mir_node_is_template(mir: &Vue2Mir, id: NodeId) -> bool {
+    match mir.node(id).map(|node| &node.kind) {
+        Some(Vue2MirKind::CreateElement(create)) => create.is_template,
+        Some(Vue2MirKind::If(if_node)) => if_node
+            .branches
+            .iter()
+            .any(|branch| mir_node_is_template(mir, branch.body)),
+        Some(Vue2MirKind::For(for_node)) => mir_node_is_template(mir, for_node.body),
+        Some(Vue2MirKind::RenderStatic(render_static)) => render_static
+            .body
+            .is_some_and(|body| mir_node_is_template(mir, body)),
+        Some(Vue2MirKind::Once(once)) => mir_node_is_template(mir, once.body),
+        _ => false,
+    }
+}
+
+fn mir_node_is_slot_outlet(mir: &Vue2Mir, id: NodeId) -> bool {
+    match mir.node(id).map(|node| &node.kind) {
+        Some(Vue2MirKind::SlotOutlet(_)) => true,
+        Some(Vue2MirKind::If(if_node)) => if_node
+            .branches
+            .iter()
+            .any(|branch| mir_node_is_slot_outlet(mir, branch.body)),
+        Some(Vue2MirKind::For(for_node)) => mir_node_is_slot_outlet(mir, for_node.body),
+        Some(Vue2MirKind::RenderStatic(render_static)) => render_static
+            .body
+            .is_some_and(|body| mir_node_is_slot_outlet(mir, body)),
+        Some(Vue2MirKind::Once(once)) => mir_node_is_slot_outlet(mir, once.body),
+        _ => false,
+    }
+}
+
+fn mir_node_is_component(mir: &Vue2Mir, id: NodeId, options: &Vue2CompileOptions) -> bool {
+    match mir.node(id).map(|node| &node.kind) {
+        Some(Vue2MirKind::CreateElement(create)) => {
+            create.is_component
+                || matches!(
+                    &create.tag,
+                    MirExpr::String(tag) if !is_reserved_tag_with_options(tag, options)
+                )
+        }
+        Some(Vue2MirKind::If(if_node)) => if_node
+            .branches
+            .iter()
+            .any(|branch| mir_node_is_component(mir, branch.body, options)),
+        Some(Vue2MirKind::For(for_node)) => mir_node_is_component(mir, for_node.body, options),
+        Some(Vue2MirKind::RenderStatic(render_static)) => render_static
+            .body
+            .is_some_and(|body| mir_node_is_component(mir, body, options)),
+        Some(Vue2MirKind::Once(once)) => mir_node_is_component(mir, once.body, options),
+        _ => false,
+    }
+}
+
+fn render_mir_expr(expr: &MirExpr, state: &Vue2MirCodegenState<'_>) -> String {
+    match expr {
+        MirExpr::String(value) => js_string(value),
+        MirExpr::Bool(value) => value.to_string(),
+        MirExpr::Null => "null".into(),
+        MirExpr::JsExpr(id) => render_js_expr(state.js, *id),
+        MirExpr::Helper(helper) => format!("{helper:?}"),
+    }
+}
+
+fn render_mir_string_arg(expr: &MirExpr, state: &Vue2MirCodegenState<'_>) -> String {
+    match expr {
+        MirExpr::String(value) => value.clone(),
+        _ => render_mir_expr(expr, state),
+    }
+}
+
+fn render_js_expr(js: &JsAstStore, id: JsExprId) -> String {
+    js.expr_entry(id)
+        .map(|entry| entry.source.as_str().to_string())
+        .unwrap_or_default()
+}
+
+fn render_js_stmt(js: &JsAstStore, id: JsStmtId) -> String {
+    js.stmt_entry(id)
+        .map(|entry| entry.source.as_str().to_string())
+        .unwrap_or_default()
+}
+
+fn render_js_pattern(js: &JsAstStore, id: JsPatternId) -> String {
+    js.pattern_entry(id)
+        .map(|entry| entry.source.as_str().to_string())
+        .unwrap_or_default()
+}
+
+fn binding_component_tag_name(tag: &str, options: &Vue2CompileOptions) -> Option<String> {
+    if !options.bindings_is_script_setup || options.bindings.is_empty() {
+        return None;
+    }
+    check_binding_type(&options.bindings, tag)
+}
+
+fn wrap_validation_mir(validation: &Vue2ValidationData, child_code: &str) -> String {
+    let field = validation
+        .validate
+        .as_ref()
+        .map(|validate| validate.field.clone())
+        .unwrap_or_default();
+    let groups = validation
+        .validate
+        .as_ref()
+        .map(|validate| validate.groups.clone())
+        .unwrap_or_default();
+    format!(
+        "_c('validate',{{props:{{field:{},groups:{},validators:{},result:{},child:{child_code}}}}})",
+        js_string(&field),
+        json_string_array(&groups),
+        ast_validators_json(&validation.validators),
+        ast_validation_result_json(&validation.validators)
+    )
+}
+
+#[derive(Clone, Copy)]
+enum PropValueKind {
+    StaticAttribute,
+    Expression,
 }
 
 fn gen_key_filter(keys: &[String]) -> String {
@@ -2660,26 +2953,6 @@ fn gen_key_filter(keys: &[String]) -> String {
             })
             .collect::<Vec<_>>()
             .join("&&")
-    )
-}
-
-fn wrap_validation(element: &Vue2Element, child_code: &str) -> String {
-    let field = element
-        .validate
-        .as_ref()
-        .map(|validate| validate.field.clone())
-        .unwrap_or_default();
-    let groups = element
-        .validate
-        .as_ref()
-        .map(|validate| validate.groups.clone())
-        .unwrap_or_default();
-    format!(
-        "_c('validate',{{props:{{field:{},groups:{},validators:{},result:{},child:{child_code}}}}})",
-        js_string(&field),
-        json_string_array(&groups),
-        validators_json(&element.validators),
-        validation_result_json(&element.validators)
     )
 }
 
@@ -2876,9 +3149,15 @@ impl Vue2AstProjection {
             }
         }
 
+        let scoped_slots = element
+            .scoped_slots
+            .iter()
+            .map(|(name, slot)| (name.clone(), self.project_element(id, slot)))
+            .collect::<BTreeMap<_, _>>();
         let if_conditions = self.project_if_conditions(id, element);
         if let Some(node) = self.ast.node_mut(id) {
             if let Vue2AstKind::Element(projected) = &mut node.kind {
+                projected.scoped_slots = scoped_slots;
                 projected.if_conditions = if_conditions;
             }
         }
@@ -3028,6 +3307,7 @@ impl Vue2AstProjection {
             .slot_scope
             .as_ref()
             .map(|scope| self.register_pattern(scope, element.span));
+        payload.slot_new_syntax = element.slot_new_syntax;
         payload.component = element.component.clone();
         payload.inline_template = element.inline_template;
         payload.static_class = element.static_class.clone();
@@ -3056,6 +3336,21 @@ impl Vue2AstProjection {
             },
         });
         payload.wrap_listeners = element.wrap_listeners.clone();
+        payload.validate = element
+            .validate
+            .as_ref()
+            .map(|validate| vuec_ast::Vue2Validation {
+                field: validate.field.clone(),
+                groups: validate.groups.clone(),
+            });
+        payload.validators = element
+            .validators
+            .iter()
+            .map(|validator| vuec_ast::Vue2Validator {
+                name: validator.name.clone(),
+                rule: validator.rule.clone(),
+            })
+            .collect();
         payload.static_node = element.static_node;
         payload.static_root = element.static_root;
         payload.static_in_for = element.static_in_for;
@@ -3090,6 +3385,8 @@ impl Vue2AstProjection {
                         .map(|handler| vuec_ast::Vue2EventHandler {
                             value: self.register_stmt(&handler.value, handler.span),
                             modifiers: handler.modifiers.clone(),
+                            modifier_order: handler.modifier_order.clone(),
+                            has_modifier_object: handler.has_modifier_object,
                             dynamic: handler.dynamic,
                             span: handler.span,
                         })
@@ -3157,6 +3454,8 @@ struct Vue2LoweringState {
     mir: Vue2Mir,
     map: LoweringMap,
     js: JsAstStore,
+    static_render_index: u32,
+    once_id: u32,
 }
 
 fn lower_vue2_child_sequence(
@@ -3165,10 +3464,16 @@ fn lower_vue2_child_sequence(
     hir_parent: NodeId,
     mir_parent: NodeId,
     state: &mut Vue2LoweringState,
-) {
+) -> Vec<(NodeId, NodeId, NodeId)> {
+    let mut lowered = Vec::new();
     for child in children {
-        lower_vue2_ast_node_to_mir(*child, ast, hir_parent, mir_parent, state);
+        if let Some((hir, mir)) =
+            lower_vue2_ast_node_to_mir(*child, ast, hir_parent, mir_parent, state)
+        {
+            lowered.push((*child, hir, mir));
+        }
     }
+    lowered
 }
 
 fn lower_vue2_ast_node_to_mir(
@@ -3262,6 +3567,7 @@ fn lower_vue2_ast_node_to_mir_inner(
                         mir_id,
                         Vue2MirKind::FilterCall {
                             name: call.name.clone(),
+                            args: call.args.clone(),
                         },
                         NodeSpan::generated(ast_node.span.source(), GeneratedReason::Lowering),
                     );
@@ -3318,16 +3624,27 @@ fn lower_vue2_for_to_mir(
     );
     let mir_id = state.mir.push_child(
         mir_parent,
-        Vue2MirKind::For { source, alias },
+        Vue2MirKind::For(Vue2ForMir {
+            source,
+            alias,
+            iterator1: element.iterator1,
+            iterator2: element.iterator2,
+            body: NodeId(0),
+        }),
         ast_node.span.clone(),
     );
     state.map.record_ast_to_hir(ast_id, hir_id);
     state.map.record_hir_to_mir(hir_id, mir_id);
-    let (body_hir, _) =
+    let (body_hir, body_mir) =
         lower_vue2_ast_node_to_mir_inner(ast_id, ast, hir_id, mir_id, state, false)?;
     if let Some(node) = state.hir.node_mut(hir_id) {
         if let HirNodeKind::For(for_node) = &mut node.kind {
             for_node.body = body_hir;
+        }
+    }
+    if let Some(node) = state.mir.node_mut(mir_id) {
+        if let Vue2MirKind::For(for_node) = &mut node.kind {
+            for_node.body = body_mir;
         }
     }
     Some((hir_id, mir_id))
@@ -3342,11 +3659,6 @@ fn lower_vue2_if_to_mir(
     mir_parent: NodeId,
     state: &mut Vue2LoweringState,
 ) -> Option<(NodeId, NodeId)> {
-    let first_condition = element
-        .if_conditions
-        .first()
-        .and_then(|condition| condition.exp)
-        .or(element.if_exp)?;
     let hir_id = state.hir.push_child(
         hir_parent,
         HirNodeKind::If(HirIf {
@@ -3356,18 +3668,19 @@ fn lower_vue2_if_to_mir(
     );
     let mir_id = state.mir.push_child(
         mir_parent,
-        Vue2MirKind::If {
-            condition: first_condition,
-        },
+        Vue2MirKind::If(Vue2IfMir {
+            branches: Vec::new(),
+        }),
         ast_node.span.clone(),
     );
     state.map.record_ast_to_hir(ast_id, hir_id);
     state.map.record_hir_to_mir(hir_id, mir_id);
 
     let mut branches = Vec::new();
+    let mut mir_branches = Vec::new();
     for condition in &element.if_conditions {
         let block = condition.block;
-        let (body_hir, _) = if block == ast_id {
+        let (body_hir, body_mir) = if block == ast_id {
             lower_vue2_plain_element_to_mir(ast_id, element, ast, ast_node, hir_id, mir_id, state)?
         } else {
             lower_vue2_branch_block_to_mir(block, ast, hir_id, mir_id, state)?
@@ -3376,10 +3689,19 @@ fn lower_vue2_if_to_mir(
             condition: condition.exp,
             body: body_hir,
         });
+        mir_branches.push(Vue2IfMirBranch {
+            condition: condition.exp,
+            body: body_mir,
+        });
     }
     if let Some(node) = state.hir.node_mut(hir_id) {
         if let HirNodeKind::If(if_node) = &mut node.kind {
             if_node.branches = branches;
+        }
+    }
+    if let Some(node) = state.mir.node_mut(mir_id) {
+        if let Vue2MirKind::If(if_node) = &mut node.kind {
+            if_node.branches = mir_branches;
         }
     }
     Some((hir_id, mir_id))
@@ -3411,14 +3733,52 @@ fn lower_vue2_plain_element_to_mir(
     state: &mut Vue2LoweringState,
 ) -> Option<(NodeId, NodeId)> {
     let hir_kind = lower_vue2_element_to_hir_kind(element, ast_node, state);
-    let mir_kind = lower_vue2_element_to_mir_kind(element);
+    let render_static = if element.static_root || (element.once && !element.static_in_for) {
+        let index = state.static_render_index;
+        state.static_render_index += 1;
+        Some(Vue2RenderStatic {
+            index,
+            body: None,
+            in_for: element.static_in_for,
+        })
+    } else {
+        None
+    };
     let hir_id = state
         .hir
         .push_child(hir_parent, hir_kind, ast_node.span.clone());
+    state.map.record_ast_to_hir(ast_id, hir_id);
+
+    let wrapper_mir = if let Some(render_static) = render_static {
+        Some(state.mir.push_child(
+            mir_parent,
+            Vue2MirKind::RenderStatic(render_static),
+            ast_node.span.clone(),
+        ))
+    } else if element.once && element.static_in_for {
+        let once_id = state.once_id;
+        state.once_id += 1;
+        Some(state.mir.push_child(
+            mir_parent,
+            Vue2MirKind::Once(Vue2Once {
+                body: NodeId(0),
+                once_id,
+                key: element.key.map(MirExpr::JsExpr),
+            }),
+            ast_node.span.clone(),
+        ))
+    } else {
+        None
+    };
+    let content_parent = wrapper_mir.unwrap_or(mir_parent);
+    if let Some(wrapper) = wrapper_mir {
+        state.map.record_hir_to_mir(hir_id, wrapper);
+    }
+
+    let mir_kind = lower_vue2_element_to_mir_kind(element, ast_node, state);
     let mir_id = state
         .mir
-        .push_child(mir_parent, mir_kind, ast_node.span.clone());
-    state.map.record_ast_to_hir(ast_id, hir_id);
+        .push_child(content_parent, mir_kind, ast_node.span.clone());
     state.map.record_hir_to_mir(hir_id, mir_id);
 
     let branch_blocks = element
@@ -3427,14 +3787,37 @@ fn lower_vue2_plain_element_to_mir(
         .skip(1)
         .map(|condition| condition.block)
         .collect::<Vec<_>>();
-    let children = ast_node
-        .children
-        .iter()
-        .copied()
-        .filter(|child| !branch_blocks.contains(child))
-        .collect::<Vec<_>>();
+    let children = if element.inline_template {
+        Vec::new()
+    } else {
+        ast_node
+            .children
+            .iter()
+            .copied()
+            .filter(|child| {
+                !branch_blocks.contains(child)
+                    && !element.scoped_slots.values().any(|slot| slot == child)
+            })
+            .collect::<Vec<_>>()
+    };
     lower_vue2_child_sequence(&children, ast, hir_id, mir_id, state);
-    Some((hir_id, mir_id))
+    lower_vue2_inline_template_to_mir(element, ast, ast_node, hir_id, mir_id, state);
+    lower_vue2_scoped_slots_to_mir(element, ast, hir_id, mir_id, state);
+
+    if let Some(wrapper) = wrapper_mir {
+        if let Some(node) = state.mir.node_mut(wrapper) {
+            match &mut node.kind {
+                Vue2MirKind::RenderStatic(render_static) => {
+                    render_static.body = Some(mir_id);
+                }
+                Vue2MirKind::Once(once) => {
+                    once.body = mir_id;
+                }
+                _ => {}
+            }
+        }
+    }
+    Some((hir_id, wrapper_mir.unwrap_or(mir_id)))
 }
 
 fn lower_vue2_element_to_hir_kind(
@@ -3472,34 +3855,356 @@ fn lower_vue2_element_to_hir_kind(
     })
 }
 
-fn lower_vue2_element_to_mir_kind(element: &vuec_ast::Vue2Element) -> Vue2MirKind {
-    if element.static_root {
-        return Vue2MirKind::RenderStatic { index: 0 };
-    }
+fn lower_vue2_element_to_mir_kind(
+    element: &vuec_ast::Vue2Element,
+    ast_node: &vuec_ast::Node<Vue2NodeKind>,
+    state: &mut Vue2LoweringState,
+) -> Vue2MirKind {
     if element.tag == "slot" {
-        return Vue2MirKind::ScopedSlot {
+        return Vue2MirKind::SlotOutlet(Vue2SlotOutlet {
             name: element
                 .slot_name
-                .clone()
-                .unwrap_or_else(|| "default".into()),
-            params: element.slot_scope,
-        };
+                .as_ref()
+                .map(|name| {
+                    MirExpr::JsExpr(state.js.register_expr(
+                        name,
+                        ast_node_span(ast_node),
+                        SourceType::script(),
+                    ))
+                })
+                .unwrap_or_else(|| MirExpr::String("default".into())),
+        });
     }
-    for directive in &element.directives {
-        if !matches!(directive.name.as_str(), "bind" | "on") {
-            return Vue2MirKind::Directive {
-                name: directive.name.clone(),
-            };
-        }
-    }
+
+    let explicit_component = element.component.is_some();
+    let tag = element
+        .component
+        .as_ref()
+        .map(|component| {
+            MirExpr::JsExpr(state.js.register_expr(
+                component,
+                ast_node_span(ast_node),
+                SourceType::script(),
+            ))
+        })
+        .unwrap_or_else(|| MirExpr::String(element.tag.clone()));
+
     Vue2MirKind::CreateElement(Vue2CreateElement {
-        tag: element
-            .component
-            .as_ref()
-            .map(|component| MirExpr::String(component.clone()))
-            .unwrap_or_else(|| MirExpr::String(element.tag.clone())),
+        tag,
+        data: lower_vue2_data_object(element, ast_node, state),
+        is_component: explicit_component,
+        is_template: element.tag == "template" && element.slot_target.is_none(),
+        validation: (!element.validators.is_empty() || element.validate.is_some()).then(|| {
+            Vue2ValidationData {
+                validate: element.validate.clone(),
+                validators: element.validators.clone(),
+            }
+        }),
         normalization_type: Vue2NormalizationType::None,
     })
+}
+
+fn lower_vue2_data_object(
+    element: &vuec_ast::Vue2Element,
+    ast_node: &vuec_ast::Node<Vue2NodeKind>,
+    state: &mut Vue2LoweringState,
+) -> Option<Vue2DataObject> {
+    let mut data = Vue2DataObject::default();
+    data.directives = element
+        .directives
+        .iter()
+        .map(|directive| Vue2DirectiveRuntime {
+            name: directive.name.clone(),
+            raw_name: directive.raw_name.clone(),
+            value: directive.value.map(MirExpr::JsExpr),
+            arg: directive.arg.as_ref().map(|arg| {
+                if directive.is_dynamic_arg {
+                    MirExpr::JsExpr(state.js.register_expr(
+                        arg,
+                        ast_node_span(ast_node),
+                        SourceType::script(),
+                    ))
+                } else {
+                    MirExpr::String(arg.clone())
+                }
+            }),
+            is_dynamic_arg: directive.is_dynamic_arg,
+            modifiers: directive.modifiers.clone(),
+        })
+        .collect();
+    data.key = element.key.map(MirExpr::JsExpr);
+    data.ref_name = element.ref_name.as_ref().map(|name| {
+        MirExpr::JsExpr(
+            state
+                .js
+                .register_expr(name, ast_node_span(ast_node), SourceType::script()),
+        )
+    });
+    data.ref_in_for = element.ref_in_for;
+    data.pre = element.pre;
+    data.tag = element.component.as_ref().map(|_| element.tag.clone());
+    data.static_class = element.static_class.as_ref().map(|value| {
+        MirExpr::JsExpr(state.js.register_expr(
+            value,
+            ast_node_span(ast_node),
+            SourceType::script(),
+        ))
+    });
+    data.class_binding = element.class_binding.map(MirExpr::JsExpr);
+    data.static_style = element.static_style.as_ref().map(|value| {
+        MirExpr::JsExpr(state.js.register_expr(
+            value,
+            ast_node_span(ast_node),
+            SourceType::script(),
+        ))
+    });
+    data.style_binding = element.style_binding.map(MirExpr::JsExpr);
+    data.attrs = lower_vue2_data_props(&element.attrs, ast_node, state);
+    data.dom_props = lower_vue2_data_props(&element.props, ast_node, state);
+    data.dynamic_attrs = lower_vue2_data_props(&element.dynamic_attrs, ast_node, state);
+    data.events = element.events.clone();
+    data.native_events = element.native_events.clone();
+    if element.slot_scope.is_none() {
+        data.slot = element.slot_target.as_ref().map(|slot| {
+            MirExpr::JsExpr(state.js.register_expr(
+                slot,
+                ast_node_span(ast_node),
+                SourceType::script(),
+            ))
+        });
+    }
+    data.model = element.model.as_ref().map(|model| Vue2ComponentModelMir {
+        value: MirExpr::JsExpr(model.value),
+        callback: model.callback,
+        expression: model.expression.clone(),
+    });
+    data.validate = element.validate.clone();
+    data.validators = element.validators.clone();
+    data.wrap_data = element.wrap_data.as_ref().map(|wrap| match wrap {
+        vuec_ast::Vue2DataWrap::Bind { value, prop, sync } => Vue2BindWrap {
+            value: MirExpr::JsExpr(*value),
+            prop: *prop,
+            sync: *sync,
+        },
+    });
+    data.wrap_listeners = element.wrap_listeners.as_ref().map(|listeners| {
+        MirExpr::JsExpr(state.js.register_expr(
+            listeners,
+            ast_node_span(ast_node),
+            SourceType::script(),
+        ))
+    });
+
+    (!data.directives.is_empty()
+        || data.key.is_some()
+        || data.ref_name.is_some()
+        || data.ref_in_for
+        || data.pre
+        || data.tag.is_some()
+        || data.static_class.is_some()
+        || data.class_binding.is_some()
+        || data.static_style.is_some()
+        || data.style_binding.is_some()
+        || !data.attrs.is_empty()
+        || !data.dom_props.is_empty()
+        || !data.dynamic_attrs.is_empty()
+        || !data.events.is_empty()
+        || !data.native_events.is_empty()
+        || data.slot.is_some()
+        || !data.scoped_slots.is_empty()
+        || data.model.is_some()
+        || data.inline_template.is_some()
+        || data.validate.is_some()
+        || !data.validators.is_empty()
+        || data.wrap_data.is_some()
+        || data.wrap_listeners.is_some()
+        || element.slot_scope.is_some()
+        || element.inline_template)
+        .then_some(data)
+}
+
+fn lower_vue2_data_props(
+    attrs: &[vuec_ast::Vue2Attribute],
+    ast_node: &vuec_ast::Node<Vue2NodeKind>,
+    state: &mut Vue2LoweringState,
+) -> Vec<Vue2DataProp> {
+    attrs
+        .iter()
+        .map(|attr| Vue2DataProp {
+            name: attr.name.clone(),
+            value: MirExpr::JsExpr(state.js.register_expr(
+                attr.value.clone(),
+                attr.span.unwrap_or_else(|| ast_node_span(ast_node)),
+                SourceType::script(),
+            )),
+            dynamic: attr.dynamic,
+            static_attribute: !attr.dynamic && attr.value.trim_start().starts_with('"'),
+        })
+        .collect()
+}
+
+fn lower_vue2_inline_template_to_mir(
+    element: &vuec_ast::Vue2Element,
+    ast: &Vue2Ast,
+    ast_node: &vuec_ast::Node<Vue2NodeKind>,
+    hir_parent: NodeId,
+    mir_id: NodeId,
+    state: &mut Vue2LoweringState,
+) {
+    if !element.inline_template {
+        return;
+    }
+    let body = ast_node.children.iter().copied().find(|child| {
+        ast.node(*child)
+            .is_some_and(|node| matches!(node.kind, Vue2AstKind::Element(_)))
+    });
+    let lowered_body = body.and_then(|body| {
+        lower_vue2_ast_node_to_mir_inner(body, ast, hir_parent, mir_id, state, true)
+            .map(|(_, mir)| mir)
+    });
+    if let Some(Vue2MirKind::CreateElement(create)) =
+        state.mir.node_mut(mir_id).map(|node| &mut node.kind)
+    {
+        let data = create.data.get_or_insert_with(Vue2DataObject::default);
+        data.inline_template = Some(Vue2InlineTemplate { body: lowered_body });
+    }
+}
+
+fn lower_vue2_scoped_slots_to_mir(
+    element: &vuec_ast::Vue2Element,
+    ast: &Vue2Ast,
+    hir_parent: NodeId,
+    mir_id: NodeId,
+    state: &mut Vue2LoweringState,
+) {
+    if element.scoped_slots.is_empty() {
+        return;
+    }
+
+    let mut slots = Vec::new();
+    for (key, slot_id) in &element.scoped_slots {
+        let Some(slot_node) = ast.node(*slot_id) else {
+            continue;
+        };
+        let Vue2AstKind::Element(slot) = &slot_node.kind else {
+            continue;
+        };
+        let slot_mir_id = state.mir.push_child(
+            mir_id,
+            Vue2MirKind::ScopedSlot(Vue2ScopedSlot {
+                name: slot
+                    .slot_target
+                    .as_ref()
+                    .map(|target| {
+                        MirExpr::JsExpr(state.js.register_expr(
+                            target,
+                            ast_node_span(slot_node),
+                            SourceType::script(),
+                        ))
+                    })
+                    .unwrap_or_else(|| {
+                        MirExpr::JsExpr(state.js.register_expr(
+                            key,
+                            ast_node_span(slot_node),
+                            SourceType::script(),
+                        ))
+                    }),
+                params: slot.slot_scope,
+                body: Vec::new(),
+                proxy: slot
+                    .slot_scope
+                    .and_then(|scope| state.js.pattern_entry(scope))
+                    .is_none_or(|entry| entry.source.as_str() == "_empty_"),
+                new_syntax: slot.slot_new_syntax,
+                body_is_fragment: slot.tag == "template",
+                condition: slot.if_exp.filter(|_| slot.slot_new_syntax),
+                legacy_condition: slot
+                    .if_exp
+                    .filter(|_| !slot.slot_new_syntax && slot.tag == "template"),
+                for_source: slot.for_exp,
+                for_alias: slot.alias,
+                for_iterator1: slot.iterator1,
+                for_iterator2: slot.iterator2,
+                force_update: false,
+            }),
+            slot_node.span.clone(),
+        );
+
+        let body =
+            lower_vue2_scoped_slot_body_to_mir(*slot_id, slot, ast, hir_parent, slot_mir_id, state);
+        if let Some(node) = state.mir.node_mut(slot_mir_id) {
+            if let Vue2MirKind::ScopedSlot(slot_payload) = &mut node.kind {
+                slot_payload.body = body;
+                slot_payload.force_update = element.for_exp.is_some()
+                    || slot.slot_target_dynamic
+                    || slot.if_exp.is_some()
+                    || slot.for_exp.is_some()
+                    || vue2_ast_contains_slot_child(*slot_id, ast);
+                slots.push(slot_payload.clone());
+            }
+        }
+    }
+
+    let force_update = slots.iter().any(|slot| slot.force_update);
+    for slot in &mut slots {
+        slot.force_update = force_update;
+    }
+    if let Some(Vue2MirKind::CreateElement(create)) =
+        state.mir.node_mut(mir_id).map(|node| &mut node.kind)
+    {
+        let data = create.data.get_or_insert_with(Vue2DataObject::default);
+        data.scoped_slots = slots;
+    }
+}
+
+fn lower_vue2_scoped_slot_body_to_mir(
+    slot_id: NodeId,
+    slot: &vuec_ast::Vue2Element,
+    ast: &Vue2Ast,
+    hir_parent: NodeId,
+    mir_parent: NodeId,
+    state: &mut Vue2LoweringState,
+) -> Vec<NodeId> {
+    if slot.tag == "template" {
+        let branch_blocks = slot
+            .if_conditions
+            .iter()
+            .skip(1)
+            .map(|condition| condition.block)
+            .collect::<Vec<_>>();
+        let children = ast
+            .node(slot_id)
+            .map(|node| {
+                node.children
+                    .iter()
+                    .copied()
+                    .filter(|child| !branch_blocks.contains(child))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        return lower_vue2_child_sequence(&children, ast, hir_parent, mir_parent, state)
+            .into_iter()
+            .map(|(_, _, mir)| mir)
+            .collect();
+    }
+
+    lower_vue2_ast_node_to_mir_inner(slot_id, ast, hir_parent, mir_parent, state, false)
+        .map(|(_, mir)| vec![mir])
+        .unwrap_or_default()
+}
+
+fn vue2_ast_contains_slot_child(ast_id: NodeId, ast: &Vue2Ast) -> bool {
+    let Some(node) = ast.node(ast_id) else {
+        return false;
+    };
+    match &node.kind {
+        Vue2AstKind::Element(element) if element.tag == "slot" => true,
+        Vue2AstKind::Element(_) | Vue2AstKind::Root(_) => node
+            .children
+            .iter()
+            .any(|child| vue2_ast_contains_slot_child(*child, ast)),
+        Vue2AstKind::Text(_) | Vue2AstKind::ExpressionText(_) | Vue2AstKind::Comment(_) => false,
+    }
 }
 
 fn lower_vue2_props_to_hir(
@@ -4252,17 +4957,6 @@ fn is_component(element: &Vue2Element, options: &Vue2CompileOptions) -> bool {
     element.component.is_some() || !is_reserved_tag_with_options(&element.tag, options)
 }
 
-fn binding_component_tag(
-    element: &Vue2Element,
-    options: &Vue2CompileOptions,
-    maybe_component: bool,
-) -> Option<String> {
-    if !maybe_component || !options.bindings_is_script_setup || options.bindings.is_empty() {
-        return None;
-    }
-    check_binding_type(&options.bindings, &element.tag)
-}
-
 fn check_binding_type(bindings: &BTreeMap<String, String>, key: &str) -> Option<String> {
     let camel_name = camelize(key);
     let pascal_name = capitalize(&camel_name);
@@ -4289,22 +4983,6 @@ fn check_binding_type_candidates(
         (bindings.get(*candidate).map(String::as_str) == Some(binding_type))
             .then(|| (*candidate).to_string())
     })
-}
-
-fn get_normalization_type(children: &[Vue2Node], options: &Vue2CompileOptions) -> u8 {
-    let mut result = 0;
-    for child in children {
-        let Vue2Node::Element(child) = child else {
-            continue;
-        };
-        if child.for_exp.is_some() || child.tag == "template" || child.tag == "slot" {
-            return 2;
-        }
-        if is_component(child, options) {
-            result = 1;
-        }
-    }
-    result
 }
 
 fn is_simple_path(value: &str) -> bool {
@@ -4488,7 +5166,7 @@ fn json_string_array(values: &[String]) -> String {
     )
 }
 
-fn validators_json(validators: &[Vue2Validator]) -> String {
+fn ast_validators_json(validators: &[vuec_ast::Vue2Validator]) -> String {
     format!(
         "[{}]",
         validators
@@ -4505,7 +5183,7 @@ fn validators_json(validators: &[Vue2Validator]) -> String {
     )
 }
 
-fn validation_result_json(validators: &[Vue2Validator]) -> String {
+fn ast_validation_result_json(validators: &[vuec_ast::Vue2Validator]) -> String {
     let mut fields = vec!["\"dirty\":false".to_string()];
     fields.extend(
         validators
@@ -4745,6 +5423,67 @@ mod tests {
                 HirNodeKind::Fragment(_) if matches!(lowered.mir.node(node.id), Some(_))
             )
         }));
+    }
+
+    #[test]
+    fn lowers_vue2_codegen_payloads_into_mir() {
+        let compiled = compile(
+            r#"<section><button @click.stop="save" :id="foo">go</button><foo><template #default="slotProps">{{ slotProps.msg }}</template></foo></section>"#,
+            options(),
+        );
+        let projected = project_vue2_public_ast("<section/>", compiled.element_ast.as_ref());
+        let lowered = lower_vue2_ast_to_mir(&projected.ast, projected.js);
+
+        let button_data = lowered.mir.nodes.iter().find_map(|node| match &node.kind {
+            Vue2MirKind::CreateElement(Vue2CreateElement {
+                tag: MirExpr::String(tag),
+                data: Some(data),
+                ..
+            }) if tag == "button" => Some(data),
+            _ => None,
+        });
+        let button_data = button_data.expect("button MIR data");
+        assert!(button_data.attrs.iter().any(|attr| attr.name == "id"));
+        assert!(button_data
+            .events
+            .get("click")
+            .and_then(|handlers| handlers.first())
+            .is_some_and(|handler| handler.modifiers.contains_key("stop")));
+
+        let scoped = lowered.mir.nodes.iter().find_map(|node| match &node.kind {
+            Vue2MirKind::CreateElement(Vue2CreateElement {
+                tag: MirExpr::String(tag),
+                data: Some(data),
+                ..
+            }) if tag == "foo" => data.scoped_slots.first(),
+            _ => None,
+        });
+        let scoped = scoped.expect("scoped slot payload");
+        assert!(scoped.new_syntax);
+        assert!(scoped.body_is_fragment);
+        assert!(!scoped.body.is_empty());
+
+        let static_compiled = compile(r#"<div v-pre><p>{{ msg }}</p></div>"#, options());
+        let static_projected =
+            project_vue2_public_ast("<div/>", static_compiled.element_ast.as_ref());
+        let static_lowered = lower_vue2_ast_to_mir(&static_projected.ast, static_projected.js);
+        assert!(static_lowered.mir.nodes.iter().any(|node| matches!(
+            node.kind,
+            Vue2MirKind::RenderStatic(Vue2RenderStatic { body: Some(_), .. })
+        )));
+    }
+
+    #[test]
+    fn normalizes_if_template_with_nested_for_children() {
+        let result = compile(
+            r#"<div><template v-if="ok"><foo v-for="i in 1" :key="i"></foo></template></div>"#,
+            options(),
+        );
+
+        assert_eq!(
+            result.render,
+            "with(this){return _c('div',[(ok)?_l((1),function(i){return _c('foo',{key:i})}):_e()],2)}"
+        );
     }
 
     #[test]
