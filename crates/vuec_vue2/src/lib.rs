@@ -7,12 +7,20 @@
 #![deny(missing_docs)]
 #![forbid(unsafe_code)]
 
+use oxc_span::SourceType;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use vuec_ast::{Vue2Ast, Vue2NodeKind};
+use vuec_ast::{
+    GeneratedReason, Hir, HirBinding, HirConstness, HirDirectiveUse, HirElement, HirEvent, HirExpr,
+    HirFor, HirFragment, HirIf, HirIfBranch, HirInterpolation, HirNodeKind, HirObjectBinding,
+    HirObjectListeners, HirPropSegment, HirProps, HirRef, HirSlotOutlet, HirStaticAttr, HirTag,
+    HtmlNamespace, JsExprId, JsPatternId, JsStmtId, LoweringMap, MirExpr, MissingSpanReason,
+    NodeId, NodeSpan, Vue2Ast, Vue2AstKind, Vue2CreateElement, Vue2Mir, Vue2MirKind, Vue2NodeKind,
+    Vue2NormalizationType, Vue2TextCall,
+};
 use vuec_diagnostics::{Diagnostic, DiagnosticSink, Severity};
 use vuec_html::{HtmlAttribute, HtmlTokenKind, HtmlTokenizer};
-use vuec_js::{rewrite_vue2_filter_expression, JsAstStore};
+use vuec_js::{parse_vue2_filter_expression, rewrite_vue2_filter_expression, JsAstStore};
 use vuec_source::{FileId, Span};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -192,6 +200,29 @@ pub struct Vue2CodegenResult {
     pub render: String,
     /// Generated static render function bodies.
     pub static_render_fns: Vec<String>,
+}
+
+/// Result of projecting the Vue 2 compatibility parser tree into canonical AST.
+pub struct Vue2AstProjectionResult {
+    /// Canonical arena-backed Vue 2 AST.
+    pub ast: Vue2Ast,
+    /// JavaScript side store referenced by AST expression, statement, and pattern ids.
+    pub js: JsAstStore,
+}
+
+/// Result of the structural Vue 2 lowering contract.
+///
+/// This is separate from the current exact render emitter so the AST -> HIR ->
+/// Vue2Mir boundary can be verified without changing public codegen parity.
+pub struct Vue2LoweringResult {
+    /// Lowered shared HIR document.
+    pub hir: Hir,
+    /// Lowered Vue 2 target MIR document.
+    pub mir: Vue2Mir,
+    /// AST-to-HIR and HIR-to-MIR edge map.
+    pub map: LoweringMap,
+    /// JavaScript side store used by AST/HIR/MIR ids.
+    pub js: JsAstStore,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -478,7 +509,7 @@ impl Vue2Compiler {
         let mut static_render_fns = Vec::new();
         let render = generate_render(element_ast.as_ref(), &options, &mut static_render_fns);
         validate_expressions(element_ast.as_ref(), &mut diagnostics);
-        let ast = project_public_ast(template, element_ast.as_ref());
+        let ast = project_public_ast(template, element_ast.as_ref()).ast;
         let diagnostics_messages = diagnostics
             .as_slice()
             .iter()
@@ -530,6 +561,20 @@ impl Vue2Compiler {
         generate(element, options)
     }
 
+    /// Projects the compatibility element tree into canonical Vue 2 AST.
+    pub fn project_ast(
+        &self,
+        template: &str,
+        element: Option<&Vue2Element>,
+    ) -> Vue2AstProjectionResult {
+        project_vue2_public_ast(template, element)
+    }
+
+    /// Lowers canonical Vue 2 AST to shared HIR and Vue 2 target MIR.
+    pub fn lower_to_mir(ast: &Vue2Ast, js: JsAstStore) -> Vue2LoweringResult {
+        lower_vue2_ast_to_mir(ast, js)
+    }
+
     /// Returns the JavaScript side store used by this compiler.
     pub fn js(&self) -> &JsAstStore {
         &self.js
@@ -564,6 +609,47 @@ pub fn generate(element: Option<&Vue2Element>, options: &Vue2CompileOptions) -> 
     Vue2CodegenResult {
         render,
         static_render_fns,
+    }
+}
+
+/// Projects a Vue 2 compatibility parser tree into the canonical arena AST.
+pub fn project_vue2_public_ast(
+    template: &str,
+    element_ast: Option<&Vue2Element>,
+) -> Vue2AstProjectionResult {
+    project_public_ast(template, element_ast)
+}
+
+/// Lowers canonical Vue 2 AST to shared HIR and Vue 2 target MIR.
+pub fn lower_vue2_ast_to_mir(ast: &Vue2Ast, js: JsAstStore) -> Vue2LoweringResult {
+    let root_span = ast
+        .root_node()
+        .map(|node| node.span.clone())
+        .unwrap_or_else(|| NodeSpan::missing(MissingSpanReason::LoweringGap));
+    let mut state = Vue2LoweringState {
+        hir: Hir::new(HirNodeKind::Root(vuec_ast::HirRoot), root_span.clone()),
+        mir: Vue2Mir::new(Vue2MirKind::Root, root_span),
+        map: LoweringMap::default(),
+        js,
+    };
+    state.map.record_ast_to_hir(ast.root, state.hir.root);
+    state.map.record_hir_to_mir(state.hir.root, state.mir.root);
+
+    if let Some(root) = ast.root_node() {
+        lower_vue2_child_sequence(
+            &root.children,
+            ast,
+            state.hir.root,
+            state.mir.root,
+            &mut state,
+        );
+    }
+
+    Vue2LoweringResult {
+        hir: state.hir,
+        mir: state.mir,
+        map: state.map,
+        js: state.js,
     }
 }
 
@@ -2744,39 +2830,874 @@ fn parse_filters(exp: &str) -> String {
     rewrite_vue2_filter_expression(exp)
 }
 
-fn project_public_ast(template: &str, element_ast: Option<&Vue2Element>) -> Vue2Ast {
-    let mut ast = Vue2Ast::with_capacity(
-        Vue2NodeKind::root(),
-        Some(Span::new(FileId(0), 0, template.len())),
-        vuec_ast::template_node_capacity_hint(template),
-    );
-    let root = ast.root;
+fn project_public_ast(
+    template: &str,
+    element_ast: Option<&Vue2Element>,
+) -> Vue2AstProjectionResult {
+    let mut projection = Vue2AstProjection {
+        ast: Vue2Ast::with_capacity(
+            Vue2NodeKind::root(),
+            Some(Span::new(FileId(0), 0, template.len())),
+            vuec_ast::template_node_capacity_hint(template),
+        ),
+        js: JsAstStore::new(),
+        source_type: SourceType::script(),
+    };
+    let root = projection.ast.root;
     if let Some(element) = element_ast {
-        project_element(&mut ast, root, element);
+        projection.project_element(root, element);
     }
-    ast
+    Vue2AstProjectionResult {
+        ast: projection.ast,
+        js: projection.js,
+    }
 }
 
-fn project_element(ast: &mut Vue2Ast, parent: vuec_ast::NodeId, element: &Vue2Element) {
-    let id = ast.push(Vue2NodeKind::element(element.tag.clone()), element.span);
-    ast.attach_child(parent, id);
-    for child in &element.children {
-        match child {
-            Vue2Node::Element(element) => project_element(ast, id, element),
-            Vue2Node::Text(text) if text.is_comment => {
-                let child_id = ast.push(Vue2NodeKind::comment(text.text.clone()), text.span);
-                ast.attach_child(id, child_id);
-            }
-            Vue2Node::Text(text) => {
-                let kind = text.expression.as_ref().map_or_else(
-                    || Vue2NodeKind::text(text.text.clone()),
-                    |expression| Vue2NodeKind::expression_text(expression.clone()),
-                );
-                let child_id = ast.push(kind, text.span);
-                ast.attach_child(id, child_id);
+struct Vue2AstProjection {
+    ast: Vue2Ast,
+    js: JsAstStore,
+    source_type: SourceType,
+}
+
+impl Vue2AstProjection {
+    fn project_element(&mut self, parent: NodeId, element: &Vue2Element) -> NodeId {
+        let payload = self.project_element_payload(element);
+        let id = self.ast.push(Vue2AstKind::Element(payload), element.span);
+        self.ast.attach_child(parent, id);
+
+        for child in &element.children {
+            match child {
+                Vue2Node::Element(element) => {
+                    self.project_element(id, element);
+                }
+                Vue2Node::Text(text) => {
+                    self.project_text(id, text);
+                }
             }
         }
+
+        let if_conditions = self.project_if_conditions(id, element);
+        if let Some(node) = self.ast.node_mut(id) {
+            if let Vue2AstKind::Element(projected) = &mut node.kind {
+                projected.if_conditions = if_conditions;
+            }
+        }
+        id
     }
+
+    fn project_text(&mut self, parent: NodeId, text: &Vue2Text) -> NodeId {
+        let kind = if text.is_comment {
+            Vue2AstKind::Comment(vuec_ast::Vue2Comment {
+                value: text.text.clone(),
+            })
+        } else if let Some(expression) = text.expression.as_ref() {
+            Vue2AstKind::ExpressionText(vuec_ast::Vue2ExpressionText {
+                raw: text.text.clone(),
+                expr: Some(self.register_expr(expression, text.span)),
+                filter_expr: self.project_filter_expression(&text.text, text.span),
+            })
+        } else {
+            Vue2AstKind::Text(vuec_ast::Vue2Text {
+                value: text.text.clone(),
+                static_node: text.static_node,
+            })
+        };
+        self.ast.push_child(parent, kind, text.span)
+    }
+
+    fn project_if_conditions(
+        &mut self,
+        primary_id: NodeId,
+        element: &Vue2Element,
+    ) -> Vec<vuec_ast::Vue2IfCondition> {
+        if element.if_conditions.is_empty() {
+            return element
+                .if_exp
+                .as_ref()
+                .map(|condition| {
+                    vec![vuec_ast::Vue2IfCondition {
+                        exp: Some(self.register_expr(condition, element.if_span.or(element.span))),
+                        block: primary_id,
+                        span: element.if_span,
+                    }]
+                })
+                .unwrap_or_default();
+        }
+
+        element
+            .if_conditions
+            .iter()
+            .enumerate()
+            .map(|(index, condition)| {
+                let block = if index == 0 {
+                    primary_id
+                } else {
+                    self.project_element(primary_id, &condition.block)
+                };
+                vuec_ast::Vue2IfCondition {
+                    exp: condition.exp.as_ref().map(|exp| {
+                        self.register_expr(
+                            exp,
+                            condition
+                                .block
+                                .if_span
+                                .or(condition.block.elseif_span)
+                                .or(element.span),
+                        )
+                    }),
+                    block,
+                    span: condition
+                        .block
+                        .if_span
+                        .or(condition.block.elseif_span)
+                        .or(condition.block.else_span),
+                }
+            })
+            .collect()
+    }
+
+    fn project_element_payload(&mut self, element: &Vue2Element) -> vuec_ast::Vue2Element {
+        let mut payload = vuec_ast::Vue2Element::new(element.tag.clone());
+        payload.attrs_list = element.attrs_list.iter().map(project_attribute).collect();
+        payload.attrs_map = element.attrs_map.clone();
+        payload.raw_attrs_map = element
+            .raw_attrs_map
+            .iter()
+            .map(|(name, attr)| (name.clone(), project_attribute(attr)))
+            .collect();
+        payload.attrs = element.attrs.iter().map(project_attribute).collect();
+        payload.props = element.props.iter().map(project_attribute).collect();
+        payload.dynamic_attrs = element
+            .dynamic_attrs
+            .iter()
+            .map(project_attribute)
+            .collect();
+        payload.directives = element
+            .directives
+            .iter()
+            .map(|directive| self.project_directive(directive))
+            .collect();
+        payload.events = self.project_events(&element.events);
+        payload.native_events = self.project_events(&element.native_events);
+        payload.ns = element.ns.clone();
+        payload.plain = element.plain;
+        payload.forbidden = element.forbidden;
+        payload.pre = element.pre;
+        payload.once = element.once;
+        payload.has_bindings = element.has_bindings;
+        payload.if_exp = element
+            .if_exp
+            .as_ref()
+            .map(|exp| self.register_expr(exp, element.if_span.or(element.span)));
+        payload.if_span = element.if_span;
+        payload.elseif = element
+            .elseif
+            .as_ref()
+            .map(|exp| self.register_expr(exp, element.elseif_span.or(element.span)));
+        payload.elseif_span = element.elseif_span;
+        payload.else_branch = element.else_branch;
+        payload.else_span = element.else_span;
+        payload.for_exp = element
+            .for_exp
+            .as_ref()
+            .map(|exp| self.register_expr(exp, element.for_span.or(element.span)));
+        payload.for_span = element.for_span;
+        payload.alias = element
+            .alias
+            .as_ref()
+            .map(|alias| self.register_pattern(alias, element.for_span.or(element.span)));
+        payload.iterator1 = element
+            .iterator1
+            .as_ref()
+            .map(|alias| self.register_pattern(alias, element.for_span.or(element.span)));
+        payload.iterator2 = element
+            .iterator2
+            .as_ref()
+            .map(|alias| self.register_pattern(alias, element.for_span.or(element.span)));
+        payload.key = element
+            .key
+            .as_ref()
+            .map(|key| self.register_expr(key, element.key_span.or(element.span)));
+        payload.key_span = element.key_span;
+        payload.ref_name = element.ref_name.clone();
+        payload.ref_in_for = element.ref_in_for;
+        payload.slot_name = element.slot_name.clone();
+        payload.slot_target = element.slot_target.clone();
+        payload.slot_target_dynamic = element.slot_target_dynamic;
+        payload.slot_scope = element
+            .slot_scope
+            .as_ref()
+            .map(|scope| self.register_pattern(scope, element.span));
+        payload.component = element.component.clone();
+        payload.inline_template = element.inline_template;
+        payload.static_class = element.static_class.clone();
+        payload.class_binding = element
+            .class_binding
+            .as_ref()
+            .map(|binding| self.register_expr(binding, element.span));
+        payload.static_style = element.static_style.clone();
+        payload.style_binding = element
+            .style_binding
+            .as_ref()
+            .map(|binding| self.register_expr(binding, element.span));
+        payload.model = element
+            .model
+            .as_ref()
+            .map(|model| vuec_ast::Vue2ComponentModel {
+                value: self.register_expr(&model.value, element.span),
+                callback: self.register_stmt(&model.callback, element.span),
+                expression: model.expression.clone(),
+            });
+        payload.wrap_data = element.wrap_data.as_ref().map(|wrap| match wrap {
+            Vue2DataWrap::Bind { value, prop, sync } => vuec_ast::Vue2DataWrap::Bind {
+                value: self.register_expr(value, element.span),
+                prop: *prop,
+                sync: *sync,
+            },
+        });
+        payload.wrap_listeners = element.wrap_listeners.clone();
+        payload.static_node = element.static_node;
+        payload.static_root = element.static_root;
+        payload.static_in_for = element.static_in_for;
+        payload
+    }
+
+    fn project_directive(&mut self, directive: &Vue2Directive) -> vuec_ast::Vue2Directive {
+        vuec_ast::Vue2Directive {
+            name: directive.name.clone(),
+            raw_name: directive.raw_name.clone(),
+            value: directive
+                .value
+                .as_ref()
+                .map(|value| self.register_expr(value, directive.span)),
+            arg: directive.arg.clone(),
+            is_dynamic_arg: directive.is_dynamic_arg,
+            modifiers: directive.modifiers.clone(),
+        }
+    }
+
+    fn project_events(
+        &mut self,
+        events: &BTreeMap<String, Vec<Vue2EventHandler>>,
+    ) -> BTreeMap<String, Vec<vuec_ast::Vue2EventHandler>> {
+        events
+            .iter()
+            .map(|(name, handlers)| {
+                (
+                    name.clone(),
+                    handlers
+                        .iter()
+                        .map(|handler| vuec_ast::Vue2EventHandler {
+                            value: self.register_stmt(&handler.value, handler.span),
+                            modifiers: handler.modifiers.clone(),
+                            dynamic: handler.dynamic,
+                            span: handler.span,
+                        })
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+
+    fn project_filter_expression(
+        &mut self,
+        raw_text: &str,
+        span: Option<Span>,
+    ) -> Option<vuec_ast::Vue2FilterExpr> {
+        let source = single_default_interpolation(raw_text)?;
+        let parsed = parse_vue2_filter_expression(source);
+        if parsed.filters.is_empty() {
+            return None;
+        }
+        Some(vuec_ast::Vue2FilterExpr {
+            raw: source.to_string(),
+            base: self.register_expr(parsed.base, span),
+            filters: parsed
+                .filters
+                .into_iter()
+                .map(|filter| vuec_ast::Vue2FilterCall {
+                    name: filter.name.to_string(),
+                    args: filter
+                        .args
+                        .into_iter()
+                        .map(|arg| self.register_expr(arg, span))
+                        .collect(),
+                })
+                .collect(),
+        })
+    }
+
+    fn register_expr(&mut self, source: &str, span: Option<Span>) -> JsExprId {
+        self.js
+            .register_expr(source, js_span(span), self.source_type)
+    }
+
+    fn register_stmt(&mut self, source: &str, span: Option<Span>) -> JsStmtId {
+        self.js
+            .register_stmt(source, js_span(span), self.source_type)
+    }
+
+    fn register_pattern(&mut self, source: &str, span: Option<Span>) -> JsPatternId {
+        self.js
+            .register_pattern(source, js_span(span), self.source_type)
+    }
+}
+
+fn project_attribute(attr: &Vue2Attribute) -> vuec_ast::Vue2Attribute {
+    vuec_ast::Vue2Attribute {
+        name: attr.name.clone(),
+        value: attr.value.clone(),
+        span: attr.span,
+        dynamic: attr.dynamic,
+    }
+}
+
+struct Vue2LoweringState {
+    hir: Hir,
+    mir: Vue2Mir,
+    map: LoweringMap,
+    js: JsAstStore,
+}
+
+fn lower_vue2_child_sequence(
+    children: &[NodeId],
+    ast: &Vue2Ast,
+    hir_parent: NodeId,
+    mir_parent: NodeId,
+    state: &mut Vue2LoweringState,
+) {
+    for child in children {
+        lower_vue2_ast_node_to_mir(*child, ast, hir_parent, mir_parent, state);
+    }
+}
+
+fn lower_vue2_ast_node_to_mir(
+    ast_id: NodeId,
+    ast: &Vue2Ast,
+    hir_parent: NodeId,
+    mir_parent: NodeId,
+    state: &mut Vue2LoweringState,
+) -> Option<(NodeId, NodeId)> {
+    lower_vue2_ast_node_to_mir_inner(ast_id, ast, hir_parent, mir_parent, state, true)
+}
+
+fn lower_vue2_ast_node_to_mir_inner(
+    ast_id: NodeId,
+    ast: &Vue2Ast,
+    hir_parent: NodeId,
+    mir_parent: NodeId,
+    state: &mut Vue2LoweringState,
+    allow_for: bool,
+) -> Option<(NodeId, NodeId)> {
+    let ast_node = ast.node(ast_id)?;
+    match &ast_node.kind {
+        Vue2AstKind::Root(_) => None,
+        Vue2AstKind::Element(element) => {
+            if allow_for && element.for_exp.is_some() {
+                return lower_vue2_for_to_mir(
+                    ast_id, element, ast, ast_node, hir_parent, mir_parent, state,
+                );
+            }
+            if element.if_exp.is_some() && !element.if_conditions.is_empty() {
+                return lower_vue2_if_to_mir(
+                    ast_id, element, ast, ast_node, hir_parent, mir_parent, state,
+                );
+            }
+            if element.elseif.is_some() || element.else_branch {
+                return None;
+            }
+            lower_vue2_plain_element_to_mir(
+                ast_id, element, ast, ast_node, hir_parent, mir_parent, state,
+            )
+        }
+        Vue2AstKind::Text(text) => {
+            let hir_id = state.hir.push_child(
+                hir_parent,
+                HirNodeKind::Text(vuec_ast::HirText {
+                    value: text.value.clone(),
+                }),
+                ast_node.span.clone(),
+            );
+            let mir_id = state.mir.push_child(
+                mir_parent,
+                Vue2MirKind::Text(Vue2TextCall {
+                    value: MirExpr::String(text.value.clone()),
+                }),
+                ast_node.span.clone(),
+            );
+            state.map.record_ast_to_hir(ast_id, hir_id);
+            state.map.record_hir_to_mir(hir_id, mir_id);
+            Some((hir_id, mir_id))
+        }
+        Vue2AstKind::ExpressionText(text) => {
+            let expression = text
+                .filter_expr
+                .as_ref()
+                .map(|filter| HirExpr::Vue2Filter(filter.clone()))
+                .or_else(|| text.expr.map(HirExpr::Js));
+            let hir_id = state.hir.push_child(
+                hir_parent,
+                HirNodeKind::Interpolation(HirInterpolation {
+                    expression: expression.unwrap_or(HirExpr::Js(JsExprId(0))),
+                }),
+                ast_node.span.clone(),
+            );
+            let mir_id = state.mir.push_child(
+                mir_parent,
+                Vue2MirKind::Text(Vue2TextCall {
+                    value: text
+                        .filter_expr
+                        .as_ref()
+                        .map(|filter| MirExpr::JsExpr(filter.base))
+                        .or_else(|| text.expr.map(MirExpr::JsExpr))
+                        .unwrap_or_else(|| MirExpr::String(text.raw.clone())),
+                }),
+                ast_node.span.clone(),
+            );
+            state.map.record_ast_to_hir(ast_id, hir_id);
+            state.map.record_hir_to_mir(hir_id, mir_id);
+            if let Some(filter) = &text.filter_expr {
+                for call in &filter.filters {
+                    let filter_id = state.mir.push_child(
+                        mir_id,
+                        Vue2MirKind::FilterCall {
+                            name: call.name.clone(),
+                        },
+                        NodeSpan::generated(ast_node.span.source(), GeneratedReason::Lowering),
+                    );
+                    state.map.record_hir_to_mir(hir_id, filter_id);
+                }
+            }
+            Some((hir_id, mir_id))
+        }
+        Vue2AstKind::Comment(comment) => {
+            let span = NodeSpan::generated(ast_node.span.source(), GeneratedReason::Lowering);
+            let hir_id =
+                state
+                    .hir
+                    .push_child(hir_parent, HirNodeKind::Fragment(HirFragment), span.clone());
+            let mir_id = state.mir.push_child(
+                mir_parent,
+                Vue2MirKind::Comment {
+                    value: comment.value.clone(),
+                },
+                span,
+            );
+            state.map.record_ast_to_hir(ast_id, hir_id);
+            state.map.record_hir_to_mir(hir_id, mir_id);
+            Some((hir_id, mir_id))
+        }
+    }
+}
+
+fn lower_vue2_for_to_mir(
+    ast_id: NodeId,
+    element: &vuec_ast::Vue2Element,
+    ast: &Vue2Ast,
+    ast_node: &vuec_ast::Node<Vue2NodeKind>,
+    hir_parent: NodeId,
+    mir_parent: NodeId,
+    state: &mut Vue2LoweringState,
+) -> Option<(NodeId, NodeId)> {
+    let source = element.for_exp?;
+    let alias = element.alias.unwrap_or_else(|| {
+        state
+            .js
+            .register_pattern("item", ast_node_span(ast_node), SourceType::script())
+    });
+    let hir_id = state.hir.push_child(
+        hir_parent,
+        HirNodeKind::For(HirFor {
+            source,
+            value_alias: alias,
+            key_alias: element.iterator1,
+            index_alias: element.iterator2,
+            body: NodeId(0),
+        }),
+        ast_node.span.clone(),
+    );
+    let mir_id = state.mir.push_child(
+        mir_parent,
+        Vue2MirKind::For { source, alias },
+        ast_node.span.clone(),
+    );
+    state.map.record_ast_to_hir(ast_id, hir_id);
+    state.map.record_hir_to_mir(hir_id, mir_id);
+    let (body_hir, _) =
+        lower_vue2_ast_node_to_mir_inner(ast_id, ast, hir_id, mir_id, state, false)?;
+    if let Some(node) = state.hir.node_mut(hir_id) {
+        if let HirNodeKind::For(for_node) = &mut node.kind {
+            for_node.body = body_hir;
+        }
+    }
+    Some((hir_id, mir_id))
+}
+
+fn lower_vue2_if_to_mir(
+    ast_id: NodeId,
+    element: &vuec_ast::Vue2Element,
+    ast: &Vue2Ast,
+    ast_node: &vuec_ast::Node<Vue2NodeKind>,
+    hir_parent: NodeId,
+    mir_parent: NodeId,
+    state: &mut Vue2LoweringState,
+) -> Option<(NodeId, NodeId)> {
+    let first_condition = element
+        .if_conditions
+        .first()
+        .and_then(|condition| condition.exp)
+        .or(element.if_exp)?;
+    let hir_id = state.hir.push_child(
+        hir_parent,
+        HirNodeKind::If(HirIf {
+            branches: Vec::new(),
+        }),
+        ast_node.span.clone(),
+    );
+    let mir_id = state.mir.push_child(
+        mir_parent,
+        Vue2MirKind::If {
+            condition: first_condition,
+        },
+        ast_node.span.clone(),
+    );
+    state.map.record_ast_to_hir(ast_id, hir_id);
+    state.map.record_hir_to_mir(hir_id, mir_id);
+
+    let mut branches = Vec::new();
+    for condition in &element.if_conditions {
+        let block = condition.block;
+        let (body_hir, _) = if block == ast_id {
+            lower_vue2_plain_element_to_mir(ast_id, element, ast, ast_node, hir_id, mir_id, state)?
+        } else {
+            lower_vue2_branch_block_to_mir(block, ast, hir_id, mir_id, state)?
+        };
+        branches.push(HirIfBranch {
+            condition: condition.exp,
+            body: body_hir,
+        });
+    }
+    if let Some(node) = state.hir.node_mut(hir_id) {
+        if let HirNodeKind::If(if_node) = &mut node.kind {
+            if_node.branches = branches;
+        }
+    }
+    Some((hir_id, mir_id))
+}
+
+fn lower_vue2_branch_block_to_mir(
+    block: NodeId,
+    ast: &Vue2Ast,
+    hir_parent: NodeId,
+    mir_parent: NodeId,
+    state: &mut Vue2LoweringState,
+) -> Option<(NodeId, NodeId)> {
+    let ast_node = ast.node(block)?;
+    match &ast_node.kind {
+        Vue2AstKind::Element(element) => lower_vue2_plain_element_to_mir(
+            block, element, ast, ast_node, hir_parent, mir_parent, state,
+        ),
+        _ => lower_vue2_ast_node_to_mir_inner(block, ast, hir_parent, mir_parent, state, false),
+    }
+}
+
+fn lower_vue2_plain_element_to_mir(
+    ast_id: NodeId,
+    element: &vuec_ast::Vue2Element,
+    ast: &Vue2Ast,
+    ast_node: &vuec_ast::Node<Vue2NodeKind>,
+    hir_parent: NodeId,
+    mir_parent: NodeId,
+    state: &mut Vue2LoweringState,
+) -> Option<(NodeId, NodeId)> {
+    let hir_kind = lower_vue2_element_to_hir_kind(element, ast_node, state);
+    let mir_kind = lower_vue2_element_to_mir_kind(element);
+    let hir_id = state
+        .hir
+        .push_child(hir_parent, hir_kind, ast_node.span.clone());
+    let mir_id = state
+        .mir
+        .push_child(mir_parent, mir_kind, ast_node.span.clone());
+    state.map.record_ast_to_hir(ast_id, hir_id);
+    state.map.record_hir_to_mir(hir_id, mir_id);
+
+    let branch_blocks = element
+        .if_conditions
+        .iter()
+        .skip(1)
+        .map(|condition| condition.block)
+        .collect::<Vec<_>>();
+    let children = ast_node
+        .children
+        .iter()
+        .copied()
+        .filter(|child| !branch_blocks.contains(child))
+        .collect::<Vec<_>>();
+    lower_vue2_child_sequence(&children, ast, hir_id, mir_id, state);
+    Some((hir_id, mir_id))
+}
+
+fn lower_vue2_element_to_hir_kind(
+    element: &vuec_ast::Vue2Element,
+    ast_node: &vuec_ast::Node<Vue2NodeKind>,
+    state: &mut Vue2LoweringState,
+) -> HirNodeKind {
+    if element.tag == "slot" {
+        return HirNodeKind::SlotOutlet(HirSlotOutlet {
+            name: element.slot_name.clone(),
+            props: lower_vue2_props_to_hir(element, ast_node, state),
+        });
+    }
+
+    let props = lower_vue2_props_to_hir(element, ast_node, state);
+    if let Some(component) = &element.component {
+        return HirNodeKind::Component(vuec_ast::HirComponent {
+            name: component.clone(),
+            props,
+        });
+    }
+
+    HirNodeKind::Element(HirElement {
+        tag: HirTag::Native(element.tag.clone()),
+        namespace: vue2_namespace(element.ns.as_deref()),
+        props,
+        directives: lower_vue2_directives_to_hir(element, ast_node, state),
+        constness: if element.static_root {
+            HirConstness::Constant
+        } else if element.static_node {
+            HirConstness::Static
+        } else {
+            HirConstness::Dynamic
+        },
+    })
+}
+
+fn lower_vue2_element_to_mir_kind(element: &vuec_ast::Vue2Element) -> Vue2MirKind {
+    if element.static_root {
+        return Vue2MirKind::RenderStatic { index: 0 };
+    }
+    if element.tag == "slot" {
+        return Vue2MirKind::ScopedSlot {
+            name: element
+                .slot_name
+                .clone()
+                .unwrap_or_else(|| "default".into()),
+            params: element.slot_scope,
+        };
+    }
+    for directive in &element.directives {
+        if !matches!(directive.name.as_str(), "bind" | "on") {
+            return Vue2MirKind::Directive {
+                name: directive.name.clone(),
+            };
+        }
+    }
+    Vue2MirKind::CreateElement(Vue2CreateElement {
+        tag: element
+            .component
+            .as_ref()
+            .map(|component| MirExpr::String(component.clone()))
+            .unwrap_or_else(|| MirExpr::String(element.tag.clone())),
+        normalization_type: Vue2NormalizationType::None,
+    })
+}
+
+fn lower_vue2_props_to_hir(
+    element: &vuec_ast::Vue2Element,
+    ast_node: &vuec_ast::Node<Vue2NodeKind>,
+    state: &mut Vue2LoweringState,
+) -> HirProps {
+    let mut props = HirProps {
+        key: element.key,
+        ref_name: element.ref_name.as_ref().map(|name| HirRef {
+            name: name.clone(),
+            in_for: element.ref_in_for,
+        }),
+        ..HirProps::default()
+    };
+
+    for attr in &element.attrs {
+        lower_vue2_attr_to_hir(attr, ast_node, &mut props, state);
+    }
+    for attr in &element.props {
+        lower_vue2_binding_attr_to_hir(attr, ast_node, &mut props, state);
+    }
+    for attr in &element.dynamic_attrs {
+        lower_vue2_binding_attr_to_hir(attr, ast_node, &mut props, state);
+    }
+    if let Some(class_binding) = element.class_binding {
+        push_hir_binding(
+            &mut props,
+            HirBinding {
+                name: "class".into(),
+                dynamic_name: None,
+                value: class_binding,
+                dynamic_arg: false,
+                modifiers: Vec::new(),
+            },
+        );
+    }
+    if let Some(style_binding) = element.style_binding {
+        push_hir_binding(
+            &mut props,
+            HirBinding {
+                name: "style".into(),
+                dynamic_name: None,
+                value: style_binding,
+                dynamic_arg: false,
+                modifiers: Vec::new(),
+            },
+        );
+    }
+    for (event, handlers) in &element.events {
+        for handler in handlers {
+            let lowered = HirEvent {
+                name: event.clone(),
+                dynamic_name: None,
+                handler: handler.value,
+                dynamic_arg: handler.dynamic,
+                modifiers: handler.modifiers.keys().cloned().collect(),
+            };
+            props.segments.push(HirPropSegment::Event(lowered.clone()));
+            props.events.push(lowered);
+        }
+    }
+    for (event, handlers) in &element.native_events {
+        for handler in handlers {
+            let lowered = HirEvent {
+                name: format!("native:{event}"),
+                dynamic_name: None,
+                handler: handler.value,
+                dynamic_arg: handler.dynamic,
+                modifiers: handler.modifiers.keys().cloned().collect(),
+            };
+            props.segments.push(HirPropSegment::Event(lowered.clone()));
+            props.events.push(lowered);
+        }
+    }
+    if let Some(vuec_ast::Vue2DataWrap::Bind { value, .. }) = element.wrap_data {
+        let lowered = HirObjectBinding { value };
+        props
+            .segments
+            .push(HirPropSegment::ObjectBinding(lowered.clone()));
+        props.object_bindings.push(lowered);
+    }
+    if let Some(listeners) = &element.wrap_listeners {
+        let lowered = HirObjectListeners {
+            value: state
+                .js
+                .register_expr(listeners, ast_node_span(ast_node), SourceType::script()),
+        };
+        props
+            .segments
+            .push(HirPropSegment::ObjectListeners(lowered.clone()));
+        props.object_listeners.push(lowered);
+    }
+    props
+}
+
+fn lower_vue2_attr_to_hir(
+    attr: &vuec_ast::Vue2Attribute,
+    ast_node: &vuec_ast::Node<Vue2NodeKind>,
+    props: &mut HirProps,
+    state: &mut Vue2LoweringState,
+) {
+    if !attr.dynamic && attr.value.trim_start().starts_with('"') {
+        let lowered = HirStaticAttr {
+            name: attr.name.clone(),
+            value: attr.value.clone(),
+        };
+        props
+            .segments
+            .push(HirPropSegment::StaticAttr(lowered.clone()));
+        props.static_attrs.push(lowered);
+    } else {
+        lower_vue2_binding_attr_to_hir(attr, ast_node, props, state);
+    }
+}
+
+fn lower_vue2_binding_attr_to_hir(
+    attr: &vuec_ast::Vue2Attribute,
+    ast_node: &vuec_ast::Node<Vue2NodeKind>,
+    props: &mut HirProps,
+    state: &mut Vue2LoweringState,
+) {
+    let value = state.js.register_expr(
+        attr.value.clone(),
+        attr.span.unwrap_or_else(|| ast_node_span(ast_node)),
+        SourceType::script(),
+    );
+    let lowered = HirBinding {
+        name: attr.name.clone(),
+        dynamic_name: attr.dynamic.then(|| {
+            state.js.register_expr(
+                attr.name.clone(),
+                attr.span.unwrap_or_else(|| ast_node_span(ast_node)),
+                SourceType::script(),
+            )
+        }),
+        value,
+        dynamic_arg: attr.dynamic,
+        modifiers: Vec::new(),
+    };
+    push_hir_binding(props, lowered);
+}
+
+fn push_hir_binding(props: &mut HirProps, binding: HirBinding) {
+    props
+        .segments
+        .push(HirPropSegment::DynamicBinding(binding.clone()));
+    props.dynamic_bindings.push(binding);
+}
+
+fn lower_vue2_directives_to_hir(
+    element: &vuec_ast::Vue2Element,
+    ast_node: &vuec_ast::Node<Vue2NodeKind>,
+    state: &mut Vue2LoweringState,
+) -> Vec<HirDirectiveUse> {
+    element
+        .directives
+        .iter()
+        .map(|directive| HirDirectiveUse {
+            name: directive.name.clone(),
+            argument: (!directive.is_dynamic_arg)
+                .then(|| directive.arg.clone())
+                .flatten(),
+            dynamic_argument: directive.arg.as_ref().and_then(|arg| {
+                directive.is_dynamic_arg.then(|| {
+                    state
+                        .js
+                        .register_expr(arg, ast_node_span(ast_node), SourceType::script())
+                })
+            }),
+            expression: directive.value,
+            modifiers: directive.modifiers.keys().cloned().collect(),
+        })
+        .collect()
+}
+
+fn vue2_namespace(ns: Option<&str>) -> HtmlNamespace {
+    match ns {
+        Some("svg") => HtmlNamespace::Svg,
+        Some("math") | Some("mathml") => HtmlNamespace::MathMl,
+        _ => HtmlNamespace::Html,
+    }
+}
+
+fn ast_node_span(node: &vuec_ast::Node<Vue2NodeKind>) -> Span {
+    node.span
+        .source()
+        .unwrap_or_else(|| Span::new(FileId(0), 0, 0))
+}
+
+fn js_span(span: Option<Span>) -> Span {
+    span.unwrap_or_else(|| Span::new(FileId(0), 0, 0))
+}
+
+fn single_default_interpolation(text: &str) -> Option<&str> {
+    let trimmed = text.trim();
+    let inner = trimmed.strip_prefix("{{")?.strip_suffix("}}")?.trim();
+    (!inner.contains("{{") && !inner.contains("}}")).then_some(inner)
 }
 
 fn get_binding_attr(element: &mut Vue2Element, name: &str, get_static: bool) -> Option<String> {
@@ -3726,6 +4647,104 @@ mod tests {
     fn compile_to_functions_wraps_render() {
         let result = compile_to_functions("<div/>", options());
         assert!(result.render.contains("with(this)"));
+    }
+
+    #[test]
+    fn projects_vue2_public_ast_with_registered_js_ids() {
+        let compiled = compile(
+            r#"<div :id="item.id" @click.stop="save(item)">{{ item.name | upper }}</div>"#,
+            options(),
+        );
+        let projected = project_vue2_public_ast("<div/>", compiled.element_ast.as_ref());
+        assert!(projected.ast.validate_span_consistency().is_ok());
+        assert!(projected.js.expressions().len() >= 2);
+        assert_eq!(projected.js.statements().len(), 1);
+
+        let root = projected.ast.root_node().unwrap();
+        let element = projected.ast.node(root.children[0]).unwrap();
+        let Vue2AstKind::Element(element) = &element.kind else {
+            panic!("expected Vue2 element projection");
+        };
+        assert!(element.attrs.iter().any(|attr| attr.name == "id"));
+        assert_eq!(
+            element
+                .events
+                .get("click")
+                .and_then(|handlers| handlers.first())
+                .map(|handler| handler.modifiers.contains_key("stop")),
+            Some(true)
+        );
+
+        let text_id = projected.ast.node(root.children[0]).unwrap().children[0];
+        let Vue2AstKind::ExpressionText(text) = &projected.ast.node(text_id).unwrap().kind else {
+            panic!("expected expression text projection");
+        };
+        let filter = text.filter_expr.as_ref().expect("Vue2 filter payload");
+        assert_eq!(filter.filters[0].name, "upper");
+    }
+
+    #[test]
+    fn lowers_vue2_ast_to_hir_and_target_split_mir() {
+        let compiled = compile(
+            r#"<ul><li v-for="(item, i) in items" :key="item.id">{{ item.name }}</li></ul>"#,
+            options(),
+        );
+        let projected = project_vue2_public_ast("<ul/>", compiled.element_ast.as_ref());
+        let lowered = lower_vue2_ast_to_mir(&projected.ast, projected.js);
+
+        assert!(lowered.hir.validate_span_consistency().is_ok());
+        assert!(lowered.mir.validate_span_consistency().is_ok());
+        assert_eq!(
+            lowered
+                .map
+                .hir_for_ast(projected.ast.root)
+                .collect::<Vec<_>>(),
+            vec![lowered.hir.root]
+        );
+        assert!(lowered.map.hir_to_mir.iter().any(|(_, mir)| matches!(
+            lowered.mir.node(*mir).map(|node| &node.kind),
+            Some(Vue2MirKind::For { .. })
+        )));
+        assert!(lowered.hir.nodes.iter().any(|node| matches!(
+            node.kind,
+            HirNodeKind::For(_) | HirNodeKind::Interpolation(_)
+        )));
+        assert!(lowered.mir.nodes.iter().any(|node| matches!(
+            node.kind,
+            Vue2MirKind::CreateElement(_) | Vue2MirKind::Text(_)
+        )));
+    }
+
+    #[test]
+    fn lowers_vue2_if_chain_and_filters_without_hir_helpers() {
+        let compiled = compile(
+            r#"<div><p v-if="ok">{{ msg | upper }}</p><p v-else>fallback</p></div>"#,
+            options(),
+        );
+        let projected = project_vue2_public_ast("<div/>", compiled.element_ast.as_ref());
+        let lowered = lower_vue2_ast_to_mir(&projected.ast, projected.js);
+
+        let if_nodes = lowered
+            .hir
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.kind {
+                HirNodeKind::If(if_node) => Some(if_node),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(if_nodes.len(), 1);
+        assert_eq!(if_nodes[0].branches.len(), 2);
+        assert!(lowered.mir.nodes.iter().any(|node| matches!(
+            node.kind,
+            Vue2MirKind::If { .. } | Vue2MirKind::FilterCall { .. }
+        )));
+        assert!(lowered.hir.nodes.iter().all(|node| {
+            !matches!(
+                node.kind,
+                HirNodeKind::Fragment(_) if matches!(lowered.mir.node(node.id), Some(_))
+            )
+        }));
     }
 
     #[test]

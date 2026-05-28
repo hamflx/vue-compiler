@@ -19,3 +19,4 @@ vuec_diagnostics = { path = "../vuec_diagnostics", version = "0.1.0" }
 vuec_html = { path = "../vuec_html", version = "0.1.0" }
 vuec_js = { path = "../vuec_js", version = "0.1.0" }
 vuec_source = { path = "../vuec_source", version = "0.1.0" }
+oxc_span.workspace = true

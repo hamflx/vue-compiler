@@ -1468,6 +1468,7 @@ dependencies = [
 name = "vuec_vue2"
 version = "0.1.0"
 dependencies = [
+ "oxc_span",
  "serde",
  "serde_json",
  "vuec_ast",

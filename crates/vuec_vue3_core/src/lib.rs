@@ -32,9 +32,10 @@ use vuec_ast::{
 };
 use vuec_codegen::{CodeWriter, SourceMapArtifact, SourceMapSegment};
 use vuec_diagnostics::Diagnostic;
+pub use vuec_html::find_matching_raw_text_end;
 use vuec_html::{
-    decode_html_attr_entities, decode_html_text_entities, find_matching_raw_text_end,
-    raw_text_mode_for_tag, resolve_html_namespace, HtmlTextMode, HtmlTokenKind, HtmlTokenizer,
+    decode_html_attr_entities, decode_html_text_entities, raw_text_mode_for_tag,
+    resolve_html_namespace, HtmlTextMode, HtmlTokenKind, HtmlTokenizer,
 };
 use vuec_js::{
     js_error_to_vue3_invalid_expression_diagnostic,
@@ -12560,7 +12561,7 @@ fn incomplete_start_tag_recovery_text_start(slice: &str) -> Option<usize> {
 }
 
 /// Returns the Vue 3 raw-text parsing mode for a tag and namespace.
-fn vue3_raw_text_kind(
+pub fn vue3_raw_text_kind(
     tag: &str,
     namespace: vuec_ast::HtmlNamespace,
     in_v_pre: bool,
