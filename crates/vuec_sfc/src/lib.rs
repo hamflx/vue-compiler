@@ -8451,6 +8451,25 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
     }
 
     #[test]
+    fn compile_style_reports_css_modules_complex_composes_selector() {
+        let source =
+            r#"<style module>.button.extra { composes: base; }.base { color: red; }</style>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse("modules.vue", source);
+        let result = compiler.compile_style(&descriptor, SfcStyleCompileOptions::default());
+
+        assert_eq!(
+            result.errors,
+            vec![
+                "composition is only allowed when selector is single :local class name not in \":local(.button):local(.extra)\""
+            ]
+        );
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(result.diagnostics[0].code, "VUEC_STYLE_MODULE_COMPOSE");
+        assert!(!result.code.contains("composes"));
+    }
+
+    #[test]
     fn compile_style_forwards_scss_preprocess_options_and_dependencies() {
         let dir = tempfile::tempdir().expect("temp dir");
         let filename = dir.path().join("component.vue");

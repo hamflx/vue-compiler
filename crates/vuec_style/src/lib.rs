@@ -2281,6 +2281,7 @@ fn rewrite_css_modules_items(
             output.push_str(&rewrite_css_modules_items(body, context, next_context));
         } else {
             output.push_str(&rewrite_css_module_declarations(
+                prelude,
                 body,
                 context,
                 block_context,
@@ -2460,6 +2461,7 @@ fn register_css_module_icss_import_segment(
 }
 
 fn rewrite_css_module_declarations(
+    prelude: &str,
     body: &str,
     context: &mut CssModulesContext<'_>,
     block_context: CssBlockContext,
@@ -2476,6 +2478,7 @@ fn rewrite_css_module_declarations(
         rewrite_css_module_declaration_segment(
             &body[segment_start..semicolon],
             context,
+            prelude,
             compose_local_names,
             body_offset + segment_start,
             true,
@@ -2486,6 +2489,7 @@ fn rewrite_css_module_declarations(
     rewrite_css_module_declaration_segment(
         &body[segment_start..],
         context,
+        prelude,
         compose_local_names,
         body_offset + segment_start,
         false,
@@ -2497,6 +2501,7 @@ fn rewrite_css_module_declarations(
 fn rewrite_css_module_declaration_segment(
     segment: &str,
     context: &mut CssModulesContext<'_>,
+    prelude: &str,
     compose_local_names: &[String],
     segment_offset: usize,
     has_semicolon: bool,
@@ -2519,10 +2524,8 @@ fn rewrite_css_module_declaration_segment(
     }
 
     if compose_local_names.is_empty() {
-        output.push_str(segment);
-        if has_semicolon {
-            output.push(';');
-        }
+        let message = css_module_invalid_compose_selector_message(prelude, context);
+        context.push_compose_diagnostic(message, segment_offset, segment_offset + segment.len());
         return;
     }
     match css_module_composed_values(&segment[colon + 1..], context, segment_offset + colon + 1) {
@@ -2557,6 +2560,45 @@ fn rewrite_css_module_declaration_segment(
             );
         }
     }
+}
+
+fn css_module_invalid_compose_selector_message(
+    prelude: &str,
+    context: &CssModulesContext<'_>,
+) -> String {
+    let selector = css_module_localized_selector_for_message(prelude, context);
+    format!("composition is only allowed when selector is single :local class name not in \"{selector}\"")
+}
+
+fn css_module_localized_selector_for_message(
+    prelude: &str,
+    context: &CssModulesContext<'_>,
+) -> String {
+    split_selector_list(prelude)
+        .into_iter()
+        .map(|selector| css_module_localized_selector_part_for_message(selector.trim(), context))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn css_module_localized_selector_part_for_message(
+    selector: &str,
+    context: &CssModulesContext<'_>,
+) -> String {
+    if !context.is_local_default() {
+        return selector.to_string();
+    }
+    let mut output = String::new();
+    let mut cursor = 0usize;
+    while let Some((start, end, name)) = find_next_class_selector(selector, cursor) {
+        output.push_str(&selector[cursor..start]);
+        output.push_str(":local(.");
+        output.push_str(name);
+        output.push(')');
+        cursor = end;
+    }
+    output.push_str(&selector[cursor..]);
+    output
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -4627,7 +4669,7 @@ mod tests {
     }
 
     #[test]
-    fn leaves_css_modules_unsupported_composes_declarations() {
+    fn reports_css_modules_composes_on_complex_selector() {
         let result = compile_style(
             ".button.extra { composes: base; }\n.next { color: blue }",
             StyleCompileOptions {
@@ -4638,9 +4680,17 @@ mod tests {
             },
         );
 
-        assert!(result.code.contains("composes: base"));
-        assert!(result.errors.is_empty());
-        assert!(result.diagnostics.is_empty());
+        assert_eq!(
+            result.errors,
+            vec![
+                "composition is only allowed when selector is single :local class name not in \":local(.button):local(.extra)\""
+            ]
+        );
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(result.diagnostics[0].code, "VUEC_STYLE_MODULE_COMPOSE");
+        assert!(!result.code.contains("composes"));
+        assert!(result.code.contains("._button_"));
+        assert!(result.code.contains("._extra_"));
     }
 
     #[test]
