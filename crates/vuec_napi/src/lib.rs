@@ -498,7 +498,11 @@ fn template_source(source: &str, options: &Value) -> TemplateSource {
         filename: string_option(options, "filename", "anonymous.vue"),
         source: source.into(),
         file_id: FileId(0),
-        base_offset: 0,
+        base_offset: options
+            .get("__vuecTemplateBaseOffset")
+            .or_else(|| options.get("__vuecBaseOffset"))
+            .and_then(Value::as_u64)
+            .unwrap_or_default() as usize,
     }
 }
 
@@ -1298,6 +1302,14 @@ fn vue3_options(value: Option<&Value>) -> Vue3CompilerOptions {
         "sourceMap",
         bool_option(value, "source_map", options.source_map),
     );
+    options.source_map_source = value
+        .get("__vuecSourceMapSource")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    options.source_map_base_offset = value
+        .get("__vuecSourceMapBaseOffset")
+        .and_then(Value::as_u64)
+        .unwrap_or_default() as usize;
     options.stringify_static = bool_option(
         value,
         "stringifyStatic",

@@ -610,9 +610,10 @@ function createReturnStatement(returns) {
 }
 
 function createRoot(children) {
+  const source = arguments.length > 1 && arguments[1] != null ? String(arguments[1]) : '';
   return {
     type: 0,
-    source: '',
+    source,
     children: children || [],
     helpers: new Set(),
     components: [],

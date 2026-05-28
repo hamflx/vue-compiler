@@ -145,7 +145,12 @@ const parserOptions = {
 };
 
 function compile(src) {
-  return native.compileVue3Dom(String(src || ''), vue3DomNativeOptions(arguments[1]));
+  const options = arguments.length > 1 ? arguments[1] : undefined;
+  if (src && typeof src === 'object' && src.type === core.NodeTypes.ROOT && Array.isArray(src.children)) {
+    const payload = vue3AstCompilePayload(src, options);
+    return native.compileVue3Dom(payload.source, vue3DomNativeOptions(payload.options));
+  }
+  return native.compileVue3Dom(String(src || ''), vue3DomNativeOptions(options));
 }
 
 function parse(template) {
@@ -160,6 +165,38 @@ function vue3DomNativeOptions(options) {
     stringifyStatic: true,
     __vuecStringifyStaticPreserveHelpers: true,
   };
+}
+
+function vue3AstCompilePayload(ast, options) {
+  const source = typeof ast.source === 'string' ? ast.source : '';
+  const range = vue3AstChildrenRange(ast, source);
+  const template = range ? source.slice(range.start, range.end) : source;
+  return {
+    source: template,
+    options: {
+      ...(options || {}),
+      __vuecTemplateBaseOffset: range ? range.start : 0,
+      __vuecSourceMapSource: source,
+      __vuecSourceMapBaseOffset: 0,
+    },
+  };
+}
+
+function vue3AstChildrenRange(ast, source) {
+  const children = Array.isArray(ast && ast.children) ? ast.children : [];
+  if (!children.length) return { start: 0, end: 0 };
+  let start = Infinity;
+  let end = -Infinity;
+  for (const child of children) {
+    const locStart = child && child.loc && child.loc.start && child.loc.start.offset;
+    const locEnd = child && child.loc && child.loc.end && child.loc.end.offset;
+    if (Number.isFinite(locStart) && Number.isFinite(locEnd) && locEnd >= locStart) {
+      start = Math.min(start, locStart);
+      end = Math.max(end, locEnd);
+    }
+  }
+  if (!Number.isFinite(start) || end < start) return null;
+  return { start, end };
 }
 
 function createDOMCompilerError(code, loc) {

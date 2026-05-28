@@ -6,7 +6,7 @@ const vue2 = require('vue-template-compiler');
 const vue27Sfc = require('vue/compiler-sfc');
 const core = require('@vue/compiler-core');
 const dom = require('@vue/compiler-dom');
-const ssr = require('@vue/compiler-ssr');
+const ssrCompiler = require('@vue/compiler-ssr');
 const sfc = require('@vue/compiler-sfc');
 
 const vue2Result = vue2.compile('<div>{{ msg }}</div>');
@@ -41,9 +41,21 @@ const defaultTransformContext = core.createTransformContext(core.createRoot([]),
 assert.strictEqual(defaultTransformContext.hoistStatic, false);
 const hoistTransformContext = core.createTransformContext(core.createRoot([]), { hoistStatic: true });
 assert.strictEqual(hoistTransformContext.hoistStatic, true);
+assert.strictEqual(core.createRoot([], '<template/>').source, '<template/>');
 
 const coreGenerated = core.generate(coreAst);
 assert.match(coreGenerated.code, /function render/);
+
+const sfcSource = '<template><div>{{ msg }}</div></template>';
+const sfcAst = dom.parse(sfcSource, { parseMode: 'sfc', prefixIdentifiers: true });
+const templateRoot = core.createRoot(sfcAst.children[0].children, sfcSource);
+const astDom = dom.compile(templateRoot, { mode: 'module', prefixIdentifiers: true, sourceMap: true, filename: 'smoke.vue' });
+assert.match(astDom.code, /_ctx\.msg/);
+assert.deepStrictEqual(astDom.map.sources, ['smoke.vue']);
+assert.deepStrictEqual(astDom.map.sourcesContent, [sfcSource]);
+const astSsr = ssrCompiler.compile(templateRoot, { mode: 'module', prefixIdentifiers: true, sourceMap: true, filename: 'smoke.vue' });
+assert.match(astSsr.code, /_ssrInterpolate\(_ctx\.msg\)/);
+assert.deepStrictEqual(astSsr.map.sourcesContent, [sfcSource]);
 
 const onceAst = core.baseParse('<div :id="foo" v-once />');
 const [onceNodeTransforms, onceDirectiveTransforms] = core.getBaseTransformPreset();
@@ -76,7 +88,7 @@ const domAst = dom.parse('<textarea>{{ msg }}</textarea>');
 assert.strictEqual(domAst.type, dom.NodeTypes.ROOT);
 assert.strictEqual(domAst.children[0].tag, 'textarea');
 
-const ssrResult = ssr.compile('<div>{{ msg }}</div>', {
+const ssrResult = ssrCompiler.compile('<div>{{ msg }}</div>', {
   mode: 'module',
   prefixIdentifiers: true,
 });
