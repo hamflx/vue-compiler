@@ -107,6 +107,6 @@
   },
   "status": "pass",
   "source": "official",
-  "lock_hash": "ee33465b421a58b83fac04aa850a6d250ee09ec169fa80ed8820794a0c9a2769",
-  "official_revision": "af43c9d14dd087b9852912bd15b1eacbda0e13b0"
+  "lock_hash": "a9b1d2dee8c939951eabda27ef594a9d7189603985cff8d4e1338494ec317b77",
+  "official_revision": "612fb89547711cacb030a3893a0065b785802860"
 }

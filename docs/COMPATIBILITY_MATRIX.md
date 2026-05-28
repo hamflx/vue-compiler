@@ -6,7 +6,7 @@ This matrix records the pinned official compiler baselines and the current Rust 
 
 | Line | Official repo | Commit | npm packages |
 | --- | --- | --- | --- |
-| Vue 2.6 | `https://github.com/vuejs/vue` | `af43c9d14dd087b9852912bd15b1eacbda0e13b0` | `vue@2.6.14`, `vue-template-compiler@2.6.14` |
+| Vue 2.6 | `https://github.com/vuejs/vue` | `612fb89547711cacb030a3893a0065b785802860` | `vue@2.6.14`, `vue-template-compiler@2.6.14` |
 | Vue 2.7 | `https://github.com/vuejs/vue` | `13f4e7dc03e2caed900ac70ff8b8fe58dda45663` | `vue@2.7.16`, `vue-template-compiler@2.7.16` |
 | Vue 3 | `https://github.com/vuejs/core` | `57545e958ae28ed17aa9e0ed321abcd8dc99f752` | `@vue/compiler-core@3.5.34`, `@vue/compiler-dom@3.5.34`, `@vue/compiler-sfc@3.5.34`, `@vue/compiler-ssr@3.5.34` |
 

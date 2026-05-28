@@ -40,6 +40,10 @@ enum Command {
     VerifyOfficialLock {
         #[arg(long, default_value = "compat/official-revisions.lock")]
         path: PathBuf,
+        #[arg(long, default_value = "vendor")]
+        vendor_dir: PathBuf,
+        #[arg(long)]
+        require_vendor: bool,
     },
     SyncOfficialTests {
         #[arg(long, default_value = "compat/official-revisions.lock")]
@@ -143,7 +147,11 @@ enum Command {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let report = match cli.command {
-        Command::VerifyOfficialLock { path } => verify_official_lock(&path),
+        Command::VerifyOfficialLock {
+            path,
+            vendor_dir,
+            require_vendor,
+        } => verify_official_lock(&path, &vendor_dir, require_vendor),
         Command::SyncOfficialTests {
             lock,
             locked,

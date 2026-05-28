@@ -1306,11 +1306,26 @@ fn vue3_sfc_cases(_target: TargetSpec) -> Vec<OptionMatrixCase> {
     ]
 }
 
-pub fn verify_official_lock(path: &Path) -> JsonReport {
+pub fn verify_official_lock(path: &Path, vendor_dir: &Path, require_vendor: bool) -> JsonReport {
     let lock_hash = file_sha256(path).ok();
     match load_official_lock(path) {
         Ok(lock) => {
-            let violations = validate_official_lock(&lock);
+            let mut items = Vec::new();
+            let mut violations = validate_official_lock(&lock);
+            let vendor_validation = if require_vendor || vendor_dir.exists() {
+                validate_official_lock_vendor(&lock, vendor_dir)
+            } else {
+                Vec::new()
+            };
+            if require_vendor {
+                for item in &vendor_validation {
+                    if item.status == ReportStatus::Fail {
+                        violations.push(item.detail.clone());
+                    }
+                }
+            }
+            items.extend(official_lock_static_items(&lock));
+            items.extend(vendor_validation);
             let status = if violations.is_empty() {
                 ReportStatus::Pass
             } else {
@@ -1319,15 +1334,26 @@ pub fn verify_official_lock(path: &Path) -> JsonReport {
             let mut report = JsonReport::new("verify_official_lock", status);
             report.metadata = report.metadata.with_lock_hash(lock_hash);
             report
+                .with_items(items)
                 .with_violations(violations)
-                .with_note(format!("lock: {}", path.display()))
+                .with_note(format!(
+                    "lock: {}, vendor: {}, require_vendor: {}",
+                    path.display(),
+                    vendor_dir.display(),
+                    require_vendor
+                ))
         }
         Err(err) => {
             let mut report = JsonReport::new("verify_official_lock", ReportStatus::Fail);
             report.metadata = report.metadata.with_lock_hash(lock_hash);
             report
                 .with_violations(vec![format!("failed to read/parse lock file: {err}")])
-                .with_note(format!("lock: {}", path.display()))
+                .with_note(format!(
+                    "lock: {}, vendor: {}, require_vendor: {}",
+                    path.display(),
+                    vendor_dir.display(),
+                    require_vendor
+                ))
         }
     }
 }
@@ -9661,6 +9687,210 @@ pub fn validate_official_lock(lock: &OfficialRevisionsLock) -> Vec<String> {
     violations
 }
 
+fn official_lock_static_items(lock: &OfficialRevisionsLock) -> Vec<ReportItem> {
+    [
+        (VersionLine::Vue26, "vue2_6", &lock.vue2_6),
+        (VersionLine::Vue27, "vue2_7", &lock.vue2_7),
+        (VersionLine::Vue3, "vue3", &lock.vue3),
+    ]
+    .into_iter()
+    .flat_map(|(_, label, baseline)| {
+        let mut items = Vec::new();
+        let rev_status = if is_commit_sha(&baseline.rev) {
+            ReportStatus::Pass
+        } else {
+            ReportStatus::Fail
+        };
+        items.push(ReportItem::new(
+            format!("{label}.rev"),
+            rev_status,
+            format!("rev={}", baseline.rev),
+            None,
+        ));
+        for (package, version) in &baseline.npm {
+            let status = if is_exact_npm_version(version) {
+                ReportStatus::Pass
+            } else {
+                ReportStatus::Fail
+            };
+            items.push(ReportItem::new(
+                format!("{label}.npm.{package}"),
+                status,
+                format!("version={version}"),
+                None,
+            ));
+        }
+        items
+    })
+    .collect()
+}
+
+fn validate_official_lock_vendor(
+    lock: &OfficialRevisionsLock,
+    vendor_dir: &Path,
+) -> Vec<ReportItem> {
+    [
+        (VersionLine::Vue26, &lock.vue2_6),
+        (VersionLine::Vue27, &lock.vue2_7),
+        (VersionLine::Vue3, &lock.vue3),
+    ]
+    .into_iter()
+    .flat_map(|(version_line, baseline)| {
+        let checkout = vendor_dir.join(version_line.as_str());
+        let mut items = Vec::new();
+        items.push(validate_official_checkout_revision(
+            version_line,
+            baseline,
+            &checkout,
+        ));
+        for (package, expected) in &baseline.npm {
+            items.push(validate_official_package_manifest(
+                version_line,
+                package,
+                expected,
+                &checkout,
+            ));
+        }
+        items
+    })
+    .collect()
+}
+
+fn validate_official_checkout_revision(
+    version_line: VersionLine,
+    baseline: &BaselineLock,
+    checkout: &Path,
+) -> ReportItem {
+    if !checkout.join(".git").exists() {
+        return ReportItem::new(
+            format!("{}.checkout", version_line.as_str()),
+            ReportStatus::Fail,
+            format!("{} is not a git checkout", checkout.display()),
+            Some(checkout.to_path_buf()),
+        );
+    }
+    let object_type = git_output(checkout, &["cat-file", "-t", &baseline.rev]);
+    if object_type.as_deref() != Some("commit") {
+        return ReportItem::new(
+            format!("{}.rev-object", version_line.as_str()),
+            ReportStatus::Fail,
+            format!(
+                "lock rev {} resolves to {:?}, expected commit",
+                baseline.rev, object_type
+            ),
+            Some(checkout.to_path_buf()),
+        );
+    }
+    let head = git_output(checkout, &["rev-parse", "HEAD"]);
+    let status = if head.as_deref() == Some(baseline.rev.as_str()) {
+        ReportStatus::Pass
+    } else {
+        ReportStatus::Fail
+    };
+    ReportItem::new(
+        format!("{}.checkout", version_line.as_str()),
+        status,
+        format!(
+            "expected rev {}, checkout HEAD {}",
+            baseline.rev,
+            head.unwrap_or_else(|| "<unreadable>".into())
+        ),
+        Some(checkout.to_path_buf()),
+    )
+}
+
+fn validate_official_package_manifest(
+    version_line: VersionLine,
+    package: &str,
+    expected: &str,
+    checkout: &Path,
+) -> ReportItem {
+    let Some(package_json) = official_package_manifest_path(version_line, package, checkout) else {
+        return ReportItem::new(
+            format!("{}.npm.{package}", version_line.as_str()),
+            ReportStatus::Fail,
+            format!("no package manifest mapping for {package}"),
+            Some(checkout.to_path_buf()),
+        );
+    };
+    let actual = read_package_manifest_version(&package_json);
+    let status = if actual.as_deref() == Some(expected) {
+        ReportStatus::Pass
+    } else {
+        ReportStatus::Fail
+    };
+    ReportItem::new(
+        format!("{}.npm.{package}", version_line.as_str()),
+        status,
+        format!(
+            "lock version {}, manifest version {}",
+            expected,
+            actual.unwrap_or_else(|| "<missing>".into())
+        ),
+        Some(package_json),
+    )
+}
+
+fn official_package_manifest_path(
+    version_line: VersionLine,
+    package: &str,
+    checkout: &Path,
+) -> Option<PathBuf> {
+    match (version_line, package) {
+        (VersionLine::Vue26, "vue") | (VersionLine::Vue27, "vue") => {
+            Some(checkout.join("package.json"))
+        }
+        (VersionLine::Vue26, "vue-template-compiler") => Some(
+            checkout
+                .join("packages")
+                .join("vue-template-compiler")
+                .join("package.json"),
+        ),
+        (VersionLine::Vue27, "vue-template-compiler") => Some(
+            checkout
+                .join("packages")
+                .join("template-compiler")
+                .join("package.json"),
+        ),
+        (VersionLine::Vue3, "vue") => {
+            Some(checkout.join("packages").join("vue").join("package.json"))
+        }
+        (VersionLine::Vue3, "@vue/compiler-core") => Some(
+            checkout
+                .join("packages")
+                .join("compiler-core")
+                .join("package.json"),
+        ),
+        (VersionLine::Vue3, "@vue/compiler-dom") => Some(
+            checkout
+                .join("packages")
+                .join("compiler-dom")
+                .join("package.json"),
+        ),
+        (VersionLine::Vue3, "@vue/compiler-ssr") => Some(
+            checkout
+                .join("packages")
+                .join("compiler-ssr")
+                .join("package.json"),
+        ),
+        (VersionLine::Vue3, "@vue/compiler-sfc") => Some(
+            checkout
+                .join("packages")
+                .join("compiler-sfc")
+                .join("package.json"),
+        ),
+        _ => None,
+    }
+}
+
+fn read_package_manifest_version(path: &Path) -> Option<String> {
+    read_json::<serde_json::Value>(path)
+        .ok()?
+        .get("version")?
+        .as_str()
+        .map(ToOwned::to_owned)
+}
+
 #[derive(Debug, Deserialize)]
 pub struct OfficialRevisionsLock {
     pub vue2_6: BaselineLock,
@@ -9693,7 +9923,10 @@ fn validate_baseline(
     }
     for key in required_npm {
         match baseline.npm.get(*key) {
-            Some(value) if !value.trim().is_empty() => {}
+            Some(value) if is_exact_npm_version(value) => {}
+            Some(value) if !value.trim().is_empty() => violations.push(format!(
+                "{label}.npm.{key} must be an exact npm package version, got {value:?}"
+            )),
             Some(_) => violations.push(format!("{label}.npm.{key} is empty")),
             None => violations.push(format!("{label}.npm.{key} is missing")),
         }
@@ -9709,6 +9942,43 @@ fn validate_baseline(
 
 fn is_commit_sha(value: &str) -> bool {
     value.len() == 40 && value.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn is_exact_npm_version(value: &str) -> bool {
+    let value = value.trim();
+    if value.is_empty()
+        || value.starts_with(['^', '~', '>', '<', '=', '*'])
+        || value.contains(" - ")
+        || value.contains("||")
+        || matches!(
+            value,
+            "latest" | "next" | "v2-latest" | "main" | "master" | "dev" | "nightly"
+        )
+    {
+        return false;
+    }
+    let suffix_start = value.find(['-', '+']).unwrap_or(value.len());
+    let core = &value[..suffix_start];
+    let parts = core.split('.').collect::<Vec<_>>();
+    parts.len() == 3
+        && parts
+            .iter()
+            .all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()))
+        && value[suffix_start..]
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '+' | '.'))
+}
+
+fn git_output(dir: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 pub fn sanitize_segment(segment: &str) -> String {
@@ -12679,6 +12949,144 @@ mod tests {
     }
 
     #[test]
+    fn official_lock_rejects_floating_npm_versions() {
+        let mut lock = OfficialRevisionsLock {
+            vue2_6: BaselineLock {
+                repo: "https://github.com/vuejs/vue".into(),
+                rev: "612fb89547711cacb030a3893a0065b785802860".into(),
+                npm: BTreeMap::from([
+                    ("vue".into(), "2.6.14".into()),
+                    ("vue-template-compiler".into(), "^2.6.14".into()),
+                ]),
+                exports: BTreeMap::new(),
+            },
+            vue2_7: BaselineLock {
+                repo: "https://github.com/vuejs/vue".into(),
+                rev: "13f4e7dc03e2caed900ac70ff8b8fe58dda45663".into(),
+                npm: BTreeMap::from([
+                    ("vue".into(), "2.7.16".into()),
+                    ("vue-template-compiler".into(), "2.7.16".into()),
+                ]),
+                exports: BTreeMap::from([(
+                    "vue/compiler-sfc".into(),
+                    "./compiler-sfc/index.js".into(),
+                )]),
+            },
+            vue3: BaselineLock {
+                repo: "https://github.com/vuejs/core".into(),
+                rev: "57545e958ae28ed17aa9e0ed321abcd8dc99f752".into(),
+                npm: BTreeMap::from([
+                    ("vue".into(), "3.5.34".into()),
+                    ("@vue/compiler-core".into(), "3.5.34".into()),
+                    ("@vue/compiler-dom".into(), "3.5.34".into()),
+                    ("@vue/compiler-sfc".into(), "3.5.34".into()),
+                    ("@vue/compiler-ssr".into(), "3.5.34".into()),
+                ]),
+                exports: BTreeMap::new(),
+            },
+        };
+
+        let violations = validate_official_lock(&lock);
+        assert!(violations
+            .iter()
+            .any(|violation| violation.contains("must be an exact npm package version")));
+
+        lock.vue2_6
+            .npm
+            .insert("vue-template-compiler".into(), "latest".into());
+        let violations = validate_official_lock(&lock);
+        assert!(violations
+            .iter()
+            .any(|violation| violation.contains("must be an exact npm package version")));
+    }
+
+    #[test]
+    fn official_lock_vendor_validation_rejects_tag_object_revs() {
+        let temp = std::env::temp_dir().join(format!(
+            "vuec-xtask-official-lock-vendor-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let checkout = temp.join("vue2_6");
+        fs::create_dir_all(checkout.join("packages/vue-template-compiler")).unwrap();
+        run_command("git", &["init"], Some(&checkout)).unwrap();
+        fs::write(checkout.join("package.json"), r#"{"version":"2.6.14"}"#).unwrap();
+        fs::write(
+            checkout
+                .join("packages/vue-template-compiler")
+                .join("package.json"),
+            r#"{"version":"2.6.14"}"#,
+        )
+        .unwrap();
+        run_git(&checkout, &["add", "."]).unwrap();
+        run_git(
+            &checkout,
+            &[
+                "-c",
+                "user.email=a@b.c",
+                "-c",
+                "user.name=Vuec",
+                "commit",
+                "-m",
+                "init",
+            ],
+        )
+        .unwrap();
+        let commit = git_output(&checkout, &["rev-parse", "HEAD"]).unwrap();
+        run_git(
+            &checkout,
+            &[
+                "-c",
+                "user.email=a@b.c",
+                "-c",
+                "user.name=Vuec",
+                "tag",
+                "-a",
+                "v2.6.14",
+                "-m",
+                "v2.6.14",
+            ],
+        )
+        .unwrap();
+        let tag_object = git_output(&checkout, &["rev-parse", "v2.6.14"]).unwrap();
+        assert_ne!(tag_object, commit);
+
+        let lock = OfficialRevisionsLock {
+            vue2_6: BaselineLock {
+                repo: "https://github.com/vuejs/vue".into(),
+                rev: tag_object,
+                npm: BTreeMap::from([
+                    ("vue".into(), "2.6.14".into()),
+                    ("vue-template-compiler".into(), "2.6.14".into()),
+                ]),
+                exports: BTreeMap::new(),
+            },
+            vue2_7: BaselineLock {
+                repo: "https://github.com/vuejs/vue".into(),
+                rev: "13f4e7dc03e2caed900ac70ff8b8fe58dda45663".into(),
+                npm: BTreeMap::new(),
+                exports: BTreeMap::new(),
+            },
+            vue3: BaselineLock {
+                repo: "https://github.com/vuejs/core".into(),
+                rev: "57545e958ae28ed17aa9e0ed321abcd8dc99f752".into(),
+                npm: BTreeMap::new(),
+                exports: BTreeMap::new(),
+            },
+        };
+
+        let items = validate_official_lock_vendor(&lock, &temp);
+        assert!(items.iter().any(|item| {
+            item.target == "vue2_6.rev-object"
+                && item.status == ReportStatus::Fail
+                && item.detail.contains("expected commit")
+        }));
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
     fn api_diff_detects_export_and_arity_mismatch() {
         let mut official = test_manifest(vec![("compile", 2)]);
         let mut rust = test_manifest(vec![("compile", 1)]);
@@ -14096,7 +14504,7 @@ jasmine@^2.99.0:
             status: "pass".into(),
             source: "official".into(),
             lock_hash: Some("lock".into()),
-            official_revision: Some("af43c9d14dd087b9852912bd15b1eacbda0e13b0".into()),
+            official_revision: Some("612fb89547711cacb030a3893a0065b785802860".into()),
         }
     }
 }
