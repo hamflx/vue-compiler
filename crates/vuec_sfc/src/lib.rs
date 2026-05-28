@@ -8335,6 +8335,29 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
     }
 
     #[test]
+    fn compile_style_forwards_css_modules_export_globals() {
+        let mut compiler = SfcCompiler::new();
+        let source = r#"<style module>.local :global(.global) { color: red }</style>"#;
+        let descriptor = compiler.parse("modules.vue", source);
+        let result = compiler.compile_style(
+            &descriptor,
+            SfcStyleCompileOptions {
+                modules_options: CssModulesOptions {
+                    export_globals: true,
+                    ..CssModulesOptions::default()
+                },
+                ..SfcStyleCompileOptions::default()
+            },
+        );
+        let modules = result.modules.expect("css modules");
+
+        assert!(modules
+            .get("local")
+            .is_some_and(|value| value.contains("_local_")));
+        assert_eq!(modules.get("global").map(String::as_str), Some("global"));
+    }
+
+    #[test]
     fn compile_style_forwards_scss_preprocess_options_and_dependencies() {
         let dir = tempfile::tempdir().expect("temp dir");
         let filename = dir.path().join("component.vue");

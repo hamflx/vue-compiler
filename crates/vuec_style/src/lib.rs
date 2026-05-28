@@ -97,6 +97,9 @@ pub struct CssModulesOptions {
     /// Export key convention such as `asIs`, `camelCase`, or `camelCaseOnly`.
     #[serde(default, rename = "localsConvention", alias = "locals_convention")]
     pub locals_convention: String,
+    /// Whether global class selectors are included in the module export map.
+    #[serde(default, rename = "exportGlobals", alias = "export_globals")]
+    pub export_globals: bool,
 }
 
 impl Default for CssModulesOptions {
@@ -105,6 +108,7 @@ impl Default for CssModulesOptions {
             scope_behaviour: "local".into(),
             generate_scoped_name: None,
             locals_convention: "asIs".into(),
+            export_globals: false,
         }
     }
 }
@@ -1917,6 +1921,7 @@ struct CssModulesContext<'a> {
     scope_behaviour: CssModulesScopeBehaviour,
     generate_scoped_name: Option<&'a str>,
     locals_convention: CssModulesLocalsConvention,
+    export_globals: bool,
     modules: BTreeMap<String, String>,
 }
 
@@ -1932,6 +1937,7 @@ impl<'a> CssModulesContext<'a> {
             locals_convention: CssModulesLocalsConvention::from_option(
                 &options.modules_options.locals_convention,
             ),
+            export_globals: options.modules_options.export_globals,
             modules: BTreeMap::new(),
         }
     }
@@ -2114,7 +2120,11 @@ fn rewrite_css_module_selector(selector: &str, context: &mut CssModulesContext<'
                 default_local,
             ));
             if let Some((open, close)) = global.parens {
-                output.push_str(selector[open + 1..close].trim());
+                output.push_str(&rewrite_css_module_default_segment(
+                    selector[open + 1..close].trim(),
+                    context,
+                    false,
+                ));
                 cursor = close + 1;
                 continue;
             }
@@ -2157,6 +2167,9 @@ fn rewrite_css_module_default_segment(
     local: bool,
 ) -> String {
     if !local {
+        if context.export_globals {
+            register_css_module_globals(segment, context);
+        }
         return segment.to_string();
     }
     let mut output = String::new();
@@ -2171,6 +2184,14 @@ fn rewrite_css_module_default_segment(
     }
     output.push_str(&segment[cursor..]);
     output
+}
+
+fn register_css_module_globals(segment: &str, context: &mut CssModulesContext<'_>) {
+    let mut cursor = 0usize;
+    while let Some((_, end, name)) = find_next_class_selector(segment, cursor) {
+        context.register(name, name);
+        cursor = end;
+    }
 }
 
 fn find_pseudo_function_from(
@@ -3771,6 +3792,7 @@ mod tests {
                     scope_behaviour: "global".into(),
                     generate_scoped_name: Some("[name]__[local]__[hash:base64:5]".into()),
                     locals_convention: "camelCaseOnly".into(),
+                    ..CssModulesOptions::default()
                 },
                 ..StyleCompileOptions::default()
             },
@@ -3866,6 +3888,58 @@ mod tests {
                 .get("fooBar")
                 .is_some_and(|value| value.contains("_fooBar_")));
         }
+    }
+
+    #[test]
+    fn compiles_css_modules_export_globals() {
+        let result = compile_style(
+            ".local :global(.global) { color: red }\n:global(.blue) { color: blue }",
+            StyleCompileOptions {
+                id: Some("test".into()),
+                filename: Some("test.css".into()),
+                modules: true,
+                modules_options: CssModulesOptions {
+                    export_globals: true,
+                    ..CssModulesOptions::default()
+                },
+                ..StyleCompileOptions::default()
+            },
+        );
+        let modules = result.modules.expect("css modules map");
+
+        assert!(modules
+            .get("local")
+            .is_some_and(|value| value.contains("_local_")));
+        assert_eq!(modules.get("global").map(String::as_str), Some("global"));
+        assert_eq!(modules.get("blue").map(String::as_str), Some("blue"));
+        assert!(result.code.contains("._local_"));
+        assert!(result.code.contains(".global"));
+        assert!(result.code.contains(".blue { color: blue }"));
+    }
+
+    #[test]
+    fn compiles_css_modules_export_globals_with_global_scope_and_convention() {
+        let result = compile_style(
+            ".foo-bar .foo_bar { color: blue }",
+            StyleCompileOptions {
+                id: Some("test".into()),
+                filename: Some("test.css".into()),
+                modules: true,
+                modules_options: CssModulesOptions {
+                    scope_behaviour: "global".into(),
+                    locals_convention: "dashesOnly".into(),
+                    export_globals: true,
+                    ..CssModulesOptions::default()
+                },
+                ..StyleCompileOptions::default()
+            },
+        );
+        let modules = result.modules.expect("css modules map");
+
+        assert_eq!(modules.get("fooBar").map(String::as_str), Some("foo-bar"));
+        assert_eq!(modules.get("foo_bar").map(String::as_str), Some("foo_bar"));
+        assert!(!modules.contains_key("foo-bar"));
+        assert_eq!(result.code, ".foo-bar .foo_bar { color: blue }");
     }
 
     #[test]
