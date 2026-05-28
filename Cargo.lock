@@ -1319,6 +1319,7 @@ dependencies = [
  "oxc_sourcemap",
  "serde",
  "serde_json",
+ "vuec_ast",
  "vuec_source",
 ]
 
