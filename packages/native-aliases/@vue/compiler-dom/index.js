@@ -148,23 +148,62 @@ function compile(src) {
   const options = arguments.length > 1 ? arguments[1] : undefined;
   if (src && typeof src === 'object' && src.type === core.NodeTypes.ROOT && Array.isArray(src.children)) {
     const payload = vue3AstCompilePayload(src, options);
-    return native.compileVue3Dom(payload.source, vue3DomNativeOptions(payload.options));
+    return projectVue3DomCompileResult(
+      native.compileVue3Dom(payload.source, vue3DomNativeOptions(payload.options, payload.source)),
+      payload.options,
+      payload.source,
+    );
   }
-  return native.compileVue3Dom(String(src || ''), vue3DomNativeOptions(options));
+  const source = String(src || '');
+  return projectVue3DomCompileResult(
+    native.compileVue3Dom(source, vue3DomNativeOptions(options, source)),
+    options,
+    source,
+  );
 }
 
 function parse(template) {
-  return native.parseVue3Dom(String(template || ''), arguments[1] || {});
+  const source = String(template || '');
+  const options = arguments.length > 1 ? arguments[1] : undefined;
+  return hydrateVue3DomAst(
+    native.parseVue3Dom(source, vue3DomNativeOptions(options, source)),
+    options,
+  );
 }
 
-function vue3DomNativeOptions(options) {
+function vue3DomNativeOptions(options, source) {
   options = options || {};
-  if (typeof options.transformHoist !== 'function') return options;
-  return {
-    ...options,
-    stringifyStatic: true,
-    __vuecStringifyStaticPreserveHelpers: true,
-  };
+  const out = {};
+  for (const key of Object.keys(options)) {
+    if (typeof options[key] !== 'function') out[key] = options[key];
+  }
+  if (typeof options.transformHoist === 'function') {
+    out.stringifyStatic = true;
+    out.__vuecStringifyStaticPreserveHelpers = true;
+  }
+  const tags = extractVueTemplateTags(String(source || ''));
+  if (hasVuePredicateOption(options, 'isVoidTag')) {
+    out.__vuecVoidTags = collectVuePredicateHits(options.isVoidTag, tags);
+  }
+  if (hasVuePredicateOption(options, 'isPreTag')) {
+    out.__vuecPreTags = collectVuePredicateHits(options.isPreTag, tags);
+  }
+  if (hasVuePredicateOption(options, 'isIgnoreNewlineTag')) {
+    out.__vuecIgnoreNewlineTags = collectVuePredicateHits(options.isIgnoreNewlineTag, tags);
+  }
+  if (typeof options.getNamespace === 'function') {
+    out.__vuecNamespaces = collectVueNamespaceHits(options.getNamespace, tags);
+    out.__vuecDomNamespaces = true;
+  }
+  if (Object.prototype.hasOwnProperty.call(options, 'ns')) {
+    out.__vuecRootNamespace = options.ns;
+  }
+  if (hasVuePredicateOption(options, 'isNativeTag')) {
+    out.__vuecNativeTags = collectVuePredicateHits(options.isNativeTag, tags);
+  }
+  out.__vuecCustomElements = collectVuePredicateHits(options.isCustomElement, tags);
+  out.__vuecBuiltInComponents = collectVuePredicateHits(options.isBuiltInComponent, tags);
+  return out;
 }
 
 function vue3AstCompilePayload(ast, options) {
@@ -197,6 +236,215 @@ function vue3AstChildrenRange(ast, source) {
   }
   if (!Number.isFinite(start) || end < start) return null;
   return { start, end };
+}
+
+function hasVuePredicateOption(options, name) {
+  return Object.prototype.hasOwnProperty.call(options, name) &&
+    (typeof options[name] === 'function' || Array.isArray(options[name]));
+}
+
+function extractVueTemplateTags(source) {
+  const tags = [];
+  const seen = new Set();
+  const pattern = /<\/?\s*([A-Za-z][A-Za-z0-9._:-]*)/g;
+  let match;
+  while ((match = pattern.exec(source))) {
+    const tag = match[1];
+    if (!seen.has(tag)) {
+      seen.add(tag);
+      tags.push(tag);
+    }
+  }
+  return tags;
+}
+
+function collectVuePredicateHits(predicate, values) {
+  if (Array.isArray(predicate)) return predicate.map(String);
+  if (typeof predicate !== 'function') return [];
+  const hits = [];
+  for (const value of values) {
+    try {
+      if (predicate(value)) hits.push(value);
+    } catch (_) {}
+  }
+  return hits;
+}
+
+function collectVueNamespaceHits(getNamespace, values) {
+  if (!getNamespace || typeof getNamespace !== 'function') return {};
+  const namespaces = {};
+  for (const value of values) {
+    try {
+      const namespace = getNamespace(value);
+      if (namespace !== undefined && namespace !== null) namespaces[value] = namespace;
+    } catch (_) {}
+  }
+  return namespaces;
+}
+
+function hydrateVue3DomAst(ast, options) {
+  emitVue3ParseDiagnostics(ast, options);
+  hydrateVue3DomNode(ast);
+  return ast;
+}
+
+function emitVue3ParseDiagnostics(ast, options) {
+  if (!ast || !Array.isArray(ast.__vuecDiagnostics)) return;
+  const onError = options && typeof options.onError === 'function'
+    ? options.onError
+    : error => { throw error; };
+  for (const diagnostic of ast.__vuecDiagnostics) {
+    const error = new SyntaxError(diagnostic.message || 'Vue compiler parse error');
+    error.code = diagnostic.code;
+    error.loc = diagnostic.loc;
+    onError(error);
+  }
+  delete ast.__vuecDiagnostics;
+}
+
+function hydrateVue3DomNode(node) {
+  if (!node || typeof node !== 'object') return node;
+  if (node.type === core.NodeTypes.ROOT) {
+    node.helpers = new Set(Array.from(node.helpers || [], helper => helperSymbolFromProjection(helper) || helper));
+    node.components = node.components || [];
+    node.directives = node.directives || [];
+    node.hoists = node.hoists || [];
+    node.imports = node.imports || [];
+    node.cached = node.cached || [];
+    node.temps = node.temps || 0;
+    if (node.codegenNode === null) node.codegenNode = undefined;
+  }
+  if (node.type === core.NodeTypes.ELEMENT) {
+    if (node.codegenNode === null) node.codegenNode = undefined;
+    if (node.isSelfClosing === null) delete node.isSelfClosing;
+  }
+  if (node.type === core.NodeTypes.ATTRIBUTE) {
+    if (node.value === null) node.value = undefined;
+  }
+  if (node.type === core.NodeTypes.DIRECTIVE) {
+    if (node.exp === null) node.exp = undefined;
+    if (node.arg === null) node.arg = undefined;
+  }
+  if (node.type === core.NodeTypes.JS_CALL_EXPRESSION && typeof node.callee === 'string') {
+    node.callee = helperSymbolFromProjection(node.callee) || node.callee;
+  }
+  if (Array.isArray(node.children)) node.children.forEach(hydrateVue3DomNode);
+  if (Array.isArray(node.props)) node.props.forEach(hydrateVue3DomNode);
+  if (Array.isArray(node.modifiers)) node.modifiers.forEach(hydrateVue3DomNode);
+  if (Array.isArray(node.arguments)) node.arguments.forEach(hydrateVue3DomNode);
+  if (Array.isArray(node.elements)) node.elements.forEach(hydrateVue3DomNode);
+  if (Array.isArray(node.properties)) node.properties.forEach(hydrateVue3DomNode);
+  if (Array.isArray(node.params)) node.params.forEach(hydrateVue3DomNode);
+  if (Array.isArray(node.returns)) node.returns.forEach(hydrateVue3DomNode);
+  if (Array.isArray(node.hoists)) node.hoists.forEach(hydrateVue3DomNode);
+  if (Array.isArray(node.imports)) node.imports.forEach(hydrateVue3DomNode);
+  if (Array.isArray(node.cached)) node.cached.forEach(hydrateVue3DomNode);
+  if (node.content && typeof node.content === 'object') hydrateVue3DomNode(node.content);
+  if (node.codegenNode && typeof node.codegenNode === 'object') hydrateVue3DomNode(node.codegenNode);
+  if (node.value && typeof node.value === 'object') hydrateVue3DomNode(node.value);
+  if (node.key && typeof node.key === 'object') hydrateVue3DomNode(node.key);
+  if (node.exp && typeof node.exp === 'object') hydrateVue3DomNode(node.exp);
+  if (node.arg && typeof node.arg === 'object') hydrateVue3DomNode(node.arg);
+  return node;
+}
+
+function helperSymbolFromProjection(name) {
+  if (!name) return undefined;
+  for (const symbol of Reflect.ownKeys(helperNameMap)) {
+    if (typeof symbol === 'symbol' && helperNameMap[symbol] === name) return symbol;
+  }
+  for (const value of Object.values(core || {})) {
+    if (typeof value === 'symbol' && helperNameMap[value] === name) return value;
+  }
+  return undefined;
+}
+
+function projectVue3DomCompileResult(result, options, source) {
+  emitVue3CompileDiagnostics(result, options, source);
+  return result;
+}
+
+function emitVue3CompileDiagnostics(result, options, source) {
+  if (!result || !Array.isArray(result.diagnostics)) return;
+  const onError = options && typeof options.onError === 'function'
+    ? options.onError
+    : null;
+  const onWarn = options && typeof options.onWarn === 'function'
+    ? options.onWarn
+    : null;
+  for (const diagnostic of result.diagnostics) {
+    const severity = String(diagnostic.severity || '').toLowerCase();
+    if (severity === 'error') {
+      const error = vue3DiagnosticError(diagnostic, source);
+      if (onError) {
+        onError(error);
+      } else {
+        throw error;
+      }
+    } else if (severity === 'warning' && onWarn) {
+      onWarn(vue3DiagnosticError(diagnostic, source));
+    }
+  }
+  delete result.diagnostics;
+}
+
+function vue3DiagnosticError(diagnostic, source) {
+  const code = diagnostic && diagnostic.code != null
+    ? Number(diagnostic.code)
+    : 0;
+  const loc = vue3DiagnosticLoc(diagnostic, source);
+  const error = new SyntaxError(String(diagnostic && diagnostic.message || 'Vue compiler error'));
+  error.code = Number.isNaN(code) ? diagnostic.code : code;
+  error.loc = loc;
+  return error;
+}
+
+function vue3DiagnosticLoc(diagnostic, source) {
+  const span = diagnostic && diagnostic.span;
+  if (!span || !span.start || !span.end) {
+    return {
+      start: { line: 1, column: 1, offset: 0 },
+      end: { line: 1, column: 1, offset: 0 },
+      source: '',
+    };
+  }
+  const start = Number(span.start) || 0;
+  const end = Math.max(start, Number(span.end) || start);
+  return vue3SourceLocValue(String(source || ''), start, end);
+}
+
+function vue3SourceLocValue(source, start, end) {
+  const localStart = Math.min(start, source.length);
+  const localEnd = Math.max(localStart, Math.min(end, source.length));
+  return {
+    start: vue3Position(source, start),
+    end: vue3Position(source, end),
+    source: source.slice(localStart, localEnd),
+  };
+}
+
+function vue3Position(source, offset) {
+  let line = 1;
+  let column = 1;
+  let utf16Offset = 0;
+  for (let index = 0; index < source.length && index < offset;) {
+    const codePoint = source.codePointAt(index);
+    const size = codePoint > 0xffff ? 2 : 1;
+    if (codePoint === 10) {
+      line += 1;
+      column = 1;
+    } else {
+      column += size;
+    }
+    utf16Offset += size;
+    index += size;
+  }
+  if (offset > source.length) {
+    const extra = offset - source.length;
+    column += extra;
+    utf16Offset += extra;
+  }
+  return { offset: utf16Offset, line, column };
 }
 
 function createDOMCompilerError(code, loc) {
