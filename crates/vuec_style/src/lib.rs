@@ -1904,7 +1904,7 @@ fn compile_css_modules(source: &str, options: &StyleCompileOptions) -> CssModule
     let code = rewrite_css_modules_items(source, &mut context, CssBlockContext::Root);
     CssModulesCompileResult {
         code,
-        modules: context.modules,
+        modules: context.modules(),
     }
 }
 
@@ -1922,7 +1922,8 @@ struct CssModulesContext<'a> {
     generate_scoped_name: Option<&'a str>,
     locals_convention: CssModulesLocalsConvention,
     export_globals: bool,
-    modules: BTreeMap<String, String>,
+    raw_exports: Vec<CssModuleExport>,
+    raw_export_index: BTreeMap<String, usize>,
 }
 
 impl<'a> CssModulesContext<'a> {
@@ -1938,7 +1939,8 @@ impl<'a> CssModulesContext<'a> {
                 &options.modules_options.locals_convention,
             ),
             export_globals: options.modules_options.export_globals,
-            modules: BTreeMap::new(),
+            raw_exports: Vec::new(),
+            raw_export_index: BTreeMap::new(),
         }
     }
 
@@ -1957,31 +1959,98 @@ impl<'a> CssModulesContext<'a> {
         )
     }
 
-    fn register(&mut self, local: &str, scoped: &str) {
+    fn register_local(&mut self, local: &str, scoped: &str) {
+        self.push_raw_export_value(local, scoped);
+    }
+
+    fn register_global(&mut self, name: &str) {
+        self.set_raw_export_values(name, vec![name.to_string()]);
+    }
+
+    fn compose(&mut self, local: &str, values: Vec<String>) {
+        for value in values {
+            self.push_raw_export_value(local, &value);
+        }
+    }
+
+    fn raw_export_values(&self, local: &str) -> Option<Vec<String>> {
+        self.raw_export_index
+            .get(local)
+            .map(|index| self.raw_exports[*index].values.clone())
+    }
+
+    fn push_raw_export_value(&mut self, local: &str, value: &str) {
+        if let Some(index) = self.raw_export_index.get(local).copied() {
+            let export = &mut self.raw_exports[index];
+            if !export.values.iter().any(|existing| existing == value) {
+                export.values.push(value.to_string());
+            }
+            return;
+        }
+
+        let index = self.raw_exports.len();
+        self.raw_exports.push(CssModuleExport {
+            local: local.to_string(),
+            values: vec![value.to_string()],
+        });
+        self.raw_export_index.insert(local.to_string(), index);
+    }
+
+    fn set_raw_export_values(&mut self, local: &str, values: Vec<String>) {
+        if let Some(index) = self.raw_export_index.get(local).copied() {
+            self.raw_exports[index].values = values;
+            return;
+        }
+
+        let index = self.raw_exports.len();
+        self.raw_exports.push(CssModuleExport {
+            local: local.to_string(),
+            values,
+        });
+        self.raw_export_index.insert(local.to_string(), index);
+    }
+
+    fn modules(&self) -> BTreeMap<String, String> {
+        let mut modules = BTreeMap::new();
+        for export in &self.raw_exports {
+            let value = export.values.join(" ");
+            self.register_module_export(&mut modules, &export.local, &value);
+        }
+        modules
+    }
+
+    fn register_module_export(
+        &self,
+        modules: &mut BTreeMap<String, String>,
+        local: &str,
+        value: &str,
+    ) {
         match self.locals_convention {
             CssModulesLocalsConvention::AsIs => {
-                self.modules.insert(local.to_string(), scoped.to_string());
+                modules.insert(local.to_string(), value.to_string());
             }
             CssModulesLocalsConvention::CamelCase => {
-                self.modules.insert(local.to_string(), scoped.to_string());
-                self.modules
-                    .insert(camel_case_css_module_key(local), scoped.to_string());
+                modules.insert(local.to_string(), value.to_string());
+                modules.insert(camel_case_css_module_key(local), value.to_string());
             }
             CssModulesLocalsConvention::CamelCaseOnly => {
-                self.modules
-                    .insert(camel_case_css_module_key(local), scoped.to_string());
+                modules.insert(camel_case_css_module_key(local), value.to_string());
             }
             CssModulesLocalsConvention::Dashes => {
-                self.modules.insert(local.to_string(), scoped.to_string());
-                self.modules
-                    .insert(dashes_css_module_key(local), scoped.to_string());
+                modules.insert(local.to_string(), value.to_string());
+                modules.insert(dashes_css_module_key(local), value.to_string());
             }
             CssModulesLocalsConvention::DashesOnly => {
-                self.modules
-                    .insert(dashes_css_module_key(local), scoped.to_string());
+                modules.insert(dashes_css_module_key(local), value.to_string());
             }
         }
     }
+}
+
+#[derive(Debug)]
+struct CssModuleExport {
+    local: String,
+    values: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2068,6 +2137,7 @@ fn rewrite_css_modules_items(
             break;
         };
         let body = &source[delimiter + 1..close];
+        let compose_local_names = css_module_composable_local_names(prelude, context);
         output.push_str(&rewrite_css_modules_prelude(
             prelude,
             context,
@@ -2083,7 +2153,12 @@ fn rewrite_css_modules_items(
             };
             output.push_str(&rewrite_css_modules_items(body, context, next_context));
         } else {
-            output.push_str(body);
+            output.push_str(&rewrite_css_module_declarations(
+                body,
+                context,
+                block_context,
+                &compose_local_names,
+            ));
         }
         output.push('}');
         cursor = close + 1;
@@ -2177,7 +2252,7 @@ fn rewrite_css_module_default_segment(
     while let Some((start, end, name)) = find_next_class_selector(segment, cursor) {
         output.push_str(&segment[cursor..start]);
         let scoped = context.scoped_name(name);
-        context.register(name, &scoped);
+        context.register_local(name, &scoped);
         output.push('.');
         output.push_str(&scoped);
         cursor = end;
@@ -2189,8 +2264,160 @@ fn rewrite_css_module_default_segment(
 fn register_css_module_globals(segment: &str, context: &mut CssModulesContext<'_>) {
     let mut cursor = 0usize;
     while let Some((_, end, name)) = find_next_class_selector(segment, cursor) {
-        context.register(name, name);
+        context.register_global(name);
         cursor = end;
+    }
+}
+
+fn rewrite_css_module_declarations(
+    body: &str,
+    context: &mut CssModulesContext<'_>,
+    block_context: CssBlockContext,
+    compose_local_names: &[String],
+) -> String {
+    if matches!(block_context, CssBlockContext::Keyframes) {
+        return body.to_string();
+    }
+
+    let mut output = String::new();
+    let mut segment_start = 0usize;
+    for semicolon in top_level_semicolons(body) {
+        rewrite_css_module_declaration_segment(
+            &body[segment_start..semicolon],
+            context,
+            compose_local_names,
+            true,
+            &mut output,
+        );
+        segment_start = semicolon + 1;
+    }
+    rewrite_css_module_declaration_segment(
+        &body[segment_start..],
+        context,
+        compose_local_names,
+        false,
+        &mut output,
+    );
+    output
+}
+
+fn rewrite_css_module_declaration_segment(
+    segment: &str,
+    context: &mut CssModulesContext<'_>,
+    compose_local_names: &[String],
+    has_semicolon: bool,
+    output: &mut String,
+) {
+    let Some(colon) = find_top_level_colon(segment) else {
+        output.push_str(segment);
+        if has_semicolon {
+            output.push(';');
+        }
+        return;
+    };
+    let prop = segment[..colon].trim();
+    if !prop.eq_ignore_ascii_case("composes") && !prop.eq_ignore_ascii_case("compose-with") {
+        output.push_str(segment);
+        if has_semicolon {
+            output.push(';');
+        }
+        return;
+    }
+
+    if compose_local_names.is_empty() {
+        output.push_str(segment);
+        if has_semicolon {
+            output.push(';');
+        }
+        return;
+    }
+    let composed_values = css_module_composed_values(&segment[colon + 1..], context);
+    if composed_values.is_empty() {
+        output.push_str(segment);
+        if has_semicolon {
+            output.push(';');
+        }
+        return;
+    }
+
+    for local_name in compose_local_names {
+        context.compose(local_name, composed_values.clone());
+    }
+}
+
+fn css_module_composable_local_names(
+    prelude: &str,
+    context: &CssModulesContext<'_>,
+) -> Vec<String> {
+    if prelude.starts_with('@') {
+        return Vec::new();
+    }
+    let mut names = Vec::new();
+    for selector in split_selector_list(prelude) {
+        let Some(name) =
+            css_module_composable_local_name(selector.trim(), context.is_local_default())
+        else {
+            return Vec::new();
+        };
+        names.push(name);
+    }
+    names
+}
+
+fn css_module_composable_local_name(selector: &str, default_local: bool) -> Option<String> {
+    if let Some(local) = find_pseudo_function(selector, &[":local", "::v-local"]) {
+        if local.start == 0 && local.end == selector.len() {
+            let (open, close) = local.parens?;
+            return css_module_single_class_selector_name(selector[open + 1..close].trim());
+        }
+    }
+    if default_local {
+        css_module_single_class_selector_name(selector)
+    } else {
+        None
+    }
+}
+
+fn css_module_single_class_selector_name(selector: &str) -> Option<String> {
+    let (start, end, name) = find_next_class_selector(selector, 0)?;
+    (start == 0 && end == selector.len()).then(|| name.to_string())
+}
+
+fn css_module_composed_values(value: &str, context: &CssModulesContext<'_>) -> Vec<String> {
+    let mut composed = Vec::new();
+    for part in value.split(',') {
+        for class_name in part.split_whitespace() {
+            if let Some(global) = parse_css_module_global_compose(class_name) {
+                push_unique_css_module_value(&mut composed, global);
+            } else if let Some(values) = context.raw_export_values(class_name) {
+                for value in values {
+                    push_unique_css_module_value(&mut composed, value);
+                }
+            } else if class_name == "from"
+                || class_name.starts_with('"')
+                || class_name.starts_with('\'')
+            {
+                return Vec::new();
+            } else {
+                return Vec::new();
+            }
+        }
+    }
+    composed
+}
+
+fn parse_css_module_global_compose(value: &str) -> Option<String> {
+    let inner = value.strip_prefix("global(")?.strip_suffix(')')?;
+    if inner.is_empty() {
+        None
+    } else {
+        Some(inner.to_string())
+    }
+}
+
+fn push_unique_css_module_value(values: &mut Vec<String>, value: String) {
+    if !values.iter().any(|existing| existing == &value) {
+        values.push(value);
     }
 }
 
@@ -3940,6 +4167,67 @@ mod tests {
         assert_eq!(modules.get("foo_bar").map(String::as_str), Some("foo_bar"));
         assert!(!modules.contains_key("foo-bar"));
         assert_eq!(result.code, ".foo-bar .foo_bar { color: blue }");
+    }
+
+    #[test]
+    fn compiles_css_modules_local_composes() {
+        let result = compile_style(
+            ".base { color: blue }\n.button { composes: base; color: red }",
+            StyleCompileOptions {
+                id: Some("test".into()),
+                filename: Some("test.css".into()),
+                modules: true,
+                ..StyleCompileOptions::default()
+            },
+        );
+        let modules = result.modules.expect("css modules map");
+        let base = modules.get("base").expect("base export");
+        let button = modules.get("button").expect("button export");
+
+        assert!(base.contains("_base_"));
+        assert!(button.contains("_button_"));
+        assert!(button.contains(base));
+        assert!(!result.code.contains("composes"));
+        assert!(result.code.contains("._button_"));
+    }
+
+    #[test]
+    fn compiles_css_modules_global_and_chained_composes() {
+        let result = compile_style(
+            ".base { composes: global(reset); }\n.button { composes: base global(extra); }",
+            StyleCompileOptions {
+                id: Some("test".into()),
+                filename: Some("test.css".into()),
+                modules: true,
+                ..StyleCompileOptions::default()
+            },
+        );
+        let modules = result.modules.expect("css modules map");
+        let base = modules.get("base").expect("base export");
+        let button = modules.get("button").expect("button export");
+
+        assert!(base.contains("_base_"));
+        assert!(base.contains("reset"));
+        assert!(button.contains("_button_"));
+        assert!(button.contains(base));
+        assert!(button.contains("extra"));
+        assert!(!result.code.contains("composes"));
+    }
+
+    #[test]
+    fn leaves_css_modules_unsupported_composes_declarations() {
+        let result = compile_style(
+            ".button.extra { composes: base; }\n.late { composes: next; }\n.next { color: blue }",
+            StyleCompileOptions {
+                id: Some("test".into()),
+                filename: Some("test.css".into()),
+                modules: true,
+                ..StyleCompileOptions::default()
+            },
+        );
+
+        assert!(result.code.contains("composes: base"));
+        assert!(result.code.contains("composes: next"));
     }
 
     #[test]

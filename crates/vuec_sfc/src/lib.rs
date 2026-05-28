@@ -8358,6 +8358,21 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
     }
 
     #[test]
+    fn compile_style_returns_css_modules_composes_exports() {
+        let mut compiler = SfcCompiler::new();
+        let source = r#"<style module>.base { color: blue }.button { composes: base global(extra); color: red }</style>"#;
+        let descriptor = compiler.parse("modules.vue", source);
+        let result = compiler.compile_style(&descriptor, SfcStyleCompileOptions::default());
+        let modules = result.modules.expect("css modules");
+        let base = modules.get("base").expect("base export");
+        let button = modules.get("button").expect("button export");
+
+        assert!(button.contains(base));
+        assert!(button.contains("extra"));
+        assert!(!result.code.contains("composes"));
+    }
+
+    #[test]
     fn compile_style_forwards_scss_preprocess_options_and_dependencies() {
         let dir = tempfile::tempdir().expect("temp dir");
         let filename = dir.path().join("component.vue");
