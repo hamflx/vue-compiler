@@ -1,0 +1,108 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  compatibility:
+    name: Compatibility (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Run Rust tests
+        run: cargo test --workspace
+
+      - name: Verify official lock
+        run: cargo xtask verify-official-lock
+
+      - name: Sync official tests
+        run: cargo xtask sync-official-tests --locked
+
+      - name: Verify vendored lock
+        run: cargo xtask verify-official-lock --require-vendor
+
+      - name: Verify generated alias API
+        run: |
+          cargo xtask export-api --all
+          cargo xtask diff-api --all
+
+      - name: Verify option and output contracts
+        run: |
+          cargo xtask generate-option-matrix --all
+          cargo xtask audit-option-matrix --all
+          cargo xtask run-option-matrix --all
+          cargo xtask run-output-contract --all
+
+      - name: Verify generated alias conformance
+        run: |
+          cargo xtask verify-npm-alias --all
+          cargo xtask run-conformance --all
+
+      - name: Verify NAPI package aliases
+        run: |
+          cargo xtask verify-napi
+          cargo xtask verify-napi-alias
+          cargo xtask verify-napi-api
+          cargo xtask verify-napi-platform
+          cargo xtask run-napi-option-matrix --all
+          cargo xtask run-napi-output-contract --all
+          cargo xtask run-napi-conformance --all
+
+  product-smoke:
+    name: Product Smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Verify CLI and release metadata
+        run: |
+          cargo xtask verify-cli
+          cargo xtask bench
+          cargo xtask verify-incremental
+          cargo xtask verify-parallel
+          cargo xtask verify-ast-cache
+          cargo xtask verify-arena
+          cargo xtask verify-string-interning
+          cargo xtask verify-release-docs
+          cargo xtask verify-public-api-docs
+          cargo xtask verify-crate-metadata
+          cargo xtask verify-supply-chain
