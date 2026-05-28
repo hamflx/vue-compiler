@@ -1822,7 +1822,10 @@ fn rewrite_single_selector(selector: &str, scope_id: &str) -> String {
     if let Some(deep) = find_deep_combinator(selector) {
         return rewrite_deep_selector(&selector[..deep.start], &selector[deep.end..], scope_id);
     }
-    if let Some(deep) = find_pseudo_function(selector, &[":deep", "::v-deep"]) {
+    if let Some(rewritten) = rewrite_deep_container_selector(selector, scope_id) {
+        return rewritten;
+    }
+    if let Some(deep) = find_top_level_pseudo_function(selector, &[":deep", "::v-deep"]) {
         if let Some((open, close)) = deep.parens {
             let mut rhs = selector[open + 1..close].trim().to_string();
             rhs.push_str(&selector[close + 1..]);
@@ -1834,6 +1837,73 @@ fn rewrite_single_selector(selector: &str, scope_id: &str) -> String {
         return rewritten;
     }
     inject_scope_attribute(selector, scope_id)
+}
+
+fn rewrite_deep_container_selector(selector: &str, scope_id: &str) -> Option<String> {
+    let names = [":is", ":where", ":not", ":has"];
+    let container = find_top_level_pseudo_function(selector, &names)?;
+    let (open, close) = container.parens?;
+    let inner = &selector[open + 1..close];
+    if !selector_has_deep(inner) {
+        return None;
+    }
+
+    let name = matched_selector_name(selector, container.start, &names)?;
+    let prefix = &selector[..container.start];
+    let suffix = &selector[close + 1..];
+    let branches = split_selector_list(inner)
+        .into_iter()
+        .map(str::trim)
+        .collect::<Vec<_>>();
+    let has_deep = branches.iter().any(|branch| selector_has_deep(branch));
+    let has_normal = branches.iter().any(|branch| !selector_has_deep(branch));
+    let can_split = matches!(name, ":is" | ":where" | ":has");
+    let should_split = can_split
+        && has_deep
+        && has_normal
+        && prefix.trim().is_empty()
+        && !suffix.trim().is_empty();
+
+    if should_split {
+        let selectors = branches
+            .into_iter()
+            .map(|branch| {
+                let branch_selector = format!("{prefix}{name}({branch}){suffix}");
+                if selector_has_deep(branch) {
+                    let rewritten_branch = rewrite_single_selector(branch, scope_id);
+                    format!("{prefix}{name}({rewritten_branch}){suffix}")
+                } else {
+                    inject_scope_attribute(&branch_selector, scope_id)
+                }
+            })
+            .collect::<Vec<_>>();
+        return Some(selectors.join(", "));
+    }
+
+    let rewritten_inner = branches
+        .into_iter()
+        .map(|branch| {
+            if selector_has_deep(branch) {
+                rewrite_single_selector(branch, scope_id)
+            } else {
+                branch.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!("{prefix}{name}({rewritten_inner}){suffix}"))
+}
+
+fn selector_has_deep(selector: &str) -> bool {
+    find_deep_combinator(selector).is_some()
+        || find_pseudo_function(selector, &[":deep", "::v-deep"]).is_some()
+}
+
+fn matched_selector_name<'a>(selector: &str, start: usize, names: &'a [&str]) -> Option<&'a str> {
+    names
+        .iter()
+        .copied()
+        .find(|name| selector[start..].starts_with(name))
 }
 
 fn rewrite_slotted_selector(selector: &str, scope_id: &str) -> Option<String> {
@@ -2569,6 +2639,52 @@ mod tests {
                 "data-v-test",
             ),
             ":has(:global(.foo), .bar) .baz[data-v-test] { color: red; }"
+        );
+    }
+
+    #[test]
+    fn rewrites_nested_deep_container_pseudos_like_vue3() {
+        assert_eq!(
+            rewrite_scoped_selectors(":is(.foo :deep(.bar)) { color: red; }", "data-v-test"),
+            ":is(.foo[data-v-test] .bar) { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(":where(.foo :deep(.bar)) { color: red; }", "data-v-test",),
+            ":where(.foo[data-v-test] .bar) { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(":is(:deep(.foo)) .bar { color: red; }", "data-v-test"),
+            ":is([data-v-test] .foo) .bar { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(":where(:deep(.foo)) .bar { color: red; }", "data-v-test",),
+            ":where([data-v-test] .foo) .bar { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(":is(:deep(.foo), .bar) .baz { color: red; }", "data-v-test",),
+            ":is([data-v-test] .foo) .baz, :is(.bar) .baz[data-v-test] { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(
+                ":where(:deep(.foo), .bar) .baz { color: red; }",
+                "data-v-test",
+            ),
+            ":where([data-v-test] .foo) .baz, :where(.bar) .baz[data-v-test] { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(":not(:deep(.foo)) .bar { color: red; }", "data-v-test"),
+            ":not([data-v-test] .foo) .bar { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(":has(:deep(.foo)) .bar { color: red; }", "data-v-test"),
+            ":has([data-v-test] .foo) .bar { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(
+                ":has(:deep(.foo), .bar) .baz { color: red; }",
+                "data-v-test",
+            ),
+            ":has([data-v-test] .foo) .baz, :has(.bar) .baz[data-v-test] { color: red; }"
         );
     }
 
