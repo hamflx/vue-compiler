@@ -1645,9 +1645,11 @@ fn rewrite_single_selector(selector: &str, scope_id: &str) -> String {
     if selector.is_empty() {
         return selector.to_string();
     }
-    if let Some(global) = find_pseudo_function(selector, &[":global", "::v-global"]) {
+    if let Some(global) = find_top_level_pseudo_function(selector, &[":global", "::v-global"]) {
         if let Some((open, close)) = global.parens {
-            return selector[open + 1..close].trim().to_string();
+            return first_selector_branch(selector[open + 1..close].trim())
+                .trim()
+                .to_string();
         }
     }
     if let Some(deep) = find_deep_combinator(selector) {
@@ -2344,6 +2346,62 @@ mod tests {
         assert_eq!(
             rewrite_scoped_selectors(".a :slotted(* + .foo) { color: red; }", "data-v-test"),
             ".a  + .foo[data-v-test-s] { color: red; }"
+        );
+    }
+
+    #[test]
+    fn rewrites_top_level_global_selectors_like_vue3() {
+        assert_eq!(
+            rewrite_scoped_selectors(":global(.foo) { color: red; }", "data-v-test"),
+            ".foo { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors("::v-global(.foo .bar) { color: red; }", "data-v-test"),
+            ".foo .bar { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(
+                ".baz .qux ::v-global(.foo .bar) { color: red; }",
+                "data-v-test",
+            ),
+            ".foo .bar { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(".a :global(.b) .c { color: red; }", "data-v-test"),
+            ".b { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(":global(.foo, .bar) { color: red; }", "data-v-test"),
+            ".foo { color: red; }"
+        );
+    }
+
+    #[test]
+    fn leaves_nested_global_pseudo_scoped_on_outer_selector() {
+        assert_eq!(
+            rewrite_scoped_selectors(
+                ":is(:global(.foo), .bar) .baz { color: red; }",
+                "data-v-test",
+            ),
+            ":is(:global(.foo), .bar) .baz[data-v-test] { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(
+                ":where(:global(.foo), .bar) .baz { color: red; }",
+                "data-v-test",
+            ),
+            ":where(:global(.foo), .bar) .baz[data-v-test] { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(":not(:global(.foo)) .bar { color: red; }", "data-v-test"),
+            ":not(:global(.foo)) .bar[data-v-test] { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(
+                ":has(:global(.foo), .bar) .baz { color: red; }",
+                "data-v-test",
+            ),
+            ":has(:global(.foo), .bar) .baz[data-v-test] { color: red; }"
         );
     }
 
