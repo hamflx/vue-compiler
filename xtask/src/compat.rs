@@ -4359,6 +4359,13 @@ const vue3CoreRuntime = (() => {
     return parser.parse(source, options);
   };
   runtime.createTransformContext = function createTransformContext(root, options = {}) {
+    const canonicalHelpers = new Map();
+    const canonicalHelper = name => {
+      const helperName = runtime.helperNameMap[name];
+      if (!helperName) return name;
+      if (!canonicalHelpers.has(helperName)) canonicalHelpers.set(helperName, name);
+      return canonicalHelpers.get(helperName);
+    };
     const context = {
       filename: options.filename || '',
       selfName: options.filename ? selfNameFromFilename(options.filename) : null,
@@ -4400,10 +4407,12 @@ const vue3CoreRuntime = (() => {
       childIndex: 0,
       inVOnce: false,
       helper(name) {
+        name = canonicalHelper(name);
         context.helpers.set(name, (context.helpers.get(name) || 0) + 1);
         return name;
       },
       removeHelper(name) {
+        name = canonicalHelper(name);
         const count = context.helpers.get(name);
         if (count === 1) context.helpers.delete(name);
         else if (count) context.helpers.set(name, count - 1);

@@ -668,6 +668,13 @@ function createTemplateLiteral(elements) {
 }
 
 function createTransformContext(root, options) {
+  const canonicalHelpers = new Map();
+  const canonicalHelper = name => {
+    const helperName = helperNameMap[name];
+    if (!helperName) return name;
+    if (!canonicalHelpers.has(helperName)) canonicalHelpers.set(helperName, name);
+    return canonicalHelpers.get(helperName);
+  };
   return {
     root,
     options: options || {},
@@ -709,10 +716,12 @@ function createTransformContext(root, options) {
     transformHoist: (options || {}).transformHoist || null,
     inVOnce: false,
     helper(name) {
+      name = canonicalHelper(name);
       this.helpers.set(name, (this.helpers.get(name) || 0) + 1);
       return name;
     },
     removeHelper(name) {
+      name = canonicalHelper(name);
       const count = this.helpers.get(name);
       if (count > 1) this.helpers.set(name, count - 1);
       else this.helpers.delete(name);
