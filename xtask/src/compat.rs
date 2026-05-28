@@ -229,25 +229,38 @@ pub struct ReportMetadata {
     pub os: String,
     pub rustc: Option<String>,
     pub node: Option<String>,
+    pub official_commits: BTreeMap<String, String>,
+    pub rust_compiler_commit: Option<String>,
     pub created_unix: u64,
 }
 
 impl ReportMetadata {
     fn capture() -> Self {
-        Self {
+        let mut metadata = Self {
             lock_hash: None,
             os: std::env::consts::OS.to_string(),
             rustc: command_output("rustc", &["--version"]),
             node: command_output("node", &["--version"]),
+            official_commits: BTreeMap::new(),
+            rust_compiler_commit: command_output("git", &["rev-parse", "HEAD"]),
             created_unix: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map(|duration| duration.as_secs())
                 .unwrap_or_default(),
+        };
+        if let Some((lock_hash, lock)) = default_official_lock_context() {
+            metadata = metadata.with_lock_context(Some(lock_hash), Some(&lock));
         }
+        metadata
     }
 
-    fn with_lock_hash(mut self, lock_hash: Option<String>) -> Self {
+    fn with_lock_context(
+        mut self,
+        lock_hash: Option<String>,
+        lock: Option<&OfficialRevisionsLock>,
+    ) -> Self {
         self.lock_hash = lock_hash;
+        self.official_commits = lock.map(official_commit_map).unwrap_or_default();
         self
     }
 }
@@ -1332,7 +1345,7 @@ pub fn verify_official_lock(path: &Path, vendor_dir: &Path, require_vendor: bool
                 ReportStatus::Fail
             };
             let mut report = JsonReport::new("verify_official_lock", status);
-            report.metadata = report.metadata.with_lock_hash(lock_hash);
+            report.metadata = report.metadata.with_lock_context(lock_hash, Some(&lock));
             report
                 .with_items(items)
                 .with_violations(violations)
@@ -1345,7 +1358,7 @@ pub fn verify_official_lock(path: &Path, vendor_dir: &Path, require_vendor: bool
         }
         Err(err) => {
             let mut report = JsonReport::new("verify_official_lock", ReportStatus::Fail);
-            report.metadata = report.metadata.with_lock_hash(lock_hash);
+            report.metadata = report.metadata.with_lock_context(lock_hash, None);
             report
                 .with_violations(vec![format!("failed to read/parse lock file: {err}")])
                 .with_note(format!(
@@ -1371,7 +1384,11 @@ pub fn sync_official_tests(path: &Path, locked: bool, out_dir: &Path) -> JsonRep
             ] {
                 let dir = out_dir.join(version_line.as_str());
                 if let Err(err) = sync_git_checkout(&baseline.repo, &baseline.rev, &dir) {
-                    return JsonReport::new("sync_official_tests", ReportStatus::Fail)
+                    let mut report = JsonReport::new("sync_official_tests", ReportStatus::Fail);
+                    report.metadata = report
+                        .metadata
+                        .with_lock_context(lock_hash.clone(), Some(&lock));
+                    return report
                         .with_violations(vec![format!(
                             "failed to sync {} into {}: {err}",
                             baseline.repo,
@@ -1390,7 +1407,11 @@ pub fn sync_official_tests(path: &Path, locked: bool, out_dir: &Path) -> JsonRep
                     "locked": locked,
                 });
                 if let Err(err) = write_json(&metadata_path, &metadata) {
-                    return JsonReport::new("sync_official_tests", ReportStatus::Fail)
+                    let mut report = JsonReport::new("sync_official_tests", ReportStatus::Fail);
+                    report.metadata = report
+                        .metadata
+                        .with_lock_context(lock_hash.clone(), Some(&lock));
+                    return report
                         .with_violations(vec![format!(
                             "failed to write {}: {err}",
                             metadata_path.display()
@@ -1406,7 +1427,7 @@ pub fn sync_official_tests(path: &Path, locked: bool, out_dir: &Path) -> JsonRep
                 ));
             }
             let mut report = JsonReport::new("sync_official_tests", ReportStatus::Pass);
-            report.metadata = report.metadata.with_lock_hash(lock_hash);
+            report.metadata = report.metadata.with_lock_context(lock_hash, Some(&lock));
             report
                 .with_scope(&SelectionArgs {
                     all: true,
@@ -1422,7 +1443,7 @@ pub fn sync_official_tests(path: &Path, locked: bool, out_dir: &Path) -> JsonRep
         }
         Err(err) => {
             let mut report = JsonReport::new("sync_official_tests", ReportStatus::Fail);
-            report.metadata = report.metadata.with_lock_hash(lock_hash);
+            report.metadata = report.metadata.with_lock_context(lock_hash, None);
             report
                 .with_violations(vec![format!("failed to read/parse lock file: {err}")])
                 .with_note(format!("lock: {}", path.display()))
@@ -1442,7 +1463,7 @@ pub fn export_api(scope: &SelectionArgs) -> JsonReport {
     if sides.contains(&ApiManifestSide::Rust) {
         if let Err(err) = generate_rust_alias_packages(&targets) {
             let mut report = JsonReport::new("export_api", ReportStatus::Fail);
-            report.metadata = report.metadata.with_lock_hash(lock_hash);
+            report.metadata = report.metadata.with_lock_context(lock_hash, lock.as_ref());
             return report.with_scope(scope).with_violations(vec![format!(
                 "failed to generate Rust alias packages: {err:#}"
             )]);
@@ -1527,7 +1548,7 @@ pub fn export_api(scope: &SelectionArgs) -> JsonReport {
         }
     }
     let mut report = JsonReport::new("export_api", ReportStatus::Pending);
-    report.metadata = report.metadata.with_lock_hash(lock_hash);
+    report.metadata = report.metadata.with_lock_context(lock_hash, lock.as_ref());
     report
         .with_scope(scope)
         .with_items(items)
@@ -1547,7 +1568,9 @@ pub fn diff_api(scope: &SelectionArgs) -> JsonReport {
     let targets = select_targets(scope);
     let mut items = Vec::new();
     let mut violations = Vec::new();
-    let lock_hash = file_sha256(&PathBuf::from("compat/official-revisions.lock")).ok();
+    let lock_path = PathBuf::from("compat/official-revisions.lock");
+    let lock_hash = file_sha256(&lock_path).ok();
+    let lock = load_official_lock(&lock_path).ok();
     let allowed = load_allowed_api_diffs(&PathBuf::from("compat/api/allowed-diff.json"));
     for target in targets {
         let official_path = target.relative_api_manifest_path(ApiManifestSide::Official.as_str());
@@ -1607,7 +1630,7 @@ pub fn diff_api(scope: &SelectionArgs) -> JsonReport {
         }
     }
     let mut report = JsonReport::new("diff_api", ReportStatus::Pending);
-    report.metadata = report.metadata.with_lock_hash(lock_hash);
+    report.metadata = report.metadata.with_lock_context(lock_hash, lock.as_ref());
     report
         .with_scope(scope)
         .with_items(items)
@@ -8765,7 +8788,7 @@ fn run_option_matrix_with_backend(scope: &SelectionArgs, backend: AliasBackend) 
         Ok(lock) => lock,
         Err(err) => {
             let mut report = JsonReport::new(backend.option_command(), ReportStatus::Fail);
-            report.metadata = report.metadata.with_lock_hash(lock_hash);
+            report.metadata = report.metadata.with_lock_context(lock_hash, None);
             return report
                 .with_scope(scope)
                 .with_violations(vec![format!("failed to load official lock: {err}")]);
@@ -8941,6 +8964,7 @@ fn run_option_matrix_with_backend(scope: &SelectionArgs, backend: AliasBackend) 
             "rows": row_reports,
         }));
     }
+    let metadata = ReportMetadata::capture().with_lock_context(lock_hash.clone(), Some(&lock));
     let report_path = PathBuf::from("target")
         .join("conformance")
         .join(lock_hash.as_deref().unwrap_or("unknown-lock"))
@@ -8952,6 +8976,7 @@ fn run_option_matrix_with_backend(scope: &SelectionArgs, backend: AliasBackend) 
     }
     let report_body = serde_json::json!({
         "command": backend.option_command(),
+        "metadata": metadata,
         "lock_hash": lock_hash,
         "alias_backend": backend.name(),
         "targets": target_reports,
@@ -8961,7 +8986,7 @@ fn run_option_matrix_with_backend(scope: &SelectionArgs, backend: AliasBackend) 
         violations.push(format!("failed to write {}: {err}", report_path.display()));
     }
     let mut report = JsonReport::new(backend.option_command(), aggregate_status(&items));
-    report.metadata = report.metadata.with_lock_hash(lock_hash);
+    report.metadata = metadata;
     report
         .with_scope(scope)
         .with_items(items)
@@ -8986,6 +9011,8 @@ pub fn run_napi_conformance(args: &ConformanceArgs) -> JsonReport {
 fn run_conformance_with_backend(args: &ConformanceArgs, backend: AliasBackend) -> JsonReport {
     let lock_hash = file_sha256(&args.lock).ok();
     let lock = load_official_lock(&args.lock).ok();
+    let report_metadata =
+        ReportMetadata::capture().with_lock_context(lock_hash.clone(), lock.as_ref());
     let requested = select_conformance_suites(args);
     let mut items = Vec::new();
     let mut violations = Vec::new();
@@ -9001,17 +9028,17 @@ fn run_conformance_with_backend(args: &ConformanceArgs, backend: AliasBackend) -
     for suite in requested {
         let spec = suite_spec(suite);
         let root = args.vendor_dir.join(spec.version_line.as_str());
-        let metadata = root.join("official-revision.json");
-        if !metadata.exists() {
+        let revision_metadata = root.join("official-revision.json");
+        if !revision_metadata.exists() {
             violations.push(format!(
                 "{} is missing; run `cargo xtask sync-official-tests --locked` first",
-                metadata.display()
+                revision_metadata.display()
             ));
             items.push(ReportItem::new(
                 spec.name,
                 ReportStatus::Fail,
                 "official checkout metadata is missing",
-                Some(metadata),
+                Some(revision_metadata),
             ));
             continue;
         }
@@ -9094,6 +9121,7 @@ fn run_conformance_with_backend(args: &ConformanceArgs, backend: AliasBackend) -
             .join(backend.conformance_report_name(spec));
         let report_body = serde_json::json!({
             "command": backend.conformance_command(),
+            "metadata": report_metadata,
             "suite": spec.name,
             "version_line": spec.version_line,
             "alias_backend": backend.name(),
@@ -9157,7 +9185,7 @@ fn run_conformance_with_backend(args: &ConformanceArgs, backend: AliasBackend) -
     }
 
     let mut report = JsonReport::new(backend.conformance_command(), ReportStatus::Pending);
-    report.metadata = report.metadata.with_lock_hash(lock_hash);
+    report.metadata = report_metadata;
     report
         .with_items(items)
         .with_violations(violations)
@@ -9222,12 +9250,13 @@ fn run_output_contract_with_backend(scope: &SelectionArgs, backend: AliasBackend
         Ok(lock) => lock,
         Err(err) => {
             let mut report = JsonReport::new(backend.output_command(), ReportStatus::Fail);
-            report.metadata = report.metadata.with_lock_hash(lock_hash);
+            report.metadata = report.metadata.with_lock_context(lock_hash, None);
             return report
                 .with_scope(scope)
                 .with_violations(vec![format!("failed to load official lock: {err}")]);
         }
     };
+    let metadata = ReportMetadata::capture().with_lock_context(lock_hash.clone(), Some(&lock));
     let report_path = PathBuf::from("target")
         .join("conformance")
         .join(lock_hash.as_deref().unwrap_or("unknown-lock"))
@@ -9353,6 +9382,7 @@ fn run_output_contract_with_backend(scope: &SelectionArgs, backend: AliasBackend
     }
     let aggregate = serde_json::json!({
         "command": backend.output_command(),
+        "metadata": metadata,
         "lock_hash": lock_hash,
         "alias_backend": backend.name(),
         "targets": target_reports,
@@ -9367,7 +9397,7 @@ fn run_output_contract_with_backend(scope: &SelectionArgs, backend: AliasBackend
         violations.push(format!("failed to write {}: {err}", report_path.display()));
     }
     let mut report = JsonReport::new(backend.output_command(), ReportStatus::Pending);
-    report.metadata = report.metadata.with_lock_hash(lock_hash);
+    report.metadata = metadata;
     report
         .with_scope(scope)
         .with_items(items)
@@ -9383,7 +9413,9 @@ fn run_output_contract_with_backend(scope: &SelectionArgs, backend: AliasBackend
 
 pub fn verify_npm_alias(scope: &SelectionArgs) -> JsonReport {
     let targets = select_targets(scope);
-    let lock_hash = file_sha256(&PathBuf::from("compat/official-revisions.lock")).ok();
+    let lock_path = PathBuf::from("compat/official-revisions.lock");
+    let lock_hash = file_sha256(&lock_path).ok();
+    let lock = load_official_lock(&lock_path).ok();
     let mut items = Vec::new();
     let mut violations = Vec::new();
     if let Err(err) = generate_rust_alias_packages(&targets) {
@@ -9410,7 +9442,7 @@ pub fn verify_npm_alias(scope: &SelectionArgs) -> JsonReport {
         }
     }
     let mut report = JsonReport::new("verify_npm_alias", ReportStatus::Pending);
-    report.metadata = report.metadata.with_lock_hash(lock_hash);
+    report.metadata = report.metadata.with_lock_context(lock_hash, lock.as_ref());
     report
         .with_scope(scope)
         .with_items(items)
@@ -9428,6 +9460,7 @@ fn summarize_compat_at_root(locked: bool, path: &Path, root: &Path) -> JsonRepor
     let mut items = Vec::new();
     let mut violations = Vec::new();
     let lock = load_official_lock(&lock_path).ok();
+    let metadata = ReportMetadata::capture().with_lock_context(lock_hash.clone(), lock.as_ref());
     let conformance_root = root
         .join("target")
         .join("conformance")
@@ -9511,7 +9544,7 @@ fn summarize_compat_at_root(locked: bool, path: &Path, root: &Path) -> JsonRepor
     }
 
     let mut report = JsonReport::new("summarize_compat", aggregate_status(&items));
-    report.metadata = report.metadata.with_lock_hash(lock_hash);
+    report.metadata = metadata;
     report
         .with_items(items)
         .with_violations(violations)
@@ -9915,6 +9948,27 @@ pub struct BaselineLock {
     pub npm: BTreeMap<String, String>,
     #[serde(default)]
     pub exports: BTreeMap<String, String>,
+}
+
+fn default_official_lock_context() -> Option<(String, OfficialRevisionsLock)> {
+    official_lock_context(Path::new("compat/official-revisions.lock"))
+}
+
+fn official_lock_context(path: &Path) -> Option<(String, OfficialRevisionsLock)> {
+    let lock_hash = file_sha256(path).ok()?;
+    let lock = load_official_lock(path).ok()?;
+    Some((lock_hash, lock))
+}
+
+fn official_commit_map(lock: &OfficialRevisionsLock) -> BTreeMap<String, String> {
+    [
+        (VersionLine::Vue26.as_str(), &lock.vue2_6.rev),
+        (VersionLine::Vue27.as_str(), &lock.vue2_7.rev),
+        (VersionLine::Vue3.as_str(), &lock.vue3.rev),
+    ]
+    .into_iter()
+    .map(|(version_line, rev)| (version_line.to_string(), rev.clone()))
+    .collect()
 }
 
 fn validate_baseline(
@@ -13332,6 +13386,78 @@ mod tests {
             "smoke": [{ "status": "fail", "request": "@vue/compiler-core" }]
         });
         assert_eq!(report_value_status(&value), ReportStatus::Fail);
+    }
+
+    #[test]
+    fn report_metadata_records_lock_versions_and_rust_commit() {
+        let lock = OfficialRevisionsLock {
+            vue2_6: BaselineLock {
+                repo: "https://github.com/vuejs/vue".into(),
+                rev: "612fb89547711cacb030a3893a0065b785802860".into(),
+                npm: BTreeMap::new(),
+                exports: BTreeMap::new(),
+            },
+            vue2_7: BaselineLock {
+                repo: "https://github.com/vuejs/vue".into(),
+                rev: "13f4e7dc03e2caed900ac70ff8b8fe58dda45663".into(),
+                npm: BTreeMap::new(),
+                exports: BTreeMap::new(),
+            },
+            vue3: BaselineLock {
+                repo: "https://github.com/vuejs/core".into(),
+                rev: "57545e958ae28ed17aa9e0ed321abcd8dc99f752".into(),
+                npm: BTreeMap::new(),
+                exports: BTreeMap::new(),
+            },
+        };
+        let metadata =
+            ReportMetadata::capture().with_lock_context(Some("lock-hash".into()), Some(&lock));
+
+        assert_eq!(metadata.lock_hash.as_deref(), Some("lock-hash"));
+        assert_eq!(
+            metadata.official_commits.get("vue2_6").map(String::as_str),
+            Some("612fb89547711cacb030a3893a0065b785802860")
+        );
+        assert_eq!(
+            metadata.official_commits.get("vue2_7").map(String::as_str),
+            Some("13f4e7dc03e2caed900ac70ff8b8fe58dda45663")
+        );
+        assert_eq!(
+            metadata.official_commits.get("vue3").map(String::as_str),
+            Some("57545e958ae28ed17aa9e0ed321abcd8dc99f752")
+        );
+        assert!(metadata
+            .rust_compiler_commit
+            .as_deref()
+            .map(is_commit_sha)
+            .unwrap_or(true));
+    }
+
+    #[test]
+    fn aggregate_artifact_status_ignores_metadata_payload() {
+        let value = serde_json::json!({
+            "command": "run_conformance",
+            "metadata": {
+                "lock_hash": "lock-hash",
+                "os": "linux",
+                "rustc": "rustc 1.0.0",
+                "node": "v22.0.0",
+                "official_commits": { "vue3": "57545e958ae28ed17aa9e0ed321abcd8dc99f752" },
+                "rust_compiler_commit": "0123456789012345678901234567890123456789",
+                "created_unix": 1
+            },
+            "counts": { "total": 1, "pass": 1, "pending": 0, "fail": 0 },
+            "coverage": {
+                "source": "rust-backed",
+                "counts_by_source": {
+                    "rust-backed": { "total": 1, "pass": 1, "pending": 0, "fail": 0, "skip": 0 },
+                    "mixed": { "total": 0, "pass": 0, "pending": 0, "fail": 0, "skip": 0 },
+                    "shim-backed": { "total": 0, "pass": 0, "pending": 0, "fail": 0, "skip": 0 }
+                }
+            }
+        });
+
+        assert_eq!(report_value_status(&value), ReportStatus::Pass);
     }
 
     #[test]
