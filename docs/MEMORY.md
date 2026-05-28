@@ -1,5 +1,9 @@
 # Memory
 
+- Current round: closed the `vuec_source` source/span/location foundation slice.
+- `vuec_source` now provides `SourceAnchor` for SFC block base-offset mapping, span-to-location projection, span slices, UTF-16 column to byte-position lookup, line helpers for LF/CRLF/mixed newlines, and a queryable `SourceMapTrace` for generated-position to original-span/location lookup. This is source infrastructure for AST/HIR/MIR span fidelity and source-map traceability only; no compiler semantics, NAPI alias code, or JavaScript shims changed.
+- Verification for this slice passes: `cargo test -p vuec_source -- --nocapture` and `cargo check -p vuec_source -p vuec_diagnostics -p vuec_ast -p vuec_codegen`.
+
 - Current round: closed the official lock baseline validation slice.
 - `cargo xtask verify-official-lock` now emits per-baseline JSON items instead of an empty report, rejects floating npm specs such as ranges / `latest` / branch names, and can run `--require-vendor` after `sync-official-tests --locked` to prove synced vendor checkout HEADs and package manifests match `compat/official-revisions.lock`. The Vue 2.6 lock entry was corrected from the annotated tag object SHA to the peeled commit SHA `612fb89547711cacb030a3893a0065b785802860`, and API manifests were regenerated under the new lock hash. This is compatibility gate infrastructure only; no compiler semantics, AST/HIR/MIR structures, or JavaScript alias shims changed.
 - Verification for this slice passes: `cargo fmt --all --check`, `git diff --check`, `cargo test -p xtask official_lock -- --nocapture`, `cargo test -p xtask official_npm_versions_read_locked_compilers -- --nocapture`, `cargo xtask verify-official-lock`, `cargo xtask verify-official-lock --require-vendor`, `cargo xtask export-api --all`, and `cargo xtask diff-api --all`.
