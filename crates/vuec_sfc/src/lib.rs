@@ -8389,6 +8389,27 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
     }
 
     #[test]
+    fn compile_style_returns_css_modules_external_composes() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let filename = dir.path().join("component.vue");
+        let dep = dir.path().join("dep.css");
+        std::fs::write(&dep, ".dep { color: blue; }\n:export { token: green; }")
+            .expect("write dep");
+        let source =
+            r#"<style module>.button { composes: dep from "./dep.css"; color: token; }</style>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let result = compiler.compile_style(&descriptor, SfcStyleCompileOptions::default());
+        let modules = result.modules.expect("css modules");
+        let button = modules.get("button").expect("button export");
+
+        assert!(button.contains("_button_"));
+        assert!(button.contains("_dep_"));
+        assert!(result.code.starts_with("._dep_"));
+        assert!(!result.code.contains("composes"));
+    }
+
+    #[test]
     fn compile_style_forwards_scss_preprocess_options_and_dependencies() {
         let dir = tempfile::tempdir().expect("temp dir");
         let filename = dir.path().join("component.vue");

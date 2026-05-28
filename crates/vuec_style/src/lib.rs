@@ -7,7 +7,7 @@
 #![forbid(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use vuec_codegen::{SourceMapArtifact, SourceMapBuilder};
@@ -1900,23 +1900,52 @@ fn rewrite_css_items(
 }
 
 fn compile_css_modules(source: &str, options: &StyleCompileOptions) -> CssModulesCompileResult {
-    let mut context = CssModulesContext::new(options);
+    let filename = options
+        .filename
+        .as_deref()
+        .unwrap_or("style.css")
+        .to_string();
+    let mut active_paths = Vec::new();
+    compile_css_modules_file(source, options, filename, &mut active_paths)
+}
+
+fn compile_css_modules_file(
+    source: &str,
+    options: &StyleCompileOptions,
+    filename: String,
+    active_paths: &mut Vec<PathBuf>,
+) -> CssModulesCompileResult {
+    let active_path = css_module_active_path(&filename);
+    let pushed_active = !active_paths.iter().any(|active| active == &active_path);
+    if pushed_active {
+        active_paths.push(active_path);
+    }
+    let mut context = CssModulesContext::new(options, filename, active_paths);
     let code = rewrite_css_modules_items(source, &mut context, CssBlockContext::Root);
+    let code = context.finish_code(code);
+    let raw_modules = context.raw_modules();
+    let modules = context.modules();
+    if pushed_active {
+        context.active_paths.pop();
+    }
     CssModulesCompileResult {
         code,
-        modules: context.modules(),
+        raw_modules,
+        modules,
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct CssModulesCompileResult {
     code: String,
+    raw_modules: BTreeMap<String, String>,
     modules: BTreeMap<String, String>,
 }
 
 #[derive(Debug)]
 struct CssModulesContext<'a> {
-    filename: &'a str,
+    options: &'a StyleCompileOptions,
+    filename: String,
     id: &'a str,
     scope_behaviour: CssModulesScopeBehaviour,
     generate_scoped_name: Option<&'a str>,
@@ -1924,12 +1953,22 @@ struct CssModulesContext<'a> {
     export_globals: bool,
     raw_exports: Vec<CssModuleExport>,
     raw_export_index: BTreeMap<String, usize>,
+    import_symbols: BTreeMap<String, String>,
+    imported_modules: BTreeMap<String, CssModulesCompileResult>,
+    prepended_paths: BTreeSet<String>,
+    prepended_css: Vec<String>,
+    active_paths: &'a mut Vec<PathBuf>,
 }
 
 impl<'a> CssModulesContext<'a> {
-    fn new(options: &'a StyleCompileOptions) -> Self {
+    fn new(
+        options: &'a StyleCompileOptions,
+        filename: String,
+        active_paths: &'a mut Vec<PathBuf>,
+    ) -> Self {
         Self {
-            filename: options.filename.as_deref().unwrap_or("style.css"),
+            options,
+            filename,
             id: options.id.as_deref().unwrap_or_default(),
             scope_behaviour: CssModulesScopeBehaviour::from_option(
                 &options.modules_options.scope_behaviour,
@@ -1941,6 +1980,11 @@ impl<'a> CssModulesContext<'a> {
             export_globals: options.modules_options.export_globals,
             raw_exports: Vec::new(),
             raw_export_index: BTreeMap::new(),
+            import_symbols: BTreeMap::new(),
+            imported_modules: BTreeMap::new(),
+            prepended_paths: BTreeSet::new(),
+            prepended_css: Vec::new(),
+            active_paths,
         }
     }
 
@@ -1950,12 +1994,12 @@ impl<'a> CssModulesContext<'a> {
 
     fn scoped_name(&self, local: &str) -> String {
         if let Some(pattern) = self.generate_scoped_name {
-            return format_css_module_pattern(pattern, self.filename, local, self.id);
+            return format_css_module_pattern(pattern, &self.filename, local, self.id);
         }
         format!(
             "_{}_{}",
             local,
-            css_module_hash(self.filename, local, self.id)
+            css_module_hash(&self.filename, local, self.id)
         )
     }
 
@@ -1977,6 +2021,17 @@ impl<'a> CssModulesContext<'a> {
         self.raw_export_index
             .get(local)
             .map(|index| self.raw_exports[*index].values.clone())
+    }
+
+    fn raw_modules(&self) -> BTreeMap<String, String> {
+        self.raw_exports
+            .iter()
+            .map(|export| (export.local.clone(), export.values.join(" ")))
+            .collect()
+    }
+
+    fn import_symbol_value(&self, local: &str) -> Option<String> {
+        self.import_symbols.get(local).cloned()
     }
 
     fn push_raw_export_value(&mut self, local: &str, value: &str) {
@@ -2017,6 +2072,50 @@ impl<'a> CssModulesContext<'a> {
             self.register_module_export(&mut modules, &export.local, &value);
         }
         modules
+    }
+
+    fn finish_code(&self, code: String) -> String {
+        if self.prepended_css.is_empty() {
+            return code;
+        }
+        let mut output = String::new();
+        for css in &self.prepended_css {
+            if css.is_empty() {
+                continue;
+            }
+            if !output.is_empty() && !output.ends_with('\n') {
+                output.push('\n');
+            }
+            output.push_str(css);
+        }
+        if !output.is_empty() && !code.is_empty() && !output.ends_with('\n') {
+            output.push('\n');
+        }
+        output.push_str(&code);
+        output
+    }
+
+    fn load_imported_module(&mut self, import: &str) -> Option<CssModulesCompileResult> {
+        let path = resolve_css_module_import(import, &self.filename)?;
+        let normalized = normalize_dependency_path(&path);
+        if let Some(result) = self.imported_modules.get(&normalized) {
+            return Some(result.clone());
+        }
+        if self.active_paths.iter().any(|active| active == &path) {
+            return None;
+        }
+        let source = std::fs::read_to_string(&path).ok()?;
+        let result = compile_css_modules_file(
+            &source,
+            self.options,
+            path.to_string_lossy().to_string(),
+            self.active_paths,
+        );
+        if self.prepended_paths.insert(normalized.clone()) && !result.code.is_empty() {
+            self.prepended_css.push(result.code.clone());
+        }
+        self.imported_modules.insert(normalized, result.clone());
+        Some(result)
     }
 
     fn register_module_export(
@@ -2138,6 +2237,11 @@ fn rewrite_css_modules_items(
         };
         let body = &source[delimiter + 1..close];
         let compose_local_names = css_module_composable_local_names(prelude, context);
+        if let Some(import) = parse_css_module_import_prelude(prelude) {
+            register_css_module_icss_imports(import, body, context);
+            cursor = close + 1;
+            continue;
+        }
         if prelude == ":export" {
             register_css_module_icss_exports(body, context);
             cursor = close + 1;
@@ -2295,6 +2399,47 @@ fn register_css_module_icss_export_segment(segment: &str, context: &mut CssModul
     context.set_raw_export_values(key, vec![value.to_string()]);
 }
 
+fn parse_css_module_import_prelude(prelude: &str) -> Option<&str> {
+    let inner = prelude.strip_prefix(":import(")?.strip_suffix(')')?.trim();
+    (!inner.is_empty()).then_some(inner)
+}
+
+fn register_css_module_icss_imports(import: &str, body: &str, context: &mut CssModulesContext<'_>) {
+    let Some(result) = context.load_imported_module(import) else {
+        return;
+    };
+    let mut segment_start = 0usize;
+    for semicolon in top_level_semicolons(body) {
+        register_css_module_icss_import_segment(
+            &body[segment_start..semicolon],
+            &result.raw_modules,
+            context,
+        );
+        segment_start = semicolon + 1;
+    }
+    register_css_module_icss_import_segment(&body[segment_start..], &result.raw_modules, context);
+}
+
+fn register_css_module_icss_import_segment(
+    segment: &str,
+    modules: &BTreeMap<String, String>,
+    context: &mut CssModulesContext<'_>,
+) {
+    let Some(colon) = find_top_level_colon(segment) else {
+        return;
+    };
+    let local = segment[..colon].trim();
+    let remote = segment[colon + 1..].trim();
+    if local.is_empty() || remote.is_empty() {
+        return;
+    }
+    if let Some(value) = modules.get(remote) {
+        context
+            .import_symbols
+            .insert(local.to_string(), value.clone());
+    }
+}
+
 fn rewrite_css_module_declarations(
     body: &str,
     context: &mut CssModulesContext<'_>,
@@ -2343,7 +2488,7 @@ fn rewrite_css_module_declaration_segment(
     };
     let prop = segment[..colon].trim();
     if !prop.eq_ignore_ascii_case("composes") && !prop.eq_ignore_ascii_case("compose-with") {
-        output.push_str(segment);
+        output.push_str(&replace_css_module_import_symbols(segment, context));
         if has_semicolon {
             output.push(';');
         }
@@ -2409,16 +2554,35 @@ fn css_module_single_class_selector_name(selector: &str) -> Option<String> {
     (start == 0 && end == selector.len()).then(|| name.to_string())
 }
 
-fn css_module_composed_values(value: &str, context: &CssModulesContext<'_>) -> Vec<String> {
+fn css_module_composed_values(value: &str, context: &mut CssModulesContext<'_>) -> Vec<String> {
     let mut composed = Vec::new();
     for part in value.split(',') {
-        for class_name in part.split_whitespace() {
+        let tokens = part.split_whitespace().collect::<Vec<_>>();
+        if let Some(from_index) = tokens.iter().position(|token| *token == "from") {
+            if from_index == 0 || from_index + 2 != tokens.len() {
+                return Vec::new();
+            }
+            let import = tokens[from_index + 1];
+            for class_name in &tokens[..from_index] {
+                let Some(values) = css_module_external_composed_values(class_name, import, context)
+                else {
+                    return Vec::new();
+                };
+                for value in values {
+                    push_unique_css_module_value(&mut composed, value);
+                }
+            }
+            continue;
+        }
+        for class_name in tokens {
             if let Some(global) = parse_css_module_global_compose(class_name) {
                 push_unique_css_module_value(&mut composed, global);
             } else if let Some(values) = context.raw_export_values(class_name) {
                 for value in values {
                     push_unique_css_module_value(&mut composed, value);
                 }
+            } else if let Some(value) = context.import_symbol_value(class_name) {
+                push_unique_css_module_value(&mut composed, value);
             } else if class_name == "from"
                 || class_name.starts_with('"')
                 || class_name.starts_with('\'')
@@ -2430,6 +2594,18 @@ fn css_module_composed_values(value: &str, context: &CssModulesContext<'_>) -> V
         }
     }
     composed
+}
+
+fn css_module_external_composed_values(
+    class_name: &str,
+    import: &str,
+    context: &mut CssModulesContext<'_>,
+) -> Option<Vec<String>> {
+    let result = context.load_imported_module(import)?;
+    result
+        .raw_modules
+        .get(class_name)
+        .map(|value| value.split_whitespace().map(ToOwned::to_owned).collect())
 }
 
 fn parse_css_module_global_compose(value: &str) -> Option<String> {
@@ -2445,6 +2621,95 @@ fn push_unique_css_module_value(values: &mut Vec<String>, value: String) {
     if !values.iter().any(|existing| existing == &value) {
         values.push(value);
     }
+}
+
+fn replace_css_module_import_symbols(segment: &str, context: &CssModulesContext<'_>) -> String {
+    if context.import_symbols.is_empty() {
+        return segment.to_string();
+    }
+    let Some(colon) = find_top_level_colon(segment) else {
+        return segment.to_string();
+    };
+    let value = &segment[colon + 1..];
+    let replaced = replace_css_module_value_symbols(value, &context.import_symbols);
+    let mut output = String::new();
+    output.push_str(&segment[..colon + 1]);
+    output.push_str(&replaced);
+    output
+}
+
+fn replace_css_module_value_symbols(value: &str, symbols: &BTreeMap<String, String>) -> String {
+    let mut output = String::new();
+    let mut cursor = 0usize;
+    while cursor < value.len() {
+        let Some((start, end, token)) = find_next_css_module_symbol(value, cursor) else {
+            output.push_str(&value[cursor..]);
+            break;
+        };
+        output.push_str(&value[cursor..start]);
+        if let Some(replacement) = symbols.get(token) {
+            output.push_str(replacement);
+        } else {
+            output.push_str(token);
+        }
+        cursor = end;
+    }
+    output
+}
+
+fn find_next_css_module_symbol(source: &str, mut cursor: usize) -> Option<(usize, usize, &str)> {
+    while cursor < source.len() {
+        let ch = source[cursor..].chars().next()?;
+        if ch == '$' || ch == '_' || ch == '-' || ch.is_ascii_alphanumeric() {
+            let start = cursor;
+            cursor += ch.len_utf8();
+            while cursor < source.len() {
+                let next = source[cursor..].chars().next()?;
+                if next == '_' || next == '-' || next.is_ascii_alphanumeric() {
+                    cursor += next.len_utf8();
+                } else {
+                    break;
+                }
+            }
+            return Some((start, cursor, &source[start..cursor]));
+        }
+        cursor += ch.len_utf8();
+    }
+    None
+}
+
+fn resolve_css_module_import(import: &str, filename: &str) -> Option<PathBuf> {
+    let import = unquote_css_module_path(import);
+    let import_path = Path::new(&import);
+    let path = if import_path.is_absolute() {
+        PathBuf::from(import_path)
+    } else {
+        Path::new(filename)
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .join(import_path)
+    };
+    if path.is_file() {
+        Some(std::fs::canonicalize(&path).unwrap_or(path))
+    } else {
+        None
+    }
+}
+
+fn unquote_css_module_path(value: &str) -> String {
+    let value = value.trim();
+    if value.len() >= 2
+        && ((value.starts_with('"') && value.ends_with('"'))
+            || (value.starts_with('\'') && value.ends_with('\'')))
+    {
+        value[1..value.len() - 1].to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+fn css_module_active_path(filename: &str) -> PathBuf {
+    std::fs::canonicalize(filename).unwrap_or_else(|_| PathBuf::from(filename))
 }
 
 fn find_pseudo_function_from(
@@ -4300,6 +4565,128 @@ mod tests {
         assert!(modules
             .get("button")
             .is_some_and(|value| value.contains("_button_")));
+    }
+
+    #[test]
+    fn compiles_css_modules_external_composes_from_relative_file() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let filename = dir.path().join("component.vue");
+        let dep = dir.path().join("dep.css");
+        std::fs::write(&dep, ".dep { color: blue; }\n:export { token: green; }")
+            .expect("write dep");
+
+        let result = compile_style(
+            ".button { composes: dep from \"./dep.css\"; color: token; }\n.plain { color: red; }",
+            StyleCompileOptions {
+                id: Some("test".into()),
+                filename: Some(filename.to_string_lossy().to_string()),
+                modules: true,
+                ..StyleCompileOptions::default()
+            },
+        );
+        let modules = result.modules.expect("css modules map");
+        let button = modules.get("button").expect("button export");
+
+        assert!(button.contains("_button_"));
+        assert!(button.contains("_dep_"));
+        assert!(modules
+            .get("plain")
+            .is_some_and(|value| value.contains("_plain_")));
+        assert!(result.code.starts_with("._dep_"));
+        assert!(result.code.contains("._button_"));
+        assert!(!result.code.contains("composes"));
+        assert!(!result.code.contains(":export"));
+    }
+
+    #[test]
+    fn compiles_css_modules_multiple_external_composes_from_relative_file() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let filename = dir.path().join("component.vue");
+        let dep = dir.path().join("dep.css");
+        std::fs::write(&dep, ".dep { color: blue; }\n.extra { color: green; }").expect("write dep");
+
+        let result = compile_style(
+            ".button { composes: dep extra from \"./dep.css\"; }",
+            StyleCompileOptions {
+                id: Some("test".into()),
+                filename: Some(filename.to_string_lossy().to_string()),
+                modules: true,
+                ..StyleCompileOptions::default()
+            },
+        );
+        let modules = result.modules.expect("css modules map");
+        let button = modules.get("button").expect("button export");
+
+        assert!(button.contains("_button_"));
+        assert!(button.contains("_dep_"));
+        assert!(button.contains("_extra_"));
+        assert!(result.code.starts_with("._dep_"));
+        assert!(result.code.contains("._extra_"));
+        assert!(!result.code.contains("composes"));
+    }
+
+    #[test]
+    fn compiles_css_modules_icss_imports_from_relative_file() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let filename = dir.path().join("component.vue");
+        let dep = dir.path().join("dep.css");
+        std::fs::write(&dep, ".dep { color: blue; }\n:export { token: green; }")
+            .expect("write dep");
+
+        let result = compile_style(
+            ":import(\"./dep.css\") { imported: dep; shade: token; }\n.button { color: shade; }\n.other { composes: imported; }",
+            StyleCompileOptions {
+                id: Some("test".into()),
+                filename: Some(filename.to_string_lossy().to_string()),
+                modules: true,
+                ..StyleCompileOptions::default()
+            },
+        );
+        let modules = result.modules.expect("css modules map");
+        let other = modules.get("other").expect("other export");
+
+        assert!(other.contains("_other_"));
+        assert!(other.contains("_dep_"));
+        assert!(modules
+            .get("button")
+            .is_some_and(|value| value.contains("_button_")));
+        assert!(result.code.starts_with("._dep_"));
+        assert!(result.code.contains("color: green"));
+        assert!(!result.code.contains(":import"));
+    }
+
+    #[test]
+    fn compiles_css_modules_relative_imports_before_locals_convention_projection() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let filename = dir.path().join("component.vue");
+        let dep = dir.path().join("dep.css");
+        std::fs::write(
+            &dep,
+            ".foo-bar { color: blue; }\n:export { theme-color: green; }",
+        )
+        .expect("write dep");
+
+        let result = compile_style(
+            ":import(\"./dep.css\") { shade: theme-color; }\n.button { composes: foo-bar from \"./dep.css\"; color: shade; }",
+            StyleCompileOptions {
+                id: Some("test".into()),
+                filename: Some(filename.to_string_lossy().to_string()),
+                modules: true,
+                modules_options: CssModulesOptions {
+                    locals_convention: "dashesOnly".into(),
+                    ..CssModulesOptions::default()
+                },
+                ..StyleCompileOptions::default()
+            },
+        );
+        let modules = result.modules.expect("css modules map");
+        let button = modules.get("button").expect("button export");
+
+        assert!(button.contains("_button_"));
+        assert!(button.contains("_foo-bar_"));
+        assert!(result.code.contains("color: green"));
+        assert!(!modules.contains_key("foo-bar"));
+        assert!(!modules.contains_key("fooBar"));
     }
 
     #[test]
