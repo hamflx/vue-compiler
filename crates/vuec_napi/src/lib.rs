@@ -3718,6 +3718,19 @@ fn sfc_style_options(value: Option<&Value>) -> SfcStyleCompileOptions {
         .and_then(Value::as_str)
         .map(ToOwned::to_owned);
     options.scoped = bool_option(value, "scoped", options.scoped);
+    options.modules = bool_option(
+        value,
+        "modules",
+        bool_option(value, "module", options.modules),
+    );
+    if let Some(modules_options) = value
+        .get("modulesOptions")
+        .or_else(|| value.get("modules_options"))
+    {
+        if let Ok(parsed) = serde_json::from_value(modules_options.clone()) {
+            options.modules_options = parsed;
+        }
+    }
     options.is_prod = bool_option(
         value,
         "isProd",

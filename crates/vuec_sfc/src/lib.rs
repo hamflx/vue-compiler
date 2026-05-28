@@ -28,7 +28,9 @@ use vuec_diagnostics::{Diagnostic, Severity};
 use vuec_html::{HtmlAttribute, HtmlTokenKind, HtmlTokenizer};
 use vuec_js::{JsAstStore, JsParseMode};
 use vuec_source::{FileId, SourceMap, Span};
-use vuec_style::{collect_css_vars, compile_style, gen_css_var_name, StyleCompileOptions};
+use vuec_style::{
+    collect_css_vars, compile_style, gen_css_var_name, CssModulesOptions, StyleCompileOptions,
+};
 use vuec_vue3_core::{TemplateSource, Vue3CompilerOptions};
 use vuec_vue3_dom::{
     apply_dom_parser_defaults, compile as compile_dom, AssetUrlOptions, DomCompilerOptions,
@@ -239,6 +241,10 @@ pub struct SfcStyleCompileOptions {
     pub scoped: bool,
     /// CSS vars to inject or rewrite.
     pub vars: Vec<String>,
+    /// Whether CSS modules should be enabled for direct style source calls.
+    pub modules: bool,
+    /// CSS Modules naming and export options.
+    pub modules_options: CssModulesOptions,
     /// Whether production compile behavior is requested.
     pub is_prod: bool,
     /// Optional preprocessor language override.
@@ -253,6 +259,8 @@ impl Default for SfcStyleCompileOptions {
             id: None,
             scoped: false,
             vars: Vec::new(),
+            modules: false,
+            modules_options: CssModulesOptions::default(),
             is_prod: false,
             preprocess_lang: None,
             source_map: false,
@@ -379,6 +387,9 @@ pub struct SfcStyleCompileResult {
     pub errors: Vec<String>,
     /// External style dependencies.
     pub dependencies: Vec<String>,
+    /// CSS module exports keyed by local class names.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modules: Option<BTreeMap<String, String>>,
     /// Raw PostCSS result marker data.
     #[serde(rename = "rawResult")]
     pub raw_result: Vec<String>,
@@ -928,6 +939,7 @@ impl SfcCompiler {
         let mut code = String::new();
         let mut errors = Vec::new();
         let mut dependencies = Vec::new();
+        let mut modules = BTreeMap::new();
         let mut raw_result = Vec::new();
         let mut map_builder = options.source_map.then(|| {
             let mut builder = SourceMapBuilder::new().file(descriptor.filename.clone());
@@ -941,7 +953,8 @@ impl SfcCompiler {
                 StyleCompileOptions {
                     id: options.id.clone(),
                     scoped: options.scoped || style.attrs.scoped,
-                    modules: style.attrs.module.is_some(),
+                    modules: options.modules || style.attrs.module.is_some(),
+                    modules_options: options.modules_options.clone(),
                     vars: options.vars.clone(),
                     is_prod: options.is_prod,
                     filename: Some(descriptor.filename.clone()),
@@ -962,6 +975,9 @@ impl SfcCompiler {
             }
             code.push_str(&result.code);
             errors.extend(result.errors);
+            if let Some(result_modules) = result.modules {
+                modules.extend(result_modules);
+            }
             if let Some(builder) = map_builder.as_mut() {
                 add_style_block_mappings(
                     builder,
@@ -983,11 +999,13 @@ impl SfcCompiler {
         dependencies.sort();
         dependencies.dedup();
         let map = map_builder.map(SourceMapBuilder::build);
+        let modules = (!modules.is_empty()).then_some(modules);
         SfcStyleCompileResult {
             code,
             map,
             errors,
             dependencies,
+            modules,
             raw_result,
         }
     }
@@ -8215,6 +8233,21 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
         assert_eq!(style.raw_result.len(), 1);
         let style_json = serde_json::to_value(&style).expect("style json");
         assert!(style_json.get("rawResult").is_some());
+    }
+
+    #[test]
+    fn compile_style_returns_css_module_exports() {
+        let mut compiler = SfcCompiler::new();
+        let source = r#"<style module>.red { color: red }\n:global(.blue) { color: blue }</style>"#;
+        let descriptor = compiler.parse("modules.vue", source);
+        let result = compiler.compile_style(&descriptor, SfcStyleCompileOptions::default());
+        let modules = result.modules.expect("css modules");
+
+        assert!(modules
+            .get("red")
+            .is_some_and(|value| value.contains("_red_")));
+        assert!(!modules.contains_key("blue"));
+        assert!(result.code.contains(".blue { color: blue }"));
     }
 
     #[test]

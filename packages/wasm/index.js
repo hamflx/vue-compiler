@@ -112,11 +112,22 @@ function styleSfcSource(source, options) {
   if (options.scoped) {
     attrs.push('scoped');
   }
+  if (options.modules || options.module) {
+    attrs.push(
+      options.module && typeof options.module === 'string'
+        ? `module="${escapeAttribute(options.module)}"`
+        : 'module'
+    );
+  }
   const lang = options.lang || options.preprocessLang || options.preprocess_lang;
   if (lang) {
-    attrs.push(`lang="${String(lang).replace(/&/g, '&amp;').replace(/"/g, '&quot;')}"`);
+    attrs.push(`lang="${escapeAttribute(lang)}"`);
   }
   return `<style${attrs.length ? ` ${attrs.join(' ')}` : ''}>${source}</style>`;
+}
+
+function escapeAttribute(value) {
+  return String(value).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
 }
 
 export const api = {

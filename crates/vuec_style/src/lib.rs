@@ -7,6 +7,8 @@
 #![forbid(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::path::Path;
 use vuec_codegen::{SourceMapArtifact, SourceMapBuilder};
 use vuec_source::{FileId, Span};
 
@@ -19,6 +21,9 @@ pub struct StyleCompileOptions {
     pub scoped: bool,
     /// Whether CSS module class names should be collected.
     pub modules: bool,
+    /// CSS Modules naming and export options.
+    #[serde(default)]
+    pub modules_options: CssModulesOptions,
     /// Explicit CSS variable expressions; when empty they are collected from source.
     pub vars: Vec<String>,
     /// Whether production CSS variable names should use hashed names.
@@ -40,6 +45,30 @@ pub struct StyleCompileOptions {
     pub preprocess_lang: Option<String>,
 }
 
+/// CSS Modules naming and export options.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CssModulesOptions {
+    /// Scope behavior: `local` scopes normal class selectors, `global` scopes only `:local(...)`.
+    #[serde(default, rename = "scopeBehaviour", alias = "scope_behaviour")]
+    pub scope_behaviour: String,
+    /// Optional scoped-name template such as `[name]__[local]__[hash:base64:5]`.
+    #[serde(default, rename = "generateScopedName", alias = "generate_scoped_name")]
+    pub generate_scoped_name: Option<String>,
+    /// Export key convention such as `asIs`, `camelCase`, or `camelCaseOnly`.
+    #[serde(default, rename = "localsConvention", alias = "locals_convention")]
+    pub locals_convention: String,
+}
+
+impl Default for CssModulesOptions {
+    fn default() -> Self {
+        Self {
+            scope_behaviour: "local".into(),
+            generate_scoped_name: None,
+            locals_convention: "asIs".into(),
+        }
+    }
+}
+
 /// Result returned from style compilation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StyleCompileResult {
@@ -49,8 +78,9 @@ pub struct StyleCompileResult {
     pub map: Option<SourceMapArtifact>,
     /// Non-fatal style compilation errors.
     pub errors: Vec<String>,
-    /// Collected CSS module class names.
-    pub modules: Vec<String>,
+    /// CSS module exports keyed by local class names.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modules: Option<BTreeMap<String, String>>,
     /// CSS variable expressions referenced by `v-bind(...)`.
     pub vars: Vec<String>,
 }
@@ -82,9 +112,11 @@ pub fn compile_style(source: &str, options: StyleCompileOptions) -> StyleCompile
     }
     code = normalize_style_output(&code);
     let modules = if options.modules {
-        collect_class_names(&code)
+        let result = compile_css_modules(&code, &options);
+        code = result.code;
+        Some(result.modules)
     } else {
-        Vec::new()
+        None
     };
     if code.contains("@import") && code.contains("missing") {
         errors.push("style import could not be resolved".into());
@@ -654,6 +686,402 @@ fn rewrite_css_items(
             output.push('}');
         }
         cursor = close + 1;
+    }
+    output
+}
+
+fn compile_css_modules(source: &str, options: &StyleCompileOptions) -> CssModulesCompileResult {
+    let mut context = CssModulesContext::new(options);
+    let code = rewrite_css_modules_items(source, &mut context, CssBlockContext::Root);
+    CssModulesCompileResult {
+        code,
+        modules: context.modules,
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CssModulesCompileResult {
+    code: String,
+    modules: BTreeMap<String, String>,
+}
+
+#[derive(Debug)]
+struct CssModulesContext<'a> {
+    filename: &'a str,
+    id: &'a str,
+    scope_behaviour: CssModulesScopeBehaviour,
+    generate_scoped_name: Option<&'a str>,
+    locals_convention: CssModulesLocalsConvention,
+    modules: BTreeMap<String, String>,
+}
+
+impl<'a> CssModulesContext<'a> {
+    fn new(options: &'a StyleCompileOptions) -> Self {
+        Self {
+            filename: options.filename.as_deref().unwrap_or("style.css"),
+            id: options.id.as_deref().unwrap_or_default(),
+            scope_behaviour: CssModulesScopeBehaviour::from_option(
+                &options.modules_options.scope_behaviour,
+            ),
+            generate_scoped_name: options.modules_options.generate_scoped_name.as_deref(),
+            locals_convention: CssModulesLocalsConvention::from_option(
+                &options.modules_options.locals_convention,
+            ),
+            modules: BTreeMap::new(),
+        }
+    }
+
+    fn is_local_default(&self) -> bool {
+        matches!(self.scope_behaviour, CssModulesScopeBehaviour::Local)
+    }
+
+    fn scoped_name(&self, local: &str) -> String {
+        if let Some(pattern) = self.generate_scoped_name {
+            return format_css_module_pattern(pattern, self.filename, local, self.id);
+        }
+        format!(
+            "_{}_{}",
+            local,
+            css_module_hash(self.filename, local, self.id)
+        )
+    }
+
+    fn register(&mut self, local: &str, scoped: &str) {
+        match self.locals_convention {
+            CssModulesLocalsConvention::AsIs => {
+                self.modules
+                    .entry(local.to_string())
+                    .or_insert_with(|| scoped.to_string());
+            }
+            CssModulesLocalsConvention::CamelCase => {
+                self.modules
+                    .entry(local.to_string())
+                    .or_insert_with(|| scoped.to_string());
+                self.modules
+                    .entry(camel_case_css_module_key(local))
+                    .or_insert_with(|| scoped.to_string());
+            }
+            CssModulesLocalsConvention::CamelCaseOnly => {
+                self.modules
+                    .entry(camel_case_css_module_key(local))
+                    .or_insert_with(|| scoped.to_string());
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CssModulesScopeBehaviour {
+    Local,
+    Global,
+}
+
+impl CssModulesScopeBehaviour {
+    fn from_option(value: &str) -> Self {
+        if value.eq_ignore_ascii_case("global") {
+            Self::Global
+        } else {
+            Self::Local
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CssModulesLocalsConvention {
+    AsIs,
+    CamelCase,
+    CamelCaseOnly,
+}
+
+impl CssModulesLocalsConvention {
+    fn from_option(value: &str) -> Self {
+        match value {
+            "camelCase" | "camel-case" => Self::CamelCase,
+            "camelCaseOnly" | "camel-case-only" | "dashesOnly" | "dashes-only" => {
+                Self::CamelCaseOnly
+            }
+            _ => Self::AsIs,
+        }
+    }
+}
+
+fn rewrite_css_modules_items(
+    source: &str,
+    context: &mut CssModulesContext<'_>,
+    block_context: CssBlockContext,
+) -> String {
+    let mut output = String::new();
+    let mut cursor = 0usize;
+    while cursor < source.len() {
+        let whitespace_start = cursor;
+        cursor = skip_css_whitespace(source, cursor);
+        if cursor > whitespace_start {
+            push_normalized_css_whitespace(&mut output, &source[whitespace_start..cursor]);
+        }
+        if cursor >= source.len() {
+            break;
+        }
+        if source[cursor..].starts_with("/*") {
+            let Some(end_offset) = source[cursor + 2..].find("*/") else {
+                output.push_str(&source[cursor..]);
+                break;
+            };
+            let end = cursor + 2 + end_offset + 2;
+            output.push_str(&source[cursor..end]);
+            cursor = end;
+            continue;
+        }
+
+        let Some((delimiter, delimiter_ch)) = find_next_css_delimiter(source, cursor) else {
+            output.push_str(&source[cursor..]);
+            break;
+        };
+        let raw_prelude = &source[cursor..delimiter];
+        let prelude_end = raw_prelude.trim_end().len();
+        let prelude = raw_prelude[..prelude_end].trim();
+        let brace_spacing = &raw_prelude[prelude_end..];
+        if delimiter_ch == ';' {
+            output.push_str(prelude);
+            output.push(';');
+            cursor = delimiter + 1;
+            continue;
+        }
+
+        let Some(close) = find_matching_brace(source, delimiter) else {
+            output.push_str(&source[cursor..]);
+            break;
+        };
+        let body = &source[delimiter + 1..close];
+        output.push_str(&rewrite_css_modules_prelude(
+            prelude,
+            context,
+            block_context,
+        ));
+        output.push_str(brace_spacing);
+        output.push('{');
+        if prelude.starts_with('@') {
+            let next_context = if is_keyframes_at_rule(prelude) {
+                CssBlockContext::Keyframes
+            } else {
+                CssBlockContext::Container
+            };
+            output.push_str(&rewrite_css_modules_items(body, context, next_context));
+        } else {
+            output.push_str(body);
+        }
+        output.push('}');
+        cursor = close + 1;
+    }
+    output
+}
+
+fn rewrite_css_modules_prelude(
+    prelude: &str,
+    context: &mut CssModulesContext<'_>,
+    block_context: CssBlockContext,
+) -> String {
+    if prelude.starts_with('@') || matches!(block_context, CssBlockContext::Keyframes) {
+        return prelude.to_string();
+    }
+    split_selector_list(prelude)
+        .into_iter()
+        .map(|part| rewrite_css_module_selector(part.trim(), context))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn rewrite_css_module_selector(selector: &str, context: &mut CssModulesContext<'_>) -> String {
+    let mut output = String::new();
+    let mut cursor = 0usize;
+    let mut default_local = context.is_local_default();
+    while cursor < selector.len() {
+        if let Some(global) =
+            find_pseudo_function_from(selector, &[":global", "::v-global"], cursor)
+        {
+            output.push_str(&rewrite_css_module_default_segment(
+                &selector[cursor..global.start],
+                context,
+                default_local,
+            ));
+            if let Some((open, close)) = global.parens {
+                output.push_str(selector[open + 1..close].trim());
+                cursor = close + 1;
+                continue;
+            }
+            cursor = global.end;
+            default_local = false;
+            continue;
+        }
+        if let Some(local) = find_pseudo_function_from(selector, &[":local", "::v-local"], cursor) {
+            output.push_str(&rewrite_css_module_default_segment(
+                &selector[cursor..local.start],
+                context,
+                default_local,
+            ));
+            if let Some((open, close)) = local.parens {
+                output.push_str(&rewrite_css_module_default_segment(
+                    selector[open + 1..close].trim(),
+                    context,
+                    true,
+                ));
+                cursor = close + 1;
+                continue;
+            }
+            cursor = local.end;
+            default_local = true;
+            continue;
+        }
+        output.push_str(&rewrite_css_module_default_segment(
+            &selector[cursor..],
+            context,
+            default_local,
+        ));
+        break;
+    }
+    output
+}
+
+fn rewrite_css_module_default_segment(
+    segment: &str,
+    context: &mut CssModulesContext<'_>,
+    local: bool,
+) -> String {
+    if !local {
+        return segment.to_string();
+    }
+    let mut output = String::new();
+    let mut cursor = 0usize;
+    while let Some((start, end, name)) = find_next_class_selector(segment, cursor) {
+        output.push_str(&segment[cursor..start]);
+        let scoped = context.scoped_name(name);
+        context.register(name, &scoped);
+        output.push('.');
+        output.push_str(&scoped);
+        cursor = end;
+    }
+    output.push_str(&segment[cursor..]);
+    output
+}
+
+fn find_pseudo_function_from(
+    selector: &str,
+    names: &[&str],
+    start: usize,
+) -> Option<SelectorMatch> {
+    find_pseudo_function(&selector[start..], names).map(|matched| SelectorMatch {
+        start: start + matched.start,
+        end: start + matched.end,
+        parens: matched
+            .parens
+            .map(|(open, close)| (start + open, start + close)),
+    })
+}
+
+fn find_next_class_selector(source: &str, start: usize) -> Option<(usize, usize, &str)> {
+    let mut state = SelectorScannerState::Normal;
+    let mut index = start;
+    while index < source.len() {
+        let ch = source[index..].chars().next()?;
+        match state {
+            SelectorScannerState::Normal => match ch {
+                '\'' => state = SelectorScannerState::SingleQuote,
+                '"' => state = SelectorScannerState::DoubleQuote,
+                '[' => {
+                    let Some(end) = find_matching_selector_bracket(source, index) else {
+                        return None;
+                    };
+                    index = end + 1;
+                    continue;
+                }
+                '.' => {
+                    let name_start = index + 1;
+                    let name_end = consume_css_module_class_name(source, name_start);
+                    if name_end > name_start {
+                        return Some((index, name_end, &source[name_start..name_end]));
+                    }
+                }
+                _ => {}
+            },
+            SelectorScannerState::SingleQuote => {
+                if ch == '\\' {
+                    index += ch.len_utf8();
+                    if index < source.len() {
+                        index += source[index..].chars().next().map_or(0, char::len_utf8);
+                    }
+                    continue;
+                }
+                if ch == '\'' {
+                    state = SelectorScannerState::Normal;
+                }
+            }
+            SelectorScannerState::DoubleQuote => {
+                if ch == '\\' {
+                    index += ch.len_utf8();
+                    if index < source.len() {
+                        index += source[index..].chars().next().map_or(0, char::len_utf8);
+                    }
+                    continue;
+                }
+                if ch == '"' {
+                    state = SelectorScannerState::Normal;
+                }
+            }
+        }
+        index += ch.len_utf8();
+    }
+    None
+}
+
+fn consume_css_module_class_name(source: &str, mut index: usize) -> usize {
+    while index < source.len() {
+        let Some(ch) = source[index..].chars().next() else {
+            break;
+        };
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            index += ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    index
+}
+
+fn format_css_module_pattern(pattern: &str, filename: &str, local: &str, id: &str) -> String {
+    let file_stem = Path::new(filename)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("style");
+    let hash = css_module_hash(filename, local, id);
+    let mut output = pattern
+        .replace("[name]", file_stem)
+        .replace("[local]", local)
+        .replace("[hash:base64:5]", &hash[..hash.len().min(5)])
+        .replace("[hash]", &hash);
+    output = output.replace('.', "_");
+    output
+}
+
+fn css_module_hash(filename: &str, local: &str, id: &str) -> String {
+    let seed = format!("{filename}:{id}:{local}");
+    hash_sum_string(&seed).chars().take(6).collect()
+}
+
+fn camel_case_css_module_key(value: &str) -> String {
+    let mut output = String::new();
+    let mut uppercase_next = false;
+    for ch in value.chars() {
+        if ch == '-' || ch == '_' {
+            uppercase_next = true;
+            continue;
+        }
+        if uppercase_next {
+            for upper in ch.to_uppercase() {
+                output.push(upper);
+            }
+            uppercase_next = false;
+        } else {
+            output.push(ch);
+        }
     }
     output
 }
@@ -1610,36 +2038,6 @@ fn is_selector_ident_start(ch: char) -> bool {
     ch.is_ascii_alphabetic() || ch == '_' || ch == '-'
 }
 
-fn collect_class_names(source: &str) -> Vec<String> {
-    let mut classes = Vec::new();
-    let bytes = source.as_bytes();
-    let mut index = 0usize;
-    while index < bytes.len() {
-        if bytes[index] == b'.' {
-            let start = index + 1;
-            let mut end = start;
-            while end < bytes.len() {
-                let ch = bytes[end] as char;
-                if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
-                    end += 1;
-                } else {
-                    break;
-                }
-            }
-            if end > start {
-                let name = source[start..end].to_string();
-                if !classes.iter().any(|existing| existing == &name) {
-                    classes.push(name);
-                }
-            }
-            index = end;
-        } else {
-            index += 1;
-        }
-    }
-    classes
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1722,11 +2120,61 @@ mod tests {
                 ..StyleCompileOptions::default()
             },
         );
-        assert!(result.code.contains(".a[data-v-x]"));
+        assert!(result.code.contains("[data-v-x]"));
         assert!(result.code.contains("var(--x-color)"));
-        assert_eq!(result.modules, vec!["a"]);
+        let modules = result.modules.expect("css modules map");
+        assert!(modules.get("a").is_some_and(|value| value.contains("_a_")));
         assert_eq!(result.vars, vec!["color"]);
         assert!(result.map.is_some());
+    }
+
+    #[test]
+    fn compiles_css_modules_default_local_and_global_pseudo() {
+        let result = compile_style(
+            ".red { color: red }\n.green { color: green }\n:global(.blue) { color: blue }",
+            StyleCompileOptions {
+                id: Some("test".into()),
+                filename: Some("test.css".into()),
+                modules: true,
+                ..StyleCompileOptions::default()
+            },
+        );
+        let modules = result.modules.expect("css modules map");
+
+        assert!(modules
+            .get("red")
+            .is_some_and(|value| value.contains("_red_")));
+        assert!(modules
+            .get("green")
+            .is_some_and(|value| value.contains("_green_")));
+        assert!(!modules.contains_key("blue"));
+        assert!(result.code.contains(".blue { color: blue }"));
+    }
+
+    #[test]
+    fn compiles_css_modules_global_scope_with_local_and_camel_case_only() {
+        let result = compile_style(
+            ":local(.foo-bar) { color: red }\n.baz-qux { color: green }",
+            StyleCompileOptions {
+                id: Some("test".into()),
+                filename: Some("test.css".into()),
+                modules: true,
+                modules_options: CssModulesOptions {
+                    scope_behaviour: "global".into(),
+                    generate_scoped_name: Some("[name]__[local]__[hash:base64:5]".into()),
+                    locals_convention: "camelCaseOnly".into(),
+                },
+                ..StyleCompileOptions::default()
+            },
+        );
+        let modules = result.modules.expect("css modules map");
+
+        assert!(modules
+            .get("fooBar")
+            .is_some_and(|value| value.contains("__foo-bar__")));
+        assert!(!modules.contains_key("foo-bar"));
+        assert!(!modules.contains_key("bazQux"));
+        assert!(result.code.contains(".baz-qux { color: green }"));
     }
 
     #[test]

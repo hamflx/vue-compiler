@@ -293,7 +293,11 @@ function styleSfcSource(source, options) {
     attrs.push('scoped');
   }
   if (options.modules || options.module) {
-    attrs.push('module');
+    attrs.push(
+      options.module && typeof options.module === 'string'
+        ? `module="${escapeAttribute(options.module)}"`
+        : 'module'
+    );
   }
   const lang = options.lang || options.preprocessLang || options.preprocess_lang;
   if (lang) {

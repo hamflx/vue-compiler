@@ -471,16 +471,21 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
                     source_map_file_id: Some(vuec_source::FileId(0)),
                     source_map_base_offset: 0,
                     source_map: options.source_map,
-                    modules: false,
+                    modules: options.modules,
+                    modules_options: options.modules_options.clone(),
                     preprocess_lang: options.preprocess_lang,
                 },
             );
-            Ok(json!({
+            let mut value = json!({
                 "code": style.code,
                 "map": style.map,
                 "errors": style.errors,
                 "rawResult": ["postcss-result"],
-            }))
+            });
+            if let Some(modules) = style.modules {
+                value["modules"] = json!(modules);
+            }
+            Ok(value)
         }
         other => bail!("unsupported bridge command `{other}`"),
     }
@@ -4057,6 +4062,19 @@ fn sfc_style_options(value: Option<&Value>) -> SfcStyleCompileOptions {
         .and_then(Value::as_str)
         .map(ToOwned::to_owned);
     options.scoped = bool_option(value, "scoped", options.scoped);
+    options.modules = bool_option(
+        value,
+        "modules",
+        bool_option(value, "module", options.modules),
+    );
+    if let Some(modules_options) = value
+        .get("modulesOptions")
+        .or_else(|| value.get("modules_options"))
+    {
+        if let Ok(parsed) = serde_json::from_value(modules_options.clone()) {
+            options.modules_options = parsed;
+        }
+    }
     options.is_prod = bool_option(
         value,
         "isProd",
