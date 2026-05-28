@@ -17,7 +17,7 @@ use vuec_ast::{
     HtmlNamespace, NodeId, RuntimeHelper, TemplateAttribute, Vue3Ast, Vue3AstKind, Vue3Element,
     Vue3ElementType, Vue3ImportItem, Vue3Prop, Vue3Root,
 };
-use vuec_diagnostics::{Diagnostic, Severity};
+use vuec_diagnostics::{Diagnostic, Vue3ErrorCode};
 use vuec_pass::TransformContext;
 use vuec_vue3_asset::transform_asset_url_props;
 /// Asset URL transform options re-exported for DOM compiler callers.
@@ -867,14 +867,11 @@ fn report_invalid_native_v_model(
         if model_binding_error_preempts_invalid_native_model(model, options) {
             continue;
         }
-        ctx.report(Diagnostic {
-            code: "58".into(),
-            severity: Severity::Error,
-            message: "v-model can only be used on <input>, <textarea> and <select> elements."
-                .into(),
-            span: model.span.or_else(|| node.span.source()),
-            notes: Vec::new(),
-        });
+        ctx.report(Diagnostic::vue3_error(
+            Vue3ErrorCode::XVModelOnInvalidElement,
+            "v-model can only be used on <input>, <textarea> and <select> elements.",
+            model.span.or_else(|| node.span.source()),
+        ));
     }
 }
 
@@ -912,13 +909,11 @@ fn report_transition_invalid_children_for_node(
             && matches!(element.tag.as_str(), "Transition" | "transition")
             && transition_children_are_invalid(ast, &node.children)
         {
-            ctx.report(Diagnostic {
-                code: "63".into(),
-                severity: Severity::Error,
-                message: "<Transition> expects exactly one child element or component.".into(),
-                span: node.span.source(),
-                notes: Vec::new(),
-            });
+            ctx.report(Diagnostic::vue3_error(
+                Vue3ErrorCode::XTransitionInvalidChildren,
+                "<Transition> expects exactly one child element or component.",
+                node.span.source(),
+            ));
         }
     }
     for child_id in node.children.clone() {
@@ -1071,13 +1066,11 @@ fn remove_side_effect_children(ast: &mut Vue3Ast, parent_id: NodeId, ctx: &mut T
         });
         if remove {
             if let Some(span) = ast.node(child_id).and_then(|node| node.span.source()) {
-                ctx.report(Diagnostic {
-                    code: "64".into(),
-                    severity: Severity::Error,
-                    message: "Tags with side effect (<script> and <style>) are ignored in client component templates.".into(),
-                    span: Some(span),
-                    notes: Vec::new(),
-                });
+                ctx.report(Diagnostic::vue3_error(
+                    Vue3ErrorCode::XIgnoredSideEffectTag,
+                    "Tags with side effect (<script> and <style>) are ignored in client component templates.",
+                    Some(span),
+                ));
             }
         } else {
             remove_side_effect_children(ast, child_id, ctx);

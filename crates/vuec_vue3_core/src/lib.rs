@@ -31,7 +31,7 @@ use vuec_ast::{
     Vue3SsrRoot, Vue3SsrSuspense, Vue3SsrTeleport, Vue3VNodeCall,
 };
 use vuec_codegen::{CodeWriter, SourceMapArtifact, SourceMapSegment};
-use vuec_diagnostics::{Diagnostic, Severity};
+use vuec_diagnostics::{Diagnostic, Vue3ErrorCode};
 use vuec_html::{HtmlTokenKind, HtmlTokenizer};
 use vuec_js::JsAstStore;
 use vuec_pass::TransformContext;
@@ -26026,13 +26026,7 @@ fn model_binding_host_supports_expression_diagnostic(element: &Vue3Element) -> b
 }
 
 fn vue3_model_diagnostic(code: &str, message: &str, span: Option<Span>) -> Diagnostic {
-    Diagnostic {
-        code: code.into(),
-        severity: Severity::Error,
-        message: message.into(),
-        span,
-        notes: Vec::new(),
-    }
+    Diagnostic::error(code, message).with_span(span)
 }
 
 fn push_event_handler_parse_diagnostic(
@@ -26058,10 +26052,9 @@ fn push_event_handler_parse_diagnostic(
     if !parsed.panicked && parsed.errors.is_empty() {
         return;
     }
-    diagnostics.push(Diagnostic {
-        code: "46".into(),
-        severity: Severity::Error,
-        message: parsed
+    diagnostics.push(Diagnostic::vue3_error(
+        Vue3ErrorCode::XInvalidExpression,
+        parsed
             .errors
             .first()
             .map(ToString::to_string)
@@ -26069,9 +26062,8 @@ fn push_event_handler_parse_diagnostic(
             .unwrap_or_else(|| {
                 "Error parsing JavaScript expression: Unexpected token (1:3)".into()
             }),
-        span: expression_parse_error_span(expression, span),
-        notes: Vec::new(),
-    });
+        expression_parse_error_span(expression, span),
+    ));
 }
 
 fn push_expression_parse_diagnostic(
@@ -26089,13 +26081,11 @@ fn push_expression_parse_diagnostic(
     let Err(err) = store.parse_expression(&wrapped, source_type) else {
         return;
     };
-    diagnostics.push(Diagnostic {
-        code: "46".into(),
-        severity: Severity::Error,
-        message: vue3_expression_parse_error_message(err.message()),
-        span: expression_parse_error_span(expression, span),
-        notes: Vec::new(),
-    });
+    diagnostics.push(Diagnostic::vue3_error(
+        Vue3ErrorCode::XInvalidExpression,
+        vue3_expression_parse_error_message(err.message()),
+        expression_parse_error_span(expression, span),
+    ));
 }
 
 fn vue3_expression_parse_error_message(raw: &str) -> String {

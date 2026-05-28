@@ -3725,23 +3725,11 @@ fn has_duplicate_attr(attrs: &[Vue2Attribute]) -> bool {
 }
 
 fn vue2_warning(code: &str, message: impl Into<String>, span: Option<Span>) -> Diagnostic {
-    Diagnostic {
-        code: code.into(),
-        severity: Severity::Warning,
-        message: message.into(),
-        span,
-        notes: Vec::new(),
-    }
+    Diagnostic::vue2_warning(code, message, span)
 }
 
 fn vue2_error(code: &str, message: impl Into<String>, span: Option<Span>) -> Diagnostic {
-    Diagnostic {
-        code: code.into(),
-        severity: Severity::Error,
-        message: message.into(),
-        span,
-        notes: Vec::new(),
-    }
+    Diagnostic::vue2_error(code, message, span)
 }
 
 fn split_compilation_issues(diagnostics: &DiagnosticSink) -> (Vec<Vue2Error>, Vec<Vue2Warning>) {

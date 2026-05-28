@@ -1,5 +1,9 @@
 # Memory
 
+- Current round: closed the `vuec_diagnostics` foundation slice.
+- `vuec_diagnostics` now owns the unified `Diagnostic` model with severity, notes, related information, suggestions, stable snapshot serialization, code-frame rendering, Vue 2 warning/error/tip constructors, and Vue 3 official numeric compiler error-code constructors for compiler-core/compiler-dom observable diagnostics. Existing Vue 2 and Vue 3 core/dom diagnostic creation points were migrated to the shared constructors. This is diagnostic infrastructure only; no compiler semantics, conformance runner logic, or JavaScript alias shims changed.
+- Verification for this slice passes: `cargo test -p vuec_diagnostics -- --nocapture`, `cargo check -p vuec_diagnostics -p vuec_pass -p vuec_vue2 -p vuec_vue3_core -p vuec_vue3_dom`, `cargo test -p vuec_vue3_dom v_model -- --nocapture`, `cargo test -p vuec_vue3_core expression_parse_error -- --nocapture`, and `cargo test -p vuec_vue2 code_frame -- --nocapture`.
+
 - Current round: closed the `vuec_source` source/span/location foundation slice.
 - `vuec_source` now provides `SourceAnchor` for SFC block base-offset mapping, span-to-location projection, span slices, UTF-16 column to byte-position lookup, line helpers for LF/CRLF/mixed newlines, and a queryable `SourceMapTrace` for generated-position to original-span/location lookup. This is source infrastructure for AST/HIR/MIR span fidelity and source-map traceability only; no compiler semantics, NAPI alias code, or JavaScript shims changed.
 - Verification for this slice passes: `cargo test -p vuec_source -- --nocapture` and `cargo check -p vuec_source -p vuec_diagnostics -p vuec_ast -p vuec_codegen`.
