@@ -914,12 +914,28 @@ fn sfc_diagnostics(
         }));
     }
     for style in styles {
-        diagnostics.extend(style.errors.iter().map(|error| CliDiagnostic {
-            code: "sfc-style".into(),
-            severity: "error".into(),
-            message: error.clone(),
-            start: None,
-            end: None,
+        diagnostics.extend(style.diagnostics.iter().map(|diagnostic| CliDiagnostic {
+            code: diagnostic.code.clone(),
+            severity: diagnostic.severity.as_str().into(),
+            message: diagnostic.message.clone(),
+            start: diagnostic.span.map(|span| span.start.0),
+            end: diagnostic.span.map(|span| span.end.0),
+        }));
+        diagnostics.extend(style.errors.iter().filter_map(|error| {
+            if style
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message == *error)
+            {
+                return None;
+            }
+            Some(CliDiagnostic {
+                code: "sfc-style".into(),
+                severity: "error".into(),
+                message: error.clone(),
+                start: None,
+                end: None,
+            })
         }));
     }
     diagnostics
@@ -1072,6 +1088,26 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("setup"));
+    }
+
+    #[test]
+    fn prints_sfc_style_diagnostic_source_range() {
+        let source = "<template><div/></template>\n<style>\n@import \"missing.css\";\n</style>";
+        let path = write_temp("vuec-cli-style-diagnostic.vue", source);
+        let output = run_with_args([
+            "vuec",
+            "compile-sfc",
+            "--diagnostics",
+            path.to_str().unwrap(),
+        ])
+        .expect("run");
+        let import_start = source.find("@import").expect("import start");
+        let import_end = import_start + "@import \"missing.css\";".len();
+
+        assert!(output.stderr.contains("VUEC_STYLE_IMPORT_RESOLVE"));
+        assert!(output
+            .stderr
+            .contains(&format!("@{import_start}-{import_end}")));
     }
 
     #[test]

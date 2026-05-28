@@ -482,6 +482,9 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
                 "errors": style.errors,
                 "rawResult": ["postcss-result"],
             });
+            if !style.diagnostics.is_empty() {
+                value["diagnostics"] = json!(style.diagnostics);
+            }
             if let Some(modules) = style.modules {
                 value["modules"] = json!(modules);
             }

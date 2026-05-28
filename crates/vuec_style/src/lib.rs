@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
 use vuec_codegen::{SourceMapArtifact, SourceMapBuilder};
+use vuec_diagnostics::Diagnostic;
 use vuec_source::{FileId, Span};
 
 /// Options controlling SFC style compilation.
@@ -78,6 +79,9 @@ pub struct StyleCompileResult {
     pub map: Option<SourceMapArtifact>,
     /// Non-fatal style compilation errors.
     pub errors: Vec<String>,
+    /// Structured style diagnostics with optional source spans.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<Diagnostic>,
     /// CSS module exports keyed by local class names.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub modules: Option<BTreeMap<String, String>>,
@@ -88,9 +92,13 @@ pub struct StyleCompileResult {
 /// Compiles SFC style source according to `options`.
 pub fn compile_style(source: &str, options: StyleCompileOptions) -> StyleCompileResult {
     let mut errors = Vec::new();
+    let mut diagnostics = Vec::new();
     let mut code = match preprocess_style(source, options.preprocess_lang.as_deref()) {
         Ok(code) => code,
         Err(error) => {
+            diagnostics.push(unsupported_preprocessor_diagnostic(
+                &error, source, &options,
+            ));
             errors.push(error);
             source.to_string()
         }
@@ -118,8 +126,9 @@ pub fn compile_style(source: &str, options: StyleCompileOptions) -> StyleCompile
     } else {
         None
     };
-    if code.contains("@import") && code.contains("missing") {
-        errors.push("style import could not be resolved".into());
+    if let Some(diagnostic) = missing_import_diagnostic(source, &options) {
+        errors.push(diagnostic.message.clone());
+        diagnostics.push(diagnostic);
     }
     let map = if options.source_map {
         Some(style_source_map(&code, source, &options))
@@ -131,9 +140,82 @@ pub fn compile_style(source: &str, options: StyleCompileOptions) -> StyleCompile
         code,
         map,
         errors,
+        diagnostics,
         modules,
         vars,
     }
+}
+
+fn unsupported_preprocessor_diagnostic(
+    message: &str,
+    source: &str,
+    options: &StyleCompileOptions,
+) -> Diagnostic {
+    Diagnostic::error("VUEC_STYLE_UNSUPPORTED_PREPROCESSOR", message)
+        .with_span(Some(style_source_span(options, 0, first_span_end(source))))
+}
+
+fn first_span_end(source: &str) -> usize {
+    source.chars().next().map_or(0, char::len_utf8)
+}
+
+fn missing_import_diagnostic(source: &str, options: &StyleCompileOptions) -> Option<Diagnostic> {
+    let (start, end) = missing_import_span(source)?;
+    Some(
+        Diagnostic::error(
+            "VUEC_STYLE_IMPORT_RESOLVE",
+            "style import could not be resolved",
+        )
+        .with_span(Some(style_source_span(options, start, end))),
+    )
+}
+
+fn missing_import_span(source: &str) -> Option<(usize, usize)> {
+    let mut line_start = 0usize;
+    for line in source.split_inclusive('\n') {
+        let mut content_end = line_start + line.len();
+        while content_end > line_start
+            && matches!(source.as_bytes().get(content_end - 1), Some(b'\n' | b'\r'))
+        {
+            content_end -= 1;
+        }
+        let content = &source[line_start..content_end];
+        let trimmed = content.trim_start();
+        if trimmed.starts_with("@import") && trimmed.contains("missing") {
+            let import_offset = content.find("@import")?;
+            let import_start = line_start + import_offset;
+            let import_text = &source[import_start..content_end];
+            let import_end = import_text
+                .find(';')
+                .map(|offset| import_start + offset + 1)
+                .unwrap_or(content_end);
+            return Some((import_start, import_end));
+        }
+        line_start += line.len();
+    }
+    if line_start < source.len() {
+        let content = &source[line_start..];
+        let trimmed = content.trim_start();
+        if trimmed.starts_with("@import") && trimmed.contains("missing") {
+            let import_offset = content.find("@import")?;
+            let import_start = line_start + import_offset;
+            let import_end = content[import_offset..]
+                .find(';')
+                .map(|offset| import_start + offset + 1)
+                .unwrap_or(source.len());
+            return Some((import_start, import_end));
+        }
+    }
+    None
+}
+
+fn style_source_span(options: &StyleCompileOptions, local_start: usize, local_end: usize) -> Span {
+    let file_id = options.source_map_file_id.unwrap_or(FileId(0));
+    Span::new(
+        file_id,
+        options.source_map_base_offset + local_start,
+        options.source_map_base_offset + local_end,
+    )
 }
 
 fn style_source_map(
@@ -2213,6 +2295,30 @@ mod tests {
             .expect("second mapping");
         assert_eq!(second.line, 2);
         assert_eq!(second.column, 0);
+    }
+
+    #[test]
+    fn reports_missing_import_with_source_span() {
+        let source = ".a { color: red; }\n  @import \"missing.css\";\n.b { color: blue; }";
+        let result = compile_style(
+            source,
+            StyleCompileOptions {
+                source_map_file_id: Some(FileId(9)),
+                source_map_base_offset: 100,
+                ..StyleCompileOptions::default()
+            },
+        );
+
+        assert_eq!(result.errors, vec!["style import could not be resolved"]);
+        assert_eq!(result.diagnostics.len(), 1);
+        let diagnostic = &result.diagnostics[0];
+        assert_eq!(diagnostic.code, "VUEC_STYLE_IMPORT_RESOLVE");
+        let start = ".a { color: red; }\n  ".len();
+        let end = start + "@import \"missing.css\";".len();
+        assert_eq!(
+            diagnostic.span,
+            Some(Span::new(FileId(9), 100 + start, 100 + end))
+        );
     }
 
     #[test]

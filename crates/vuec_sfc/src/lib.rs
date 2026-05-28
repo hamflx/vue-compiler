@@ -385,6 +385,9 @@ pub struct SfcStyleCompileResult {
     pub map: Option<SourceMapArtifact>,
     /// Style compile errors.
     pub errors: Vec<String>,
+    /// Structured style diagnostics with spans in the original SFC source.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<Diagnostic>,
     /// External style dependencies.
     pub dependencies: Vec<String>,
     /// CSS module exports keyed by local class names.
@@ -938,6 +941,7 @@ impl SfcCompiler {
     ) -> SfcStyleCompileResult {
         let mut code = String::new();
         let mut errors = Vec::new();
+        let mut diagnostics = Vec::new();
         let mut dependencies = Vec::new();
         let mut modules = BTreeMap::new();
         let mut raw_result = Vec::new();
@@ -975,6 +979,7 @@ impl SfcCompiler {
             }
             code.push_str(&result.code);
             errors.extend(result.errors);
+            diagnostics.extend(result.diagnostics);
             if let Some(result_modules) = result.modules {
                 modules.extend(result_modules);
             }
@@ -1004,6 +1009,7 @@ impl SfcCompiler {
             code,
             map,
             errors,
+            diagnostics,
             dependencies,
             modules,
             raw_result,
@@ -8313,6 +8319,23 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
         assert_eq!(first.source, "multi.vue");
         assert_eq!(first.line, 1);
         assert_eq!(first.column, "<style>".len() as u32);
+    }
+
+    #[test]
+    fn compile_style_diagnostics_map_to_vue_source_offsets() {
+        let mut compiler = SfcCompiler::new();
+        let source = "<template><div/></template>\n<style>\n.a { color: red; }\n@import \"missing.css\";\n</style>";
+        let descriptor = compiler.parse("diagnostic.vue", source);
+        let result = compiler.compile_style(&descriptor, SfcStyleCompileOptions::default());
+
+        assert_eq!(result.errors, vec!["style import could not be resolved"]);
+        assert_eq!(result.diagnostics.len(), 1);
+        let import_start = source.find("@import").expect("import start");
+        let import_end = import_start + "@import \"missing.css\";".len();
+        assert_eq!(
+            result.diagnostics[0].span,
+            Some(Span::new(descriptor.source_file, import_start, import_end))
+        );
     }
 
     #[test]
