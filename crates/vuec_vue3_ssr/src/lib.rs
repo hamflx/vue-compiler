@@ -289,7 +289,7 @@ mod tests {
             },
         );
         assert!(result.code.contains("data-v-x"));
-        assert!(result.code.contains("data-vuec-slotted"));
+        assert!(!result.code.contains("data-vuec-slotted"));
     }
 
     #[test]
@@ -368,6 +368,6 @@ mod tests {
         );
 
         assert!(result.code.contains("data-v-x"));
-        assert!(result.code.contains("data-vuec-slotted"));
+        assert!(!result.code.contains("data-vuec-slotted"));
     }
 }

@@ -2221,6 +2221,9 @@ pub struct Vue3SsrSlot {
 pub struct Vue3SsrAttrs {
     /// Props to render as SSR attrs.
     pub props: Vue3DomProps,
+    /// Whether the full props payload must render through `ssrRenderAttrs`.
+    #[serde(default)]
+    pub force_render_attrs: bool,
     /// Optional `v-show` expression id.
     pub v_show: Option<JsExprId>,
     /// Optional SSR model metadata.
@@ -2311,6 +2314,8 @@ pub struct Vue3SsrFor {
     pub key_alias: Option<JsPatternId>,
     /// Index alias pattern id.
     pub index_alias: Option<JsPatternId>,
+    /// Whether the loop renders an SSR fragment wrapper around its children.
+    pub fragment: bool,
 }
 
 /// Vue 3 SSR teleport payload.
@@ -2350,6 +2355,8 @@ pub enum Vue3SsrMirKind {
     If {
         /// Optional condition expression id.
         condition: Option<JsExprId>,
+        /// Whether codegen emits the SSR false-branch comment marker when no alternate exists.
+        comment: bool,
     },
     /// Loop node.
     For(Vue3SsrFor),

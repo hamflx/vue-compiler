@@ -11857,6 +11857,8 @@ fn rewrite_vue3_ssr_rust_backed_public_compile_imports(prepared_root: &Path) -> 
     rewrite_vue3_ssr_spec_compile_import(&tests.join("ssrSlotOutlet.spec.ts"))?;
     rewrite_vue3_ssr_spec_compile_import(&tests.join("ssrPortal.spec.ts"))?;
     rewrite_vue3_ssr_spec_compile_import(&tests.join("ssrSuspense.spec.ts"))?;
+    rewrite_vue3_ssr_spec_compile_import(&tests.join("ssrTransition.spec.ts"))?;
+    rewrite_vue3_ssr_spec_compile_import(&tests.join("ssrTransitionGroup.spec.ts"))?;
 
     let utils = tests.join("utils.ts");
     if utils.exists() {
@@ -12300,6 +12302,8 @@ fn conformance_coverage_file_kind(
         || path.ends_with("packages/compiler-ssr/__tests__/ssrPortal.spec.ts")
         || path.ends_with("packages/compiler-ssr/__tests__/ssrSlotOutlet.spec.ts")
         || path.ends_with("packages/compiler-ssr/__tests__/ssrSuspense.spec.ts")
+        || path.ends_with("packages/compiler-ssr/__tests__/ssrTransition.spec.ts")
+        || path.ends_with("packages/compiler-ssr/__tests__/ssrTransitionGroup.spec.ts")
         || path.ends_with("packages/compiler-ssr/__tests__/ssrVFor.spec.ts")
         || path.ends_with("packages/compiler-ssr/__tests__/ssrVIf.spec.ts")
         || path.ends_with("packages/compiler-ssr/__tests__/ssrVModel.spec.ts")
@@ -13741,6 +13745,16 @@ mod tests {
             "import { compile } from '../src'\n",
         )
         .unwrap();
+        fs::write(
+            tests.join("ssrTransition.spec.ts"),
+            "import { compile } from '../src'\n",
+        )
+        .unwrap();
+        fs::write(
+            tests.join("ssrTransitionGroup.spec.ts"),
+            "import { compile } from '../src'\n",
+        )
+        .unwrap();
         fs::write(tests.join("utils.ts"), "import { compile } from '../src'\n").unwrap();
 
         rewrite_vue3_ssr_rust_backed_public_compile_imports(&temp).unwrap();
@@ -13753,6 +13767,9 @@ mod tests {
         let slot_outlet_spec = fs::read_to_string(tests.join("ssrSlotOutlet.spec.ts")).unwrap();
         let portal_spec = fs::read_to_string(tests.join("ssrPortal.spec.ts")).unwrap();
         let suspense_spec = fs::read_to_string(tests.join("ssrSuspense.spec.ts")).unwrap();
+        let transition_spec = fs::read_to_string(tests.join("ssrTransition.spec.ts")).unwrap();
+        let transition_group_spec =
+            fs::read_to_string(tests.join("ssrTransitionGroup.spec.ts")).unwrap();
         let utils = fs::read_to_string(tests.join("utils.ts")).unwrap();
         let rust_text_utils = fs::read_to_string(tests.join("utils.rust-ssr-text.ts")).unwrap();
         assert!(spec.contains("from '@vue/compiler-ssr'"));
@@ -13764,6 +13781,8 @@ mod tests {
         assert!(slot_outlet_spec.contains("from '@vue/compiler-ssr'"));
         assert!(portal_spec.contains("from '@vue/compiler-ssr'"));
         assert!(suspense_spec.contains("from '@vue/compiler-ssr'"));
+        assert!(transition_spec.contains("from '@vue/compiler-ssr'"));
+        assert!(transition_group_spec.contains("from '@vue/compiler-ssr'"));
         assert!(utils.contains("from '../src'"));
         assert!(!utils.contains("from '@vue/compiler-ssr'"));
         assert!(rust_text_utils.contains("from '@vue/compiler-ssr'"));
