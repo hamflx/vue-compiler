@@ -313,6 +313,197 @@ impl<K> AstDocument<K> {
             }
         }
     }
+
+    /// Walks the document in deterministic depth-first pre-order.
+    pub fn visit<V>(&self, visitor: &mut V) -> VisitControl
+    where
+        V: AstVisitor<K>,
+    {
+        self.visit_node(self.root, visitor)
+    }
+
+    fn visit_node<V>(&self, id: NodeId, visitor: &mut V) -> VisitControl
+    where
+        V: AstVisitor<K>,
+    {
+        let Some(node) = self.node(id) else {
+            return VisitControl::Continue;
+        };
+        let children = node.children.clone();
+        match visitor.enter_node(self, node) {
+            VisitControl::Stop => return VisitControl::Stop,
+            VisitControl::SkipChildren => {}
+            VisitControl::Continue => {
+                for child in children {
+                    if self.visit_node(child, visitor) == VisitControl::Stop {
+                        return VisitControl::Stop;
+                    }
+                }
+            }
+        }
+        let Some(node) = self.node(id) else {
+            return VisitControl::Continue;
+        };
+        visitor.exit_node(self, node)
+    }
+
+    /// Walks the document mutably in deterministic depth-first pre-order.
+    pub fn visit_mut<V>(&mut self, visitor: &mut V) -> VisitControl
+    where
+        V: AstVisitorMut<K>,
+    {
+        self.visit_node_mut(self.root, visitor)
+    }
+
+    fn visit_node_mut<V>(&mut self, id: NodeId, visitor: &mut V) -> VisitControl
+    where
+        V: AstVisitorMut<K>,
+    {
+        let control = {
+            let Some(node) = self.node_mut(id) else {
+                return VisitControl::Continue;
+            };
+            visitor.enter_node_mut(node)
+        };
+        match control {
+            VisitControl::Stop => return VisitControl::Stop,
+            VisitControl::SkipChildren => {}
+            VisitControl::Continue => {
+                let children = self
+                    .node(id)
+                    .map(|node| node.children.clone())
+                    .unwrap_or_default();
+                for child in children {
+                    if self.visit_node_mut(child, visitor) == VisitControl::Stop {
+                        return VisitControl::Stop;
+                    }
+                }
+            }
+        }
+        let Some(node) = self.node_mut(id) else {
+            return VisitControl::Continue;
+        };
+        visitor.exit_node_mut(node)
+    }
+
+    /// Validates tree invariants and all declared node span metadata.
+    pub fn validate_span_consistency(&self) -> Result<(), SpanConsistencyError>
+    where
+        K: SpanMetadata,
+    {
+        self.validate_tree().map_err(SpanConsistencyError::Tree)?;
+        for node in &self.nodes {
+            validate_node_span(node.id, "node", &node.span)?;
+            let mut spans = Vec::new();
+            node.kind.collect_extra_spans(&mut spans);
+            for extra in spans {
+                validate_node_span(node.id, &extra.owner, &extra.span)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Controls traversal after visitor callbacks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VisitControl {
+    /// Continue normal traversal.
+    Continue,
+    /// Skip the current node's children but still run its exit callback.
+    SkipChildren,
+    /// Stop the traversal immediately.
+    Stop,
+}
+
+/// Immutable AST/HIR/MIR arena visitor.
+pub trait AstVisitor<K> {
+    /// Called before visiting a node's children.
+    fn enter_node(&mut self, _document: &AstDocument<K>, _node: &Node<K>) -> VisitControl {
+        VisitControl::Continue
+    }
+
+    /// Called after visiting a node's children.
+    fn exit_node(&mut self, _document: &AstDocument<K>, _node: &Node<K>) -> VisitControl {
+        VisitControl::Continue
+    }
+}
+
+/// Mutable AST/HIR/MIR arena visitor.
+pub trait AstVisitorMut<K> {
+    /// Called before visiting a node's children.
+    fn enter_node_mut(&mut self, _node: &mut Node<K>) -> VisitControl {
+        VisitControl::Continue
+    }
+
+    /// Called after visiting a node's children.
+    fn exit_node_mut(&mut self, _node: &mut Node<K>) -> VisitControl {
+        VisitControl::Continue
+    }
+}
+
+/// Deterministic document snapshot.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AstSnapshot<K> {
+    /// Root node id.
+    pub root: NodeId,
+    /// Arena nodes in stable id order.
+    pub nodes: Vec<AstNodeSnapshot<K>>,
+}
+
+/// Deterministic node snapshot.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AstNodeSnapshot<K> {
+    /// Node id.
+    pub id: NodeId,
+    /// Parent id.
+    pub parent: Option<NodeId>,
+    /// Position inside the parent.
+    pub index_in_parent: u32,
+    /// Child ids in source/tree order.
+    pub children: Vec<NodeId>,
+    /// Source, generated, or missing span metadata.
+    pub span: NodeSpan,
+    /// Dialect-specific node payload.
+    pub kind: K,
+}
+
+impl<K> AstDocument<K>
+where
+    K: Clone,
+{
+    /// Creates a deterministic snapshot of this document.
+    pub fn snapshot(&self) -> AstSnapshot<K> {
+        AstSnapshot {
+            root: self.root,
+            nodes: self
+                .nodes
+                .iter()
+                .map(|node| AstNodeSnapshot {
+                    id: node.id,
+                    parent: node.parent,
+                    index_in_parent: node.index_in_parent,
+                    children: node.children.clone(),
+                    span: node.span.clone(),
+                    kind: node.kind.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
+impl<K> AstDocument<K>
+where
+    K: Clone + Serialize,
+{
+    /// Serializes the deterministic snapshot as compact JSON.
+    pub fn snapshot_json(&self) -> serde_json::Result<String> {
+        serde_json::to_string(&self.snapshot())
+    }
+
+    /// Serializes the deterministic snapshot as pretty JSON.
+    pub fn snapshot_json_pretty(&self) -> serde_json::Result<String> {
+        serde_json::to_string_pretty(&self.snapshot())
+    }
 }
 
 impl NodeSpan {
@@ -470,6 +661,84 @@ impl NodeSpan {
     pub fn missing(reason: MissingSpanReason) -> Self {
         Self::Missing { reason }
     }
+}
+
+/// One additional span field owned by a node payload.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExtraSpan {
+    /// Human-readable field owner for diagnostics and snapshots.
+    pub owner: String,
+    /// Extra span metadata.
+    pub span: NodeSpan,
+}
+
+impl ExtraSpan {
+    /// Creates an extra span entry.
+    pub fn new(owner: impl Into<String>, span: impl Into<NodeSpan>) -> Self {
+        Self {
+            owner: owner.into(),
+            span: span.into(),
+        }
+    }
+}
+
+/// Trait implemented by node payloads that own nested source span metadata.
+pub trait SpanMetadata {
+    /// Appends extra spans that are not the arena node's primary span.
+    fn collect_extra_spans(&self, _spans: &mut Vec<ExtraSpan>) {}
+}
+
+impl<T> SpanMetadata for Box<T>
+where
+    T: SpanMetadata,
+{
+    fn collect_extra_spans(&self, spans: &mut Vec<ExtraSpan>) {
+        self.as_ref().collect_extra_spans(spans);
+    }
+}
+
+/// Span consistency validation failure.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpanConsistencyError {
+    /// Underlying tree invariants are invalid.
+    Tree(AstInvariantError),
+    /// A source span has `end < start`.
+    InvalidSourceRange {
+        /// Node owning the span.
+        node: NodeId,
+        /// Field that owns the span.
+        owner: String,
+        /// Invalid span.
+        span: Span,
+    },
+}
+
+fn validate_node_span(
+    node: NodeId,
+    owner: &str,
+    span: &NodeSpan,
+) -> Result<(), SpanConsistencyError> {
+    match span {
+        NodeSpan::Source(source) => validate_source_span(node, owner, *source),
+        NodeSpan::Generated { origin, .. } => {
+            if let Some(origin) = origin {
+                validate_source_span(node, owner, *origin)?;
+            }
+            Ok(())
+        }
+        NodeSpan::Missing { .. } => Ok(()),
+    }
+}
+
+fn validate_source_span(node: NodeId, owner: &str, span: Span) -> Result<(), SpanConsistencyError> {
+    if span.end.0 < span.start.0 {
+        return Err(SpanConsistencyError::InvalidSourceRange {
+            node,
+            owner: owner.into(),
+            span,
+        });
+    }
+    Ok(())
 }
 
 /// Mapping edges recorded during AST to HIR and HIR to MIR lowering.
@@ -914,14 +1183,22 @@ pub struct Vue2Element {
     pub has_bindings: bool,
     /// `v-if` expression id.
     pub if_exp: Option<JsExprId>,
+    /// `v-if` source range.
+    pub if_span: Option<Span>,
     /// `v-else-if` expression id.
     pub elseif: Option<JsExprId>,
+    /// `v-else-if` source range.
+    pub elseif_span: Option<Span>,
     /// Whether this is a `v-else` branch.
     pub else_branch: bool,
+    /// `v-else` source range.
+    pub else_span: Option<Span>,
     /// Linked Vue 2 if conditions.
     pub if_conditions: Vec<Vue2IfCondition>,
     /// `v-for` source expression id.
     pub for_exp: Option<JsExprId>,
+    /// `v-for` source range.
+    pub for_span: Option<Span>,
     /// `v-for` value alias pattern id.
     pub alias: Option<JsPatternId>,
     /// `v-for` first iterator alias pattern id.
@@ -930,6 +1207,8 @@ pub struct Vue2Element {
     pub iterator2: Option<JsPatternId>,
     /// Key binding expression id.
     pub key: Option<JsExprId>,
+    /// Key binding source range.
+    pub key_span: Option<Span>,
     /// Template ref name.
     pub ref_name: Option<String>,
     /// Whether the ref appears inside `v-for`.
@@ -991,14 +1270,19 @@ impl Vue2Element {
             once: false,
             has_bindings: false,
             if_exp: None,
+            if_span: None,
             elseif: None,
+            elseif_span: None,
             else_branch: false,
+            else_span: None,
             if_conditions: Vec::new(),
             for_exp: None,
+            for_span: None,
             alias: None,
             iterator1: None,
             iterator2: None,
             key: None,
+            key_span: None,
             ref_name: None,
             ref_in_for: false,
             slot_name: None,
@@ -1056,6 +1340,8 @@ pub struct Vue2Attribute {
     pub name: String,
     /// Attribute value.
     pub value: String,
+    /// Source span for this attribute.
+    pub span: Option<Span>,
     /// Whether the name or value is dynamic.
     pub dynamic: bool,
 }
@@ -1086,6 +1372,8 @@ pub struct Vue2EventHandler {
     pub modifiers: BTreeMap<String, bool>,
     /// Whether the event name is dynamic.
     pub dynamic: bool,
+    /// Source span for this handler.
+    pub span: Option<Span>,
 }
 
 /// Vue 2 `v-if` branch condition.
@@ -1095,6 +1383,8 @@ pub struct Vue2IfCondition {
     pub exp: Option<JsExprId>,
     /// Branch root node id.
     pub block: NodeId,
+    /// Condition source span.
+    pub span: Option<Span>,
 }
 
 /// Vue 2 component `v-model` metadata.
@@ -1140,6 +1430,158 @@ pub struct Vue2FilterCall {
     pub name: String,
     /// Filter argument expression ids.
     pub args: Vec<JsExprId>,
+}
+
+impl SpanMetadata for CstNodeKind {
+    fn collect_extra_spans(&self, spans: &mut Vec<ExtraSpan>) {
+        match self {
+            Self::SfcBlock(_)
+            | Self::Document
+            | Self::Text { .. }
+            | Self::Comment { .. }
+            | Self::Cdata { .. }
+            | Self::Doctype { .. } => {}
+            Self::Element(element) => element.collect_extra_spans(spans),
+            Self::Attribute(attribute) => attribute.collect_extra_spans(spans),
+            Self::Interpolation(interpolation) => interpolation.collect_extra_spans(spans),
+        }
+    }
+}
+
+impl SpanMetadata for CstElement {
+    fn collect_extra_spans(&self, spans: &mut Vec<ExtraSpan>) {
+        spans.push(ExtraSpan::new("cst.open_span", self.open_span));
+        if let Some(span) = self.close_span {
+            spans.push(ExtraSpan::new("cst.close_span", span));
+        }
+    }
+}
+
+impl SpanMetadata for CstAttribute {
+    fn collect_extra_spans(&self, spans: &mut Vec<ExtraSpan>) {
+        spans.push(ExtraSpan::new("cst.name_span", self.name_span));
+        if let Some(span) = self.value_span {
+            spans.push(ExtraSpan::new("cst.value_span", span));
+        }
+    }
+}
+
+impl SpanMetadata for CstInterpolation {
+    fn collect_extra_spans(&self, spans: &mut Vec<ExtraSpan>) {
+        spans.push(ExtraSpan::new("cst.open_span", self.open_span));
+        spans.push(ExtraSpan::new("cst.inner_span", self.inner_span));
+        spans.push(ExtraSpan::new("cst.close_span", self.close_span));
+    }
+}
+
+impl SpanMetadata for Vue2AstKind {
+    fn collect_extra_spans(&self, spans: &mut Vec<ExtraSpan>) {
+        if let Self::Element(element) = self {
+            element.collect_extra_spans(spans);
+        }
+    }
+}
+
+impl SpanMetadata for Vue2Element {
+    fn collect_extra_spans(&self, spans: &mut Vec<ExtraSpan>) {
+        push_optional_span(spans, "vue2.if_span", self.if_span);
+        push_optional_span(spans, "vue2.elseif_span", self.elseif_span);
+        push_optional_span(spans, "vue2.else_span", self.else_span);
+        push_optional_span(spans, "vue2.for_span", self.for_span);
+        push_optional_span(spans, "vue2.key_span", self.key_span);
+        for (index, attr) in self.attrs_list.iter().enumerate() {
+            push_optional_span(spans, format!("vue2.attrs_list[{index}].span"), attr.span);
+        }
+        for (index, attr) in self.attrs.iter().enumerate() {
+            push_optional_span(spans, format!("vue2.attrs[{index}].span"), attr.span);
+        }
+        for (index, attr) in self.props.iter().enumerate() {
+            push_optional_span(spans, format!("vue2.props[{index}].span"), attr.span);
+        }
+        for (index, attr) in self.dynamic_attrs.iter().enumerate() {
+            push_optional_span(
+                spans,
+                format!("vue2.dynamic_attrs[{index}].span"),
+                attr.span,
+            );
+        }
+        for (event, handlers) in &self.events {
+            for (index, handler) in handlers.iter().enumerate() {
+                push_optional_span(
+                    spans,
+                    format!("vue2.events[{event}][{index}].span"),
+                    handler.span,
+                );
+            }
+        }
+        for (event, handlers) in &self.native_events {
+            for (index, handler) in handlers.iter().enumerate() {
+                push_optional_span(
+                    spans,
+                    format!("vue2.native_events[{event}][{index}].span"),
+                    handler.span,
+                );
+            }
+        }
+        for (index, condition) in self.if_conditions.iter().enumerate() {
+            push_optional_span(
+                spans,
+                format!("vue2.if_conditions[{index}].span"),
+                condition.span,
+            );
+        }
+    }
+}
+
+impl SpanMetadata for Vue3AstKind {
+    fn collect_extra_spans(&self, spans: &mut Vec<ExtraSpan>) {
+        if let Self::Element(element) = self {
+            element.collect_extra_spans(spans);
+        }
+    }
+}
+
+impl SpanMetadata for Vue3Element {
+    fn collect_extra_spans(&self, spans: &mut Vec<ExtraSpan>) {
+        for (index, prop) in self.props.iter().enumerate() {
+            prop.collect_extra_spans_with_prefix(spans, &format!("vue3.props[{index}]"));
+        }
+    }
+}
+
+impl Vue3Prop {
+    fn collect_extra_spans_with_prefix(&self, spans: &mut Vec<ExtraSpan>, prefix: &str) {
+        match self {
+            Self::Attribute(attribute) => {
+                push_optional_span(spans, format!("{prefix}.span"), attribute.span);
+                push_optional_span(spans, format!("{prefix}.name_span"), attribute.name_span);
+                push_optional_span(spans, format!("{prefix}.value_span"), attribute.value_span);
+            }
+            Self::Directive(directive) => {
+                push_optional_span(spans, format!("{prefix}.span"), directive.span);
+                push_optional_span(spans, format!("{prefix}.arg_span"), directive.arg_span);
+                push_optional_span(spans, format!("{prefix}.exp_span"), directive.exp_span);
+                for (index, span) in directive.modifier_spans.iter().enumerate() {
+                    spans.push(ExtraSpan::new(
+                        format!("{prefix}.modifier_spans[{index}]"),
+                        span.clone(),
+                    ));
+                }
+            }
+        }
+    }
+}
+
+impl SpanMetadata for HirNodeKind {}
+impl SpanMetadata for Vue2MirKind {}
+impl SpanMetadata for Vue3DomMirKind {}
+impl SpanMetadata for Vue3SsrMirKind {}
+impl SpanMetadata for VaporMirKind {}
+
+fn push_optional_span(spans: &mut Vec<ExtraSpan>, owner: impl Into<String>, span: Option<Span>) {
+    if let Some(span) = span {
+        spans.push(ExtraSpan::new(owner, span));
+    }
 }
 
 /// Vue 3 AST node kinds.
@@ -2707,5 +3149,195 @@ mod tests {
             expression: HirExpr::Js(expression),
         });
         assert!(matches!(hir, HirNodeKind::Interpolation(_)));
+    }
+
+    #[test]
+    fn visitor_reports_stable_enter_exit_order() {
+        #[derive(Default)]
+        struct Recorder {
+            events: Vec<String>,
+        }
+
+        impl AstVisitor<Vue3NodeKind> for Recorder {
+            fn enter_node(
+                &mut self,
+                _document: &AstDocument<Vue3NodeKind>,
+                node: &Node<Vue3NodeKind>,
+            ) -> VisitControl {
+                self.events.push(format!("enter:{}", node.id.0));
+                VisitControl::Continue
+            }
+
+            fn exit_node(
+                &mut self,
+                _document: &AstDocument<Vue3NodeKind>,
+                node: &Node<Vue3NodeKind>,
+            ) -> VisitControl {
+                self.events.push(format!("exit:{}", node.id.0));
+                VisitControl::Continue
+            }
+        }
+
+        let mut doc = Vue3Ast::new(Vue3NodeKind::root(), Span::new(FileId(0), 0, 10));
+        let element = doc.push_child(
+            doc.root,
+            Vue3NodeKind::element("div", Vec::new(), false),
+            Span::new(FileId(0), 0, 10),
+        );
+        doc.push_child(
+            element,
+            Vue3NodeKind::text("hello"),
+            Span::new(FileId(0), 5, 10),
+        );
+
+        let mut recorder = Recorder::default();
+        assert_eq!(doc.visit(&mut recorder), VisitControl::Continue);
+        assert_eq!(
+            recorder.events,
+            vec!["enter:0", "enter:1", "enter:2", "exit:2", "exit:1", "exit:0"]
+        );
+    }
+
+    #[test]
+    fn mutable_visitor_can_update_payloads_without_changing_tree_shape() {
+        struct UppercaseText;
+
+        impl AstVisitorMut<Vue3NodeKind> for UppercaseText {
+            fn enter_node_mut(&mut self, node: &mut Node<Vue3NodeKind>) -> VisitControl {
+                if let Vue3NodeKind::Text(text) = &mut node.kind {
+                    text.value.make_ascii_uppercase();
+                }
+                VisitControl::Continue
+            }
+        }
+
+        let mut doc = Vue3Ast::new(Vue3NodeKind::root(), Span::new(FileId(0), 0, 5));
+        let text = doc.push_child(
+            doc.root,
+            Vue3NodeKind::text("hello"),
+            Span::new(FileId(0), 0, 5),
+        );
+
+        assert_eq!(doc.visit_mut(&mut UppercaseText), VisitControl::Continue);
+        assert_eq!(doc.validate_tree(), Ok(()));
+        assert!(matches!(
+            &doc.node(text).unwrap().kind,
+            Vue3NodeKind::Text(value) if value.value == "HELLO"
+        ));
+    }
+
+    #[test]
+    fn snapshot_json_preserves_generated_and_missing_span_reasons() {
+        let mut doc = Vue3Ast::new(
+            Vue3NodeKind::root(),
+            NodeSpan::generated(Some(Span::new(FileId(0), 0, 1)), GeneratedReason::Lowering),
+        );
+        doc.push_child(
+            doc.root,
+            Vue3NodeKind::text("fallback"),
+            NodeSpan::missing(MissingSpanReason::ParseRecovery),
+        );
+
+        let json = doc.snapshot_json().expect("snapshot json");
+        assert!(json.contains("Generated"));
+        assert!(json.contains("Lowering"));
+        assert!(json.contains("Missing"));
+        assert!(json.contains("ParseRecovery"));
+    }
+
+    #[test]
+    fn span_consistency_checks_node_and_nested_spans() {
+        let mut doc = Vue3Ast::new(Vue3NodeKind::root(), Span::new(FileId(0), 0, 20));
+        doc.push_child(
+            doc.root,
+            Vue3AstKind::Element(Vue3Element {
+                tag: "div".into(),
+                tag_type: Vue3ElementType::Element,
+                ns: HtmlNamespace::Html,
+                props: vec![
+                    Vue3Prop::Attribute(Vue3Attribute {
+                        name: "id".into(),
+                        value: Some("a".into()),
+                        span: Some(Span::new(FileId(0), 5, 11)),
+                        name_span: Some(Span::new(FileId(0), 5, 7)),
+                        value_span: Some(Span::new(FileId(0), 9, 10)),
+                        quote: Some(QuoteKind::Double),
+                    }),
+                    Vue3Prop::Directive(Vue3Directive {
+                        name: "bind".into(),
+                        raw_name: ":class.mod".into(),
+                        arg: Some(Vue3Expression::Raw("class".into())),
+                        exp: Some(Vue3Expression::Raw("klass".into())),
+                        modifiers: vec!["mod".into()],
+                        is_dynamic_arg: false,
+                        span: Some(Span::new(FileId(0), 12, 30)),
+                        arg_span: Some(Span::new(FileId(0), 13, 18)),
+                        exp_span: Some(Span::new(FileId(0), 24, 29)),
+                        modifier_spans: vec![NodeSpan::Source(Span::new(FileId(0), 19, 22))],
+                    }),
+                ],
+                self_closing: false,
+                codegen_node: None,
+                ssr_codegen_node: None,
+            }),
+            Span::new(FileId(0), 0, 30),
+        );
+
+        assert_eq!(doc.validate_span_consistency(), Ok(()));
+    }
+
+    #[test]
+    fn vue2_ast_schema_keeps_source_ranges_and_filter_structure_out_of_children() {
+        let mut element = Vue2Element::new("li");
+        element.if_exp = Some(JsExprId(0));
+        element.if_span = Some(Span::new(FileId(0), 1, 10));
+        element.for_exp = Some(JsExprId(1));
+        element.for_span = Some(Span::new(FileId(0), 11, 25));
+        element.alias = Some(JsPatternId(0));
+        element.key = Some(JsExprId(2));
+        element.key_span = Some(Span::new(FileId(0), 26, 35));
+        element.attrs_list.push(Vue2Attribute {
+            name: ":title".into(),
+            value: "title".into(),
+            span: Some(Span::new(FileId(0), 36, 50)),
+            dynamic: true,
+        });
+
+        let mut doc = Vue2Ast::new(
+            Vue2AstKind::Root(Vue2Root::default()),
+            Span::new(FileId(0), 0, 60),
+        );
+        let element_id = doc.push_child(
+            doc.root,
+            Vue2AstKind::Element(element),
+            Span::new(FileId(0), 0, 60),
+        );
+        let text_id = doc.push_child(
+            element_id,
+            Vue2AstKind::ExpressionText(Vue2ExpressionText {
+                raw: "msg | cap".into(),
+                expr: None,
+                filter_expr: Some(Vue2FilterExpr {
+                    raw: "msg | cap".into(),
+                    base: JsExprId(3),
+                    filters: vec![Vue2FilterCall {
+                        name: "cap".into(),
+                        args: Vec::new(),
+                    }],
+                }),
+            }),
+            Span::new(FileId(0), 40, 52),
+        );
+
+        assert_eq!(doc.validate_span_consistency(), Ok(()));
+        assert_eq!(doc.node(element_id).unwrap().children, vec![text_id]);
+        let Vue2AstKind::Element(projected) = &doc.node(element_id).unwrap().kind else {
+            panic!("expected element");
+        };
+        assert_eq!(projected.for_span, Some(Span::new(FileId(0), 11, 25)));
+        assert_eq!(
+            projected.attrs_list[0].span,
+            Some(Span::new(FileId(0), 36, 50))
+        );
     }
 }
