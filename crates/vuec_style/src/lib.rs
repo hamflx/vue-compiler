@@ -2563,13 +2563,20 @@ fn css_module_composed_values(value: &str, context: &mut CssModulesContext<'_>) 
                 return Vec::new();
             }
             let import = tokens[from_index + 1];
-            for class_name in &tokens[..from_index] {
-                let Some(values) = css_module_external_composed_values(class_name, import, context)
-                else {
-                    return Vec::new();
-                };
-                for value in values {
-                    push_unique_css_module_value(&mut composed, value);
+            if import == "global" {
+                for class_name in &tokens[..from_index] {
+                    push_unique_css_module_value(&mut composed, (*class_name).to_string());
+                }
+            } else {
+                for class_name in &tokens[..from_index] {
+                    let Some(values) =
+                        css_module_external_composed_values(class_name, import, context)
+                    else {
+                        return Vec::new();
+                    };
+                    for value in values {
+                        push_unique_css_module_value(&mut composed, value);
+                    }
                 }
             }
             continue;
@@ -4623,6 +4630,27 @@ mod tests {
         assert!(result.code.starts_with("._dep_"));
         assert!(result.code.contains("._extra_"));
         assert!(!result.code.contains("composes"));
+    }
+
+    #[test]
+    fn compiles_css_modules_composes_from_global() {
+        let result = compile_style(
+            ".button { composes: reset utility from global; color: red; }",
+            StyleCompileOptions {
+                id: Some("test".into()),
+                filename: Some("test.css".into()),
+                modules: true,
+                ..StyleCompileOptions::default()
+            },
+        );
+        let modules = result.modules.expect("css modules map");
+        let button = modules.get("button").expect("button export");
+
+        assert!(button.contains("_button_"));
+        assert!(button.contains("reset"));
+        assert!(button.contains("utility"));
+        assert!(!result.code.contains("composes"));
+        assert!(result.code.contains("color: red"));
     }
 
     #[test]
