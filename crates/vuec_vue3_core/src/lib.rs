@@ -31,12 +31,15 @@ use vuec_ast::{
     Vue3SsrRoot, Vue3SsrSuspense, Vue3SsrTeleport, Vue3VNodeCall,
 };
 use vuec_codegen::{CodeWriter, SourceMapArtifact, SourceMapSegment};
-use vuec_diagnostics::{Diagnostic, Vue3ErrorCode};
+use vuec_diagnostics::Diagnostic;
 use vuec_html::{
     decode_html_attr_entities, decode_html_text_entities, find_matching_raw_text_end,
     raw_text_mode_for_tag, resolve_html_namespace, HtmlTextMode, HtmlTokenKind, HtmlTokenizer,
 };
-use vuec_js::JsAstStore;
+use vuec_js::{
+    js_error_to_vue3_invalid_expression_diagnostic,
+    js_program_errors_to_vue3_invalid_expression_diagnostic, JsAstStore,
+};
 use vuec_pass::TransformContext;
 use vuec_source::{FileId, Span};
 
@@ -25997,17 +26000,10 @@ fn push_event_handler_parse_diagnostic(
     if !parsed.panicked && parsed.errors.is_empty() {
         return;
     }
-    diagnostics.push(Diagnostic::vue3_error(
-        Vue3ErrorCode::XInvalidExpression,
-        parsed
-            .errors
-            .first()
-            .map(ToString::to_string)
-            .map(|raw| vue3_expression_parse_error_message(&raw))
-            .unwrap_or_else(|| {
-                "Error parsing JavaScript expression: Unexpected token (1:3)".into()
-            }),
-        expression_parse_error_span(expression, span),
+    diagnostics.push(js_program_errors_to_vue3_invalid_expression_diagnostic(
+        &parsed.errors,
+        expression,
+        span,
     ));
 }
 
@@ -26026,62 +26022,9 @@ fn push_expression_parse_diagnostic(
     let Err(err) = store.parse_expression(&wrapped, source_type) else {
         return;
     };
-    diagnostics.push(Diagnostic::vue3_error(
-        Vue3ErrorCode::XInvalidExpression,
-        vue3_expression_parse_error_message(err.message()),
-        expression_parse_error_span(expression, span),
+    diagnostics.push(js_error_to_vue3_invalid_expression_diagnostic(
+        &err, expression, span,
     ));
-}
-
-fn vue3_expression_parse_error_message(raw: &str) -> String {
-    let detail = raw
-        .lines()
-        .find_map(|line| line.trim().strip_prefix("× ").map(str::trim))
-        .or_else(|| raw.lines().next().map(str::trim))
-        .unwrap_or("Unexpected token");
-    let detail = if detail == "Unexpected token" {
-        "Unexpected token (1:3)"
-    } else {
-        detail
-    };
-    format!("Error parsing JavaScript expression: {detail}")
-}
-
-fn expression_parse_error_span(expression: &str, span: Option<Span>) -> Option<Span> {
-    let span = span?;
-    let relative = expression_parse_error_relative_offset(expression).unwrap_or(expression.len());
-    let start = span.start.0.saturating_add(relative).min(span.end.0);
-    Some(Span::new(span.file_id, start, start))
-}
-
-fn expression_parse_error_relative_offset(expression: &str) -> Option<usize> {
-    let message = JsAstStore::new()
-        .parse_expression(&format!("({expression})"), oxc_span::SourceType::ts())
-        .err()
-        .map(|err| err.message().to_string())?;
-    let (_line, column) = parse_oxc_line_column(&message)?;
-    let wrapped_column = column.saturating_sub(1);
-    Some(wrapped_column.min(expression.len()))
-}
-
-fn parse_oxc_line_column(message: &str) -> Option<(usize, usize)> {
-    for line in message.lines() {
-        let trimmed = line.trim();
-        let Some(open) = trimmed.rfind('(') else {
-            continue;
-        };
-        let Some(close) = trimmed[open + 1..].find(')') else {
-            continue;
-        };
-        let location = &trimmed[open + 1..open + 1 + close];
-        let Some((line, column)) = location.split_once(':') else {
-            continue;
-        };
-        let line = line.parse::<usize>().ok()?;
-        let column = column.parse::<usize>().ok()?;
-        return Some((line, column));
-    }
-    None
 }
 
 fn expression_source_type(options: &Vue3CompilerOptions) -> oxc_span::SourceType {

@@ -1353,6 +1353,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "vuec_ast",
+ "vuec_diagnostics",
  "vuec_source",
 ]
 

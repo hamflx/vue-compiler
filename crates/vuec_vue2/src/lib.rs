@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use vuec_ast::{Vue2Ast, Vue2NodeKind};
 use vuec_diagnostics::{Diagnostic, DiagnosticSink, Severity};
 use vuec_html::{HtmlAttribute, HtmlTokenKind, HtmlTokenizer};
-use vuec_js::JsAstStore;
+use vuec_js::{rewrite_vue2_filter_expression, JsAstStore};
 use vuec_source::{FileId, Span};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2741,101 +2741,7 @@ fn parse_text(text: &str, delimiters: Option<&[String; 2]>) -> Option<String> {
 }
 
 fn parse_filters(exp: &str) -> String {
-    let mut in_single = false;
-    let mut in_double = false;
-    let mut in_template = false;
-    let mut in_regex = false;
-    let mut curly = 0usize;
-    let mut square = 0usize;
-    let mut paren = 0usize;
-    let mut expression: Option<String> = None;
-    let mut filters = Vec::new();
-    let mut last_filter_index = 0usize;
-    let mut prev = '\0';
-
-    for (index, ch) in exp.char_indices() {
-        if in_single {
-            if ch == '\'' && prev != '\\' {
-                in_single = false;
-            }
-        } else if in_double {
-            if ch == '"' && prev != '\\' {
-                in_double = false;
-            }
-        } else if in_template {
-            if ch == '`' && prev != '\\' {
-                in_template = false;
-            }
-        } else if in_regex {
-            if ch == '/' && prev != '\\' {
-                in_regex = false;
-            }
-        } else if ch == '|'
-            && exp[index + ch.len_utf8()..].chars().next() != Some('|')
-            && prev != '|'
-            && curly == 0
-            && square == 0
-            && paren == 0
-        {
-            if expression.is_none() {
-                expression = Some(exp[..index].trim().to_string());
-                last_filter_index = index + ch.len_utf8();
-            } else {
-                filters.push(exp[last_filter_index..index].trim().to_string());
-                last_filter_index = index + ch.len_utf8();
-            }
-        } else {
-            match ch {
-                '\'' => in_single = true,
-                '"' => in_double = true,
-                '`' => in_template = true,
-                '(' => paren += 1,
-                ')' => paren = paren.saturating_sub(1),
-                '[' => square += 1,
-                ']' => square = square.saturating_sub(1),
-                '{' => curly += 1,
-                '}' => curly = curly.saturating_sub(1),
-                '/' if !valid_division_before(exp, index) => in_regex = true,
-                _ => {}
-            }
-        }
-        prev = ch;
-    }
-
-    let mut expression = if let Some(expression) = expression {
-        filters.push(exp[last_filter_index..].trim().to_string());
-        expression
-    } else {
-        exp.trim().to_string()
-    };
-    for filter in filters {
-        expression = wrap_filter(&expression, &filter);
-    }
-    expression
-}
-
-fn wrap_filter(exp: &str, filter: &str) -> String {
-    if let Some(index) = filter.find('(') {
-        let name = &filter[..index];
-        let args = &filter[index + 1..];
-        if args == ")" {
-            format!("_f(\"{name}\")({exp})")
-        } else {
-            format!("_f(\"{name}\")({exp},{args}")
-        }
-    } else {
-        format!("_f(\"{filter}\")({exp})")
-    }
-}
-
-fn valid_division_before(exp: &str, slash_index: usize) -> bool {
-    let previous = exp[..slash_index]
-        .chars()
-        .rev()
-        .find(|ch| !ch.is_whitespace());
-    previous.is_some_and(|ch| {
-        ch.is_ascii_alphanumeric() || matches!(ch, ')' | '.' | '+' | '-' | '_' | '$' | ']')
-    })
+    rewrite_vue2_filter_expression(exp)
 }
 
 fn project_public_ast(template: &str, element_ast: Option<&Vue2Element>) -> Vue2Ast {

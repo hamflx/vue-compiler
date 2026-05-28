@@ -22,4 +22,5 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 vuec_ast = { path = "../vuec_ast", version = "0.1.0" }
+vuec_diagnostics = { path = "../vuec_diagnostics", version = "0.1.0" }
 vuec_source = { path = "../vuec_source", version = "0.1.0" }
