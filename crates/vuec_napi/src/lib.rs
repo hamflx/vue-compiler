@@ -1310,6 +1310,10 @@ fn vue3_options(value: Option<&Value>) -> Vue3CompilerOptions {
         .get("__vuecSourceMapBaseOffset")
         .and_then(Value::as_u64)
         .unwrap_or_default() as usize;
+    options.ssr_css_vars = value
+        .get("ssrCssVars")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
     options.stringify_static = bool_option(
         value,
         "stringifyStatic",
@@ -3819,11 +3823,13 @@ mod tests {
             "mode": "module",
             "prefixIdentifiers": true,
             "sourceMap": true,
+            "ssrCssVars": "{ \"--x\": (foo) }",
             "scopeId": "data-v-test"
         })));
         assert_eq!(options.mode, "module");
         assert!(options.prefix_identifiers);
         assert!(options.source_map);
+        assert_eq!(options.ssr_css_vars.as_deref(), Some("{ \"--x\": (foo) }"));
         assert_eq!(options.scope_id.as_deref(), Some("data-v-test"));
     }
 
