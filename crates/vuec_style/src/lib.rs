@@ -1661,14 +1661,25 @@ fn rewrite_single_selector(selector: &str, scope_id: &str) -> String {
         }
         return rewrite_deep_selector(&selector[..deep.start], &selector[deep.end..], scope_id);
     }
-    if let Some(slotted) = find_pseudo_function(selector, &[":slotted", "::v-slotted"]) {
-        if let Some((open, close)) = slotted.parens {
-            let mut inner = selector[open + 1..close].trim().to_string();
-            inner.push_str(&selector[close + 1..]);
-            return inject_scope_attribute(&inner, &format!("{scope_id}-s"));
-        }
+    if let Some(rewritten) = rewrite_slotted_selector(selector, scope_id) {
+        return rewritten;
     }
     inject_scope_attribute(selector, scope_id)
+}
+
+fn rewrite_slotted_selector(selector: &str, scope_id: &str) -> Option<String> {
+    let slotted = find_top_level_pseudo_function(selector, &[":slotted", "::v-slotted"])?;
+    let (open, close) = slotted.parens?;
+    let inner = first_selector_branch(selector[open + 1..close].trim()).trim();
+    let mut rewritten = String::new();
+    rewritten.push_str(&selector[..slotted.start]);
+    if inner.is_empty() {
+        rewritten.push_str(&format!("[{scope_id}-s]"));
+    } else {
+        rewritten.push_str(&inject_scope_attribute(inner, &format!("{scope_id}-s")));
+    }
+    rewritten.push_str(&selector[close + 1..]);
+    Some(rewritten)
 }
 
 fn split_selector_list(selector: &str) -> Vec<&str> {
@@ -1805,6 +1816,82 @@ fn find_pseudo_function(selector: &str, names: &[&str]) -> Option<SelectorMatch>
         index += ch.len_utf8();
     }
     None
+}
+
+fn find_top_level_pseudo_function(selector: &str, names: &[&str]) -> Option<SelectorMatch> {
+    let mut state = SelectorScannerState::Normal;
+    let mut bracket_depth = 0usize;
+    let mut paren_depth = 0usize;
+    let mut index = 0usize;
+    while index < selector.len() {
+        let ch = selector[index..].chars().next()?;
+        match state {
+            SelectorScannerState::Normal => match ch {
+                '\'' => state = SelectorScannerState::SingleQuote,
+                '"' => state = SelectorScannerState::DoubleQuote,
+                '[' => bracket_depth += 1,
+                ']' if bracket_depth > 0 => bracket_depth -= 1,
+                '(' => paren_depth += 1,
+                ')' if paren_depth > 0 => paren_depth -= 1,
+                _ if bracket_depth == 0 && paren_depth == 0 => {
+                    for name in names {
+                        if selector[index..].starts_with(name)
+                            && selector_name_boundary(selector, index + name.len())
+                        {
+                            let end = index + name.len();
+                            let open = skip_selector_whitespace(selector, end);
+                            let parens = if selector[open..].starts_with('(') {
+                                find_matching_selector_paren(selector, open)
+                                    .map(|close| (open, close))
+                            } else {
+                                None
+                            };
+                            let match_end = parens.map(|(_, close)| close + 1).unwrap_or(end);
+                            return Some(SelectorMatch {
+                                start: index,
+                                end: match_end,
+                                parens,
+                            });
+                        }
+                    }
+                }
+                _ => {}
+            },
+            SelectorScannerState::SingleQuote => {
+                if ch == '\\' {
+                    index += ch.len_utf8();
+                    if index < selector.len() {
+                        index += selector[index..].chars().next().map_or(0, char::len_utf8);
+                    }
+                    continue;
+                }
+                if ch == '\'' {
+                    state = SelectorScannerState::Normal;
+                }
+            }
+            SelectorScannerState::DoubleQuote => {
+                if ch == '\\' {
+                    index += ch.len_utf8();
+                    if index < selector.len() {
+                        index += selector[index..].chars().next().map_or(0, char::len_utf8);
+                    }
+                    continue;
+                }
+                if ch == '"' {
+                    state = SelectorScannerState::Normal;
+                }
+            }
+        }
+        index += ch.len_utf8();
+    }
+    None
+}
+
+fn first_selector_branch(selector: &str) -> &str {
+    split_selector_list(selector)
+        .into_iter()
+        .next()
+        .unwrap_or(selector)
 }
 
 fn selector_name_boundary(selector: &str, index: usize) -> bool {
@@ -1955,17 +2042,55 @@ fn rewrite_deep_selector(prefix: &str, suffix: &str, scope_id: &str) -> String {
 }
 
 fn inject_scope_attribute(selector: &str, scope_id: &str) -> String {
-    let selector = selector.trim();
+    let selector = strip_leading_universal_selector(selector.trim());
     let Some(index) = selector_injection_index(selector) else {
         return format!("[{scope_id}]{selector}");
     };
     let mut rewritten = String::new();
-    rewritten.push_str(selector[..index].trim_end());
+    let mut prefix_end = index;
+    let mut removed_universal = false;
+    if let Some(stripped) = selector[..index].strip_suffix('*') {
+        if selector[index..].starts_with(['.', '#', ':', '[']) {
+            prefix_end = stripped.len();
+            removed_universal = true;
+        }
+    }
+    if removed_universal {
+        rewritten.push_str(&selector[..prefix_end]);
+    } else {
+        rewritten.push_str(selector[..prefix_end].trim_end());
+    }
     rewritten.push('[');
     rewritten.push_str(scope_id);
     rewritten.push(']');
     rewritten.push_str(&selector[index..]);
     rewritten
+}
+
+fn strip_leading_universal_selector(selector: &str) -> &str {
+    let Some(after_star) = selector.strip_prefix('*') else {
+        return selector;
+    };
+    if after_star.is_empty() {
+        return "";
+    }
+    if let Some(first) = after_star.chars().next() {
+        if !first.is_whitespace() {
+            return after_star;
+        }
+    }
+    let whitespace_end = skip_selector_whitespace(selector, '*'.len_utf8());
+    if whitespace_end >= selector.len() {
+        return "";
+    }
+    let next = selector[whitespace_end..].chars().next();
+    if next.is_some_and(|ch| {
+        ch == '.' || ch == '#' || ch == '[' || ch == ':' || is_selector_ident_start(ch)
+    }) {
+        &selector[whitespace_end..]
+    } else {
+        after_star
+    }
 }
 
 fn selector_injection_index(selector: &str) -> Option<usize> {
@@ -1992,7 +2117,8 @@ fn selector_injection_index(selector: &str) -> Option<usize> {
                     continue;
                 }
                 '>' | '+' | '~' | ',' => {}
-                '*' => last_node_end = Some(index + ch.len_utf8()),
+                '*' if last_node_end.is_none() => last_node_end = Some(index + ch.len_utf8()),
+                '*' => {}
                 _ if ch.is_whitespace() => {}
                 _ if is_selector_ident_start(ch) || ch == '.' || ch == '#' => {
                     let end = consume_selector_token(selector, index);
@@ -2183,11 +2309,85 @@ mod tests {
     }
 
     #[test]
+    fn rewrites_scoped_slotted_selectors_like_vue3() {
+        assert_eq!(
+            rewrite_scoped_selectors(":slotted(.foo) { color: red; }", "data-v-test"),
+            ".foo[data-v-test-s] { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(
+                ".baz .qux ::v-slotted(.foo .bar) { color: red; }",
+                "data-v-test",
+            ),
+            ".baz .qux .foo .bar[data-v-test-s] { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(":slotted(.foo):hover { color: red; }", "data-v-test"),
+            ".foo[data-v-test-s]:hover { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(".wrapper:slotted(.foo) { color: red; }", "data-v-test"),
+            ".wrapper.foo[data-v-test-s] { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(".a :slotted(.foo) .bar { color: red; }", "data-v-test"),
+            ".a .foo[data-v-test-s] .bar { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(".a :slotted(*:hover) { color: red; }", "data-v-test"),
+            ".a [data-v-test-s]:hover { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(".a :slotted(*.foo) { color: red; }", "data-v-test"),
+            ".a .foo[data-v-test-s] { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(".a :slotted(* + .foo) { color: red; }", "data-v-test"),
+            ".a  + .foo[data-v-test-s] { color: red; }"
+        );
+    }
+
+    #[test]
+    fn leaves_nested_slotted_pseudo_scoped_on_outer_selector() {
+        let code =
+            rewrite_scoped_selectors(":not(:slotted(.foo)) .bar { color: red; }", "data-v-test");
+
+        assert_eq!(
+            code,
+            ":not(:slotted(.foo)) .bar[data-v-test] { color: red; }"
+        );
+    }
+
+    #[test]
     fn rewrites_scoped_selectors_inside_container_at_rules() {
         let code =
             rewrite_scoped_selectors("@media print { .foo { color: #000; } }", "v-scope-xxx");
 
         assert!(code.contains(".foo[v-scope-xxx] { color: #000;"));
+    }
+
+    #[test]
+    fn mounts_scope_on_correct_universal_selector_target() {
+        assert_eq!(
+            rewrite_scoped_selectors("* { color: red; }", "data-v-test"),
+            "[data-v-test] { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors("* .foo { color: red; }", "data-v-test"),
+            ".foo[data-v-test] { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors("*.foo { color: red; }", "data-v-test"),
+            ".foo[data-v-test] { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(".foo * { color: red; }", "data-v-test"),
+            ".foo[data-v-test] * { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(".foo *.bar { color: red; }", "data-v-test"),
+            ".foo *.bar[data-v-test] { color: red; }"
+        );
     }
 
     #[test]
