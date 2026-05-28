@@ -29,6 +29,13 @@ pub struct StyleCompileOptions {
     pub vars: Vec<String>,
     /// Whether production CSS variable names should use hashed names.
     pub is_prod: bool,
+    /// CSS variable naming behavior. Vue 3 escapes CSS punctuation, Vue 2.7
+    /// legacy behavior replaces non-ASCII-word characters with underscores.
+    #[serde(default)]
+    pub css_var_name_style: CssVarNameStyle,
+    /// Whether `// ...` comments are ignored while collecting/replacing CSS vars.
+    #[serde(default)]
+    pub css_var_ignore_line_comments: bool,
     /// Optional filename used for generated source-map metadata.
     pub filename: Option<String>,
     /// Original source text used for source-map `sourcesContent`.
@@ -44,6 +51,17 @@ pub struct StyleCompileOptions {
     pub source_map: bool,
     /// Optional preprocessor language, for example `scss`, `sass`, `less`, or `styl`.
     pub preprocess_lang: Option<String>,
+}
+
+/// CSS variable custom property naming behavior.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CssVarNameStyle {
+    /// Vue 3 behavior: CSS-escape punctuation and preserve Unicode identifier text.
+    #[default]
+    Vue3Escaped,
+    /// Vue 2.7 behavior: replace characters outside `[A-Za-z0-9_-]` with `_`.
+    Vue27Legacy,
 }
 
 /// CSS Modules naming and export options.
@@ -106,7 +124,12 @@ pub fn compile_style(source: &str, options: StyleCompileOptions) -> StyleCompile
     let option_id = options.id.clone();
     let id = option_id.clone().unwrap_or_else(|| "data-v-vuec".into());
     let vars = if options.vars.is_empty() {
-        collect_css_vars(&code)
+        collect_css_vars_with_options(
+            &code,
+            CssVarCollectOptions {
+                ignore_line_comments: options.css_var_ignore_line_comments,
+            },
+        )
     } else {
         options.vars.clone()
     };
@@ -116,7 +139,15 @@ pub fn compile_style(source: &str, options: StyleCompileOptions) -> StyleCompile
     }
     if !vars.is_empty() {
         let var_id = option_id.as_deref().map(style_var_id).unwrap_or_default();
-        code = rewrite_css_vars(&code, &var_id, options.is_prod);
+        code = rewrite_css_vars_with_options(
+            &code,
+            &var_id,
+            CssVarRewriteOptions {
+                is_prod: options.is_prod,
+                name_style: options.css_var_name_style,
+                ignore_line_comments: options.css_var_ignore_line_comments,
+            },
+        );
     }
     code = normalize_style_output(&code);
     let modules = if options.modules {
@@ -474,8 +505,20 @@ pub fn rewrite_scoped_selectors(source: &str, scope_id: &str) -> String {
 
 /// Collects unique CSS variable expressions from `v-bind(...)` calls.
 pub fn collect_css_vars(source: &str) -> Vec<String> {
+    collect_css_vars_with_options(source, CssVarCollectOptions::default())
+}
+
+/// Options for collecting CSS variable expressions from `v-bind(...)`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CssVarCollectOptions {
+    /// Whether Less/Sass/Stylus-style `// ...` comments are skipped.
+    pub ignore_line_comments: bool,
+}
+
+/// Collects unique CSS variable expressions from `v-bind(...)` calls.
+pub fn collect_css_vars_with_options(source: &str, options: CssVarCollectOptions) -> Vec<String> {
     let mut vars = Vec::new();
-    for binding in css_var_bindings(source) {
+    for binding in css_var_bindings(source, options.ignore_line_comments) {
         if !binding.expression.is_empty()
             && !vars.iter().any(|existing| existing == &binding.expression)
         {
@@ -487,28 +530,73 @@ pub fn collect_css_vars(source: &str) -> Vec<String> {
 
 /// Generates the CSS custom property name for a Vue style variable binding.
 pub fn gen_css_var_name(id: &str, raw: &str, is_prod: bool) -> String {
+    gen_css_var_name_with_style(id, raw, is_prod, CssVarNameStyle::Vue27Legacy)
+}
+
+/// Generates the CSS custom property name for a Vue style variable binding.
+pub fn gen_css_var_name_with_style(
+    id: &str,
+    raw: &str,
+    is_prod: bool,
+    style: CssVarNameStyle,
+) -> String {
     if is_prod {
-        hash_sum_string(&format!("{id}{raw}"))
-    } else {
-        let mut name = String::new();
-        if !id.is_empty() {
-            name.push_str(id);
-            name.push('-');
-        }
-        for ch in raw.chars() {
-            if ch == '-' || ch == '_' || ch.is_ascii_alphanumeric() {
-                name.push(ch);
-            } else {
-                name.push('_');
-            }
-        }
-        name
+        let hash = hash_sum_string(&format!("{id}{raw}"));
+        return if matches!(style, CssVarNameStyle::Vue3Escaped)
+            && hash.chars().next().is_some_and(|ch| ch.is_ascii_digit())
+        {
+            format!("v{hash}")
+        } else {
+            hash
+        };
     }
+    let mut name = String::new();
+    if !id.is_empty() {
+        name.push_str(id);
+        name.push('-');
+    }
+    match style {
+        CssVarNameStyle::Vue3Escaped => {
+            name.push_str(&escape_vue3_css_var_name(raw));
+        }
+        CssVarNameStyle::Vue27Legacy => {
+            name.push_str(&legacy_vue27_css_var_name(raw));
+        }
+    }
+    name
 }
 
 /// Rewrites `v-bind(...)` CSS expressions to `var(--...)` custom properties.
 pub fn rewrite_css_vars(source: &str, id: &str, is_prod: bool) -> String {
-    let bindings = css_var_bindings(source);
+    rewrite_css_vars_with_options(
+        source,
+        id,
+        CssVarRewriteOptions {
+            is_prod,
+            name_style: CssVarNameStyle::Vue27Legacy,
+            ignore_line_comments: false,
+        },
+    )
+}
+
+/// Options for rewriting CSS variable bindings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CssVarRewriteOptions {
+    /// Whether production CSS variable names should use hashed names.
+    pub is_prod: bool,
+    /// CSS variable custom-property naming behavior.
+    pub name_style: CssVarNameStyle,
+    /// Whether Less/Sass/Stylus-style `// ...` comments are skipped.
+    pub ignore_line_comments: bool,
+}
+
+/// Rewrites `v-bind(...)` CSS expressions to `var(--...)` custom properties.
+pub fn rewrite_css_vars_with_options(
+    source: &str,
+    id: &str,
+    options: CssVarRewriteOptions,
+) -> String {
+    let bindings = css_var_bindings(source, options.ignore_line_comments);
     if bindings.is_empty() {
         return source.to_string();
     }
@@ -520,12 +608,76 @@ pub fn rewrite_css_vars(source: &str, id: &str, is_prod: bool) -> String {
         }
         output.push_str(&source[cursor..binding.start]);
         output.push_str("var(--");
-        output.push_str(&gen_css_var_name(id, &binding.expression, is_prod));
+        output.push_str(&gen_css_var_name_with_style(
+            id,
+            &binding.expression,
+            options.is_prod,
+            options.name_style,
+        ));
         output.push(')');
         cursor = binding.end;
     }
     output.push_str(&source[cursor..]);
     output
+}
+
+fn escape_vue3_css_var_name(raw: &str) -> String {
+    let mut escaped = String::new();
+    for ch in raw.chars() {
+        if is_vue3_css_var_escape_symbol(ch) {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped
+}
+
+fn is_vue3_css_var_escape_symbol(ch: char) -> bool {
+    matches!(
+        ch,
+        ' ' | '!'
+            | '"'
+            | '#'
+            | '$'
+            | '%'
+            | '&'
+            | '\''
+            | '('
+            | ')'
+            | '*'
+            | '+'
+            | ','
+            | '.'
+            | '/'
+            | ':'
+            | ';'
+            | '<'
+            | '='
+            | '>'
+            | '?'
+            | '@'
+            | '['
+            | '\\'
+            | ']'
+            | '^'
+            | '`'
+            | '{'
+            | '|'
+            | '}'
+            | '~'
+    )
+}
+
+fn legacy_vue27_css_var_name(raw: &str) -> String {
+    raw.chars()
+        .map(|ch| {
+            if ch == '-' || ch == '_' || ch.is_ascii_alphanumeric() {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 fn style_var_id(id: &str) -> String {
@@ -539,7 +691,7 @@ struct CssVarBinding {
     expression: String,
 }
 
-fn css_var_bindings(source: &str) -> Vec<CssVarBinding> {
+fn css_var_bindings(source: &str, ignore_line_comments: bool) -> Vec<CssVarBinding> {
     let mut bindings = Vec::new();
     let mut cursor = 0usize;
     while cursor < source.len() {
@@ -550,7 +702,11 @@ fn css_var_bindings(source: &str) -> Vec<CssVarBinding> {
             cursor += 2 + end_offset + 2;
             continue;
         }
-        let Some(start_offset) = find_next_v_bind(source, cursor) else {
+        if ignore_line_comments && source[cursor..].starts_with("//") {
+            cursor = skip_css_line_comment(source, cursor);
+            continue;
+        }
+        let Some(start_offset) = find_next_v_bind(source, cursor, ignore_line_comments) else {
             break;
         };
         let open_end = start_offset + v_bind_prefix_len(&source[start_offset..]);
@@ -568,7 +724,7 @@ fn css_var_bindings(source: &str) -> Vec<CssVarBinding> {
     bindings
 }
 
-fn find_next_v_bind(source: &str, cursor: usize) -> Option<usize> {
+fn find_next_v_bind(source: &str, cursor: usize, ignore_line_comments: bool) -> Option<usize> {
     let bytes = source.as_bytes();
     let mut index = cursor;
     while index + "v-bind".len() <= source.len() {
@@ -578,6 +734,10 @@ fn find_next_v_bind(source: &str, cursor: usize) -> Option<usize> {
                 continue;
             }
             return None;
+        }
+        if ignore_line_comments && source[index..].starts_with("//") {
+            index = skip_css_line_comment(source, index);
+            continue;
         }
         if source[index..].starts_with("v-bind") {
             let mut open = index + "v-bind".len();
@@ -592,6 +752,13 @@ fn find_next_v_bind(source: &str, cursor: usize) -> Option<usize> {
         index += ch.len_utf8();
     }
     None
+}
+
+fn skip_css_line_comment(source: &str, start: usize) -> usize {
+    source[start..]
+        .find(['\n', '\r'])
+        .map(|offset| start + offset)
+        .unwrap_or(source.len())
 }
 
 fn v_bind_prefix_len(source: &str) -> usize {
@@ -2648,6 +2815,34 @@ mod tests {
     }
 
     #[test]
+    fn collects_css_vars_like_vue3_with_line_comments() {
+        let vars = collect_css_vars_with_options(
+            r#"
+            // color: v-bind(ignored);
+            div {
+              color: v-bind(color);
+              width: v-bind('font.size');
+              top: v-bind    ((a + b) / 2 + 'px' );
+              height: v-bind("count.toString(");
+            }
+            "#,
+            CssVarCollectOptions {
+                ignore_line_comments: true,
+            },
+        );
+
+        assert_eq!(
+            vars,
+            vec![
+                "color",
+                "font.size",
+                "(a + b) / 2 + 'px'",
+                "count.toString("
+            ]
+        );
+    }
+
+    #[test]
     fn rewrites_css_vars_with_vue27_names() {
         let code = rewrite_css_vars(
             ".foo { color: v-bind(color); font-size: v-bind('font.size'); }",
@@ -2658,5 +2853,34 @@ mod tests {
         assert!(code.contains("var(--test-font_size)"));
         assert_eq!(gen_css_var_name("xxxxxxxx", "color", true), "4003f1a6");
         assert_eq!(gen_css_var_name("xxxxxxxx", "font.size", true), "41b6490a");
+    }
+
+    #[test]
+    fn rewrites_css_vars_with_vue3_escaped_names() {
+        let code = rewrite_css_vars_with_options(
+            concat!(
+                ".foo { color: v-bind(color); font-size: v-bind('font.size'); ",
+                "font-weight: v-bind(_φ); width: calc(v-bind(foo + 'px') - 3px); }\n",
+                "// color: v-bind(ignored)\n",
+                ".bar { width: v-bind(width); }"
+            ),
+            "test",
+            CssVarRewriteOptions {
+                is_prod: false,
+                name_style: CssVarNameStyle::Vue3Escaped,
+                ignore_line_comments: true,
+            },
+        );
+
+        assert!(code.contains("var(--test-color)"));
+        assert!(code.contains(r"var(--test-font\.size)"));
+        assert!(code.contains("var(--test-_φ)"));
+        assert!(code.contains(r"var(--test-foo\ \+\ \'px\')"));
+        assert!(code.contains("// color: v-bind(ignored)"));
+        assert!(code.contains("var(--test-width)"));
+        assert_eq!(
+            gen_css_var_name_with_style("xxxxxxxx", "color", true, CssVarNameStyle::Vue3Escaped),
+            "v4003f1a6"
+        );
     }
 }

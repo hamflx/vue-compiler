@@ -28,8 +28,10 @@ use vuec_diagnostics::{Diagnostic, Severity};
 use vuec_html::{HtmlAttribute, HtmlTokenKind, HtmlTokenizer};
 use vuec_js::{JsAstStore, JsParseMode};
 use vuec_source::{FileId, SourceMap, Span};
+pub use vuec_style::CssVarNameStyle as SfcCssVarNameStyle;
 use vuec_style::{
-    collect_css_vars, compile_style, gen_css_var_name, CssModulesOptions, StyleCompileOptions,
+    collect_css_vars_with_options, compile_style, gen_css_var_name_with_style, CssModulesOptions,
+    CssVarCollectOptions, CssVarNameStyle, StyleCompileOptions,
 };
 use vuec_vue3_core::{TemplateSource, Vue3CompilerOptions};
 use vuec_vue3_dom::{
@@ -247,6 +249,10 @@ pub struct SfcStyleCompileOptions {
     pub modules_options: CssModulesOptions,
     /// Whether production compile behavior is requested.
     pub is_prod: bool,
+    /// CSS variable naming behavior used by style compilation.
+    pub css_var_name_style: CssVarNameStyle,
+    /// Whether `// ...` comments are ignored while collecting/replacing CSS vars.
+    pub css_var_ignore_line_comments: bool,
     /// Optional preprocessor language override.
     pub preprocess_lang: Option<String>,
     /// Whether source maps should be generated.
@@ -262,6 +268,8 @@ impl Default for SfcStyleCompileOptions {
             modules: false,
             modules_options: CssModulesOptions::default(),
             is_prod: false,
+            css_var_name_style: CssVarNameStyle::Vue3Escaped,
+            css_var_ignore_line_comments: true,
             preprocess_lang: None,
             source_map: false,
         }
@@ -889,7 +897,12 @@ impl SfcCompiler {
             script_setup_ast.push(format!("JsProgramId({})", id.0));
         }
         let summary = self.js.summarize_program(&raw_content, source_type);
-        let css_vars = descriptor_css_vars(descriptor);
+        let css_vars = descriptor_css_vars(
+            descriptor,
+            CssVarCollectOptions {
+                ignore_line_comments: false,
+            },
+        );
         let script_errors = vue27_script_compile_errors(descriptor);
         let content = vue27_script_content(descriptor, &options, &css_vars);
         let bindings = if descriptor.script_setup.is_some() {
@@ -961,6 +974,8 @@ impl SfcCompiler {
                     modules_options: options.modules_options.clone(),
                     vars: options.vars.clone(),
                     is_prod: options.is_prod,
+                    css_var_name_style: options.css_var_name_style,
+                    css_var_ignore_line_comments: options.css_var_ignore_line_comments,
                     filename: Some(descriptor.filename.clone()),
                     source_map_source: Some(descriptor.source.clone()),
                     source_map_file_id: Some(descriptor.source_file),
@@ -2497,10 +2512,10 @@ fn style_dependencies(style: &SfcBlock) -> Vec<String> {
     dependencies
 }
 
-fn descriptor_css_vars(descriptor: &SfcDescriptor) -> Vec<String> {
+fn descriptor_css_vars(descriptor: &SfcDescriptor, options: CssVarCollectOptions) -> Vec<String> {
     let mut vars = Vec::new();
     for style in &descriptor.styles {
-        for var in collect_css_vars(&style.content) {
+        for var in collect_css_vars_with_options(&style.content, options) {
             if !vars.iter().any(|existing| existing == &var) {
                 vars.push(var);
             }
@@ -3050,7 +3065,13 @@ fn gen_vue27_css_vars_code(
 ) -> String {
     let vars = css_vars
         .iter()
-        .map(|var| format!("\"{}\": ({})", gen_css_var_name(id, var, is_prod), var))
+        .map(|var| {
+            format!(
+                "\"{}\": ({})",
+                gen_css_var_name_with_style(id, var, is_prod, CssVarNameStyle::Vue27Legacy),
+                var
+            )
+        })
         .collect::<Vec<_>>()
         .join(",\n  ");
     let expression = format!("({{\n  {vars}\n}})");
@@ -7531,6 +7552,27 @@ mod tests {
     }
 
     #[test]
+    fn vue27_compile_script_uses_legacy_css_var_names_and_comment_rules() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "foo.vue",
+            "<script>const a = 1</script><style>// color: v-bind(color)\ndiv{ font-size: v-bind('font.size'); }</style>",
+        );
+        let script = compiler.compile_vue27_script(
+            &descriptor,
+            SfcScriptCompileOptions {
+                id: Some("xxxxxxxx".into()),
+                ..SfcScriptCompileOptions::default()
+            },
+        );
+
+        assert!(script.content.contains("\"xxxxxxxx-color\": (_vm.color)"));
+        assert!(script
+            .content
+            .contains("\"xxxxxxxx-font_size\": (_vm.font.size)"));
+    }
+
+    #[test]
     fn vue27_compile_script_injects_setup_css_vars_with_props() {
         let mut compiler = SfcCompiler::new();
         let descriptor = compiler.parse(
@@ -8254,6 +8296,25 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
             .is_some_and(|value| value.contains("_red_")));
         assert!(!modules.contains_key("blue"));
         assert!(result.code.contains(".blue { color: blue }"));
+    }
+
+    #[test]
+    fn compile_style_uses_vue3_css_var_names_by_default() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "style.vue",
+            "<style>.foo { font-size: v-bind('font.size'); font-weight: v-bind(_φ); }</style>",
+        );
+        let result = compiler.compile_style(
+            &descriptor,
+            SfcStyleCompileOptions {
+                id: Some("data-v-test".into()),
+                ..SfcStyleCompileOptions::default()
+            },
+        );
+
+        assert!(result.code.contains(r"var(--test-font\.size)"));
+        assert!(result.code.contains("var(--test-_φ)"));
     }
 
     #[test]

@@ -26,7 +26,7 @@ use vuec_sfc::{
     Vue27SfcPad, Vue27TemplatePreprocessOptions,
 };
 use vuec_source::FileId;
-use vuec_style::{compile_style, StyleCompileOptions};
+use vuec_style::{compile_style, CssVarNameStyle, StyleCompileOptions};
 use vuec_vue2::{
     self, Vue2CompileOptions, Vue2CompiledResult, Vue2Element, Vue2Error,
     Vue2SfcAssetUrlTransformOptions, Vue2Warning,
@@ -466,6 +466,8 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
                     scoped: options.scoped,
                     vars: options.vars.clone(),
                     is_prod: options.is_prod,
+                    css_var_name_style: CssVarNameStyle::Vue27Legacy,
+                    css_var_ignore_line_comments: false,
                     filename: Some(filename),
                     source_map_source: Some(source.clone()),
                     source_map_file_id: Some(vuec_source::FileId(0)),
@@ -4082,6 +4084,30 @@ fn sfc_style_options(value: Option<&Value>) -> SfcStyleCompileOptions {
         value,
         "isProd",
         bool_option(value, "is_prod", options.is_prod),
+    );
+    if let Some(style) = value
+        .get("__vuecCssVarNameStyle")
+        .or_else(|| value.get("cssVarNameStyle"))
+        .or_else(|| value.get("css_var_name_style"))
+        .and_then(Value::as_str)
+    {
+        options.css_var_name_style = match style {
+            "vue27Legacy" | "vue27_legacy" | "legacy" => CssVarNameStyle::Vue27Legacy,
+            _ => CssVarNameStyle::Vue3Escaped,
+        };
+    }
+    options.css_var_ignore_line_comments = bool_option(
+        value,
+        "__vuecCssVarIgnoreLineComments",
+        bool_option(
+            value,
+            "cssVarIgnoreLineComments",
+            bool_option(
+                value,
+                "css_var_ignore_line_comments",
+                options.css_var_ignore_line_comments,
+            ),
+        ),
     );
     options.source_map = value.get("map").is_some_and(|map| !map.is_null())
         || bool_option(

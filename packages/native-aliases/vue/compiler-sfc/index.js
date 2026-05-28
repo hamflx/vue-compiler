@@ -81,7 +81,10 @@ function vue27StyleOptions(options) {
 }
 
 function vue27StyleNativeOptions(options) {
-  const out = {};
+  const out = {
+    __vuecCssVarNameStyle: 'vue27Legacy',
+    __vuecCssVarIgnoreLineComments: false,
+  };
   for (const key of Object.keys(options || {})) {
     if (key !== 'postcssPlugins' && key !== 'postcssOptions') {
       out[key] = options[key];

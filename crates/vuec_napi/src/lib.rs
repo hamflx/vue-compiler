@@ -22,8 +22,8 @@ use vuec_ast::{NodeSpan, Vue3Ast, Vue3AstKind, Vue3Expression, Vue3Prop};
 use vuec_html::{HtmlTokenKind, HtmlTokenizer};
 use vuec_js::JsAstStore;
 use vuec_sfc::{
-    SfcCompiler, SfcScriptCompileOptions, SfcStyleCompileOptions, SfcTemplateCompileOptions,
-    Vue27ParseComponentOptions, Vue27RewriteDefaultOptions, Vue27SfcPad,
+    SfcCompiler, SfcCssVarNameStyle, SfcScriptCompileOptions, SfcStyleCompileOptions,
+    SfcTemplateCompileOptions, Vue27ParseComponentOptions, Vue27RewriteDefaultOptions, Vue27SfcPad,
     Vue27TemplatePreprocessOptions,
 };
 use vuec_source::{FileId, Span};
@@ -3735,6 +3735,30 @@ fn sfc_style_options(value: Option<&Value>) -> SfcStyleCompileOptions {
         value,
         "isProd",
         bool_option(value, "is_prod", options.is_prod),
+    );
+    if let Some(style) = value
+        .get("__vuecCssVarNameStyle")
+        .or_else(|| value.get("cssVarNameStyle"))
+        .or_else(|| value.get("css_var_name_style"))
+        .and_then(Value::as_str)
+    {
+        options.css_var_name_style = match style {
+            "vue27Legacy" | "vue27_legacy" | "legacy" => SfcCssVarNameStyle::Vue27Legacy,
+            _ => SfcCssVarNameStyle::Vue3Escaped,
+        };
+    }
+    options.css_var_ignore_line_comments = bool_option(
+        value,
+        "__vuecCssVarIgnoreLineComments",
+        bool_option(
+            value,
+            "cssVarIgnoreLineComments",
+            bool_option(
+                value,
+                "css_var_ignore_line_comments",
+                options.css_var_ignore_line_comments,
+            ),
+        ),
     );
     options.source_map = value.get("map").is_some_and(|map| !map.is_null())
         || bool_option(
