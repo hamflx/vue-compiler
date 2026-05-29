@@ -8335,6 +8335,31 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
     }
 
     #[test]
+    fn compile_style_forwards_css_modules_hash_prefix() {
+        let mut compiler = SfcCompiler::new();
+        let source = r#"<style module>.button { color: red }</style>"#;
+        let descriptor = compiler.parse("src/Comp.vue", source);
+        let result = compiler.compile_style(
+            &descriptor,
+            SfcStyleCompileOptions {
+                modules_options: CssModulesOptions {
+                    generate_scoped_name: Some("[local]__[hash:base64:5]".into()),
+                    hash_prefix: "alpha".into(),
+                    ..CssModulesOptions::default()
+                },
+                ..SfcStyleCompileOptions::default()
+            },
+        );
+        let modules = result.modules.expect("css modules");
+
+        assert_eq!(
+            modules.get("button").map(String::as_str),
+            Some("button__2G66Z")
+        );
+        assert!(result.code.contains(".button__2G66Z"));
+    }
+
+    #[test]
     fn compile_style_forwards_css_modules_export_globals() {
         let mut compiler = SfcCompiler::new();
         let source = r#"<style module>.local :global(.global) { color: red }</style>"#;

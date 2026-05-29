@@ -94,6 +94,9 @@ pub struct CssModulesOptions {
     /// Optional scoped-name template such as `[name]__[local]__[hash:base64:5]`.
     #[serde(default, rename = "generateScopedName", alias = "generate_scoped_name")]
     pub generate_scoped_name: Option<String>,
+    /// Optional prefix included in template hash generation.
+    #[serde(default, rename = "hashPrefix", alias = "hash_prefix")]
+    pub hash_prefix: String,
     /// Export key convention such as `asIs`, `camelCase`, or `camelCaseOnly`.
     #[serde(default, rename = "localsConvention", alias = "locals_convention")]
     pub locals_convention: String,
@@ -107,6 +110,7 @@ impl Default for CssModulesOptions {
         Self {
             scope_behaviour: "local".into(),
             generate_scoped_name: None,
+            hash_prefix: String::new(),
             locals_convention: "asIs".into(),
             export_globals: false,
         }
@@ -181,9 +185,10 @@ pub fn compile_style(source: &str, options: StyleCompileOptions) -> StyleCompile
             },
         );
     }
+    let css_modules_hash_source = code.clone();
     code = normalize_style_output(&code);
     let modules = if options.modules {
-        let result = compile_css_modules(&code, &options);
+        let result = compile_css_modules(&code, &css_modules_hash_source, &options);
         code = result.code;
         errors.extend(
             result
@@ -1906,18 +1911,23 @@ fn rewrite_css_items(
     output
 }
 
-fn compile_css_modules(source: &str, options: &StyleCompileOptions) -> CssModulesCompileResult {
+fn compile_css_modules(
+    source: &str,
+    hash_source: &str,
+    options: &StyleCompileOptions,
+) -> CssModulesCompileResult {
     let filename = options
         .filename
         .as_deref()
         .unwrap_or("style.css")
         .to_string();
     let mut active_paths = Vec::new();
-    compile_css_modules_file(source, options, filename, &mut active_paths)
+    compile_css_modules_file(source, hash_source, options, filename, &mut active_paths)
 }
 
 fn compile_css_modules_file(
     source: &str,
+    hash_source: &str,
     options: &StyleCompileOptions,
     filename: String,
     active_paths: &mut Vec<PathBuf>,
@@ -1927,7 +1937,8 @@ fn compile_css_modules_file(
     if pushed_active {
         active_paths.push(active_path);
     }
-    let mut context = CssModulesContext::new(options, filename, active_paths);
+    let mut context =
+        CssModulesContext::new(options, filename, hash_source.to_string(), active_paths);
     let code = rewrite_css_modules_items(source, &mut context, CssBlockContext::Root);
     let code = context.finish_code(code);
     let raw_modules = context.raw_modules();
@@ -1955,9 +1966,10 @@ struct CssModulesCompileResult {
 struct CssModulesContext<'a> {
     options: &'a StyleCompileOptions,
     filename: String,
-    id: &'a str,
+    hash_source: String,
     scope_behaviour: CssModulesScopeBehaviour,
     generate_scoped_name: Option<&'a str>,
+    hash_prefix: &'a str,
     locals_convention: CssModulesLocalsConvention,
     export_globals: bool,
     raw_exports: Vec<CssModuleExport>,
@@ -1974,16 +1986,18 @@ impl<'a> CssModulesContext<'a> {
     fn new(
         options: &'a StyleCompileOptions,
         filename: String,
+        hash_source: String,
         active_paths: &'a mut Vec<PathBuf>,
     ) -> Self {
         Self {
             options,
             filename,
-            id: options.id.as_deref().unwrap_or_default(),
+            hash_source,
             scope_behaviour: CssModulesScopeBehaviour::from_option(
                 &options.modules_options.scope_behaviour,
             ),
             generate_scoped_name: options.modules_options.generate_scoped_name.as_deref(),
+            hash_prefix: &options.modules_options.hash_prefix,
             locals_convention: CssModulesLocalsConvention::from_option(
                 &options.modules_options.locals_convention,
             ),
@@ -2005,13 +2019,9 @@ impl<'a> CssModulesContext<'a> {
 
     fn scoped_name(&self, local: &str) -> String {
         if let Some(pattern) = self.generate_scoped_name {
-            return format_css_module_pattern(pattern, &self.filename, local, self.id);
+            return format_css_module_pattern(pattern, &self.filename, local, self.hash_prefix);
         }
-        format!(
-            "_{}_{}",
-            local,
-            css_module_hash(&self.filename, local, self.id)
-        )
+        format_css_module_default_scoped_name(local, &self.hash_source)
     }
 
     fn register_local(&mut self, local: &str, scoped: &str) {
@@ -2117,6 +2127,7 @@ impl<'a> CssModulesContext<'a> {
         }
         let source = std::fs::read_to_string(&path).ok()?;
         let result = compile_css_modules_file(
+            &source,
             &source,
             self.options,
             path.to_string_lossy().to_string(),
@@ -2958,24 +2969,302 @@ fn consume_css_module_class_name(source: &str, mut index: usize) -> usize {
     index
 }
 
-fn format_css_module_pattern(pattern: &str, filename: &str, local: &str, id: &str) -> String {
+fn format_css_module_default_scoped_name(local: &str, css: &str) -> String {
+    let selector = format!(".{local}");
+    let index = css.find(&selector).unwrap_or(0);
+    let line_number = css[..index].split(['\r', '\n']).count();
+    let hash = css_module_default_hash(css);
+    format!("_{local}_{hash}_{line_number}")
+}
+
+fn css_module_default_hash(css: &str) -> String {
+    let codes = css.encode_utf16().collect::<Vec<_>>();
+    let mut hash = 5381u32;
+    for code in codes.iter().rev() {
+        hash = hash.wrapping_mul(33) ^ (*code as u32);
+    }
+    let mut base36 = encode_base36_u32(hash);
+    base36.truncate(5);
+    base36
+}
+
+fn encode_base36_u32(mut value: u32) -> String {
+    if value == 0 {
+        return "0".into();
+    }
+    let mut digits = Vec::new();
+    while value > 0 {
+        let digit = value % 36;
+        digits.push(char::from_digit(digit, 36).expect("base36 digit"));
+        value /= 36;
+    }
+    digits.iter().rev().collect()
+}
+
+fn format_css_module_pattern(
+    pattern: &str,
+    filename: &str,
+    local: &str,
+    hash_prefix: &str,
+) -> String {
     let file_stem = Path::new(filename)
         .file_stem()
         .and_then(|stem| stem.to_str())
         .unwrap_or("style");
-    let hash = css_module_hash(filename, local, id);
     let mut output = pattern
         .replace("[name]", file_stem)
-        .replace("[local]", local)
-        .replace("[hash:base64:5]", &hash[..hash.len().min(5)])
-        .replace("[hash]", &hash);
-    output = output.replace('.', "_");
+        .replace("[local]", local);
+    output = replace_css_module_hash_patterns(&output, filename, local, hash_prefix);
+    sanitize_css_module_generic_name(&output)
+}
+
+fn replace_css_module_hash_patterns(
+    pattern: &str,
+    filename: &str,
+    local: &str,
+    hash_prefix: &str,
+) -> String {
+    let mut output = String::new();
+    let mut cursor = 0usize;
+    while let Some(start_offset) = pattern[cursor..].find('[') {
+        let start = cursor + start_offset;
+        let Some(end_offset) = pattern[start + 1..].find(']') else {
+            break;
+        };
+        let end = start + 1 + end_offset;
+        let token = &pattern[start + 1..end];
+        let replacement = css_module_hash_pattern_replacement(token, filename, local, hash_prefix);
+        output.push_str(&pattern[cursor..start]);
+        if let Some(replacement) = replacement {
+            output.push_str(&replacement);
+        } else {
+            output.push_str(&pattern[start..=end]);
+        }
+        cursor = end + 1;
+    }
+    output.push_str(&pattern[cursor..]);
     output
 }
 
-fn css_module_hash(filename: &str, local: &str, id: &str) -> String {
-    let seed = format!("{filename}:{id}:{local}");
-    hash_sum_string(&seed).chars().take(6).collect()
+fn css_module_hash_pattern_replacement(
+    token: &str,
+    filename: &str,
+    local: &str,
+    hash_prefix: &str,
+) -> Option<String> {
+    let parts = token.split(':').collect::<Vec<_>>();
+    let (hash_index, digest_index, length_index) = match parts.as_slice() {
+        ["hash"] | ["contenthash"] => (0usize, None, None),
+        ["hash", _] | ["contenthash", _] => (0usize, Some(1usize), None),
+        ["hash", _, _] | ["contenthash", _, _] => (0usize, Some(1usize), Some(2usize)),
+        [_, "hash"] | [_, "contenthash"] => (1usize, None, None),
+        [_, "hash", _] | [_, "contenthash", _] => (1usize, Some(2usize), None),
+        [_, "hash", _, _] | [_, "contenthash", _, _] => (1usize, Some(2usize), Some(3usize)),
+        _ => return None,
+    };
+    let algorithm = if hash_index == 0 {
+        "xxhash64"
+    } else {
+        parts[0]
+    };
+    if !algorithm.eq_ignore_ascii_case("xxhash64") {
+        return None;
+    }
+    let digest = digest_index.map(|index| parts[index]).unwrap_or("hex");
+    let max_length = length_index.and_then(|index| parts[index].parse::<usize>().ok());
+    Some(css_module_template_hash(
+        filename,
+        local,
+        hash_prefix,
+        digest,
+        max_length,
+    ))
+}
+
+fn css_module_template_hash(
+    filename: &str,
+    local: &str,
+    hash_prefix: &str,
+    digest: &str,
+    max_length: Option<usize>,
+) -> String {
+    let relative = css_module_hash_resource_path(filename);
+    let content = format!("{hash_prefix}{relative}\0{local}");
+    let hash = xxhash64(content.as_bytes());
+    let mut output = if digest.eq_ignore_ascii_case("base64") {
+        base64_encode(&hash.to_be_bytes())
+    } else {
+        format!("{hash:016x}")
+    };
+    if let Some(max_length) = max_length {
+        output.truncate(max_length);
+    }
+    output
+}
+
+fn css_module_hash_resource_path(filename: &str) -> String {
+    let path = Path::new(filename);
+    let relative = if path.is_absolute() {
+        std::env::current_dir()
+            .ok()
+            .and_then(|cwd| path.strip_prefix(cwd).ok().map(Path::to_path_buf))
+            .unwrap_or_else(|| path.to_path_buf())
+    } else {
+        path.to_path_buf()
+    };
+    relative.to_string_lossy().replace('\\', "/")
+}
+
+fn sanitize_css_module_generic_name(value: &str) -> String {
+    let mut output = String::new();
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || (ch as u32) >= 0x00a0 {
+            output.push(ch);
+        } else {
+            output.push('-');
+        }
+    }
+    if css_module_generic_name_needs_prefix(&output) {
+        output.insert(0, '_');
+    }
+    output
+}
+
+fn css_module_generic_name_needs_prefix(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if first.is_ascii_digit() {
+        return true;
+    }
+    if first != '-' {
+        return false;
+    }
+    matches!(chars.next(), Some('-') | Some('0'..='9'))
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut output = String::new();
+    let mut cursor = 0usize;
+    while cursor + 3 <= bytes.len() {
+        let chunk = ((bytes[cursor] as u32) << 16)
+            | ((bytes[cursor + 1] as u32) << 8)
+            | bytes[cursor + 2] as u32;
+        output.push(TABLE[((chunk >> 18) & 0x3f) as usize] as char);
+        output.push(TABLE[((chunk >> 12) & 0x3f) as usize] as char);
+        output.push(TABLE[((chunk >> 6) & 0x3f) as usize] as char);
+        output.push(TABLE[(chunk & 0x3f) as usize] as char);
+        cursor += 3;
+    }
+    let remaining = bytes.len() - cursor;
+    if remaining == 1 {
+        let chunk = (bytes[cursor] as u32) << 16;
+        output.push(TABLE[((chunk >> 18) & 0x3f) as usize] as char);
+        output.push(TABLE[((chunk >> 12) & 0x3f) as usize] as char);
+        output.push('=');
+        output.push('=');
+    } else if remaining == 2 {
+        let chunk = ((bytes[cursor] as u32) << 16) | ((bytes[cursor + 1] as u32) << 8);
+        output.push(TABLE[((chunk >> 18) & 0x3f) as usize] as char);
+        output.push(TABLE[((chunk >> 12) & 0x3f) as usize] as char);
+        output.push(TABLE[((chunk >> 6) & 0x3f) as usize] as char);
+        output.push('=');
+    }
+    output
+}
+
+fn xxhash64(input: &[u8]) -> u64 {
+    const PRIME64_1: u64 = 11_400_714_785_074_694_791;
+    const PRIME64_2: u64 = 14_029_467_366_897_019_727;
+    const PRIME64_3: u64 = 1_609_587_929_392_839_161;
+    const PRIME64_4: u64 = 9_650_029_242_287_828_579;
+    const PRIME64_5: u64 = 2_870_177_450_012_600_261;
+
+    let mut cursor = 0usize;
+    let mut hash;
+    if input.len() >= 32 {
+        let mut v1 = PRIME64_1.wrapping_add(PRIME64_2);
+        let mut v2 = PRIME64_2;
+        let mut v3 = 0u64;
+        let mut v4 = 0u64.wrapping_sub(PRIME64_1);
+        while cursor + 32 <= input.len() {
+            v1 = xxhash64_round(v1, read_u64_le(input, cursor));
+            cursor += 8;
+            v2 = xxhash64_round(v2, read_u64_le(input, cursor));
+            cursor += 8;
+            v3 = xxhash64_round(v3, read_u64_le(input, cursor));
+            cursor += 8;
+            v4 = xxhash64_round(v4, read_u64_le(input, cursor));
+            cursor += 8;
+        }
+        hash = v1
+            .rotate_left(1)
+            .wrapping_add(v2.rotate_left(7))
+            .wrapping_add(v3.rotate_left(12))
+            .wrapping_add(v4.rotate_left(18));
+        hash = xxhash64_merge_round(hash, v1);
+        hash = xxhash64_merge_round(hash, v2);
+        hash = xxhash64_merge_round(hash, v3);
+        hash = xxhash64_merge_round(hash, v4);
+    } else {
+        hash = PRIME64_5;
+    }
+
+    hash = hash.wrapping_add(input.len() as u64);
+    while cursor + 8 <= input.len() {
+        let lane = xxhash64_round(0, read_u64_le(input, cursor));
+        hash ^= lane;
+        hash = hash
+            .rotate_left(27)
+            .wrapping_mul(PRIME64_1)
+            .wrapping_add(PRIME64_4);
+        cursor += 8;
+    }
+    if cursor + 4 <= input.len() {
+        hash ^= (read_u32_le(input, cursor) as u64).wrapping_mul(PRIME64_1);
+        hash = hash
+            .rotate_left(23)
+            .wrapping_mul(PRIME64_2)
+            .wrapping_add(PRIME64_3);
+        cursor += 4;
+    }
+    while cursor < input.len() {
+        hash ^= (input[cursor] as u64).wrapping_mul(PRIME64_5);
+        hash = hash.rotate_left(11).wrapping_mul(PRIME64_1);
+        cursor += 1;
+    }
+    hash ^= hash >> 33;
+    hash = hash.wrapping_mul(PRIME64_2);
+    hash ^= hash >> 29;
+    hash = hash.wrapping_mul(PRIME64_3);
+    hash ^ (hash >> 32)
+}
+
+fn xxhash64_round(accumulator: u64, input: u64) -> u64 {
+    const PRIME64_1: u64 = 11_400_714_785_074_694_791;
+    const PRIME64_2: u64 = 14_029_467_366_897_019_727;
+    accumulator
+        .wrapping_add(input.wrapping_mul(PRIME64_2))
+        .rotate_left(31)
+        .wrapping_mul(PRIME64_1)
+}
+
+fn xxhash64_merge_round(accumulator: u64, value: u64) -> u64 {
+    const PRIME64_1: u64 = 11_400_714_785_074_694_791;
+    const PRIME64_4: u64 = 9_650_029_242_287_828_579;
+    (accumulator ^ xxhash64_round(0, value))
+        .wrapping_mul(PRIME64_1)
+        .wrapping_add(PRIME64_4)
+}
+
+fn read_u64_le(input: &[u8], start: usize) -> u64 {
+    u64::from_le_bytes(input[start..start + 8].try_into().expect("u64 lane"))
+}
+
+fn read_u32_le(input: &[u8], start: usize) -> u32 {
+    u32::from_le_bytes(input[start..start + 4].try_into().expect("u32 lane"))
 }
 
 fn camel_case_css_module_key(value: &str) -> String {
@@ -4486,6 +4775,60 @@ mod tests {
         assert!(!modules.contains_key("foo-bar"));
         assert!(!modules.contains_key("bazQux"));
         assert!(result.code.contains(".baz-qux { color: green }"));
+    }
+
+    #[test]
+    fn compiles_css_modules_generate_scoped_name_hash_prefix_like_official() {
+        let result = compile_style(
+            ".button { color: red }",
+            StyleCompileOptions {
+                id: Some("data-v-probe".into()),
+                filename: Some("src/Comp.vue".into()),
+                modules: true,
+                modules_options: CssModulesOptions {
+                    generate_scoped_name: Some("[local]__[hash:base64:5]".into()),
+                    hash_prefix: "alpha".into(),
+                    ..CssModulesOptions::default()
+                },
+                ..StyleCompileOptions::default()
+            },
+        );
+        let modules = result.modules.expect("css modules map");
+
+        assert_eq!(
+            modules.get("button").map(String::as_str),
+            Some("button__2G66Z")
+        );
+        assert!(result.code.contains(".button__2G66Z"));
+    }
+
+    #[test]
+    fn ignores_css_modules_hash_prefix_for_default_scoped_names_like_official() {
+        let base = compile_style(
+            ".button { color: red }",
+            StyleCompileOptions {
+                id: Some("data-v-probe".into()),
+                filename: Some("src/Comp.vue".into()),
+                modules: true,
+                ..StyleCompileOptions::default()
+            },
+        );
+        let prefixed = compile_style(
+            ".button { color: red }",
+            StyleCompileOptions {
+                id: Some("data-v-probe".into()),
+                filename: Some("src/Comp.vue".into()),
+                modules: true,
+                modules_options: CssModulesOptions {
+                    hash_prefix: "alpha".into(),
+                    ..CssModulesOptions::default()
+                },
+                ..StyleCompileOptions::default()
+            },
+        );
+
+        assert_eq!(base.code, prefixed.code);
+        assert_eq!(base.modules, prefixed.modules);
     }
 
     #[test]
