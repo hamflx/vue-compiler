@@ -8,6 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 use vuec_codegen::{SourceMapArtifact, SourceMapBuilder};
@@ -3255,8 +3256,8 @@ fn css_module_package_main_file(package_dir: &Path) -> Option<PathBuf> {
     }
     let package_json = package_dir.join("package.json");
     if let Ok(source) = std::fs::read_to_string(package_json) {
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&source) {
-            if let Some(main) = value.get("main").and_then(serde_json::Value::as_str) {
+        if let Ok(value) = serde_json::from_str::<CssModulePackageJson>(&source) {
+            if let Some(main) = value.main {
                 let candidate = package_dir.join(main);
                 if candidate.is_file() {
                     return Some(candidate);
@@ -3275,6 +3276,97 @@ enum CssModulePackageExportsResolution {
     Blocked,
 }
 
+#[derive(Debug, Deserialize)]
+struct CssModulePackageJson {
+    #[serde(default)]
+    main: Option<String>,
+    #[serde(default)]
+    exports: Option<CssModulePackageJsonValue>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(untagged)]
+enum CssModulePackageJsonValue {
+    String(String),
+    Object(CssModulePackageJsonObject),
+    Other,
+}
+
+impl CssModulePackageJsonValue {
+    fn as_str(&self) -> Option<&str> {
+        match self {
+            Self::String(value) => Some(value),
+            Self::Object(_) | Self::Other => None,
+        }
+    }
+
+    fn entries(&self) -> Option<&[(String, CssModulePackageJsonValue)]> {
+        match self {
+            Self::Object(object) => Some(&object.0),
+            Self::String(_) | Self::Other => None,
+        }
+    }
+
+    fn get(&self, key: &str) -> Option<&Self> {
+        self.entries()?
+            .iter()
+            .find_map(|(entry_key, value)| (entry_key == key).then_some(value))
+    }
+}
+
+impl From<serde_json::Value> for CssModulePackageJsonValue {
+    fn from(value: serde_json::Value) -> Self {
+        match value {
+            serde_json::Value::String(value) => Self::String(value),
+            serde_json::Value::Object(object) => Self::Object(CssModulePackageJsonObject(
+                object
+                    .into_iter()
+                    .map(|(key, value)| (key, Self::from(value)))
+                    .collect(),
+            )),
+            serde_json::Value::Null
+            | serde_json::Value::Bool(_)
+            | serde_json::Value::Number(_)
+            | serde_json::Value::Array(_) => Self::Other,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CssModulePackageJsonObject(Vec<(String, CssModulePackageJsonValue)>);
+
+impl<'de> Deserialize<'de> for CssModulePackageJsonObject {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct OrderedObjectVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for OrderedObjectVisitor {
+            type Value = CssModulePackageJsonObject;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("an object")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut entries = Vec::with_capacity(map.size_hint().unwrap_or(0));
+                while let Some((key, value)) =
+                    map.next_entry::<String, CssModulePackageJsonValue>()?
+                {
+                    entries.push((key, value));
+                }
+                Ok(CssModulePackageJsonObject(entries))
+            }
+        }
+
+        deserializer.deserialize_map(OrderedObjectVisitor)
+    }
+}
+
 fn css_module_package_exports_file(
     package_dir: &Path,
     subpath: &Path,
@@ -3283,14 +3375,14 @@ fn css_module_package_exports_file(
     let Ok(source) = std::fs::read_to_string(package_json) else {
         return CssModulePackageExportsResolution::NoExports;
     };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&source) else {
+    let Ok(value) = serde_json::from_str::<CssModulePackageJson>(&source) else {
         return CssModulePackageExportsResolution::NoExports;
     };
-    let Some(exports) = value.get("exports") else {
+    let Some(exports) = value.exports.as_ref() else {
         return CssModulePackageExportsResolution::NoExports;
     };
     let target = if subpath.as_os_str().is_empty() {
-        css_module_package_exports_root_target(exports).map(ToOwned::to_owned)
+        css_module_package_exports_root_target(exports)
     } else {
         let key = format!(
             "./{}",
@@ -3310,28 +3402,25 @@ fn css_module_package_exports_file(
     CssModulePackageExportsResolution::Resolved(path)
 }
 
-fn css_module_package_exports_root_target(exports: &serde_json::Value) -> Option<&str> {
+fn css_module_package_exports_root_target(exports: &CssModulePackageJsonValue) -> Option<String> {
     css_module_package_export_target_value(exports).or_else(|| {
-        exports.as_object().and_then(|object| {
-            object
-                .get(".")
-                .and_then(css_module_package_export_target_value)
-        })
+        exports
+            .get(".")
+            .and_then(css_module_package_export_target_value)
     })
 }
 
 fn css_module_package_exports_subpath_target(
-    exports: &serde_json::Value,
+    exports: &CssModulePackageJsonValue,
     key: &str,
 ) -> Option<String> {
-    let object = exports.as_object()?;
-    if let Some(target) = object
+    if let Some(target) = exports
         .get(key)
         .and_then(css_module_package_export_target_value)
     {
-        return Some(target.to_string());
+        return Some(target);
     }
-    for (pattern, target) in object {
+    for (pattern, target) in exports.entries()? {
         let Some(capture) = css_module_package_export_pattern_capture(pattern, key) else {
             continue;
         };
@@ -3341,13 +3430,18 @@ fn css_module_package_exports_subpath_target(
     None
 }
 
-fn css_module_package_export_target_value(value: &serde_json::Value) -> Option<&str> {
-    value.as_str().or_else(|| {
-        value
-            .as_object()
-            .and_then(|object| object.get("default"))
-            .and_then(serde_json::Value::as_str)
-    })
+fn css_module_package_export_target_value(value: &CssModulePackageJsonValue) -> Option<String> {
+    if let Some(value) = value.as_str() {
+        return Some(value.to_string());
+    }
+    for (condition, target) in value.entries()? {
+        if matches!(condition.as_str(), "require" | "node" | "default") {
+            if let Some(target) = css_module_package_export_target_value(target) {
+                return Some(target);
+            }
+        }
+    }
+    None
 }
 
 fn css_module_package_export_pattern_capture(pattern: &str, key: &str) -> Option<String> {
@@ -6069,6 +6163,127 @@ mod tests {
     }
 
     #[test]
+    fn compiles_css_modules_icss_imports_from_node_modules_exports_require_condition_root() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let src_dir = dir.path().join("src");
+        let package_dir = dir.path().join("node_modules").join("vuec-css-fixture");
+        std::fs::create_dir_all(&src_dir).expect("src dir");
+        std::fs::create_dir_all(&package_dir).expect("package dir");
+        let filename = src_dir.join("component.vue");
+        std::fs::write(
+            package_dir.join("require.css"),
+            ".dep { color: blue; }\n:export { token: requireGreen; }",
+        )
+        .expect("write require dep");
+        std::fs::write(
+            package_dir.join("default.css"),
+            ".dep { color: red; }\n:export { token: defaultRed; }",
+        )
+        .expect("write default dep");
+        std::fs::write(
+            package_dir.join("package.json"),
+            r#"{"name":"vuec-css-fixture","exports":{".":{"require":"./require.css","default":"./default.css"}}}"#,
+        )
+        .expect("write package");
+
+        let result = compile_style(
+            ":import(\"vuec-css-fixture\") { imported: dep; shade: token; }\n.button { composes: imported; color: shade; }",
+            StyleCompileOptions {
+                id: Some("test".into()),
+                filename: Some(filename.to_string_lossy().to_string()),
+                modules: true,
+                ..StyleCompileOptions::default()
+            },
+        );
+        let modules = result.modules.expect("css modules map");
+        let button = modules.get("button").expect("button export");
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert!(button.contains("_button_"));
+        assert!(button.contains("_dep_"));
+        assert!(result.code.contains("color: requireGreen"));
+        assert!(!result.code.contains("defaultRed"));
+    }
+
+    #[test]
+    fn compiles_css_modules_icss_imports_from_node_modules_exports_condition_order_root() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let src_dir = dir.path().join("src");
+        let package_dir = dir.path().join("node_modules").join("vuec-css-fixture");
+        std::fs::create_dir_all(&src_dir).expect("src dir");
+        std::fs::create_dir_all(&package_dir).expect("package dir");
+        let filename = src_dir.join("component.vue");
+        std::fs::write(
+            package_dir.join("node.css"),
+            ".dep { color: blue; }\n:export { token: nodePurple; }",
+        )
+        .expect("write node dep");
+        std::fs::write(
+            package_dir.join("require.css"),
+            ".dep { color: red; }\n:export { token: requireGreen; }",
+        )
+        .expect("write require dep");
+        std::fs::write(
+            package_dir.join("package.json"),
+            r#"{"name":"vuec-css-fixture","exports":{".":{"node":"./node.css","require":"./require.css","default":"./require.css"}}}"#,
+        )
+        .expect("write package");
+
+        let result = compile_style(
+            ":import(\"vuec-css-fixture\") { imported: dep; shade: token; }\n.button { composes: imported; color: shade; }",
+            StyleCompileOptions {
+                id: Some("test".into()),
+                filename: Some(filename.to_string_lossy().to_string()),
+                modules: true,
+                ..StyleCompileOptions::default()
+            },
+        );
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert!(result.code.contains("color: nodePurple"));
+        assert!(!result.code.contains("requireGreen"));
+    }
+
+    #[test]
+    fn compiles_css_modules_icss_imports_from_node_modules_nested_exports_conditions_root() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let src_dir = dir.path().join("src");
+        let package_dir = dir.path().join("node_modules").join("vuec-css-fixture");
+        std::fs::create_dir_all(&src_dir).expect("src dir");
+        std::fs::create_dir_all(&package_dir).expect("package dir");
+        let filename = src_dir.join("component.vue");
+        std::fs::write(
+            package_dir.join("require.css"),
+            ".dep { color: blue; }\n:export { token: nestedRequire; }",
+        )
+        .expect("write require dep");
+        std::fs::write(
+            package_dir.join("default.css"),
+            ".dep { color: red; }\n:export { token: fallbackDefault; }",
+        )
+        .expect("write default dep");
+        std::fs::write(
+            package_dir.join("package.json"),
+            r#"{"name":"vuec-css-fixture","exports":{".":{"node":{"require":"./require.css","default":"./default.css"},"default":"./default.css"}}}"#,
+        )
+        .expect("write package");
+
+        let result = compile_style(
+            ":import(\"vuec-css-fixture\") { imported: dep; shade: token; }\n.button { composes: imported; color: shade; }",
+            StyleCompileOptions {
+                id: Some("test".into()),
+                filename: Some(filename.to_string_lossy().to_string()),
+                modules: true,
+                ..StyleCompileOptions::default()
+            },
+        );
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert!(result.code.contains("color: nestedRequire"));
+        assert!(!result.code.contains("fallbackDefault"));
+    }
+
+    #[test]
     fn compiles_css_modules_external_composes_from_node_modules_package_exports_subpath() {
         let dir = tempfile::tempdir().expect("temp dir");
         let src_dir = dir.path().join("src");
@@ -6144,6 +6359,52 @@ mod tests {
         assert!(button.contains("_dep_"));
         assert!(result.code.starts_with("._dep_"));
         assert!(result.code.contains("._button_"));
+    }
+
+    #[test]
+    fn compiles_css_modules_external_composes_from_node_modules_exports_require_condition_subpath()
+    {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let src_dir = dir.path().join("src");
+        let package_dir = dir.path().join("node_modules").join("vuec-css-fixture");
+        let dist_dir = package_dir.join("dist");
+        std::fs::create_dir_all(&src_dir).expect("src dir");
+        std::fs::create_dir_all(&dist_dir).expect("dist dir");
+        let filename = src_dir.join("component.vue");
+        std::fs::write(
+            dist_dir.join("require.css"),
+            ".dep { color: requireGreen; }\n:export { token: requireGreen; }",
+        )
+        .expect("write require dep");
+        std::fs::write(
+            dist_dir.join("default.css"),
+            ".dep { color: defaultRed; }\n:export { token: defaultRed; }",
+        )
+        .expect("write default dep");
+        std::fs::write(
+            package_dir.join("package.json"),
+            r#"{"name":"vuec-css-fixture","exports":{"./theme.css":{"require":"./dist/require.css","default":"./dist/default.css"}}}"#,
+        )
+        .expect("write package");
+
+        let result = compile_style(
+            ".button { composes: dep from \"vuec-css-fixture/theme.css\"; color: red; }",
+            StyleCompileOptions {
+                id: Some("test".into()),
+                filename: Some(filename.to_string_lossy().to_string()),
+                modules: true,
+                ..StyleCompileOptions::default()
+            },
+        );
+        let modules = result.modules.expect("css modules map");
+        let button = modules.get("button").expect("button export");
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert!(button.contains("_button_"));
+        assert!(button.contains("_dep_"));
+        assert!(result.code.starts_with("._dep_"));
+        assert!(result.code.contains("requireGreen"));
+        assert!(!result.code.contains("defaultRed"));
     }
 
     #[test]
