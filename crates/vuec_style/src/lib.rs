@@ -1888,10 +1888,24 @@ fn rewrite_css_items(
             } else {
                 CssBlockContext::Container
             };
-            output.push_str(&rewrite_css_items(body, scope_id, keyframes, next_context));
+            let rewritten_body = rewrite_css_items(body, scope_id, keyframes, next_context);
+            if css_block_contains_style_rules(&rewritten_body)
+                || css_block_contains_at_rule_with_style_rules(&rewritten_body)
+            {
+                output.push('\n');
+                output.push_str(rewritten_body.trim());
+                output.push('\n');
+            } else {
+                output.push_str(&rewritten_body);
+            }
             output.push('}');
         } else {
+            let has_nested_block =
+                !matches!(context, CssBlockContext::Keyframes) && css_block_has_nested_block(body);
+            let has_direct_nested_rule = has_nested_block && css_block_has_direct_nested_rule(body);
             let selector = if context == CssBlockContext::Keyframes {
+                prelude.to_string()
+            } else if has_direct_nested_rule {
                 prelude.to_string()
             } else {
                 rewrite_selector_list(prelude, scope_id)
@@ -1906,14 +1920,454 @@ fn rewrite_css_items(
                     keyframes,
                     CssBlockContext::Keyframes,
                 ));
+            } else if has_nested_block {
+                output.push_str(&rewrite_nested_scoped_rule_body(
+                    body,
+                    scope_id,
+                    keyframes,
+                    has_direct_nested_rule,
+                ));
             } else {
-                output.push_str(&rewrite_animation_declarations(body, keyframes));
+                output.push_str(&rewrite_scoped_declaration_body(body, keyframes));
             }
             output.push('}');
         }
         cursor = close + 1;
     }
     output
+}
+
+fn css_block_has_nested_block(body: &str) -> bool {
+    let mut cursor = 0usize;
+    while cursor < body.len() {
+        cursor = skip_css_whitespace(body, cursor);
+        if cursor >= body.len() {
+            break;
+        }
+        if body[cursor..].starts_with("/*") {
+            let Some(end_offset) = body[cursor + 2..].find("*/") else {
+                break;
+            };
+            cursor += 2 + end_offset + 2;
+            continue;
+        }
+        let Some((delimiter, delimiter_ch)) = find_next_css_delimiter(body, cursor) else {
+            break;
+        };
+        if delimiter_ch == ';' {
+            cursor = delimiter + 1;
+            continue;
+        }
+        let prelude = body[cursor..delimiter].trim();
+        let Some(close) = find_matching_brace(body, delimiter) else {
+            break;
+        };
+        if !css_prelude_is_block_declaration(prelude) {
+            return true;
+        }
+        cursor = css_block_declaration_end(body, close);
+    }
+    false
+}
+
+fn css_block_has_direct_nested_rule(body: &str) -> bool {
+    let mut cursor = 0usize;
+    while cursor < body.len() {
+        cursor = skip_css_whitespace(body, cursor);
+        if cursor >= body.len() {
+            break;
+        }
+        if body[cursor..].starts_with("/*") {
+            let Some(end_offset) = body[cursor + 2..].find("*/") else {
+                break;
+            };
+            cursor += 2 + end_offset + 2;
+            continue;
+        }
+        let Some((delimiter, delimiter_ch)) = find_next_css_delimiter(body, cursor) else {
+            break;
+        };
+        if delimiter_ch == ';' {
+            cursor = delimiter + 1;
+            continue;
+        }
+        let prelude = body[cursor..delimiter].trim();
+        if css_prelude_is_block_declaration(prelude) {
+            let Some(close) = find_matching_brace(body, delimiter) else {
+                break;
+            };
+            cursor = css_block_declaration_end(body, close);
+            continue;
+        }
+        if !prelude.starts_with('@') {
+            return true;
+        }
+        let Some(close) = find_matching_brace(body, delimiter) else {
+            break;
+        };
+        cursor = close + 1;
+    }
+    false
+}
+
+fn rewrite_nested_scoped_rule_body(
+    body: &str,
+    scope_id: &str,
+    keyframes: &[(String, String)],
+    wrap_declarations: bool,
+) -> String {
+    let mut declarations = String::new();
+    let mut nested_blocks = Vec::new();
+    let mut ordered_output = String::new();
+    let mut cursor = 0usize;
+    while cursor < body.len() {
+        let whitespace_start = cursor;
+        cursor = skip_css_whitespace(body, cursor);
+        if cursor > whitespace_start {
+            push_normalized_css_whitespace(&mut declarations, &body[whitespace_start..cursor]);
+        }
+        if cursor >= body.len() {
+            break;
+        }
+        if body[cursor..].starts_with("/*") {
+            let Some(end_offset) = body[cursor + 2..].find("*/") else {
+                declarations.push_str(&body[cursor..]);
+                break;
+            };
+            let end = cursor + 2 + end_offset + 2;
+            declarations.push_str(&body[cursor..end]);
+            cursor = end;
+            continue;
+        }
+
+        let Some((delimiter, delimiter_ch)) = find_next_css_delimiter(body, cursor) else {
+            declarations.push_str(&body[cursor..]);
+            break;
+        };
+        let raw_prelude = &body[cursor..delimiter];
+        let prelude_end = raw_prelude.trim_end().len();
+        let prelude = raw_prelude[..prelude_end].trim();
+        let brace_spacing = &raw_prelude[prelude_end..];
+        if delimiter_ch == ';' {
+            declarations.push_str(prelude);
+            declarations.push(';');
+            cursor = delimiter + 1;
+            continue;
+        }
+
+        let Some(close) = find_matching_brace(body, delimiter) else {
+            declarations.push_str(&body[cursor..]);
+            break;
+        };
+        if css_prelude_is_block_declaration(prelude) {
+            let end = css_block_declaration_end(body, close);
+            declarations.push_str(&body[cursor..end]);
+            cursor = end;
+            continue;
+        }
+        if !wrap_declarations {
+            flush_scoped_nested_declarations(
+                &mut ordered_output,
+                &mut declarations,
+                keyframes,
+                true,
+            );
+        }
+        let nested_body = &body[delimiter + 1..close];
+        if prelude.starts_with('@') {
+            let rewritten_prelude = rewrite_at_rule_prelude(prelude, keyframes);
+            let next_context = if is_keyframes_at_rule(prelude) {
+                CssBlockContext::Keyframes
+            } else {
+                CssBlockContext::Container
+            };
+            let nested_rewritten =
+                rewrite_css_items(nested_body, scope_id, keyframes, next_context);
+            let mut block = String::new();
+            block.push_str(&rewritten_prelude);
+            block.push_str(brace_spacing);
+            block.push('{');
+            if css_block_contains_style_rules(&nested_rewritten)
+                || css_block_contains_at_rule_with_style_rules(&nested_rewritten)
+            {
+                block.push('\n');
+                block.push_str(nested_rewritten.trim());
+                block.push('\n');
+            } else {
+                block.push_str(&nested_rewritten);
+            }
+            block.push('}');
+            let block = normalize_style_output(&block);
+            if wrap_declarations {
+                nested_blocks.push(block);
+            } else {
+                if !ordered_output.is_empty() && !ordered_output.ends_with('\n') {
+                    ordered_output.push('\n');
+                }
+                ordered_output.push_str(&block);
+            }
+        } else {
+            let has_nested_block = css_block_has_nested_block(nested_body);
+            let has_direct_nested_rule =
+                has_nested_block && css_block_has_direct_nested_rule(nested_body);
+            let mut block = String::new();
+            if has_direct_nested_rule {
+                block.push_str(prelude);
+            } else {
+                block.push_str(&rewrite_selector_list(prelude, scope_id));
+            }
+            block.push_str(brace_spacing);
+            block.push('{');
+            if has_nested_block {
+                block.push_str(&rewrite_nested_scoped_rule_body(
+                    nested_body,
+                    scope_id,
+                    keyframes,
+                    has_direct_nested_rule,
+                ));
+            } else {
+                block.push_str(&rewrite_scoped_declaration_body(nested_body, keyframes));
+            }
+            block.push('}');
+            let block = normalize_style_output(&block);
+            if wrap_declarations {
+                nested_blocks.push(block);
+            } else {
+                if !ordered_output.is_empty() && !ordered_output.ends_with('\n') {
+                    ordered_output.push('\n');
+                }
+                ordered_output.push_str(&block);
+            }
+        }
+        cursor = close + 1;
+    }
+
+    let mut output = String::new();
+    if wrap_declarations {
+        let declarations = rewrite_scoped_declaration_body(&declarations, keyframes);
+        let declarations = normalize_nested_scoped_declarations(&declarations);
+        if !declarations.trim().is_empty() {
+            output.push_str("\n&[");
+            output.push_str(scope_id);
+            output.push_str("] {");
+            output.push_str(&declarations);
+            output.push_str("\n}");
+        }
+        for block in nested_blocks {
+            output.push('\n');
+            output.push_str(&block);
+        }
+    } else {
+        flush_scoped_nested_declarations(&mut ordered_output, &mut declarations, keyframes, false);
+        output.push_str(&ordered_output);
+    }
+    if !output.is_empty() {
+        output.push('\n');
+    }
+    output
+}
+
+fn flush_scoped_nested_declarations(
+    output: &mut String,
+    declarations: &mut String,
+    keyframes: &[(String, String)],
+    separate_before_next_block: bool,
+) {
+    if declarations.is_empty() {
+        return;
+    }
+    let rewritten = rewrite_scoped_declaration_body(declarations, keyframes);
+    output.push_str(rewritten.trim_end());
+    if separate_before_next_block && !output.ends_with('\n') {
+        output.push('\n');
+    }
+    declarations.clear();
+}
+
+fn rewrite_scoped_declaration_body(body: &str, keyframes: &[(String, String)]) -> String {
+    rewrite_animation_declarations(body, keyframes)
+}
+
+fn normalize_nested_scoped_declarations(declarations: &str) -> String {
+    let collapsed = collapse_css_whitespace_outside_strings(declarations.trim());
+    if collapsed.is_empty() {
+        String::new()
+    } else {
+        format!(" {collapsed}")
+    }
+}
+
+fn collapse_css_whitespace_outside_strings(source: &str) -> String {
+    let mut output = String::new();
+    let mut state = CssScannerState::Normal;
+    let mut pending_space = false;
+    let mut index = 0usize;
+    while index < source.len() {
+        let Some(ch) = source[index..].chars().next() else {
+            break;
+        };
+        match state {
+            CssScannerState::Normal => {
+                if source[index..].starts_with("/*") {
+                    if pending_space && !output.is_empty() {
+                        output.push(' ');
+                    }
+                    pending_space = false;
+                    if let Some(end_offset) = source[index + 2..].find("*/") {
+                        let end = index + 2 + end_offset + 2;
+                        output.push_str(&source[index..end]);
+                        index = end;
+                        continue;
+                    }
+                }
+                match ch {
+                    '\'' => {
+                        if pending_space && !output.is_empty() {
+                            output.push(' ');
+                        }
+                        pending_space = false;
+                        output.push(ch);
+                        state = CssScannerState::SingleQuote;
+                    }
+                    '"' => {
+                        if pending_space && !output.is_empty() {
+                            output.push(' ');
+                        }
+                        pending_space = false;
+                        output.push(ch);
+                        state = CssScannerState::DoubleQuote;
+                    }
+                    _ if ch.is_whitespace() => pending_space = true,
+                    _ => {
+                        if pending_space && !output.is_empty() {
+                            output.push(' ');
+                        }
+                        pending_space = false;
+                        output.push(ch);
+                    }
+                }
+            }
+            CssScannerState::SingleQuote => {
+                output.push(ch);
+                if ch == '\\' {
+                    index += ch.len_utf8();
+                    if index < source.len() {
+                        if let Some(next) = source[index..].chars().next() {
+                            output.push(next);
+                            index += next.len_utf8();
+                            continue;
+                        }
+                    }
+                } else if ch == '\'' {
+                    state = CssScannerState::Normal;
+                }
+            }
+            CssScannerState::DoubleQuote => {
+                output.push(ch);
+                if ch == '\\' {
+                    index += ch.len_utf8();
+                    if index < source.len() {
+                        if let Some(next) = source[index..].chars().next() {
+                            output.push(next);
+                            index += next.len_utf8();
+                            continue;
+                        }
+                    }
+                } else if ch == '"' {
+                    state = CssScannerState::Normal;
+                }
+            }
+            CssScannerState::BlockComment => {}
+        }
+        index += ch.len_utf8();
+    }
+    output
+}
+
+fn css_block_contains_style_rules(body: &str) -> bool {
+    let mut cursor = 0usize;
+    while cursor < body.len() {
+        cursor = skip_css_whitespace(body, cursor);
+        if cursor >= body.len() {
+            break;
+        }
+        if body[cursor..].starts_with("/*") {
+            let Some(end_offset) = body[cursor + 2..].find("*/") else {
+                break;
+            };
+            cursor += 2 + end_offset + 2;
+            continue;
+        }
+        let Some((delimiter, delimiter_ch)) = find_next_css_delimiter(body, cursor) else {
+            break;
+        };
+        if delimiter_ch == ';' {
+            cursor = delimiter + 1;
+            continue;
+        }
+        let prelude = body[cursor..delimiter].trim();
+        if !prelude.starts_with('@') && !css_prelude_is_block_declaration(prelude) {
+            return true;
+        }
+        let Some(close) = find_matching_brace(body, delimiter) else {
+            break;
+        };
+        if prelude.starts_with('@') && css_block_contains_style_rules(&body[delimiter + 1..close]) {
+            return true;
+        }
+        cursor = css_block_declaration_end(body, close);
+    }
+    false
+}
+
+fn css_block_contains_at_rule_with_style_rules(body: &str) -> bool {
+    let mut cursor = 0usize;
+    while cursor < body.len() {
+        cursor = skip_css_whitespace(body, cursor);
+        if cursor >= body.len() {
+            break;
+        }
+        if body[cursor..].starts_with("/*") {
+            let Some(end_offset) = body[cursor + 2..].find("*/") else {
+                break;
+            };
+            cursor += 2 + end_offset + 2;
+            continue;
+        }
+        let Some((delimiter, delimiter_ch)) = find_next_css_delimiter(body, cursor) else {
+            break;
+        };
+        if delimiter_ch == ';' {
+            cursor = delimiter + 1;
+            continue;
+        }
+        let prelude = body[cursor..delimiter].trim();
+        let Some(close) = find_matching_brace(body, delimiter) else {
+            break;
+        };
+        if prelude.starts_with('@') && css_block_contains_style_rules(&body[delimiter + 1..close]) {
+            return true;
+        }
+        cursor = css_block_declaration_end(body, close);
+    }
+    false
+}
+
+fn css_prelude_is_block_declaration(prelude: &str) -> bool {
+    let prelude = prelude.trim();
+    let Some(name) = prelude.strip_suffix(':') else {
+        return false;
+    };
+    is_style_property_name(name.trim())
+}
+
+fn css_block_declaration_end(body: &str, close: usize) -> usize {
+    let after_close = close + 1;
+    if after_close < body.len() && body[after_close..].starts_with(';') {
+        after_close + 1
+    } else {
+        after_close
+    }
 }
 
 fn compile_css_modules(
@@ -4119,6 +4573,8 @@ fn collect_scoped_keyframes_in(
             } else {
                 collect_scoped_keyframes_in(&source[delimiter + 1..close], short_id, keyframes);
             }
+        } else {
+            collect_scoped_keyframes_in(&source[delimiter + 1..close], short_id, keyframes);
         }
         cursor = close + 1;
     }
@@ -5071,6 +5527,9 @@ fn selector_injection_index(selector: &str) -> Option<usize> {
                 '*' if last_node_end.is_none() => last_node_end = Some(index + ch.len_utf8()),
                 '*' => {}
                 _ if ch.is_whitespace() => {}
+                '&' => {
+                    last_node_end = Some(index + ch.len_utf8());
+                }
                 _ if is_selector_ident_start(ch) || ch == '.' || ch == '#' => {
                     let end = consume_selector_token(selector, index);
                     last_node_end = Some(end);
@@ -5490,6 +5949,50 @@ mod tests {
         assert_eq!(
             rewrite_scoped_selectors(".foo *.bar { color: red; }", "data-v-test"),
             ".foo *.bar[data-v-test] { color: red; }"
+        );
+    }
+
+    #[test]
+    fn rewrites_native_nested_scoped_rules_like_vue3() {
+        assert_eq!(
+            rewrite_scoped_selectors(".foo { .bar { color: red; } }", "data-v-test"),
+            ".foo {\n.bar[data-v-test] { color: red;\n}\n}"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(
+                ".foo { color: blue; .bar { color: red; } color: green; }",
+                "data-v-test",
+            ),
+            ".foo {\n&[data-v-test] { color: blue; color: green;\n}\n.bar[data-v-test] { color: red;\n}\n}"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(".foo { &:hover { color: red; } }", "data-v-test"),
+            ".foo {\n&[data-v-test]:hover { color: red;\n}\n}"
+        );
+    }
+
+    #[test]
+    fn rewrites_scoped_nested_at_rules_like_vue3() {
+        assert_eq!(
+            rewrite_scoped_selectors(
+                ".foo { color: blue; @media (min-width: 1px) { .bar { color: red; } } }",
+                "data-v-test",
+            ),
+            ".foo[data-v-test] { color: blue;\n@media (min-width: 1px) {\n.bar[data-v-test] { color: red;\n}\n}\n}"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(
+                ".foo { @media (min-width: 1px) { &:hover { color: red; } } }",
+                "data-v-test",
+            ),
+            ".foo[data-v-test] {\n@media (min-width: 1px) {\n&[data-v-test]:hover { color: red;\n}\n}\n}"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(
+                ".foo { @keyframes fade { to { opacity: 1; } } animation: fade 1s; }",
+                "data-v-test",
+            ),
+            ".foo[data-v-test] {\n@keyframes fade-test {\nto { opacity: 1;\n}\n} animation: fade-test 1s;\n}"
         );
     }
 

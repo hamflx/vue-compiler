@@ -8777,6 +8777,29 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
     }
 
     #[test]
+    fn compile_style_rewrites_native_nested_scoped_rules() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "style.vue",
+            r#"<style scoped>.foo { color: blue; .bar { color: red; } @media (min-width: 1px) { &:hover { color: green; } } }</style>"#,
+        );
+        let result = compiler.compile_style(
+            &descriptor,
+            SfcStyleCompileOptions {
+                id: Some("data-v-test".into()),
+                scoped: true,
+                ..SfcStyleCompileOptions::default()
+            },
+        );
+
+        assert!(result.code.contains(".foo {"));
+        assert!(result.code.contains("&[data-v-test] { color: blue;"));
+        assert!(result.code.contains(".bar[data-v-test] { color: red;"));
+        assert!(result.code.contains("@media (min-width: 1px) {"));
+        assert!(result.code.contains("&[data-v-test]:hover { color: green;"));
+    }
+
+    #[test]
     fn compile_style_source_map_merges_style_blocks_to_vue_source() {
         let mut compiler = SfcCompiler::new();
         let source = "<style>.a { color: red; }</style>\n<style>.b { color: blue; }</style>";
