@@ -103,6 +103,9 @@ pub struct CssModulesOptions {
     /// Whether global class selectors are included in the module export map.
     #[serde(default, rename = "exportGlobals", alias = "export_globals")]
     pub export_globals: bool,
+    /// File-name patterns whose CSS Modules default scope should be global.
+    #[serde(default, rename = "globalModulePaths", alias = "global_module_paths")]
+    pub global_module_paths: Vec<String>,
 }
 
 impl Default for CssModulesOptions {
@@ -113,6 +116,7 @@ impl Default for CssModulesOptions {
             hash_prefix: String::new(),
             locals_convention: "asIs".into(),
             export_globals: false,
+            global_module_paths: Vec::new(),
         }
     }
 }
@@ -1921,8 +1925,20 @@ fn compile_css_modules(
         .as_deref()
         .unwrap_or("style.css")
         .to_string();
+    let scope_behaviour = CssModulesScopeBehaviour::from_options(
+        &options.modules_options.scope_behaviour,
+        &options.modules_options.global_module_paths,
+        &filename,
+    );
     let mut active_paths = Vec::new();
-    compile_css_modules_file(source, hash_source, options, filename, &mut active_paths)
+    compile_css_modules_file(
+        source,
+        hash_source,
+        options,
+        filename,
+        scope_behaviour,
+        &mut active_paths,
+    )
 }
 
 fn compile_css_modules_file(
@@ -1930,6 +1946,7 @@ fn compile_css_modules_file(
     hash_source: &str,
     options: &StyleCompileOptions,
     filename: String,
+    scope_behaviour: CssModulesScopeBehaviour,
     active_paths: &mut Vec<PathBuf>,
 ) -> CssModulesCompileResult {
     let active_path = css_module_active_path(&filename);
@@ -1937,8 +1954,13 @@ fn compile_css_modules_file(
     if pushed_active {
         active_paths.push(active_path);
     }
-    let mut context =
-        CssModulesContext::new(options, filename, hash_source.to_string(), active_paths);
+    let mut context = CssModulesContext::new(
+        options,
+        filename,
+        hash_source.to_string(),
+        scope_behaviour,
+        active_paths,
+    );
     let code = rewrite_css_modules_items(source, &mut context, CssBlockContext::Root);
     let code = context.finish_code(code);
     let raw_modules = context.raw_modules();
@@ -1987,15 +2009,14 @@ impl<'a> CssModulesContext<'a> {
         options: &'a StyleCompileOptions,
         filename: String,
         hash_source: String,
+        scope_behaviour: CssModulesScopeBehaviour,
         active_paths: &'a mut Vec<PathBuf>,
     ) -> Self {
         Self {
             options,
             filename,
             hash_source,
-            scope_behaviour: CssModulesScopeBehaviour::from_option(
-                &options.modules_options.scope_behaviour,
-            ),
+            scope_behaviour,
             generate_scoped_name: options.modules_options.generate_scoped_name.as_deref(),
             hash_prefix: &options.modules_options.hash_prefix,
             locals_convention: CssModulesLocalsConvention::from_option(
@@ -2141,6 +2162,7 @@ impl<'a> CssModulesContext<'a> {
             &source,
             self.options,
             resolved.logical_filename,
+            self.scope_behaviour,
             self.active_paths,
         );
         if self.prepended_paths.insert(normalized.clone()) && !result.code.is_empty() {
@@ -2198,13 +2220,27 @@ enum CssModulesScopeBehaviour {
 }
 
 impl CssModulesScopeBehaviour {
-    fn from_option(value: &str) -> Self {
-        if value.eq_ignore_ascii_case("global") {
+    fn from_options(scope_behaviour: &str, global_module_paths: &[String], filename: &str) -> Self {
+        if scope_behaviour.eq_ignore_ascii_case("global")
+            || css_module_filename_matches_global_pattern(filename, global_module_paths)
+        {
             Self::Global
         } else {
             Self::Local
         }
     }
+}
+
+fn css_module_filename_matches_global_pattern(filename: &str, patterns: &[String]) -> bool {
+    if patterns.is_empty() {
+        return false;
+    }
+    let normalized = filename.replace('\\', "/");
+    patterns.iter().any(|pattern| {
+        regex::Regex::new(pattern)
+            .map(|compiled| compiled.is_match(filename) || compiled.is_match(&normalized))
+            .unwrap_or(false)
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -5253,6 +5289,64 @@ mod tests {
         assert!(!modules.contains_key("foo-bar"));
         assert!(!modules.contains_key("bazQux"));
         assert!(result.code.contains(".baz-qux { color: green }"));
+    }
+
+    #[test]
+    fn compiles_css_modules_global_module_paths_for_matching_file() {
+        let result = compile_style(
+            ".button { color: red }\n:local(.forced) { color: blue }",
+            StyleCompileOptions {
+                filename: Some("src/theme.global.css".into()),
+                modules: true,
+                modules_options: CssModulesOptions {
+                    global_module_paths: vec![r"global\.css$".into()],
+                    ..CssModulesOptions::default()
+                },
+                ..StyleCompileOptions::default()
+            },
+        );
+        let modules = result.modules.expect("css modules map");
+
+        assert!(!modules.contains_key("button"));
+        assert!(modules
+            .get("forced")
+            .is_some_and(|value| value.contains("_forced_")));
+        assert!(result.code.contains(".button { color: red }"));
+        assert!(result.code.contains("._forced_"));
+    }
+
+    #[test]
+    fn compiles_css_modules_global_module_paths_uses_entry_scope_for_imported_files() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let filename = dir.path().join("component.vue");
+        let dep = dir.path().join("theme.global.css");
+        std::fs::write(
+            &dep,
+            ".dep { color: blue; }\n:local(.forced) { color: green; }",
+        )
+        .expect("write dep");
+
+        let result = compile_style(
+            ".button { composes: forced from \"./theme.global.css\"; color: red; }",
+            StyleCompileOptions {
+                filename: Some(filename.to_string_lossy().to_string()),
+                modules: true,
+                modules_options: CssModulesOptions {
+                    global_module_paths: vec![r"global\.css$".into()],
+                    ..CssModulesOptions::default()
+                },
+                ..StyleCompileOptions::default()
+            },
+        );
+        let modules = result.modules.expect("css modules map");
+        let button = modules.get("button").expect("button export");
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert!(!modules.contains_key("dep"));
+        assert!(button.contains("_button_"));
+        assert!(button.contains("_forced_"));
+        assert!(result.code.contains("._dep_"));
+        assert!(result.code.contains("._forced_"));
     }
 
     #[test]

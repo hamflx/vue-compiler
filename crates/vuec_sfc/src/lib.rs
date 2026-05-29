@@ -8360,6 +8360,32 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
     }
 
     #[test]
+    fn compile_style_forwards_css_modules_global_module_paths() {
+        let mut compiler = SfcCompiler::new();
+        let source =
+            r#"<style module>.button { color: red }:local(.forced) { color: blue }</style>"#;
+        let descriptor = compiler.parse("src/theme.global.css", source);
+        let result = compiler.compile_style(
+            &descriptor,
+            SfcStyleCompileOptions {
+                modules_options: CssModulesOptions {
+                    global_module_paths: vec![r"global\.css$".into()],
+                    ..CssModulesOptions::default()
+                },
+                ..SfcStyleCompileOptions::default()
+            },
+        );
+        let modules = result.modules.expect("css modules");
+
+        assert!(!modules.contains_key("button"));
+        assert!(modules
+            .get("forced")
+            .is_some_and(|value| value.contains("_forced_")));
+        assert!(result.code.contains(".button { color: red }"));
+        assert!(result.code.contains("._forced_"));
+    }
+
+    #[test]
     fn compile_style_returns_css_modules_id_exports() {
         let source = r#"<style module>#panel { color: red }.button#item { color: blue }</style>"#;
         let mut compiler = SfcCompiler::new();
