@@ -8484,10 +8484,16 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
         let dir = tempfile::tempdir().expect("temp dir");
         let src_dir = dir.path().join("src");
         let package_dir = dir.path().join("node_modules").join("vuec-css-fixture");
+        let dist_dir = package_dir.join("dist");
         std::fs::create_dir_all(&src_dir).expect("src dir");
-        std::fs::create_dir_all(&package_dir).expect("package dir");
+        std::fs::create_dir_all(&dist_dir).expect("dist dir");
         let filename = src_dir.join("component.vue");
-        std::fs::write(package_dir.join("theme.css"), ".dep { color: blue; }").expect("write dep");
+        std::fs::write(dist_dir.join("theme.css"), ".dep { color: blue; }").expect("write dep");
+        std::fs::write(
+            package_dir.join("package.json"),
+            r#"{"name":"vuec-css-fixture","exports":{"./theme.css":"./dist/theme.css"}}"#,
+        )
+        .expect("write package");
         let source = r#"<style module>.button { composes: dep from "vuec-css-fixture/theme.css"; color: red; }</style>"#;
         let mut compiler = SfcCompiler::new();
         let descriptor = compiler.parse(filename.to_string_lossy(), source);
