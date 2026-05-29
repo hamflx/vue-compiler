@@ -8752,6 +8752,31 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
     }
 
     #[test]
+    fn compile_style_rewrites_top_level_is_where_scoped_branches() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "style.vue",
+            r#"<style scoped>:is(.foo, .bar):hover { color: red; }:where(.one .child, .two > .item) { color: blue; }.host:is(.foo, .bar) { color: green; }</style>"#,
+        );
+        let result = compiler.compile_style(
+            &descriptor,
+            SfcStyleCompileOptions {
+                id: Some("data-v-test".into()),
+                scoped: true,
+                ..SfcStyleCompileOptions::default()
+            },
+        );
+
+        assert!(result
+            .code
+            .contains(":is(.foo[data-v-test], .bar[data-v-test]):hover"));
+        assert!(result
+            .code
+            .contains(":where(.one .child[data-v-test], .two > .item[data-v-test])"));
+        assert!(result.code.contains(".host[data-v-test]:is(.foo, .bar)"));
+    }
+
+    #[test]
     fn compile_style_source_map_merges_style_blocks_to_vue_source() {
         let mut compiler = SfcCompiler::new();
         let source = "<style>.a { color: red; }</style>\n<style>.b { color: blue; }</style>";

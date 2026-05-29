@@ -4420,7 +4420,108 @@ fn rewrite_single_selector(selector: &str, scope_id: &str) -> String {
     if let Some(rewritten) = rewrite_slotted_selector(selector, scope_id) {
         return rewritten;
     }
+    if let Some(rewritten) = rewrite_scoped_container_injection_target(selector, scope_id) {
+        return rewritten;
+    }
     inject_scope_attribute(selector, scope_id)
+}
+
+fn rewrite_scoped_container_injection_target(selector: &str, scope_id: &str) -> Option<String> {
+    let selector = strip_leading_universal_selector(selector.trim());
+    let target = scoped_container_injection_target(selector)?;
+    let (open, close) = target.parens?;
+    let name = matched_selector_name(selector, target.start, &[":is", ":where"])?;
+    let rewritten_inner = split_selector_list(&selector[open + 1..close])
+        .into_iter()
+        .map(|branch| rewrite_single_selector(branch.trim(), scope_id))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    Some(format!(
+        "{}{name}({rewritten_inner}){}",
+        &selector[..target.start],
+        &selector[close + 1..]
+    ))
+}
+
+fn scoped_container_injection_target(selector: &str) -> Option<SelectorMatch> {
+    let mut state = SelectorScannerState::Normal;
+    let mut target = None;
+    let mut has_target = false;
+    let mut index = 0usize;
+    while index < selector.len() {
+        let ch = selector[index..].chars().next()?;
+        match state {
+            SelectorScannerState::Normal => match ch {
+                '\'' => state = SelectorScannerState::SingleQuote,
+                '"' => state = SelectorScannerState::DoubleQuote,
+                '[' => {
+                    let end = find_matching_selector_bracket(selector, index)
+                        .unwrap_or(selector.len().saturating_sub(1));
+                    target = None;
+                    has_target = true;
+                    index = end + 1;
+                    continue;
+                }
+                ':' => {
+                    if let Some(pseudo) =
+                        match_selector_pseudo_function(selector, index, &[":is", ":where"])
+                    {
+                        if !has_target {
+                            target = Some(pseudo);
+                            has_target = true;
+                        }
+                        index = pseudo.end;
+                        continue;
+                    }
+                    index = skip_selector_pseudo(selector, index);
+                    continue;
+                }
+                '>' | '+' | '~' | ',' => {}
+                '*' => {
+                    if !has_target {
+                        has_target = true;
+                        target = None;
+                    }
+                }
+                _ if ch.is_whitespace() => {}
+                _ if is_selector_ident_start(ch) || ch == '.' || ch == '#' => {
+                    let end = consume_selector_token(selector, index);
+                    target = None;
+                    has_target = true;
+                    index = end;
+                    continue;
+                }
+                _ => {}
+            },
+            SelectorScannerState::SingleQuote => {
+                if ch == '\\' {
+                    index += ch.len_utf8();
+                    if index < selector.len() {
+                        index += selector[index..].chars().next().map_or(0, char::len_utf8);
+                    }
+                    continue;
+                }
+                if ch == '\'' {
+                    state = SelectorScannerState::Normal;
+                }
+            }
+            SelectorScannerState::DoubleQuote => {
+                if ch == '\\' {
+                    index += ch.len_utf8();
+                    if index < selector.len() {
+                        index += selector[index..].chars().next().map_or(0, char::len_utf8);
+                    }
+                    continue;
+                }
+                if ch == '"' {
+                    state = SelectorScannerState::Normal;
+                }
+            }
+        }
+        index += ch.len_utf8();
+    }
+    target
 }
 
 fn rewrite_deep_container_selector(selector: &str, scope_id: &str) -> Option<String> {
@@ -4637,6 +4738,33 @@ fn find_pseudo_function(selector: &str, names: &[&str]) -> Option<SelectorMatch>
             }
         }
         index += ch.len_utf8();
+    }
+    None
+}
+
+fn match_selector_pseudo_function(
+    selector: &str,
+    index: usize,
+    names: &[&str],
+) -> Option<SelectorMatch> {
+    for name in names {
+        if selector[index..].starts_with(name)
+            && selector_name_boundary(selector, index + name.len())
+        {
+            let end = index + name.len();
+            let open = skip_selector_whitespace(selector, end);
+            let parens = if selector[open..].starts_with('(') {
+                find_matching_selector_paren(selector, open).map(|close| (open, close))
+            } else {
+                None
+            };
+            let match_end = parens.map(|(_, close)| close + 1).unwrap_or(end);
+            return Some(SelectorMatch {
+                start: index,
+                end: match_end,
+                parens,
+            });
+        }
     }
     None
 }
@@ -5223,6 +5351,56 @@ mod tests {
                 "data-v-test",
             ),
             ":has(:global(.foo), .bar) .baz[data-v-test] { color: red; }"
+        );
+    }
+
+    #[test]
+    fn rewrites_top_level_is_where_branches_like_vue3() {
+        assert_eq!(
+            rewrite_scoped_selectors(":is(.foo, .bar) { color: red; }", "data-v-test"),
+            ":is(.foo[data-v-test], .bar[data-v-test]) { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(
+                ":where(.foo .child, .bar > .item) { color: red; }",
+                "data-v-test",
+            ),
+            ":where(.foo .child[data-v-test], .bar > .item[data-v-test]) { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(":is(.foo, .bar):hover { color: red; }", "data-v-test"),
+            ":is(.foo[data-v-test], .bar[data-v-test]):hover { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(
+                ":where(.foo, :is(.bar, .baz)) { color: red; }",
+                "data-v-test",
+            ),
+            ":where(.foo[data-v-test], :is(.bar[data-v-test], .baz[data-v-test])) { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(":is(:global(.foo), .bar) { color: red; }", "data-v-test",),
+            ":is(.foo, .bar[data-v-test]) { color: red; }"
+        );
+    }
+
+    #[test]
+    fn leaves_non_target_is_where_pseudos_on_outer_scoped_selector() {
+        assert_eq!(
+            rewrite_scoped_selectors(".host:is(.foo, .bar) { color: red; }", "data-v-test"),
+            ".host[data-v-test]:is(.foo, .bar) { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(".host :where(.foo, .bar) { color: red; }", "data-v-test",),
+            ".host[data-v-test] :where(.foo, .bar) { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(":where(.foo, .bar).active { color: red; }", "data-v-test",),
+            ":where(.foo, .bar).active[data-v-test] { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(":is(.foo) [x] { color: red; }", "data-v-test"),
+            ":is(.foo) [x][data-v-test] { color: red; }"
         );
     }
 
