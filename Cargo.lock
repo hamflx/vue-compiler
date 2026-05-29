@@ -1704,6 +1704,7 @@ version = "0.1.0"
 dependencies = [
  "grass",
  "serde",
+ "serde_json",
  "tempfile",
  "vuec_codegen",
  "vuec_diagnostics",

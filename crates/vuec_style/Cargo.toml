@@ -14,6 +14,7 @@ categories.workspace = true
 [dependencies]
 grass.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 vuec_codegen = { path = "../vuec_codegen", version = "0.1.0" }
 vuec_diagnostics = { path = "../vuec_diagnostics", version = "0.1.0" }
 vuec_source = { path = "../vuec_source", version = "0.1.0" }

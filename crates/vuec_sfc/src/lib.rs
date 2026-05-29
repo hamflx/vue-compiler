@@ -8480,6 +8480,28 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
     }
 
     #[test]
+    fn compile_style_returns_css_modules_node_modules_composes() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let src_dir = dir.path().join("src");
+        let package_dir = dir.path().join("node_modules").join("vuec-css-fixture");
+        std::fs::create_dir_all(&src_dir).expect("src dir");
+        std::fs::create_dir_all(&package_dir).expect("package dir");
+        let filename = src_dir.join("component.vue");
+        std::fs::write(package_dir.join("theme.css"), ".dep { color: blue; }").expect("write dep");
+        let source = r#"<style module>.button { composes: dep from "vuec-css-fixture/theme.css"; color: red; }</style>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let result = compiler.compile_style(&descriptor, SfcStyleCompileOptions::default());
+        let modules = result.modules.expect("css modules");
+        let button = modules.get("button").expect("button export");
+
+        assert!(button.contains("_button_"));
+        assert!(button.contains("_dep_"));
+        assert!(result.code.starts_with("._dep_"));
+        assert!(!result.code.contains("composes"));
+    }
+
+    #[test]
     fn compile_style_returns_css_modules_composes_from_global() {
         let source =
             r#"<style module>.button { composes: reset utility from global; color: red; }</style>"#;
