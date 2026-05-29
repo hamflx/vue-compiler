@@ -5386,6 +5386,30 @@ mod tests {
     }
 
     #[test]
+    fn compiles_css_modules_leaves_class_attribute_selectors_global() {
+        let result = compile_style(
+            "[class=\"btn\"] { color: red }\n:local([class='forced']) { color: blue }\n[class~=tag] { color: green }\n.btn { color: black }",
+            StyleCompileOptions {
+                filename: Some("src/Attr.vue".into()),
+                modules: true,
+                ..StyleCompileOptions::default()
+            },
+        );
+        let modules = result.modules.expect("css modules map");
+
+        assert!(modules
+            .get("btn")
+            .is_some_and(|value| value.contains("_btn_")));
+        assert!(!modules.contains_key("forced"));
+        assert!(!modules.contains_key("tag"));
+        assert!(result.code.contains("[class=\"btn\"] { color: red }"));
+        assert!(result.code.contains("[class='forced'] { color: blue }"));
+        assert!(result.code.contains("[class~=tag] { color: green }"));
+        assert!(result.code.contains("._btn_"));
+        assert!(result.code.contains("{ color: black }"));
+    }
+
+    #[test]
     fn compiles_css_modules_global_module_paths_for_matching_file() {
         let result = compile_style(
             ".button { color: red }\n:local(.forced) { color: blue }",

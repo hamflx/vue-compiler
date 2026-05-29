@@ -8410,6 +8410,23 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
     }
 
     #[test]
+    fn compile_style_leaves_css_modules_class_attribute_selectors_global() {
+        let source = r#"<style module>[class="btn"] { color: red }:local([class='forced']) { color: blue }.btn { color: black }</style>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse("src/Attr.vue", source);
+        let result = compiler.compile_style(&descriptor, SfcStyleCompileOptions::default());
+        let modules = result.modules.expect("css modules");
+
+        assert!(modules
+            .get("btn")
+            .is_some_and(|value| value.contains("_btn_")));
+        assert!(!modules.contains_key("forced"));
+        assert!(result.code.contains("[class=\"btn\"] { color: red }"));
+        assert!(result.code.contains("[class='forced'] { color: blue }"));
+        assert!(result.code.contains("._btn_"));
+    }
+
+    #[test]
     fn compile_style_returns_css_modules_keyframe_exports() {
         let source = r#"<style module>@keyframes fade { from { opacity: 0 } to { opacity: 1 } }
 .button { animation-name: fade; }</style>"#;
