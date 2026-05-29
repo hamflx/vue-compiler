@@ -8360,6 +8360,30 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
     }
 
     #[test]
+    fn compile_style_returns_css_modules_id_exports() {
+        let source = r#"<style module>#panel { color: red }.button#item { color: blue }</style>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse("src/Selectors.vue", source);
+        let result = compiler.compile_style(&descriptor, SfcStyleCompileOptions::default());
+        let modules = result.modules.expect("css modules");
+
+        assert_eq!(
+            modules.get("panel").map(String::as_str),
+            Some("_panel_7jaos_1")
+        );
+        assert_eq!(
+            modules.get("button").map(String::as_str),
+            Some("_button_7jaos_1")
+        );
+        assert_eq!(
+            modules.get("item").map(String::as_str),
+            Some("_item_7jaos_1")
+        );
+        assert!(result.code.contains("#_panel_7jaos_1"));
+        assert!(result.code.contains("._button_7jaos_1#_item_7jaos_1"));
+    }
+
+    #[test]
     fn compile_style_returns_css_modules_keyframe_exports() {
         let source = r#"<style module>@keyframes fade { from { opacity: 0 } to { opacity: 1 } }
 .button { animation-name: fade; }</style>"#;

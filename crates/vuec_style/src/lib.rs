@@ -2447,13 +2447,13 @@ fn rewrite_css_module_default_segment(
     }
     let mut output = String::new();
     let mut cursor = 0usize;
-    while let Some((start, end, name)) = find_next_class_selector(segment, cursor) {
-        output.push_str(&segment[cursor..start]);
-        let scoped = context.scoped_name(name);
-        context.register_local(name, &scoped);
-        output.push('.');
+    while let Some(token) = find_next_css_module_selector_token(segment, cursor) {
+        output.push_str(&segment[cursor..token.start]);
+        let scoped = context.scoped_name(token.name);
+        context.register_local(token.name, &scoped);
+        output.push(token.sigil);
         output.push_str(&scoped);
-        cursor = end;
+        cursor = token.end;
     }
     output.push_str(&segment[cursor..]);
     output
@@ -2461,9 +2461,9 @@ fn rewrite_css_module_default_segment(
 
 fn register_css_module_globals(segment: &str, context: &mut CssModulesContext<'_>) {
     let mut cursor = 0usize;
-    while let Some((_, end, name)) = find_next_class_selector(segment, cursor) {
-        context.register_global(name);
-        cursor = end;
+    while let Some(token) = find_next_css_module_selector_token(segment, cursor) {
+        context.register_global(token.name);
+        cursor = token.end;
     }
 }
 
@@ -2846,12 +2846,13 @@ fn css_module_localized_selector_part_for_message(
     }
     let mut output = String::new();
     let mut cursor = 0usize;
-    while let Some((start, end, name)) = find_next_class_selector(selector, cursor) {
-        output.push_str(&selector[cursor..start]);
-        output.push_str(":local(.");
-        output.push_str(name);
+    while let Some(token) = find_next_css_module_selector_token(selector, cursor) {
+        output.push_str(&selector[cursor..token.start]);
+        output.push_str(":local(");
+        output.push(token.sigil);
+        output.push_str(token.name);
         output.push(')');
-        cursor = end;
+        cursor = token.end;
     }
     output.push_str(&selector[cursor..]);
     output
@@ -3008,8 +3009,9 @@ fn css_module_composable_local_name(selector: &str, default_local: bool) -> Opti
 }
 
 fn css_module_single_class_selector_name(selector: &str) -> Option<String> {
-    let (start, end, name) = find_next_class_selector(selector, 0)?;
-    (start == 0 && end == selector.len()).then(|| name.to_string())
+    let token = find_next_css_module_selector_token(selector, 0)?;
+    (token.sigil == '.' && token.start == 0 && token.end == selector.len())
+        .then(|| token.name.to_string())
 }
 
 fn css_module_external_composed_values(
@@ -3145,7 +3147,18 @@ fn find_pseudo_function_from(
     })
 }
 
-fn find_next_class_selector(source: &str, start: usize) -> Option<(usize, usize, &str)> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CssModuleSelectorToken<'a> {
+    start: usize,
+    end: usize,
+    sigil: char,
+    name: &'a str,
+}
+
+fn find_next_css_module_selector_token(
+    source: &str,
+    start: usize,
+) -> Option<CssModuleSelectorToken<'_>> {
     let mut state = SelectorScannerState::Normal;
     let mut index = start;
     while index < source.len() {
@@ -3161,11 +3174,16 @@ fn find_next_class_selector(source: &str, start: usize) -> Option<(usize, usize,
                     index = end + 1;
                     continue;
                 }
-                '.' => {
+                '.' | '#' => {
                     let name_start = index + 1;
                     let name_end = consume_css_module_class_name(source, name_start);
                     if name_end > name_start {
-                        return Some((index, name_end, &source[name_start..name_end]));
+                        return Some(CssModuleSelectorToken {
+                            start: index,
+                            end: name_end,
+                            sigil: ch,
+                            name: &source[name_start..name_end],
+                        });
                     }
                 }
                 _ => {}
@@ -5020,6 +5038,78 @@ mod tests {
         assert!(!modules.contains_key("foo-bar"));
         assert!(!modules.contains_key("bazQux"));
         assert!(result.code.contains(".baz-qux { color: green }"));
+    }
+
+    #[test]
+    fn compiles_css_modules_id_selectors_like_official() {
+        let result = compile_style(
+            "#panel { color: red }\n.button#item { color: blue }",
+            StyleCompileOptions {
+                filename: Some("src/Selectors.vue".into()),
+                modules: true,
+                ..StyleCompileOptions::default()
+            },
+        );
+        let modules = result.modules.expect("css modules map");
+
+        assert_eq!(
+            modules.get("panel").map(String::as_str),
+            Some("_panel_aau0c_1")
+        );
+        assert_eq!(
+            modules.get("button").map(String::as_str),
+            Some("_button_aau0c_2")
+        );
+        assert_eq!(
+            modules.get("item").map(String::as_str),
+            Some("_item_aau0c_1")
+        );
+        assert!(result.code.contains("#_panel_aau0c_1"));
+        assert!(result.code.contains("._button_aau0c_2#_item_aau0c_1"));
+    }
+
+    #[test]
+    fn compiles_css_modules_global_scope_local_id_only() {
+        let result = compile_style(
+            ":local(#panel) #plain { color: red }",
+            StyleCompileOptions {
+                filename: Some("src/Selectors.vue".into()),
+                modules: true,
+                modules_options: CssModulesOptions {
+                    scope_behaviour: "global".into(),
+                    ..CssModulesOptions::default()
+                },
+                ..StyleCompileOptions::default()
+            },
+        );
+        let modules = result.modules.expect("css modules map");
+
+        assert_eq!(
+            modules.get("panel").map(String::as_str),
+            Some("_panel_qt8vi_1")
+        );
+        assert!(!modules.contains_key("plain"));
+        assert!(result.code.contains("#_panel_qt8vi_1 #plain"));
+    }
+
+    #[test]
+    fn compiles_css_modules_export_global_ids() {
+        let result = compile_style(
+            ":global(#panel) { color: red }",
+            StyleCompileOptions {
+                filename: Some("src/Selectors.vue".into()),
+                modules: true,
+                modules_options: CssModulesOptions {
+                    export_globals: true,
+                    ..CssModulesOptions::default()
+                },
+                ..StyleCompileOptions::default()
+            },
+        );
+        let modules = result.modules.expect("css modules map");
+
+        assert_eq!(modules.get("panel").map(String::as_str), Some("panel"));
+        assert!(result.code.contains("#panel"));
     }
 
     #[test]
