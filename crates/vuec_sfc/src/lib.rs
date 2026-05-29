@@ -8360,6 +8360,27 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
     }
 
     #[test]
+    fn compile_style_returns_css_modules_keyframe_exports() {
+        let source = r#"<style module>@keyframes fade { from { opacity: 0 } to { opacity: 1 } }
+.button { animation-name: fade; }</style>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse("src/Anim.vue", source);
+        let result = compiler.compile_style(&descriptor, SfcStyleCompileOptions::default());
+        let modules = result.modules.expect("css modules");
+
+        assert_eq!(
+            modules.get("fade").map(String::as_str),
+            Some("_fade_17sru_1")
+        );
+        assert_eq!(
+            modules.get("button").map(String::as_str),
+            Some("_button_17sru_2")
+        );
+        assert!(result.code.contains("@keyframes _fade_17sru_1"));
+        assert!(result.code.contains("animation-name: _fade_17sru_1"));
+    }
+
+    #[test]
     fn compile_style_forwards_css_modules_export_globals() {
         let mut compiler = SfcCompiler::new();
         let source = r#"<style module>.local :global(.global) { color: red }</style>"#;

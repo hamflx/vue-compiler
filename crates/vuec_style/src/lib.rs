@@ -2038,6 +2038,12 @@ impl<'a> CssModulesContext<'a> {
         }
     }
 
+    fn scoped_local_value(&mut self, local: &str) -> String {
+        let scoped = self.scoped_name(local);
+        self.register_local(local, &scoped);
+        scoped
+    }
+
     fn raw_export_values(&self, local: &str) -> Option<Vec<String>> {
         self.raw_export_index
             .get(local)
@@ -2276,11 +2282,12 @@ fn rewrite_css_modules_items(
             cursor = close + 1;
             continue;
         }
-        output.push_str(&rewrite_css_modules_prelude(
-            prelude,
-            context,
-            block_context,
-        ));
+        let rewritten_prelude = if prelude.starts_with('@') {
+            rewrite_css_module_at_rule_prelude(prelude, context)
+        } else {
+            rewrite_css_modules_prelude(prelude, context, block_context)
+        };
+        output.push_str(&rewritten_prelude);
         output.push_str(brace_spacing);
         output.push('{');
         if prelude.starts_with('@') {
@@ -2319,6 +2326,57 @@ fn rewrite_css_modules_prelude(
         .map(|part| rewrite_css_module_selector(part.trim(), context))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn rewrite_css_module_at_rule_prelude(
+    prelude: &str,
+    context: &mut CssModulesContext<'_>,
+) -> String {
+    let Some((name, params)) = parse_at_rule(prelude) else {
+        return prelude.to_string();
+    };
+    if !is_keyframes_name(name) {
+        return prelude.to_string();
+    }
+    let Some((local, global)) = css_module_keyframes_local_name(params, context) else {
+        return format!(
+            "@{name} {}",
+            css_module_unwrap_global_keyframes_name(params)
+        );
+    };
+    if global {
+        return format!("@{name} {local}");
+    }
+    let scoped = context.scoped_name(local);
+    context.register_local(local, &scoped);
+    format!("@{name} {scoped}")
+}
+
+fn css_module_keyframes_local_name<'a>(
+    params: &'a str,
+    context: &CssModulesContext<'_>,
+) -> Option<(&'a str, bool)> {
+    if let Some(inner) = parse_css_module_keyframes_pseudo(params, ":global") {
+        return Some((inner, true));
+    }
+    if let Some(inner) = parse_css_module_keyframes_pseudo(params, ":local") {
+        return Some((inner, false));
+    }
+    let params = params.trim();
+    (!params.is_empty() && context.is_local_default()).then_some((params, false))
+}
+
+fn parse_css_module_keyframes_pseudo<'a>(params: &'a str, pseudo: &str) -> Option<&'a str> {
+    let params = params.trim();
+    let inner = params.strip_prefix(pseudo)?.strip_suffix(')')?;
+    let inner = inner.strip_prefix('(')?.trim();
+    (!inner.is_empty()).then_some(inner)
+}
+
+fn css_module_unwrap_global_keyframes_name(params: &str) -> String {
+    parse_css_module_keyframes_pseudo(params, ":global")
+        .unwrap_or(params)
+        .to_string()
 }
 
 fn rewrite_css_module_selector(selector: &str, context: &mut CssModulesContext<'_>) -> String {
@@ -2527,7 +2585,8 @@ fn rewrite_css_module_declaration_segment(
     };
     let prop = segment[..colon].trim();
     if !prop.eq_ignore_ascii_case("composes") && !prop.eq_ignore_ascii_case("compose-with") {
-        output.push_str(&replace_css_module_import_symbols(segment, context));
+        let segment = rewrite_css_module_animation_declaration(segment, context);
+        output.push_str(&replace_css_module_import_symbols(&segment, context));
         if has_semicolon {
             output.push(';');
         }
@@ -2570,6 +2629,192 @@ fn rewrite_css_module_declaration_segment(
                 end,
             );
         }
+    }
+}
+
+fn rewrite_css_module_animation_declaration(
+    segment: &str,
+    context: &mut CssModulesContext<'_>,
+) -> String {
+    let Some(colon) = find_top_level_colon(segment) else {
+        return segment.to_string();
+    };
+    let prop = segment[..colon].trim();
+    if !is_animation_name_property(prop) && !is_animation_property(prop) {
+        return segment.to_string();
+    }
+    let value_start = colon + 1;
+    let value = &segment[value_start..];
+    let leading_value_whitespace = value
+        .char_indices()
+        .find_map(|(index, ch)| (!ch.is_whitespace()).then_some(index))
+        .unwrap_or(value.len());
+    let value_prefix = &value[..leading_value_whitespace];
+    let value_body = &value[leading_value_whitespace..];
+    let rewritten = rewrite_css_module_animation_value(value_body.trim(), context);
+
+    let mut output = String::new();
+    output.push_str(&segment[..value_start]);
+    output.push_str(value_prefix);
+    output.push_str(&rewritten);
+    output
+}
+
+fn rewrite_css_module_animation_value(value: &str, context: &mut CssModulesContext<'_>) -> String {
+    split_selector_list(value)
+        .into_iter()
+        .map(|part| rewrite_css_module_animation_part(part.trim(), context))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn rewrite_css_module_animation_part(part: &str, context: &mut CssModulesContext<'_>) -> String {
+    let mut parsed_keywords = BTreeMap::new();
+    tokenize_css_module_animation_part(part)
+        .into_iter()
+        .map(|token| rewrite_css_module_animation_token(token, context, &mut parsed_keywords))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn rewrite_css_module_animation_token(
+    token: &str,
+    context: &mut CssModulesContext<'_>,
+    parsed_keywords: &mut BTreeMap<String, usize>,
+) -> String {
+    if let Some(global) = parse_css_module_animation_function(token, "global") {
+        return global.to_string();
+    }
+    if let Some(local) = parse_css_module_animation_function(token, "local") {
+        return context.scoped_local_value(local);
+    }
+    if !context.is_local_default()
+        || context.import_symbol_value(token).is_some()
+        || !is_css_module_animation_identifier(token)
+    {
+        return token.to_string();
+    }
+    let lower = token.to_ascii_lowercase();
+    if let Some(limit) = css_module_animation_keyword_limit(&lower) {
+        let count = parsed_keywords.entry(lower).or_insert(0);
+        let should_localize = *count >= limit;
+        *count = count.saturating_add(1);
+        if !should_localize {
+            return token.to_string();
+        }
+    }
+    context.scoped_local_value(token)
+}
+
+fn tokenize_css_module_animation_part(part: &str) -> Vec<&str> {
+    let mut tokens = Vec::new();
+    let mut state = CssScannerState::Normal;
+    let mut paren_depth = 0usize;
+    let mut token_start = None;
+    let mut index = 0usize;
+    while index < part.len() {
+        let Some(ch) = part[index..].chars().next() else {
+            break;
+        };
+        match state {
+            CssScannerState::Normal => {
+                if ch.is_whitespace() && paren_depth == 0 {
+                    if let Some(start) = token_start.take() {
+                        tokens.push(&part[start..index]);
+                    }
+                    index += ch.len_utf8();
+                    continue;
+                }
+                if token_start.is_none() {
+                    token_start = Some(index);
+                }
+                match ch {
+                    '\'' => state = CssScannerState::SingleQuote,
+                    '"' => state = CssScannerState::DoubleQuote,
+                    '(' => paren_depth += 1,
+                    ')' if paren_depth > 0 => paren_depth -= 1,
+                    _ => {}
+                }
+            }
+            CssScannerState::SingleQuote => {
+                if ch == '\\' {
+                    index += ch.len_utf8();
+                    if index < part.len() {
+                        index += part[index..].chars().next().map_or(0, char::len_utf8);
+                    }
+                    continue;
+                }
+                if ch == '\'' {
+                    state = CssScannerState::Normal;
+                }
+            }
+            CssScannerState::DoubleQuote => {
+                if ch == '\\' {
+                    index += ch.len_utf8();
+                    if index < part.len() {
+                        index += part[index..].chars().next().map_or(0, char::len_utf8);
+                    }
+                    continue;
+                }
+                if ch == '"' {
+                    state = CssScannerState::Normal;
+                }
+            }
+            CssScannerState::BlockComment => {}
+        }
+        index += ch.len_utf8();
+    }
+    if let Some(start) = token_start {
+        tokens.push(&part[start..]);
+    }
+    tokens
+}
+
+fn parse_css_module_animation_function<'a>(token: &'a str, name: &str) -> Option<&'a str> {
+    let inner = token
+        .strip_prefix(name)?
+        .strip_prefix('(')?
+        .strip_suffix(')')?
+        .trim();
+    (!inner.is_empty()).then_some(inner)
+}
+
+fn is_css_module_animation_identifier(token: &str) -> bool {
+    let mut chars = token.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if first == '-' {
+        let Some(second) = chars.next() else {
+            return false;
+        };
+        if second.is_ascii_digit() {
+            return false;
+        }
+        if !is_css_module_identifier_start(second) && second != '-' {
+            return false;
+        }
+    } else if !is_css_module_identifier_start(first) {
+        return false;
+    }
+    chars.all(is_css_module_identifier_continue)
+}
+
+fn is_css_module_identifier_start(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphabetic() || !ch.is_ascii()
+}
+
+fn is_css_module_identifier_continue(ch: char) -> bool {
+    is_css_module_identifier_start(ch) || ch.is_ascii_digit() || ch == '-'
+}
+
+fn css_module_animation_keyword_limit(value: &str) -> Option<usize> {
+    match value {
+        "normal" | "reverse" | "alternate" | "alternate-reverse" | "forwards" | "backwards"
+        | "both" | "infinite" | "paused" | "running" | "ease" | "ease-in" | "ease-out"
+        | "ease-in-out" | "linear" | "step-end" | "step-start" => Some(1),
+        "none" | "initial" | "inherit" | "unset" | "revert" | "revert-layer" => Some(usize::MAX),
+        _ => None,
     }
 }
 
@@ -4829,6 +5074,89 @@ mod tests {
 
         assert_eq!(base.code, prefixed.code);
         assert_eq!(base.modules, prefixed.modules);
+    }
+
+    #[test]
+    fn compiles_css_modules_keyframes_and_animation_names_like_official() {
+        let result = compile_style(
+            "@keyframes fade { from { opacity: 0 } to { opacity: 1 } }\n.button { animation-name: fade; }",
+            StyleCompileOptions {
+                filename: Some("src/Anim.vue".into()),
+                modules: true,
+                ..StyleCompileOptions::default()
+            },
+        );
+        let modules = result.modules.expect("css modules map");
+
+        assert_eq!(
+            modules.get("fade").map(String::as_str),
+            Some("_fade_17sru_1")
+        );
+        assert_eq!(
+            modules.get("button").map(String::as_str),
+            Some("_button_17sru_2")
+        );
+        assert!(result.code.contains("@keyframes _fade_17sru_1"));
+        assert!(result.code.contains("animation-name: _fade_17sru_1"));
+    }
+
+    #[test]
+    fn compiles_css_modules_animation_shorthand_keywords_like_official() {
+        let result = compile_style(
+            ".button { animation: infinite infinite, ease ease, none 1s, fade 1s; }",
+            StyleCompileOptions {
+                filename: Some("src/Anim.vue".into()),
+                modules: true,
+                ..StyleCompileOptions::default()
+            },
+        );
+        let modules = result.modules.expect("css modules map");
+
+        assert_eq!(
+            modules.get("button").map(String::as_str),
+            Some("_button_11sc8_1")
+        );
+        assert_eq!(
+            modules.get("infinite").map(String::as_str),
+            Some("_infinite_11sc8_1")
+        );
+        assert_eq!(
+            modules.get("ease").map(String::as_str),
+            Some("_ease_11sc8_1")
+        );
+        assert_eq!(
+            modules.get("fade").map(String::as_str),
+            Some("_fade_11sc8_1")
+        );
+        assert!(!modules.contains_key("none"));
+        assert!(result.code.contains(
+            "animation: infinite _infinite_11sc8_1, ease _ease_11sc8_1, none 1s, _fade_11sc8_1 1s"
+        ));
+    }
+
+    #[test]
+    fn compiles_css_modules_global_scope_local_keyframes_only() {
+        let result = compile_style(
+            "@keyframes :local(fade) { from { opacity: 0 } to { opacity: 1 } }\n.button { animation-name: fade; }",
+            StyleCompileOptions {
+                filename: Some("src/Anim.vue".into()),
+                modules: true,
+                modules_options: CssModulesOptions {
+                    scope_behaviour: "global".into(),
+                    ..CssModulesOptions::default()
+                },
+                ..StyleCompileOptions::default()
+            },
+        );
+        let modules = result.modules.expect("css modules map");
+
+        assert_eq!(
+            modules.get("fade").map(String::as_str),
+            Some("_fade_3cm9u_1")
+        );
+        assert!(!modules.contains_key("button"));
+        assert!(result.code.contains("@keyframes _fade_3cm9u_1"));
+        assert!(result.code.contains(".button { animation-name: fade"));
     }
 
     #[test]
