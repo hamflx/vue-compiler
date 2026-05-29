@@ -8800,6 +8800,32 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
     }
 
     #[test]
+    fn compile_style_rewrites_deep_nested_scoped_rules() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "style.vue",
+            r#"<style scoped>:deep(.foo, .bar) { color: blue; .child { color: red; } @media (min-width: 1px) { .inner { color: green; } } }</style>"#,
+        );
+        let result = compiler.compile_style(
+            &descriptor,
+            SfcStyleCompileOptions {
+                id: Some("data-v-test".into()),
+                scoped: true,
+                ..SfcStyleCompileOptions::default()
+            },
+        );
+
+        assert!(result.code.contains("[data-v-test] .foo {"));
+        assert!(result.code.contains("color: blue;"));
+        assert!(result.code.contains(".child { color: red;"));
+        assert!(result.code.contains("@media (min-width: 1px) {"));
+        assert!(result.code.contains(".inner { color: green;"));
+        assert!(!result.code.contains(".bar"));
+        assert!(!result.code.contains(".child[data-v-test]"));
+        assert!(!result.code.contains(".inner[data-v-test]"));
+    }
+
+    #[test]
     fn compile_style_source_map_merges_style_blocks_to_vue_source() {
         let mut compiler = SfcCompiler::new();
         let source = "<style>.a { color: red; }</style>\n<style>.b { color: blue; }</style>";
