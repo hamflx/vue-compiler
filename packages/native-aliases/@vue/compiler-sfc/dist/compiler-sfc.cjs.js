@@ -91,8 +91,10 @@ function compileScript(descriptor, options) {
 
 function compileStyle(options) {
   const opts = options || {};
-  return emitVue3StyleWarnings(
-    native.compileStyle(resolveStylePreprocessOptions(String(opts.source || ''), opts))
+  return normalizeVue3StyleResult(
+    emitVue3StyleWarnings(
+      native.compileStyle(vue3StyleNativeOptions(resolveStylePreprocessOptions(String(opts.source || ''), opts)))
+    )
   );
 }
 
@@ -128,6 +130,21 @@ function emitVue3StyleWarnings(result) {
   } else {
     delete out.diagnostics;
   }
+  return out;
+}
+
+function vue3StyleNativeOptions(options) {
+  if (!options || typeof options !== 'object') return options;
+  const out = { ...options };
+  delete out.sourceMap;
+  delete out.source_map;
+  return out;
+}
+
+function normalizeVue3StyleResult(result) {
+  if (!result || typeof result !== 'object' || result.map !== null) return result;
+  const out = { ...result };
+  out.map = undefined;
   return out;
 }
 

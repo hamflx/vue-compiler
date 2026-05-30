@@ -65,6 +65,7 @@ function normalizeVue27StyleResult(result) {
   if (!result || typeof result !== 'object') return result;
   const out = { ...result };
   delete out.dependencies;
+  if (out.map === null) out.map = undefined;
   return out;
 }
 
@@ -106,7 +107,12 @@ function vue27StyleNativeOptions(options) {
     __vuecWarnDeprecatedScopedSelectors: false,
   };
   for (const key of Object.keys(options || {})) {
-    if (key !== 'postcssPlugins' && key !== 'postcssOptions') {
+    if (
+      key !== 'postcssPlugins' &&
+      key !== 'postcssOptions' &&
+      key !== 'sourceMap' &&
+      key !== 'source_map'
+    ) {
       out[key] = options[key];
     }
   }

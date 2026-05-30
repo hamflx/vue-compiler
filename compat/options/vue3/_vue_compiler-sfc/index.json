@@ -158,6 +158,47 @@
       },
       "execution_mode": "diff",
       "status": "pass"
+    },
+    {
+      "option_name": "compileStyle.sourceMap",
+      "option_path": "compileStyle.sourceMap",
+      "entry": "index",
+      "version_line": "vue3",
+      "accepted_types": [
+        "boolean"
+      ],
+      "default_when_missing": "false",
+      "behavior_when_undefined": "undefined",
+      "behavior_when_null": "undefined",
+      "side_effects": [
+        "style rewrite"
+      ],
+      "diagnostics": [
+        "source map"
+      ],
+      "output_fields_affected": [
+        "code",
+        "map",
+        "errors"
+      ],
+      "official_fixture_ids": [
+        "vue3-sfc-style"
+      ],
+      "variant": "base",
+      "input_kind": "value",
+      "method": "compileStyle",
+      "fixture_id": "vue3-sfc-style",
+      "fixture_source": "<style scoped>.a{ color: v-bind(color); }</style>",
+      "option_value": {
+        "id": "data-v-contract",
+        "scoped": true,
+        "sourceMap": true,
+        "vars": [
+          "color"
+        ]
+      },
+      "execution_mode": "diff",
+      "status": "pass"
     }
   ]
 }

@@ -963,6 +963,26 @@ fn vue27_sfc_cases(_target: TargetSpec) -> Vec<OptionMatrixCase> {
             Some(serde_json::json!({"id": "data-v-contract", "scoped": true, "vars": ["color"]})),
             false,
         ),
+        option_case(
+            "compileStyle.sourceMap",
+            "compileStyle.sourceMap",
+            &["boolean"],
+            "false",
+            "undefined",
+            "undefined",
+            &["style rewrite"],
+            &["source map"],
+            &["code", "map", "errors"],
+            &["vue27-sfc-style"],
+            "base",
+            "compileStyle",
+            "vue27-sfc-style",
+            r#"<style scoped>.a{ color: v-bind(color); }</style>"#,
+            Some(
+                serde_json::json!({"id": "data-v-contract", "scoped": true, "vars": ["color"], "sourceMap": true}),
+            ),
+            false,
+        ),
     ]
 }
 
@@ -1314,6 +1334,26 @@ fn vue3_sfc_cases(_target: TargetSpec) -> Vec<OptionMatrixCase> {
             "vue3-sfc-style",
             r#"<style scoped>.a{ color: v-bind(color); }</style>"#,
             Some(serde_json::json!({"id": "data-v-contract", "scoped": true, "vars": ["color"]})),
+            false,
+        ),
+        option_case(
+            "compileStyle.sourceMap",
+            "compileStyle.sourceMap",
+            &["boolean"],
+            "false",
+            "undefined",
+            "undefined",
+            &["style rewrite"],
+            &["source map"],
+            &["code", "map", "errors"],
+            &["vue3-sfc-style"],
+            "base",
+            "compileStyle",
+            "vue3-sfc-style",
+            r#"<style scoped>.a{ color: v-bind(color); }</style>"#,
+            Some(
+                serde_json::json!({"id": "data-v-contract", "scoped": true, "vars": ["color"], "sourceMap": true}),
+            ),
             false,
         ),
     ]
@@ -2375,6 +2415,8 @@ fn alias_function_expression(
                 "Object.assign({}, __vuecPayload, { ast: vue3CoreRuntime.dehydrateForBridge(a0), source: '' })"
             } else if is_vue27_sfc_compile_script {
                 "vue27CompileScriptBridgePayload(__vuecPayload)"
+            } else if is_vue3_sfc_compile_style {
+                "vue3StyleBridgePayload(__vuecPayload)"
             } else {
                 "__vuecPayload"
             };
@@ -2391,7 +2433,7 @@ fn alias_function_expression(
             };
             let return_expr = if is_vue3_sfc_compile_style {
                 format!(
-                    "(() => {{ const __vuecStyleResult = {call}; return emitVue3StyleWarnings(__vuecStyleResult); }})()"
+                    "(() => {{ const __vuecStyleResult = {call}; return normalizeStyleAliasResult(emitVue3StyleWarnings(__vuecStyleResult)); }})()"
                 )
             } else if is_vue3_generate {
                 format!(
@@ -7473,11 +7515,35 @@ function vue27StyleBridgePayload(payload) {
   const options = payload.options;
   const bridgeOptions = {};
   for (const key of Object.keys(options)) {
-    if (key !== 'postcssPlugins' && key !== 'postcssOptions') {
+    if (
+      key !== 'postcssPlugins' &&
+      key !== 'postcssOptions' &&
+      key !== 'sourceMap' &&
+      key !== 'source_map'
+    ) {
       bridgeOptions[key] = options[key];
     }
   }
   return Object.assign({}, payload, { options: bridgeOptions });
+}
+
+function vue3StyleBridgePayload(payload) {
+  if (!payload || !payload.options || typeof payload.options !== 'object') return payload;
+  const options = payload.options;
+  const bridgeOptions = {};
+  for (const key of Object.keys(options)) {
+    if (key !== 'sourceMap' && key !== 'source_map') {
+      bridgeOptions[key] = options[key];
+    }
+  }
+  return Object.assign({}, payload, { options: bridgeOptions });
+}
+
+function normalizeStyleAliasResult(result) {
+  if (!result || typeof result !== 'object' || result.map !== null) return result;
+  const out = Object.assign({}, result);
+  out.map = undefined;
+  return out;
 }
 
 function vue27StylePostcssRequired(options) {
@@ -7498,7 +7564,7 @@ function vue27StylePostcssOptions(options) {
 }
 
 function applyVue27StylePostcssSync(result, options) {
-  if (!vue27StylePostcssRequired(options)) return result;
+  if (!vue27StylePostcssRequired(options)) return normalizeStyleAliasResult(result);
   const out = Object.assign({}, result);
   const errors = Array.isArray(out.errors) ? out.errors.slice() : [];
   let rawResult;
@@ -7515,14 +7581,14 @@ function applyVue27StylePostcssSync(result, options) {
   }
   out.errors = errors;
   out.rawResult = rawResult;
-  return out;
+  return normalizeStyleAliasResult(out);
 }
 
 function applyVue27StylePostcssAsync(result, options) {
   const out = Object.assign({}, result);
   const errors = Array.isArray(out.errors) ? out.errors.slice() : [];
   if (!vue27StylePostcssRequired(options)) {
-    return Promise.resolve(out);
+    return Promise.resolve(normalizeStyleAliasResult(out));
   }
   try {
     const postcss = require('postcss');
@@ -7536,7 +7602,7 @@ function applyVue27StylePostcssAsync(result, options) {
         out.map = postcssResult.map && postcssResult.map.toJSON ? postcssResult.map.toJSON() : out.map;
         out.errors = errors;
         out.rawResult = postcssResult;
-        return out;
+        return normalizeStyleAliasResult(out);
       })
       .catch(error => ({
         code: '',
@@ -13379,7 +13445,8 @@ mod tests {
         assert!(expression.contains("applyVue27StylePostcssSync"));
         assert!(expression.contains("sfc.vue27.compileStyle"));
         assert!(ALIAS_RUNTIME_JS.contains("function applyVue27StylePostcssSync"));
-        assert!(ALIAS_RUNTIME_JS.contains("key !== 'postcssPlugins' && key !== 'postcssOptions'"));
+        assert!(ALIAS_RUNTIME_JS.contains("key !== 'postcssPlugins'"));
+        assert!(ALIAS_RUNTIME_JS.contains("key !== 'postcssOptions'"));
     }
 
     #[test]
@@ -13402,8 +13469,18 @@ mod tests {
         let expression = alias_export_expression(target, "compileStyle", Some(&detail));
 
         assert!(expression.contains("emitVue3StyleWarnings"));
+        assert!(expression.contains("normalizeStyleAliasResult"));
+        assert!(expression.contains("vue3StyleBridgePayload"));
         assert!(ALIAS_RUNTIME_JS.contains("function emitVue3StyleWarnings"));
+        assert!(ALIAS_RUNTIME_JS.contains("function normalizeStyleAliasResult"));
+        assert!(ALIAS_RUNTIME_JS.contains("function vue3StyleBridgePayload"));
         assert!(ALIAS_RUNTIME_JS.contains("VUEC_STYLE_DEPRECATED_SCOPED_SELECTOR"));
+    }
+
+    #[test]
+    fn sfc_compile_style_alias_strips_public_source_map_option() {
+        assert!(ALIAS_RUNTIME_JS.contains("key !== 'sourceMap' && key !== 'source_map'"));
+        assert!(ALIAS_RUNTIME_JS.contains("key !== 'sourceMap'"));
     }
 
     #[test]
@@ -13428,7 +13505,9 @@ mod tests {
         assert!(expression.contains("applyVue27StylePostcssAsync"));
         assert!(expression.contains("sfc.vue27.compileStyleAsync"));
         assert!(ALIAS_RUNTIME_JS.contains("function applyVue27StylePostcssAsync"));
-        assert!(ALIAS_RUNTIME_JS.contains("return Promise.resolve(out);"));
+        assert!(
+            ALIAS_RUNTIME_JS.contains("return Promise.resolve(normalizeStyleAliasResult(out));")
+        );
     }
 
     #[test]
