@@ -8369,6 +8369,34 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
     }
 
     #[test]
+    fn compile_style_returns_css_modules_missing_imported_value_composes() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join("tokens.css"),
+            "@value primary: red; .remote { color: primary; }",
+        )
+        .expect("write dep");
+        let filename = dir.path().join("modules.vue");
+        let mut compiler = SfcCompiler::new();
+        let source = r#"<style module>@value missing from "./tokens.css"; .button { composes: missing; color: missing; }</style>"#;
+        let descriptor = compiler.parse(filename.to_string_lossy().to_string(), source);
+        let result = compiler.compile_style(&descriptor, SfcStyleCompileOptions::default());
+        let modules = result.modules.expect("css modules");
+        let button = modules.get("button").expect("button export");
+
+        assert!(result.errors.is_empty());
+        assert_eq!(
+            modules.get("missing").map(String::as_str),
+            Some("undefined")
+        );
+        assert!(button.contains("_button_"));
+        assert!(button.contains("undefined"));
+        assert!(!button.contains("i__const_missing_0"));
+        assert!(!result.code.contains("@value"));
+        assert!(result.code.contains("color: i__const_missing_0"));
+    }
+
+    #[test]
     fn compile_style_forwards_css_modules_dashes_convention() {
         let mut compiler = SfcCompiler::new();
         let source = r#"<style module>.foo-bar { color: red }\n.foo_bar { color: blue }</style>"#;

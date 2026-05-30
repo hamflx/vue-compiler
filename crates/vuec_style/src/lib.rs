@@ -2914,6 +2914,7 @@ struct CssModulesContext<'a> {
     imported_modules: BTreeMap<String, CssModulesCompileResult>,
     prepended_css_has_nested_import: bool,
     value_placeholders: BTreeMap<String, String>,
+    value_placeholder_modules: BTreeMap<String, String>,
     next_value_placeholder: usize,
     prepended_paths: BTreeSet<String>,
     prepended_css: Vec<String>,
@@ -2948,6 +2949,7 @@ impl<'a> CssModulesContext<'a> {
             imported_modules: BTreeMap::new(),
             prepended_css_has_nested_import: false,
             value_placeholders: BTreeMap::new(),
+            value_placeholder_modules: BTreeMap::new(),
             next_value_placeholder: 0,
             prepended_paths: BTreeSet::new(),
             prepended_css: Vec::new(),
@@ -3081,15 +3083,24 @@ impl<'a> CssModulesContext<'a> {
         self.replace_value_placeholders(output)
     }
 
-    fn import_value_placeholder(&mut self, value: String) -> String {
+    fn import_value_placeholder(&mut self, replacement: String, module_value: String) -> String {
         let placeholder = format!("__vuec_value_{}", self.next_value_placeholder);
         self.next_value_placeholder += 1;
-        self.value_placeholders.insert(placeholder.clone(), value);
+        self.value_placeholders
+            .insert(placeholder.clone(), replacement);
+        self.value_placeholder_modules
+            .insert(placeholder.clone(), module_value);
         placeholder
     }
 
     fn value_placeholder_replacement(&self, placeholder: &str) -> Option<&str> {
         self.value_placeholders.get(placeholder).map(String::as_str)
+    }
+
+    fn value_placeholder_module_value(&self, placeholder: &str) -> Option<&str> {
+        self.value_placeholder_modules
+            .get(placeholder)
+            .map(String::as_str)
     }
 
     fn replace_value_placeholders(&self, source: String) -> String {
@@ -3435,7 +3446,7 @@ fn register_css_module_value_import(
                 "undefined".to_string(),
             )
         };
-        let replacement = context.import_value_placeholder(replacement);
+        let replacement = context.import_value_placeholder(replacement, export.clone());
         replacements.insert(spec.local.to_string(), replacement);
         exports.insert(spec.local.to_string(), export.clone());
         context.set_raw_export_values(spec.local, vec![export]);
@@ -4646,7 +4657,7 @@ fn css_module_composed_values(
                 for value in values {
                     push_unique_css_module_value(&mut composed, value);
                 }
-            } else if let Some(value) = context.value_placeholder_replacement(class_name) {
+            } else if let Some(value) = context.value_placeholder_module_value(class_name) {
                 push_unique_css_module_value(&mut composed, value.to_string());
             } else if let Some(value) = context.import_symbol_module_value(class_name) {
                 push_unique_css_module_value(&mut composed, value);
@@ -9614,6 +9625,38 @@ mod tests {
         assert!(result.code.contains("color: red"));
         assert!(result.code.contains("outline-color: i__const_missing_3"));
         assert!(result.code.contains("border-color: red"));
+    }
+
+    #[test]
+    fn compiles_css_modules_missing_value_import_composes_like_official() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let dep = dir.path().join("tokens.css");
+        std::fs::write(&dep, "@value primary: red; .remote { color: primary; }")
+            .expect("write dep");
+        let entry = dir.path().join("entry.css");
+        let result = compile_style(
+            r#"@value missing from "./tokens.css";
+.button { composes: missing; color: missing; }"#,
+            StyleCompileOptions {
+                id: Some("test".into()),
+                filename: Some(entry.to_string_lossy().to_string()),
+                modules: true,
+                ..StyleCompileOptions::default()
+            },
+        );
+        let modules = result.modules.expect("css modules map");
+        let button = modules.get("button").expect("button export");
+
+        assert!(result.errors.is_empty());
+        assert_eq!(
+            modules.get("missing").map(String::as_str),
+            Some("undefined")
+        );
+        assert!(button.contains("_button_"));
+        assert!(button.contains("undefined"));
+        assert!(!button.contains("i__const_missing_0"));
+        assert!(!result.code.contains("@value"));
+        assert!(result.code.contains("color: i__const_missing_0"));
     }
 
     #[test]
