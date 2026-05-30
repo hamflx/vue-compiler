@@ -8318,6 +8318,27 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
     }
 
     #[test]
+    fn compile_style_returns_css_modules_values() {
+        let mut compiler = SfcCompiler::new();
+        let source = r#"<style module>@value primary: red; @value query: (min-width: 1px); @media query { .button { color: primary; } }</style>"#;
+        let descriptor = compiler.parse("modules.vue", source);
+        let result = compiler.compile_style(&descriptor, SfcStyleCompileOptions::default());
+        let modules = result.modules.expect("css modules");
+
+        assert_eq!(modules.get("primary").map(String::as_str), Some("red"));
+        assert_eq!(
+            modules.get("query").map(String::as_str),
+            Some("(min-width: 1px)")
+        );
+        assert!(modules
+            .get("button")
+            .is_some_and(|value| value.contains("_button_")));
+        assert!(!result.code.contains("@value"));
+        assert!(result.code.contains("@media (min-width: 1px)"));
+        assert!(result.code.contains("color: red"));
+    }
+
+    #[test]
     fn compile_style_forwards_css_modules_dashes_convention() {
         let mut compiler = SfcCompiler::new();
         let source = r#"<style module>.foo-bar { color: red }\n.foo_bar { color: blue }</style>"#;

@@ -2861,7 +2861,11 @@ fn compile_css_modules_file(
         scope_behaviour,
         active_paths,
     );
-    let code = rewrite_css_modules_items(source, &mut context, CssBlockContext::Root);
+    let (source, values) = prepare_css_module_values(source);
+    for (name, value) in values {
+        context.set_raw_export_values(&name, vec![value]);
+    }
+    let code = rewrite_css_modules_items(&source, &mut context, CssBlockContext::Root);
     let code = context.finish_code(code);
     let raw_modules = context.raw_modules();
     let modules = context.modules();
@@ -3113,6 +3117,202 @@ struct CssModuleExport {
     values: Vec<String>,
 }
 
+fn prepare_css_module_values(source: &str) -> (String, Vec<(String, String)>) {
+    let mut output = String::with_capacity(source.len());
+    let mut values = Vec::new();
+    let mut value_map = BTreeMap::new();
+    let mut index = 0usize;
+    let mut drop_leading_whitespace = false;
+    while index < source.len() {
+        let Some(ch) = source[index..].chars().next() else {
+            break;
+        };
+        if drop_leading_whitespace && ch.is_whitespace() {
+            index += ch.len_utf8();
+            continue;
+        }
+        drop_leading_whitespace = false;
+        if source[index..].starts_with("/*") {
+            let Some(end_offset) = source[index + 2..].find("*/") else {
+                output.push_str(&source[index..]);
+                break;
+            };
+            let end = index + 2 + end_offset + 2;
+            output.push_str(&source[index..end]);
+            index = end;
+            continue;
+        }
+        if source[index..].starts_with(['\'', '"']) {
+            let end = skip_css_string(source, index);
+            output.push_str(&source[index..end]);
+            index = end;
+            continue;
+        }
+        if source[index..].starts_with("@value")
+            && css_module_value_keyword_boundary(source, index + "@value".len())
+        {
+            if let Some(end) = css_module_value_statement_end(source, index + "@value".len()) {
+                let statement = &source[index..end];
+                if let Some((name, value)) =
+                    parse_css_module_local_value_statement(statement, &value_map)
+                {
+                    if output.trim().is_empty() {
+                        output.clear();
+                        drop_leading_whitespace = true;
+                    }
+                    value_map.insert(name.clone(), value.clone());
+                    values.push((name, value));
+                    index = end;
+                    continue;
+                }
+            }
+        }
+        output.push(ch);
+        index += ch.len_utf8();
+    }
+    (replace_css_module_values(&output, &value_map), values)
+}
+
+fn css_module_value_keyword_boundary(source: &str, index: usize) -> bool {
+    source[index..]
+        .chars()
+        .next()
+        .is_none_or(|ch| !is_css_module_identifier_continue(ch))
+}
+
+fn css_module_value_statement_end(source: &str, mut index: usize) -> Option<usize> {
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    while index < source.len() {
+        if source[index..].starts_with("/*") {
+            let end_offset = source[index + 2..].find("*/")?;
+            index += 2 + end_offset + 2;
+            continue;
+        }
+        if source[index..].starts_with(['\'', '"']) {
+            index = skip_css_string(source, index);
+            continue;
+        }
+        let ch = source[index..].chars().next()?;
+        match ch {
+            '(' => paren_depth += 1,
+            ')' if paren_depth > 0 => paren_depth -= 1,
+            '[' => bracket_depth += 1,
+            ']' if bracket_depth > 0 => bracket_depth -= 1,
+            ';' if paren_depth == 0 && bracket_depth == 0 => return Some(index + ch.len_utf8()),
+            '{' if paren_depth == 0 && bracket_depth == 0 => return None,
+            _ => {}
+        }
+        index += ch.len_utf8();
+    }
+    None
+}
+
+fn skip_css_string(source: &str, start: usize) -> usize {
+    let Some(quote) = source[start..].chars().next() else {
+        return start;
+    };
+    let mut index = start + quote.len_utf8();
+    while index < source.len() {
+        let Some(ch) = source[index..].chars().next() else {
+            break;
+        };
+        index += ch.len_utf8();
+        if ch == '\\' {
+            if index < source.len() {
+                index += source[index..].chars().next().map_or(0, char::len_utf8);
+            }
+            continue;
+        }
+        if ch == quote {
+            return index;
+        }
+    }
+    source.len()
+}
+
+fn parse_css_module_local_value_statement(
+    statement: &str,
+    values: &BTreeMap<String, String>,
+) -> Option<(String, String)> {
+    let body = statement.strip_prefix("@value")?.strip_suffix(';')?.trim();
+    let colon = find_top_level_colon(body)?;
+    let name = body[..colon].trim();
+    let value = body[colon + 1..].trim();
+    if !is_css_module_value_name(name) || value.is_empty() {
+        return None;
+    }
+    Some((name.to_string(), replace_css_module_values(value, values)))
+}
+
+fn is_css_module_value_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    is_css_module_identifier_start(first) && chars.all(is_css_module_identifier_continue)
+}
+
+fn replace_css_module_values(source: &str, values: &BTreeMap<String, String>) -> String {
+    if values.is_empty() {
+        return source.to_string();
+    }
+    let mut names = values.keys().map(String::as_str).collect::<Vec<_>>();
+    names.sort_by_key(|name| std::cmp::Reverse(name.len()));
+    let mut output = String::with_capacity(source.len());
+    let mut index = 0usize;
+    while index < source.len() {
+        if source[index..].starts_with("/*") {
+            let Some(end_offset) = source[index + 2..].find("*/") else {
+                output.push_str(&source[index..]);
+                break;
+            };
+            let end = index + 2 + end_offset + 2;
+            output.push_str(&source[index..end]);
+            index = end;
+            continue;
+        }
+        if let Some(name) = names
+            .iter()
+            .copied()
+            .find(|name| css_module_value_matches_at(source, index, name))
+        {
+            output.push_str(
+                values
+                    .get(name)
+                    .expect("value name came from map keys")
+                    .as_str(),
+            );
+            index += name.len();
+            continue;
+        }
+        let Some(ch) = source[index..].chars().next() else {
+            break;
+        };
+        output.push(ch);
+        index += ch.len_utf8();
+    }
+    output
+}
+
+fn css_module_value_matches_at(source: &str, index: usize, name: &str) -> bool {
+    if !source[index..].starts_with(name) {
+        return false;
+    }
+    let before_is_ident = source[..index]
+        .chars()
+        .next_back()
+        .is_some_and(is_css_module_identifier_continue);
+    if before_is_ident {
+        return false;
+    }
+    let end = index + name.len();
+    source[end..]
+        .chars()
+        .next()
+        .is_none_or(|ch| !is_css_module_identifier_continue(ch))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CssModulesScopeBehaviour {
     Local,
@@ -3236,7 +3436,16 @@ fn rewrite_css_modules_items(
             } else {
                 CssBlockContext::Container
             };
-            output.push_str(&rewrite_css_modules_items(body, context, next_context));
+            let rewritten_body = rewrite_css_modules_items(body, context, next_context);
+            if css_block_contains_style_rules(&rewritten_body)
+                || css_block_contains_at_rule_with_style_rules(&rewritten_body)
+            {
+                output.push('\n');
+                output.push_str(rewritten_body.trim());
+                output.push('\n');
+            } else {
+                output.push_str(&rewritten_body);
+            }
         } else {
             output.push_str(&rewrite_css_module_declarations(
                 prelude,
@@ -8697,6 +8906,56 @@ mod tests {
             .is_some_and(|value| value.contains("_button_")));
         assert!(!result.code.contains(":export"));
         assert!(result.code.contains("color: primary"));
+    }
+
+    #[test]
+    fn compiles_css_modules_local_values_like_official() {
+        let result = compile_style(
+            r#"@value primary: red; @value accent: primary; @value query: (min-width: 1px);
+@media query { .button::before { content: "accent"; /* accent */ color: accent; } }
+.accent { border-color: accent; }"#,
+            StyleCompileOptions {
+                id: Some("test".into()),
+                filename: Some("value.module.css".into()),
+                modules: true,
+                ..StyleCompileOptions::default()
+            },
+        );
+        let modules = result.modules.expect("css modules map");
+
+        assert_eq!(modules.get("primary").map(String::as_str), Some("red"));
+        assert_eq!(modules.get("accent").map(String::as_str), Some("red"));
+        assert_eq!(
+            modules.get("query").map(String::as_str),
+            Some("(min-width: 1px)")
+        );
+        assert!(modules
+            .get("red")
+            .is_some_and(|value| value.contains("_red_")));
+        assert!(!result.code.contains("@value"));
+        assert!(result.code.contains("@media (min-width: 1px)"));
+        assert!(result.code.contains("content: \"red\""));
+        assert!(result.code.contains("/* accent */ color: red"));
+        assert!(result.code.contains("border-color: red"));
+    }
+
+    #[test]
+    fn compiles_css_modules_values_as_single_pass_replacements() {
+        let result = compile_style(
+            "@value accent: primary; @value primary: red; .button { color: accent; background: primary; }",
+            StyleCompileOptions {
+                id: Some("test".into()),
+                filename: Some("value-order.module.css".into()),
+                modules: true,
+                ..StyleCompileOptions::default()
+            },
+        );
+        let modules = result.modules.expect("css modules map");
+
+        assert_eq!(modules.get("accent").map(String::as_str), Some("primary"));
+        assert_eq!(modules.get("primary").map(String::as_str), Some("red"));
+        assert!(result.code.contains("color: primary"));
+        assert!(result.code.contains("background: red"));
     }
 
     #[test]
