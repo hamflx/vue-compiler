@@ -5376,6 +5376,9 @@ fn rewrite_selector_branches(selector: &str, scope_id: &str) -> String {
 }
 
 fn rewrite_direct_nested_parent_selector(selector: &str) -> String {
+    if !direct_nested_parent_selector_needs_rewrite(selector) {
+        return selector.to_string();
+    }
     let parts = split_selector_list(selector);
     let mut rewritten = String::new();
     for (index, part) in parts.into_iter().enumerate() {
@@ -5392,11 +5395,51 @@ fn rewrite_direct_nested_parent_selector(selector: &str) -> String {
     rewritten
 }
 
+fn direct_nested_parent_selector_needs_rewrite(selector: &str) -> bool {
+    split_selector_list(selector)
+        .into_iter()
+        .any(|part| direct_nested_parent_selector_branch_needs_rewrite(part.trim()))
+}
+
+fn direct_nested_parent_selector_branch_needs_rewrite(selector: &str) -> bool {
+    let normalized_selector = normalize_selector_comments(selector);
+    let selector = normalized_selector.trim();
+    if selector.is_empty() {
+        return false;
+    }
+    let stripped = strip_leading_universal_selector(selector);
+    if stripped != selector {
+        return true;
+    }
+    if rewrite_scope_anchored_deep_container_branch(selector) != selector {
+        return true;
+    }
+    direct_nested_parent_container_selector_needs_rewrite(selector)
+}
+
 fn rewrite_direct_nested_parent_selector_branch(selector: &str) -> String {
     let normalized_selector = normalize_selector_comments(selector);
     let selector = strip_leading_universal_selector(normalized_selector.trim());
     let selector = rewrite_scope_anchored_deep_container_branch(selector);
     rewrite_direct_nested_parent_container_selector(&selector).unwrap_or(selector)
+}
+
+fn direct_nested_parent_container_selector_needs_rewrite(selector: &str) -> bool {
+    let Some(target) = scoped_container_injection_target(selector) else {
+        return false;
+    };
+    let Some((open, close)) = target.parens else {
+        return false;
+    };
+    let Some(name) = matched_selector_name(selector, target.start, &[":is", ":where"]) else {
+        return false;
+    };
+    let suffix = &selector[close + 1..];
+    if !suffix.trim().is_empty() && !selector_suffix_is_pseudo_only(suffix) {
+        return false;
+    }
+    matches!(name, ":is" | ":where")
+        && direct_nested_parent_selector_needs_rewrite(&selector[open + 1..close])
 }
 
 fn rewrite_direct_nested_parent_container_selector(selector: &str) -> Option<String> {
@@ -7870,6 +7913,31 @@ mod tests {
                 "data-v-test",
             ),
             ":is(.g,.s,.item):hover {\n&[data-v-test] { color: blue;\n}\n.bar[data-v-test] { color: red;\n}\n}"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(".foo /*x*/ .bar { .child { color: red; } }", "data-v-test",),
+            ".foo /*x*/ .bar {\n.child[data-v-test] { color: red;\n}\n}"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(
+                ".foo /*x*/ .bar, *.baz { .child { color: red; } }",
+                "data-v-test",
+            ),
+            ".foo  .bar,.baz {\n.child[data-v-test] { color: red;\n}\n}"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(
+                ":is(.foo /*x*/ .bar, .baz) { .child { color: red; } }",
+                "data-v-test",
+            ),
+            ":is(.foo /*x*/ .bar, .baz) {\n.child[data-v-test] { color: red;\n}\n}"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(
+                ":is(.foo /*x*/ .bar, *.baz) { .child { color: red; } }",
+                "data-v-test",
+            ),
+            ":is(.foo  .bar,.baz) {\n.child[data-v-test] { color: red;\n}\n}"
         );
     }
 

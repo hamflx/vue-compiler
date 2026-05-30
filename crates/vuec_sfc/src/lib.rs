@@ -8833,7 +8833,7 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
         let mut compiler = SfcCompiler::new();
         let descriptor = compiler.parse(
             "style.vue",
-            r#"<style scoped>*.foo { color: blue; .bar { color: red; } }:is(:global(.g), :slotted(.s), * .item):hover { color: green; .child { color: yellow; } }</style>"#,
+            r#"<style scoped>*.foo { color: blue; .bar { color: red; } }.foo /*x*/ .bar { .child { color: orange; } }:is(.foo /*x*/ .bar, *.baz) { .child { color: purple; } }:is(:global(.g), :slotted(.s), * .item):hover { color: green; .child { color: yellow; } }</style>"#,
         );
         let result = compiler.compile_style(
             &descriptor,
@@ -8847,6 +8847,8 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
         assert!(result.code.contains(".foo {"));
         assert!(!result.code.contains("*.foo {"));
         assert!(result.code.contains(":is(.g,.s,.item):hover {"));
+        assert!(result.code.contains(".foo /*x*/ .bar {"));
+        assert!(result.code.contains(":is(.foo  .bar,.baz) {"));
         assert!(result.code.contains(".bar[data-v-test] { color: red;"));
         assert!(result.code.contains(".child[data-v-test] { color: yellow;"));
     }
