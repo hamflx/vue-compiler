@@ -5155,6 +5155,8 @@ fn rewrite_single_selector_with_options(
     rule_has_nested_block: bool,
     in_container_branch: bool,
 ) -> SelectorRewriteResult {
+    let normalized_selector = normalize_selector_comments(selector);
+    let selector = normalized_selector.trim();
     if selector.is_empty() {
         return SelectorRewriteResult {
             selector: selector.to_string(),
@@ -5245,6 +5247,16 @@ fn scoped_container_injection_target(selector: &str) -> Option<SelectorMatch> {
                     has_target = true;
                     index = end;
                     continue;
+                }
+                '/' if selector[index..].starts_with("/*") => {
+                    index = skip_selector_comment(selector, index);
+                    continue;
+                }
+                '&' => {
+                    if !has_target {
+                        has_target = true;
+                        target = None;
+                    }
                 }
                 '[' => {
                     let end = find_matching_selector_bracket(selector, index)
@@ -5437,6 +5449,10 @@ fn collect_selector_deprecation_warnings(selector: &str, warnings: &mut Vec<Stri
                     index = consume_selector_escape(selector, index);
                     continue;
                 }
+                '/' if selector[index..].starts_with("/*") => {
+                    index = skip_selector_comment(selector, index);
+                    continue;
+                }
                 '[' => bracket_depth += 1,
                 ']' if bracket_depth > 0 => bracket_depth -= 1,
                 '(' => paren_depth += 1,
@@ -5571,6 +5587,10 @@ fn split_selector_list(selector: &str) -> Vec<&str> {
                     index = consume_selector_escape(selector, index);
                     continue;
                 }
+                '/' if selector[index..].starts_with("/*") => {
+                    index = skip_selector_comment(selector, index);
+                    continue;
+                }
                 '(' => paren_depth += 1,
                 ')' if paren_depth > 0 => paren_depth -= 1,
                 '[' => bracket_depth += 1,
@@ -5638,6 +5658,10 @@ fn find_pseudo_function(selector: &str, names: &[&str]) -> Option<SelectorMatch>
                 '"' => state = SelectorScannerState::DoubleQuote,
                 '\\' => {
                     index = consume_selector_escape(selector, index);
+                    continue;
+                }
+                '/' if selector[index..].starts_with("/*") => {
+                    index = skip_selector_comment(selector, index);
                     continue;
                 }
                 '[' => bracket_depth += 1,
@@ -5736,6 +5760,10 @@ fn find_top_level_pseudo_function(selector: &str, names: &[&str]) -> Option<Sele
                 '"' => state = SelectorScannerState::DoubleQuote,
                 '\\' => {
                     index = consume_selector_escape(selector, index);
+                    continue;
+                }
+                '/' if selector[index..].starts_with("/*") => {
+                    index = skip_selector_comment(selector, index);
                     continue;
                 }
                 '[' => bracket_depth += 1,
@@ -5838,6 +5866,10 @@ fn find_matching_selector_paren(selector: &str, open: usize) -> Option<usize> {
                     index = consume_selector_escape(selector, index);
                     continue;
                 }
+                '/' if selector[index..].starts_with("/*") => {
+                    index = skip_selector_comment(selector, index);
+                    continue;
+                }
                 '(' => depth += 1,
                 ')' => {
                     depth = depth.saturating_sub(1);
@@ -5896,6 +5928,10 @@ fn find_deep_combinator(selector: &str) -> Option<DeepCombinator> {
                 '"' => state = SelectorScannerState::DoubleQuote,
                 '\\' => {
                     index = consume_selector_escape(selector, index);
+                    continue;
+                }
+                '/' if selector[index..].starts_with("/*") => {
+                    index = skip_selector_comment(selector, index);
                     continue;
                 }
                 '(' => paren_depth += 1,
@@ -6058,6 +6094,12 @@ fn selector_injection_index(selector: &str) -> Option<usize> {
                     index = end;
                     continue;
                 }
+                '/' if selector[index..].starts_with("/*") => {
+                    let end = skip_selector_comment(selector, index);
+                    last_node_end = Some(end);
+                    index = end;
+                    continue;
+                }
                 '[' => {
                     let Some(end) = find_matching_selector_bracket(selector, index) else {
                         return last_node_end.or(Some(selector.len()));
@@ -6134,6 +6176,10 @@ fn find_matching_selector_bracket(selector: &str, open: usize) -> Option<usize> 
                 '"' => state = SelectorScannerState::DoubleQuote,
                 '\\' => {
                     index = consume_selector_escape(selector, index);
+                    continue;
+                }
+                '/' if selector[index..].starts_with("/*") => {
+                    index = skip_selector_comment(selector, index);
                     continue;
                 }
                 ']' => return Some(index),
@@ -6221,6 +6267,92 @@ fn is_selector_ident_start(ch: char) -> bool {
 
 fn is_selector_ident_continue(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || !ch.is_ascii()
+}
+
+fn normalize_selector_comments(selector: &str) -> String {
+    let mut output = String::with_capacity(selector.len());
+    let mut state = SelectorScannerState::Normal;
+    let mut index = 0usize;
+    while index < selector.len() {
+        let Some(ch) = selector[index..].chars().next() else {
+            break;
+        };
+        match state {
+            SelectorScannerState::Normal => match ch {
+                '\'' => {
+                    state = SelectorScannerState::SingleQuote;
+                    output.push(ch);
+                    index += ch.len_utf8();
+                }
+                '"' => {
+                    state = SelectorScannerState::DoubleQuote;
+                    output.push(ch);
+                    index += ch.len_utf8();
+                }
+                '/' if selector[index..].starts_with("/*") => {
+                    let end = skip_selector_comment(selector, index);
+                    let before_is_whitespace =
+                        output.chars().next_back().is_some_and(char::is_whitespace);
+                    let after_is_whitespace = if end < selector.len() {
+                        selector[end..]
+                            .chars()
+                            .next()
+                            .is_some_and(char::is_whitespace)
+                    } else {
+                        false
+                    };
+                    if !before_is_whitespace && !after_is_whitespace {
+                        output.push_str(&selector[index..end]);
+                    }
+                    index = end;
+                }
+                _ => {
+                    output.push(ch);
+                    index += ch.len_utf8();
+                }
+            },
+            SelectorScannerState::SingleQuote => {
+                output.push(ch);
+                index += ch.len_utf8();
+                if ch == '\\' {
+                    if index < selector.len() {
+                        if let Some(next) = selector[index..].chars().next() {
+                            output.push(next);
+                            index += next.len_utf8();
+                        }
+                    }
+                    continue;
+                }
+                if ch == '\'' {
+                    state = SelectorScannerState::Normal;
+                }
+            }
+            SelectorScannerState::DoubleQuote => {
+                output.push(ch);
+                index += ch.len_utf8();
+                if ch == '\\' {
+                    if index < selector.len() {
+                        if let Some(next) = selector[index..].chars().next() {
+                            output.push(next);
+                            index += next.len_utf8();
+                        }
+                    }
+                    continue;
+                }
+                if ch == '"' {
+                    state = SelectorScannerState::Normal;
+                }
+            }
+        }
+    }
+    output
+}
+
+fn skip_selector_comment(selector: &str, start: usize) -> usize {
+    selector[start + 2..]
+        .find("*/")
+        .map(|offset| start + 2 + offset + 2)
+        .unwrap_or(selector.len())
 }
 
 fn consume_selector_escape(selector: &str, start: usize) -> usize {
@@ -6593,8 +6725,50 @@ mod tests {
         assert!(result.diagnostics.is_empty());
         assert_eq!(
             result.code,
-            r#".foo\:deep(.bar)[data-v-test] { color: red;
-}"#
+            ".foo\\:deep(.bar)[data-v-test] { color: red;\n}"
+        );
+    }
+
+    #[test]
+    fn rewrites_commented_scoped_selectors_like_vue3() {
+        assert_eq!(
+            rewrite_scoped_selectors(".foo/*x*/.bar { color: red; }", "data-v-test"),
+            ".foo/*x*/.bar[data-v-test] { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(".foo /*x*/ .bar { color: red; }", "data-v-test"),
+            ".foo  .bar[data-v-test] { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(".foo/*,*/.bar { color: red; }", "data-v-test"),
+            ".foo/*,*/.bar[data-v-test] { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(".foo/*:deep(.bar)*/.baz { color: red; }", "data-v-test"),
+            ".foo/*:deep(.bar)*/.baz[data-v-test] { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(".foo/*[*/.bar { color: red; }", "data-v-test"),
+            ".foo/*[*/.bar[data-v-test] { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(".foo/*x*/:hover { color: red; }", "data-v-test"),
+            ".foo/*x*/[data-v-test]:hover { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(".foo /*x*/:hover { color: red; }", "data-v-test"),
+            ".foo[data-v-test] :hover { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(":is(.foo/*,*/.bar, .baz) { color: red; }", "data-v-test"),
+            ":is(.foo/*,*/.bar[data-v-test], .baz[data-v-test]) { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(
+                ".foo { &:is(.bar/*,*/.baz, .qux) { color: red; } }",
+                "data-v-test",
+            ),
+            ".foo {\n&[data-v-test]:is(.bar/*,*/.baz, .qux) { color: red;\n}\n}"
         );
     }
 

@@ -8925,6 +8925,29 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
     }
 
     #[test]
+    fn compile_style_rewrites_commented_scoped_selectors() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "style.vue",
+            r#"<style scoped>.foo/*,*/.bar { color: red; }.foo /*x*/:hover { color: blue; }:is(.foo/*:deep(.bar)*/.baz, .qux) { color: green; }</style>"#,
+        );
+        let result = compiler.compile_style(
+            &descriptor,
+            SfcStyleCompileOptions {
+                id: Some("data-v-test".into()),
+                scoped: true,
+                ..SfcStyleCompileOptions::default()
+            },
+        );
+
+        assert!(result.code.contains(".foo/*,*/.bar[data-v-test]"));
+        assert!(result.code.contains(".foo[data-v-test] :hover"));
+        assert!(result
+            .code
+            .contains(":is(.foo/*:deep(.bar)*/.baz[data-v-test], .qux[data-v-test])"));
+    }
+
+    #[test]
     fn compile_style_emits_vue3_deprecated_deep_warnings() {
         let mut compiler = SfcCompiler::new();
         let descriptor = compiler.parse(
