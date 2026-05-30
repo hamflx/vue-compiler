@@ -3779,6 +3779,19 @@ fn sfc_style_options(value: Option<&Value>) -> SfcStyleCompileOptions {
             options.preprocess_options = parsed;
         }
     }
+    options.warn_deprecated_scoped_selectors = bool_option(
+        value,
+        "__vuecWarnDeprecatedScopedSelectors",
+        bool_option(
+            value,
+            "warnDeprecatedScopedSelectors",
+            bool_option(
+                value,
+                "warn_deprecated_scoped_selectors",
+                options.warn_deprecated_scoped_selectors,
+            ),
+        ),
+    );
     options.vars = value
         .get("vars")
         .and_then(Value::as_array)

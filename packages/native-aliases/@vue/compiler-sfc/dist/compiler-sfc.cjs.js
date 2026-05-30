@@ -91,11 +91,44 @@ function compileScript(descriptor, options) {
 
 function compileStyle(options) {
   const opts = options || {};
-  return native.compileStyle(resolveStylePreprocessOptions(String(opts.source || ''), opts));
+  return emitVue3StyleWarnings(
+    native.compileStyle(resolveStylePreprocessOptions(String(opts.source || ''), opts))
+  );
 }
 
 function compileStyleAsync(options) {
   return Promise.resolve(compileStyle(options || {}));
+}
+
+function emitVue3StyleWarnings(result) {
+  if (!result || !Array.isArray(result.diagnostics) || !result.diagnostics.length) {
+    return result;
+  }
+  const diagnostics = [];
+  for (const diagnostic of result.diagnostics) {
+    const severity = diagnostic && diagnostic.severity;
+    const code = diagnostic && diagnostic.code;
+    const message = typeof diagnostic === 'string' ? diagnostic : diagnostic && diagnostic.message;
+    if (
+      severity === 'warning' &&
+      code === 'VUEC_STYLE_DEPRECATED_SCOPED_SELECTOR' &&
+      message
+    ) {
+      console.warn(`[@vue/compiler-sfc] ${message}`);
+    } else {
+      diagnostics.push(diagnostic);
+    }
+  }
+  if (diagnostics.length === result.diagnostics.length) {
+    return result;
+  }
+  const out = { ...result };
+  if (diagnostics.length) {
+    out.diagnostics = diagnostics;
+  } else {
+    delete out.diagnostics;
+  }
+  return out;
 }
 
 function resolveStylePreprocessOptions(source, options) {

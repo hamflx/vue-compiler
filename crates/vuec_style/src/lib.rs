@@ -56,6 +56,9 @@ pub struct StyleCompileOptions {
     /// Preprocessor option surface forwarded from SFC `preprocessOptions`.
     #[serde(default)]
     pub preprocess_options: StylePreprocessOptions,
+    /// Whether scoped CSS deprecated deep syntax should produce warning diagnostics.
+    #[serde(default)]
+    pub warn_deprecated_scoped_selectors: bool,
 }
 
 /// Options for SFC style preprocessing.
@@ -176,6 +179,9 @@ pub fn compile_style(source: &str, options: StyleCompileOptions) -> StyleCompile
     };
 
     if options.scoped {
+        if options.warn_deprecated_scoped_selectors {
+            diagnostics.extend(scoped_selector_deprecation_warnings(&code));
+        }
         code = rewrite_scoped_selectors(&code, &id);
     }
     if !vars.is_empty() {
@@ -1483,6 +1489,28 @@ pub fn rewrite_scoped_selectors(source: &str, scope_id: &str) -> String {
     rewrite_css_items(source, scope_id, &keyframes, CssBlockContext::Root)
 }
 
+const DEPRECATED_DEEP_COMBINATOR_MESSAGE: &str =
+    "the >>> and /deep/ combinators have been deprecated. Use :deep() instead.";
+
+fn deprecated_deep_pseudo_message(value: &str) -> String {
+    format!(
+        "{value} usage as a combinator has been deprecated. Use :deep(<inner-selector>) instead of {value} <inner-selector>."
+    )
+}
+
+fn deprecated_scoped_selector_diagnostic(message: impl Into<String>) -> Diagnostic {
+    Diagnostic::warning("VUEC_STYLE_DEPRECATED_SCOPED_SELECTOR", message)
+}
+
+fn scoped_selector_deprecation_warnings(source: &str) -> Vec<Diagnostic> {
+    let mut warnings = Vec::new();
+    collect_scoped_selector_deprecation_warnings(source, CssBlockContext::Root, &mut warnings);
+    warnings
+        .into_iter()
+        .map(deprecated_scoped_selector_diagnostic)
+        .collect()
+}
+
 /// Collects unique CSS variable expressions from `v-bind(...)` calls.
 pub fn collect_css_vars(source: &str) -> Vec<String> {
     collect_css_vars_with_options(source, CssVarCollectOptions::default())
@@ -1977,6 +2005,56 @@ fn rewrite_css_items(
         cursor = close + 1;
     }
     output
+}
+
+fn collect_scoped_selector_deprecation_warnings(
+    source: &str,
+    context: CssBlockContext,
+    warnings: &mut Vec<String>,
+) {
+    let mut cursor = 0usize;
+    while cursor < source.len() {
+        cursor = skip_css_whitespace(source, cursor);
+        if cursor >= source.len() {
+            break;
+        }
+        if source[cursor..].starts_with("/*") {
+            let Some(end_offset) = source[cursor + 2..].find("*/") else {
+                break;
+            };
+            cursor += 2 + end_offset + 2;
+            continue;
+        }
+
+        let Some((delimiter, delimiter_ch)) = find_next_css_delimiter(source, cursor) else {
+            break;
+        };
+        if delimiter_ch == ';' {
+            cursor = delimiter + 1;
+            continue;
+        }
+
+        let prelude = source[cursor..delimiter].trim();
+        let Some(close) = find_matching_brace(source, delimiter) else {
+            break;
+        };
+        let body = &source[delimiter + 1..close];
+        if prelude.starts_with('@') {
+            if !is_keyframes_at_rule(prelude) {
+                collect_scoped_selector_deprecation_warnings(
+                    body,
+                    CssBlockContext::Container,
+                    warnings,
+                );
+            }
+        } else if !matches!(context, CssBlockContext::Keyframes)
+            && !css_prelude_is_block_declaration(prelude)
+        {
+            collect_selector_list_deprecation_warnings(prelude, warnings);
+            collect_scoped_selector_deprecation_warnings(body, context, warnings);
+        }
+        cursor = close + 1;
+    }
 }
 
 fn rewrite_deep_passthrough_body(
@@ -5231,6 +5309,115 @@ fn selector_has_deep(selector: &str) -> bool {
         || find_pseudo_function(selector, &[":deep", "::v-deep"]).is_some()
 }
 
+fn selector_has_deep_pseudo(selector: &str) -> bool {
+    find_pseudo_function(selector, &[":deep", "::v-deep"]).is_some()
+}
+
+fn collect_selector_list_deprecation_warnings(selector: &str, warnings: &mut Vec<String>) {
+    for part in split_selector_list(selector) {
+        collect_selector_deprecation_warnings(part.trim(), warnings);
+    }
+}
+
+fn collect_selector_deprecation_warnings(selector: &str, warnings: &mut Vec<String>) {
+    let mut state = SelectorScannerState::Normal;
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut index = 0usize;
+    while index < selector.len() {
+        let Some(ch) = selector[index..].chars().next() else {
+            break;
+        };
+        match state {
+            SelectorScannerState::Normal => match ch {
+                '\'' => state = SelectorScannerState::SingleQuote,
+                '"' => state = SelectorScannerState::DoubleQuote,
+                '[' => bracket_depth += 1,
+                ']' if bracket_depth > 0 => bracket_depth -= 1,
+                '(' => paren_depth += 1,
+                ')' if paren_depth > 0 => paren_depth -= 1,
+                _ if bracket_depth == 0 && paren_depth == 0 => {
+                    if selector[index..].starts_with(">>>")
+                        || selector[index..].starts_with("/deep/")
+                    {
+                        warnings.push(DEPRECATED_DEEP_COMBINATOR_MESSAGE.to_string());
+                        return;
+                    }
+                    if let Some(deep) =
+                        match_selector_pseudo_function(selector, index, &[":deep", "::v-deep"])
+                    {
+                        if deep.parens.is_none() {
+                            let value =
+                                matched_selector_name(selector, deep.start, &[":deep", "::v-deep"])
+                                    .unwrap_or(":deep");
+                            warnings.push(deprecated_deep_pseudo_message(value));
+                        }
+                        return;
+                    }
+                    if match_selector_pseudo_function(selector, index, &[":global", "::v-global"])
+                        .is_some()
+                    {
+                        return;
+                    }
+                    if let Some(slotted) = match_selector_pseudo_function(
+                        selector,
+                        index,
+                        &[":slotted", "::v-slotted"],
+                    ) {
+                        if let Some((open, close)) = slotted.parens {
+                            let inner = first_selector_branch(selector[open + 1..close].trim());
+                            collect_selector_deprecation_warnings(inner.trim(), warnings);
+                        }
+                        return;
+                    }
+                    if let Some(container) = match_selector_pseudo_function(
+                        selector,
+                        index,
+                        &[":is", ":where", ":not", ":has"],
+                    ) {
+                        if let Some((open, close)) = container.parens {
+                            for branch in split_selector_list(&selector[open + 1..close]) {
+                                let branch = branch.trim();
+                                if selector_has_deep_pseudo(branch) {
+                                    collect_selector_deprecation_warnings(branch, warnings);
+                                }
+                            }
+                        }
+                        index = container.end;
+                        continue;
+                    }
+                }
+                _ => {}
+            },
+            SelectorScannerState::SingleQuote => {
+                if ch == '\\' {
+                    index += ch.len_utf8();
+                    if index < selector.len() {
+                        index += selector[index..].chars().next().map_or(0, char::len_utf8);
+                    }
+                    continue;
+                }
+                if ch == '\'' {
+                    state = SelectorScannerState::Normal;
+                }
+            }
+            SelectorScannerState::DoubleQuote => {
+                if ch == '\\' {
+                    index += ch.len_utf8();
+                    if index < selector.len() {
+                        index += selector[index..].chars().next().map_or(0, char::len_utf8);
+                    }
+                    continue;
+                }
+                if ch == '"' {
+                    state = SelectorScannerState::Normal;
+                }
+            }
+        }
+        index += ch.len_utf8();
+    }
+}
+
 fn matched_selector_name<'a>(selector: &str, start: usize, names: &'a [&str]) -> Option<&'a str> {
     names
         .iter()
@@ -6165,6 +6352,63 @@ mod tests {
             ),
             ".foo .bar {\n&[data-v-test] { color: blue;\n}\n.child[data-v-test] { color: red;\n}\n}"
         );
+    }
+
+    #[test]
+    fn emits_vue3_deprecated_deep_selector_warnings() {
+        let result = compile_style(
+            ">>> .foo { color: red; } ::v-deep .bar { color: blue; } :deep .baz { color: green; }",
+            StyleCompileOptions {
+                id: Some("data-v-test".into()),
+                scoped: true,
+                warn_deprecated_scoped_selectors: true,
+                ..StyleCompileOptions::default()
+            },
+        );
+
+        let messages = result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            messages,
+            vec![
+                DEPRECATED_DEEP_COMBINATOR_MESSAGE,
+                "::v-deep usage as a combinator has been deprecated. Use :deep(<inner-selector>) instead of ::v-deep <inner-selector>.",
+                ":deep usage as a combinator has been deprecated. Use :deep(<inner-selector>) instead of :deep <inner-selector>.",
+            ]
+        );
+        assert!(result.diagnostics.iter().all(|diagnostic| {
+            diagnostic.code == "VUEC_STYLE_DEPRECATED_SCOPED_SELECTOR"
+                && diagnostic.severity == vuec_diagnostics::Severity::Warning
+        }));
+        assert!(result.errors.is_empty());
+    }
+
+    #[test]
+    fn skips_deprecated_deep_warnings_outside_vue3_warning_mode() {
+        let result = compile_style(
+            ">>> .foo { color: red; } @keyframes fade { >>> { opacity: 1; } } :global(>>> .bar) { color: blue; }",
+            StyleCompileOptions {
+                id: Some("data-v-test".into()),
+                scoped: true,
+                ..StyleCompileOptions::default()
+            },
+        );
+
+        assert!(result.diagnostics.is_empty());
+
+        let warned = compile_style(
+            "@keyframes fade { >>> { opacity: 1; } } :global(>>> .bar) { color: blue; }",
+            StyleCompileOptions {
+                id: Some("data-v-test".into()),
+                scoped: true,
+                warn_deprecated_scoped_selectors: true,
+                ..StyleCompileOptions::default()
+            },
+        );
+        assert!(warned.diagnostics.is_empty());
     }
 
     #[test]

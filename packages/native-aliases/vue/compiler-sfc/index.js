@@ -103,6 +103,7 @@ function vue27StyleNativeOptions(options) {
   const out = {
     __vuecCssVarNameStyle: 'vue27Legacy',
     __vuecCssVarIgnoreLineComments: false,
+    __vuecWarnDeprecatedScopedSelectors: false,
   };
   for (const key of Object.keys(options || {})) {
     if (key !== 'postcssPlugins' && key !== 'postcssOptions') {

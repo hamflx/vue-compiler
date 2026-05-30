@@ -258,6 +258,9 @@ pub struct SfcStyleCompileOptions {
     /// Preprocessor option surface forwarded to style compilation.
     #[serde(default)]
     pub preprocess_options: StylePreprocessOptions,
+    /// Whether Vue 3 scoped CSS deprecated deep syntax should produce warnings.
+    #[serde(default = "default_warn_deprecated_scoped_selectors")]
+    pub warn_deprecated_scoped_selectors: bool,
     /// Whether source maps should be generated.
     pub source_map: bool,
 }
@@ -275,9 +278,14 @@ impl Default for SfcStyleCompileOptions {
             css_var_ignore_line_comments: true,
             preprocess_lang: None,
             preprocess_options: StylePreprocessOptions::default(),
+            warn_deprecated_scoped_selectors: true,
             source_map: false,
         }
     }
+}
+
+fn default_warn_deprecated_scoped_selectors() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -991,6 +999,7 @@ impl SfcCompiler {
                         .clone()
                         .or_else(|| options.preprocess_lang.clone()),
                     preprocess_options: options.preprocess_options.clone(),
+                    warn_deprecated_scoped_selectors: options.warn_deprecated_scoped_selectors,
                 },
             );
             let needs_join_newline = !code.is_empty() && !result.code.is_empty();
@@ -8823,6 +8832,36 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
         assert!(!result.code.contains(".bar"));
         assert!(!result.code.contains(".child[data-v-test]"));
         assert!(!result.code.contains(".inner[data-v-test]"));
+    }
+
+    #[test]
+    fn compile_style_emits_vue3_deprecated_deep_warnings() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "style.vue",
+            r#"<style scoped>>>> .foo { color: red; } ::v-deep .bar { color: blue; }</style>"#,
+        );
+        let result = compiler.compile_style(
+            &descriptor,
+            SfcStyleCompileOptions {
+                id: Some("data-v-test".into()),
+                scoped: true,
+                ..SfcStyleCompileOptions::default()
+            },
+        );
+
+        assert_eq!(result.diagnostics.len(), 2);
+        assert!(result.diagnostics.iter().all(|diagnostic| {
+            diagnostic.code == "VUEC_STYLE_DEPRECATED_SCOPED_SELECTOR"
+                && diagnostic.severity == Severity::Warning
+        }));
+        assert!(result.diagnostics[0]
+            .message
+            .contains("the >>> and /deep/ combinators have been deprecated"));
+        assert!(result.diagnostics[1]
+            .message
+            .contains("::v-deep usage as a combinator has been deprecated"));
+        assert!(result.errors.is_empty());
     }
 
     #[test]

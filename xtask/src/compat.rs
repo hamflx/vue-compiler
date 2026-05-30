@@ -2369,6 +2369,8 @@ fn alias_function_expression(
                     "compileStyle" | "compileStyleAsync"
                 )
             );
+            let is_vue3_sfc_compile_style = target.kind == TargetKind::Vue3Sfc
+                && matches!(export_name, "compileStyle" | "compileStyleAsync");
             let payload = if is_vue3_generate {
                 "Object.assign({}, __vuecPayload, { ast: vue3CoreRuntime.dehydrateForBridge(a0), source: '' })"
             } else if is_vue27_sfc_compile_script {
@@ -2387,7 +2389,11 @@ fn alias_function_expression(
                     alias_argument_object(target, export_name, body_arity)
                 )
             };
-            let return_expr = if is_vue3_generate {
+            let return_expr = if is_vue3_sfc_compile_style {
+                format!(
+                    "(() => {{ const __vuecStyleResult = {call}; return emitVue3StyleWarnings(__vuecStyleResult); }})()"
+                )
+            } else if is_vue3_generate {
                 format!(
                     "(() => {{ const __vuecGenerateResult = {call}; __vuecGenerateResult.ast = a0; return __vuecGenerateResult; }})()"
                 )
@@ -7751,6 +7757,29 @@ function emitVue3CompileDiagnostics(result, options) {
     error.loc = diagnostic && diagnostic.loc !== undefined ? diagnostic.loc : undefined;
     onError(error);
   }
+}
+
+function emitVue3StyleWarnings(result) {
+  if (!result || !Array.isArray(result.diagnostics) || !result.diagnostics.length) return result;
+  const diagnostics = [];
+  for (const diagnostic of result.diagnostics) {
+    const severity = diagnostic && diagnostic.severity;
+    const code = diagnostic && diagnostic.code;
+    const message = typeof diagnostic === 'string' ? diagnostic : diagnostic && diagnostic.message;
+    if (severity === 'warning' && code === 'VUEC_STYLE_DEPRECATED_SCOPED_SELECTOR' && message) {
+      console.warn(`[@vue/compiler-sfc] ${message}`);
+    } else {
+      diagnostics.push(diagnostic);
+    }
+  }
+  if (diagnostics.length === result.diagnostics.length) return result;
+  const out = Object.assign({}, result);
+  if (diagnostics.length) {
+    out.diagnostics = diagnostics;
+  } else {
+    delete out.diagnostics;
+  }
+  return out;
 }
 
 const vue3DomParserOptions = {
@@ -13351,6 +13380,30 @@ mod tests {
         assert!(expression.contains("sfc.vue27.compileStyle"));
         assert!(ALIAS_RUNTIME_JS.contains("function applyVue27StylePostcssSync"));
         assert!(ALIAS_RUNTIME_JS.contains("key !== 'postcssPlugins' && key !== 'postcssOptions'"));
+    }
+
+    #[test]
+    fn vue3_sfc_compile_style_alias_emits_rust_style_warnings() {
+        let target = TargetSpec {
+            version_line: VersionLine::Vue3,
+            package: "@vue/compiler-sfc",
+            entry: "@vue/compiler-sfc",
+            kind: TargetKind::Vue3Sfc,
+        };
+        let detail = ApiExportDetail {
+            kind: "function".into(),
+            tag: "[object Function]".into(),
+            name: Some("compileStyle".into()),
+            function_arity: Some(1),
+            is_async_function: Some(false),
+            is_class_like: Some(false),
+            own_property_names: vec!["length".into(), "name".into(), "prototype".into()],
+        };
+        let expression = alias_export_expression(target, "compileStyle", Some(&detail));
+
+        assert!(expression.contains("emitVue3StyleWarnings"));
+        assert!(ALIAS_RUNTIME_JS.contains("function emitVue3StyleWarnings"));
+        assert!(ALIAS_RUNTIME_JS.contains("VUEC_STYLE_DEPRECATED_SCOPED_SELECTOR"));
     }
 
     #[test]
