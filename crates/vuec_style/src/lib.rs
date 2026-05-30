@@ -2910,7 +2910,7 @@ struct CssModulesContext<'a> {
     imported_dependency: bool,
     raw_exports: Vec<CssModuleExport>,
     raw_export_index: BTreeMap<String, usize>,
-    import_symbols: BTreeMap<String, String>,
+    import_symbols: BTreeMap<String, CssModuleImportSymbol>,
     imported_modules: BTreeMap<String, CssModulesCompileResult>,
     prepended_css_has_nested_import: bool,
     value_placeholders: BTreeMap<String, String>,
@@ -3000,8 +3000,22 @@ impl<'a> CssModulesContext<'a> {
             .collect()
     }
 
-    fn import_symbol_value(&self, local: &str) -> Option<String> {
-        self.import_symbols.get(local).cloned()
+    fn import_symbol_value(&self, local: &str) -> Option<&str> {
+        match self.import_symbols.get(local)? {
+            CssModuleImportSymbol::Found(value) => Some(value),
+            CssModuleImportSymbol::Missing => None,
+        }
+    }
+
+    fn import_symbol_module_value(&self, local: &str) -> Option<String> {
+        match self.import_symbols.get(local)? {
+            CssModuleImportSymbol::Found(value) => Some(value.clone()),
+            CssModuleImportSymbol::Missing => Some("undefined".to_string()),
+        }
+    }
+
+    fn import_symbol_is_imported(&self, local: &str) -> bool {
+        self.import_symbols.contains_key(local)
     }
 
     fn push_raw_export_value(&mut self, local: &str, value: &str) {
@@ -3162,6 +3176,12 @@ impl<'a> CssModulesContext<'a> {
 struct CssModuleExport {
     local: String,
     values: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CssModuleImportSymbol {
+    Found(String),
+    Missing,
 }
 
 fn prepare_css_module_values(source: &str, context: &mut CssModulesContext<'_>) -> String {
@@ -3968,12 +3988,17 @@ fn rewrite_css_module_default_segment(
     let mut cursor = 0usize;
     while let Some(token) = find_next_css_module_selector_token(segment, cursor) {
         output.push_str(&segment[cursor..token.start]);
-        if let Some(replacement) = context.import_symbol_value(token.name) {
-            if replacement.starts_with('.') || replacement.starts_with('#') {
-                output.push_str(&replacement);
+        if context.import_symbol_is_imported(token.name) {
+            if let Some(replacement) = context.import_symbol_value(token.name) {
+                if replacement.starts_with('.') || replacement.starts_with('#') {
+                    output.push_str(replacement);
+                } else {
+                    output.push(token.sigil);
+                    output.push_str(replacement);
+                }
             } else {
                 output.push(token.sigil);
-                output.push_str(&replacement);
+                output.push_str(token.name);
             }
             cursor = token.end;
             continue;
@@ -4024,7 +4049,7 @@ fn register_css_module_icss_export_segment(segment: &str, context: &mut CssModul
     if key.is_empty() {
         return;
     }
-    context.set_raw_export_values(key, vec![value.to_string()]);
+    context.set_raw_export_values(key, vec![replace_css_module_export_symbols(value, context)]);
 }
 
 fn parse_css_module_import_prelude(prelude: &str) -> Option<&str> {
@@ -4061,11 +4086,12 @@ fn register_css_module_icss_import_segment(
     if local.is_empty() || remote.is_empty() {
         return;
     }
-    if let Some(value) = modules.get(remote) {
-        context
-            .import_symbols
-            .insert(local.to_string(), value.clone());
-    }
+    let symbol = modules
+        .get(remote)
+        .cloned()
+        .map(CssModuleImportSymbol::Found)
+        .unwrap_or(CssModuleImportSymbol::Missing);
+    context.import_symbols.insert(local.to_string(), symbol);
 }
 
 fn rewrite_css_module_declarations(
@@ -4253,7 +4279,7 @@ fn rewrite_css_module_animation_token(
         return replacement.to_string();
     }
     if !context.is_local_default()
-        || context.import_symbol_value(token).is_some()
+        || context.import_symbol_is_imported(token)
         || !is_css_module_animation_identifier(token)
     {
         return token.to_string();
@@ -4622,7 +4648,7 @@ fn css_module_composed_values(
                 }
             } else if let Some(value) = context.value_placeholder_replacement(class_name) {
                 push_unique_css_module_value(&mut composed, value.to_string());
-            } else if let Some(value) = context.import_symbol_value(class_name) {
+            } else if let Some(value) = context.import_symbol_module_value(class_name) {
                 push_unique_css_module_value(&mut composed, value);
             } else if class_name.starts_with('"') || class_name.starts_with('\'') {
                 return unsupported_css_module_compose();
@@ -4750,7 +4776,7 @@ fn replace_css_module_import_symbols(segment: &str, context: &CssModulesContext<
         return segment.to_string();
     };
     let value = &segment[colon + 1..];
-    let replaced = replace_css_module_value_symbols(value, &context.import_symbols);
+    let replaced = replace_css_module_import_symbols_in_text(value, context);
     let mut output = String::new();
     output.push_str(&segment[..colon + 1]);
     output.push_str(&replaced);
@@ -4764,7 +4790,33 @@ fn replace_css_module_import_symbols_in_text(
     if context.import_symbols.is_empty() {
         return source.to_string();
     }
-    replace_css_module_value_symbols(source, &context.import_symbols)
+    let symbols = context
+        .import_symbols
+        .iter()
+        .filter_map(|(name, symbol)| match symbol {
+            CssModuleImportSymbol::Found(value) => Some((name.clone(), value.clone())),
+            CssModuleImportSymbol::Missing => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+    replace_css_module_value_symbols(source, &symbols)
+}
+
+fn replace_css_module_export_symbols(source: &str, context: &CssModulesContext<'_>) -> String {
+    if context.import_symbols.is_empty() {
+        return source.to_string();
+    }
+    let symbols = context
+        .import_symbols
+        .iter()
+        .map(|(name, symbol)| {
+            let value = match symbol {
+                CssModuleImportSymbol::Found(value) => value.clone(),
+                CssModuleImportSymbol::Missing => "undefined".to_string(),
+            };
+            (name.clone(), value)
+        })
+        .collect::<BTreeMap<_, _>>();
+    replace_css_module_value_symbols(source, &symbols)
 }
 
 fn replace_css_module_value_symbols(value: &str, symbols: &BTreeMap<String, String>) -> String {
@@ -10203,6 +10255,56 @@ mod tests {
         assert!(result.code.contains("@media (min-width: 1px)"));
         assert!(result.code.contains("content: \"green\""));
         assert!(result.code.contains("color: green"));
+    }
+
+    #[test]
+    fn compiles_css_modules_missing_icss_import_symbols_like_official() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let filename = dir.path().join("component.vue");
+        let dep = dir.path().join("dep.css");
+        std::fs::write(&dep, ".dep { color: blue; }\n:export { token: green; }")
+            .expect("write dep");
+
+        let result = compile_style(
+            r#":import("./dep.css") { imported: dep; shade: nope; color: token; mq: missing; }
+.shade { color: red; }
+.imported { border-color: color; }
+.button { composes: shade; color: shade; }
+@media mq { .panel { color: shade; } }
+:export { out: shade; importedOut: color; }"#,
+            StyleCompileOptions {
+                id: Some("test".into()),
+                filename: Some(filename.to_string_lossy().to_string()),
+                modules: true,
+                ..StyleCompileOptions::default()
+            },
+        );
+        let modules = result.modules.expect("css modules map");
+        let button = modules.get("button").expect("button export");
+
+        assert!(result.errors.is_empty());
+        assert!(!modules.contains_key("shade"));
+        assert!(!modules.contains_key("imported"));
+        assert!(button.contains("_button_"));
+        assert!(button.contains("undefined"));
+        assert_eq!(modules.get("out").map(String::as_str), Some("undefined"));
+        assert_eq!(
+            modules.get("importedOut").map(String::as_str),
+            Some("green")
+        );
+        assert!(modules
+            .get("panel")
+            .is_some_and(|value| value.contains("_panel_")));
+        assert!(!result.code.contains(":import"));
+        assert!(!result.code.contains(":export"));
+        assert!(!result.code.contains("composes"));
+        assert!(!result.code.contains("_shade_"));
+        assert!(!result.code.contains("_imported_"));
+        assert!(result.code.starts_with("._dep_"));
+        assert!(result.code.contains(".shade { color: red"));
+        assert!(result.code.contains("border-color: green"));
+        assert!(result.code.contains("color: shade"));
+        assert!(result.code.contains("@media mq"));
     }
 
     #[test]

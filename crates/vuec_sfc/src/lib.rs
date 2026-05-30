@@ -969,6 +969,7 @@ impl SfcCompiler {
         let mut diagnostics = Vec::new();
         let mut dependencies = Vec::new();
         let mut modules = BTreeMap::new();
+        let mut has_modules_result = false;
         let mut raw_result = Vec::new();
         let mut map_builder = options.source_map.then(|| {
             let mut builder = SourceMapBuilder::new().file(descriptor.filename.clone());
@@ -1010,6 +1011,7 @@ impl SfcCompiler {
             errors.extend(result.errors);
             diagnostics.extend(result.diagnostics);
             if let Some(result_modules) = result.modules {
+                has_modules_result = true;
                 modules.extend(result_modules);
             }
             if let Some(builder) = map_builder.as_mut() {
@@ -1037,7 +1039,7 @@ impl SfcCompiler {
         dependencies.sort();
         dependencies.dedup();
         let map = map_builder.map(SourceMapBuilder::build);
-        let modules = (!modules.is_empty()).then_some(modules);
+        let modules = has_modules_result.then_some(modules);
         SfcStyleCompileResult {
             code,
             map,
@@ -8585,6 +8587,24 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
         assert!(result.code.contains(".green"));
         assert!(result.code.contains("@media (min-width: 1px)"));
         assert!(result.code.contains("color: green"));
+    }
+
+    #[test]
+    fn compile_style_preserves_empty_css_modules_for_missing_icss_imports() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let filename = dir.path().join("component.vue");
+        std::fs::write(dir.path().join("dep.css"), ":export { token: green; }").expect("write dep");
+        let source = r#"<style module>:import("./dep.css") { shade: missing; }.shade { color: red; }</style>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let result = compiler.compile_style(&descriptor, SfcStyleCompileOptions::default());
+        let modules = result.modules.expect("empty css modules map");
+
+        assert!(modules.is_empty());
+        assert!(result.errors.is_empty());
+        assert!(!result.code.contains(":import"));
+        assert!(result.code.contains(".shade { color: red"));
+        assert!(!result.code.contains("_shade_"));
     }
 
     #[test]
