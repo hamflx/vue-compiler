@@ -2116,6 +2116,8 @@ fn write_alias_index(
     source.push('\n');
     if target.kind == TargetKind::Vue3Core {
         source.push_str("Object.defineProperty(exports, '__vuecRuntime', { value: vue3CoreRuntime, enumerable: false });\n");
+    } else if target.kind == TargetKind::Vue3Dom {
+        source.push_str("Object.defineProperty(exports, '__vuecRuntime', { value: vue3CoreRuntime, enumerable: false });\n");
     } else if matches!(
         target.kind,
         TargetKind::Vue26Template | TargetKind::Vue27Template
@@ -6095,6 +6097,90 @@ const vue3CoreRuntime = (() => {
   };
   runtime.checkCompatEnabled = () => false;
   runtime.warnDeprecation = () => {};
+  const DOMErrorMessages = {
+    54: 'v-html is missing expression.',
+    55: 'v-html will override element children.',
+    56: 'v-text is missing expression.',
+    57: 'v-text will override element children.',
+  };
+  runtime.createDOMCompilerError = function createDOMCompilerError(code, loc) {
+    return runtime.createCompilerError(code, loc, DOMErrorMessages);
+  };
+  function vue3DomDirectiveLoc(loc, dir, node) {
+    if (loc && typeof loc === 'object') return loc;
+    if (loc === 'dir') return dir && dir.loc || locStub;
+    if (loc === 'node') return node && node.loc || dir && dir.loc || locStub;
+    return locStub;
+  }
+  function materializeVue3DomDirectiveValue(projection, dir, node, context) {
+    if (!projection || projection.kind === 'undefined') return undefined;
+    if (projection.type) return projection;
+    switch (projection.kind) {
+      case 'node':
+        if (projection.path === 'dir.exp') return dir && dir.exp;
+        if (projection.path === 'dir.arg') return dir && dir.arg;
+        return undefined;
+      case 'simple': {
+        const loc = Object.prototype.hasOwnProperty.call(projection, 'loc')
+          ? vue3DomDirectiveLoc(projection.loc, dir, node)
+          : locStub;
+        const simple = runtime.createSimpleExpression(projection.content || '', !!projection.isStatic, loc);
+        if (projection.constType !== undefined) simple.constType = projection.constType;
+        return simple;
+      }
+      case 'displayString': {
+        const argument = materializeVue3DomDirectiveValue(projection.argument, dir, node, context);
+        const helper = runtime.TO_DISPLAY_STRING;
+        const callee = context && typeof context.helperString === 'function'
+          ? context.helperString(helper)
+          : `_${runtime.helperNameMap[helper] || 'toDisplayString'}`;
+        return runtime.createCallExpression(
+          callee,
+          [argument],
+          vue3DomDirectiveLoc(projection.loc, dir, node),
+        );
+      }
+      default:
+        throw new Error(`Unsupported Rust Vue 3 DOM directive projection: ${projection.kind}`);
+    }
+  }
+  function materializeVue3DomDirectiveErrors(projection, dir, node, context) {
+    if (!projection || !Array.isArray(projection.errors) || !context || typeof context.onError !== 'function') return;
+    for (const error of projection.errors) {
+      context.onError(runtime.createDOMCompilerError(error.code, vue3DomDirectiveLoc(error.loc, dir, node)));
+    }
+  }
+  function materializeVue3DomContentDirective(command, dir, node, context) {
+    context = context || {
+      helperString: name => `_${runtime.helperNameMap[name] || name}`,
+      onError: error => { throw error; },
+    };
+    const projection = callBridge(command, {
+      dir: runtime.dehydrateForBridge(dir),
+      node: runtime.dehydrateForBridge(node),
+    });
+    materializeVue3DomDirectiveErrors(projection, dir, node, context);
+    if (projection && projection.clearChildren && node && Array.isArray(node.children)) {
+      node.children.length = 0;
+    }
+    return {
+      props: (projection && projection.props || []).map(prop => {
+        const key = prop.keyLoc
+          ? runtime.createSimpleExpression(prop.key || '', true, vue3DomDirectiveLoc(prop.keyLoc, dir, node))
+          : (prop.key || '');
+        return runtime.createObjectProperty(
+          key,
+          materializeVue3DomDirectiveValue(prop.value, dir, node, context),
+        );
+      }),
+    };
+  }
+  runtime.transformVHtml = function transformVHtml(dir, node, context) {
+    return materializeVue3DomContentDirective('vue3.dom.transformVHtml', dir, node, context);
+  };
+  runtime.transformVText = function transformVText(dir, node, context) {
+    return materializeVue3DomContentDirective('vue3.dom.transformVText', dir, node, context);
+  };
   runtime.transformStyle = function transformStyle(node) {
     if (!node || node.type !== NodeTypes.ELEMENT) return;
     const projection = callBridge('vue3.dom.transformStyle', { node });
@@ -12005,6 +12091,8 @@ fn write_vue3_dom_conformance_shims(prepared_root: &Path) -> Result<()> {
         &transforms.join("transformStyle.ts"),
         "export { transformStyle } from '@vue/compiler-dom'\n",
     )?;
+    write_vue3_dom_transform_shim(&transforms.join("vHtml.ts"), "transformVHtml")?;
+    write_vue3_dom_transform_shim(&transforms.join("vText.ts"), "transformVText")?;
     write_vue3_core_test_setup(prepared_root)?;
 
     let config = r#"
@@ -12471,6 +12559,16 @@ fn write_vue3_core_transform_shim(path: &Path, module: &str) -> Result<()> {
     }
 }
 
+fn write_vue3_dom_transform_shim(path: &Path, export_name: &str) -> Result<()> {
+    write_text(
+        path,
+        &format!(
+            "import {{ __vuecRuntime }} from {}\nconst r = __vuecRuntime\nexport const {export_name} = r.{export_name}\n",
+            js_string_literal("@vue/compiler-dom")
+        ),
+    )
+}
+
 fn copy_dir_recursive(from: &Path, to: &Path) -> Result<()> {
     fs::create_dir_all(to).with_context(|| format!("failed to create {}", to.display()))?;
     for entry in fs::read_dir(from).with_context(|| format!("failed to read {}", from.display()))? {
@@ -12758,6 +12856,9 @@ fn conformance_coverage_file_kind(
         || path.ends_with("packages/compiler-core/__tests__/utils.spec.ts")
         || path.ends_with("packages/compiler-dom/__tests__/index.spec.ts")
         || path.ends_with("packages/compiler-dom/__tests__/parse.spec.ts")
+        || path.ends_with("packages/compiler-dom/__tests__/transforms/transformStyle.spec.ts")
+        || path.ends_with("packages/compiler-dom/__tests__/transforms/vHtml.spec.ts")
+        || path.ends_with("packages/compiler-dom/__tests__/transforms/vText.spec.ts")
         || path.ends_with("packages/compiler-ssr/__tests__/ssrText.spec.ts")
         || path.ends_with("packages/compiler-ssr/__tests__/ssrPortal.spec.ts")
         || path.ends_with("packages/compiler-ssr/__tests__/ssrSlotOutlet.spec.ts")
@@ -14111,6 +14212,30 @@ mod tests {
         .unwrap();
         assert!(transform_style.contains("export { transformStyle } from '@vue/compiler-dom'"));
 
+        let v_html = fs::read_to_string(
+            temp.join("packages")
+                .join("compiler-dom")
+                .join("src")
+                .join("transforms")
+                .join("vHtml.ts"),
+        )
+        .unwrap();
+        assert!(v_html.contains("__vuecRuntime"));
+        assert!(v_html.contains("@vue/compiler-dom"));
+        assert!(v_html.contains("transformVHtml"));
+
+        let v_text = fs::read_to_string(
+            temp.join("packages")
+                .join("compiler-dom")
+                .join("src")
+                .join("transforms")
+                .join("vText.ts"),
+        )
+        .unwrap();
+        assert!(v_text.contains("__vuecRuntime"));
+        assert!(v_text.contains("@vue/compiler-dom"));
+        assert!(v_text.contains("transformVText"));
+
         let v_model = fs::read_to_string(
             temp.join("packages")
                 .join("compiler-core")
@@ -14121,6 +14246,8 @@ mod tests {
         .unwrap();
         assert!(v_model.contains("__vuecRuntime"));
         assert!(v_model.contains("transformModel"));
+        assert!(ALIAS_RUNTIME_JS.contains("vue3.dom.transformVHtml"));
+        assert!(ALIAS_RUNTIME_JS.contains("vue3.dom.transformVText"));
         let _ = fs::remove_dir_all(temp);
     }
 
@@ -14224,6 +14351,29 @@ mod tests {
                   ]
                 },
                 {
+                  "name": "F:/repo/prepared/vue3-dom/packages/compiler-dom/__tests__/transforms/transformStyle.spec.ts",
+                  "assertionResults": [
+                    { "status": "passed" },
+                    { "status": "passed" }
+                  ]
+                },
+                {
+                  "name": "F:/repo/prepared/vue3-dom/packages/compiler-dom/__tests__/transforms/vHtml.spec.ts",
+                  "assertionResults": [
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" }
+                  ]
+                },
+                {
+                  "name": "F:/repo/prepared/vue3-dom/packages/compiler-dom/__tests__/transforms/vText.spec.ts",
+                  "assertionResults": [
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" }
+                  ]
+                },
+                {
                   "name": "F:/repo/prepared/vue3-dom/packages/compiler-dom/__tests__/transforms/vModel.spec.ts",
                   "assertionResults": [
                     { "status": "passed" },
@@ -14243,8 +14393,8 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             counts: ConformanceExecutionCounts {
-                total: 6,
-                pass: 5,
+                total: 14,
+                pass: 13,
                 fail: 1,
                 skip: 0,
                 pending: 0,
@@ -14258,8 +14408,8 @@ mod tests {
         );
 
         assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
-        assert_eq!(coverage.rust_backed_pass, 4);
-        assert_eq!(coverage.rust_backed_total, 4);
+        assert_eq!(coverage.rust_backed_pass, 12);
+        assert_eq!(coverage.rust_backed_total, 12);
         assert_eq!(
             coverage.files[0].source,
             ConformanceCoverageKind::RustBacked
@@ -14268,7 +14418,19 @@ mod tests {
             coverage.files[1].source,
             ConformanceCoverageKind::RustBacked
         );
-        assert_eq!(coverage.files[2].source, ConformanceCoverageKind::Mixed);
+        assert_eq!(
+            coverage.files[2].source,
+            ConformanceCoverageKind::RustBacked
+        );
+        assert_eq!(
+            coverage.files[3].source,
+            ConformanceCoverageKind::RustBacked
+        );
+        assert_eq!(
+            coverage.files[4].source,
+            ConformanceCoverageKind::RustBacked
+        );
+        assert_eq!(coverage.files[5].source, ConformanceCoverageKind::Mixed);
         assert!(coverage.files[0]
             .reason
             .contains("routed through vuec_node_bridge"));

@@ -704,6 +704,111 @@ pub fn transform_style_projection(payload: &Value) -> Value {
     json!({ "replacements": replacements })
 }
 
+/// Projects the DOM `v-html` directive transform for compatibility bridge callers.
+pub fn transform_v_html_projection(payload: &Value) -> Value {
+    transform_dom_content_directive_projection(
+        payload,
+        DomContentDirectiveProjection {
+            key: "innerHTML",
+            key_loc: Some("dir"),
+            missing_expression_code: 54,
+            with_children_code: 55,
+            wrap_dynamic_text: false,
+        },
+    )
+}
+
+/// Projects the DOM `v-text` directive transform for compatibility bridge callers.
+pub fn transform_v_text_projection(payload: &Value) -> Value {
+    transform_dom_content_directive_projection(
+        payload,
+        DomContentDirectiveProjection {
+            key: "textContent",
+            key_loc: None,
+            missing_expression_code: 56,
+            with_children_code: 57,
+            wrap_dynamic_text: true,
+        },
+    )
+}
+
+struct DomContentDirectiveProjection {
+    key: &'static str,
+    key_loc: Option<&'static str>,
+    missing_expression_code: u8,
+    with_children_code: u8,
+    wrap_dynamic_text: bool,
+}
+
+fn transform_dom_content_directive_projection(
+    payload: &Value,
+    projection: DomContentDirectiveProjection,
+) -> Value {
+    let dir = payload.get("dir").unwrap_or(&Value::Null);
+    let exp = dir.get("exp").filter(|exp| !exp.is_null());
+    let has_children = payload
+        .get("node")
+        .and_then(|node| node.get("children"))
+        .and_then(Value::as_array)
+        .is_some_and(|children| !children.is_empty());
+
+    let mut errors = Vec::new();
+    if exp.is_none() {
+        errors.push(json!({
+            "code": projection.missing_expression_code,
+            "loc": "dir",
+        }));
+    }
+    if has_children {
+        errors.push(json!({
+            "code": projection.with_children_code,
+            "loc": "dir",
+        }));
+    }
+
+    let value = match exp {
+        Some(exp) if projection.wrap_dynamic_text && !dom_directive_exp_is_constant(exp) => {
+            json!({
+                "kind": "displayString",
+                "argument": {
+                    "kind": "node",
+                    "path": "dir.exp",
+                },
+                "loc": "dir",
+            })
+        }
+        Some(_) => json!({
+            "kind": "node",
+            "path": "dir.exp",
+        }),
+        None => json!({
+            "kind": "simple",
+            "content": "",
+            "isStatic": true,
+        }),
+    };
+
+    let mut prop = json!({
+        "key": projection.key,
+        "value": value,
+    });
+    if let Some(key_loc) = projection.key_loc {
+        prop["keyLoc"] = json!(key_loc);
+    }
+
+    json!({
+        "props": [prop],
+        "errors": errors,
+        "clearChildren": has_children,
+    })
+}
+
+fn dom_directive_exp_is_constant(exp: &Value) -> bool {
+    exp.get("constType")
+        .and_then(Value::as_i64)
+        .is_some_and(|constant_type| constant_type > 0)
+}
+
 /// Extracts DOM directive summaries from compatibility template attributes.
 pub fn extract_directives(attributes: &[TemplateAttribute]) -> Vec<DomDirective> {
     attributes
@@ -1865,5 +1970,106 @@ mod tests {
             projection["replacements"][0]["expression"],
             json!("{\"color\":\"green\",\"background\":\"url(a;b)\",\"margin\":\"0\"}")
         );
+    }
+
+    #[test]
+    fn transform_v_html_projection_reports_children_and_clears_them() {
+        let projection = transform_v_html_projection(&json!({
+            "dir": {
+                "exp": {
+                    "type": 4,
+                    "content": "raw",
+                    "isStatic": false,
+                    "constType": 0
+                },
+                "loc": { "source": "v-html=\"raw\"" }
+            },
+            "node": {
+                "children": [
+                    { "type": 2, "content": "old" }
+                ]
+            }
+        }));
+
+        assert_eq!(projection["clearChildren"], json!(true));
+        assert_eq!(projection["errors"][0]["code"], json!(55));
+        assert_eq!(projection["errors"][0]["loc"], json!("dir"));
+        assert_eq!(projection["props"][0]["key"], json!("innerHTML"));
+        assert_eq!(projection["props"][0]["keyLoc"], json!("dir"));
+        assert_eq!(projection["props"][0]["value"]["kind"], json!("node"));
+        assert_eq!(projection["props"][0]["value"]["path"], json!("dir.exp"));
+    }
+
+    #[test]
+    fn transform_v_html_projection_reports_missing_expression() {
+        let projection = transform_v_html_projection(&json!({
+            "dir": {
+                "loc": { "source": "v-html" }
+            },
+            "node": {
+                "children": []
+            }
+        }));
+
+        assert_eq!(projection["clearChildren"], json!(false));
+        assert_eq!(projection["errors"][0]["code"], json!(54));
+        assert_eq!(projection["props"][0]["value"]["kind"], json!("simple"));
+        assert_eq!(projection["props"][0]["value"]["content"], json!(""));
+        assert_eq!(projection["props"][0]["value"]["isStatic"], json!(true));
+    }
+
+    #[test]
+    fn transform_v_text_projection_wraps_dynamic_expression() {
+        let projection = transform_v_text_projection(&json!({
+            "dir": {
+                "exp": {
+                    "type": 4,
+                    "content": "msg",
+                    "isStatic": false,
+                    "constType": 0
+                },
+                "loc": { "source": "v-text=\"msg\"" }
+            },
+            "node": {
+                "children": []
+            }
+        }));
+
+        assert_eq!(projection["errors"].as_array().unwrap().len(), 0);
+        assert_eq!(projection["props"][0]["key"], json!("textContent"));
+        assert!(projection["props"][0]["keyLoc"].is_null());
+        assert_eq!(
+            projection["props"][0]["value"]["kind"],
+            json!("displayString")
+        );
+        assert_eq!(
+            projection["props"][0]["value"]["argument"]["path"],
+            json!("dir.exp")
+        );
+    }
+
+    #[test]
+    fn transform_v_text_projection_keeps_constant_expression() {
+        let projection = transform_v_text_projection(&json!({
+            "dir": {
+                "exp": {
+                    "type": 4,
+                    "content": "'hi'",
+                    "isStatic": false,
+                    "constType": 3
+                },
+                "loc": { "source": "v-text=\"'hi'\"" }
+            },
+            "node": {
+                "children": [
+                    { "type": 2, "content": "old" }
+                ]
+            }
+        }));
+
+        assert_eq!(projection["clearChildren"], json!(true));
+        assert_eq!(projection["errors"][0]["code"], json!(57));
+        assert_eq!(projection["props"][0]["value"]["kind"], json!("node"));
+        assert_eq!(projection["props"][0]["value"]["path"], json!("dir.exp"));
     }
 }

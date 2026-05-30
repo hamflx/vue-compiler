@@ -73,6 +73,80 @@ const transformStyle = (node) => {
   return undefined;
 };
 
+function domDirectiveLoc(loc, dir, node) {
+  if (loc && typeof loc === 'object') return loc;
+  if (loc === 'dir') return (dir && dir.loc) || core.locStub;
+  if (loc === 'node') return (node && node.loc) || (dir && dir.loc) || core.locStub;
+  return core.locStub;
+}
+
+function materializeDomDirectiveValue(projection, dir, node, context) {
+  if (!projection || projection.kind === 'undefined') return undefined;
+  if (projection.type) return projection;
+  switch (projection.kind) {
+    case 'node':
+      if (projection.path === 'dir.exp') return dir && dir.exp;
+      if (projection.path === 'dir.arg') return dir && dir.arg;
+      return undefined;
+    case 'simple': {
+      const loc = Object.prototype.hasOwnProperty.call(projection, 'loc')
+        ? domDirectiveLoc(projection.loc, dir, node)
+        : core.locStub;
+      const simple = core.createSimpleExpression(projection.content || '', !!projection.isStatic, loc);
+      if (projection.constType !== undefined) simple.constType = projection.constType;
+      return simple;
+    }
+    case 'displayString': {
+      const helper = core.TO_DISPLAY_STRING;
+      const callee = context && typeof context.helperString === 'function'
+        ? context.helperString(helper)
+        : `_${helperNameMap[helper] || 'toDisplayString'}`;
+      return core.createCallExpression(
+        callee,
+        [materializeDomDirectiveValue(projection.argument, dir, node, context)],
+        domDirectiveLoc(projection.loc, dir, node),
+      );
+    }
+    default:
+      throw new Error(`Unsupported Rust Vue 3 DOM directive projection: ${projection.kind}`);
+  }
+}
+
+function materializeDomDirectiveErrors(projection, dir, node, context) {
+  if (!projection || !Array.isArray(projection.errors) || !context || typeof context.onError !== 'function') return;
+  for (const error of projection.errors) {
+    context.onError(createDOMCompilerError(error.code, domDirectiveLoc(error.loc, dir, node)));
+  }
+}
+
+function materializeDomContentDirective(command, dir, node, context) {
+  context = context || {
+    helperString: name => `_${helperNameMap[name] || name}`,
+    onError: error => { throw error; },
+  };
+  const projection = callVue3DomProjection(command, { dir, node });
+  materializeDomDirectiveErrors(projection, dir, node, context);
+  if (projection && projection.clearChildren && node && Array.isArray(node.children)) {
+    node.children.length = 0;
+  }
+  return {
+    props: (projection && projection.props || []).map(prop => {
+      const key = prop.keyLoc
+        ? core.createSimpleExpression(prop.key || '', true, domDirectiveLoc(prop.keyLoc, dir, node))
+        : (prop.key || '');
+      return core.createObjectProperty(key, materializeDomDirectiveValue(prop.value, dir, node, context));
+    }),
+  };
+}
+
+const transformVHtml = (dir, node, context) => {
+  return materializeDomContentDirective('vue3.dom.transformVHtml', dir, node, context);
+};
+
+const transformVText = (dir, node, context) => {
+  return materializeDomContentDirective('vue3.dom.transformVText', dir, node, context);
+};
+
 const DOMNodeTransforms = [
   transformStyle,
   function transformTransition(node, context) {
@@ -85,16 +159,8 @@ const DOMNodeTransforms = [
 
 const DOMDirectiveTransforms = {
   cloak: core.noopDirectiveTransform,
-  html: function transformVHtml(dir, node, context) {
-    return dir && dir.exp
-      ? { props: [core.createObjectProperty('innerHTML', dir.exp)] }
-      : { props: [] };
-  },
-  text: function transformVText(dir, node, context) {
-    return dir && dir.exp
-      ? { props: [core.createObjectProperty('textContent', dir.exp)] }
-      : { props: [] };
-  },
+  html: transformVHtml,
+  text: transformVText,
   model: function transformModel(dir, node, context) {
     return core.transformModel(dir, node, context);
   },
@@ -513,3 +579,13 @@ module.exports = {
   parserOptions,
   transformStyle,
 };
+
+Object.defineProperty(module.exports, '__vuecRuntime', {
+  value: {
+    ...module.exports,
+    transformStyle,
+    transformVHtml,
+    transformVText,
+  },
+  enumerable: false,
+});
