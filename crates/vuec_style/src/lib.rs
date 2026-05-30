@@ -5239,6 +5239,13 @@ fn scoped_container_injection_target(selector: &str) -> Option<SelectorMatch> {
             SelectorScannerState::Normal => match ch {
                 '\'' => state = SelectorScannerState::SingleQuote,
                 '"' => state = SelectorScannerState::DoubleQuote,
+                '\\' => {
+                    let end = consume_selector_token(selector, index);
+                    target = None;
+                    has_target = true;
+                    index = end;
+                    continue;
+                }
                 '[' => {
                     let end = find_matching_selector_bracket(selector, index)
                         .unwrap_or(selector.len().saturating_sub(1));
@@ -5426,6 +5433,10 @@ fn collect_selector_deprecation_warnings(selector: &str, warnings: &mut Vec<Stri
             SelectorScannerState::Normal => match ch {
                 '\'' => state = SelectorScannerState::SingleQuote,
                 '"' => state = SelectorScannerState::DoubleQuote,
+                '\\' => {
+                    index = consume_selector_escape(selector, index);
+                    continue;
+                }
                 '[' => bracket_depth += 1,
                 ']' if bracket_depth > 0 => bracket_depth -= 1,
                 '(' => paren_depth += 1,
@@ -5556,6 +5567,10 @@ fn split_selector_list(selector: &str) -> Vec<&str> {
             SelectorScannerState::Normal => match ch {
                 '\'' => state = SelectorScannerState::SingleQuote,
                 '"' => state = SelectorScannerState::DoubleQuote,
+                '\\' => {
+                    index = consume_selector_escape(selector, index);
+                    continue;
+                }
                 '(' => paren_depth += 1,
                 ')' if paren_depth > 0 => paren_depth -= 1,
                 '[' => bracket_depth += 1,
@@ -5621,6 +5636,10 @@ fn find_pseudo_function(selector: &str, names: &[&str]) -> Option<SelectorMatch>
             SelectorScannerState::Normal => match ch {
                 '\'' => state = SelectorScannerState::SingleQuote,
                 '"' => state = SelectorScannerState::DoubleQuote,
+                '\\' => {
+                    index = consume_selector_escape(selector, index);
+                    continue;
+                }
                 '[' => bracket_depth += 1,
                 ']' if bracket_depth > 0 => bracket_depth -= 1,
                 _ if bracket_depth == 0 => {
@@ -5715,6 +5734,10 @@ fn find_top_level_pseudo_function(selector: &str, names: &[&str]) -> Option<Sele
             SelectorScannerState::Normal => match ch {
                 '\'' => state = SelectorScannerState::SingleQuote,
                 '"' => state = SelectorScannerState::DoubleQuote,
+                '\\' => {
+                    index = consume_selector_escape(selector, index);
+                    continue;
+                }
                 '[' => bracket_depth += 1,
                 ']' if bracket_depth > 0 => bracket_depth -= 1,
                 '(' => paren_depth += 1,
@@ -5811,6 +5834,10 @@ fn find_matching_selector_paren(selector: &str, open: usize) -> Option<usize> {
             SelectorScannerState::Normal => match ch {
                 '\'' => state = SelectorScannerState::SingleQuote,
                 '"' => state = SelectorScannerState::DoubleQuote,
+                '\\' => {
+                    index = consume_selector_escape(selector, index);
+                    continue;
+                }
                 '(' => depth += 1,
                 ')' => {
                     depth = depth.saturating_sub(1);
@@ -5867,6 +5894,10 @@ fn find_deep_combinator(selector: &str) -> Option<DeepCombinator> {
             SelectorScannerState::Normal => match ch {
                 '\'' => state = SelectorScannerState::SingleQuote,
                 '"' => state = SelectorScannerState::DoubleQuote,
+                '\\' => {
+                    index = consume_selector_escape(selector, index);
+                    continue;
+                }
                 '(' => paren_depth += 1,
                 ')' if paren_depth > 0 => paren_depth -= 1,
                 '[' => bracket_depth += 1,
@@ -5998,7 +6029,12 @@ fn strip_leading_universal_selector(selector: &str) -> &str {
     }
     let next = selector[whitespace_end..].chars().next();
     if next.is_some_and(|ch| {
-        ch == '.' || ch == '#' || ch == '[' || ch == ':' || is_selector_ident_start(ch)
+        ch == '.'
+            || ch == '#'
+            || ch == '['
+            || ch == ':'
+            || ch == '\\'
+            || is_selector_ident_start(ch)
     }) {
         &selector[whitespace_end..]
     } else {
@@ -6016,6 +6052,12 @@ fn selector_injection_index(selector: &str) -> Option<usize> {
             SelectorScannerState::Normal => match ch {
                 '\'' => state = SelectorScannerState::SingleQuote,
                 '"' => state = SelectorScannerState::DoubleQuote,
+                '\\' => {
+                    let end = consume_selector_token(selector, index);
+                    last_node_end = Some(end);
+                    index = end;
+                    continue;
+                }
                 '[' => {
                     let Some(end) = find_matching_selector_bracket(selector, index) else {
                         return last_node_end.or(Some(selector.len()));
@@ -6028,6 +6070,13 @@ fn selector_injection_index(selector: &str) -> Option<usize> {
                     let end = skip_selector_pseudo(selector, index);
                     index = end;
                     continue;
+                }
+                '(' => {
+                    if let Some(close) = find_matching_selector_paren(selector, index) {
+                        last_node_end = Some(close + 1);
+                        index = close + 1;
+                        continue;
+                    }
                 }
                 '>' | '+' | '~' | ',' => {}
                 '*' if last_node_end.is_none() => last_node_end = Some(index + ch.len_utf8()),
@@ -6083,6 +6132,10 @@ fn find_matching_selector_bracket(selector: &str, open: usize) -> Option<usize> 
             SelectorScannerState::Normal => match ch {
                 '\'' => state = SelectorScannerState::SingleQuote,
                 '"' => state = SelectorScannerState::DoubleQuote,
+                '\\' => {
+                    index = consume_selector_escape(selector, index);
+                    continue;
+                }
                 ']' => return Some(index),
                 _ => {}
             },
@@ -6150,7 +6203,11 @@ fn consume_selector_token(selector: &str, start: usize) -> usize {
         let Some(ch) = selector[index..].chars().next() else {
             break;
         };
-        if !(ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '\\') {
+        if ch == '\\' {
+            index = consume_selector_escape(selector, index);
+            continue;
+        }
+        if !is_selector_ident_continue(ch) {
             break;
         }
         index += ch.len_utf8();
@@ -6159,7 +6216,43 @@ fn consume_selector_token(selector: &str, start: usize) -> usize {
 }
 
 fn is_selector_ident_start(ch: char) -> bool {
-    ch.is_ascii_alphabetic() || ch == '_' || ch == '-'
+    ch.is_ascii_alphabetic() || ch == '_' || ch == '-' || !ch.is_ascii()
+}
+
+fn is_selector_ident_continue(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || !ch.is_ascii()
+}
+
+fn consume_selector_escape(selector: &str, start: usize) -> usize {
+    let mut index = start + '\\'.len_utf8();
+    if index >= selector.len() {
+        return index;
+    }
+
+    let mut hex_digits = 0usize;
+    while index < selector.len() && hex_digits < 6 {
+        let Some(ch) = selector[index..].chars().next() else {
+            break;
+        };
+        if !ch.is_ascii_hexdigit() {
+            break;
+        }
+        index += ch.len_utf8();
+        hex_digits += 1;
+    }
+
+    if hex_digits > 0 {
+        if index < selector.len() {
+            if let Some(ch) = selector[index..].chars().next() {
+                if ch.is_whitespace() {
+                    index += ch.len_utf8();
+                }
+            }
+        }
+        return index;
+    }
+
+    index + selector[index..].chars().next().map_or(0, char::len_utf8)
 }
 
 #[cfg(test)]
@@ -6446,6 +6539,62 @@ mod tests {
         assert_eq!(
             rewrite_scoped_selectors(".a, * .b { color: red; }", "data-v-test"),
             ".a[data-v-test],.b[data-v-test] { color: red; }"
+        );
+    }
+
+    #[test]
+    fn rewrites_escaped_scoped_selector_tokens_like_vue3() {
+        assert_eq!(
+            rewrite_scoped_selectors(r#".foo\:bar { color: red; }"#, "data-v-test"),
+            r#".foo\:bar[data-v-test] { color: red; }"#
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(r#".foo\,bar { color: red; }"#, "data-v-test"),
+            r#".foo\,bar[data-v-test] { color: red; }"#
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(r#".foo\:global(.bar) { color: red; }"#, "data-v-test"),
+            r#".foo\:global(.bar)[data-v-test] { color: red; }"#
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(r#":is(.foo\:bar, .baz) { color: red; }"#, "data-v-test"),
+            r#":is(.foo\:bar[data-v-test], .baz[data-v-test]) { color: red; }"#
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(r#":slotted(.foo\:bar) { color: red; }"#, "data-v-test"),
+            r#".foo\:bar[data-v-test-s] { color: red; }"#
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(r#".\31 foo:hover { color: red; }"#, "data-v-test"),
+            r#".\31 foo[data-v-test]:hover { color: red; }"#
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(".你好 { color: red; }", "data-v-test"),
+            ".你好[data-v-test] { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(r#"* .foo\:bar { color: red; }"#, "data-v-test"),
+            r#".foo\:bar[data-v-test] { color: red; }"#
+        );
+    }
+
+    #[test]
+    fn escaped_deep_like_tokens_do_not_emit_deprecated_warnings() {
+        let result = compile_style(
+            r#".foo\:deep(.bar) { color: red; }"#,
+            StyleCompileOptions {
+                id: Some("data-v-test".into()),
+                scoped: true,
+                warn_deprecated_scoped_selectors: true,
+                ..StyleCompileOptions::default()
+            },
+        );
+
+        assert!(result.diagnostics.is_empty());
+        assert_eq!(
+            result.code,
+            r#".foo\:deep(.bar)[data-v-test] { color: red;
+}"#
         );
     }
 
