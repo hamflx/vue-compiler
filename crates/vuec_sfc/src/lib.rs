@@ -8852,6 +8852,32 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
     }
 
     #[test]
+    fn compile_style_rewrites_first_normal_deep_container_nested_rules() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "style.vue",
+            r#"<style scoped>:is(.foo, :deep(.bar), .baz) { color: blue; .child { color: red; } }.host :where(:global(.g), :slotted(.s), :deep(.d), .tail) { color: green; & .child { color: yellow; } }</style>"#,
+        );
+        let result = compiler.compile_style(
+            &descriptor,
+            SfcStyleCompileOptions {
+                id: Some("data-v-test".into()),
+                scoped: true,
+                ..SfcStyleCompileOptions::default()
+            },
+        );
+
+        assert!(result
+            .code
+            .contains(":is(.foo,[data-v-test] .bar, .baz[data-v-test])[data-v-test] {"));
+        assert!(result.code.contains("& { color: blue;"));
+        assert!(result
+            .code
+            .contains(".host[data-v-test] :where(.g,.s,[data-v-test] .d, .tail[data-v-test]) {"));
+        assert!(result.code.contains("& .child { color: yellow;"));
+    }
+
+    #[test]
     fn compile_style_rewrites_deep_nested_scoped_rules() {
         let mut compiler = SfcCompiler::new();
         let descriptor = compiler.parse(
