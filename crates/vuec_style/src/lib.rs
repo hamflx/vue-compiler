@@ -1526,7 +1526,11 @@ pub struct CssVarCollectOptions {
 /// Collects unique CSS variable expressions from `v-bind(...)` calls.
 pub fn collect_css_vars_with_options(source: &str, options: CssVarCollectOptions) -> Vec<String> {
     let mut vars = Vec::new();
-    for binding in css_var_bindings(source, options.ignore_line_comments) {
+    for binding in css_var_bindings(
+        source,
+        options.ignore_line_comments,
+        CssVarScanMode::Collect,
+    ) {
         if !binding.expression.is_empty()
             && !vars.iter().any(|existing| existing == &binding.expression)
         {
@@ -1604,7 +1608,11 @@ pub fn rewrite_css_vars_with_options(
     id: &str,
     options: CssVarRewriteOptions,
 ) -> String {
-    let bindings = css_var_bindings(source, options.ignore_line_comments);
+    let bindings = css_var_bindings(
+        source,
+        options.ignore_line_comments,
+        CssVarScanMode::Rewrite,
+    );
     if bindings.is_empty() {
         return source.to_string();
     }
@@ -1699,7 +1707,17 @@ struct CssVarBinding {
     expression: String,
 }
 
-fn css_var_bindings(source: &str, ignore_line_comments: bool) -> Vec<CssVarBinding> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CssVarScanMode {
+    Collect,
+    Rewrite,
+}
+
+fn css_var_bindings(
+    source: &str,
+    ignore_line_comments: bool,
+    mode: CssVarScanMode,
+) -> Vec<CssVarBinding> {
     let mut bindings = Vec::new();
     let mut cursor = 0usize;
     while cursor < source.len() {
@@ -1714,10 +1732,11 @@ fn css_var_bindings(source: &str, ignore_line_comments: bool) -> Vec<CssVarBindi
             cursor = skip_css_line_comment(source, cursor);
             continue;
         }
-        let Some(start_offset) = find_next_v_bind(source, cursor, ignore_line_comments) else {
+        let Some((start_offset, open_end)) =
+            find_next_v_bind(source, cursor, ignore_line_comments, mode)
+        else {
             break;
         };
-        let open_end = start_offset + v_bind_prefix_len(&source[start_offset..]);
         let Some(end) = lex_css_var_binding(source, open_end) else {
             cursor = open_end;
             continue;
@@ -1732,7 +1751,12 @@ fn css_var_bindings(source: &str, ignore_line_comments: bool) -> Vec<CssVarBindi
     bindings
 }
 
-fn find_next_v_bind(source: &str, cursor: usize, ignore_line_comments: bool) -> Option<usize> {
+fn find_next_v_bind(
+    source: &str,
+    cursor: usize,
+    ignore_line_comments: bool,
+    mode: CssVarScanMode,
+) -> Option<(usize, usize)> {
     let bytes = source.as_bytes();
     let mut index = cursor;
     while index + "v-bind".len() <= source.len() {
@@ -1749,11 +1773,34 @@ fn find_next_v_bind(source: &str, cursor: usize, ignore_line_comments: bool) -> 
         }
         if source[index..].starts_with("v-bind") {
             let mut open = index + "v-bind".len();
-            while open < source.len() && bytes[open].is_ascii_whitespace() {
-                open += 1;
+            let mut saw_comment = false;
+            let mut saw_whitespace = false;
+            while open < source.len() {
+                if bytes[open].is_ascii_whitespace() {
+                    saw_whitespace = true;
+                    open += 1;
+                    continue;
+                }
+                if source[open..].starts_with("/*") {
+                    let Some(end_offset) = source[open + 2..].find("*/") else {
+                        return None;
+                    };
+                    saw_comment = true;
+                    open += 2 + end_offset + 2;
+                    continue;
+                }
+                if ignore_line_comments && source[open..].starts_with("//") {
+                    saw_comment = true;
+                    open = skip_css_line_comment(source, open);
+                    continue;
+                }
+                break;
             }
-            if open < source.len() && bytes[open] == b'(' {
-                return Some(index);
+            if open < source.len()
+                && bytes[open] == b'('
+                && (mode == CssVarScanMode::Collect || !saw_comment || saw_whitespace)
+            {
+                return Some((index, open + 1));
             }
         }
         let ch = source[index..].chars().next()?;
@@ -1767,15 +1814,6 @@ fn skip_css_line_comment(source: &str, start: usize) -> usize {
         .find(['\n', '\r'])
         .map(|offset| start + offset)
         .unwrap_or(source.len())
-}
-
-fn v_bind_prefix_len(source: &str) -> usize {
-    let mut len = "v-bind".len();
-    let bytes = source.as_bytes();
-    while len < source.len() && bytes[len].is_ascii_whitespace() {
-        len += 1;
-    }
-    len + 1
 }
 
 fn lex_css_var_binding(source: &str, start: usize) -> Option<usize> {
@@ -1981,7 +2019,9 @@ fn rewrite_css_items(
                     keyframes,
                     CssBlockContext::Keyframes,
                 ));
-            } else if context == CssBlockContext::Deep || selector_rewrite.deep_passthrough {
+            } else if context == CssBlockContext::Deep
+                || (selector_rewrite.deep_passthrough && has_nested_block)
+            {
                 let rewritten_body = rewrite_deep_passthrough_body(body, scope_id, keyframes);
                 if css_block_starts_with_block(&rewritten_body) {
                     output.push('\n');
@@ -6321,6 +6361,13 @@ mod tests {
             "[data-v-test] .foo { color: red; }"
         );
         assert_eq!(
+            rewrite_scoped_selectors(
+                ":deep(.foo) {\n  color: red;\n} ::v-deep .bar {\n  color: blue;\n}",
+                "data-v-test",
+            ),
+            "[data-v-test] .foo {\n  color: red;\n} [data-v-test] .bar {\n  color: blue;\n}"
+        );
+        assert_eq!(
             rewrite_scoped_selectors(":deep(.foo, .bar) .baz { color: red; }", "data-v-test"),
             "[data-v-test] .foo .baz { color: red; }"
         );
@@ -8241,6 +8288,22 @@ $red: red;
     }
 
     #[test]
+    fn collects_css_vars_across_interstitial_block_comments() {
+        let vars = collect_css_vars_with_options(
+            concat!(
+                ".foo { color: v-bind/**/(color); ",
+                "font-size: v-bind /*x*/ ('font.size'); ",
+                "width: v-bind/**/ (size); }"
+            ),
+            CssVarCollectOptions {
+                ignore_line_comments: true,
+            },
+        );
+
+        assert_eq!(vars, vec!["color", "font.size", "size"]);
+    }
+
+    #[test]
     fn rewrites_css_vars_with_vue27_names() {
         let code = rewrite_css_vars(
             ".foo { color: v-bind(color); font-size: v-bind('font.size'); }",
@@ -8251,6 +8314,29 @@ $red: red;
         assert!(code.contains("var(--test-font_size)"));
         assert_eq!(gen_css_var_name("xxxxxxxx", "color", true), "4003f1a6");
         assert_eq!(gen_css_var_name("xxxxxxxx", "font.size", true), "41b6490a");
+    }
+
+    #[test]
+    fn rewrites_css_vars_across_comment_separated_call_gaps() {
+        let code = rewrite_css_vars_with_options(
+            concat!(
+                ".foo { color: v-bind /*x*/ (color); ",
+                "font-size: v-bind /**/ /**/ ('font.size'); ",
+                "width: v-bind/**/ (size); ",
+                "height: v-bind/**/(height); }"
+            ),
+            "test",
+            CssVarRewriteOptions {
+                is_prod: false,
+                name_style: CssVarNameStyle::Vue3Escaped,
+                ignore_line_comments: true,
+            },
+        );
+
+        assert!(code.contains("var(--test-color)"));
+        assert!(code.contains(r"var(--test-font\.size)"));
+        assert!(code.contains("var(--test-size)"));
+        assert!(code.contains("v-bind/**/(height)"));
     }
 
     #[test]

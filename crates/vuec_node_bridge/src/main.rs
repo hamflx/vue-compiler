@@ -4297,6 +4297,20 @@ mod tests {
     }
 
     #[test]
+    fn vue27_bridge_parse_collects_comment_separated_css_vars() {
+        let parsed = dispatch(
+            "sfc.vue27.parse",
+            json!({
+                "source": r#"<style>.foo { color: v-bind/**/(color); font-size: v-bind /*x*/ ('font.size'); }</style>"#,
+                "filename": "test.vue"
+            }),
+        )
+        .expect("vue27 parse");
+
+        assert_eq!(parsed["cssVars"], json!(["color", "font.size"]));
+    }
+
+    #[test]
     fn vue27_bridge_compile_script_passes_css_var_options() {
         let compiled = dispatch(
             "sfc.vue27.compileScript",

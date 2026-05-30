@@ -8761,6 +8761,26 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
     }
 
     #[test]
+    fn compile_style_rewrites_comment_separated_css_vars() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "style.vue",
+            r#"<style>.foo { color: v-bind /*x*/ (color); font-size: v-bind/**/ ('font.size'); height: v-bind/**/(height); }</style>"#,
+        );
+        let result = compiler.compile_style(
+            &descriptor,
+            SfcStyleCompileOptions {
+                id: Some("data-v-test".into()),
+                ..SfcStyleCompileOptions::default()
+            },
+        );
+
+        assert!(result.code.contains("var(--test-color)"));
+        assert!(result.code.contains(r"var(--test-font\.size)"));
+        assert!(result.code.contains("v-bind/**/(height)"));
+    }
+
+    #[test]
     fn compile_style_rewrites_top_level_is_where_scoped_branches() {
         let mut compiler = SfcCompiler::new();
         let descriptor = compiler.parse(
