@@ -8829,6 +8829,29 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
     }
 
     #[test]
+    fn compile_style_rewrites_direct_nested_parent_selectors() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "style.vue",
+            r#"<style scoped>*.foo { color: blue; .bar { color: red; } }:is(:global(.g), :slotted(.s), * .item):hover { color: green; .child { color: yellow; } }</style>"#,
+        );
+        let result = compiler.compile_style(
+            &descriptor,
+            SfcStyleCompileOptions {
+                id: Some("data-v-test".into()),
+                scoped: true,
+                ..SfcStyleCompileOptions::default()
+            },
+        );
+
+        assert!(result.code.contains(".foo {"));
+        assert!(!result.code.contains("*.foo {"));
+        assert!(result.code.contains(":is(.g,.s,.item):hover {"));
+        assert!(result.code.contains(".bar[data-v-test] { color: red;"));
+        assert!(result.code.contains(".child[data-v-test] { color: yellow;"));
+    }
+
+    #[test]
     fn compile_style_rewrites_deep_nested_scoped_rules() {
         let mut compiler = SfcCompiler::new();
         let descriptor = compiler.parse(

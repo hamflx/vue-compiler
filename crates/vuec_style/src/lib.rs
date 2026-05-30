@@ -2029,7 +2029,7 @@ fn rewrite_css_items(
                 rewrite_deep_combinator_selector_without_scope(prelude)
                     .unwrap_or(selector_rewrite.selector)
             } else if has_direct_nested_rule {
-                prelude.to_string()
+                rewrite_direct_nested_parent_selector(prelude)
             } else {
                 selector_rewrite.selector
             };
@@ -5158,6 +5158,45 @@ fn rewrite_selector_branches(selector: &str, scope_id: &str) -> String {
     rewritten
 }
 
+fn rewrite_direct_nested_parent_selector(selector: &str) -> String {
+    let parts = split_selector_list(selector);
+    let mut rewritten = String::new();
+    for (index, part) in parts.into_iter().enumerate() {
+        let trimmed = part.trim();
+        let branch = rewrite_direct_nested_parent_selector_branch(trimmed);
+        if index > 0 {
+            rewritten.push(',');
+            if selector_list_branch_preserves_leading_whitespace(trimmed, &branch) {
+                rewritten.push_str(selector_leading_whitespace(part));
+            }
+        }
+        rewritten.push_str(&branch);
+    }
+    rewritten
+}
+
+fn rewrite_direct_nested_parent_selector_branch(selector: &str) -> String {
+    let normalized_selector = normalize_selector_comments(selector);
+    let selector = strip_leading_universal_selector(normalized_selector.trim());
+    let selector = rewrite_scope_anchored_deep_container_branch(selector);
+    rewrite_direct_nested_parent_container_selector(&selector).unwrap_or(selector)
+}
+
+fn rewrite_direct_nested_parent_container_selector(selector: &str) -> Option<String> {
+    let target = scoped_container_injection_target(selector)?;
+    let (open, close) = target.parens?;
+    let name = matched_selector_name(selector, target.start, &[":is", ":where"])?;
+    let suffix = &selector[close + 1..];
+    if !suffix.trim().is_empty() && !selector_suffix_is_pseudo_only(suffix) {
+        return None;
+    }
+    let rewritten_inner = rewrite_direct_nested_parent_selector(&selector[open + 1..close]);
+    Some(format!(
+        "{}{name}({rewritten_inner}){suffix}",
+        &selector[..target.start]
+    ))
+}
+
 fn rewrite_slotted_inner_selector(selector: &str, scope_id: &str) -> String {
     rewrite_scoped_container_injection_target_with(selector, scope_id, rewrite_selector_branches)
         .unwrap_or_else(|| inject_scope_attribute(selector, scope_id))
@@ -7415,6 +7454,35 @@ mod tests {
         assert_eq!(
             rewrite_scoped_selectors(".foo { &:hover { color: red; } }", "data-v-test"),
             ".foo {\n&[data-v-test]:hover { color: red;\n}\n}"
+        );
+    }
+
+    #[test]
+    fn rewrites_direct_nested_parent_selectors_like_vue3() {
+        assert_eq!(
+            rewrite_scoped_selectors("*.foo { color: blue; .bar { color: red; } }", "data-v-test"),
+            ".foo {\n&[data-v-test] { color: blue;\n}\n.bar[data-v-test] { color: red;\n}\n}"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(
+                "*.foo,* + .baz { color: blue; .bar { color: red; } }",
+                "data-v-test",
+            ),
+            ".foo, + .baz {\n&[data-v-test] { color: blue;\n}\n.bar[data-v-test] { color: red;\n}\n}"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(
+                ".host :slotted(.slot) { color: blue; .bar { color: red; } }",
+                "data-v-test",
+            ),
+            ".host .slot {\n&[data-v-test] { color: blue;\n}\n.bar[data-v-test] { color: red;\n}\n}"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(
+                ":is(:global(.g), :slotted(.s), * .item):hover { color: blue; .bar { color: red; } }",
+                "data-v-test",
+            ),
+            ":is(.g,.s,.item):hover {\n&[data-v-test] { color: blue;\n}\n.bar[data-v-test] { color: red;\n}\n}"
         );
     }
 
