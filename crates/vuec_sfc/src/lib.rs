@@ -8617,6 +8617,25 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
     }
 
     #[test]
+    fn compile_style_reports_css_modules_native_nested_composes() {
+        let source = r#"<style module>.foo { .bar { composes: foo; color: red; } }</style>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse("modules.vue", source);
+        let result = compiler.compile_style(&descriptor, SfcStyleCompileOptions::default());
+
+        assert_eq!(
+            result.errors,
+            vec![
+                "composition is not allowed in nested rule \n\n:local(.bar) { composes: foo; color: red;\n}"
+            ]
+        );
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(result.diagnostics[0].code, "VUEC_STYLE_MODULE_COMPOSE");
+        assert!(result.code.is_empty());
+        assert!(result.modules.is_none());
+    }
+
+    #[test]
     fn compile_style_returns_css_modules_external_composes() {
         let dir = tempfile::tempdir().expect("temp dir");
         let filename = dir.path().join("component.vue");

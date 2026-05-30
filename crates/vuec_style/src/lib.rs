@@ -200,15 +200,21 @@ pub fn compile_style(source: &str, options: StyleCompileOptions) -> StyleCompile
     code = normalize_style_output(&code);
     let modules = if options.modules {
         let result = compile_css_modules(&code, &css_modules_hash_source, &options);
-        code = result.code;
         errors.extend(
             result
                 .diagnostics
                 .iter()
                 .map(|diagnostic| diagnostic.message.clone()),
         );
+        let has_fatal_module_error = !result.diagnostics.is_empty();
         diagnostics.extend(result.diagnostics);
-        Some(result.modules)
+        if has_fatal_module_error {
+            code.clear();
+            None
+        } else {
+            code = result.code;
+            Some(result.modules)
+        }
     } else {
         None
     };
@@ -2865,7 +2871,7 @@ fn compile_css_modules_file(
         active_paths,
     );
     let source = prepare_css_module_values(source, &mut context);
-    let code = rewrite_css_modules_items(&source, &mut context, CssBlockContext::Root);
+    let code = rewrite_css_modules_items(&source, &mut context, CssBlockContext::Root, false);
     let has_prepended_css = !context.prepended_css.is_empty();
     let code = context.finish_code(code);
     let raw_modules = context.raw_modules();
@@ -3541,6 +3547,7 @@ fn rewrite_css_modules_items(
     source: &str,
     context: &mut CssModulesContext<'_>,
     block_context: CssBlockContext,
+    native_nested_rule: bool,
 ) -> String {
     let mut output = String::new();
     let mut cursor = 0usize;
@@ -3612,7 +3619,8 @@ fn rewrite_css_modules_items(
             } else {
                 CssBlockContext::Container
             };
-            let rewritten_body = rewrite_css_modules_items(body, context, next_context);
+            let rewritten_body =
+                rewrite_css_modules_items(body, context, next_context, native_nested_rule);
             if css_block_contains_style_rules(&rewritten_body)
                 || css_block_contains_at_rule_with_style_rules(&rewritten_body)
             {
@@ -3630,6 +3638,7 @@ fn rewrite_css_modules_items(
                 block_context,
                 &compose_local_names,
                 delimiter + 1,
+                native_nested_rule,
             ));
         }
         output.push('}');
@@ -3645,6 +3654,7 @@ fn rewrite_css_module_rule_body(
     block_context: CssBlockContext,
     compose_local_names: &[String],
     body_offset: usize,
+    native_nested_rule: bool,
 ) -> String {
     if !css_block_has_nested_block(body) {
         return rewrite_css_module_declarations(
@@ -3654,6 +3664,7 @@ fn rewrite_css_module_rule_body(
             block_context,
             compose_local_names,
             body_offset,
+            native_nested_rule,
         );
     }
 
@@ -3720,6 +3731,7 @@ fn rewrite_css_module_rule_body(
             prelude,
             compose_local_names,
             declarations_offset.take().unwrap_or(body_offset),
+            native_nested_rule,
             true,
         );
 
@@ -3732,7 +3744,8 @@ fn rewrite_css_module_rule_body(
             } else {
                 CssBlockContext::Container
             };
-            let nested_rewritten = rewrite_css_modules_items(nested_body, context, next_context);
+            let nested_rewritten =
+                rewrite_css_modules_items(nested_body, context, next_context, true);
             block.push_str(&rewritten_prelude);
             block.push_str(brace_spacing);
             block.push('{');
@@ -3761,6 +3774,7 @@ fn rewrite_css_module_rule_body(
                 block_context,
                 &nested_compose_local_names,
                 body_offset + delimiter + 1,
+                true,
             ));
             block.push('}');
         }
@@ -3780,6 +3794,7 @@ fn rewrite_css_module_rule_body(
         prelude,
         compose_local_names,
         declarations_offset.take().unwrap_or(body_offset),
+        native_nested_rule,
         false,
     );
     if !output.is_empty() {
@@ -3795,6 +3810,7 @@ fn flush_css_module_nested_declarations(
     prelude: &str,
     compose_local_names: &[String],
     body_offset: usize,
+    native_nested_rule: bool,
     separate_before_next_block: bool,
 ) {
     if declarations.is_empty() {
@@ -3807,6 +3823,7 @@ fn flush_css_module_nested_declarations(
         CssBlockContext::Container,
         compose_local_names,
         body_offset,
+        native_nested_rule,
     );
     output.push_str(rewritten.trim_end());
     if separate_before_next_block && !output.ends_with('\n') {
@@ -4058,12 +4075,16 @@ fn rewrite_css_module_declarations(
     block_context: CssBlockContext,
     compose_local_names: &[String],
     body_offset: usize,
+    native_nested_rule: bool,
 ) -> String {
     if matches!(block_context, CssBlockContext::Keyframes) {
         return body.to_string();
     }
 
     let mut output = String::new();
+    let nested_compose_message =
+        native_nested_rule.then(|| css_module_nested_compose_message(prelude, body, context));
+    let mut nested_compose_reported = false;
     let mut segment_start = 0usize;
     for semicolon in top_level_semicolons(body) {
         rewrite_css_module_declaration_segment(
@@ -4073,6 +4094,8 @@ fn rewrite_css_module_declarations(
             compose_local_names,
             body_offset + segment_start,
             true,
+            nested_compose_message.as_deref(),
+            &mut nested_compose_reported,
             &mut output,
         );
         segment_start = semicolon + 1;
@@ -4084,6 +4107,8 @@ fn rewrite_css_module_declarations(
         compose_local_names,
         body_offset + segment_start,
         false,
+        nested_compose_message.as_deref(),
+        &mut nested_compose_reported,
         &mut output,
     );
     output
@@ -4096,6 +4121,8 @@ fn rewrite_css_module_declaration_segment(
     compose_local_names: &[String],
     segment_offset: usize,
     has_semicolon: bool,
+    nested_compose_message: Option<&str>,
+    nested_compose_reported: &mut bool,
     output: &mut String,
 ) {
     let Some(colon) = find_top_level_colon(segment) else {
@@ -4111,6 +4138,18 @@ fn rewrite_css_module_declaration_segment(
         output.push_str(&replace_css_module_import_symbols(&segment, context));
         if has_semicolon {
             output.push(';');
+        }
+        return;
+    }
+
+    if let Some(message) = nested_compose_message {
+        if !*nested_compose_reported {
+            context.push_compose_diagnostic(
+                message.to_string(),
+                segment_offset,
+                segment_offset + segment.len(),
+            );
+            *nested_compose_reported = true;
         }
         return;
     }
@@ -4351,6 +4390,79 @@ fn css_module_invalid_compose_selector_message(
     format!("composition is only allowed when selector is single :local class name not in \"{selector}\"")
 }
 
+fn css_module_nested_compose_message(
+    prelude: &str,
+    body: &str,
+    context: &CssModulesContext<'_>,
+) -> String {
+    let selector = css_module_localized_selector_for_message(prelude, context);
+    let mut body = css_module_nested_compose_message_body(body);
+    if !body.ends_with(';') {
+        body.push(';');
+    }
+    format!("composition is not allowed in nested rule \n\n{selector} {{ {body}\n}}")
+}
+
+fn css_module_nested_compose_message_body(body: &str) -> String {
+    let mut output = Vec::new();
+    let mut segment_start = 0usize;
+    for semicolon in top_level_semicolons(body) {
+        let segment = css_module_nested_compose_message_segment(&body[segment_start..semicolon]);
+        if !segment.is_empty() {
+            output.push(format!("{segment};"));
+        }
+        segment_start = semicolon + 1;
+    }
+    let segment = css_module_nested_compose_message_segment(&body[segment_start..]);
+    if !segment.is_empty() {
+        output.push(segment);
+    }
+    output.join(" ")
+}
+
+fn css_module_nested_compose_message_segment(segment: &str) -> String {
+    let segment = normalize_style_output(segment).trim().to_string();
+    let Some(colon) = find_top_level_colon(&segment) else {
+        return segment;
+    };
+    let prop = segment[..colon].trim();
+    if !prop.eq_ignore_ascii_case("composes") && !prop.eq_ignore_ascii_case("compose-with") {
+        return segment;
+    }
+    let value = css_module_nested_compose_message_value(segment[colon + 1..].trim());
+    format!("{prop}: {value}")
+}
+
+fn css_module_nested_compose_message_value(value: &str) -> String {
+    let mut output = Vec::new();
+    for part in value.split(',') {
+        let tokens = css_module_compose_tokens(part, value, 0);
+        if let Some(from_index) = tokens.iter().position(|token| token.value == "from") {
+            if from_index > 0
+                && from_index + 2 == tokens.len()
+                && tokens[from_index + 1].value == "global"
+            {
+                output.push(
+                    tokens[..from_index]
+                        .iter()
+                        .map(|token| {
+                            if parse_css_module_global_compose(token.value).is_some() {
+                                token.value.to_string()
+                            } else {
+                                format!("global({})", token.value)
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                );
+                continue;
+            }
+        }
+        output.push(part.trim().to_string());
+    }
+    output.join(", ")
+}
+
 fn css_module_localized_selector_for_message(
     prelude: &str,
     context: &CssModulesContext<'_>,
@@ -4369,17 +4481,76 @@ fn css_module_localized_selector_part_for_message(
     if !context.is_local_default() {
         return selector.to_string();
     }
+    css_module_localized_selector_segment_for_message(selector, true)
+}
+
+fn css_module_localized_selector_segment_for_message(
+    selector: &str,
+    mut default_local: bool,
+) -> String {
     let mut output = String::new();
     let mut cursor = 0usize;
-    while let Some(token) = find_next_css_module_selector_token(selector, cursor) {
-        output.push_str(&selector[cursor..token.start]);
+    while cursor < selector.len() {
+        if let Some(global) =
+            find_pseudo_function_from(selector, &[":global", "::v-global"], cursor)
+        {
+            output.push_str(&css_module_localized_default_segment_for_message(
+                &selector[cursor..global.start],
+                default_local,
+            ));
+            if let Some((open, close)) = global.parens {
+                output.push_str(":global(");
+                output.push_str(selector[open + 1..close].trim());
+                output.push(')');
+                cursor = close + 1;
+                continue;
+            }
+            output.push_str(&selector[global.start..global.end]);
+            cursor = global.end;
+            default_local = false;
+            continue;
+        }
+        if let Some(local) = find_pseudo_function_from(selector, &[":local", "::v-local"], cursor) {
+            output.push_str(&css_module_localized_default_segment_for_message(
+                &selector[cursor..local.start],
+                default_local,
+            ));
+            if let Some((open, close)) = local.parens {
+                output.push_str(":local(");
+                output.push_str(selector[open + 1..close].trim());
+                output.push(')');
+                cursor = close + 1;
+                continue;
+            }
+            output.push_str(&selector[local.start..local.end]);
+            cursor = local.end;
+            default_local = true;
+            continue;
+        }
+        output.push_str(&css_module_localized_default_segment_for_message(
+            &selector[cursor..],
+            default_local,
+        ));
+        break;
+    }
+    output
+}
+
+fn css_module_localized_default_segment_for_message(segment: &str, local: bool) -> String {
+    if !local {
+        return segment.to_string();
+    }
+    let mut output = String::new();
+    let mut cursor = 0usize;
+    while let Some(token) = find_next_css_module_selector_token(segment, cursor) {
+        output.push_str(&segment[cursor..token.start]);
         output.push_str(":local(");
         output.push(token.sigil);
         output.push_str(token.name);
         output.push(')');
         cursor = token.end;
     }
-    output.push_str(&selector[cursor..]);
+    output.push_str(&segment[cursor..]);
     output
 }
 
@@ -9191,9 +9362,8 @@ mod tests {
         );
         assert_eq!(result.diagnostics.len(), 1);
         assert_eq!(result.diagnostics[0].code, "VUEC_STYLE_MODULE_COMPOSE");
-        assert!(!result.code.contains("composes"));
-        assert!(result.code.contains("._button_"));
-        assert!(result.code.contains("._extra_"));
+        assert!(result.code.is_empty());
+        assert!(result.modules.is_none());
     }
 
     #[test]
@@ -9225,8 +9395,8 @@ mod tests {
                 20 + start + "missing".len()
             ))
         );
-        assert!(!result.code.contains("composes"));
-        assert!(result.code.contains("color: red"));
+        assert!(result.code.is_empty());
+        assert!(result.modules.is_none());
     }
 
     #[test]
@@ -9245,8 +9415,8 @@ mod tests {
             result.errors,
             vec!["referenced class name \"next\" in composes not found"]
         );
-        assert!(!result.code.contains("composes"));
-        assert!(result.code.contains("._next_"));
+        assert!(result.code.is_empty());
+        assert!(result.modules.is_none());
     }
 
     #[test]
@@ -10068,6 +10238,41 @@ mod tests {
         assert!(!result.code.contains("\n&.active {"));
         assert!(!result.code.contains(":local(.inner)"));
         assert!(!result.code.contains(":global(.global)"));
+    }
+
+    #[test]
+    fn reports_css_modules_native_nested_composes_like_official() {
+        let result = compile_style(
+            ".foo { .bar { composes: foo; color: red; } }",
+            StyleCompileOptions {
+                id: Some("test".into()),
+                filename: Some("test.css".into()),
+                modules: true,
+                source_map_file_id: Some(FileId(7)),
+                source_map_base_offset: 10,
+                ..StyleCompileOptions::default()
+            },
+        );
+
+        assert_eq!(
+            result.errors,
+            vec![
+                "composition is not allowed in nested rule \n\n:local(.bar) { composes: foo; color: red;\n}"
+            ]
+        );
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(result.diagnostics[0].code, "VUEC_STYLE_MODULE_COMPOSE");
+        let start = ".foo { .bar {".len();
+        assert_eq!(
+            result.diagnostics[0].span,
+            Some(Span::new(
+                FileId(7),
+                10 + start,
+                10 + start + " composes: foo".len()
+            ))
+        );
+        assert!(result.code.is_empty());
+        assert!(result.modules.is_none());
     }
 
     #[test]
