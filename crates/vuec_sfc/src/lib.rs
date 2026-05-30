@@ -8588,6 +8588,35 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
     }
 
     #[test]
+    fn compile_style_rewrites_css_modules_native_nested_rules() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let filename = dir.path().join("component.vue");
+        let source = r#"<style module>.foo { color: blue; .bar { color: red; } &.active { color: green; } @media (min-width: 1px) { :global(.global) { color: black; } :local(.inner) { color: white; } } color: yellow; }</style>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let result = compiler.compile_style(&descriptor, SfcStyleCompileOptions::default());
+        let modules = result.modules.expect("css modules");
+
+        for key in ["foo", "bar", "active", "inner"] {
+            assert!(
+                modules.get(key).is_some_and(|value| value.contains('_')),
+                "missing module key {key}: {modules:?}"
+            );
+        }
+        assert!(!modules.contains_key("global"));
+        assert!(result.code.contains("{ color: blue;\n"));
+        assert!(result.code.contains("\n._bar_"));
+        assert!(result.code.contains("\n&._active_"));
+        assert!(result.code.contains("@media (min-width: 1px) {\n.global"));
+        assert!(result.code.contains("\n._inner_"));
+        assert!(result.code.contains("} color: yellow;"));
+        assert!(!result.code.contains("\n.bar {"));
+        assert!(!result.code.contains("\n&.active {"));
+        assert!(!result.code.contains(":local(.inner)"));
+        assert!(!result.code.contains(":global(.global)"));
+    }
+
+    #[test]
     fn compile_style_returns_css_modules_external_composes() {
         let dir = tempfile::tempdir().expect("temp dir");
         let filename = dir.path().join("component.vue");

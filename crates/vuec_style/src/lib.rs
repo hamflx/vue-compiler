@@ -3623,7 +3623,7 @@ fn rewrite_css_modules_items(
                 output.push_str(&rewritten_body);
             }
         } else {
-            output.push_str(&rewrite_css_module_declarations(
+            output.push_str(&rewrite_css_module_rule_body(
                 prelude,
                 body,
                 context,
@@ -3636,6 +3636,183 @@ fn rewrite_css_modules_items(
         cursor = close + 1;
     }
     output
+}
+
+fn rewrite_css_module_rule_body(
+    prelude: &str,
+    body: &str,
+    context: &mut CssModulesContext<'_>,
+    block_context: CssBlockContext,
+    compose_local_names: &[String],
+    body_offset: usize,
+) -> String {
+    if !css_block_has_nested_block(body) {
+        return rewrite_css_module_declarations(
+            prelude,
+            body,
+            context,
+            block_context,
+            compose_local_names,
+            body_offset,
+        );
+    }
+
+    let mut output = String::new();
+    let mut declarations = String::new();
+    let mut declarations_offset = None;
+    let mut cursor = 0usize;
+    while cursor < body.len() {
+        let whitespace_start = cursor;
+        cursor = skip_css_whitespace(body, cursor);
+        if cursor > whitespace_start {
+            declarations_offset.get_or_insert(body_offset + whitespace_start);
+            push_normalized_css_whitespace(&mut declarations, &body[whitespace_start..cursor]);
+        }
+        if cursor >= body.len() {
+            break;
+        }
+        if body[cursor..].starts_with("/*") {
+            let Some(end_offset) = body[cursor + 2..].find("*/") else {
+                declarations_offset.get_or_insert(body_offset + cursor);
+                declarations.push_str(&body[cursor..]);
+                break;
+            };
+            let end = cursor + 2 + end_offset + 2;
+            declarations_offset.get_or_insert(body_offset + cursor);
+            declarations.push_str(&body[cursor..end]);
+            cursor = end;
+            continue;
+        }
+
+        let Some((delimiter, delimiter_ch)) = find_next_css_delimiter(body, cursor) else {
+            declarations_offset.get_or_insert(body_offset + cursor);
+            declarations.push_str(&body[cursor..]);
+            break;
+        };
+        let raw_prelude = &body[cursor..delimiter];
+        let prelude_end = raw_prelude.trim_end().len();
+        let nested_prelude = raw_prelude[..prelude_end].trim();
+        let brace_spacing = &raw_prelude[prelude_end..];
+        if delimiter_ch == ';' {
+            declarations_offset.get_or_insert(body_offset + cursor);
+            declarations.push_str(nested_prelude);
+            declarations.push(';');
+            cursor = delimiter + 1;
+            continue;
+        }
+
+        let Some(close) = find_matching_brace(body, delimiter) else {
+            declarations.push_str(&body[cursor..]);
+            break;
+        };
+        if css_prelude_is_block_declaration(nested_prelude) {
+            let end = css_block_declaration_end(body, close);
+            declarations_offset.get_or_insert(body_offset + cursor);
+            declarations.push_str(&body[cursor..end]);
+            cursor = end;
+            continue;
+        }
+
+        flush_css_module_nested_declarations(
+            &mut output,
+            &mut declarations,
+            context,
+            prelude,
+            compose_local_names,
+            declarations_offset.take().unwrap_or(body_offset),
+            true,
+        );
+
+        let nested_body = &body[delimiter + 1..close];
+        let mut block = String::new();
+        if nested_prelude.starts_with('@') {
+            let rewritten_prelude = rewrite_css_module_at_rule_prelude(nested_prelude, context);
+            let next_context = if is_keyframes_at_rule(nested_prelude) {
+                CssBlockContext::Keyframes
+            } else {
+                CssBlockContext::Container
+            };
+            let nested_rewritten = rewrite_css_modules_items(nested_body, context, next_context);
+            block.push_str(&rewritten_prelude);
+            block.push_str(brace_spacing);
+            block.push('{');
+            if css_block_contains_style_rules(&nested_rewritten)
+                || css_block_contains_at_rule_with_style_rules(&nested_rewritten)
+            {
+                block.push('\n');
+                block.push_str(nested_rewritten.trim());
+                block.push('\n');
+            } else {
+                block.push_str(&nested_rewritten);
+            }
+            block.push('}');
+        } else {
+            let nested_compose_local_names =
+                css_module_composable_local_names(nested_prelude, context);
+            let rewritten_prelude =
+                rewrite_css_modules_prelude(nested_prelude, context, block_context);
+            block.push_str(&rewritten_prelude);
+            block.push_str(brace_spacing);
+            block.push('{');
+            block.push_str(&rewrite_css_module_rule_body(
+                nested_prelude,
+                nested_body,
+                context,
+                block_context,
+                &nested_compose_local_names,
+                body_offset + delimiter + 1,
+            ));
+            block.push('}');
+        }
+
+        let block = normalize_style_output(&block);
+        if output.is_empty() || !output.ends_with('\n') {
+            output.push('\n');
+        }
+        output.push_str(&block);
+        cursor = close + 1;
+    }
+
+    flush_css_module_nested_declarations(
+        &mut output,
+        &mut declarations,
+        context,
+        prelude,
+        compose_local_names,
+        declarations_offset.take().unwrap_or(body_offset),
+        false,
+    );
+    if !output.is_empty() {
+        output.push('\n');
+    }
+    output
+}
+
+fn flush_css_module_nested_declarations(
+    output: &mut String,
+    declarations: &mut String,
+    context: &mut CssModulesContext<'_>,
+    prelude: &str,
+    compose_local_names: &[String],
+    body_offset: usize,
+    separate_before_next_block: bool,
+) {
+    if declarations.is_empty() {
+        return;
+    }
+    let rewritten = rewrite_css_module_declarations(
+        prelude,
+        declarations,
+        context,
+        CssBlockContext::Container,
+        compose_local_names,
+        body_offset,
+    );
+    output.push_str(rewritten.trim_end());
+    if separate_before_next_block && !output.ends_with('\n') {
+        output.push('\n');
+    }
+    declarations.clear();
 }
 
 fn rewrite_css_modules_prelude(
@@ -9856,6 +10033,41 @@ mod tests {
         assert!(result.code.contains("@media (min-width: 1px)"));
         assert!(result.code.contains("content: \"green\""));
         assert!(result.code.contains("color: green"));
+    }
+
+    #[test]
+    fn compiles_css_modules_native_nested_rules_like_official() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let filename = dir.path().join("component.vue");
+
+        let result = compile_style(
+            r#".foo { color: blue; .bar { color: red; } &.active { color: green; } @media (min-width: 1px) { :global(.global) { color: black; } :local(.inner) { color: white; } } color: yellow; }"#,
+            StyleCompileOptions {
+                id: Some("test".into()),
+                filename: Some(filename.to_string_lossy().to_string()),
+                modules: true,
+                ..StyleCompileOptions::default()
+            },
+        );
+        let modules = result.modules.expect("css modules map");
+
+        for key in ["foo", "bar", "active", "inner"] {
+            assert!(
+                modules.get(key).is_some_and(|value| value.contains('_')),
+                "missing module key {key}: {modules:?}"
+            );
+        }
+        assert!(!modules.contains_key("global"));
+        assert!(result.code.contains("{ color: blue;\n"));
+        assert!(result.code.contains("\n._bar_"));
+        assert!(result.code.contains("\n&._active_"));
+        assert!(result.code.contains("@media (min-width: 1px) {\n.global"));
+        assert!(result.code.contains("\n._inner_"));
+        assert!(result.code.contains("} color: yellow;"));
+        assert!(!result.code.contains("\n.bar {"));
+        assert!(!result.code.contains("\n&.active {"));
+        assert!(!result.code.contains(":local(.inner)"));
+        assert!(!result.code.contains(":global(.global)"));
     }
 
     #[test]
