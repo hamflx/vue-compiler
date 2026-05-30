@@ -5040,16 +5040,21 @@ fn rewrite_selector_list_for_rule(
     rule_has_nested_block: bool,
 ) -> SelectorRewriteResult {
     let mut deep_passthrough = false;
-    let rewritten = split_selector_list(selector)
-        .into_iter()
-        .map(|part| {
-            let result =
-                rewrite_single_selector_for_rule(part.trim(), scope_id, rule_has_nested_block);
-            deep_passthrough |= result.deep_passthrough;
-            result.selector
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
+    let parts = split_selector_list(selector);
+    let mut rewritten = String::new();
+    for (index, part) in parts.into_iter().enumerate() {
+        let trimmed = part.trim();
+        let result = rewrite_single_selector_for_rule(trimmed, scope_id, rule_has_nested_block);
+        deep_passthrough |= result.deep_passthrough;
+
+        if index > 0 {
+            rewritten.push(',');
+            if selector_list_branch_preserves_leading_whitespace(trimmed, &result.selector) {
+                rewritten.push_str(selector_leading_whitespace(part));
+            }
+        }
+        rewritten.push_str(&result.selector);
+    }
     let selector = if selector.ends_with(' ') {
         format!("{rewritten} ")
     } else {
@@ -5059,6 +5064,69 @@ fn rewrite_selector_list_for_rule(
         selector,
         deep_passthrough,
     }
+}
+
+fn selector_list_branch_preserves_leading_whitespace(original: &str, rewritten: &str) -> bool {
+    if original.is_empty() || rewritten.starts_with('[') || original.starts_with('*') {
+        return false;
+    }
+    if original.starts_with(">>>") || original.starts_with("/deep/") {
+        return false;
+    }
+    !match_selector_pseudo_function(
+        original,
+        0,
+        &[":global", "::v-global", ":slotted", "::v-slotted"],
+    )
+    .is_some()
+}
+
+fn selector_leading_whitespace(selector: &str) -> &str {
+    let end = selector
+        .char_indices()
+        .find_map(|(index, ch)| (!ch.is_whitespace()).then_some(index))
+        .unwrap_or(selector.len());
+    &selector[..end]
+}
+
+fn rewrite_selector_branches(selector: &str, scope_id: &str) -> String {
+    let parts = split_selector_list(selector);
+    let mut rewritten = String::new();
+    for (index, part) in parts.into_iter().enumerate() {
+        let trimmed = part.trim();
+        let branch = rewrite_single_selector(trimmed, scope_id);
+        if index > 0 {
+            rewritten.push(',');
+            if selector_list_branch_preserves_leading_whitespace(trimmed, &branch) {
+                rewritten.push_str(selector_leading_whitespace(part));
+            }
+        }
+        rewritten.push_str(&branch);
+    }
+    rewritten
+}
+
+fn rewrite_slotted_inner_selector(selector: &str, scope_id: &str) -> String {
+    rewrite_scoped_container_injection_target_with(selector, scope_id, rewrite_selector_branches)
+        .unwrap_or_else(|| inject_scope_attribute(selector, scope_id))
+}
+
+fn rewrite_scoped_container_injection_target_with(
+    selector: &str,
+    scope_id: &str,
+    rewrite_branches: fn(&str, &str) -> String,
+) -> Option<String> {
+    let selector = strip_leading_universal_selector(selector.trim());
+    let target = scoped_container_injection_target(selector)?;
+    let (open, close) = target.parens?;
+    let name = matched_selector_name(selector, target.start, &[":is", ":where"])?;
+    let rewritten_inner = rewrite_branches(&selector[open + 1..close], scope_id);
+
+    Some(format!(
+        "{}{name}({rewritten_inner}){}",
+        &selector[..target.start],
+        &selector[close + 1..]
+    ))
 }
 
 fn rewrite_single_selector(selector: &str, scope_id: &str) -> String {
@@ -5157,21 +5225,7 @@ fn rewrite_single_selector_with_options(
 }
 
 fn rewrite_scoped_container_injection_target(selector: &str, scope_id: &str) -> Option<String> {
-    let selector = strip_leading_universal_selector(selector.trim());
-    let target = scoped_container_injection_target(selector)?;
-    let (open, close) = target.parens?;
-    let name = matched_selector_name(selector, target.start, &[":is", ":where"])?;
-    let rewritten_inner = split_selector_list(&selector[open + 1..close])
-        .into_iter()
-        .map(|branch| rewrite_single_selector(branch.trim(), scope_id))
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    Some(format!(
-        "{}{name}({rewritten_inner}){}",
-        &selector[..target.start],
-        &selector[close + 1..]
-    ))
+    rewrite_scoped_container_injection_target_with(selector, scope_id, rewrite_selector_branches)
 }
 
 fn scoped_container_injection_target(selector: &str) -> Option<SelectorMatch> {
@@ -5476,7 +5530,7 @@ fn rewrite_slotted_selector(selector: &str, scope_id: &str) -> Option<String> {
     if inner.is_empty() {
         rewritten.push_str(&format!("[{scope_id}-s]"));
     } else {
-        let scoped_inner = inject_scope_attribute(inner, &format!("{scope_id}-s"));
+        let scoped_inner = rewrite_slotted_inner_selector(inner, &format!("{scope_id}-s"));
         if trim_leading_combinator_space {
             rewritten.push_str(scoped_inner.trim_start());
         } else {
@@ -6222,6 +6276,31 @@ mod tests {
             rewrite_scoped_selectors(":where(:slotted(* + .foo)) { color: red; }", "data-v-test",),
             ":where(+ .foo[data-v-test-s]) { color: red; }"
         );
+        assert_eq!(
+            rewrite_scoped_selectors(
+                ":is(:slotted(* + .foo), :slotted(* ~ .bar)) { color: red; }",
+                "data-v-test",
+            ),
+            ":is(+ .foo[data-v-test-s],~ .bar[data-v-test-s]) { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(":slotted(:is(.foo, .bar)) { color: red; }", "data-v-test",),
+            ":is(.foo[data-v-test-s], .bar[data-v-test-s]) { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(
+                ":slotted(:where(.foo, .bar)) { color: red; }",
+                "data-v-test",
+            ),
+            ":where(.foo[data-v-test-s], .bar[data-v-test-s]) { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(
+                ".host :slotted(:is(.foo, .bar)) { color: red; }",
+                "data-v-test",
+            ),
+            ".host :is(.foo[data-v-test-s], .bar[data-v-test-s]) { color: red; }"
+        );
     }
 
     #[test]
@@ -6287,6 +6366,10 @@ mod tests {
             ":is(.foo[data-v-test], .bar[data-v-test]) { color: red; }"
         );
         assert_eq!(
+            rewrite_scoped_selectors(":is(.foo,.bar) { color: red; }", "data-v-test"),
+            ":is(.foo[data-v-test],.bar[data-v-test]) { color: red; }"
+        );
+        assert_eq!(
             rewrite_scoped_selectors(
                 ":where(.foo .child, .bar > .item) { color: red; }",
                 "data-v-test",
@@ -6327,6 +6410,42 @@ mod tests {
         assert_eq!(
             rewrite_scoped_selectors(":is(.foo) [x] { color: red; }", "data-v-test"),
             ":is(.foo) [x][data-v-test] { color: red; }"
+        );
+    }
+
+    #[test]
+    fn preserves_scoped_selector_list_spacing_like_vue3() {
+        assert_eq!(
+            rewrite_scoped_selectors(".a,.b { color: red; }", "data-v-test"),
+            ".a[data-v-test],.b[data-v-test] { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(".a,    .b { color: red; }", "data-v-test"),
+            ".a[data-v-test],    .b[data-v-test] { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(".a, :slotted(.b) { color: red; }", "data-v-test"),
+            ".a[data-v-test],.b[data-v-test-s] { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(".a, :deep(.b) { color: red; }", "data-v-test"),
+            ".a[data-v-test],[data-v-test] .b { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(".a, :global(.b) { color: red; }", "data-v-test"),
+            ".a[data-v-test],.b { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(".a, :not(.b) { color: red; }", "data-v-test"),
+            ".a[data-v-test],[data-v-test]:not(.b) { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(".a, :where(.b).active { color: red; }", "data-v-test"),
+            ".a[data-v-test], :where(.b).active[data-v-test] { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(".a, * .b { color: red; }", "data-v-test"),
+            ".a[data-v-test],.b[data-v-test] { color: red; }"
         );
     }
 

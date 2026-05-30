@@ -8859,7 +8859,7 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
         let mut compiler = SfcCompiler::new();
         let descriptor = compiler.parse(
             "style.vue",
-            r#"<style scoped>:slotted(* + .foo) { color: red; }:is(:slotted(* + .bar), .baz) { color: blue; }</style>"#,
+            r#"<style scoped>:slotted(* + .foo) { color: red; }:is(:slotted(* + .bar), .baz) { color: blue; }:slotted(:is(.alpha, .beta)) { color: green; }</style>"#,
         );
         let result = compiler.compile_style(
             &descriptor,
@@ -8874,6 +8874,32 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
         assert!(result
             .code
             .contains(":is(+ .bar[data-v-test-s], .baz[data-v-test])"));
+        assert!(result
+            .code
+            .contains(":is(.alpha[data-v-test-s], .beta[data-v-test-s])"));
+    }
+
+    #[test]
+    fn compile_style_preserves_scoped_selector_list_spacing() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "style.vue",
+            r#"<style scoped>.a,.b { color: red; }.a, :slotted(.b) { color: blue; }.a, :where(.b).active { color: green; }</style>"#,
+        );
+        let result = compiler.compile_style(
+            &descriptor,
+            SfcStyleCompileOptions {
+                id: Some("data-v-test".into()),
+                scoped: true,
+                ..SfcStyleCompileOptions::default()
+            },
+        );
+
+        assert!(result.code.contains(".a[data-v-test],.b[data-v-test]"));
+        assert!(result.code.contains(".a[data-v-test],.b[data-v-test-s]"));
+        assert!(result
+            .code
+            .contains(".a[data-v-test], :where(.b).active[data-v-test]"));
     }
 
     #[test]
