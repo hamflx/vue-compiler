@@ -1988,7 +1988,12 @@ fn rewrite_css_items(
             let has_direct_nested_rule = has_nested_block && css_block_has_direct_nested_rule(body);
             let selector_rewrite =
                 if matches!(context, CssBlockContext::Root | CssBlockContext::Container) {
-                    rewrite_selector_list_for_rule(prelude, scope_id, has_nested_block)
+                    rewrite_selector_list_for_rule(
+                        prelude,
+                        scope_id,
+                        has_nested_block,
+                        has_direct_nested_rule,
+                    )
                 } else {
                     SelectorRewriteResult {
                         selector: prelude.to_string(),
@@ -5025,7 +5030,7 @@ fn rewrite_animation_value(value: &str, keyframes: &[(String, String)]) -> Strin
 }
 
 fn rewrite_selector_list(selector: &str, scope_id: &str) -> String {
-    rewrite_selector_list_for_rule(selector, scope_id, false).selector
+    rewrite_selector_list_for_rule(selector, scope_id, false, false).selector
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -5038,13 +5043,19 @@ fn rewrite_selector_list_for_rule(
     selector: &str,
     scope_id: &str,
     rule_has_nested_block: bool,
+    rule_has_direct_nested_rule: bool,
 ) -> SelectorRewriteResult {
     let mut deep_passthrough = false;
     let parts = split_selector_list(selector);
     let mut rewritten = String::new();
     for (index, part) in parts.into_iter().enumerate() {
         let trimmed = part.trim();
-        let result = rewrite_single_selector_for_rule(trimmed, scope_id, rule_has_nested_block);
+        let result = rewrite_single_selector_for_rule(
+            trimmed,
+            scope_id,
+            rule_has_nested_block,
+            rule_has_direct_nested_rule,
+        );
         deep_passthrough |= result.deep_passthrough;
 
         if index > 0 {
@@ -5076,7 +5087,14 @@ fn selector_list_branch_preserves_leading_whitespace(original: &str, rewritten: 
     !match_selector_pseudo_function(
         original,
         0,
-        &[":global", "::v-global", ":slotted", "::v-slotted"],
+        &[
+            ":global",
+            "::v-global",
+            ":slotted",
+            "::v-slotted",
+            ":deep",
+            "::v-deep",
+        ],
     )
     .is_some()
 }
@@ -5130,29 +5148,44 @@ fn rewrite_scoped_container_injection_target_with(
 }
 
 fn rewrite_single_selector(selector: &str, scope_id: &str) -> String {
-    rewrite_single_selector_for_rule(selector, scope_id, false).selector
+    rewrite_single_selector_for_rule(selector, scope_id, false, false).selector
 }
 
 fn rewrite_single_selector_for_rule(
     selector: &str,
     scope_id: &str,
     rule_has_nested_block: bool,
+    rule_has_direct_nested_rule: bool,
 ) -> SelectorRewriteResult {
-    rewrite_single_selector_with_options(selector, scope_id, rule_has_nested_block, false)
+    rewrite_single_selector_with_options(
+        selector,
+        scope_id,
+        rule_has_nested_block,
+        rule_has_direct_nested_rule,
+        false,
+    )
 }
 
 fn rewrite_single_selector_branch(
     selector: &str,
     scope_id: &str,
     rule_has_nested_block: bool,
+    rule_has_direct_nested_rule: bool,
 ) -> SelectorRewriteResult {
-    rewrite_single_selector_with_options(selector, scope_id, rule_has_nested_block, true)
+    rewrite_single_selector_with_options(
+        selector,
+        scope_id,
+        rule_has_nested_block,
+        rule_has_direct_nested_rule,
+        true,
+    )
 }
 
 fn rewrite_single_selector_with_options(
     selector: &str,
     scope_id: &str,
     rule_has_nested_block: bool,
+    rule_has_direct_nested_rule: bool,
     in_container_branch: bool,
 ) -> SelectorRewriteResult {
     let normalized_selector = normalize_selector_comments(selector);
@@ -5183,9 +5216,12 @@ fn rewrite_single_selector_with_options(
             deep_passthrough: false,
         };
     }
-    if let Some(rewritten) =
-        rewrite_deep_container_selector_for_rule(selector, scope_id, rule_has_nested_block)
-    {
+    if let Some(rewritten) = rewrite_deep_container_selector_for_rule(
+        selector,
+        scope_id,
+        rule_has_nested_block,
+        rule_has_direct_nested_rule,
+    ) {
         return rewritten;
     }
     if let Some(deep) = find_top_level_pseudo_function(selector, &[":deep", "::v-deep"]) {
@@ -5331,6 +5367,7 @@ fn rewrite_deep_container_selector_for_rule(
     selector: &str,
     scope_id: &str,
     rule_has_nested_block: bool,
+    rule_has_direct_nested_rule: bool,
 ) -> Option<SelectorRewriteResult> {
     let names = [":is", ":where", ":not", ":has"];
     let container = find_top_level_pseudo_function(selector, &names)?;
@@ -5366,11 +5403,15 @@ fn rewrite_deep_container_selector_for_rule(
             .map(|branch| {
                 let branch_selector = format!("{prefix}{name}({branch}){suffix}");
                 if selector_has_deep(branch) {
-                    let result =
-                        rewrite_single_selector_branch(branch, scope_id, rule_has_nested_block);
+                    let result = rewrite_single_selector_branch(
+                        branch,
+                        scope_id,
+                        rule_has_nested_block,
+                        rule_has_direct_nested_rule,
+                    );
                     deep_passthrough = true;
                     let mut rewritten = format!("{prefix}{name}({}){suffix}", result.selector);
-                    if rule_has_nested_block {
+                    if rule_has_direct_nested_rule {
                         rewritten = inject_scope_after_container_pseudo(&rewritten, name, scope_id);
                     }
                     rewritten
@@ -5385,31 +5426,168 @@ fn rewrite_deep_container_selector_for_rule(
         });
     }
 
-    let mut deep_passthrough = false;
-    let rewritten_inner = branches
-        .into_iter()
-        .map(|branch| {
-            if selector_has_deep(branch) {
-                let result =
-                    rewrite_single_selector_branch(branch, scope_id, rule_has_nested_block);
-                deep_passthrough = true;
-                result.selector
-            } else {
-                inject_scope_attribute(branch, scope_id)
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
+    if has_scope_anchor && !rule_has_direct_nested_rule {
+        let rewritten_inner = rewrite_scope_anchored_deep_container_inner_branches(inner);
+        let rewritten = format!("{prefix}{name}({rewritten_inner}){suffix}");
+        return Some(SelectorRewriteResult {
+            selector: inject_scope_attribute(&rewritten, scope_id),
+            deep_passthrough: true,
+        });
+    }
+
+    let (rewritten_inner, deep_passthrough) = rewrite_scoped_deep_container_inner_branches(
+        inner,
+        scope_id,
+        rule_has_nested_block,
+        rule_has_direct_nested_rule,
+    );
     let mut rewritten = format!("{prefix}{name}({rewritten_inner}){suffix}");
     if has_scope_anchor {
         rewritten = inject_scope_attribute(&rewritten, scope_id);
-    } else if rule_has_nested_block && deep_passthrough {
+    } else if rule_has_direct_nested_rule && deep_passthrough {
         rewritten = inject_scope_after_container_pseudo(&rewritten, name, scope_id);
     }
     Some(SelectorRewriteResult {
         selector: rewritten,
         deep_passthrough,
     })
+}
+
+fn rewrite_scoped_deep_container_inner_branches(
+    inner: &str,
+    scope_id: &str,
+    rule_has_nested_block: bool,
+    rule_has_direct_nested_rule: bool,
+) -> (String, bool) {
+    let mut rewritten = String::new();
+    let mut deep_passthrough = false;
+    for (index, part) in split_selector_list(inner).into_iter().enumerate() {
+        let trimmed = part.trim();
+        if selector_has_deep(trimmed) {
+            deep_passthrough = true;
+        }
+        let result = if rule_has_direct_nested_rule {
+            rewrite_direct_nested_deep_container_branch(
+                trimmed,
+                scope_id,
+                rule_has_nested_block,
+                rule_has_direct_nested_rule,
+            )
+        } else {
+            rewrite_single_selector_branch(
+                trimmed,
+                scope_id,
+                rule_has_nested_block,
+                rule_has_direct_nested_rule,
+            )
+        };
+        if index > 0 {
+            rewritten.push(',');
+            if selector_list_branch_preserves_leading_whitespace(trimmed, &result.selector) {
+                rewritten.push_str(selector_leading_whitespace(part));
+            }
+        }
+        rewritten.push_str(&result.selector);
+    }
+    (rewritten, deep_passthrough)
+}
+
+fn rewrite_direct_nested_deep_container_branch(
+    selector: &str,
+    scope_id: &str,
+    rule_has_nested_block: bool,
+    rule_has_direct_nested_rule: bool,
+) -> SelectorRewriteResult {
+    if let Some(slotted) = rewrite_slotted_selector_with_prefix_scope(selector, scope_id) {
+        return SelectorRewriteResult {
+            selector: slotted,
+            deep_passthrough: false,
+        };
+    }
+    rewrite_single_selector_branch(
+        selector,
+        scope_id,
+        rule_has_nested_block,
+        rule_has_direct_nested_rule,
+    )
+}
+
+fn rewrite_scope_anchored_deep_container_inner_branches(inner: &str) -> String {
+    let mut rewritten = String::new();
+    for (index, part) in split_selector_list(inner).into_iter().enumerate() {
+        let trimmed = part.trim();
+        let branch = rewrite_scope_anchored_deep_container_branch(trimmed);
+        if index > 0 {
+            rewritten.push(',');
+            if selector_list_branch_preserves_leading_whitespace(trimmed, &branch) {
+                rewritten.push_str(selector_leading_whitespace(part));
+            }
+        }
+        rewritten.push_str(&branch);
+    }
+    rewritten
+}
+
+fn rewrite_scope_anchored_deep_container_branch(selector: &str) -> String {
+    let names = [
+        ":global",
+        "::v-global",
+        ":slotted",
+        "::v-slotted",
+        ":deep",
+        "::v-deep",
+    ];
+    let Some(special) = find_top_level_pseudo_function(selector, &names) else {
+        return selector.to_string();
+    };
+    let Some((open, close)) = special.parens else {
+        return selector.to_string();
+    };
+    let name = matched_selector_name(selector, special.start, &names).unwrap_or_default();
+    let inner = first_selector_branch(selector[open + 1..close].trim()).trim();
+    if matches!(name, ":global" | "::v-global") {
+        return inner.to_string();
+    }
+    if matches!(name, ":slotted" | "::v-slotted") {
+        return replace_slotted_pseudo_without_scope(selector, special, inner);
+    }
+    replace_deep_pseudo_without_scope(selector, special, inner)
+}
+
+fn replace_slotted_pseudo_without_scope(
+    selector: &str,
+    slotted: SelectorMatch,
+    inner: &str,
+) -> String {
+    let Some((_, close)) = slotted.parens else {
+        return selector.to_string();
+    };
+    let prefix = &selector[..slotted.start];
+    let inner = strip_leading_universal_selector(inner);
+    let inner = if prefix.is_empty() {
+        inner.trim_start()
+    } else {
+        inner
+    };
+    format!("{prefix}{inner}{}", &selector[close + 1..])
+}
+
+fn replace_deep_pseudo_without_scope(selector: &str, deep: SelectorMatch, inner: &str) -> String {
+    let Some((_, close)) = deep.parens else {
+        return selector.to_string();
+    };
+    let mut suffix = String::new();
+    suffix.push_str(inner);
+    suffix.push_str(&selector[close + 1..]);
+    let suffix = suffix.trim_start();
+    let prefix = selector[..deep.start].trim_end();
+    if suffix.is_empty() {
+        prefix.to_string()
+    } else if prefix.is_empty() {
+        format!(" {suffix}")
+    } else {
+        format!("{prefix} {suffix}")
+    }
 }
 
 fn selector_scope_anchor_before(selector: &str, end: usize) -> bool {
@@ -5566,6 +5744,35 @@ fn rewrite_slotted_selector(selector: &str, scope_id: &str) -> Option<String> {
     }
     rewritten.push_str(&selector[close + 1..]);
     Some(rewritten)
+}
+
+fn rewrite_slotted_selector_with_prefix_scope(selector: &str, scope_id: &str) -> Option<String> {
+    let slotted = find_top_level_pseudo_function(selector, &[":slotted", "::v-slotted"])?;
+    let (open, close) = slotted.parens?;
+    let inner = first_selector_branch(selector[open + 1..close].trim()).trim();
+    let prefix = &selector[..slotted.start];
+    let prefix_trimmed = prefix.trim_end();
+    let prefix_spacing = &prefix[prefix_trimmed.len()..];
+    let scoped_prefix = if prefix_trimmed.is_empty() {
+        format!("[{scope_id}]")
+    } else {
+        inject_scope_attribute(prefix_trimmed, scope_id)
+    };
+    let slotted_scope = format!("{scope_id}-s");
+    let scoped_inner = if inner.is_empty() {
+        format!("[{slotted_scope}]")
+    } else {
+        rewrite_slotted_inner_selector(strip_leading_universal_selector(inner), &slotted_scope)
+    };
+    let inner = if prefix_trimmed.is_empty() {
+        scoped_inner.trim_start()
+    } else {
+        scoped_inner.as_str()
+    };
+    Some(format!(
+        "{scoped_prefix}{prefix_spacing}{inner}{}",
+        &selector[close + 1..]
+    ))
 }
 
 fn split_selector_list(selector: &str) -> Vec<&str> {
@@ -6815,6 +7022,51 @@ mod tests {
                 "data-v-test",
             ),
             ":has([data-v-test] .foo) .baz, :has(.bar) .baz[data-v-test] { color: red; }"
+        );
+    }
+
+    #[test]
+    fn rewrites_deep_container_special_branches_like_vue3() {
+        let options = StyleCompileOptions {
+            id: Some("data-v-test".into()),
+            scoped: true,
+            ..StyleCompileOptions::default()
+        };
+
+        let mixed = compile_style(
+            ":is(:slotted(.foo), :deep(.bar), :global(.baz), .qux) { color: red; }",
+            options.clone(),
+        );
+        assert_eq!(
+            mixed.code,
+            ":is(.foo[data-v-test-s],[data-v-test] .bar,.baz, .qux[data-v-test]) { color: red;\n}"
+        );
+
+        let scoped_anchor = compile_style(
+            ".host:is(:deep(.foo), :global(.bar), :slotted(.baz), .qux) { color: red; }",
+            options.clone(),
+        );
+        assert_eq!(
+            scoped_anchor.code,
+            ".host[data-v-test]:is( .foo,.bar,.baz, .qux) { color: red;\n}"
+        );
+
+        let nested_at_rule = compile_style(
+            ":is(:deep(.foo), :slotted(.baz), .qux) { @media (min-width:1px){ .child { color:red; } } }",
+            options.clone(),
+        );
+        assert_eq!(
+            nested_at_rule.code,
+            ":is([data-v-test] .foo,.baz[data-v-test-s], .qux[data-v-test]) {\n@media (min-width:1px){\n.child { color:red;\n}\n}\n}"
+        );
+
+        let direct_nested = compile_style(
+            ":is(:deep(.foo), :global(.bar), :slotted(.baz), .qux) { color: blue; .child { color:red; } }",
+            options,
+        );
+        assert_eq!(
+            direct_nested.code,
+            ":is([data-v-test] .foo,.bar,[data-v-test].baz[data-v-test-s], .qux[data-v-test])[data-v-test] { color: blue;\n.child { color:red;\n}\n}"
         );
     }
 
