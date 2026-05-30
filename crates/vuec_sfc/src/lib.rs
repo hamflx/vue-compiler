@@ -8855,6 +8855,28 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
     }
 
     #[test]
+    fn compile_style_rewrites_slotted_universal_combinators() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "style.vue",
+            r#"<style scoped>:slotted(* + .foo) { color: red; }:is(:slotted(* + .bar), .baz) { color: blue; }</style>"#,
+        );
+        let result = compiler.compile_style(
+            &descriptor,
+            SfcStyleCompileOptions {
+                id: Some("data-v-test".into()),
+                scoped: true,
+                ..SfcStyleCompileOptions::default()
+            },
+        );
+
+        assert!(result.code.contains("+ .foo[data-v-test-s]"));
+        assert!(result
+            .code
+            .contains(":is(+ .bar[data-v-test-s], .baz[data-v-test])"));
+    }
+
+    #[test]
     fn compile_style_emits_vue3_deprecated_deep_warnings() {
         let mut compiler = SfcCompiler::new();
         let descriptor = compiler.parse(

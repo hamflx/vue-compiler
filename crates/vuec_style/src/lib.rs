@@ -5470,11 +5470,18 @@ fn rewrite_slotted_selector(selector: &str, scope_id: &str) -> Option<String> {
     let (open, close) = slotted.parens?;
     let inner = first_selector_branch(selector[open + 1..close].trim()).trim();
     let mut rewritten = String::new();
-    rewritten.push_str(&selector[..slotted.start]);
+    let prefix = &selector[..slotted.start];
+    rewritten.push_str(prefix);
+    let trim_leading_combinator_space = prefix.is_empty();
     if inner.is_empty() {
         rewritten.push_str(&format!("[{scope_id}-s]"));
     } else {
-        rewritten.push_str(&inject_scope_attribute(inner, &format!("{scope_id}-s")));
+        let scoped_inner = inject_scope_attribute(inner, &format!("{scope_id}-s"));
+        if trim_leading_combinator_space {
+            rewritten.push_str(scoped_inner.trim_start());
+        } else {
+            rewritten.push_str(&scoped_inner);
+        }
     }
     rewritten.push_str(&selector[close + 1..]);
     Some(rewritten)
@@ -6199,6 +6206,21 @@ mod tests {
         assert_eq!(
             rewrite_scoped_selectors(".a :slotted(* + .foo) { color: red; }", "data-v-test"),
             ".a  + .foo[data-v-test-s] { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(":slotted(* + .foo) { color: red; }", "data-v-test"),
+            "+ .foo[data-v-test-s] { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(
+                ":is(:slotted(* + .foo), .bar) { color: red; }",
+                "data-v-test",
+            ),
+            ":is(+ .foo[data-v-test-s], .bar[data-v-test]) { color: red; }"
+        );
+        assert_eq!(
+            rewrite_scoped_selectors(":where(:slotted(* + .foo)) { color: red; }", "data-v-test",),
+            ":where(+ .foo[data-v-test-s]) { color: red; }"
         );
     }
 
