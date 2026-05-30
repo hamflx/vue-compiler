@@ -8908,7 +8908,7 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
         let mut compiler = SfcCompiler::new();
         let descriptor = compiler.parse(
             "style.vue",
-            r#"<style scoped>:deep(.foo, .bar) { color: blue; .child { color: red; } @media (min-width: 1px) { .inner { color: green; } } }</style>"#,
+            r#"<style scoped>:deep(.foo, .bar) { color: blue; .child { color: red; } @media (min-width: 1px) { .inner { color: green; } } }:deep(.anchor) { color: blue; & .child { color: red; } }</style>"#,
         );
         let result = compiler.compile_style(
             &descriptor,
@@ -8924,6 +8924,9 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
         assert!(result.code.contains(".child { color: red;"));
         assert!(result.code.contains("@media (min-width: 1px) {"));
         assert!(result.code.contains(".inner { color: green;"));
+        assert!(result
+            .code
+            .contains("[data-v-test] .anchor { color: blue;\n& .child { color: red;"));
         assert!(!result.code.contains(".bar"));
         assert!(!result.code.contains(".child[data-v-test]"));
         assert!(!result.code.contains(".inner[data-v-test]"));

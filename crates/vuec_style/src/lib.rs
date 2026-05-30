@@ -2055,7 +2055,11 @@ fn rewrite_css_items(
                     rewrite_deep_passthrough_body(body, scope_id, keyframes)
                 };
                 if css_block_starts_with_block(&rewritten_body) {
-                    output.push('\n');
+                    if css_block_starts_with_commented_block(&rewritten_body) {
+                        output.push(' ');
+                    } else {
+                        output.push('\n');
+                    }
                     output.push_str(rewritten_body.trim());
                     output.push('\n');
                 } else {
@@ -2133,7 +2137,8 @@ fn rewrite_deep_passthrough_body(
     scope_id: &str,
     keyframes: &[(String, String)],
 ) -> String {
-    rewrite_css_items(body, scope_id, keyframes, CssBlockContext::Deep)
+    let rewritten = rewrite_css_items(body, scope_id, keyframes, CssBlockContext::Deep);
+    normalize_deep_passthrough_parent_anchor_blocks(&rewritten)
 }
 
 fn rewrite_deep_passthrough_wrapped_nested_body(
@@ -2245,6 +2250,86 @@ fn rewrite_deep_passthrough_wrapped_nested_body(
     output
 }
 
+fn normalize_deep_passthrough_parent_anchor_blocks(source: &str) -> String {
+    let mut output = String::new();
+    let mut state = CssScannerState::Normal;
+    let mut depth = 0usize;
+    let mut index = 0usize;
+    while index < source.len() {
+        if matches!(state, CssScannerState::Normal) && source[index..].starts_with("/*") {
+            let Some(end_offset) = source[index + 2..].find("*/") else {
+                output.push_str(&source[index..]);
+                break;
+            };
+            let end = index + 2 + end_offset + 2;
+            output.push_str(&source[index..end]);
+            index = end;
+            continue;
+        }
+
+        let ch = source[index..].chars().next().expect("valid char boundary");
+        match state {
+            CssScannerState::Normal => match ch {
+                '\'' => state = CssScannerState::SingleQuote,
+                '"' => state = CssScannerState::DoubleQuote,
+                '{' => depth += 1,
+                '}' => depth = depth.saturating_sub(1),
+                '&' if depth == 0 && css_top_level_selector_block_starts_at(source, index) => {
+                    trim_trailing_horizontal_whitespace(&mut output);
+                    if !output.is_empty() && !output.ends_with('\n') {
+                        output.push('\n');
+                    }
+                }
+                _ => {}
+            },
+            CssScannerState::SingleQuote => {
+                if ch == '\\' {
+                    output.push(ch);
+                    index += ch.len_utf8();
+                    if index < source.len() {
+                        let escaped = source[index..].chars().next().expect("valid char boundary");
+                        output.push(escaped);
+                        index += escaped.len_utf8();
+                    }
+                    continue;
+                }
+                if ch == '\'' {
+                    state = CssScannerState::Normal;
+                }
+            }
+            CssScannerState::DoubleQuote => {
+                if ch == '\\' {
+                    output.push(ch);
+                    index += ch.len_utf8();
+                    if index < source.len() {
+                        let escaped = source[index..].chars().next().expect("valid char boundary");
+                        output.push(escaped);
+                        index += escaped.len_utf8();
+                    }
+                    continue;
+                }
+                if ch == '"' {
+                    state = CssScannerState::Normal;
+                }
+            }
+            CssScannerState::BlockComment => {}
+        }
+        output.push(ch);
+        index += ch.len_utf8();
+    }
+    output
+}
+
+fn css_top_level_selector_block_starts_at(source: &str, index: usize) -> bool {
+    matches!(find_next_css_delimiter(source, index), Some((_, '{')))
+}
+
+fn trim_trailing_horizontal_whitespace(output: &mut String) {
+    while output.ends_with([' ', '\t', '\r']) {
+        output.pop();
+    }
+}
+
 fn rewrite_deep_passthrough_selector(selector: &str) -> String {
     rewrite_scope_anchored_deep_container_branch(selector)
 }
@@ -2279,6 +2364,22 @@ fn css_block_starts_with_block(body: &str) -> bool {
         return false;
     };
     delimiter_ch == '{'
+}
+
+fn css_block_starts_with_commented_block(body: &str) -> bool {
+    let mut cursor = skip_css_whitespace(body, 0);
+    if cursor >= body.len() || !body[cursor..].starts_with("/*") {
+        return false;
+    }
+    let Some(end_offset) = body[cursor + 2..].find("*/") else {
+        return false;
+    };
+    cursor += 2 + end_offset + 2;
+    cursor = skip_css_whitespace(body, cursor);
+    if cursor >= body.len() {
+        return false;
+    }
+    matches!(find_next_css_delimiter(body, cursor), Some((_, '{')))
 }
 
 fn css_block_has_nested_block(body: &str) -> bool {
@@ -7498,6 +7599,33 @@ mod tests {
             scoped: true,
             ..StyleCompileOptions::default()
         };
+
+        let anchor = compile_style(
+            ":deep(.d) { color: blue; & .child { color: red; } }",
+            options.clone(),
+        );
+        assert_eq!(
+            anchor.code,
+            "[data-v-test] .d { color: blue;\n& .child { color: red;\n}\n}"
+        );
+
+        let commented_anchor = compile_style(
+            ":deep(.d) { color: blue; /*x*/ &.active { color: red; } }",
+            options.clone(),
+        );
+        assert_eq!(
+            commented_anchor.code,
+            "[data-v-test] .d { color: blue; /*x*/\n&.active { color: red;\n}\n}"
+        );
+
+        let container_anchor = compile_style(
+            ".host :is(:deep(.d), .n):hover { color: blue; & .child { color: red; } }",
+            options.clone(),
+        );
+        assert_eq!(
+            container_anchor.code,
+            ".host[data-v-test] :is([data-v-test] .d, .n[data-v-test]):hover { color: blue;\n& .child { color: red;\n}\n}"
+        );
 
         let deep = compile_style(
             ":deep(.d) { @media (min-width:1px){ :deep(.inner) { color:red; } :global(.g) { color:blue; } :slotted(.s) { color:green; } } }",
