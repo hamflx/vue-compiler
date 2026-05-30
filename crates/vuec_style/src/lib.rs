@@ -2861,10 +2861,7 @@ fn compile_css_modules_file(
         scope_behaviour,
         active_paths,
     );
-    let (source, values) = prepare_css_module_values(source);
-    for (name, value) in values {
-        context.set_raw_export_values(&name, vec![value]);
-    }
+    let source = prepare_css_module_values(source, &mut context);
     let code = rewrite_css_modules_items(&source, &mut context, CssBlockContext::Root);
     let code = context.finish_code(code);
     let raw_modules = context.raw_modules();
@@ -2902,6 +2899,8 @@ struct CssModulesContext<'a> {
     raw_export_index: BTreeMap<String, usize>,
     import_symbols: BTreeMap<String, String>,
     imported_modules: BTreeMap<String, CssModulesCompileResult>,
+    value_placeholders: BTreeMap<String, String>,
+    next_value_placeholder: usize,
     prepended_paths: BTreeSet<String>,
     prepended_css: Vec<String>,
     diagnostics: Vec<Diagnostic>,
@@ -2931,6 +2930,8 @@ impl<'a> CssModulesContext<'a> {
             raw_export_index: BTreeMap::new(),
             import_symbols: BTreeMap::new(),
             imported_modules: BTreeMap::new(),
+            value_placeholders: BTreeMap::new(),
+            next_value_placeholder: 0,
             prepended_paths: BTreeSet::new(),
             prepended_css: Vec::new(),
             diagnostics: Vec::new(),
@@ -3027,9 +3028,6 @@ impl<'a> CssModulesContext<'a> {
     }
 
     fn finish_code(&self, code: String) -> String {
-        if self.prepended_css.is_empty() {
-            return code;
-        }
         let mut output = String::new();
         for css in &self.prepended_css {
             if css.is_empty() {
@@ -3044,6 +3042,28 @@ impl<'a> CssModulesContext<'a> {
             output.push('\n');
         }
         output.push_str(&code);
+        self.replace_value_placeholders(output)
+    }
+
+    fn import_value_placeholder(&mut self, value: String) -> String {
+        let placeholder = format!("__vuec_value_{}", self.next_value_placeholder);
+        self.next_value_placeholder += 1;
+        self.value_placeholders.insert(placeholder.clone(), value);
+        placeholder
+    }
+
+    fn value_placeholder_replacement(&self, placeholder: &str) -> Option<&str> {
+        self.value_placeholders.get(placeholder).map(String::as_str)
+    }
+
+    fn replace_value_placeholders(&self, source: String) -> String {
+        if self.value_placeholders.is_empty() {
+            return source;
+        }
+        let mut output = source;
+        for (placeholder, value) in &self.value_placeholders {
+            output = output.replace(placeholder, value);
+        }
         output
     }
 
@@ -3117,10 +3137,11 @@ struct CssModuleExport {
     values: Vec<String>,
 }
 
-fn prepare_css_module_values(source: &str) -> (String, Vec<(String, String)>) {
+fn prepare_css_module_values(source: &str, context: &mut CssModulesContext<'_>) -> String {
     let mut output = String::with_capacity(source.len());
-    let mut values = Vec::new();
-    let mut value_map = BTreeMap::new();
+    let mut replacements = BTreeMap::new();
+    let mut exports = BTreeMap::new();
+    let mut import_index = 0usize;
     let mut index = 0usize;
     let mut drop_leading_whitespace = false;
     while index < source.len() {
@@ -3153,15 +3174,31 @@ fn prepare_css_module_values(source: &str) -> (String, Vec<(String, String)>) {
         {
             if let Some(end) = css_module_value_statement_end(source, index + "@value".len()) {
                 let statement = &source[index..end];
-                if let Some((name, value)) =
-                    parse_css_module_local_value_statement(statement, &value_map)
+                if let Some(import) = parse_css_module_value_import_statement(statement) {
+                    if register_css_module_value_import(
+                        import,
+                        context,
+                        &mut replacements,
+                        &mut exports,
+                        &mut import_index,
+                    ) {
+                        if output.trim().is_empty() {
+                            output.clear();
+                            drop_leading_whitespace = true;
+                        }
+                        index = end;
+                        continue;
+                    }
+                } else if let Some(value) =
+                    parse_css_module_local_value_statement(statement, &replacements, &exports)
                 {
                     if output.trim().is_empty() {
                         output.clear();
                         drop_leading_whitespace = true;
                     }
-                    value_map.insert(name.clone(), value.clone());
-                    values.push((name, value));
+                    replacements.insert(value.name.clone(), value.replacement.clone());
+                    exports.insert(value.name.clone(), value.export.clone());
+                    context.set_raw_export_values(&value.name, vec![value.export]);
                     index = end;
                     continue;
                 }
@@ -3170,7 +3207,7 @@ fn prepare_css_module_values(source: &str) -> (String, Vec<(String, String)>) {
         output.push(ch);
         index += ch.len_utf8();
     }
-    (replace_css_module_values(&output, &value_map), values)
+    replace_css_module_values(&output, &replacements)
 }
 
 fn css_module_value_keyword_boundary(source: &str, index: usize) -> bool {
@@ -3231,10 +3268,30 @@ fn skip_css_string(source: &str, start: usize) -> usize {
     source.len()
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CssModuleLocalValue {
+    name: String,
+    replacement: String,
+    export: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CssModuleValueImport<'a> {
+    import: &'a str,
+    specs: Vec<CssModuleValueImportSpec<'a>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CssModuleValueImportSpec<'a> {
+    remote: &'a str,
+    local: &'a str,
+}
+
 fn parse_css_module_local_value_statement(
     statement: &str,
-    values: &BTreeMap<String, String>,
-) -> Option<(String, String)> {
+    replacements: &BTreeMap<String, String>,
+    exports: &BTreeMap<String, String>,
+) -> Option<CssModuleLocalValue> {
     let body = statement.strip_prefix("@value")?.strip_suffix(';')?.trim();
     let colon = find_top_level_colon(body)?;
     let name = body[..colon].trim();
@@ -3242,7 +3299,102 @@ fn parse_css_module_local_value_statement(
     if !is_css_module_value_name(name) || value.is_empty() {
         return None;
     }
-    Some((name.to_string(), replace_css_module_values(value, values)))
+    Some(CssModuleLocalValue {
+        name: name.to_string(),
+        replacement: replace_css_module_values(value, replacements),
+        export: replace_css_module_values(value, exports),
+    })
+}
+
+fn parse_css_module_value_import_statement(statement: &str) -> Option<CssModuleValueImport<'_>> {
+    let body = statement.strip_prefix("@value")?.strip_suffix(';')?.trim();
+    if find_top_level_colon(body).is_some() {
+        return None;
+    }
+    let from = find_css_module_value_from_keyword(body)?;
+    let specs = body[..from].trim();
+    let import = body[from + "from".len()..].trim();
+    if specs.is_empty() || import.is_empty() {
+        return None;
+    }
+    let specs = split_selector_list(specs)
+        .into_iter()
+        .map(|spec| parse_css_module_value_import_spec(spec.trim()))
+        .collect::<Option<Vec<_>>>()?;
+    (!specs.is_empty()).then_some(CssModuleValueImport { import, specs })
+}
+
+fn find_css_module_value_from_keyword(source: &str) -> Option<usize> {
+    let mut index = 0usize;
+    while index < source.len() {
+        if source[index..].starts_with("/*") {
+            let end_offset = source[index + 2..].find("*/")?;
+            index += 2 + end_offset + 2;
+            continue;
+        }
+        if source[index..].starts_with(['\'', '"']) {
+            index = skip_css_string(source, index);
+            continue;
+        }
+        if source[index..].starts_with("from")
+            && source[..index]
+                .chars()
+                .next_back()
+                .is_none_or(|ch| !is_css_module_identifier_continue(ch))
+            && css_module_value_keyword_boundary(source, index + "from".len())
+        {
+            return Some(index);
+        }
+        let ch = source[index..].chars().next()?;
+        index += ch.len_utf8();
+    }
+    None
+}
+
+fn parse_css_module_value_import_spec(spec: &str) -> Option<CssModuleValueImportSpec<'_>> {
+    let tokens = spec.split_whitespace().collect::<Vec<_>>();
+    match tokens.as_slice() {
+        [name] if is_css_module_value_name(name) => Some(CssModuleValueImportSpec {
+            remote: name,
+            local: name,
+        }),
+        [remote, keyword, local]
+            if keyword.eq_ignore_ascii_case("as")
+                && is_css_module_value_name(remote)
+                && is_css_module_value_name(local) =>
+        {
+            Some(CssModuleValueImportSpec { remote, local })
+        }
+        _ => None,
+    }
+}
+
+fn register_css_module_value_import(
+    import: CssModuleValueImport<'_>,
+    context: &mut CssModulesContext<'_>,
+    replacements: &mut BTreeMap<String, String>,
+    exports: &mut BTreeMap<String, String>,
+    import_index: &mut usize,
+) -> bool {
+    let Some(result) = context.load_imported_module(import.import) else {
+        return false;
+    };
+    for spec in import.specs {
+        let (replacement, export) = if let Some(value) = result.raw_modules.get(spec.remote) {
+            (value.clone(), value.clone())
+        } else {
+            (
+                format!("i__const_{}_{}", spec.local, *import_index),
+                "undefined".to_string(),
+            )
+        };
+        let replacement = context.import_value_placeholder(replacement);
+        replacements.insert(spec.local.to_string(), replacement);
+        exports.insert(spec.local.to_string(), export.clone());
+        context.set_raw_export_values(spec.local, vec![export]);
+        *import_index += 1;
+    }
+    true
 }
 
 fn is_css_module_value_name(name: &str) -> bool {
@@ -3598,6 +3750,16 @@ fn rewrite_css_module_default_segment(
     let mut cursor = 0usize;
     while let Some(token) = find_next_css_module_selector_token(segment, cursor) {
         output.push_str(&segment[cursor..token.start]);
+        if let Some(replacement) = context.value_placeholder_replacement(token.name) {
+            if replacement.starts_with('.') || replacement.starts_with('#') {
+                output.push_str(replacement);
+            } else {
+                output.push(token.sigil);
+                output.push_str(replacement);
+            }
+            cursor = token.end;
+            continue;
+        }
         let scoped = context.scoped_name(token.name);
         context.register_local(token.name, &scoped);
         output.push(token.sigil);
@@ -3837,6 +3999,9 @@ fn rewrite_css_module_animation_token(
     if let Some(local) = parse_css_module_animation_function(token, "local") {
         return context.scoped_local_value(local);
     }
+    if let Some(replacement) = context.value_placeholder_replacement(token) {
+        return replacement.to_string();
+    }
     if !context.is_local_default()
         || context.import_symbol_value(token).is_some()
         || !is_css_module_animation_identifier(token)
@@ -4073,6 +4238,8 @@ fn css_module_composed_values(
                 for value in values {
                     push_unique_css_module_value(&mut composed, value);
                 }
+            } else if let Some(value) = context.value_placeholder_replacement(class_name) {
+                push_unique_css_module_value(&mut composed, value.to_string());
             } else if let Some(value) = context.import_symbol_value(class_name) {
                 push_unique_css_module_value(&mut composed, value);
             } else if class_name.starts_with('"') || class_name.starts_with('\'') {
@@ -8956,6 +9123,53 @@ mod tests {
         assert_eq!(modules.get("primary").map(String::as_str), Some("red"));
         assert!(result.code.contains("color: primary"));
         assert!(result.code.contains("background: red"));
+    }
+
+    #[test]
+    fn compiles_css_modules_value_imports_like_official() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let dep = dir.path().join("tokens.css");
+        std::fs::write(
+            &dep,
+            "@value primary: red; @value query: (min-width: 1px); .remote { color: primary; }",
+        )
+        .expect("write dep");
+        let entry = dir.path().join("entry.css");
+        let result = compile_style(
+            r#"@value primary, query, remote as external, missing from "./tokens.css";
+@value accent: primary;
+@media query { .button { composes: external; color: accent; outline-color: missing; } }
+.external { border-color: primary; }"#,
+            StyleCompileOptions {
+                id: Some("test".into()),
+                filename: Some(entry.to_string_lossy().to_string()),
+                modules: true,
+                ..StyleCompileOptions::default()
+            },
+        );
+        let modules = result.modules.expect("css modules map");
+        let external = modules.get("external").expect("external export");
+
+        assert_eq!(modules.get("primary").map(String::as_str), Some("red"));
+        assert_eq!(modules.get("accent").map(String::as_str), Some("red"));
+        assert_eq!(
+            modules.get("query").map(String::as_str),
+            Some("(min-width: 1px)")
+        );
+        assert_eq!(
+            modules.get("missing").map(String::as_str),
+            Some("undefined")
+        );
+        assert!(external.contains("_remote_"));
+        assert!(modules
+            .get("button")
+            .is_some_and(|value| value.contains("_button_") && value.contains(external)));
+        assert!(!result.code.contains("@value"));
+        assert!(!result.code.contains("_external_"));
+        assert!(result.code.contains("@media (min-width: 1px)"));
+        assert!(result.code.contains("color: red"));
+        assert!(result.code.contains("outline-color: i__const_missing_3"));
+        assert!(result.code.contains("border-color: red"));
     }
 
     #[test]

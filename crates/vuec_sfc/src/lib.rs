@@ -8339,6 +8339,33 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
     }
 
     #[test]
+    fn compile_style_returns_css_modules_imported_values() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join("tokens.css"),
+            "@value primary: red; .remote { color: primary; }",
+        )
+        .expect("write dep");
+        let filename = dir.path().join("modules.vue");
+        let mut compiler = SfcCompiler::new();
+        let source = r#"<style module>@value primary, remote as external from "./tokens.css"; .button { composes: external; color: primary; } .external { border-color: primary; }</style>"#;
+        let descriptor = compiler.parse(filename.to_string_lossy().to_string(), source);
+        let result = compiler.compile_style(&descriptor, SfcStyleCompileOptions::default());
+        let modules = result.modules.expect("css modules");
+        let external = modules.get("external").expect("external export");
+
+        assert_eq!(modules.get("primary").map(String::as_str), Some("red"));
+        assert!(external.contains("_remote_"));
+        assert!(modules
+            .get("button")
+            .is_some_and(|value| value.contains("_button_") && value.contains(external)));
+        assert!(!result.code.contains("@value"));
+        assert!(!result.code.contains("_external_"));
+        assert!(result.code.contains("color: red"));
+        assert!(result.code.contains("border-color: red"));
+    }
+
+    #[test]
     fn compile_style_forwards_css_modules_dashes_convention() {
         let mut compiler = SfcCompiler::new();
         let source = r#"<style module>.foo-bar { color: red }\n.foo_bar { color: blue }</style>"#;
