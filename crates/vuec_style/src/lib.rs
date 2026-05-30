@@ -5432,30 +5432,61 @@ fn rewrite_deep_container_selector_for_rule(
 
     if should_split {
         let mut deep_passthrough = false;
-        let selectors = branches
-            .into_iter()
-            .map(|branch| {
-                let branch_selector = format!("{prefix}{name}({branch}){suffix}");
-                if selector_has_deep(branch) {
-                    let result = rewrite_single_selector_branch(
+        let mut selector = String::new();
+        for (index, part) in split_selector_list(inner).into_iter().enumerate() {
+            let branch = part.trim();
+            let branch_selector = format!("{prefix}{name}({branch}){suffix}");
+            let rewritten = if selector_has_deep(branch) {
+                let result = rewrite_single_selector_branch(
+                    branch,
+                    scope_id,
+                    rule_has_nested_block,
+                    rule_has_direct_nested_rule,
+                );
+                deep_passthrough = true;
+                let mut rewritten = format!("{prefix}{name}({}){suffix}", result.selector);
+                if rule_has_direct_nested_rule {
+                    rewritten = inject_scope_after_container_pseudo(&rewritten, name, scope_id);
+                }
+                rewritten
+            } else if matches!(name, ":is" | ":where") && selector_suffix_is_pseudo_only(suffix) {
+                let result = if rule_has_direct_nested_rule {
+                    rewrite_direct_nested_deep_container_branch(
                         branch,
                         scope_id,
                         rule_has_nested_block,
                         rule_has_direct_nested_rule,
-                    );
-                    deep_passthrough = true;
-                    let mut rewritten = format!("{prefix}{name}({}){suffix}", result.selector);
-                    if rule_has_direct_nested_rule {
-                        rewritten = inject_scope_after_container_pseudo(&rewritten, name, scope_id);
-                    }
-                    rewritten
+                    )
                 } else {
-                    inject_scope_attribute(&branch_selector, scope_id)
+                    rewrite_single_selector_branch(
+                        branch,
+                        scope_id,
+                        rule_has_nested_block,
+                        rule_has_direct_nested_rule,
+                    )
+                };
+                format!("{prefix}{name}({}){suffix}", result.selector)
+            } else {
+                inject_scope_attribute(&branch_selector, scope_id)
+            };
+            if index > 0 {
+                selector.push(',');
+                let preserve_leading = if matches!(name, ":is" | ":where")
+                    && selector_suffix_is_pseudo_only(suffix)
+                    && !selector_has_deep(branch)
+                {
+                    !branch.is_empty() && !rewritten.starts_with('[')
+                } else {
+                    selector_list_branch_preserves_leading_whitespace(branch, &rewritten)
+                };
+                if preserve_leading {
+                    selector.push_str(selector_leading_whitespace(part));
                 }
-            })
-            .collect::<Vec<_>>();
+            }
+            selector.push_str(&rewritten);
+        }
         return Some(SelectorRewriteResult {
-            selector: selectors.join(", "),
+            selector,
             deep_passthrough,
         });
     }
@@ -5586,6 +5617,48 @@ fn rewrite_scope_anchored_deep_container_branch(selector: &str) -> String {
         return replace_slotted_pseudo_without_scope(selector, special, inner);
     }
     replace_deep_pseudo_without_scope(selector, special, inner)
+}
+
+fn selector_suffix_is_pseudo_only(suffix: &str) -> bool {
+    let suffix = suffix.trim();
+    if suffix.is_empty() {
+        return false;
+    }
+    let mut index = 0usize;
+    while index < suffix.len() {
+        let Some(ch) = suffix[index..].chars().next() else {
+            break;
+        };
+        if ch != ':' {
+            return false;
+        }
+        index += ch.len_utf8();
+        if suffix[index..].starts_with(':') {
+            index += ':'.len_utf8();
+        }
+        let name_start = index;
+        while index < suffix.len() {
+            let Some(ch) = suffix[index..].chars().next() else {
+                break;
+            };
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                index += ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+        if index == name_start {
+            return false;
+        }
+        let open = skip_selector_whitespace(suffix, index);
+        if suffix[open..].starts_with('(') {
+            let Some(close) = find_matching_selector_paren(suffix, open) else {
+                return false;
+            };
+            index = close + 1;
+        }
+    }
+    index == suffix.len()
 }
 
 fn replace_slotted_pseudo_without_scope(
@@ -7101,6 +7174,45 @@ mod tests {
         assert_eq!(
             direct_nested.code,
             ":is([data-v-test] .foo,.bar,[data-v-test].baz[data-v-test-s], .qux[data-v-test])[data-v-test] { color: blue;\n.child { color:red;\n}\n}"
+        );
+    }
+
+    #[test]
+    fn rewrites_deep_container_split_pseudo_suffix_like_vue3() {
+        let options = StyleCompileOptions {
+            id: Some("data-v-test".into()),
+            scoped: true,
+            ..StyleCompileOptions::default()
+        };
+
+        let is_hover = compile_style(":is(:deep(.d), .n):hover { color:red; }", options.clone());
+        assert_eq!(
+            is_hover.code,
+            ":is([data-v-test] .d):hover, :is(.n[data-v-test]):hover { color:red;\n}"
+        );
+
+        let where_before = compile_style(
+            ":where(.x :deep(.d), :slotted(.s))::before { color:red; }",
+            options.clone(),
+        );
+        assert_eq!(
+            where_before.code,
+            ":where(.x[data-v-test] .d)::before, :where(.s[data-v-test-s])::before { color:red;\n}"
+        );
+
+        let has_hover = compile_style(":has(:deep(.d), .n):hover { color:red; }", options.clone());
+        assert_eq!(
+            has_hover.code,
+            ":has([data-v-test] .d):hover,[data-v-test]:has(.n):hover { color:red;\n}"
+        );
+
+        let direct_nested = compile_style(
+            ":where(:deep(.d), :slotted(.s))::before { color: blue; .child { color: red; } }",
+            options,
+        );
+        assert_eq!(
+            direct_nested.code,
+            ":where([data-v-test] .d)[data-v-test]::before, :where([data-v-test].s[data-v-test-s])::before { color: blue;\n.child { color: red;\n}\n}"
         );
     }
 
