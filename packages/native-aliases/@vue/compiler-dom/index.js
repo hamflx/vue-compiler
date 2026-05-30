@@ -147,6 +147,20 @@ const transformVText = (dir, node, context) => {
   return materializeDomContentDirective('vue3.dom.transformVText', dir, node, context);
 };
 
+const transformShow = (dir, node, context) => {
+  context = context || {
+    onError: error => { throw error; },
+  };
+  const projection = callVue3DomProjection('vue3.dom.transformShow', { dir });
+  materializeDomDirectiveErrors(projection, dir, node, context);
+  return {
+    props: [],
+    needRuntime: projection && projection.needRuntime === 'V_SHOW'
+      ? V_SHOW
+      : projection && projection.needRuntime,
+  };
+};
+
 const DOMNodeTransforms = [
   transformStyle,
   function transformTransition(node, context) {
@@ -167,9 +181,7 @@ const DOMDirectiveTransforms = {
   on: function transformOn(dir, node, context) {
     return core.transformOn(dir, node, context);
   },
-  show: function transformShow(dir, node, context) {
-    return { props: [], needRuntime: V_SHOW };
-  },
+  show: transformShow,
 };
 
 const parserOptions = {
@@ -586,6 +598,7 @@ Object.defineProperty(module.exports, '__vuecRuntime', {
     transformStyle,
     transformVHtml,
     transformVText,
+    transformShow,
   },
   enumerable: false,
 });

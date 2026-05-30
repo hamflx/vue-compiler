@@ -2323,6 +2323,16 @@ function vue3DirectiveRuntimePayload(needRuntime) {
       helperName: helperNameMap[needRuntime],
     };
   }
+  if (typeof needRuntime === 'string') {
+    const helper = helperSymbolFromProjection(needRuntime);
+    if (helper) {
+      return {
+        kind: 'helper',
+        helper: needRuntime,
+        helperName: helperNameMap[helper],
+      };
+    }
+  }
   if (needRuntime) return { kind: 'asset' };
   return null;
 }
@@ -2331,7 +2341,8 @@ function projectionNameFromHelperSymbol(symbol) {
   const helperName = helperNameMap[symbol];
   if (helperName) return helperName;
   const entries = Object.entries(module.exports || {}).filter(([, value]) => value === symbol);
-  return entries.length ? entries[0][0] : undefined;
+  if (entries.length) return entries[0][0];
+  return symbol && symbol.description;
 }
 
 function materializeVue3ElementSlotsProjection(projection, node, context) {

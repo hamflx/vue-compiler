@@ -732,6 +732,25 @@ pub fn transform_v_text_projection(payload: &Value) -> Value {
     )
 }
 
+/// Projects the DOM `v-show` directive transform for compatibility bridge callers.
+pub fn transform_show_projection(payload: &Value) -> Value {
+    let dir = payload.get("dir").unwrap_or(&Value::Null);
+    let exp = dir.get("exp").filter(|exp| !exp.is_null());
+    let errors = if exp.is_none() {
+        vec![json!({
+            "code": 62,
+            "loc": "dir",
+        })]
+    } else {
+        Vec::new()
+    };
+    json!({
+        "props": [],
+        "errors": errors,
+        "needRuntime": "V_SHOW",
+    })
+}
+
 struct DomContentDirectiveProjection {
     key: &'static str,
     key_loc: Option<&'static str>,
@@ -2071,5 +2090,38 @@ mod tests {
         assert_eq!(projection["errors"][0]["code"], json!(57));
         assert_eq!(projection["props"][0]["value"]["kind"], json!("node"));
         assert_eq!(projection["props"][0]["value"]["path"], json!("dir.exp"));
+    }
+
+    #[test]
+    fn transform_show_projection_returns_runtime_helper() {
+        let projection = transform_show_projection(&json!({
+            "dir": {
+                "exp": {
+                    "type": 4,
+                    "content": "ok",
+                    "isStatic": false,
+                    "constType": 0
+                },
+                "loc": { "source": "v-show=\"ok\"" }
+            }
+        }));
+
+        assert_eq!(projection["props"].as_array().unwrap().len(), 0);
+        assert_eq!(projection["errors"].as_array().unwrap().len(), 0);
+        assert_eq!(projection["needRuntime"], json!("V_SHOW"));
+    }
+
+    #[test]
+    fn transform_show_projection_reports_missing_expression() {
+        let projection = transform_show_projection(&json!({
+            "dir": {
+                "loc": { "source": "v-show" }
+            }
+        }));
+
+        assert_eq!(projection["props"].as_array().unwrap().len(), 0);
+        assert_eq!(projection["errors"][0]["code"], json!(62));
+        assert_eq!(projection["errors"][0]["loc"], json!("dir"));
+        assert_eq!(projection["needRuntime"], json!("V_SHOW"));
     }
 }
