@@ -1912,7 +1912,22 @@ fn rewrite_css_items(
         let whitespace_start = cursor;
         cursor = skip_css_whitespace(source, cursor);
         if cursor > whitespace_start {
-            push_normalized_css_whitespace(&mut output, &source[whitespace_start..cursor]);
+            if matches!(context, CssBlockContext::Deep)
+                && output.is_empty()
+                && css_next_item_is_block(source, cursor)
+            {
+                // Leading whitespace in deep passthrough bodies is parser trivia;
+                // preserve only whitespace introduced by special selector rewrites.
+            } else if matches!(context, CssBlockContext::Deep)
+                && output.ends_with(';')
+                && css_next_item_is_at_rule_block(source, cursor)
+            {
+                if !output.ends_with('\n') {
+                    output.push('\n');
+                }
+            } else {
+                push_normalized_css_whitespace(&mut output, &source[whitespace_start..cursor]);
+            }
         }
         if cursor >= source.len() {
             break;
@@ -1976,7 +1991,11 @@ fn rewrite_css_items(
                 || css_block_contains_at_rule_with_style_rules(&rewritten_body)
             {
                 output.push('\n');
-                output.push_str(rewritten_body.trim());
+                if next_context == CssBlockContext::Deep {
+                    output.push_str(rewritten_body.trim_end());
+                } else {
+                    output.push_str(rewritten_body.trim());
+                }
                 output.push('\n');
             } else {
                 output.push_str(&rewritten_body);
@@ -2003,7 +2022,7 @@ fn rewrite_css_items(
             let selector = if context == CssBlockContext::Keyframes {
                 prelude.to_string()
             } else if context == CssBlockContext::Deep {
-                prelude.to_string()
+                rewrite_deep_passthrough_selector(prelude)
             } else if selector_rewrite.deep_passthrough {
                 selector_rewrite.selector
             } else if has_direct_nested_rule && find_deep_combinator(prelude).is_some() {
@@ -2108,6 +2127,21 @@ fn rewrite_deep_passthrough_body(
     keyframes: &[(String, String)],
 ) -> String {
     rewrite_css_items(body, scope_id, keyframes, CssBlockContext::Deep)
+}
+
+fn rewrite_deep_passthrough_selector(selector: &str) -> String {
+    rewrite_scope_anchored_deep_container_branch(selector)
+}
+
+fn css_next_item_is_block(source: &str, cursor: usize) -> bool {
+    find_next_css_delimiter(source, cursor).is_some_and(|(_, delimiter_ch)| delimiter_ch == '{')
+}
+
+fn css_next_item_is_at_rule_block(source: &str, cursor: usize) -> bool {
+    let Some((delimiter, delimiter_ch)) = find_next_css_delimiter(source, cursor) else {
+        return false;
+    };
+    delimiter_ch == '{' && source[cursor..delimiter].trim().starts_with('@')
 }
 
 fn css_block_starts_with_block(body: &str) -> bool {
@@ -7067,6 +7101,42 @@ mod tests {
         assert_eq!(
             direct_nested.code,
             ":is([data-v-test] .foo,.bar,[data-v-test].baz[data-v-test-s], .qux[data-v-test])[data-v-test] { color: blue;\n.child { color:red;\n}\n}"
+        );
+    }
+
+    #[test]
+    fn rewrites_deep_passthrough_nested_at_rule_special_selectors_like_vue3() {
+        let options = StyleCompileOptions {
+            id: Some("data-v-test".into()),
+            scoped: true,
+            ..StyleCompileOptions::default()
+        };
+
+        let deep = compile_style(
+            ":deep(.d) { @media (min-width:1px){ :deep(.inner) { color:red; } :global(.g) { color:blue; } :slotted(.s) { color:green; } } }",
+            options.clone(),
+        );
+        assert_eq!(
+            deep.code,
+            "[data-v-test] .d {\n@media (min-width:1px){\n .inner { color:red;\n}\n.g { color:blue;\n}\n.s { color:green;\n}\n}\n}"
+        );
+
+        let prefixed = compile_style(
+            ":deep(.d) { @media (min-width:1px){ .x :deep(.inner) { color:red; } .x:slotted(.s) { color:blue; } } }",
+            options.clone(),
+        );
+        assert_eq!(
+            prefixed.code,
+            "[data-v-test] .d {\n@media (min-width:1px){\n.x .inner { color:red;\n}\n.x.s { color:blue;\n}\n}\n}"
+        );
+
+        let container = compile_style(
+            ":is(:deep(.d), .n) { color: blue; @media (min-width:1px){ :deep(.inner) { color:red; } :global(.g) { color:green; } :slotted(.s) { color:yellow; } } }",
+            options,
+        );
+        assert_eq!(
+            container.code,
+            ":is([data-v-test] .d, .n[data-v-test]) { color: blue;\n@media (min-width:1px){\n .inner { color:red;\n}\n.g { color:green;\n}\n.s { color:yellow;\n}\n}\n}"
         );
     }
 

@@ -8975,6 +8975,35 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
     }
 
     #[test]
+    fn compile_style_rewrites_deep_passthrough_nested_at_rule_special_selectors() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "style.vue",
+            r#"<style scoped>:deep(.d) { @media (min-width:1px){ :deep(.inner) { color:red; } :global(.g) { color:blue; } :slotted(.s) { color:green; } } }:is(:deep(.d), .n) { color: blue; @media (min-width:1px){ .x :deep(.inner) { color:red; } } }</style>"#,
+        );
+        let result = compiler.compile_style(
+            &descriptor,
+            SfcStyleCompileOptions {
+                id: Some("data-v-test".into()),
+                scoped: true,
+                ..SfcStyleCompileOptions::default()
+            },
+        );
+
+        assert!(result.code.contains("[data-v-test] .d {"));
+        assert!(result.code.contains(" .inner { color:red;"));
+        assert!(result.code.contains(".g { color:blue;"));
+        assert!(result.code.contains(".s { color:green;"));
+        assert!(result
+            .code
+            .contains(":is([data-v-test] .d, .n[data-v-test]) { color: blue;"));
+        assert!(result.code.contains(".x .inner { color:red;"));
+        assert!(!result.code.contains(":deep(.inner)"));
+        assert!(!result.code.contains(":global(.g)"));
+        assert!(!result.code.contains(":slotted(.s)"));
+    }
+
+    #[test]
     fn compile_style_emits_vue3_deprecated_deep_warnings() {
         let mut compiler = SfcCompiler::new();
         let descriptor = compiler.parse(
