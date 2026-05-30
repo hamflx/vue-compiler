@@ -9057,7 +9057,7 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
         let mut compiler = SfcCompiler::new();
         let descriptor = compiler.parse(
             "style.vue",
-            r#"<style scoped>:is(:deep(.d), .n):hover { color:red; }:where(.x :deep(.d), :slotted(.s))::before { color:red; }:where(:deep(.d), :slotted(.s))::before { color: blue; .child { color: red; } }</style>"#,
+            r#"<style scoped>:is(:deep(.d), .n):hover { color:red; }:where(.x :deep(.d), :slotted(.s))::before { color:red; }:has(.n,:deep(.d),.m):hover { color:red; }:where(:deep(.d), :slotted(.s))::before { color: blue; .child { color: red; } }</style>"#,
         );
         let result = compiler.compile_style(
             &descriptor,
@@ -9074,6 +9074,9 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
         assert!(result
             .code
             .contains(":where(.x[data-v-test] .d)::before, :where(.s[data-v-test-s])::before"));
+        assert!(result.code.contains(
+            "[data-v-test]:has(.n):hover, :has([data-v-test] .d):hover,[data-v-test]:has(.m):hover"
+        ));
         assert!(result.code.contains(
             ":where([data-v-test] .d)[data-v-test]::before, :where([data-v-test].s[data-v-test-s])::before"
         ));

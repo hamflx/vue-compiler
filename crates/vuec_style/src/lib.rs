@@ -5770,6 +5770,11 @@ fn rewrite_deep_container_selector_for_rule(
                     selector.push(' ');
                 } else if name == ":has" && !selector_suffix_is_pseudo_only(suffix) {
                     selector.push(' ');
+                } else if name == ":has"
+                    && selector_suffix_is_pseudo_only(suffix)
+                    && branch_has_deep
+                {
+                    selector.push(' ');
                 } else if branch_is_first_deep {
                     selector.push(' ');
                 } else {
@@ -7580,6 +7585,24 @@ mod tests {
         assert_eq!(
             has_hover.code,
             ":has([data-v-test] .d):hover,[data-v-test]:has(.n):hover { color:red;\n}"
+        );
+
+        let has_normal_first = compile_style(
+            ":has(.n,:deep(.d),.m):hover { color:red; }",
+            options.clone(),
+        );
+        assert_eq!(
+            has_normal_first.code,
+            "[data-v-test]:has(.n):hover, :has([data-v-test] .d):hover,[data-v-test]:has(.m):hover { color:red;\n}"
+        );
+
+        let has_multiple_deep = compile_style(
+            ":has(.n,:deep(.d),:deep(.e),.m):hover { color:red; }",
+            options.clone(),
+        );
+        assert_eq!(
+            has_multiple_deep.code,
+            "[data-v-test]:has(.n):hover, :has([data-v-test] .d):hover, :has([data-v-test] .e):hover,[data-v-test]:has(.m):hover { color:red;\n}"
         );
 
         let direct_nested = compile_style(
