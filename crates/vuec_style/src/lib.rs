@@ -3545,6 +3545,7 @@ fn rewrite_css_modules_items(
     let mut output = String::new();
     let mut cursor = 0usize;
     while cursor < source.len() {
+        let output_len_before_whitespace = output.len();
         let whitespace_start = cursor;
         cursor = skip_css_whitespace(source, cursor);
         if cursor > whitespace_start {
@@ -3586,13 +3587,15 @@ fn rewrite_css_modules_items(
         let body = &source[delimiter + 1..close];
         let compose_local_names = css_module_composable_local_names(prelude, context);
         if let Some(import) = parse_css_module_import_prelude(prelude) {
+            output.truncate(output_len_before_whitespace);
             register_css_module_icss_imports(import, body, context);
-            cursor = close + 1;
+            cursor = skip_css_whitespace(source, close + 1);
             continue;
         }
         if prelude == ":export" {
+            output.truncate(output_len_before_whitespace);
             register_css_module_icss_exports(body, context);
-            cursor = close + 1;
+            cursor = skip_css_whitespace(source, close + 1);
             continue;
         }
         let rewritten_prelude = if prelude.starts_with('@') {
@@ -3655,10 +3658,10 @@ fn rewrite_css_module_at_rule_prelude(
     context: &mut CssModulesContext<'_>,
 ) -> String {
     let Some((name, params)) = parse_at_rule(prelude) else {
-        return prelude.to_string();
+        return replace_css_module_import_symbols_in_text(prelude, context);
     };
     if !is_keyframes_name(name) {
-        return prelude.to_string();
+        return replace_css_module_import_symbols_in_text(prelude, context);
     }
     let Some((local, global)) = css_module_keyframes_local_name(params, context) else {
         return format!(
@@ -3771,6 +3774,16 @@ fn rewrite_css_module_default_segment(
     let mut cursor = 0usize;
     while let Some(token) = find_next_css_module_selector_token(segment, cursor) {
         output.push_str(&segment[cursor..token.start]);
+        if let Some(replacement) = context.import_symbol_value(token.name) {
+            if replacement.starts_with('.') || replacement.starts_with('#') {
+                output.push_str(&replacement);
+            } else {
+                output.push(token.sigil);
+                output.push_str(&replacement);
+            }
+            cursor = token.end;
+            continue;
+        }
         if let Some(replacement) = context.value_placeholder_replacement(token.name) {
             if replacement.starts_with('.') || replacement.starts_with('#') {
                 output.push_str(replacement);
@@ -4394,6 +4407,16 @@ fn replace_css_module_import_symbols(segment: &str, context: &CssModulesContext<
     output.push_str(&segment[..colon + 1]);
     output.push_str(&replaced);
     output
+}
+
+fn replace_css_module_import_symbols_in_text(
+    source: &str,
+    context: &CssModulesContext<'_>,
+) -> String {
+    if context.import_symbols.is_empty() {
+        return source.to_string();
+    }
+    replace_css_module_value_symbols(source, &context.import_symbols)
 }
 
 fn replace_css_module_value_symbols(value: &str, symbols: &BTreeMap<String, String>) -> String {
@@ -9791,6 +9814,48 @@ mod tests {
         assert!(result.code.starts_with("._dep_"));
         assert!(result.code.contains("color: green"));
         assert!(!result.code.contains(":import"));
+    }
+
+    #[test]
+    fn compiles_css_modules_icss_import_symbols_like_official() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let filename = dir.path().join("component.vue");
+        let dep = dir.path().join("dep.css");
+        std::fs::write(
+            &dep,
+            ".dep { color: blue; }\n:export { token: green; query: (min-width: 1px); }",
+        )
+        .expect("write dep");
+
+        let result = compile_style(
+            r#":import("./dep.css") { imported: dep; shade: token; mq: query; }
+.shade { color: red; }
+.imported { border-color: shade; }
+@media mq { .button::before { content: "shade"; color: shade; } }"#,
+            StyleCompileOptions {
+                id: Some("test".into()),
+                filename: Some(filename.to_string_lossy().to_string()),
+                modules: true,
+                ..StyleCompileOptions::default()
+            },
+        );
+        let modules = result.modules.expect("css modules map");
+
+        assert!(!modules.contains_key("shade"));
+        assert!(!modules.contains_key("imported"));
+        assert!(modules
+            .get("button")
+            .is_some_and(|value| value.contains("_button_")));
+        assert!(!result.code.contains(":import"));
+        assert!(!result.code.contains("_shade_"));
+        assert!(!result.code.contains("_imported_"));
+        assert!(result.code.starts_with("._dep_"));
+        assert!(result.code.contains(".green { color: red"));
+        assert!(result.code.contains("._dep_"));
+        assert!(result.code.contains("border-color: green"));
+        assert!(result.code.contains("@media (min-width: 1px)"));
+        assert!(result.code.contains("content: \"green\""));
+        assert!(result.code.contains("color: green"));
     }
 
     #[test]

@@ -8560,6 +8560,34 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
     }
 
     #[test]
+    fn compile_style_rewrites_css_modules_icss_import_symbols() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let filename = dir.path().join("component.vue");
+        std::fs::write(
+            dir.path().join("dep.css"),
+            ".dep { color: blue; }\n:export { token: green; query: (min-width: 1px); }",
+        )
+        .expect("write dep");
+        let source = r#"<style module>:import("./dep.css") { imported: dep; shade: token; mq: query; }.shade { color: shade; }.imported { color: shade; }@media mq { .button { color: shade; } }</style>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let result = compiler.compile_style(&descriptor, SfcStyleCompileOptions::default());
+        let modules = result.modules.expect("css modules");
+
+        assert!(!modules.contains_key("shade"));
+        assert!(!modules.contains_key("imported"));
+        assert!(modules
+            .get("button")
+            .is_some_and(|value| value.contains("_button_")));
+        assert!(!result.code.contains(":import"));
+        assert!(!result.code.contains("_shade_"));
+        assert!(!result.code.contains("_imported_"));
+        assert!(result.code.contains(".green"));
+        assert!(result.code.contains("@media (min-width: 1px)"));
+        assert!(result.code.contains("color: green"));
+    }
+
+    #[test]
     fn compile_style_returns_css_modules_external_composes() {
         let dir = tempfile::tempdir().expect("temp dir");
         let filename = dir.path().join("component.vue");
