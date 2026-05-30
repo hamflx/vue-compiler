@@ -2837,6 +2837,7 @@ fn compile_css_modules(
         options,
         filename,
         scope_behaviour,
+        false,
         &mut active_paths,
     )
 }
@@ -2847,6 +2848,7 @@ fn compile_css_modules_file(
     options: &StyleCompileOptions,
     filename: String,
     scope_behaviour: CssModulesScopeBehaviour,
+    imported_dependency: bool,
     active_paths: &mut Vec<PathBuf>,
 ) -> CssModulesCompileResult {
     let active_path = css_module_active_path(&filename);
@@ -2859,10 +2861,12 @@ fn compile_css_modules_file(
         filename,
         hash_source.to_string(),
         scope_behaviour,
+        imported_dependency,
         active_paths,
     );
     let source = prepare_css_module_values(source, &mut context);
     let code = rewrite_css_modules_items(&source, &mut context, CssBlockContext::Root);
+    let has_prepended_css = !context.prepended_css.is_empty();
     let code = context.finish_code(code);
     let raw_modules = context.raw_modules();
     let modules = context.modules();
@@ -2874,6 +2878,7 @@ fn compile_css_modules_file(
         raw_modules,
         modules,
         diagnostics: context.diagnostics.clone(),
+        has_prepended_css,
     }
 }
 
@@ -2883,6 +2888,7 @@ struct CssModulesCompileResult {
     raw_modules: BTreeMap<String, String>,
     modules: BTreeMap<String, String>,
     diagnostics: Vec<Diagnostic>,
+    has_prepended_css: bool,
 }
 
 #[derive(Debug)]
@@ -2895,10 +2901,12 @@ struct CssModulesContext<'a> {
     hash_prefix: &'a str,
     locals_convention: CssModulesLocalsConvention,
     export_globals: bool,
+    imported_dependency: bool,
     raw_exports: Vec<CssModuleExport>,
     raw_export_index: BTreeMap<String, usize>,
     import_symbols: BTreeMap<String, String>,
     imported_modules: BTreeMap<String, CssModulesCompileResult>,
+    prepended_css_has_nested_import: bool,
     value_placeholders: BTreeMap<String, String>,
     next_value_placeholder: usize,
     prepended_paths: BTreeSet<String>,
@@ -2913,6 +2921,7 @@ impl<'a> CssModulesContext<'a> {
         filename: String,
         hash_source: String,
         scope_behaviour: CssModulesScopeBehaviour,
+        imported_dependency: bool,
         active_paths: &'a mut Vec<PathBuf>,
     ) -> Self {
         Self {
@@ -2926,10 +2935,12 @@ impl<'a> CssModulesContext<'a> {
                 &options.modules_options.locals_convention,
             ),
             export_globals: options.modules_options.export_globals,
+            imported_dependency,
             raw_exports: Vec::new(),
             raw_export_index: BTreeMap::new(),
             import_symbols: BTreeMap::new(),
             imported_modules: BTreeMap::new(),
+            prepended_css_has_nested_import: false,
             value_placeholders: BTreeMap::new(),
             next_value_placeholder: 0,
             prepended_paths: BTreeSet::new(),
@@ -3033,12 +3044,17 @@ impl<'a> CssModulesContext<'a> {
             if css.is_empty() {
                 continue;
             }
-            if !output.is_empty() && !output.ends_with('\n') {
+            if !self.imported_dependency && !output.is_empty() && !output.ends_with('\n') {
                 output.push('\n');
             }
             output.push_str(css);
         }
-        if !output.is_empty() && !code.is_empty() && !output.ends_with('\n') {
+        if !self.imported_dependency
+            && !self.prepended_css_has_nested_import
+            && !output.is_empty()
+            && !code.is_empty()
+            && !output.ends_with('\n')
+        {
             output.push('\n');
         }
         output.push_str(&code);
@@ -3081,15 +3097,20 @@ impl<'a> CssModulesContext<'a> {
             return None;
         }
         let source = std::fs::read_to_string(&resolved.path).ok()?;
+        let normalized_source = normalize_style_output(&source);
         let result = compile_css_modules_file(
-            &source,
+            &normalized_source,
             &source,
             self.options,
             resolved.logical_filename,
             self.scope_behaviour,
+            true,
             self.active_paths,
         );
         if self.prepended_paths.insert(normalized.clone()) && !result.code.is_empty() {
+            if result.has_prepended_css {
+                self.prepended_css_has_nested_import = true;
+            }
             self.prepended_css.push(result.code.clone());
         }
         self.imported_modules.insert(normalized, result.clone());
@@ -9166,6 +9187,7 @@ mod tests {
             .is_some_and(|value| value.contains("_button_") && value.contains(external)));
         assert!(!result.code.contains("@value"));
         assert!(!result.code.contains("_external_"));
+        assert!(!result.code.contains("; }"));
         assert!(result.code.contains("@media (min-width: 1px)"));
         assert!(result.code.contains("color: red"));
         assert!(result.code.contains("outline-color: i__const_missing_3"));

@@ -8361,6 +8361,7 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
             .is_some_and(|value| value.contains("_button_") && value.contains(external)));
         assert!(!result.code.contains("@value"));
         assert!(!result.code.contains("_external_"));
+        assert!(!result.code.contains("; }"));
         assert!(result.code.contains("color: red"));
         assert!(result.code.contains("border-color: red"));
     }
