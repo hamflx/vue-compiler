@@ -372,10 +372,23 @@ pub fn parse_sfc(env: Env, source: String, options: Option<Unknown>) -> Result<S
     let raw_options = from_js_options(&env, options)?;
     let filename = string_option(&raw_options, "filename", "anonymous.vue");
     let mut compiler = SfcCompiler::new();
-    let descriptor = compiler.parse(filename, &source);
+    let result = compiler.parse_vue3(filename, &source);
     let projection_options = vue3_sfc_parse_projection_options(&raw_options);
-    let mut value = vuec_sfc::vue3_sfc_descriptor_value(&descriptor, &projection_options);
-    vue3_sfc_attach_template_ast(&mut value, &descriptor, &raw_options);
+    let mut value = vuec_sfc::vue3_sfc_descriptor_value(&result.descriptor, &projection_options);
+    vue3_sfc_attach_template_ast(&mut value, &result.descriptor, &raw_options);
+    to_json_string(value)
+}
+
+#[napi(js_name = "parseSfcResult")]
+/// Parses a Vue 3 SFC and returns the official public parse-result shape.
+pub fn parse_sfc_result(env: Env, source: String, options: Option<Unknown>) -> Result<String> {
+    let raw_options = from_js_options(&env, options)?;
+    let filename = string_option(&raw_options, "filename", "anonymous.vue");
+    let mut compiler = SfcCompiler::new();
+    let result = compiler.parse_vue3(filename, &source);
+    let projection_options = vue3_sfc_parse_projection_options(&raw_options);
+    let mut value = vuec_sfc::vue3_sfc_parse_result_value(&result, &projection_options);
+    vue3_sfc_attach_template_ast(&mut value, &result.descriptor, &raw_options);
     to_json_string(value)
 }
 

@@ -120,6 +120,24 @@ pub struct SfcDescriptor {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// Vue 3 SFC `parse()` result before public JSON projection.
+pub struct Vue3SfcParseResult {
+    /// Parsed and validated descriptor.
+    pub descriptor: SfcDescriptor,
+    /// Parse diagnostics emitted by Vue 3 SFC descriptor validation.
+    pub errors: Vec<Vue3SfcParseError>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+/// Vue 3 SFC parse diagnostic.
+pub struct Vue3SfcParseError {
+    /// Error message.
+    pub message: String,
+    /// Optional full block location that caused the error.
+    pub loc: Option<SfcBlockLocation>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 /// Options for projecting Vue 3 `parse()` descriptor output.
 pub struct Vue3SfcParseProjectionOptions {
     /// Whether template/style/script source maps are emitted.
@@ -486,6 +504,7 @@ struct SfcCacheKey {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SfcDescriptorCacheEntry {
     descriptor: SfcDescriptor,
+    vue3_errors: Vec<Vue3SfcParseError>,
     vue27_errors: Vec<Vue27SfcParseError>,
 }
 
@@ -528,11 +547,19 @@ impl SfcCompiler {
 
     /// Parses an SFC descriptor using Vue 3-style descriptor rules.
     pub fn parse(&mut self, filename: impl Into<String>, source: &str) -> SfcDescriptor {
+        self.parse_vue3(filename, source).descriptor
+    }
+
+    /// Parses an SFC descriptor and returns Vue 3 public `parse()` diagnostics.
+    pub fn parse_vue3(&mut self, filename: impl Into<String>, source: &str) -> Vue3SfcParseResult {
         let filename = filename.into();
         let key = SfcCacheKey::new(filename.clone(), source, SfcParseCacheMode::Raw);
         if let Some(entry) = self.descriptor_cache.get(&key) {
             self.cache_stats.descriptor_hits += 1;
-            return entry.descriptor.clone();
+            return Vue3SfcParseResult {
+                descriptor: entry.descriptor.clone(),
+                errors: entry.vue3_errors.clone(),
+            };
         }
         self.invalidate_stale_descriptor_entries(&filename, &key.mode);
         self.cache_stats.descriptor_misses += 1;
@@ -540,20 +567,22 @@ impl SfcCompiler {
             Some(std::path::PathBuf::from(&filename)),
             source.to_string(),
         );
-        let descriptor = descriptor_from_blocks(
+        let result = vue3_descriptor_from_blocks(
             filename,
             source,
             source_file,
             extract_sfc_blocks(source, source_file, SfcBlockContentMode::Raw).blocks,
         );
+        let cached_errors = result.errors.clone();
         self.descriptor_cache.insert(
             key,
             SfcDescriptorCacheEntry {
-                descriptor: descriptor.clone(),
+                descriptor: result.descriptor.clone(),
+                vue3_errors: cached_errors,
                 vue27_errors: Vec::new(),
             },
         );
-        descriptor
+        result
     }
 
     /// Parses an anonymous Vue 2.7 SFC component.
@@ -606,6 +635,7 @@ impl SfcCompiler {
             key,
             SfcDescriptorCacheEntry {
                 descriptor: descriptor.clone(),
+                vue3_errors: Vec::new(),
                 vue27_errors: cached_errors,
             },
         );
@@ -1149,6 +1179,117 @@ struct OpenSfcBlock {
     self_closing: bool,
 }
 
+fn vue3_descriptor_from_blocks(
+    filename: String,
+    source: &str,
+    source_file: FileId,
+    blocks: Vec<SfcBlock>,
+) -> Vue3SfcParseResult {
+    let mut descriptor = SfcDescriptor {
+        filename,
+        source: source.to_string(),
+        source_file,
+        template: None,
+        script: None,
+        script_setup: None,
+        styles: Vec::new(),
+        custom_blocks: Vec::new(),
+    };
+    let mut errors = Vec::new();
+    let mut has_template_or_script_candidate = false;
+    let mut has_script_setup_candidate = false;
+
+    for block in blocks {
+        match block.type_name.as_str() {
+            "template" => {
+                has_template_or_script_candidate = true;
+                if descriptor.template.is_some() {
+                    errors.push(vue3_sfc_parse_block_error(
+                        "Single file component can contain only one <template> element",
+                        &block,
+                    ));
+                } else {
+                    descriptor.template = Some(block);
+                }
+            }
+            "script" => {
+                if vue3_script_block_is_empty(&block) {
+                    continue;
+                }
+                has_template_or_script_candidate = true;
+                if block.attrs.setup {
+                    if descriptor.script_setup.is_some() {
+                        errors.push(vue3_sfc_parse_block_error(
+                            "Single file component can contain only one <script setup> element",
+                            &block,
+                        ));
+                    } else {
+                        has_script_setup_candidate = true;
+                        descriptor.script_setup = Some(block);
+                    }
+                } else if descriptor.script.is_some() {
+                    errors.push(vue3_sfc_parse_block_error(
+                        "Single file component can contain only one <script> element",
+                        &block,
+                    ));
+                } else {
+                    descriptor.script = Some(block);
+                }
+            }
+            "style" => descriptor.styles.push(block),
+            _ => descriptor.custom_blocks.push(block),
+        }
+    }
+
+    if descriptor
+        .script_setup
+        .as_ref()
+        .is_some_and(|script_setup| script_setup.attrs.src.is_some())
+    {
+        errors.push(vue3_sfc_parse_error(
+            "<script setup> cannot use the \"src\" attribute because its syntax will be ambiguous outside of the component.",
+        ));
+        descriptor.script_setup = None;
+    }
+    if has_script_setup_candidate
+        && descriptor
+            .script
+            .as_ref()
+            .is_some_and(|script| script.attrs.src.is_some())
+    {
+        errors.push(vue3_sfc_parse_error(
+            "<script> cannot use the \"src\" attribute when <script setup> is also present because they must be processed together.",
+        ));
+        descriptor.script = None;
+    }
+    if !has_template_or_script_candidate {
+        errors.push(vue3_sfc_parse_error(format!(
+            "At least one <template> or <script> is required in a single file component. {}",
+            descriptor.filename
+        )));
+    }
+
+    Vue3SfcParseResult { descriptor, errors }
+}
+
+fn vue3_script_block_is_empty(block: &SfcBlock) -> bool {
+    block.attrs.src.is_none() && block.content.trim().is_empty()
+}
+
+fn vue3_sfc_parse_error(message: impl Into<String>) -> Vue3SfcParseError {
+    Vue3SfcParseError {
+        message: message.into(),
+        loc: None,
+    }
+}
+
+fn vue3_sfc_parse_block_error(message: impl Into<String>, block: &SfcBlock) -> Vue3SfcParseError {
+    Vue3SfcParseError {
+        message: message.into(),
+        loc: Some(block.loc.clone()),
+    }
+}
+
 fn descriptor_from_blocks(
     filename: String,
     source: &str,
@@ -1186,12 +1327,12 @@ fn descriptor_from_blocks(
 
 /// Projects a Rust SFC descriptor into the Vue 3 public `parse()` result shape.
 pub fn vue3_sfc_parse_result_value(
-    descriptor: &SfcDescriptor,
+    result: &Vue3SfcParseResult,
     options: &Vue3SfcParseProjectionOptions,
 ) -> serde_json::Value {
     json!({
-        "descriptor": vue3_sfc_descriptor_value(descriptor, options),
-        "errors": [],
+        "descriptor": vue3_sfc_descriptor_value(&result.descriptor, options),
+        "errors": result.errors.iter().map(|error| vue3_sfc_parse_error_value(&result.descriptor, error)).collect::<Vec<_>>(),
     })
 }
 
@@ -1372,6 +1513,31 @@ fn vue3_sfc_descriptor_has_slotted_styles(descriptor: &SfcDescriptor) -> bool {
         style.attrs.scoped
             && (style.content.contains(":slotted(") || style.content.contains("::v-slotted("))
     })
+}
+
+fn vue3_sfc_parse_error_value(
+    descriptor: &SfcDescriptor,
+    error: &Vue3SfcParseError,
+) -> serde_json::Value {
+    let mut value = serde_json::Map::new();
+    value.insert("message".into(), json!(error.message));
+    if let Some(loc) = error.loc.as_ref() {
+        let start = loc.start.min(descriptor.source.len());
+        let end = if loc.end == 0 {
+            start
+        } else {
+            loc.end.min(descriptor.source.len()).max(start)
+        };
+        value.insert(
+            "loc".into(),
+            json!({
+                "start": vue3_sfc_position_value(&descriptor.source, start),
+                "end": vue3_sfc_position_value(&descriptor.source, end),
+                "source": descriptor.source.get(start..end).unwrap_or_default(),
+            }),
+        );
+    }
+    serde_json::Value::Object(value)
 }
 
 fn project_vue27_errors(
@@ -7513,6 +7679,89 @@ mod tests {
         assert_eq!(projected["styles"][0]["attrs"]["scoped"], json!("x"));
         assert_eq!(projected["styles"][0]["scoped"], json!(true));
         assert!(projected["styles"][0].get("map").is_none());
+    }
+
+    #[test]
+    fn vue3_parse_reports_duplicate_blocks_like_official_parser() {
+        let mut compiler = SfcCompiler::new();
+        let result = compiler.parse_vue3(
+            "Dup.vue",
+            "<template>a</template><template>b</template><script>one</script><script>two</script><script setup>first</script><script setup>second</script>",
+        );
+
+        assert_eq!(result.descriptor.template.as_ref().unwrap().content, "a");
+        assert_eq!(result.descriptor.script.as_ref().unwrap().content, "one");
+        assert_eq!(
+            result.descriptor.script_setup.as_ref().unwrap().content,
+            "first"
+        );
+        assert_eq!(
+            result
+                .errors
+                .iter()
+                .map(|error| error.message.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "Single file component can contain only one <template> element",
+                "Single file component can contain only one <script> element",
+                "Single file component can contain only one <script setup> element",
+            ]
+        );
+        let projected =
+            vue3_sfc_parse_result_value(&result, &Vue3SfcParseProjectionOptions::default());
+        assert_eq!(
+            projected["errors"][0]["loc"]["source"],
+            json!("<template>b</template>")
+        );
+        assert_eq!(projected["errors"][0]["loc"]["start"]["offset"], json!(22));
+    }
+
+    #[test]
+    fn vue3_parse_applies_script_src_and_empty_script_rules() {
+        let mut compiler = SfcCompiler::new();
+        let empty_script =
+            compiler.parse_vue3("Empty.vue", "<script>  \n</script><style>x</style>");
+        assert!(empty_script.descriptor.script.is_none());
+        assert_eq!(
+            empty_script.errors[0].message,
+            "At least one <template> or <script> is required in a single file component. Empty.vue"
+        );
+
+        let setup_src = compiler.parse_vue3(
+            "SetupSrc.vue",
+            r#"<script setup src="x"></script><script setup>ok</script>"#,
+        );
+        assert!(setup_src.descriptor.script_setup.is_none());
+        assert_eq!(
+            setup_src
+                .errors
+                .iter()
+                .map(|error| error.message.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "Single file component can contain only one <script setup> element",
+                "<script setup> cannot use the \"src\" attribute because its syntax will be ambiguous outside of the component.",
+            ]
+        );
+
+        let script_src_with_setup = compiler.parse_vue3(
+            "SrcAndSetup.vue",
+            r#"<script src="x"></script><script setup>ok</script>"#,
+        );
+        assert!(script_src_with_setup.descriptor.script.is_none());
+        assert_eq!(
+            script_src_with_setup
+                .descriptor
+                .script_setup
+                .as_ref()
+                .unwrap()
+                .content,
+            "ok"
+        );
+        assert_eq!(
+            script_src_with_setup.errors[0].message,
+            "<script> cannot use the \"src\" attribute when <script setup> is also present because they must be processed together."
+        );
     }
 
     #[test]

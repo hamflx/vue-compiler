@@ -78,7 +78,7 @@ function parse(source, options) {
 
 function parse$1(source) {
   const options = arguments.length > 1 ? arguments[1] : undefined;
-  return { descriptor: native.parseSfc(String(source || ''), options || {}), errors: [] };
+  return native.parseSfcResult(String(source || ''), options || {});
 }
 
 function compileTemplate(options) {

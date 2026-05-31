@@ -202,6 +202,10 @@ function parseSfc(source, options = {}) {
   return fromJson(binding.parseSfc(source, dehydrateForNative(options || {})));
 }
 
+function parseSfcResult(source, options = {}) {
+  return fromJson(binding.parseSfcResult(source, dehydrateForNative(options || {})));
+}
+
 function parseVue27SfcComponent(source, options = {}) {
   return fromJson(binding.parseVue27SfcComponent(source, dehydrateForNative(options || {})));
 }
@@ -357,6 +361,7 @@ module.exports = {
   parseVue3Dom,
   compileVue3Ssr,
   parseSfc,
+  parseSfcResult,
   parseVue27SfcComponent,
   compileSfcTemplate,
   compileSfcTemplateSource,

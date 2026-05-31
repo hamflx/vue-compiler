@@ -29,6 +29,11 @@ export interface SfcDescriptor {
   shouldForceReload?: unknown;
 }
 
+export interface SfcParseResult {
+  descriptor: SfcDescriptor;
+  errors: unknown[];
+}
+
 export function version(): string;
 export function apiManifest(): {
   package: string;
@@ -58,6 +63,7 @@ export function compileVue3Dom(source: string, options?: Record<string, unknown>
 export function parseVue3Dom(source: string, options?: Record<string, unknown>): unknown;
 export function compileVue3Ssr(source: string, options?: Record<string, unknown>): Vue3CodegenResult;
 export function parseSfc(source: string, options?: Record<string, unknown>): SfcDescriptor;
+export function parseSfcResult(source: string, options?: Record<string, unknown>): SfcParseResult;
 export function parseVue27SfcComponent(source: string, options?: Record<string, unknown>): unknown;
 export function compileSfcTemplate(source: string, options?: Record<string, unknown>): unknown;
 export function compileSfcTemplateSource(source: string, options?: Record<string, unknown>): unknown;

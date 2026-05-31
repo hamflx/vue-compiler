@@ -352,12 +352,11 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
             let filename = string_field_or(&payload, "filename", "anonymous.vue");
             let source = string_field(&payload, "source");
             let mut compiler = SfcCompiler::new();
-            let descriptor = compiler.parse(filename, &source);
+            let result = compiler.parse_vue3(filename, &source);
             let projection_options = vue3_sfc_parse_projection_options(payload.get("options"));
-            let mut result =
-                vuec_sfc::vue3_sfc_parse_result_value(&descriptor, &projection_options);
-            vue3_sfc_attach_template_ast(&mut result, &descriptor, payload.get("options"));
-            Ok(result)
+            let mut value = vuec_sfc::vue3_sfc_parse_result_value(&result, &projection_options);
+            vue3_sfc_attach_template_ast(&mut value, &result.descriptor, payload.get("options"));
+            Ok(value)
         }
         "sfc.vue27.parse" => {
             let filename = string_field_or(&payload, "filename", "anonymous.vue");
@@ -4446,6 +4445,40 @@ mod tests {
         assert_eq!(descriptor["customBlocks"][0]["type"], json!("i18n"));
         assert!(descriptor.get("script_setup").is_none());
         assert_eq!(parsed["errors"], json!([]));
+    }
+
+    #[test]
+    fn vue3_sfc_bridge_parse_returns_descriptor_validation_errors() {
+        let parsed = dispatch(
+            "sfc.parse",
+            json!({
+                "source": concat!(
+                    "<template>a</template>",
+                    "<template>b</template>",
+                    "<script src=\"x\"></script>",
+                    "<script setup>ok</script>"
+                ),
+                "filename": "Dup.vue"
+            }),
+        )
+        .expect("vue3 sfc parse");
+
+        let descriptor = &parsed["descriptor"];
+        assert_eq!(descriptor["template"]["content"], json!("a"));
+        assert!(descriptor["script"].is_null());
+        assert_eq!(descriptor["scriptSetup"]["content"], json!("ok"));
+        assert_eq!(
+            parsed["errors"][0]["message"],
+            json!("Single file component can contain only one <template> element")
+        );
+        assert_eq!(
+            parsed["errors"][0]["loc"]["source"],
+            json!("<template>b</template>")
+        );
+        assert_eq!(
+            parsed["errors"][1]["message"],
+            json!("<script> cannot use the \"src\" attribute when <script setup> is also present because they must be processed together.")
+        );
     }
 
     #[test]
