@@ -15154,6 +15154,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                             push_unique_helper(&mut helpers, RuntimeHelper::Vue3CreateVNode);
                         }
                         self.push_vnode_fallback_helpers(node.id, &mut helpers);
+                        self.push_rendered_vnode_fallback_helpers(node.id, &mut helpers);
                     }
                     self.push_prop_helpers(&component.props, &mut helpers);
                 }
@@ -15209,6 +15210,25 @@ impl<'a> Vue3SsrMirCodegen<'a> {
             }
         }
         sort_helpers_by_order(&mut helpers, vue3_helper_order(false));
+        if helpers.contains(&RuntimeHelper::Vue3ResolveComponent)
+            && helpers.contains(&RuntimeHelper::Vue3WithCtx)
+        {
+            if helpers.contains(&RuntimeHelper::Vue3ToDisplayString) {
+                move_helper_after(
+                    &mut helpers,
+                    RuntimeHelper::Vue3ToDisplayString,
+                    RuntimeHelper::Vue3WithCtx,
+                );
+            }
+            if helpers.contains(&RuntimeHelper::Vue3CreateTextVNode) {
+                let after = if helpers.contains(&RuntimeHelper::Vue3ToDisplayString) {
+                    RuntimeHelper::Vue3ToDisplayString
+                } else {
+                    RuntimeHelper::Vue3WithCtx
+                };
+                move_helper_after(&mut helpers, RuntimeHelper::Vue3CreateTextVNode, after);
+            }
+        }
         if helpers.contains(&RuntimeHelper::Vue3RenderSlot)
             && helpers.contains(&RuntimeHelper::Vue3WithCtx)
         {
@@ -15336,6 +15356,20 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                 }
                 _ => {}
             }
+        }
+    }
+
+    fn push_rendered_vnode_fallback_helpers(
+        &self,
+        parent: NodeId,
+        helpers: &mut Vec<RuntimeHelper>,
+    ) {
+        let scope = RenderScope::default().with_locals(vec!["_scopeId".into()]);
+        let rendered = self
+            .render_component_slot_vnode_fallback_children(parent, &scope)
+            .join("\n");
+        for helper in render_helpers_from_code(vue3_helper_order(false), &rendered) {
+            push_unique_helper(helpers, helper);
         }
     }
 
@@ -17202,21 +17236,30 @@ impl<'a> Vue3SsrMirCodegen<'a> {
             return;
         }
         let tag = self.render_component_tag(&component.tag, scope);
+        let scope_id_arg = self.render_component_scope_id_arg(scope);
         if self
             .mir
             .node(node_id)
             .is_some_and(|node| node.children.is_empty())
         {
             writer.push_line(&format!(
-                "_push(_ssrRenderComponent({}, {}, null, _parent))",
-                tag, props
+                "_push(_ssrRenderComponent({}, {}, null, _parent{}))",
+                tag, props, scope_id_arg
             ));
         } else {
             writer.push_line(&format!("_push(_ssrRenderComponent({}, {}, {{", tag, props));
             writer.indent();
             self.render_component_default_slot(node_id, scope, writer);
             writer.dedent();
-            writer.push_line("}, _parent))");
+            writer.push_line(&format!("}}, _parent{}))", scope_id_arg));
+        }
+    }
+
+    fn render_component_scope_id_arg(&self, scope: &RenderScope) -> &'static str {
+        if scope.locals.iter().any(|local| local == "_scopeId") {
+            ", _scopeId"
+        } else {
+            ""
         }
     }
 
@@ -17273,7 +17316,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         writer.dedent();
         writer.push_line("} else {");
         writer.indent();
-        let fallback = self.render_vnode_fallback_children(node_id, &slot_scope);
+        let fallback = self.render_component_slot_vnode_fallback_children(node_id, &slot_scope);
         writer.push_line(&format!("return {}", render_array(&fallback)));
         writer.dedent();
         writer.push_line("}");
@@ -17285,6 +17328,23 @@ impl<'a> Vue3SsrMirCodegen<'a> {
             Vue3SlotFlag::Stable
         };
         writer.push_line(&format!("_: {}", vue3_slot_flag_with_comment(flag)));
+    }
+
+    fn render_component_slot_vnode_fallback_children(
+        &self,
+        parent: NodeId,
+        scope: &RenderScope,
+    ) -> Vec<String> {
+        self.render_vnode_fallback_children(parent, scope)
+            .into_iter()
+            .map(|child| {
+                if vue3_expression_is_string_literal(&child) {
+                    format!("_createTextVNode({child})")
+                } else {
+                    child
+                }
+            })
+            .collect()
     }
 
     fn component_slot_is_forwarded(&self, node_id: NodeId) -> bool {
@@ -17423,12 +17483,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                 Some(self.render_vnode_fallback_slot(slot, scope))
             }
             Vue3SsrMirKind::RenderComponent(component) => {
-                let children = self.render_vnode_fallback_children(node_id, scope);
-                Some(self.render_vnode_fallback_call(
-                    &self.render_component_vnode_tag(component, scope),
-                    Some(self.render_component_props(&component.props, scope)),
-                    children,
-                ))
+                Some(self.render_component_vnode_fallback(node_id, component, scope))
             }
             Vue3SsrMirKind::If {
                 condition,
@@ -17446,6 +17501,38 @@ impl<'a> Vue3SsrMirCodegen<'a> {
             }
             _ => None,
         }
+    }
+
+    fn render_component_vnode_fallback(
+        &self,
+        node_id: NodeId,
+        component: &Vue3SsrComponent,
+        scope: &RenderScope,
+    ) -> String {
+        let tag = self.render_component_vnode_tag(component, scope);
+        let props = self.render_component_props(&component.props, scope);
+        let has_children = self
+            .mir
+            .node(node_id)
+            .is_some_and(|node| !node.children.is_empty());
+        if !has_children {
+            return self.render_vnode_fallback_call(&tag, Some(props), Vec::new());
+        }
+        let slots = self.render_component_vnode_fallback_slots_object(node_id, scope);
+        format!("_createVNode({tag}, {props}, {slots})")
+    }
+
+    fn render_component_vnode_fallback_slots_object(
+        &self,
+        node_id: NodeId,
+        scope: &RenderScope,
+    ) -> String {
+        let children = self.render_component_slot_vnode_fallback_children(node_id, scope);
+        let rendered_children = render_array(&children).replace('\n', "\n  ");
+        format!(
+            "{{\n  default: _withCtx(() => {}),\n  _: 1 /* STABLE */\n}}",
+            rendered_children
+        )
     }
 
     fn render_slot_as_vnode_fallback(&self, slot: &vuec_ast::Vue3SsrSlot) -> bool {
@@ -17492,6 +17579,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
     ) -> Option<String> {
         let rendered = entries
             .iter()
+            .filter(|(name, _)| !self.is_vnode_fallback_scope_attr(name))
             .map(|(name, value)| {
                 format!(
                     "{}: {}",
@@ -17508,6 +17596,13 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         } else {
             self.render_plain_props(&rendered)
         }
+    }
+
+    fn is_vnode_fallback_scope_attr(&self, name: &str) -> bool {
+        self.options
+            .scope_id
+            .as_ref()
+            .is_some_and(|scope_id| name == scope_id || name == format!("{scope_id}-s"))
     }
 
     fn render_vnode_fallback_dynamic_props(
@@ -17585,10 +17680,16 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                 format!("_createVNode({tag})")
             }
         } else {
+            let rendered_children =
+                if children.len() == 1 && vue3_expression_is_string_literal(children[0].trim()) {
+                    children[0].clone()
+                } else {
+                    render_array(&children)
+                };
             format!(
                 "_createVNode({tag}, {}, {})",
                 props.unwrap_or_else(|| "null".into()),
-                render_array(&children)
+                rendered_children
             )
         }
     }
@@ -32190,6 +32291,58 @@ mod tests {
             .code
             .contains("_createVNode(\"img\", { src: _imports_0 })"));
         assert!(!generated.code.contains("_ctx._imports_0"));
+    }
+
+    #[test]
+    fn generate_vue3_ssr_mir_emits_scope_id_slot_vnode_fallback() {
+        let text_source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<foo>foo</foo>"#.into(),
+            file_id: FileId(77),
+            base_offset: 0,
+        };
+        let options = Vue3CompilerOptions {
+            mode: "module".into(),
+            prefix_identifiers: true,
+            scope_id: Some("data-v-xxxxxxx".into()),
+            native_tags: Some(vec!["span".into(), "div".into()]),
+            ..Vue3CompilerOptions::default()
+        };
+        let text_ast = Vue3Dialect::base_parse(text_source, &options);
+        let text_result = lower_vue3_ast_to_ssr_mir(&text_ast, &options);
+        let text_generated = generate_vue3_ssr_mir(&text_result.mir, &text_result.js, &options);
+        assert!(text_generated
+            .code
+            .contains("createTextVNode as _createTextVNode"));
+        assert!(text_generated
+            .code
+            .contains("return [\n          _createTextVNode(\"foo\")\n        ]"));
+        assert!(!text_generated
+            .code
+            .contains("return [\n          \"foo\"\n        ]"));
+
+        let nested_source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<foo><span>hello</span><bar><span/></bar></foo>"#.into(),
+            file_id: FileId(78),
+            base_offset: 0,
+        };
+        let nested_ast = Vue3Dialect::base_parse(nested_source, &options);
+        let nested_result = lower_vue3_ast_to_ssr_mir(&nested_ast, &options);
+        let nested_generated =
+            generate_vue3_ssr_mir(&nested_result.mir, &nested_result.js, &options);
+        assert!(nested_generated
+            .code
+            .contains("_push(`<span data-v-xxxxxxx${_scopeId}>hello</span>`)"));
+        assert!(nested_generated.code.contains("}, _parent, _scopeId)"));
+        assert!(nested_generated
+            .code
+            .contains("_createVNode(\"span\", null, \"hello\")"));
+        assert!(nested_generated.code.contains(
+            "_createVNode(_component_bar, null, {\n            default: _withCtx(() => ["
+        ));
+        assert!(nested_generated.code.contains("_createVNode(\"span\")"));
+        assert!(!nested_generated.code.contains("\"data-v-xxxxxxx\": \"\""));
     }
 
     #[test]

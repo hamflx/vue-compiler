@@ -12729,6 +12729,7 @@ fn rewrite_vue3_ssr_rust_backed_public_compile_imports(prepared_root: &Path) -> 
 
     rewrite_vue3_ssr_spec_compile_import(&tests.join("ssrVIf.spec.ts"))?;
     rewrite_vue3_ssr_spec_compile_import(&tests.join("ssrVFor.spec.ts"))?;
+    rewrite_vue3_ssr_spec_compile_import(&tests.join("ssrScopeId.spec.ts"))?;
     rewrite_vue3_ssr_spec_compile_import(&tests.join("ssrVShow.spec.ts"))?;
     rewrite_vue3_ssr_spec_compile_import(&tests.join("ssrVModel.spec.ts"))?;
     rewrite_vue3_ssr_spec_compile_import(&tests.join("ssrSlotOutlet.spec.ts"))?;
@@ -13276,6 +13277,7 @@ fn conformance_coverage_file_kind(
         || path.ends_with("packages/compiler-dom/__tests__/transforms/vShow.spec.ts")
         || path.ends_with("packages/compiler-dom/__tests__/transforms/vText.spec.ts")
         || path.ends_with("packages/compiler-dom/__tests__/transforms/validateHtmlNesting.spec.ts")
+        || path.ends_with("packages/compiler-ssr/__tests__/ssrScopeId.spec.ts")
         || path.ends_with("packages/compiler-ssr/__tests__/ssrText.spec.ts")
         || path.ends_with("packages/compiler-ssr/__tests__/ssrPortal.spec.ts")
         || path.ends_with("packages/compiler-ssr/__tests__/ssrSlotOutlet.spec.ts")
@@ -15184,6 +15186,11 @@ mod tests {
         )
         .unwrap();
         fs::write(
+            tests.join("ssrScopeId.spec.ts"),
+            "import { compile } from '../src'\n",
+        )
+        .unwrap();
+        fs::write(
             tests.join("ssrVShow.spec.ts"),
             "import { compile } from '../src'\n",
         )
@@ -15225,6 +15232,7 @@ mod tests {
         let spec = fs::read_to_string(tests.join("ssrText.spec.ts")).unwrap();
         let vif_spec = fs::read_to_string(tests.join("ssrVIf.spec.ts")).unwrap();
         let vfor_spec = fs::read_to_string(tests.join("ssrVFor.spec.ts")).unwrap();
+        let scope_id_spec = fs::read_to_string(tests.join("ssrScopeId.spec.ts")).unwrap();
         let vshow_spec = fs::read_to_string(tests.join("ssrVShow.spec.ts")).unwrap();
         let vmodel_spec = fs::read_to_string(tests.join("ssrVModel.spec.ts")).unwrap();
         let slot_outlet_spec = fs::read_to_string(tests.join("ssrSlotOutlet.spec.ts")).unwrap();
@@ -15239,6 +15247,7 @@ mod tests {
         assert!(spec.contains("from './utils.rust-ssr-text'"));
         assert!(vif_spec.contains("from '@vue/compiler-ssr'"));
         assert!(vfor_spec.contains("from '@vue/compiler-ssr'"));
+        assert!(scope_id_spec.contains("from '@vue/compiler-ssr'"));
         assert!(vshow_spec.contains("from '@vue/compiler-ssr'"));
         assert!(vmodel_spec.contains("from '@vue/compiler-ssr'"));
         assert!(slot_outlet_spec.contains("from '@vue/compiler-ssr'"));
