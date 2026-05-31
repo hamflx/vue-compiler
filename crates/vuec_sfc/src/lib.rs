@@ -56,6 +56,9 @@ pub struct SfcBlock {
     /// Raw content end byte offset in the full SFC source.
     #[serde(skip)]
     pub content_end: usize,
+    /// Additional original source-map column offset after descriptor-level content transforms.
+    #[serde(skip)]
+    pub source_map_column_offset: usize,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -138,12 +141,44 @@ pub struct Vue3SfcParseError {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// Vue 3 SFC `parse()` options that affect descriptor block selection/content.
+pub struct Vue3SfcParseOptions {
+    /// Padding mode for non-template blocks.
+    pub pad: Vue3SfcPad,
+    /// Whether empty non-template blocks without `src` are ignored.
+    pub ignore_empty: bool,
+}
+
+impl Default for Vue3SfcParseOptions {
+    fn default() -> Self {
+        Self {
+            pad: Vue3SfcPad::False,
+            ignore_empty: true,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+/// Vue 3 SFC block padding mode.
+pub enum Vue3SfcPad {
+    /// Do not pad block content.
+    #[default]
+    False,
+    /// Pad non-template blocks by preserving generated line numbers.
+    Line,
+    /// Pad non-template blocks by preserving original text width as spaces.
+    Space,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 /// Options for projecting Vue 3 `parse()` descriptor output.
 pub struct Vue3SfcParseProjectionOptions {
     /// Whether template/style/script source maps are emitted.
     pub source_map: bool,
     /// Source-map source root.
     pub source_root: String,
+    /// Padding mode used when the descriptor was parsed.
+    pub pad: Vue3SfcPad,
 }
 
 impl Default for Vue3SfcParseProjectionOptions {
@@ -151,6 +186,7 @@ impl Default for Vue3SfcParseProjectionOptions {
         Self {
             source_map: true,
             source_root: String::new(),
+            pad: Vue3SfcPad::False,
         }
     }
 }
@@ -510,7 +546,10 @@ struct SfcDescriptorCacheEntry {
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum SfcParseCacheMode {
-    Raw,
+    Vue3 {
+        pad: Vue3SfcPad,
+        ignore_empty: bool,
+    },
     Vue27 {
         pad: Vue27SfcPad,
         deindent: Option<bool>,
@@ -552,8 +591,22 @@ impl SfcCompiler {
 
     /// Parses an SFC descriptor and returns Vue 3 public `parse()` diagnostics.
     pub fn parse_vue3(&mut self, filename: impl Into<String>, source: &str) -> Vue3SfcParseResult {
+        self.parse_vue3_with_options(filename, source, Vue3SfcParseOptions::default())
+    }
+
+    /// Parses an SFC descriptor and returns Vue 3 public diagnostics with parse options.
+    pub fn parse_vue3_with_options(
+        &mut self,
+        filename: impl Into<String>,
+        source: &str,
+        options: Vue3SfcParseOptions,
+    ) -> Vue3SfcParseResult {
         let filename = filename.into();
-        let key = SfcCacheKey::new(filename.clone(), source, SfcParseCacheMode::Raw);
+        let mode = SfcParseCacheMode::Vue3 {
+            pad: options.pad.clone(),
+            ignore_empty: options.ignore_empty,
+        };
+        let key = SfcCacheKey::new(filename.clone(), source, mode);
         if let Some(entry) = self.descriptor_cache.get(&key) {
             self.cache_stats.descriptor_hits += 1;
             return Vue3SfcParseResult {
@@ -571,7 +624,13 @@ impl SfcCompiler {
             filename,
             source,
             source_file,
-            extract_sfc_blocks(source, source_file, SfcBlockContentMode::Raw).blocks,
+            extract_sfc_blocks(
+                source,
+                source_file,
+                SfcBlockContentMode::Vue3 { options: &options },
+            )
+            .blocks,
+            &options,
         );
         let cached_errors = result.errors.clone();
         self.descriptor_cache.insert(
@@ -1165,7 +1224,9 @@ struct ExtractedSfcBlocks {
 
 #[derive(Clone, Copy)]
 enum SfcBlockContentMode<'a> {
-    Raw,
+    Vue3 {
+        options: &'a Vue3SfcParseOptions,
+    },
     Vue27 {
         options: &'a Vue27ParseComponentOptions,
     },
@@ -1184,6 +1245,7 @@ fn vue3_descriptor_from_blocks(
     source: &str,
     source_file: FileId,
     blocks: Vec<SfcBlock>,
+    options: &Vue3SfcParseOptions,
 ) -> Vue3SfcParseResult {
     let mut descriptor = SfcDescriptor {
         filename,
@@ -1200,6 +1262,13 @@ fn vue3_descriptor_from_blocks(
     let mut has_script_setup_candidate = false;
 
     for block in blocks {
+        if options.ignore_empty
+            && block.type_name != "template"
+            && block.attrs.src.is_none()
+            && block.content.trim().is_empty()
+        {
+            continue;
+        }
         match block.type_name.as_str() {
             "template" => {
                 has_template_or_script_candidate = true;
@@ -1213,9 +1282,6 @@ fn vue3_descriptor_from_blocks(
                 }
             }
             "script" => {
-                if vue3_script_block_is_empty(&block) {
-                    continue;
-                }
                 has_template_or_script_candidate = true;
                 if block.attrs.setup {
                     if descriptor.script_setup.is_some() {
@@ -1268,12 +1334,9 @@ fn vue3_descriptor_from_blocks(
             descriptor.filename
         )));
     }
+    vue3_dedent_pug_template(&mut descriptor);
 
     Vue3SfcParseResult { descriptor, errors }
-}
-
-fn vue3_script_block_is_empty(block: &SfcBlock) -> bool {
-    block.attrs.src.is_none() && block.content.trim().is_empty()
 }
 
 fn vue3_sfc_parse_error(message: impl Into<String>) -> Vue3SfcParseError {
@@ -1288,6 +1351,41 @@ fn vue3_sfc_parse_block_error(message: impl Into<String>, block: &SfcBlock) -> V
         message: message.into(),
         loc: Some(block.loc.clone()),
     }
+}
+
+fn vue3_dedent_pug_template(descriptor: &mut SfcDescriptor) {
+    let Some(template) = descriptor.template.as_mut() else {
+        return;
+    };
+    if !matches!(template.attrs.lang.as_deref(), Some("pug" | "jade")) {
+        return;
+    }
+    let (content, column_offset) = vue3_dedent_template_content(&template.content);
+    template.content = content;
+    template.source_map_column_offset = column_offset;
+}
+
+fn vue3_dedent_template_content(source: &str) -> (String, usize) {
+    let lines = source.split('\n').collect::<Vec<_>>();
+    let mut min_indent = usize::MAX;
+    for line in &lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let indent = line.chars().take_while(|ch| ch.is_whitespace()).count();
+        min_indent = min_indent.min(indent);
+    }
+    if min_indent == usize::MAX || min_indent == 0 {
+        return (source.to_string(), 0);
+    }
+    (
+        lines
+            .iter()
+            .map(|line| strip_chars(line, min_indent))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        min_indent,
+    )
 }
 
 fn descriptor_from_blocks(
@@ -1467,26 +1565,39 @@ fn vue3_sfc_block_map_value(
     let filename = descriptor.filename.replace('\\', "/");
     let mut builder = SourceMapBuilder::new().file(filename.clone());
     builder.add_source_content(filename.clone(), descriptor.source.clone());
+    let block_start = vue3_sfc_position_value(&descriptor.source, block.content_start);
+    let line_offset = if !options.pad.is_enabled() || block.type_name == "template" {
+        block_start
+            .get("line")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(1)
+            .saturating_sub(1) as usize
+    } else {
+        0
+    };
     for (line_index, line) in block.content.split('\n').enumerate() {
+        if vue3_sfc_source_map_line_is_empty(line) {
+            continue;
+        }
+        let original_line = line_index + 1 + line_offset;
         let mut generated_column = 0usize;
-        let mut local_byte = block
-            .content
-            .split('\n')
-            .take(line_index)
-            .map(|line| line.len() + 1)
-            .sum::<usize>();
         for ch in line.chars() {
             if !ch.is_whitespace() {
-                let absolute = block.content_start + local_byte;
-                builder.add_mapping(
-                    line_index + 1,
-                    generated_column,
-                    Some(Span::new(descriptor.source_file, absolute, absolute)),
-                    Some(filename.clone()),
-                );
+                let original_column = generated_column + block.source_map_column_offset;
+                if let Some(absolute) = byte_offset_at_utf16_line_column(
+                    &descriptor.source,
+                    original_line,
+                    original_column,
+                ) {
+                    builder.add_mapping(
+                        line_index + 1,
+                        generated_column,
+                        Some(Span::new(descriptor.source_file, absolute, absolute)),
+                        Some(filename.clone()),
+                    );
+                }
             }
             generated_column += ch.len_utf16();
-            local_byte += ch.len_utf8();
         }
     }
     let mut value = serde_json::to_value(builder.build()).unwrap_or_else(|_| {
@@ -1506,6 +1617,64 @@ fn vue3_sfc_block_map_value(
         );
     }
     value
+}
+
+fn vue3_sfc_source_map_line_is_empty(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.is_empty() || trimmed == "//"
+}
+
+fn byte_offset_at_utf16_line_column(source: &str, line: usize, column: usize) -> Option<usize> {
+    if line == 0 {
+        return None;
+    }
+    let mut current_line = 1usize;
+    let mut line_start = 0usize;
+    let bytes = source.as_bytes();
+    let mut index = 0usize;
+    while current_line < line && index < source.len() {
+        match bytes[index] {
+            b'\r' => {
+                if index + 1 < source.len() && bytes[index + 1] == b'\n' {
+                    index += 2;
+                } else {
+                    index += 1;
+                }
+                current_line += 1;
+                line_start = index;
+            }
+            b'\n' => {
+                index += 1;
+                current_line += 1;
+                line_start = index;
+            }
+            _ => index += 1,
+        }
+    }
+    if current_line != line {
+        return None;
+    }
+    let line_end = source[line_start..]
+        .find(['\r', '\n'])
+        .map(|offset| line_start + offset)
+        .unwrap_or(source.len());
+    let mut current_column = 0usize;
+    let mut cursor = line_start;
+    while cursor <= line_end {
+        if current_column == column {
+            return Some(cursor);
+        }
+        if cursor == line_end {
+            break;
+        }
+        let ch = source[cursor..line_end].chars().next()?;
+        current_column += ch.len_utf16();
+        cursor += ch.len_utf8();
+        if current_column > column {
+            return None;
+        }
+    }
+    (current_column == column).then_some(cursor)
 }
 
 fn vue3_sfc_descriptor_has_slotted_styles(descriptor: &SfcDescriptor) -> bool {
@@ -1747,12 +1916,19 @@ fn finish_sfc_block(
     let content_start = open.open_end.min(source.len());
     let raw_end = content_end.min(source.len()).max(content_start);
     let mut content = source[content_start..raw_end].to_string();
-    if let SfcBlockContentMode::Vue27 { options } = mode {
-        if should_vue27_deindent(&open, options) {
-            content = deindent(&content);
+    match mode {
+        SfcBlockContentMode::Vue3 { options } => {
+            if open.type_name != "template" && options.pad.is_enabled() {
+                content = vue3_pad_content(source, &open, &options.pad) + &content;
+            }
         }
-        if open.type_name != "template" && options.pad.is_enabled() {
-            content = vue27_pad_content(source, &open, &options.pad) + &content;
+        SfcBlockContentMode::Vue27 { options } => {
+            if should_vue27_deindent(&open, options) {
+                content = deindent(&content);
+            }
+            if open.type_name != "template" && options.pad.is_enabled() {
+                content = vue27_pad_content(source, &open, &options.pad) + &content;
+            }
         }
     }
 
@@ -1767,6 +1943,7 @@ fn finish_sfc_block(
         },
         content_start,
         content_end: raw_end,
+        source_map_column_offset: 0,
     }
 }
 
@@ -1915,6 +2092,28 @@ impl Vue27SfcPad {
     fn is_enabled(&self) -> bool {
         !matches!(self, Vue27SfcPad::False)
     }
+}
+
+impl Vue3SfcPad {
+    fn is_enabled(&self) -> bool {
+        !matches!(self, Vue3SfcPad::False)
+    }
+}
+
+fn vue3_pad_content(source: &str, block: &OpenSfcBlock, pad: &Vue3SfcPad) -> String {
+    if matches!(pad, Vue3SfcPad::Space) {
+        return source[..block.open_end]
+            .chars()
+            .map(|ch| if matches!(ch, '\n' | '\r') { ch } else { ' ' })
+            .collect();
+    }
+    let offset = source[..block.open_end].split('\n').count();
+    let pad_char = if block.type_name == "script" && block.attrs.lang.is_none() {
+        "//\n"
+    } else {
+        "\n"
+    };
+    pad_char.repeat(offset.saturating_sub(1))
 }
 
 fn vue27_pad_content(source: &str, block: &OpenSfcBlock, pad: &Vue27SfcPad) -> String {
@@ -7636,6 +7835,7 @@ mod tests {
             &Vue3SfcParseProjectionOptions {
                 source_map: false,
                 source_root: String::new(),
+                pad: Vue3SfcPad::False,
             },
         );
 
@@ -7667,6 +7867,7 @@ mod tests {
             &Vue3SfcParseProjectionOptions {
                 source_map: true,
                 source_root: String::new(),
+                pad: Vue3SfcPad::False,
             },
         );
 
@@ -7762,6 +7963,85 @@ mod tests {
             script_src_with_setup.errors[0].message,
             "<script> cannot use the \"src\" attribute when <script setup> is also present because they must be processed together."
         );
+    }
+
+    #[test]
+    fn vue3_parse_options_pad_non_template_blocks_like_official_parser() {
+        let mut compiler = SfcCompiler::new();
+        let source = concat!(
+            "<template>\n  div\n</template>\n",
+            "<script>\nconst a = 1\n</script>\n",
+            "<style>\n.a{}\n</style>\n",
+            "<i18n>\n{}\n</i18n>"
+        );
+        let line = compiler.parse_vue3_with_options(
+            "Pad.vue",
+            source,
+            Vue3SfcParseOptions {
+                pad: Vue3SfcPad::Line,
+                ..Vue3SfcParseOptions::default()
+            },
+        );
+
+        assert_eq!(
+            line.descriptor.template.as_ref().unwrap().content,
+            "\n  div\n"
+        );
+        assert_eq!(
+            line.descriptor.script.as_ref().unwrap().content,
+            "//\n//\n//\n\nconst a = 1\n"
+        );
+        assert_eq!(line.descriptor.styles[0].content, "\n\n\n\n\n\n\n.a{}\n");
+        assert_eq!(
+            line.descriptor.custom_blocks[0].content,
+            "\n\n\n\n\n\n\n\n\n\n{}\n"
+        );
+
+        let space = compiler.parse_vue3_with_options(
+            "Pad.vue",
+            source,
+            Vue3SfcParseOptions {
+                pad: Vue3SfcPad::Space,
+                ..Vue3SfcParseOptions::default()
+            },
+        );
+        assert!(space
+            .descriptor
+            .script
+            .as_ref()
+            .unwrap()
+            .content
+            .starts_with("          \n"));
+        assert!(space.descriptor.styles[0].content.ends_with(".a{}\n"));
+    }
+
+    #[test]
+    fn vue3_parse_options_ignore_empty_and_dedent_pug_template() {
+        let mut compiler = SfcCompiler::new();
+        let source = concat!(
+            "<template lang=\"pug\">\n  div\n    span\n</template>",
+            "<script> </script><style> </style><i18n> </i18n>"
+        );
+        let default = compiler.parse_vue3("Pug.vue", source);
+        assert_eq!(
+            default.descriptor.template.as_ref().unwrap().content,
+            "\ndiv\n  span\n"
+        );
+        assert!(default.descriptor.script.is_none());
+        assert!(default.descriptor.styles.is_empty());
+        assert!(default.descriptor.custom_blocks.is_empty());
+
+        let keep_empty = compiler.parse_vue3_with_options(
+            "Pug.vue",
+            source,
+            Vue3SfcParseOptions {
+                ignore_empty: false,
+                ..Vue3SfcParseOptions::default()
+            },
+        );
+        assert_eq!(keep_empty.descriptor.script.as_ref().unwrap().content, " ");
+        assert_eq!(keep_empty.descriptor.styles[0].content, " ");
+        assert_eq!(keep_empty.descriptor.custom_blocks[0].content, " ");
     }
 
     #[test]

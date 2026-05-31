@@ -24,7 +24,7 @@ use vuec_js::JsAstStore;
 use vuec_sfc::{
     SfcCompiler, SfcCssVarNameStyle, SfcScriptCompileOptions, SfcStyleCompileOptions,
     SfcTemplateCompileOptions, Vue27ParseComponentOptions, Vue27RewriteDefaultOptions, Vue27SfcPad,
-    Vue27TemplatePreprocessOptions, Vue3SfcParseProjectionOptions,
+    Vue27TemplatePreprocessOptions, Vue3SfcPad, Vue3SfcParseOptions, Vue3SfcParseProjectionOptions,
 };
 use vuec_source::{FileId, Span};
 use vuec_vue2::{
@@ -372,8 +372,9 @@ pub fn parse_sfc(env: Env, source: String, options: Option<Unknown>) -> Result<S
     let raw_options = from_js_options(&env, options)?;
     let filename = string_option(&raw_options, "filename", "anonymous.vue");
     let mut compiler = SfcCompiler::new();
-    let result = compiler.parse_vue3(filename, &source);
-    let projection_options = vue3_sfc_parse_projection_options(&raw_options);
+    let parse_options = vue3_sfc_parse_options(&raw_options);
+    let result = compiler.parse_vue3_with_options(filename, &source, parse_options.clone());
+    let projection_options = vue3_sfc_parse_projection_options(&raw_options, &parse_options);
     let mut value = vuec_sfc::vue3_sfc_descriptor_value(&result.descriptor, &projection_options);
     vue3_sfc_attach_template_ast(&mut value, &result.descriptor, &raw_options);
     to_json_string(value)
@@ -385,8 +386,9 @@ pub fn parse_sfc_result(env: Env, source: String, options: Option<Unknown>) -> R
     let raw_options = from_js_options(&env, options)?;
     let filename = string_option(&raw_options, "filename", "anonymous.vue");
     let mut compiler = SfcCompiler::new();
-    let result = compiler.parse_vue3(filename, &source);
-    let projection_options = vue3_sfc_parse_projection_options(&raw_options);
+    let parse_options = vue3_sfc_parse_options(&raw_options);
+    let result = compiler.parse_vue3_with_options(filename, &source, parse_options.clone());
+    let projection_options = vue3_sfc_parse_projection_options(&raw_options, &parse_options);
     let mut value = vuec_sfc::vue3_sfc_parse_result_value(&result, &projection_options);
     vue3_sfc_attach_template_ast(&mut value, &result.descriptor, &raw_options);
     to_json_string(value)
@@ -1478,8 +1480,19 @@ fn vue3_parse_mode_is_sfc(value: Option<&Value>) -> bool {
         == Some("sfc")
 }
 
-fn vue3_sfc_parse_projection_options(value: &Value) -> Vue3SfcParseProjectionOptions {
+fn vue3_sfc_parse_options(value: &Value) -> Vue3SfcParseOptions {
+    let mut options = Vue3SfcParseOptions::default();
+    options.ignore_empty = bool_option(value, "ignoreEmpty", options.ignore_empty);
+    options.pad = vue3_sfc_pad_option(value.get("pad"));
+    options
+}
+
+fn vue3_sfc_parse_projection_options(
+    value: &Value,
+    parse_options: &Vue3SfcParseOptions,
+) -> Vue3SfcParseProjectionOptions {
     let mut options = Vue3SfcParseProjectionOptions::default();
+    options.pad = parse_options.pad.clone();
     options.source_map = bool_option(value, "sourceMap", true);
     options.source_root = value
         .get("sourceRoot")
@@ -1487,6 +1500,15 @@ fn vue3_sfc_parse_projection_options(value: &Value) -> Vue3SfcParseProjectionOpt
         .unwrap_or_default()
         .to_string();
     options
+}
+
+fn vue3_sfc_pad_option(value: Option<&Value>) -> Vue3SfcPad {
+    match value {
+        Some(Value::Bool(true)) => Vue3SfcPad::Line,
+        Some(Value::String(value)) if value == "line" => Vue3SfcPad::Line,
+        Some(Value::String(value)) if value == "space" => Vue3SfcPad::Space,
+        _ => Vue3SfcPad::False,
+    }
 }
 
 fn vue3_sfc_attach_template_ast(

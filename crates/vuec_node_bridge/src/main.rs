@@ -23,7 +23,8 @@ use vuec_sfc::{
     SfcAttrValue, SfcBlock, SfcBlockAttrs, SfcCompiler, SfcDescriptor, SfcScriptBlock,
     SfcScriptCompileOptions, SfcStyleCompileOptions, SfcTemplateCompileOptions,
     Vue27ParseComponentOptions, Vue27PrefixIdentifiersOptions, Vue27RewriteDefaultOptions,
-    Vue27SfcPad, Vue27TemplatePreprocessOptions, Vue3SfcParseProjectionOptions,
+    Vue27SfcPad, Vue27TemplatePreprocessOptions, Vue3SfcPad, Vue3SfcParseOptions,
+    Vue3SfcParseProjectionOptions,
 };
 use vuec_source::FileId;
 use vuec_style::{compile_style, CssVarNameStyle, StyleCompileOptions};
@@ -352,8 +353,10 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
             let filename = string_field_or(&payload, "filename", "anonymous.vue");
             let source = string_field(&payload, "source");
             let mut compiler = SfcCompiler::new();
-            let result = compiler.parse_vue3(filename, &source);
-            let projection_options = vue3_sfc_parse_projection_options(payload.get("options"));
+            let parse_options = vue3_sfc_parse_options(payload.get("options"));
+            let result = compiler.parse_vue3_with_options(filename, &source, parse_options.clone());
+            let projection_options =
+                vue3_sfc_parse_projection_options(payload.get("options"), &parse_options);
             let mut value = vuec_sfc::vue3_sfc_parse_result_value(&result, &projection_options);
             vue3_sfc_attach_template_ast(&mut value, &result.descriptor, payload.get("options"));
             Ok(value)
@@ -1127,8 +1130,22 @@ fn vue27_css_vars(descriptor: &SfcDescriptor) -> Vec<String> {
     vars
 }
 
-fn vue3_sfc_parse_projection_options(value: Option<&Value>) -> Vue3SfcParseProjectionOptions {
+fn vue3_sfc_parse_options(value: Option<&Value>) -> Vue3SfcParseOptions {
+    let mut options = Vue3SfcParseOptions::default();
+    let Some(value) = value else {
+        return options;
+    };
+    options.ignore_empty = bool_option(value, "ignoreEmpty", options.ignore_empty);
+    options.pad = vue3_sfc_pad_option(value.get("pad"));
+    options
+}
+
+fn vue3_sfc_parse_projection_options(
+    value: Option<&Value>,
+    parse_options: &Vue3SfcParseOptions,
+) -> Vue3SfcParseProjectionOptions {
     let mut options = Vue3SfcParseProjectionOptions::default();
+    options.pad = parse_options.pad.clone();
     let Some(value) = value else {
         return options;
     };
@@ -1139,6 +1156,15 @@ fn vue3_sfc_parse_projection_options(value: Option<&Value>) -> Vue3SfcParseProje
         .unwrap_or_default()
         .to_string();
     options
+}
+
+fn vue3_sfc_pad_option(value: Option<&Value>) -> Vue3SfcPad {
+    match value {
+        Some(Value::Bool(true)) => Vue3SfcPad::Line,
+        Some(Value::String(value)) if value == "line" => Vue3SfcPad::Line,
+        Some(Value::String(value)) if value == "space" => Vue3SfcPad::Space,
+        _ => Vue3SfcPad::False,
+    }
 }
 
 fn vue3_sfc_attach_template_ast(
@@ -4479,6 +4505,35 @@ mod tests {
             parsed["errors"][1]["message"],
             json!("<script> cannot use the \"src\" attribute when <script setup> is also present because they must be processed together.")
         );
+    }
+
+    #[test]
+    fn vue3_sfc_bridge_parse_applies_padding_and_ignore_empty_options() {
+        let parsed = dispatch(
+            "sfc.parse",
+            json!({
+                "source": concat!(
+                    "<template lang=\"pug\">\n  div\n</template>\n",
+                    "<script>\nconst a = 1\n</script>\n",
+                    "<style> </style>"
+                ),
+                "filename": "Pad.vue",
+                "options": {
+                    "pad": "line",
+                    "ignoreEmpty": false,
+                    "sourceMap": false
+                }
+            }),
+        )
+        .expect("vue3 sfc parse");
+
+        let descriptor = &parsed["descriptor"];
+        assert_eq!(descriptor["template"]["content"], json!("\ndiv\n"));
+        assert_eq!(
+            descriptor["script"]["content"],
+            json!("//\n//\n//\n\nconst a = 1\n")
+        );
+        assert_eq!(descriptor["styles"][0]["content"], json!("\n\n\n\n\n\n "));
     }
 
     #[test]
