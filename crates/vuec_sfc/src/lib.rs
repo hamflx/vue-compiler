@@ -25,7 +25,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
 use vuec_codegen::{SourceMapArtifact, SourceMapBuilder};
 use vuec_diagnostics::{Diagnostic, Severity};
-use vuec_html::{HtmlAttribute, HtmlTokenKind, HtmlTokenizer};
+use vuec_html::{decode_html_attr_entities, HtmlAttribute, HtmlTokenKind, HtmlTokenizer};
 use vuec_js::{JsAstStore, JsParseMode};
 use vuec_source::{FileId, SourceMap, Span};
 pub use vuec_style::CssVarNameStyle as SfcCssVarNameStyle;
@@ -81,6 +81,9 @@ pub struct SfcBlockAttrs {
     /// Source ranges for raw attributes keyed by attribute name.
     #[serde(skip)]
     pub ranges: BTreeMap<String, (usize, usize)>,
+    /// Source offsets for duplicated attributes after the first occurrence.
+    #[serde(skip)]
+    pub duplicate_attr_starts: Vec<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,6 +182,20 @@ impl SfcBlockAttrs {
             end,
             source_file,
         })
+    }
+
+    fn duplicate_attr_errors(&self, source_file: FileId) -> Vec<Vue3SfcParseError> {
+        self.duplicate_attr_starts
+            .iter()
+            .map(|offset| Vue3SfcParseError {
+                message: "Duplicate attribute.".into(),
+                loc: Some(SfcBlockLocation {
+                    start: *offset,
+                    end: *offset,
+                    source_file,
+                }),
+            })
+            .collect()
     }
 }
 
@@ -1256,6 +1273,12 @@ enum SfcBlockContentMode<'a> {
     },
 }
 
+impl SfcBlockContentMode<'_> {
+    fn decodes_attr_entities(&self) -> bool {
+        matches!(self, SfcBlockContentMode::Vue3 { .. })
+    }
+}
+
 struct OpenSfcBlock {
     type_name: String,
     attrs: SfcBlockAttrs,
@@ -1286,6 +1309,7 @@ fn vue3_descriptor_from_blocks(
     let mut has_script_setup_candidate = false;
 
     for block in blocks {
+        errors.extend(block.attrs.duplicate_attr_errors(source_file));
         if options.ignore_empty
             && block.type_name != "template"
             && !block.attrs.has_src_attr()
@@ -1504,7 +1528,12 @@ fn vue3_sfc_block_value(
     value.insert("loc".into(), vue3_sfc_block_loc_value(descriptor, block));
     value.insert("attrs".into(), vue3_sfc_attrs_value(&block.attrs));
 
-    if let Some(setup) = block.attrs.raw.get("setup") {
+    if block.type_name == "script" && block.attrs.setup {
+        let setup = block
+            .attrs
+            .raw
+            .get("setup")
+            .unwrap_or(&SfcAttrValue::Bool(true));
         value.insert("setup".into(), vue3_sfc_attr_value(setup));
     }
     if let Some(lang) = block.attrs.lang.as_ref() {
@@ -1789,7 +1818,7 @@ fn extract_sfc_blocks(
                 if depth == 0 {
                     current_block = Some(OpenSfcBlock {
                         type_name: name.clone(),
-                        attrs: attrs_from_html(&attributes),
+                        attrs: attrs_from_html(&attributes, mode.decodes_attr_entities()),
                         start: token.start,
                         open_end: token.end,
                         self_closing,
@@ -2006,14 +2035,24 @@ fn malformed_tail_content_end(source: &str, open: &OpenSfcBlock, fallback: usize
     absolute
 }
 
-fn attrs_from_html(attributes: &[HtmlAttribute]) -> SfcBlockAttrs {
+fn attrs_from_html(attributes: &[HtmlAttribute], decode_entities: bool) -> SfcBlockAttrs {
     let mut attrs = SfcBlockAttrs::default();
     for attribute in attributes {
         let value = attribute
             .value
             .as_ref()
-            .map(|value| SfcAttrValue::String(value.clone()))
+            .map(|value| {
+                let value = if decode_entities {
+                    decode_html_attr_entities(value)
+                } else {
+                    value.clone()
+                };
+                SfcAttrValue::String(value)
+            })
             .unwrap_or(SfcAttrValue::Bool(true));
+        if attrs.raw.contains_key(&attribute.name) {
+            attrs.duplicate_attr_starts.push(attribute.name_start);
+        }
         attrs.raw.insert(attribute.name.clone(), value.clone());
         attrs
             .ranges
@@ -7922,6 +7961,43 @@ mod tests {
         assert_eq!(projected["styles"][0]["attrs"]["scoped"], json!("x"));
         assert_eq!(projected["styles"][0]["scoped"], json!(true));
         assert!(projected["styles"][0].get("map").is_none());
+    }
+
+    #[test]
+    fn vue3_parse_decodes_attrs_and_reports_duplicate_attrs_like_official_parser() {
+        let mut compiler = SfcCompiler::new();
+        let result = compiler.parse_vue3(
+            "Attrs.vue",
+            r#"<template a="1" a="&amp;" lang="p&amp;g">x</template><style module="m&amp;n" setup>.a{}</style><script setup generic="T &amp; U">y</script>"#,
+        );
+
+        let projected =
+            vue3_sfc_parse_result_value(&result, &Vue3SfcParseProjectionOptions::default());
+        assert_eq!(
+            projected["descriptor"]["template"]["attrs"]["a"],
+            json!("&")
+        );
+        assert_eq!(
+            projected["descriptor"]["template"]["attrs"]["lang"],
+            json!("p&g")
+        );
+        assert_eq!(projected["descriptor"]["template"]["lang"], json!("p&g"));
+        assert_eq!(
+            projected["descriptor"]["styles"][0]["attrs"]["module"],
+            json!("m&n")
+        );
+        assert_eq!(projected["descriptor"]["styles"][0]["module"], json!("m&n"));
+        assert!(projected["descriptor"]["styles"][0].get("setup").is_none());
+        assert_eq!(
+            projected["descriptor"]["scriptSetup"]["attrs"]["generic"],
+            json!("T & U")
+        );
+        assert_eq!(
+            projected["errors"][0]["message"],
+            json!("Duplicate attribute.")
+        );
+        assert_eq!(projected["errors"][0]["loc"]["source"], json!(""));
+        assert_eq!(projected["errors"][0]["loc"]["start"]["offset"], json!(16));
     }
 
     #[test]

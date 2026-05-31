@@ -4546,6 +4546,31 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_parse_decodes_attrs_and_duplicate_attr_errors() {
+        let parsed = dispatch(
+            "sfc.parse",
+            json!({
+                "source": r#"<template a="1" a="&amp;">x</template><style module="m&amp;n" setup>.a{}</style>"#,
+                "filename": "Attrs.vue",
+                "options": {
+                    "sourceMap": false
+                }
+            }),
+        )
+        .expect("vue3 sfc parse");
+
+        let descriptor = &parsed["descriptor"];
+        assert_eq!(descriptor["template"]["attrs"]["a"], json!("&"));
+        assert_eq!(descriptor["styles"][0]["module"], json!("m&n"));
+        assert!(descriptor["styles"][0].get("setup").is_none());
+        assert_eq!(
+            parsed["errors"][0]["message"],
+            json!("Duplicate attribute.")
+        );
+        assert_eq!(parsed["errors"][0]["loc"]["start"]["offset"], json!(16));
+    }
+
+    #[test]
     fn vue3_sfc_bridge_parse_applies_padding_and_ignore_empty_options() {
         let parsed = dispatch(
             "sfc.parse",
