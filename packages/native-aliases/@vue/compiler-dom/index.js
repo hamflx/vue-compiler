@@ -139,6 +139,121 @@ function materializeDomContentDirective(command, dir, node, context) {
   };
 }
 
+function domTransformContextPayload(context) {
+  context = context || {};
+  return {
+    prefixIdentifiers: !!context.prefixIdentifiers,
+    cacheHandlers: !!context.cacheHandlers,
+    inVOnce: !!context.inVOnce,
+    inline: !!context.inline,
+    isTS: !!context.isTS,
+    identifiers: context.identifiers || {},
+    bindingMetadata: context.bindingMetadata || {},
+    expressionPlugins: context.expressionPlugins || [],
+  };
+}
+
+function materializeDomOnProjection(projection, dir, context) {
+  if (!projection || projection.kind === 'undefined') return undefined;
+  if (typeof projection === 'string') return projection;
+  if (projection.type) return projection;
+  switch (projection.kind) {
+    case 'node':
+      if (projection.path === 'dir.arg') return dir && dir.arg;
+      if (projection.path === 'dir.exp') return dir && dir.exp;
+      if (projection.path === 'dir.arg.children') return (dir && dir.arg && dir.arg.children) || [];
+      return undefined;
+    case 'children': {
+      const children = [];
+      for (const child of projection.children || []) {
+        const materialized = materializeDomOnProjection(child, dir, context);
+        if (Array.isArray(materialized)) children.push(...materialized);
+        else children.push(materialized);
+      }
+      return children;
+    }
+    case 'helperString': {
+      const helper = helperSymbolFromProjection(projection.helper, context);
+      return `${context && helper ? context.helperString(helper) : `_${helperNameMap[helper]}`}(`;
+    }
+    case 'static':
+      return core.createSimpleExpression(projection.content || '', true, projection.loc || (dir && dir.loc) || core.locStub);
+    case 'simple': {
+      registerDomProjectionHelpers(projection, context);
+      const node = core.createSimpleExpression(
+        projection.content || '',
+        !!projection.isStatic,
+        projection.loc || (dir && dir.exp && dir.exp.loc) || (dir && dir.arg && dir.arg.loc) || (dir && dir.loc) || core.locStub,
+      );
+      if (projection.constType !== undefined) node.constType = projection.constType;
+      return node;
+    }
+    case 'compound': {
+      registerDomProjectionHelpers(projection, context);
+      const children = [];
+      for (const child of projection.children || []) {
+        const materialized = materializeDomOnProjection(child, dir, context);
+        if (Array.isArray(materialized)) children.push(...materialized);
+        else children.push(materialized);
+      }
+      const node = core.createCompoundExpression(children);
+      node.loc = projection.loc || (dir && dir.arg && dir.arg.loc) || (dir && dir.exp && dir.exp.loc) || core.locStub;
+      return node;
+    }
+    case 'call': {
+      const helper = helperSymbolFromProjection(projection.callee || projection.helper, context);
+      if (helper && context && typeof context.helper === 'function') context.helper(helper);
+      const args = (projection.arguments || []).map(arg => materializeDomOnProjection(arg, dir, context));
+      return core.createCallExpression(helper || projection.callee || projection.helper, args, projection.loc || (dir && dir.loc) || core.locStub);
+    }
+    default:
+      throw new Error(`Unsupported Rust Vue 3 DOM v-on projection: ${projection.kind}`);
+  }
+}
+
+function registerDomProjectionHelpers(projection, context) {
+  if (!context || typeof context.helper !== 'function') return;
+  for (const helperName of projection.helpers || []) {
+    const helper = helperSymbolFromProjection(helperName, context);
+    if (helper) context.helper(helper);
+  }
+}
+
+const transformOn = (dir, node, context, _augmentor) => {
+  context = context || {
+    helper: name => name,
+    helperString: name => `_${helperNameMap[name] || name}`,
+    cache: value => value,
+    onError: error => { throw error; },
+  };
+  const projection = callVue3DomProjection('vue3.dom.transformOn', {
+    dir,
+    node,
+    context: domTransformContextPayload(context),
+  });
+  materializeDomDirectiveErrors(projection, dir, node, context);
+  const onMeta = (projection && projection.props || []).map(prop => ({
+    cache: !!prop.cache,
+    handlerKey: !!prop.handlerKey,
+    dynamicKey: !!prop.dynamicKey,
+    ignoreDynamicKeyForNormalize: !!prop.ignoreDynamicKeyForNormalize,
+    valueConstant: !!prop.valueConstant,
+  }));
+  const result = {
+    props: (projection && projection.props || []).map(prop => core.createObjectProperty(
+      materializeDomOnProjection(prop.key, dir, context),
+      materializeDomOnProjection(prop.value, dir, context) || core.createSimpleExpression('() => {}', false, dir && dir.loc || core.locStub),
+    )),
+  };
+  for (const [index, prop] of (result.props || []).entries()) {
+    const meta = onMeta[index] || onMeta[0] || {};
+    if (prop.key && meta.handlerKey) prop.key.isHandlerKey = true;
+    if (meta.cache && context && typeof context.cache === 'function') prop.value = context.cache(prop.value);
+    prop.__vuecOn = meta;
+  }
+  return result;
+};
+
 const transformVHtml = (dir, node, context) => {
   return materializeDomContentDirective('vue3.dom.transformVHtml', dir, node, context);
 };
@@ -178,9 +293,7 @@ const DOMDirectiveTransforms = {
   model: function transformModel(dir, node, context) {
     return core.transformModel(dir, node, context);
   },
-  on: function transformOn(dir, node, context) {
-    return core.transformOn(dir, node, context);
-  },
+  on: transformOn,
   show: transformShow,
 };
 
@@ -426,15 +539,60 @@ function hydrateVue3DomNode(node) {
   return node;
 }
 
-function helperSymbolFromProjection(name) {
+function helperSymbolFromProjection(name, context) {
   if (!name) return undefined;
-  for (const symbol of Reflect.ownKeys(helperNameMap)) {
-    if (typeof symbol === 'symbol' && helperNameMap[symbol] === name) return symbol;
+  if (context && context.__vuecDomHelpers && typeof context.__vuecDomHelpers[name] === 'symbol') {
+    return context.__vuecDomHelpers[name];
+  }
+  const direct = domProjectionHelperSymbol(name)
+    || (core && core[name] && typeof core[name] === 'symbol' ? core[name] : undefined);
+  const helperName = direct && helperNameMap[direct] || domProjectionHelperName(name) || name;
+  return helperSymbolFromHelperName(helperName) || direct;
+}
+
+function helperSymbolFromHelperName(name) {
+  if (!name) return undefined;
+  const keys = Reflect.ownKeys(helperNameMap);
+  for (let index = keys.length - 1; index >= 0; index -= 1) {
+    const key = keys[index];
+    if (typeof key === 'symbol' && helperNameMap[key] === name) return key;
   }
   for (const value of Object.values(core || {})) {
     if (typeof value === 'symbol' && helperNameMap[value] === name) return value;
   }
   return undefined;
+}
+
+function domProjectionHelperSymbol(name) {
+  switch (name) {
+    case 'TRANSITION': return TRANSITION;
+    case 'TRANSITION_GROUP': return TRANSITION_GROUP;
+    case 'V_MODEL_RADIO': return V_MODEL_RADIO;
+    case 'V_MODEL_CHECKBOX': return V_MODEL_CHECKBOX;
+    case 'V_MODEL_TEXT': return V_MODEL_TEXT;
+    case 'V_MODEL_SELECT': return V_MODEL_SELECT;
+    case 'V_MODEL_DYNAMIC': return V_MODEL_DYNAMIC;
+    case 'V_ON_WITH_MODIFIERS': return V_ON_WITH_MODIFIERS;
+    case 'V_ON_WITH_KEYS': return V_ON_WITH_KEYS;
+    case 'V_SHOW': return V_SHOW;
+    default: return undefined;
+  }
+}
+
+function domProjectionHelperName(name) {
+  switch (name) {
+    case 'TRANSITION': return 'Transition';
+    case 'TRANSITION_GROUP': return 'TransitionGroup';
+    case 'V_MODEL_RADIO': return 'vModelRadio';
+    case 'V_MODEL_CHECKBOX': return 'vModelCheckbox';
+    case 'V_MODEL_TEXT': return 'vModelText';
+    case 'V_MODEL_SELECT': return 'vModelSelect';
+    case 'V_MODEL_DYNAMIC': return 'vModelDynamic';
+    case 'V_ON_WITH_MODIFIERS': return 'withModifiers';
+    case 'V_ON_WITH_KEYS': return 'withKeys';
+    case 'V_SHOW': return 'vShow';
+    default: return undefined;
+  }
 }
 
 function projectVue3DomCompileResult(result, options, source) {
@@ -589,6 +747,7 @@ module.exports = {
   createDOMCompilerError,
   parse,
   parserOptions,
+  transformOn,
   transformStyle,
 };
 
@@ -599,6 +758,7 @@ Object.defineProperty(module.exports, '__vuecRuntime', {
     transformVHtml,
     transformVText,
     transformShow,
+    transformOn,
   },
   enumerable: false,
 });

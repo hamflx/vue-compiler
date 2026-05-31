@@ -751,6 +751,84 @@ pub fn transform_show_projection(payload: &Value) -> Value {
     })
 }
 
+/// Projects the DOM `v-on` directive transform for compatibility bridge callers.
+pub fn transform_on_projection(payload: &Value) -> Value {
+    let dir = payload.get("dir").unwrap_or(&Value::Null);
+    let mut projection = vuec_vue3_core::transform_on_projection(payload);
+    let modifiers = dom_directive_modifiers(dir);
+    if modifiers.is_empty() {
+        return projection;
+    }
+
+    let Some(first_prop) = projection
+        .get("props")
+        .and_then(Value::as_array)
+        .and_then(|props| props.first())
+        .cloned()
+    else {
+        return projection;
+    };
+
+    let mut key = first_prop
+        .get("key")
+        .cloned()
+        .unwrap_or_else(|| json!({ "kind": "undefined" }));
+    let mut value = first_prop
+        .get("value")
+        .cloned()
+        .unwrap_or_else(|| json!({ "kind": "undefined" }));
+    let resolved = dom_resolve_event_modifiers(&key, &modifiers);
+
+    if resolved
+        .non_key_modifiers
+        .iter()
+        .any(|modifier| modifier == "right")
+    {
+        key = dom_transform_click_projection(key, "onContextmenu");
+    }
+    if resolved
+        .non_key_modifiers
+        .iter()
+        .any(|modifier| modifier == "middle")
+    {
+        key = dom_transform_click_projection(key, "onMouseup");
+    }
+
+    if !resolved.non_key_modifiers.is_empty() {
+        value = dom_helper_call_projection(
+            "V_ON_WITH_MODIFIERS",
+            vec![
+                value,
+                json!(dom_json_string_array(&resolved.non_key_modifiers)),
+            ],
+        );
+    }
+
+    if !resolved.key_modifiers.is_empty()
+        && (!dom_projection_is_static_expression(&key) || dom_projection_is_keyboard_event(&key))
+    {
+        value = dom_helper_call_projection(
+            "V_ON_WITH_KEYS",
+            vec![value, json!(dom_json_string_array(&resolved.key_modifiers))],
+        );
+    }
+
+    if !resolved.event_option_modifiers.is_empty() {
+        let postfix = resolved
+            .event_option_modifiers
+            .iter()
+            .map(|modifier| dom_capitalize(modifier))
+            .collect::<String>();
+        key = dom_event_option_key_projection(key, &postfix);
+    }
+
+    let mut prop = first_prop;
+    prop["key"] = key;
+    prop["value"] = value;
+    projection["props"] = json!([prop]);
+    projection
+}
+
 struct DomContentDirectiveProjection {
     key: &'static str,
     key_loc: Option<&'static str>,
@@ -826,6 +904,172 @@ fn dom_directive_exp_is_constant(exp: &Value) -> bool {
     exp.get("constType")
         .and_then(Value::as_i64)
         .is_some_and(|constant_type| constant_type > 0)
+}
+
+#[derive(Default)]
+struct DomEventModifiers {
+    key_modifiers: Vec<String>,
+    non_key_modifiers: Vec<String>,
+    event_option_modifiers: Vec<String>,
+}
+
+fn dom_directive_modifiers(dir: &Value) -> Vec<String> {
+    dir.get("modifiers")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|modifier| {
+            modifier
+                .as_str()
+                .or_else(|| modifier.get("content").and_then(Value::as_str))
+                .map(ToOwned::to_owned)
+        })
+        .collect()
+}
+
+fn dom_resolve_event_modifiers(key: &Value, raw_modifiers: &[String]) -> DomEventModifiers {
+    let mut modifiers = DomEventModifiers::default();
+    for modifier in raw_modifiers {
+        if dom_event_option_modifier(modifier) {
+            modifiers.event_option_modifiers.push(modifier.clone());
+            continue;
+        }
+
+        if dom_maybe_key_modifier(modifier) {
+            if dom_projection_is_static_expression(key) {
+                if dom_projection_is_keyboard_event(key) {
+                    modifiers.key_modifiers.push(modifier.clone());
+                } else {
+                    modifiers.non_key_modifiers.push(modifier.clone());
+                }
+            } else {
+                modifiers.key_modifiers.push(modifier.clone());
+                modifiers.non_key_modifiers.push(modifier.clone());
+            }
+            continue;
+        }
+
+        if dom_non_key_modifier(modifier) {
+            modifiers.non_key_modifiers.push(modifier.clone());
+        } else {
+            modifiers.key_modifiers.push(modifier.clone());
+        }
+    }
+    modifiers
+}
+
+fn dom_event_option_modifier(modifier: &str) -> bool {
+    matches!(modifier, "passive" | "once" | "capture")
+}
+
+fn dom_non_key_modifier(modifier: &str) -> bool {
+    matches!(
+        modifier,
+        "stop" | "prevent" | "self" | "ctrl" | "shift" | "alt" | "meta" | "exact" | "middle"
+    )
+}
+
+fn dom_maybe_key_modifier(modifier: &str) -> bool {
+    matches!(modifier, "left" | "right")
+}
+
+fn dom_projection_is_static_expression(projection: &Value) -> bool {
+    match projection.get("kind").and_then(Value::as_str) {
+        Some("static") => true,
+        Some("simple") => projection
+            .get("isStatic")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+fn dom_projection_is_keyboard_event(projection: &Value) -> bool {
+    dom_projection_static_content(projection)
+        .map(|content| {
+            matches!(
+                content.to_ascii_lowercase().as_str(),
+                "onkeyup" | "onkeydown" | "onkeypress"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn dom_projection_static_content(projection: &Value) -> Option<&str> {
+    if dom_projection_is_static_expression(projection) {
+        projection.get("content").and_then(Value::as_str)
+    } else {
+        None
+    }
+}
+
+fn dom_transform_click_projection(key: Value, event: &str) -> Value {
+    if dom_projection_static_content(&key)
+        .is_some_and(|content| content.eq_ignore_ascii_case("onClick"))
+    {
+        return json!({
+            "kind": "simple",
+            "content": event,
+            "isStatic": true,
+            "loc": key.get("loc").cloned().unwrap_or(Value::Null),
+        });
+    }
+
+    if key.get("kind").and_then(Value::as_str) != Some("simple") {
+        return json!({
+            "kind": "compound",
+            "children": [
+                "(",
+                key.clone(),
+                format!(") === \"onClick\" ? \"{event}\" : ("),
+                key,
+                ")",
+            ],
+        });
+    }
+    key
+}
+
+fn dom_helper_call_projection(helper: &str, arguments: Vec<Value>) -> Value {
+    json!({
+        "kind": "call",
+        "callee": helper,
+        "arguments": arguments,
+    })
+}
+
+fn dom_event_option_key_projection(key: Value, postfix: &str) -> Value {
+    if dom_projection_is_static_expression(&key) {
+        let content = dom_projection_static_content(&key)
+            .unwrap_or("")
+            .to_string();
+        let mut next = key;
+        next["kind"] = json!("simple");
+        next["content"] = json!(format!("{content}{postfix}"));
+        next["isStatic"] = json!(true);
+        return next;
+    }
+
+    json!({
+        "kind": "compound",
+        "children": [
+            "(",
+            key,
+            format!(") + \"{postfix}\""),
+        ],
+    })
+}
+
+fn dom_json_string_array(values: &[String]) -> String {
+    serde_json::to_string(values).unwrap_or_else(|_| "[]".to_string())
+}
+
+fn dom_capitalize(value: &str) -> String {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    first.to_uppercase().collect::<String>() + chars.as_str()
 }
 
 /// Extracts DOM directive summaries from compatibility template attributes.
@@ -2123,5 +2367,163 @@ mod tests {
         assert_eq!(projection["errors"][0]["code"], json!(62));
         assert_eq!(projection["errors"][0]["loc"], json!("dir"));
         assert_eq!(projection["needRuntime"], json!("V_SHOW"));
+    }
+
+    #[test]
+    fn transform_on_projection_wraps_non_key_modifiers() {
+        let projection = transform_on_projection(&json!({
+            "dir": {
+                "name": "on",
+                "arg": {
+                    "type": 4,
+                    "content": "click",
+                    "isStatic": true,
+                    "loc": { "source": "click" }
+                },
+                "exp": {
+                    "type": 4,
+                    "content": "test",
+                    "isStatic": false,
+                    "constType": 0,
+                    "loc": { "source": "test" }
+                },
+                "modifiers": [{ "content": "stop" }, { "content": "prevent" }],
+                "loc": { "source": "@click.stop.prevent=\"test\"" }
+            },
+            "node": { "type": 1, "tag": "div", "tagType": 0 },
+            "context": { "prefixIdentifiers": true }
+        }));
+
+        assert_eq!(projection["props"][0]["key"]["content"], json!("onClick"));
+        assert_eq!(projection["props"][0]["value"]["kind"], json!("call"));
+        assert_eq!(
+            projection["props"][0]["value"]["callee"],
+            json!("V_ON_WITH_MODIFIERS")
+        );
+        assert_eq!(
+            projection["props"][0]["value"]["arguments"][1],
+            json!("[\"stop\",\"prevent\"]")
+        );
+    }
+
+    #[test]
+    fn transform_on_projection_wraps_key_and_option_modifiers() {
+        let projection = transform_on_projection(&json!({
+            "dir": {
+                "name": "on",
+                "arg": {
+                    "type": 4,
+                    "content": "keydown",
+                    "isStatic": true,
+                    "loc": { "source": "keydown" }
+                },
+                "exp": {
+                    "type": 4,
+                    "content": "test",
+                    "isStatic": false,
+                    "constType": 0,
+                    "loc": { "source": "test" }
+                },
+                "modifiers": [
+                    { "content": "stop" },
+                    { "content": "capture" },
+                    { "content": "ctrl" },
+                    { "content": "a" }
+                ],
+                "loc": { "source": "@keydown.stop.capture.ctrl.a=\"test\"" }
+            },
+            "node": { "type": 1, "tag": "div", "tagType": 0 },
+            "context": { "prefixIdentifiers": true }
+        }));
+
+        assert_eq!(
+            projection["props"][0]["key"]["content"],
+            json!("onKeydownCapture")
+        );
+        let value = &projection["props"][0]["value"];
+        assert_eq!(value["callee"], json!("V_ON_WITH_KEYS"));
+        assert_eq!(value["arguments"][1], json!("[\"a\"]"));
+        assert_eq!(
+            value["arguments"][0]["callee"],
+            json!("V_ON_WITH_MODIFIERS")
+        );
+        assert_eq!(
+            value["arguments"][0]["arguments"][1],
+            json!("[\"stop\",\"ctrl\"]")
+        );
+    }
+
+    #[test]
+    fn transform_on_projection_rewrites_click_right() {
+        let projection = transform_on_projection(&json!({
+            "dir": {
+                "name": "on",
+                "arg": {
+                    "type": 4,
+                    "content": "click",
+                    "isStatic": true,
+                    "loc": { "source": "click" }
+                },
+                "exp": {
+                    "type": 4,
+                    "content": "test",
+                    "isStatic": false,
+                    "constType": 0,
+                    "loc": { "source": "test" }
+                },
+                "modifiers": [{ "content": "right" }],
+                "loc": { "source": "@click.right=\"test\"" }
+            },
+            "node": { "type": 1, "tag": "div", "tagType": 0 },
+            "context": {}
+        }));
+
+        assert_eq!(
+            projection["props"][0]["key"]["content"],
+            json!("onContextmenu")
+        );
+        assert_eq!(
+            projection["props"][0]["value"]["callee"],
+            json!("V_ON_WITH_MODIFIERS")
+        );
+        assert_eq!(
+            projection["props"][0]["value"]["arguments"][1],
+            json!("[\"right\"]")
+        );
+    }
+
+    #[test]
+    fn transform_on_projection_preserves_constant_handler_metadata() {
+        let projection = transform_on_projection(&json!({
+            "dir": {
+                "name": "on",
+                "arg": {
+                    "type": 4,
+                    "content": "keydown",
+                    "isStatic": true,
+                    "loc": { "source": "keydown" }
+                },
+                "exp": {
+                    "type": 4,
+                    "content": "foo",
+                    "isStatic": false,
+                    "constType": 0,
+                    "loc": { "source": "foo" }
+                },
+                "modifiers": [{ "content": "up" }],
+                "loc": { "source": "@keydown.up=\"foo\"" }
+            },
+            "node": { "type": 1, "tag": "div", "tagType": 0 },
+            "context": {
+                "prefixIdentifiers": true,
+                "bindingMetadata": { "foo": "setup-const" }
+            }
+        }));
+
+        assert_eq!(
+            projection["props"][0]["value"]["callee"],
+            json!("V_ON_WITH_KEYS")
+        );
+        assert_eq!(projection["props"][0]["valueConstant"], json!(true));
     }
 }

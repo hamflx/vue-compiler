@@ -2117,7 +2117,7 @@ fn write_alias_index(
     if target.kind == TargetKind::Vue3Core {
         source.push_str("Object.defineProperty(exports, '__vuecRuntime', { value: vue3CoreRuntime, enumerable: false });\n");
     } else if target.kind == TargetKind::Vue3Dom {
-        source.push_str("Object.defineProperty(exports, '__vuecRuntime', { value: vue3CoreRuntime, enumerable: false });\n");
+        source.push_str("Object.defineProperty(exports, '__vuecRuntime', { value: Object.assign({}, vue3CoreRuntime, { transformOn: vue3CoreRuntime.transformDomOn }), enumerable: false });\n");
     } else if matches!(
         target.kind,
         TargetKind::Vue26Template | TargetKind::Vue27Template
@@ -2204,6 +2204,14 @@ fn alias_export_expression(
     }
     if target.kind == TargetKind::Vue3Dom && export_name == "parserOptions" {
         return "vue3DomParserOptions".into();
+    }
+    if target.kind == TargetKind::Vue3Dom && export_name == "transformOn" {
+        return alias_runtime_function_expression_as(
+            "vue3CoreRuntime",
+            "transformDomOn",
+            export_name,
+            detail,
+        );
     }
     if target.kind == TargetKind::Vue3Dom
         && !matches!(
@@ -2482,6 +2490,15 @@ fn alias_runtime_function_expression(
     export_name: &str,
     detail: &ApiExportDetail,
 ) -> String {
+    alias_runtime_function_expression_as(runtime_object, export_name, export_name, detail)
+}
+
+fn alias_runtime_function_expression_as(
+    runtime_object: &str,
+    runtime_key: &str,
+    export_name: &str,
+    detail: &ApiExportDetail,
+) -> String {
     let name = detail.name.as_deref().unwrap_or(export_name);
     let arity = detail.function_arity.unwrap_or(0);
     let args = (0..arity)
@@ -2491,7 +2508,7 @@ fn alias_runtime_function_expression(
     let apply_body = format!(
         "return {}[{}].apply(this, arguments);",
         runtime_object,
-        js_string_literal(export_name)
+        js_string_literal(runtime_key)
     );
     if detail
         .own_property_names
@@ -6195,6 +6212,36 @@ const vue3CoreRuntime = (() => {
       needRuntime: projection && projection.needRuntime,
     };
   };
+  runtime.transformDomOn = function transformDomOn(dir, node, context) {
+    context = context || { helperString: name => `_${runtime.helperNameMap[name] || name}`, helper: name => name, cache: value => value, onError: error => { throw error; } };
+    const projection = callBridge('vue3.dom.transformOn', {
+      dir,
+      node,
+      context: vue3TransformOnContextPayload(context),
+    });
+    materializeVue3OnErrors(projection, dir, context);
+    const onMeta = (projection.props || []).map(prop => ({
+      cache: !!prop.cache,
+      valueConstant: !!prop.valueConstant,
+      handlerKey: !!prop.handlerKey,
+      dynamicKey: !!prop.dynamicKey,
+      ignoreDynamicKeyForNormalize: !!prop.ignoreDynamicKeyForNormalize,
+    }));
+    const result = {
+      props: (projection.props || []).map(prop => {
+        const key = materializeVue3OnProjection(prop.key, dir, context);
+        const value = materializeVue3OnProjection(prop.value, dir, context) || runtime.createSimpleExpression('() => {}', false, dir.loc);
+        return runtime.createObjectProperty(key, value);
+      }),
+    };
+    for (const [index, prop] of (result.props || []).entries()) {
+      const meta = onMeta[index] || onMeta[0] || {};
+      if (prop.key && meta.handlerKey) prop.key.isHandlerKey = true;
+      if (meta.cache && context && context.cache) prop.value = context.cache(prop.value);
+      prop.__vuecOn = meta;
+    }
+    return result;
+  };
   runtime.transformStyle = function transformStyle(node) {
     if (!node || node.type !== NodeTypes.ELEMENT) return;
     const projection = callBridge('vue3.dom.transformStyle', { node });
@@ -6362,9 +6409,15 @@ function materializeVue3OnProjection(projection, dir, context) {
       return children;
     }
     case 'helperString': {
-      const helper = helperSymbolFromProjection(projection.helper);
+      const helper = helperSymbolFromProjection(projection.helper, context);
       return `${context && helper ? context.helperString(helper) : `_${vue3CoreRuntime.helperNameMap[helper]}`}(`;
     }
+    case 'static':
+      return vue3CoreRuntime.createSimpleExpression(
+        projection.content || '',
+        true,
+        projection.loc || (dir && dir.loc) || locStub,
+      );
     case 'simple':
       for (const name of projection.helpers || []) {
         const symbol = helperSymbolFromProjection(name);
@@ -6390,6 +6443,16 @@ function materializeVue3OnProjection(projection, dir, context) {
       return vue3CoreRuntime.createCompoundExpression(
         children,
         projection.loc || (dir && dir.arg && dir.arg.loc) || (dir && dir.exp && dir.exp.loc) || locStub,
+      );
+    }
+    case 'call': {
+      const helper = helperSymbolFromProjection(projection.callee || projection.helper, context);
+      if (helper && context) context.helper(helper);
+      const args = (projection.arguments || []).map(arg => materializeVue3OnProjection(arg, dir, context));
+      return vue3CoreRuntime.createCallExpression(
+        helper || projection.callee || projection.helper,
+        args,
+        projection.loc || (dir && dir.loc) || locStub,
       );
     }
     default:
@@ -7469,13 +7532,26 @@ function materializeVue3ComponentProjectionNode(projection, node, context) {
   }
 }
 
-function helperSymbolFromProjection(name) {
+function helperSymbolFromProjection(name, context) {
   if (!name) return undefined;
-  if (vue3CoreRuntime[name]) return vue3CoreRuntime[name];
+  if (context && context.__vuecDomHelpers && typeof context.__vuecDomHelpers[name] === 'symbol') {
+    return context.__vuecDomHelpers[name];
+  }
+  if (vue3CoreRuntime[name]) {
+    const direct = vue3CoreRuntime[name];
+    const helperName = typeof direct === 'symbol' ? vue3CoreRuntime.helperNameMap[direct] : undefined;
+    return helperSymbolFromHelperName(helperName) || direct;
+  }
   return helperSymbolFromHelperName(name);
 }
 
 function helperSymbolFromHelperName(name) {
+  if (!name) return undefined;
+  const keys = Reflect.ownKeys(vue3CoreRuntime.helperNameMap);
+  for (let index = keys.length - 1; index >= 0; index--) {
+    const key = keys[index];
+    if (typeof key === 'symbol' && vue3CoreRuntime.helperNameMap[key] === name) return key;
+  }
   return Object.values(vue3CoreRuntime).find(value => {
     return typeof value === 'symbol' && vue3CoreRuntime.helperNameMap[value] === name;
   });
@@ -12115,6 +12191,7 @@ fn write_vue3_dom_conformance_shims(prepared_root: &Path) -> Result<()> {
     write_vue3_dom_transform_shim(&transforms.join("vHtml.ts"), "transformVHtml")?;
     write_vue3_dom_transform_shim(&transforms.join("vText.ts"), "transformVText")?;
     write_vue3_dom_transform_shim(&transforms.join("vShow.ts"), "transformShow")?;
+    write_vue3_dom_v_on_transform_shim(&transforms.join("vOn.ts"))?;
     write_vue3_core_test_setup(prepared_root)?;
 
     let config = r#"
@@ -12591,6 +12668,16 @@ fn write_vue3_dom_transform_shim(path: &Path, export_name: &str) -> Result<()> {
     )
 }
 
+fn write_vue3_dom_v_on_transform_shim(path: &Path) -> Result<()> {
+    write_text(
+        path,
+        &format!(
+            "import {{ __vuecRuntime }} from {}\nimport {{ TO_HANDLER_KEY }} from '@vue/compiler-core'\nimport {{ V_ON_WITH_KEYS, V_ON_WITH_MODIFIERS }} from '../runtimeHelpers'\nconst r = __vuecRuntime\nexport const transformOn = (dir, node, context) => {{\n  if (context) {{\n    context.__vuecDomHelpers = {{ ...(context.__vuecDomHelpers || {{}}), TO_HANDLER_KEY, V_ON_WITH_KEYS, V_ON_WITH_MODIFIERS }}\n  }}\n  return r.transformOn(dir, node, context)\n}}\n",
+            js_string_literal("@vue/compiler-dom")
+        ),
+    )
+}
+
 fn copy_dir_recursive(from: &Path, to: &Path) -> Result<()> {
     fs::create_dir_all(to).with_context(|| format!("failed to create {}", to.display()))?;
     for entry in fs::read_dir(from).with_context(|| format!("failed to read {}", from.display()))? {
@@ -12880,6 +12967,7 @@ fn conformance_coverage_file_kind(
         || path.ends_with("packages/compiler-dom/__tests__/parse.spec.ts")
         || path.ends_with("packages/compiler-dom/__tests__/transforms/transformStyle.spec.ts")
         || path.ends_with("packages/compiler-dom/__tests__/transforms/vHtml.spec.ts")
+        || path.ends_with("packages/compiler-dom/__tests__/transforms/vOn.spec.ts")
         || path.ends_with("packages/compiler-dom/__tests__/transforms/vShow.spec.ts")
         || path.ends_with("packages/compiler-dom/__tests__/transforms/vText.spec.ts")
         || path.ends_with("packages/compiler-ssr/__tests__/ssrText.spec.ts")
@@ -14271,6 +14359,19 @@ mod tests {
         assert!(v_show.contains("@vue/compiler-dom"));
         assert!(v_show.contains("transformShow"));
 
+        let v_on = fs::read_to_string(
+            temp.join("packages")
+                .join("compiler-dom")
+                .join("src")
+                .join("transforms")
+                .join("vOn.ts"),
+        )
+        .unwrap();
+        assert!(v_on.contains("__vuecRuntime"));
+        assert!(v_on.contains("@vue/compiler-dom"));
+        assert!(v_on.contains("transformOn"));
+        assert!(v_on.contains("V_ON_WITH_MODIFIERS"));
+
         let v_model = fs::read_to_string(
             temp.join("packages")
                 .join("compiler-core")
@@ -14284,6 +14385,7 @@ mod tests {
         assert!(ALIAS_RUNTIME_JS.contains("vue3.dom.transformVHtml"));
         assert!(ALIAS_RUNTIME_JS.contains("vue3.dom.transformVText"));
         assert!(ALIAS_RUNTIME_JS.contains("vue3.dom.transformShow"));
+        assert!(ALIAS_RUNTIME_JS.contains("vue3.dom.transformOn"));
         let _ = fs::remove_dir_all(temp);
     }
 
@@ -14417,6 +14519,13 @@ mod tests {
                   ]
                 },
                 {
+                  "name": "F:/repo/prepared/vue3-dom/packages/compiler-dom/__tests__/transforms/vOn.spec.ts",
+                  "assertionResults": [
+                    { "status": "passed" },
+                    { "status": "passed" }
+                  ]
+                },
+                {
                   "name": "F:/repo/prepared/vue3-dom/packages/compiler-dom/__tests__/transforms/vModel.spec.ts",
                   "assertionResults": [
                     { "status": "passed" },
@@ -14436,8 +14545,8 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             counts: ConformanceExecutionCounts {
-                total: 16,
-                pass: 15,
+                total: 18,
+                pass: 17,
                 fail: 1,
                 skip: 0,
                 pending: 0,
@@ -14451,8 +14560,8 @@ mod tests {
         );
 
         assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
-        assert_eq!(coverage.rust_backed_pass, 14);
-        assert_eq!(coverage.rust_backed_total, 14);
+        assert_eq!(coverage.rust_backed_pass, 16);
+        assert_eq!(coverage.rust_backed_total, 16);
         assert_eq!(
             coverage.files[0].source,
             ConformanceCoverageKind::RustBacked
@@ -14477,7 +14586,11 @@ mod tests {
             coverage.files[5].source,
             ConformanceCoverageKind::RustBacked
         );
-        assert_eq!(coverage.files[6].source, ConformanceCoverageKind::Mixed);
+        assert_eq!(
+            coverage.files[6].source,
+            ConformanceCoverageKind::RustBacked
+        );
+        assert_eq!(coverage.files[7].source, ConformanceCoverageKind::Mixed);
         assert!(coverage.files[0]
             .reason
             .contains("routed through vuec_node_bridge"));
