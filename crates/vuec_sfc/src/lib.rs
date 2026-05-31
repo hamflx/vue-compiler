@@ -25,7 +25,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
 use vuec_codegen::{SourceMapArtifact, SourceMapBuilder};
 use vuec_diagnostics::{Diagnostic, Severity};
-use vuec_html::{decode_html_attr_entities, HtmlAttribute, HtmlTokenKind, HtmlTokenizer};
+use vuec_html::{
+    decode_html_attr_entities, HtmlAttribute, HtmlQuoteKind, HtmlTokenKind, HtmlTokenizer,
+};
 use vuec_js::{JsAstStore, JsParseMode};
 use vuec_source::{FileId, SourceMap, Span};
 pub use vuec_style::CssVarNameStyle as SfcCssVarNameStyle;
@@ -1425,6 +1427,18 @@ fn vue3_sfc_missing_end_tag_error(start: usize, source_file: FileId) -> Vue3SfcP
     vue3_sfc_parse_syntax_error("Element is missing end tag.", start, source_file)
 }
 
+fn vue3_sfc_invalid_end_tag_error(start: usize, source_file: FileId) -> Vue3SfcParseError {
+    vue3_sfc_parse_syntax_error("Invalid end tag.", start, source_file)
+}
+
+fn vue3_sfc_cdata_error(start: usize, source_file: FileId) -> Vue3SfcParseError {
+    vue3_sfc_parse_syntax_error(
+        "CDATA section is allowed only in XML context.",
+        start,
+        source_file,
+    )
+}
+
 fn vue3_sfc_parse_block_error(message: impl Into<String>, block: &SfcBlock) -> Vue3SfcParseError {
     Vue3SfcParseError {
         message: message.into(),
@@ -1834,6 +1848,8 @@ fn extract_sfc_blocks(
     let mut current_block: Option<OpenSfcBlock> = None;
     let mut depth = 0usize;
     let mut malformed_tail_start = None;
+    let mut vue3_terminal_root_cdata_start = None;
+    let mut vue3_terminal_root_invalid_end_start = None;
     let mut tokenizer = HtmlTokenizer::new(source);
 
     loop {
@@ -1844,6 +1860,19 @@ fn extract_sfc_blocks(
                 attributes,
                 self_closing,
             } => {
+                let is_vue3_template_content = current_block
+                    .as_ref()
+                    .is_some_and(|block| block.type_name == "template");
+                if mode.is_vue3() && (depth == 0 || is_vue3_template_content) {
+                    vue3_collect_sfc_attr_syntax_errors(
+                        &attributes,
+                        source_file,
+                        depth > 0 && is_vue3_template_content,
+                        &mut vue3_errors,
+                    );
+                    vue3_terminal_root_cdata_start = None;
+                    vue3_terminal_root_invalid_end_start = None;
+                }
                 if depth == 0 {
                     current_block = Some(OpenSfcBlock {
                         type_name: name.clone(),
@@ -1887,9 +1916,12 @@ fn extract_sfc_blocks(
             }
             HtmlTokenKind::EndTag { name } => {
                 if depth == 0 {
+                    if mode.is_vue3() && !name.is_empty() {
+                        vue3_errors.push(vue3_sfc_invalid_end_tag_error(token.start, source_file));
+                    }
                     continue;
                 }
-                let Some(pos) = matching_open_pos(&stack, &name) else {
+                let Some(pos) = matching_open_pos(&stack, &name, mode.is_vue3()) else {
                     if name.is_empty() {
                         malformed_tail_start.get_or_insert(token.start);
                     } else if name.eq_ignore_ascii_case("br") && depth == 0 {
@@ -1900,6 +1932,16 @@ fn extract_sfc_blocks(
                             open_end: token.end,
                             self_closing: true,
                         });
+                    } else if mode.is_vue3()
+                        && current_block
+                            .as_ref()
+                            .is_some_and(|block| block.type_name == "template")
+                    {
+                        vue3_errors.push(vue3_sfc_invalid_end_tag_error(token.start, source_file));
+                        if depth == 1 {
+                            vue3_terminal_root_invalid_end_start = Some(token.start);
+                            vue3_terminal_root_cdata_start = None;
+                        }
                     }
                     continue;
                 };
@@ -1926,12 +1968,21 @@ fn extract_sfc_blocks(
                 stack.pop();
                 if depth == 1 {
                     if let Some(open) = current_block.take() {
+                        let content_end =
+                            if mode.is_vue3() && open.type_name == "template" && pos == 0 {
+                                vue3_terminal_root_cdata_start
+                                    .take()
+                                    .or_else(|| vue3_terminal_root_invalid_end_start.take())
+                                    .unwrap_or(token.start)
+                            } else {
+                                token.start
+                            };
                         blocks.push(finish_sfc_block(
                             source,
                             source_file,
                             mode,
                             open,
-                            token.start,
+                            content_end,
                             token.end,
                             false,
                         ));
@@ -1950,6 +2001,19 @@ fn extract_sfc_blocks(
                         token.start.saturating_add(1),
                         source_file,
                     ));
+                }
+            }
+            HtmlTokenKind::Cdata(_) => {
+                if mode.is_vue3()
+                    && current_block
+                        .as_ref()
+                        .is_some_and(|block| block.type_name == "template")
+                {
+                    vue3_errors.push(vue3_sfc_cdata_error(token.start, source_file));
+                    if depth == 1 {
+                        vue3_terminal_root_cdata_start = Some(token.start);
+                        vue3_terminal_root_invalid_end_start = None;
+                    }
                 }
             }
             HtmlTokenKind::Eof => {
@@ -1990,7 +2054,10 @@ fn extract_sfc_blocks(
                 }
                 break;
             }
-            _ => {}
+            HtmlTokenKind::Text(_) | HtmlTokenKind::Comment(_) | HtmlTokenKind::Doctype(_) => {
+                vue3_terminal_root_cdata_start = None;
+                vue3_terminal_root_invalid_end_start = None;
+            }
         }
     }
 
@@ -2098,11 +2165,22 @@ fn finish_sfc_block(
     }
 }
 
-fn matching_open_pos(stack: &[(String, usize, usize)], name: &str) -> Option<usize> {
+fn matching_open_pos(
+    stack: &[(String, usize, usize)],
+    name: &str,
+    vue3_sfc_mode: bool,
+) -> Option<usize> {
     let lower_name = name.to_ascii_lowercase();
-    stack
-        .iter()
-        .rposition(|(tag, _, _)| tag.to_ascii_lowercase() == lower_name)
+    stack.iter().enumerate().rposition(|(index, (tag, _, _))| {
+        if vue3_sfc_mode && index == 0 && has_ascii_uppercase(tag) {
+            return false;
+        }
+        tag.to_ascii_lowercase() == lower_name
+    })
+}
+
+fn has_ascii_uppercase(source: &str) -> bool {
+    source.bytes().any(|byte| byte.is_ascii_uppercase())
 }
 
 fn malformed_tail_content_end(source: &str, open: &OpenSfcBlock, fallback: usize) -> usize {
@@ -2116,6 +2194,41 @@ fn malformed_tail_content_end(source: &str, open: &OpenSfcBlock, fallback: usize
         return fallback;
     }
     absolute
+}
+
+fn vue3_collect_sfc_attr_syntax_errors(
+    attributes: &[HtmlAttribute],
+    source_file: FileId,
+    include_duplicates: bool,
+    errors: &mut Vec<Vue3SfcParseError>,
+) {
+    let mut seen = BTreeSet::new();
+    for attribute in attributes {
+        if include_duplicates && !seen.insert(attribute.name.as_str()) {
+            errors.push(vue3_sfc_parse_syntax_error(
+                "Duplicate attribute.",
+                attribute.name_start,
+                source_file,
+            ));
+        }
+        if attribute.name.starts_with('=') {
+            errors.push(vue3_sfc_parse_syntax_error(
+                "Attribute name cannot start with '='.",
+                attribute.name_start,
+                source_file,
+            ));
+        }
+        if matches!(attribute.quote, Some(HtmlQuoteKind::Unquoted))
+            && attribute.value_content_start == attribute.value_content_end
+        {
+            let offset = attribute.value_start.unwrap_or(attribute.name_end);
+            errors.push(vue3_sfc_parse_syntax_error(
+                "Attribute value was expected.",
+                offset,
+                source_file,
+            ));
+        }
+    }
 }
 
 fn attrs_from_html(attributes: &[HtmlAttribute], decode_entities: bool) -> SfcBlockAttrs {
@@ -2175,7 +2288,7 @@ fn attrs_from_html(attributes: &[HtmlAttribute], decode_entities: bool) -> SfcBl
 }
 
 fn is_plain_text_sfc_tag(name: &str) -> bool {
-    matches!(name.to_ascii_lowercase().as_str(), "script" | "style")
+    matches!(name, "script" | "style")
 }
 
 fn should_vue27_deindent(block: &OpenSfcBlock, options: &Vue27ParseComponentOptions) -> bool {
@@ -8144,6 +8257,63 @@ mod tests {
         assert_eq!(custom.descriptor.custom_blocks[0].content, "");
         assert_eq!(custom.errors.len(), 1);
         assert_eq!(custom.errors[0].loc.as_ref().unwrap().start, 11);
+    }
+
+    #[test]
+    fn vue3_parse_reports_malformed_descriptor_syntax_like_official_parser() {
+        let mut compiler = SfcCompiler::new();
+
+        let uppercase = compiler.parse_vue3("Upper.vue", "<SCRIPT>let a=1</SCRIPT>");
+        assert_eq!(uppercase.descriptor.custom_blocks[0].type_name, "SCRIPT");
+        assert_eq!(uppercase.descriptor.custom_blocks[0].content, "");
+        assert_eq!(uppercase.errors[0].message, "Element is missing end tag.");
+        assert_eq!(uppercase.errors[0].loc.as_ref().unwrap().start, 0);
+
+        let raw_extra =
+            compiler.parse_vue3("RawExtra.vue", r#"<script>const s = "</script>";</script>"#);
+        assert_eq!(
+            raw_extra.descriptor.script.as_ref().unwrap().content,
+            "const s = \""
+        );
+        assert_eq!(raw_extra.errors[0].message, "Invalid end tag.");
+        assert_eq!(raw_extra.errors[0].loc.as_ref().unwrap().start, 30);
+
+        let cdata = compiler.parse_vue3("Cdata.vue", "<template><![CDATA[x]]></template>");
+        assert_eq!(cdata.descriptor.template.as_ref().unwrap().content, "");
+        assert_eq!(
+            cdata.errors[0].message,
+            "CDATA section is allowed only in XML context."
+        );
+        assert_eq!(cdata.errors[0].loc.as_ref().unwrap().start, 10);
+
+        let invalid_end = compiler.parse_vue3("InvalidEnd.vue", "<template></div></template>");
+        assert_eq!(
+            invalid_end.descriptor.template.as_ref().unwrap().content,
+            ""
+        );
+        assert_eq!(invalid_end.errors[0].message, "Invalid end tag.");
+        assert_eq!(invalid_end.errors[0].loc.as_ref().unwrap().start, 10);
+
+        let invalid_attr = compiler.parse_vue3("InvalidAttr.vue", "<template =x></template>");
+        assert_eq!(
+            invalid_attr.errors[0].message,
+            "Attribute name cannot start with '='."
+        );
+        assert_eq!(invalid_attr.errors[0].loc.as_ref().unwrap().start, 10);
+
+        let missing_value = compiler.parse_vue3("MissingValue.vue", "<template a=></template>");
+        assert_eq!(
+            missing_value.errors[0].message,
+            "Attribute value was expected."
+        );
+        assert_eq!(missing_value.errors[0].loc.as_ref().unwrap().start, 12);
+
+        let nested_duplicate = compiler.parse_vue3(
+            "NestedDuplicate.vue",
+            "<template><div id id></div></template>",
+        );
+        assert_eq!(nested_duplicate.errors[0].message, "Duplicate attribute.");
+        assert_eq!(nested_duplicate.errors[0].loc.as_ref().unwrap().start, 18);
     }
 
     #[test]

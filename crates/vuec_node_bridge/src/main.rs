@@ -4616,6 +4616,31 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![15, 10, 0]
         );
+
+        let malformed = dispatch(
+            "sfc.parse",
+            json!({
+                "source": r#"<template><div id id></div></template><script>const s = "</script>";</script>"#,
+                "filename": "Malformed.vue",
+                "options": {
+                    "sourceMap": false
+                }
+            }),
+        )
+        .expect("vue3 sfc parse");
+        assert_eq!(
+            malformed["descriptor"]["script"]["content"],
+            json!("const s = \"")
+        );
+        assert_eq!(
+            malformed["errors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|error| error["message"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["Duplicate attribute.", "Invalid end tag."]
+        );
     }
 
     #[test]
