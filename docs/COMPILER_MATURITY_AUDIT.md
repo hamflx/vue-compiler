@@ -86,9 +86,9 @@ target/conformance/ee33465b421a58b83fac04aa850a6d250ee09ec169fa80ed8820794a0c9a2
 | `vue27-compiler` | 190 | 0 | 190 | 190/190 | 0/0 | Vue 2.7 模板编译器兼容度强 |
 | `vue27-sfc` | 144 | 0 | 144 | 134/134 | 10/10 | 官方 suite 关闭；`compileStyle.spec.ts` 因 PostCSS callback 边界为 mixed |
 | `vue3-core` | 652 | 0 | 652 | 199/199 | 453/453 | core 有 Rust-backed 子集，但大部分仍是 mixed |
-| `vue3-dom` | 133 | 0 | 133 | 34/34 | 99/99 | 不能作为纯 Rust DOM compiler parity 证明 |
+| `vue3-dom` | 133 | 0 | 133 | 133/133 | 0/0 | Vue 3 DOM public official suite 已迁入 Rust-backed 覆盖 |
 | `vue3-sfc` | 461 | 0 | 461 | 0/0 | 461/461 | 不能作为纯 Rust SFC parity 证明 |
-| `vue3-ssr` | 129 | 0 | 129 | 0/0 | 129/129 | 不能作为纯 Rust SSR compiler parity 证明 |
+| `vue3-ssr` | 129 | 0 | 129 | 129/129 | 0/0 | Vue 3 SSR public official suite 已迁入 Rust-backed 覆盖 |
 
 ## 成熟度分级
 
@@ -97,8 +97,8 @@ target/conformance/ee33465b421a58b83fac04aa850a6d250ee09ec169fa80ed8820794a0c9a2
 | Vue 2 模板编译 | 高，接近可产品化 | Vue 2.6/2.7 rust-backed 官方测试全部通过；option/output/API 检查通过 | 仍需补完整发布包、性能、fuzz、诊断契约后才能产品化 |
 | Vue 2.7 SFC | 中到高 | generated-alias 官方测试 144/144；coverage 为 rust-backed 134/134、mixed 10/10 | public conformance 已关闭；PostCSS callback 边界仍不是纯 Rust |
 | Vue 3 compiler-core | 中 | 199/199 rust-backed 通过，另有 453 mixed 通过；源码已有 AST/HIR/MIR lowering 入口 | core 子集进展明显，但完整 transform/codegen parity 仍需纯 Rust 覆盖 |
-| Vue 3 compiler-dom | 低到中 | 官方 suite 133/133；coverage 为 rust-backed 34/34、mixed 99/99 | 不能宣称纯 Rust DOM compiler 成熟 |
-| Vue 3 compiler-ssr | 低到中 | 官方 suite 129/129 全为 mixed，rust-backed 0/0 | 不能宣称纯 Rust SSR compiler 成熟 |
+| Vue 3 compiler-dom | 中 | 官方 suite 133/133；coverage 为 rust-backed 133/133、mixed 0/0 | public conformance 已关闭；仍需发布、生态、性能和更广泛 runtime/hydration 验证 |
+| Vue 3 compiler-ssr | 中 | 官方 suite 129/129；coverage 为 rust-backed 129/129、mixed 0/0 | public conformance 已关闭；仍需发布、runtime 集成、fuzz 和长尾 SSR 行为验证 |
 | Vue 3 compiler-sfc | 低 | 官方 suite 461/461 全为 mixed，rust-backed 0/0 | 不能宣称纯 Rust SFC compiler 成熟 |
 | Style compiler | 中 | scoped/css vars/preprocessor 当前 option 与 Vue 2.7 SFC 官方 suite 通过；PostCSS callbacks 仍在 JS API adapter | 产品风险集中在 CSS 生态完整性和 mixed API 边界 |
 | Source/diagnostics/sourcemap | 基础可用 | 有 `vuec_source`、`vuec_diagnostics`、`SourceMapBuilder`，output contract 代表性通过 | 距离完整 source map 和诊断 parity 还有明显距离 |
@@ -119,13 +119,13 @@ target/conformance/ee33465b421a58b83fac04aa850a6d250ee09ec169fa80ed8820794a0c9a2
 
 ### 1. 纯 Rust conformance 没有闭环
 
-最重要的问题不是测试数量，而是测试来源。`xtask/src/compat.rs` 明确把 `vue3-core`、`vue3-dom`、`vue3-sfc`、`vue3-ssr` 标为 `mixed`。其说明中也写明 Vue 3 DOM/SFC/SSR official tests 会执行官方 TypeScript source、generated alias、compat adapter 和 Rust bridge 的混合路径。
+最重要的问题不是测试数量，而是测试来源。当前 Vue 3 DOM 与 SSR official suites 已迁入 Rust-backed 覆盖，但 Vue 3 core 仍有大量 mixed transform/codegen 覆盖，Vue 3 SFC 仍主要执行 official TypeScript source、generated alias、compat adapter 和 Rust bridge 的混合路径。
 
 因此：
 
-1. Vue 3 DOM 133/133、SFC 461/461、SSR 129/129 的通过，不能整体计入纯 Rust 编译器完成度。
+1. Vue 3 DOM 133/133 与 SSR 129/129 当前可以按 Rust-backed public official suite 计入对应模块覆盖；Vue 3 SFC 461/461 仍不能整体计入纯 Rust 编译器完成度。
 2. Vue 3 core 的 652/652 总通过中，只有 199/199 是 rust-backed，453/453 是 mixed。
-3. Vue 3 DOM 的 133/133 总通过中，只有 34/34 是 rust-backed，99/99 是 mixed。
+3. Vue 3 SFC 的 461/461 仍为 mixed。
 4. 产品成熟的验收必须把 mixed 视为 harness 健康度，而不是编译器 parity。
 
 ### 2. Vue 2.7 SFC public conformance 已关闭，但仍有 mixed API 边界
@@ -404,16 +404,16 @@ Vue 2、Vue 2.7、Vue 3 DOM、Vue 3 SSR、Vue 3 SFC 之间有大量相似概念�
 
 ### `vuec_vue3_dom`
 
-1. facade crate 较薄，官方 DOM suite 当前 133/133，其中 rust-backed 34/34、mixed 99/99。
-2. 不能把当前 DOM official 通过视为纯 Rust DOM compiler 成熟。
-3. DOM transform、directive transform、runtime helper、patch flag、static stringify、asset URL、namespace 需要 Rust-backed suite。
-4. 需要确认 DOM codegen 不通过 compiler-core mixed adapter 获得隐性语义。
+1. 官方 DOM suite 当前 `133/133` 已迁入 Rust-backed public compile / projection 覆盖，`mixed 0/0`。
+2. 不能把 official conformance 关闭直接等同于产品成熟；还需要发布、runtime、生态和性能验证。
+3. DOM transform、directive transform、runtime helper、patch flag、static stringify、asset URL、namespace 需要继续用 Rust-backed regression 和真实生态用例扩大证据面。
+4. 需要持续确认 DOM codegen 不通过 compiler-core mixed adapter 获得隐性语义。
 
 ### `vuec_vue3_ssr`
 
-1. facade crate 很薄，官方 SSR suite 当前 129/129 全是 mixed，rust-backed 0/0。
-2. SSR 不是 DOM codegen 的简单变体，需要独立 MIR 和 push/stringify/hydration mismatch/teleport/suspense/component slot contract。
-3. 需要 Rust-backed SSR official suite，而不是官方 TS source 加 alias runtime 的 mixed 通过。
+1. 官方 SSR suite 当前 `129/129` 已迁入 Rust-backed public compile 覆盖，`mixed 0/0`。
+2. SSR 不是 DOM codegen 的简单变体；当前已有独立 SSR MIR/codegen 覆盖 push/stringify、teleport、suspense、component slot、attrs、scopeId、css vars 等 official public cases。
+3. 后续风险集中在 official suite 外的长尾 SSR 行为、runtime 集成、hydration mismatch、性能和发布边界。
 
 ### `vuec_vue3_asset`
 
@@ -481,8 +481,8 @@ Vue 2、Vue 2.7、Vue 3 DOM、Vue 3 SSR、Vue 3 SFC 之间有大量相似概念�
 
 ### P1：把 Vue 3 mixed 覆盖迁移为 Rust-backed 覆盖
 
-1. 为 Vue 3 DOM 建立 Rust-backed official slices。
-2. 为 Vue 3 SSR 建立 Rust-backed official slices。
+1. Vue 3 DOM Rust-backed official suite 已关闭，后续补 runtime/ecosystem/perf/fuzz 验证。
+2. Vue 3 SSR Rust-backed official suite 已关闭，后续补 runtime/ecosystem/perf/fuzz 验证。
 3. 为 Vue 3 SFC 建立 Rust-backed official slices。
 4. 将 compiler-core mixed 中的 transform/codegen 语义逐步迁移到 Rust。
 5. 每次迁移都记录 coverage 数字变化，mixed 下降，rust-backed 上升。

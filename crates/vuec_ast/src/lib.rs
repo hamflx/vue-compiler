@@ -2990,6 +2990,12 @@ pub struct Vue3SsrComponent {
     pub tag: MirExpr,
     /// Component props.
     pub props: Vue3DomProps,
+    /// Component custom directive SSR props.
+    #[serde(default)]
+    pub directives: Vec<Vue3DomDirective>,
+    /// Component slot payload.
+    #[serde(default)]
+    pub slots: Option<Vue3DomSlots>,
     /// Whether the component tag is resolved with `resolveDynamicComponent`.
     pub dynamic: bool,
 }
@@ -3040,6 +3046,8 @@ pub enum Vue3SsrMirKind {
     RenderAttrs(Vue3SsrAttrs),
     /// Renders a component.
     RenderComponent(Vue3SsrComponent),
+    /// Renders an SSR Transition boundary while preserving client VNode fallback.
+    Transition,
     /// Renders a slot.
     RenderSlot(Vue3SsrSlot),
     /// Conditional branch.

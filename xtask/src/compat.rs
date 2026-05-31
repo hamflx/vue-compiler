@@ -12753,6 +12753,7 @@ fn rewrite_vue3_ssr_rust_backed_public_compile_imports(prepared_root: &Path) -> 
     rewrite_vue3_ssr_spec_compile_import(&tests.join("ssrSuspense.spec.ts"))?;
     rewrite_vue3_ssr_spec_compile_import(&tests.join("ssrTransition.spec.ts"))?;
     rewrite_vue3_ssr_spec_compile_import(&tests.join("ssrTransitionGroup.spec.ts"))?;
+    rewrite_vue3_ssr_spec_compile_import(&tests.join("ssrComponent.spec.ts"))?;
 
     let utils = tests.join("utils.ts");
     if utils.exists() {
@@ -13324,6 +13325,7 @@ fn conformance_coverage_file_kind(
         || path.ends_with("packages/compiler-ssr/__tests__/ssrSuspense.spec.ts")
         || path.ends_with("packages/compiler-ssr/__tests__/ssrTransition.spec.ts")
         || path.ends_with("packages/compiler-ssr/__tests__/ssrTransitionGroup.spec.ts")
+        || path.ends_with("packages/compiler-ssr/__tests__/ssrComponent.spec.ts")
         || path.ends_with("packages/compiler-ssr/__tests__/ssrVFor.spec.ts")
         || path.ends_with("packages/compiler-ssr/__tests__/ssrVIf.spec.ts")
         || path.ends_with("packages/compiler-ssr/__tests__/ssrVModel.spec.ts")
@@ -15327,6 +15329,11 @@ mod tests {
             "import { compile } from '../src'\n",
         )
         .unwrap();
+        fs::write(
+            tests.join("ssrComponent.spec.ts"),
+            "import { compile } from '../src'\n",
+        )
+        .unwrap();
         fs::write(tests.join("utils.ts"), "import { compile } from '../src'\n").unwrap();
 
         rewrite_vue3_ssr_rust_backed_public_compile_imports(&temp).unwrap();
@@ -15348,6 +15355,7 @@ mod tests {
         let transition_spec = fs::read_to_string(tests.join("ssrTransition.spec.ts")).unwrap();
         let transition_group_spec =
             fs::read_to_string(tests.join("ssrTransitionGroup.spec.ts")).unwrap();
+        let component_spec = fs::read_to_string(tests.join("ssrComponent.spec.ts")).unwrap();
         let utils = fs::read_to_string(tests.join("utils.ts")).unwrap();
         let rust_text_utils = fs::read_to_string(tests.join("utils.rust-ssr-text.ts")).unwrap();
         assert!(spec.contains("from '@vue/compiler-ssr'"));
@@ -15366,6 +15374,7 @@ mod tests {
         assert!(suspense_spec.contains("from '@vue/compiler-ssr'"));
         assert!(transition_spec.contains("from '@vue/compiler-ssr'"));
         assert!(transition_group_spec.contains("from '@vue/compiler-ssr'"));
+        assert!(component_spec.contains("from '@vue/compiler-ssr'"));
         assert!(utils.contains("from '../src'"));
         assert!(!utils.contains("from '@vue/compiler-ssr'"));
         assert!(rust_text_utils.contains("from '@vue/compiler-ssr'"));
