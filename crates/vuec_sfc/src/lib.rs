@@ -59,6 +59,9 @@ pub struct SfcBlock {
     /// Additional original source-map column offset after descriptor-level content transforms.
     #[serde(skip)]
     pub source_map_column_offset: usize,
+    /// Whether an empty block must be preserved because parser recovery produced it.
+    #[serde(skip)]
+    pub preserve_empty: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -661,18 +664,18 @@ impl SfcCompiler {
             Some(std::path::PathBuf::from(&filename)),
             source.to_string(),
         );
-        let result = vue3_descriptor_from_blocks(
-            filename,
+        let extracted = extract_sfc_blocks(
             source,
             source_file,
-            extract_sfc_blocks(
-                source,
-                source_file,
-                SfcBlockContentMode::Vue3 { options: &options },
-            )
-            .blocks,
-            &options,
+            SfcBlockContentMode::Vue3 { options: &options },
         );
+        let mut result =
+            vue3_descriptor_from_blocks(filename, source, source_file, extracted.blocks, &options);
+        if !extracted.vue3_errors.is_empty() {
+            let mut errors = extracted.vue3_errors;
+            errors.extend(result.errors);
+            result.errors = errors;
+        }
         let cached_errors = result.errors.clone();
         self.descriptor_cache.insert(
             key,
@@ -1260,6 +1263,7 @@ impl Default for SfcCompiler {
 #[derive(Clone, Debug)]
 struct ExtractedSfcBlocks {
     blocks: Vec<SfcBlock>,
+    vue3_errors: Vec<Vue3SfcParseError>,
     errors: Vec<Vue27SfcParseError>,
 }
 
@@ -1274,6 +1278,10 @@ enum SfcBlockContentMode<'a> {
 }
 
 impl SfcBlockContentMode<'_> {
+    fn is_vue3(&self) -> bool {
+        matches!(self, SfcBlockContentMode::Vue3 { .. })
+    }
+
     fn decodes_attr_entities(&self) -> bool {
         matches!(self, SfcBlockContentMode::Vue3 { .. })
     }
@@ -1314,6 +1322,7 @@ fn vue3_descriptor_from_blocks(
             && block.type_name != "template"
             && !block.attrs.has_src_attr()
             && block.content.trim().is_empty()
+            && !block.preserve_empty
         {
             continue;
         }
@@ -1395,6 +1404,25 @@ fn vue3_sfc_parse_error(message: impl Into<String>) -> Vue3SfcParseError {
         message: message.into(),
         loc: None,
     }
+}
+
+fn vue3_sfc_parse_syntax_error(
+    message: impl Into<String>,
+    offset: usize,
+    source_file: FileId,
+) -> Vue3SfcParseError {
+    Vue3SfcParseError {
+        message: message.into(),
+        loc: Some(SfcBlockLocation {
+            start: offset,
+            end: offset,
+            source_file,
+        }),
+    }
+}
+
+fn vue3_sfc_missing_end_tag_error(start: usize, source_file: FileId) -> Vue3SfcParseError {
+    vue3_sfc_parse_syntax_error("Element is missing end tag.", start, source_file)
 }
 
 fn vue3_sfc_parse_block_error(message: impl Into<String>, block: &SfcBlock) -> Vue3SfcParseError {
@@ -1800,6 +1828,7 @@ fn extract_sfc_blocks(
     mode: SfcBlockContentMode<'_>,
 ) -> ExtractedSfcBlocks {
     let mut blocks = Vec::new();
+    let mut vue3_errors = Vec::new();
     let mut errors = Vec::new();
     let mut stack: Vec<(String, usize, usize)> = Vec::new();
     let mut current_block: Option<OpenSfcBlock> = None;
@@ -1833,6 +1862,7 @@ fn extract_sfc_blocks(
                             mode,
                             &mut tokenizer,
                             &mut blocks,
+                            &mut vue3_errors,
                             &mut current_block,
                             token.end,
                         );
@@ -1850,6 +1880,7 @@ fn extract_sfc_blocks(
                             open,
                             0,
                             token.end,
+                            false,
                         ));
                     }
                 }
@@ -1872,8 +1903,18 @@ fn extract_sfc_blocks(
                     }
                     continue;
                 };
+                let mut emitted_vue3_missing_child = false;
                 while stack.len() > pos + 1 {
                     if let Some((tag, start, end)) = stack.pop() {
+                        if mode.is_vue3()
+                            && current_block
+                                .as_ref()
+                                .is_some_and(|block| block.type_name == "template")
+                            && !emitted_vue3_missing_child
+                        {
+                            vue3_errors.push(vue3_sfc_missing_end_tag_error(start, source_file));
+                            emitted_vue3_missing_child = true;
+                        }
                         errors.push(Vue27SfcParseError {
                             msg: format!("tag <{tag}> has no matching end tag."),
                             start: Some(start),
@@ -1892,13 +1933,35 @@ fn extract_sfc_blocks(
                             open,
                             token.start,
                             token.end,
+                            false,
                         ));
                     }
                 }
                 depth = depth.saturating_sub(1);
             }
+            HtmlTokenKind::BogusQuestionTag => {
+                if mode.is_vue3()
+                    && current_block
+                        .as_ref()
+                        .is_none_or(|block| block.type_name == "template")
+                {
+                    vue3_errors.push(vue3_sfc_parse_syntax_error(
+                        "'<?' is allowed only in XML context.",
+                        token.start.saturating_add(1),
+                        source_file,
+                    ));
+                }
+            }
             HtmlTokenKind::Eof => {
+                let is_vue3_template = mode.is_vue3()
+                    && current_block
+                        .as_ref()
+                        .is_some_and(|block| block.type_name == "template");
+                let is_vue3 = mode.is_vue3();
                 while let Some((tag, start, end)) = stack.pop() {
+                    if is_vue3 && (is_vue3_template || stack.is_empty()) {
+                        vue3_errors.push(vue3_sfc_missing_end_tag_error(start, source_file));
+                    }
                     errors.push(Vue27SfcParseError {
                         msg: format!("tag <{tag}> has no matching end tag."),
                         start: Some(start),
@@ -1906,9 +1969,13 @@ fn extract_sfc_blocks(
                     });
                     if stack.is_empty() {
                         if let Some(open) = current_block.take() {
-                            let fallback_end = malformed_tail_start.unwrap_or_else(|| {
-                                malformed_tail_content_end(source, &open, token.start)
-                            });
+                            let fallback_end = if mode.is_vue3() {
+                                open.open_end
+                            } else {
+                                malformed_tail_start.unwrap_or_else(|| {
+                                    malformed_tail_content_end(source, &open, token.start)
+                                })
+                            };
                             blocks.push(finish_sfc_block(
                                 source,
                                 source_file,
@@ -1916,6 +1983,7 @@ fn extract_sfc_blocks(
                                 open,
                                 fallback_end,
                                 token.end,
+                                mode.is_vue3(),
                             ));
                         }
                     }
@@ -1927,7 +1995,11 @@ fn extract_sfc_blocks(
     }
 
     blocks.sort_by_key(|block| block.loc.start);
-    ExtractedSfcBlocks { blocks, errors }
+    ExtractedSfcBlocks {
+        blocks,
+        vue3_errors,
+        errors,
+    }
 }
 
 fn consume_plain_text_element(
@@ -1936,6 +2008,7 @@ fn consume_plain_text_element(
     mode: SfcBlockContentMode<'_>,
     tokenizer: &mut HtmlTokenizer<'_>,
     blocks: &mut Vec<SfcBlock>,
+    vue3_errors: &mut Vec<Vue3SfcParseError>,
     current_block: &mut Option<OpenSfcBlock>,
     content_start: usize,
 ) {
@@ -1959,16 +2032,24 @@ fn consume_plain_text_element(
             open,
             close_start,
             close_end,
+            false,
         ));
     } else {
         tokenizer.set_cursor(source.len());
+        let content_end = if mode.is_vue3() {
+            vue3_errors.push(vue3_sfc_missing_end_tag_error(open.start, source_file));
+            open.open_end
+        } else {
+            source.len()
+        };
         blocks.push(finish_sfc_block(
             source,
             source_file,
             mode,
             open,
+            content_end,
             source.len(),
-            source.len(),
+            mode.is_vue3(),
         ));
     }
 }
@@ -1980,6 +2061,7 @@ fn finish_sfc_block(
     open: OpenSfcBlock,
     content_end: usize,
     close_end: usize,
+    preserve_empty: bool,
 ) -> SfcBlock {
     let content_start = open.open_end.min(source.len());
     let raw_end = content_end.min(source.len()).max(content_start);
@@ -2012,6 +2094,7 @@ fn finish_sfc_block(
         content_start,
         content_end: raw_end,
         source_map_column_offset: 0,
+        preserve_empty,
     }
 }
 
@@ -7998,6 +8081,69 @@ mod tests {
         );
         assert_eq!(projected["errors"][0]["loc"]["source"], json!(""));
         assert_eq!(projected["errors"][0]["loc"]["start"]["offset"], json!(16));
+    }
+
+    #[test]
+    fn vue3_parse_reports_bogus_question_tags_like_official_parser() {
+        let mut compiler = SfcCompiler::new();
+        let result = compiler.parse_vue3(
+            "Question.vue",
+            r#"<?xml?><template><?x?><div/></template><docs><?keep?></docs>"#,
+        );
+
+        assert_eq!(
+            result.descriptor.template.as_ref().unwrap().content,
+            "<?x?><div/>"
+        );
+        assert_eq!(result.descriptor.custom_blocks[0].content, "<?keep?>");
+        let projected =
+            vue3_sfc_parse_result_value(&result, &Vue3SfcParseProjectionOptions::default());
+        assert_eq!(
+            projected["errors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|error| error["message"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                "'<?' is allowed only in XML context.",
+                "'<?' is allowed only in XML context.",
+            ]
+        );
+        assert_eq!(projected["errors"][0]["loc"]["start"]["offset"], json!(1));
+        assert_eq!(projected["errors"][1]["loc"]["start"]["offset"], json!(18));
+    }
+
+    #[test]
+    fn vue3_parse_reports_missing_end_tags_like_official_parser() {
+        let mut compiler = SfcCompiler::new();
+        let script = compiler.parse_vue3("UnclosedScript.vue", "<script>x");
+        assert_eq!(script.descriptor.script.as_ref().unwrap().content, "");
+        assert_eq!(script.errors[0].message, "Element is missing end tag.");
+        assert_eq!(script.errors[0].loc.as_ref().unwrap().start, 0);
+
+        let nested = compiler.parse_vue3("Nested.vue", "<template><div><span></template>");
+        assert_eq!(
+            nested.descriptor.template.as_ref().unwrap().content,
+            "<div><span>"
+        );
+        assert_eq!(nested.errors.len(), 1);
+        assert_eq!(nested.errors[0].loc.as_ref().unwrap().start, 15);
+
+        let eof = compiler.parse_vue3("Eof.vue", "<template><div><span>");
+        assert_eq!(eof.descriptor.template.as_ref().unwrap().content, "");
+        assert_eq!(
+            eof.errors
+                .iter()
+                .map(|error| error.loc.as_ref().unwrap().start)
+                .collect::<Vec<_>>(),
+            vec![15, 10, 0]
+        );
+
+        let custom = compiler.parse_vue3("Custom.vue", "<template/><docs><?x?");
+        assert_eq!(custom.descriptor.custom_blocks[0].content, "");
+        assert_eq!(custom.errors.len(), 1);
+        assert_eq!(custom.errors[0].loc.as_ref().unwrap().start, 11);
     }
 
     #[test]

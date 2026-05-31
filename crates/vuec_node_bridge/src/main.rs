@@ -4571,6 +4571,54 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_parse_reports_syntax_errors_from_descriptor_scan() {
+        let parsed = dispatch(
+            "sfc.parse",
+            json!({
+                "source": r#"<?xml?><template><?x?><div/></template><docs><?keep?></docs>"#,
+                "filename": "Syntax.vue",
+                "options": {
+                    "sourceMap": false
+                }
+            }),
+        )
+        .expect("vue3 sfc parse");
+
+        assert_eq!(
+            parsed["descriptor"]["template"]["content"],
+            json!("<?x?><div/>")
+        );
+        assert_eq!(
+            parsed["errors"][0]["message"],
+            json!("'<?' is allowed only in XML context.")
+        );
+        assert_eq!(parsed["errors"][0]["loc"]["start"]["offset"], json!(1));
+        assert_eq!(parsed["errors"][1]["loc"]["start"]["offset"], json!(18));
+
+        let unclosed = dispatch(
+            "sfc.parse",
+            json!({
+                "source": "<template><div><span>",
+                "filename": "Unclosed.vue",
+                "options": {
+                    "sourceMap": false
+                }
+            }),
+        )
+        .expect("vue3 sfc parse");
+        assert_eq!(unclosed["descriptor"]["template"]["content"], json!(""));
+        assert_eq!(
+            unclosed["errors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|error| error["loc"]["start"]["offset"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![15, 10, 0]
+        );
+    }
+
+    #[test]
     fn vue3_sfc_bridge_parse_applies_padding_and_ignore_empty_options() {
         let parsed = dispatch(
             "sfc.parse",
