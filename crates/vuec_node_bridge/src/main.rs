@@ -166,6 +166,7 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
             payload.get("root").unwrap_or(&payload),
         )),
         "vue3.core.cacheStatic" => Ok(vuec_vue3_core::cache_static_projection(&payload)),
+        "vue3.core.stringifyStatic" => Ok(vuec_vue3_core::stringify_static_projection(&payload)),
         "vue3.core.getConstantType" => Ok(vuec_vue3_core::get_constant_type_projection(&payload)),
         "vue3.core.isMemberExpression" => {
             Ok(vuec_vue3_core::is_member_expression_projection(&payload))

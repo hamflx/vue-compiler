@@ -6068,6 +6068,15 @@ const vue3CoreRuntime = (() => {
       vue3ApplyTransformHoist(root, context);
     }
   };
+  runtime.stringifyStatic = function stringifyStatic(children, context, parent) {
+    if (!Array.isArray(children)) return;
+    const projection = callBridge('vue3.core.stringifyStatic', {
+      children: runtime.dehydrateForBridge(children),
+      parent: runtime.dehydrateForBridge(parent),
+      context: vue3StringifyStaticContextPayload(context),
+    });
+    materializeVue3StringifyStaticProjection(projection, children, context, runtime);
+  };
   runtime.transformOnce = function transformOnce(node, context) {
     const projection = callBridge('vue3.core.transformOnce', {
       node: runtime.dehydrateForBridge(node),
@@ -6737,6 +6746,16 @@ function vue3CacheStaticContextPayload(context) {
   };
 }
 
+function vue3StringifyStaticContextPayload(context) {
+  context = context || {};
+  return {
+    scopeId: context.scopeId || undefined,
+    scopes: {
+      vSlot: Number(context.scopes && context.scopes.vSlot || 0),
+    },
+  };
+}
+
 function vue3ProcessExpressionContextPayload(context) {
   context = context || {};
   return {
@@ -6927,6 +6946,45 @@ function materializeVue3CacheStaticOperation(operation, root, context) {
     }
     default:
       throw new Error(`Unsupported Rust cacheStatic projection: ${operation.kind}`);
+  }
+}
+
+function materializeVue3StringifyStaticProjection(projection, children, context, runtime = vue3CoreRuntime) {
+  if (!projection || !Array.isArray(projection.operations) || !Array.isArray(children)) return;
+  context = context || {};
+  for (const operation of projection.operations) {
+    if (!operation || !operation.kind) continue;
+    const call = runtime.createCallExpression(
+      context && typeof context.helper === 'function'
+        ? context.helper(runtime.CREATE_STATIC)
+        : runtime.CREATE_STATIC,
+      [operation.html || '""', String(operation.domNodes || operation.count || 0)],
+    );
+    const start = Number(operation.start) || 0;
+    const count = Math.max(1, Number(operation.count) || 1);
+    if (operation.kind === 'stringifyParentCachedRange') {
+      children.splice(start, count, call);
+      continue;
+    }
+    if (operation.kind === 'stringifyCachedChildRange') {
+      const first = children[start];
+      const last = children[start + count - 1];
+      const lastCache = last && last.codegenNode;
+      if (first && first.codegenNode) first.codegenNode.value = call;
+      if (count > 1) {
+        children.splice(start + 1, count - 1);
+        const cacheIndex = context.cached && context.cached.indexOf(lastCache);
+        if (cacheIndex > -1) {
+          for (let index = cacheIndex; index < context.cached.length; index++) {
+            const cache = context.cached[index];
+            if (cache) cache.index -= count - 1;
+          }
+          context.cached.splice(cacheIndex - count + 2, count - 1);
+        }
+      }
+      continue;
+    }
+    throw new Error(`Unsupported Rust stringifyStatic projection: ${operation.kind}`);
   }
 }
 
@@ -12353,6 +12411,7 @@ fn write_vue3_dom_conformance_shims(prepared_root: &Path) -> Result<()> {
         &transforms.join("transformStyle.ts"),
         "export { transformStyle } from '@vue/compiler-dom'\n",
     )?;
+    write_vue3_dom_stringify_static_shim(&transforms.join("stringifyStatic.ts"))?;
     write_vue3_dom_transform_shim(&transforms.join("vHtml.ts"), "transformVHtml")?;
     write_vue3_dom_transform_shim(&transforms.join("vText.ts"), "transformVText")?;
     write_vue3_dom_transform_shim(&transforms.join("vShow.ts"), "transformShow")?;
@@ -12839,6 +12898,16 @@ fn write_vue3_dom_transform_shim(path: &Path, export_name: &str) -> Result<()> {
     )
 }
 
+fn write_vue3_dom_stringify_static_shim(path: &Path) -> Result<()> {
+    write_text(
+        path,
+        &format!(
+            "import {{ __vuecRuntime }} from {}\nconst r = __vuecRuntime\nexport enum StringifyThresholds {{\n  ELEMENT_WITH_BINDING_COUNT = 5,\n  NODE_COUNT = 20,\n}}\nexport const stringifyStatic = (children, context, parent) => r.stringifyStatic(children, context, parent)\n",
+            js_string_literal("@vue/compiler-core")
+        ),
+    )
+}
+
 fn write_vue3_dom_v_on_transform_shim(path: &Path) -> Result<()> {
     write_text(
         path,
@@ -13199,6 +13268,7 @@ fn conformance_coverage_file_kind(
         || path.ends_with("packages/compiler-dom/__tests__/parse.spec.ts")
         || path.ends_with("packages/compiler-dom/__tests__/transforms/Transition.spec.ts")
         || path.ends_with("packages/compiler-dom/__tests__/transforms/ignoreSideEffectTags.spec.ts")
+        || path.ends_with("packages/compiler-dom/__tests__/transforms/stringifyStatic.spec.ts")
         || path.ends_with("packages/compiler-dom/__tests__/transforms/transformStyle.spec.ts")
         || path.ends_with("packages/compiler-dom/__tests__/transforms/vHtml.spec.ts")
         || path.ends_with("packages/compiler-dom/__tests__/transforms/vModel.spec.ts")
@@ -14559,6 +14629,19 @@ mod tests {
         .unwrap();
         assert!(transform_style.contains("export { transformStyle } from '@vue/compiler-dom'"));
 
+        let stringify_static = fs::read_to_string(
+            temp.join("packages")
+                .join("compiler-dom")
+                .join("src")
+                .join("transforms")
+                .join("stringifyStatic.ts"),
+        )
+        .unwrap();
+        assert!(stringify_static.contains("__vuecRuntime"));
+        assert!(stringify_static.contains("@vue/compiler-core"));
+        assert!(stringify_static.contains("StringifyThresholds"));
+        assert!(stringify_static.contains("stringifyStatic"));
+
         let v_html = fs::read_to_string(
             temp.join("packages")
                 .join("compiler-dom")
@@ -14682,6 +14765,7 @@ mod tests {
         assert!(ALIAS_RUNTIME_JS.contains("vue3.dom.decodeHtmlBrowser"));
         assert!(ALIAS_RUNTIME_JS.contains("vue3.dom.validateHtmlNesting"));
         assert!(ALIAS_RUNTIME_JS.contains("vue3.dom.isValidHTMLNesting"));
+        assert!(ALIAS_RUNTIME_JS.contains("vue3.core.stringifyStatic"));
         let _ = fs::remove_dir_all(temp);
     }
 
@@ -14886,9 +14970,9 @@ mod tests {
             Some(&execution),
         );
 
-        assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
+        assert_eq!(coverage.source, ConformanceCoverageKind::RustBacked);
         assert_eq!(coverage.rust_backed_pass, 23);
-        assert_eq!(coverage.rust_backed_total, 23);
+        assert_eq!(coverage.rust_backed_total, 24);
         assert_eq!(
             coverage.files[0].source,
             ConformanceCoverageKind::RustBacked
@@ -14937,7 +15021,10 @@ mod tests {
             coverage.files[11].source,
             ConformanceCoverageKind::RustBacked
         );
-        assert_eq!(coverage.files[12].source, ConformanceCoverageKind::Mixed);
+        assert_eq!(
+            coverage.files[12].source,
+            ConformanceCoverageKind::RustBacked
+        );
         assert!(coverage.files[0]
             .reason
             .contains("routed through vuec_node_bridge"));

@@ -2249,6 +2249,16 @@ function vue3CacheStaticContextPayload(context) {
   };
 }
 
+function vue3StringifyStaticContextPayload(context) {
+  context = context || {};
+  return {
+    scopeId: context.scopeId || undefined,
+    scopes: {
+      vSlot: Number(context.scopes && context.scopes.vSlot || 0),
+    },
+  };
+}
+
 function materializeVue3TextProjection(projection, node, context) {
   if (!projection || !Array.isArray(projection.operations) || !node || !Array.isArray(node.children)) return;
   for (const operation of projection.operations) {
@@ -2534,6 +2544,55 @@ function cacheStatic(root, context) {
   }
   if (context && typeof context.transformHoist === 'function') {
     applyVue3TransformHoist(root, context);
+  }
+}
+
+function stringifyStatic(children, context, parent) {
+  if (!Array.isArray(children)) return;
+  const projection = callVue3CoreProjection('vue3.core.stringifyStatic', {
+    children,
+    parent,
+    context: vue3StringifyStaticContextPayload(context),
+  });
+  materializeVue3StringifyStaticProjection(projection, children, context);
+}
+
+function materializeVue3StringifyStaticProjection(projection, children, context) {
+  if (!projection || !Array.isArray(projection.operations) || !Array.isArray(children)) return;
+  context = context || {};
+  for (const operation of projection.operations) {
+    if (!operation || !operation.kind) continue;
+    const call = createCallExpression(
+      context && typeof context.helper === 'function'
+        ? context.helper(CREATE_STATIC)
+        : CREATE_STATIC,
+      [operation.html || '""', String(operation.domNodes || operation.count || 0)],
+    );
+    const start = Number(operation.start) || 0;
+    const count = Math.max(1, Number(operation.count) || 1);
+    if (operation.kind === 'stringifyParentCachedRange') {
+      children.splice(start, count, call);
+      continue;
+    }
+    if (operation.kind === 'stringifyCachedChildRange') {
+      const first = children[start];
+      const last = children[start + count - 1];
+      const lastCache = last && last.codegenNode;
+      if (first && first.codegenNode) first.codegenNode.value = call;
+      if (count > 1) {
+        children.splice(start + 1, count - 1);
+        const cacheIndex = context.cached && context.cached.indexOf(lastCache);
+        if (cacheIndex > -1) {
+          for (let index = cacheIndex; index < context.cached.length; index++) {
+            const cache = context.cached[index];
+            if (cache) cache.index -= count - 1;
+          }
+          context.cached.splice(cacheIndex - count + 2, count - 1);
+        }
+      }
+      continue;
+    }
+    throw new Error(`Unsupported Rust stringifyStatic projection: ${operation.kind}`);
   }
 }
 
@@ -3653,6 +3712,7 @@ module.exports = {
 Object.defineProperty(module.exports, '__vuecRuntime', {
   value: {
     ...module.exports,
+    stringifyStatic,
     transformFor,
     transformIf,
     transformOnce,

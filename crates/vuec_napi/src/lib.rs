@@ -256,6 +256,7 @@ pub fn call_vue3_core_projection(env: Env, command: String, payload: Unknown) ->
         "vue3.core.toValidAssetId" => vuec_vue3_core::to_valid_asset_id_projection(&payload),
         "vue3.core.getConstantType" => vuec_vue3_core::get_constant_type_projection(&payload),
         "vue3.core.cacheStatic" => vuec_vue3_core::cache_static_projection(&payload),
+        "vue3.core.stringifyStatic" => vuec_vue3_core::stringify_static_projection(&payload),
         "vue3.core.rootCodegen" => {
             vuec_vue3_core::root_codegen_projection(payload.get("root").unwrap_or(&payload))
         }

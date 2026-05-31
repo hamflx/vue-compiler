@@ -6672,6 +6672,491 @@ pub fn cache_static_projection(payload: &Value) -> Value {
     })
 }
 
+/// Projects Rust-backed `stringifyStatic` transform-hoist behavior for public AST callers.
+pub fn stringify_static_projection(payload: &Value) -> Value {
+    let children = payload
+        .get("children")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let context = payload.get("context").unwrap_or(&Value::Null);
+    let parent = payload.get("parent").unwrap_or(&Value::Null);
+    if json_usize(
+        context
+            .get("scopes")
+            .unwrap_or_else(|| context.get("scope").unwrap_or(&Value::Null)),
+        "vSlot",
+    )
+    .unwrap_or(0)
+        > 0
+    {
+        return json!({ "operations": [] });
+    }
+
+    let is_parent_cached = vue3_stringify_parent_is_cached(parent);
+    let mut virtual_children = (0..children.len())
+        .map(Vue3StringifyVirtualChild::Original)
+        .collect::<Vec<_>>();
+    let mut operations = Vec::new();
+    let mut current_chunk = Vec::<StaticHtmlAnalysis>::new();
+    let mut index = 0usize;
+    while index < virtual_children.len() {
+        let child = match virtual_children[index] {
+            Vue3StringifyVirtualChild::Original(original) => children.get(original),
+            Vue3StringifyVirtualChild::StaticCall => None,
+        };
+        if let Some(child) = child {
+            let is_cached = is_parent_cached || vue3_stringify_cached_node(child).is_some();
+            if is_cached {
+                if let Some(analysis) = vue3_stringify_analyze_public_node(child, context) {
+                    current_chunk.push(analysis);
+                    index += 1;
+                    continue;
+                }
+            }
+        }
+
+        let delete_count = vue3_stringify_flush_public_chunk(
+            index,
+            is_parent_cached,
+            &mut current_chunk,
+            &mut virtual_children,
+            &mut operations,
+        );
+        current_chunk.clear();
+        index = index.saturating_sub(delete_count) + 1;
+    }
+    vue3_stringify_flush_public_chunk(
+        virtual_children.len(),
+        is_parent_cached,
+        &mut current_chunk,
+        &mut virtual_children,
+        &mut operations,
+    );
+
+    json!({ "operations": operations })
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Vue3StringifyVirtualChild {
+    Original(usize),
+    StaticCall,
+}
+
+fn vue3_stringify_parent_is_cached(parent: &Value) -> bool {
+    json_node_type(parent) == Some(1)
+        && parent.get("codegenNode").is_some_and(|codegen| {
+            json_node_type(codegen) == Some(13)
+                && codegen
+                    .get("children")
+                    .is_some_and(|children| json_node_type(children) == Some(20))
+        })
+}
+
+fn vue3_stringify_cached_node(node: &Value) -> Option<&Value> {
+    let cacheable = (json_node_type(node) == Some(1) && json_u64(node, "tagType") == Some(0))
+        || json_node_type(node) == Some(12);
+    if !cacheable {
+        return None;
+    }
+    let codegen = node.get("codegenNode")?;
+    (json_node_type(codegen) == Some(20)).then_some(codegen)
+}
+
+fn vue3_stringify_flush_public_chunk(
+    current_index: usize,
+    is_parent_cached: bool,
+    current_chunk: &mut [StaticHtmlAnalysis],
+    virtual_children: &mut Vec<Vue3StringifyVirtualChild>,
+    operations: &mut Vec<Value>,
+) -> usize {
+    if current_chunk.is_empty() {
+        return 0;
+    }
+    let mut analysis = StaticHtmlAnalysis {
+        html: StaticHtmlBuffer::default(),
+        dom_nodes: current_chunk.len(),
+        node_count: 0,
+        element_with_binding_count: 0,
+    };
+    for item in current_chunk.iter() {
+        analysis.html.append(item.html.clone());
+        analysis.node_count += item.node_count;
+        analysis.element_with_binding_count += item.element_with_binding_count;
+    }
+    if !analysis.meets_threshold() {
+        return 0;
+    }
+
+    let start = current_index.saturating_sub(current_chunk.len());
+    let count = current_chunk.len();
+    let operation = json!({
+        "kind": if is_parent_cached {
+            "stringifyParentCachedRange"
+        } else {
+            "stringifyCachedChildRange"
+        },
+        "start": start,
+        "count": count,
+        "html": analysis.html.to_js_expression(),
+        "domNodes": analysis.dom_nodes,
+    });
+    operations.push(operation);
+    let delete_count = count.saturating_sub(1);
+    if is_parent_cached {
+        virtual_children.splice(
+            start..start + count,
+            [Vue3StringifyVirtualChild::StaticCall],
+        );
+    } else if delete_count > 0 {
+        virtual_children.drain(start + 1..start + count);
+    }
+    delete_count
+}
+
+fn vue3_stringify_analyze_public_node(node: &Value, context: &Value) -> Option<StaticHtmlAnalysis> {
+    match json_node_type(node) {
+        Some(1) => {
+            let tag = json_str(node, "tag").unwrap_or_default();
+            if static_html_non_stringifiable_tag(tag)
+                || vue3_public_node_has_directive(node, "once")
+            {
+                return None;
+            }
+            let ns = vue3_public_element_namespace(node, vuec_ast::HtmlNamespace::Html);
+            let mut analysis = StaticHtmlAnalysis {
+                html: vue3_stringify_public_node_html_with_ns(
+                    node,
+                    context,
+                    vuec_ast::HtmlNamespace::Html,
+                )?,
+                dom_nodes: 1,
+                node_count: 1,
+                element_with_binding_count: (!vue3_public_props(node).is_empty()) as usize,
+            };
+            for child in vue3_public_children(node) {
+                analysis.node_count += 1;
+                if json_node_type(child) == Some(1) {
+                    if !vue3_public_props(child).is_empty() {
+                        analysis.element_with_binding_count += 1;
+                    }
+                    vue3_stringify_walk_public_element(child, ns, &mut analysis)?;
+                }
+            }
+            Some(analysis)
+        }
+        Some(12) => Some(StaticHtmlAnalysis {
+            html: vue3_stringify_public_node_html(
+                node.get("content").unwrap_or(&Value::Null),
+                context,
+            )?,
+            dom_nodes: 1,
+            node_count: 1,
+            element_with_binding_count: 0,
+        }),
+        _ => None,
+    }
+}
+
+fn vue3_stringify_walk_public_element(
+    node: &Value,
+    parent_ns: vuec_ast::HtmlNamespace,
+    analysis: &mut StaticHtmlAnalysis,
+) -> Option<()> {
+    let tag = json_str(node, "tag").unwrap_or_default();
+    if static_html_non_stringifiable_tag(tag) || vue3_public_node_has_directive(node, "once") {
+        return None;
+    }
+    let ns = vue3_public_element_namespace(node, parent_ns);
+    let is_option = ns == vuec_ast::HtmlNamespace::Html && tag == "option";
+    for prop in vue3_public_props(node) {
+        if !vue3_stringify_public_prop_is_allowed(prop, ns, is_option) {
+            return None;
+        }
+    }
+    for child in vue3_public_children(node) {
+        analysis.node_count += 1;
+        if json_node_type(child) == Some(1) {
+            if !vue3_public_props(child).is_empty() {
+                analysis.element_with_binding_count += 1;
+            }
+            vue3_stringify_walk_public_element(child, ns, analysis)?;
+        }
+    }
+    Some(())
+}
+
+fn vue3_stringify_public_prop_is_allowed(
+    prop: &Value,
+    ns: vuec_ast::HtmlNamespace,
+    is_option: bool,
+) -> bool {
+    match json_node_type(prop) {
+        Some(6) => {
+            json_str(prop, "name").is_some_and(|name| static_html_attr_is_stringifiable(name, ns))
+        }
+        Some(7) if json_str(prop, "name") == Some("bind") => {
+            let Some(arg) = prop.get("arg").filter(|arg| !arg.is_null()) else {
+                return false;
+            };
+            if json_node_type(arg) == Some(8) {
+                return false;
+            }
+            let arg_name = json_str(arg, "content").unwrap_or_default();
+            if json_bool(arg, "isStatic") && !static_html_attr_is_stringifiable(arg_name, ns) {
+                return false;
+            }
+            let Some(exp) = prop.get("exp").filter(|exp| !exp.is_null()) else {
+                return false;
+            };
+            if json_node_type(exp) == Some(8) {
+                return false;
+            }
+            if json_u64(exp, "constType").unwrap_or(0) < u64::from(VUE3_CONSTANT_CAN_STRINGIFY) {
+                return false;
+            }
+            !(is_option && arg_name == "value" && !json_bool(exp, "isStatic"))
+        }
+        _ => true,
+    }
+}
+
+fn vue3_stringify_public_node_html(node: &Value, context: &Value) -> Option<StaticHtmlBuffer> {
+    vue3_stringify_public_node_html_with_ns(node, context, vuec_ast::HtmlNamespace::Html)
+}
+
+fn vue3_stringify_public_node_html_with_ns(
+    node: &Value,
+    context: &Value,
+    parent_ns: vuec_ast::HtmlNamespace,
+) -> Option<StaticHtmlBuffer> {
+    match json_node_type(node) {
+        Some(1) => vue3_stringify_public_element_html(node, context, parent_ns),
+        Some(2) => Some(StaticHtmlBuffer::from_text(escape_static_html_text(
+            json_str(node, "content").unwrap_or_default(),
+        ))),
+        Some(3) => Some(StaticHtmlBuffer::from_text(format!(
+            "<!--{}-->",
+            escape_static_html_text(json_str(node, "content").unwrap_or_default())
+        ))),
+        Some(5) => {
+            let value = vue3_public_evaluate_constant(node.get("content")?)?.to_display_string()?;
+            Some(StaticHtmlBuffer::from_text(escape_static_html_text(&value)))
+        }
+        Some(8) => {
+            let value = vue3_public_evaluate_constant(node)?.to_js_string()?;
+            Some(StaticHtmlBuffer::from_text(escape_static_html_text(&value)))
+        }
+        Some(12) => {
+            vue3_stringify_public_node_html_with_ns(node.get("content")?, context, parent_ns)
+        }
+        _ => None,
+    }
+}
+
+fn vue3_stringify_public_element_html(
+    node: &Value,
+    context: &Value,
+    parent_ns: vuec_ast::HtmlNamespace,
+) -> Option<StaticHtmlBuffer> {
+    if json_u64(node, "tagType") != Some(0) || vue3_public_node_has_directive(node, "once") {
+        return None;
+    }
+    let tag = json_str(node, "tag").unwrap_or_default();
+    let ns = vue3_public_element_namespace(node, parent_ns);
+    if ns == vuec_ast::HtmlNamespace::Html
+        && (static_html_non_stringifiable_tag(tag)
+            || static_html_is_void_tag(tag) && !vue3_public_children(node).is_empty())
+    {
+        return None;
+    }
+
+    let mut html = StaticHtmlBuffer::default();
+    html.push_text("<");
+    html.push_text(tag);
+    let mut inner_html = None::<String>;
+    for prop in vue3_public_props(node) {
+        match json_node_type(prop) {
+            Some(6) => {
+                let name = json_str(prop, "name")?;
+                if !static_html_attr_is_stringifiable(name, ns) {
+                    return None;
+                }
+                html.push_text(" ");
+                html.push_text(name);
+                if let Some(value) = prop.get("value").filter(|value| !value.is_null()) {
+                    html.push_text("=\"");
+                    html.push_text(escape_static_html_attr(
+                        json_str(value, "content").unwrap_or_default(),
+                    ));
+                    html.push_text("\"");
+                }
+            }
+            Some(7) if json_str(prop, "name") == Some("html") => {
+                let source = json_str(prop.get("exp")?, "content")?;
+                let value = vue3_public_evaluate_source(source)?;
+                inner_html = Some(decode_static_html_entities(&value.to_display_string()?));
+            }
+            Some(7) if json_str(prop, "name") == Some("text") => {
+                let source = json_str(prop.get("exp")?, "content")?;
+                let value = vue3_public_evaluate_source(source)?;
+                inner_html = Some(escape_static_html_text(&value.to_display_string()?));
+            }
+            Some(7) if json_str(prop, "name") == Some("bind") => {
+                let Some(attr) = vue3_stringify_public_bind_attr(tag, ns, prop)? else {
+                    continue;
+                };
+                html.push_text(" ");
+                html.push_text(attr.name);
+                html.push_text("=\"");
+                html.append(attr.value);
+                html.push_text("\"");
+            }
+            Some(7) => {}
+            _ => return None,
+        }
+    }
+    if let Some(scope_id) = json_str(context, "scopeId").filter(|scope_id| !scope_id.is_empty()) {
+        html.push_text(" ");
+        html.push_text(scope_id);
+    }
+    html.push_text(">");
+
+    if ns != vuec_ast::HtmlNamespace::Html || !static_html_is_void_tag(tag) {
+        if let Some(inner_html) = inner_html.filter(|value| !value.is_empty()) {
+            html.push_text(inner_html);
+        } else {
+            for child in vue3_public_children(node) {
+                html.append(vue3_stringify_public_node_html_with_ns(child, context, ns)?);
+            }
+        }
+        html.push_text("</");
+        html.push_text(tag);
+        html.push_text(">");
+    }
+    Some(html)
+}
+
+fn vue3_stringify_public_bind_attr(
+    tag: &str,
+    ns: vuec_ast::HtmlNamespace,
+    prop: &Value,
+) -> Option<Option<StaticHtmlAttr>> {
+    let arg = prop.get("arg")?;
+    if json_node_type(arg) == Some(8) || !json_bool(arg, "isStatic") {
+        return None;
+    }
+    let name = json_str(arg, "content")?.to_string();
+    if !static_html_attr_is_stringifiable(&name, ns) {
+        return None;
+    }
+    if ns == vuec_ast::HtmlNamespace::Html && tag == "option" && name == "value" {
+        return None;
+    }
+    let source = json_str(prop.get("exp")?, "content")?;
+    if source.starts_with('_') {
+        let mut value = StaticHtmlBuffer::default();
+        value.push_expression(source);
+        return Some(Some(StaticHtmlAttr { name, value }));
+    }
+    let value = vue3_public_evaluate_source(source)?;
+    if matches!(value, StaticConstValue::Null) {
+        return Some(None);
+    }
+    if static_html_is_boolean_attr(&name) && matches!(value, StaticConstValue::Bool(false)) {
+        return Some(None);
+    }
+    let value = if name == "class" {
+        static_const_normalize_class(&value)?
+    } else if name == "style" {
+        static_const_stringify_style(&value)?
+    } else {
+        value.to_display_string()?
+    };
+    Some(Some(StaticHtmlAttr {
+        name,
+        value: StaticHtmlBuffer::from_text(escape_static_html_attr(&value)),
+    }))
+}
+
+fn vue3_public_evaluate_constant(node: &Value) -> Option<StaticConstValue> {
+    match json_node_type(node) {
+        Some(4) => vue3_public_evaluate_source(json_str(node, "content")?),
+        Some(8) => {
+            let mut output = String::new();
+            for child in node.get("children").and_then(Value::as_array)? {
+                if child.is_string() {
+                    continue;
+                }
+                match json_node_type(child) {
+                    Some(2) => output.push_str(json_str(child, "content").unwrap_or_default()),
+                    Some(5) => output.push_str(
+                        &vue3_public_evaluate_constant(child.get("content")?)?
+                            .to_display_string()?,
+                    ),
+                    _ => output.push_str(&vue3_public_evaluate_constant(child)?.to_js_string()?),
+                }
+            }
+            Some(StaticConstValue::String(output))
+        }
+        _ => None,
+    }
+}
+
+fn vue3_public_evaluate_source(source: &str) -> Option<StaticConstValue> {
+    static_const_eval_source(source)
+}
+
+fn vue3_public_node_has_directive(node: &Value, name: &str) -> bool {
+    vue3_public_props(node)
+        .iter()
+        .any(|prop| json_node_type(prop) == Some(7) && json_str(prop, "name") == Some(name))
+}
+
+fn vue3_public_props(node: &Value) -> &[Value] {
+    node.get("props")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+}
+
+fn vue3_public_children(node: &Value) -> &[Value] {
+    node.get("children")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+}
+
+fn vue3_public_namespace(ns: u64) -> vuec_ast::HtmlNamespace {
+    match ns {
+        1 => vuec_ast::HtmlNamespace::Svg,
+        2 => vuec_ast::HtmlNamespace::MathMl,
+        _ => vuec_ast::HtmlNamespace::Html,
+    }
+}
+
+fn vue3_public_element_namespace(
+    node: &Value,
+    parent_ns: vuec_ast::HtmlNamespace,
+) -> vuec_ast::HtmlNamespace {
+    let tag = json_str(node, "tag").unwrap_or_default();
+    if tag == "svg" {
+        return vuec_ast::HtmlNamespace::Svg;
+    }
+    if tag == "math" {
+        return vuec_ast::HtmlNamespace::MathMl;
+    }
+    if parent_ns == vuec_ast::HtmlNamespace::Svg
+        && matches!(tag, "foreignObject" | "desc" | "title")
+    {
+        return vuec_ast::HtmlNamespace::Html;
+    }
+    if let Some(ns) = json_u64(node, "ns").filter(|ns| *ns != 0) {
+        return vue3_public_namespace(ns);
+    }
+    parent_ns
+}
+
 #[derive(Default)]
 struct Vue3CacheStaticState {
     operations: Vec<Value>,
@@ -34665,6 +35150,180 @@ mod tests {
                 "needArraySpread": true
             })
         );
+    }
+
+    #[test]
+    fn stringify_static_projection_stringifies_cached_adjacent_children() {
+        let children = (0..STRINGIFY_STATIC_ELEMENT_WITH_BINDING_COUNT)
+            .map(|_| {
+                json!({
+                    "type": 1,
+                    "tag": "span",
+                    "tagType": 0,
+                    "ns": 0,
+                    "props": [{
+                        "type": 6,
+                        "name": "class",
+                        "value": { "content": "foo" }
+                    }],
+                    "children": [],
+                    "codegenNode": { "type": 20, "index": 0 }
+                })
+            })
+            .collect::<Vec<_>>();
+        let projection = stringify_static_projection(&json!({
+            "children": children,
+            "context": {}
+        }));
+        let expected_html =
+            r#"<span class="foo"></span>"#.repeat(STRINGIFY_STATIC_ELEMENT_WITH_BINDING_COUNT);
+
+        assert_eq!(
+            projection["operations"],
+            json!([{
+                "kind": "stringifyCachedChildRange",
+                "start": 0,
+                "count": STRINGIFY_STATIC_ELEMENT_WITH_BINDING_COUNT,
+                "html": quote_string(&expected_html),
+                "domNodes": STRINGIFY_STATIC_ELEMENT_WITH_BINDING_COUNT
+            }])
+        );
+    }
+
+    #[test]
+    fn stringify_static_projection_stringifies_parent_cached_child_tree() {
+        let children = vec![json!({
+            "type": 1,
+            "tag": "div",
+            "tagType": 0,
+            "ns": 0,
+            "props": [],
+            "children": (0..STRINGIFY_STATIC_ELEMENT_WITH_BINDING_COUNT)
+                .map(|_| json!({
+                    "type": 1,
+                    "tag": "span",
+                    "tagType": 0,
+                    "ns": 0,
+                    "props": [{
+                        "type": 6,
+                        "name": "class",
+                        "value": { "content": "foo" }
+                    }],
+                    "children": []
+                }))
+                .collect::<Vec<_>>()
+        })];
+        let projection = stringify_static_projection(&json!({
+            "children": children,
+            "parent": {
+                "type": 1,
+                "tagType": 0,
+                "codegenNode": {
+                    "type": 13,
+                    "children": { "type": 20 }
+                }
+            },
+            "context": { "scopeId": "data-v-test" }
+        }));
+        let expected_html = format!(
+            r#"<div data-v-test>{}</div>"#,
+            r#"<span class="foo" data-v-test></span>"#
+                .repeat(STRINGIFY_STATIC_ELEMENT_WITH_BINDING_COUNT)
+        );
+
+        assert_eq!(
+            projection["operations"],
+            json!([{
+                "kind": "stringifyParentCachedRange",
+                "start": 0,
+                "count": 1,
+                "html": quote_string(&expected_html),
+                "domNodes": 1
+            }])
+        );
+    }
+
+    #[test]
+    fn stringify_static_projection_infers_nested_svg_namespace() {
+        let children = vec![json!({
+            "type": 1,
+            "tag": "svg",
+            "tagType": 0,
+            "props": [{
+                "type": 6,
+                "name": "viewBox",
+                "value": { "content": "0 0 50 50" }
+            }],
+            "children": (0..STRINGIFY_STATIC_ELEMENT_WITH_BINDING_COUNT)
+                .map(|_| json!({
+                    "type": 1,
+                    "tag": "rect",
+                    "tagType": 0,
+                    "props": [{
+                        "type": 6,
+                        "name": "fill",
+                        "value": { "content": "#C4C4C4" }
+                    }],
+                    "children": []
+                }))
+                .collect::<Vec<_>>()
+        })];
+        let projection = stringify_static_projection(&json!({
+            "children": children,
+            "parent": {
+                "type": 1,
+                "tagType": 0,
+                "codegenNode": {
+                    "type": 13,
+                    "children": { "type": 20 }
+                }
+            },
+            "context": {}
+        }));
+        let expected_html = format!(
+            r#"<svg viewBox="0 0 50 50">{}</svg>"#,
+            r##"<rect fill="#C4C4C4"></rect>"##.repeat(STRINGIFY_STATIC_ELEMENT_WITH_BINDING_COUNT)
+        );
+
+        assert_eq!(
+            projection["operations"],
+            json!([{
+                "kind": "stringifyParentCachedRange",
+                "start": 0,
+                "count": 1,
+                "html": quote_string(&expected_html),
+                "domNodes": 1
+            }])
+        );
+    }
+
+    #[test]
+    fn stringify_static_projection_bails_can_cache_option_values() {
+        let children = vec![json!({
+            "type": 1,
+            "tag": "option",
+            "tagType": 0,
+            "ns": 0,
+            "props": [{
+                "type": 7,
+                "name": "bind",
+                "arg": { "type": 4, "content": "value", "isStatic": true },
+                "exp": {
+                    "type": 4,
+                    "content": "_imports_0",
+                    "isStatic": false,
+                    "constType": VUE3_CONSTANT_CAN_STRINGIFY
+                }
+            }],
+            "children": [],
+            "codegenNode": { "type": 20, "index": 0 }
+        })];
+        let projection = stringify_static_projection(&json!({
+            "children": children,
+            "context": {}
+        }));
+
+        assert_eq!(projection["operations"], json!([]));
     }
 
     #[test]
