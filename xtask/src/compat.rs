@@ -2117,7 +2117,7 @@ fn write_alias_index(
     if target.kind == TargetKind::Vue3Core {
         source.push_str("Object.defineProperty(exports, '__vuecRuntime', { value: vue3CoreRuntime, enumerable: false });\n");
     } else if target.kind == TargetKind::Vue3Dom {
-        source.push_str("Object.defineProperty(exports, '__vuecRuntime', { value: Object.assign({}, vue3CoreRuntime, { transformOn: vue3CoreRuntime.transformDomOn, transformModel: vue3CoreRuntime.transformDomModel, transformTransition: vue3CoreRuntime.transformDomTransition, validateHtmlNesting: vue3CoreRuntime.validateHtmlNesting, isValidHTMLNesting: vue3CoreRuntime.isValidHTMLNesting }), enumerable: false });\n");
+        source.push_str("Object.defineProperty(exports, '__vuecRuntime', { value: Object.assign({}, vue3CoreRuntime, { ignoreSideEffectTags: vue3CoreRuntime.ignoreSideEffectTags, transformOn: vue3CoreRuntime.transformDomOn, transformModel: vue3CoreRuntime.transformDomModel, transformTransition: vue3CoreRuntime.transformDomTransition, validateHtmlNesting: vue3CoreRuntime.validateHtmlNesting, isValidHTMLNesting: vue3CoreRuntime.isValidHTMLNesting }), enumerable: false });\n");
     } else if matches!(
         target.kind,
         TargetKind::Vue26Template | TargetKind::Vue27Template
@@ -6133,6 +6133,7 @@ const vue3CoreRuntime = (() => {
     61: "Unnecessary value binding used alongside v-model. It will interfere with v-model's behavior.",
     62: 'v-show is missing expression.',
     63: '<Transition> expects exactly one child element or component.',
+    64: 'Tags with side effect (<script> and <style>) are ignored in client component templates.',
   };
   runtime.createDOMCompilerError = function createDOMCompilerError(code, loc) {
     return runtime.createCompilerError(code, loc, DOMErrorMessages);
@@ -6304,6 +6305,13 @@ const vue3CoreRuntime = (() => {
       });
     }
   }
+  runtime.ignoreSideEffectTags = function ignoreSideEffectTags(node, context) {
+    const projection = callBridge('vue3.dom.ignoreSideEffectTags', { node });
+    materializeVue3DomDirectiveErrors(projection, null, node, context);
+    if (projection && projection.remove && context && typeof context.removeNode === 'function') {
+      context.removeNode();
+    }
+  };
   runtime.transformDomTransition = function transformDomTransition(node, context) {
     if (!vue3DomNodeIsTransition(node, context)) return;
     return () => {
@@ -12341,6 +12349,7 @@ fn write_vue3_dom_conformance_shims(prepared_root: &Path) -> Result<()> {
     write_vue3_dom_v_on_transform_shim(&transforms.join("vOn.ts"))?;
     write_vue3_dom_v_model_transform_shim(&transforms.join("vModel.ts"))?;
     write_vue3_dom_transition_transform_shim(&transforms.join("Transition.ts"))?;
+    write_vue3_dom_ignore_side_effect_tags_shim(&transforms.join("ignoreSideEffectTags.ts"))?;
     write_vue3_dom_validate_html_nesting_shim(&transforms.join("validateHtmlNesting.ts"))?;
     write_vue3_dom_html_nesting_shim(&dom_src.join("htmlNesting.ts"))?;
     write_vue3_core_test_setup(prepared_root)?;
@@ -12859,6 +12868,16 @@ fn write_vue3_dom_validate_html_nesting_shim(path: &Path) -> Result<()> {
     )
 }
 
+fn write_vue3_dom_ignore_side_effect_tags_shim(path: &Path) -> Result<()> {
+    write_text(
+        path,
+        &format!(
+            "import {{ __vuecRuntime }} from {}\nconst r = __vuecRuntime\nexport const ignoreSideEffectTags = r.ignoreSideEffectTags\n",
+            js_string_literal("@vue/compiler-dom")
+        ),
+    )
+}
+
 fn write_vue3_dom_html_nesting_shim(path: &Path) -> Result<()> {
     write_text(
         path,
@@ -13157,6 +13176,7 @@ fn conformance_coverage_file_kind(
         || path.ends_with("packages/compiler-dom/__tests__/index.spec.ts")
         || path.ends_with("packages/compiler-dom/__tests__/parse.spec.ts")
         || path.ends_with("packages/compiler-dom/__tests__/transforms/Transition.spec.ts")
+        || path.ends_with("packages/compiler-dom/__tests__/transforms/ignoreSideEffectTags.spec.ts")
         || path.ends_with("packages/compiler-dom/__tests__/transforms/transformStyle.spec.ts")
         || path.ends_with("packages/compiler-dom/__tests__/transforms/vHtml.spec.ts")
         || path.ends_with("packages/compiler-dom/__tests__/transforms/vModel.spec.ts")
@@ -14590,6 +14610,17 @@ mod tests {
         assert!(transition.contains("@vue/compiler-dom"));
         assert!(transition.contains("transformTransition"));
         assert!(transition.contains("TRANSITION"));
+        let ignore_side_effect_tags = fs::read_to_string(
+            temp.join("packages")
+                .join("compiler-dom")
+                .join("src")
+                .join("transforms")
+                .join("ignoreSideEffectTags.ts"),
+        )
+        .unwrap();
+        assert!(ignore_side_effect_tags.contains("__vuecRuntime"));
+        assert!(ignore_side_effect_tags.contains("@vue/compiler-dom"));
+        assert!(ignore_side_effect_tags.contains("ignoreSideEffectTags"));
         let validate_html_nesting = fs::read_to_string(
             temp.join("packages")
                 .join("compiler-dom")
@@ -14615,6 +14646,7 @@ mod tests {
         assert!(ALIAS_RUNTIME_JS.contains("vue3.dom.transformOn"));
         assert!(ALIAS_RUNTIME_JS.contains("vue3.dom.transformModel"));
         assert!(ALIAS_RUNTIME_JS.contains("vue3.dom.transformTransition"));
+        assert!(ALIAS_RUNTIME_JS.contains("vue3.dom.ignoreSideEffectTags"));
         assert!(ALIAS_RUNTIME_JS.contains("vue3.dom.validateHtmlNesting"));
         assert!(ALIAS_RUNTIME_JS.contains("vue3.dom.isValidHTMLNesting"));
         let _ = fs::remove_dir_all(temp);
@@ -14727,6 +14759,13 @@ mod tests {
                   ]
                 },
                 {
+                  "name": "F:/repo/prepared/vue3-dom/packages/compiler-dom/__tests__/transforms/ignoreSideEffectTags.spec.ts",
+                  "assertionResults": [
+                    { "status": "passed" },
+                    { "status": "passed" }
+                  ]
+                },
+                {
                   "name": "F:/repo/prepared/vue3-dom/packages/compiler-dom/__tests__/transforms/vHtml.spec.ts",
                   "assertionResults": [
                     { "status": "passed" },
@@ -14794,8 +14833,8 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             counts: ConformanceExecutionCounts {
-                total: 21,
-                pass: 20,
+                total: 23,
+                pass: 22,
                 fail: 1,
                 skip: 0,
                 pending: 0,
@@ -14809,8 +14848,8 @@ mod tests {
         );
 
         assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
-        assert_eq!(coverage.rust_backed_pass, 20);
-        assert_eq!(coverage.rust_backed_total, 20);
+        assert_eq!(coverage.rust_backed_pass, 22);
+        assert_eq!(coverage.rust_backed_total, 22);
         assert_eq!(
             coverage.files[0].source,
             ConformanceCoverageKind::RustBacked
@@ -14851,7 +14890,11 @@ mod tests {
             coverage.files[9].source,
             ConformanceCoverageKind::RustBacked
         );
-        assert_eq!(coverage.files[10].source, ConformanceCoverageKind::Mixed);
+        assert_eq!(
+            coverage.files[10].source,
+            ConformanceCoverageKind::RustBacked
+        );
+        assert_eq!(coverage.files[11].source, ConformanceCoverageKind::Mixed);
         assert!(coverage.files[0]
             .reason
             .contains("routed through vuec_node_bridge"));

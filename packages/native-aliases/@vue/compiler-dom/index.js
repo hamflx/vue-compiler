@@ -73,6 +73,14 @@ const transformStyle = (node) => {
   return undefined;
 };
 
+const ignoreSideEffectTags = (node, context) => {
+  const projection = callVue3DomProjection('vue3.dom.ignoreSideEffectTags', { node });
+  materializeDomDirectiveErrors(projection, null, node, context);
+  if (projection && projection.remove && context && typeof context.removeNode === 'function') {
+    context.removeNode();
+  }
+};
+
 function domDirectiveLoc(loc, dir, node) {
   if (loc && typeof loc === 'object') return loc;
   if (loc === 'dir') return (dir && dir.loc) || core.locStub;
@@ -896,6 +904,7 @@ module.exports = {
 Object.defineProperty(module.exports, '__vuecRuntime', {
   value: {
     ...module.exports,
+    ignoreSideEffectTags,
     transformStyle,
     transformVHtml,
     transformVText,

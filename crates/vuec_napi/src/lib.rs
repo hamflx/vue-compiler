@@ -313,6 +313,9 @@ pub fn call_vue3_dom_projection(env: Env, command: String, payload: Unknown) -> 
     let payload = from_js_options(&env, Some(payload))?;
     let value = match command.as_str() {
         "vue3.dom.transformStyle" => vuec_vue3_dom::transform_style_projection(&payload),
+        "vue3.dom.ignoreSideEffectTags" => {
+            vuec_vue3_dom::ignore_side_effect_tags_projection(&payload)
+        }
         "vue3.dom.transformVHtml" => vuec_vue3_dom::transform_v_html_projection(&payload),
         "vue3.dom.transformVText" => vuec_vue3_dom::transform_v_text_projection(&payload),
         "vue3.dom.transformShow" => vuec_vue3_dom::transform_show_projection(&payload),

@@ -704,6 +704,25 @@ pub fn transform_style_projection(payload: &Value) -> Value {
     json!({ "replacements": replacements })
 }
 
+/// Projects the DOM `ignoreSideEffectTags` node transform for compatibility bridge callers.
+pub fn ignore_side_effect_tags_projection(payload: &Value) -> Value {
+    let node = payload.get("node").unwrap_or(&Value::Null);
+    if !json_node_is_side_effect_tag(node) {
+        return json!({
+            "remove": false,
+            "errors": [],
+        });
+    }
+
+    json!({
+        "remove": true,
+        "errors": [{
+            "code": 64,
+            "loc": node.get("loc").cloned().unwrap_or(Value::Null),
+        }],
+    })
+}
+
 /// Projects the DOM `v-html` directive transform for compatibility bridge callers.
 pub fn transform_v_html_projection(payload: &Value) -> Value {
     transform_dom_content_directive_projection(
@@ -1956,12 +1975,9 @@ fn remove_side_effect_children(ast: &mut Vue3Ast, parent_id: NodeId, ctx: &mut T
         .unwrap_or_default();
     let mut retained = Vec::new();
     for child_id in child_ids {
-        let remove = ast.node(child_id).is_some_and(|child| {
-            matches!(
-                child.kind,
-                Vue3AstKind::Element(ref element) if element.tag == "script" || element.tag == "style"
-            )
-        });
+        let remove = ast
+            .node(child_id)
+            .is_some_and(|child| ast_node_is_side_effect_tag(child));
         if remove {
             if let Some(span) = ast.node(child_id).and_then(|node| node.span.source()) {
                 ctx.report(Diagnostic::vue3_error(
@@ -1978,6 +1994,24 @@ fn remove_side_effect_children(ast: &mut Vue3Ast, parent_id: NodeId, ctx: &mut T
     if let Some(parent) = ast.node_mut(parent_id) {
         parent.children = retained;
     }
+}
+
+fn ast_node_is_side_effect_tag(node: &vuec_ast::Node<Vue3AstKind>) -> bool {
+    matches!(
+        node.kind,
+        Vue3AstKind::Element(ref element)
+            if element.tag_type == Vue3ElementType::Element && is_side_effect_tag(&element.tag)
+    )
+}
+
+fn json_node_is_side_effect_tag(node: &Value) -> bool {
+    json_u64(node, "type") == Some(1)
+        && json_u64(node, "tagType") == Some(0)
+        && json_str(node, "tag").is_some_and(is_side_effect_tag)
+}
+
+fn is_side_effect_tag(tag: &str) -> bool {
+    matches!(tag, "script" | "style")
 }
 
 fn decode_basic_entities(value: &str) -> String {
@@ -2059,6 +2093,42 @@ mod tests {
             },
             "context": { "isTransition": true },
         }))
+    }
+
+    #[test]
+    fn ignore_side_effect_tags_projection_removes_native_script_and_style() {
+        for tag in ["script", "style"] {
+            let projection = ignore_side_effect_tags_projection(&json!({
+                "node": {
+                    "type": 1,
+                    "tag": tag,
+                    "tagType": 0,
+                    "loc": { "source": format!("<{tag}></{tag}>") }
+                }
+            }));
+
+            assert_eq!(projection["remove"], json!(true));
+            assert_eq!(projection["errors"][0]["code"], json!(64));
+            assert_eq!(
+                projection["errors"][0]["loc"]["source"],
+                json!(format!("<{tag}></{tag}>"))
+            );
+        }
+    }
+
+    #[test]
+    fn ignore_side_effect_tags_projection_keeps_non_native_side_effect_names() {
+        for node in [
+            json!({ "type": 1, "tag": "div", "tagType": 0 }),
+            json!({ "type": 1, "tag": "script", "tagType": 1 }),
+            json!({ "type": 1, "tag": "style", "tagType": 3 }),
+            json!({ "type": 2, "content": "script" }),
+        ] {
+            let projection = ignore_side_effect_tags_projection(&json!({ "node": node }));
+
+            assert_eq!(projection["remove"], json!(false));
+            assert_eq!(projection["errors"], json!([]));
+        }
     }
 
     #[test]
