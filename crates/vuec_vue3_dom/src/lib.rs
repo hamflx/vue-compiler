@@ -922,6 +922,43 @@ pub fn transform_model_projection(payload: &Value) -> Value {
     projection
 }
 
+/// Projects the DOM `Transition` node transform for compatibility bridge callers.
+pub fn transform_transition_projection(payload: &Value) -> Value {
+    let node = payload.get("node").unwrap_or(&Value::Null);
+    let context = payload.get("context").unwrap_or(&Value::Null);
+    if !json_bool(context, "isTransition") {
+        return json!({ "transform": false });
+    }
+    let Some(children) = node.get("children").and_then(Value::as_array) else {
+        return json!({ "transform": true, "errors": [] });
+    };
+    if children.is_empty() {
+        return json!({ "transform": true, "errors": [] });
+    }
+
+    let visible_indices = transition_json_visible_child_indices(children);
+    let visible_children = visible_indices
+        .iter()
+        .filter_map(|index| children.get(*index))
+        .collect::<Vec<_>>();
+    let mut errors = Vec::new();
+    if transition_json_child_sequence_is_invalid(&visible_children, false) {
+        if let Some(loc) = transition_json_error_loc(&visible_children) {
+            errors.push(json!({
+                "code": 63,
+                "loc": loc,
+            }));
+        }
+    }
+
+    json!({
+        "transform": true,
+        "keepChildren": visible_indices,
+        "errors": errors,
+        "injectPersisted": transition_json_single_child_has_v_show(&visible_children),
+    })
+}
+
 struct DomContentDirectiveProjection {
     key: &'static str,
     key_loc: Option<&'static str>,
@@ -1283,6 +1320,95 @@ fn dom_filter_native_model_props(props: Vec<Value>) -> Vec<Value> {
                 .is_none_or(|key| json_str(key, "content") != Some("modelValue"))
         })
         .collect()
+}
+
+fn transition_json_visible_child_indices(children: &[Value]) -> Vec<usize> {
+    children
+        .iter()
+        .enumerate()
+        .filter_map(|(index, child)| transition_json_child_is_visible(child).then_some(index))
+        .collect()
+}
+
+fn transition_json_child_is_visible(child: &Value) -> bool {
+    match json_u64(child, "type") {
+        Some(3) => false,
+        Some(2) => json_str(child, "content")
+            .or_else(|| json_str(child, "value"))
+            .is_none_or(|text| !text.chars().all(is_html_whitespace)),
+        _ => true,
+    }
+}
+
+fn transition_json_child_sequence_is_invalid(children: &[&Value], empty_is_invalid: bool) -> bool {
+    if children.is_empty() {
+        return empty_is_invalid;
+    }
+    children.len() != 1 || transition_json_child_is_invalid(children[0])
+}
+
+fn transition_json_child_is_invalid(child: &Value) -> bool {
+    if json_u64(child, "type") == Some(11) {
+        return true;
+    }
+    if json_u64(child, "type") == Some(9) {
+        return child
+            .get("branches")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .any(transition_json_if_branch_is_invalid);
+    }
+    if json_u64(child, "type") == Some(1) {
+        return child
+            .get("props")
+            .and_then(Value::as_array)
+            .is_some_and(|props| transition_json_props_have_directive(props, "for"));
+    }
+    false
+}
+
+fn transition_json_if_branch_is_invalid(branch: &Value) -> bool {
+    let visible_indices = branch
+        .get("children")
+        .and_then(Value::as_array)
+        .map(|children| {
+            transition_json_visible_child_indices(children)
+                .into_iter()
+                .filter_map(|index| children.get(index))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    transition_json_child_sequence_is_invalid(&visible_indices, true)
+}
+
+fn transition_json_single_child_has_v_show(children: &[&Value]) -> bool {
+    let [child] = children else {
+        return false;
+    };
+    if json_u64(child, "type") != Some(1) {
+        return false;
+    }
+    child
+        .get("props")
+        .and_then(Value::as_array)
+        .is_some_and(|props| transition_json_props_have_directive(props, "show"))
+}
+
+fn transition_json_props_have_directive(props: &[Value], name: &str) -> bool {
+    props
+        .iter()
+        .any(|prop| json_u64(prop, "type") == Some(7) && json_str(prop, "name") == Some(name))
+}
+
+fn transition_json_error_loc(children: &[&Value]) -> Option<Value> {
+    let first = children.first()?.get("loc")?;
+    let last = children.last()?.get("loc")?;
+    Some(json!({
+        "start": first.get("start").cloned().unwrap_or(Value::Null),
+        "end": last.get("end").cloned().unwrap_or(Value::Null),
+        "source": "",
+    }))
 }
 
 /// Extracts DOM directive summaries from compatibility template attributes.
@@ -1717,6 +1843,33 @@ mod tests {
         }))
     }
 
+    fn transition_element_child(props: Vec<Value>) -> Value {
+        json!({
+            "type": 1,
+            "tag": "div",
+            "tagType": 0,
+            "props": props,
+            "children": [],
+            "loc": {
+                "start": { "line": 1, "column": 13, "offset": 12 },
+                "end": { "line": 1, "column": 24, "offset": 23 },
+                "source": "<div></div>"
+            }
+        })
+    }
+
+    fn transition_projection(children: Vec<Value>) -> Value {
+        transform_transition_projection(&json!({
+            "node": {
+                "type": 1,
+                "tag": "transition",
+                "tagType": 1,
+                "children": children,
+            },
+            "context": { "isTransition": true },
+        }))
+    }
+
     #[test]
     fn dom_compiler_ast_cache_hits_for_same_parse_input() {
         let mut compiler = DomCompiler::new();
@@ -1973,6 +2126,93 @@ mod tests {
             })],
         );
         assert_eq!(static_value["errors"], json!([]));
+    }
+
+    #[test]
+    fn transform_transition_projection_filters_comments_and_whitespace() {
+        let projection = transition_projection(vec![
+            json!({ "type": 3, "content": "ignored" }),
+            json!({ "type": 2, "content": "\n  " }),
+            transition_element_child(vec![]),
+        ]);
+
+        assert_eq!(projection["keepChildren"], json!([2]));
+        assert_eq!(projection["errors"], json!([]));
+        assert_eq!(projection["injectPersisted"], json!(false));
+    }
+
+    #[test]
+    fn transform_transition_projection_reports_invalid_children() {
+        let projection = transition_projection(vec![
+            transition_element_child(vec![]),
+            json!({
+                "type": 1,
+                "tag": "span",
+                "tagType": 0,
+                "props": [],
+                "children": [],
+                "loc": {
+                    "start": { "line": 1, "column": 25, "offset": 24 },
+                    "end": { "line": 1, "column": 38, "offset": 37 },
+                    "source": "<span></span>"
+                }
+            }),
+        ]);
+
+        assert_eq!(projection["errors"][0]["code"], json!(63));
+        assert_eq!(projection["errors"][0]["loc"]["start"]["offset"], json!(12));
+        assert_eq!(projection["errors"][0]["loc"]["end"]["offset"], json!(37));
+
+        let for_child = transition_projection(vec![json!({
+            "type": 11,
+            "loc": {
+                "start": { "line": 1, "column": 13, "offset": 12 },
+                "end": { "line": 1, "column": 40, "offset": 39 },
+                "source": "<div v-for=\"i in items\"/>"
+            }
+        })]);
+        assert_eq!(for_child["errors"][0]["code"], json!(63));
+    }
+
+    #[test]
+    fn transform_transition_projection_handles_if_branch_shape() {
+        let valid_if = transition_projection(vec![json!({
+            "type": 9,
+            "branches": [
+                { "children": [transition_element_child(vec![])] },
+                { "children": [transition_element_child(vec![])] }
+            ],
+            "loc": {
+                "start": { "line": 1, "column": 13, "offset": 12 },
+                "end": { "line": 1, "column": 80, "offset": 79 },
+                "source": ""
+            }
+        })]);
+        assert_eq!(valid_if["errors"], json!([]));
+
+        let invalid_template_if = transition_projection(vec![json!({
+            "type": 9,
+            "branches": [
+                { "children": [] }
+            ],
+            "loc": {
+                "start": { "line": 1, "column": 13, "offset": 12 },
+                "end": { "line": 1, "column": 40, "offset": 39 },
+                "source": ""
+            }
+        })]);
+        assert_eq!(invalid_template_if["errors"][0]["code"], json!(63));
+    }
+
+    #[test]
+    fn transform_transition_projection_injects_persisted_for_v_show_child() {
+        let projection = transition_projection(vec![transition_element_child(vec![json!({
+            "type": 7,
+            "name": "show",
+        })])]);
+
+        assert_eq!(projection["errors"], json!([]));
+        assert_eq!(projection["injectPersisted"], json!(true));
     }
 
     #[test]

@@ -2117,7 +2117,7 @@ fn write_alias_index(
     if target.kind == TargetKind::Vue3Core {
         source.push_str("Object.defineProperty(exports, '__vuecRuntime', { value: vue3CoreRuntime, enumerable: false });\n");
     } else if target.kind == TargetKind::Vue3Dom {
-        source.push_str("Object.defineProperty(exports, '__vuecRuntime', { value: Object.assign({}, vue3CoreRuntime, { transformOn: vue3CoreRuntime.transformDomOn, transformModel: vue3CoreRuntime.transformDomModel }), enumerable: false });\n");
+        source.push_str("Object.defineProperty(exports, '__vuecRuntime', { value: Object.assign({}, vue3CoreRuntime, { transformOn: vue3CoreRuntime.transformDomOn, transformModel: vue3CoreRuntime.transformDomModel, transformTransition: vue3CoreRuntime.transformDomTransition }), enumerable: false });\n");
     } else if matches!(
         target.kind,
         TargetKind::Vue26Template | TargetKind::Vue27Template
@@ -6132,6 +6132,7 @@ const vue3CoreRuntime = (() => {
     60: 'v-model cannot be used on file inputs since they are read-only. Use a v-on:change listener instead.',
     61: "Unnecessary value binding used alongside v-model. It will interfere with v-model's behavior.",
     62: 'v-show is missing expression.',
+    63: '<Transition> expects exactly one child element or component.',
   };
   runtime.createDOMCompilerError = function createDOMCompilerError(code, loc) {
     return runtime.createCompilerError(code, loc, DOMErrorMessages);
@@ -6266,6 +6267,52 @@ const vue3CoreRuntime = (() => {
         : helper || projection.needRuntime;
     }
     return result;
+  };
+  function vue3DomNodeIsTransition(node, context) {
+    if (!node || node.type !== NodeTypes.ELEMENT || node.tagType !== ElementTypes.COMPONENT) return false;
+    if (!context || typeof context.isBuiltInComponent !== 'function') return false;
+    let component;
+    try {
+      component = context.isBuiltInComponent(node.tag);
+    } catch (_error) {
+      component = undefined;
+    }
+    const transition = context.__vuecDomHelpers && context.__vuecDomHelpers.TRANSITION || vue3CoreRuntime.TRANSITION;
+    return component === transition || vue3CoreRuntime.helperNameMap[component] === 'Transition';
+  }
+  function vue3DomTransitionContextPayload(context, node) {
+    return {
+      isTransition: vue3DomNodeIsTransition(node, context),
+    };
+  }
+  function materializeVue3DomTransitionProjection(projection, node, context) {
+    if (!projection || !projection.transform || !node) return;
+    if (Array.isArray(projection.keepChildren) && Array.isArray(node.children)) {
+      node.children = projection.keepChildren
+        .map(index => node.children[index])
+        .filter(Boolean);
+    }
+    materializeVue3DomDirectiveErrors(projection, null, node, context);
+    if (projection.injectPersisted) {
+      node.props = node.props || [];
+      node.props.push({
+        type: NodeTypes.ATTRIBUTE,
+        name: 'persisted',
+        nameLoc: node.loc,
+        value: undefined,
+        loc: node.loc,
+      });
+    }
+  }
+  runtime.transformDomTransition = function transformDomTransition(node, context) {
+    if (!vue3DomNodeIsTransition(node, context)) return;
+    return () => {
+      const projection = callBridge('vue3.dom.transformTransition', {
+        node,
+        context: vue3DomTransitionContextPayload(context, node),
+      });
+      materializeVue3DomTransitionProjection(projection, node, context);
+    };
   };
   runtime.transformDomOn = function transformDomOn(dir, node, context) {
     context = context || { helperString: name => `_${runtime.helperNameMap[name] || name}`, helper: name => name, cache: value => value, onError: error => { throw error; } };
@@ -12271,6 +12318,7 @@ fn write_vue3_dom_conformance_shims(prepared_root: &Path) -> Result<()> {
     write_vue3_dom_transform_shim(&transforms.join("vShow.ts"), "transformShow")?;
     write_vue3_dom_v_on_transform_shim(&transforms.join("vOn.ts"))?;
     write_vue3_dom_v_model_transform_shim(&transforms.join("vModel.ts"))?;
+    write_vue3_dom_transition_transform_shim(&transforms.join("Transition.ts"))?;
     write_vue3_core_test_setup(prepared_root)?;
 
     let config = r#"
@@ -12767,6 +12815,16 @@ fn write_vue3_dom_v_model_transform_shim(path: &Path) -> Result<()> {
     )
 }
 
+fn write_vue3_dom_transition_transform_shim(path: &Path) -> Result<()> {
+    write_text(
+        path,
+        &format!(
+            "import {{ __vuecRuntime }} from {}\nimport {{ TRANSITION }} from '../runtimeHelpers'\nconst r = __vuecRuntime\nexport const transformTransition = (node, context) => {{\n  if (context) {{\n    context.__vuecDomHelpers = {{ ...(context.__vuecDomHelpers || {{}}), TRANSITION }}\n  }}\n  return r.transformTransition(node, context)\n}}\n",
+            js_string_literal("@vue/compiler-dom")
+        ),
+    )
+}
+
 fn copy_dir_recursive(from: &Path, to: &Path) -> Result<()> {
     fs::create_dir_all(to).with_context(|| format!("failed to create {}", to.display()))?;
     for entry in fs::read_dir(from).with_context(|| format!("failed to read {}", from.display()))? {
@@ -13054,6 +13112,7 @@ fn conformance_coverage_file_kind(
         || path.ends_with("packages/compiler-core/__tests__/utils.spec.ts")
         || path.ends_with("packages/compiler-dom/__tests__/index.spec.ts")
         || path.ends_with("packages/compiler-dom/__tests__/parse.spec.ts")
+        || path.ends_with("packages/compiler-dom/__tests__/transforms/Transition.spec.ts")
         || path.ends_with("packages/compiler-dom/__tests__/transforms/transformStyle.spec.ts")
         || path.ends_with("packages/compiler-dom/__tests__/transforms/vHtml.spec.ts")
         || path.ends_with("packages/compiler-dom/__tests__/transforms/vModel.spec.ts")
@@ -14474,11 +14533,24 @@ mod tests {
         assert!(v_model.contains("@vue/compiler-dom"));
         assert!(v_model.contains("transformModel"));
         assert!(v_model.contains("V_MODEL_TEXT"));
+        let transition = fs::read_to_string(
+            temp.join("packages")
+                .join("compiler-dom")
+                .join("src")
+                .join("transforms")
+                .join("Transition.ts"),
+        )
+        .unwrap();
+        assert!(transition.contains("__vuecRuntime"));
+        assert!(transition.contains("@vue/compiler-dom"));
+        assert!(transition.contains("transformTransition"));
+        assert!(transition.contains("TRANSITION"));
         assert!(ALIAS_RUNTIME_JS.contains("vue3.dom.transformVHtml"));
         assert!(ALIAS_RUNTIME_JS.contains("vue3.dom.transformVText"));
         assert!(ALIAS_RUNTIME_JS.contains("vue3.dom.transformShow"));
         assert!(ALIAS_RUNTIME_JS.contains("vue3.dom.transformOn"));
         assert!(ALIAS_RUNTIME_JS.contains("vue3.dom.transformModel"));
+        assert!(ALIAS_RUNTIME_JS.contains("vue3.dom.transformTransition"));
         let _ = fs::remove_dir_all(temp);
     }
 
@@ -14626,7 +14698,13 @@ mod tests {
                   ]
                 },
                 {
-                  "name": "F:/repo/prepared/vue3-dom/packages/compiler-dom/__tests__/Transition.spec.ts",
+                  "name": "F:/repo/prepared/vue3-dom/packages/compiler-dom/__tests__/transforms/Transition.spec.ts",
+                  "assertionResults": [
+                    { "status": "passed" }
+                  ]
+                },
+                {
+                  "name": "F:/repo/prepared/vue3-dom/packages/compiler-dom/__tests__/transforms/validateHtmlNesting.spec.ts",
                   "assertionResults": [
                     { "status": "failed" }
                   ]
@@ -14644,8 +14722,8 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             counts: ConformanceExecutionCounts {
-                total: 19,
-                pass: 18,
+                total: 20,
+                pass: 19,
                 fail: 1,
                 skip: 0,
                 pending: 0,
@@ -14659,8 +14737,8 @@ mod tests {
         );
 
         assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
-        assert_eq!(coverage.rust_backed_pass, 18);
-        assert_eq!(coverage.rust_backed_total, 18);
+        assert_eq!(coverage.rust_backed_pass, 19);
+        assert_eq!(coverage.rust_backed_total, 19);
         assert_eq!(
             coverage.files[0].source,
             ConformanceCoverageKind::RustBacked
@@ -14693,7 +14771,11 @@ mod tests {
             coverage.files[7].source,
             ConformanceCoverageKind::RustBacked
         );
-        assert_eq!(coverage.files[8].source, ConformanceCoverageKind::Mixed);
+        assert_eq!(
+            coverage.files[8].source,
+            ConformanceCoverageKind::RustBacked
+        );
+        assert_eq!(coverage.files[9].source, ConformanceCoverageKind::Mixed);
         assert!(coverage.files[0]
             .reason
             .contains("routed through vuec_node_bridge"));

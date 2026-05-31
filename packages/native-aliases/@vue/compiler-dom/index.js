@@ -348,11 +348,59 @@ const transformShow = (dir, node, context) => {
   };
 };
 
+function domNodeIsTransition(node, context) {
+  if (!node || node.type !== core.NodeTypes.ELEMENT || node.tagType !== core.ElementTypes.COMPONENT) return false;
+  if (!context || typeof context.isBuiltInComponent !== 'function') return false;
+  let component;
+  try {
+    component = context.isBuiltInComponent(node.tag);
+  } catch (_error) {
+    component = undefined;
+  }
+  const transition = context.__vuecDomHelpers && context.__vuecDomHelpers.TRANSITION || TRANSITION;
+  return component === transition || helperNameMap[component] === 'Transition';
+}
+
+function domTransitionContextPayload(context, node) {
+  return {
+    isTransition: domNodeIsTransition(node, context),
+  };
+}
+
+function materializeDomTransitionProjection(projection, node, context) {
+  if (!projection || !projection.transform || !node) return;
+  if (Array.isArray(projection.keepChildren) && Array.isArray(node.children)) {
+    node.children = projection.keepChildren
+      .map(index => node.children[index])
+      .filter(Boolean);
+  }
+  materializeDomDirectiveErrors(projection, null, node, context);
+  if (projection.injectPersisted) {
+    node.props = node.props || [];
+    node.props.push({
+      type: core.NodeTypes.ATTRIBUTE,
+      name: 'persisted',
+      nameLoc: node.loc,
+      value: undefined,
+      loc: node.loc,
+    });
+  }
+}
+
+const transformTransition = (node, context) => {
+  if (!domNodeIsTransition(node, context)) return undefined;
+  return () => {
+    const projection = callVue3DomProjection('vue3.dom.transformTransition', {
+      node,
+      context: domTransitionContextPayload(context, node),
+    });
+    materializeDomTransitionProjection(projection, node, context);
+  };
+};
+
 const DOMNodeTransforms = [
   transformStyle,
-  function transformTransition(node, context) {
-    return undefined;
-  },
+  transformTransition,
   function validateHtmlNesting(node, context) {
     return undefined;
   },
@@ -831,6 +879,7 @@ Object.defineProperty(module.exports, '__vuecRuntime', {
     transformShow,
     transformModel,
     transformOn,
+    transformTransition,
   },
   enumerable: false,
 });

@@ -232,6 +232,9 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
         "vue3.dom.transformShow" => Ok(vuec_vue3_dom::transform_show_projection(&payload)),
         "vue3.dom.transformOn" => Ok(vuec_vue3_dom::transform_on_projection(&payload)),
         "vue3.dom.transformModel" => Ok(vuec_vue3_dom::transform_model_projection(&payload)),
+        "vue3.dom.transformTransition" => {
+            Ok(vuec_vue3_dom::transform_transition_projection(&payload))
+        }
         "vue3.dom.compile" => {
             let source = template_source(&payload);
             let mut core = vue3_options(payload.get("options"));
