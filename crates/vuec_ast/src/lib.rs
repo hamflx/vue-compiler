@@ -2903,6 +2903,15 @@ pub struct Vue3SsrSlot {
 pub struct Vue3SsrAttrs {
     /// Props to render as SSR attrs.
     pub props: Vue3DomProps,
+    /// Custom directives whose SSR props participate in attrs rendering.
+    #[serde(default)]
+    pub directives: Vec<Vue3DomDirective>,
+    /// Whether directive SSR props may provide textContent / innerHTML fallback.
+    #[serde(default)]
+    pub directive_content: bool,
+    /// Static textarea fallback used when object attrs may provide `value`.
+    #[serde(default)]
+    pub textarea_value_fallback: Option<String>,
     /// Whether the full props payload must render through `ssrRenderAttrs`.
     #[serde(default)]
     pub force_render_attrs: bool,

@@ -9,7 +9,8 @@ function compile(source) {
     const payload = vue3AstCompilePayload(source, options);
     result = native.compileVue3Ssr(payload.source, payload.options);
   } else {
-    result = native.compileVue3Ssr(String(source || ''), options || {});
+    const template = String(source || '');
+    result = native.compileVue3Ssr(template, vue3SsrNativeOptions(options, template));
   }
   return hydrateCompileResult(result);
 }
@@ -33,13 +34,87 @@ function vue3AstCompilePayload(ast, options) {
   const template = range ? source.slice(range.start, range.end) : source;
   return {
     source: template,
-    options: {
-      ...(options || {}),
+    options: Object.assign(vue3SsrNativeOptions(options, template), {
       __vuecTemplateBaseOffset: range ? range.start : 0,
       __vuecSourceMapSource: source,
       __vuecSourceMapBaseOffset: 0,
-    },
+    }),
   };
+}
+
+function vue3SsrNativeOptions(options, source) {
+  options = options || {};
+  const out = {};
+  for (const key of Object.keys(options)) {
+    if (typeof options[key] !== 'function') out[key] = options[key];
+  }
+  const tags = extractVueTemplateTags(String(source || ''));
+  if (hasVuePredicateOption(options, 'isVoidTag')) {
+    out.__vuecVoidTags = collectVuePredicateHits(options.isVoidTag, tags);
+  }
+  if (hasVuePredicateOption(options, 'isPreTag')) {
+    out.__vuecPreTags = collectVuePredicateHits(options.isPreTag, tags);
+  }
+  if (hasVuePredicateOption(options, 'isIgnoreNewlineTag')) {
+    out.__vuecIgnoreNewlineTags = collectVuePredicateHits(options.isIgnoreNewlineTag, tags);
+  }
+  if (typeof options.getNamespace === 'function') {
+    out.__vuecNamespaces = collectVueNamespaceHits(options.getNamespace, tags);
+    out.__vuecDomNamespaces = true;
+  }
+  if (Object.prototype.hasOwnProperty.call(options, 'ns')) {
+    out.__vuecRootNamespace = options.ns;
+  }
+  if (hasVuePredicateOption(options, 'isNativeTag')) {
+    out.__vuecNativeTags = collectVuePredicateHits(options.isNativeTag, tags);
+  }
+  out.__vuecCustomElements = collectVuePredicateHits(options.isCustomElement, tags);
+  out.__vuecBuiltInComponents = collectVuePredicateHits(options.isBuiltInComponent, tags);
+  return out;
+}
+
+function hasVuePredicateOption(options, name) {
+  return Object.prototype.hasOwnProperty.call(options, name) &&
+    (typeof options[name] === 'function' || Array.isArray(options[name]));
+}
+
+function extractVueTemplateTags(source) {
+  const tags = [];
+  const seen = new Set();
+  const pattern = /<\/?\s*([A-Za-z][A-Za-z0-9._:-]*)/g;
+  let match;
+  while ((match = pattern.exec(source))) {
+    const tag = match[1];
+    if (!seen.has(tag)) {
+      seen.add(tag);
+      tags.push(tag);
+    }
+  }
+  return tags;
+}
+
+function collectVuePredicateHits(predicate, values) {
+  if (Array.isArray(predicate)) return predicate.map(String);
+  if (typeof predicate !== 'function') return [];
+  const hits = [];
+  for (const value of values) {
+    try {
+      if (predicate(value)) hits.push(value);
+    } catch (_) {}
+  }
+  return hits;
+}
+
+function collectVueNamespaceHits(getNamespace, values) {
+  if (!getNamespace || typeof getNamespace !== 'function') return {};
+  const namespaces = {};
+  for (const value of values) {
+    try {
+      const namespace = getNamespace(value);
+      if (namespace !== undefined && namespace !== null) namespaces[value] = namespace;
+    } catch (_) {}
+  }
+  return namespaces;
 }
 
 function vue3AstChildrenRange(ast, source) {

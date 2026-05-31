@@ -4054,6 +4054,9 @@ fn vue3_ssr_transition_group_attrs(
     }
     Some(Vue3SsrAttrs {
         props,
+        directives: Vec::new(),
+        directive_content: false,
+        textarea_value_fallback: None,
         force_render_attrs: true,
         v_show: None,
         v_model: None,
@@ -4672,16 +4675,37 @@ fn lower_vue3_native_element_to_ssr_mir(
     };
     let v_model = lower_vue3_ssr_v_model(element, ast_node, state);
     let content = lower_vue3_ssr_content(element, ast_node, state);
+    let textarea_static_value = (element.tag == "textarea" && content.is_none())
+        .then(|| vue3_ssr_static_textarea_value(element))
+        .flatten();
+    let textarea_value_fallback = (element.tag == "textarea"
+        && content.is_none()
+        && textarea_static_value.is_none()
+        && vue3_ssr_has_object_v_bind(element))
+    .then(|| vue3_ssr_static_textarea_fallback(ast_node, ast))
+    .flatten();
     let is_void = state
         .options
         .void_tags
         .iter()
         .any(|candidate| candidate == &element.tag);
     let has_content_override = content.is_some()
+        || textarea_static_value.is_some()
+        || textarea_value_fallback.is_some()
         || matches!(
             v_model.as_ref().map(|model| &model.kind),
             Some(Vue3SsrModelKind::Textarea)
         );
+    let directive_content = !is_void
+        && !has_content_override
+        && ast_node.children.is_empty()
+        && state.hir.node(hir_id).is_some_and(|node| {
+            matches!(
+                &node.kind,
+                HirNodeKind::Element(element)
+                    if element.directives.iter().any(|directive| directive.name != "show")
+            )
+        });
     let open_id = state.mir.push_child(
         mir_parent,
         Vue3SsrMirKind::PushString(vue3_ssr_open_tag_start(
@@ -4694,7 +4718,14 @@ fn lower_vue3_native_element_to_ssr_mir(
     );
     state.map.record_hir_to_mir(hir_id, open_id);
 
-    if let Some(attrs) = lower_vue3_ssr_attrs(hir_id, v_show, v_model.clone(), state) {
+    if let Some(attrs) = lower_vue3_ssr_attrs(
+        hir_id,
+        v_show,
+        v_model.clone(),
+        directive_content,
+        textarea_value_fallback.clone(),
+        state,
+    ) {
         let attrs_id = state.mir.push_child(
             mir_parent,
             Vue3SsrMirKind::RenderAttrs(attrs),
@@ -4731,6 +4762,15 @@ fn lower_vue3_native_element_to_ssr_mir(
             generated_span.clone(),
         );
         state.map.record_hir_to_mir(hir_id, content_id);
+    } else if let Some(value) = textarea_static_value {
+        let text_id = state.mir.push_child(
+            mir_parent,
+            Vue3SsrMirKind::PushString(escape_static_html_text(&value)),
+            generated_span.clone(),
+        );
+        state.map.record_hir_to_mir(hir_id, text_id);
+    } else if textarea_value_fallback.is_some() {
+        // The content expression is emitted together with the attrs temp in codegen.
     } else if let Some(expression) = v_model
         .as_ref()
         .filter(|model| matches!(model.kind, Vue3SsrModelKind::Textarea))
@@ -4921,8 +4961,72 @@ fn lower_vue3_ssr_content(
     if let Some(expression) = vue3_ssr_directive_expression(element, "html", ast_node, state) {
         return Some(Vue3SsrContent::Html { expression });
     }
-    vue3_ssr_directive_expression(element, "text", ast_node, state)
-        .map(|expression| Vue3SsrContent::Text { expression })
+    if let Some(expression) = vue3_ssr_directive_expression(element, "text", ast_node, state) {
+        return Some(Vue3SsrContent::Text { expression });
+    }
+    if element.tag == "textarea" {
+        return vue3_ssr_dynamic_textarea_value(element, ast_node, state)
+            .map(|expression| Vue3SsrContent::Text { expression });
+    }
+    None
+}
+
+fn vue3_ssr_dynamic_textarea_value(
+    element: &Vue3Element,
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    state: &mut Vue3SsrLoweringState,
+) -> Option<JsExprId> {
+    element.props.iter().find_map(|prop| match prop {
+        Vue3Prop::Directive(dir)
+            if dir.name == "bind"
+                && !dir.is_dynamic_arg
+                && dir
+                    .arg
+                    .as_ref()
+                    .is_some_and(|arg| arg.source_string() == "value") =>
+        {
+            let expression = dir.exp.as_ref()?;
+            Some(register_or_reuse_vue3_expression_with_span(
+                &mut state.js,
+                expression,
+                dir.exp_span.or_else(|| ast_node.span.source()),
+                state.source_type,
+            ))
+        }
+        _ => None,
+    })
+}
+
+fn vue3_ssr_static_textarea_value(element: &Vue3Element) -> Option<String> {
+    element.props.iter().find_map(|prop| match prop {
+        Vue3Prop::Attribute(attr) if attr.name == "value" => attr.value.clone(),
+        _ => None,
+    })
+}
+
+fn vue3_ssr_has_object_v_bind(element: &Vue3Element) -> bool {
+    element.props.iter().any(|prop| {
+        matches!(
+            prop,
+            Vue3Prop::Directive(dir) if dir.name == "bind" && dir.arg.is_none()
+        )
+    })
+}
+
+fn vue3_ssr_static_textarea_fallback(
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    ast: &Vue3Ast,
+) -> Option<String> {
+    let mut fallback = String::new();
+    for child in &ast_node.children {
+        let node = ast.node(*child)?;
+        match &node.kind {
+            Vue3AstKind::Text(text) => fallback.push_str(&text.value),
+            Vue3AstKind::Comment(_) => {}
+            _ => return None,
+        }
+    }
+    Some(fallback)
 }
 
 fn vue3_ssr_directive_expression(
@@ -5136,6 +5240,9 @@ fn vue3_ssr_should_omit_static_attr(
     omit_static_style: bool,
     v_model: Option<&Vue3SsrModel>,
 ) -> bool {
+    if matches!(name, "key" | "ref") || (element.tag == "textarea" && name == "value") {
+        return true;
+    }
     if omit_static_style && name == "style" {
         return true;
     }
@@ -5166,17 +5273,44 @@ fn lower_vue3_ssr_attrs(
     hir_id: NodeId,
     v_show: Option<JsExprId>,
     v_model: Option<Vue3SsrModel>,
+    directive_content: bool,
+    textarea_value_fallback: Option<String>,
     state: &Vue3SsrLoweringState,
 ) -> Option<Vue3SsrAttrs> {
-    let props = match state.hir.node(hir_id).map(|node| &node.kind) {
+    let (props, directives) = match state.hir.node(hir_id).map(|node| &node.kind) {
         Some(HirNodeKind::Element(element)) => {
-            filter_vue3_ssr_attr_props(&element.props, v_show, v_model.as_ref())
+            let tag = match &element.tag {
+                HirTag::Native(tag) => tag.as_str(),
+                HirTag::Dynamic(_) => "",
+            };
+            (
+                filter_vue3_ssr_attr_props(&element.props, tag, v_show, v_model.as_ref()),
+                element
+                    .directives
+                    .iter()
+                    .filter(|directive| directive.name != "show")
+                    .map(lower_hir_directive_to_dom_mir)
+                    .collect::<Vec<_>>(),
+            )
         }
-        _ => HirProps::default(),
+        _ => (HirProps::default(), Vec::new()),
     };
+    let has_dynamic_props = !props.dynamic_bindings.is_empty() || !props.object_bindings.is_empty();
     if props.segments.is_empty()
         && props.dynamic_bindings.is_empty()
         && props.object_bindings.is_empty()
+        && directives.is_empty()
+        && !directive_content
+        && textarea_value_fallback.is_none()
+        && v_show.is_none()
+        && v_model.is_none()
+    {
+        return None;
+    }
+    if !has_dynamic_props
+        && directives.is_empty()
+        && !directive_content
+        && textarea_value_fallback.is_none()
         && v_show.is_none()
         && v_model.is_none()
     {
@@ -5184,6 +5318,9 @@ fn lower_vue3_ssr_attrs(
     }
     Some(Vue3SsrAttrs {
         props: lower_hir_props_to_dom_mir_without_event_cache(&props),
+        directives,
+        directive_content,
+        textarea_value_fallback,
         force_render_attrs: false,
         v_show,
         v_model,
@@ -5192,6 +5329,7 @@ fn lower_vue3_ssr_attrs(
 
 fn filter_vue3_ssr_attr_props(
     props: &HirProps,
+    tag: &str,
     include_static_style: Option<JsExprId>,
     v_model: Option<&Vue3SsrModel>,
 ) -> HirProps {
@@ -5199,15 +5337,10 @@ fn filter_vue3_ssr_attr_props(
     for segment in &props.segments {
         match segment {
             HirPropSegment::StaticAttr(attr)
-                if include_static_style.is_some() && attr.name == "style" =>
-            {
-                filtered.static_attrs.push(attr.clone());
-                filtered
-                    .segments
-                    .push(HirPropSegment::StaticAttr(attr.clone()));
-            }
-            HirPropSegment::StaticAttr(attr)
-                if vue3_ssr_should_keep_static_attr_in_payload(attr, v_model) =>
+                if !vue3_ssr_should_skip_static_attr_payload(attr, tag)
+                    && (include_static_style.is_none()
+                        || attr.name == "style"
+                        || vue3_ssr_should_keep_static_attr_in_payload(attr, v_model)) =>
             {
                 filtered.static_attrs.push(attr.clone());
                 filtered
@@ -5215,7 +5348,7 @@ fn filter_vue3_ssr_attr_props(
                     .push(HirPropSegment::StaticAttr(attr.clone()));
             }
             HirPropSegment::DynamicBinding(binding) => {
-                if vue3_ssr_should_skip_dynamic_binding(binding, v_model) {
+                if vue3_ssr_should_skip_dynamic_binding(binding, v_model, tag) {
                     continue;
                 }
                 filtered.dynamic_bindings.push(binding.clone());
@@ -5238,12 +5371,16 @@ fn filter_vue3_ssr_attr_props(
         filtered.dynamic_bindings = props
             .dynamic_bindings
             .iter()
-            .filter(|binding| !vue3_ssr_should_skip_dynamic_binding(binding, v_model))
+            .filter(|binding| !vue3_ssr_should_skip_dynamic_binding(binding, v_model, tag))
             .cloned()
             .collect();
         filtered.object_bindings = props.object_bindings.clone();
     }
     filtered
+}
+
+fn vue3_ssr_should_skip_static_attr_payload(attr: &HirStaticAttr, tag: &str) -> bool {
+    matches!(attr.name.as_str(), "key" | "ref") || (tag == "textarea" && attr.name == "value")
 }
 
 fn vue3_ssr_should_keep_static_attr_in_payload(
@@ -5266,11 +5403,15 @@ fn vue3_ssr_should_keep_static_attr_in_payload(
 fn vue3_ssr_should_skip_dynamic_binding(
     binding: &HirBinding,
     v_model: Option<&Vue3SsrModel>,
+    tag: &str,
 ) -> bool {
     if binding.dynamic_arg {
         return false;
     }
-    matches!(binding.name.as_str(), "true-value" | "false-value")
+    matches!(
+        binding.name.as_str(),
+        "key" | "ref" | "true-value" | "false-value"
+    ) || (tag == "textarea" && binding.name == "value")
         || matches!(
             v_model.map(|model| &model.kind),
             Some(Vue3SsrModelKind::InputValue)
@@ -14630,7 +14771,8 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         let scope = RenderScope::default();
         let vue_helpers = self.vue_helpers();
         let ssr_helpers = self.ssr_helpers();
-        let declarations = self.component_declarations();
+        let mut declarations = self.component_declarations();
+        declarations.extend(self.directive_declarations());
         let mut preamble = String::new();
         self.render_preamble(&mut writer, &mut preamble, &vue_helpers, &ssr_helpers);
         self.render_function_start(&mut writer);
@@ -15002,6 +15144,31 @@ impl<'a> Vue3SsrMirCodegen<'a> {
             .collect()
     }
 
+    fn directive_declarations(&self) -> Vec<String> {
+        let mut directives = Vec::<String>::new();
+        for node in &self.mir.nodes {
+            let Vue3SsrMirKind::RenderAttrs(attrs) = &node.kind else {
+                continue;
+            };
+            for directive in &attrs.directives {
+                if directives.iter().any(|item| item == &directive.name) {
+                    continue;
+                }
+                directives.push(directive.name.clone());
+            }
+        }
+        directives
+            .iter()
+            .map(|directive| {
+                format!(
+                    "const {} = _resolveDirective({})",
+                    directive_asset_id(directive),
+                    quote_string(directive)
+                )
+            })
+            .collect()
+    }
+
     fn render_function_start(&self, writer: &mut CodeWriter) {
         let args = self.render_function_args();
         if self.options.inline {
@@ -15028,7 +15195,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
             matches!(
                 &node.kind,
                 Vue3SsrMirKind::RenderAttrs(attrs)
-                    if matches!(
+                    if attrs.directive_content || attrs.textarea_value_fallback.is_some() || matches!(
                         attrs.v_model.as_ref().map(|model| &model.kind),
                         Some(Vue3SsrModelKind::InputDynamicProps)
                     )
@@ -15316,6 +15483,12 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                     {
                         continue;
                     }
+                    if !attrs.directives.is_empty() {
+                        push_unique_helper(&mut helpers, RuntimeHelper::Vue3ResolveDirective);
+                    }
+                    if self.ssr_attrs_need_merge_props(attrs, root_attr_node == Some(node.id)) {
+                        push_unique_helper(&mut helpers, RuntimeHelper::Vue3MergeProps);
+                    }
                     if attrs.force_render_attrs {
                         self.push_prop_helpers(&attrs.props, &mut helpers);
                         continue;
@@ -15328,6 +15501,12 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                             self.push_dynamic_model_props_vue_helpers(&attrs.props, &mut helpers);
                         } else if attrs.v_show.is_some() {
                             self.push_v_show_merged_props_vue_helpers(&attrs.props, &mut helpers);
+                        } else if self.ssr_attrs_use_rebuilt_element_attrs(attrs) {
+                            for binding in &attrs.props.dynamic_bindings {
+                                if binding.dynamic_arg && binding.camel {
+                                    push_unique_helper(&mut helpers, RuntimeHelper::Vue3Camelize);
+                                }
+                            }
                         } else {
                             self.push_prop_helpers(&attrs.props, &mut helpers);
                         }
@@ -15848,10 +16027,35 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         helpers: &mut Vec<RuntimeHelper>,
     ) {
         self.push_ssr_v_model_helpers(attrs, helpers);
+        if !attrs.directives.is_empty() {
+            push_unique_helper(helpers, RuntimeHelper::Vue3SsrGetDirectiveProps);
+            push_unique_helper(helpers, RuntimeHelper::Vue3SsrRenderAttrs);
+            if attrs.directive_content {
+                push_unique_helper(helpers, RuntimeHelper::Vue3SsrInterpolate);
+            }
+        }
+        if attrs.textarea_value_fallback.is_some() {
+            push_unique_helper(helpers, RuntimeHelper::Vue3SsrRenderAttrs);
+            push_unique_helper(helpers, RuntimeHelper::Vue3SsrInterpolate);
+        }
         if root_attrs_take_over {
             return;
         }
         let props = &attrs.props;
+        if self.ssr_attrs_need_render_attrs(attrs) {
+            push_unique_helper(helpers, RuntimeHelper::Vue3SsrRenderAttrs);
+        }
+        if attrs.v_show.is_none()
+            && attrs.v_model.is_none()
+            && self.ssr_attrs_need_render_attrs(attrs)
+        {
+            for binding in &props.dynamic_bindings {
+                if binding.dynamic_arg && binding.camel {
+                    push_unique_helper(helpers, RuntimeHelper::Vue3Camelize);
+                }
+            }
+            return;
+        }
         if matches!(
             attrs.v_model.as_ref().map(|model| &model.kind),
             Some(Vue3SsrModelKind::InputDynamicProps)
@@ -15899,6 +16103,30 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         }
     }
 
+    fn ssr_attrs_need_render_attrs(&self, attrs: &Vue3SsrAttrs) -> bool {
+        !attrs.directives.is_empty()
+            || !attrs.props.object_bindings.is_empty()
+            || attrs
+                .props
+                .dynamic_bindings
+                .iter()
+                .any(|binding| binding.dynamic_arg)
+    }
+
+    fn ssr_attrs_need_merge_props(&self, attrs: &Vue3SsrAttrs, has_root_attrs: bool) -> bool {
+        if attrs.v_show.is_some() && !ssr_attrs_has_object_binding(&attrs.props) {
+            return false;
+        }
+        let prop_chunks = ssr_attrs_prop_chunk_count(&attrs.props);
+        has_root_attrs && (prop_chunks > 0 || !attrs.directives.is_empty())
+            || prop_chunks > 1
+            || attrs.props.object_bindings.len() > 1
+            || (!attrs.directives.is_empty()
+                && (prop_chunks > 0
+                    || attrs.directives.len() > 1
+                    || !attrs.props.object_bindings.is_empty()))
+    }
+
     fn push_ssr_v_model_helpers(&self, attrs: &Vue3SsrAttrs, helpers: &mut Vec<RuntimeHelper>) {
         let Some(model) = &attrs.v_model else {
             return;
@@ -15933,7 +16161,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
 
     fn push_ssr_binding_helper(&self, binding: &Vue3DomBinding, helpers: &mut Vec<RuntimeHelper>) {
         if binding.dynamic_arg {
-            push_unique_helper(helpers, RuntimeHelper::Vue3SsrRenderDynamicAttr);
+            push_unique_helper(helpers, RuntimeHelper::Vue3SsrRenderAttrs);
             if binding.camel {
                 push_unique_helper(helpers, RuntimeHelper::Vue3Camelize);
             }
@@ -15941,6 +16169,8 @@ impl<'a> Vue3SsrMirCodegen<'a> {
             push_unique_helper(helpers, RuntimeHelper::Vue3SsrRenderClass);
         } else if binding.name == "style" {
             push_unique_helper(helpers, RuntimeHelper::Vue3SsrRenderStyle);
+        } else if vue3_ssr_is_boolean_attr(&binding.name) {
+            push_unique_helper(helpers, RuntimeHelper::Vue3SsrIncludeBooleanAttr);
         } else {
             push_unique_helper(helpers, RuntimeHelper::Vue3SsrRenderAttr);
         }
@@ -16286,6 +16516,11 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                 _ => None,
             });
         let forced_attrs = attrs.is_some_and(|attrs| attrs.force_render_attrs);
+        let rebuilt_attrs = attrs.is_some_and(|attrs| {
+            attrs.v_show.is_none()
+                && attrs.v_model.is_none()
+                && self.ssr_attrs_use_rebuilt_element_attrs(attrs)
+        });
         let [dynamic_id] = children.get(open_end + 1..close_index)? else {
             return None;
         };
@@ -16306,7 +16541,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         if let Some(expression) = self.dynamic_tag_name_expr(&open_tag, scope) {
             open_parts.push(SsrTemplatePart::Static("<".into()));
             open_parts.push(SsrTemplatePart::Expr(expression));
-        } else if forced_attrs {
+        } else if forced_attrs || rebuilt_attrs {
             open_parts.push(SsrTemplatePart::Static(format!("<{open_tag}")));
         } else {
             open_parts.push(SsrTemplatePart::Static(open_static));
@@ -16337,6 +16572,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                             attrs,
                             root_attrs,
                             scope,
+                            &open_tag,
                             &static_entries,
                         ),
                     ));
@@ -16345,6 +16581,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                 self.collect_ssr_template_attrs_for_open_tag(
                     attrs,
                     scope,
+                    &open_tag,
                     dynamic_open_tag,
                     &static_entries,
                     &mut open_parts,
@@ -16356,7 +16593,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                 open_parts.push(SsrTemplatePart::Expr(rendered));
             }
         }
-        if root_attrs.is_some() || dynamic_open_tag || forced_attrs {
+        if root_attrs.is_some() || dynamic_open_tag || forced_attrs || rebuilt_attrs {
             let tail =
                 self.render_static_attr_tail(&self.root_static_tail_entries(&static_entries));
             if !tail.is_empty() {
@@ -16540,11 +16777,16 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                 _ => None,
             });
         let forced_attrs = attrs.is_some_and(|attrs| attrs.force_render_attrs);
+        let rebuilt_attrs = attrs.is_some_and(|attrs| {
+            attrs.v_show.is_none()
+                && attrs.v_model.is_none()
+                && self.ssr_attrs_use_rebuilt_element_attrs(attrs)
+        });
         let mut parts = Vec::new();
         if let Some(expression) = self.dynamic_tag_name_expr(&open_tag, scope) {
             parts.push(SsrTemplatePart::Static("<".into()));
             parts.push(SsrTemplatePart::Expr(expression));
-        } else if root_attrs.is_some() || forced_attrs {
+        } else if root_attrs.is_some() || forced_attrs || rebuilt_attrs {
             parts.push(SsrTemplatePart::Static(format!("<{open_tag}")));
         } else {
             parts.push(SsrTemplatePart::Static(open_start.to_string()));
@@ -16568,6 +16810,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                             attrs,
                             root_attrs,
                             scope,
+                            &open_tag,
                             &static_entries,
                         ),
                     ));
@@ -16576,6 +16819,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                 self.collect_ssr_template_attrs_for_open_tag(
                     attrs,
                     scope,
+                    &open_tag,
                     dynamic_open_tag,
                     &static_entries,
                     &mut parts,
@@ -16588,7 +16832,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                 parts.push(SsrTemplatePart::Expr(rendered));
             }
         }
-        if root_attrs.is_some() || dynamic_open_tag || forced_attrs {
+        if root_attrs.is_some() || dynamic_open_tag || forced_attrs || rebuilt_attrs {
             let tail =
                 self.render_static_attr_tail(&self.root_static_tail_entries(&static_entries));
             if !tail.is_empty() {
@@ -16664,6 +16908,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                                             attrs,
                                             root_attrs,
                                             scope,
+                                            &tag,
                                             &static_entries,
                                         ),
                                     ));
@@ -16703,7 +16948,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                 }
                 Vue3SsrMirKind::RenderContent(Vue3SsrContent::Html { expression }) => {
                     parts.push(SsrTemplatePart::Expr(format!(
-                        "({}) ?? \"\"",
+                        "({}) ?? ''",
                         self.render_js_expr(expression, scope)
                     )));
                 }
@@ -16829,7 +17074,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
             }
             Vue3SsrMirKind::RenderContent(Vue3SsrContent::Html { expression }) => {
                 parts.push(SsrTemplatePart::Expr(format!(
-                    "({}) ?? \"\"",
+                    "({}) ?? ''",
                     self.render_js_expr(*expression, scope)
                 )));
                 *dynamic = true;
@@ -16872,11 +17117,16 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                 _ => None,
             });
         let forced_attrs = attrs.is_some_and(|attrs| attrs.force_render_attrs);
+        let rebuilt_attrs = attrs.is_some_and(|attrs| {
+            attrs.v_show.is_none()
+                && attrs.v_model.is_none()
+                && self.ssr_attrs_use_rebuilt_element_attrs(attrs)
+        });
         if let Some(expression) = self.dynamic_tag_name_expr(&tag, scope) {
             parts.push(SsrTemplatePart::Static("<".into()));
             parts.push(SsrTemplatePart::Expr(expression));
             *dynamic = true;
-        } else if root_attrs.is_some() || forced_attrs {
+        } else if root_attrs.is_some() || forced_attrs || rebuilt_attrs {
             parts.push(SsrTemplatePart::Static(format!("<{tag}")));
         } else {
             self.push_ssr_open_tag_start_part(
@@ -16911,6 +17161,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                             attrs,
                             root_attrs,
                             scope,
+                            &tag,
                             &static_entries,
                         ),
                     ));
@@ -16919,6 +17170,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                 self.collect_ssr_template_attrs_for_open_tag(
                     attrs,
                     scope,
+                    &tag,
                     dynamic_open_tag,
                     &static_entries,
                     parts,
@@ -16933,7 +17185,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                 *dynamic = true;
             }
         }
-        if root_attrs.is_some() || dynamic_open_tag || forced_attrs {
+        if root_attrs.is_some() || dynamic_open_tag || forced_attrs || rebuilt_attrs {
             let root_tail_entries = self.root_static_tail_entries(&static_entries);
             let tail = self.render_static_attr_tail(&root_tail_entries);
             if !tail.is_empty() {
@@ -16947,12 +17199,40 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         let close_open = self.ssr_push_string(*children.get(cursor)?)?;
         if close_open == "/>" {
             parts.push(SsrTemplatePart::Static(">".into()));
+            if let Some(attrs) = attrs.filter(|attrs| attrs.directive_content) {
+                let _ = attrs;
+                parts.push(SsrTemplatePart::Expr(
+                    self.render_ssr_directive_content_expr(),
+                ));
+                *dynamic = true;
+            } else if let Some(fallback) =
+                attrs.and_then(|attrs| attrs.textarea_value_fallback.as_deref())
+            {
+                parts.push(SsrTemplatePart::Expr(
+                    self.render_ssr_textarea_value_content_expr(fallback),
+                ));
+                *dynamic = true;
+            }
             return Some(cursor + 1);
         }
         if close_open != ">" {
             return None;
         }
         parts.push(SsrTemplatePart::Static(">".into()));
+        if let Some(attrs) = attrs.filter(|attrs| attrs.directive_content) {
+            let _ = attrs;
+            parts.push(SsrTemplatePart::Expr(
+                self.render_ssr_directive_content_expr(),
+            ));
+            *dynamic = true;
+        } else if let Some(fallback) =
+            attrs.and_then(|attrs| attrs.textarea_value_fallback.as_deref())
+        {
+            parts.push(SsrTemplatePart::Expr(
+                self.render_ssr_textarea_value_content_expr(fallback),
+            ));
+            *dynamic = true;
+        }
         cursor += 1;
         while cursor < children.len() {
             if self
@@ -17005,7 +17285,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                 }
                 Some(Vue3SsrMirKind::RenderContent(Vue3SsrContent::Html { expression })) => {
                     parts.push(SsrTemplatePart::Expr(format!(
-                        "({}) ?? \"\"",
+                        "({}) ?? ''",
                         self.render_js_expr(*expression, scope)
                     )));
                     *dynamic = true;
@@ -17155,6 +17435,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         &self,
         attrs: &Vue3SsrAttrs,
         scope: &RenderScope,
+        tag: &str,
         dynamic_tag: bool,
         static_entries: &[(String, Option<String>)],
         parts: &mut Vec<SsrTemplatePart>,
@@ -17170,7 +17451,577 @@ impl<'a> Vue3SsrMirCodegen<'a> {
             )?));
             return Some(());
         }
+        if attrs.v_show.is_none()
+            && attrs.v_model.is_none()
+            && self.ssr_attrs_use_rebuilt_element_attrs(attrs)
+        {
+            if self.ssr_attrs_need_render_attrs(attrs) {
+                parts.push(SsrTemplatePart::Expr(self.render_ssr_render_attrs_call(
+                    attrs,
+                    scope,
+                    None,
+                    Some(tag),
+                )?));
+            } else {
+                self.collect_ssr_template_ordered_attrs(attrs, scope, parts);
+            }
+            return Some(());
+        }
         self.collect_ssr_template_attrs(attrs, scope, parts)
+    }
+
+    fn ssr_attrs_use_rebuilt_element_attrs(&self, attrs: &Vue3SsrAttrs) -> bool {
+        !attrs.props.static_attrs.is_empty()
+            || !attrs.directives.is_empty()
+            || attrs.props.dynamic_bindings.iter().any(|binding| {
+                binding.dynamic_arg
+                    || matches!(binding.name.as_str(), "class" | "style")
+                    || vue3_ssr_is_boolean_attr(&binding.name)
+            })
+            || !attrs.props.object_bindings.is_empty()
+    }
+
+    fn collect_ssr_template_ordered_attrs(
+        &self,
+        attrs: &Vue3SsrAttrs,
+        scope: &RenderScope,
+        parts: &mut Vec<SsrTemplatePart>,
+    ) {
+        let class_expr = self.render_ssr_class_expr(&attrs.props, scope, true);
+        let style_expr = self.render_ssr_style_expr(&attrs.props, scope, true);
+        let mut emitted_class = false;
+        let mut emitted_style = false;
+        if attrs.props.segments.is_empty() {
+            for attr in &attrs.props.static_attrs {
+                self.collect_ssr_template_static_or_merged_attr(
+                    attr,
+                    class_expr.as_deref(),
+                    style_expr.as_deref(),
+                    &mut emitted_class,
+                    &mut emitted_style,
+                    parts,
+                );
+            }
+            for binding in &attrs.props.dynamic_bindings {
+                self.collect_ssr_template_dynamic_or_merged_attr(
+                    binding,
+                    scope,
+                    class_expr.as_deref(),
+                    style_expr.as_deref(),
+                    &mut emitted_class,
+                    &mut emitted_style,
+                    parts,
+                );
+            }
+            return;
+        }
+        for segment in &attrs.props.segments {
+            match segment {
+                Vue3DomPropSegment::StaticAttr(attr) => {
+                    self.collect_ssr_template_static_or_merged_attr(
+                        attr,
+                        class_expr.as_deref(),
+                        style_expr.as_deref(),
+                        &mut emitted_class,
+                        &mut emitted_style,
+                        parts,
+                    );
+                }
+                Vue3DomPropSegment::DynamicBinding(binding) => {
+                    self.collect_ssr_template_dynamic_or_merged_attr(
+                        binding,
+                        scope,
+                        class_expr.as_deref(),
+                        style_expr.as_deref(),
+                        &mut emitted_class,
+                        &mut emitted_style,
+                        parts,
+                    );
+                }
+                Vue3DomPropSegment::Content(_)
+                | Vue3DomPropSegment::Model(_)
+                | Vue3DomPropSegment::Event(_)
+                | Vue3DomPropSegment::ObjectBinding(_)
+                | Vue3DomPropSegment::ObjectListeners(_) => {}
+            }
+        }
+    }
+
+    fn collect_ssr_template_static_or_merged_attr(
+        &self,
+        attr: &Vue3DomStaticAttr,
+        class_expr: Option<&str>,
+        style_expr: Option<&str>,
+        emitted_class: &mut bool,
+        emitted_style: &mut bool,
+        parts: &mut Vec<SsrTemplatePart>,
+    ) {
+        match attr.name.as_str() {
+            "class" => {
+                if !*emitted_class {
+                    if let Some(class_expr) = class_expr {
+                        parts.push(SsrTemplatePart::Static(" class=\"".into()));
+                        parts.push(SsrTemplatePart::Expr(format!(
+                            "_ssrRenderClass({class_expr})"
+                        )));
+                        parts.push(SsrTemplatePart::Static("\"".into()));
+                    } else {
+                        parts.push(SsrTemplatePart::Static(format!(
+                            " class=\"{}\"",
+                            vue3_ssr_escape_attr(&attr.value)
+                        )));
+                    }
+                    *emitted_class = true;
+                }
+            }
+            "style" => {
+                if !*emitted_style {
+                    if let Some(style_expr) = style_expr {
+                        parts.push(SsrTemplatePart::Static(" style=\"".into()));
+                        parts.push(SsrTemplatePart::Expr(format!(
+                            "_ssrRenderStyle({style_expr})"
+                        )));
+                        parts.push(SsrTemplatePart::Static("\"".into()));
+                    } else {
+                        parts.push(SsrTemplatePart::Static(format!(
+                            " style=\"{}\"",
+                            vue3_ssr_escape_attr(&attr.value)
+                        )));
+                    }
+                    *emitted_style = true;
+                }
+            }
+            _ => parts.push(SsrTemplatePart::Static(format!(
+                " {}=\"{}\"",
+                attr.name,
+                vue3_ssr_escape_attr(&attr.value)
+            ))),
+        }
+    }
+
+    fn collect_ssr_template_dynamic_or_merged_attr(
+        &self,
+        binding: &Vue3DomBinding,
+        scope: &RenderScope,
+        class_expr: Option<&str>,
+        style_expr: Option<&str>,
+        emitted_class: &mut bool,
+        emitted_style: &mut bool,
+        parts: &mut Vec<SsrTemplatePart>,
+    ) {
+        match binding.name.as_str() {
+            "class" if !binding.dynamic_arg => {
+                if !*emitted_class {
+                    if let Some(class_expr) = class_expr {
+                        parts.push(SsrTemplatePart::Static(" class=\"".into()));
+                        parts.push(SsrTemplatePart::Expr(format!(
+                            "_ssrRenderClass({class_expr})"
+                        )));
+                        parts.push(SsrTemplatePart::Static("\"".into()));
+                    }
+                    *emitted_class = true;
+                }
+            }
+            "style" if !binding.dynamic_arg => {
+                if !*emitted_style {
+                    if let Some(style_expr) = style_expr {
+                        parts.push(SsrTemplatePart::Static(" style=\"".into()));
+                        parts.push(SsrTemplatePart::Expr(format!(
+                            "_ssrRenderStyle({style_expr})"
+                        )));
+                        parts.push(SsrTemplatePart::Static("\"".into()));
+                    }
+                    *emitted_style = true;
+                }
+            }
+            _ if vue3_ssr_is_boolean_attr(&binding.name) && !binding.dynamic_arg => {
+                parts.push(SsrTemplatePart::Expr(format!(
+                    "(_ssrIncludeBooleanAttr({})) ? \" {}\" : \"\"",
+                    self.render_js_expr(binding.value, scope),
+                    binding.name
+                )));
+            }
+            _ => parts.push(SsrTemplatePart::Expr(
+                self.render_ssr_binding(binding, scope),
+            )),
+        }
+    }
+
+    fn render_ssr_render_attrs_call(
+        &self,
+        attrs: &Vue3SsrAttrs,
+        scope: &RenderScope,
+        extra_props: Option<String>,
+        tag: Option<&str>,
+    ) -> Option<String> {
+        let mut merge_args = self.render_ssr_attrs_merge_args(&attrs.props, scope);
+        if let Some(extra_props) = extra_props {
+            merge_args.push(extra_props);
+        }
+        merge_args.extend(
+            attrs
+                .directives
+                .iter()
+                .map(|directive| self.render_ssr_directive_props(directive, scope)),
+        );
+        if merge_args.is_empty() {
+            return None;
+        }
+        let props = if merge_args.len() == 1 {
+            merge_args.pop().unwrap_or_else(|| "{}".into())
+        } else {
+            format!("_mergeProps({})", merge_args.join(", "))
+        };
+        let props = if attrs.directive_content || attrs.textarea_value_fallback.is_some() {
+            format!("_temp0 = {props}")
+        } else {
+            props
+        };
+        let tag_arg = self.ssr_render_attrs_tag_arg(tag);
+        Some(match tag_arg {
+            Some(tag) => format!("_ssrRenderAttrs({props}, {tag})"),
+            None => format!("_ssrRenderAttrs({props})"),
+        })
+    }
+
+    fn render_ssr_attrs_merge_args(
+        &self,
+        props: &Vue3DomProps,
+        scope: &RenderScope,
+    ) -> Vec<String> {
+        let mut merge_args = Vec::new();
+        let mut object_entries = Vec::new();
+        let mut emitted_class = false;
+        let mut emitted_style = false;
+        let class_expr = self.render_ssr_class_expr(props, scope, false);
+        let style_expr = self.render_ssr_style_expr(props, scope, false);
+        if props.segments.is_empty() {
+            for attr in &props.static_attrs {
+                self.push_ssr_attrs_object_static_entry(
+                    attr,
+                    class_expr.as_deref(),
+                    style_expr.as_deref(),
+                    &mut emitted_class,
+                    &mut emitted_style,
+                    &mut object_entries,
+                );
+            }
+            for binding in &props.dynamic_bindings {
+                self.push_ssr_attrs_object_binding_entry(
+                    binding,
+                    scope,
+                    class_expr.as_deref(),
+                    style_expr.as_deref(),
+                    &mut emitted_class,
+                    &mut emitted_style,
+                    &mut object_entries,
+                );
+            }
+            self.push_ssr_attrs_object_arg(&mut merge_args, &mut object_entries);
+            merge_args.extend(
+                props
+                    .object_bindings
+                    .iter()
+                    .map(|binding| self.render_js_expr(binding.value, scope)),
+            );
+            return merge_args;
+        }
+        for segment in &props.segments {
+            match segment {
+                Vue3DomPropSegment::StaticAttr(attr) => {
+                    self.push_ssr_attrs_object_static_entry(
+                        attr,
+                        class_expr.as_deref(),
+                        style_expr.as_deref(),
+                        &mut emitted_class,
+                        &mut emitted_style,
+                        &mut object_entries,
+                    );
+                }
+                Vue3DomPropSegment::DynamicBinding(binding) => {
+                    self.push_ssr_attrs_object_binding_entry(
+                        binding,
+                        scope,
+                        class_expr.as_deref(),
+                        style_expr.as_deref(),
+                        &mut emitted_class,
+                        &mut emitted_style,
+                        &mut object_entries,
+                    );
+                }
+                Vue3DomPropSegment::ObjectBinding(binding) => {
+                    self.push_ssr_attrs_object_arg(&mut merge_args, &mut object_entries);
+                    merge_args.push(self.render_js_expr(binding.value, scope));
+                }
+                Vue3DomPropSegment::Content(_)
+                | Vue3DomPropSegment::Model(_)
+                | Vue3DomPropSegment::Event(_)
+                | Vue3DomPropSegment::ObjectListeners(_) => {}
+            }
+        }
+        self.push_ssr_attrs_object_arg(&mut merge_args, &mut object_entries);
+        merge_args
+    }
+
+    fn push_ssr_attrs_object_static_entry(
+        &self,
+        attr: &Vue3DomStaticAttr,
+        class_expr: Option<&str>,
+        style_expr: Option<&str>,
+        emitted_class: &mut bool,
+        emitted_style: &mut bool,
+        object_entries: &mut Vec<String>,
+    ) {
+        match attr.name.as_str() {
+            "class" => {
+                if !*emitted_class {
+                    if let Some(class_expr) = class_expr {
+                        object_entries.push(format!("class: {class_expr}"));
+                    }
+                    *emitted_class = true;
+                }
+            }
+            "style" => {
+                if !*emitted_style {
+                    if let Some(style_expr) = style_expr {
+                        object_entries.push(format!("style: {style_expr}"));
+                    }
+                    *emitted_style = true;
+                }
+            }
+            _ => object_entries.push(Self::render_ssr_static_prop_entry(
+                &attr.name,
+                Some(&attr.value),
+            )),
+        }
+    }
+
+    fn push_ssr_attrs_object_binding_entry(
+        &self,
+        binding: &Vue3DomBinding,
+        scope: &RenderScope,
+        class_expr: Option<&str>,
+        style_expr: Option<&str>,
+        emitted_class: &mut bool,
+        emitted_style: &mut bool,
+        object_entries: &mut Vec<String>,
+    ) {
+        match binding.name.as_str() {
+            "class" if !binding.dynamic_arg => {
+                if !*emitted_class {
+                    if let Some(class_expr) = class_expr {
+                        object_entries.push(format!("class: {class_expr}"));
+                    }
+                    *emitted_class = true;
+                }
+            }
+            "style" if !binding.dynamic_arg => {
+                if !*emitted_style {
+                    if let Some(style_expr) = style_expr {
+                        object_entries.push(format!("style: {style_expr}"));
+                    }
+                    *emitted_style = true;
+                }
+            }
+            _ => object_entries.push(self.render_ssr_object_binding(binding, scope)),
+        }
+    }
+
+    fn push_ssr_attrs_object_arg(
+        &self,
+        merge_args: &mut Vec<String>,
+        object_entries: &mut Vec<String>,
+    ) {
+        if !object_entries.is_empty() {
+            let object = if object_entries.len() == 1
+                && object_entries.first().is_some_and(|entry| {
+                    entry.starts_with("class: [") || entry.starts_with("style: [")
+                }) {
+                render_object(object_entries)
+            } else {
+                self.render_plain_props(object_entries)
+                    .unwrap_or_else(|| "{}".into())
+            };
+            merge_args.push(object);
+            object_entries.clear();
+        }
+    }
+
+    fn render_ssr_class_expr(
+        &self,
+        props: &Vue3DomProps,
+        scope: &RenderScope,
+        dynamic_first: bool,
+    ) -> Option<String> {
+        let mut static_classes = Vec::new();
+        let mut dynamic_classes = Vec::new();
+        self.collect_ssr_class_parts(props, scope, &mut static_classes, &mut dynamic_classes);
+        if dynamic_first && dynamic_classes.is_empty() {
+            return None;
+        }
+        let mut parts = Vec::new();
+        if dynamic_first {
+            parts.extend(dynamic_classes);
+            parts.extend(static_classes);
+        } else {
+            parts.extend(static_classes);
+            parts.extend(dynamic_classes);
+        }
+        match parts.as_slice() {
+            [] => None,
+            [single] => Some(single.clone()),
+            _ => Some(render_inline_array(&parts)),
+        }
+    }
+
+    fn collect_ssr_class_parts(
+        &self,
+        props: &Vue3DomProps,
+        scope: &RenderScope,
+        static_classes: &mut Vec<String>,
+        dynamic_classes: &mut Vec<String>,
+    ) {
+        if props.segments.is_empty() {
+            static_classes.extend(
+                props
+                    .static_attrs
+                    .iter()
+                    .filter(|attr| attr.name == "class")
+                    .map(|attr| quote_string(&attr.value)),
+            );
+            dynamic_classes.extend(
+                props
+                    .dynamic_bindings
+                    .iter()
+                    .filter(|binding| !binding.dynamic_arg && binding.name == "class")
+                    .map(|binding| self.render_js_expr(binding.value, scope)),
+            );
+            return;
+        }
+        for segment in &props.segments {
+            match segment {
+                Vue3DomPropSegment::StaticAttr(attr) if attr.name == "class" => {
+                    static_classes.push(quote_string(&attr.value));
+                }
+                Vue3DomPropSegment::DynamicBinding(binding)
+                    if !binding.dynamic_arg && binding.name == "class" =>
+                {
+                    dynamic_classes.push(self.render_js_expr(binding.value, scope));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn render_ssr_style_expr(
+        &self,
+        props: &Vue3DomProps,
+        scope: &RenderScope,
+        require_dynamic: bool,
+    ) -> Option<String> {
+        let mut parts = Vec::new();
+        let mut has_dynamic = false;
+        if props.segments.is_empty() {
+            parts.extend(
+                props
+                    .static_attrs
+                    .iter()
+                    .filter(|attr| attr.name == "style")
+                    .map(|attr| vue3_static_style_object_expr(&attr.value)),
+            );
+            parts.extend(
+                props
+                    .dynamic_bindings
+                    .iter()
+                    .filter(|binding| !binding.dynamic_arg && binding.name == "style")
+                    .map(|binding| {
+                        has_dynamic = true;
+                        self.render_js_expr(binding.value, scope)
+                    }),
+            );
+        } else {
+            for segment in &props.segments {
+                match segment {
+                    Vue3DomPropSegment::StaticAttr(attr) if attr.name == "style" => {
+                        parts.push(vue3_static_style_object_expr(&attr.value));
+                    }
+                    Vue3DomPropSegment::DynamicBinding(binding)
+                        if !binding.dynamic_arg && binding.name == "style" =>
+                    {
+                        has_dynamic = true;
+                        parts.push(self.render_js_expr(binding.value, scope));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if require_dynamic && !has_dynamic {
+            return None;
+        }
+        match parts.as_slice() {
+            [] => None,
+            [single] => Some(single.clone()),
+            _ => Some(render_inline_array(&parts)),
+        }
+    }
+
+    fn render_ssr_directive_props(
+        &self,
+        directive: &Vue3DomDirective,
+        scope: &RenderScope,
+    ) -> String {
+        let mut args = vec!["_ctx".to_string(), directive_asset_id(&directive.name)];
+        if let Some(expression) = directive.expression {
+            args.push(self.render_js_expr(expression, scope));
+        } else if directive.argument.is_some()
+            || directive.dynamic_argument.is_some()
+            || !directive.modifiers.is_empty()
+        {
+            args.push("void 0".into());
+        }
+        if let Some(argument) = &directive.argument {
+            args.push(quote_string(argument));
+        } else if let Some(argument) = directive.dynamic_argument {
+            args.push(self.render_js_expr(argument, scope));
+        } else if !directive.modifiers.is_empty() {
+            args.push("void 0".into());
+        }
+        if !directive.modifiers.is_empty() {
+            let modifiers = directive
+                .modifiers
+                .iter()
+                .map(|modifier| format!("{}: true", json_key(modifier)))
+                .collect::<Vec<_>>();
+            args.push(
+                self.render_plain_props(&modifiers)
+                    .unwrap_or_else(|| "{}".into()),
+            );
+        }
+        format!("_ssrGetDirectiveProps({})", args.join(", "))
+    }
+
+    fn render_ssr_directive_content_expr(&self) -> String {
+        "(\"textContent\" in _temp0) ? _ssrInterpolate(_temp0.textContent) : _temp0.innerHTML ?? ''"
+            .into()
+    }
+
+    fn render_ssr_textarea_value_content_expr(&self, fallback: &str) -> String {
+        format!(
+            "_ssrInterpolate((\"value\" in _temp0) ? _temp0.value : {})",
+            quote_string(fallback)
+        )
+    }
+
+    fn ssr_render_attrs_tag_arg(&self, tag: Option<&str>) -> Option<String> {
+        let tag = tag?.trim();
+        if tag.is_empty() || tag.starts_with("#expr") {
+            return None;
+        }
+        if tag == "textarea" || self.options.custom_elements.iter().any(|item| item == tag) {
+            Some(quote_string(tag))
+        } else {
+            None
+        }
     }
 
     fn collect_ssr_template_attrs_with_v_model(
@@ -17962,8 +18813,19 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         attrs: &Vue3SsrAttrs,
         root_attrs: &SsrRootAttrs,
         scope: &RenderScope,
+        tag: &str,
         static_entries: &[(String, Option<String>)],
     ) -> String {
+        if attrs.v_model.is_none() && self.ssr_attrs_use_rebuilt_element_attrs(attrs) {
+            if let Some(rendered) = self.render_ssr_render_attrs_call(
+                attrs,
+                scope,
+                self.root_attrs_props(Some(root_attrs)),
+                Some(tag),
+            ) {
+                return rendered;
+            }
+        }
         let static_props = if root_attrs.attrs.is_some() {
             self.root_static_props(static_entries)
         } else {
@@ -18209,7 +19071,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         match content {
             Vue3SsrContent::Html { expression } => {
                 writer.push_line(&format!(
-                    "_push(({}) ?? \"\");",
+                    "_push(({}) ?? '');",
                     self.render_js_expr(*expression, scope)
                 ));
             }
@@ -18274,7 +19136,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                 return;
             }
             let rendered =
-                self.render_root_element_attrs_expr_with_static(attrs, root_attrs, scope, &[]);
+                self.render_root_element_attrs_expr_with_static(attrs, root_attrs, scope, "", &[]);
             writer.push_line(&format!("_push({rendered});"));
             return;
         }
@@ -19687,6 +20549,72 @@ fn ssr_attrs_has_object_binding(props: &Vue3DomProps) -> bool {
             .iter()
             .any(|segment| matches!(segment, Vue3DomPropSegment::ObjectBinding(_)))
     }
+}
+
+fn ssr_attrs_prop_chunk_count(props: &Vue3DomProps) -> usize {
+    let mut chunks = 0usize;
+    let mut pending_object = false;
+    if props.segments.is_empty() {
+        if !props.static_attrs.is_empty() || !props.dynamic_bindings.is_empty() {
+            chunks += 1;
+        }
+        chunks += props.object_bindings.len();
+        return chunks;
+    }
+    for segment in &props.segments {
+        match segment {
+            Vue3DomPropSegment::StaticAttr(_) | Vue3DomPropSegment::DynamicBinding(_) => {
+                pending_object = true;
+            }
+            Vue3DomPropSegment::ObjectBinding(_) => {
+                if pending_object {
+                    chunks += 1;
+                    pending_object = false;
+                }
+                chunks += 1;
+            }
+            Vue3DomPropSegment::Content(_)
+            | Vue3DomPropSegment::Model(_)
+            | Vue3DomPropSegment::Event(_)
+            | Vue3DomPropSegment::ObjectListeners(_) => {}
+        }
+    }
+    if pending_object {
+        chunks += 1;
+    }
+    chunks
+}
+
+fn vue3_ssr_is_boolean_attr(name: &str) -> bool {
+    matches!(
+        name,
+        "allowfullscreen"
+            | "async"
+            | "autofocus"
+            | "autoplay"
+            | "checked"
+            | "controls"
+            | "default"
+            | "defer"
+            | "disabled"
+            | "formnovalidate"
+            | "hidden"
+            | "inert"
+            | "ismap"
+            | "itemscope"
+            | "loop"
+            | "multiple"
+            | "muted"
+            | "nomodule"
+            | "novalidate"
+            | "open"
+            | "readonly"
+            | "required"
+            | "reversed"
+            | "scoped"
+            | "seamless"
+            | "selected"
+    )
 }
 
 fn vue3_slot_flag_value(flag: Vue3SlotFlag) -> u8 {
@@ -25412,6 +26340,10 @@ fn render_object(properties: &[String]) -> String {
                 .join(",\n")
         )
     }
+}
+
+fn render_inline_array(items: &[String]) -> String {
+    format!("[{}]", items.join(", "))
 }
 
 fn has_class_binding(element: &Vue3Element) -> bool {
@@ -31731,18 +32663,16 @@ mod tests {
             },
         );
 
-        assert!(generated.code.contains("normalizeClass as _normalizeClass"));
-        assert!(generated.code.contains("normalizeProps as _normalizeProps"));
-        assert!(generated
+        assert!(!generated.code.contains("normalizeClass as _normalizeClass"));
+        assert!(!generated.code.contains("normalizeProps as _normalizeProps"));
+        assert!(!generated
             .code
             .contains("guardReactiveProps as _guardReactiveProps"));
         assert!(generated.code.contains("mergeProps as _mergeProps"));
         assert!(generated.code.contains("ssrRenderAttrs as _ssrRenderAttrs"));
         assert!(generated.code.contains("_ssrRenderAttrs(_mergeProps("));
-        assert!(generated.code.contains("{ id: \"app\" }"));
-        assert!(generated
-            .code
-            .contains("class: _normalizeClass(_ctx.klass)"));
+        assert!(generated.code.contains("id: \"app\""));
+        assert!(generated.code.contains("class: _ctx.klass"));
         assert!(generated.code.contains("style: _ctx.style"));
         assert!(generated.code.contains("title: _ctx.title"));
         assert!(generated.code.contains("[_ctx.name || \"\"]: _ctx.value"));
@@ -31772,7 +32702,7 @@ mod tests {
         );
 
         assert!(generated.code.contains("camelize as _camelize"));
-        assert!(generated.code.contains("normalizeProps as _normalizeProps"));
+        assert!(!generated.code.contains("normalizeProps as _normalizeProps"));
         assert!(generated.code.contains("ssrRenderAttrs as _ssrRenderAttrs"));
         assert!(generated.code.contains("fooBar: _ctx.foo"));
         assert!(generated.code.contains("\".id\": _ctx.id"));
@@ -31781,6 +32711,80 @@ mod tests {
             .code
             .contains("[_camelize(_ctx.name || \"\")]: _ctx.value"));
         assert!(generated.code.contains("_attrs"));
+    }
+
+    #[test]
+    fn generate_vue3_ssr_mir_rebuilds_element_attrs_like_public_ssr() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div><div key="1" ref="el"></div><div class="foo" :class="bar"></div><input type="checkbox" :checked="checked"><div class="foo" v-bind:[key]="value"></div></div>"#.into(),
+            file_id: FileId(74),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_ssr_mir(&ast, &Vue3CompilerOptions::default());
+        let generated = generate_vue3_ssr_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(!generated.code.contains(" key="));
+        assert!(!generated.code.contains(" ref="));
+        assert!(generated
+            .code
+            .contains(r#"_ssrRenderClass([_ctx.bar, "foo"])"#));
+        assert!(generated
+            .code
+            .contains(r#"(_ssrIncludeBooleanAttr(_ctx.checked)) ? " checked" : """#));
+        assert!(generated.code.contains("class: \"foo\""));
+        assert!(generated.code.contains("[_ctx.key || \"\"]: _ctx.value"));
+        assert!(!generated.code.contains("<div class=\"foo\"${"));
+    }
+
+    #[test]
+    fn generate_vue3_ssr_mir_emits_directive_attrs_and_textarea_value_fallback() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source:
+                r#"<div><textarea v-bind="obj">fallback</textarea><section v-xxx:x.y="z"/></div>"#
+                    .into(),
+            file_id: FileId(75),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_ssr_mir(&ast, &Vue3CompilerOptions::default());
+        let generated = generate_vue3_ssr_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(generated
+            .code
+            .contains("resolveDirective: _resolveDirective"));
+        assert!(generated
+            .code
+            .contains("ssrGetDirectiveProps: _ssrGetDirectiveProps"));
+        assert!(generated.code.contains("let _temp0"));
+        assert!(generated
+            .code
+            .contains(r#"_ssrRenderAttrs(_temp0 = _ctx.obj, "textarea")"#));
+        assert!(generated
+            .code
+            .contains(r#"_ssrInterpolate(("value" in _temp0) ? _temp0.value : "fallback")"#));
+        assert!(generated
+            .code
+            .contains(r#"_ssrGetDirectiveProps(_ctx, _directive_xxx, _ctx.z, "x", { y: true })"#));
+        assert!(generated.code.contains(
+            r#"("textContent" in _temp0) ? _ssrInterpolate(_temp0.textContent) : _temp0.innerHTML ?? ''"#
+        ));
     }
 
     #[test]
@@ -32235,7 +33239,7 @@ mod tests {
         );
 
         assert!(generated.code.contains("ssrInterpolate as _ssrInterpolate"));
-        assert!(generated.code.contains("(_ctx.raw) ?? \"\""));
+        assert!(generated.code.contains("(_ctx.raw) ?? ''"));
         assert!(generated.code.contains("_ssrInterpolate(_ctx.msg)"));
         assert!(generated.code.contains("<p>${"));
         assert!(generated.code.contains("}</p>"));

@@ -12747,6 +12747,7 @@ fn rewrite_vue3_ssr_rust_backed_public_compile_imports(prepared_root: &Path) -> 
     rewrite_vue3_ssr_spec_compile_import(&tests.join("ssrInjectCssVars.spec.ts"))?;
     rewrite_vue3_ssr_spec_compile_import(&tests.join("ssrVShow.spec.ts"))?;
     rewrite_vue3_ssr_spec_compile_import(&tests.join("ssrVModel.spec.ts"))?;
+    rewrite_vue3_ssr_element_public_compile_imports(&tests.join("ssrElement.spec.ts"))?;
     rewrite_vue3_ssr_spec_compile_import(&tests.join("ssrSlotOutlet.spec.ts"))?;
     rewrite_vue3_ssr_spec_compile_import(&tests.join("ssrPortal.spec.ts"))?;
     rewrite_vue3_ssr_spec_compile_import(&tests.join("ssrSuspense.spec.ts"))?;
@@ -12762,6 +12763,27 @@ fn rewrite_vue3_ssr_rust_backed_public_compile_imports(prepared_root: &Path) -> 
             "import { compile } from '@vue/compiler-ssr'",
         );
         write_text(&tests.join("utils.rust-ssr-text.ts"), &rewritten)?;
+    }
+    Ok(())
+}
+
+fn rewrite_vue3_ssr_element_public_compile_imports(path: &Path) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let original =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let rewritten = original
+        .replace(
+            "import { compile } from '../src'",
+            "import { compile } from '@vue/compiler-ssr'",
+        )
+        .replace(
+            "import { getCompiledString } from './utils'",
+            "import { getCompiledString } from './utils.rust-ssr-text'",
+        );
+    if rewritten != original {
+        write_text(path, &rewritten)?;
     }
     Ok(())
 }
@@ -13295,6 +13317,7 @@ fn conformance_coverage_file_kind(
         || path.ends_with("packages/compiler-ssr/__tests__/ssrScopeId.spec.ts")
         || path.ends_with("packages/compiler-ssr/__tests__/ssrFallthroughAttrs.spec.ts")
         || path.ends_with("packages/compiler-ssr/__tests__/ssrInjectCssVars.spec.ts")
+        || path.ends_with("packages/compiler-ssr/__tests__/ssrElement.spec.ts")
         || path.ends_with("packages/compiler-ssr/__tests__/ssrText.spec.ts")
         || path.ends_with("packages/compiler-ssr/__tests__/ssrPortal.spec.ts")
         || path.ends_with("packages/compiler-ssr/__tests__/ssrSlotOutlet.spec.ts")
@@ -14037,6 +14060,28 @@ mod tests {
         assert!(expression.contains("vue3.ssr.compile"));
         assert!(ALIAS_RUNTIME_JS.contains("function hydrateVue3SsrCompileResult"));
         assert!(ALIAS_RUNTIME_JS.contains("new Set(result.ast_helpers.map(name => Symbol(name)))"));
+    }
+
+    #[test]
+    fn napi_vue3_ssr_native_alias_normalizes_custom_element_predicates() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let source = fs::read_to_string(
+            repo_root
+                .join("packages")
+                .join("native-aliases")
+                .join("@vue")
+                .join("compiler-ssr")
+                .join("dist")
+                .join("compiler-ssr.cjs.js"),
+        )
+        .unwrap();
+
+        assert!(source.contains("vue3SsrNativeOptions(options, template)"));
+        assert!(source.contains("Object.assign(vue3SsrNativeOptions(options, template)"));
+        assert!(source.contains(
+            "out.__vuecCustomElements = collectVuePredicateHits(options.isCustomElement, tags);"
+        ));
+        assert!(!source.contains("native.compileVue3Ssr(String(source || ''), options || {})"));
     }
 
     #[test]
@@ -15253,6 +15298,11 @@ mod tests {
         )
         .unwrap();
         fs::write(
+            tests.join("ssrElement.spec.ts"),
+            "import { compile } from '../src'\nimport { getCompiledString } from './utils'\n",
+        )
+        .unwrap();
+        fs::write(
             tests.join("ssrSlotOutlet.spec.ts"),
             "import { compile } from '../src'\n",
         )
@@ -15291,6 +15341,7 @@ mod tests {
             fs::read_to_string(tests.join("ssrInjectCssVars.spec.ts")).unwrap();
         let vshow_spec = fs::read_to_string(tests.join("ssrVShow.spec.ts")).unwrap();
         let vmodel_spec = fs::read_to_string(tests.join("ssrVModel.spec.ts")).unwrap();
+        let element_spec = fs::read_to_string(tests.join("ssrElement.spec.ts")).unwrap();
         let slot_outlet_spec = fs::read_to_string(tests.join("ssrSlotOutlet.spec.ts")).unwrap();
         let portal_spec = fs::read_to_string(tests.join("ssrPortal.spec.ts")).unwrap();
         let suspense_spec = fs::read_to_string(tests.join("ssrSuspense.spec.ts")).unwrap();
@@ -15308,6 +15359,8 @@ mod tests {
         assert!(inject_css_vars_spec.contains("from '@vue/compiler-ssr'"));
         assert!(vshow_spec.contains("from '@vue/compiler-ssr'"));
         assert!(vmodel_spec.contains("from '@vue/compiler-ssr'"));
+        assert!(element_spec.contains("from '@vue/compiler-ssr'"));
+        assert!(element_spec.contains("from './utils.rust-ssr-text'"));
         assert!(slot_outlet_spec.contains("from '@vue/compiler-ssr'"));
         assert!(portal_spec.contains("from '@vue/compiler-ssr'"));
         assert!(suspense_spec.contains("from '@vue/compiler-ssr'"));
