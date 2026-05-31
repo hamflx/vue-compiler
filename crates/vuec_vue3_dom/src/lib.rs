@@ -959,6 +959,41 @@ pub fn transform_transition_projection(payload: &Value) -> Value {
     })
 }
 
+/// Projects the DOM HTML nesting validator for compatibility bridge callers.
+pub fn validate_html_nesting_projection(payload: &Value) -> Value {
+    let node = payload.get("node").unwrap_or(&Value::Null);
+    let parent = payload.get("parent").unwrap_or(&Value::Null);
+    if json_u64(node, "type") != Some(1)
+        || json_u64(node, "tagType") != Some(0)
+        || json_u64(parent, "type") != Some(1)
+        || json_u64(parent, "tagType") != Some(0)
+    {
+        return json!({ "warnings": [] });
+    }
+    let parent_tag = json_str(parent, "tag").unwrap_or("");
+    let child_tag = json_str(node, "tag").unwrap_or("");
+    if is_valid_html_nesting(parent_tag, child_tag) {
+        return json!({ "warnings": [] });
+    }
+    json!({
+        "warnings": [{
+            "message": format!(
+                "<{child_tag}> cannot be child of <{parent_tag}>, according to HTML specifications. This can cause hydration errors or potentially disrupt future functionality."
+            ),
+            "loc": node.get("loc").cloned().unwrap_or(Value::Null),
+        }]
+    })
+}
+
+/// Returns whether the given parent-child pair is valid according to Vue's DOM nesting table.
+pub fn is_valid_html_nesting_projection(payload: &Value) -> Value {
+    let parent = json_str(payload, "parent").unwrap_or("");
+    let child = json_str(payload, "child").unwrap_or("");
+    json!({
+        "valid": is_valid_html_nesting(parent, child),
+    })
+}
+
 struct DomContentDirectiveProjection {
     key: &'static str,
     key_loc: Option<&'static str>,
@@ -1409,6 +1444,162 @@ fn transition_json_error_loc(children: &[&Value]) -> Option<Value> {
         "end": last.get("end").cloned().unwrap_or(Value::Null),
         "source": "",
     }))
+}
+
+fn is_valid_html_nesting(parent: &str, child: &str) -> bool {
+    if parent == "template" {
+        return true;
+    }
+    if let Some(children) = html_nesting_only_valid_children(parent) {
+        return children.contains(&child);
+    }
+    if let Some(parents) = html_nesting_only_valid_parents(child) {
+        return parents.contains(&parent);
+    }
+    if let Some(children) = html_nesting_known_invalid_children(parent) {
+        if children.contains(&child) {
+            return false;
+        }
+    }
+    if let Some(parents) = html_nesting_known_invalid_parents(child) {
+        if parents.contains(&parent) {
+            return false;
+        }
+    }
+    true
+}
+
+fn html_nesting_only_valid_children(parent: &str) -> Option<&'static [&'static str]> {
+    match parent {
+        "head" => Some(&[
+            "base",
+            "basefront",
+            "bgsound",
+            "link",
+            "meta",
+            "title",
+            "noscript",
+            "noframes",
+            "style",
+            "script",
+            "template",
+        ]),
+        "optgroup" => Some(&["option"]),
+        "select" => Some(&["optgroup", "option", "hr"]),
+        "table" => Some(&["caption", "colgroup", "tbody", "tfoot", "thead"]),
+        "tr" => Some(&["td", "th"]),
+        "colgroup" => Some(&["col"]),
+        "tbody" | "thead" | "tfoot" => Some(&["tr"]),
+        "script" | "iframe" | "option" | "textarea" | "style" | "title" => Some(&[]),
+        _ => None,
+    }
+}
+
+fn html_nesting_only_valid_parents(child: &str) -> Option<&'static [&'static str]> {
+    match child {
+        "html" => Some(&[]),
+        "body" | "head" => Some(&["html"]),
+        "td" | "th" => Some(&["tr"]),
+        "colgroup" | "caption" | "tbody" | "tfoot" | "thead" => Some(&["table"]),
+        "col" => Some(&["colgroup"]),
+        "tr" => Some(&["tbody", "thead", "tfoot"]),
+        "dd" | "dt" => Some(&["dl", "div"]),
+        "figcaption" => Some(&["figure"]),
+        "summary" => Some(&["details"]),
+        "area" => Some(&["map"]),
+        _ => None,
+    }
+}
+
+fn html_nesting_known_invalid_children(parent: &str) -> Option<&'static [&'static str]> {
+    match parent {
+        "p" => Some(&[
+            "address",
+            "article",
+            "aside",
+            "blockquote",
+            "center",
+            "details",
+            "dialog",
+            "dir",
+            "div",
+            "dl",
+            "fieldset",
+            "figure",
+            "footer",
+            "form",
+            "h1",
+            "h2",
+            "h3",
+            "h4",
+            "h5",
+            "h6",
+            "header",
+            "hgroup",
+            "hr",
+            "li",
+            "main",
+            "nav",
+            "menu",
+            "ol",
+            "p",
+            "pre",
+            "section",
+            "table",
+            "ul",
+        ]),
+        "svg" => Some(&[
+            "b",
+            "blockquote",
+            "br",
+            "code",
+            "dd",
+            "div",
+            "dl",
+            "dt",
+            "em",
+            "embed",
+            "h1",
+            "h2",
+            "h3",
+            "h4",
+            "h5",
+            "h6",
+            "hr",
+            "i",
+            "img",
+            "li",
+            "menu",
+            "meta",
+            "ol",
+            "p",
+            "pre",
+            "ruby",
+            "s",
+            "small",
+            "span",
+            "strong",
+            "sub",
+            "sup",
+            "table",
+            "u",
+            "ul",
+            "var",
+        ]),
+        _ => None,
+    }
+}
+
+fn html_nesting_known_invalid_parents(child: &str) -> Option<&'static [&'static str]> {
+    match child {
+        "a" => Some(&["a"]),
+        "button" => Some(&["button"]),
+        "dd" | "dt" => Some(&["dd", "dt"]),
+        "form" => Some(&["form"]),
+        "li" => Some(&["li"]),
+        "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => Some(&["h1", "h2", "h3", "h4", "h5", "h6"]),
+        _ => None,
+    }
 }
 
 /// Extracts DOM directive summaries from compatibility template attributes.
@@ -2213,6 +2404,82 @@ mod tests {
 
         assert_eq!(projection["errors"], json!([]));
         assert_eq!(projection["injectPersisted"], json!(true));
+    }
+
+    #[test]
+    fn is_valid_html_nesting_projection_matches_vue_dom_table() {
+        for (parent, child, valid) in [
+            ("form", "form", false),
+            ("form", "input", true),
+            ("p", "div", false),
+            ("p", "span", true),
+            ("a", "a", false),
+            ("button", "button", false),
+            ("table", "tr", false),
+            ("table", "tbody", true),
+            ("td", "td", false),
+            ("tr", "td", true),
+            ("tbody", "td", false),
+            ("tbody", "tr", true),
+            ("li", "li", false),
+            ("li", "ul", true),
+            ("h1", "h6", false),
+            ("h1", "div", true),
+            ("svg", "div", false),
+            ("svg", "g", true),
+            ("foreignObject", "div", true),
+            ("g", "p", true),
+            ("span", "dt", false),
+            ("dl", "dt", true),
+            ("template", "tr", true),
+        ] {
+            assert_eq!(
+                is_valid_html_nesting_projection(&json!({
+                    "parent": parent,
+                    "child": child,
+                }))["valid"],
+                json!(valid),
+                "{parent} > {child}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_html_nesting_projection_reports_invalid_children() {
+        let projection = validate_html_nesting_projection(&json!({
+            "node": {
+                "type": 1,
+                "tag": "div",
+                "tagType": 0,
+                "loc": { "source": "<div></div>" }
+            },
+            "parent": {
+                "type": 1,
+                "tag": "p",
+                "tagType": 0
+            }
+        }));
+
+        assert_eq!(
+            projection["warnings"][0]["loc"]["source"],
+            json!("<div></div>")
+        );
+        assert!(projection["warnings"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("<div> cannot be child of <p>"));
+
+        let valid = validate_html_nesting_projection(&json!({
+            "node": { "type": 1, "tag": "hr", "tagType": 0 },
+            "parent": { "type": 1, "tag": "select", "tagType": 0 }
+        }));
+        assert_eq!(valid["warnings"], json!([]));
+
+        let component_child = validate_html_nesting_projection(&json!({
+            "node": { "type": 1, "tag": "Child", "tagType": 1 },
+            "parent": { "type": 1, "tag": "p", "tagType": 0 }
+        }));
+        assert_eq!(component_child["warnings"], json!([]));
     }
 
     #[test]

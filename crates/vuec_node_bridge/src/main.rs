@@ -235,6 +235,12 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
         "vue3.dom.transformTransition" => {
             Ok(vuec_vue3_dom::transform_transition_projection(&payload))
         }
+        "vue3.dom.validateHtmlNesting" => {
+            Ok(vuec_vue3_dom::validate_html_nesting_projection(&payload))
+        }
+        "vue3.dom.isValidHTMLNesting" => {
+            Ok(vuec_vue3_dom::is_valid_html_nesting_projection(&payload))
+        }
         "vue3.dom.compile" => {
             let source = template_source(&payload);
             let mut core = vue3_options(payload.get("options"));

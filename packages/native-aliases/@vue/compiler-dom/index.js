@@ -398,12 +398,35 @@ const transformTransition = (node, context) => {
   };
 };
 
+function isValidHTMLNesting(parent, child) {
+  const projection = callVue3DomProjection('vue3.dom.isValidHTMLNesting', {
+    parent: String(parent || ''),
+    child: String(child || ''),
+  });
+  return !!(projection && projection.valid);
+}
+
+function materializeDomNestingWarnings(projection, context) {
+  if (!projection || !Array.isArray(projection.warnings) || !context || typeof context.onWarn !== 'function') return;
+  for (const warning of projection.warnings) {
+    const error = new SyntaxError(String(warning.message || ''));
+    error.loc = warning.loc || core.locStub;
+    context.onWarn(error);
+  }
+}
+
+const validateHtmlNesting = (node, context) => {
+  const projection = callVue3DomProjection('vue3.dom.validateHtmlNesting', {
+    node,
+    parent: context && context.parent,
+  });
+  materializeDomNestingWarnings(projection, context);
+};
+
 const DOMNodeTransforms = [
   transformStyle,
   transformTransition,
-  function validateHtmlNesting(node, context) {
-    return undefined;
-  },
+  validateHtmlNesting,
 ];
 
 const DOMDirectiveTransforms = {
@@ -880,6 +903,8 @@ Object.defineProperty(module.exports, '__vuecRuntime', {
     transformModel,
     transformOn,
     transformTransition,
+    validateHtmlNesting,
+    isValidHTMLNesting,
   },
   enumerable: false,
 });

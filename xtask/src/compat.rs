@@ -2117,7 +2117,7 @@ fn write_alias_index(
     if target.kind == TargetKind::Vue3Core {
         source.push_str("Object.defineProperty(exports, '__vuecRuntime', { value: vue3CoreRuntime, enumerable: false });\n");
     } else if target.kind == TargetKind::Vue3Dom {
-        source.push_str("Object.defineProperty(exports, '__vuecRuntime', { value: Object.assign({}, vue3CoreRuntime, { transformOn: vue3CoreRuntime.transformDomOn, transformModel: vue3CoreRuntime.transformDomModel, transformTransition: vue3CoreRuntime.transformDomTransition }), enumerable: false });\n");
+        source.push_str("Object.defineProperty(exports, '__vuecRuntime', { value: Object.assign({}, vue3CoreRuntime, { transformOn: vue3CoreRuntime.transformDomOn, transformModel: vue3CoreRuntime.transformDomModel, transformTransition: vue3CoreRuntime.transformDomTransition, validateHtmlNesting: vue3CoreRuntime.validateHtmlNesting, isValidHTMLNesting: vue3CoreRuntime.isValidHTMLNesting }), enumerable: false });\n");
     } else if matches!(
         target.kind,
         TargetKind::Vue26Template | TargetKind::Vue27Template
@@ -6313,6 +6313,28 @@ const vue3CoreRuntime = (() => {
       });
       materializeVue3DomTransitionProjection(projection, node, context);
     };
+  };
+  runtime.isValidHTMLNesting = function isValidHTMLNesting(parent, child) {
+    const projection = callBridge('vue3.dom.isValidHTMLNesting', {
+      parent: String(parent || ''),
+      child: String(child || ''),
+    });
+    return !!(projection && projection.valid);
+  };
+  function materializeVue3DomNestingWarnings(projection, context) {
+    if (!projection || !Array.isArray(projection.warnings) || !context || typeof context.onWarn !== 'function') return;
+    for (const warning of projection.warnings) {
+      const error = new SyntaxError(String(warning.message || ''));
+      error.loc = warning.loc || vue3CoreRuntime.locStub;
+      context.onWarn(error);
+    }
+  }
+  runtime.validateHtmlNesting = function validateHtmlNesting(node, context) {
+    const projection = callBridge('vue3.dom.validateHtmlNesting', {
+      node,
+      parent: context && context.parent,
+    });
+    materializeVue3DomNestingWarnings(projection, context);
   };
   runtime.transformDomOn = function transformDomOn(dir, node, context) {
     context = context || { helperString: name => `_${runtime.helperNameMap[name] || name}`, helper: name => name, cache: value => value, onError: error => { throw error; } };
@@ -12319,6 +12341,8 @@ fn write_vue3_dom_conformance_shims(prepared_root: &Path) -> Result<()> {
     write_vue3_dom_v_on_transform_shim(&transforms.join("vOn.ts"))?;
     write_vue3_dom_v_model_transform_shim(&transforms.join("vModel.ts"))?;
     write_vue3_dom_transition_transform_shim(&transforms.join("Transition.ts"))?;
+    write_vue3_dom_validate_html_nesting_shim(&transforms.join("validateHtmlNesting.ts"))?;
+    write_vue3_dom_html_nesting_shim(&dom_src.join("htmlNesting.ts"))?;
     write_vue3_core_test_setup(prepared_root)?;
 
     let config = r#"
@@ -12825,6 +12849,26 @@ fn write_vue3_dom_transition_transform_shim(path: &Path) -> Result<()> {
     )
 }
 
+fn write_vue3_dom_validate_html_nesting_shim(path: &Path) -> Result<()> {
+    write_text(
+        path,
+        &format!(
+            "import {{ __vuecRuntime }} from {}\nconst r = __vuecRuntime\nexport const validateHtmlNesting = r.validateHtmlNesting\n",
+            js_string_literal("@vue/compiler-dom")
+        ),
+    )
+}
+
+fn write_vue3_dom_html_nesting_shim(path: &Path) -> Result<()> {
+    write_text(
+        path,
+        &format!(
+            "import {{ __vuecRuntime }} from {}\nconst r = __vuecRuntime\nexport const isValidHTMLNesting = r.isValidHTMLNesting\n",
+            js_string_literal("@vue/compiler-dom")
+        ),
+    )
+}
+
 fn copy_dir_recursive(from: &Path, to: &Path) -> Result<()> {
     fs::create_dir_all(to).with_context(|| format!("failed to create {}", to.display()))?;
     for entry in fs::read_dir(from).with_context(|| format!("failed to read {}", from.display()))? {
@@ -13119,6 +13163,7 @@ fn conformance_coverage_file_kind(
         || path.ends_with("packages/compiler-dom/__tests__/transforms/vOn.spec.ts")
         || path.ends_with("packages/compiler-dom/__tests__/transforms/vShow.spec.ts")
         || path.ends_with("packages/compiler-dom/__tests__/transforms/vText.spec.ts")
+        || path.ends_with("packages/compiler-dom/__tests__/transforms/validateHtmlNesting.spec.ts")
         || path.ends_with("packages/compiler-ssr/__tests__/ssrText.spec.ts")
         || path.ends_with("packages/compiler-ssr/__tests__/ssrPortal.spec.ts")
         || path.ends_with("packages/compiler-ssr/__tests__/ssrSlotOutlet.spec.ts")
@@ -14545,12 +14590,33 @@ mod tests {
         assert!(transition.contains("@vue/compiler-dom"));
         assert!(transition.contains("transformTransition"));
         assert!(transition.contains("TRANSITION"));
+        let validate_html_nesting = fs::read_to_string(
+            temp.join("packages")
+                .join("compiler-dom")
+                .join("src")
+                .join("transforms")
+                .join("validateHtmlNesting.ts"),
+        )
+        .unwrap();
+        assert!(validate_html_nesting.contains("__vuecRuntime"));
+        assert!(validate_html_nesting.contains("validateHtmlNesting"));
+        let html_nesting = fs::read_to_string(
+            temp.join("packages")
+                .join("compiler-dom")
+                .join("src")
+                .join("htmlNesting.ts"),
+        )
+        .unwrap();
+        assert!(html_nesting.contains("__vuecRuntime"));
+        assert!(html_nesting.contains("isValidHTMLNesting"));
         assert!(ALIAS_RUNTIME_JS.contains("vue3.dom.transformVHtml"));
         assert!(ALIAS_RUNTIME_JS.contains("vue3.dom.transformVText"));
         assert!(ALIAS_RUNTIME_JS.contains("vue3.dom.transformShow"));
         assert!(ALIAS_RUNTIME_JS.contains("vue3.dom.transformOn"));
         assert!(ALIAS_RUNTIME_JS.contains("vue3.dom.transformModel"));
         assert!(ALIAS_RUNTIME_JS.contains("vue3.dom.transformTransition"));
+        assert!(ALIAS_RUNTIME_JS.contains("vue3.dom.validateHtmlNesting"));
+        assert!(ALIAS_RUNTIME_JS.contains("vue3.dom.isValidHTMLNesting"));
         let _ = fs::remove_dir_all(temp);
     }
 
@@ -14706,6 +14772,12 @@ mod tests {
                 {
                   "name": "F:/repo/prepared/vue3-dom/packages/compiler-dom/__tests__/transforms/validateHtmlNesting.spec.ts",
                   "assertionResults": [
+                    { "status": "passed" }
+                  ]
+                },
+                {
+                  "name": "F:/repo/prepared/vue3-dom/packages/compiler-dom/__tests__/decoderHtmlBrowser.spec.ts",
+                  "assertionResults": [
                     { "status": "failed" }
                   ]
                 }
@@ -14722,8 +14794,8 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             counts: ConformanceExecutionCounts {
-                total: 20,
-                pass: 19,
+                total: 21,
+                pass: 20,
                 fail: 1,
                 skip: 0,
                 pending: 0,
@@ -14737,8 +14809,8 @@ mod tests {
         );
 
         assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
-        assert_eq!(coverage.rust_backed_pass, 19);
-        assert_eq!(coverage.rust_backed_total, 19);
+        assert_eq!(coverage.rust_backed_pass, 20);
+        assert_eq!(coverage.rust_backed_total, 20);
         assert_eq!(
             coverage.files[0].source,
             ConformanceCoverageKind::RustBacked
@@ -14775,7 +14847,11 @@ mod tests {
             coverage.files[8].source,
             ConformanceCoverageKind::RustBacked
         );
-        assert_eq!(coverage.files[9].source, ConformanceCoverageKind::Mixed);
+        assert_eq!(
+            coverage.files[9].source,
+            ConformanceCoverageKind::RustBacked
+        );
+        assert_eq!(coverage.files[10].source, ConformanceCoverageKind::Mixed);
         assert!(coverage.files[0]
             .reason
             .contains("routed through vuec_node_bridge"));

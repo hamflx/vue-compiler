@@ -319,6 +319,8 @@ pub fn call_vue3_dom_projection(env: Env, command: String, payload: Unknown) -> 
         "vue3.dom.transformOn" => vuec_vue3_dom::transform_on_projection(&payload),
         "vue3.dom.transformModel" => vuec_vue3_dom::transform_model_projection(&payload),
         "vue3.dom.transformTransition" => vuec_vue3_dom::transform_transition_projection(&payload),
+        "vue3.dom.validateHtmlNesting" => vuec_vue3_dom::validate_html_nesting_projection(&payload),
+        "vue3.dom.isValidHTMLNesting" => vuec_vue3_dom::is_valid_html_nesting_projection(&payload),
         other => {
             return Err(napi::Error::from_reason(format!(
                 "unsupported Vue 3 compiler-dom projection command: {other}"
