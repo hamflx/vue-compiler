@@ -119,6 +119,19 @@ function materializeDomDirectiveErrors(projection, dir, node, context) {
   }
 }
 
+function materializeDomModelErrors(projection, dir, node, context) {
+  if (!projection || !Array.isArray(projection.errors) || !context || typeof context.onError !== 'function') return;
+  for (const error of projection.errors) {
+    const code = typeof error === 'number' ? error : error.code;
+    const loc = domDirectiveLoc(error && error.loc, dir, node);
+    context.onError(
+      code >= DOMErrorCodes.X_V_HTML_NO_EXPRESSION
+        ? createDOMCompilerError(code, loc)
+        : core.createCompilerError(code, loc),
+    );
+  }
+}
+
 function materializeDomContentDirective(command, dir, node, context) {
   context = context || {
     helperString: name => `_${helperNameMap[name] || name}`,
@@ -150,6 +163,29 @@ function domTransformContextPayload(context) {
     identifiers: context.identifiers || {},
     bindingMetadata: context.bindingMetadata || {},
     expressionPlugins: context.expressionPlugins || [],
+  };
+}
+
+function domModelTransformContextPayload(context, node) {
+  context = context || {};
+  let isCustomElement = false;
+  if (typeof context.isCustomElement === 'function' && node) {
+    try {
+      isCustomElement = !!context.isCustomElement(node.tag);
+    } catch (_error) {
+      isCustomElement = false;
+    }
+  }
+  return {
+    prefixIdentifiers: !!context.prefixIdentifiers,
+    cacheHandlers: !!context.cacheHandlers,
+    inVOnce: !!context.inVOnce,
+    inline: !!context.inline,
+    isTS: !!context.isTS,
+    identifiers: context.identifiers || {},
+    bindingMetadata: context.bindingMetadata || {},
+    expressionPlugins: context.expressionPlugins || [],
+    isCustomElement,
   };
 }
 
@@ -262,6 +298,42 @@ const transformVText = (dir, node, context) => {
   return materializeDomContentDirective('vue3.dom.transformVText', dir, node, context);
 };
 
+const transformModel = (dir, node, context) => {
+  context = context || {
+    helper: name => name,
+    cache: value => value,
+    onError: error => { throw error; },
+  };
+  const projection = callVue3DomProjection('vue3.dom.transformModel', {
+    dir,
+    node,
+    context: domModelTransformContextPayload(context, node),
+  });
+  materializeDomModelErrors(projection, dir, node, context);
+  const result = {
+    props: (projection && projection.props || []).map(prop => {
+      const key = materializeDomOnProjection(prop.key, dir, context);
+      const value = materializeDomOnProjection(prop.value, dir, context);
+      const objectProp = core.createObjectProperty(key, value);
+      objectProp.__vuecModel = {
+        dynamic: !!prop.dynamic,
+        cache: !!prop.cache,
+        hydrate: !!prop.hydrate,
+        kind: prop.kind,
+      };
+      if (prop.cache && context && typeof context.cache === 'function') objectProp.value = context.cache(objectProp.value);
+      return objectProp;
+    }),
+  };
+  if (projection && projection.needRuntime) {
+    const helper = helperSymbolFromProjection(projection.needRuntime, context);
+    result.needRuntime = helper && context && typeof context.helper === 'function'
+      ? context.helper(helper)
+      : helper || projection.needRuntime;
+  }
+  return result;
+};
+
 const transformShow = (dir, node, context) => {
   context = context || {
     onError: error => { throw error; },
@@ -290,9 +362,7 @@ const DOMDirectiveTransforms = {
   cloak: core.noopDirectiveTransform,
   html: transformVHtml,
   text: transformVText,
-  model: function transformModel(dir, node, context) {
-    return core.transformModel(dir, node, context);
-  },
+  model: transformModel,
   on: transformOn,
   show: transformShow,
 };
@@ -747,6 +817,7 @@ module.exports = {
   createDOMCompilerError,
   parse,
   parserOptions,
+  transformModel,
   transformOn,
   transformStyle,
 };
@@ -758,6 +829,7 @@ Object.defineProperty(module.exports, '__vuecRuntime', {
     transformVHtml,
     transformVText,
     transformShow,
+    transformModel,
     transformOn,
   },
   enumerable: false,

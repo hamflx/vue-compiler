@@ -317,6 +317,7 @@ pub fn call_vue3_dom_projection(env: Env, command: String, payload: Unknown) -> 
         "vue3.dom.transformVText" => vuec_vue3_dom::transform_v_text_projection(&payload),
         "vue3.dom.transformShow" => vuec_vue3_dom::transform_show_projection(&payload),
         "vue3.dom.transformOn" => vuec_vue3_dom::transform_on_projection(&payload),
+        "vue3.dom.transformModel" => vuec_vue3_dom::transform_model_projection(&payload),
         other => {
             return Err(napi::Error::from_reason(format!(
                 "unsupported Vue 3 compiler-dom projection command: {other}"

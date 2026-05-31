@@ -829,6 +829,99 @@ pub fn transform_on_projection(payload: &Value) -> Value {
     projection
 }
 
+/// Projects the DOM `v-model` directive transform for compatibility bridge callers.
+pub fn transform_model_projection(payload: &Value) -> Value {
+    let dir = payload.get("dir").unwrap_or(&Value::Null);
+    let node = payload.get("node").unwrap_or(&Value::Null);
+    let context = payload.get("context").unwrap_or(&Value::Null);
+    let mut projection = vuec_vue3_core::transform_model_projection(payload);
+    if projection
+        .get("props")
+        .and_then(Value::as_array)
+        .is_none_or(Vec::is_empty)
+        || json_u64(node, "tagType") == Some(1)
+    {
+        return dom_normalize_core_model_projection(projection, dir);
+    }
+
+    let mut errors = projection
+        .get("errors")
+        .and_then(Value::as_array)
+        .map(|errors| {
+            errors
+                .iter()
+                .filter_map(|error| error.as_u64().map(|code| dom_core_model_error(code, dir)))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    if let Some(arg) = dir.get("arg").filter(|arg| !arg.is_null()) {
+        errors.push(json!({
+            "code": 59,
+            "loc": arg.get("loc").cloned().unwrap_or_else(|| dir.get("loc").cloned().unwrap_or(Value::Null)),
+        }));
+    }
+
+    let mut need_runtime = None::<&'static str>;
+    let tag = json_str(node, "tag").unwrap_or("");
+    let is_custom_element = json_bool(context, "isCustomElement");
+    if matches!(tag, "input" | "textarea" | "select") || is_custom_element {
+        let mut helper = "V_MODEL_TEXT";
+        let mut invalid_type = false;
+        if tag == "input" || is_custom_element {
+            match dom_model_input_type(node) {
+                DomModelInputType::Dynamic => helper = "V_MODEL_DYNAMIC",
+                DomModelInputType::Static("radio") => helper = "V_MODEL_RADIO",
+                DomModelInputType::Static("checkbox") => helper = "V_MODEL_CHECKBOX",
+                DomModelInputType::Static("file") => {
+                    invalid_type = true;
+                    errors.push(json!({
+                        "code": 60,
+                        "loc": dir.get("loc").cloned().unwrap_or(Value::Null),
+                    }));
+                }
+                DomModelInputType::PresentWithoutValue => {}
+                DomModelInputType::Static(_) | DomModelInputType::None => {
+                    if let Some(value_loc) = dom_model_dynamic_value_binding_loc(node) {
+                        errors.push(json!({
+                            "code": 61,
+                            "loc": value_loc,
+                        }));
+                    }
+                }
+            }
+        } else if tag == "select" {
+            helper = "V_MODEL_SELECT";
+        } else if let Some(value_loc) = dom_model_dynamic_value_binding_loc(node) {
+            errors.push(json!({
+                "code": 61,
+                "loc": value_loc,
+            }));
+        }
+        if !invalid_type {
+            need_runtime = Some(helper);
+        }
+    } else {
+        errors.push(json!({
+            "code": 58,
+            "loc": dir.get("loc").cloned().unwrap_or(Value::Null),
+        }));
+    }
+
+    projection["errors"] = json!(errors);
+    projection["props"] = json!(dom_filter_native_model_props(
+        projection
+            .get("props")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    ));
+    if let Some(helper) = need_runtime {
+        projection["needRuntime"] = json!(helper);
+    }
+    projection
+}
+
 struct DomContentDirectiveProjection {
     key: &'static str,
     key_loc: Option<&'static str>,
@@ -1070,6 +1163,126 @@ fn dom_capitalize(value: &str) -> String {
         return String::new();
     };
     first.to_uppercase().collect::<String>() + chars.as_str()
+}
+
+fn json_str<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
+    value.get(key).and_then(Value::as_str)
+}
+
+fn json_bool(value: &Value, key: &str) -> bool {
+    value.get(key).and_then(Value::as_bool).unwrap_or(false)
+}
+
+fn json_u64(value: &Value, key: &str) -> Option<u64> {
+    value.get(key).and_then(Value::as_u64)
+}
+
+fn dom_normalize_core_model_projection(mut projection: Value, dir: &Value) -> Value {
+    let errors = projection
+        .get("errors")
+        .and_then(Value::as_array)
+        .map(|errors| {
+            errors
+                .iter()
+                .filter_map(|error| error.as_u64().map(|code| dom_core_model_error(code, dir)))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    projection["errors"] = json!(errors);
+    projection
+}
+
+fn dom_core_model_error(code: u64, dir: &Value) -> Value {
+    let loc = if code == 41 {
+        dir.get("loc").cloned().unwrap_or(Value::Null)
+    } else {
+        dir.get("exp")
+            .and_then(|exp| exp.get("loc"))
+            .cloned()
+            .or_else(|| dir.get("loc").cloned())
+            .unwrap_or(Value::Null)
+    };
+    json!({
+        "code": code,
+        "loc": loc,
+    })
+}
+
+enum DomModelInputType<'a> {
+    None,
+    Dynamic,
+    PresentWithoutValue,
+    Static(&'a str),
+}
+
+fn dom_model_input_type(node: &Value) -> DomModelInputType<'_> {
+    let Some(props) = node.get("props").and_then(Value::as_array) else {
+        return DomModelInputType::None;
+    };
+    for prop in props {
+        if json_u64(prop, "type") == Some(6) && json_str(prop, "name") == Some("type") {
+            return prop
+                .get("value")
+                .and_then(|value| json_str(value, "content"))
+                .map(DomModelInputType::Static)
+                .unwrap_or(DomModelInputType::PresentWithoutValue);
+        }
+        if json_u64(prop, "type") == Some(7)
+            && json_str(prop, "name") == Some("bind")
+            && prop.get("exp").is_some_and(|exp| !exp.is_null())
+            && prop
+                .get("arg")
+                .filter(|arg| !arg.is_null())
+                .is_some_and(|arg| {
+                    json_bool(arg, "isStatic") && json_str(arg, "content") == Some("type")
+                })
+        {
+            return DomModelInputType::Dynamic;
+        }
+    }
+    if dom_model_has_dynamic_key_bind(props) {
+        return DomModelInputType::Dynamic;
+    }
+    DomModelInputType::None
+}
+
+fn dom_model_has_dynamic_key_bind(props: &[Value]) -> bool {
+    props.iter().any(|prop| {
+        json_u64(prop, "type") == Some(7)
+            && json_str(prop, "name") == Some("bind")
+            && (prop.get("arg").is_none_or(Value::is_null)
+                || prop
+                    .get("arg")
+                    .is_some_and(|arg| !json_bool(arg, "isStatic")))
+    })
+}
+
+fn dom_model_dynamic_value_binding_loc(node: &Value) -> Option<Value> {
+    node.get("props")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|prop| {
+            json_u64(prop, "type") == Some(7)
+                && json_str(prop, "name") == Some("bind")
+                && prop.get("exp").is_some_and(|exp| !exp.is_null())
+                && prop
+                    .get("arg")
+                    .filter(|arg| !arg.is_null())
+                    .is_some_and(|arg| {
+                        json_bool(arg, "isStatic") && json_str(arg, "content") == Some("value")
+                    })
+        })
+        .map(|prop| prop.get("loc").cloned().unwrap_or(Value::Null))
+}
+
+fn dom_filter_native_model_props(props: Vec<Value>) -> Vec<Value> {
+    props
+        .into_iter()
+        .filter(|prop| {
+            prop.get("key")
+                .is_none_or(|key| json_str(key, "content") != Some("modelValue"))
+        })
+        .collect()
 }
 
 /// Extracts DOM directive summaries from compatibility template attributes.
@@ -1474,6 +1687,36 @@ mod tests {
         }
     }
 
+    fn model_dir() -> Value {
+        json!({
+            "name": "model",
+            "exp": {
+                "type": 4,
+                "content": "model",
+                "loc": { "source": "model" }
+            },
+            "modifiers": [],
+            "loc": { "source": "v-model=\"model\"" }
+        })
+    }
+
+    fn model_node(tag: &str, props: Vec<Value>) -> Value {
+        json!({
+            "type": 1,
+            "tag": tag,
+            "tagType": 0,
+            "props": props,
+        })
+    }
+
+    fn model_projection(tag: &str, props: Vec<Value>) -> Value {
+        transform_model_projection(&json!({
+            "dir": model_dir(),
+            "node": model_node(tag, props),
+            "context": {},
+        }))
+    }
+
     #[test]
     fn dom_compiler_ast_cache_hits_for_same_parse_input() {
         let mut compiler = DomCompiler::new();
@@ -1578,6 +1821,158 @@ mod tests {
         assert!(result.ast_summary.starts_with("dom:"));
         assert!(result.ast_summary.contains("v-model:vModelText"));
         assert!(!result.code.contains("data-vuec-dom"));
+    }
+
+    #[test]
+    fn transform_model_projection_selects_text_runtime_and_filters_model_value() {
+        let projection = model_projection("input", vec![]);
+
+        assert_eq!(projection["errors"], json!([]));
+        assert_eq!(projection["needRuntime"], json!("V_MODEL_TEXT"));
+        assert_eq!(projection["props"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            projection["props"][0]["key"],
+            json!({ "kind": "static", "content": "onUpdate:modelValue" })
+        );
+    }
+
+    #[test]
+    fn transform_model_projection_selects_native_input_helpers() {
+        let radio = model_projection(
+            "input",
+            vec![json!({
+                "type": 6,
+                "name": "type",
+                "value": { "content": "radio" },
+            })],
+        );
+        assert_eq!(radio["needRuntime"], json!("V_MODEL_RADIO"));
+
+        let checkbox = model_projection(
+            "input",
+            vec![json!({
+                "type": 6,
+                "name": "type",
+                "value": { "content": "checkbox" },
+            })],
+        );
+        assert_eq!(checkbox["needRuntime"], json!("V_MODEL_CHECKBOX"));
+
+        let dynamic = model_projection(
+            "input",
+            vec![json!({
+                "type": 7,
+                "name": "bind",
+                "arg": { "type": 4, "content": "type", "isStatic": true },
+                "exp": { "type": 4, "content": "kind" },
+            })],
+        );
+        assert_eq!(dynamic["needRuntime"], json!("V_MODEL_DYNAMIC"));
+
+        let static_type_wins_over_dynamic_bind = model_projection(
+            "input",
+            vec![
+                json!({
+                    "type": 6,
+                    "name": "type",
+                    "value": { "content": "radio" },
+                }),
+                json!({
+                    "type": 7,
+                    "name": "bind",
+                    "arg": null,
+                    "exp": { "type": 4, "content": "attrs" },
+                }),
+            ],
+        );
+        assert_eq!(
+            static_type_wins_over_dynamic_bind["needRuntime"],
+            json!("V_MODEL_RADIO")
+        );
+    }
+
+    #[test]
+    fn transform_model_projection_selects_select_textarea_and_custom_helpers() {
+        let select = model_projection("select", vec![]);
+        assert_eq!(select["needRuntime"], json!("V_MODEL_SELECT"));
+
+        let textarea = model_projection("textarea", vec![]);
+        assert_eq!(textarea["needRuntime"], json!("V_MODEL_TEXT"));
+
+        let custom = transform_model_projection(&json!({
+            "dir": model_dir(),
+            "node": model_node("my-input", vec![]),
+            "context": { "isCustomElement": true },
+        }));
+        assert_eq!(custom["errors"], json!([]));
+        assert_eq!(custom["needRuntime"], json!("V_MODEL_TEXT"));
+    }
+
+    #[test]
+    fn transform_model_projection_reports_dom_model_errors() {
+        let file = model_projection(
+            "input",
+            vec![json!({
+                "type": 6,
+                "name": "type",
+                "value": { "content": "file" },
+            })],
+        );
+        assert_eq!(file["errors"][0]["code"], json!(60));
+        assert!(file.get("needRuntime").is_none());
+
+        let invalid = model_projection("span", vec![]);
+        assert_eq!(invalid["errors"][0]["code"], json!(58));
+
+        let with_arg = transform_model_projection(&json!({
+            "dir": {
+                "name": "model",
+                "exp": {
+                    "type": 4,
+                    "content": "model",
+                    "loc": { "source": "model" }
+                },
+                "arg": {
+                    "type": 4,
+                    "content": "value",
+                    "isStatic": true,
+                    "loc": { "source": "value" }
+                },
+                "modifiers": [],
+                "loc": { "source": "v-model:value=\"model\"" }
+            },
+            "node": model_node("input", vec![]),
+            "context": {},
+        }));
+        assert_eq!(with_arg["errors"][0]["code"], json!(59));
+        assert_eq!(with_arg["errors"][0]["loc"]["source"], json!("value"));
+        assert_eq!(with_arg["props"].as_array().unwrap().len(), 2);
+
+        let dynamic_value = model_projection(
+            "input",
+            vec![json!({
+                "type": 7,
+                "name": "bind",
+                "arg": { "type": 4, "content": "value", "isStatic": true },
+                "exp": { "type": 4, "content": "model" },
+                "loc": { "source": ":value=\"model\"" },
+            })],
+        );
+        assert_eq!(dynamic_value["errors"][0]["code"], json!(61));
+        assert_eq!(
+            dynamic_value["errors"][0]["loc"]["source"],
+            json!(":value=\"model\"")
+        );
+
+        let static_value = model_projection(
+            "input",
+            vec![json!({
+                "type": 6,
+                "name": "value",
+                "value": { "content": "model" },
+            })],
+        );
+        assert_eq!(static_value["errors"], json!([]));
     }
 
     #[test]
