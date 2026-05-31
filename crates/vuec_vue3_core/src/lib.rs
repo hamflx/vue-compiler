@@ -14611,6 +14611,7 @@ struct Vue3SsrMirCodegen<'a> {
 struct SsrRootAttrs {
     attrs: Option<String>,
     css_vars: Option<String>,
+    target_start: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -15054,23 +15055,117 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         let children = self.effective_root_children(children);
         let css_vars = self.has_ssr_css_vars().then(|| "_cssVars".to_string());
         let root_spans = self.root_spans(children);
-        if css_vars.is_none() && root_spans.len() != 1 {
+        if root_spans.len() == 1 {
+            let root_span = *root_spans.first()?;
+            let root = *children.get(root_span.start)?;
+            if self.node_accepts_root_attrs(root) {
+                return Some(SsrRootAttrs {
+                    attrs: Some("_attrs".to_string()),
+                    css_vars,
+                    target_start: Some(root_span.start),
+                });
+            }
             return None;
         }
-        if root_spans.len() != 1 {
-            return css_vars.map(|css_vars| SsrRootAttrs {
-                attrs: None,
-                css_vars: Some(css_vars),
-            });
+        let visible_spans = root_spans
+            .iter()
+            .copied()
+            .filter(|span| !self.is_ssr_root_comment_span(children, *span))
+            .collect::<Vec<_>>();
+        if let [root_span] = visible_spans.as_slice() {
+            let root = *children.get(root_span.start)?;
+            if self.node_accepts_root_attrs(root) {
+                return Some(SsrRootAttrs {
+                    attrs: Some("_attrs".to_string()),
+                    css_vars,
+                    target_start: Some(root_span.start),
+                });
+            }
         }
-        let root = *children.get(root_spans.first()?.start)?;
-        if self.node_accepts_root_attrs(root) {
-            return Some(SsrRootAttrs {
-                attrs: Some("_attrs".to_string()),
-                css_vars,
-            });
+        css_vars.map(|css_vars| SsrRootAttrs {
+            attrs: None,
+            css_vars: Some(css_vars),
+            target_start: None,
+        })
+    }
+
+    fn is_ssr_root_comment_span(&self, children: &[NodeId], span: SsrRootSpan) -> bool {
+        children
+            .get(span.start)
+            .and_then(|id| self.ssr_push_string(*id))
+            .is_some_and(|value| {
+                value.starts_with("<!--") && value != "<!--[-->" && value != "<!--]-->"
+            })
+    }
+
+    fn root_attr_node_for_children(
+        &self,
+        children: &[NodeId],
+        root_attrs: &SsrRootAttrs,
+    ) -> Option<NodeId> {
+        let target_start = root_attrs.target_start?;
+        let children = self.effective_root_children(children);
+        let root_spans = self.root_spans(children);
+        let root_span = root_spans.iter().find(|span| span.start == target_start)?;
+        let attrs_index = root_span.attrs_index?;
+        children.get(attrs_index).copied()
+    }
+
+    fn root_attrs_for_child_slice(
+        &self,
+        root_attrs: Option<&SsrRootAttrs>,
+        offset: usize,
+    ) -> Option<SsrRootAttrs> {
+        root_attrs.and_then(|attrs| {
+            let mut attrs = attrs.clone();
+            if let Some(target_start) = attrs.target_start {
+                attrs.target_start = target_start.checked_sub(offset);
+                if attrs.target_start.is_none() {
+                    return None;
+                }
+            }
+            Some(attrs)
+        })
+    }
+
+    fn root_attrs_for_render_index(
+        &self,
+        children: &[NodeId],
+        index: usize,
+        root_attrs: &SsrRootAttrs,
+    ) -> Option<SsrRootAttrs> {
+        if let Some(target_start) = root_attrs.target_start {
+            if index == target_start
+                || self.root_attrs_apply_to_render_attrs_index(children, index, target_start)
+            {
+                let mut attrs = root_attrs.clone();
+                attrs.target_start = Some(0);
+                return Some(attrs);
+            }
+            return None;
+        }
+        if root_attrs.attrs.is_none() && root_attrs.css_vars.is_some() {
+            return Some(root_attrs.clone());
         }
         None
+    }
+
+    fn root_attrs_apply_to_render_attrs_index(
+        &self,
+        children: &[NodeId],
+        index: usize,
+        target_start: usize,
+    ) -> bool {
+        target_start.checked_add(1) == Some(index)
+            && children
+                .get(target_start)
+                .and_then(|id| self.ssr_push_string(*id))
+                .is_some_and(|value| parse_ssr_open_tag_start(value).is_some())
+            && children.get(index).is_some_and(|id| {
+                self.mir
+                    .node(*id)
+                    .is_some_and(|node| matches!(node.kind, Vue3SsrMirKind::RenderAttrs(_)))
+            })
     }
 
     fn node_accepts_root_attrs(&self, node_id: NodeId) -> bool {
@@ -15121,12 +15216,9 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         let mut helpers = Vec::new();
         let root_children = self.root_children();
         let root_attrs = self.root_attrs_for_children(root_children);
-        let root_spans = self.root_spans(root_children);
-        let root_attr_node = root_attrs.as_ref().and_then(|_| {
-            let first = root_spans.first()?;
-            let attrs_index = first.attrs_index?;
-            root_children.get(attrs_index).copied()
-        });
+        let root_attr_node = root_attrs
+            .as_ref()
+            .and_then(|root_attrs| self.root_attr_node_for_children(root_children, root_attrs));
         if let Some(root_attrs) = &root_attrs {
             if self.root_attrs_need_merge_props(self.root_children(), &root_attrs) {
                 push_unique_helper(&mut helpers, RuntimeHelper::Vue3MergeProps);
@@ -15419,11 +15511,9 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         let root_children = self.root_children();
         let root_attrs = self.root_attrs_for_children(root_children);
         let root_spans = self.root_spans(root_children);
-        let root_attr_node = root_attrs.as_ref().and_then(|_| {
-            let first = root_spans.first()?;
-            let attrs_index = first.attrs_index?;
-            root_children.get(attrs_index).copied()
-        });
+        let root_attr_node = root_attrs
+            .as_ref()
+            .and_then(|root_attrs| self.root_attr_node_for_children(root_children, root_attrs));
         for node in &self.mir.nodes {
             match &node.kind {
                 Vue3SsrMirKind::Root(_) | Vue3SsrMirKind::PushString(_) => {}
@@ -15901,14 +15991,19 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                     return;
                 }
                 writer.push_line(&format!("_push({html})"));
-                self.render_child_slice(
+                let sliced_root_attrs =
+                    self.root_attrs_for_child_slice(root_attrs.as_ref(), next_index);
+                let close_appended = self.render_child_slice_with_final_suffix(
                     &effective_children[next_index..],
                     scope,
                     None,
-                    root_attrs.as_ref(),
+                    sliced_root_attrs.as_ref(),
+                    "</template>",
                     writer,
                 );
-                writer.push_line("_push(`</template>`)");
+                if !close_appended {
+                    writer.push_line("_push(`</template>`)");
+                }
                 return;
             }
             writer.push_line("_push(`<template>`)");
@@ -15942,8 +16037,18 @@ impl<'a> Vue3SsrMirCodegen<'a> {
             } else {
                 writer.push_line("_push(`<!--[-->`)");
             }
-            self.render_child_slice(&children[index..], scope, None, root_attrs.as_ref(), writer);
-            writer.push_line("_push(`<!--]-->`)");
+            let sliced_root_attrs = self.root_attrs_for_child_slice(root_attrs.as_ref(), index);
+            let close_appended = self.render_child_slice_with_final_suffix(
+                &children[index..],
+                scope,
+                None,
+                sliced_root_attrs.as_ref(),
+                "<!--]-->",
+                writer,
+            );
+            if !close_appended {
+                writer.push_line("_push(`<!--]-->`)");
+            }
         } else {
             self.render_child_slice(children, scope, None, root_attrs.as_ref(), writer);
         }
@@ -15968,33 +16073,60 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         root_attrs: Option<&SsrRootAttrs>,
         writer: &mut CodeWriter,
     ) {
+        let _ =
+            self.render_child_slice_inner(children, scope, scope_id_expr, root_attrs, None, writer);
+    }
+
+    fn render_child_slice_with_final_suffix(
+        &self,
+        children: &[NodeId],
+        scope: &RenderScope,
+        scope_id_expr: Option<&str>,
+        root_attrs: Option<&SsrRootAttrs>,
+        final_suffix: &str,
+        writer: &mut CodeWriter,
+    ) -> bool {
+        self.render_child_slice_inner(
+            children,
+            scope,
+            scope_id_expr,
+            root_attrs,
+            Some(final_suffix),
+            writer,
+        )
+    }
+
+    fn render_child_slice_inner(
+        &self,
+        children: &[NodeId],
+        scope: &RenderScope,
+        scope_id_expr: Option<&str>,
+        root_attrs: Option<&SsrRootAttrs>,
+        final_suffix: Option<&str>,
+        writer: &mut CodeWriter,
+    ) -> bool {
         let mut index = 0usize;
+        let mut appended_final_suffix = false;
         while index < children.len() {
-            let current_root_attrs = root_attrs.and_then(|attrs| {
-                if index == 0 {
-                    return Some(attrs);
-                }
-                if index == 1
-                    && children
-                        .first()
-                        .and_then(|id| self.ssr_push_string(*id))
-                        .is_some_and(|value| parse_ssr_open_tag_start(value).is_some())
-                    && self
-                        .mir
-                        .node(children[index])
-                        .is_some_and(|node| matches!(node.kind, Vue3SsrMirKind::RenderAttrs(_)))
-                {
-                    return Some(attrs);
-                }
-                None
-            });
+            let current_root_attrs = root_attrs
+                .and_then(|attrs| self.root_attrs_for_render_index(children, index, attrs));
             if let Some((html, next_index)) = self.render_ssr_template_literal_slice(
                 children,
                 index,
                 scope,
                 scope_id_expr,
-                current_root_attrs,
+                current_root_attrs.as_ref(),
             ) {
+                let html = if next_index == children.len() {
+                    if let Some(final_suffix) = final_suffix {
+                        appended_final_suffix = true;
+                        append_static_to_ssr_template_literal(html, final_suffix)
+                    } else {
+                        html
+                    }
+                } else {
+                    html
+                };
                 writer.push_line(&format!("_push({html})"));
                 index = next_index;
                 continue;
@@ -16004,15 +16136,16 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                 index,
                 scope,
                 scope_id_expr,
-                current_root_attrs,
+                current_root_attrs.as_ref(),
                 writer,
             ) {
                 index = next_index;
                 continue;
             }
-            self.render_node(children[index], scope, current_root_attrs, writer);
+            self.render_node(children[index], scope, current_root_attrs.as_ref(), writer);
             index += 1;
         }
+        appended_final_suffix
     }
 
     fn render_ssr_static_shell_with_dynamic_descendant(
@@ -16543,6 +16676,8 @@ impl<'a> Vue3SsrMirCodegen<'a> {
             parts.push(SsrTemplatePart::Static(prefix.to_string()));
         }
         let mut dynamic = !prefix.is_empty() || scope_id_expr.is_some();
+        let current_root_attrs =
+            root_attrs.and_then(|attrs| self.root_attrs_for_render_index(children, index, attrs));
         let next_index = self.collect_ssr_template_node(
             children,
             index,
@@ -16550,12 +16685,12 @@ impl<'a> Vue3SsrMirCodegen<'a> {
             scope_id_expr,
             &mut parts,
             &mut dynamic,
-            root_attrs,
+            current_root_attrs.as_ref(),
         )?;
         let mut next_index = next_index;
         while next_index < children.len() {
-            let continuation_root_attrs =
-                root_attrs.filter(|root_attrs| root_attrs.attrs.is_none());
+            let continuation_root_attrs = root_attrs
+                .and_then(|attrs| self.root_attrs_for_render_index(children, next_index, attrs));
             let Some(next) = self.collect_ssr_template_node(
                 children,
                 next_index,
@@ -16563,7 +16698,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                 scope_id_expr,
                 &mut parts,
                 &mut dynamic,
-                continuation_root_attrs,
+                continuation_root_attrs.as_ref(),
             ) else {
                 break;
             };
@@ -32242,6 +32377,41 @@ mod tests {
         assert!(generated
             .code
             .contains("_push(`<p${_ssrRenderAttrs(_attrs)}></p>`)"));
+    }
+
+    #[test]
+    fn generate_vue3_ssr_mir_injects_fallthrough_attrs_through_root_comments() {
+        let options = Vue3CompilerOptions {
+            mode: "module".into(),
+            prefix_identifiers: true,
+            built_in_components: vec!["transition".into()],
+            ..Vue3CompilerOptions::default()
+        };
+        let render = |source: &str, file_id: u32| {
+            let source = TemplateSource {
+                filename: "foo.vue".into(),
+                source: source.into(),
+                file_id: FileId(file_id),
+                base_offset: 0,
+            };
+            let ast = Vue3Dialect::base_parse(source, &options);
+            let result = lower_vue3_ast_to_ssr_mir(&ast, &options);
+            generate_vue3_ssr_mir(&result.mir, &result.js, &options).code
+        };
+
+        let commented_root = render(r#"<!--!--><div/>"#, 84);
+        assert!(commented_root.contains("ssrRenderAttrs as _ssrRenderAttrs"));
+        assert!(commented_root
+            .contains(r#"_push(`<!--[--><!--!--><div${_ssrRenderAttrs(_attrs)}></div><!--]-->`)"#));
+
+        let transition_root = render(r#"<!--root--><transition><div/></transition>"#, 85);
+        assert!(transition_root.contains(
+            r#"_push(`<!--[--><!--root--><div${_ssrRenderAttrs(_attrs)}></div><!--]-->`)"#
+        ));
+
+        let dynamic_fragment = render(r#"<div v-if="true"/><div/>"#, 86);
+        assert!(!dynamic_fragment.contains("_ssrRenderAttrs(_attrs)"));
+        assert!(dynamic_fragment.contains(r#"_push(`<div></div><!--]-->`)"#));
     }
 
     #[test]
