@@ -230,6 +230,7 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
         "vue3.dom.ignoreSideEffectTags" => {
             Ok(vuec_vue3_dom::ignore_side_effect_tags_projection(&payload))
         }
+        "vue3.dom.decodeHtmlBrowser" => Ok(vuec_vue3_dom::decode_html_browser_projection(&payload)),
         "vue3.dom.transformVHtml" => Ok(vuec_vue3_dom::transform_v_html_projection(&payload)),
         "vue3.dom.transformVText" => Ok(vuec_vue3_dom::transform_v_text_projection(&payload)),
         "vue3.dom.transformShow" => Ok(vuec_vue3_dom::transform_show_projection(&payload)),

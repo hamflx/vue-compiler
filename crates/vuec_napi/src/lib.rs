@@ -316,6 +316,7 @@ pub fn call_vue3_dom_projection(env: Env, command: String, payload: Unknown) -> 
         "vue3.dom.ignoreSideEffectTags" => {
             vuec_vue3_dom::ignore_side_effect_tags_projection(&payload)
         }
+        "vue3.dom.decodeHtmlBrowser" => vuec_vue3_dom::decode_html_browser_projection(&payload),
         "vue3.dom.transformVHtml" => vuec_vue3_dom::transform_v_html_projection(&payload),
         "vue3.dom.transformVText" => vuec_vue3_dom::transform_v_text_projection(&payload),
         "vue3.dom.transformShow" => vuec_vue3_dom::transform_show_projection(&payload),

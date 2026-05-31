@@ -49,6 +49,17 @@ function callVue3DomProjection(command, payload) {
   return native.callVue3DomProjection(command, payload || {});
 }
 
+function decodeHtmlBrowser(raw, asAttr = false) {
+  const source = String(raw == null ? '' : raw);
+  const projection = callVue3DomProjection('vue3.dom.decodeHtmlBrowser', {
+    raw: source,
+    asAttr: !!asAttr,
+  });
+  return projection && typeof projection.decoded === 'string'
+    ? projection.decoded
+    : source;
+}
+
 const transformStyle = (node) => {
   if (!node || node.type !== core.NodeTypes.ELEMENT) return undefined;
   const projection = callVue3DomProjection('vue3.dom.transformStyle', { node });
@@ -468,12 +479,7 @@ const parserOptions = {
     return undefined;
   },
   decodeEntities(rawText, asAttr) {
-    return String(rawText || '')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&amp;/g, '&')
-      .replace(/&quot;/g, '"')
-      .replace(/&#39;/g, "'");
+    return decodeHtmlBrowser(rawText, asAttr);
   },
   getNamespace(tag, parent, rootNamespace) {
     const name = String(tag || '');
@@ -904,6 +910,7 @@ module.exports = {
 Object.defineProperty(module.exports, '__vuecRuntime', {
   value: {
     ...module.exports,
+    decodeHtmlBrowser,
     ignoreSideEffectTags,
     transformStyle,
     transformVHtml,

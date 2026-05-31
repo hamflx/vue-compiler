@@ -18,6 +18,7 @@ use vuec_ast::{
     Vue3ElementType, Vue3ImportItem, Vue3Prop, Vue3Root,
 };
 use vuec_diagnostics::{Diagnostic, Vue3ErrorCode};
+use vuec_html::{decode_html_attr_entities, decode_html_text_entities};
 use vuec_pass::TransformContext;
 use vuec_vue3_asset::transform_asset_url_props;
 /// Asset URL transform options re-exported for DOM compiler callers.
@@ -721,6 +722,17 @@ pub fn ignore_side_effect_tags_projection(payload: &Value) -> Value {
             "loc": node.get("loc").cloned().unwrap_or(Value::Null),
         }],
     })
+}
+
+/// Projects browser HTML entity decoding for DOM parser option compatibility.
+pub fn decode_html_browser_projection(payload: &Value) -> Value {
+    let raw = json_str(payload, "raw").unwrap_or("");
+    let decoded = if json_bool(payload, "asAttr") {
+        decode_html_attr_entities(raw)
+    } else {
+        decode_html_text_entities(raw)
+    };
+    json!({ "decoded": decoded })
 }
 
 /// Projects the DOM `v-html` directive transform for compatibility bridge callers.
@@ -2129,6 +2141,38 @@ mod tests {
             assert_eq!(projection["remove"], json!(false));
             assert_eq!(projection["errors"], json!([]));
         }
+    }
+
+    #[test]
+    fn decode_html_browser_projection_decodes_text_and_attribute_entities() {
+        for (raw, decoded) in [
+            (" abc  123 ", " abc  123 "),
+            ("&", "&"),
+            ("&amp;", "&"),
+            ("&amp;amp;", "&amp;"),
+            ("&lt;", "<"),
+            ("&amp;lt;", "&lt;"),
+            ("&gt;", ">"),
+            ("&nbsp;", "\u{00a0}"),
+            ("&quot;", "\""),
+            ("&apos;", "'"),
+            ("&Eacute;", "\u{00c9}"),
+            ("&#xc9;", "\u{00c9}"),
+            ("&#201;", "\u{00c9}"),
+        ] {
+            let projection = decode_html_browser_projection(&json!({ "raw": raw }));
+
+            assert_eq!(projection["decoded"], json!(decoded), "{raw}");
+        }
+
+        let attr = decode_html_browser_projection(&json!({
+            "raw": "<strong>&lt;strong&gt;&amp;&lt;/strong&gt;</strong>",
+            "asAttr": true,
+        }));
+        assert_eq!(
+            attr["decoded"],
+            json!("<strong><strong>&</strong></strong>")
+        );
     }
 
     #[test]

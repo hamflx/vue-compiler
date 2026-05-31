@@ -1799,6 +1799,7 @@ dependencies = [
  "serde_json",
  "vuec_ast",
  "vuec_diagnostics",
+ "vuec_html",
  "vuec_pass",
  "vuec_source",
  "vuec_vue3_asset",

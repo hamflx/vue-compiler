@@ -2117,7 +2117,7 @@ fn write_alias_index(
     if target.kind == TargetKind::Vue3Core {
         source.push_str("Object.defineProperty(exports, '__vuecRuntime', { value: vue3CoreRuntime, enumerable: false });\n");
     } else if target.kind == TargetKind::Vue3Dom {
-        source.push_str("Object.defineProperty(exports, '__vuecRuntime', { value: Object.assign({}, vue3CoreRuntime, { ignoreSideEffectTags: vue3CoreRuntime.ignoreSideEffectTags, transformOn: vue3CoreRuntime.transformDomOn, transformModel: vue3CoreRuntime.transformDomModel, transformTransition: vue3CoreRuntime.transformDomTransition, validateHtmlNesting: vue3CoreRuntime.validateHtmlNesting, isValidHTMLNesting: vue3CoreRuntime.isValidHTMLNesting }), enumerable: false });\n");
+        source.push_str("Object.defineProperty(exports, '__vuecRuntime', { value: Object.assign({}, vue3CoreRuntime, { decodeHtmlBrowser: vue3CoreRuntime.decodeHtmlBrowser, ignoreSideEffectTags: vue3CoreRuntime.ignoreSideEffectTags, transformOn: vue3CoreRuntime.transformDomOn, transformModel: vue3CoreRuntime.transformDomModel, transformTransition: vue3CoreRuntime.transformDomTransition, validateHtmlNesting: vue3CoreRuntime.validateHtmlNesting, isValidHTMLNesting: vue3CoreRuntime.isValidHTMLNesting }), enumerable: false });\n");
     } else if matches!(
         target.kind,
         TargetKind::Vue26Template | TargetKind::Vue27Template
@@ -6391,6 +6391,16 @@ const vue3CoreRuntime = (() => {
       };
     }
   };
+  runtime.decodeHtmlBrowser = function decodeHtmlBrowser(raw, asAttr = false) {
+    const source = String(raw == null ? '' : raw);
+    const projection = callBridge('vue3.dom.decodeHtmlBrowser', {
+      raw: source,
+      asAttr: !!asAttr,
+    });
+    return projection && typeof projection.decoded === 'string'
+      ? projection.decoded
+      : source;
+  };
   return runtime;
 })();
 
@@ -8192,7 +8202,7 @@ const vue3DomParserOptions = {
   isNativeTag: tag => /^(?:html|body|base|head|link|meta|style|title|address|article|aside|footer|header|hgroup|h1|h2|h3|h4|h5|h6|nav|section|div|dd|dl|dt|figcaption|figure|picture|hr|img|li|main|ol|p|pre|ul|a|b|abbr|bdi|bdo|br|cite|code|data|dfn|em|i|kbd|mark|q|rp|rt|ruby|s|samp|small|span|strong|sub|sup|time|u|var|wbr|area|audio|map|track|video|embed|object|param|source|canvas|script|noscript|del|ins|caption|col|colgroup|table|thead|tbody|td|th|tr|button|datalist|fieldset|form|input|label|legend|meter|optgroup|option|output|progress|select|textarea|details|dialog|menu|summary|template|blockquote|iframe|tfoot|svg|math)$/i.test(String(tag || '')),
   isPreTag: tag => String(tag || '').toLowerCase() === 'pre',
   isIgnoreNewlineTag: tag => /^(?:pre|textarea)$/i.test(String(tag || '')),
-  decodeEntities: undefined,
+  decodeEntities: vue3CoreRuntime.decodeHtmlBrowser,
   isBuiltInComponent: tag => {
     if (tag === 'Transition' || tag === 'transition') return vue3CoreRuntime.TRANSITION;
     if (tag === 'TransitionGroup' || tag === 'transition-group') return vue3CoreRuntime.TRANSITION_GROUP;
@@ -12351,6 +12361,7 @@ fn write_vue3_dom_conformance_shims(prepared_root: &Path) -> Result<()> {
     write_vue3_dom_transition_transform_shim(&transforms.join("Transition.ts"))?;
     write_vue3_dom_ignore_side_effect_tags_shim(&transforms.join("ignoreSideEffectTags.ts"))?;
     write_vue3_dom_validate_html_nesting_shim(&transforms.join("validateHtmlNesting.ts"))?;
+    write_vue3_dom_decode_html_browser_shim(&dom_src.join("decodeHtmlBrowser.ts"))?;
     write_vue3_dom_html_nesting_shim(&dom_src.join("htmlNesting.ts"))?;
     write_vue3_core_test_setup(prepared_root)?;
 
@@ -12878,6 +12889,16 @@ fn write_vue3_dom_ignore_side_effect_tags_shim(path: &Path) -> Result<()> {
     )
 }
 
+fn write_vue3_dom_decode_html_browser_shim(path: &Path) -> Result<()> {
+    write_text(
+        path,
+        &format!(
+            "import {{ __vuecRuntime }} from {}\nconst r = __vuecRuntime\nexport const decodeHtmlBrowser = r.decodeHtmlBrowser\n",
+            js_string_literal("@vue/compiler-dom")
+        ),
+    )
+}
+
 fn write_vue3_dom_html_nesting_shim(path: &Path) -> Result<()> {
     write_text(
         path,
@@ -13174,6 +13195,7 @@ fn conformance_coverage_file_kind(
         || path.ends_with("packages/compiler-core/__tests__/scopeId.spec.ts")
         || path.ends_with("packages/compiler-core/__tests__/utils.spec.ts")
         || path.ends_with("packages/compiler-dom/__tests__/index.spec.ts")
+        || path.ends_with("packages/compiler-dom/__tests__/decoderHtmlBrowser.spec.ts")
         || path.ends_with("packages/compiler-dom/__tests__/parse.spec.ts")
         || path.ends_with("packages/compiler-dom/__tests__/transforms/Transition.spec.ts")
         || path.ends_with("packages/compiler-dom/__tests__/transforms/ignoreSideEffectTags.spec.ts")
@@ -14621,6 +14643,16 @@ mod tests {
         assert!(ignore_side_effect_tags.contains("__vuecRuntime"));
         assert!(ignore_side_effect_tags.contains("@vue/compiler-dom"));
         assert!(ignore_side_effect_tags.contains("ignoreSideEffectTags"));
+        let decode_html_browser = fs::read_to_string(
+            temp.join("packages")
+                .join("compiler-dom")
+                .join("src")
+                .join("decodeHtmlBrowser.ts"),
+        )
+        .unwrap();
+        assert!(decode_html_browser.contains("__vuecRuntime"));
+        assert!(decode_html_browser.contains("@vue/compiler-dom"));
+        assert!(decode_html_browser.contains("decodeHtmlBrowser"));
         let validate_html_nesting = fs::read_to_string(
             temp.join("packages")
                 .join("compiler-dom")
@@ -14647,6 +14679,7 @@ mod tests {
         assert!(ALIAS_RUNTIME_JS.contains("vue3.dom.transformModel"));
         assert!(ALIAS_RUNTIME_JS.contains("vue3.dom.transformTransition"));
         assert!(ALIAS_RUNTIME_JS.contains("vue3.dom.ignoreSideEffectTags"));
+        assert!(ALIAS_RUNTIME_JS.contains("vue3.dom.decodeHtmlBrowser"));
         assert!(ALIAS_RUNTIME_JS.contains("vue3.dom.validateHtmlNesting"));
         assert!(ALIAS_RUNTIME_JS.contains("vue3.dom.isValidHTMLNesting"));
         let _ = fs::remove_dir_all(temp);
@@ -14817,6 +14850,12 @@ mod tests {
                 {
                   "name": "F:/repo/prepared/vue3-dom/packages/compiler-dom/__tests__/decoderHtmlBrowser.spec.ts",
                   "assertionResults": [
+                    { "status": "passed" }
+                  ]
+                },
+                {
+                  "name": "F:/repo/prepared/vue3-dom/packages/compiler-dom/__tests__/transforms/stringifyStatic.spec.ts",
+                  "assertionResults": [
                     { "status": "failed" }
                   ]
                 }
@@ -14833,8 +14872,8 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             counts: ConformanceExecutionCounts {
-                total: 23,
-                pass: 22,
+                total: 24,
+                pass: 23,
                 fail: 1,
                 skip: 0,
                 pending: 0,
@@ -14848,8 +14887,8 @@ mod tests {
         );
 
         assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
-        assert_eq!(coverage.rust_backed_pass, 22);
-        assert_eq!(coverage.rust_backed_total, 22);
+        assert_eq!(coverage.rust_backed_pass, 23);
+        assert_eq!(coverage.rust_backed_total, 23);
         assert_eq!(
             coverage.files[0].source,
             ConformanceCoverageKind::RustBacked
@@ -14894,7 +14933,11 @@ mod tests {
             coverage.files[10].source,
             ConformanceCoverageKind::RustBacked
         );
-        assert_eq!(coverage.files[11].source, ConformanceCoverageKind::Mixed);
+        assert_eq!(
+            coverage.files[11].source,
+            ConformanceCoverageKind::RustBacked
+        );
+        assert_eq!(coverage.files[12].source, ConformanceCoverageKind::Mixed);
         assert!(coverage.files[0]
             .reason
             .contains("routed through vuec_node_bridge"));
