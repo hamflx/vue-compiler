@@ -78,6 +78,9 @@ pub struct SfcBlockAttrs {
     pub generic: Option<String>,
     /// Raw attributes keyed by attribute name.
     pub raw: BTreeMap<String, SfcAttrValue>,
+    /// Source ranges for raw attributes keyed by attribute name.
+    #[serde(skip)]
+    pub ranges: BTreeMap<String, (usize, usize)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -155,6 +158,27 @@ impl Default for Vue3SfcParseOptions {
             pad: Vue3SfcPad::False,
             ignore_empty: true,
         }
+    }
+}
+
+impl SfcBlockAttrs {
+    /// Whether a `src` attribute was present, regardless of whether it has a string value.
+    pub fn has_src_attr(&self) -> bool {
+        self.raw.contains_key("src")
+    }
+
+    /// Whether a `src` attribute has a non-empty string value.
+    pub fn has_non_empty_src(&self) -> bool {
+        self.src.as_deref().is_some_and(|src| !src.is_empty())
+    }
+
+    fn attr_location(&self, name: &str, source_file: FileId) -> Option<SfcBlockLocation> {
+        let (start, end) = *self.ranges.get(name)?;
+        Some(SfcBlockLocation {
+            start,
+            end,
+            source_file,
+        })
     }
 }
 
@@ -1264,7 +1288,7 @@ fn vue3_descriptor_from_blocks(
     for block in blocks {
         if options.ignore_empty
             && block.type_name != "template"
-            && block.attrs.src.is_none()
+            && !block.attrs.has_src_attr()
             && block.content.trim().is_empty()
         {
             continue;
@@ -1278,6 +1302,9 @@ fn vue3_descriptor_from_blocks(
                         &block,
                     ));
                 } else {
+                    if let Some(error) = vue3_sfc_functional_template_error(&block) {
+                        errors.push(error);
+                    }
                     descriptor.template = Some(block);
                 }
             }
@@ -1310,7 +1337,7 @@ fn vue3_descriptor_from_blocks(
     if descriptor
         .script_setup
         .as_ref()
-        .is_some_and(|script_setup| script_setup.attrs.src.is_some())
+        .is_some_and(|script_setup| script_setup.attrs.has_non_empty_src())
     {
         errors.push(vue3_sfc_parse_error(
             "<script setup> cannot use the \"src\" attribute because its syntax will be ambiguous outside of the component.",
@@ -1321,7 +1348,7 @@ fn vue3_descriptor_from_blocks(
         && descriptor
             .script
             .as_ref()
-            .is_some_and(|script| script.attrs.src.is_some())
+            .is_some_and(|script| script.attrs.has_non_empty_src())
     {
         errors.push(vue3_sfc_parse_error(
             "<script> cannot use the \"src\" attribute when <script setup> is also present because they must be processed together.",
@@ -1351,6 +1378,18 @@ fn vue3_sfc_parse_block_error(message: impl Into<String>, block: &SfcBlock) -> V
         message: message.into(),
         loc: Some(block.loc.clone()),
     }
+}
+
+fn vue3_sfc_functional_template_error(block: &SfcBlock) -> Option<Vue3SfcParseError> {
+    if !block.attrs.raw.contains_key("functional") {
+        return None;
+    }
+    Some(Vue3SfcParseError {
+        message: "<template functional> is no longer supported in Vue 3, since functional components no longer have significant performance difference from stateful ones. Just use a normal <template> instead.".into(),
+        loc: block
+            .attrs
+            .attr_location("functional", block.loc.source_file),
+    })
 }
 
 fn vue3_dedent_pug_template(descriptor: &mut SfcDescriptor) {
@@ -1491,7 +1530,7 @@ fn vue3_sfc_block_value(
             );
         }
     }
-    if options.source_map && include_map && block.attrs.src.is_none() {
+    if options.source_map && include_map && !block.attrs.has_src_attr() {
         value.insert(
             "map".into(),
             vue3_sfc_block_map_value(descriptor, block, options),
@@ -1976,6 +2015,9 @@ fn attrs_from_html(attributes: &[HtmlAttribute]) -> SfcBlockAttrs {
             .map(|value| SfcAttrValue::String(value.clone()))
             .unwrap_or(SfcAttrValue::Bool(true));
         attrs.raw.insert(attribute.name.clone(), value.clone());
+        attrs
+            .ranges
+            .insert(attribute.name.clone(), (attribute.start, attribute.end));
         match attribute.name.as_str() {
             "lang" => {
                 if let SfcAttrValue::String(value) = value {
@@ -7883,6 +7925,53 @@ mod tests {
     }
 
     #[test]
+    fn vue3_parse_preserves_boolean_src_attr_presence_like_official_parser() {
+        let mut compiler = SfcCompiler::new();
+        let result = compiler.parse_vue3(
+            "BoolSrc.vue",
+            "<template src></template><script src></script><style src></style>",
+        );
+
+        assert!(result.errors.is_empty());
+        assert!(result
+            .descriptor
+            .template
+            .as_ref()
+            .unwrap()
+            .attrs
+            .has_src_attr());
+        assert!(result
+            .descriptor
+            .script
+            .as_ref()
+            .unwrap()
+            .attrs
+            .has_src_attr());
+        assert!(result.descriptor.styles[0].attrs.has_src_attr());
+
+        let projected =
+            vue3_sfc_parse_result_value(&result, &Vue3SfcParseProjectionOptions::default());
+        assert_eq!(
+            projected["descriptor"]["template"]["attrs"]["src"],
+            json!(true)
+        );
+        assert!(projected["descriptor"]["template"].get("src").is_none());
+        assert!(projected["descriptor"]["template"].get("map").is_none());
+        assert_eq!(
+            projected["descriptor"]["script"]["attrs"]["src"],
+            json!(true)
+        );
+        assert!(projected["descriptor"]["script"].get("src").is_none());
+        assert!(projected["descriptor"]["script"].get("map").is_none());
+        assert_eq!(
+            projected["descriptor"]["styles"][0]["attrs"]["src"],
+            json!(true)
+        );
+        assert!(projected["descriptor"]["styles"][0].get("src").is_none());
+        assert!(projected["descriptor"]["styles"][0].get("map").is_none());
+    }
+
+    #[test]
     fn vue3_parse_reports_duplicate_blocks_like_official_parser() {
         let mut compiler = SfcCompiler::new();
         let result = compiler.parse_vue3(
@@ -7962,6 +8051,46 @@ mod tests {
         assert_eq!(
             script_src_with_setup.errors[0].message,
             "<script> cannot use the \"src\" attribute when <script setup> is also present because they must be processed together."
+        );
+
+        let empty_src_with_setup = compiler.parse_vue3(
+            "EmptySrcAndSetup.vue",
+            r#"<script src=""></script><script setup src=""></script>"#,
+        );
+        assert!(empty_src_with_setup.errors.is_empty());
+        assert!(empty_src_with_setup.descriptor.script.is_some());
+        assert!(empty_src_with_setup.descriptor.script_setup.is_some());
+    }
+
+    #[test]
+    fn vue3_parse_reports_functional_template_attr_like_official_parser() {
+        let mut compiler = SfcCompiler::new();
+        let result = compiler.parse_vue3(
+            "Functional.vue",
+            r#"<template functional="x"><div/></template><template functional>b</template>"#,
+        );
+
+        assert_eq!(
+            result
+                .errors
+                .iter()
+                .map(|error| error.message.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "<template functional> is no longer supported in Vue 3, since functional components no longer have significant performance difference from stateful ones. Just use a normal <template> instead.",
+                "Single file component can contain only one <template> element",
+            ]
+        );
+        let projected =
+            vue3_sfc_parse_result_value(&result, &Vue3SfcParseProjectionOptions::default());
+        assert_eq!(
+            projected["errors"][0]["loc"]["source"],
+            json!("functional=\"x\"")
+        );
+        assert_eq!(projected["errors"][0]["loc"]["start"]["offset"], json!(10));
+        assert_eq!(
+            projected["errors"][1]["loc"]["source"],
+            json!("<template functional>b</template>")
         );
     }
 

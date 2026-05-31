@@ -1175,7 +1175,7 @@ fn vue3_sfc_attach_template_ast(
     let Some(template) = descriptor.template.as_ref() else {
         return;
     };
-    if template.attrs.src.is_some() {
+    if template.attrs.has_src_attr() {
         return;
     }
     let ast = vue3_sfc_template_ast_value(descriptor, template, parse_options);
@@ -4504,6 +4504,44 @@ mod tests {
         assert_eq!(
             parsed["errors"][1]["message"],
             json!("<script> cannot use the \"src\" attribute when <script setup> is also present because they must be processed together.")
+        );
+    }
+
+    #[test]
+    fn vue3_sfc_bridge_parse_preserves_src_presence_and_functional_template_error() {
+        let src_parsed = dispatch(
+            "sfc.parse",
+            json!({
+                "source": "<template src></template><script src></script><style src></style>",
+                "filename": "BoolSrc.vue"
+            }),
+        )
+        .expect("vue3 sfc parse");
+
+        let descriptor = &src_parsed["descriptor"];
+        assert_eq!(descriptor["template"]["attrs"]["src"], json!(true));
+        assert!(descriptor["template"].get("src").is_none());
+        assert!(descriptor["template"].get("map").is_none());
+        assert!(descriptor["template"].get("ast").is_none());
+        assert_eq!(descriptor["script"]["attrs"]["src"], json!(true));
+        assert_eq!(descriptor["styles"][0]["attrs"]["src"], json!(true));
+        assert_eq!(src_parsed["errors"], json!([]));
+
+        let functional = dispatch(
+            "sfc.parse",
+            json!({
+                "source": r#"<template functional="x"><div/></template>"#,
+                "filename": "Functional.vue"
+            }),
+        )
+        .expect("vue3 sfc parse");
+        assert_eq!(
+            functional["errors"][0]["message"],
+            json!("<template functional> is no longer supported in Vue 3, since functional components no longer have significant performance difference from stateful ones. Just use a normal <template> instead.")
+        );
+        assert_eq!(
+            functional["errors"][0]["loc"]["source"],
+            json!("functional=\"x\"")
         );
     }
 

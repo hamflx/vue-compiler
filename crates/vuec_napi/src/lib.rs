@@ -390,7 +390,9 @@ pub fn parse_sfc_result(env: Env, source: String, options: Option<Unknown>) -> R
     let result = compiler.parse_vue3_with_options(filename, &source, parse_options.clone());
     let projection_options = vue3_sfc_parse_projection_options(&raw_options, &parse_options);
     let mut value = vuec_sfc::vue3_sfc_parse_result_value(&result, &projection_options);
-    vue3_sfc_attach_template_ast(&mut value, &result.descriptor, &raw_options);
+    if let Some(descriptor_value) = value.get_mut("descriptor") {
+        vue3_sfc_attach_template_ast(descriptor_value, &result.descriptor, &raw_options);
+    }
     to_json_string(value)
 }
 
@@ -1519,7 +1521,7 @@ fn vue3_sfc_attach_template_ast(
     let Some(template) = descriptor.template.as_ref() else {
         return;
     };
-    if template.attrs.src.is_some() {
+    if template.attrs.has_src_attr() {
         return;
     }
     let ast = vue3_sfc_template_ast_value(descriptor, template, parse_options);
@@ -4081,6 +4083,41 @@ mod tests {
         })));
 
         assert!(!options.transform_asset_urls);
+    }
+
+    #[test]
+    fn vue3_sfc_parse_result_attaches_template_ast_to_descriptor() {
+        let mut compiler = SfcCompiler::new();
+        let result = compiler.parse_vue3(
+            "Functional.vue",
+            r#"<template functional="x"><div/></template>"#,
+        );
+        let mut value = vuec_sfc::vue3_sfc_parse_result_value(
+            &result,
+            &Vue3SfcParseProjectionOptions::default(),
+        );
+        if let Some(descriptor_value) = value.get_mut("descriptor") {
+            vue3_sfc_attach_template_ast(descriptor_value, &result.descriptor, &Value::Null);
+        }
+
+        assert_eq!(
+            value["descriptor"]["template"]["ast"]["children"][0]["tag"],
+            json!("div")
+        );
+        assert_eq!(
+            value["errors"][0]["loc"]["source"],
+            json!("functional=\"x\"")
+        );
+
+        let src_result = compiler.parse_vue3("Src.vue", "<template src></template>");
+        let mut src_value = vuec_sfc::vue3_sfc_parse_result_value(
+            &src_result,
+            &Vue3SfcParseProjectionOptions::default(),
+        );
+        if let Some(descriptor_value) = src_value.get_mut("descriptor") {
+            vue3_sfc_attach_template_ast(descriptor_value, &src_result.descriptor, &Value::Null);
+        }
+        assert!(src_value["descriptor"]["template"].get("ast").is_none());
     }
 
     #[test]
