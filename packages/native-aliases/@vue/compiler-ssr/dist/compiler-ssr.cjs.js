@@ -4,11 +4,27 @@ const native = require('@vuec-rs/native');
 
 function compile(source) {
   const options = arguments.length > 1 ? arguments[1] : undefined;
+  let result;
   if (source && typeof source === 'object' && source.type === 0 && Array.isArray(source.children)) {
     const payload = vue3AstCompilePayload(source, options);
-    return native.compileVue3Ssr(payload.source, payload.options);
+    result = native.compileVue3Ssr(payload.source, payload.options);
+  } else {
+    result = native.compileVue3Ssr(String(source || ''), options || {});
   }
-  return native.compileVue3Ssr(String(source || ''), options || {});
+  return hydrateCompileResult(result);
+}
+
+function hydrateCompileResult(result) {
+  if (!result || typeof result !== 'object') return result;
+  if (Array.isArray(result.ast_helpers)) {
+    const helpers = new Set(result.ast_helpers.map(name => Symbol(name)));
+    delete result.ast_helpers;
+    result.ast = {
+      ...(result.ast || {}),
+      helpers,
+    };
+  }
+  return result;
 }
 
 function vue3AstCompilePayload(ast, options) {

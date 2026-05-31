@@ -2420,6 +2420,7 @@ fn alias_function_expression(
             );
             let is_vue27_sfc_compile_script =
                 target.kind == TargetKind::Vue27Sfc && export_name == "compileScript";
+            let is_vue3_ssr_compile = target.kind == TargetKind::Vue3Ssr && export_name == "compile";
             let is_sfc_compile_style = matches!(
                 (target.kind, export_name),
                 (
@@ -2459,6 +2460,8 @@ fn alias_function_expression(
                 )
             } else if is_vue27_sfc_compile_script {
                 format!("hydrateVue27CompileScriptResult({call})")
+            } else if is_vue3_ssr_compile {
+                format!("hydrateVue3SsrCompileResult({call})")
             } else if is_vue2_template_compile {
                 format!(
                     "(() => {{ const __vuecVue2Result = {call}; emitVue2CompileWarnings(__vuecVue2Result, __vuecPayload.options); return __vuecVue2Result; }})()"
@@ -7952,6 +7955,16 @@ function normalizeStyleAliasResult(result) {
   return out;
 }
 
+function hydrateVue3SsrCompileResult(result) {
+  if (!result || typeof result !== 'object') return result;
+  if (Array.isArray(result.ast_helpers)) {
+    const helpers = new Set(result.ast_helpers.map(name => Symbol(name)));
+    delete result.ast_helpers;
+    result.ast = Object.assign({}, result.ast || {}, { helpers });
+  }
+  return result;
+}
+
 function vue27StylePostcssRequired(options) {
   return !!(
     options &&
@@ -12731,6 +12744,7 @@ fn rewrite_vue3_ssr_rust_backed_public_compile_imports(prepared_root: &Path) -> 
     rewrite_vue3_ssr_spec_compile_import(&tests.join("ssrVFor.spec.ts"))?;
     rewrite_vue3_ssr_spec_compile_import(&tests.join("ssrScopeId.spec.ts"))?;
     rewrite_vue3_ssr_spec_compile_import(&tests.join("ssrFallthroughAttrs.spec.ts"))?;
+    rewrite_vue3_ssr_spec_compile_import(&tests.join("ssrInjectCssVars.spec.ts"))?;
     rewrite_vue3_ssr_spec_compile_import(&tests.join("ssrVShow.spec.ts"))?;
     rewrite_vue3_ssr_spec_compile_import(&tests.join("ssrVModel.spec.ts"))?;
     rewrite_vue3_ssr_spec_compile_import(&tests.join("ssrSlotOutlet.spec.ts"))?;
@@ -13280,6 +13294,7 @@ fn conformance_coverage_file_kind(
         || path.ends_with("packages/compiler-dom/__tests__/transforms/validateHtmlNesting.spec.ts")
         || path.ends_with("packages/compiler-ssr/__tests__/ssrScopeId.spec.ts")
         || path.ends_with("packages/compiler-ssr/__tests__/ssrFallthroughAttrs.spec.ts")
+        || path.ends_with("packages/compiler-ssr/__tests__/ssrInjectCssVars.spec.ts")
         || path.ends_with("packages/compiler-ssr/__tests__/ssrText.spec.ts")
         || path.ends_with("packages/compiler-ssr/__tests__/ssrPortal.spec.ts")
         || path.ends_with("packages/compiler-ssr/__tests__/ssrSlotOutlet.spec.ts")
@@ -13997,6 +14012,31 @@ mod tests {
         assert!(ALIAS_RUNTIME_JS.contains("function normalizeStyleAliasResult"));
         assert!(ALIAS_RUNTIME_JS.contains("function vue3StyleBridgePayload"));
         assert!(ALIAS_RUNTIME_JS.contains("VUEC_STYLE_DEPRECATED_SCOPED_SELECTOR"));
+    }
+
+    #[test]
+    fn vue3_ssr_compile_alias_hydrates_public_ast_helpers() {
+        let target = TargetSpec {
+            version_line: VersionLine::Vue3,
+            package: "@vue/compiler-ssr",
+            entry: "@vue/compiler-ssr",
+            kind: TargetKind::Vue3Ssr,
+        };
+        let detail = ApiExportDetail {
+            kind: "function".into(),
+            tag: "[object Function]".into(),
+            name: Some("compile".into()),
+            function_arity: Some(2),
+            is_async_function: Some(false),
+            is_class_like: Some(false),
+            own_property_names: vec!["length".into(), "name".into(), "prototype".into()],
+        };
+        let expression = alias_export_expression(target, "compile", Some(&detail));
+
+        assert!(expression.contains("hydrateVue3SsrCompileResult"));
+        assert!(expression.contains("vue3.ssr.compile"));
+        assert!(ALIAS_RUNTIME_JS.contains("function hydrateVue3SsrCompileResult"));
+        assert!(ALIAS_RUNTIME_JS.contains("new Set(result.ast_helpers.map(name => Symbol(name)))"));
     }
 
     #[test]
@@ -15198,6 +15238,11 @@ mod tests {
         )
         .unwrap();
         fs::write(
+            tests.join("ssrInjectCssVars.spec.ts"),
+            "import { compile } from '../src'\n",
+        )
+        .unwrap();
+        fs::write(
             tests.join("ssrVShow.spec.ts"),
             "import { compile } from '../src'\n",
         )
@@ -15242,6 +15287,8 @@ mod tests {
         let scope_id_spec = fs::read_to_string(tests.join("ssrScopeId.spec.ts")).unwrap();
         let fallthrough_attrs_spec =
             fs::read_to_string(tests.join("ssrFallthroughAttrs.spec.ts")).unwrap();
+        let inject_css_vars_spec =
+            fs::read_to_string(tests.join("ssrInjectCssVars.spec.ts")).unwrap();
         let vshow_spec = fs::read_to_string(tests.join("ssrVShow.spec.ts")).unwrap();
         let vmodel_spec = fs::read_to_string(tests.join("ssrVModel.spec.ts")).unwrap();
         let slot_outlet_spec = fs::read_to_string(tests.join("ssrSlotOutlet.spec.ts")).unwrap();
@@ -15258,6 +15305,7 @@ mod tests {
         assert!(vfor_spec.contains("from '@vue/compiler-ssr'"));
         assert!(scope_id_spec.contains("from '@vue/compiler-ssr'"));
         assert!(fallthrough_attrs_spec.contains("from '@vue/compiler-ssr'"));
+        assert!(inject_css_vars_spec.contains("from '@vue/compiler-ssr'"));
         assert!(vshow_spec.contains("from '@vue/compiler-ssr'"));
         assert!(vmodel_spec.contains("from '@vue/compiler-ssr'"));
         assert!(slot_outlet_spec.contains("from '@vue/compiler-ssr'"));

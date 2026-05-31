@@ -15048,7 +15048,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         if vars.is_empty() {
             return None;
         }
-        Some(rewrite_expression_with_scope(vars, self.options, scope))
+        Some(rewrite_ssr_css_vars_expression(vars, self.options, scope))
     }
 
     fn root_attrs_for_children(&self, children: &[NodeId]) -> Option<SsrRootAttrs> {
@@ -15096,6 +15096,61 @@ impl<'a> Vue3SsrMirCodegen<'a> {
             .is_some_and(|value| {
                 value.starts_with("<!--") && value != "<!--[-->" && value != "<!--]-->"
             })
+    }
+
+    fn is_ssr_comment_or_fragment_marker_span(
+        &self,
+        children: &[NodeId],
+        span: SsrRootSpan,
+    ) -> bool {
+        children
+            .get(span.start)
+            .and_then(|id| self.ssr_push_string(*id))
+            .is_some_and(|value| value.starts_with("<!--"))
+    }
+
+    fn root_attrs_for_branch_children(
+        &self,
+        children: &[NodeId],
+        root_attrs: Option<&SsrRootAttrs>,
+    ) -> Option<SsrRootAttrs> {
+        let root_attrs = root_attrs?;
+        if root_attrs.attrs.is_none() {
+            return Some(root_attrs.clone());
+        }
+        let root_spans = self.root_spans(children);
+        let visible_spans = root_spans
+            .iter()
+            .copied()
+            .filter(|span| !self.is_ssr_comment_or_fragment_marker_span(children, *span))
+            .collect::<Vec<_>>();
+        if let [root_span] = visible_spans.as_slice() {
+            if children
+                .get(root_span.start)
+                .is_some_and(|root| self.node_accepts_root_attrs(*root))
+            {
+                let mut attrs = root_attrs.clone();
+                attrs.target_start = Some(root_span.start);
+                return Some(attrs);
+            }
+        }
+        self.root_attrs_css_vars_only(root_attrs)
+    }
+
+    fn root_attrs_css_vars_only(&self, root_attrs: &SsrRootAttrs) -> Option<SsrRootAttrs> {
+        root_attrs.css_vars.as_ref().map(|css_vars| SsrRootAttrs {
+            attrs: None,
+            css_vars: Some(css_vars.clone()),
+            target_start: None,
+        })
+    }
+
+    fn ssr_css_vars_only_root_attrs(&self) -> Option<SsrRootAttrs> {
+        self.has_ssr_css_vars().then(|| SsrRootAttrs {
+            attrs: None,
+            css_vars: Some("_cssVars".to_string()),
+            target_start: None,
+        })
     }
 
     fn root_attr_node_for_children(
@@ -15575,8 +15630,13 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                 Vue3SsrMirKind::Teleport(_) => {
                     push_unique_helper(&mut helpers, RuntimeHelper::Vue3SsrRenderTeleport);
                 }
-                Vue3SsrMirKind::Suspense(_) => {
+                Vue3SsrMirKind::Suspense(suspense) => {
                     push_unique_helper(&mut helpers, RuntimeHelper::Vue3SsrRenderSuspense);
+                    if self.has_ssr_css_vars()
+                        && self.suspense_slots_need_css_var_ssr_render_attrs(suspense)
+                    {
+                        push_unique_helper(&mut helpers, RuntimeHelper::Vue3SsrRenderAttrs);
+                    }
                 }
             }
         }
@@ -15763,6 +15823,22 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         children
             .get(span.start)
             .is_some_and(|root| self.node_needs_root_attr_ssr_render_attrs(*root))
+    }
+
+    fn suspense_slots_need_css_var_ssr_render_attrs(&self, suspense: &Vue3SsrSuspense) -> bool {
+        suspense
+            .slots
+            .slots
+            .iter()
+            .any(|slot| self.children_need_css_var_ssr_render_attrs(&slot.children))
+    }
+
+    fn children_need_css_var_ssr_render_attrs(&self, children: &[NodeId]) -> bool {
+        self.root_spans(children).iter().any(|span| {
+            children
+                .get(span.start)
+                .is_some_and(|root| self.node_needs_root_attr_ssr_render_attrs(*root))
+        })
     }
 
     fn push_ssr_attr_helpers(
@@ -18026,22 +18102,14 @@ impl<'a> Vue3SsrMirCodegen<'a> {
             .unwrap_or_else(|| scope.clone());
         writer.push_line(&format!("{}: () => {{", json_key(&slot.name)));
         writer.indent();
-        let mut index = 0usize;
-        while index < slot.children.len() {
-            if let Some((html, next_index)) = self.render_ssr_template_literal_slice(
-                &slot.children,
-                index,
-                &child_scope,
-                None,
-                None,
-            ) {
-                writer.push_line(&format!("_push({html})"));
-                index = next_index;
-                continue;
-            }
-            self.render_node(slot.children[index], &child_scope, None, writer);
-            index += 1;
-        }
+        let root_attrs = self.ssr_css_vars_only_root_attrs();
+        self.render_child_slice(
+            &slot.children,
+            &child_scope,
+            None,
+            root_attrs.as_ref(),
+            writer,
+        );
         writer.dedent();
         writer.push_line("},");
     }
@@ -18915,7 +18983,14 @@ impl<'a> Vue3SsrMirCodegen<'a> {
             return None;
         };
         let (primary_children, alternate) = self.split_if_children(&node.children);
-        self.render_child_slice(&primary_children, scope, None, root_attrs, writer);
+        let branch_root_attrs = self.root_attrs_for_branch_children(&primary_children, root_attrs);
+        self.render_child_slice(
+            &primary_children,
+            scope,
+            None,
+            branch_root_attrs.as_ref(),
+            writer,
+        );
         alternate
     }
 
@@ -25896,6 +25971,32 @@ fn split_top_level_like(source: &str, separator: char) -> Vec<&str> {
     items
 }
 
+fn find_top_level_char(source: &str, target: char) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut escape = false;
+    for (index, ch) in source.char_indices() {
+        if let Some(active_quote) = quote {
+            if escape {
+                escape = false;
+            } else if ch == '\\' {
+                escape = true;
+            } else if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' | '`' => quote = Some(ch),
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            _ if ch == target && depth == 0 => return Some(index),
+            _ => {}
+        }
+    }
+    None
+}
+
 fn capitalize(value: &str) -> String {
     let mut chars = value.chars();
     let Some(first) = chars.next() else {
@@ -25930,6 +26031,52 @@ fn rewrite_expression_with_scope(
         rewrite_js_like_expression(expression, options)
     } else {
         rewrite_js_like_expression_with_locals(expression, options, &scope.locals)
+    }
+}
+
+fn rewrite_ssr_css_vars_expression(
+    expression: &str,
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+) -> String {
+    let trimmed = expression.trim();
+    let Some(body) = trimmed
+        .strip_prefix('{')
+        .and_then(|value| value.strip_suffix('}'))
+    else {
+        return rewrite_expression_with_scope(trimmed, options, scope);
+    };
+    let properties = split_top_level_like(body, ',')
+        .into_iter()
+        .map(|property| rewrite_ssr_css_var_property(property, options, scope))
+        .collect::<Vec<_>>();
+    format!("{{ {} }}", properties.join(", "))
+}
+
+fn rewrite_ssr_css_var_property(
+    property: &str,
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+) -> String {
+    let property = property.trim();
+    if property.starts_with("...") {
+        return rewrite_expression_with_scope(property, options, scope);
+    }
+    if let Some(colon) = find_top_level_char(property, ':') {
+        let key = property[..colon].trim();
+        let value = property[colon + 1..].trim();
+        return format!(
+            "{key}: {}",
+            rewrite_expression_with_scope(value, options, scope)
+        );
+    }
+    if is_simple_identifier(property) {
+        format!(
+            "{property}: {}",
+            rewrite_identifier_with_scope(property, options, scope)
+        )
+    } else {
+        rewrite_expression_with_scope(property, options, scope)
     }
 }
 
@@ -32412,6 +32559,49 @@ mod tests {
         let dynamic_fragment = render(r#"<div v-if="true"/><div/>"#, 86);
         assert!(!dynamic_fragment.contains("_ssrRenderAttrs(_attrs)"));
         assert!(dynamic_fragment.contains(r#"_push(`<div></div><!--]-->`)"#));
+    }
+
+    #[test]
+    fn generate_vue3_ssr_mir_injects_css_vars_across_fragments_and_suspense() {
+        let options = Vue3CompilerOptions {
+            mode: "module".into(),
+            prefix_identifiers: true,
+            ssr_css_vars: Some("{ color }".into()),
+            ..Vue3CompilerOptions::default()
+        };
+        let render = |source: &str, file_id: u32| {
+            let source = TemplateSource {
+                filename: "foo.vue".into(),
+                source: source.into(),
+                file_id: FileId(file_id),
+                base_offset: 0,
+            };
+            let ast = Vue3Dialect::base_parse(source, &options);
+            let result = lower_vue3_ast_to_ssr_mir(&ast, &options);
+            generate_vue3_ssr_mir(&result.mir, &result.js, &options).code
+        };
+
+        let basic = render(r#"<div/>"#, 87);
+        assert!(basic.contains("const _cssVars = { style: { color: _ctx.color }}"));
+        assert!(basic.contains(r#"_ssrRenderAttrs(_mergeProps(_attrs, _cssVars))"#));
+
+        let fragment = render(r#"<div/><div/>"#, 88);
+        assert_eq!(fragment.matches("_ssrRenderAttrs(_cssVars)").count(), 2);
+        assert!(!fragment.contains("_mergeProps(_attrs, _cssVars)"));
+
+        let branches = render(
+            r#"<div v-if="ok"/><template v-else><div/><div/></template>"#,
+            89,
+        );
+        assert!(branches.contains(r#"_ssrRenderAttrs(_mergeProps(_attrs, _cssVars))"#));
+        assert_eq!(branches.matches("_ssrRenderAttrs(_cssVars)").count(), 2);
+
+        let suspense = render(
+            r#"<Suspense><div>ok</div><template #fallback><div>fallback</div></template></Suspense>"#,
+            90,
+        );
+        assert!(suspense.contains(r#"_push(`<div${_ssrRenderAttrs(_cssVars)}>fallback</div>`)"#));
+        assert!(suspense.contains(r#"_push(`<div${_ssrRenderAttrs(_cssVars)}>ok</div>`)"#));
     }
 
     #[test]

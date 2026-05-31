@@ -1329,6 +1329,7 @@ fn vue3_ssr_compile_value(
     json!({
         "code": result.code,
         "map": result.map,
+        "ast_helpers": result.ast_helpers,
         "ast_summary": result.ast_summary,
         "diagnostics": vue3_compile_diagnostics_value(
             &result.diagnostics,

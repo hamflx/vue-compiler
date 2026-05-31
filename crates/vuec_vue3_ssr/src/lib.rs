@@ -74,6 +74,8 @@ pub struct SsrCompileResult {
     pub code: String,
     /// Optional source map.
     pub map: Option<vuec_codegen::SourceMapArtifact>,
+    /// Public AST helper names observed by official SSR compile callers.
+    pub ast_helpers: Vec<String>,
     /// Compact AST/SSR transform summary.
     pub ast_summary: String,
     /// Diagnostics produced during compilation.
@@ -96,6 +98,7 @@ pub fn compile(source: TemplateSource, options: SsrCompilerOptions) -> SsrCompil
         generated.map = source_map_for_render(&generated.code, &ast, &source, &options.core);
     }
     SsrCompileResult {
+        ast_helpers: vue3_ssr_public_ast_helpers(&generated.code, &generated.preamble),
         code: generated.code,
         map: generated.map,
         ast_summary: format!(
@@ -155,6 +158,58 @@ fn transform_ssr_asset_urls(ast: &mut Vue3Ast, options: &SsrCompilerOptions) {
 fn generate_mir_ssr(ast: &Vue3Ast, options: &SsrCompilerOptions) -> CodegenResult {
     let lowering = lower_vue3_ast_to_ssr_mir(ast, &options.core);
     generate_vue3_ssr_mir(&lowering.mir, &lowering.js, &options.core)
+}
+
+fn vue3_ssr_public_ast_helpers(code: &str, preamble: &str) -> Vec<String> {
+    let probe = format!("{preamble}\n{code}");
+    const VUE_HELPERS: &[&str] = &[
+        "resolveDirective",
+        "withDirectives",
+        "setBlockTracking",
+        "openBlock",
+        "createElementVNode",
+        "createElementBlock",
+        "createCommentVNode",
+        "createTextVNode",
+        "BaseTransition",
+        "Transition",
+        "TransitionGroup",
+        "Teleport",
+        "Suspense",
+        "KeepAlive",
+        "Fragment",
+        "toDisplayString",
+        "renderList",
+        "renderSlot",
+        "normalizeClass",
+        "normalizeProps",
+        "normalizeStyle",
+        "guardReactiveProps",
+        "mergeProps",
+        "resolveComponent",
+        "resolveDynamicComponent",
+        "withCtx",
+        "createBlock",
+        "createVNode",
+        "createSlots",
+        "createStaticVNode",
+        "isMemoSame",
+        "withMemo",
+        "toHandlers",
+        "camelize",
+        "capitalize",
+        "toHandlerKey",
+        "pushScopeId",
+        "popScopeId",
+        "unref",
+        "isRef",
+    ];
+    VUE_HELPERS
+        .iter()
+        .copied()
+        .filter(|helper| probe.contains(&format!("_{helper}")))
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 /// Summarizes SSR-relevant nodes from a Vue 3 AST node-kind slice.
