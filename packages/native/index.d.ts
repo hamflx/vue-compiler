@@ -19,11 +19,14 @@ export interface Vue3CodegenResult {
 export interface SfcDescriptor {
   filename: string;
   source: string;
-  template?: unknown;
-  script?: unknown;
-  script_setup?: unknown;
+  template: unknown;
+  script: unknown;
+  scriptSetup: unknown;
   styles: unknown[];
-  custom_blocks: unknown[];
+  customBlocks: unknown[];
+  cssVars: string[];
+  slotted: boolean;
+  shouldForceReload?: unknown;
 }
 
 export function version(): string;

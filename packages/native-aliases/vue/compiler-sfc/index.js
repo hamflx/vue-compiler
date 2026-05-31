@@ -5,16 +5,13 @@ const native = require('@vuec-rs/native');
 function parse(input) {
   const options = arguments.length > 1 ? arguments[1] : undefined;
   const opts = options || {};
-  let descriptor;
   if (input && typeof input === 'object') {
-    descriptor = native.parseSfc(String(input.source || ''), {
+    return normalizeVue27ParseComponentResult(native.parseVue27SfcComponent(String(input.source || ''), {
       ...opts,
       filename: input.filename || opts.filename,
-    });
-  } else {
-    descriptor = native.parseSfc(String(input || ''), opts);
+    }));
   }
-  return normalizeVue27Descriptor(descriptor);
+  return normalizeVue27ParseComponentResult(native.parseVue27SfcComponent(String(input || ''), opts));
 }
 
 function parseComponent(source) {

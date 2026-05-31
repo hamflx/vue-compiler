@@ -119,6 +119,24 @@ pub struct SfcDescriptor {
     pub custom_blocks: Vec<SfcBlock>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+/// Options for projecting Vue 3 `parse()` descriptor output.
+pub struct Vue3SfcParseProjectionOptions {
+    /// Whether template/style/script source maps are emitted.
+    pub source_map: bool,
+    /// Source-map source root.
+    pub source_root: String,
+}
+
+impl Default for Vue3SfcParseProjectionOptions {
+    fn default() -> Self {
+        Self {
+            source_map: true,
+            source_root: String::new(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 /// Vue 2.7 `parseComponent` options.
 pub struct Vue27ParseComponentOptions {
@@ -1164,6 +1182,196 @@ fn descriptor_from_blocks(
     }
 
     descriptor
+}
+
+/// Projects a Rust SFC descriptor into the Vue 3 public `parse()` result shape.
+pub fn vue3_sfc_parse_result_value(
+    descriptor: &SfcDescriptor,
+    options: &Vue3SfcParseProjectionOptions,
+) -> serde_json::Value {
+    json!({
+        "descriptor": vue3_sfc_descriptor_value(descriptor, options),
+        "errors": [],
+    })
+}
+
+/// Projects a Rust SFC descriptor into the Vue 3 public descriptor shape.
+pub fn vue3_sfc_descriptor_value(
+    descriptor: &SfcDescriptor,
+    options: &Vue3SfcParseProjectionOptions,
+) -> serde_json::Value {
+    json!({
+        "filename": descriptor.filename,
+        "source": descriptor.source,
+        "template": descriptor.template.as_ref().map(|block| vue3_sfc_block_value(descriptor, block, options, true)),
+        "script": descriptor.script.as_ref().map(|block| vue3_sfc_block_value(descriptor, block, options, true)),
+        "scriptSetup": descriptor.script_setup.as_ref().map(|block| vue3_sfc_block_value(descriptor, block, options, false)),
+        "styles": descriptor.styles.iter().map(|block| vue3_sfc_block_value(descriptor, block, options, true)).collect::<Vec<_>>(),
+        "customBlocks": descriptor.custom_blocks.iter().map(|block| vue3_sfc_block_value(descriptor, block, options, true)).collect::<Vec<_>>(),
+        "cssVars": descriptor_css_vars(descriptor, CssVarCollectOptions::default()),
+        "slotted": vue3_sfc_descriptor_has_slotted_styles(descriptor),
+        "shouldForceReload": serde_json::Value::Null,
+    })
+}
+
+fn vue3_sfc_block_value(
+    descriptor: &SfcDescriptor,
+    block: &SfcBlock,
+    options: &Vue3SfcParseProjectionOptions,
+    include_map: bool,
+) -> serde_json::Value {
+    let mut value = serde_json::Map::new();
+    value.insert("type".into(), json!(block.type_name));
+    value.insert("content".into(), json!(block.content));
+    value.insert("loc".into(), vue3_sfc_block_loc_value(descriptor, block));
+    value.insert("attrs".into(), vue3_sfc_attrs_value(&block.attrs));
+
+    if let Some(setup) = block.attrs.raw.get("setup") {
+        value.insert("setup".into(), vue3_sfc_attr_value(setup));
+    }
+    if let Some(lang) = block.attrs.lang.as_ref() {
+        value.insert("lang".into(), json!(lang));
+    }
+    if let Some(src) = block.attrs.src.as_ref() {
+        value.insert("src".into(), json!(src));
+    }
+    if block.type_name == "style" && block.attrs.scoped {
+        value.insert("scoped".into(), json!(true));
+    }
+    if block.type_name == "style" {
+        if let Some(module) = block.attrs.raw.get("module") {
+            value.insert("module".into(), vue3_sfc_attr_value(module));
+        } else if let Some(module) = block.attrs.module.as_ref() {
+            value.insert(
+                "module".into(),
+                if module.is_empty() {
+                    json!(true)
+                } else {
+                    json!(module)
+                },
+            );
+        }
+    }
+    if options.source_map && include_map && block.attrs.src.is_none() {
+        value.insert(
+            "map".into(),
+            vue3_sfc_block_map_value(descriptor, block, options),
+        );
+    }
+
+    serde_json::Value::Object(value)
+}
+
+fn vue3_sfc_attrs_value(attrs: &SfcBlockAttrs) -> serde_json::Value {
+    let mut object = serde_json::Map::new();
+    for (name, value) in &attrs.raw {
+        object.insert(name.clone(), vue3_sfc_attr_value(value));
+    }
+    serde_json::Value::Object(object)
+}
+
+fn vue3_sfc_attr_value(value: &SfcAttrValue) -> serde_json::Value {
+    match value {
+        SfcAttrValue::Bool(value) => json!(value),
+        SfcAttrValue::String(value) if value.is_empty() => json!(true),
+        SfcAttrValue::String(value) => json!(value),
+    }
+}
+
+fn vue3_sfc_block_loc_value(descriptor: &SfcDescriptor, block: &SfcBlock) -> serde_json::Value {
+    let start = block.content_start.min(descriptor.source.len());
+    let end = block.content_end.min(descriptor.source.len()).max(start);
+    json!({
+        "start": vue3_sfc_position_value(&descriptor.source, start),
+        "end": vue3_sfc_position_value(&descriptor.source, end),
+        "source": descriptor.source.get(start..end).unwrap_or(&block.content),
+    })
+}
+
+fn vue3_sfc_position_value(source: &str, offset: usize) -> serde_json::Value {
+    let mut line = 1usize;
+    let mut column = 1usize;
+    let mut byte_index = 0usize;
+    let mut utf16_offset = 0usize;
+    for ch in source.chars() {
+        if byte_index >= offset {
+            break;
+        }
+        byte_index += ch.len_utf8();
+        if ch == '\n' {
+            line += 1;
+            column = 1;
+        } else {
+            column += ch.len_utf16();
+        }
+        utf16_offset += ch.len_utf16();
+    }
+    if offset > byte_index {
+        let extra = offset - byte_index;
+        column += extra;
+        utf16_offset += extra;
+    }
+    json!({
+        "column": column,
+        "line": line,
+        "offset": utf16_offset,
+    })
+}
+
+fn vue3_sfc_block_map_value(
+    descriptor: &SfcDescriptor,
+    block: &SfcBlock,
+    options: &Vue3SfcParseProjectionOptions,
+) -> serde_json::Value {
+    let filename = descriptor.filename.replace('\\', "/");
+    let mut builder = SourceMapBuilder::new().file(filename.clone());
+    builder.add_source_content(filename.clone(), descriptor.source.clone());
+    for (line_index, line) in block.content.split('\n').enumerate() {
+        let mut generated_column = 0usize;
+        let mut local_byte = block
+            .content
+            .split('\n')
+            .take(line_index)
+            .map(|line| line.len() + 1)
+            .sum::<usize>();
+        for ch in line.chars() {
+            if !ch.is_whitespace() {
+                let absolute = block.content_start + local_byte;
+                builder.add_mapping(
+                    line_index + 1,
+                    generated_column,
+                    Some(Span::new(descriptor.source_file, absolute, absolute)),
+                    Some(filename.clone()),
+                );
+            }
+            generated_column += ch.len_utf16();
+            local_byte += ch.len_utf8();
+        }
+    }
+    let mut value = serde_json::to_value(builder.build()).unwrap_or_else(|_| {
+        json!({
+            "version": 3,
+            "sources": [filename],
+            "names": [],
+            "mappings": "",
+            "file": descriptor.filename.replace('\\', "/"),
+            "sourcesContent": [descriptor.source],
+        })
+    });
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "sourceRoot".into(),
+            json!(options.source_root.replace('\\', "/")),
+        );
+    }
+    value
+}
+
+fn vue3_sfc_descriptor_has_slotted_styles(descriptor: &SfcDescriptor) -> bool {
+    descriptor.styles.iter().any(|style| {
+        style.attrs.scoped
+            && (style.content.contains(":slotted(") || style.content.contains("::v-slotted("))
+    })
 }
 
 fn project_vue27_errors(
@@ -7243,6 +7451,68 @@ mod tests {
         assert!(descriptor.template.is_some());
         assert!(descriptor.script_setup.is_some());
         assert_eq!(descriptor.styles.len(), 1);
+    }
+
+    #[test]
+    fn vue3_public_parse_projection_uses_official_descriptor_keys() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "Comp.vue",
+            concat!(
+                r#"<template><div>{{ msg }}</div></template>"#,
+                r#"<script setup lang="ts">const msg: string = 'hi'</script>"#,
+                r#"<style scoped module>.a{ color: v-bind(color); }</style>"#,
+                r#"<i18n lang="json">{"en":"hi"}</i18n>"#,
+            ),
+        );
+        let projected = vue3_sfc_descriptor_value(
+            &descriptor,
+            &Vue3SfcParseProjectionOptions {
+                source_map: false,
+                source_root: String::new(),
+            },
+        );
+
+        assert_eq!(projected["scriptSetup"]["type"], json!("script"));
+        assert_eq!(projected["scriptSetup"]["setup"], json!(true));
+        assert_eq!(projected["scriptSetup"]["lang"], json!("ts"));
+        assert!(projected.get("script_setup").is_none());
+        assert_eq!(projected["styles"][0]["attrs"]["scoped"], json!(true));
+        assert_eq!(projected["styles"][0]["module"], json!(true));
+        assert_eq!(projected["customBlocks"][0]["type"], json!("i18n"));
+        assert_eq!(projected["customBlocks"][0]["lang"], json!("json"));
+        assert_eq!(projected["cssVars"], json!(["color"]));
+        assert_eq!(
+            projected["template"]["loc"]["source"],
+            json!("<div>{{ msg }}</div>")
+        );
+        assert!(projected["template"].get("map").is_none());
+    }
+
+    #[test]
+    fn vue3_public_parse_projection_maps_empty_attr_values_like_vue3() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "Comp.vue",
+            r#"<template src=""></template><script setup="named">x</script><style scoped="x" module="" src=""></style>"#,
+        );
+        let projected = vue3_sfc_descriptor_value(
+            &descriptor,
+            &Vue3SfcParseProjectionOptions {
+                source_map: true,
+                source_root: String::new(),
+            },
+        );
+
+        assert_eq!(projected["template"]["attrs"]["src"], json!(true));
+        assert_eq!(projected["template"]["src"], json!(""));
+        assert_eq!(projected["scriptSetup"]["attrs"]["setup"], json!("named"));
+        assert_eq!(projected["scriptSetup"]["setup"], json!("named"));
+        assert_eq!(projected["styles"][0]["attrs"]["module"], json!(true));
+        assert_eq!(projected["styles"][0]["module"], json!(true));
+        assert_eq!(projected["styles"][0]["attrs"]["scoped"], json!("x"));
+        assert_eq!(projected["styles"][0]["scoped"], json!(true));
+        assert!(projected["styles"][0].get("map").is_none());
     }
 
     #[test]

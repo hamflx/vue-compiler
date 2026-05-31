@@ -14,6 +14,7 @@
 - [x] Official API manifest generation and diff harness.
 - [x] Rust npm alias bridge and API manifest parity.
 - [x] Vue 3 SFC official output-contract parity and option-matrix closure.
+- [x] Vue 3 SFC public `parse()` descriptor projection slice: Rust SFC descriptors now project official public `scriptSetup` / `customBlocks` fields, attrs, block locs, source maps, cssVars, slotted, and Rust DOM template ASTs through generated and NAPI package boundaries; Vue 2.7 NAPI parse now stays on its version-specific SFC entry, and Vue 3 core preserves multi-line SSR CSS vars formatting surfaced by SFC conformance. The `shouldForceReload` function remains a non-JSON API-adapter/HMR edge, not a Rust compiler semantic claim.
 - [x] AST / HIR / MIR base arena migration and lowering pipeline alignment.
 - [x] Vue 3 public projection exactness for directive arg/exp/modifier spans and loc content.
 - [x] Development plan and goal wording aligned with `docs/3.AST_HIR_MIR_DESIGN.md` as the single AST/HIR/MIR structure constraint.

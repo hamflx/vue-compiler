@@ -28007,10 +28007,14 @@ fn rewrite_ssr_css_vars_expression(
     else {
         return rewrite_expression_with_scope(trimmed, options, scope);
     };
+    let multiline = body.contains('\n');
     let properties = split_top_level_like(body, ',')
         .into_iter()
         .map(|property| rewrite_ssr_css_var_property(property, options, scope))
         .collect::<Vec<_>>();
+    if multiline {
+        return format!("{{\n  {}\n}}", properties.join(",\n  "));
+    }
     format!("{{ {} }}", properties.join(", "))
 }
 
@@ -34617,6 +34621,26 @@ mod tests {
         let basic = render(r#"<div/>"#, 87);
         assert!(basic.contains("const _cssVars = { style: { color: _ctx.color }}"));
         assert!(basic.contains(r#"_ssrRenderAttrs(_mergeProps(_attrs, _cssVars))"#));
+
+        let multiline_options = Vue3CompilerOptions {
+            mode: "module".into(),
+            prefix_identifiers: true,
+            ssr_css_vars: Some("{\n  \":--x-color\": (color),\n  \":--x-size\": (size)\n}".into()),
+            ..Vue3CompilerOptions::default()
+        };
+        let multiline_source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div/>"#.into(),
+            file_id: FileId(91),
+            base_offset: 0,
+        };
+        let multiline_ast = Vue3Dialect::base_parse(multiline_source, &multiline_options);
+        let multiline = lower_vue3_ast_to_ssr_mir(&multiline_ast, &multiline_options);
+        let multiline_code =
+            generate_vue3_ssr_mir(&multiline.mir, &multiline.js, &multiline_options).code;
+        assert!(multiline_code.contains(
+            "const _cssVars = { style: {\n  \":--x-color\": (_ctx.color),\n  \":--x-size\": (_ctx.size)\n}}"
+        ));
 
         let fragment = render(r#"<div/><div/>"#, 88);
         assert_eq!(fragment.matches("_ssrRenderAttrs(_cssVars)").count(), 2);

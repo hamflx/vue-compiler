@@ -23,7 +23,7 @@ use vuec_sfc::{
     SfcAttrValue, SfcBlock, SfcBlockAttrs, SfcCompiler, SfcDescriptor, SfcScriptBlock,
     SfcScriptCompileOptions, SfcStyleCompileOptions, SfcTemplateCompileOptions,
     Vue27ParseComponentOptions, Vue27PrefixIdentifiersOptions, Vue27RewriteDefaultOptions,
-    Vue27SfcPad, Vue27TemplatePreprocessOptions,
+    Vue27SfcPad, Vue27TemplatePreprocessOptions, Vue3SfcParseProjectionOptions,
 };
 use vuec_source::FileId;
 use vuec_style::{compile_style, CssVarNameStyle, StyleCompileOptions};
@@ -353,10 +353,11 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
             let source = string_field(&payload, "source");
             let mut compiler = SfcCompiler::new();
             let descriptor = compiler.parse(filename, &source);
-            Ok(json!({
-                "descriptor": descriptor,
-                "errors": [],
-            }))
+            let projection_options = vue3_sfc_parse_projection_options(payload.get("options"));
+            let mut result =
+                vuec_sfc::vue3_sfc_parse_result_value(&descriptor, &projection_options);
+            vue3_sfc_attach_template_ast(&mut result, &descriptor, payload.get("options"));
+            Ok(result)
         }
         "sfc.vue27.parse" => {
             let filename = string_field_or(&payload, "filename", "anonymous.vue");
@@ -1125,6 +1126,81 @@ fn vue27_css_vars(descriptor: &SfcDescriptor) -> Vec<String> {
         }
     }
     vars
+}
+
+fn vue3_sfc_parse_projection_options(value: Option<&Value>) -> Vue3SfcParseProjectionOptions {
+    let mut options = Vue3SfcParseProjectionOptions::default();
+    let Some(value) = value else {
+        return options;
+    };
+    options.source_map = bool_option(value, "sourceMap", true);
+    options.source_root = value
+        .get("sourceRoot")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    options
+}
+
+fn vue3_sfc_attach_template_ast(
+    result: &mut Value,
+    descriptor: &SfcDescriptor,
+    parse_options: Option<&Value>,
+) {
+    let Some(template) = descriptor.template.as_ref() else {
+        return;
+    };
+    if template.attrs.src.is_some() {
+        return;
+    }
+    let ast = vue3_sfc_template_ast_value(descriptor, template, parse_options);
+    if let Some(template_value) = result
+        .get_mut("descriptor")
+        .and_then(|descriptor| descriptor.get_mut("template"))
+        .and_then(Value::as_object_mut)
+    {
+        template_value.insert("ast".into(), ast);
+    }
+}
+
+fn vue3_sfc_template_ast_value(
+    descriptor: &SfcDescriptor,
+    template: &SfcBlock,
+    parse_options: Option<&Value>,
+) -> Value {
+    let null = Value::Null;
+    let template_options = parse_options
+        .and_then(|options| options.get("templateParseOptions"))
+        .unwrap_or(&null);
+    let mut core = vue3_options(Some(template_options));
+    core.prefix_identifiers = true;
+    apply_bridge_dom_parser_defaults(&mut core, Some(template_options));
+    let default_options = DomCompilerOptions::default();
+    let dom_options = DomCompilerOptions {
+        core,
+        transform_asset_urls: false,
+        asset_url_options: default_options.asset_url_options.clone(),
+        decode_entities: bool_option(
+            template_options,
+            "decodeEntities",
+            default_options.decode_entities,
+        ),
+        is_custom_element: string_array_option(template_options, "isCustomElement"),
+    };
+    let source = TemplateSource {
+        filename: descriptor.filename.clone(),
+        source: template.content.clone(),
+        file_id: descriptor.source_file,
+        base_offset: template.content_start,
+    };
+    let ast = vuec_vue3_dom::parse(source, &dom_options);
+    let mut value = vue3_parse_value(&ast, &descriptor.source, 0, false, &dom_options.core, false);
+    if let Some(object) = value.as_object_mut() {
+        object.insert("source".into(), json!(descriptor.source));
+        object.insert("loc".into(), vue3_loc_stub_value());
+        object.remove("__vuecDiagnostics");
+    }
+    value
 }
 
 fn vue27_template_code(render: &str, static_render_fns: &[String]) -> String {
@@ -4328,6 +4404,48 @@ mod tests {
         .expect("vue27 parse");
 
         assert_eq!(parsed["cssVars"], json!(["color", "font.size"]));
+    }
+
+    #[test]
+    fn vue3_sfc_bridge_parse_projects_public_descriptor_shape() {
+        let parsed = dispatch(
+            "sfc.parse",
+            json!({
+                "source": concat!(
+                    "<template><div>{{ msg }}</div></template>",
+                    "<script setup lang=\"ts\">const msg: string = 'hi'</script>",
+                    "<style scoped>.a{color:v-bind(color)}</style>",
+                    "<i18n lang=\"json\">{\"en\":\"hi\"}</i18n>"
+                ),
+                "filename": "Comp.vue",
+                "options": {
+                    "sourceMap": false
+                }
+            }),
+        )
+        .expect("vue3 sfc parse");
+
+        let descriptor = &parsed["descriptor"];
+        assert_eq!(descriptor["template"]["type"], json!("template"));
+        assert_eq!(
+            descriptor["template"]["loc"]["source"],
+            json!("<div>{{ msg }}</div>")
+        );
+        assert_eq!(
+            descriptor["template"]["ast"]["source"],
+            descriptor["source"]
+        );
+        assert_eq!(
+            descriptor["template"]["ast"]["children"][0]["tag"],
+            json!("div")
+        );
+        assert_eq!(descriptor["scriptSetup"]["setup"], json!(true));
+        assert_eq!(descriptor["scriptSetup"]["lang"], json!("ts"));
+        assert_eq!(descriptor["styles"][0]["scoped"], json!(true));
+        assert_eq!(descriptor["cssVars"], json!(["color"]));
+        assert_eq!(descriptor["customBlocks"][0]["type"], json!("i18n"));
+        assert!(descriptor.get("script_setup").is_none());
+        assert_eq!(parsed["errors"], json!([]));
     }
 
     #[test]
