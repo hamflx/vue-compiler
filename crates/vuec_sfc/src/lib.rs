@@ -8878,12 +8878,13 @@ fn analyze_vue3_script_setup(
 
     if !analysis.props_destructured_bindings.is_empty() {
         check_vue3_define_props_destructure_default_types(&mut analysis);
-        let mut usage_checker = Vue3PropsDestructureUsageChecker::new(
+        let mut rewrite = Vue3PropsDestructureRewriter::new(
             &analysis.props_destructured_bindings,
             &analysis.vue_import_aliases,
+            &mut edits,
         );
-        usage_checker.walk_program(&parsed.program.body);
-        analysis.errors.extend(usage_checker.errors);
+        rewrite.walk_program(&parsed.program.body);
+        analysis.errors.extend(rewrite.errors);
     }
 
     module_chunks.sort_by_key(|chunk| chunk.start);
@@ -9961,17 +9962,19 @@ fn infer_vue3_define_props_destructure_default_value_type(
     }
 }
 
-struct Vue3PropsDestructureUsageChecker<'a> {
+struct Vue3PropsDestructureRewriter<'a, 'source> {
     props_destructured_bindings: &'a BTreeMap<String, String>,
     vue_import_aliases: &'a BTreeMap<String, String>,
+    edits: &'a mut SourceEdits<'source>,
     scopes: Vec<BTreeMap<String, bool>>,
     errors: Vec<String>,
 }
 
-impl<'a> Vue3PropsDestructureUsageChecker<'a> {
+impl<'a, 'source> Vue3PropsDestructureRewriter<'a, 'source> {
     fn new(
         props_destructured_bindings: &'a BTreeMap<String, String>,
         vue_import_aliases: &'a BTreeMap<String, String>,
+        edits: &'a mut SourceEdits<'source>,
     ) -> Self {
         let root_scope = props_destructured_bindings
             .keys()
@@ -9980,6 +9983,7 @@ impl<'a> Vue3PropsDestructureUsageChecker<'a> {
         Self {
             props_destructured_bindings,
             vue_import_aliases,
+            edits,
             scopes: vec![root_scope],
             errors: Vec::new(),
         }
@@ -10129,7 +10133,13 @@ impl<'a> Vue3PropsDestructureUsageChecker<'a> {
 
     fn walk_expression(&mut self, expression: &Expression<'_>) {
         match expression {
-            Expression::Identifier(_) => {}
+            Expression::Identifier(identifier) => {
+                self.rewrite_identifier_reference(
+                    identifier.name.as_str(),
+                    identifier.span.start as usize,
+                    identifier.span.end as usize,
+                );
+            }
             Expression::ArrayExpression(array) => {
                 for element in &array.elements {
                     match element {
@@ -10272,6 +10282,19 @@ impl<'a> Vue3PropsDestructureUsageChecker<'a> {
             ObjectPropertyKind::ObjectProperty(property) => {
                 if property.computed {
                     self.walk_property_key(&property.key);
+                }
+                if property.shorthand {
+                    if let Expression::Identifier(identifier) = &property.value {
+                        if let Some(public_name) =
+                            self.active_prop_public_name(identifier.name.as_str())
+                        {
+                            self.edits.append_left(
+                                identifier.span.end as usize,
+                                format!(": {}", vue3_props_access_exp(public_name)),
+                            );
+                            return;
+                        }
+                    }
                 }
                 self.walk_expression(&property.value);
             }
@@ -10519,14 +10542,39 @@ impl<'a> Vue3PropsDestructureUsageChecker<'a> {
     }
 
     fn is_active_prop_binding(&self, name: &str) -> bool {
-        self.props_destructured_bindings.contains_key(name)
-            && self
-                .scopes
-                .iter()
-                .rev()
-                .find_map(|scope| scope.get(name))
-                .copied()
-                .unwrap_or(false)
+        self.active_prop_public_name(name).is_some()
+    }
+
+    fn active_prop_public_name(&self, name: &str) -> Option<&str> {
+        let is_active = self
+            .scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name))
+            .copied()
+            .unwrap_or(false);
+        if !is_active {
+            return None;
+        }
+        self.props_destructured_bindings
+            .get(name)
+            .map(String::as_str)
+    }
+
+    fn rewrite_identifier_reference(&mut self, name: &str, start: usize, end: usize) {
+        let Some(public_name) = self.active_prop_public_name(name) else {
+            return;
+        };
+        self.edits
+            .overwrite(start, end, vue3_props_access_exp(public_name));
+    }
+}
+
+fn vue3_props_access_exp(prop: &str) -> String {
+    if is_ascii_js_identifier(prop) {
+        format!("__props.{prop}")
+    } else {
+        format!("__props[\"{}\"]", escape_js_double(prop))
     }
 }
 
@@ -12329,6 +12377,57 @@ const { foo, bar: baz } = defineProps({ foo: String, bar: Number })
         );
         assert_eq!(
             script.bindings.get("baz").map(String::as_str),
+            Some("props-aliased")
+        );
+    }
+
+    #[test]
+    fn vue3_compile_script_rewrites_define_props_destructure_references() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup>
+const { foo, bar: baz, 'foo.bar': fooBar } = defineProps({ foo: String, bar: Number, 'foo.bar': Boolean })
+const message = foo + baz
+const payload = { foo, baz, fooBar }
+function read(foo) {
+  return foo + baz
+}
+for (const baz of [1]) {
+  console.log(baz, foo)
+}
+console.log(message, payload, fooBar)
+</script>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(!script
+            .content
+            .contains("const { foo, bar: baz, 'foo.bar': fooBar }"));
+        assert!(script
+            .content
+            .contains("const message = __props.foo + __props.bar"));
+        assert!(script.content.contains(
+            r#"const payload = { foo: __props.foo, baz: __props.bar, fooBar: __props["foo.bar"] }"#
+        ));
+        assert!(script
+            .content
+            .contains("function read(foo) {\n  return foo + __props.bar\n}"));
+        assert!(script.content.contains("console.log(baz, __props.foo)"));
+        assert!(script
+            .content
+            .contains(r#"console.log(message, payload, __props["foo.bar"])"#));
+        assert_eq!(
+            script.bindings.get("foo").map(String::as_str),
+            Some("props")
+        );
+        assert_eq!(
+            script.bindings.get("baz").map(String::as_str),
+            Some("props-aliased")
+        );
+        assert_eq!(
+            script.bindings.get("fooBar").map(String::as_str),
             Some("props-aliased")
         );
     }

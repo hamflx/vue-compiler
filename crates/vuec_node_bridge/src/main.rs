@@ -4931,6 +4931,36 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_rewrites_props_destructure_references() {
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup>",
+                    "const { foo, bar: baz, 'foo.bar': fooBar } = defineProps({ foo: String, bar: Number, 'foo.bar': Boolean })\n",
+                    "const message = foo + baz\n",
+                    "const payload = { foo, baz, fooBar }\n",
+                    "function read(foo) { return foo + baz }\n",
+                    "console.log(message, payload, fooBar)",
+                    "</script>"
+                ),
+                "filename": "FooBar.vue"
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = compiled["content"].as_str().unwrap_or_default();
+        assert!(compiled["errors"].as_array().unwrap().is_empty());
+        assert!(!content.contains("const { foo, bar: baz, 'foo.bar': fooBar }"));
+        assert!(content.contains("const message = __props.foo + __props.bar"));
+        assert!(content.contains(
+            r#"const payload = { foo: __props.foo, baz: __props.bar, fooBar: __props["foo.bar"] }"#
+        ));
+        assert!(content.contains("function read(foo) { return foo + __props.bar }"));
+        assert!(content.contains(r#"console.log(message, payload, __props["foo.bar"])"#));
+    }
+
+    #[test]
     fn vue3_sfc_bridge_compile_script_reports_props_destructure_default_type_errors() {
         let mismatch = dispatch(
             "sfc.compileScript",
