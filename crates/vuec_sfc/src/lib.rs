@@ -6017,6 +6017,7 @@ fn vue3_import_specifier_compiler_macro(
             | "defineOptions"
             | "defineModel"
             | "defineSlots"
+            | "withDefaults"
     ) {
         return None;
     }
@@ -9294,18 +9295,27 @@ fn collect_vue3_with_defaults_call(
                 _ => None,
             })
     else {
-        return false;
+        analysis
+            .errors
+            .push("withDefaults' first argument must be a defineProps call.".to_string());
+        return true;
     };
     let Some(type_argument) = define_props_call
         .type_arguments
         .as_ref()
         .and_then(|arguments| arguments.params.first())
     else {
+        collect_vue3_define_props_call(source, define_props_call, analysis, is_prod);
         analysis.errors.push(
             "withDefaults can only be used with type-based defineProps declaration.".to_string(),
         );
         return true;
     };
+    if call.arguments.get(1).is_none() {
+        analysis
+            .errors
+            .push("The 2nd argument of withDefaults is required.".to_string());
+    }
     let defaults = call
         .arguments
         .get(1)
@@ -12181,6 +12191,83 @@ const props = withDefaults(defineProps<{
         assert!(prod.content.contains("ok: { type: Boolean }"));
         assert!(prod.content.contains("fn: { type: Function }"));
         assert!(prod.content.contains("}, defaults),"));
+    }
+
+    #[test]
+    fn vue3_compile_script_removes_with_defaults_imports() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup lang="ts">
+import { withDefaults, defineProps, ref } from 'vue'
+const props = withDefaults(defineProps<{ foo?: string }>(), { foo: 'x' })
+const count = ref(1)
+</script>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty());
+        assert!(script
+            .content
+            .contains("import { defineComponent as _defineComponent } from 'vue'"));
+        assert!(script.content.contains("import { ref } from 'vue'"));
+        assert!(script
+            .content
+            .contains("foo: { type: String, required: false, default: 'x' }"));
+        assert!(script.content.contains("const props = __props"));
+        assert!(!script.content.contains("withDefaults"));
+        assert!(!script.content.contains("defineProps"));
+        assert!(script.bindings.get("withDefaults").is_none());
+        assert!(script.bindings.get("defineProps").is_none());
+    }
+
+    #[test]
+    fn vue3_compile_script_reports_with_defaults_errors() {
+        let mut compiler = SfcCompiler::new();
+        let bad_first = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup lang="ts">
+const props = withDefaults(foo(), { foo: 'x' })
+</script>"#,
+        );
+        let script = compiler.compile_script(&bad_first, SfcScriptCompileOptions::default());
+        assert!(
+            script
+                .errors
+                .iter()
+                .any(|error| error
+                    .contains("withDefaults' first argument must be a defineProps call"))
+        );
+        assert!(!script.content.contains("withDefaults"));
+
+        let runtime_props = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup>
+const props = withDefaults(defineProps({ foo: String }), { foo: 'x' })
+</script>"#,
+        );
+        let script = compiler.compile_script(&runtime_props, SfcScriptCompileOptions::default());
+        assert!(script.errors.iter().any(|error| error
+            .contains("withDefaults can only be used with type-based defineProps declaration")));
+        assert!(script.content.contains("props: { foo: String },"));
+        assert!(!script.content.contains("withDefaults"));
+        assert!(!script.content.contains("defineProps"));
+
+        let missing_defaults = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup lang="ts">
+const props = withDefaults(defineProps<{ foo?: string }>())
+</script>"#,
+        );
+        let script = compiler.compile_script(&missing_defaults, SfcScriptCompileOptions::default());
+        assert!(script
+            .errors
+            .iter()
+            .any(|error| error.contains("The 2nd argument of withDefaults is required")));
+        assert!(script
+            .content
+            .contains("foo: { type: String, required: false }"));
+        assert!(!script.content.contains("withDefaults"));
     }
 
     #[test]

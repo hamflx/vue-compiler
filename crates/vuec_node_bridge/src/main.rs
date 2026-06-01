@@ -4648,6 +4648,82 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_reports_with_defaults_errors() {
+        let bad_first = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "const props = withDefaults(foo(), { foo: 'x' })",
+                    "</script>"
+                ),
+                "filename": "FooBar.vue"
+            }),
+        )
+        .expect("vue3 compileScript");
+        assert!(bad_first["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error
+                .as_str()
+                .is_some_and(|error| error
+                    .contains("withDefaults' first argument must be a defineProps call"))));
+        assert!(!bad_first["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("withDefaults"));
+
+        let runtime_props = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup>",
+                    "const props = withDefaults(defineProps({ foo: String }), { foo: 'x' })",
+                    "</script>"
+                ),
+                "filename": "FooBar.vue"
+            }),
+        )
+        .expect("vue3 compileScript");
+        let runtime_content = runtime_props["content"].as_str().unwrap_or_default();
+        assert!(runtime_props["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error.as_str().is_some_and(|error| error.contains(
+                "withDefaults can only be used with type-based defineProps declaration"
+            ))));
+        assert!(runtime_content.contains("props: { foo: String },"));
+        assert!(!runtime_content.contains("withDefaults"));
+        assert!(!runtime_content.contains("defineProps"));
+
+        let missing_defaults = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "const props = withDefaults(defineProps<{ foo?: string }>())",
+                    "</script>"
+                ),
+                "filename": "FooBar.vue"
+            }),
+        )
+        .expect("vue3 compileScript");
+        assert!(missing_defaults["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error.as_str().is_some_and(
+                |error| error.contains("The 2nd argument of withDefaults is required")
+            )));
+        assert!(!missing_defaults["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("withDefaults"));
+    }
+
+    #[test]
     fn vue3_sfc_bridge_compile_script_merges_define_options() {
         let compiled = dispatch(
             "sfc.compileScript",
