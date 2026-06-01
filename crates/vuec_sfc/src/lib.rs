@@ -4724,6 +4724,43 @@ fn vue3_normal_script_type_context(descriptor: &SfcDescriptor) -> Vue27TypeConte
     }
 }
 
+fn vue3_normal_script_vue_import_aliases(descriptor: &SfcDescriptor) -> BTreeMap<String, String> {
+    let Some(script) = descriptor.script.as_ref() else {
+        return BTreeMap::new();
+    };
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(
+        &allocator,
+        script.content.as_str(),
+        script_source_type_from_attrs(&script.attrs),
+    )
+    .with_options(oxc_parser::ParseOptions {
+        parse_regular_expression: true,
+        ..oxc_parser::ParseOptions::default()
+    })
+    .parse();
+    if parsed.panicked || !parsed.errors.is_empty() {
+        return BTreeMap::new();
+    }
+    let mut aliases = BTreeMap::new();
+    for statement in &parsed.program.body {
+        let Statement::ImportDeclaration(import) = statement else {
+            continue;
+        };
+        if import.source.value.as_str() != "vue" {
+            continue;
+        }
+        if let Some(specifiers) = &import.specifiers {
+            for specifier in specifiers {
+                if let Some(imported) = import_specifier_imported(specifier) {
+                    aliases.insert(imported, import_specifier_local(specifier));
+                }
+            }
+        }
+    }
+    aliases
+}
+
 fn collect_vue3_declared_types_from_statements(
     source: &str,
     statements: &[Statement<'_>],
@@ -8485,6 +8522,8 @@ struct Vue3ScriptSetupAnalysis {
     errors: Vec<String>,
     local_setup_bindings: BTreeSet<String>,
     local_setup_binding_types: BTreeMap<String, String>,
+    props_destructured_bindings: BTreeMap<String, String>,
+    vue_import_aliases: BTreeMap<String, String>,
     declared_types: BTreeMap<String, Vec<String>>,
     define_model_declared_types: BTreeMap<String, Vec<String>>,
     props_type_declarations: BTreeMap<String, Vue27TypeMembers>,
@@ -8522,10 +8561,12 @@ fn script_content(
 
     let normal_script = analyze_vue3_normal_script_for_setup(descriptor);
     let normal_type_context = vue3_normal_script_type_context(descriptor);
+    let normal_vue_import_aliases = vue3_normal_script_vue_import_aliases(descriptor);
     let setup_analysis = analyze_vue3_script_setup(
         script_setup,
         descriptor.script.is_none(),
         &normal_type_context,
+        &normal_vue_import_aliases,
         is_prod,
     );
     let is_ts = script_is_typescript(&script_setup.attrs)
@@ -8650,6 +8691,7 @@ fn analyze_vue3_script_setup(
     script_setup: &SfcBlock,
     hoist_static_literals: bool,
     normal_type_context: &Vue27TypeContext,
+    normal_vue_import_aliases: &BTreeMap<String, String>,
     is_prod: bool,
 ) -> Vue3ScriptSetupAnalysis {
     let source = script_setup.content.as_str();
@@ -8691,6 +8733,7 @@ fn analyze_vue3_script_setup(
         emits_type_declarations: type_analysis.emits_type_declarations,
         local_setup_bindings: type_analysis.local_setup_bindings,
         local_setup_binding_types: type_analysis.local_setup_binding_types,
+        vue_import_aliases: normal_vue_import_aliases.clone(),
         ..Vue3ScriptSetupAnalysis::default()
     };
     let mut module_chunks = Vec::new();
@@ -8716,6 +8759,13 @@ fn analyze_vue3_script_setup(
                                 ));
                             }
                             continue;
+                        }
+                        if source_value == "vue" {
+                            if let Some(imported) = import_specifier_imported(specifier) {
+                                analysis
+                                    .vue_import_aliases
+                                    .insert(imported, import_specifier_local(specifier));
+                            }
                         }
                         analysis.imports.push(Vue27ScriptImport {
                             local: import_specifier_local(specifier),
@@ -8822,6 +8872,15 @@ fn analyze_vue3_script_setup(
             }
             _ => {}
         }
+    }
+
+    if !analysis.props_destructured_bindings.is_empty() {
+        let mut usage_checker = Vue3PropsDestructureUsageChecker::new(
+            &analysis.props_destructured_bindings,
+            &analysis.vue_import_aliases,
+        );
+        usage_checker.walk_program(&parsed.program.body);
+        analysis.errors.extend(usage_checker.errors);
     }
 
     module_chunks.sort_by_key(|chunk| chunk.start);
@@ -9840,6 +9899,9 @@ fn register_vue3_define_props_destructure_binding(
     local: &str,
     analysis: &mut Vue3ScriptSetupAnalysis,
 ) {
+    analysis
+        .props_destructured_bindings
+        .insert(local.to_string(), key.unwrap_or(local).to_string());
     if key.is_some_and(|key| key == local) {
         analysis
             .setup_bindings
@@ -9848,6 +9910,586 @@ fn register_vue3_define_props_destructure_binding(
         analysis
             .setup_bindings
             .insert(local.to_string(), "props-aliased".into());
+    }
+}
+
+struct Vue3PropsDestructureUsageChecker<'a> {
+    props_destructured_bindings: &'a BTreeMap<String, String>,
+    vue_import_aliases: &'a BTreeMap<String, String>,
+    scopes: Vec<BTreeMap<String, bool>>,
+    errors: Vec<String>,
+}
+
+impl<'a> Vue3PropsDestructureUsageChecker<'a> {
+    fn new(
+        props_destructured_bindings: &'a BTreeMap<String, String>,
+        vue_import_aliases: &'a BTreeMap<String, String>,
+    ) -> Self {
+        let root_scope = props_destructured_bindings
+            .keys()
+            .map(|local| (local.clone(), true))
+            .collect::<BTreeMap<_, _>>();
+        Self {
+            props_destructured_bindings,
+            vue_import_aliases,
+            scopes: vec![root_scope],
+            errors: Vec::new(),
+        }
+    }
+
+    fn walk_program(&mut self, statements: &[Statement<'_>]) {
+        self.mark_block_declarations(statements, true);
+        for statement in statements {
+            self.walk_statement(statement, true);
+        }
+    }
+
+    fn walk_statement(&mut self, statement: &Statement<'_>, is_root: bool) {
+        match statement {
+            Statement::BlockStatement(block) => {
+                self.push_scope();
+                self.mark_block_declarations(&block.body, false);
+                for statement in &block.body {
+                    self.walk_statement(statement, false);
+                }
+                self.pop_scope();
+            }
+            Statement::ExpressionStatement(statement) => {
+                self.walk_expression(&statement.expression);
+            }
+            Statement::ReturnStatement(statement) => {
+                if let Some(argument) = &statement.argument {
+                    self.walk_expression(argument);
+                }
+            }
+            Statement::VariableDeclaration(declaration) => {
+                self.mark_variable_declaration(declaration, is_root);
+                for declarator in &declaration.declarations {
+                    if let Some(init) = &declarator.init {
+                        self.walk_expression(init);
+                    }
+                }
+            }
+            Statement::FunctionDeclaration(function) => self.walk_function(function),
+            Statement::IfStatement(statement) => {
+                self.walk_expression(&statement.test);
+                self.walk_statement(&statement.consequent, false);
+                if let Some(alternate) = &statement.alternate {
+                    self.walk_statement(alternate, false);
+                }
+            }
+            Statement::ForStatement(statement) => {
+                self.push_scope();
+                if let Some(init) = &statement.init {
+                    match init {
+                        oxc_ast::ast::ForStatementInit::VariableDeclaration(declaration) => {
+                            self.mark_variable_declaration(declaration, false);
+                            for declarator in &declaration.declarations {
+                                if let Some(init) = &declarator.init {
+                                    self.walk_expression(init);
+                                }
+                            }
+                        }
+                        _ => {
+                            if let Some(expression) = init.as_expression() {
+                                self.walk_expression(expression);
+                            }
+                        }
+                    }
+                }
+                if let Some(test) = &statement.test {
+                    self.walk_expression(test);
+                }
+                if let Some(update) = &statement.update {
+                    self.walk_expression(update);
+                }
+                self.walk_statement(&statement.body, false);
+                self.pop_scope();
+            }
+            Statement::ForInStatement(statement) => {
+                self.push_scope();
+                self.mark_for_iteration_left(&statement.left);
+                self.walk_expression(&statement.right);
+                self.walk_statement(&statement.body, false);
+                self.pop_scope();
+            }
+            Statement::ForOfStatement(statement) => {
+                self.push_scope();
+                self.mark_for_iteration_left(&statement.left);
+                self.walk_expression(&statement.right);
+                self.walk_statement(&statement.body, false);
+                self.pop_scope();
+            }
+            Statement::WhileStatement(statement) => {
+                self.walk_expression(&statement.test);
+                self.walk_statement(&statement.body, false);
+            }
+            Statement::DoWhileStatement(statement) => {
+                self.walk_statement(&statement.body, false);
+                self.walk_expression(&statement.test);
+            }
+            Statement::SwitchStatement(statement) => {
+                self.walk_expression(&statement.discriminant);
+                for case in &statement.cases {
+                    if let Some(test) = &case.test {
+                        self.walk_expression(test);
+                    }
+                    self.push_scope();
+                    self.mark_block_declarations(&case.consequent, false);
+                    for statement in &case.consequent {
+                        self.walk_statement(statement, false);
+                    }
+                    self.pop_scope();
+                }
+            }
+            Statement::ThrowStatement(statement) => {
+                self.walk_expression(&statement.argument);
+            }
+            Statement::TryStatement(statement) => {
+                self.push_scope();
+                self.mark_block_declarations(&statement.block.body, false);
+                for statement in &statement.block.body {
+                    self.walk_statement(statement, false);
+                }
+                self.pop_scope();
+                if let Some(handler) = &statement.handler {
+                    self.push_scope();
+                    if let Some(param) = &handler.param {
+                        self.mark_binding_pattern(&param.pattern);
+                    }
+                    self.mark_block_declarations(&handler.body.body, false);
+                    for statement in &handler.body.body {
+                        self.walk_statement(statement, false);
+                    }
+                    self.pop_scope();
+                }
+                if let Some(finalizer) = &statement.finalizer {
+                    self.push_scope();
+                    self.mark_block_declarations(&finalizer.body, false);
+                    for statement in &finalizer.body {
+                        self.walk_statement(statement, false);
+                    }
+                    self.pop_scope();
+                }
+            }
+            Statement::LabeledStatement(statement) => {
+                self.walk_statement(&statement.body, false);
+            }
+            _ => {}
+        }
+    }
+
+    fn walk_expression(&mut self, expression: &Expression<'_>) {
+        match expression {
+            Expression::Identifier(_) => {}
+            Expression::ArrayExpression(array) => {
+                for element in &array.elements {
+                    match element {
+                        oxc_ast::ast::ArrayExpressionElement::SpreadElement(spread) => {
+                            self.walk_expression(&spread.argument);
+                        }
+                        oxc_ast::ast::ArrayExpressionElement::Elision(_) => {}
+                        element => {
+                            if let Some(expression) = element.as_expression() {
+                                self.walk_expression(expression);
+                            }
+                        }
+                    }
+                }
+            }
+            Expression::ObjectExpression(object) => {
+                for property in &object.properties {
+                    self.walk_object_property_kind(property);
+                }
+            }
+            Expression::CallExpression(call) => {
+                self.check_call_usage(call);
+                self.walk_expression(&call.callee);
+                for argument in &call.arguments {
+                    self.walk_argument(argument);
+                }
+            }
+            Expression::NewExpression(expression) => {
+                self.walk_expression(&expression.callee);
+                for argument in &expression.arguments {
+                    self.walk_argument(argument);
+                }
+            }
+            Expression::StaticMemberExpression(member) => {
+                self.walk_expression(&member.object);
+            }
+            Expression::ComputedMemberExpression(member) => {
+                self.walk_expression(&member.object);
+                self.walk_expression(&member.expression);
+            }
+            Expression::PrivateFieldExpression(member) => {
+                self.walk_expression(&member.object);
+            }
+            Expression::FunctionExpression(function) => self.walk_function(function),
+            Expression::ArrowFunctionExpression(function) => self.walk_arrow_function(function),
+            Expression::AssignmentExpression(assignment) => {
+                self.check_assignment_target(&assignment.left);
+                self.walk_assignment_target(&assignment.left);
+                self.walk_expression(&assignment.right);
+            }
+            Expression::UpdateExpression(update) => {
+                self.check_simple_assignment_target(&update.argument);
+                self.walk_simple_assignment_target(&update.argument);
+            }
+            Expression::UnaryExpression(expression) => self.walk_expression(&expression.argument),
+            Expression::AwaitExpression(expression) => self.walk_expression(&expression.argument),
+            Expression::BinaryExpression(expression) => {
+                self.walk_expression(&expression.left);
+                self.walk_expression(&expression.right);
+            }
+            Expression::PrivateInExpression(expression) => {
+                self.walk_expression(&expression.right);
+            }
+            Expression::LogicalExpression(expression) => {
+                self.walk_expression(&expression.left);
+                self.walk_expression(&expression.right);
+            }
+            Expression::ConditionalExpression(expression) => {
+                self.walk_expression(&expression.test);
+                self.walk_expression(&expression.consequent);
+                self.walk_expression(&expression.alternate);
+            }
+            Expression::SequenceExpression(expression) => {
+                for expression in &expression.expressions {
+                    self.walk_expression(expression);
+                }
+            }
+            Expression::TemplateLiteral(expression) => {
+                for expression in &expression.expressions {
+                    self.walk_expression(expression);
+                }
+            }
+            Expression::TaggedTemplateExpression(expression) => {
+                self.walk_expression(&expression.tag);
+                for expression in &expression.quasi.expressions {
+                    self.walk_expression(expression);
+                }
+            }
+            Expression::ParenthesizedExpression(expression) => {
+                self.walk_expression(&expression.expression);
+            }
+            Expression::TSAsExpression(expression) => self.walk_expression(&expression.expression),
+            Expression::TSSatisfiesExpression(expression) => {
+                self.walk_expression(&expression.expression);
+            }
+            Expression::TSTypeAssertion(expression) => {
+                self.walk_expression(&expression.expression);
+            }
+            Expression::TSNonNullExpression(expression) => {
+                self.walk_expression(&expression.expression);
+            }
+            Expression::TSInstantiationExpression(expression) => {
+                self.walk_expression(&expression.expression);
+            }
+            Expression::ChainExpression(chain) => match &chain.expression {
+                oxc_ast::ast::ChainElement::CallExpression(call) => {
+                    self.check_call_usage(call);
+                    self.walk_expression(&call.callee);
+                    for argument in &call.arguments {
+                        self.walk_argument(argument);
+                    }
+                }
+                oxc_ast::ast::ChainElement::TSNonNullExpression(expression) => {
+                    self.walk_expression(&expression.expression);
+                }
+                oxc_ast::ast::ChainElement::StaticMemberExpression(member) => {
+                    self.walk_expression(&member.object);
+                }
+                oxc_ast::ast::ChainElement::ComputedMemberExpression(member) => {
+                    self.walk_expression(&member.object);
+                    self.walk_expression(&member.expression);
+                }
+                oxc_ast::ast::ChainElement::PrivateFieldExpression(member) => {
+                    self.walk_expression(&member.object);
+                }
+            },
+            _ => {}
+        }
+    }
+
+    fn walk_argument(&mut self, argument: &Argument<'_>) {
+        match argument {
+            Argument::SpreadElement(spread) => self.walk_expression(&spread.argument),
+            _ => self.walk_expression(argument.to_expression()),
+        }
+    }
+
+    fn walk_object_property_kind(&mut self, property: &ObjectPropertyKind<'_>) {
+        match property {
+            ObjectPropertyKind::ObjectProperty(property) => {
+                if property.computed {
+                    self.walk_property_key(&property.key);
+                }
+                self.walk_expression(&property.value);
+            }
+            ObjectPropertyKind::SpreadProperty(spread) => {
+                self.walk_expression(&spread.argument);
+            }
+        }
+    }
+
+    fn walk_property_key(&mut self, key: &PropertyKey<'_>) {
+        match key {
+            PropertyKey::StaticIdentifier(_) | PropertyKey::PrivateIdentifier(_) => {}
+            _ => self.walk_expression(key.to_expression()),
+        }
+    }
+
+    fn walk_function(&mut self, function: &Function<'_>) {
+        self.push_scope();
+        if let Some(id) = &function.id {
+            self.mark_local(id.name.as_str());
+        }
+        for param in &function.params.items {
+            self.mark_binding_pattern(&param.pattern);
+            if let Some(initializer) = &param.initializer {
+                self.walk_expression(initializer);
+            }
+        }
+        if let Some(rest) = &function.params.rest {
+            self.mark_binding_pattern(&rest.rest.argument);
+        }
+        if let Some(body) = &function.body {
+            self.mark_block_declarations(&body.statements, false);
+            for statement in &body.statements {
+                self.walk_statement(statement, false);
+            }
+        }
+        self.pop_scope();
+    }
+
+    fn walk_arrow_function(&mut self, function: &ArrowFunctionExpression<'_>) {
+        self.push_scope();
+        for param in &function.params.items {
+            self.mark_binding_pattern(&param.pattern);
+            if let Some(initializer) = &param.initializer {
+                self.walk_expression(initializer);
+            }
+        }
+        if let Some(rest) = &function.params.rest {
+            self.mark_binding_pattern(&rest.rest.argument);
+        }
+        self.mark_block_declarations(&function.body.statements, false);
+        for statement in &function.body.statements {
+            self.walk_statement(statement, false);
+        }
+        self.pop_scope();
+    }
+
+    fn walk_assignment_target(&mut self, target: &AssignmentTarget<'_>) {
+        match target {
+            AssignmentTarget::AssignmentTargetIdentifier(_) => {}
+            AssignmentTarget::StaticMemberExpression(member) => {
+                self.walk_expression(&member.object);
+            }
+            AssignmentTarget::ComputedMemberExpression(member) => {
+                self.walk_expression(&member.object);
+                self.walk_expression(&member.expression);
+            }
+            AssignmentTarget::PrivateFieldExpression(member) => {
+                self.walk_expression(&member.object);
+            }
+            _ => {}
+        }
+    }
+
+    fn walk_simple_assignment_target(&mut self, target: &SimpleAssignmentTarget<'_>) {
+        match target {
+            SimpleAssignmentTarget::AssignmentTargetIdentifier(_) => {}
+            SimpleAssignmentTarget::StaticMemberExpression(member) => {
+                self.walk_expression(&member.object);
+            }
+            SimpleAssignmentTarget::ComputedMemberExpression(member) => {
+                self.walk_expression(&member.object);
+                self.walk_expression(&member.expression);
+            }
+            SimpleAssignmentTarget::PrivateFieldExpression(member) => {
+                self.walk_expression(&member.object);
+            }
+            _ => {}
+        }
+    }
+
+    fn check_call_usage(&mut self, call: &oxc_ast::ast::CallExpression<'_>) {
+        for method in ["watch", "toRef"] {
+            if !self.is_call_named_or_alias(call, method) {
+                continue;
+            }
+            let Some(argument) = call
+                .arguments
+                .first()
+                .and_then(vue3_call_argument_expression)
+                .map(unwrap_vue3_ts_expression)
+            else {
+                continue;
+            };
+            let Expression::Identifier(identifier) = argument else {
+                continue;
+            };
+            if self.is_active_prop_binding(identifier.name.as_str()) {
+                self.errors.push(format!(
+                    "\"{}\" is a destructured prop and should not be passed directly to {}(). Pass a getter () => {} instead.",
+                    identifier.name, method, identifier.name
+                ));
+            }
+        }
+    }
+
+    fn is_call_named_or_alias(
+        &self,
+        call: &oxc_ast::ast::CallExpression<'_>,
+        method: &str,
+    ) -> bool {
+        let expected = self
+            .vue_import_aliases
+            .get(method)
+            .map(String::as_str)
+            .unwrap_or(method);
+        matches!(&call.callee, Expression::Identifier(identifier) if identifier.name == expected)
+    }
+
+    fn check_assignment_target(&mut self, target: &AssignmentTarget<'_>) {
+        if let AssignmentTarget::AssignmentTargetIdentifier(identifier) = target {
+            if self.is_active_prop_binding(identifier.name.as_str()) {
+                self.errors
+                    .push("Cannot assign to destructured props as they are readonly.".into());
+            }
+        }
+    }
+
+    fn check_simple_assignment_target(&mut self, target: &SimpleAssignmentTarget<'_>) {
+        if let SimpleAssignmentTarget::AssignmentTargetIdentifier(identifier) = target {
+            if self.is_active_prop_binding(identifier.name.as_str()) {
+                self.errors
+                    .push("Cannot assign to destructured props as they are readonly.".into());
+            }
+        }
+    }
+
+    fn mark_block_declarations(&mut self, statements: &[Statement<'_>], is_root: bool) {
+        for statement in statements {
+            match statement {
+                Statement::VariableDeclaration(declaration) if !declaration.declare => {
+                    self.mark_variable_declaration(declaration, is_root);
+                }
+                Statement::FunctionDeclaration(function) if !function.declare => {
+                    if let Some(id) = &function.id {
+                        self.mark_local(id.name.as_str());
+                    }
+                }
+                Statement::ClassDeclaration(class) if !class.declare => {
+                    if let Some(id) = &class.id {
+                        self.mark_local(id.name.as_str());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn mark_variable_declaration(&mut self, declaration: &VariableDeclaration<'_>, is_root: bool) {
+        if declaration.declare {
+            return;
+        }
+        for declarator in &declaration.declarations {
+            if is_root
+                && declarator
+                    .init
+                    .as_ref()
+                    .is_some_and(vue3_is_define_props_call)
+            {
+                continue;
+            }
+            self.mark_binding_pattern(&declarator.id);
+        }
+    }
+
+    fn mark_for_iteration_left(&mut self, left: &oxc_ast::ast::ForStatementLeft<'_>) {
+        match left {
+            oxc_ast::ast::ForStatementLeft::VariableDeclaration(declaration) => {
+                self.mark_variable_declaration(declaration, false);
+            }
+            _ => {
+                if let Some(target) = left.as_assignment_target() {
+                    self.mark_assignment_target_as_local(target);
+                }
+            }
+        }
+    }
+
+    fn mark_assignment_target_as_local(&mut self, target: &AssignmentTarget<'_>) {
+        if let AssignmentTarget::AssignmentTargetIdentifier(identifier) = target {
+            self.mark_local(identifier.name.as_str());
+        }
+    }
+
+    fn mark_binding_pattern(&mut self, pattern: &BindingPattern<'_>) {
+        match pattern {
+            BindingPattern::BindingIdentifier(identifier) => {
+                self.mark_local(identifier.name.as_str());
+            }
+            BindingPattern::ObjectPattern(pattern) => {
+                for property in &pattern.properties {
+                    self.mark_binding_pattern(&property.value);
+                }
+                if let Some(rest) = &pattern.rest {
+                    self.mark_binding_pattern(&rest.argument);
+                }
+            }
+            BindingPattern::ArrayPattern(pattern) => {
+                for element in pattern.elements.iter().flatten() {
+                    self.mark_binding_pattern(element);
+                }
+                if let Some(rest) = &pattern.rest {
+                    self.mark_binding_pattern(&rest.argument);
+                }
+            }
+            BindingPattern::AssignmentPattern(pattern) => {
+                self.mark_binding_pattern(&pattern.left);
+                self.walk_expression(&pattern.right);
+            }
+        }
+    }
+
+    fn push_scope(&mut self) {
+        self.scopes.push(BTreeMap::new());
+    }
+
+    fn pop_scope(&mut self) {
+        self.scopes.pop();
+    }
+
+    fn mark_local(&mut self, name: &str) {
+        if let Some(scope) = self.scopes.last_mut() {
+            scope.insert(name.to_string(), false);
+        }
+    }
+
+    fn is_active_prop_binding(&self, name: &str) -> bool {
+        self.props_destructured_bindings.contains_key(name)
+            && self
+                .scopes
+                .iter()
+                .rev()
+                .find_map(|scope| scope.get(name))
+                .copied()
+                .unwrap_or(false)
+    }
+}
+
+fn vue3_is_define_props_call(expression: &Expression<'_>) -> bool {
+    matches!(unwrap_vue3_ts_expression(expression), Expression::CallExpression(call) if is_call_named(call, "defineProps"))
+}
+
+fn vue3_call_argument_expression<'a>(argument: &'a Argument<'a>) -> Option<&'a Expression<'a>> {
+    match argument {
+        Argument::SpreadElement(_) => None,
+        _ => Some(argument.to_expression()),
     }
 }
 
@@ -12557,6 +13199,121 @@ const { ['foo']: foo } = defineProps(['foo'])
             script.bindings.get("foo").map(String::as_str),
             Some("props")
         );
+    }
+
+    #[test]
+    fn vue3_compile_script_reports_define_props_destructure_usage_errors() {
+        let mut compiler = SfcCompiler::new();
+        let assignment = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup>
+const { foo } = defineProps(['foo'])
+foo = 'bar'
+</script>"#,
+        );
+        let script = compiler.compile_script(&assignment, SfcScriptCompileOptions::default());
+
+        assert!(script
+            .errors
+            .iter()
+            .any(|error| error.contains("Cannot assign to destructured props")));
+
+        let update = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup>
+let { foo } = defineProps(['foo'])
+foo++
+</script>"#,
+        );
+        let script = compiler.compile_script(&update, SfcScriptCompileOptions::default());
+
+        assert!(script
+            .errors
+            .iter()
+            .any(|error| error.contains("Cannot assign to destructured props")));
+
+        let watch_alias = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup>
+import { watch as w } from 'vue'
+const { foo } = defineProps(['foo'])
+w(foo, () => {})
+</script>"#,
+        );
+        let script = compiler.compile_script(&watch_alias, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.iter().any(|error| {
+            error.contains(
+                "\"foo\" is a destructured prop and should not be passed directly to watch().",
+            )
+        }));
+
+        let normal_script_watch_alias = compiler.parse(
+            "FooBar.vue",
+            r#"<script>
+import { watch as w } from 'vue'
+</script>
+<script setup>
+const { foo } = defineProps(['foo'])
+w(foo, () => {})
+</script>"#,
+        );
+        let script = compiler.compile_script(
+            &normal_script_watch_alias,
+            SfcScriptCompileOptions::default(),
+        );
+
+        assert!(script.errors.iter().any(|error| {
+            error.contains(
+                "\"foo\" is a destructured prop and should not be passed directly to watch().",
+            )
+        }));
+
+        let spread_argument = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup>
+import { watch } from 'vue'
+const { foo } = defineProps(['foo'])
+watch(...[foo])
+</script>"#,
+        );
+        let script = compiler.compile_script(&spread_argument, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+
+        let to_ref_alias = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup>
+import { toRef as r } from 'vue'
+const { foo } = defineProps(['foo'])
+r(foo)
+</script>"#,
+        );
+        let script = compiler.compile_script(&to_ref_alias, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.iter().any(|error| {
+            error.contains(
+                "\"foo\" is a destructured prop and should not be passed directly to toRef().",
+            )
+        }));
+
+        let shadowed = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup>
+import { watch } from 'vue'
+const { foo } = defineProps(['foo'])
+function useLocal(foo) {
+  watch(foo, () => {})
+  foo++
+}
+const run = (foo = 1) => {
+  foo++
+}
+</script>"#,
+        );
+        let script = compiler.compile_script(&shadowed, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
     }
 
     #[test]

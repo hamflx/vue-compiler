@@ -4840,6 +4840,97 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_reports_props_destructure_usage_errors() {
+        let assignment = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup>",
+                    "const { foo } = defineProps(['foo'])\n",
+                    "foo = 'bar'",
+                    "</script>"
+                ),
+                "filename": "FooBar.vue"
+            }),
+        )
+        .expect("vue3 compileScript");
+        assert!(assignment["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error
+                .as_str()
+                .is_some_and(|error| error.contains("Cannot assign to destructured props"))));
+
+        let watch_alias = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup>",
+                    "import { watch as w, toRef as r } from 'vue'\n",
+                    "const { foo, bar } = defineProps(['foo', 'bar'])\n",
+                    "w(foo, () => {})\n",
+                    "r(bar)",
+                    "</script>"
+                ),
+                "filename": "FooBar.vue"
+            }),
+        )
+        .expect("vue3 compileScript");
+        let errors = watch_alias["errors"].as_array().unwrap();
+        assert!(errors
+            .iter()
+            .any(|error| error.as_str().is_some_and(|error| error.contains(
+                "\"foo\" is a destructured prop and should not be passed directly to watch()."
+            ))));
+        assert!(errors
+            .iter()
+            .any(|error| error.as_str().is_some_and(|error| error.contains(
+                "\"bar\" is a destructured prop and should not be passed directly to toRef()."
+            ))));
+
+        let normal_script_watch_alias = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script>",
+                    "import { watch as w } from 'vue'",
+                    "</script>",
+                    "<script setup>",
+                    "const { foo } = defineProps(['foo'])\n",
+                    "w(foo, () => {})",
+                    "</script>"
+                ),
+                "filename": "FooBar.vue"
+            }),
+        )
+        .expect("vue3 compileScript");
+        assert!(normal_script_watch_alias["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error.as_str().is_some_and(|error| error.contains(
+                "\"foo\" is a destructured prop and should not be passed directly to watch()."
+            ))));
+
+        let shadowed = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup>",
+                    "import { watch } from 'vue'\n",
+                    "const { foo } = defineProps(['foo'])\n",
+                    "function useLocal(foo) { watch(foo, () => {}); foo++ }",
+                    "</script>"
+                ),
+                "filename": "FooBar.vue"
+            }),
+        )
+        .expect("vue3 compileScript");
+        assert!(shadowed["errors"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
     fn vue3_sfc_bridge_compile_script_merges_define_options() {
         let compiled = dispatch(
             "sfc.compileScript",
