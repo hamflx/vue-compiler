@@ -78,7 +78,7 @@ function parse(source, options) {
 
 function parse$1(source) {
   const options = arguments.length > 1 ? arguments[1] : undefined;
-  return native.parseSfcResult(String(source || ''), options || {});
+  return hydrateVue3SfcParseResult(native.parseSfcResult(String(source || ''), options || {}));
 }
 
 function compileTemplate(options) {
@@ -146,6 +146,129 @@ function normalizeVue3StyleResult(result) {
   const out = { ...result };
   out.map = undefined;
   return out;
+}
+
+function hydrateVue3SfcParseResult(result) {
+  if (!result || typeof result !== 'object' || !result.descriptor) return result;
+  const descriptor = result.descriptor;
+  descriptor.shouldForceReload = function shouldForceReload(prevImports) {
+    return vue3SfcShouldForceReload(prevImports, descriptor);
+  };
+  return result;
+}
+
+function vue3SfcShouldForceReload(prevImports, descriptor) {
+  const scriptSetup = descriptor && descriptor.scriptSetup;
+  if (!scriptSetup || (scriptSetup.lang !== 'ts' && scriptSetup.lang !== 'tsx')) {
+    return false;
+  }
+  for (const key in prevImports) {
+    if (!prevImports[key].isUsedInTemplate && vue3SfcIsImportUsed(key, descriptor)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function vue3SfcIsImportUsed(local, descriptor) {
+  return vue3SfcTemplateUsedIdentifiers(descriptor).has(local);
+}
+
+function vue3SfcTemplateUsedIdentifiers(descriptor) {
+  const template = descriptor.template;
+  const ids = new Set();
+  const children = template.ast && Array.isArray(template.ast.children) ? template.ast.children : [];
+  children.forEach(node => collectVue3SfcTemplateIds(node, ids));
+  return ids;
+}
+
+function collectVue3SfcTemplateIds(node, ids) {
+  if (!node || typeof node !== 'object') return;
+  if (node.type === 1) {
+    let tag = String(node.tag || '');
+    if (tag.includes('.')) tag = tag.split('.')[0].trim();
+    if (tag && !vue3SfcIsNativeTag(tag) && !vue3SfcIsDomBuiltInComponent(tag)) {
+      ids.add(camelize(tag));
+      ids.add(capitalize(camelize(tag)));
+    }
+    for (const prop of node.props || []) {
+      if (prop && prop.type === 7) {
+        if (!vue3SfcIsBuiltInDirective(prop.name)) {
+          ids.add(`v${capitalize(camelize(prop.name))}`);
+        }
+        if (prop.arg && !prop.arg.isStatic) {
+          collectVue3SfcExpressionIds(prop.arg, ids);
+        }
+        if (prop.name === 'for' && prop.forParseResult && prop.forParseResult.source) {
+          collectVue3SfcExpressionIds(prop.forParseResult.source, ids);
+        } else if (prop.exp) {
+          collectVue3SfcExpressionIds(prop.exp, ids);
+        } else if (prop.name === 'bind' && prop.arg && prop.arg.content) {
+          ids.add(camelize(prop.arg.content));
+        }
+      } else if (prop && prop.type === 6 && prop.name === 'ref' && prop.value && prop.value.content) {
+        ids.add(prop.value.content);
+      }
+    }
+    for (const child of node.children || []) {
+      collectVue3SfcTemplateIds(child, ids);
+    }
+  } else if (node.type === 5) {
+    collectVue3SfcExpressionIds(node.content, ids);
+  }
+}
+
+function collectVue3SfcExpressionIds(exp, ids) {
+  if (!exp) return;
+  if (exp.ast) {
+    collectVue3SfcAstIds(exp.ast, ids);
+  } else if (exp.ast === null) {
+    collectVue3SfcStringExpressionIds(exp.content, ids);
+  } else if (exp.content) {
+    collectVue3SfcStringExpressionIds(exp.content, ids);
+  }
+}
+
+function collectVue3SfcAstIds(root, ids) {
+  walkAst(root, (node, parent) => {
+    if (!node || node.type !== 'Identifier') return;
+    if (parent && parent.type === 'MemberExpression' && parent.property === node && !parent.computed) return;
+    if (parent && (parent.type === 'ObjectProperty' || parent.type === 'Property') && parent.key === node && !parent.computed) return;
+    ids.add(node.name);
+  });
+}
+
+function collectVue3SfcStringExpressionIds(source, ids) {
+  const text = String(source || '');
+  const pattern = /[A-Za-z_$][\w$]*/g;
+  let match;
+  while ((match = pattern.exec(text))) {
+    const name = match[0];
+    const before = text.slice(0, match.index).trimEnd();
+    if (before.endsWith('.')) continue;
+    ids.add(name);
+  }
+}
+
+function vue3SfcIsBuiltInDirective(name) {
+  return new Set(['bind', 'cloak', 'else-if', 'else', 'for', 'html', 'if', 'model', 'on', 'once', 'pre', 'show', 'slot', 'text', 'memo']).has(String(name || ''));
+}
+
+function vue3SfcIsNativeTag(tag) {
+  return /^(?:html|body|base|head|link|meta|style|title|address|article|aside|footer|header|hgroup|h1|h2|h3|h4|h5|h6|nav|section|div|dd|dl|dt|figcaption|figure|picture|hr|img|li|main|ol|p|pre|ul|a|b|abbr|bdi|bdo|br|cite|code|data|dfn|em|i|kbd|mark|q|rp|rt|ruby|s|samp|small|span|strong|sub|sup|time|u|var|wbr|area|audio|map|track|video|embed|object|param|source|canvas|script|noscript|del|ins|caption|col|colgroup|table|thead|tbody|td|th|tr|button|datalist|fieldset|form|input|label|legend|meter|optgroup|option|output|progress|select|textarea|details|dialog|menu|summary|template|blockquote|iframe|tfoot|svg|math)$/i.test(String(tag || ''));
+}
+
+function vue3SfcIsDomBuiltInComponent(tag) {
+  return tag === 'Transition' || tag === 'transition' || tag === 'TransitionGroup' || tag === 'transition-group';
+}
+
+function capitalize(value) {
+  value = String(value || '');
+  return value ? value.charAt(0).toUpperCase() + value.slice(1) : value;
+}
+
+function camelize(value) {
+  return String(value || '').replace(/-(\w)/g, (_, c) => c ? c.toUpperCase() : '');
 }
 
 function resolveStylePreprocessOptions(source, options) {

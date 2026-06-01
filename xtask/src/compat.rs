@@ -2420,6 +2420,7 @@ fn alias_function_expression(
             );
             let is_vue27_sfc_compile_script =
                 target.kind == TargetKind::Vue27Sfc && export_name == "compileScript";
+            let is_vue3_sfc_parse = target.kind == TargetKind::Vue3Sfc && export_name == "parse";
             let is_vue3_ssr_compile = target.kind == TargetKind::Vue3Ssr && export_name == "compile";
             let is_sfc_compile_style = matches!(
                 (target.kind, export_name),
@@ -2458,6 +2459,8 @@ fn alias_function_expression(
                 format!(
                     "(() => {{ const __vuecGenerateResult = {call}; __vuecGenerateResult.ast = a0; return __vuecGenerateResult; }})()"
                 )
+            } else if is_vue3_sfc_parse {
+                format!("hydrateVue3SfcParseResult({call})")
             } else if is_vue27_sfc_compile_script {
                 format!("hydrateVue27CompileScriptResult({call})")
             } else if is_vue3_ssr_compile {
@@ -7953,6 +7956,125 @@ function normalizeStyleAliasResult(result) {
   const out = Object.assign({}, result);
   out.map = undefined;
   return out;
+}
+
+function hydrateVue3SfcParseResult(result) {
+  if (!result || typeof result !== 'object' || !result.descriptor) return result;
+  const descriptor = result.descriptor;
+  descriptor.shouldForceReload = function shouldForceReload(prevImports) {
+    return vue3SfcShouldForceReload(prevImports, descriptor);
+  };
+  return result;
+}
+
+function vue3SfcShouldForceReload(prevImports, descriptor) {
+  const scriptSetup = descriptor && descriptor.scriptSetup;
+  if (!scriptSetup || (scriptSetup.lang !== 'ts' && scriptSetup.lang !== 'tsx')) {
+    return false;
+  }
+  for (const key in prevImports) {
+    if (!prevImports[key].isUsedInTemplate && vue3SfcIsImportUsed(key, descriptor)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function vue3SfcIsImportUsed(local, descriptor) {
+  return vue3SfcTemplateUsedIdentifiers(descriptor).has(local);
+}
+
+function vue3SfcTemplateUsedIdentifiers(descriptor) {
+  const template = descriptor.template;
+  const ids = new Set();
+  const children = template.ast && Array.isArray(template.ast.children) ? template.ast.children : [];
+  children.forEach(node => collectVue3SfcTemplateIds(node, ids));
+  return ids;
+}
+
+function collectVue3SfcTemplateIds(node, ids) {
+  if (!node || typeof node !== 'object') return;
+  if (node.type === vue3CoreRuntime.NodeTypes.ELEMENT) {
+    let tag = String(node.tag || '');
+    if (tag.includes('.')) tag = tag.split('.')[0].trim();
+    if (tag && !vue3SfcIsNativeTag(tag) && !vue3SfcIsDomBuiltInComponent(tag)) {
+      ids.add(camelize(tag));
+      ids.add(capitalize(camelize(tag)));
+    }
+    for (const prop of node.props || []) {
+      if (prop && prop.type === vue3CoreRuntime.NodeTypes.DIRECTIVE) {
+        if (!vue3CoreRuntime.isBuiltInDirective(prop.name)) {
+          ids.add(`v${capitalize(camelize(prop.name))}`);
+        }
+        if (prop.arg && !prop.arg.isStatic) {
+          collectVue3SfcExpressionIds(prop.arg, ids);
+        }
+        if (prop.name === 'for' && prop.forParseResult && prop.forParseResult.source) {
+          collectVue3SfcExpressionIds(prop.forParseResult.source, ids);
+        } else if (prop.exp) {
+          collectVue3SfcExpressionIds(prop.exp, ids);
+        } else if (prop.name === 'bind' && prop.arg && prop.arg.content) {
+          ids.add(camelize(prop.arg.content));
+        }
+      } else if (prop && prop.type === vue3CoreRuntime.NodeTypes.ATTRIBUTE && prop.name === 'ref' && prop.value && prop.value.content) {
+        ids.add(prop.value.content);
+      }
+    }
+    for (const child of node.children || []) {
+      collectVue3SfcTemplateIds(child, ids);
+    }
+  } else if (node.type === vue3CoreRuntime.NodeTypes.INTERPOLATION) {
+    collectVue3SfcExpressionIds(node.content, ids);
+  }
+}
+
+function collectVue3SfcExpressionIds(exp, ids) {
+  if (!exp) return;
+  if (exp.ast) {
+    collectVue3SfcAstIds(exp.ast, ids, null);
+  } else if (exp.ast === null) {
+    collectVue3SfcStringExpressionIds(exp.content, ids);
+  } else if (exp.content) {
+    collectVue3SfcStringExpressionIds(exp.content, ids);
+  }
+}
+
+function collectVue3SfcAstIds(node, ids, parent) {
+  if (!node || typeof node !== 'object') return;
+  if (Array.isArray(node)) {
+    node.forEach(child => collectVue3SfcAstIds(child, ids, parent));
+    return;
+  }
+  if (node.type === 'Identifier') {
+    if (parent && parent.type === 'MemberExpression' && parent.property === node && !parent.computed) return;
+    if (parent && (parent.type === 'ObjectProperty' || parent.type === 'Property') && parent.key === node && !parent.computed) return;
+    ids.add(node.name);
+  }
+  for (const key of Object.keys(node)) {
+    if (key === 'parent' || key === 'loc') continue;
+    const value = node[key];
+    if (value && typeof value === 'object') {
+      collectVue3SfcAstIds(value, ids, node);
+    }
+  }
+}
+
+function collectVue3SfcStringExpressionIds(source, ids) {
+  const text = String(source || '');
+  const pattern = /[A-Za-z_$][\w$]*/g;
+  let match;
+  while ((match = pattern.exec(text))) {
+    const before = text.slice(0, match.index).trimEnd();
+    if (!before.endsWith('.')) ids.add(match[0]);
+  }
+}
+
+function vue3SfcIsNativeTag(tag) {
+  return /^(?:html|body|base|head|link|meta|style|title|address|article|aside|footer|header|hgroup|h1|h2|h3|h4|h5|h6|nav|section|div|dd|dl|dt|figcaption|figure|picture|hr|img|li|main|ol|p|pre|ul|a|b|abbr|bdi|bdo|br|cite|code|data|dfn|em|i|kbd|mark|q|rp|rt|ruby|s|samp|small|span|strong|sub|sup|time|u|var|wbr|area|audio|map|track|video|embed|object|param|source|canvas|script|noscript|del|ins|caption|col|colgroup|table|thead|tbody|td|th|tr|button|datalist|fieldset|form|input|label|legend|meter|optgroup|option|output|progress|select|textarea|details|dialog|menu|summary|template|blockquote|iframe|tfoot|svg|math)$/i.test(String(tag || ''));
+}
+
+function vue3SfcIsDomBuiltInComponent(tag) {
+  return tag === 'Transition' || tag === 'transition' || tag === 'TransitionGroup' || tag === 'transition-group';
 }
 
 function hydrateVue3SsrCompileResult(result) {
@@ -14037,6 +14159,52 @@ mod tests {
         assert!(ALIAS_RUNTIME_JS.contains("function normalizeStyleAliasResult"));
         assert!(ALIAS_RUNTIME_JS.contains("function vue3StyleBridgePayload"));
         assert!(ALIAS_RUNTIME_JS.contains("VUEC_STYLE_DEPRECATED_SCOPED_SELECTOR"));
+    }
+
+    #[test]
+    fn vue3_sfc_parse_alias_hydrates_hmr_reload_api() {
+        let target = TargetSpec {
+            version_line: VersionLine::Vue3,
+            package: "@vue/compiler-sfc",
+            entry: "@vue/compiler-sfc",
+            kind: TargetKind::Vue3Sfc,
+        };
+        let detail = ApiExportDetail {
+            kind: "function".into(),
+            tag: "[object Function]".into(),
+            name: Some("parse".into()),
+            function_arity: Some(2),
+            is_async_function: Some(false),
+            is_class_like: Some(false),
+            own_property_names: vec!["length".into(), "name".into(), "prototype".into()],
+        };
+        let expression = alias_export_expression(target, "parse", Some(&detail));
+
+        assert!(expression.contains("hydrateVue3SfcParseResult"));
+        assert!(expression.contains("sfc.parse"));
+        assert!(ALIAS_RUNTIME_JS.contains("function hydrateVue3SfcParseResult"));
+        assert!(ALIAS_RUNTIME_JS.contains("function vue3SfcShouldForceReload"));
+        assert!(ALIAS_RUNTIME_JS.contains("function vue3SfcTemplateUsedIdentifiers"));
+    }
+
+    #[test]
+    fn napi_vue3_sfc_native_alias_hydrates_hmr_reload_api() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let source = fs::read_to_string(
+            repo_root
+                .join("packages")
+                .join("native-aliases")
+                .join("@vue")
+                .join("compiler-sfc")
+                .join("dist")
+                .join("compiler-sfc.cjs.js"),
+        )
+        .unwrap();
+
+        assert!(source.contains("hydrateVue3SfcParseResult(native.parseSfcResult"));
+        assert!(source.contains("function hydrateVue3SfcParseResult"));
+        assert!(source.contains("function vue3SfcShouldForceReload"));
+        assert!(source.contains("descriptor.shouldForceReload = function shouldForceReload"));
     }
 
     #[test]
