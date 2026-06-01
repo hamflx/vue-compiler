@@ -4556,6 +4556,37 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_rewrites_define_slots() {
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "import { defineSlots, ref } from 'vue'\n",
+                    "const slots = defineSlots<{ default: { msg: string } }>()\n",
+                    "const count = ref(1)",
+                    "</script>"
+                ),
+                "filename": "FooBar.vue"
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = compiled["content"].as_str().unwrap_or_default();
+        assert!(compiled["errors"].as_array().unwrap().is_empty());
+        assert!(content.contains(
+            "import { useSlots as _useSlots, defineComponent as _defineComponent } from 'vue'"
+        ));
+        assert!(content.contains("import { ref } from 'vue'"));
+        assert!(content.contains("const slots = _useSlots()"));
+        assert!(content.contains("const __returned__ = { slots, count, ref }"));
+        assert!(!content.contains("defineSlots"));
+        assert_eq!(compiled["bindings"]["slots"], json!("setup-const"));
+        assert_eq!(compiled["bindings"]["count"], json!("setup-maybe-ref"));
+        assert!(compiled["bindings"].get("defineSlots").is_none());
+    }
+
+    #[test]
     fn vue3_sfc_bridge_compile_script_infers_typescript_macros() {
         let compiled = dispatch(
             "sfc.compileScript",

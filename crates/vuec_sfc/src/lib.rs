@@ -6011,7 +6011,12 @@ fn vue3_import_specifier_compiler_macro(
     let imported = specifier.imported.name();
     if !matches!(
         imported.as_str(),
-        "defineProps" | "defineEmits" | "defineExpose" | "defineOptions" | "defineModel"
+        "defineProps"
+            | "defineEmits"
+            | "defineExpose"
+            | "defineOptions"
+            | "defineModel"
+            | "defineSlots"
     ) {
         return None;
     }
@@ -8455,6 +8460,8 @@ struct Vue3ScriptSetupAnalysis {
     emit_binding: Option<String>,
     models: Vec<Vue3ModelDecl>,
     has_define_expose: bool,
+    has_define_slots: bool,
+    needs_use_slots: bool,
     errors: Vec<String>,
     local_setup_bindings: BTreeSet<String>,
     declared_types: BTreeMap<String, Vec<String>>,
@@ -8546,6 +8553,9 @@ fn vue3_script_setup_helper_import(
     let mut helpers = Vec::new();
     if !setup_analysis.models.is_empty() {
         helpers.push("useModel as _useModel");
+    }
+    if setup_analysis.needs_use_slots {
+        helpers.push("useSlots as _useSlots");
     }
     if setup_analysis.needs_merge_defaults {
         helpers.push("mergeDefaults as _mergeDefaults");
@@ -8762,6 +8772,9 @@ fn analyze_vue3_script_setup(
                     } else if is_call_named(call, "defineOptions") {
                         collect_vue3_define_options_call(source, call, &mut analysis);
                         edits.remove(statement.span.start as usize, statement.span.end as usize);
+                    } else if is_call_named(call, "defineSlots") {
+                        collect_vue3_define_slots_call(call, None, &mut edits, &mut analysis);
+                        edits.remove(statement.span.start as usize, statement.span.end as usize);
                     } else if is_call_named(call, "defineModel") {
                         collect_vue3_define_model_call(
                             source,
@@ -8875,6 +8888,16 @@ fn analyze_vue3_setup_variable_declaration(
                     .push("defineOptions() has no returning value, it cannot be assigned.".into());
                 continue;
             }
+            if is_call_named(call, "defineSlots") {
+                collect_vue3_define_slots_call(call, Some(&declarator.id), edits, analysis);
+                collect_pattern_bindings(&declarator.id, &mut analysis.return_bindings);
+                collect_pattern_binding_types(
+                    &declarator.id,
+                    "setup-const",
+                    &mut analysis.setup_bindings,
+                );
+                continue;
+            }
             if is_call_named(call, "defineModel") {
                 collect_vue3_define_model_call(source, call, Some(&declarator.id), edits, analysis);
                 collect_pattern_bindings(&declarator.id, &mut analysis.return_bindings);
@@ -8974,6 +8997,31 @@ fn check_vue3_define_options_keys(
                 "defineOptions() cannot be used to declare {key}. Use {replacement}() instead."
             ));
         }
+    }
+}
+
+fn collect_vue3_define_slots_call(
+    call: &oxc_ast::ast::CallExpression<'_>,
+    binding: Option<&BindingPattern<'_>>,
+    edits: &mut SourceEdits<'_>,
+    analysis: &mut Vue3ScriptSetupAnalysis,
+) {
+    if analysis.has_define_slots {
+        analysis.errors.push("duplicate defineSlots() call".into());
+    }
+    analysis.has_define_slots = true;
+    if !call.arguments.is_empty() {
+        analysis
+            .errors
+            .push("defineSlots() cannot accept arguments".into());
+    }
+    if binding.is_some() {
+        analysis.needs_use_slots = true;
+        edits.overwrite(
+            call.span.start as usize,
+            call.span.end as usize,
+            "_useSlots()",
+        );
     }
 }
 
@@ -11222,6 +11270,98 @@ defineExpose({ reset() {} })
             script.bindings.get("emit").map(String::as_str),
             Some("setup-const")
         );
+    }
+
+    #[test]
+    fn vue3_compile_script_rewrites_define_slots() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup lang="ts">
+import { defineSlots } from 'vue'
+const slots = defineSlots<{
+  default: { msg: string }
+}>()
+</script>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty());
+        assert!(script.content.contains(
+            "import { useSlots as _useSlots, defineComponent as _defineComponent } from 'vue'"
+        ));
+        assert!(script.content.contains("const slots = _useSlots()"));
+        assert!(script.content.contains("const __returned__ = { slots }"));
+        assert!(!script.content.contains("defineSlots"));
+        assert_eq!(
+            script.bindings.get("slots").map(String::as_str),
+            Some("setup-const")
+        );
+        assert!(script.bindings.get("defineSlots").is_none());
+
+        let unbound = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup lang="ts">
+defineSlots<{
+  default: { msg: string }
+}>()
+</script>"#,
+        );
+        let script = compiler.compile_script(&unbound, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty());
+        assert!(!script.content.contains("defineSlots"));
+        assert!(!script.content.contains("_useSlots"));
+
+        let runtime = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup>
+const slots = defineSlots()
+</script>"#,
+        );
+        let script = compiler.compile_script(&runtime, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty());
+        assert!(script
+            .content
+            .contains("import { useSlots as _useSlots } from 'vue'"));
+        assert!(script.content.contains("const slots = _useSlots()"));
+        assert!(!script.content.contains("defineSlots"));
+    }
+
+    #[test]
+    fn vue3_compile_script_reports_define_slots_errors() {
+        let mut compiler = SfcCompiler::new();
+        let duplicate = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup>
+defineSlots()
+defineSlots()
+</script>"#,
+        );
+        let script = compiler.compile_script(&duplicate, SfcScriptCompileOptions::default());
+
+        assert!(script
+            .errors
+            .iter()
+            .any(|error| error.contains("duplicate defineSlots() call")));
+        assert!(!script.content.contains("defineSlots"));
+        assert!(!script.content.contains("_useSlots"));
+
+        let arguments = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup>
+const slots = defineSlots({})
+</script>"#,
+        );
+        let script = compiler.compile_script(&arguments, SfcScriptCompileOptions::default());
+
+        assert!(script
+            .errors
+            .iter()
+            .any(|error| error.contains("defineSlots() cannot accept arguments")));
+        assert!(script.content.contains("const slots = _useSlots()"));
+        assert!(!script.content.contains("defineSlots"));
     }
 
     #[test]
