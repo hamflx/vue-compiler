@@ -4587,6 +4587,34 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_reports_duplicate_define_expose() {
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup>",
+                    "defineExpose({ first: true })\n",
+                    "defineExpose({ second: true })",
+                    "</script>"
+                ),
+                "filename": "FooBar.vue"
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = compiled["content"].as_str().unwrap_or_default();
+        assert!(compiled["errors"].as_array().unwrap().iter().any(|error| {
+            error
+                .as_str()
+                .is_some_and(|error| error.contains("duplicate defineExpose() call"))
+        }));
+        assert!(content.contains("__expose({ first: true })"));
+        assert!(content.contains("__expose({ second: true })"));
+        assert!(!content.contains("defineExpose"));
+        assert!(!content.contains("__expose();"));
+    }
+
+    #[test]
     fn vue3_sfc_bridge_compile_script_infers_typescript_macros() {
         let compiled = dispatch(
             "sfc.compileScript",

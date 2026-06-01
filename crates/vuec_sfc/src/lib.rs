@@ -8784,12 +8784,7 @@ fn analyze_vue3_script_setup(
                             &mut analysis,
                         );
                     } else if is_call_named(call, "defineExpose") {
-                        analysis.has_define_expose = true;
-                        edits.overwrite(
-                            call.span.start as usize,
-                            call.callee.span().end as usize,
-                            "__expose",
-                        );
+                        collect_vue3_define_expose_call(call, &mut edits, &mut analysis);
                     }
                 }
             }
@@ -9023,6 +9018,22 @@ fn collect_vue3_define_slots_call(
             "_useSlots()",
         );
     }
+}
+
+fn collect_vue3_define_expose_call(
+    call: &oxc_ast::ast::CallExpression<'_>,
+    edits: &mut SourceEdits<'_>,
+    analysis: &mut Vue3ScriptSetupAnalysis,
+) {
+    if analysis.has_define_expose {
+        analysis.errors.push("duplicate defineExpose() call".into());
+    }
+    analysis.has_define_expose = true;
+    edits.overwrite(
+        call.span.start as usize,
+        call.callee.span().end as usize,
+        "__expose",
+    );
 }
 
 fn collect_vue3_define_model_call(
@@ -11362,6 +11373,28 @@ const slots = defineSlots({})
             .any(|error| error.contains("defineSlots() cannot accept arguments")));
         assert!(script.content.contains("const slots = _useSlots()"));
         assert!(!script.content.contains("defineSlots"));
+    }
+
+    #[test]
+    fn vue3_compile_script_reports_duplicate_define_expose() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup>
+defineExpose({ first: true })
+defineExpose({ second: true })
+</script>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script
+            .errors
+            .iter()
+            .any(|error| error.contains("duplicate defineExpose() call")));
+        assert!(script.content.contains("__expose({ first: true })"));
+        assert!(script.content.contains("__expose({ second: true })"));
+        assert!(!script.content.contains("defineExpose"));
+        assert!(!script.content.contains("__expose();"));
     }
 
     #[test]
