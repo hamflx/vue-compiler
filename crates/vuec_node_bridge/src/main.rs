@@ -4931,6 +4931,42 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_reports_props_destructure_default_type_errors() {
+        let mismatch = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "const { foo = 'hello' } = defineProps<{ foo?: number }>()",
+                    "</script>"
+                ),
+                "filename": "FooBar.vue"
+            }),
+        )
+        .expect("vue3 compileScript");
+        assert!(mismatch["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error.as_str().is_some_and(|error| error
+                .contains("Default value of prop \"foo\" does not match declared type."))));
+
+        let matching = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "const { foo = 1, bar = 'ok' } = defineProps<{ foo?: number, bar?: string }>()",
+                    "</script>"
+                ),
+                "filename": "FooBar.vue"
+            }),
+        )
+        .expect("vue3 compileScript");
+        assert!(matching["errors"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
     fn vue3_sfc_bridge_compile_script_merges_define_options() {
         let compiled = dispatch(
             "sfc.compileScript",

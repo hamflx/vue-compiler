@@ -8523,6 +8523,8 @@ struct Vue3ScriptSetupAnalysis {
     local_setup_bindings: BTreeSet<String>,
     local_setup_binding_types: BTreeMap<String, String>,
     props_destructured_bindings: BTreeMap<String, String>,
+    props_destructured_default_types: BTreeMap<String, String>,
+    props_type_runtime_types: BTreeMap<String, Vec<String>>,
     vue_import_aliases: BTreeMap<String, String>,
     declared_types: BTreeMap<String, Vec<String>>,
     define_model_declared_types: BTreeMap<String, Vec<String>>,
@@ -8875,6 +8877,7 @@ fn analyze_vue3_script_setup(
     }
 
     if !analysis.props_destructured_bindings.is_empty() {
+        check_vue3_define_props_destructure_default_types(&mut analysis);
         let mut usage_checker = Vue3PropsDestructureUsageChecker::new(
             &analysis.props_destructured_bindings,
             &analysis.vue_import_aliases,
@@ -9455,6 +9458,9 @@ fn collect_vue3_define_props_type(
         if let Some(default) = default_map.and_then(|defaults| defaults.get(&prop.key)) {
             prop.default = Some(default.clone());
         }
+        analysis
+            .props_type_runtime_types
+            .insert(prop.key.clone(), prop.types.clone());
         push_unique(&mut analysis.props_bindings, &prop.key);
         props.push(prop);
     }
@@ -9868,6 +9874,15 @@ fn collect_vue3_define_props_destructure_property(
                         .into(),
                 );
             }
+            if let Some(key) = key {
+                if let Some(value_type) =
+                    infer_vue3_define_props_destructure_default_value_type(&pattern.right)
+                {
+                    analysis
+                        .props_destructured_default_types
+                        .insert(key.to_string(), value_type.to_string());
+                }
+            }
             if let BindingPattern::BindingIdentifier(identifier) = &pattern.left {
                 register_vue3_define_props_destructure_binding(
                     key,
@@ -9910,6 +9925,39 @@ fn register_vue3_define_props_destructure_binding(
         analysis
             .setup_bindings
             .insert(local.to_string(), "props-aliased".into());
+    }
+}
+
+fn check_vue3_define_props_destructure_default_types(analysis: &mut Vue3ScriptSetupAnalysis) {
+    for (key, value_type) in &analysis.props_destructured_default_types {
+        let Some(prop_types) = analysis.props_type_runtime_types.get(key) else {
+            continue;
+        };
+        if prop_types.is_empty()
+            || prop_types.iter().any(|ty| ty == "null")
+            || prop_types.iter().any(|ty| ty == value_type)
+        {
+            continue;
+        }
+        analysis.errors.push(format!(
+            "Default value of prop \"{key}\" does not match declared type."
+        ));
+    }
+}
+
+fn infer_vue3_define_props_destructure_default_value_type(
+    expression: &Expression<'_>,
+) -> Option<&'static str> {
+    match unwrap_vue3_ts_expression(expression) {
+        Expression::StringLiteral(_) => Some("String"),
+        Expression::NumericLiteral(_) => Some("Number"),
+        Expression::BooleanLiteral(_) => Some("Boolean"),
+        Expression::ObjectExpression(_) => Some("Object"),
+        Expression::ArrayExpression(_) => Some("Array"),
+        Expression::FunctionExpression(_) | Expression::ArrowFunctionExpression(_) => {
+            Some("Function")
+        }
+        _ => None,
     }
 }
 
@@ -13313,6 +13361,57 @@ const run = (foo = 1) => {
         );
         let script = compiler.compile_script(&shadowed, SfcScriptCompileOptions::default());
 
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+    }
+
+    #[test]
+    fn vue3_compile_script_reports_define_props_destructure_default_type_errors() {
+        let mut compiler = SfcCompiler::new();
+        let mismatch = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup lang="ts">
+const { foo = 'hello' } = defineProps<{ foo?: number }>()
+</script>"#,
+        );
+        let script = compiler.compile_script(&mismatch, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.iter().any(|error| {
+            error.contains("Default value of prop \"foo\" does not match declared type.")
+        }));
+
+        let matching = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup lang="ts">
+const { foo = 1, bar = 'ok', enabled = true, items = [], options = {}, run = () => {} } = defineProps<{
+  foo?: number
+  bar?: string
+  enabled?: boolean
+  items?: string[]
+  options?: object
+  run?: () => void
+}>()
+</script>"#,
+        );
+        let script = compiler.compile_script(&matching, SfcScriptCompileOptions::default());
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+
+        let nullable = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup lang="ts">
+const { foo = 'hello' } = defineProps<{ foo?: number | null }>()
+</script>"#,
+        );
+        let script = compiler.compile_script(&nullable, SfcScriptCompileOptions::default());
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+
+        let runtime_declaration = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup>
+const { foo = 'hello' } = defineProps({ foo: Number })
+</script>"#,
+        );
+        let script =
+            compiler.compile_script(&runtime_declaration, SfcScriptCompileOptions::default());
         assert!(script.errors.is_empty(), "{:?}", script.errors);
     }
 
