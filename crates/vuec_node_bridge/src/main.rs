@@ -452,7 +452,7 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
             let filename = string_field_or(&payload, "filename", "anonymous.vue");
             let mut compiler = SfcCompiler::new();
             let descriptor = compiler.parse(filename, &source);
-            let options = SfcScriptCompileOptions::default();
+            let options = sfc_script_options(payload.get("options"));
             Ok(serde_json::to_value(
                 compiler.compile_script(&descriptor, options),
             )?)
@@ -4552,6 +4552,39 @@ mod tests {
         assert!(content.contains("__expose({ reset() {} })"));
         assert_eq!(compiled["bindings"]["foo"], json!("props"));
         assert_eq!(compiled["bindings"]["props"], json!("setup-reactive-const"));
+        assert_eq!(compiled["bindings"]["emit"], json!("setup-const"));
+    }
+
+    #[test]
+    fn vue3_sfc_bridge_compile_script_infers_typescript_macros() {
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "type Props = { foo?: string; ok?: boolean; cb?: () => void }\n",
+                    "const props = withDefaults(defineProps<Props>(), { foo: 'x', ok: true })\n",
+                    "const emit = defineEmits<{(e: 'save'): void}>()",
+                    "</script>"
+                ),
+                "filename": "FooBar.vue",
+                "options": {
+                    "isProd": true
+                }
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = compiled["content"].as_str().unwrap_or_default();
+        assert!(content.contains("foo: { default: 'x' }"));
+        assert!(content.contains("ok: { type: Boolean, default: true }"));
+        assert!(content.contains("cb: {}"));
+        assert!(content.contains(r#"emits: ["save"],"#));
+        assert!(content.contains("setup(__props: any, { expose: __expose, emit: __emit })"));
+        assert_eq!(compiled["bindings"]["foo"], json!("props"));
+        assert_eq!(compiled["bindings"]["ok"], json!("props"));
+        assert_eq!(compiled["bindings"]["cb"], json!("props"));
+        assert_eq!(compiled["bindings"]["props"], json!("setup-const"));
         assert_eq!(compiled["bindings"]["emit"], json!("setup-const"));
     }
 
