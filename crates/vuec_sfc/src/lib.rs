@@ -8523,6 +8523,8 @@ struct Vue3ScriptSetupAnalysis {
     local_setup_bindings: BTreeSet<String>,
     local_setup_binding_types: BTreeMap<String, String>,
     props_destructured_bindings: BTreeMap<String, String>,
+    props_destructured_prop_order: Vec<String>,
+    props_destructured_rest_id: Option<String>,
     props_destructured_defaults: BTreeMap<String, Vue3PropsDestructuredDefault>,
     props_destructured_default_order: Vec<String>,
     props_destructured_default_types: BTreeMap<String, String>,
@@ -8634,6 +8636,9 @@ fn vue3_script_setup_helper_import(
     }
     if setup_analysis.needs_merge_defaults {
         helpers.push("mergeDefaults as _mergeDefaults");
+    }
+    if setup_analysis.props_destructured_rest_id.is_some() {
+        helpers.push("createPropsRestProxy as _createPropsRestProxy");
     }
     if vue3_script_setup_needs_merge_models(setup_analysis) {
         helpers.push("mergeModels as _mergeModels");
@@ -8942,13 +8947,23 @@ fn analyze_vue3_setup_variable_declaration(
                     );
                     edits.overwrite(call.span.start as usize, call.span.end as usize, "__props");
                 } else {
-                    collect_vue3_define_props_destructure_bindings(
+                    let props_rest_id = collect_vue3_define_props_destructure_bindings(
                         source,
                         &declarator.id,
                         analysis,
                     );
                     collect_vue3_define_props_call(source, call, analysis, is_prod);
-                    macro_declarators.push(index);
+                    if let Some(rest_id) = props_rest_id {
+                        rewrite_vue3_define_props_destructure_rest(
+                            &declarator.id,
+                            call,
+                            &rest_id,
+                            analysis,
+                            edits,
+                        );
+                    } else {
+                        macro_declarators.push(index);
+                    }
                 }
                 continue;
             }
@@ -9881,6 +9896,31 @@ fn vue3_props_destructured_default_needs_skip_factory(
     inferred_types.is_none() && (default.is_function || default.is_identifier)
 }
 
+fn rewrite_vue3_define_props_destructure_rest(
+    pattern: &BindingPattern<'_>,
+    call: &oxc_ast::ast::CallExpression<'_>,
+    rest_id: &str,
+    analysis: &Vue3ScriptSetupAnalysis,
+    edits: &mut SourceEdits<'_>,
+) {
+    let excluded = analysis
+        .props_destructured_prop_order
+        .iter()
+        .map(|name| format!("\"{}\"", escape_js_double(name)))
+        .collect::<Vec<_>>()
+        .join(",");
+    edits.overwrite(
+        pattern.span().start as usize,
+        pattern.span().end as usize,
+        rest_id,
+    );
+    edits.overwrite(
+        call.span.start as usize,
+        call.span.end as usize,
+        format!("_createPropsRestProxy(__props, [{excluded}])"),
+    );
+}
+
 fn is_ascii_js_identifier(value: &str) -> bool {
     let mut chars = value.chars();
     let Some(first) = chars.next() else {
@@ -9894,7 +9934,7 @@ fn collect_vue3_define_props_destructure_bindings(
     source: &str,
     pattern: &BindingPattern<'_>,
     analysis: &mut Vue3ScriptSetupAnalysis,
-) {
+) -> Option<String> {
     match pattern {
         BindingPattern::ObjectPattern(pattern) => {
             for property in &pattern.properties {
@@ -9908,12 +9948,23 @@ fn collect_vue3_define_props_destructure_bindings(
                 );
             }
             if let Some(rest) = &pattern.rest {
+                if let Some(rest_id) = first_pattern_binding(&rest.argument) {
+                    analysis.props_destructured_rest_id = Some(rest_id.clone());
+                    push_unique(&mut analysis.return_bindings, &rest_id);
+                    collect_pattern_binding_types(
+                        &rest.argument,
+                        "setup-reactive-const",
+                        &mut analysis.setup_bindings,
+                    );
+                    return Some(rest_id);
+                }
                 collect_pattern_binding_types(
                     &rest.argument,
                     "setup-reactive-const",
                     &mut analysis.setup_bindings,
                 );
             }
+            None
         }
         BindingPattern::ArrayPattern(pattern) => {
             for element in pattern.elements.iter().flatten() {
@@ -9930,11 +9981,12 @@ fn collect_vue3_define_props_destructure_bindings(
                     &mut analysis.setup_bindings,
                 );
             }
+            None
         }
         BindingPattern::AssignmentPattern(pattern) => {
-            collect_vue3_define_props_destructure_bindings(source, &pattern.left, analysis);
+            collect_vue3_define_props_destructure_bindings(source, &pattern.left, analysis)
         }
-        BindingPattern::BindingIdentifier(_) => {}
+        BindingPattern::BindingIdentifier(_) => None,
     }
 }
 
@@ -10062,9 +10114,11 @@ fn register_vue3_define_props_destructure_binding(
     local: &str,
     analysis: &mut Vue3ScriptSetupAnalysis,
 ) {
+    let public_key = key.unwrap_or(local);
+    push_unique(&mut analysis.props_destructured_prop_order, public_key);
     analysis
         .props_destructured_bindings
-        .insert(local.to_string(), key.unwrap_or(local).to_string());
+        .insert(local.to_string(), public_key.to_string());
     if key.is_some_and(|key| key == local) {
         analysis
             .setup_bindings
@@ -12577,6 +12631,68 @@ console.log(message, payload, fooBar)
             script.bindings.get("fooBar").map(String::as_str),
             Some("props-aliased")
         );
+    }
+
+    #[test]
+    fn vue3_compile_script_generates_define_props_destructure_rest_proxy() {
+        let mut compiler = SfcCompiler::new();
+        let runtime = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup>
+const { foo, bar: baz, ...rest } = defineProps(['foo', 'bar', 'baz'])
+const read = foo + baz + rest.baz
+</script>"#,
+        );
+        let script = compiler.compile_script(&runtime, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .starts_with("import { createPropsRestProxy as _createPropsRestProxy } from 'vue'\n"));
+        assert!(script
+            .content
+            .contains(r#"const rest = _createPropsRestProxy(__props, ["foo","bar"])"#));
+        assert!(script
+            .content
+            .contains("const read = __props.foo + __props.bar + rest.baz"));
+        assert!(!script.content.contains("const { foo, bar: baz, ...rest }"));
+        assert!(!script.content.contains("defineProps"));
+        assert!(script
+            .content
+            .contains("const __returned__ = { rest, read }"));
+        assert_eq!(
+            script.bindings.get("foo").map(String::as_str),
+            Some("props")
+        );
+        assert_eq!(
+            script.bindings.get("bar").map(String::as_str),
+            Some("props")
+        );
+        assert_eq!(
+            script.bindings.get("baz").map(String::as_str),
+            Some("props-aliased")
+        );
+        assert_eq!(
+            script.bindings.get("rest").map(String::as_str),
+            Some("setup-reactive-const")
+        );
+
+        let typed = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup lang="ts">
+const { foo, ...rest } = defineProps<{ foo?: string, bar?: number }>()
+</script>"#,
+        );
+        let script = compiler.compile_script(&typed, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script.content.starts_with(
+            "import { createPropsRestProxy as _createPropsRestProxy, defineComponent as _defineComponent } from 'vue'\n"
+        ));
+        assert!(script.content.contains("setup(__props: any"));
+        assert!(script
+            .content
+            .contains(r#"const rest = _createPropsRestProxy(__props, ["foo"])"#));
     }
 
     #[test]

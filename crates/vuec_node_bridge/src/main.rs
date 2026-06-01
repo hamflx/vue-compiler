@@ -4961,6 +4961,34 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_generates_props_destructure_rest_proxy() {
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup>",
+                    "const { foo, bar: baz, ...rest } = defineProps(['foo', 'bar', 'baz'])\n",
+                    "const read = foo + baz + rest.baz",
+                    "</script>"
+                ),
+                "filename": "FooBar.vue"
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = compiled["content"].as_str().unwrap_or_default();
+        assert!(compiled["errors"].as_array().unwrap().is_empty());
+        assert!(content.contains(r#"const rest = _createPropsRestProxy(__props, ["foo","bar"])"#));
+        assert!(content.contains("const read = __props.foo + __props.bar + rest.baz"));
+        assert!(!content.contains("const { foo, bar: baz, ...rest }"));
+        assert!(!content.contains("defineProps"));
+        assert_eq!(
+            compiled["bindings"]["rest"].as_str(),
+            Some("setup-reactive-const")
+        );
+    }
+
+    #[test]
     fn vue3_sfc_bridge_compile_script_merges_props_destructure_defaults() {
         let runtime = dispatch(
             "sfc.compileScript",
