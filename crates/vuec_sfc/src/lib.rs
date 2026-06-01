@@ -8523,6 +8523,8 @@ struct Vue3ScriptSetupAnalysis {
     local_setup_bindings: BTreeSet<String>,
     local_setup_binding_types: BTreeMap<String, String>,
     props_destructured_bindings: BTreeMap<String, String>,
+    props_destructured_defaults: BTreeMap<String, Vue3PropsDestructuredDefault>,
+    props_destructured_default_order: Vec<String>,
     props_destructured_default_types: BTreeMap<String, String>,
     props_type_runtime_types: BTreeMap<String, Vec<String>>,
     vue_import_aliases: BTreeMap<String, String>,
@@ -8544,6 +8546,15 @@ struct Vue3DefineModelOptionsSplit {
     prop_option_ranges: Vec<(usize, usize)>,
     transformer_option_ranges: Vec<(usize, usize)>,
     remove_entire_call_options: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Vue3PropsDestructuredDefault {
+    value: String,
+    inferred_type: Option<String>,
+    is_literal: bool,
+    is_function: bool,
+    is_identifier: bool,
 }
 
 fn script_content(
@@ -8921,8 +8932,8 @@ fn analyze_vue3_setup_variable_declaration(
     for (index, declarator) in declaration.declarations.iter().enumerate() {
         if let Some(Expression::CallExpression(call)) = &declarator.init {
             if is_call_named(call, "defineProps") {
-                collect_vue3_define_props_call(source, call, analysis, is_prod);
                 if matches!(declarator.id, BindingPattern::BindingIdentifier(_)) {
+                    collect_vue3_define_props_call(source, call, analysis, is_prod);
                     collect_pattern_bindings(&declarator.id, &mut analysis.return_bindings);
                     collect_pattern_binding_types(
                         &declarator.id,
@@ -8931,7 +8942,12 @@ fn analyze_vue3_setup_variable_declaration(
                     );
                     edits.overwrite(call.span.start as usize, call.span.end as usize, "__props");
                 } else {
-                    collect_vue3_define_props_destructure_bindings(&declarator.id, analysis);
+                    collect_vue3_define_props_destructure_bindings(
+                        source,
+                        &declarator.id,
+                        analysis,
+                    );
+                    collect_vue3_define_props_call(source, call, analysis, is_prod);
                     macro_declarators.push(index);
                 }
                 continue;
@@ -9359,9 +9375,23 @@ fn collect_vue3_define_props_call(
     for key in vue3_runtime_prop_keys(expression) {
         push_unique(&mut analysis.props_bindings, &key);
     }
-    analysis.props_runtime = source
+    let Some(runtime) = source
         .get(expression.span().start as usize..expression.span().end as usize)
-        .map(ToOwned::to_owned);
+        .map(ToOwned::to_owned)
+    else {
+        return;
+    };
+    analysis.props_runtime =
+        if let Some(defaults) = vue3_props_destructured_runtime_defaults(analysis) {
+            analysis.needs_merge_defaults = true;
+            Some(format!(
+                "/*@__PURE__*/_mergeDefaults({}, {})",
+                runtime.trim(),
+                defaults
+            ))
+        } else {
+            Some(runtime)
+        };
 }
 
 fn collect_vue3_define_props_call_seen(analysis: &mut Vue3ScriptSetupAnalysis) {
@@ -9456,7 +9486,11 @@ fn collect_vue3_define_props_type(
     let mut props = Vec::new();
     for member in &type_members.members {
         let mut prop = member.clone();
-        if let Some(default) = default_map.and_then(|defaults| defaults.get(&prop.key)) {
+        if let Some(default) =
+            vue3_props_destructured_default_option(analysis, &prop.key, Some(prop.types.as_slice()))
+        {
+            prop.default = Some(default);
+        } else if let Some(default) = default_map.and_then(|defaults| defaults.get(&prop.key)) {
             prop.default = Some(default.clone());
         }
         analysis
@@ -9785,6 +9819,68 @@ fn vue3_runtime_prop_key(key: &str) -> String {
     }
 }
 
+fn vue3_props_destructured_runtime_defaults(analysis: &Vue3ScriptSetupAnalysis) -> Option<String> {
+    if analysis.props_destructured_default_order.is_empty() {
+        return None;
+    }
+    let mut entries = Vec::new();
+    for key in &analysis.props_destructured_default_order {
+        let Some(default) = analysis.props_destructured_defaults.get(key) else {
+            continue;
+        };
+        let final_key = vue3_runtime_prop_key(key);
+        let value = vue3_props_destructured_default_value(default, None);
+        let skip = if vue3_props_destructured_default_needs_skip_factory(default, None) {
+            format!(", __skip_{final_key}: true")
+        } else {
+            String::new()
+        };
+        entries.push(format!("{final_key}: {value}{skip}"));
+    }
+    if entries.is_empty() {
+        None
+    } else {
+        Some(format!("{{\n  {}\n}}", entries.join(",\n  ")))
+    }
+}
+
+fn vue3_props_destructured_default_option(
+    analysis: &Vue3ScriptSetupAnalysis,
+    key: &str,
+    inferred_types: Option<&[String]>,
+) -> Option<String> {
+    let default = analysis.props_destructured_defaults.get(key)?;
+    let value = vue3_props_destructured_default_value(default, inferred_types);
+    let skip = if vue3_props_destructured_default_needs_skip_factory(default, inferred_types) {
+        ", skipFactory: true"
+    } else {
+        ""
+    };
+    Some(format!("default: {value}{skip}"))
+}
+
+fn vue3_props_destructured_default_value(
+    default: &Vue3PropsDestructuredDefault,
+    inferred_types: Option<&[String]>,
+) -> String {
+    let need_skip_factory =
+        vue3_props_destructured_default_needs_skip_factory(default, inferred_types);
+    let is_function_prop =
+        inferred_types.is_some_and(|types| types.iter().any(|ty| ty == "Function"));
+    if !need_skip_factory && !default.is_literal && !is_function_prop {
+        format!("() => ({})", default.value)
+    } else {
+        default.value.clone()
+    }
+}
+
+fn vue3_props_destructured_default_needs_skip_factory(
+    default: &Vue3PropsDestructuredDefault,
+    inferred_types: Option<&[String]>,
+) -> bool {
+    inferred_types.is_none() && (default.is_function || default.is_identifier)
+}
+
 fn is_ascii_js_identifier(value: &str) -> bool {
     let mut chars = value.chars();
     let Some(first) = chars.next() else {
@@ -9795,6 +9891,7 @@ fn is_ascii_js_identifier(value: &str) -> bool {
 }
 
 fn collect_vue3_define_props_destructure_bindings(
+    source: &str,
     pattern: &BindingPattern<'_>,
     analysis: &mut Vue3ScriptSetupAnalysis,
 ) {
@@ -9804,6 +9901,7 @@ fn collect_vue3_define_props_destructure_bindings(
                 let key =
                     vue3_define_props_destructure_key(&property.key, property.computed, analysis);
                 collect_vue3_define_props_destructure_property(
+                    source,
                     key.as_deref(),
                     &property.value,
                     analysis,
@@ -9834,7 +9932,7 @@ fn collect_vue3_define_props_destructure_bindings(
             }
         }
         BindingPattern::AssignmentPattern(pattern) => {
-            collect_vue3_define_props_destructure_bindings(&pattern.left, analysis);
+            collect_vue3_define_props_destructure_bindings(source, &pattern.left, analysis);
         }
         BindingPattern::BindingIdentifier(_) => {}
     }
@@ -9860,6 +9958,7 @@ fn vue3_define_props_destructure_key(
 }
 
 fn collect_vue3_define_props_destructure_property(
+    source: &str,
     key: Option<&str>,
     value: &BindingPattern<'_>,
     analysis: &mut Vue3ScriptSetupAnalysis,
@@ -9876,12 +9975,26 @@ fn collect_vue3_define_props_destructure_property(
                 );
             }
             if let Some(key) = key {
-                if let Some(value_type) =
-                    infer_vue3_define_props_destructure_default_value_type(&pattern.right)
+                if let Some(default) =
+                    vue3_props_destructured_default_from_expression(source, &pattern.right)
                 {
+                    if !analysis
+                        .props_destructured_default_order
+                        .iter()
+                        .any(|existing| existing == key)
+                    {
+                        analysis
+                            .props_destructured_default_order
+                            .push(key.to_string());
+                    }
+                    if let Some(value_type) = default.inferred_type.as_ref() {
+                        analysis
+                            .props_destructured_default_types
+                            .insert(key.to_string(), value_type.clone());
+                    }
                     analysis
-                        .props_destructured_default_types
-                        .insert(key.to_string(), value_type.to_string());
+                        .props_destructured_defaults
+                        .insert(key.to_string(), default);
                 }
             }
             if let BindingPattern::BindingIdentifier(identifier) = &pattern.left {
@@ -9908,6 +10021,40 @@ fn collect_vue3_define_props_destructure_property(
             }
         }
     }
+}
+
+fn vue3_props_destructured_default_from_expression(
+    source: &str,
+    expression: &Expression<'_>,
+) -> Option<Vue3PropsDestructuredDefault> {
+    let value = source
+        .get(expression.span().start as usize..expression.span().end as usize)?
+        .to_string();
+    let unwrapped = unwrap_vue3_ts_expression(expression);
+    Some(Vue3PropsDestructuredDefault {
+        value,
+        inferred_type: infer_vue3_define_props_destructure_default_value_type(expression)
+            .map(ToOwned::to_owned),
+        is_literal: vue3_props_destructured_default_is_literal(unwrapped),
+        is_function: matches!(
+            unwrapped,
+            Expression::FunctionExpression(_) | Expression::ArrowFunctionExpression(_)
+        ),
+        is_identifier: matches!(unwrapped, Expression::Identifier(_)),
+    })
+}
+
+fn vue3_props_destructured_default_is_literal(expression: &Expression<'_>) -> bool {
+    matches!(
+        expression,
+        Expression::StringLiteral(_)
+            | Expression::NumericLiteral(_)
+            | Expression::BooleanLiteral(_)
+            | Expression::NullLiteral(_)
+            | Expression::RegExpLiteral(_)
+            | Expression::BigIntLiteral(_)
+            | Expression::TemplateLiteral(_)
+    )
 }
 
 fn register_vue3_define_props_destructure_binding(
@@ -12430,6 +12577,78 @@ console.log(message, payload, fooBar)
             script.bindings.get("fooBar").map(String::as_str),
             Some("props-aliased")
         );
+    }
+
+    #[test]
+    fn vue3_compile_script_merges_define_props_destructure_defaults() {
+        let mut compiler = SfcCompiler::new();
+        let runtime = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup>
+const external = 'x'
+const { foo = 1, bar = {}, func = () => {}, ext = external, 'foo:bar': fooBar = 'foo-bar' } = defineProps(['foo', 'bar', 'func', 'ext', 'foo:bar'])
+</script>"#,
+        );
+        let script = compiler.compile_script(&runtime, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .starts_with("import { mergeDefaults as _mergeDefaults } from 'vue'\n"));
+        assert!(script.content.contains(
+            "props: /*@__PURE__*/_mergeDefaults(['foo', 'bar', 'func', 'ext', 'foo:bar'], {"
+        ));
+        assert!(script.content.contains("foo: 1"));
+        assert!(script.content.contains("bar: () => ({})"));
+        assert!(script.content.contains("func: () => {}, __skip_func: true"));
+        assert!(script.content.contains("ext: external, __skip_ext: true"));
+        assert!(script.content.contains(r#""foo:bar": 'foo-bar'"#));
+        assert!(!script.content.contains("const { foo = 1"));
+
+        let typed = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup lang="ts">
+const { foo = 1, bar = {}, func = () => {}, label = 'x' } = defineProps<{
+  foo?: number
+  bar?: object
+  func?: () => void
+  label?: string
+}>()
+</script>"#,
+        );
+        let script = compiler.compile_script(&typed, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .starts_with("import { defineComponent as _defineComponent } from 'vue'\n"));
+        assert!(script
+            .content
+            .contains("foo: { type: Number, required: false, default: 1 }"));
+        assert!(script
+            .content
+            .contains("bar: { type: Object, required: false, default: () => ({}) }"));
+        assert!(script
+            .content
+            .contains("func: { type: Function, required: false, default: () => {} }"));
+        assert!(script
+            .content
+            .contains("label: { type: String, required: false, default: 'x' }"));
+
+        let prod = compiler.compile_script(
+            &typed,
+            SfcScriptCompileOptions {
+                is_prod: true,
+                ..SfcScriptCompileOptions::default()
+            },
+        );
+        assert!(prod.errors.is_empty(), "{:?}", prod.errors);
+        assert!(prod.content.contains("foo: { default: 1 }"));
+        assert!(prod.content.contains("bar: { default: () => ({}) }"));
+        assert!(prod
+            .content
+            .contains("func: { type: Function, default: () => {} }"));
+        assert!(prod.content.contains("label: { default: 'x' }"));
     }
 
     #[test]

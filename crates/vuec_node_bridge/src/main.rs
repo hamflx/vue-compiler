@@ -4961,6 +4961,50 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_merges_props_destructure_defaults() {
+        let runtime = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup>",
+                    "const external = 'x'\n",
+                    "const { foo = 1, bar = {}, func = () => {}, ext = external, 'foo:bar': fooBar = 'foo-bar' } = defineProps(['foo', 'bar', 'func', 'ext', 'foo:bar'])",
+                    "</script>"
+                ),
+                "filename": "FooBar.vue"
+            }),
+        )
+        .expect("vue3 compileScript");
+        let content = runtime["content"].as_str().unwrap_or_default();
+        assert!(runtime["errors"].as_array().unwrap().is_empty());
+        assert!(content.contains(
+            "props: /*@__PURE__*/_mergeDefaults(['foo', 'bar', 'func', 'ext', 'foo:bar'], {"
+        ));
+        assert!(content.contains("bar: () => ({})"));
+        assert!(content.contains("func: () => {}, __skip_func: true"));
+        assert!(content.contains("ext: external, __skip_ext: true"));
+        assert!(content.contains(r#""foo:bar": 'foo-bar'"#));
+
+        let typed = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "const { foo = 1, bar = {}, func = () => {} } = defineProps<{ foo?: number, bar?: object, func?: () => void }>()",
+                    "</script>"
+                ),
+                "filename": "FooBar.vue"
+            }),
+        )
+        .expect("vue3 compileScript");
+        let content = typed["content"].as_str().unwrap_or_default();
+        assert!(typed["errors"].as_array().unwrap().is_empty());
+        assert!(content.contains("foo: { type: Number, required: false, default: 1 }"));
+        assert!(content.contains("bar: { type: Object, required: false, default: () => ({}) }"));
+        assert!(content.contains("func: { type: Function, required: false, default: () => {} }"));
+    }
+
+    #[test]
     fn vue3_sfc_bridge_compile_script_reports_props_destructure_default_type_errors() {
         let mismatch = dispatch(
             "sfc.compileScript",
