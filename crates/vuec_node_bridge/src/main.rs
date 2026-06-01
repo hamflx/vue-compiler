@@ -4508,6 +4508,25 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_merges_normal_default_export_with_setup() {
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": "<script>export default { name: 'X' }</script><script setup>const a = 1</script>",
+                "filename": "Comp.vue"
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = compiled["content"].as_str().unwrap_or_default();
+        assert!(content.contains("const __default__ = { name: 'X' }"));
+        assert!(content.contains("export default /*@__PURE__*/Object.assign(__default__, {"));
+        assert!(content.contains("const a = 1\nconst __returned__ = { a }"));
+        assert!(compiled["scriptAst"].as_array().is_some());
+        assert!(compiled["scriptSetupAst"].as_array().is_some());
+    }
+
+    #[test]
     fn vue3_sfc_bridge_parse_projects_public_descriptor_shape() {
         let parsed = dispatch(
             "sfc.parse",

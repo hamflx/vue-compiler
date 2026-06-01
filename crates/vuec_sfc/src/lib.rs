@@ -1001,14 +1001,13 @@ impl SfcCompiler {
             .or(descriptor.script_setup.as_ref())
             .map(|block| block.attrs.clone())
             .unwrap_or_default();
+        let generated_content =
+            script_content(descriptor, &raw_content, descriptor.filename.as_str());
+        let mut errors = summary.errors;
+        errors.extend(generated_content.errors);
         SfcScriptBlock {
             type_name: "script".into(),
-            content: script_content(
-                descriptor,
-                &raw_content,
-                &summary.bindings,
-                descriptor.filename.as_str(),
-            ),
+            content: generated_content.content,
             loc: descriptor
                 .script
                 .as_ref()
@@ -1023,7 +1022,7 @@ impl SfcCompiler {
                 .and_then(|block| block.attrs.lang.clone()),
             bindings,
             imports,
-            errors: summary.errors,
+            errors,
             map: None,
             script_ast,
             script_setup_ast,
@@ -2790,9 +2789,7 @@ fn rewrite_vue3_named_default_exports(
     found
 }
 
-fn vue27_export_named_declaration_only_exports_default(
-    declaration: &ExportNamedDeclaration<'_>,
-) -> bool {
+fn export_named_declaration_only_exports_default(declaration: &ExportNamedDeclaration<'_>) -> bool {
     !declaration.specifiers.is_empty()
         && declaration
             .specifiers
@@ -4046,7 +4043,7 @@ fn analyze_vue27_normal_script_for_setup(descriptor: &SfcDescriptor) -> Vue27Nor
         match statement {
             Statement::ExportDefaultDeclaration(declaration) => {
                 analysis.has_default_export = true;
-                analysis.has_default_export_name = vue27_default_export_has_name(declaration);
+                analysis.has_default_export_name = default_export_has_name(declaration);
                 edits.overwrite(
                     declaration.span.start as usize,
                     declaration.declaration.span().start as usize,
@@ -4056,7 +4053,7 @@ fn analyze_vue27_normal_script_for_setup(descriptor: &SfcDescriptor) -> Vue27Nor
             Statement::ExportNamedDeclaration(declaration) => {
                 if rewrite_named_default_exports(source, "__default__", declaration, &mut edits) {
                     analysis.has_default_export = true;
-                    if vue27_export_named_declaration_only_exports_default(declaration) {
+                    if export_named_declaration_only_exports_default(declaration) {
                         named_default_exports.push((
                             declaration.span.start as usize,
                             declaration.span.end as usize,
@@ -4077,7 +4074,7 @@ fn analyze_vue27_normal_script_for_setup(descriptor: &SfcDescriptor) -> Vue27Nor
     analysis
 }
 
-fn vue27_default_export_has_name(declaration: &ExportDefaultDeclaration<'_>) -> bool {
+fn default_export_has_name(declaration: &ExportDefaultDeclaration<'_>) -> bool {
     match &declaration.declaration {
         ExportDefaultDeclarationKind::ObjectExpression(object) => {
             object_expression_has_static_key(object, "name")
@@ -8124,31 +8121,300 @@ fn script_bindings(names: &[String]) -> BTreeMap<String, String> {
         .collect()
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct GeneratedScriptContent {
+    content: String,
+    errors: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Vue3NormalScriptAnalysis {
+    module_content: String,
+    has_default_export: bool,
+    has_default_export_name: bool,
+    errors: Vec<String>,
+}
+
 fn script_content(
     descriptor: &SfcDescriptor,
     raw_content: &str,
+    filename: &str,
+) -> GeneratedScriptContent {
+    let Some(script_setup) = descriptor.script_setup.as_ref() else {
+        return GeneratedScriptContent {
+            content: raw_content.to_string(),
+            errors: Vec::new(),
+        };
+    };
+
+    let normal_script = analyze_vue3_normal_script_for_setup(descriptor);
+    let is_ts = script_is_typescript(&script_setup.attrs)
+        || descriptor
+            .script
+            .as_ref()
+            .is_some_and(|script| script_is_typescript(&script.attrs));
+    let return_bindings = vue3_script_setup_return_bindings(descriptor, is_ts);
+    let mut content = String::new();
+    if is_ts {
+        content.push_str("import { defineComponent as _defineComponent } from 'vue'\n");
+    }
+    append_vue3_module_chunk(&mut content, &normal_script.module_content);
+    let setup_content_is_module_chunk = descriptor.script.is_none();
+    if setup_content_is_module_chunk {
+        append_vue3_module_chunk(&mut content, &script_setup.content);
+    }
+    append_vue3_module_chunk(
+        &mut content,
+        &vue3_script_setup_export(
+            script_setup,
+            &return_bindings,
+            filename,
+            &normal_script,
+            is_ts,
+            setup_content_is_module_chunk,
+        ),
+    );
+    GeneratedScriptContent {
+        content: content.trim().to_string(),
+        errors: normal_script.errors,
+    }
+}
+
+fn vue3_script_setup_return_bindings(descriptor: &SfcDescriptor, is_ts: bool) -> Vec<String> {
+    let script_returns = descriptor
+        .script
+        .as_ref()
+        .map(vue3_script_block_return_bindings)
+        .unwrap_or_default();
+    let setup_returns = descriptor
+        .script_setup
+        .as_ref()
+        .map(vue3_script_block_return_bindings)
+        .unwrap_or_default();
+
+    let mut bindings = script_returns.bindings;
+    for binding in setup_returns.bindings {
+        push_unique(&mut bindings, &binding);
+    }
+    for import in script_returns
+        .imports
+        .iter()
+        .chain(setup_returns.imports.iter())
+    {
+        if import.is_type {
+            continue;
+        }
+        if vue27_script_setup_import_is_returned(descriptor, import, is_ts) {
+            push_unique(&mut bindings, &import.local);
+        }
+    }
+    bindings
+}
+
+fn vue3_script_block_return_bindings(block: &SfcBlock) -> Vue27ScriptReturnBindings {
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(
+        &allocator,
+        &block.content,
+        script_source_type_from_attrs(&block.attrs),
+    )
+    .with_options(oxc_parser::ParseOptions {
+        parse_regular_expression: true,
+        ..oxc_parser::ParseOptions::default()
+    })
+    .parse();
+    if parsed.panicked || !parsed.errors.is_empty() {
+        return Vue27ScriptReturnBindings::default();
+    }
+    let mut result = Vue27ScriptReturnBindings::default();
+    for statement in &parsed.program.body {
+        collect_vue27_top_level_script_return_binding(statement, &mut result);
+    }
+    result
+}
+
+fn analyze_vue3_normal_script_for_setup(descriptor: &SfcDescriptor) -> Vue3NormalScriptAnalysis {
+    let Some(script) = descriptor.script.as_ref() else {
+        return Vue3NormalScriptAnalysis::default();
+    };
+    let source = script.content.as_str();
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(
+        &allocator,
+        source,
+        script_source_type_from_attrs(&script.attrs),
+    )
+    .with_options(oxc_parser::ParseOptions {
+        parse_regular_expression: true,
+        ..oxc_parser::ParseOptions::default()
+    })
+    .parse();
+    if parsed.panicked || !parsed.errors.is_empty() {
+        return Vue3NormalScriptAnalysis {
+            module_content: source.to_string(),
+            errors: parsed.errors.iter().map(ToString::to_string).collect(),
+            ..Vue3NormalScriptAnalysis::default()
+        };
+    }
+
+    let mut edits = SourceEdits::new(source);
+    let mut analysis = Vue3NormalScriptAnalysis::default();
+    for statement in &parsed.program.body {
+        match statement {
+            Statement::ExportDefaultDeclaration(declaration) => {
+                analysis.has_default_export = true;
+                analysis.has_default_export_name = default_export_has_name(declaration);
+                rewrite_vue3_export_default("__default__", declaration, &mut edits);
+            }
+            Statement::ExportNamedDeclaration(declaration) => {
+                if rewrite_vue3_compile_script_named_default_export(
+                    source,
+                    "__default__",
+                    declaration,
+                    &mut edits,
+                ) {
+                    analysis.has_default_export = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    analysis.module_content = trim_trailing_blank_lines(&edits.apply()).to_string();
+    analysis
+}
+
+fn rewrite_vue3_compile_script_named_default_export(
+    input: &str,
+    variable: &str,
+    declaration: &ExportNamedDeclaration<'_>,
+    edits: &mut SourceEdits,
+) -> bool {
+    let Some(specifier) = declaration
+        .specifiers
+        .iter()
+        .find(|specifier| module_export_name(specifier.exported()) == Some("default"))
+    else {
+        return false;
+    };
+
+    if export_named_declaration_only_exports_default(declaration) {
+        edits.remove(
+            declaration.span.start as usize,
+            declaration.span.end as usize,
+        );
+    } else {
+        let end = specifier_end(
+            input,
+            specifier.span.end as usize,
+            declaration.span.end as usize,
+        );
+        edits.remove(specifier.span.start as usize, end);
+    }
+
+    let local_name = module_export_name(specifier.local()).unwrap_or("default");
+    if let Some(source) = declaration.source.as_ref() {
+        let source_value = source.value.to_string();
+        let local_source =
+            &input[specifier.local().span().start as usize..specifier.local().span().end as usize];
+        edits.prepend(format!(
+            "import {{ {local_source} as {variable} }} from '{}'\n",
+            source_value
+        ));
+    } else {
+        edits.append(format!("\nconst {variable} = {local_name}\n"));
+    }
+    true
+}
+
+fn vue3_script_setup_export(
+    script_setup: &SfcBlock,
     bindings: &[String],
     filename: &str,
+    normal_script: &Vue3NormalScriptAnalysis,
+    is_ts: bool,
+    setup_content_is_module_chunk: bool,
 ) -> String {
-    let Some(script_setup) = descriptor.script_setup.as_ref() else {
-        return raw_content.to_string();
-    };
-    let component_name = script_component_name(filename);
+    let runtime_options = vue3_script_setup_runtime_options(filename, normal_script);
+    let setup_body = vue3_script_setup_body(script_setup, bindings, setup_content_is_module_chunk);
+    if is_ts {
+        let spread = if normal_script.has_default_export {
+            "\n  ...__default__,"
+        } else {
+            ""
+        };
+        return format!(
+            "export default /*@__PURE__*/_defineComponent({{{spread}{runtime_options}\n  setup(__props, {{ expose: __expose }}) {{\n{setup_body}\n}}\n\n}})"
+        );
+    }
+    if normal_script.has_default_export {
+        format!(
+            "export default /*@__PURE__*/Object.assign(__default__, {{{runtime_options}\n  setup(__props, {{ expose: __expose }}) {{\n{setup_body}\n}}\n\n}})"
+        )
+    } else {
+        format!(
+            "export default {{{runtime_options}\n  setup(__props, {{ expose: __expose }}) {{\n{setup_body}\n}}\n\n}}"
+        )
+    }
+}
+
+fn vue3_script_setup_runtime_options(
+    filename: &str,
+    normal_script: &Vue3NormalScriptAnalysis,
+) -> String {
+    if normal_script.has_default_export_name {
+        String::new()
+    } else {
+        format!(
+            "\n  __name: '{}',",
+            escape_js_single(&script_component_name(filename))
+        )
+    }
+}
+
+fn vue3_script_setup_body(
+    script_setup: &SfcBlock,
+    bindings: &[String],
+    setup_content_is_module_chunk: bool,
+) -> String {
+    let returned = script_setup_returned_bindings(bindings);
+    let mut body = String::from("  __expose();\n");
+    if setup_content_is_module_chunk {
+        body.push('\n');
+    } else {
+        body.push_str(&script_setup.content);
+        if !script_setup.content.ends_with('\n') {
+            body.push('\n');
+        }
+    }
+    body.push_str(&format!(
+        "const __returned__ = {returned}\nObject.defineProperty(__returned__, '__isScriptSetup', {{ enumerable: false, value: true }})\nreturn __returned__"
+    ));
+    body
+}
+
+fn script_setup_returned_bindings(bindings: &[String]) -> String {
     let returned = bindings
         .iter()
         .filter(|name| !name.starts_with("import:") && !name.starts_with("export:"))
         .cloned()
         .collect::<Vec<_>>()
         .join(", ");
-    let returned = if returned.is_empty() {
+    if returned.is_empty() {
         "{}".to_string()
     } else {
         format!("{{ {returned} }}")
-    };
-    format!(
-        "import {{ defineComponent as _defineComponent }} from 'vue'\n{}\nexport default /*@__PURE__*/_defineComponent({{\n  __name: '{}',\n  setup(__props, {{ expose: __expose }}) {{\n  __expose();\n\nconst __returned__ = {}\nObject.defineProperty(__returned__, '__isScriptSetup', {{ enumerable: false, value: true }})\nreturn __returned__\n}}\n\n}})",
-        script_setup.content, component_name, returned
-    )
+    }
+}
+
+fn append_vue3_module_chunk(output: &mut String, chunk: &str) {
+    let chunk = trim_trailing_blank_lines(chunk);
+    if chunk.is_empty() {
+        return;
+    }
+    if !output.is_empty() && !output.ends_with('\n') {
+        output.push('\n');
+    }
+    output.push_str(chunk);
 }
 
 fn script_component_name(filename: &str) -> String {
@@ -9132,6 +9398,87 @@ mod tests {
                 .unwrap(),
             "const __default__ = interface Foo {}"
         );
+    }
+
+    #[test]
+    fn vue3_compile_script_merges_normal_default_export_with_setup() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "Comp.vue",
+            "<script>export default { name: 'X' }</script><script setup>const a = 1</script>",
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty());
+        assert!(script.content.contains("const __default__ = { name: 'X' }"));
+        assert!(script
+            .content
+            .contains("export default /*@__PURE__*/Object.assign(__default__, {"));
+        assert!(!script.content.contains("__name: 'Comp'"));
+        assert!(script
+            .content
+            .contains("const a = 1\nconst __returned__ = { a }"));
+        assert!(!script.content.contains("_defineComponent"));
+    }
+
+    #[test]
+    fn vue3_compile_script_merges_named_default_export_with_setup() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "Comp.vue",
+            "<script>const def = {}; export { def as default }</script><script setup>const a = 1</script>",
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty());
+        assert!(script.content.contains("const def = {};"));
+        assert!(script.content.contains("const __default__ = def"));
+        assert!(!script.content.contains("export {"));
+        assert!(script
+            .content
+            .contains("export default /*@__PURE__*/Object.assign(__default__, {"));
+        assert!(script.content.contains("__name: 'Comp'"));
+        assert!(script.content.contains("const __returned__ = { def, a }"));
+    }
+
+    #[test]
+    fn vue3_compile_script_keeps_normal_script_without_default_in_setup_compile() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "Comp.vue",
+            "<script>export const n = 1</script><script setup>const a = 1</script>",
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty());
+        assert!(script.content.contains("export const n = 1"));
+        assert!(script.content.contains("export default {"));
+        assert!(!script.content.contains("const __default__ = {}"));
+        assert!(!script.content.contains("Object.assign(__default__"));
+        assert!(script.content.contains("const a = 1\nconst __returned__"));
+    }
+
+    #[test]
+    fn vue3_compile_script_merges_typescript_default_with_define_component() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "Comp.vue",
+            "<script lang=\"ts\">export default { name: 'X' }</script><script setup lang=\"ts\">const a: number = 1</script>",
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty());
+        assert!(script
+            .content
+            .starts_with("import { defineComponent as _defineComponent } from 'vue'\n"));
+        assert!(script.content.contains("const __default__ = { name: 'X' }"));
+        assert!(script
+            .content
+            .contains("export default /*@__PURE__*/_defineComponent({\n  ...__default__,"));
+        assert!(!script.content.contains("Object.assign(__default__"));
+        assert!(script
+            .content
+            .contains("const a: number = 1\nconst __returned__ = { a }"));
     }
 
     #[test]
