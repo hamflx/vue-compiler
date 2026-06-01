@@ -5992,7 +5992,7 @@ fn vue3_import_specifier_compiler_macro(
     let imported = specifier.imported.name();
     if !matches!(
         imported.as_str(),
-        "defineProps" | "defineEmits" | "defineExpose" | "defineOptions"
+        "defineProps" | "defineEmits" | "defineExpose" | "defineOptions" | "defineModel"
     ) {
         return None;
     }
@@ -8434,12 +8434,19 @@ struct Vue3ScriptSetupAnalysis {
     needs_merge_defaults: bool,
     emits_runtime: Option<String>,
     emit_binding: Option<String>,
+    models: Vec<Vue3ModelDecl>,
     has_define_expose: bool,
     errors: Vec<String>,
     local_setup_bindings: BTreeSet<String>,
     declared_types: BTreeMap<String, Vec<String>>,
     props_type_declarations: BTreeMap<String, Vue27TypeMembers>,
     emits_type_declarations: BTreeMap<String, Vue27EmitsType>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Vue3ModelDecl {
+    name: String,
+    prop_runtime: String,
 }
 
 fn script_content(
@@ -8472,14 +8479,8 @@ fn script_content(
             .is_some_and(|script| script_is_typescript(&script.attrs));
     let return_bindings = vue3_script_setup_return_bindings(descriptor, &setup_analysis, is_ts);
     let mut content = String::new();
-    if is_ts {
-        if setup_analysis.needs_merge_defaults {
-            content.push_str(
-                "import { mergeDefaults as _mergeDefaults, defineComponent as _defineComponent } from 'vue'\n",
-            );
-        } else {
-            content.push_str("import { defineComponent as _defineComponent } from 'vue'\n");
-        }
+    if let Some(import) = vue3_script_setup_helper_import(&setup_analysis, is_ts) {
+        content.push_str(&import);
     }
     append_vue3_module_chunk(&mut content, &normal_script.module_content);
     append_vue3_module_chunk(&mut content, &setup_analysis.module_content);
@@ -8495,7 +8496,9 @@ fn script_content(
     );
     let mut bindings = setup_analysis.setup_bindings.clone();
     for prop in &setup_analysis.props_bindings {
-        bindings.insert(prop.clone(), "props".into());
+        bindings
+            .entry(prop.clone())
+            .or_insert_with(|| "props".into());
     }
     let mut errors = normal_script.errors;
     errors.extend(setup_analysis.errors);
@@ -8504,6 +8507,30 @@ fn script_content(
         errors,
         bindings,
         removed_bindings: setup_analysis.removed_bindings,
+    }
+}
+
+fn vue3_script_setup_helper_import(
+    setup_analysis: &Vue3ScriptSetupAnalysis,
+    is_ts: bool,
+) -> Option<String> {
+    let mut helpers = Vec::new();
+    if !setup_analysis.models.is_empty() {
+        helpers.push("useModel as _useModel");
+    }
+    if setup_analysis.needs_merge_defaults {
+        helpers.push("mergeDefaults as _mergeDefaults");
+    }
+    if vue3_script_setup_needs_merge_models(setup_analysis) {
+        helpers.push("mergeModels as _mergeModels");
+    }
+    if is_ts {
+        helpers.push("defineComponent as _defineComponent");
+    }
+    if helpers.is_empty() {
+        None
+    } else {
+        Some(format!("import {{ {} }} from 'vue'\n", helpers.join(", ")))
     }
 }
 
@@ -8704,6 +8731,14 @@ fn analyze_vue3_script_setup(
                     } else if is_call_named(call, "defineOptions") {
                         collect_vue3_define_options_call(source, call, &mut analysis);
                         edits.remove(statement.span.start as usize, statement.span.end as usize);
+                    } else if is_call_named(call, "defineModel") {
+                        collect_vue3_define_model_call(
+                            source,
+                            call,
+                            None,
+                            &mut edits,
+                            &mut analysis,
+                        );
                     } else if is_call_named(call, "defineExpose") {
                         analysis.has_define_expose = true;
                         edits.overwrite(
@@ -8809,6 +8844,16 @@ fn analyze_vue3_setup_variable_declaration(
                     .push("defineOptions() has no returning value, it cannot be assigned.".into());
                 continue;
             }
+            if is_call_named(call, "defineModel") {
+                collect_vue3_define_model_call(source, call, Some(&declarator.id), edits, analysis);
+                collect_pattern_bindings(&declarator.id, &mut analysis.return_bindings);
+                collect_pattern_binding_types(
+                    &declarator.id,
+                    "setup-ref",
+                    &mut analysis.setup_bindings,
+                );
+                continue;
+            }
         }
         let binding_type = vue3_setup_binding_type(declaration.kind, declarator.init.as_ref());
         collect_pattern_binding_types(&declarator.id, binding_type, &mut analysis.setup_bindings);
@@ -8899,6 +8944,153 @@ fn check_vue3_define_options_keys(
             ));
         }
     }
+}
+
+fn collect_vue3_define_model_call(
+    source: &str,
+    call: &oxc_ast::ast::CallExpression<'_>,
+    binding: Option<&BindingPattern<'_>>,
+    edits: &mut SourceEdits<'_>,
+    analysis: &mut Vue3ScriptSetupAnalysis,
+) {
+    let model = vue3_define_model_decl(source, call);
+    if analysis
+        .models
+        .iter()
+        .any(|existing| existing.name == model.name)
+    {
+        analysis
+            .errors
+            .push(format!("duplicate model name \"{}\"", model.name));
+    }
+    push_unique(&mut analysis.props_bindings, &model.name);
+    if let Some(binding) = binding.and_then(first_pattern_binding) {
+        analysis
+            .setup_bindings
+            .insert(binding, "setup-ref".to_string());
+    }
+    rewrite_vue3_define_model_call(call, edits);
+    analysis.models.push(model);
+}
+
+fn vue3_define_model_decl(source: &str, call: &oxc_ast::ast::CallExpression<'_>) -> Vue3ModelDecl {
+    let first_expression = call
+        .arguments
+        .first()
+        .map(|argument| unwrap_vue3_ts_expression(argument.to_expression()));
+    let (name, has_name) = first_expression
+        .and_then(vue3_define_model_name)
+        .map(|name| (name, true))
+        .unwrap_or_else(|| ("modelValue".to_string(), false));
+    let options = if has_name {
+        call.arguments.get(1)
+    } else {
+        call.arguments.first()
+    };
+    let prop_runtime = options
+        .map(|argument| vue3_define_model_prop_runtime(source, argument))
+        .unwrap_or_else(|| "{}".to_string());
+    Vue3ModelDecl { name, prop_runtime }
+}
+
+fn vue3_define_model_name(expression: &Expression<'_>) -> Option<String> {
+    match expression {
+        Expression::StringLiteral(literal) => Some(literal.value.to_string()),
+        Expression::TemplateLiteral(literal)
+            if literal.expressions.is_empty() && literal.quasis.len() == 1 =>
+        {
+            literal
+                .quasis
+                .first()
+                .and_then(|quasi| quasi.value.cooked.as_ref())
+                .map(|value| value.as_str().to_string())
+        }
+        _ => None,
+    }
+}
+
+fn vue3_define_model_prop_runtime(source: &str, argument: &Argument<'_>) -> String {
+    let expression = unwrap_vue3_ts_expression(argument.to_expression());
+    source
+        .get(expression.span().start as usize..expression.span().end as usize)
+        .map(str::trim)
+        .filter(|source| !source.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| "{}".to_string())
+}
+
+fn rewrite_vue3_define_model_call(
+    call: &oxc_ast::ast::CallExpression<'_>,
+    edits: &mut SourceEdits<'_>,
+) {
+    let first_expression = call
+        .arguments
+        .first()
+        .map(|argument| unwrap_vue3_ts_expression(argument.to_expression()));
+    let has_name = first_expression.and_then(vue3_define_model_name).is_some();
+    let remove_options = vue3_define_model_call_removes_options(call, has_name);
+    if let Some((start, end)) = remove_options {
+        edits.remove(start, end);
+    }
+    edits.overwrite(
+        call.callee.span().start as usize,
+        call.callee.span().end as usize,
+        "_useModel",
+    );
+    let Some(first_argument) = call.arguments.first() else {
+        edits.prepend_right(call.span.end as usize - 1, r#"__props, "modelValue""#);
+        return;
+    };
+    let first_start = first_argument.to_expression().span().start as usize;
+    if has_name {
+        edits.prepend_right(first_start, "__props, ");
+        return;
+    }
+    let prefix = if remove_options.is_some() {
+        r#"__props, "modelValue""#
+    } else {
+        r#"__props, "modelValue", "#
+    };
+    edits.prepend_right(first_start, prefix);
+}
+
+fn vue3_define_model_call_removes_options(
+    call: &oxc_ast::ast::CallExpression<'_>,
+    has_name: bool,
+) -> Option<(usize, usize)> {
+    let options_index = if has_name { 1 } else { 0 };
+    let options = call.arguments.get(options_index)?;
+    if !vue3_define_model_options_are_prop_only(options.to_expression()) {
+        return None;
+    }
+    if has_name {
+        let previous = call.arguments.first()?.to_expression();
+        Some((
+            previous.span().end as usize,
+            options.to_expression().span().end as usize,
+        ))
+    } else {
+        let expression = options.to_expression();
+        Some((
+            expression.span().start as usize,
+            expression.span().end as usize,
+        ))
+    }
+}
+
+fn vue3_define_model_options_are_prop_only(expression: &Expression<'_>) -> bool {
+    let Expression::ObjectExpression(object) = unwrap_vue3_ts_expression(expression) else {
+        return false;
+    };
+    object.properties.iter().all(|property| {
+        let ObjectPropertyKind::ObjectProperty(property) = property else {
+            return false;
+        };
+        if property.computed {
+            return false;
+        }
+        !matches!(property.key.static_name().as_deref(), Some("get" | "set"))
+    })
 }
 
 fn collect_vue3_define_props_call(
@@ -9547,13 +9739,89 @@ fn vue3_script_setup_runtime_options(
             escape_js_single(&script_component_name(filename))
         ));
     }
-    if let Some(props) = setup_analysis.props_runtime.as_ref() {
+    if let Some(props) = vue3_script_setup_props_runtime(setup_analysis) {
         runtime_options.push_str(&format!("\n  props: {},", props.trim()));
     }
-    if let Some(emits) = setup_analysis.emits_runtime.as_ref() {
+    if let Some(emits) = vue3_script_setup_emits_runtime(setup_analysis) {
         runtime_options.push_str(&format!("\n  emits: {},", emits.trim()));
     }
     runtime_options
+}
+
+fn vue3_script_setup_needs_merge_models(setup_analysis: &Vue3ScriptSetupAnalysis) -> bool {
+    !setup_analysis.models.is_empty()
+        && (setup_analysis.props_runtime.is_some() || setup_analysis.emits_runtime.is_some())
+}
+
+fn vue3_script_setup_props_runtime(setup_analysis: &Vue3ScriptSetupAnalysis) -> Option<String> {
+    let props = setup_analysis.props_runtime.as_ref();
+    let model_props = vue3_script_setup_model_props_runtime(&setup_analysis.models);
+    match (props, model_props) {
+        (Some(props), Some(model_props)) => Some(format!(
+            "/*@__PURE__*/_mergeModels({}, {})",
+            props.trim(),
+            model_props
+        )),
+        (Some(props), None) => Some(props.clone()),
+        (None, Some(model_props)) => Some(model_props),
+        (None, None) => None,
+    }
+}
+
+fn vue3_script_setup_model_props_runtime(models: &[Vue3ModelDecl]) -> Option<String> {
+    if models.is_empty() {
+        return None;
+    }
+    let mut entries = Vec::new();
+    for model in models {
+        entries.push(format!(
+            "    \"{}\": {},",
+            escape_js_double(&model.name),
+            model.prop_runtime
+        ));
+        entries.push(format!(
+            "    \"{}\": {{}},",
+            escape_js_double(&vue3_model_modifiers_prop_name(&model.name))
+        ));
+    }
+    Some(format!("{{\n{}\n  }}", entries.join("\n")))
+}
+
+fn vue3_script_setup_emits_runtime(setup_analysis: &Vue3ScriptSetupAnalysis) -> Option<String> {
+    let emits = setup_analysis.emits_runtime.as_ref();
+    let model_emits = vue3_script_setup_model_emits_runtime(&setup_analysis.models);
+    match (emits, model_emits) {
+        (Some(emits), Some(model_emits)) => Some(format!(
+            "/*@__PURE__*/_mergeModels({}, {})",
+            emits.trim(),
+            model_emits
+        )),
+        (Some(emits), None) => Some(emits.clone()),
+        (None, Some(model_emits)) => Some(model_emits),
+        (None, None) => None,
+    }
+}
+
+fn vue3_script_setup_model_emits_runtime(models: &[Vue3ModelDecl]) -> Option<String> {
+    if models.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "[{}]",
+        models
+            .iter()
+            .map(|model| format!("\"update:{}\"", escape_js_double(&model.name)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
+}
+
+fn vue3_model_modifiers_prop_name(name: &str) -> String {
+    if name == "modelValue" {
+        "modelModifiers".to_string()
+    } else {
+        format!("{name}Modifiers")
+    }
 }
 
 fn vue3_script_setup_params(setup_analysis: &Vue3ScriptSetupAnalysis) -> String {
@@ -10945,6 +11213,156 @@ const a: number = 1
             .iter()
             .any(|error| error.contains("cannot be aliased to a different name")));
         assert!(!script.content.contains("defineOptions as d"));
+    }
+
+    #[test]
+    fn vue3_compile_script_generates_define_model_runtime() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup>
+import { defineModel, ref } from 'vue'
+const modelValue = defineModel({ required: true })
+const c = defineModel('count')
+const title = defineModel(`title`, { default: 'x' })
+const other = ref(1)
+</script>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty());
+        assert!(script
+            .content
+            .contains("import { useModel as _useModel } from 'vue'"));
+        assert!(script.content.contains("import { ref } from 'vue'"));
+        assert!(script
+            .content
+            .contains("\"modelValue\": { required: true },"));
+        assert!(script.content.contains("\"modelModifiers\": {},"));
+        assert!(script.content.contains("\"count\": {},"));
+        assert!(script.content.contains("\"countModifiers\": {},"));
+        assert!(script.content.contains("\"title\": { default: 'x' },"));
+        assert!(script.content.contains("\"titleModifiers\": {},"));
+        assert!(script
+            .content
+            .contains("emits: [\"update:modelValue\", \"update:count\", \"update:title\"],"));
+        assert!(script
+            .content
+            .contains(r#"const modelValue = _useModel(__props, "modelValue")"#));
+        assert!(script
+            .content
+            .contains("const c = _useModel(__props, 'count')"));
+        assert!(script
+            .content
+            .contains("const title = _useModel(__props, `title`)"));
+        assert!(script
+            .content
+            .contains("const __returned__ = { modelValue, c, title, other, ref }"));
+        assert!(!script.content.contains("defineModel"));
+        assert_eq!(
+            script.bindings.get("modelValue").map(String::as_str),
+            Some("setup-ref")
+        );
+        assert_eq!(
+            script.bindings.get("c").map(String::as_str),
+            Some("setup-ref")
+        );
+        assert_eq!(
+            script.bindings.get("count").map(String::as_str),
+            Some("props")
+        );
+        assert_eq!(
+            script.bindings.get("title").map(String::as_str),
+            Some("setup-ref")
+        );
+        assert!(script.bindings.get("defineModel").is_none());
+    }
+
+    #[test]
+    fn vue3_compile_script_merges_define_model_with_props_and_emits() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup>
+defineProps({ foo: String })
+defineEmits(['change'])
+const count = defineModel({ default: 0 })
+</script>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty());
+        assert!(script
+            .content
+            .contains("import { useModel as _useModel, mergeModels as _mergeModels } from 'vue'"));
+        assert!(script
+            .content
+            .contains("props: /*@__PURE__*/_mergeModels({ foo: String }, {"));
+        assert!(script.content.contains("\"modelValue\": { default: 0 },"));
+        assert!(script.content.contains("\"modelModifiers\": {},"));
+        assert!(script
+            .content
+            .contains("emits: /*@__PURE__*/_mergeModels(['change'], [\"update:modelValue\"]),"));
+        assert!(script
+            .content
+            .contains(r#"const count = _useModel(__props, "modelValue")"#));
+        assert!(!script.content.contains("defineModel"));
+        assert_eq!(
+            script.bindings.get("foo").map(String::as_str),
+            Some("props")
+        );
+        assert_eq!(
+            script.bindings.get("modelValue").map(String::as_str),
+            Some("props")
+        );
+        assert_eq!(
+            script.bindings.get("count").map(String::as_str),
+            Some("setup-ref")
+        );
+    }
+
+    #[test]
+    fn vue3_compile_script_reports_duplicate_define_model_names() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup>
+const a = defineModel('count')
+const b = defineModel('count')
+</script>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script
+            .errors
+            .iter()
+            .any(|error| error.contains("duplicate model name \"count\"")));
+    }
+
+    #[test]
+    fn vue3_compile_script_rewrites_unbound_define_model_expression() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup>
+defineModel('count')
+</script>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty());
+        assert!(script.content.contains("\"count\": {},"));
+        assert!(script.content.contains("\"countModifiers\": {},"));
+        assert!(script.content.contains(r#"emits: ["update:count"],"#));
+        assert!(
+            script.content.contains(" _useModel(__props, 'count')")
+                || script.content.contains("\n_useModel(__props, 'count')")
+        );
+        assert!(!script.content.contains("defineModel"));
+        assert_eq!(
+            script.bindings.get("count").map(String::as_str),
+            Some("props")
+        );
     }
 
     #[test]

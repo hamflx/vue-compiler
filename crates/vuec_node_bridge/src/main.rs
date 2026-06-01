@@ -4619,6 +4619,47 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_generates_define_model() {
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup>",
+                    "import { defineModel, ref } from 'vue'\n",
+                    "defineProps({ foo: String })\n",
+                    "defineEmits(['change'])\n",
+                    "const count = defineModel({ default: 0 })\n",
+                    "const title = defineModel('title')\n",
+                    "const other = ref(1)",
+                    "</script>"
+                ),
+                "filename": "FooBar.vue"
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = compiled["content"].as_str().unwrap_or_default();
+        assert!(compiled["errors"].as_array().unwrap().is_empty());
+        assert!(content
+            .contains("import { useModel as _useModel, mergeModels as _mergeModels } from 'vue'"));
+        assert!(content.contains("import { ref } from 'vue'"));
+        assert!(content.contains("props: /*@__PURE__*/_mergeModels({ foo: String }, {"));
+        assert!(content.contains("\"modelValue\": { default: 0 },"));
+        assert!(content.contains("\"title\": {},"));
+        assert!(content.contains(
+            "emits: /*@__PURE__*/_mergeModels(['change'], [\"update:modelValue\", \"update:title\"]),"
+        ));
+        assert!(content.contains(r#"const count = _useModel(__props, "modelValue")"#));
+        assert!(content.contains("const title = _useModel(__props, 'title')"));
+        assert!(!content.contains("defineModel"));
+        assert_eq!(compiled["bindings"]["foo"], json!("props"));
+        assert_eq!(compiled["bindings"]["modelValue"], json!("props"));
+        assert_eq!(compiled["bindings"]["count"], json!("setup-ref"));
+        assert_eq!(compiled["bindings"]["title"], json!("setup-ref"));
+        assert!(compiled["bindings"].get("defineModel").is_none());
+    }
+
+    #[test]
     fn vue3_sfc_bridge_parse_projects_public_descriptor_shape() {
         let parsed = dispatch(
             "sfc.parse",
