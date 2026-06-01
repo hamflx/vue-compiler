@@ -2600,6 +2600,7 @@ fn bridge_command(target: TargetSpec, export_name: &str) -> Option<&'static str>
         (TargetKind::Vue27Sfc, "rewriteDefault") => Some("sfc.vue27.rewriteDefault"),
         (TargetKind::Vue27Sfc, "prefixIdentifiers") => Some("sfc.vue27.prefixIdentifiers"),
         (TargetKind::Vue3Sfc, "parse") => Some("sfc.parse"),
+        (TargetKind::Vue3Sfc, "rewriteDefault") => Some("sfc.rewriteDefault"),
         (TargetKind::Vue27Sfc, "compileTemplate") => Some("sfc.vue27.compileTemplate"),
         (TargetKind::Vue3Sfc, "compileTemplate") => Some("sfc.compileTemplate"),
         (TargetKind::Vue27Sfc, "compileScript") => Some("sfc.vue27.compileScript"),
@@ -2658,6 +2659,10 @@ fn alias_argument_object(target: TargetSpec, export_name: &str, _arity: u32) -> 
         }
         (TargetKind::Vue3Sfc, "parse") => {
             "{ source: a0, filename: a1 && a1.filename, options: a1 }".into()
+        }
+        (TargetKind::Vue3Sfc, "rewriteDefault") => {
+            "{ source: a0 == null ? '' : String(a0), variable: a1 || 'script', plugins: a2 }"
+                .into()
         }
         (TargetKind::Vue3Sfc, "compileTemplate") => {
             "{ source: a0 && a0.source ? a0.source : '', filename: a0 && (a0.filename || 'template.vue.html'), options: a0 }"
@@ -14188,6 +14193,30 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_rewrite_default_alias_routes_to_rust_bridge() {
+        let target = TargetSpec {
+            version_line: VersionLine::Vue3,
+            package: "@vue/compiler-sfc",
+            entry: "@vue/compiler-sfc",
+            kind: TargetKind::Vue3Sfc,
+        };
+        let detail = ApiExportDetail {
+            kind: "function".into(),
+            tag: "[object Function]".into(),
+            name: Some("rewriteDefault".into()),
+            function_arity: Some(3),
+            is_async_function: Some(false),
+            is_class_like: Some(false),
+            own_property_names: vec!["length".into(), "name".into(), "prototype".into()],
+        };
+        let expression = alias_export_expression(target, "rewriteDefault", Some(&detail));
+
+        assert!(expression.contains("sfc.rewriteDefault"));
+        assert!(expression.contains("plugins: a2"));
+        assert!(!expression.contains("sfc.vue27.rewriteDefault"));
+    }
+
+    #[test]
     fn napi_vue3_sfc_native_alias_hydrates_hmr_reload_api() {
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let source = fs::read_to_string(
@@ -14205,6 +14234,29 @@ mod tests {
         assert!(source.contains("function hydrateVue3SfcParseResult"));
         assert!(source.contains("function vue3SfcShouldForceReload"));
         assert!(source.contains("descriptor.shouldForceReload = function shouldForceReload"));
+    }
+
+    #[test]
+    fn napi_vue3_sfc_native_alias_routes_rewrite_default_to_vue3_native_api() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let source = fs::read_to_string(
+            repo_root
+                .join("packages")
+                .join("native-aliases")
+                .join("@vue")
+                .join("compiler-sfc")
+                .join("dist")
+                .join("compiler-sfc.cjs.js"),
+        )
+        .unwrap();
+
+        assert!(source.contains("function rewriteDefault(source, as, parserPlugins)"));
+        assert!(source.contains(
+            "return native.rewriteDefaultVue3(String(source || ''), String(as || ''), parserPlugins || []);"
+        ));
+        assert!(!source.contains(
+            "return native.rewriteDefaultVue27(String(source || ''), String(as || ''), parserPlugins || []);"
+        ));
     }
 
     #[test]

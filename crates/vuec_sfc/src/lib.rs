@@ -547,6 +547,13 @@ pub struct Vue27RewriteDefaultOptions {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Vue 3 `rewriteDefault` options.
+pub struct Vue3RewriteDefaultOptions {
+    /// Whether input should be parsed as TypeScript.
+    pub typescript: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 /// Vue 2.7 template identifier prefixing options.
 pub struct Vue27PrefixIdentifiersOptions {
     /// Whether the template belongs to a functional component.
@@ -1212,6 +1219,16 @@ impl SfcCompiler {
         options: Vue27RewriteDefaultOptions,
     ) -> String {
         rewrite_vue27_default(input, variable, options)
+    }
+
+    /// Rewrites Vue 3 default exports to an assigned variable.
+    pub fn rewrite_vue3_default(
+        &self,
+        input: &str,
+        variable: &str,
+        options: Vue3RewriteDefaultOptions,
+    ) -> Result<String, String> {
+        rewrite_vue3_default(input, variable, options)
     }
 
     /// Prefixes Vue 2.7 template identifiers for render-function generation.
@@ -2454,6 +2471,46 @@ fn rewrite_vue27_default(
     rewrite_vue27_default_from_program(input, variable, &parsed.program.body)
 }
 
+fn rewrite_vue3_default(
+    input: &str,
+    variable: &str,
+    options: Vue3RewriteDefaultOptions,
+) -> Result<String, String> {
+    let allocator = oxc_allocator::Allocator::default();
+    let source_type = if options.typescript {
+        oxc_span::SourceType::ts()
+    } else {
+        oxc_span::SourceType::mjs()
+    };
+    let parsed = oxc_parser::Parser::new(&allocator, input, source_type)
+        .with_options(oxc_parser::ParseOptions {
+            parse_regular_expression: true,
+            ..oxc_parser::ParseOptions::default()
+        })
+        .parse();
+    if parsed.panicked || !parsed.errors.is_empty() {
+        return Err(parsed
+            .errors
+            .first()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "failed to parse default export".into()));
+    }
+    if !options.typescript {
+        if let Some(offset) = vue3_typescript_default_export_start(&parsed.program.body) {
+            let (line, column) = line_column(input, offset);
+            return Err(format!(
+                "Unexpected reserved word 'interface'. ({line}:{column})"
+            ));
+        }
+    }
+
+    Ok(rewrite_vue3_default_from_program(
+        input,
+        variable,
+        &parsed.program.body,
+    ))
+}
+
 fn rewrite_vue27_default_from_program(
     input: &str,
     variable: &str,
@@ -2479,6 +2536,59 @@ fn rewrite_vue27_default_from_program(
         edits.append(format!("\nconst {variable} = {{}}"));
     }
     edits.apply()
+}
+
+fn rewrite_vue3_default_from_program(
+    input: &str,
+    variable: &str,
+    body: &[Statement<'_>],
+) -> String {
+    let mut edits = SourceEdits::new(input);
+    let mut found_default = false;
+    for statement in body {
+        match statement {
+            Statement::ExportDefaultDeclaration(declaration) => {
+                found_default = true;
+                rewrite_vue3_export_default(variable, declaration, &mut edits);
+            }
+            Statement::ExportNamedDeclaration(declaration) => {
+                if rewrite_vue3_named_default_exports(input, variable, declaration, &mut edits) {
+                    found_default = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    if !found_default {
+        edits.append(format!("\nconst {variable} = {{}}"));
+    }
+    edits.apply()
+}
+
+fn vue3_typescript_default_export_start(body: &[Statement<'_>]) -> Option<usize> {
+    body.iter().find_map(|statement| match statement {
+        Statement::ExportDefaultDeclaration(declaration) => match &declaration.declaration {
+            ExportDefaultDeclarationKind::TSInterfaceDeclaration(declaration) => {
+                Some(declaration.span.start as usize)
+            }
+            _ => None,
+        },
+        _ => None,
+    })
+}
+
+fn line_column(input: &str, offset: usize) -> (usize, usize) {
+    let mut line = 1usize;
+    let mut column = 0usize;
+    for ch in input[..offset.min(input.len())].chars() {
+        if ch == '\n' {
+            line += 1;
+            column = 0;
+        } else {
+            column += 1;
+        }
+    }
+    (line, column)
 }
 
 fn rewrite_export_default(
@@ -2534,6 +2644,31 @@ fn rewrite_export_default(
         declaration.span.start as usize,
         export_default_declaration_value_start(input, declaration),
         format!("const {variable} ="),
+    );
+}
+
+fn rewrite_vue3_export_default(
+    variable: &str,
+    declaration: &ExportDefaultDeclaration<'_>,
+    edits: &mut SourceEdits,
+) {
+    if let ExportDefaultDeclarationKind::ClassDeclaration(class) = &declaration.declaration {
+        if let Some(id) = &class.id {
+            let replace_start = class
+                .decorators
+                .last()
+                .map(|decorator| decorator.span.end as usize)
+                .unwrap_or(declaration.span.start as usize);
+            edits.overwrite(replace_start, id.span.start as usize, " class ");
+            edits.append(format!("\nconst {variable} = {}", id.name));
+            return;
+        }
+    }
+
+    edits.overwrite(
+        declaration.span.start as usize,
+        declaration.declaration.span().start as usize,
+        format!("const {variable} = "),
     );
 }
 
@@ -2594,6 +2729,61 @@ fn rewrite_named_default_exports(
                 declaration.span.end as usize,
             );
             edits.overwrite(specifier.span.start as usize, end, "");
+            edits.append(format!("\nconst {variable} = {local_name}"));
+        }
+    }
+    found
+}
+
+fn rewrite_vue3_named_default_exports(
+    input: &str,
+    variable: &str,
+    declaration: &ExportNamedDeclaration<'_>,
+    edits: &mut SourceEdits,
+) -> bool {
+    let mut found = false;
+    for specifier in &declaration.specifiers {
+        if module_export_name(specifier.exported()) != Some("default") {
+            continue;
+        }
+        found = true;
+        let local_name = module_export_name(specifier.local()).unwrap_or("default");
+        if let Some(source) = declaration.source.as_ref() {
+            let source_value = source.value.to_string();
+            if local_name == "default" {
+                let end = specifier_end(
+                    input,
+                    specifier.local().span().end as usize,
+                    declaration.span.end as usize,
+                );
+                edits.prepend(format!(
+                    "import {{ default as __VUE_DEFAULT__ }} from '{}'\n",
+                    source_value
+                ));
+                edits.remove(specifier.span.start as usize, end);
+                edits.append(format!("\nconst {variable} = __VUE_DEFAULT__"));
+            } else {
+                let end = specifier_end(
+                    input,
+                    specifier.exported().span().end as usize,
+                    declaration.span.end as usize,
+                );
+                let local_source = &input[specifier.local().span().start as usize
+                    ..specifier.local().span().end as usize];
+                edits.prepend(format!(
+                    "import {{ {local_source} as __VUE_DEFAULT__ }} from '{}'\n",
+                    source_value
+                ));
+                edits.remove(specifier.span.start as usize, end);
+                edits.append(format!("\nconst {variable} = __VUE_DEFAULT__"));
+            }
+        } else {
+            let end = specifier_end(
+                input,
+                specifier.span.end as usize,
+                declaration.span.end as usize,
+            );
+            edits.remove(specifier.span.start as usize, end);
             edits.append(format!("\nconst {variable} = {local_name}"));
         }
     }
@@ -8837,6 +9027,110 @@ mod tests {
                 },
             ),
             "@Component({})\nclass HelloWorld extends Vue {\n  test = \"\";\n}\nconst script = HelloWorld"
+        );
+    }
+
+    #[test]
+    fn vue3_rewrite_default_handles_official_export_shapes() {
+        let compiler = SfcCompiler::new();
+        assert_eq!(
+            compiler
+                .rewrite_vue3_default(
+                    "const a = 1",
+                    "script",
+                    Vue3RewriteDefaultOptions::default()
+                )
+                .unwrap(),
+            "const a = 1\nconst script = {}"
+        );
+        assert_eq!(
+            compiler
+                .rewrite_vue3_default(
+                    "export default {}",
+                    "script",
+                    Vue3RewriteDefaultOptions::default()
+                )
+                .unwrap(),
+            "const script = {}"
+        );
+        assert_eq!(
+            compiler
+                .rewrite_vue3_default(
+                    "export default function Foo() {}",
+                    "__default__",
+                    Vue3RewriteDefaultOptions::default()
+                )
+                .unwrap(),
+            "const __default__ = function Foo() {}"
+        );
+        assert_eq!(
+            compiler
+                .rewrite_vue3_default(
+                    "@Component\nexport default class Foo {}",
+                    "script",
+                    Vue3RewriteDefaultOptions { typescript: true },
+                )
+                .unwrap(),
+            "@Component class Foo {}\nconst script = Foo"
+        );
+    }
+
+    #[test]
+    fn vue3_rewrite_default_handles_named_default_exports() {
+        let compiler = SfcCompiler::new();
+        assert_eq!(
+            compiler
+                .rewrite_vue3_default(
+                    "const a = 1 \n export { a as b, a as default, a as c}",
+                    "script",
+                    Vue3RewriteDefaultOptions::default()
+                )
+                .unwrap(),
+            "const a = 1 \n export { a as b,  a as c}\nconst script = a"
+        );
+        assert_eq!(
+            compiler
+                .rewrite_vue3_default(
+                    "export { default, foo } from './index.js'",
+                    "script",
+                    Vue3RewriteDefaultOptions::default()
+                )
+                .unwrap(),
+            "import { default as __VUE_DEFAULT__ } from './index.js'\nexport {  foo } from './index.js'\nconst script = __VUE_DEFAULT__"
+        );
+        assert_eq!(
+            compiler
+                .rewrite_vue3_default(
+                    "export { foo as default, bar } from './index.js'",
+                    "script",
+                    Vue3RewriteDefaultOptions::default()
+                )
+                .unwrap(),
+            "import { foo as __VUE_DEFAULT__ } from './index.js'\nexport {  bar } from './index.js'\nconst script = __VUE_DEFAULT__"
+        );
+    }
+
+    #[test]
+    fn vue3_rewrite_default_preserves_typescript_plugin_boundary() {
+        let compiler = SfcCompiler::new();
+        let without_ts = compiler
+            .rewrite_vue3_default(
+                "export default interface Foo {}",
+                "__default__",
+                Vue3RewriteDefaultOptions::default(),
+            )
+            .unwrap_err();
+        assert!(without_ts.contains("Unexpected reserved word 'interface'. (1:15)"));
+
+        assert_eq!(
+            compiler
+                .rewrite_vue3_default(
+                    "export default interface Foo {}",
+                    "__default__",
+                    Vue3RewriteDefaultOptions { typescript: true },
+                )
+                .unwrap(),
+            "const __default__ = interface Foo {}"
         );
     }
 

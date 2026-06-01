@@ -295,7 +295,7 @@ function generateCodeFrame(source) {
 }
 
 function rewriteDefault(source, as, parserPlugins) {
-  return native.rewriteDefaultVue27(String(source || ''), String(as || ''), parserPlugins || []);
+  return native.rewriteDefaultVue3(String(source || ''), String(as || ''), parserPlugins || []);
 }
 
 function rewriteDefaultAST(ast, s, as) {

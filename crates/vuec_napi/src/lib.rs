@@ -24,7 +24,8 @@ use vuec_js::JsAstStore;
 use vuec_sfc::{
     SfcCompiler, SfcCssVarNameStyle, SfcScriptCompileOptions, SfcStyleCompileOptions,
     SfcTemplateCompileOptions, Vue27ParseComponentOptions, Vue27RewriteDefaultOptions, Vue27SfcPad,
-    Vue27TemplatePreprocessOptions, Vue3SfcPad, Vue3SfcParseOptions, Vue3SfcParseProjectionOptions,
+    Vue27TemplatePreprocessOptions, Vue3RewriteDefaultOptions, Vue3SfcPad, Vue3SfcParseOptions,
+    Vue3SfcParseProjectionOptions,
 };
 use vuec_source::{FileId, Span};
 use vuec_vue2::{
@@ -158,6 +159,21 @@ pub fn rewrite_default_vue27(
     let plugin_options = vue27_rewrite_default_options(from_js_options(&env, parser_plugins)?);
     let compiler = SfcCompiler::new();
     Ok(compiler.rewrite_vue27_default(&source, &variable, plugin_options))
+}
+
+#[napi(js_name = "rewriteDefaultVue3")]
+/// Rewrites a Vue 3 default export to an assigned variable.
+pub fn rewrite_default_vue3(
+    env: Env,
+    source: String,
+    variable: String,
+    parser_plugins: Option<Unknown>,
+) -> Result<String> {
+    let plugin_options = vue3_rewrite_default_options(from_js_options(&env, parser_plugins)?);
+    let compiler = SfcCompiler::new();
+    compiler
+        .rewrite_vue3_default(&source, &variable, plugin_options)
+        .map_err(napi::Error::from_reason)
 }
 
 #[napi(js_name = "compileVue3Dom")]
@@ -1301,14 +1317,36 @@ fn vue27_rewrite_default_options(value: Value) -> Vue27RewriteDefaultOptions {
     Vue27RewriteDefaultOptions {
         typescript: plugins
             .iter()
-            .any(|plugin| plugin.as_str() == Some("typescript")),
+            .any(|plugin| parser_plugin_name(plugin) == Some("typescript")),
         decorators: plugins.iter().any(|plugin| {
             matches!(
-                plugin.as_str(),
+                parser_plugin_name(plugin),
                 Some("decorators" | "decorators-legacy" | "decoratorAutoAccessors")
             )
         }),
     }
+}
+
+fn vue3_rewrite_default_options(value: Value) -> Vue3RewriteDefaultOptions {
+    let plugins = match &value {
+        Value::Array(values) => values.as_slice(),
+        Value::Null => &[],
+        other => std::slice::from_ref(other),
+    };
+    Vue3RewriteDefaultOptions {
+        typescript: plugins
+            .iter()
+            .any(|plugin| parser_plugin_name(plugin) == Some("typescript")),
+    }
+}
+
+fn parser_plugin_name(value: &Value) -> Option<&str> {
+    value.as_str().or_else(|| {
+        value
+            .as_array()
+            .and_then(|items| items.first())
+            .and_then(Value::as_str)
+    })
 }
 
 fn vue3_options(value: Option<&Value>) -> Vue3CompilerOptions {
@@ -3974,6 +4012,7 @@ pub fn api_manifest() -> Result<String> {
                 "generateCodeFrameVue2",
                 "callVue2Bridge",
                 "rewriteDefaultVue27",
+                "rewriteDefaultVue3",
                 "baseCompileVue3",
                 "baseParseVue3",
                 "generateVue3Core",

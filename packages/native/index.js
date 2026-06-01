@@ -166,6 +166,10 @@ function rewriteDefaultVue27(source, variable, parserPlugins) {
   return binding.rewriteDefaultVue27(String(source || ''), String(variable || ''), parserPlugins || []);
 }
 
+function rewriteDefaultVue3(source, variable, parserPlugins) {
+  return binding.rewriteDefaultVue3(String(source || ''), String(variable || ''), parserPlugins || []);
+}
+
 function baseCompileVue3(source, options = {}) {
   return fromJson(binding.baseCompileVue3(source, dehydrateForNative(options || {})));
 }
@@ -352,6 +356,7 @@ module.exports = {
   generateCodeFrameVue2,
   callVue2Bridge,
   rewriteDefaultVue27,
+  rewriteDefaultVue3,
   baseCompileVue3,
   baseParseVue3,
   generateVue3Core,

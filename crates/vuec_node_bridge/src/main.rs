@@ -23,8 +23,8 @@ use vuec_sfc::{
     SfcAttrValue, SfcBlock, SfcBlockAttrs, SfcCompiler, SfcDescriptor, SfcScriptBlock,
     SfcScriptCompileOptions, SfcStyleCompileOptions, SfcTemplateCompileOptions,
     Vue27ParseComponentOptions, Vue27PrefixIdentifiersOptions, Vue27RewriteDefaultOptions,
-    Vue27SfcPad, Vue27TemplatePreprocessOptions, Vue3SfcPad, Vue3SfcParseOptions,
-    Vue3SfcParseProjectionOptions,
+    Vue27SfcPad, Vue27TemplatePreprocessOptions, Vue3RewriteDefaultOptions, Vue3SfcPad,
+    Vue3SfcParseOptions, Vue3SfcParseProjectionOptions,
 };
 use vuec_source::FileId;
 use vuec_style::{compile_style, CssVarNameStyle, StyleCompileOptions};
@@ -389,6 +389,19 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
                 &variable,
                 vue27_rewrite_default_options(payload.get("plugins")),
             )))
+        }
+        "sfc.rewriteDefault" => {
+            let source = string_field(&payload, "source");
+            let variable = string_field_or(&payload, "variable", "script");
+            let compiler = SfcCompiler::new();
+            let rewritten = compiler
+                .rewrite_vue3_default(
+                    &source,
+                    &variable,
+                    vue3_rewrite_default_options(payload.get("plugins")),
+                )
+                .map_err(anyhow::Error::msg)?;
+            Ok(json!(rewritten))
         }
         "sfc.vue27.prefixIdentifiers" => {
             let source = string_field(&payload, "source");
@@ -4307,14 +4320,38 @@ fn vue27_rewrite_default_options(value: Option<&Value>) -> Vue27RewriteDefaultOp
     Vue27RewriteDefaultOptions {
         typescript: plugins
             .iter()
-            .any(|plugin| plugin.as_str() == Some("typescript")),
+            .any(|plugin| parser_plugin_name(plugin) == Some("typescript")),
         decorators: plugins.iter().any(|plugin| {
             matches!(
-                plugin.as_str(),
+                parser_plugin_name(plugin),
                 Some("decorators" | "decorators-legacy" | "decoratorAutoAccessors")
             )
         }),
     }
+}
+
+fn vue3_rewrite_default_options(value: Option<&Value>) -> Vue3RewriteDefaultOptions {
+    let Some(value) = value else {
+        return Vue3RewriteDefaultOptions::default();
+    };
+    let plugins = value
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_else(|| std::slice::from_ref(value));
+    Vue3RewriteDefaultOptions {
+        typescript: plugins
+            .iter()
+            .any(|plugin| parser_plugin_name(plugin) == Some("typescript")),
+    }
+}
+
+fn parser_plugin_name(value: &Value) -> Option<&str> {
+    value.as_str().or_else(|| {
+        value
+            .as_array()
+            .and_then(|items| items.first())
+            .and_then(Value::as_str)
+    })
 }
 
 fn vue27_prefix_identifiers_options(value: &Value) -> Vue27PrefixIdentifiersOptions {
@@ -4429,6 +4466,45 @@ mod tests {
         .expect("vue27 parse");
 
         assert_eq!(parsed["cssVars"], json!(["color", "font.size"]));
+    }
+
+    #[test]
+    fn vue3_sfc_bridge_rewrite_default_routes_parser_plugins() {
+        let rewritten = dispatch(
+            "sfc.rewriteDefault",
+            json!({
+                "source": "export { foo as default, bar } from './index.js'",
+                "variable": "script",
+                "plugins": []
+            }),
+        )
+        .expect("vue3 rewriteDefault");
+        assert_eq!(
+            rewritten,
+            json!("import { foo as __VUE_DEFAULT__ } from './index.js'\nexport {  bar } from './index.js'\nconst script = __VUE_DEFAULT__")
+        );
+
+        let without_ts = dispatch(
+            "sfc.rewriteDefault",
+            json!({
+                "source": "export default interface Foo {}",
+                "variable": "__default__",
+                "plugins": []
+            }),
+        )
+        .unwrap_err();
+        assert!(format!("{without_ts:#}").contains("Unexpected reserved word 'interface'. (1:15)"));
+
+        let with_ts = dispatch(
+            "sfc.rewriteDefault",
+            json!({
+                "source": "export default interface Foo {}",
+                "variable": "__default__",
+                "plugins": [["typescript", {}]]
+            }),
+        )
+        .expect("vue3 TypeScript rewriteDefault");
+        assert_eq!(with_ts, json!("const __default__ = interface Foo {}"));
     }
 
     #[test]
