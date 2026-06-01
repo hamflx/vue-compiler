@@ -4527,6 +4527,35 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_generates_runtime_macros() {
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup>",
+                    "const props = defineProps({ foo: String })\n",
+                    "const emit = defineEmits(['save'])\n",
+                    "defineExpose({ reset() {} })",
+                    "</script>"
+                ),
+                "filename": "FooBar.vue"
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = compiled["content"].as_str().unwrap_or_default();
+        assert!(content.contains("props: { foo: String },"));
+        assert!(content.contains("emits: ['save'],"));
+        assert!(content.contains("setup(__props, { expose: __expose, emit: __emit })"));
+        assert!(content.contains("const props = __props"));
+        assert!(content.contains("const emit = __emit"));
+        assert!(content.contains("__expose({ reset() {} })"));
+        assert_eq!(compiled["bindings"]["foo"], json!("props"));
+        assert_eq!(compiled["bindings"]["props"], json!("setup-reactive-const"));
+        assert_eq!(compiled["bindings"]["emit"], json!("setup-const"));
+    }
+
+    #[test]
     fn vue3_sfc_bridge_parse_projects_public_descriptor_shape() {
         let parsed = dispatch(
             "sfc.parse",
