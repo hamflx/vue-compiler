@@ -4660,6 +4660,71 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_infers_define_model_types() {
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "const modelValue = defineModel<boolean | string>()\n",
+                    "const count = defineModel<number>('count')\n",
+                    "const any = defineModel<any | boolean>('any')",
+                    "</script>"
+                ),
+                "filename": "FooBar.vue"
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = compiled["content"].as_str().unwrap_or_default();
+        assert!(compiled["errors"].as_array().unwrap().is_empty());
+        assert!(content.contains("\"modelValue\": { type: [Boolean, String] },"));
+        assert!(content.contains("\"count\": { type: Number },"));
+        assert!(content.contains("\"any\": { type: Boolean, skipCheck: true },"));
+        assert!(
+            content.contains("emits: [\"update:modelValue\", \"update:count\", \"update:any\"],")
+        );
+        assert!(content
+            .contains(r#"const modelValue = _useModel<boolean | string>(__props, "modelValue")"#));
+        assert!(content.contains("const count = _useModel<number>(__props, 'count')"));
+        assert_eq!(compiled["bindings"]["modelValue"], json!("setup-ref"));
+        assert_eq!(compiled["bindings"]["count"], json!("setup-ref"));
+        assert_eq!(compiled["bindings"]["any"], json!("setup-ref"));
+
+        let prod = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "const modelValue = defineModel<boolean>()\n",
+                    "const fn = defineModel<() => void>('fn')\n",
+                    "const fnWithDefault = defineModel<() => void>('fnWithDefault', { default: () => null })\n",
+                    "const str = defineModel<string>('str')",
+                    "</script>"
+                ),
+                "filename": "FooBar.vue",
+                "options": {
+                    "isProd": true
+                }
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = prod["content"].as_str().unwrap_or_default();
+        assert!(prod["errors"].as_array().unwrap().is_empty());
+        assert!(content.contains("\"modelValue\": { type: Boolean },"));
+        assert!(content.contains("\"fn\": {},"));
+        assert!(
+            content.contains("\"fnWithDefault\": { type: Function, ...{ default: () => null } },")
+        );
+        assert!(content.contains("\"str\": {},"));
+        assert_eq!(prod["bindings"]["modelValue"], json!("setup-ref"));
+        assert_eq!(prod["bindings"]["fn"], json!("setup-ref"));
+        assert_eq!(prod["bindings"]["fnWithDefault"], json!("setup-ref"));
+        assert_eq!(prod["bindings"]["str"], json!("setup-ref"));
+    }
+
+    #[test]
     fn vue3_sfc_bridge_parse_projects_public_descriptor_shape() {
         let parsed = dispatch(
             "sfc.parse",

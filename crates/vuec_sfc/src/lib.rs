@@ -4214,6 +4214,7 @@ struct Vue27EmitsType {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Vue27TypeContext {
     declared_types: BTreeMap<String, Vec<String>>,
+    define_model_declared_types: BTreeMap<String, Vec<String>>,
     props_type_declarations: BTreeMap<String, Vue27TypeMembers>,
     emits_type_declarations: BTreeMap<String, Vue27EmitsType>,
 }
@@ -4685,6 +4686,7 @@ fn vue27_normal_script_type_context(descriptor: &SfcDescriptor) -> Vue27TypeCont
     );
     Vue27TypeContext {
         declared_types: analysis.declared_types,
+        define_model_declared_types: BTreeMap::new(),
         props_type_declarations: analysis.props_type_declarations,
         emits_type_declarations: analysis.emits_type_declarations,
     }
@@ -4716,6 +4718,7 @@ fn vue3_normal_script_type_context(descriptor: &SfcDescriptor) -> Vue27TypeConte
     );
     Vue27TypeContext {
         declared_types: analysis.declared_types,
+        define_model_declared_types: analysis.define_model_declared_types,
         props_type_declarations: analysis.props_type_declarations,
         emits_type_declarations: analysis.emits_type_declarations,
     }
@@ -4741,6 +4744,9 @@ fn collect_vue3_declared_type_from_statement(
             analysis
                 .declared_types
                 .insert(declaration.id.name.to_string(), vec!["Object".into()]);
+            analysis
+                .define_model_declared_types
+                .insert(declaration.id.name.to_string(), vec!["Object".into()]);
             let props = vue3_type_members_from_interface_body(source, &declaration.body, analysis);
             analysis
                 .props_type_declarations
@@ -4754,9 +4760,14 @@ fn collect_vue3_declared_type_from_statement(
         }
         Statement::TSTypeAliasDeclaration(declaration) => {
             let runtime = infer_vue3_runtime_type(&declaration.type_annotation, analysis);
+            let model_runtime =
+                infer_vue3_define_model_runtime_type(&declaration.type_annotation, analysis);
             analysis
                 .declared_types
                 .insert(declaration.id.name.to_string(), runtime);
+            analysis
+                .define_model_declared_types
+                .insert(declaration.id.name.to_string(), model_runtime);
             match &declaration.type_annotation {
                 TSType::TSTypeLiteral(literal) => {
                     let props = vue3_type_members_from_literal(source, literal, analysis);
@@ -4800,6 +4811,9 @@ fn collect_vue3_declared_type_from_declaration(
             analysis
                 .declared_types
                 .insert(declaration.id.name.to_string(), vec!["Object".into()]);
+            analysis
+                .define_model_declared_types
+                .insert(declaration.id.name.to_string(), vec!["Object".into()]);
             let props = vue3_type_members_from_interface_body(source, &declaration.body, analysis);
             analysis
                 .props_type_declarations
@@ -4813,9 +4827,14 @@ fn collect_vue3_declared_type_from_declaration(
         }
         Declaration::TSTypeAliasDeclaration(declaration) => {
             let runtime = infer_vue3_runtime_type(&declaration.type_annotation, analysis);
+            let model_runtime =
+                infer_vue3_define_model_runtime_type(&declaration.type_annotation, analysis);
             analysis
                 .declared_types
                 .insert(declaration.id.name.to_string(), runtime);
+            analysis
+                .define_model_declared_types
+                .insert(declaration.id.name.to_string(), model_runtime);
             match &declaration.type_annotation {
                 TSType::TSTypeLiteral(literal) => {
                     let props = vue3_type_members_from_literal(source, literal, analysis);
@@ -8439,6 +8458,7 @@ struct Vue3ScriptSetupAnalysis {
     errors: Vec<String>,
     local_setup_bindings: BTreeSet<String>,
     declared_types: BTreeMap<String, Vec<String>>,
+    define_model_declared_types: BTreeMap<String, Vec<String>>,
     props_type_declarations: BTreeMap<String, Vue27TypeMembers>,
     emits_type_declarations: BTreeMap<String, Vue27EmitsType>,
 }
@@ -8446,7 +8466,8 @@ struct Vue3ScriptSetupAnalysis {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Vue3ModelDecl {
     name: String,
-    prop_runtime: String,
+    prop_runtime: Option<String>,
+    runtime_types: Option<Vec<String>>,
 }
 
 fn script_content(
@@ -8492,6 +8513,7 @@ fn script_content(
             filename,
             &normal_script,
             is_ts,
+            is_prod,
         ),
     );
     let mut bindings = setup_analysis.setup_bindings.clone();
@@ -8615,6 +8637,7 @@ fn analyze_vue3_script_setup(
 
     let mut type_analysis = Vue3ScriptSetupAnalysis {
         declared_types: normal_type_context.declared_types.clone(),
+        define_model_declared_types: normal_type_context.define_model_declared_types.clone(),
         props_type_declarations: normal_type_context.props_type_declarations.clone(),
         emits_type_declarations: normal_type_context.emits_type_declarations.clone(),
         ..Vue3ScriptSetupAnalysis::default()
@@ -8625,6 +8648,7 @@ fn analyze_vue3_script_setup(
     let mut edits = SourceEdits::new(source);
     let mut analysis = Vue3ScriptSetupAnalysis {
         declared_types: type_analysis.declared_types,
+        define_model_declared_types: type_analysis.define_model_declared_types,
         props_type_declarations: type_analysis.props_type_declarations,
         emits_type_declarations: type_analysis.emits_type_declarations,
         local_setup_bindings: type_analysis.local_setup_bindings,
@@ -8953,7 +8977,7 @@ fn collect_vue3_define_model_call(
     edits: &mut SourceEdits<'_>,
     analysis: &mut Vue3ScriptSetupAnalysis,
 ) {
-    let model = vue3_define_model_decl(source, call);
+    let model = vue3_define_model_decl(source, call, analysis);
     if analysis
         .models
         .iter()
@@ -8973,7 +8997,11 @@ fn collect_vue3_define_model_call(
     analysis.models.push(model);
 }
 
-fn vue3_define_model_decl(source: &str, call: &oxc_ast::ast::CallExpression<'_>) -> Vue3ModelDecl {
+fn vue3_define_model_decl(
+    source: &str,
+    call: &oxc_ast::ast::CallExpression<'_>,
+    analysis: &Vue3ScriptSetupAnalysis,
+) -> Vue3ModelDecl {
     let first_expression = call
         .arguments
         .first()
@@ -8987,10 +9015,18 @@ fn vue3_define_model_decl(source: &str, call: &oxc_ast::ast::CallExpression<'_>)
     } else {
         call.arguments.first()
     };
-    let prop_runtime = options
-        .map(|argument| vue3_define_model_prop_runtime(source, argument))
-        .unwrap_or_else(|| "{}".to_string());
-    Vue3ModelDecl { name, prop_runtime }
+    let prop_runtime =
+        options.and_then(|argument| vue3_define_model_prop_runtime(source, argument));
+    let runtime_types = call
+        .type_arguments
+        .as_ref()
+        .and_then(|arguments| arguments.params.first())
+        .map(|type_argument| infer_vue3_define_model_runtime_type(type_argument, analysis));
+    Vue3ModelDecl {
+        name,
+        prop_runtime,
+        runtime_types,
+    }
 }
 
 fn vue3_define_model_name(expression: &Expression<'_>) -> Option<String> {
@@ -9009,14 +9045,13 @@ fn vue3_define_model_name(expression: &Expression<'_>) -> Option<String> {
     }
 }
 
-fn vue3_define_model_prop_runtime(source: &str, argument: &Argument<'_>) -> String {
+fn vue3_define_model_prop_runtime(source: &str, argument: &Argument<'_>) -> Option<String> {
     let expression = unwrap_vue3_ts_expression(argument.to_expression());
     source
         .get(expression.span().start as usize..expression.span().end as usize)
         .map(str::trim)
         .filter(|source| !source.is_empty())
         .map(ToOwned::to_owned)
-        .unwrap_or_else(|| "{}".to_string())
 }
 
 fn rewrite_vue3_define_model_call(
@@ -9379,6 +9414,93 @@ fn infer_vue3_runtime_type(node: &TSType<'_>, analysis: &Vue3ScriptSetupAnalysis
     }
 }
 
+fn infer_vue3_define_model_runtime_type(
+    node: &TSType<'_>,
+    analysis: &Vue3ScriptSetupAnalysis,
+) -> Vec<String> {
+    match node {
+        TSType::TSStringKeyword(_) => vec!["String".into()],
+        TSType::TSNumberKeyword(_) => vec!["Number".into()],
+        TSType::TSBooleanKeyword(_) => vec!["Boolean".into()],
+        TSType::TSObjectKeyword(_) => vec!["Object".into()],
+        TSType::TSTypeLiteral(literal) => {
+            let mut types = Vec::new();
+            for member in &literal.members {
+                let runtime_type = match member {
+                    TSSignature::TSCallSignatureDeclaration(_)
+                    | TSSignature::TSConstructSignatureDeclaration(_) => "Function",
+                    _ => "Object",
+                };
+                push_unique(&mut types, runtime_type);
+            }
+            if types.is_empty() {
+                vec!["Object".into()]
+            } else {
+                types
+            }
+        }
+        TSType::TSIntersectionType(intersection) => {
+            let mut types = Vec::new();
+            for ty in &intersection.types {
+                for runtime_type in infer_vue3_define_model_runtime_type(ty, analysis) {
+                    if runtime_type != "Unknown" {
+                        push_unique(&mut types, &runtime_type);
+                    }
+                }
+            }
+            if types.is_empty() {
+                vec!["Unknown".into()]
+            } else {
+                types
+            }
+        }
+        TSType::TSFunctionType(_) | TSType::TSConstructorType(_) => vec!["Function".into()],
+        TSType::TSArrayType(_) | TSType::TSTupleType(_) => vec!["Array".into()],
+        TSType::TSSymbolKeyword(_) => vec!["Symbol".into()],
+        TSType::TSNullKeyword(_) => vec!["null".into()],
+        TSType::TSAnyKeyword(_)
+        | TSType::TSBigIntKeyword(_)
+        | TSType::TSNeverKeyword(_)
+        | TSType::TSUndefinedKeyword(_)
+        | TSType::TSUnknownKeyword(_)
+        | TSType::TSVoidKeyword(_) => vec!["Unknown".into()],
+        TSType::TSLiteralType(literal) => match &literal.literal {
+            TSLiteral::StringLiteral(_) => vec!["String".into()],
+            TSLiteral::BooleanLiteral(_) => vec!["Boolean".into()],
+            TSLiteral::NumericLiteral(_) | TSLiteral::BigIntLiteral(_) => vec!["Number".into()],
+            _ => vec!["Unknown".into()],
+        },
+        TSType::TSTypeReference(reference) => {
+            if let Some(name) = vue27_ts_type_name_identifier(&reference.type_name) {
+                if let Some(types) = analysis.define_model_declared_types.get(name) {
+                    return types.clone();
+                }
+                match name {
+                    "Array" | "Function" | "Object" | "Set" | "Map" | "WeakSet" | "WeakMap"
+                    | "Date" | "Promise" => return vec![name.to_string()],
+                    "Record" | "Partial" | "Readonly" | "Pick" | "Omit" | "Exclude" | "Extract"
+                    | "Required" | "InstanceType" => return vec!["Object".into()],
+                    _ => {}
+                }
+            }
+            vec!["Unknown".into()]
+        }
+        TSType::TSParenthesizedType(parenthesized) => {
+            infer_vue3_define_model_runtime_type(&parenthesized.type_annotation, analysis)
+        }
+        TSType::TSUnionType(union) => {
+            let mut types = Vec::new();
+            for ty in &union.types {
+                for runtime_type in infer_vue3_define_model_runtime_type(ty, analysis) {
+                    push_unique(&mut types, &runtime_type);
+                }
+            }
+            types
+        }
+        _ => vec!["Unknown".into()],
+    }
+}
+
 fn gen_vue3_runtime_props(
     props: &[Vue27RuntimeProp],
     is_prod: bool,
@@ -9686,9 +9808,10 @@ fn vue3_script_setup_export(
     filename: &str,
     normal_script: &Vue3NormalScriptAnalysis,
     is_ts: bool,
+    is_prod: bool,
 ) -> String {
     let runtime_options =
-        vue3_script_setup_runtime_options(filename, normal_script, setup_analysis);
+        vue3_script_setup_runtime_options(filename, normal_script, setup_analysis, is_prod);
     let setup_params = vue3_script_setup_params(setup_analysis);
     let setup_body = vue3_script_setup_body(setup_analysis, bindings);
     if is_ts {
@@ -9731,6 +9854,7 @@ fn vue3_script_setup_runtime_options(
     filename: &str,
     normal_script: &Vue3NormalScriptAnalysis,
     setup_analysis: &Vue3ScriptSetupAnalysis,
+    is_prod: bool,
 ) -> String {
     let mut runtime_options = String::new();
     if !normal_script.has_default_export_name {
@@ -9739,7 +9863,7 @@ fn vue3_script_setup_runtime_options(
             escape_js_single(&script_component_name(filename))
         ));
     }
-    if let Some(props) = vue3_script_setup_props_runtime(setup_analysis) {
+    if let Some(props) = vue3_script_setup_props_runtime(setup_analysis, is_prod) {
         runtime_options.push_str(&format!("\n  props: {},", props.trim()));
     }
     if let Some(emits) = vue3_script_setup_emits_runtime(setup_analysis) {
@@ -9753,9 +9877,12 @@ fn vue3_script_setup_needs_merge_models(setup_analysis: &Vue3ScriptSetupAnalysis
         && (setup_analysis.props_runtime.is_some() || setup_analysis.emits_runtime.is_some())
 }
 
-fn vue3_script_setup_props_runtime(setup_analysis: &Vue3ScriptSetupAnalysis) -> Option<String> {
+fn vue3_script_setup_props_runtime(
+    setup_analysis: &Vue3ScriptSetupAnalysis,
+    is_prod: bool,
+) -> Option<String> {
     let props = setup_analysis.props_runtime.as_ref();
-    let model_props = vue3_script_setup_model_props_runtime(&setup_analysis.models);
+    let model_props = vue3_script_setup_model_props_runtime(&setup_analysis.models, is_prod);
     match (props, model_props) {
         (Some(props), Some(model_props)) => Some(format!(
             "/*@__PURE__*/_mergeModels({}, {})",
@@ -9768,7 +9895,10 @@ fn vue3_script_setup_props_runtime(setup_analysis: &Vue3ScriptSetupAnalysis) -> 
     }
 }
 
-fn vue3_script_setup_model_props_runtime(models: &[Vue3ModelDecl]) -> Option<String> {
+fn vue3_script_setup_model_props_runtime(
+    models: &[Vue3ModelDecl],
+    is_prod: bool,
+) -> Option<String> {
     if models.is_empty() {
         return None;
     }
@@ -9777,7 +9907,7 @@ fn vue3_script_setup_model_props_runtime(models: &[Vue3ModelDecl]) -> Option<Str
         entries.push(format!(
             "    \"{}\": {},",
             escape_js_double(&model.name),
-            model.prop_runtime
+            vue3_define_model_runtime_decl(model, is_prod)
         ));
         entries.push(format!(
             "    \"{}\": {{}},",
@@ -9785,6 +9915,47 @@ fn vue3_script_setup_model_props_runtime(models: &[Vue3ModelDecl]) -> Option<Str
         ));
     }
     Some(format!("{{\n{}\n  }}", entries.join("\n")))
+}
+
+fn vue3_define_model_runtime_decl(model: &Vue3ModelDecl, is_prod: bool) -> String {
+    let mut runtime_types = model.runtime_types.clone();
+    let has_runtime_options = model.prop_runtime.is_some();
+    let mut skip_check = false;
+    let mut codegen_options = String::new();
+
+    if let Some(types) = runtime_types.as_mut() {
+        let has_boolean = types.iter().any(|ty| ty == "Boolean");
+        let has_function = types.iter().any(|ty| ty == "Function");
+        let has_unknown = types.iter().any(|ty| ty == "Unknown");
+
+        if has_unknown {
+            if has_boolean || has_function {
+                types.retain(|ty| ty != "Unknown");
+                skip_check = true;
+            } else {
+                types.clear();
+                types.push("null".to_string());
+            }
+        }
+
+        if !is_prod {
+            codegen_options = format!("type: {}", vue27_runtime_type_string(types));
+            if skip_check {
+                codegen_options.push_str(", skipCheck: true");
+            }
+        } else if has_boolean || (has_runtime_options && has_function) {
+            codegen_options = format!("type: {}", vue27_runtime_type_string(types));
+        }
+    }
+
+    match (codegen_options.is_empty(), model.prop_runtime.as_deref()) {
+        (false, Some(runtime_options)) => {
+            format!("{{ {codegen_options}, ...{runtime_options} }}")
+        }
+        (false, None) => format!("{{ {codegen_options} }}"),
+        (true, Some(runtime_options)) => runtime_options.to_string(),
+        (true, None) => "{}".to_string(),
+    }
 }
 
 fn vue3_script_setup_emits_runtime(setup_analysis: &Vue3ScriptSetupAnalysis) -> Option<String> {
@@ -11363,6 +11534,170 @@ defineModel('count')
             script.bindings.get("count").map(String::as_str),
             Some("props")
         );
+    }
+
+    #[test]
+    fn vue3_compile_script_infers_define_model_typescript_runtime_options() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup lang="ts">
+const modelValue = defineModel<boolean | string>()
+const count = defineModel<number>('count')
+const disabled = defineModel<number>('disabled', { required: false })
+const any = defineModel<any | boolean>('any')
+</script>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty());
+        assert!(script.content.contains(
+            "import { useModel as _useModel, defineComponent as _defineComponent } from 'vue'"
+        ));
+        assert!(script
+            .content
+            .contains("\"modelValue\": { type: [Boolean, String] },"));
+        assert!(script.content.contains("\"modelModifiers\": {},"));
+        assert!(script.content.contains("\"count\": { type: Number },"));
+        assert!(script
+            .content
+            .contains("\"disabled\": { type: Number, ...{ required: false } },"));
+        assert!(script
+            .content
+            .contains("\"any\": { type: Boolean, skipCheck: true },"));
+        assert!(script.content.contains(
+            "emits: [\"update:modelValue\", \"update:count\", \"update:disabled\", \"update:any\"],"
+        ));
+        assert!(script
+            .content
+            .contains(r#"const modelValue = _useModel<boolean | string>(__props, "modelValue")"#));
+        assert!(script
+            .content
+            .contains("const count = _useModel<number>(__props, 'count')"));
+        assert!(script
+            .content
+            .contains("const disabled = _useModel<number>(__props, 'disabled')"));
+        assert!(script
+            .content
+            .contains("const any = _useModel<any | boolean>(__props, 'any')"));
+        assert!(!script.content.contains("defineModel"));
+        assert_eq!(
+            script.bindings.get("modelValue").map(String::as_str),
+            Some("setup-ref")
+        );
+        assert_eq!(
+            script.bindings.get("count").map(String::as_str),
+            Some("setup-ref")
+        );
+        assert_eq!(
+            script.bindings.get("disabled").map(String::as_str),
+            Some("setup-ref")
+        );
+        assert_eq!(
+            script.bindings.get("any").map(String::as_str),
+            Some("setup-ref")
+        );
+    }
+
+    #[test]
+    fn vue3_compile_script_erases_define_model_types_in_production() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup lang="ts">
+const modelValue = defineModel<boolean>()
+const fn = defineModel<() => void>('fn')
+const fnWithDefault = defineModel<() => void>('fnWithDefault', { default: () => null })
+const str = defineModel<string>('str')
+const optional = defineModel<string>('optional', { required: false })
+</script>"#,
+        );
+        let script = compiler.compile_script(
+            &descriptor,
+            SfcScriptCompileOptions {
+                is_prod: true,
+                ..SfcScriptCompileOptions::default()
+            },
+        );
+
+        assert!(script.errors.is_empty());
+        assert!(script
+            .content
+            .contains("\"modelValue\": { type: Boolean },"));
+        assert!(script.content.contains("\"fn\": {},"));
+        assert!(script
+            .content
+            .contains("\"fnWithDefault\": { type: Function, ...{ default: () => null } },"));
+        assert!(script.content.contains("\"str\": {},"));
+        assert!(script
+            .content
+            .contains("\"optional\": { required: false },"));
+        assert!(script.content.contains(
+            "emits: [\"update:modelValue\", \"update:fn\", \"update:fnWithDefault\", \"update:str\", \"update:optional\"],"
+        ));
+        assert!(script
+            .content
+            .contains(r#"const modelValue = _useModel<boolean>(__props, "modelValue")"#));
+        assert!(script
+            .content
+            .contains("const fn = _useModel<() => void>(__props, 'fn')"));
+        assert!(script
+            .content
+            .contains("const str = _useModel<string>(__props, 'str')"));
+
+        let mixed = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup lang="ts">
+const modelValue = defineModel<boolean | string | {}>()
+const value = defineModel<number | (() => number)>('value', { default: () => 1 })
+</script>"#,
+        );
+        let mixed_script = compiler.compile_script(
+            &mixed,
+            SfcScriptCompileOptions {
+                is_prod: true,
+                ..SfcScriptCompileOptions::default()
+            },
+        );
+
+        assert!(mixed_script.errors.is_empty());
+        assert!(mixed_script
+            .content
+            .contains("\"modelValue\": { type: [Boolean, String, Object] },"));
+        assert!(mixed_script
+            .content
+            .contains("\"value\": { type: [Number, Function], ...{ default: () => 1 } },"));
+    }
+
+    #[test]
+    fn vue3_compile_script_resolves_define_model_type_aliases() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "FooBar.vue",
+            r#"<script lang="ts">
+type NormalMaybe = any | boolean
+</script>
+<script setup lang="ts">
+type SetupMaybe = any | boolean
+const setupAlias = defineModel<SetupMaybe>('setupAlias')
+const normalAlias = defineModel<NormalMaybe>('normalAlias')
+</script>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty());
+        assert!(script
+            .content
+            .contains("\"setupAlias\": { type: Boolean, skipCheck: true },"));
+        assert!(script
+            .content
+            .contains("\"normalAlias\": { type: Boolean, skipCheck: true },"));
+        assert!(script
+            .content
+            .contains("const setupAlias = _useModel<SetupMaybe>(__props, 'setupAlias')"));
+        assert!(script
+            .content
+            .contains("const normalAlias = _useModel<NormalMaybe>(__props, 'normalAlias')"));
     }
 
     #[test]
