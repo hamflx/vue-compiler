@@ -13,9 +13,9 @@ use oxc_ast::ast::{
     ExportDefaultDeclaration, ExportDefaultDeclarationKind, ExportNamedDeclaration,
     ExportSpecifier, Expression, FormalParameter, Function, ImportDeclarationSpecifier,
     ImportOrExportKind, ModuleExportName, ObjectExpression, ObjectProperty, ObjectPropertyKind,
-    PropertyKey, SimpleAssignmentTarget, Statement, TSFunctionType, TSInterfaceBody, TSLiteral,
-    TSSignature, TSType, TSTypeLiteral, TSTypeName, VariableDeclaration, VariableDeclarationKind,
-    WithStatement,
+    PropertyKey, SimpleAssignmentTarget, Statement, TSEnumDeclaration, TSFunctionType,
+    TSInterfaceBody, TSLiteral, TSSignature, TSType, TSTypeLiteral, TSTypeName,
+    VariableDeclaration, VariableDeclarationKind, WithStatement,
 };
 use oxc_span::GetSpan;
 use serde::{Deserialize, Serialize};
@@ -4873,22 +4873,39 @@ fn collect_vue3_setup_local_bindings(
             Statement::VariableDeclaration(declaration) if !declaration.declare => {
                 for declarator in &declaration.declarations {
                     insert_pattern_bindings(&declarator.id, &mut analysis.local_setup_bindings);
+                    let binding_type =
+                        vue3_setup_binding_type(declaration.kind, declarator.init.as_ref());
+                    collect_pattern_binding_types(
+                        &declarator.id,
+                        binding_type,
+                        &mut analysis.local_setup_binding_types,
+                    );
                 }
             }
             Statement::FunctionDeclaration(function) if !function.declare => {
                 if let Some(id) = &function.id {
                     analysis.local_setup_bindings.insert(id.name.to_string());
+                    analysis
+                        .local_setup_binding_types
+                        .insert(id.name.to_string(), "setup-const".into());
                 }
             }
             Statement::ClassDeclaration(class) if !class.declare => {
                 if let Some(id) = &class.id {
                     analysis.local_setup_bindings.insert(id.name.to_string());
+                    analysis
+                        .local_setup_binding_types
+                        .insert(id.name.to_string(), "setup-const".into());
                 }
             }
             Statement::TSEnumDeclaration(declaration) if is_ts && !declaration.declare => {
                 analysis
                     .local_setup_bindings
                     .insert(declaration.id.name.to_string());
+                analysis.local_setup_binding_types.insert(
+                    declaration.id.name.to_string(),
+                    vue3_ts_enum_binding_type(declaration).into(),
+                );
             }
             _ => {}
         }
@@ -8467,6 +8484,7 @@ struct Vue3ScriptSetupAnalysis {
     needs_use_slots: bool,
     errors: Vec<String>,
     local_setup_bindings: BTreeSet<String>,
+    local_setup_binding_types: BTreeMap<String, String>,
     declared_types: BTreeMap<String, Vec<String>>,
     define_model_declared_types: BTreeMap<String, Vec<String>>,
     props_type_declarations: BTreeMap<String, Vue27TypeMembers>,
@@ -8672,6 +8690,7 @@ fn analyze_vue3_script_setup(
         props_type_declarations: type_analysis.props_type_declarations,
         emits_type_declarations: type_analysis.emits_type_declarations,
         local_setup_bindings: type_analysis.local_setup_bindings,
+        local_setup_binding_types: type_analysis.local_setup_binding_types,
         ..Vue3ScriptSetupAnalysis::default()
     };
     let mut module_chunks = Vec::new();
@@ -9339,9 +9358,9 @@ fn collect_vue3_with_defaults_call(
         .arguments
         .get(1)
         .and_then(|argument| {
-            if vue27_expression_references_setup_local(
+            if vue3_expression_references_non_literal_setup_local(
                 argument.to_expression(),
-                &analysis.local_setup_bindings,
+                analysis,
             ) {
                 analysis.errors.push(
                     "`defineProps()` in <script setup> cannot reference locally declared variables because it will be hoisted outside of the setup() function. If your component options require initialization in the module scope, use a separate normal <script> to export the options instead."
@@ -9716,17 +9735,13 @@ fn collect_vue3_define_props_destructure_bindings(
     match pattern {
         BindingPattern::ObjectPattern(pattern) => {
             for property in &pattern.properties {
-                let key = property.key.static_name().map(|name| name.into_owned());
-                let local = first_pattern_binding(&property.value);
-                if let Some(local) = local {
-                    if key.as_deref().is_some_and(|key| key == local) {
-                        analysis.setup_bindings.insert(local, "props".into());
-                    } else {
-                        analysis
-                            .setup_bindings
-                            .insert(local, "props-aliased".into());
-                    }
-                }
+                let key =
+                    vue3_define_props_destructure_key(&property.key, property.computed, analysis);
+                collect_vue3_define_props_destructure_property(
+                    key.as_deref(),
+                    &property.value,
+                    analysis,
+                );
             }
             if let Some(rest) = &pattern.rest {
                 collect_pattern_binding_types(
@@ -9757,6 +9772,97 @@ fn collect_vue3_define_props_destructure_bindings(
         }
         BindingPattern::BindingIdentifier(_) => {}
     }
+}
+
+fn vue3_define_props_destructure_key(
+    key: &PropertyKey<'_>,
+    computed: bool,
+    analysis: &mut Vue3ScriptSetupAnalysis,
+) -> Option<String> {
+    let key = match key {
+        PropertyKey::StaticIdentifier(identifier) if !computed => Some(identifier.name.to_string()),
+        PropertyKey::StringLiteral(literal) => Some(literal.value.to_string()),
+        PropertyKey::NumericLiteral(literal) => Some(literal.value.to_string()),
+        _ => None,
+    };
+    if key.is_none() {
+        analysis
+            .errors
+            .push("defineProps() destructure cannot use computed key.".into());
+    }
+    key
+}
+
+fn collect_vue3_define_props_destructure_property(
+    key: Option<&str>,
+    value: &BindingPattern<'_>,
+    analysis: &mut Vue3ScriptSetupAnalysis,
+) {
+    match value {
+        BindingPattern::BindingIdentifier(identifier) => {
+            register_vue3_define_props_destructure_binding(key, identifier.name.as_str(), analysis);
+        }
+        BindingPattern::AssignmentPattern(pattern) => {
+            if vue3_expression_references_non_literal_setup_local(&pattern.right, analysis) {
+                analysis.errors.push(
+                    "`defineProps()` in <script setup> cannot reference locally declared variables because it will be hoisted outside of the setup() function. If your component options require initialization in the module scope, use a separate normal <script> to export the options instead."
+                        .into(),
+                );
+            }
+            if let BindingPattern::BindingIdentifier(identifier) = &pattern.left {
+                register_vue3_define_props_destructure_binding(
+                    key,
+                    identifier.name.as_str(),
+                    analysis,
+                );
+            } else {
+                analysis
+                    .errors
+                    .push("defineProps() destructure does not support nested patterns.".into());
+                if let Some(local) = first_pattern_binding(&pattern.left) {
+                    register_vue3_define_props_destructure_binding(key, &local, analysis);
+                }
+            }
+        }
+        _ => {
+            analysis
+                .errors
+                .push("defineProps() destructure does not support nested patterns.".into());
+            if let Some(local) = first_pattern_binding(value) {
+                register_vue3_define_props_destructure_binding(key, &local, analysis);
+            }
+        }
+    }
+}
+
+fn register_vue3_define_props_destructure_binding(
+    key: Option<&str>,
+    local: &str,
+    analysis: &mut Vue3ScriptSetupAnalysis,
+) {
+    if key.is_some_and(|key| key == local) {
+        analysis
+            .setup_bindings
+            .insert(local.to_string(), "props".into());
+    } else {
+        analysis
+            .setup_bindings
+            .insert(local.to_string(), "props-aliased".into());
+    }
+}
+
+fn vue3_expression_references_non_literal_setup_local(
+    expression: &Expression<'_>,
+    analysis: &Vue3ScriptSetupAnalysis,
+) -> bool {
+    let non_literal_bindings = analysis
+        .local_setup_binding_types
+        .iter()
+        .filter_map(|(name, binding_type)| {
+            (binding_type != "literal-const").then_some(name.clone())
+        })
+        .collect::<BTreeSet<_>>();
+    vue27_expression_references_setup_local(expression, &non_literal_bindings)
 }
 
 fn collect_vue3_define_emits_call(
@@ -9855,10 +9961,64 @@ fn vue3_setup_binding_type(
     if kind != VariableDeclarationKind::Const {
         return "setup-let";
     }
-    if init.is_some_and(is_literal_expression) {
+    if init.is_some_and(vue3_is_static_node) {
         return "literal-const";
     }
     "setup-maybe-ref"
+}
+
+fn vue3_ts_enum_binding_type(declaration: &TSEnumDeclaration<'_>) -> &'static str {
+    if declaration
+        .body
+        .members
+        .iter()
+        .all(|member| member.initializer.as_ref().is_none_or(vue3_is_static_node))
+    {
+        "literal-const"
+    } else {
+        "setup-const"
+    }
+}
+
+fn vue3_is_static_node(expression: &Expression<'_>) -> bool {
+    match expression {
+        Expression::UnaryExpression(expression) => vue3_is_static_node(&expression.argument),
+        Expression::LogicalExpression(expression) => {
+            vue3_is_static_node(&expression.left) && vue3_is_static_node(&expression.right)
+        }
+        Expression::BinaryExpression(expression) => {
+            vue3_is_static_node(&expression.left) && vue3_is_static_node(&expression.right)
+        }
+        Expression::ConditionalExpression(expression) => {
+            vue3_is_static_node(&expression.test)
+                && vue3_is_static_node(&expression.consequent)
+                && vue3_is_static_node(&expression.alternate)
+        }
+        Expression::SequenceExpression(expression) => {
+            expression.expressions.iter().all(vue3_is_static_node)
+        }
+        Expression::TemplateLiteral(expression) => {
+            expression.expressions.iter().all(vue3_is_static_node)
+        }
+        Expression::ParenthesizedExpression(expression) => {
+            vue3_is_static_node(&expression.expression)
+        }
+        Expression::TSAsExpression(expression) => vue3_is_static_node(&expression.expression),
+        Expression::TSSatisfiesExpression(expression) => {
+            vue3_is_static_node(&expression.expression)
+        }
+        Expression::TSTypeAssertion(expression) => vue3_is_static_node(&expression.expression),
+        Expression::TSNonNullExpression(expression) => vue3_is_static_node(&expression.expression),
+        Expression::TSInstantiationExpression(expression) => {
+            vue3_is_static_node(&expression.expression)
+        }
+        Expression::StringLiteral(_)
+        | Expression::NumericLiteral(_)
+        | Expression::BooleanLiteral(_)
+        | Expression::NullLiteral(_)
+        | Expression::BigIntLiteral(_) => true,
+        _ => false,
+    }
 }
 
 fn analyze_vue3_normal_script_for_setup(descriptor: &SfcDescriptor) -> Vue3NormalScriptAnalysis {
@@ -12327,6 +12487,76 @@ const emit = defineEmits(['cancel'])
             .any(|error| error.contains("duplicate defineEmits() call")));
         assert!(script.content.contains("const emit = __emit"));
         assert!(!script.content.contains("defineEmits"));
+    }
+
+    #[test]
+    fn vue3_compile_script_reports_define_props_destructure_errors() {
+        let mut compiler = SfcCompiler::new();
+        let dynamic_key = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup>
+const key = 'foo'
+const { [key]: foo } = defineProps(['foo'])
+</script>"#,
+        );
+        let script = compiler.compile_script(&dynamic_key, SfcScriptCompileOptions::default());
+
+        assert!(script
+            .errors
+            .iter()
+            .any(|error| error.contains("destructure cannot use computed key")));
+
+        let nested_pattern = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup>
+const { foo: { bar } } = defineProps(['foo'])
+</script>"#,
+        );
+        let script = compiler.compile_script(&nested_pattern, SfcScriptCompileOptions::default());
+
+        assert!(script
+            .errors
+            .iter()
+            .any(|error| error.contains("destructure does not support nested patterns")));
+
+        let local_default = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup>
+let x = 1
+const { foo = () => x } = defineProps(['foo'])
+</script>"#,
+        );
+        let script = compiler.compile_script(&local_default, SfcScriptCompileOptions::default());
+
+        assert!(script
+            .errors
+            .iter()
+            .any(|error| error.contains("cannot reference locally declared variables")));
+
+        let literal_const_default = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup>
+const x = 1
+const { foo = x } = defineProps(['foo'])
+</script>"#,
+        );
+        let script =
+            compiler.compile_script(&literal_const_default, SfcScriptCompileOptions::default());
+        assert!(script.errors.is_empty());
+
+        let static_computed_key = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup>
+const { ['foo']: foo } = defineProps(['foo'])
+</script>"#,
+        );
+        let script =
+            compiler.compile_script(&static_computed_key, SfcScriptCompileOptions::default());
+        assert!(script.errors.is_empty());
+        assert_eq!(
+            script.bindings.get("foo").map(String::as_str),
+            Some("props")
+        );
     }
 
     #[test]

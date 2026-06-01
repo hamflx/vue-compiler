@@ -4775,6 +4775,71 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_reports_props_destructure_errors() {
+        let dynamic_key = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup>",
+                    "const key = 'foo'\n",
+                    "const { [key]: foo } = defineProps(['foo'])",
+                    "</script>"
+                ),
+                "filename": "FooBar.vue"
+            }),
+        )
+        .expect("vue3 compileScript");
+        assert!(dynamic_key["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error
+                .as_str()
+                .is_some_and(|error| error.contains("destructure cannot use computed key"))));
+
+        let nested_pattern = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup>",
+                    "const { foo: { bar } } = defineProps(['foo'])",
+                    "</script>"
+                ),
+                "filename": "FooBar.vue"
+            }),
+        )
+        .expect("vue3 compileScript");
+        assert!(nested_pattern["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error.as_str().is_some_and(
+                |error| error.contains("destructure does not support nested patterns")
+            )));
+
+        let local_default = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup>",
+                    "let x = 1\n",
+                    "const { foo = () => x } = defineProps(['foo'])",
+                    "</script>"
+                ),
+                "filename": "FooBar.vue"
+            }),
+        )
+        .expect("vue3 compileScript");
+        assert!(local_default["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error.as_str().is_some_and(
+                |error| error.contains("cannot reference locally declared variables")
+            )));
+    }
+
+    #[test]
     fn vue3_sfc_bridge_compile_script_merges_define_options() {
         let compiled = dispatch(
             "sfc.compileScript",
