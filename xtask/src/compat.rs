@@ -2461,6 +2461,8 @@ fn alias_function_expression(
                 )
             } else if is_vue3_sfc_parse {
                 format!("hydrateVue3SfcParseResult({call})")
+            } else if target.kind == TargetKind::Vue3Sfc && export_name == "compileScript" {
+                format!("throwVue3CompileScriptErrors({call})")
             } else if is_vue27_sfc_compile_script {
                 format!("hydrateVue27CompileScriptResult({call})")
             } else if is_vue3_ssr_compile {
@@ -7970,6 +7972,15 @@ function hydrateVue3SfcParseResult(result) {
     return vue3SfcShouldForceReload(prevImports, descriptor);
   };
   return result;
+}
+
+function throwVue3CompileScriptErrors(result) {
+  if (!result || !Array.isArray(result.errors) || result.errors.length === 0) {
+    return result;
+  }
+  const first = result.errors[0];
+  const message = typeof first === 'string' ? first : (first && first.message) || String(first);
+  throw new Error(message.startsWith('[@vue/compiler-sfc]') ? message : `[@vue/compiler-sfc] ${message}`);
 }
 
 function vue3SfcShouldForceReload(prevImports, descriptor) {
@@ -14193,6 +14204,31 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_compile_script_alias_throws_rust_errors() {
+        let target = TargetSpec {
+            version_line: VersionLine::Vue3,
+            package: "@vue/compiler-sfc",
+            entry: "@vue/compiler-sfc",
+            kind: TargetKind::Vue3Sfc,
+        };
+        let detail = ApiExportDetail {
+            kind: "function".into(),
+            tag: "[object Function]".into(),
+            name: Some("compileScript".into()),
+            function_arity: Some(2),
+            is_async_function: Some(false),
+            is_class_like: Some(false),
+            own_property_names: vec!["length".into(), "name".into(), "prototype".into()],
+        };
+        let expression = alias_export_expression(target, "compileScript", Some(&detail));
+
+        assert!(expression.contains("sfc.compileScript"));
+        assert!(expression.contains("throwVue3CompileScriptErrors"));
+        assert!(ALIAS_RUNTIME_JS.contains("function throwVue3CompileScriptErrors"));
+        assert!(ALIAS_RUNTIME_JS.contains("[@vue/compiler-sfc] ${message}"));
+    }
+
+    #[test]
     fn vue3_sfc_rewrite_default_alias_routes_to_rust_bridge() {
         let target = TargetSpec {
             version_line: VersionLine::Vue3,
@@ -14234,6 +14270,27 @@ mod tests {
         assert!(source.contains("function hydrateVue3SfcParseResult"));
         assert!(source.contains("function vue3SfcShouldForceReload"));
         assert!(source.contains("descriptor.shouldForceReload = function shouldForceReload"));
+    }
+
+    #[test]
+    fn napi_vue3_sfc_native_alias_throws_compile_script_errors() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let source = fs::read_to_string(
+            repo_root
+                .join("packages")
+                .join("native-aliases")
+                .join("@vue")
+                .join("compiler-sfc")
+                .join("dist")
+                .join("compiler-sfc.cjs.js"),
+        )
+        .unwrap();
+
+        assert!(source.contains(
+            "return throwVue3CompileScriptErrors(native.compileScript(descriptor || {}, options || {}));"
+        ));
+        assert!(source.contains("function throwVue3CompileScriptErrors"));
+        assert!(source.contains("[@vue/compiler-sfc] ${message}"));
     }
 
     #[test]

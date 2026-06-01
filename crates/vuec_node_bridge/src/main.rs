@@ -4589,6 +4589,36 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_merges_define_options() {
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup>",
+                    "import { defineOptions, ref } from 'vue'\n",
+                    "defineOptions({ name: 'FooApp', inheritAttrs: false })\n",
+                    "const count = ref(1)",
+                    "</script>"
+                ),
+                "filename": "FooBar.vue"
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = compiled["content"].as_str().unwrap_or_default();
+        assert!(compiled["errors"].as_array().unwrap().is_empty());
+        assert!(content.contains("import { ref } from 'vue'"));
+        assert!(content.contains(
+            "export default /*@__PURE__*/Object.assign({ name: 'FooApp', inheritAttrs: false }, {"
+        ));
+        assert!(content.contains("__name: 'FooBar',"));
+        assert!(content.contains("const __returned__ = { count, ref }"));
+        assert!(!content.contains("defineOptions"));
+        assert_eq!(compiled["bindings"]["count"], json!("setup-maybe-ref"));
+        assert!(compiled["bindings"].get("defineOptions").is_none());
+    }
+
+    #[test]
     fn vue3_sfc_bridge_parse_projects_public_descriptor_shape() {
         let parsed = dispatch(
             "sfc.parse",

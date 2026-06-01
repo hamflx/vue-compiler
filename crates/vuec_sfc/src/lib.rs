@@ -1008,6 +1008,9 @@ impl SfcCompiler {
         );
         let mut bindings = script_bindings(&summary.bindings);
         bindings.extend(generated_content.bindings.clone());
+        for removed in &generated_content.removed_bindings {
+            bindings.remove(removed);
+        }
         let mut errors = summary.errors;
         errors.extend(generated_content.errors);
         SfcScriptBlock {
@@ -5909,6 +5912,93 @@ fn import_specifier_source(source: &str, specifier: &ImportDeclarationSpecifier<
     source[specifier.span().start as usize..specifier.span().end as usize].to_string()
 }
 
+fn vue3_script_setup_kept_import_source(
+    source: &str,
+    import: &oxc_ast::ast::ImportDeclaration<'_>,
+    source_value: &str,
+    statement_start: usize,
+    statement_end: usize,
+) -> Option<String> {
+    let Some(specifiers) = import.specifiers.as_ref() else {
+        return source
+            .get(statement_start..statement_end)
+            .map(ToOwned::to_owned);
+    };
+    let kept = specifiers
+        .iter()
+        .filter(|specifier| vue3_import_specifier_compiler_macro(source_value, specifier).is_none())
+        .collect::<Vec<_>>();
+    if kept.is_empty() {
+        return None;
+    }
+    if kept.len() == specifiers.len() {
+        return source
+            .get(statement_start..statement_end)
+            .map(ToOwned::to_owned);
+    }
+    let trailing = source
+        .get(import.span().end as usize..statement_end)
+        .unwrap_or_default();
+    let mut default_import = None;
+    let mut namespace_import = None;
+    let mut named_imports = Vec::new();
+    for specifier in kept {
+        let specifier_source = import_specifier_source(source, specifier);
+        match specifier {
+            ImportDeclarationSpecifier::ImportDefaultSpecifier(_) => {
+                default_import = Some(specifier_source);
+            }
+            ImportDeclarationSpecifier::ImportNamespaceSpecifier(_) => {
+                namespace_import = Some(specifier_source);
+            }
+            ImportDeclarationSpecifier::ImportSpecifier(_) => {
+                named_imports.push(specifier_source);
+            }
+        }
+    }
+    let mut import_clause = String::new();
+    if let Some(default_import) = default_import {
+        import_clause.push_str(&default_import);
+    }
+    if let Some(namespace_import) = namespace_import {
+        if !import_clause.is_empty() {
+            import_clause.push_str(", ");
+        }
+        import_clause.push_str(&namespace_import);
+    }
+    if !named_imports.is_empty() {
+        if !import_clause.is_empty() {
+            import_clause.push_str(", ");
+        }
+        import_clause.push_str("{ ");
+        import_clause.push_str(&named_imports.join(", "));
+        import_clause.push_str(" }");
+    }
+    Some(format!(
+        "import {import_clause} from '{source_value}'{trailing}"
+    ))
+}
+
+fn vue3_import_specifier_compiler_macro(
+    source: &str,
+    specifier: &ImportDeclarationSpecifier<'_>,
+) -> Option<(String, String)> {
+    if source != "vue" {
+        return None;
+    }
+    let ImportDeclarationSpecifier::ImportSpecifier(specifier) = specifier else {
+        return None;
+    };
+    let imported = specifier.imported.name();
+    if !matches!(
+        imported.as_str(),
+        "defineProps" | "defineEmits" | "defineExpose" | "defineOptions"
+    ) {
+        return None;
+    }
+    Some((imported.to_string(), specifier.local.name.to_string()))
+}
+
 fn vue27_template_uses_identifier(template: &str, local: &str, is_ts: bool) -> bool {
     let usage = vue27_template_usage_check_string(template, is_ts);
     identifier_usage_contains(&usage, local)
@@ -8317,6 +8407,7 @@ struct GeneratedScriptContent {
     content: String,
     errors: Vec<String>,
     bindings: BTreeMap<String, String>,
+    removed_bindings: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -8334,6 +8425,9 @@ struct Vue3ScriptSetupAnalysis {
     return_bindings: Vec<String>,
     imports: Vec<Vue27ScriptImport>,
     setup_bindings: BTreeMap<String, String>,
+    removed_bindings: BTreeSet<String>,
+    options_runtime: Option<String>,
+    has_define_options: bool,
     props_bindings: Vec<String>,
     props_runtime: Option<String>,
     props_type_runtime: bool,
@@ -8359,6 +8453,7 @@ fn script_content(
             content: raw_content.to_string(),
             errors: Vec::new(),
             bindings: BTreeMap::new(),
+            removed_bindings: BTreeSet::new(),
         };
     };
 
@@ -8408,6 +8503,7 @@ fn script_content(
         content: content.trim().to_string(),
         errors,
         bindings,
+        removed_bindings: setup_analysis.removed_bindings,
     }
 }
 
@@ -8517,9 +8613,20 @@ fn analyze_vue3_script_setup(
                     end,
                     &parsed.program.comments,
                 );
+                let source_value = import.source.value.as_str();
                 if let Some(specifiers) = &import.specifiers {
-                    let source_value = import.source.value.as_str();
                     for specifier in specifiers {
+                        if let Some((imported, local)) =
+                            vue3_import_specifier_compiler_macro(source_value, specifier)
+                        {
+                            analysis.removed_bindings.insert(local.clone());
+                            if imported != local {
+                                analysis.errors.push(format!(
+                                    "`{imported}` is a compiler macro and cannot be aliased to a different name."
+                                ));
+                            }
+                            continue;
+                        }
                         analysis.imports.push(Vue27ScriptImport {
                             local: import_specifier_local(specifier),
                             source: source_value.to_string(),
@@ -8529,10 +8636,12 @@ fn analyze_vue3_script_setup(
                         });
                     }
                 }
-                if let Some(import_source) = source.get(start..end) {
+                if let Some(import_source) =
+                    vue3_script_setup_kept_import_source(source, import, source_value, start, end)
+                {
                     module_chunks.push(Vue27ModuleChunk {
                         start,
-                        content: import_source.to_string(),
+                        content: import_source,
                     });
                 }
                 edits.remove(start, end);
@@ -8591,6 +8700,9 @@ fn analyze_vue3_script_setup(
                         edits.remove(statement.span.start as usize, statement.span.end as usize);
                     } else if is_call_named(call, "defineEmits") {
                         collect_vue3_define_emits_call(source, call, None, &mut analysis);
+                        edits.remove(statement.span.start as usize, statement.span.end as usize);
+                    } else if is_call_named(call, "defineOptions") {
+                        collect_vue3_define_options_call(source, call, &mut analysis);
                         edits.remove(statement.span.start as usize, statement.span.end as usize);
                     } else if is_call_named(call, "defineExpose") {
                         analysis.has_define_expose = true;
@@ -8690,12 +8802,103 @@ fn analyze_vue3_setup_variable_declaration(
                 edits.overwrite(call.span.start as usize, call.span.end as usize, "__emit");
                 continue;
             }
+            if is_call_named(call, "defineOptions") {
+                collect_vue3_define_options_call(source, call, analysis);
+                analysis
+                    .errors
+                    .push("defineOptions() has no returning value, it cannot be assigned.".into());
+                continue;
+            }
         }
         let binding_type = vue3_setup_binding_type(declaration.kind, declarator.init.as_ref());
         collect_pattern_binding_types(&declarator.id, binding_type, &mut analysis.setup_bindings);
         collect_pattern_bindings(&declarator.id, &mut analysis.return_bindings);
     }
     remove_vue27_macro_declarators(declaration, &macro_declarators, edits);
+}
+
+fn collect_vue3_define_options_call(
+    source: &str,
+    call: &oxc_ast::ast::CallExpression<'_>,
+    analysis: &mut Vue3ScriptSetupAnalysis,
+) {
+    if analysis.has_define_options {
+        analysis
+            .errors
+            .push("duplicate defineOptions() call".into());
+    }
+    if call.type_arguments.is_some() {
+        analysis
+            .errors
+            .push("defineOptions() cannot accept type arguments".into());
+    }
+    let Some(argument) = call.arguments.first() else {
+        return;
+    };
+    analysis.has_define_options = true;
+    let expression = unwrap_vue3_ts_expression(argument.to_expression());
+    check_vue3_define_options_keys(expression, analysis);
+    analysis.options_runtime = source
+        .get(expression.span().start as usize..expression.span().end as usize)
+        .map(str::trim)
+        .map(ToOwned::to_owned);
+}
+
+fn unwrap_vue3_ts_expression<'a>(expression: &'a Expression<'a>) -> &'a Expression<'a> {
+    match expression {
+        Expression::TSAsExpression(expression) => unwrap_vue3_ts_expression(&expression.expression),
+        Expression::TSSatisfiesExpression(expression) => {
+            unwrap_vue3_ts_expression(&expression.expression)
+        }
+        Expression::TSTypeAssertion(expression) => {
+            unwrap_vue3_ts_expression(&expression.expression)
+        }
+        Expression::TSNonNullExpression(expression) => {
+            unwrap_vue3_ts_expression(&expression.expression)
+        }
+        Expression::TSInstantiationExpression(expression) => {
+            unwrap_vue3_ts_expression(&expression.expression)
+        }
+        Expression::ParenthesizedExpression(expression) => {
+            unwrap_vue3_ts_expression(&expression.expression)
+        }
+        _ => expression,
+    }
+}
+
+fn check_vue3_define_options_keys(
+    expression: &Expression<'_>,
+    analysis: &mut Vue3ScriptSetupAnalysis,
+) {
+    let Expression::ObjectExpression(object) = expression else {
+        return;
+    };
+    for property in &object.properties {
+        let key = match property {
+            ObjectPropertyKind::ObjectProperty(property) if !property.computed => {
+                match &property.key {
+                    PropertyKey::StaticIdentifier(identifier) => Some(identifier.name.to_string()),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        let Some(key) = key else {
+            continue;
+        };
+        let replacement = match key.as_str() {
+            "props" => Some("defineProps"),
+            "emits" => Some("defineEmits"),
+            "expose" => Some("defineExpose"),
+            "slots" => Some("defineSlots"),
+            _ => None,
+        };
+        if let Some(replacement) = replacement {
+            analysis.errors.push(format!(
+                "defineOptions() cannot be used to declare {key}. Use {replacement}() instead."
+            ));
+        }
+    }
 }
 
 fn collect_vue3_define_props_call(
@@ -9297,18 +9500,33 @@ fn vue3_script_setup_export(
     let setup_params = vue3_script_setup_params(setup_analysis);
     let setup_body = vue3_script_setup_body(setup_analysis, bindings);
     if is_ts {
+        let options_spread = setup_analysis
+            .options_runtime
+            .as_ref()
+            .map(|options| format!("\n  ...{options},"))
+            .unwrap_or_default();
         let spread = if normal_script.has_default_export {
             "\n  ...__default__,"
         } else {
             ""
         };
         return format!(
-            "export default /*@__PURE__*/_defineComponent({{{spread}{runtime_options}\n  setup({setup_params}) {{\n{setup_body}\n}}\n\n}})"
+            "export default /*@__PURE__*/_defineComponent({{{spread}{options_spread}{runtime_options}\n  setup({setup_params}) {{\n{setup_body}\n}}\n\n}})"
         );
     }
-    if normal_script.has_default_export {
+    if normal_script.has_default_export || setup_analysis.options_runtime.is_some() {
+        let default_arg = if normal_script.has_default_export {
+            "__default__, "
+        } else {
+            ""
+        };
+        let options_arg = setup_analysis
+            .options_runtime
+            .as_ref()
+            .map(|options| format!("{options}, "))
+            .unwrap_or_default();
         format!(
-            "export default /*@__PURE__*/Object.assign(__default__, {{{runtime_options}\n  setup({setup_params}) {{\n{setup_body}\n}}\n\n}})"
+            "export default /*@__PURE__*/Object.assign({default_arg}{options_arg}{{{runtime_options}\n  setup({setup_params}) {{\n{setup_body}\n}}\n\n}})"
         )
     } else {
         format!(
@@ -10606,6 +10824,127 @@ defineExpose({ reset() {} })
         assert!(script.content.contains("emits: ['save'],"));
         assert!(script.content.contains("const props = __props"));
         assert!(script.content.contains("const emit = __emit"));
+    }
+
+    #[test]
+    fn vue3_compile_script_merges_define_options_runtime() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup>
+import { defineOptions, ref } from 'vue'
+defineOptions({ name: 'FooApp', inheritAttrs: false })
+const a = ref(1)
+</script>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty());
+        assert!(script.content.contains("import { ref } from 'vue'"));
+        assert!(script.content.contains(
+            "export default /*@__PURE__*/Object.assign({ name: 'FooApp', inheritAttrs: false }, {"
+        ));
+        assert!(script.content.contains("__name: 'FooBar',"));
+        assert!(script.content.contains("const __returned__ = { a, ref }"));
+        assert!(!script.content.contains("defineOptions"));
+
+        let empty = compiler.parse("FooBar.vue", "<script setup>defineOptions()</script>");
+        let empty_script = compiler.compile_script(&empty, SfcScriptCompileOptions::default());
+        assert!(empty_script.errors.is_empty());
+        assert!(empty_script.content.contains("export default {"));
+        assert!(!empty_script.content.contains("Object.assign"));
+        assert!(!empty_script.content.contains("defineOptions"));
+    }
+
+    #[test]
+    fn vue3_compile_script_spreads_define_options_in_typescript_wrapper() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "FooBar.vue",
+            r#"<script lang="ts">export default { custom: true }</script>
+<script setup lang="ts">
+defineOptions({ name: 'FooApp' } as any)
+const a: number = 1
+</script>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty());
+        assert!(script
+            .content
+            .starts_with("import { defineComponent as _defineComponent } from 'vue'\n"));
+        assert!(script
+            .content
+            .contains("const __default__ = { custom: true }"));
+        assert!(script.content.contains(
+            "export default /*@__PURE__*/_defineComponent({\n  ...__default__,\n  ...{ name: 'FooApp' },"
+        ));
+        assert!(script
+            .content
+            .contains("const a: number = 1\nconst __returned__ = { a }"));
+        assert!(!script.content.contains("defineOptions"));
+    }
+
+    #[test]
+    fn vue3_compile_script_reports_define_options_errors() {
+        let mut compiler = SfcCompiler::new();
+        let duplicate = compiler.parse(
+            "FooBar.vue",
+            "<script setup>defineOptions({}); defineOptions({})</script>",
+        );
+        let script = compiler.compile_script(&duplicate, SfcScriptCompileOptions::default());
+        assert!(script
+            .errors
+            .iter()
+            .any(|error| error.contains("duplicate defineOptions() call")));
+
+        let invalid_option = compiler.parse(
+            "FooBar.vue",
+            "<script setup>defineOptions({ props: [] })</script>",
+        );
+        let script = compiler.compile_script(&invalid_option, SfcScriptCompileOptions::default());
+        assert!(script
+            .errors
+            .iter()
+            .any(|error| error.contains("cannot be used to declare props")));
+
+        let string_key = compiler.parse(
+            "FooBar.vue",
+            "<script setup>defineOptions({ 'props': [] })</script>",
+        );
+        let script = compiler.compile_script(&string_key, SfcScriptCompileOptions::default());
+        assert!(script.errors.is_empty());
+
+        let type_argument = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup lang="ts">defineOptions<{ name: 'FooApp' }>()</script>"#,
+        );
+        let script = compiler.compile_script(&type_argument, SfcScriptCompileOptions::default());
+        assert!(script
+            .errors
+            .iter()
+            .any(|error| error.contains("cannot accept type arguments")));
+
+        let assigned = compiler.parse(
+            "FooBar.vue",
+            "<script setup>const options = defineOptions({ name: 'FooApp' })</script>",
+        );
+        let script = compiler.compile_script(&assigned, SfcScriptCompileOptions::default());
+        assert!(script
+            .errors
+            .iter()
+            .any(|error| error.contains("has no returning value")));
+
+        let aliased = compiler.parse(
+            "FooBar.vue",
+            "<script setup>import { defineOptions as d } from 'vue'\nd({ name: 'FooApp' })</script>",
+        );
+        let script = compiler.compile_script(&aliased, SfcScriptCompileOptions::default());
+        assert!(script
+            .errors
+            .iter()
+            .any(|error| error.contains("cannot be aliased to a different name")));
+        assert!(!script.content.contains("defineOptions as d"));
     }
 
     #[test]

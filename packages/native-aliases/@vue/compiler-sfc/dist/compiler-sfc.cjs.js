@@ -86,7 +86,7 @@ function compileTemplate(options) {
 }
 
 function compileScript(descriptor, options) {
-  return native.compileScript(descriptor || {}, options || {});
+  return throwVue3CompileScriptErrors(native.compileScript(descriptor || {}, options || {}));
 }
 
 function compileStyle(options) {
@@ -155,6 +155,15 @@ function hydrateVue3SfcParseResult(result) {
     return vue3SfcShouldForceReload(prevImports, descriptor);
   };
   return result;
+}
+
+function throwVue3CompileScriptErrors(result) {
+  if (!result || !Array.isArray(result.errors) || result.errors.length === 0) {
+    return result;
+  }
+  const first = result.errors[0];
+  const message = typeof first === 'string' ? first : (first && first.message) || String(first);
+  throw new Error(message.startsWith('[@vue/compiler-sfc]') ? message : `[@vue/compiler-sfc] ${message}`);
 }
 
 function vue3SfcShouldForceReload(prevImports, descriptor) {
