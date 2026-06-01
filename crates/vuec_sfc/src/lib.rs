@@ -1004,7 +1004,8 @@ impl SfcCompiler {
             descriptor,
             &raw_content,
             descriptor.filename.as_str(),
-            options.is_prod,
+            &options,
+            &script_bindings(&summary.bindings),
         );
         let mut bindings = script_bindings(&summary.bindings);
         bindings.extend(generated_content.bindings.clone());
@@ -8489,6 +8490,13 @@ struct GeneratedScriptContent {
     removed_bindings: BTreeSet<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Vue3InlineTemplateRender {
+    preamble: String,
+    code: String,
+    errors: Vec<String>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Vue3NormalScriptAnalysis {
     module_content: String,
@@ -8563,7 +8571,8 @@ fn script_content(
     descriptor: &SfcDescriptor,
     raw_content: &str,
     filename: &str,
-    is_prod: bool,
+    options: &SfcScriptCompileOptions,
+    base_bindings: &BTreeMap<String, String>,
 ) -> GeneratedScriptContent {
     let Some(script_setup) = descriptor.script_setup.as_ref() else {
         return GeneratedScriptContent {
@@ -8582,7 +8591,7 @@ fn script_content(
         descriptor.script.is_none(),
         &normal_type_context,
         &normal_vue_import_aliases,
-        is_prod,
+        options.is_prod,
     );
     let is_ts = script_is_typescript(&script_setup.attrs)
         || descriptor
@@ -8590,9 +8599,22 @@ fn script_content(
             .as_ref()
             .is_some_and(|script| script_is_typescript(&script.attrs));
     let return_bindings = vue3_script_setup_return_bindings(descriptor, &setup_analysis, is_ts);
+    let template_binding_metadata =
+        vue3_script_setup_template_binding_metadata(base_bindings, &setup_analysis);
+    let template_props_aliases = vue3_script_setup_template_props_aliases(&setup_analysis);
+    let inline_render = vue3_inline_template_render(
+        descriptor,
+        options,
+        &template_binding_metadata,
+        &template_props_aliases,
+        is_ts,
+    );
     let mut content = String::new();
+    if let Some(render) = inline_render.as_ref() {
+        append_vue3_module_chunk(&mut content, &render.preamble);
+    }
     if let Some(import) = vue3_script_setup_helper_import(&setup_analysis, is_ts) {
-        content.push_str(&import);
+        append_vue3_module_chunk(&mut content, &import);
     }
     append_vue3_module_chunk(&mut content, &normal_script.module_content);
     append_vue3_module_chunk(&mut content, &setup_analysis.module_content);
@@ -8604,7 +8626,8 @@ fn script_content(
             filename,
             &normal_script,
             is_ts,
-            is_prod,
+            options.is_prod,
+            inline_render.as_ref(),
         ),
     );
     let mut bindings = setup_analysis.setup_bindings.clone();
@@ -8615,12 +8638,104 @@ fn script_content(
     }
     let mut errors = normal_script.errors;
     errors.extend(setup_analysis.errors);
+    if let Some(render) = inline_render.as_ref() {
+        errors.extend(render.errors.clone());
+    }
     GeneratedScriptContent {
         content: content.trim().to_string(),
         errors,
         bindings,
         removed_bindings: setup_analysis.removed_bindings,
     }
+}
+
+fn vue3_script_setup_template_binding_metadata(
+    base_bindings: &BTreeMap<String, String>,
+    setup_analysis: &Vue3ScriptSetupAnalysis,
+) -> BTreeMap<String, String> {
+    let mut bindings = base_bindings.clone();
+    bindings.extend(setup_analysis.setup_bindings.clone());
+    for prop in &setup_analysis.props_bindings {
+        bindings
+            .entry(prop.clone())
+            .or_insert_with(|| "props".into());
+    }
+    for removed in &setup_analysis.removed_bindings {
+        bindings.remove(removed);
+    }
+    bindings
+}
+
+fn vue3_inline_template_render(
+    descriptor: &SfcDescriptor,
+    options: &SfcScriptCompileOptions,
+    binding_metadata: &BTreeMap<String, String>,
+    props_aliases: &BTreeMap<String, String>,
+    is_ts: bool,
+) -> Option<Vue3InlineTemplateRender> {
+    if !options.inline_template {
+        return None;
+    }
+    let Some(template) = descriptor.template.as_ref() else {
+        return Some(Vue3InlineTemplateRender {
+            preamble: String::new(),
+            code: "() => {}".into(),
+            errors: Vec::new(),
+        });
+    };
+    if template.attrs.src.is_some() {
+        return Some(Vue3InlineTemplateRender {
+            preamble: String::new(),
+            code: "() => {}".into(),
+            errors: Vec::new(),
+        });
+    }
+
+    let mut core = Vue3CompilerOptions {
+        prefix_identifiers: true,
+        mode: "module".into(),
+        hoist_static: true,
+        cache_handlers: true,
+        scope_id: options.id.as_ref().map(|id| format!("data-v-{id}")),
+        is_ts,
+        source_map: false,
+        binding_metadata: binding_metadata.clone(),
+        props_aliases: props_aliases.clone(),
+        inline: true,
+        ..Vue3CompilerOptions::default()
+    };
+    apply_dom_parser_defaults(&mut core);
+    let result = compile_dom(
+        TemplateSource {
+            filename: descriptor.filename.clone(),
+            source: template.content.clone(),
+            file_id: descriptor.source_file,
+            base_offset: template.loc.start,
+        },
+        DomCompilerOptions {
+            core,
+            transform_asset_urls: true,
+            asset_url_options: AssetUrlOptions::default(),
+            ..DomCompilerOptions::default()
+        },
+    );
+    let errors = result
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.severity == Severity::Error)
+        .map(|diagnostic| format!("{:?}: {}", diagnostic.code, diagnostic.message))
+        .collect();
+    Some(Vue3InlineTemplateRender {
+        preamble: result.preamble,
+        code: result.code,
+        errors,
+    })
+}
+
+fn vue3_script_setup_template_props_aliases(
+    setup_analysis: &Vue3ScriptSetupAnalysis,
+) -> BTreeMap<String, String> {
+    setup_analysis.props_destructured_bindings.clone()
 }
 
 fn vue3_script_setup_helper_import(
@@ -11060,11 +11175,12 @@ fn vue3_script_setup_export(
     normal_script: &Vue3NormalScriptAnalysis,
     is_ts: bool,
     is_prod: bool,
+    inline_render: Option<&Vue3InlineTemplateRender>,
 ) -> String {
     let runtime_options =
         vue3_script_setup_runtime_options(filename, normal_script, setup_analysis, is_prod);
     let setup_params = vue3_script_setup_params(setup_analysis);
-    let setup_body = vue3_script_setup_body(setup_analysis, bindings);
+    let setup_body = vue3_script_setup_body(setup_analysis, bindings, inline_render);
     if is_ts {
         let options_spread = setup_analysis
             .options_runtime
@@ -11259,10 +11375,14 @@ fn vue3_script_setup_params(setup_analysis: &Vue3ScriptSetupAnalysis) -> String 
     }
 }
 
-fn vue3_script_setup_body(setup_analysis: &Vue3ScriptSetupAnalysis, bindings: &[String]) -> String {
+fn vue3_script_setup_body(
+    setup_analysis: &Vue3ScriptSetupAnalysis,
+    bindings: &[String],
+    inline_render: Option<&Vue3InlineTemplateRender>,
+) -> String {
     let returned = script_setup_returned_bindings(bindings);
     let mut body = String::new();
-    if !setup_analysis.has_define_expose {
+    if inline_render.is_none() && !setup_analysis.has_define_expose {
         body.push_str("  __expose();\n");
     }
     if setup_analysis.setup_content.is_empty() {
@@ -11272,6 +11392,11 @@ fn vue3_script_setup_body(setup_analysis: &Vue3ScriptSetupAnalysis, bindings: &[
         if !setup_analysis.setup_content.ends_with('\n') {
             body.push('\n');
         }
+    }
+    if let Some(render) = inline_render {
+        body.push_str("return ");
+        body.push_str(&render.code);
+        return body;
     }
     body.push_str(&format!(
         "const __returned__ = {returned}\nObject.defineProperty(__returned__, '__isScriptSetup', {{ enumerable: false, value: true }})\nreturn __returned__"
@@ -13867,6 +13992,87 @@ const { foo = 'hello' } = defineProps({ foo: Number })
             script.bindings.get("msg").map(String::as_str),
             Some("literal-const")
         );
+    }
+
+    #[test]
+    fn vue3_compile_script_inlines_template_render() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup>
+import { ref } from 'vue'
+import ChildComp from './ChildComp.vue'
+const count = ref(0)
+const local = 1
+const { title: heading } = defineProps(['title'])
+</script>
+<template><div>{{ count }} {{ local }} {{ heading }}</div><ChildComp /></template>"#,
+        );
+        let script = compiler.compile_script(
+            &descriptor,
+            SfcScriptCompileOptions {
+                inline_template: true,
+                ..SfcScriptCompileOptions::default()
+            },
+        );
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script.content.contains("unref as _unref"));
+        assert!(script
+            .content
+            .contains("toDisplayString as _toDisplayString"));
+        assert!(script.content.contains("openBlock as _openBlock"));
+        assert!(script
+            .content
+            .contains("createElementBlock as _createElementBlock"));
+        assert!(script.content.contains("import { ref } from 'vue'"));
+        assert!(script.content.contains("props: ['title'],"));
+        assert!(script.content.contains("return (_ctx, _cache) => {"));
+        assert!(script.content.contains("_unref(count)"));
+        assert!(script.content.contains("_toDisplayString(local)"));
+        assert!(script.content.contains("_toDisplayString(__props.title)"));
+        assert!(script.content.contains("_createVNode(ChildComp)"));
+        assert!(!script.content.contains("const __returned__"));
+        assert!(!script
+            .content
+            .contains("Object.defineProperty(__returned__"));
+        assert_eq!(
+            script.bindings.get("heading").map(String::as_str),
+            Some("props-aliased")
+        );
+    }
+
+    #[test]
+    fn vue3_compile_script_inlines_empty_template_render_when_missing_or_src() {
+        let mut compiler = SfcCompiler::new();
+        let no_template = compiler.parse("FooBar.vue", "<script setup>const a = 1</script>");
+        let script = compiler.compile_script(
+            &no_template,
+            SfcScriptCompileOptions {
+                inline_template: true,
+                ..SfcScriptCompileOptions::default()
+            },
+        );
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script.content.contains("return () => {}"));
+        assert!(!script.content.contains("const __returned__"));
+
+        let src_template = compiler.parse(
+            "FooBar.vue",
+            r#"<template src="./Foo.html"></template><script setup>const a = 1</script>"#,
+        );
+        let script = compiler.compile_script(
+            &src_template,
+            SfcScriptCompileOptions {
+                inline_template: true,
+                ..SfcScriptCompileOptions::default()
+            },
+        );
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script.content.contains("return () => {}"));
+        assert!(!script.content.contains("const __returned__"));
     }
 
     #[test]

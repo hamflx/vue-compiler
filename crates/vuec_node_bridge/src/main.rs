@@ -4989,6 +4989,39 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_inlines_template_render() {
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup>",
+                    "import { ref } from 'vue'\n",
+                    "import ChildComp from './ChildComp.vue'\n",
+                    "const count = ref(0)\n",
+                    "const { title: heading } = defineProps(['title'])",
+                    "</script>",
+                    "<template><div>{{ count }} {{ heading }}</div><ChildComp /></template>"
+                ),
+                "filename": "FooBar.vue",
+                "options": {
+                    "inlineTemplate": true
+                }
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = compiled["content"].as_str().unwrap_or_default();
+        assert!(compiled["errors"].as_array().unwrap().is_empty());
+        assert!(content.contains("toDisplayString as _toDisplayString"));
+        assert!(content.contains("return (_ctx, _cache) => {"));
+        assert!(content.contains("_unref(count)"));
+        assert!(content.contains("_toDisplayString(__props.title)"));
+        assert!(content.contains("_createVNode(ChildComp)"));
+        assert!(!content.contains("const __returned__"));
+        assert_eq!(compiled["bindings"]["heading"], json!("props-aliased"));
+    }
+
+    #[test]
     fn vue3_sfc_bridge_compile_script_merges_props_destructure_defaults() {
         let runtime = dispatch(
             "sfc.compileScript",
