@@ -4724,6 +4724,57 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_reports_duplicate_props_and_emits() {
+        let duplicate_props = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "defineProps<{ foo?: string }>()\n",
+                    "const props = withDefaults(defineProps<{ bar?: number }>(), { bar: 1 })",
+                    "</script>"
+                ),
+                "filename": "FooBar.vue"
+            }),
+        )
+        .expect("vue3 compileScript");
+        let props_content = duplicate_props["content"].as_str().unwrap_or_default();
+        assert!(duplicate_props["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error
+                .as_str()
+                .is_some_and(|error| error.contains("duplicate defineProps() call"))));
+        assert!(!props_content.contains("defineProps"));
+        assert!(!props_content.contains("withDefaults"));
+
+        let duplicate_emits = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup>",
+                    "defineEmits(['save'])\n",
+                    "const emit = defineEmits(['cancel'])",
+                    "</script>"
+                ),
+                "filename": "FooBar.vue"
+            }),
+        )
+        .expect("vue3 compileScript");
+        let emits_content = duplicate_emits["content"].as_str().unwrap_or_default();
+        assert!(duplicate_emits["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error
+                .as_str()
+                .is_some_and(|error| error.contains("duplicate defineEmits() call"))));
+        assert!(emits_content.contains("const emit = __emit"));
+        assert!(!emits_content.contains("defineEmits"));
+    }
+
+    #[test]
     fn vue3_sfc_bridge_compile_script_merges_define_options() {
         let compiled = dispatch(
             "sfc.compileScript",

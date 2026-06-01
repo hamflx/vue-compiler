@@ -8452,6 +8452,7 @@ struct Vue3ScriptSetupAnalysis {
     setup_bindings: BTreeMap<String, String>,
     removed_bindings: BTreeSet<String>,
     options_runtime: Option<String>,
+    has_define_props: bool,
     has_define_options: bool,
     props_bindings: Vec<String>,
     props_runtime: Option<String>,
@@ -8459,6 +8460,7 @@ struct Vue3ScriptSetupAnalysis {
     needs_merge_defaults: bool,
     emits_runtime: Option<String>,
     emit_binding: Option<String>,
+    has_define_emits: bool,
     models: Vec<Vue3ModelDecl>,
     has_define_expose: bool,
     has_define_slots: bool,
@@ -9254,6 +9256,7 @@ fn collect_vue3_define_props_call(
     analysis: &mut Vue3ScriptSetupAnalysis,
     is_prod: bool,
 ) {
+    collect_vue3_define_props_call_seen(analysis);
     if let Some(type_argument) = call
         .type_arguments
         .as_ref()
@@ -9277,6 +9280,13 @@ fn collect_vue3_define_props_call(
     analysis.props_runtime = source
         .get(expression.span().start as usize..expression.span().end as usize)
         .map(ToOwned::to_owned);
+}
+
+fn collect_vue3_define_props_call_seen(analysis: &mut Vue3ScriptSetupAnalysis) {
+    if analysis.has_define_props {
+        analysis.errors.push("duplicate defineProps() call".into());
+    }
+    analysis.has_define_props = true;
 }
 
 fn collect_vue3_with_defaults_call(
@@ -9311,6 +9321,15 @@ fn collect_vue3_with_defaults_call(
         );
         return true;
     };
+    collect_vue3_define_props_call_seen(analysis);
+    if !define_props_call.arguments.is_empty() {
+        analysis
+            .errors
+            .push(vue27_macro_type_and_runtime_error("defineProps"));
+        analysis.errors.push(
+            "withDefaults can only be used with type-based defineProps declaration.".to_string(),
+        );
+    }
     if call.arguments.get(1).is_none() {
         analysis
             .errors
@@ -9746,6 +9765,10 @@ fn collect_vue3_define_emits_call(
     binding: Option<&str>,
     analysis: &mut Vue3ScriptSetupAnalysis,
 ) {
+    if analysis.has_define_emits {
+        analysis.errors.push("duplicate defineEmits() call".into());
+    }
+    analysis.has_define_emits = true;
     if analysis.emit_binding.is_none() {
         if let Some(binding) = binding {
             analysis.emit_binding = Some(binding.to_string());
@@ -12268,6 +12291,42 @@ const props = withDefaults(defineProps<{ foo?: string }>())
             .content
             .contains("foo: { type: String, required: false }"));
         assert!(!script.content.contains("withDefaults"));
+    }
+
+    #[test]
+    fn vue3_compile_script_reports_duplicate_define_props_and_emits() {
+        let mut compiler = SfcCompiler::new();
+        let duplicate_props = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup lang="ts">
+defineProps<{ foo?: string }>()
+const props = withDefaults(defineProps<{ bar?: number }>(), { bar: 1 })
+</script>"#,
+        );
+        let script = compiler.compile_script(&duplicate_props, SfcScriptCompileOptions::default());
+
+        assert!(script
+            .errors
+            .iter()
+            .any(|error| error.contains("duplicate defineProps() call")));
+        assert!(!script.content.contains("defineProps"));
+        assert!(!script.content.contains("withDefaults"));
+
+        let duplicate_emits = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup>
+defineEmits(['save'])
+const emit = defineEmits(['cancel'])
+</script>"#,
+        );
+        let script = compiler.compile_script(&duplicate_emits, SfcScriptCompileOptions::default());
+
+        assert!(script
+            .errors
+            .iter()
+            .any(|error| error.contains("duplicate defineEmits() call")));
+        assert!(script.content.contains("const emit = __emit"));
+        assert!(!script.content.contains("defineEmits"));
     }
 
     #[test]
