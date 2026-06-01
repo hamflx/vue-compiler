@@ -8470,6 +8470,13 @@ struct Vue3ModelDecl {
     runtime_types: Option<Vec<String>>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Vue3DefineModelOptionsSplit {
+    prop_option_ranges: Vec<(usize, usize)>,
+    transformer_option_ranges: Vec<(usize, usize)>,
+    remove_entire_call_options: bool,
+}
+
 fn script_content(
     descriptor: &SfcDescriptor,
     raw_content: &str,
@@ -9047,11 +9054,20 @@ fn vue3_define_model_name(expression: &Expression<'_>) -> Option<String> {
 
 fn vue3_define_model_prop_runtime(source: &str, argument: &Argument<'_>) -> Option<String> {
     let expression = unwrap_vue3_ts_expression(argument.to_expression());
-    source
-        .get(expression.span().start as usize..expression.span().end as usize)
-        .map(str::trim)
-        .filter(|source| !source.is_empty())
-        .map(ToOwned::to_owned)
+    let start = expression.span().start as usize;
+    let end = expression.span().end as usize;
+    let runtime = if let Some(split) = vue3_define_model_options_split(expression) {
+        remove_source_ranges(source, start, end, &split.transformer_option_ranges)
+            .or_else(|| source.get(start..end).map(ToOwned::to_owned))
+    } else {
+        source.get(start..end).map(ToOwned::to_owned)
+    }?;
+    let runtime = runtime.trim();
+    if runtime.is_empty() {
+        None
+    } else {
+        Some(runtime.to_string())
+    }
 }
 
 fn rewrite_vue3_define_model_call(
@@ -9063,9 +9079,35 @@ fn rewrite_vue3_define_model_call(
         .first()
         .map(|argument| unwrap_vue3_ts_expression(argument.to_expression()));
     let has_name = first_expression.and_then(vue3_define_model_name).is_some();
-    let remove_options = vue3_define_model_call_removes_options(call, has_name);
-    if let Some((start, end)) = remove_options {
-        edits.remove(start, end);
+    let options_index = if has_name { 1 } else { 0 };
+    let options = call.arguments.get(options_index);
+    let options_split = options.and_then(|argument| {
+        vue3_define_model_options_split(unwrap_vue3_ts_expression(argument.to_expression()))
+    });
+    let options_removed = options_split
+        .as_ref()
+        .is_some_and(|split| split.remove_entire_call_options);
+    if let Some(split) = options_split.as_ref() {
+        if split.remove_entire_call_options {
+            if has_name {
+                if let (Some(previous), Some(options)) = (call.arguments.first(), options) {
+                    edits.remove(
+                        previous.to_expression().span().end as usize,
+                        options.to_expression().span().end as usize,
+                    );
+                }
+            } else if let Some(options) = options {
+                let expression = options.to_expression();
+                edits.remove(
+                    expression.span().start as usize,
+                    expression.span().end as usize,
+                );
+            }
+        } else {
+            for (start, end) in &split.prop_option_ranges {
+                edits.remove(*start, *end);
+            }
+        }
     }
     edits.overwrite(
         call.callee.span().start as usize,
@@ -9081,7 +9123,7 @@ fn rewrite_vue3_define_model_call(
         edits.prepend_right(first_start, "__props, ");
         return;
     }
-    let prefix = if remove_options.is_some() {
+    let prefix = if options_removed {
         r#"__props, "modelValue""#
     } else {
         r#"__props, "modelValue", "#
@@ -9089,43 +9131,61 @@ fn rewrite_vue3_define_model_call(
     edits.prepend_right(first_start, prefix);
 }
 
-fn vue3_define_model_call_removes_options(
-    call: &oxc_ast::ast::CallExpression<'_>,
-    has_name: bool,
-) -> Option<(usize, usize)> {
-    let options_index = if has_name { 1 } else { 0 };
-    let options = call.arguments.get(options_index)?;
-    if !vue3_define_model_options_are_prop_only(options.to_expression()) {
+fn vue3_define_model_options_split(
+    expression: &Expression<'_>,
+) -> Option<Vue3DefineModelOptionsSplit> {
+    let Expression::ObjectExpression(object) = unwrap_vue3_ts_expression(expression) else {
+        return None;
+    };
+    if object.properties.iter().any(|property| {
+        let ObjectPropertyKind::ObjectProperty(property) = property else {
+            return true;
+        };
+        property.computed
+    }) {
         return None;
     }
-    if has_name {
-        let previous = call.arguments.first()?.to_expression();
-        Some((
-            previous.span().end as usize,
-            options.to_expression().span().end as usize,
-        ))
-    } else {
-        let expression = options.to_expression();
-        Some((
-            expression.span().start as usize,
-            expression.span().end as usize,
-        ))
+
+    let mut split = Vue3DefineModelOptionsSplit::default();
+    for (index, property) in object.properties.iter().enumerate() {
+        let ObjectPropertyKind::ObjectProperty(property) = property else {
+            return None;
+        };
+        let start = property.span.start as usize;
+        let end = object
+            .properties
+            .get(index + 1)
+            .map(|next| next.span().start as usize)
+            .unwrap_or_else(|| (object.span.end as usize).saturating_sub(1));
+        if matches!(property.key.static_name().as_deref(), Some("get" | "set")) {
+            split.transformer_option_ranges.push((start, end));
+        } else {
+            split.prop_option_ranges.push((start, end));
+        }
     }
+    split.remove_entire_call_options = split.prop_option_ranges.len() == object.properties.len();
+    Some(split)
 }
 
-fn vue3_define_model_options_are_prop_only(expression: &Expression<'_>) -> bool {
-    let Expression::ObjectExpression(object) = unwrap_vue3_ts_expression(expression) else {
-        return false;
-    };
-    object.properties.iter().all(|property| {
-        let ObjectPropertyKind::ObjectProperty(property) = property else {
-            return false;
-        };
-        if property.computed {
-            return false;
+fn remove_source_ranges(
+    source: &str,
+    start: usize,
+    end: usize,
+    ranges: &[(usize, usize)],
+) -> Option<String> {
+    let mut ranges = ranges.to_vec();
+    ranges.sort_by_key(|range| range.0);
+    let mut cursor = start;
+    let mut output = String::new();
+    for (range_start, range_end) in ranges {
+        if range_start < cursor || range_end < range_start || range_end > end {
+            return None;
         }
-        !matches!(property.key.static_name().as_deref(), Some("get" | "set"))
-    })
+        output.push_str(source.get(cursor..range_start)?);
+        cursor = range_end;
+    }
+    output.push_str(source.get(cursor..end)?);
+    Some(output)
 }
 
 fn collect_vue3_define_props_call(
@@ -10174,6 +10234,10 @@ fn script_mode(attrs: &SfcBlockAttrs) -> JsParseMode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn compact_js_whitespace(source: &str) -> String {
+        source.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
 
     #[test]
     fn parses_blocks() {
@@ -11534,6 +11598,92 @@ defineModel('count')
             script.bindings.get("count").map(String::as_str),
             Some("props")
         );
+    }
+
+    #[test]
+    fn vue3_compile_script_splits_define_model_get_set_transformers() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup lang="ts">
+const modelValue = defineModel({
+  get(v) { return v - 1 },
+  set: (v) => { return v + 1 },
+  required: true
+})
+const count = defineModel('count', {
+  default: 0,
+  get(v) { return v - 1 },
+  required: true,
+  set: (v) => { return v + 1 },
+})
+const value = defineModel<number>('value', {
+  get(v) { return v },
+  required: true,
+})
+const only = defineModel('only', {
+  "get": (v) => v - 1,
+  "set": (v) => v + 1,
+})
+</script>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty());
+        let compact = compact_js_whitespace(&script.content);
+        assert!(compact.contains("\"modelValue\": { required: true },"));
+        assert!(compact.contains("\"count\": { default: 0, required: true, },"));
+        assert!(compact.contains("\"value\": { type: Number, ...{ required: true, } },"));
+        assert!(compact.contains("\"only\": { },"));
+        assert!(compact.contains("const modelValue = _useModel(__props, \"modelValue\", { get(v) { return v - 1 }, set: (v) => { return v + 1 }, })"));
+        assert!(compact.contains("const count = _useModel(__props, 'count', { get(v) { return v - 1 }, set: (v) => { return v + 1 }, })"));
+        assert!(compact.contains(
+            "const value = _useModel<number>(__props, 'value', { get(v) { return v }, })"
+        ));
+        assert!(compact.contains("const only = _useModel(__props, 'only', { \"get\": (v) => v - 1, \"set\": (v) => v + 1, })"));
+        assert!(!script.content.contains("defineModel"));
+        assert_eq!(
+            script.bindings.get("modelValue").map(String::as_str),
+            Some("setup-ref")
+        );
+        assert_eq!(
+            script.bindings.get("count").map(String::as_str),
+            Some("setup-ref")
+        );
+        assert_eq!(
+            script.bindings.get("value").map(String::as_str),
+            Some("setup-ref")
+        );
+    }
+
+    #[test]
+    fn vue3_compile_script_keeps_dynamic_define_model_options_unsplit() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup>
+const extra = { required: true }
+const key = 'required'
+const spread = defineModel({ get(v) { return v }, ...extra })
+const computed = defineModel('computed', { get(v) { return v }, [key]: true })
+</script>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty());
+        assert!(script
+            .content
+            .contains("\"modelValue\": { get(v) { return v }, ...extra },"));
+        assert!(script
+            .content
+            .contains("\"computed\": { get(v) { return v }, [key]: true },"));
+        assert!(script.content.contains(
+            "const spread = _useModel(__props, \"modelValue\", { get(v) { return v }, ...extra })"
+        ));
+        assert!(script.content.contains(
+            "const computed = _useModel(__props, 'computed', { get(v) { return v }, [key]: true })"
+        ));
+        assert!(!script.content.contains("defineModel"));
     }
 
     #[test]

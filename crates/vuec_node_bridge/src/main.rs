@@ -4725,6 +4725,42 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_splits_define_model_transformers() {
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "const modelValue = defineModel({\n",
+                    "  get(v) { return v - 1 },\n",
+                    "  set: (v) => { return v + 1 },\n",
+                    "  required: true\n",
+                    "})\n",
+                    "const count = defineModel<number>('count', {\n",
+                    "  get(v) { return v },\n",
+                    "  required: true,\n",
+                    "})",
+                    "</script>"
+                ),
+                "filename": "FooBar.vue"
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = compiled["content"].as_str().unwrap_or_default();
+        let compact = content.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(compiled["errors"].as_array().unwrap().is_empty());
+        assert!(compact.contains("\"modelValue\": { required: true },"));
+        assert!(compact.contains("\"count\": { type: Number, ...{ required: true, } },"));
+        assert!(compact.contains("const modelValue = _useModel(__props, \"modelValue\", { get(v) { return v - 1 }, set: (v) => { return v + 1 }, })"));
+        assert!(compact.contains(
+            "const count = _useModel<number>(__props, 'count', { get(v) { return v }, })"
+        ));
+        assert_eq!(compiled["bindings"]["modelValue"], json!("setup-ref"));
+        assert_eq!(compiled["bindings"]["count"], json!("setup-ref"));
+    }
+
+    #[test]
     fn vue3_sfc_bridge_parse_projects_public_descriptor_shape() {
         let parsed = dispatch(
             "sfc.parse",
