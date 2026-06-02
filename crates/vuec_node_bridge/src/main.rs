@@ -5842,6 +5842,71 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_resolves_external_builtin_wrapper_types_deps() {
+        let dir = std::env::temp_dir().join(format!(
+            "vuec-node-bridge-builtin-wrapper-types-deps-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        std::fs::write(
+            dir.join("types.ts"),
+            concat!(
+                "export type Props = {\n",
+                "  list: ReadonlyArray<string>\n",
+                "  params: Parameters<(value: string) => void>\n",
+                "  map: ReadonlyMap<string, number>\n",
+                "  set: ReadonlySet<string>\n",
+                "  err: Error\n",
+                "  maybe: MaybeRef<string[]>\n",
+                "  getter: MaybeRefOrGetter<boolean>\n",
+                "}\n",
+                "export type ModelValue =\n",
+                "  ReadonlyArray<string> |\n",
+                "  ReadonlyMap<string, number> |\n",
+                "  ReadonlySet<string> |\n",
+                "  Error |\n",
+                "  MaybeRefOrGetter<boolean> |\n",
+                "  Parameters<() => void>"
+            ),
+        )
+        .expect("write builtin wrapper props");
+
+        let filename = dir.join("Comp.vue");
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "import type { Props, ModelValue } from './types'\n",
+                    "defineProps<Props>()\n",
+                    "defineModel<ModelValue>()",
+                    "</script>"
+                ),
+                "filename": filename.to_string_lossy()
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = compiled["content"].as_str().unwrap_or_default();
+        let expected_dep = dir.join("types.ts").to_string_lossy().replace('\\', "/");
+        assert!(compiled["errors"].as_array().unwrap().is_empty());
+        assert!(content.contains("list: { type: Array, required: true }"));
+        assert!(content.contains("params: { type: Array, required: true }"));
+        assert!(content.contains("map: { type: Map, required: true }"));
+        assert!(content.contains("set: { type: Set, required: true }"));
+        assert!(content.contains("err: { type: Error, required: true }"));
+        assert!(content.contains("maybe: { type: [Object, Array], required: true }"));
+        assert!(content.contains("getter: { type: [Object, Function, Boolean], required: true }"));
+        assert!(content.contains(
+            "\"modelValue\": { type: [Array, Map, Set, Error, Object, Function, Boolean] },"
+        ));
+        assert_eq!(compiled["deps"], json!([expected_dep]));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn vue3_sfc_bridge_compile_script_resolves_external_interface_extends_type_deps() {
         let dir = std::env::temp_dir().join(format!(
             "vuec-node-bridge-interface-extends-deps-{}",

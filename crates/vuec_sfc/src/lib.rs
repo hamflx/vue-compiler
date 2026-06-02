@@ -14703,7 +14703,7 @@ fn infer_vue3_runtime_type(node: &TSType<'_>, analysis: &Vue3ScriptSetupAnalysis
                 }
                 match name.as_str() {
                     "Array" | "Function" | "Object" | "Set" | "Map" | "WeakSet" | "WeakMap"
-                    | "Date" | "Promise" => return vec![name],
+                    | "Date" | "Promise" | "Error" => return vec![name],
                     "Record" | "Partial" | "Readonly" | "Pick" | "Omit" | "Required"
                     | "InstanceType" => return vec!["Object".into()],
                     _ => {}
@@ -14758,6 +14758,27 @@ fn infer_vue3_runtime_utility_type(
         "Exclude" => {
             let ty = vue3_type_reference_type_argument(reference, 0)?;
             Some(infer_vue3_runtime_type(ty, analysis))
+        }
+        "OmitThisParameter" => {
+            let ty = vue3_type_reference_type_argument(reference, 0)?;
+            Some(infer_vue3_runtime_type(ty, analysis))
+        }
+        "Uppercase" | "Lowercase" | "Capitalize" | "Uncapitalize" => Some(vec!["String".into()]),
+        "Parameters" | "ConstructorParameters" | "ReadonlyArray" => Some(vec!["Array".into()]),
+        "ReadonlyMap" => Some(vec!["Map".into()]),
+        "ReadonlySet" => Some(vec!["Set".into()]),
+        "Ref" | "ShallowRef" | "ComputedRef" | "WritableComputedRef" => Some(vec!["Object".into()]),
+        "MaybeRef" | "MaybeRefOrGetter" => {
+            let mut types = vec!["Object".to_string()];
+            if name == "MaybeRefOrGetter" {
+                push_unique(&mut types, "Function");
+            }
+            if let Some(ty) = vue3_type_reference_type_argument(reference, 0) {
+                for runtime_type in infer_vue3_runtime_type(ty, analysis) {
+                    push_unique(&mut types, &runtime_type);
+                }
+            }
+            Some(types)
         }
         _ => None,
     }
@@ -14836,7 +14857,7 @@ fn infer_vue3_define_model_runtime_type(
                 }
                 match name.as_str() {
                     "Array" | "Function" | "Object" | "Set" | "Map" | "WeakSet" | "WeakMap"
-                    | "Date" | "Promise" => return vec![name],
+                    | "Date" | "Promise" | "Error" => return vec![name],
                     "Record" | "Partial" | "Readonly" | "Pick" | "Omit" | "Required"
                     | "InstanceType" => return vec!["Object".into()],
                     _ => {}
@@ -14895,6 +14916,27 @@ fn infer_vue3_define_model_runtime_utility_type(
         "Exclude" => {
             let ty = vue3_type_reference_type_argument(reference, 0)?;
             Some(infer_vue3_define_model_runtime_type(ty, analysis))
+        }
+        "OmitThisParameter" => {
+            let ty = vue3_type_reference_type_argument(reference, 0)?;
+            Some(infer_vue3_define_model_runtime_type(ty, analysis))
+        }
+        "Uppercase" | "Lowercase" | "Capitalize" | "Uncapitalize" => Some(vec!["String".into()]),
+        "Parameters" | "ConstructorParameters" | "ReadonlyArray" => Some(vec!["Array".into()]),
+        "ReadonlyMap" => Some(vec!["Map".into()]),
+        "ReadonlySet" => Some(vec!["Set".into()]),
+        "Ref" | "ShallowRef" | "ComputedRef" | "WritableComputedRef" => Some(vec!["Object".into()]),
+        "MaybeRef" | "MaybeRefOrGetter" => {
+            let mut types = vec!["Object".to_string()];
+            if name == "MaybeRefOrGetter" {
+                push_unique(&mut types, "Function");
+            }
+            if let Some(ty) = vue3_type_reference_type_argument(reference, 0) {
+                for runtime_type in infer_vue3_define_model_runtime_type(ty, analysis) {
+                    push_unique(&mut types, &runtime_type);
+                }
+            }
+            Some(types)
         }
         _ => None,
     }
@@ -20895,6 +20937,71 @@ defineModel<NonNullable<string | null> | Extract<number | boolean, boolean> | Ex
         );
         assert_eq!(
             script.bindings.get("extracted").map(String::as_str),
+            Some("props")
+        );
+        assert!(script.deps.is_empty(), "{:?}", script.deps);
+    }
+
+    #[test]
+    fn vue3_compile_script_resolves_builtin_wrapper_runtime_types() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "Comp.vue",
+            r#"<script setup lang="ts">
+type Props = {
+  list: ReadonlyArray<string>
+  params: Parameters<(value: string) => void>
+  ctorParams: ConstructorParameters<any>
+  map: ReadonlyMap<string, number>
+  set: ReadonlySet<string>
+  err: Error
+  loud: Uppercase<'foo'>
+  maybe: MaybeRef<string[]>
+  getter: MaybeRefOrGetter<boolean>
+  ref: Ref<number>
+}
+defineProps<Props>()
+defineModel<ReadonlyArray<string> | ReadonlyMap<string, number> | ReadonlySet<string> | Error | MaybeRefOrGetter<boolean> | Parameters<() => void> | Uppercase<'foo'>>()
+</script>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("list: { type: Array, required: true }"));
+        assert!(script
+            .content
+            .contains("params: { type: Array, required: true }"));
+        assert!(script
+            .content
+            .contains("ctorParams: { type: Array, required: true }"));
+        assert!(script
+            .content
+            .contains("map: { type: Map, required: true }"));
+        assert!(script
+            .content
+            .contains("set: { type: Set, required: true }"));
+        assert!(script
+            .content
+            .contains("err: { type: Error, required: true }"));
+        assert!(script
+            .content
+            .contains("loud: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("maybe: { type: [Object, Array], required: true }"));
+        assert!(script
+            .content
+            .contains("getter: { type: [Object, Function, Boolean], required: true }"));
+        assert!(script
+            .content
+            .contains("ref: { type: Object, required: true }"));
+        assert!(script.content.contains(
+            "\"modelValue\": { type: [Array, Map, Set, Error, Object, Function, Boolean, String] },"
+        ));
+        assert_eq!(
+            script.bindings.get("getter").map(String::as_str),
             Some("props")
         );
         assert!(script.deps.is_empty(), "{:?}", script.deps);
