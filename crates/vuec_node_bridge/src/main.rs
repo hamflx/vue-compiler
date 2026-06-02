@@ -5957,6 +5957,62 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_resolves_external_type_operator_runtime_types_deps() {
+        let dir = std::env::temp_dir().join(format!(
+            "vuec-node-bridge-type-operator-runtime-types-deps-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        std::fs::write(
+            dir.join("types.ts"),
+            concat!(
+                "export type Base = { name: string; 1: boolean }\n",
+                "export type Props = {\n",
+                "  readonlyList: readonly string[]\n",
+                "  objectKeys: keyof Base\n",
+                "  literalKeys: keyof { [index: number]: string; label: string }\n",
+                "  arrayKeys: keyof ReadonlyArray<string>\n",
+                "  anyKeys: keyof any\n",
+                "  pickedKeys: keyof Pick<Base, 'name'>\n",
+                "}\n",
+                "export type ModelValue = readonly boolean[] | keyof any"
+            ),
+        )
+        .expect("write type operator runtime props");
+
+        let filename = dir.join("Comp.vue");
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "import type { Props, ModelValue } from './types'\n",
+                    "defineProps<Props>()\n",
+                    "defineModel<ModelValue>()",
+                    "</script>"
+                ),
+                "filename": filename.to_string_lossy()
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = compiled["content"].as_str().unwrap_or_default();
+        let expected_dep = dir.join("types.ts").to_string_lossy().replace('\\', "/");
+        assert!(compiled["errors"].as_array().unwrap().is_empty());
+        assert!(content.contains("readonlyList: { type: Array, required: true }"));
+        assert!(content.contains("objectKeys: { type: [String, Number], required: true }"));
+        assert!(content.contains("literalKeys: { type: [Number, String], required: true }"));
+        assert!(content.contains("arrayKeys: { type: [String, Number], required: true }"));
+        assert!(content.contains("anyKeys: { type: [String, Number, Symbol], required: true }"));
+        assert!(content.contains("pickedKeys: { type: String, required: true }"));
+        assert!(content.contains("\"modelValue\": { type: [Array, String, Number, Symbol] },"));
+        assert_eq!(compiled["deps"], json!([expected_dep]));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn vue3_sfc_bridge_compile_script_resolves_external_interface_extends_type_deps() {
         let dir = std::env::temp_dir().join(format!(
             "vuec-node-bridge-interface-extends-deps-{}",
