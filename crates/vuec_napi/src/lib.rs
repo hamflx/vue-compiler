@@ -22,10 +22,10 @@ use vuec_ast::{NodeSpan, Vue3Ast, Vue3AstKind, Vue3Expression, Vue3Prop};
 use vuec_html::{HtmlTokenKind, HtmlTokenizer};
 use vuec_js::JsAstStore;
 use vuec_sfc::{
-    SfcCompiler, SfcCssVarNameStyle, SfcScriptCompileOptions, SfcStyleCompileOptions,
-    SfcTemplateCompileOptions, Vue27ParseComponentOptions, Vue27RewriteDefaultOptions, Vue27SfcPad,
-    Vue27TemplatePreprocessOptions, Vue3RewriteDefaultOptions, Vue3SfcPad, Vue3SfcParseOptions,
-    Vue3SfcParseProjectionOptions,
+    SfcCompiler, SfcCssVarNameStyle, SfcPropsDestructureMode, SfcScriptCompileOptions,
+    SfcStyleCompileOptions, SfcTemplateCompileOptions, Vue27ParseComponentOptions,
+    Vue27RewriteDefaultOptions, Vue27SfcPad, Vue27TemplatePreprocessOptions,
+    Vue3RewriteDefaultOptions, Vue3SfcPad, Vue3SfcParseOptions, Vue3SfcParseProjectionOptions,
 };
 use vuec_source::{FileId, Span};
 use vuec_vue2::{
@@ -3863,6 +3863,7 @@ fn sfc_script_options(value: Option<&Value>) -> SfcScriptCompileOptions {
         "sourceMap",
         bool_option(value, "source_map", options.source_map),
     );
+    options.props_destructure = props_destructure_option(value, options.props_destructure);
     options.ref_sugar = bool_option(
         value,
         "refSugar",
@@ -3984,6 +3985,21 @@ fn sfc_style_options(value: Option<&Value>) -> SfcStyleCompileOptions {
 
 fn bool_option(value: &Value, name: &str, fallback: bool) -> bool {
     value.get(name).and_then(Value::as_bool).unwrap_or(fallback)
+}
+
+fn props_destructure_option(
+    value: &Value,
+    fallback: SfcPropsDestructureMode,
+) -> SfcPropsDestructureMode {
+    match value
+        .get("propsDestructure")
+        .or_else(|| value.get("props_destructure"))
+    {
+        Some(Value::Bool(false)) => SfcPropsDestructureMode::Disabled,
+        Some(Value::Bool(true)) => SfcPropsDestructureMode::Enabled,
+        Some(Value::String(mode)) if mode == "error" => SfcPropsDestructureMode::Error,
+        _ => fallback,
+    }
 }
 
 fn string_option(value: &Value, name: &str, fallback: &str) -> String {
@@ -4146,6 +4162,7 @@ mod tests {
             "id": "xxxxxxxx",
             "inlineTemplate": true,
             "source_map": false,
+            "propsDestructure": "error",
             "templateOptions": {
                 "ssr": true
             }
@@ -4155,6 +4172,15 @@ mod tests {
         assert!(options.inline_template);
         assert!(options.inline_template_ssr);
         assert!(!options.source_map);
+        assert_eq!(options.props_destructure, SfcPropsDestructureMode::Error);
+
+        let disabled = sfc_script_options(Some(&json!({
+            "props_destructure": false
+        })));
+        assert_eq!(
+            disabled.props_destructure,
+            SfcPropsDestructureMode::Disabled
+        );
     }
 
     #[test]

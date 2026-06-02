@@ -20,8 +20,8 @@ use vuec_ast::{NodeSpan, Vue3Ast, Vue3AstKind, Vue3Expression, Vue3ImportItem, V
 use vuec_html::{HtmlTokenKind, HtmlTokenizer};
 use vuec_js::JsAstStore;
 use vuec_sfc::{
-    SfcAttrValue, SfcBlock, SfcBlockAttrs, SfcCompiler, SfcDescriptor, SfcScriptBlock,
-    SfcScriptCompileOptions, SfcStyleCompileOptions, SfcTemplateCompileOptions,
+    SfcAttrValue, SfcBlock, SfcBlockAttrs, SfcCompiler, SfcDescriptor, SfcPropsDestructureMode,
+    SfcScriptBlock, SfcScriptCompileOptions, SfcStyleCompileOptions, SfcTemplateCompileOptions,
     Vue27ParseComponentOptions, Vue27PrefixIdentifiersOptions, Vue27RewriteDefaultOptions,
     Vue27SfcPad, Vue27TemplatePreprocessOptions, Vue3RewriteDefaultOptions, Vue3SfcPad,
     Vue3SfcParseOptions, Vue3SfcParseProjectionOptions,
@@ -4188,6 +4188,7 @@ fn sfc_script_options(value: Option<&Value>) -> SfcScriptCompileOptions {
         "sourceMap",
         bool_option(value, "source_map", options.source_map),
     );
+    options.props_destructure = props_destructure_option(value, options.props_destructure);
     let nested_runtime_module_name = value
         .get("templateOptions")
         .or_else(|| value.get("template_options"))
@@ -4400,6 +4401,21 @@ fn vue27_prefix_identifiers_options(value: &Value) -> Vue27PrefixIdentifiersOpti
 
 fn bool_option(value: &Value, name: &str, fallback: bool) -> bool {
     value.get(name).and_then(Value::as_bool).unwrap_or(fallback)
+}
+
+fn props_destructure_option(
+    value: &Value,
+    fallback: SfcPropsDestructureMode,
+) -> SfcPropsDestructureMode {
+    match value
+        .get("propsDestructure")
+        .or_else(|| value.get("props_destructure"))
+    {
+        Some(Value::Bool(false)) => SfcPropsDestructureMode::Disabled,
+        Some(Value::Bool(true)) => SfcPropsDestructureMode::Enabled,
+        Some(Value::String(mode)) if mode == "error" => SfcPropsDestructureMode::Error,
+        _ => fallback,
+    }
 }
 
 fn json_string_map_option(value: &Value, name: &str) -> Option<BTreeMap<String, String>> {
@@ -4935,6 +4951,54 @@ mod tests {
             .any(|error| error.as_str().is_some_and(
                 |error| error.contains("cannot reference locally declared variables")
             )));
+    }
+
+    #[test]
+    fn vue3_sfc_bridge_compile_script_honors_props_destructure_option() {
+        let disabled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup>",
+                    "const { foo, bar: baz } = defineProps(['foo', 'bar'])\n",
+                    "const message = foo + baz",
+                    "</script>"
+                ),
+                "filename": "FooBar.vue",
+                "options": {
+                    "propsDestructure": false
+                }
+            }),
+        )
+        .expect("vue3 compileScript");
+        let content = disabled["content"].as_str().unwrap_or_default();
+        assert!(disabled["errors"].as_array().unwrap().is_empty());
+        assert!(content.contains("const { foo, bar: baz } = __props"));
+        assert!(content.contains("const message = foo + baz"));
+        assert!(!content.contains("__props.foo + __props.bar"));
+        assert_eq!(disabled["bindings"]["foo"], json!("setup-const"));
+        assert_eq!(disabled["bindings"]["baz"], json!("setup-const"));
+
+        let errored = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup>",
+                    "const { foo } = defineProps(['foo'])",
+                    "</script>"
+                ),
+                "filename": "FooBar.vue",
+                "options": {
+                    "propsDestructure": "error"
+                }
+            }),
+        )
+        .expect("vue3 compileScript");
+        assert!(errored["errors"].as_array().unwrap().iter().any(|error| {
+            error.as_str().is_some_and(|error| {
+                error.contains("Props destructure is explicitly prohibited via config.")
+            })
+        }));
     }
 
     #[test]

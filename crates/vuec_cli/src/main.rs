@@ -22,8 +22,9 @@ use serde_json::{json, Value};
 use vuec_codegen::SourceMapArtifact;
 use vuec_diagnostics::Diagnostic;
 use vuec_sfc::{
-    SfcCompiler, SfcScriptBlock, SfcScriptCompileOptions, SfcStyleCompileOptions,
-    SfcStyleCompileResult, SfcTemplateCompileOptions, SfcTemplateCompileResult,
+    SfcCompiler, SfcPropsDestructureMode, SfcScriptBlock, SfcScriptCompileOptions,
+    SfcStyleCompileOptions, SfcStyleCompileResult, SfcTemplateCompileOptions,
+    SfcTemplateCompileResult,
 };
 use vuec_source::FileId;
 use vuec_vue2::{Vue2CompileOptions, Vue2CompiledResult};
@@ -87,6 +88,8 @@ struct CompileSfcArgs {
     id: Option<String>,
     #[arg(long)]
     inline_template: bool,
+    #[arg(long, value_enum, default_value_t = CliPropsDestructureMode::Enabled)]
+    props_destructure: CliPropsDestructureMode,
 }
 
 #[derive(clap::Args, Debug)]
@@ -189,6 +192,23 @@ impl CompileBatchTarget {
             Self::Vue3Template => "vue3-template",
             Self::Vue3Sfc => "vue3-sfc",
             Self::Vue3Ssr => "vue3-ssr",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum CliPropsDestructureMode {
+    Enabled,
+    Disabled,
+    Error,
+}
+
+impl From<CliPropsDestructureMode> for SfcPropsDestructureMode {
+    fn from(value: CliPropsDestructureMode) -> Self {
+        match value {
+            CliPropsDestructureMode::Enabled => Self::Enabled,
+            CliPropsDestructureMode::Disabled => Self::Disabled,
+            CliPropsDestructureMode::Error => Self::Error,
         }
     }
 }
@@ -361,6 +381,7 @@ fn compile_sfc_command(args: CompileSfcArgs) -> Result<RunOutput> {
                 inline_template: args.inline_template,
                 inline_template_ssr: args.inline_template && args.ssr,
                 source_map: args.source_map,
+                props_destructure: args.props_destructure.into(),
                 ..SfcScriptCompileOptions::default()
             },
         ))
@@ -1090,6 +1111,35 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("setup"));
+    }
+
+    #[test]
+    fn compiles_vue3_sfc_props_destructure_option_json() {
+        let path = write_temp(
+            "vuec-cli-sfc-props-destructure.vue",
+            concat!(
+                "<script setup>",
+                "const { foo, bar: baz } = defineProps(['foo', 'bar'])\n",
+                "const message = foo + baz",
+                "</script>"
+            ),
+        );
+        let output = run_with_args([
+            "vuec",
+            "compile-sfc",
+            "--json",
+            "--props-destructure",
+            "disabled",
+            path.to_str().unwrap(),
+        ])
+        .expect("run");
+        let value: Value = serde_json::from_str(&output.stdout).expect("json");
+        let content = value["script"]["content"].as_str().unwrap_or_default();
+
+        assert_eq!(value["kind"], json!("vue3-sfc"));
+        assert!(content.contains("const { foo, bar: baz } = __props"));
+        assert!(content.contains("const message = foo + baz"));
+        assert!(!content.contains("__props.foo + __props.bar"));
     }
 
     #[test]

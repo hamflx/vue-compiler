@@ -13,7 +13,8 @@ use serde_json::{json, Value};
 #[cfg(panic = "unwind")]
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use vuec_sfc::{
-    SfcCompiler, SfcScriptCompileOptions, SfcStyleCompileOptions, SfcTemplateCompileOptions,
+    SfcCompiler, SfcPropsDestructureMode, SfcScriptCompileOptions, SfcStyleCompileOptions,
+    SfcTemplateCompileOptions,
 };
 use vuec_source::FileId;
 use vuec_vue2::Vue2CompileOptions;
@@ -413,6 +414,7 @@ fn sfc_script_options(value: &Value) -> SfcScriptCompileOptions {
         "sourceMap",
         bool_option(value, "source_map", options.source_map),
     );
+    options.props_destructure = props_destructure_option(value, options.props_destructure);
     options.is_prod = bool_option(
         value,
         "isProd",
@@ -497,6 +499,21 @@ fn bool_option(value: &Value, name: &str, fallback: bool) -> bool {
     value.get(name).and_then(Value::as_bool).unwrap_or(fallback)
 }
 
+fn props_destructure_option(
+    value: &Value,
+    fallback: SfcPropsDestructureMode,
+) -> SfcPropsDestructureMode {
+    match value
+        .get("propsDestructure")
+        .or_else(|| value.get("props_destructure"))
+    {
+        Some(Value::Bool(false)) => SfcPropsDestructureMode::Disabled,
+        Some(Value::Bool(true)) => SfcPropsDestructureMode::Enabled,
+        Some(Value::String(mode)) if mode == "error" => SfcPropsDestructureMode::Error,
+        _ => fallback,
+    }
+}
+
 fn string_option(value: &Value, name: &str) -> Option<String> {
     value
         .get(name)
@@ -539,6 +556,7 @@ mod tests {
             "id": "xxxxxxxx",
             "inlineTemplate": true,
             "sourceMap": false,
+            "propsDestructure": "error",
             "templateOptions": {
                 "ssr": true
             }
@@ -548,6 +566,15 @@ mod tests {
         assert!(options.inline_template);
         assert!(options.inline_template_ssr);
         assert!(!options.source_map);
+        assert_eq!(options.props_destructure, SfcPropsDestructureMode::Error);
+
+        let disabled = sfc_script_options(&json!({
+            "props_destructure": false
+        }));
+        assert_eq!(
+            disabled.props_destructure,
+            SfcPropsDestructureMode::Disabled
+        );
     }
 
     #[test]
