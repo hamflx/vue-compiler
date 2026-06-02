@@ -5728,6 +5728,98 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_returns_bare_package_type_deps() {
+        let dir = std::env::temp_dir().join(format!(
+            "vuec-node-bridge-package-type-deps-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let node_modules = dir.join("node_modules");
+        let types_pkg = node_modules.join("vuec-bridge-types");
+        let types_dist = types_pkg.join("dist");
+        std::fs::create_dir_all(&types_dist).expect("create types package");
+        std::fs::write(
+            types_pkg.join("package.json"),
+            r#"{"types":"dist/index.d.ts"}"#,
+        )
+        .expect("write types package manifest");
+        std::fs::write(
+            types_dist.join("index.d.ts"),
+            "export interface Props { root: string }\nexport type ModelValue = import('./model').ModelValue",
+        )
+        .expect("write types package root");
+        std::fs::write(
+            types_dist.join("model.d.ts"),
+            "export type ModelValue = boolean | string",
+        )
+        .expect("write model type");
+
+        let exports_pkg = node_modules.join("vuec-bridge-exports");
+        std::fs::create_dir_all(exports_pkg.join("types")).expect("create exports package");
+        std::fs::write(
+            exports_pkg.join("package.json"),
+            r#"{"exports":{"./feature":{"types":"./types/feature.d.ts","default":"./dist/feature.js"}}}"#,
+        )
+        .expect("write exports package manifest");
+        std::fs::write(
+            exports_pkg.join("types").join("feature.d.ts"),
+            "export type FeatureProps = { count?: number }",
+        )
+        .expect("write feature type");
+
+        let ambient_pkg = node_modules.join("@types").join("vuec-bridge-ambient");
+        std::fs::create_dir_all(&ambient_pkg).expect("create @types package");
+        std::fs::write(
+            ambient_pkg.join("index.d.ts"),
+            "export type AmbientProps = { ambient: string }",
+        )
+        .expect("write ambient type");
+
+        let filename = dir.join("Comp.vue");
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "import type { Props } from 'vuec-bridge-types'\n",
+                    "import type { FeatureProps } from 'vuec-bridge-exports/feature'\n",
+                    "import type { AmbientProps } from 'vuec-bridge-ambient'\n",
+                    "const props = defineProps<Props & FeatureProps & AmbientProps>()\n",
+                    "const model = defineModel<import('vuec-bridge-types').ModelValue>()",
+                    "</script>"
+                ),
+                "filename": filename.to_string_lossy()
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = compiled["content"].as_str().unwrap_or_default();
+        let deps = compiled["deps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|dep| dep.as_str().unwrap().to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected = [
+            types_dist.join("index.d.ts"),
+            types_dist.join("model.d.ts"),
+            exports_pkg.join("types").join("feature.d.ts"),
+            ambient_pkg.join("index.d.ts"),
+        ]
+        .into_iter()
+        .map(|path| path.to_string_lossy().replace('\\', "/"))
+        .collect::<std::collections::BTreeSet<_>>();
+        assert!(compiled["errors"].as_array().unwrap().is_empty());
+        assert!(content.contains("root: { type: String, required: true }"));
+        assert!(content.contains("count: { type: Number, required: false }"));
+        assert!(content.contains("ambient: { type: String, required: true }"));
+        assert!(content.contains("\"modelValue\": { type: [Boolean, String] },"));
+        assert_eq!(deps, expected);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn vue3_sfc_bridge_compile_script_returns_dynamic_import_type_deps() {
         let dir = std::env::temp_dir().join(format!(
             "vuec-node-bridge-dynamic-import-type-deps-{}",

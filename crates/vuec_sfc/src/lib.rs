@@ -4827,13 +4827,10 @@ fn extend_vue3_type_context_from_external_imports(
             continue;
         };
         let import_source = import.source.value.as_str();
-        if !vue3_type_import_source_is_relative(import_source) {
-            continue;
-        }
         let Some(specifiers) = &import.specifiers else {
             continue;
         };
-        let Some(resolved) = resolve_vue3_relative_type_import(filename, import_source) else {
+        let Some(resolved) = resolve_vue3_type_import(filename, import_source) else {
             continue;
         };
         let mut seen = BTreeSet::new();
@@ -4905,7 +4902,7 @@ fn vue3_external_type_context_from_source_inner(
     project_vue3_default_type_exports(source, &parsed.program.body, &mut analysis);
     seed_vue3_external_type_deps(filename, &mut analysis);
     let re_exported =
-        project_vue3_relative_re_exports(filename, &parsed.program.body, &mut analysis, seen);
+        project_vue3_type_re_exports(filename, &parsed.program.body, &mut analysis, seen);
     project_vue3_exported_type_specifiers(&parsed.program.body, &mut analysis);
     let mut exported = vue3_exported_type_names(&parsed.program.body);
     exported.extend(re_exported);
@@ -4959,7 +4956,7 @@ fn seed_vue3_external_type_deps(filename: &str, analysis: &mut Vue3ScriptSetupAn
     }
 }
 
-fn project_vue3_relative_re_exports(
+fn project_vue3_type_re_exports(
     filename: &str,
     statements: &[Statement<'_>],
     analysis: &mut Vue3ScriptSetupAnalysis,
@@ -4973,15 +4970,12 @@ fn project_vue3_relative_re_exports(
                     continue;
                 };
                 let import_source = source.value.as_str();
-                if !vue3_type_import_source_is_relative(import_source) {
-                    continue;
-                }
                 let Some(imported_context) =
-                    vue3_external_type_context_from_relative_source(filename, import_source, seen)
+                    vue3_external_type_context_from_source(filename, import_source, seen)
                 else {
                     continue;
                 };
-                let Some(dependency) = resolve_vue3_relative_type_import(filename, import_source)
+                let Some(dependency) = resolve_vue3_type_import(filename, import_source)
                     .map(|path| normalize_path_string(&path))
                 else {
                     continue;
@@ -5007,15 +5001,12 @@ fn project_vue3_relative_re_exports(
             }
             Statement::ExportAllDeclaration(declaration) => {
                 let import_source = declaration.source.value.as_str();
-                if !vue3_type_import_source_is_relative(import_source) {
-                    continue;
-                }
                 let Some(imported_context) =
-                    vue3_external_type_context_from_relative_source(filename, import_source, seen)
+                    vue3_external_type_context_from_source(filename, import_source, seen)
                 else {
                     continue;
                 };
-                let Some(dependency) = resolve_vue3_relative_type_import(filename, import_source)
+                let Some(dependency) = resolve_vue3_type_import(filename, import_source)
                     .map(|path| normalize_path_string(&path))
                 else {
                     continue;
@@ -5032,12 +5023,12 @@ fn project_vue3_relative_re_exports(
     exported_names
 }
 
-fn vue3_external_type_context_from_relative_source(
+fn vue3_external_type_context_from_source(
     filename: &str,
     source: &str,
     seen: &mut BTreeSet<String>,
 ) -> Option<Vue27TypeContext> {
-    let resolved = resolve_vue3_relative_type_import(filename, source)?;
+    let resolved = resolve_vue3_type_import(filename, source)?;
     vue3_external_type_context_from_path(&resolved, seen)
 }
 
@@ -5120,12 +5111,9 @@ fn vue3_resolve_import_type(
     analysis: &Vue3ScriptSetupAnalysis,
 ) -> Option<Vue3ResolvedImportType> {
     let source = import_type.source.value.as_str();
-    if !vue3_type_import_source_is_relative(source) {
-        return None;
-    }
     let name = vue3_import_type_qualifier_key(import_type.qualifier.as_ref()?);
     let filename = analysis.type_filename.as_deref()?;
-    let resolved = resolve_vue3_relative_type_import(filename, source)?;
+    let resolved = resolve_vue3_type_import(filename, source)?;
     let dependency = normalize_path_string(&resolved);
     let mut seen = analysis.type_seen.clone();
     let context = vue3_external_type_context_from_path(&resolved, &mut seen)?;
@@ -5567,11 +5555,246 @@ fn vue3_type_import_source_is_relative(source: &str) -> bool {
     source.starts_with("./") || source.starts_with("../")
 }
 
+fn resolve_vue3_type_import(filename: &str, source: &str) -> Option<PathBuf> {
+    if vue3_type_import_source_is_relative(source) {
+        return resolve_vue3_relative_type_import(filename, source);
+    }
+    resolve_vue3_bare_type_import(filename, source)
+}
+
 fn resolve_vue3_relative_type_import(filename: &str, source: &str) -> Option<PathBuf> {
     let base = Path::new(filename)
         .parent()
         .unwrap_or_else(|| Path::new(""));
     let candidate = normalize_path_components(base.join(source));
+    resolve_vue3_type_import_path(&candidate)
+}
+
+fn resolve_vue3_bare_type_import(filename: &str, source: &str) -> Option<PathBuf> {
+    let (package_name, subpath) = vue3_package_import_parts(source)?;
+    for node_modules in vue3_node_modules_search_paths(filename) {
+        let package_dir = node_modules.join(&package_name);
+        if package_dir.is_dir() {
+            if let Some(resolved) =
+                resolve_vue3_package_type_entry(&package_dir, subpath.as_deref())
+            {
+                return Some(resolved);
+            }
+        }
+        let types_package_dir = node_modules.join(vue3_at_types_package_name(&package_name));
+        if types_package_dir.is_dir() {
+            if let Some(resolved) =
+                resolve_vue3_package_type_entry(&types_package_dir, subpath.as_deref())
+            {
+                return Some(resolved);
+            }
+        }
+    }
+    None
+}
+
+fn vue3_package_import_parts(source: &str) -> Option<(String, Option<String>)> {
+    if source.is_empty()
+        || source.starts_with('.')
+        || source.starts_with('/')
+        || source.starts_with('#')
+        || source.contains(':')
+    {
+        return None;
+    }
+    let parts = source.split('/').collect::<Vec<_>>();
+    if parts.first().is_some_and(|part| part.starts_with('@')) {
+        if parts.len() < 2 || parts[0].len() <= 1 || parts[1].is_empty() {
+            return None;
+        }
+        let package_name = format!("{}/{}", parts[0], parts[1]);
+        let subpath = (parts.len() > 2).then(|| parts[2..].join("/"));
+        return Some((package_name, subpath));
+    }
+    let package_name = parts.first().filter(|part| !part.is_empty())?.to_string();
+    let subpath = (parts.len() > 1).then(|| parts[1..].join("/"));
+    Some((package_name, subpath))
+}
+
+fn vue3_node_modules_search_paths(filename: &str) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let mut current = Path::new(filename).parent();
+    while let Some(dir) = current {
+        paths.push(normalize_path_components(dir.join("node_modules")));
+        current = dir.parent();
+    }
+    paths
+}
+
+fn vue3_at_types_package_name(package_name: &str) -> PathBuf {
+    if let Some(scoped) = package_name.strip_prefix('@') {
+        return PathBuf::from("@types").join(scoped.replace('/', "__"));
+    }
+    PathBuf::from("@types").join(package_name)
+}
+
+fn resolve_vue3_package_type_entry(package_dir: &Path, subpath: Option<&str>) -> Option<PathBuf> {
+    match resolve_vue3_package_json_type_entry(package_dir, subpath) {
+        Vue3PackageJsonTypeResolution::Resolved(path) => return Some(path),
+        Vue3PackageJsonTypeResolution::Blocked => return None,
+        Vue3PackageJsonTypeResolution::NoPackageJson
+        | Vue3PackageJsonTypeResolution::NoPackageTypeEntry => {}
+    }
+    let candidate = subpath
+        .map(|subpath| package_dir.join(subpath))
+        .unwrap_or_else(|| package_dir.to_path_buf());
+    resolve_vue3_type_import_path(&candidate)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Vue3PackageJsonTypeResolution {
+    NoPackageJson,
+    NoPackageTypeEntry,
+    Resolved(PathBuf),
+    Blocked,
+}
+
+fn resolve_vue3_package_json_type_entry(
+    package_dir: &Path,
+    subpath: Option<&str>,
+) -> Vue3PackageJsonTypeResolution {
+    let package_json = package_dir.join("package.json");
+    let Ok(source) = std::fs::read_to_string(package_json) else {
+        return Vue3PackageJsonTypeResolution::NoPackageJson;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&source) else {
+        return Vue3PackageJsonTypeResolution::NoPackageJson;
+    };
+    if let Some(exports) = value.get("exports") {
+        if let Some(target) = vue3_package_exports_type_target(exports, subpath) {
+            if let Some(resolved) = vue3_package_export_type_path(package_dir, &target) {
+                return Vue3PackageJsonTypeResolution::Resolved(resolved);
+            }
+            return Vue3PackageJsonTypeResolution::Blocked;
+        }
+        if subpath.is_some() {
+            return Vue3PackageJsonTypeResolution::Blocked;
+        }
+    }
+    if subpath.is_none() {
+        for field in ["types", "typings"] {
+            if let Some(target) = value.get(field).and_then(serde_json::Value::as_str) {
+                if let Some(resolved) = vue3_package_type_field_path(package_dir, target) {
+                    return Vue3PackageJsonTypeResolution::Resolved(resolved);
+                }
+            }
+        }
+    }
+    Vue3PackageJsonTypeResolution::NoPackageTypeEntry
+}
+
+fn vue3_package_exports_type_target(
+    exports: &serde_json::Value,
+    subpath: Option<&str>,
+) -> Option<String> {
+    let key = subpath
+        .map(|subpath| format!("./{}", subpath.trim_start_matches("./")))
+        .unwrap_or_else(|| ".".into());
+    let target = if key == "." {
+        exports
+            .get(".")
+            .or_else(|| vue3_package_exports_is_condition_map(exports).then_some(exports))
+            .and_then(vue3_package_export_target_value)
+    } else {
+        exports
+            .get(&key)
+            .and_then(vue3_package_export_target_value)
+            .or_else(|| vue3_package_exports_pattern_target(exports, &key))
+    }?;
+    Some(target)
+}
+
+fn vue3_package_exports_is_condition_map(exports: &serde_json::Value) -> bool {
+    exports
+        .as_object()
+        .is_none_or(|object| !object.keys().any(|key| key == "." || key.starts_with("./")))
+}
+
+fn vue3_package_exports_pattern_target(exports: &serde_json::Value, key: &str) -> Option<String> {
+    let object = exports.as_object()?;
+    for (pattern, target) in object {
+        let Some(capture) = vue3_package_export_pattern_capture(pattern, key) else {
+            continue;
+        };
+        let target = vue3_package_export_target_value(target)?;
+        return Some(target.replace('*', &capture));
+    }
+    None
+}
+
+fn vue3_package_export_target_value(value: &serde_json::Value) -> Option<String> {
+    if let Some(value) = value.as_str() {
+        return Some(value.to_string());
+    }
+    let object = value.as_object()?;
+    for condition in ["types", "typings"] {
+        if let Some(target) = object
+            .get(condition)
+            .and_then(vue3_package_export_target_value)
+        {
+            return Some(target);
+        }
+    }
+    for condition in ["import", "require", "node", "default"] {
+        if let Some(target) = object
+            .get(condition)
+            .and_then(vue3_package_export_target_value)
+        {
+            return Some(target);
+        }
+    }
+    None
+}
+
+fn vue3_package_export_pattern_capture(pattern: &str, key: &str) -> Option<String> {
+    let star = pattern.find('*')?;
+    let prefix = &pattern[..star];
+    let suffix = &pattern[star + 1..];
+    if !key.starts_with(prefix) || !key.ends_with(suffix) || key.len() < prefix.len() + suffix.len()
+    {
+        return None;
+    }
+    Some(key[prefix.len()..key.len() - suffix.len()].to_string())
+}
+
+fn vue3_package_export_type_path(package_dir: &Path, target: &str) -> Option<PathBuf> {
+    if !target.starts_with("./") {
+        return None;
+    }
+    vue3_package_type_target_path(package_dir, target)
+}
+
+fn vue3_package_type_field_path(package_dir: &Path, target: &str) -> Option<PathBuf> {
+    if Path::new(target).is_absolute() || target.starts_with("../") {
+        return None;
+    }
+    vue3_package_type_target_path(package_dir, target.trim_start_matches("./"))
+}
+
+fn vue3_package_type_target_path(package_dir: &Path, target: &str) -> Option<PathBuf> {
+    let candidate = normalize_path_components(package_dir.join(target));
+    if candidate
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| matches!(extension, "js" | "jsx" | "mjs" | "cjs"))
+    {
+        let extension = candidate
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or_default();
+        let stem = candidate.with_extension("");
+        if let Some(resolved) = vue3_ts_resolution_candidates(&stem, extension)
+            .into_iter()
+            .find(|candidate| candidate.exists())
+        {
+            return Some(resolved);
+        }
+    }
     resolve_vue3_type_import_path(&candidate)
 }
 
@@ -17284,6 +17507,131 @@ const model = defineModel<ModelValue>()
             .deps
             .iter()
             .any(|dep| dep.contains("unused") || dep.contains('\\')));
+    }
+
+    #[test]
+    fn vue3_compile_script_resolves_bare_package_macro_types_and_deps() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let node_modules = dir.path().join("node_modules");
+        let types_pkg = node_modules.join("vuec-types-pkg");
+        let types_dist = types_pkg.join("dist");
+        std::fs::create_dir_all(&types_dist).expect("create types package");
+        std::fs::write(
+            types_pkg.join("package.json"),
+            r#"{"types":"dist/index.d.ts"}"#,
+        )
+        .expect("write types package manifest");
+        std::fs::write(
+            types_dist.join("index.d.ts"),
+            "export interface Props { root: string }\nexport { ExtraProps } from './extra'\nexport type Events = { (e: 'save'): void }\nexport type ModelValue = import('./model').ModelValue",
+        )
+        .expect("write types package root");
+        std::fs::write(
+            types_dist.join("extra.d.ts"),
+            "export type ExtraProps = { extra?: number }",
+        )
+        .expect("write types package extra");
+        std::fs::write(
+            types_dist.join("model.d.ts"),
+            "export type ModelValue = boolean | string",
+        )
+        .expect("write types package model");
+
+        let facade_pkg = node_modules.join("vuec-facade-pkg");
+        std::fs::create_dir_all(&facade_pkg).expect("create facade package");
+        std::fs::write(facade_pkg.join("package.json"), r#"{"types":"index.d.ts"}"#)
+            .expect("write facade manifest");
+        std::fs::write(
+            facade_pkg.join("index.d.ts"),
+            "export { Props as FacadeProps } from 'vuec-types-pkg'",
+        )
+        .expect("write facade types");
+
+        let exports_pkg = node_modules.join("vuec-exports-pkg");
+        std::fs::create_dir_all(exports_pkg.join("types").join("feature"))
+            .expect("create exports package");
+        std::fs::write(
+            exports_pkg.join("package.json"),
+            r#"{"exports":{".":{"types":"./types/index.d.ts","default":"./dist/index.js"},"./feature/*":{"types":"./types/feature/*.d.ts","default":"./dist/feature/*.js"}}}"#,
+        )
+        .expect("write exports manifest");
+        std::fs::write(
+            exports_pkg.join("types").join("index.d.ts"),
+            "export namespace Nested { export type Props = { flag: boolean } }",
+        )
+        .expect("write exports root types");
+        std::fs::write(
+            exports_pkg.join("types").join("feature").join("item.d.ts"),
+            "export type FeatureProps = { feature: boolean }",
+        )
+        .expect("write exports feature types");
+
+        let ambient_pkg = node_modules.join("@types").join("vuec-ambient");
+        std::fs::create_dir_all(&ambient_pkg).expect("create @types package");
+        std::fs::write(
+            ambient_pkg.join("index.d.ts"),
+            "export type AmbientProps = { ambient: string }",
+        )
+        .expect("write @types package");
+
+        let filename = dir.path().join("Comp.vue");
+        let source = r#"<script setup lang="ts">
+import type { ExtraProps, Events } from 'vuec-types-pkg'
+import type { FacadeProps } from 'vuec-facade-pkg'
+import type { FeatureProps } from 'vuec-exports-pkg/feature/item'
+import type { AmbientProps } from 'vuec-ambient'
+import * as Exported from 'vuec-exports-pkg'
+const props = defineProps<FacadeProps & ExtraProps & FeatureProps & AmbientProps & Exported.Nested.Props>()
+const emit = defineEmits<Events>()
+const model = defineModel<import('vuec-types-pkg').ModelValue>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(
+            script
+                .content
+                .contains("root: { type: String, required: true }"),
+            "{}\ndeps: {:?}",
+            script.content,
+            script.deps
+        );
+        assert!(script
+            .content
+            .contains("extra: { type: Number, required: false }"));
+        assert!(script
+            .content
+            .contains("feature: { type: Boolean, required: true }"));
+        assert!(script
+            .content
+            .contains("ambient: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("flag: { type: Boolean, required: true }"));
+        assert!(script
+            .content
+            .contains("emits: /*@__PURE__*/_mergeModels([\"save\"], [\"update:modelValue\"]),"));
+        assert!(script
+            .content
+            .contains("\"modelValue\": { type: [Boolean, String] },"));
+
+        let deps = script.deps.iter().cloned().collect::<BTreeSet<_>>();
+        let expected = [
+            types_dist.join("index.d.ts"),
+            types_dist.join("extra.d.ts"),
+            types_dist.join("model.d.ts"),
+            facade_pkg.join("index.d.ts"),
+            exports_pkg.join("types").join("index.d.ts"),
+            exports_pkg.join("types").join("feature").join("item.d.ts"),
+            ambient_pkg.join("index.d.ts"),
+        ]
+        .into_iter()
+        .map(|path| normalize_path_string(&path))
+        .collect::<BTreeSet<_>>();
+        assert_eq!(deps, expected);
+        assert!(!script.deps.iter().any(|dep| dep.contains('\\')));
     }
 
     #[test]
