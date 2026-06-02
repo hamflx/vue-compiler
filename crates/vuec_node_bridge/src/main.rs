@@ -5789,6 +5789,59 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_resolves_external_runtime_utility_types_deps() {
+        let dir = std::env::temp_dir().join(format!(
+            "vuec-node-bridge-runtime-utility-types-deps-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        std::fs::write(
+            dir.join("types.ts"),
+            concat!(
+                "export type MaybeText = string | null\n",
+                "export type Props = {\n",
+                "  label: NonNullable<MaybeText>\n",
+                "  extracted: Extract<string | number | boolean, number | boolean>\n",
+                "  excluded: Exclude<string | number, number>\n",
+                "}\n",
+                "export type ModelValue =\n",
+                "  NonNullable<string | null> |\n",
+                "  Extract<number | boolean, boolean> |\n",
+                "  Exclude<string | number, number>"
+            ),
+        )
+        .expect("write runtime utility props");
+
+        let filename = dir.join("Comp.vue");
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "import type { Props, ModelValue } from './types'\n",
+                    "defineProps<Props>()\n",
+                    "defineModel<ModelValue>()",
+                    "</script>"
+                ),
+                "filename": filename.to_string_lossy()
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = compiled["content"].as_str().unwrap_or_default();
+        let expected_dep = dir.join("types.ts").to_string_lossy().replace('\\', "/");
+        assert!(compiled["errors"].as_array().unwrap().is_empty());
+        assert!(content.contains("label: { type: String, required: true }"));
+        assert!(content.contains("extracted: { type: [Number, Boolean], required: true }"));
+        assert!(content.contains("excluded: { type: [String, Number], required: true }"));
+        assert!(content.contains("\"modelValue\": { type: [String, Boolean, Number] },"));
+        assert_eq!(compiled["deps"], json!([expected_dep]));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn vue3_sfc_bridge_compile_script_resolves_external_interface_extends_type_deps() {
         let dir = std::env::temp_dir().join(format!(
             "vuec-node-bridge-interface-extends-deps-{}",

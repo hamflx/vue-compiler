@@ -14698,11 +14698,14 @@ fn infer_vue3_runtime_type(node: &TSType<'_>, analysis: &Vue3ScriptSetupAnalysis
                 if let Some(types) = analysis.declared_types.get(&name) {
                     return types.clone();
                 }
+                if let Some(types) = infer_vue3_runtime_utility_type(&name, reference, analysis) {
+                    return types;
+                }
                 match name.as_str() {
                     "Array" | "Function" | "Object" | "Set" | "Map" | "WeakSet" | "WeakMap"
                     | "Date" | "Promise" => return vec![name],
-                    "Record" | "Partial" | "Readonly" | "Pick" | "Omit" | "Exclude" | "Extract"
-                    | "Required" | "InstanceType" => return vec!["Object".into()],
+                    "Record" | "Partial" | "Readonly" | "Pick" | "Omit" | "Required"
+                    | "InstanceType" => return vec!["Object".into()],
                     _ => {}
                 }
             }
@@ -14733,6 +14736,30 @@ fn infer_vue3_runtime_type(node: &TSType<'_>, analysis: &Vue3ScriptSetupAnalysis
             types
         }
         _ => vec!["null".into()],
+    }
+}
+
+fn infer_vue3_runtime_utility_type(
+    name: &str,
+    reference: &TSTypeReference<'_>,
+    analysis: &Vue3ScriptSetupAnalysis,
+) -> Option<Vec<String>> {
+    match name {
+        "NonNullable" => {
+            let ty = vue3_type_reference_type_argument(reference, 0)?;
+            let mut types = infer_vue3_runtime_type(ty, analysis);
+            types.retain(|ty| ty != "null");
+            Some(types)
+        }
+        "Extract" => {
+            let ty = vue3_type_reference_type_argument(reference, 1)?;
+            Some(infer_vue3_runtime_type(ty, analysis))
+        }
+        "Exclude" => {
+            let ty = vue3_type_reference_type_argument(reference, 0)?;
+            Some(infer_vue3_runtime_type(ty, analysis))
+        }
+        _ => None,
     }
 }
 
@@ -14802,11 +14829,16 @@ fn infer_vue3_define_model_runtime_type(
                 if let Some(types) = analysis.define_model_declared_types.get(&name) {
                     return types.clone();
                 }
+                if let Some(types) =
+                    infer_vue3_define_model_runtime_utility_type(&name, reference, analysis)
+                {
+                    return types;
+                }
                 match name.as_str() {
                     "Array" | "Function" | "Object" | "Set" | "Map" | "WeakSet" | "WeakMap"
                     | "Date" | "Promise" => return vec![name],
-                    "Record" | "Partial" | "Readonly" | "Pick" | "Omit" | "Exclude" | "Extract"
-                    | "Required" | "InstanceType" => return vec!["Object".into()],
+                    "Record" | "Partial" | "Readonly" | "Pick" | "Omit" | "Required"
+                    | "InstanceType" => return vec!["Object".into()],
                     _ => {}
                 }
             }
@@ -14841,6 +14873,30 @@ fn infer_vue3_define_model_runtime_type(
             types
         }
         _ => vec!["Unknown".into()],
+    }
+}
+
+fn infer_vue3_define_model_runtime_utility_type(
+    name: &str,
+    reference: &TSTypeReference<'_>,
+    analysis: &Vue3ScriptSetupAnalysis,
+) -> Option<Vec<String>> {
+    match name {
+        "NonNullable" => {
+            let ty = vue3_type_reference_type_argument(reference, 0)?;
+            let mut types = infer_vue3_define_model_runtime_type(ty, analysis);
+            types.retain(|ty| ty != "null");
+            Some(types)
+        }
+        "Extract" => {
+            let ty = vue3_type_reference_type_argument(reference, 1)?;
+            Some(infer_vue3_define_model_runtime_type(ty, analysis))
+        }
+        "Exclude" => {
+            let ty = vue3_type_reference_type_argument(reference, 0)?;
+            Some(infer_vue3_define_model_runtime_type(ty, analysis))
+        }
+        _ => None,
     }
 }
 
@@ -20797,6 +20853,48 @@ defineModel<Base['name' | 'active']>()
         );
         assert_eq!(
             script.bindings.get("generic").map(String::as_str),
+            Some("props")
+        );
+        assert!(script.deps.is_empty(), "{:?}", script.deps);
+    }
+
+    #[test]
+    fn vue3_compile_script_resolves_runtime_utility_types() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "Comp.vue",
+            r#"<script setup lang="ts">
+type MaybeText = string | null
+type Props = {
+  label: NonNullable<MaybeText>
+  extracted: Extract<string | number | boolean, number | boolean>
+  excluded: Exclude<string | number, number>
+}
+defineProps<Props>()
+defineModel<NonNullable<string | null> | Extract<number | boolean, boolean> | Exclude<string | number, number>>()
+</script>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("label: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("extracted: { type: [Number, Boolean], required: true }"));
+        assert!(script
+            .content
+            .contains("excluded: { type: [String, Number], required: true }"));
+        assert!(script
+            .content
+            .contains("\"modelValue\": { type: [String, Boolean, Number] },"));
+        assert_eq!(
+            script.bindings.get("label").map(String::as_str),
+            Some("props")
+        );
+        assert_eq!(
+            script.bindings.get("extracted").map(String::as_str),
             Some("props")
         );
         assert!(script.deps.is_empty(), "{:?}", script.deps);
