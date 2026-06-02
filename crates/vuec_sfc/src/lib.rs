@@ -4840,7 +4840,7 @@ fn extend_vue3_type_context_from_external_imports(
         for specifier in specifiers {
             let local = import_specifier_local(specifier);
             let imported = import_specifier_imported(specifier).unwrap_or_else(|| "default".into());
-            if imported == "*" || imported == "default" {
+            if imported == "*" {
                 continue;
             }
             insert_vue3_external_type_alias(
@@ -4884,6 +4884,7 @@ fn vue3_external_type_context_from_source_inner(
     }
     let mut analysis = Vue3ScriptSetupAnalysis::default();
     collect_vue3_declared_types_from_statements(source, &parsed.program.body, &mut analysis);
+    project_vue3_default_type_exports(source, &parsed.program.body, &mut analysis);
     seed_vue3_external_type_deps(filename, &mut analysis);
     let re_exported =
         project_vue3_relative_re_exports(filename, &parsed.program.body, &mut analysis, seen);
@@ -5041,29 +5042,80 @@ fn vue3_type_source_type(filename: &str) -> oxc_span::SourceType {
 fn vue3_exported_type_names(statements: &[Statement<'_>]) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     for statement in statements {
-        let Statement::ExportNamedDeclaration(declaration) = statement else {
-            continue;
-        };
-        if let Some(declaration) = &declaration.declaration {
-            match declaration {
-                Declaration::TSInterfaceDeclaration(declaration) => {
-                    names.insert(declaration.id.name.to_string());
-                }
-                Declaration::TSTypeAliasDeclaration(declaration) => {
-                    names.insert(declaration.id.name.to_string());
-                }
-                _ => {}
-            }
-        }
-        if declaration.source.is_none() {
-            for specifier in &declaration.specifiers {
-                if let Some(exported) = module_export_name(specifier.exported()) {
-                    names.insert(exported.to_string());
+        match statement {
+            Statement::ExportDefaultDeclaration(declaration) => {
+                if vue3_default_export_may_be_type(declaration) {
+                    names.insert("default".into());
                 }
             }
+            Statement::ExportNamedDeclaration(declaration) => {
+                if let Some(declaration) = &declaration.declaration {
+                    match declaration {
+                        Declaration::TSInterfaceDeclaration(declaration) => {
+                            names.insert(declaration.id.name.to_string());
+                        }
+                        Declaration::TSTypeAliasDeclaration(declaration) => {
+                            names.insert(declaration.id.name.to_string());
+                        }
+                        _ => {}
+                    }
+                }
+                if declaration.source.is_none() {
+                    for specifier in &declaration.specifiers {
+                        if let Some(exported) = module_export_name(specifier.exported()) {
+                            names.insert(exported.to_string());
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
     names
+}
+
+fn vue3_default_export_may_be_type(declaration: &ExportDefaultDeclaration<'_>) -> bool {
+    matches!(
+        &declaration.declaration,
+        ExportDefaultDeclarationKind::TSInterfaceDeclaration(_)
+            | ExportDefaultDeclarationKind::Identifier(_)
+    )
+}
+
+fn project_vue3_default_type_exports(
+    source: &str,
+    statements: &[Statement<'_>],
+    analysis: &mut Vue3ScriptSetupAnalysis,
+) {
+    for statement in statements {
+        let Statement::ExportDefaultDeclaration(declaration) = statement else {
+            continue;
+        };
+        match &declaration.declaration {
+            ExportDefaultDeclarationKind::TSInterfaceDeclaration(declaration) => {
+                let name = declaration.id.name.to_string();
+                register_vue3_local_type_name(analysis, &name);
+                analysis
+                    .declared_types
+                    .insert(name.clone(), vec!["Object".into()]);
+                analysis
+                    .define_model_declared_types
+                    .insert(name.clone(), vec!["Object".into()]);
+                let props =
+                    vue3_type_members_from_interface_body(source, &declaration.body, analysis);
+                analysis.props_type_declarations.insert(name.clone(), props);
+                let emits = vue27_emits_type_from_interface_body(source, &declaration.body);
+                if !emits.events.is_empty() {
+                    analysis.emits_type_declarations.insert(name.clone(), emits);
+                }
+                insert_vue3_local_type_alias(analysis, &name, "default");
+            }
+            ExportDefaultDeclarationKind::Identifier(identifier) => {
+                insert_vue3_local_type_alias(analysis, identifier.name.as_str(), "default");
+            }
+            _ => {}
+        }
+    }
 }
 
 fn project_vue3_exported_type_specifiers(
@@ -5087,31 +5139,47 @@ fn project_vue3_exported_type_specifiers(
             if local == exported {
                 continue;
             }
-            if let Some(value) = analysis.declared_types.get(local).cloned() {
-                analysis.declared_types.insert(exported.to_string(), value);
-            }
-            if let Some(value) = analysis.define_model_declared_types.get(local).cloned() {
-                analysis
-                    .define_model_declared_types
-                    .insert(exported.to_string(), value);
-            }
-            if let Some(value) = analysis.props_type_declarations.get(local).cloned() {
-                analysis
-                    .props_type_declarations
-                    .insert(exported.to_string(), value);
-            }
-            if let Some(value) = analysis.emits_type_declarations.get(local).cloned() {
-                analysis
-                    .emits_type_declarations
-                    .insert(exported.to_string(), value);
-            }
-            if let Some(value) = analysis.type_sources.get(local).cloned() {
-                analysis.type_sources.insert(exported.to_string(), value);
-            }
-            if let Some(value) = analysis.type_deps.get(local).cloned() {
-                analysis.type_deps.insert(exported.to_string(), value);
-            }
+            insert_vue3_local_type_alias(analysis, local, exported);
         }
+    }
+}
+
+fn insert_vue3_local_type_alias(
+    analysis: &mut Vue3ScriptSetupAnalysis,
+    local_name: &str,
+    exported_name: &str,
+) {
+    if let Some(value) = analysis.declared_types.get(local_name).cloned() {
+        analysis
+            .declared_types
+            .insert(exported_name.to_string(), value);
+    }
+    if let Some(value) = analysis
+        .define_model_declared_types
+        .get(local_name)
+        .cloned()
+    {
+        analysis
+            .define_model_declared_types
+            .insert(exported_name.to_string(), value);
+    }
+    if let Some(value) = analysis.props_type_declarations.get(local_name).cloned() {
+        analysis
+            .props_type_declarations
+            .insert(exported_name.to_string(), value);
+    }
+    if let Some(value) = analysis.emits_type_declarations.get(local_name).cloned() {
+        analysis
+            .emits_type_declarations
+            .insert(exported_name.to_string(), value);
+    }
+    if let Some(value) = analysis.type_sources.get(local_name).cloned() {
+        analysis
+            .type_sources
+            .insert(exported_name.to_string(), value);
+    }
+    if let Some(value) = analysis.type_deps.get(local_name).cloned() {
+        analysis.type_deps.insert(exported_name.to_string(), value);
     }
 }
 
@@ -5127,6 +5195,7 @@ fn project_vue3_export_all_type_context(
         .chain(imported.props_type_declarations.keys())
         .chain(imported.emits_type_declarations.keys())
         .cloned()
+        .filter(|name| name != "default")
         .collect::<BTreeSet<_>>();
     for name in &names {
         insert_vue3_re_exported_type_alias(analysis, imported, &name, &name, dependency);
@@ -16727,6 +16796,111 @@ const model = defineModel<ModelValue>()
             .into_iter()
             .map(|name| normalize_path_string(&dir.path().join(name)))
             .collect::<BTreeSet<_>>();
+        assert_eq!(deps, expected);
+        assert!(!script.deps.iter().any(|dep| dep.contains('\\')));
+    }
+
+    #[test]
+    fn vue3_compile_script_resolves_relative_default_type_imports_and_re_exports() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join("direct.ts"),
+            "export default interface DirectProps { direct?: boolean }",
+        )
+        .expect("write direct type");
+        std::fs::write(
+            dir.path().join("alias.ts"),
+            "type AliasProps = { alias: string }; export default AliasProps",
+        )
+        .expect("write alias type");
+        std::fs::write(
+            dir.path().join("leaf.ts"),
+            "export default interface LeafProps { leaf: string }",
+        )
+        .expect("write leaf type");
+        std::fs::write(
+            dir.path().join("facade.ts"),
+            "export { default } from './leaf'",
+        )
+        .expect("write default facade");
+        std::fs::write(
+            dir.path().join("named.ts"),
+            "export interface NamedProps { named: number }",
+        )
+        .expect("write named type");
+        std::fs::write(
+            dir.path().join("default_named.ts"),
+            "export { NamedProps as default } from './named'",
+        )
+        .expect("write named default facade");
+        std::fs::write(
+            dir.path().join("renamed.ts"),
+            "export { default as RenamedProps } from './alias'",
+        )
+        .expect("write renamed default facade");
+        std::fs::write(
+            dir.path().join("events.ts"),
+            "type Events = { (e: 'save'): void }; export default Events",
+        )
+        .expect("write events type");
+        std::fs::write(
+            dir.path().join("model.ts"),
+            "type ModelValue = boolean | string; export default ModelValue",
+        )
+        .expect("write model type");
+
+        let filename = dir.path().join("Comp.vue");
+        let source = r#"<script setup lang="ts">
+import DirectProps from './direct'
+import AliasProps from './alias'
+import FacadeProps from './facade'
+import NamedDefaultProps from './default_named'
+import { RenamedProps } from './renamed'
+import Events from './events'
+import ModelValue from './model'
+const props = defineProps<DirectProps & AliasProps & FacadeProps & NamedDefaultProps & RenamedProps>()
+const emit = defineEmits<Events>()
+const model = defineModel<ModelValue>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("direct: { type: Boolean, required: false }"));
+        assert!(script
+            .content
+            .contains("alias: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("leaf: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("named: { type: Number, required: true }"));
+        assert!(script
+            .content
+            .contains("emits: /*@__PURE__*/_mergeModels([\"save\"], [\"update:modelValue\"]),"));
+        assert!(script
+            .content
+            .contains("\"modelValue\": { type: [Boolean, String] },"));
+
+        let deps = script.deps.iter().cloned().collect::<BTreeSet<_>>();
+        let expected = [
+            "direct.ts",
+            "alias.ts",
+            "leaf.ts",
+            "facade.ts",
+            "named.ts",
+            "default_named.ts",
+            "renamed.ts",
+            "events.ts",
+            "model.ts",
+        ]
+        .into_iter()
+        .map(|name| normalize_path_string(&dir.path().join(name)))
+        .collect::<BTreeSet<_>>();
         assert_eq!(deps, expected);
         assert!(!script.deps.iter().any(|dep| dep.contains('\\')));
     }
