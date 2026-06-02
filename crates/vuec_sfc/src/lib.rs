@@ -13719,24 +13719,25 @@ fn vue3_resolve_props_type<'a>(
             }
             analysis.props_type_declarations.get(&name).cloned()
         }
+        TSType::TSUnionType(union) => {
+            let members = vue3_merge_props_type_members(
+                union
+                    .types
+                    .iter()
+                    .filter_map(|ty| vue3_resolve_props_type(source, ty, analysis)),
+                false,
+            );
+            vue3_merged_type_members(source, union.span, members)
+        }
         TSType::TSIntersectionType(intersection) => {
-            let mut members = Vec::new();
-            for ty in &intersection.types {
-                if let Some(resolved) = vue3_resolve_props_type(source, ty, analysis) {
-                    members.extend(resolved.members);
-                }
-            }
-            if members.is_empty() {
-                None
-            } else {
-                Some(Vue27TypeMembers {
-                    source: source
-                        .get(intersection.span.start as usize..intersection.span.end as usize)
-                        .unwrap_or_default()
-                        .to_string(),
-                    members,
-                })
-            }
+            let members = vue3_merge_props_type_members(
+                intersection
+                    .types
+                    .iter()
+                    .filter_map(|ty| vue3_resolve_props_type(source, ty, analysis)),
+                true,
+            );
+            vue3_merged_type_members(source, intersection.span, members)
         }
         TSType::TSParenthesizedType(parenthesized) => {
             vue3_resolve_props_type(source, &parenthesized.type_annotation, analysis)
@@ -13762,6 +13763,53 @@ fn vue3_resolve_props_type<'a>(
         }
         _ => None,
     }
+}
+
+fn vue3_merged_type_members(
+    source: &str,
+    span: oxc_span::Span,
+    members: Vec<Vue27RuntimeProp>,
+) -> Option<Vue27TypeMembers> {
+    if members.is_empty() {
+        None
+    } else {
+        Some(Vue27TypeMembers {
+            source: source
+                .get(span.start as usize..span.end as usize)
+                .unwrap_or_default()
+                .to_string(),
+            members,
+        })
+    }
+}
+
+fn vue3_merge_props_type_members(
+    members: impl IntoIterator<Item = Vue27TypeMembers>,
+    filter_duplicate_unknown: bool,
+) -> Vec<Vue27RuntimeProp> {
+    let mut merged: Vec<Vue27RuntimeProp> = Vec::new();
+    for type_members in members {
+        for prop in type_members.members {
+            if let Some(index) = merged.iter().position(|existing| existing.key == prop.key) {
+                let existing = &mut merged[index];
+                let mut types = Vec::new();
+                for runtime_type in existing.types.iter().chain(prop.types.iter()) {
+                    if filter_duplicate_unknown && runtime_type == "Unknown" {
+                        continue;
+                    }
+                    push_unique(&mut types, runtime_type);
+                }
+                if types.is_empty() {
+                    types.push("Unknown".to_string());
+                }
+                existing.types = types;
+                existing.required &= prop.required;
+                continue;
+            }
+            merged.push(prop);
+        }
+    }
+    merged
 }
 
 fn vue3_resolve_projectable_props_type(
@@ -21407,6 +21455,38 @@ defineProps<Props>()
         assert!(script
             .content
             .contains("baz: { type: Boolean, required: false }"));
+        assert!(script.deps.is_empty(), "{:?}", script.deps);
+    }
+
+    #[test]
+    fn vue3_compile_script_merges_duplicate_union_intersection_props() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "Comp.vue",
+            r#"<script setup lang="ts">
+type Left = { shared: string; left?: boolean }
+type Right = { shared?: number; right: Function }
+type Props = Left & Right & ({ variant: string } | { variant?: boolean })
+defineProps<Props>()
+</script>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert_eq!(script.content.matches("shared: {").count(), 1);
+        assert_eq!(script.content.matches("variant: {").count(), 1);
+        assert!(script
+            .content
+            .contains("shared: { type: [String, Number], required: false }"));
+        assert!(script
+            .content
+            .contains("left: { type: Boolean, required: false }"));
+        assert!(script
+            .content
+            .contains("right: { type: Function, required: true }"));
+        assert!(script
+            .content
+            .contains("variant: { type: [String, Boolean], required: false }"));
         assert!(script.deps.is_empty(), "{:?}", script.deps);
     }
 

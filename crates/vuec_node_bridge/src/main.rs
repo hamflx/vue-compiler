@@ -6177,6 +6177,58 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_merges_external_duplicate_union_intersection_props_deps() {
+        let dir = std::env::temp_dir().join(format!(
+            "vuec-node-bridge-duplicate-union-intersection-props-deps-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        std::fs::write(
+            dir.join("types.ts"),
+            concat!(
+                "export type Left = { shared: string; unknownBool: any; left?: boolean }\n",
+                "export type Right = { shared?: number; unknownBool: boolean; right: Function }\n",
+                "export type Props = Left & Right & ",
+                "({ variant: string } | { variant?: boolean }) & ",
+                "({ maybe: any } | { maybe: boolean })"
+            ),
+        )
+        .expect("write duplicate props types");
+
+        let filename = dir.join("Comp.vue");
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "import type { Props } from './types'\n",
+                    "defineProps<Props>()",
+                    "</script>"
+                ),
+                "filename": filename.to_string_lossy()
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = compiled["content"].as_str().unwrap_or_default();
+        let expected_dep = dir.join("types.ts").to_string_lossy().replace('\\', "/");
+        assert!(compiled["errors"].as_array().unwrap().is_empty());
+        assert_eq!(content.matches("shared: {").count(), 1);
+        assert_eq!(content.matches("variant: {").count(), 1);
+        assert_eq!(content.matches("maybe: {").count(), 1);
+        assert!(content.contains("shared: { type: [String, Number], required: false }"));
+        assert!(content.contains("unknownBool: { type: Boolean, required: true }"));
+        assert!(content.contains("left: { type: Boolean, required: false }"));
+        assert!(content.contains("right: { type: Function, required: true }"));
+        assert!(content.contains("variant: { type: [String, Boolean], required: false }"));
+        assert!(content.contains("maybe: { type: Boolean, required: true, skipCheck: true }"));
+        assert_eq!(compiled["deps"], json!([expected_dep]));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn vue3_sfc_bridge_compile_script_resolves_external_interface_extends_type_deps() {
         let dir = std::env::temp_dir().join(format!(
             "vuec-node-bridge-interface-extends-deps-{}",
