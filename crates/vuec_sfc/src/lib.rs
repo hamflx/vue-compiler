@@ -13362,6 +13362,9 @@ fn vue3_resolve_props_type<'a>(
                     let ty = vue3_type_reference_first_type_argument(reference)?;
                     return vue3_resolve_props_type(source, ty, analysis);
                 }
+                "Record" => {
+                    return vue3_type_members_from_record_type(source, reference, analysis);
+                }
                 "Pick" => {
                     let ty = vue3_type_reference_type_argument(reference, 0)?;
                     let keys = vue3_type_reference_type_argument(reference, 1)?;
@@ -14319,6 +14322,45 @@ fn vue3_type_members_from_mapped_type(
                 key,
                 types: types.clone(),
                 required,
+                default: None,
+                is_method: false,
+                type_annotation_source: type_annotation_source.clone(),
+                member_source: member_source.clone(),
+            })
+            .collect(),
+    })
+}
+
+fn vue3_type_members_from_record_type(
+    source: &str,
+    reference: &TSTypeReference<'_>,
+    analysis: &Vue3ScriptSetupAnalysis,
+) -> Option<Vue27TypeMembers> {
+    let keys = vue3_resolve_ordered_string_type_keys(
+        vue3_type_reference_type_argument(reference, 0)?,
+        analysis,
+    )?;
+    let value = vue3_type_reference_type_argument(reference, 1)?;
+    let types = infer_vue3_runtime_type(value, analysis);
+    let span = reference.span();
+    let type_annotation_source = source
+        .get(value.span().start as usize..value.span().end as usize)
+        .map(ToOwned::to_owned);
+    let member_source = source
+        .get(span.start as usize..span.end as usize)
+        .map(ToOwned::to_owned);
+
+    Some(Vue27TypeMembers {
+        source: source
+            .get(span.start as usize..span.end as usize)
+            .unwrap_or_default()
+            .to_string(),
+        members: keys
+            .into_iter()
+            .map(|key| Vue27RuntimeProp {
+                key,
+                types: types.clone(),
+                required: true,
                 default: None,
                 is_method: false,
                 type_annotation_source: type_annotation_source.clone(),
@@ -20547,6 +20589,53 @@ defineProps<Props>()
         assert!(script
             .content
             .contains("colsLg: { type: Number, required: false }"));
+        assert!(script.deps.is_empty(), "{:?}", script.deps);
+    }
+
+    #[test]
+    fn vue3_compile_script_resolves_record_props_type() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "Comp.vue",
+            r#"<script setup lang="ts">
+type Flag = 'foo' | 'bar'
+type Breakpoints = 'sm' | 'md'
+type Props =
+  Record<`${Flag}_${Breakpoints}`, number> &
+  Partial<Record<Uppercase<Extract<Flag, 'foo'>>, string>> &
+  Record<Exclude<Flag, 'bar'>, boolean>
+defineProps<Props>()
+</script>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("foo_sm: { type: Number, required: true }"));
+        assert!(script
+            .content
+            .contains("foo_md: { type: Number, required: true }"));
+        assert!(script
+            .content
+            .contains("bar_sm: { type: Number, required: true }"));
+        assert!(script
+            .content
+            .contains("bar_md: { type: Number, required: true }"));
+        assert!(script
+            .content
+            .contains("FOO: { type: String, required: false }"));
+        assert!(script
+            .content
+            .contains("foo: { type: Boolean, required: true }"));
+        assert_eq!(
+            script.bindings.get("foo_sm").map(String::as_str),
+            Some("props")
+        );
+        assert_eq!(
+            script.bindings.get("FOO").map(String::as_str),
+            Some("props")
+        );
         assert!(script.deps.is_empty(), "{:?}", script.deps);
     }
 
