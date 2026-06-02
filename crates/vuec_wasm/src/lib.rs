@@ -408,6 +408,11 @@ fn sfc_script_options(value: &Value) -> SfcScriptCompileOptions {
         "inlineTemplateSsr",
         bool_option(value, "inline_template_ssr", nested_template_ssr),
     );
+    options.source_map = bool_option(
+        value,
+        "sourceMap",
+        bool_option(value, "source_map", options.source_map),
+    );
     options.is_prod = bool_option(
         value,
         "isProd",
@@ -533,6 +538,7 @@ mod tests {
         let options = sfc_script_options(&json!({
             "id": "xxxxxxxx",
             "inlineTemplate": true,
+            "sourceMap": false,
             "templateOptions": {
                 "ssr": true
             }
@@ -541,6 +547,7 @@ mod tests {
         assert_eq!(options.id.as_deref(), Some("xxxxxxxx"));
         assert!(options.inline_template);
         assert!(options.inline_template_ssr);
+        assert!(!options.source_map);
     }
 
     #[test]

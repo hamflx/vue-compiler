@@ -360,6 +360,7 @@ fn compile_sfc_command(args: CompileSfcArgs) -> Result<RunOutput> {
                 id: args.id.clone(),
                 inline_template: args.inline_template,
                 inline_template_ssr: args.inline_template && args.ssr,
+                source_map: args.source_map,
                 ..SfcScriptCompileOptions::default()
             },
         ))
@@ -1118,6 +1119,28 @@ mod tests {
         assert!(content.contains("__ssrInlineRender: true,"));
         assert!(content.contains("return (_ctx, _push, _parent, _attrs) => {"));
         assert!(content.contains("_ssrInterpolate(count.value)"));
+    }
+
+    #[test]
+    fn compiles_vue3_sfc_script_source_map_json() {
+        let source = "<script setup>\nconst msg = 'hi'\n</script>";
+        let path = write_temp("vuec-cli-sfc-script-map.vue", source);
+        let output = run_with_args([
+            "vuec",
+            "compile-sfc",
+            "--json",
+            "--source-map",
+            path.to_str().unwrap(),
+        ])
+        .expect("run");
+        let value: Value = serde_json::from_str(&output.stdout).expect("json");
+
+        assert_eq!(value["kind"], json!("vue3-sfc"));
+        assert_eq!(value["script"]["map"]["version"], json!(3));
+        assert_eq!(value["script"]["map"]["sourcesContent"][0], json!(source));
+        assert!(value["script"]["map"]["mappings"]
+            .as_str()
+            .is_some_and(|mappings| !mappings.is_empty()));
     }
 
     #[test]

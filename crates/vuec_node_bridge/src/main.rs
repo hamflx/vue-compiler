@@ -4183,6 +4183,11 @@ fn sfc_script_options(value: Option<&Value>) -> SfcScriptCompileOptions {
         "inlineTemplateSsr",
         bool_option(value, "inline_template_ssr", nested_template_ssr),
     );
+    options.source_map = bool_option(
+        value,
+        "sourceMap",
+        bool_option(value, "source_map", options.source_map),
+    );
     let nested_runtime_module_name = value
         .get("templateOptions")
         .or_else(|| value.get("template_options"))
@@ -4555,6 +4560,39 @@ mod tests {
         assert!(content.contains("const a = 1\nconst __returned__ = { a }"));
         assert!(compiled["scriptAst"].as_array().is_some());
         assert!(compiled["scriptSetupAst"].as_array().is_some());
+    }
+
+    #[test]
+    fn vue3_sfc_bridge_compile_script_projects_source_map_option() {
+        let source = "<script setup>\nconst count = 1\n</script>";
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": source,
+                "filename": "FooBar.vue"
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        assert_eq!(compiled["map"]["version"], json!(3));
+        assert_eq!(compiled["map"]["sources"], json!(["FooBar.vue"]));
+        assert_eq!(compiled["map"]["sourcesContent"][0], json!(source));
+        assert!(compiled["map"]["mappings"]
+            .as_str()
+            .is_some_and(|mappings| !mappings.is_empty()));
+
+        let disabled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": source,
+                "filename": "FooBar.vue",
+                "options": {
+                    "sourceMap": false
+                }
+            }),
+        )
+        .expect("vue3 compileScript");
+        assert!(disabled["map"].is_null());
     }
 
     #[test]
