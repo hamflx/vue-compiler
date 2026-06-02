@@ -4172,6 +4172,26 @@ fn sfc_script_options(value: Option<&Value>) -> SfcScriptCompileOptions {
         "inlineTemplate",
         bool_option(value, "inline_template", options.inline_template),
     );
+    let nested_runtime_module_name = value
+        .get("templateOptions")
+        .or_else(|| value.get("template_options"))
+        .and_then(|template_options| {
+            template_options
+                .get("compilerOptions")
+                .or_else(|| template_options.get("compiler_options"))
+        })
+        .and_then(|compiler_options| {
+            compiler_options
+                .get("runtimeModuleName")
+                .or_else(|| compiler_options.get("runtime_module_name"))
+        })
+        .and_then(Value::as_str);
+    options.runtime_module_name = value
+        .get("runtimeModuleName")
+        .or_else(|| value.get("runtime_module_name"))
+        .and_then(Value::as_str)
+        .or(nested_runtime_module_name)
+        .map(ToOwned::to_owned);
     options.ref_sugar = bool_option(
         value,
         "refSugar",
@@ -5019,6 +5039,38 @@ mod tests {
         assert!(content.contains("_createVNode(ChildComp)"));
         assert!(!content.contains("const __returned__"));
         assert_eq!(compiled["bindings"]["heading"], json!("props-aliased"));
+    }
+
+    #[test]
+    fn vue3_sfc_bridge_compile_script_rewrites_top_level_await_runtime_module() {
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup>",
+                    "const value = await Promise.resolve(1)",
+                    "</script>"
+                ),
+                "filename": "FooBar.vue",
+                "options": {
+                    "templateOptions": {
+                        "compilerOptions": {
+                            "runtimeModuleName": "npm:vue"
+                        }
+                    }
+                }
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = compiled["content"].as_str().unwrap_or_default();
+        assert!(compiled["errors"].as_array().unwrap().is_empty());
+        assert!(content
+            .starts_with("import { withAsyncContext as _withAsyncContext } from \"npm:vue\"\n"));
+        assert!(content.contains("async setup("));
+        assert!(content.contains("let __temp, __restore"));
+        assert!(content.contains("_withAsyncContext(() => Promise.resolve(1))"));
+        assert!(content.contains("const __returned__ = { value }"));
     }
 
     #[test]
