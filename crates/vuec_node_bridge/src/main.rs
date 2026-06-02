@@ -5074,6 +5074,40 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_returns_template_used_import_getters() {
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "import { FooBar, FooBaz, vMyDir } from './x'\n",
+                    "import { ref } from 'vue'\n",
+                    "const local = ref(0)",
+                    "</script>",
+                    "<template>",
+                    "<FooBaz />",
+                    "<foo-bar />",
+                    "<div v-my-dir>{{ FooBar }}</div>",
+                    "</template>"
+                ),
+                "filename": "FooBar.vue"
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = compiled["content"].as_str().unwrap_or_default();
+        assert!(compiled["errors"].as_array().unwrap().is_empty());
+        assert!(content.contains(
+            "const __returned__ = { local, get FooBar() { return FooBar }, get FooBaz() { return FooBaz }, get vMyDir() { return vMyDir } }"
+        ));
+        assert_eq!(compiled["bindings"]["FooBar"], json!("setup-maybe-ref"));
+        assert_eq!(compiled["bindings"]["FooBaz"], json!("setup-maybe-ref"));
+        assert_eq!(compiled["bindings"]["vMyDir"], json!("setup-maybe-ref"));
+        assert_eq!(compiled["bindings"]["ref"], json!("setup-const"));
+        assert_eq!(compiled["bindings"]["local"], json!("setup-maybe-ref"));
+    }
+
+    #[test]
     fn vue3_sfc_bridge_compile_script_merges_props_destructure_defaults() {
         let runtime = dispatch(
             "sfc.compileScript",

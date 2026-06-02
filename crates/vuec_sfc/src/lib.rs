@@ -6087,6 +6087,123 @@ fn vue27_template_uses_identifier(template: &str, local: &str, is_ts: bool) -> b
     identifier_usage_contains(&usage, local)
 }
 
+fn vue3_template_uses_identifier(template: &str, local: &str, is_ts: bool) -> bool {
+    let usage = vue3_template_usage_check_string(template, is_ts);
+    identifier_usage_contains(&usage, local)
+}
+
+fn vue3_template_usage_check_string(template: &str, is_ts: bool) -> String {
+    let mut code = String::new();
+    for token in HtmlTokenizer::new(template).tokenize() {
+        match token.kind {
+            HtmlTokenKind::StartTag {
+                name, attributes, ..
+            } => {
+                collect_vue3_template_component_usage(&mut code, &name);
+                for attribute in attributes {
+                    collect_vue3_template_attribute_usage(&mut code, &attribute, is_ts);
+                }
+            }
+            HtmlTokenKind::Text(text) => {
+                collect_vue27_template_text_usage(&mut code, &text, is_ts);
+            }
+            _ => {}
+        }
+    }
+    code.push(';');
+    code
+}
+
+fn collect_vue3_template_component_usage(code: &mut String, name: &str) {
+    let tag = name
+        .split_once('.')
+        .map(|(base, _)| base.trim())
+        .unwrap_or(name);
+    if tag.is_empty() || vue3_template_is_builtin_tag(tag) || vue27_template_is_reserved_tag(tag) {
+        return;
+    }
+    let camel = vue27_camelize(tag);
+    code.push(',');
+    code.push_str(&camel);
+    code.push(',');
+    code.push_str(&vue27_capitalize(&camel));
+}
+
+fn collect_vue3_template_attribute_usage(code: &mut String, attr: &HtmlAttribute, is_ts: bool) {
+    let name = attr.name.as_str();
+    if vue3_template_is_directive_attr(name) {
+        let base_name = vue27_template_directive_base_name(name);
+        if !vue27_template_is_builtin_dir(&base_name) {
+            code.push_str(",v");
+            code.push_str(&vue27_capitalize(&vue27_camelize(&base_name)));
+        }
+        if let Some(arg) = vue3_template_dynamic_argument(name) {
+            code.push(',');
+            code.push_str(&vue27_process_template_exp(arg, is_ts, None));
+        }
+        if let Some(value) = attr.value.as_deref() {
+            code.push(',');
+            code.push_str(&vue27_process_template_exp(value, is_ts, Some(&base_name)));
+        } else if base_name == "bind" {
+            if let Some(arg) = vue3_template_static_bind_argument(name) {
+                code.push(',');
+                code.push_str(&vue27_camelize(arg));
+            }
+        }
+    } else if name == "ref" {
+        if let Some(value) = attr.value.as_deref() {
+            code.push(',');
+            code.push_str(value);
+        }
+    }
+}
+
+fn vue3_template_is_directive_attr(name: &str) -> bool {
+    vue27_template_is_directive_attr(name) || name.starts_with('.')
+}
+
+fn vue3_template_dynamic_argument(name: &str) -> Option<&str> {
+    let start = name.find('[')?;
+    let rest = &name[start + 1..];
+    let end = rest.find(']')?;
+    Some(&rest[..end])
+}
+
+fn vue3_template_static_bind_argument(name: &str) -> Option<&str> {
+    if vue3_template_dynamic_argument(name).is_some() {
+        return None;
+    }
+    let raw = if let Some(arg) = name.strip_prefix(':') {
+        arg
+    } else if let Some(arg) = name.strip_prefix('.') {
+        arg
+    } else if let Some(arg) = name.strip_prefix("v-bind:") {
+        arg
+    } else {
+        return None;
+    };
+    raw.split('.').next().filter(|arg| !arg.is_empty())
+}
+
+fn vue3_template_is_builtin_tag(name: &str) -> bool {
+    vue27_template_is_builtin_tag(name)
+        || matches!(
+            name,
+            "Teleport"
+                | "teleport"
+                | "Suspense"
+                | "suspense"
+                | "KeepAlive"
+                | "keep-alive"
+                | "BaseTransition"
+                | "base-transition"
+                | "Transition"
+                | "transition"
+                | "TransitionGroup"
+                | "transition-group"
+        )
+}
+
 fn vue27_template_usage_check_string(template: &str, is_ts: bool) -> String {
     let mut code = String::new();
     for token in HtmlTokenizer::new(template).tokenize() {
@@ -8549,6 +8666,18 @@ struct Vue3ScriptSetupAnalysis {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+struct Vue3ScriptSetupReturnBinding {
+    name: String,
+    kind: Vue3ScriptSetupReturnBindingKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Vue3ScriptSetupReturnBindingKind {
+    Local,
+    Import { source: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Vue3ModelDecl {
     name: String,
     prop_runtime: Option<String>,
@@ -8604,7 +8733,7 @@ fn script_content(
             .is_some_and(|script| script_is_typescript(&script.attrs));
     let return_bindings = vue3_script_setup_return_bindings(descriptor, &setup_analysis, is_ts);
     let template_binding_metadata =
-        vue3_script_setup_template_binding_metadata(base_bindings, &setup_analysis);
+        vue3_script_setup_template_binding_metadata(descriptor, base_bindings, &setup_analysis);
     let template_props_aliases = vue3_script_setup_template_props_aliases(&setup_analysis);
     let inline_render = vue3_inline_template_render(
         descriptor,
@@ -8634,7 +8763,25 @@ fn script_content(
             inline_render.as_ref(),
         ),
     );
-    let mut bindings = setup_analysis.setup_bindings.clone();
+    let mut bindings = BTreeMap::new();
+    let script_returns = descriptor
+        .script
+        .as_ref()
+        .map(vue3_script_block_return_bindings)
+        .unwrap_or_default();
+    for import in script_returns
+        .imports
+        .iter()
+        .chain(setup_analysis.imports.iter())
+    {
+        if !import.is_type {
+            bindings.insert(
+                import.local.clone(),
+                vue3_script_import_binding_type(import).into(),
+            );
+        }
+    }
+    bindings.extend(setup_analysis.setup_bindings.clone());
     for prop in &setup_analysis.props_bindings {
         bindings
             .entry(prop.clone())
@@ -8654,10 +8801,28 @@ fn script_content(
 }
 
 fn vue3_script_setup_template_binding_metadata(
+    descriptor: &SfcDescriptor,
     base_bindings: &BTreeMap<String, String>,
     setup_analysis: &Vue3ScriptSetupAnalysis,
 ) -> BTreeMap<String, String> {
     let mut bindings = base_bindings.clone();
+    let script_returns = descriptor
+        .script
+        .as_ref()
+        .map(vue3_script_block_return_bindings)
+        .unwrap_or_default();
+    for import in script_returns
+        .imports
+        .iter()
+        .chain(setup_analysis.imports.iter())
+    {
+        if !import.is_type {
+            bindings.insert(
+                import.local.clone(),
+                vue3_script_import_binding_type(import).into(),
+            );
+        }
+    }
     bindings.extend(setup_analysis.setup_bindings.clone());
     for prop in &setup_analysis.props_bindings {
         bindings
@@ -8792,16 +8957,31 @@ fn vue3_script_setup_return_bindings(
     descriptor: &SfcDescriptor,
     setup_analysis: &Vue3ScriptSetupAnalysis,
     is_ts: bool,
-) -> Vec<String> {
+) -> Vec<Vue3ScriptSetupReturnBinding> {
     let script_returns = descriptor
         .script
         .as_ref()
         .map(vue3_script_block_return_bindings)
         .unwrap_or_default();
 
-    let mut bindings = script_returns.bindings;
+    let mut bindings = Vec::new();
+    for binding in script_returns.bindings {
+        push_unique_vue3_return_binding(
+            &mut bindings,
+            Vue3ScriptSetupReturnBinding {
+                name: binding,
+                kind: Vue3ScriptSetupReturnBindingKind::Local,
+            },
+        );
+    }
     for binding in &setup_analysis.return_bindings {
-        push_unique(&mut bindings, &binding);
+        push_unique_vue3_return_binding(
+            &mut bindings,
+            Vue3ScriptSetupReturnBinding {
+                name: binding.clone(),
+                kind: Vue3ScriptSetupReturnBindingKind::Local,
+            },
+        );
     }
     for import in script_returns
         .imports
@@ -8811,11 +8991,57 @@ fn vue3_script_setup_return_bindings(
         if import.is_type {
             continue;
         }
-        if vue27_script_setup_import_is_returned(descriptor, import, is_ts) {
-            push_unique(&mut bindings, &import.local);
+        if vue3_script_setup_import_is_returned(descriptor, import, is_ts) {
+            push_unique_vue3_return_binding(
+                &mut bindings,
+                Vue3ScriptSetupReturnBinding {
+                    name: import.local.clone(),
+                    kind: Vue3ScriptSetupReturnBindingKind::Import {
+                        source: import.source.clone(),
+                    },
+                },
+            );
         }
     }
     bindings
+}
+
+fn push_unique_vue3_return_binding(
+    bindings: &mut Vec<Vue3ScriptSetupReturnBinding>,
+    binding: Vue3ScriptSetupReturnBinding,
+) {
+    if bindings
+        .iter()
+        .any(|existing| existing.name == binding.name)
+    {
+        return;
+    }
+    bindings.push(binding);
+}
+
+fn vue3_script_setup_import_is_returned(
+    descriptor: &SfcDescriptor,
+    import: &Vue27ScriptImport,
+    is_ts: bool,
+) -> bool {
+    let Some(template) = descriptor.template.as_ref() else {
+        return true;
+    };
+    if template.attrs.src.is_some() || template.attrs.lang.is_some() {
+        return true;
+    }
+    vue3_template_uses_identifier(&template.content, &import.local, is_ts)
+}
+
+fn vue3_script_import_binding_type(import: &Vue27ScriptImport) -> &'static str {
+    if import.imported == "*"
+        || (import.imported == "default" && import.source.ends_with(".vue"))
+        || import.source == "vue"
+    {
+        "setup-const"
+    } else {
+        "setup-maybe-ref"
+    }
 }
 
 fn vue3_script_block_return_bindings(block: &SfcBlock) -> Vue27ScriptReturnBindings {
@@ -11832,7 +12058,7 @@ fn rewrite_vue3_compile_script_named_default_export(
 
 fn vue3_script_setup_export(
     setup_analysis: &Vue3ScriptSetupAnalysis,
-    bindings: &[String],
+    bindings: &[Vue3ScriptSetupReturnBinding],
     filename: &str,
     normal_script: &Vue3NormalScriptAnalysis,
     is_ts: bool,
@@ -12050,11 +12276,11 @@ fn vue3_script_setup_params(setup_analysis: &Vue3ScriptSetupAnalysis) -> String 
 
 fn vue3_script_setup_body(
     setup_analysis: &Vue3ScriptSetupAnalysis,
-    bindings: &[String],
+    bindings: &[Vue3ScriptSetupReturnBinding],
     inline_render: Option<&Vue3InlineTemplateRender>,
     is_ts: bool,
 ) -> String {
-    let returned = script_setup_returned_bindings(bindings);
+    let returned = script_setup_returned_bindings(bindings, &setup_analysis.setup_bindings);
     let mut body = String::new();
     if inline_render.is_none() && !setup_analysis.has_define_expose {
         body.push_str("  __expose();\n");
@@ -12085,17 +12311,46 @@ fn vue3_script_setup_body(
     body
 }
 
-fn script_setup_returned_bindings(bindings: &[String]) -> String {
+fn script_setup_returned_bindings(
+    bindings: &[Vue3ScriptSetupReturnBinding],
+    setup_bindings: &BTreeMap<String, String>,
+) -> String {
     let returned = bindings
         .iter()
-        .filter(|name| !name.starts_with("import:") && !name.starts_with("export:"))
-        .cloned()
+        .filter(|binding| {
+            !binding.name.starts_with("import:") && !binding.name.starts_with("export:")
+        })
+        .map(|binding| vue3_script_setup_return_binding_source(binding, setup_bindings))
         .collect::<Vec<_>>()
         .join(", ");
     if returned.is_empty() {
         "{  }".to_string()
     } else {
         format!("{{ {returned} }}")
+    }
+}
+
+fn vue3_script_setup_return_binding_source(
+    binding: &Vue3ScriptSetupReturnBinding,
+    setup_bindings: &BTreeMap<String, String>,
+) -> String {
+    match &binding.kind {
+        Vue3ScriptSetupReturnBindingKind::Import { source }
+            if source != "vue" && !source.ends_with(".vue") =>
+        {
+            format!("get {0}() {{ return {0} }}", binding.name)
+        }
+        _ if setup_bindings
+            .get(&binding.name)
+            .is_some_and(|binding_type| binding_type == "setup-let") =>
+        {
+            let set_arg = if binding.name == "v" { "_v" } else { "v" };
+            format!(
+                "get {0}() {{ return {0} }}, set {0}({1}) {{ {0} = {1} }}",
+                binding.name, set_arg
+            )
+        }
+        _ => binding.name.clone(),
     }
 }
 
@@ -13394,6 +13649,126 @@ await (await foo)
         assert!(script.errors.is_empty(), "{:?}", script.errors);
         assert!(script.content.contains("_withAsyncContext(async () => ("));
         assert!(script.content.matches("_withAsyncContext").count() >= 2);
+    }
+
+    #[test]
+    fn vue3_compile_script_returns_template_used_ts_import_getters() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup lang="ts">
+import { FooBar, FooBaz, FooQux, foo } from './x'
+const fooBar: FooBar = 1
+</script>
+<template>
+  <FooBaz></FooBaz>
+  <foo-qux/>
+  <foo/>
+  FooBar
+</template>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script.content.contains(
+            "const __returned__ = { fooBar, get FooBaz() { return FooBaz }, get FooQux() { return FooQux }, get foo() { return foo } }"
+        ));
+        assert!(!script.content.contains("fooBar, FooBar,"));
+        assert_eq!(
+            script.bindings.get("FooBaz").map(String::as_str),
+            Some("setup-maybe-ref")
+        );
+        assert_eq!(
+            script.bindings.get("FooQux").map(String::as_str),
+            Some("setup-maybe-ref")
+        );
+        assert_eq!(
+            script.bindings.get("foo").map(String::as_str),
+            Some("setup-maybe-ref")
+        );
+    }
+
+    #[test]
+    fn vue3_compile_script_template_import_usage_handles_directives_and_dynamic_args() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup lang="ts">
+import { vMyDir, FooBar, foo, bar, unused, baz, msg } from './x'
+</script>
+<template>
+  <div v-my-dir></div>
+  <FooBar #[foo.slotName] />
+  <FooBar #unused />
+  <div :[bar.attrName]="15"></div>
+  <div unused="unused"></div>
+  <div #[`item:${baz.key}`]="{ value }"></div>
+  <FooBar :msg />
+</template>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script.content.contains(
+            "const __returned__ = { get vMyDir() { return vMyDir }, get FooBar() { return FooBar }, get foo() { return foo }, get bar() { return bar }, get baz() { return baz }, get msg() { return msg } }"
+        ));
+        assert!(!script.content.contains("get unused()"));
+    }
+
+    #[test]
+    fn vue3_compile_script_template_import_usage_ignores_ts_annotation_identifiers() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup lang="ts">
+import { Foo, Bar, Baz, Qux, Fred } from './x'
+const a = 1
+function b() {}
+</script>
+<template>
+  {{ a as Foo }}
+  {{ b<Bar>() }}
+  {{ Baz }}
+  <Comp v-slot="{ data }: Qux">{{ data }}</Comp>
+  <div v-for="{ z = x as Qux } in list as Fred"/>
+</template>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("const __returned__ = { a, b, get Baz() { return Baz } }"));
+        assert!(!script.content.contains("get Foo()"));
+        assert!(!script.content.contains("get Bar()"));
+        assert!(!script.content.contains("get Qux()"));
+        assert!(!script.content.contains("get Fred()"));
+    }
+
+    #[test]
+    fn vue3_compile_script_return_binding_uses_setter_for_setup_let() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup>
+let count = 0
+let v = 1
+</script>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script.content.contains(
+            "const __returned__ = { get count() { return count }, set count(v) { count = v }, get v() { return v }, set v(_v) { v = _v } }"
+        ));
+        assert_eq!(
+            script.bindings.get("count").map(String::as_str),
+            Some("setup-let")
+        );
+        assert_eq!(
+            script.bindings.get("v").map(String::as_str),
+            Some("setup-let")
+        );
     }
 
     #[test]
