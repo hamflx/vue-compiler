@@ -5280,6 +5280,31 @@ mod tests {
         assert_eq!(compiled["bindings"]["vMyDir"], json!("setup-maybe-ref"));
         assert_eq!(compiled["bindings"]["ref"], json!("setup-const"));
         assert_eq!(compiled["bindings"]["local"], json!("setup-ref"));
+        assert_eq!(compiled["imports"]["FooBar"]["imported"], json!("FooBar"));
+        assert_eq!(compiled["imports"]["FooBar"]["local"], json!("FooBar"));
+        assert_eq!(compiled["imports"]["FooBar"]["source"], json!("./x"));
+        assert_eq!(compiled["imports"]["FooBar"]["isType"], json!(false));
+        assert_eq!(compiled["imports"]["FooBar"]["isFromSetup"], json!(true));
+        assert_eq!(
+            compiled["imports"]["FooBar"]["isUsedInTemplate"],
+            json!(true)
+        );
+        assert_eq!(compiled["imports"]["FooBaz"]["imported"], json!("FooBaz"));
+        assert_eq!(compiled["imports"]["FooBaz"]["local"], json!("FooBaz"));
+        assert_eq!(compiled["imports"]["FooBaz"]["source"], json!("./x"));
+        assert_eq!(compiled["imports"]["FooBaz"]["isType"], json!(false));
+        assert_eq!(compiled["imports"]["FooBaz"]["isFromSetup"], json!(true));
+        assert_eq!(
+            compiled["imports"]["FooBaz"]["isUsedInTemplate"],
+            json!(true)
+        );
+        assert_eq!(
+            compiled["imports"]["vMyDir"]["isUsedInTemplate"],
+            json!(true)
+        );
+        assert_eq!(compiled["imports"]["ref"]["source"], json!("vue"));
+        assert_eq!(compiled["imports"]["ref"]["isFromSetup"], json!(true));
+        assert_eq!(compiled["imports"]["ref"]["isUsedInTemplate"], json!(false));
     }
 
     #[test]

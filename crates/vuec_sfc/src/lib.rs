@@ -529,8 +529,8 @@ pub struct SfcScriptBlock {
     pub lang: Option<String>,
     /// Binding metadata keyed by binding name.
     pub bindings: BTreeMap<String, String>,
-    /// Imported binding names.
-    pub imports: Vec<String>,
+    /// Imported binding metadata keyed by local binding name.
+    pub imports: BTreeMap<String, SfcScriptImportBinding>,
     /// Script compile errors.
     pub errors: Vec<String>,
     /// Optional source map artifact.
@@ -543,6 +543,26 @@ pub struct SfcScriptBlock {
     pub script_setup_ast: Vec<String>,
     /// External dependencies discovered by script compilation.
     pub deps: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Public `compileScript().imports` metadata for one imported binding.
+pub struct SfcScriptImportBinding {
+    /// Whether this is a type-only import.
+    #[serde(rename = "isType")]
+    pub is_type: bool,
+    /// Imported export name: named export, `default`, or `*`.
+    pub imported: String,
+    /// Local binding name.
+    pub local: String,
+    /// Import source string.
+    pub source: String,
+    /// Whether the binding came from `<script setup>`.
+    #[serde(rename = "isFromSetup")]
+    pub is_from_setup: bool,
+    /// Whether the binding is used by the template.
+    #[serde(rename = "isUsedInTemplate")]
+    pub is_used_in_template: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1024,7 +1044,6 @@ impl SfcCompiler {
             script_setup_ast.push(format!("JsProgramId({})", id.0));
         }
         let summary = self.js.summarize_program(&raw_content, source_type);
-        let imports = summary.imports;
         let attrs = descriptor
             .script
             .as_ref()
@@ -1062,7 +1081,7 @@ impl SfcCompiler {
                 .or(descriptor.script.as_ref())
                 .and_then(|block| block.attrs.lang.clone()),
             bindings,
-            imports,
+            imports: generated_content.imports,
             errors,
             map: generated_content.map,
             script_ast,
@@ -1145,7 +1164,7 @@ impl SfcCompiler {
                 .or(descriptor.script.as_ref())
                 .and_then(|block| block.attrs.lang.clone()),
             bindings,
-            imports: summary.imports,
+            imports: BTreeMap::new(),
             errors: if script_errors.is_empty() {
                 summary.errors
             } else {
@@ -9061,6 +9080,7 @@ struct GeneratedScriptContent {
     content: String,
     errors: Vec<String>,
     bindings: BTreeMap<String, String>,
+    imports: BTreeMap<String, SfcScriptImportBinding>,
     removed_bindings: BTreeSet<String>,
     map: Option<SourceMapArtifact>,
 }
@@ -9173,6 +9193,7 @@ fn script_content(
             content,
             errors: Vec::new(),
             bindings: BTreeMap::new(),
+            imports: BTreeMap::new(),
             removed_bindings: BTreeSet::new(),
         };
     };
@@ -9201,6 +9222,12 @@ fn script_content(
         base_bindings,
         &script_binding_metadata,
         &setup_analysis,
+    );
+    let imports = vue3_script_setup_import_metadata(
+        descriptor,
+        &setup_analysis,
+        is_ts,
+        options.inline_template,
     );
     let template_props_aliases = vue3_script_setup_template_props_aliases(&setup_analysis);
     let inline_render = vue3_inline_template_render(
@@ -9270,6 +9297,7 @@ fn script_content(
         content,
         errors,
         bindings,
+        imports,
         removed_bindings: setup_analysis.removed_bindings,
         map,
     }
@@ -9714,6 +9742,88 @@ fn vue3_script_setup_return_bindings(
         }
     }
     bindings
+}
+
+fn vue3_script_setup_import_metadata(
+    descriptor: &SfcDescriptor,
+    setup_analysis: &Vue3ScriptSetupAnalysis,
+    is_ts: bool,
+    inline_template: bool,
+) -> BTreeMap<String, SfcScriptImportBinding> {
+    let script_returns = descriptor
+        .script
+        .as_ref()
+        .map(vue3_script_block_return_bindings)
+        .unwrap_or_default();
+    let mut imports = BTreeMap::new();
+    for import in &script_returns.imports {
+        vue3_insert_script_import_metadata(
+            &mut imports,
+            descriptor,
+            import,
+            false,
+            is_ts,
+            inline_template,
+        );
+    }
+    for import in &setup_analysis.imports {
+        vue3_insert_script_import_metadata(
+            &mut imports,
+            descriptor,
+            import,
+            true,
+            is_ts,
+            inline_template,
+        );
+    }
+    imports
+}
+
+fn vue3_insert_script_import_metadata(
+    imports: &mut BTreeMap<String, SfcScriptImportBinding>,
+    descriptor: &SfcDescriptor,
+    import: &Vue27ScriptImport,
+    is_from_setup: bool,
+    is_ts: bool,
+    inline_template: bool,
+) {
+    imports.entry(import.local.clone()).or_insert_with(|| {
+        let is_used_in_template = vue3_script_import_is_used_in_template(
+            descriptor,
+            &import.local,
+            is_ts,
+            inline_template,
+        );
+        SfcScriptImportBinding {
+            is_type: import.is_type,
+            imported: import.imported.clone(),
+            local: import.local.clone(),
+            source: import.source.clone(),
+            is_from_setup,
+            is_used_in_template,
+        }
+    });
+}
+
+fn vue3_script_import_is_used_in_template(
+    descriptor: &SfcDescriptor,
+    local: &str,
+    is_ts: bool,
+    inline_template: bool,
+) -> bool {
+    if inline_template {
+        return false;
+    }
+    if !is_ts {
+        return true;
+    }
+    let Some(template) = descriptor.template.as_ref() else {
+        return true;
+    };
+    if template.attrs.src.is_some() || template.attrs.lang.is_some() {
+        return true;
+    }
+    vue3_template_uses_identifier(&template.content, local, is_ts)
 }
 
 fn push_unique_vue3_return_binding(
@@ -13277,6 +13387,27 @@ mod tests {
         source.split_whitespace().collect::<Vec<_>>().join(" ")
     }
 
+    fn assert_script_import_binding(
+        script: &SfcScriptBlock,
+        local: &str,
+        imported: &str,
+        source: &str,
+        is_type: bool,
+        is_from_setup: bool,
+        is_used_in_template: bool,
+    ) {
+        let binding = script
+            .imports
+            .get(local)
+            .unwrap_or_else(|| panic!("missing import binding for {local}"));
+        assert_eq!(binding.imported, imported);
+        assert_eq!(binding.local, local);
+        assert_eq!(binding.source, source);
+        assert_eq!(binding.is_type, is_type);
+        assert_eq!(binding.is_from_setup, is_from_setup);
+        assert_eq!(binding.is_used_in_template, is_used_in_template);
+    }
+
     fn generated_original_position(
         script: &SfcScriptBlock,
         generated_needle: &str,
@@ -14668,6 +14799,65 @@ const fooBar: FooBar = 1
             script.bindings.get("foo").map(String::as_str),
             Some("setup-maybe-ref")
         );
+    }
+
+    #[test]
+    fn vue3_compile_script_projects_import_binding_metadata() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "FooBar.vue",
+            r#"<script lang="ts">
+import NormalDefault from './normal.vue'
+import { normalNamed } from './normal'
+</script>
+<script setup lang="ts">
+import SetupDefault from './setup.vue'
+import * as SetupNs from './ns'
+import { FooBar, FooBaz, type FooType } from './x'
+import { ref, defineProps } from 'vue'
+const local = ref(0)
+const props = defineProps<{ msg?: string }>()
+const typed: FooType | null = null
+</script>
+<template><FooBaz />{{ local }}{{ props.msg }}</template>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert_eq!(script.imports.len(), 8, "{:?}", script.imports);
+        assert_script_import_binding(
+            &script,
+            "NormalDefault",
+            "default",
+            "./normal.vue",
+            false,
+            false,
+            false,
+        );
+        assert_script_import_binding(
+            &script,
+            "normalNamed",
+            "normalNamed",
+            "./normal",
+            false,
+            false,
+            false,
+        );
+        assert_script_import_binding(
+            &script,
+            "SetupDefault",
+            "default",
+            "./setup.vue",
+            false,
+            true,
+            false,
+        );
+        assert_script_import_binding(&script, "SetupNs", "*", "./ns", false, true, false);
+        assert_script_import_binding(&script, "FooBar", "FooBar", "./x", false, true, false);
+        assert_script_import_binding(&script, "FooBaz", "FooBaz", "./x", false, true, true);
+        assert_script_import_binding(&script, "FooType", "FooType", "./x", true, true, false);
+        assert_script_import_binding(&script, "ref", "ref", "vue", false, true, false);
+        assert!(script.imports.get("defineProps").is_none());
     }
 
     #[test]
