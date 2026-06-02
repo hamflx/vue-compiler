@@ -4273,6 +4273,9 @@ struct Vue3GenericTypeAlias {
     params: Vec<String>,
     declared_types: BTreeMap<String, Vec<String>>,
     define_model_declared_types: BTreeMap<String, Vec<String>>,
+    type_query_declared_types: BTreeMap<String, Vec<String>>,
+    define_model_type_query_declared_types: BTreeMap<String, Vec<String>>,
+    keyof_type_query_declared_types: BTreeMap<String, Vec<String>>,
     props_type_declarations: BTreeMap<String, Vue27TypeMembers>,
     keyof_runtime_type_declarations: BTreeMap<String, Vec<String>>,
     props_options_type_declarations: BTreeMap<String, Vue27TypeMembers>,
@@ -4298,6 +4301,9 @@ struct Vue3EmitsTypeSyntax {
 struct Vue27TypeContext {
     declared_types: BTreeMap<String, Vec<String>>,
     define_model_declared_types: BTreeMap<String, Vec<String>>,
+    type_query_declared_types: BTreeMap<String, Vec<String>>,
+    define_model_type_query_declared_types: BTreeMap<String, Vec<String>>,
+    keyof_type_query_declared_types: BTreeMap<String, Vec<String>>,
     props_type_declarations: BTreeMap<String, Vue27TypeMembers>,
     keyof_runtime_type_declarations: BTreeMap<String, Vec<String>>,
     props_options_type_declarations: BTreeMap<String, Vue27TypeMembers>,
@@ -4778,6 +4784,9 @@ fn vue27_normal_script_type_context(descriptor: &SfcDescriptor) -> Vue27TypeCont
     Vue27TypeContext {
         declared_types: analysis.declared_types,
         define_model_declared_types: BTreeMap::new(),
+        type_query_declared_types: BTreeMap::new(),
+        define_model_type_query_declared_types: BTreeMap::new(),
+        keyof_type_query_declared_types: BTreeMap::new(),
         props_type_declarations: analysis.props_type_declarations,
         keyof_runtime_type_declarations: BTreeMap::new(),
         props_options_type_declarations: BTreeMap::new(),
@@ -4822,6 +4831,9 @@ fn vue3_normal_script_type_context(
     let mut analysis = Vue3ScriptSetupAnalysis {
         declared_types: context.declared_types,
         define_model_declared_types: context.define_model_declared_types,
+        type_query_declared_types: context.type_query_declared_types,
+        define_model_type_query_declared_types: context.define_model_type_query_declared_types,
+        keyof_type_query_declared_types: context.keyof_type_query_declared_types,
         props_type_declarations: context.props_type_declarations,
         keyof_runtime_type_declarations: context.keyof_runtime_type_declarations,
         props_options_type_declarations: context.props_options_type_declarations,
@@ -4844,6 +4856,9 @@ fn vue3_normal_script_type_context(
     Vue27TypeContext {
         declared_types: analysis.declared_types,
         define_model_declared_types: analysis.define_model_declared_types,
+        type_query_declared_types: analysis.type_query_declared_types,
+        define_model_type_query_declared_types: analysis.define_model_type_query_declared_types,
+        keyof_type_query_declared_types: analysis.keyof_type_query_declared_types,
         props_type_declarations: analysis.props_type_declarations,
         keyof_runtime_type_declarations: analysis.keyof_runtime_type_declarations,
         props_options_type_declarations: analysis.props_options_type_declarations,
@@ -4911,6 +4926,9 @@ fn vue3_global_type_context_from_source(
     let mut analysis = Vue3ScriptSetupAnalysis {
         declared_types: seed_context.declared_types,
         define_model_declared_types: seed_context.define_model_declared_types,
+        type_query_declared_types: seed_context.type_query_declared_types,
+        define_model_type_query_declared_types: seed_context.define_model_type_query_declared_types,
+        keyof_type_query_declared_types: seed_context.keyof_type_query_declared_types,
         props_type_declarations: seed_context.props_type_declarations,
         keyof_runtime_type_declarations: seed_context.keyof_runtime_type_declarations,
         props_options_type_declarations: seed_context.props_options_type_declarations,
@@ -4932,6 +4950,9 @@ fn vue3_global_type_context_from_source(
     let mut context = Vue27TypeContext {
         declared_types: analysis.declared_types,
         define_model_declared_types: analysis.define_model_declared_types,
+        type_query_declared_types: analysis.type_query_declared_types,
+        define_model_type_query_declared_types: analysis.define_model_type_query_declared_types,
+        keyof_type_query_declared_types: analysis.keyof_type_query_declared_types,
         props_type_declarations: analysis.props_type_declarations,
         keyof_runtime_type_declarations: analysis.keyof_runtime_type_declarations,
         props_options_type_declarations: analysis.props_options_type_declarations,
@@ -5133,6 +5154,15 @@ fn retain_vue3_type_context_names(context: &mut Vue27TypeContext, names: &BTreeS
         .define_model_declared_types
         .retain(|name, _| names.contains(name));
     context
+        .type_query_declared_types
+        .retain(|name, _| names.contains(name));
+    context
+        .define_model_type_query_declared_types
+        .retain(|name, _| names.contains(name));
+    context
+        .keyof_type_query_declared_types
+        .retain(|name, _| names.contains(name));
+    context
         .props_type_declarations
         .retain(|name, _| names.contains(name));
     context
@@ -5167,6 +5197,24 @@ fn merge_vue3_type_context_missing(target: &mut Vue27TypeContext, source: Vue27T
     for (name, runtime) in source.define_model_declared_types {
         target
             .define_model_declared_types
+            .entry(name)
+            .or_insert(runtime);
+    }
+    for (name, runtime) in source.type_query_declared_types {
+        target
+            .type_query_declared_types
+            .entry(name)
+            .or_insert(runtime);
+    }
+    for (name, runtime) in source.define_model_type_query_declared_types {
+        target
+            .define_model_type_query_declared_types
+            .entry(name)
+            .or_insert(runtime);
+    }
+    for (name, runtime) in source.keyof_type_query_declared_types {
+        target
+            .keyof_type_query_declared_types
             .entry(name)
             .or_insert(runtime);
     }
@@ -5334,6 +5382,10 @@ fn vue3_external_type_context_from_source_inner(
     );
     analysis.declared_types = seed_context.declared_types;
     analysis.define_model_declared_types = seed_context.define_model_declared_types;
+    analysis.type_query_declared_types = seed_context.type_query_declared_types;
+    analysis.define_model_type_query_declared_types =
+        seed_context.define_model_type_query_declared_types;
+    analysis.keyof_type_query_declared_types = seed_context.keyof_type_query_declared_types;
     analysis.props_type_declarations = seed_context.props_type_declarations;
     analysis.keyof_runtime_type_declarations = seed_context.keyof_runtime_type_declarations;
     analysis.props_options_type_declarations = seed_context.props_options_type_declarations;
@@ -5361,6 +5413,15 @@ fn vue3_external_type_context_from_source_inner(
             .retain(|name, _| exported.contains(name));
         analysis
             .define_model_declared_types
+            .retain(|name, _| exported.contains(name));
+        analysis
+            .type_query_declared_types
+            .retain(|name, _| exported.contains(name));
+        analysis
+            .define_model_type_query_declared_types
+            .retain(|name, _| exported.contains(name));
+        analysis
+            .keyof_type_query_declared_types
             .retain(|name, _| exported.contains(name));
         analysis
             .props_type_declarations
@@ -5394,6 +5455,9 @@ fn vue3_external_type_context_from_source_inner(
     Vue27TypeContext {
         declared_types: analysis.declared_types,
         define_model_declared_types: analysis.define_model_declared_types,
+        type_query_declared_types: analysis.type_query_declared_types,
+        define_model_type_query_declared_types: analysis.define_model_type_query_declared_types,
+        keyof_type_query_declared_types: analysis.keyof_type_query_declared_types,
         props_type_declarations: analysis.props_type_declarations,
         keyof_runtime_type_declarations: analysis.keyof_runtime_type_declarations,
         props_options_type_declarations: analysis.props_options_type_declarations,
@@ -5413,6 +5477,9 @@ fn seed_vue3_external_type_deps(filename: &str, analysis: &mut Vue3ScriptSetupAn
         .declared_types
         .keys()
         .chain(analysis.define_model_declared_types.keys())
+        .chain(analysis.type_query_declared_types.keys())
+        .chain(analysis.define_model_type_query_declared_types.keys())
+        .chain(analysis.keyof_type_query_declared_types.keys())
         .chain(analysis.props_type_declarations.keys())
         .chain(analysis.keyof_runtime_type_declarations.keys())
         .chain(analysis.props_options_type_declarations.keys())
@@ -5858,6 +5925,29 @@ fn insert_vue3_type_alias_from_analysis(
             .define_model_declared_types
             .insert(target_name.to_string(), value);
     }
+    if let Some(value) = source.type_query_declared_types.get(source_name).cloned() {
+        target
+            .type_query_declared_types
+            .insert(target_name.to_string(), value);
+    }
+    if let Some(value) = source
+        .define_model_type_query_declared_types
+        .get(source_name)
+        .cloned()
+    {
+        target
+            .define_model_type_query_declared_types
+            .insert(target_name.to_string(), value);
+    }
+    if let Some(value) = source
+        .keyof_type_query_declared_types
+        .get(source_name)
+        .cloned()
+    {
+        target
+            .keyof_type_query_declared_types
+            .insert(target_name.to_string(), value);
+    }
     if let Some(value) = source.props_type_declarations.get(source_name).cloned() {
         target
             .props_type_declarations
@@ -5945,6 +6035,29 @@ fn insert_vue3_local_type_alias(
             .define_model_declared_types
             .insert(exported_name.to_string(), value);
     }
+    if let Some(value) = analysis.type_query_declared_types.get(local_name).cloned() {
+        analysis
+            .type_query_declared_types
+            .insert(exported_name.to_string(), value);
+    }
+    if let Some(value) = analysis
+        .define_model_type_query_declared_types
+        .get(local_name)
+        .cloned()
+    {
+        analysis
+            .define_model_type_query_declared_types
+            .insert(exported_name.to_string(), value);
+    }
+    if let Some(value) = analysis
+        .keyof_type_query_declared_types
+        .get(local_name)
+        .cloned()
+    {
+        analysis
+            .keyof_type_query_declared_types
+            .insert(exported_name.to_string(), value);
+    }
     if let Some(value) = analysis.props_type_declarations.get(local_name).cloned() {
         analysis
             .props_type_declarations
@@ -6024,6 +6137,9 @@ fn project_vue3_export_all_type_context(
         .declared_types
         .keys()
         .chain(imported.define_model_declared_types.keys())
+        .chain(imported.type_query_declared_types.keys())
+        .chain(imported.define_model_type_query_declared_types.keys())
+        .chain(imported.keyof_type_query_declared_types.keys())
         .chain(imported.props_type_declarations.keys())
         .chain(imported.keyof_runtime_type_declarations.keys())
         .chain(imported.props_options_type_declarations.keys())
@@ -6056,6 +6172,24 @@ fn insert_vue3_re_exported_type_alias(
     if let Some(runtime) = imported.define_model_declared_types.get(imported_name) {
         analysis
             .define_model_declared_types
+            .insert(exported_name.to_string(), runtime.clone());
+    }
+    if let Some(runtime) = imported.type_query_declared_types.get(imported_name) {
+        analysis
+            .type_query_declared_types
+            .insert(exported_name.to_string(), runtime.clone());
+    }
+    if let Some(runtime) = imported
+        .define_model_type_query_declared_types
+        .get(imported_name)
+    {
+        analysis
+            .define_model_type_query_declared_types
+            .insert(exported_name.to_string(), runtime.clone());
+    }
+    if let Some(runtime) = imported.keyof_type_query_declared_types.get(imported_name) {
+        analysis
+            .keyof_type_query_declared_types
             .insert(exported_name.to_string(), runtime.clone());
     }
     if let Some(props) = imported.props_type_declarations.get(imported_name) {
@@ -6135,6 +6269,24 @@ fn insert_vue3_external_type_alias(
             .define_model_declared_types
             .insert(local_name.to_string(), runtime.clone());
     }
+    if let Some(runtime) = imported.type_query_declared_types.get(imported_name) {
+        context
+            .type_query_declared_types
+            .insert(local_name.to_string(), runtime.clone());
+    }
+    if let Some(runtime) = imported
+        .define_model_type_query_declared_types
+        .get(imported_name)
+    {
+        context
+            .define_model_type_query_declared_types
+            .insert(local_name.to_string(), runtime.clone());
+    }
+    if let Some(runtime) = imported.keyof_type_query_declared_types.get(imported_name) {
+        context
+            .keyof_type_query_declared_types
+            .insert(local_name.to_string(), runtime.clone());
+    }
     if let Some(props) = imported.props_type_declarations.get(imported_name) {
         context
             .props_type_declarations
@@ -6185,6 +6337,15 @@ fn insert_vue3_external_type_alias(
     if imported.declared_types.contains_key(imported_name)
         || imported
             .define_model_declared_types
+            .contains_key(imported_name)
+        || imported
+            .type_query_declared_types
+            .contains_key(imported_name)
+        || imported
+            .define_model_type_query_declared_types
+            .contains_key(imported_name)
+        || imported
+            .keyof_type_query_declared_types
             .contains_key(imported_name)
         || imported.props_type_declarations.contains_key(imported_name)
         || imported
@@ -6278,6 +6439,9 @@ fn vue3_type_context_names(context: &Vue27TypeContext) -> BTreeSet<String> {
         .declared_types
         .keys()
         .chain(context.define_model_declared_types.keys())
+        .chain(context.type_query_declared_types.keys())
+        .chain(context.define_model_type_query_declared_types.keys())
+        .chain(context.keyof_type_query_declared_types.keys())
         .chain(context.props_type_declarations.keys())
         .chain(context.keyof_runtime_type_declarations.keys())
         .chain(context.props_options_type_declarations.keys())
@@ -6293,6 +6457,11 @@ fn vue3_type_context_names(context: &Vue27TypeContext) -> BTreeSet<String> {
 fn vue3_type_context_has_name(context: &Vue27TypeContext, name: &str) -> bool {
     context.declared_types.contains_key(name)
         || context.define_model_declared_types.contains_key(name)
+        || context.type_query_declared_types.contains_key(name)
+        || context
+            .define_model_type_query_declared_types
+            .contains_key(name)
+        || context.keyof_type_query_declared_types.contains_key(name)
         || context.props_type_declarations.contains_key(name)
         || context.keyof_runtime_type_declarations.contains_key(name)
         || context.props_options_type_declarations.contains_key(name)
@@ -7238,6 +7407,11 @@ fn refresh_vue3_generic_type_alias(
         params,
         declared_types: analysis.declared_types.clone(),
         define_model_declared_types: analysis.define_model_declared_types.clone(),
+        type_query_declared_types: analysis.type_query_declared_types.clone(),
+        define_model_type_query_declared_types: analysis
+            .define_model_type_query_declared_types
+            .clone(),
+        keyof_type_query_declared_types: analysis.keyof_type_query_declared_types.clone(),
         props_type_declarations: analysis.props_type_declarations.clone(),
         keyof_runtime_type_declarations: analysis.keyof_runtime_type_declarations.clone(),
         props_options_type_declarations: analysis.props_options_type_declarations.clone(),
@@ -7314,41 +7488,57 @@ fn register_vue3_declared_variable_props_options(
         let Some(type_annotation) = declarator.type_annotation.as_ref() else {
             continue;
         };
+        register_vue3_local_type_name(analysis, &name);
+        register_vue3_declared_type_query_runtime_types(
+            &name,
+            &type_annotation.type_annotation,
+            analysis,
+        );
         match &type_annotation.type_annotation {
             TSType::TSTypeLiteral(_) => {
-                register_vue3_declared_props_options(
+                if let Some(props_options) = vue3_props_options_type_members(
                     source,
-                    &name,
                     &type_annotation.type_annotation,
                     analysis,
-                );
+                ) {
+                    analysis
+                        .props_options_type_declarations
+                        .insert(name.to_string(), props_options);
+                }
             }
             TSType::TSFunctionType(function) => {
-                register_vue3_declared_return_props_options(
+                if let Some(props_options) = vue3_props_options_type_members(
                     source,
-                    &name,
                     &function.return_type.type_annotation,
                     analysis,
-                );
+                ) {
+                    analysis
+                        .return_type_props_options_declarations
+                        .insert(name.to_string(), props_options);
+                }
             }
             _ => {}
         }
     }
 }
 
-fn register_vue3_declared_props_options(
-    source: &str,
+fn register_vue3_declared_type_query_runtime_types(
     name: &str,
     ty: &TSType<'_>,
     analysis: &mut Vue3ScriptSetupAnalysis,
 ) {
-    register_vue3_local_type_name(analysis, name);
-    let Some(props_options) = vue3_props_options_type_members(source, ty, analysis) else {
-        return;
-    };
     analysis
-        .props_options_type_declarations
-        .insert(name.to_string(), props_options);
+        .type_query_declared_types
+        .insert(name.to_string(), infer_vue3_runtime_type(ty, analysis));
+    analysis.define_model_type_query_declared_types.insert(
+        name.to_string(),
+        infer_vue3_define_model_runtime_type(ty, analysis),
+    );
+    if let Some(types) = infer_vue3_keyof_runtime_type(ty, analysis) {
+        analysis
+            .keyof_type_query_declared_types
+            .insert(name.to_string(), types);
+    }
 }
 
 fn register_vue3_declared_return_props_options(
@@ -7385,6 +7575,9 @@ fn infer_vue3_enum_runtime_type(declaration: &TSEnumDeclaration<'_>) -> Vec<Stri
 fn register_vue3_local_type_name(analysis: &mut Vue3ScriptSetupAnalysis, name: &str) {
     analysis.type_sources.remove(name);
     analysis.type_deps.remove(name);
+    analysis.type_query_declared_types.remove(name);
+    analysis.define_model_type_query_declared_types.remove(name);
+    analysis.keyof_type_query_declared_types.remove(name);
     analysis.props_options_type_declarations.remove(name);
     analysis.return_type_props_options_declarations.remove(name);
     analysis.generic_type_aliases.remove(name);
@@ -8476,6 +8669,13 @@ fn vue3_type_query_name_key(query: &TSTypeQuery<'_>) -> Option<String> {
             Some(format!("{left}.{}", qualified.right.name))
         }
         TSTypeQueryExprName::TSImportType(_) | TSTypeQueryExprName::ThisExpression(_) => None,
+    }
+}
+
+fn vue3_type_query_identifier_key(query: &TSTypeQuery<'_>) -> Option<String> {
+    match &query.expr_name {
+        TSTypeQueryExprName::IdentifierReference(identifier) => Some(identifier.name.to_string()),
+        _ => None,
     }
 }
 
@@ -11765,6 +11965,9 @@ struct Vue3ScriptSetupAnalysis {
     vue_import_aliases: BTreeMap<String, String>,
     declared_types: BTreeMap<String, Vec<String>>,
     define_model_declared_types: BTreeMap<String, Vec<String>>,
+    type_query_declared_types: BTreeMap<String, Vec<String>>,
+    define_model_type_query_declared_types: BTreeMap<String, Vec<String>>,
+    keyof_type_query_declared_types: BTreeMap<String, Vec<String>>,
     props_type_declarations: BTreeMap<String, Vue27TypeMembers>,
     keyof_runtime_type_declarations: BTreeMap<String, Vec<String>>,
     props_options_type_declarations: BTreeMap<String, Vue27TypeMembers>,
@@ -12568,6 +12771,9 @@ fn analyze_vue3_script_setup(
     let mut type_analysis = Vue3ScriptSetupAnalysis {
         declared_types: type_context.declared_types,
         define_model_declared_types: type_context.define_model_declared_types,
+        type_query_declared_types: type_context.type_query_declared_types,
+        define_model_type_query_declared_types: type_context.define_model_type_query_declared_types,
+        keyof_type_query_declared_types: type_context.keyof_type_query_declared_types,
         props_type_declarations: type_context.props_type_declarations,
         keyof_runtime_type_declarations: type_context.keyof_runtime_type_declarations,
         props_options_type_declarations: type_context.props_options_type_declarations,
@@ -12590,6 +12796,10 @@ fn analyze_vue3_script_setup(
     let mut analysis = Vue3ScriptSetupAnalysis {
         declared_types: type_analysis.declared_types,
         define_model_declared_types: type_analysis.define_model_declared_types,
+        type_query_declared_types: type_analysis.type_query_declared_types,
+        define_model_type_query_declared_types: type_analysis
+            .define_model_type_query_declared_types,
+        keyof_type_query_declared_types: type_analysis.keyof_type_query_declared_types,
         props_type_declarations: type_analysis.props_type_declarations,
         keyof_runtime_type_declarations: type_analysis.keyof_runtime_type_declarations,
         props_options_type_declarations: type_analysis.props_options_type_declarations,
@@ -13898,6 +14108,15 @@ fn vue3_scoped_analysis_for_generic_type_alias(
         .define_model_declared_types
         .extend(alias.define_model_declared_types.clone());
     scoped_analysis
+        .type_query_declared_types
+        .extend(alias.type_query_declared_types.clone());
+    scoped_analysis
+        .define_model_type_query_declared_types
+        .extend(alias.define_model_type_query_declared_types.clone());
+    scoped_analysis
+        .keyof_type_query_declared_types
+        .extend(alias.keyof_type_query_declared_types.clone());
+    scoped_analysis
         .props_type_declarations
         .extend(alias.props_type_declarations.clone());
     scoped_analysis
@@ -13955,6 +14174,20 @@ fn vue3_scoped_analysis_for_generic_type_alias(
             param.clone(),
             infer_vue3_define_model_runtime_type(argument, analysis),
         );
+        scoped_analysis
+            .type_query_declared_types
+            .insert(param.clone(), infer_vue3_runtime_type(argument, analysis));
+        scoped_analysis
+            .define_model_type_query_declared_types
+            .insert(
+                param.clone(),
+                infer_vue3_define_model_runtime_type(argument, analysis),
+            );
+        if let Some(types) = infer_vue3_keyof_runtime_type(argument, analysis) {
+            scoped_analysis
+                .keyof_type_query_declared_types
+                .insert(param.clone(), types);
+        }
     }
     Some((alias.source.clone(), scoped_analysis))
 }
@@ -14934,6 +15167,10 @@ fn infer_vue3_keyof_runtime_type(
                 .get(&resolved.name)
                 .cloned()
         }
+        TSType::TSTypeQuery(query) => {
+            let name = vue3_type_query_identifier_key(query)?;
+            analysis.keyof_type_query_declared_types.get(&name).cloned()
+        }
         TSType::TSParenthesizedType(parenthesized) => {
             infer_vue3_keyof_runtime_type(&parenthesized.type_annotation, analysis)
         }
@@ -15092,6 +15329,14 @@ fn infer_vue3_runtime_type(node: &TSType<'_>, analysis: &Vue3ScriptSetupAnalysis
         TSType::TSImportType(import_type) => {
             if let Some(resolved) = vue3_resolve_import_type(import_type, analysis) {
                 if let Some(types) = resolved.context.declared_types.get(&resolved.name) {
+                    return types.clone();
+                }
+            }
+            vec!["null".into()]
+        }
+        TSType::TSTypeQuery(query) => {
+            if let Some(name) = vue3_type_query_identifier_key(query) {
+                if let Some(types) = analysis.type_query_declared_types.get(&name) {
                     return types.clone();
                 }
             }
@@ -15265,6 +15510,14 @@ fn infer_vue3_define_model_runtime_type(
                     .define_model_declared_types
                     .get(&resolved.name)
                 {
+                    return types.clone();
+                }
+            }
+            vec!["Unknown".into()]
+        }
+        TSType::TSTypeQuery(query) => {
+            if let Some(name) = vue3_type_query_identifier_key(query) {
+                if let Some(types) = analysis.define_model_type_query_declared_types.get(&name) {
                     return types.clone();
                 }
             }
@@ -21495,6 +21748,56 @@ defineModel<readonly boolean[] | keyof any>()
         assert!(script
             .content
             .contains("\"modelValue\": { type: [Array, String, Number, Symbol] },"));
+        assert!(script.deps.is_empty(), "{:?}", script.deps);
+    }
+
+    #[test]
+    fn vue3_compile_script_resolves_type_query_runtime_types() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "Comp.vue",
+            r#"<script setup lang="ts">
+declare const text: string
+declare const count: number
+declare const flag: boolean
+declare const boxed: { id: string }
+declare const list: string[]
+type Props = {
+  text: typeof text
+  count: typeof count
+  flag: typeof flag
+  boxed: typeof boxed
+  list: typeof list
+  keys: keyof typeof boxed
+}
+defineProps<Props>()
+defineModel<typeof flag | typeof list>()
+</script>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("text: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("count: { type: Number, required: true }"));
+        assert!(script
+            .content
+            .contains("flag: { type: Boolean, required: true }"));
+        assert!(script
+            .content
+            .contains("boxed: { type: Object, required: true }"));
+        assert!(script
+            .content
+            .contains("list: { type: Array, required: true }"));
+        assert!(script
+            .content
+            .contains("keys: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("\"modelValue\": { type: [Boolean, Array] },"));
         assert!(script.deps.is_empty(), "{:?}", script.deps);
     }
 
