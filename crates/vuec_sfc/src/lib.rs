@@ -15318,27 +15318,25 @@ fn infer_vue3_runtime_type(node: &TSType<'_>, analysis: &Vue3ScriptSetupAnalysis
         TSType::TSStringKeyword(_) => vec!["String".into()],
         TSType::TSNumberKeyword(_) => vec!["Number".into()],
         TSType::TSBooleanKeyword(_) => vec!["Boolean".into()],
-        TSType::TSObjectKeyword(_) | TSType::TSIntersectionType(_) => {
-            vec!["Object".into()]
-        }
+        TSType::TSObjectKeyword(_) => vec!["Object".into()],
         TSType::TSTypeLiteral(literal) => {
             infer_vue3_runtime_type_from_signatures(&literal.members, "Object")
         }
         TSType::TSFunctionType(_) | TSType::TSConstructorType(_) => vec!["Function".into()],
         TSType::TSArrayType(_) | TSType::TSTupleType(_) => vec!["Array".into()],
         TSType::TSSymbolKeyword(_) => vec!["Symbol".into()],
+        TSType::TSNullKeyword(_) => vec!["null".into()],
         TSType::TSAnyKeyword(_)
         | TSType::TSBigIntKeyword(_)
         | TSType::TSNeverKeyword(_)
-        | TSType::TSNullKeyword(_)
         | TSType::TSUndefinedKeyword(_)
         | TSType::TSUnknownKeyword(_)
-        | TSType::TSVoidKeyword(_) => vec!["null".into()],
+        | TSType::TSVoidKeyword(_) => vec!["Unknown".into()],
         TSType::TSLiteralType(literal) => match &literal.literal {
             TSLiteral::StringLiteral(_) => vec!["String".into()],
             TSLiteral::BooleanLiteral(_) => vec!["Boolean".into()],
             TSLiteral::NumericLiteral(_) => vec!["Number".into()],
-            _ => vec!["null".into()],
+            _ => vec!["Unknown".into()],
         },
         TSType::TSTypeReference(reference) => {
             if let Some(name) = vue3_ts_type_name_key(&reference.type_name) {
@@ -15360,7 +15358,7 @@ fn infer_vue3_runtime_type(node: &TSType<'_>, analysis: &Vue3ScriptSetupAnalysis
                     _ => {}
                 }
             }
-            vec!["null".into()]
+            vec!["Unknown".into()]
         }
         TSType::TSImportType(import_type) => {
             if let Some(resolved) = vue3_resolve_import_type(import_type, analysis) {
@@ -15368,7 +15366,7 @@ fn infer_vue3_runtime_type(node: &TSType<'_>, analysis: &Vue3ScriptSetupAnalysis
                     return types.clone();
                 }
             }
-            vec!["null".into()]
+            vec!["Unknown".into()]
         }
         TSType::TSTypeQuery(query) => {
             if let Some(name) = vue3_type_query_identifier_key(query) {
@@ -15376,19 +15374,19 @@ fn infer_vue3_runtime_type(node: &TSType<'_>, analysis: &Vue3ScriptSetupAnalysis
                     return types.clone();
                 }
             }
-            vec!["null".into()]
+            vec!["Unknown".into()]
         }
         TSType::TSParenthesizedType(parenthesized) => {
             infer_vue3_runtime_type(&parenthesized.type_annotation, analysis)
         }
         TSType::TSIndexedAccessType(indexed) => {
             infer_vue3_indexed_access_runtime_type(indexed, analysis)
-                .unwrap_or_else(|| vec!["null".into()])
+                .unwrap_or_else(|| vec!["Unknown".into()])
         }
         TSType::TSTypeOperatorType(operator) => {
             if operator.operator == TSTypeOperatorOperator::Keyof {
                 return infer_vue3_keyof_runtime_type(&operator.type_annotation, analysis)
-                    .unwrap_or_else(|| vec!["null".into()]);
+                    .unwrap_or_else(|| vec!["Unknown".into()]);
             }
             infer_vue3_runtime_type(&operator.type_annotation, analysis)
         }
@@ -15401,15 +15399,30 @@ fn infer_vue3_runtime_type(node: &TSType<'_>, analysis: &Vue3ScriptSetupAnalysis
             }
             types
         }
+        TSType::TSIntersectionType(intersection) => {
+            let mut types = Vec::new();
+            for ty in &intersection.types {
+                for runtime_type in infer_vue3_runtime_type(ty, analysis) {
+                    if runtime_type != "Unknown" {
+                        push_unique(&mut types, &runtime_type);
+                    }
+                }
+            }
+            if types.is_empty() {
+                vec!["Unknown".into()]
+            } else {
+                types
+            }
+        }
         TSType::TSMappedType(mapped) => {
             if let Some(type_name) = vue3_mapped_identity_runtime_type_parameter(mapped, analysis) {
                 if let Some(types) = analysis.declared_types.get(&type_name) {
                     return types.clone();
                 }
             }
-            vec!["null".into()]
+            vec!["Unknown".into()]
         }
-        _ => vec!["null".into()],
+        _ => vec!["Unknown".into()],
     }
 }
 
@@ -15634,12 +15647,15 @@ fn gen_vue3_runtime_props(
     let mut entries = Vec::new();
     for prop in props {
         let key = vue3_runtime_prop_key(&prop.key);
-        let type_string = vue27_runtime_type_string(&prop.types);
+        let (types, skip_check) = vue3_runtime_prop_codegen_types(&prop.types);
+        let type_string = vue27_runtime_type_string(&types);
         if !is_prod {
+            let skip_check = if skip_check { ", skipCheck: true" } else { "" };
             entries.push(format!(
-                "{key}: {{ type: {}, required: {}{} }}",
+                "{key}: {{ type: {}, required: {}{}{} }}",
                 type_string,
                 prop.required,
+                skip_check,
                 prop.default
                     .as_ref()
                     .map(|default| format!(", {default}"))
@@ -15647,7 +15663,7 @@ fn gen_vue3_runtime_props(
             ));
             continue;
         }
-        let keep_prod_type = prop.types.iter().any(|ty| {
+        let keep_prod_type = types.iter().any(|ty| {
             ty == "Boolean"
                 || (ty == "Function" && (!has_static_defaults || prop.default.is_some()))
         });
@@ -15667,6 +15683,22 @@ fn gen_vue3_runtime_props(
         }
     }
     format!("{{\n    {}\n  }}", entries.join(",\n    "))
+}
+
+fn vue3_runtime_prop_codegen_types(types: &[String]) -> (Vec<String>, bool) {
+    let mut runtime_types = types.to_vec();
+    let has_unknown = runtime_types.iter().any(|ty| ty == "Unknown");
+    let has_boolean = runtime_types.iter().any(|ty| ty == "Boolean");
+    let has_function = runtime_types.iter().any(|ty| ty == "Function");
+    if has_unknown {
+        if has_boolean || has_function {
+            runtime_types.retain(|ty| ty != "Unknown");
+            return (runtime_types, true);
+        }
+        runtime_types.clear();
+        runtime_types.push("null".to_string());
+    }
+    (runtime_types, false)
 }
 
 fn vue3_runtime_prop_key(key: &str) -> String {
@@ -15980,6 +16012,7 @@ fn check_vue3_define_props_destructure_default_types(analysis: &mut Vue3ScriptSe
         };
         if prop_types.is_empty()
             || prop_types.iter().any(|ty| ty == "null")
+            || prop_types.iter().any(|ty| ty == "Unknown")
             || prop_types.iter().any(|ty| ty == value_type)
         {
             continue;
@@ -21872,6 +21905,48 @@ defineModel<Callable | InterfaceMixed>()
         assert!(script
             .content
             .contains("\"modelValue\": { type: [Function, Object] },"));
+        assert!(script.deps.is_empty(), "{:?}", script.deps);
+    }
+
+    #[test]
+    fn vue3_compile_script_resolves_intersection_runtime_types() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "Comp.vue",
+            r#"<script setup lang="ts">
+type Callable = { (): string }
+type Box = { value: number }
+type UnknownOnly = any
+type Props = {
+  scalar: string & number
+  callableBox: Callable & Box
+  maybe: any | boolean
+  unknown: UnknownOnly
+}
+defineProps<Props>()
+defineModel<(string & number) | (Callable & Box)>()
+</script>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("scalar: { type: [String, Number], required: true }"));
+        assert!(script
+            .content
+            .contains("callableBox: { type: [Function, Object], required: true }"));
+        assert!(script
+            .content
+            .contains("maybe: { type: Boolean, required: true, skipCheck: true }"));
+        assert!(script
+            .content
+            .contains("unknown: { type: null, required: true }"));
+        assert!(script
+            .content
+            .contains("\"modelValue\": { type: [String, Number, Function, Object] },"));
+        assert!(!script.content.contains("type: Unknown"));
+        assert!(!script.content.contains("[Unknown"));
         assert!(script.deps.is_empty(), "{:?}", script.deps);
     }
 
