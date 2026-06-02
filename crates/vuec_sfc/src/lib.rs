@@ -15,10 +15,10 @@ use oxc_ast::ast::{
     FormalParameter, FormalParameters, Function, ImportDeclarationSpecifier, ImportOrExportKind,
     ModuleExportName, ObjectExpression, ObjectProperty, ObjectPropertyKind, PropertyKey,
     SimpleAssignmentTarget, Statement, TSEnumDeclaration, TSFunctionType, TSImportType,
-    TSImportTypeQualifier, TSInterfaceBody, TSLiteral, TSModuleDeclaration,
-    TSModuleDeclarationBody, TSModuleDeclarationName, TSSignature, TSTupleElement, TSType,
-    TSTypeAliasDeclaration, TSTypeAnnotation, TSTypeLiteral, TSTypeName, TSTypeOperatorOperator,
-    TSTypeQuery, TSTypeQueryExprName, TSTypeReference, VariableDeclaration,
+    TSImportTypeQualifier, TSInterfaceBody, TSInterfaceDeclaration, TSInterfaceHeritage, TSLiteral,
+    TSModuleDeclaration, TSModuleDeclarationBody, TSModuleDeclarationName, TSSignature,
+    TSTupleElement, TSType, TSTypeAliasDeclaration, TSTypeAnnotation, TSTypeLiteral, TSTypeName,
+    TSTypeOperatorOperator, TSTypeQuery, TSTypeQueryExprName, TSTypeReference, VariableDeclaration,
     VariableDeclarationKind, WithStatement,
 };
 use oxc_span::GetSpan;
@@ -5176,6 +5176,23 @@ fn extend_vue3_type_context_from_external_imports(
     source_type: oxc_span::SourceType,
     context: &mut Vue27TypeContext,
 ) {
+    let mut seen = BTreeSet::new();
+    extend_vue3_type_context_from_external_imports_with_seen(
+        filename,
+        source,
+        source_type,
+        context,
+        &mut seen,
+    );
+}
+
+fn extend_vue3_type_context_from_external_imports_with_seen(
+    filename: &str,
+    source: &str,
+    source_type: oxc_span::SourceType,
+    context: &mut Vue27TypeContext,
+    seen: &mut BTreeSet<String>,
+) {
     let allocator = oxc_allocator::Allocator::default();
     let parsed = oxc_parser::Parser::new(&allocator, source, source_type)
         .with_options(oxc_parser::ParseOptions {
@@ -5197,8 +5214,7 @@ fn extend_vue3_type_context_from_external_imports(
         let Some(resolved) = resolve_vue3_type_import(filename, import_source) else {
             continue;
         };
-        let mut seen = BTreeSet::new();
-        let Some(imported_context) = vue3_external_type_context_from_path(&resolved, &mut seen)
+        let Some(imported_context) = vue3_external_type_context_from_path(&resolved, &mut *seen)
         else {
             continue;
         };
@@ -5261,6 +5277,25 @@ fn vue3_external_type_context_from_source_inner(
         type_seen: seen.clone(),
         ..Vue3ScriptSetupAnalysis::default()
     };
+    let mut seed_context = Vue27TypeContext::default();
+    extend_vue3_type_context_from_external_imports_with_seen(
+        filename,
+        source,
+        source_type,
+        &mut seed_context,
+        seen,
+    );
+    analysis.declared_types = seed_context.declared_types;
+    analysis.define_model_declared_types = seed_context.define_model_declared_types;
+    analysis.props_type_declarations = seed_context.props_type_declarations;
+    analysis.props_options_type_declarations = seed_context.props_options_type_declarations;
+    analysis.return_type_props_options_declarations =
+        seed_context.return_type_props_options_declarations;
+    analysis.generic_type_aliases = seed_context.generic_type_aliases;
+    analysis.string_literal_type_declarations = seed_context.string_literal_type_declarations;
+    analysis.emits_type_declarations = seed_context.emits_type_declarations;
+    analysis.type_sources = seed_context.type_sources;
+    analysis.type_deps = seed_context.type_deps;
     collect_vue3_declared_types_from_statements(source, &parsed.program.body, &mut analysis);
     collect_vue3_declared_type_deps_from_statements(&parsed.program.body, &mut analysis);
     project_vue3_default_type_exports(source, &parsed.program.body, &mut analysis);
@@ -5597,21 +5632,8 @@ fn project_vue3_default_type_exports(
         match &declaration.declaration {
             ExportDefaultDeclarationKind::TSInterfaceDeclaration(declaration) => {
                 let name = declaration.id.name.to_string();
-                let deps = collect_vue3_interface_body_type_deps(&declaration.body, analysis);
-                register_vue3_local_type_name(analysis, &name);
-                analysis
-                    .declared_types
-                    .insert(name.clone(), vec!["Object".into()]);
-                analysis
-                    .define_model_declared_types
-                    .insert(name.clone(), vec!["Object".into()]);
-                let props =
-                    vue3_type_members_from_interface_body(source, &declaration.body, analysis);
-                analysis.props_type_declarations.insert(name.clone(), props);
-                let emits = vue27_emits_type_from_interface_body(source, &declaration.body);
-                if !emits.events.is_empty() {
-                    analysis.emits_type_declarations.insert(name.clone(), emits);
-                }
+                let deps = collect_vue3_interface_type_deps(declaration, analysis);
+                register_vue3_interface_declaration(source, declaration, analysis);
                 insert_vue3_declared_type_deps(analysis, &name, deps);
                 insert_vue3_local_type_alias(analysis, &name, "default");
             }
@@ -6534,7 +6556,7 @@ fn collect_vue3_declared_type_deps_from_statement(
 ) {
     match statement {
         Statement::TSInterfaceDeclaration(declaration) => {
-            let deps = collect_vue3_interface_body_type_deps(&declaration.body, analysis);
+            let deps = collect_vue3_interface_type_deps(declaration, analysis);
             insert_vue3_declared_type_deps(analysis, declaration.id.name.as_str(), deps);
         }
         Statement::TSTypeAliasDeclaration(declaration) => {
@@ -6569,7 +6591,7 @@ fn collect_vue3_declared_type_deps_from_statement(
             if let ExportDefaultDeclarationKind::TSInterfaceDeclaration(declaration) =
                 &declaration.declaration
             {
-                let deps = collect_vue3_interface_body_type_deps(&declaration.body, analysis);
+                let deps = collect_vue3_interface_type_deps(declaration, analysis);
                 insert_vue3_declared_type_deps(analysis, declaration.id.name.as_str(), deps);
             }
         }
@@ -6583,7 +6605,7 @@ fn collect_vue3_declared_type_deps_from_declaration(
 ) {
     match declaration {
         Declaration::TSInterfaceDeclaration(declaration) => {
-            let deps = collect_vue3_interface_body_type_deps(&declaration.body, analysis);
+            let deps = collect_vue3_interface_type_deps(declaration, analysis);
             insert_vue3_declared_type_deps(analysis, declaration.id.name.as_str(), deps);
         }
         Declaration::TSTypeAliasDeclaration(declaration) => {
@@ -6613,12 +6635,22 @@ fn collect_vue3_declared_type_deps_from_declaration(
     }
 }
 
-fn collect_vue3_interface_body_type_deps(
-    body: &TSInterfaceBody<'_>,
+fn collect_vue3_interface_type_deps(
+    declaration: &TSInterfaceDeclaration<'_>,
     analysis: &Vue3ScriptSetupAnalysis,
 ) -> BTreeSet<String> {
     let mut deps = BTreeSet::new();
-    for signature in &body.body {
+    for heritage in &declaration.extends {
+        if let Some(name) = vue3_interface_heritage_name(heritage) {
+            collect_vue3_named_type_deps(&name, analysis, &mut deps);
+        }
+        if let Some(type_arguments) = heritage.type_arguments.as_ref() {
+            for ty in &type_arguments.params {
+                collect_vue3_type_argument_deps_into(ty, analysis, &mut deps);
+            }
+        }
+    }
+    for signature in &declaration.body.body {
         collect_vue3_signature_type_deps(signature, analysis, &mut deps);
     }
     deps
@@ -6645,20 +6677,7 @@ fn collect_vue3_declared_type_from_statement(
 ) {
     match statement {
         Statement::TSInterfaceDeclaration(declaration) => {
-            let name = declaration.id.name.to_string();
-            register_vue3_local_type_name(analysis, &name);
-            analysis
-                .declared_types
-                .insert(name.clone(), vec!["Object".into()]);
-            analysis
-                .define_model_declared_types
-                .insert(name.clone(), vec!["Object".into()]);
-            let props = vue3_type_members_from_interface_body(source, &declaration.body, analysis);
-            analysis.props_type_declarations.insert(name.clone(), props);
-            let emits = vue27_emits_type_from_interface_body(source, &declaration.body);
-            if !emits.events.is_empty() {
-                analysis.emits_type_declarations.insert(name, emits);
-            }
+            register_vue3_interface_declaration(source, declaration, analysis);
         }
         Statement::TSTypeAliasDeclaration(declaration) => {
             register_vue3_type_alias_declaration(source, declaration, analysis);
@@ -6696,20 +6715,7 @@ fn collect_vue3_declared_type_from_declaration(
 ) {
     match declaration {
         Declaration::TSInterfaceDeclaration(declaration) => {
-            let name = declaration.id.name.to_string();
-            register_vue3_local_type_name(analysis, &name);
-            analysis
-                .declared_types
-                .insert(name.clone(), vec!["Object".into()]);
-            analysis
-                .define_model_declared_types
-                .insert(name.clone(), vec!["Object".into()]);
-            let props = vue3_type_members_from_interface_body(source, &declaration.body, analysis);
-            analysis.props_type_declarations.insert(name.clone(), props);
-            let emits = vue27_emits_type_from_interface_body(source, &declaration.body);
-            if !emits.events.is_empty() {
-                analysis.emits_type_declarations.insert(name, emits);
-            }
+            register_vue3_interface_declaration(source, declaration, analysis);
         }
         Declaration::TSTypeAliasDeclaration(declaration) => {
             register_vue3_type_alias_declaration(source, declaration, analysis);
@@ -6732,6 +6738,27 @@ fn collect_vue3_declared_type_from_declaration(
             register_vue3_ts_enum_declaration(declaration, analysis);
         }
         _ => {}
+    }
+}
+
+fn register_vue3_interface_declaration(
+    source: &str,
+    declaration: &TSInterfaceDeclaration<'_>,
+    analysis: &mut Vue3ScriptSetupAnalysis,
+) {
+    let name = declaration.id.name.to_string();
+    register_vue3_local_type_name(analysis, &name);
+    analysis
+        .declared_types
+        .insert(name.clone(), vec!["Object".into()]);
+    analysis
+        .define_model_declared_types
+        .insert(name.clone(), vec!["Object".into()]);
+    let props = vue3_type_members_from_interface(source, declaration, analysis);
+    analysis.props_type_declarations.insert(name.clone(), props);
+    let emits = vue3_emits_type_from_interface(source, declaration, analysis);
+    if !emits.events.is_empty() {
+        analysis.emits_type_declarations.insert(name, emits);
     }
 }
 
@@ -13659,6 +13686,122 @@ fn vue3_type_members_from_interface_body(
     }
 }
 
+fn vue3_type_members_from_interface(
+    source: &str,
+    declaration: &TSInterfaceDeclaration<'_>,
+    analysis: &Vue3ScriptSetupAnalysis,
+) -> Vue27TypeMembers {
+    let mut members = vue3_type_members_from_interface_body(source, &declaration.body, analysis);
+    for heritage in &declaration.extends {
+        let Some(base) = vue3_resolve_interface_heritage_props_type(source, heritage, analysis)
+        else {
+            continue;
+        };
+        for prop in base.members {
+            if !members.members.iter().any(|member| member.key == prop.key) {
+                members.members.push(prop);
+            }
+        }
+    }
+    members
+}
+
+fn vue3_resolve_interface_heritage_props_type(
+    source: &str,
+    heritage: &TSInterfaceHeritage<'_>,
+    analysis: &Vue3ScriptSetupAnalysis,
+) -> Option<Vue27TypeMembers> {
+    let ty_source = vue3_interface_heritage_type_source(source, heritage)?;
+    let wrapped = format!("type __VuecResolved = {ty_source}");
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(&allocator, &wrapped, oxc_span::SourceType::ts())
+        .with_options(oxc_parser::ParseOptions {
+            parse_regular_expression: true,
+            ..oxc_parser::ParseOptions::default()
+        })
+        .parse();
+    if parsed.panicked || !parsed.errors.is_empty() {
+        return None;
+    }
+    for statement in &parsed.program.body {
+        if let Statement::TSTypeAliasDeclaration(declaration) = statement {
+            return vue3_resolve_props_type(&wrapped, &declaration.type_annotation, analysis);
+        }
+    }
+    None
+}
+
+fn vue3_emits_type_from_interface(
+    source: &str,
+    declaration: &TSInterfaceDeclaration<'_>,
+    analysis: &Vue3ScriptSetupAnalysis,
+) -> Vue27EmitsType {
+    let mut emits = vue27_emits_type_from_interface_body(source, &declaration.body);
+    for heritage in &declaration.extends {
+        let Some(base) = vue3_resolve_interface_heritage_emits_type(source, heritage, analysis)
+        else {
+            continue;
+        };
+        for event in base.events {
+            push_unique(&mut emits.events, &event);
+        }
+    }
+    emits
+}
+
+fn vue3_resolve_interface_heritage_emits_type(
+    source: &str,
+    heritage: &TSInterfaceHeritage<'_>,
+    analysis: &Vue3ScriptSetupAnalysis,
+) -> Option<Vue27EmitsType> {
+    let ty_source = vue3_interface_heritage_type_source(source, heritage)?;
+    let wrapped = format!("type __VuecResolved = {ty_source}");
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(&allocator, &wrapped, oxc_span::SourceType::ts())
+        .with_options(oxc_parser::ParseOptions {
+            parse_regular_expression: true,
+            ..oxc_parser::ParseOptions::default()
+        })
+        .parse();
+    if parsed.panicked || !parsed.errors.is_empty() {
+        return None;
+    }
+    for statement in &parsed.program.body {
+        if let Statement::TSTypeAliasDeclaration(declaration) = statement {
+            return vue3_resolve_emits_type(&wrapped, &declaration.type_annotation, analysis);
+        }
+    }
+    None
+}
+
+fn vue3_interface_heritage_type_source(
+    source: &str,
+    heritage: &TSInterfaceHeritage<'_>,
+) -> Option<String> {
+    let start = heritage.expression.span().start as usize;
+    let end = heritage
+        .type_arguments
+        .as_ref()
+        .map(|arguments| arguments.span.end as usize)
+        .unwrap_or(heritage.expression.span().end as usize);
+    source.get(start..end).map(str::trim).map(ToOwned::to_owned)
+}
+
+fn vue3_interface_heritage_name(heritage: &TSInterfaceHeritage<'_>) -> Option<String> {
+    vue3_expression_type_name_key(&heritage.expression)
+}
+
+fn vue3_expression_type_name_key(expression: &Expression<'_>) -> Option<String> {
+    match unwrap_vue3_ts_expression(expression) {
+        Expression::Identifier(identifier) => Some(identifier.name.to_string()),
+        Expression::StaticMemberExpression(member) => {
+            let left = vue3_expression_type_name_key(&member.object)?;
+            Some(format!("{left}.{}", member.property.name))
+        }
+        _ => None,
+    }
+}
+
 fn vue3_runtime_props_from_signatures(
     source: &str,
     signatures: &[TSSignature<'_>],
@@ -18983,8 +19126,13 @@ const model = defineModel<ModelValue>()
     fn vue3_compile_script_resolves_relative_default_type_imports_and_re_exports() {
         let dir = tempfile::tempdir().expect("temp dir");
         std::fs::write(
+            dir.path().join("direct_base.ts"),
+            "export interface DirectBase { inherited?: string }",
+        )
+        .expect("write direct base type");
+        std::fs::write(
             dir.path().join("direct.ts"),
-            "export default interface DirectProps { direct?: boolean }",
+            "import type { DirectBase } from './direct_base'\nexport default interface DirectProps extends DirectBase { direct?: boolean }",
         )
         .expect("write direct type");
         std::fs::write(
@@ -19051,6 +19199,9 @@ const model = defineModel<ModelValue>()
             .contains("direct: { type: Boolean, required: false }"));
         assert!(script
             .content
+            .contains("inherited: { type: String, required: false }"));
+        assert!(script
+            .content
             .contains("alias: { type: String, required: true }"));
         assert!(script
             .content
@@ -19067,6 +19218,7 @@ const model = defineModel<ModelValue>()
 
         let deps = script.deps.iter().cloned().collect::<BTreeSet<_>>();
         let expected = [
+            "direct_base.ts",
             "direct.ts",
             "alias.ts",
             "leaf.ts",
@@ -19638,6 +19790,106 @@ defineProps<Props<Base>>()
             .collect::<BTreeSet<_>>();
         assert_eq!(deps, expected);
         assert!(!script.deps.iter().any(|dep| dep.contains('\\')));
+    }
+
+    #[test]
+    fn vue3_compile_script_resolves_interface_extends_props() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "Comp.vue",
+            r#"<script lang="ts">
+interface Foo { x?: number }
+</script>
+<script setup lang="ts">
+interface Bar extends Foo { y?: number }
+type Extra = { extra?: boolean }
+interface Props extends Bar, Extra {
+  z: number
+  y: string
+}
+defineProps<Props>()
+</script>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("x: { type: Number, required: false }"));
+        assert!(script
+            .content
+            .contains("y: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("z: { type: Number, required: true }"));
+        assert!(script
+            .content
+            .contains("extra: { type: Boolean, required: false }"));
+        assert!(!script
+            .content
+            .contains("y: { type: Number, required: false }"));
+        assert_eq!(script.bindings.get("x").map(String::as_str), Some("props"));
+        assert_eq!(script.bindings.get("y").map(String::as_str), Some("props"));
+        assert_eq!(script.bindings.get("z").map(String::as_str), Some("props"));
+        assert_eq!(
+            script.bindings.get("extra").map(String::as_str),
+            Some("props")
+        );
+        assert!(script.deps.is_empty(), "{:?}", script.deps);
+    }
+
+    #[test]
+    fn vue3_compile_script_resolves_external_interface_extends_type_deps() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let types_file = dir.path().join("types.ts");
+        std::fs::write(
+            &types_file,
+            "export interface Base { ext?: string }\nexport interface Props extends Base { local: number }",
+        )
+        .expect("write interface props");
+
+        let filename = dir.path().join("Comp.vue");
+        let source = r#"<script setup lang="ts">
+import type { Props } from './types'
+defineProps<Props>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("ext: { type: String, required: false }"));
+        assert!(script
+            .content
+            .contains("local: { type: Number, required: true }"));
+
+        let deps = script.deps.iter().cloned().collect::<BTreeSet<_>>();
+        let expected = [types_file]
+            .into_iter()
+            .map(|path| normalize_path_string(&path))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(deps, expected);
+        assert!(!script.deps.iter().any(|dep| dep.contains('\\')));
+    }
+
+    #[test]
+    fn vue3_compile_script_resolves_interface_extends_emits() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "Comp.vue",
+            r#"<script setup lang="ts">
+interface Base { (e: 'foo'): void }
+interface Emits extends Base { (e: 'bar'): void }
+const emit = defineEmits<Emits>()
+</script>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script.content.contains("emits: [\"bar\", \"foo\"],"));
+        assert!(script.deps.is_empty(), "{:?}", script.deps);
     }
 
     #[test]
