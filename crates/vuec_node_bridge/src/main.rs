@@ -4893,6 +4893,74 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_reports_props_type_resolution_errors() {
+        let unresolved = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "defineProps<X>()",
+                    "</script>"
+                ),
+                "filename": "FooBar.vue"
+            }),
+        )
+        .expect("vue3 compileScript");
+        assert!(unresolved["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| {
+                error.as_str().is_some_and(|error| {
+                    error.contains(
+                        "Unresolvable type reference or unsupported built-in utility type",
+                    )
+                })
+            }));
+
+        let missing_import = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "import { X } from './foo'\n",
+                    "defineProps<X>()",
+                    "</script>"
+                ),
+                "filename": "FooBar.vue"
+            }),
+        )
+        .expect("vue3 compileScript");
+        assert!(missing_import["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| {
+                error.as_str().is_some_and(|error| {
+                    error.contains("Failed to resolve import source \"./foo\".")
+                })
+            }));
+
+        let silent_member = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "import type P from 'unknown'\n",
+                    "defineProps<{ foo: T, bar: T['bar'], baz: P }>()",
+                    "</script>"
+                ),
+                "filename": "FooBar.vue"
+            }),
+        )
+        .expect("vue3 compileScript");
+        assert!(silent_member["errors"].as_array().unwrap().is_empty());
+        assert_eq!(silent_member["bindings"]["foo"], json!("props"));
+        assert_eq!(silent_member["bindings"]["bar"], json!("props"));
+        assert_eq!(silent_member["bindings"]["baz"], json!("props"));
+    }
+
+    #[test]
     fn vue3_sfc_bridge_compile_script_reports_props_destructure_errors() {
         let dynamic_key = dispatch(
             "sfc.compileScript",
