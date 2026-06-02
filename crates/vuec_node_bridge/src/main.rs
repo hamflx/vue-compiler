@@ -5675,6 +5675,63 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_returns_class_type_deps() {
+        let dir = std::env::temp_dir().join(format!(
+            "vuec-node-bridge-class-type-deps-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        std::fs::write(
+            dir.join("classes.ts"),
+            "export class NamedClass {}\nexport type Props = { named: NamedClass }",
+        )
+        .expect("write class types");
+        std::fs::write(dir.join("leaf.ts"), "export default class DefaultClass {}")
+            .expect("write default class leaf");
+        std::fs::write(dir.join("bar.ts"), "export { default } from './leaf'")
+            .expect("write default class facade");
+
+        let filename = dir.join("Comp.vue");
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "import DefaultClass from './bar'\n",
+                    "import type { Props } from './classes'\n",
+                    "class LocalClass {}\n",
+                    "defineProps<{ local: LocalClass, external: Props, value: DefaultClass }>()\n",
+                    "defineModel<DefaultClass>()",
+                    "</script>"
+                ),
+                "filename": filename.to_string_lossy()
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = compiled["content"].as_str().unwrap_or_default();
+        let deps = compiled["deps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|dep| dep.as_str().unwrap().to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected = ["classes.ts", "bar.ts", "leaf.ts"]
+            .into_iter()
+            .map(|name| dir.join(name).to_string_lossy().replace('\\', "/"))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(compiled["errors"].as_array().unwrap().is_empty());
+        assert!(content.contains("local: { type: Object, required: true }"));
+        assert!(content.contains("external: { type: Object, required: true }"));
+        assert!(content.contains("value: { type: Object, required: true }"));
+        assert!(content.contains("\"modelValue\": { type: Object },"));
+        assert_eq!(deps, expected);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn vue3_sfc_bridge_compile_script_returns_enum_type_deps() {
         let dir = std::env::temp_dir().join(format!(
             "vuec-node-bridge-enum-type-deps-{}",

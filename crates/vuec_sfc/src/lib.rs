@@ -4915,6 +4915,9 @@ fn collect_vue3_global_types_from_statements(
     });
     if is_ambient {
         for statement in statements {
+            collect_vue3_predeclared_runtime_type_from_statement(statement, analysis);
+        }
+        for statement in statements {
             if vue3_statement_is_declare_type(statement) {
                 names.extend(vue3_declared_type_names_from_statement(statement));
                 collect_vue3_global_declared_type_from_statement(source, statement, analysis);
@@ -4967,6 +4970,7 @@ fn vue3_statement_is_declare_type(statement: &Statement<'_>) -> bool {
         Statement::TSInterfaceDeclaration(declaration) => declaration.declare,
         Statement::TSTypeAliasDeclaration(declaration) => declaration.declare,
         Statement::TSEnumDeclaration(declaration) => declaration.declare,
+        Statement::ClassDeclaration(declaration) => declaration.declare,
         Statement::TSModuleDeclaration(declaration) => declaration.declare,
         _ => false,
     }
@@ -4992,6 +4996,11 @@ fn vue3_declared_type_names_from_statement(statement: &Statement<'_>) -> BTreeSe
         Statement::TSEnumDeclaration(declaration) => {
             names.insert(declaration.id.name.to_string());
         }
+        Statement::ClassDeclaration(declaration) => {
+            if let Some(id) = &declaration.id {
+                names.insert(id.name.to_string());
+            }
+        }
         Statement::TSModuleDeclaration(declaration) => {
             names.extend(vue3_namespace_exported_type_names(declaration));
         }
@@ -5016,6 +5025,11 @@ fn vue3_declared_type_names_from_declaration(declaration: &Declaration<'_>) -> B
         }
         Declaration::TSEnumDeclaration(declaration) => {
             names.insert(declaration.id.name.to_string());
+        }
+        Declaration::ClassDeclaration(declaration) => {
+            if let Some(id) = &declaration.id {
+                names.insert(id.name.to_string());
+            }
         }
         Declaration::TSModuleDeclaration(declaration) => {
             names.extend(vue3_namespace_exported_type_names(declaration));
@@ -5415,6 +5429,11 @@ fn vue3_exported_type_names(statements: &[Statement<'_>]) -> BTreeSet<String> {
                         Declaration::TSEnumDeclaration(declaration) => {
                             names.insert(declaration.id.name.to_string());
                         }
+                        Declaration::ClassDeclaration(declaration) => {
+                            if let Some(id) = &declaration.id {
+                                names.insert(id.name.to_string());
+                            }
+                        }
                         Declaration::TSModuleDeclaration(declaration) => {
                             names.extend(vue3_namespace_exported_type_names(declaration));
                         }
@@ -5439,6 +5458,7 @@ fn vue3_default_export_may_be_type(declaration: &ExportDefaultDeclaration<'_>) -
     matches!(
         &declaration.declaration,
         ExportDefaultDeclarationKind::TSInterfaceDeclaration(_)
+            | ExportDefaultDeclarationKind::ClassDeclaration(_)
             | ExportDefaultDeclarationKind::Identifier(_)
     )
 }
@@ -5475,6 +5495,14 @@ fn project_vue3_default_type_exports(
             }
             ExportDefaultDeclarationKind::Identifier(identifier) => {
                 insert_vue3_local_type_alias(analysis, identifier.name.as_str(), "default");
+            }
+            ExportDefaultDeclarationKind::ClassDeclaration(class) => {
+                if let Some(id) = &class.id {
+                    register_vue3_class_type_name(analysis, id.name.as_str());
+                    insert_vue3_local_type_alias(analysis, id.name.as_str(), "default");
+                } else {
+                    register_vue3_class_type_name(analysis, "default");
+                }
             }
             _ => {}
         }
@@ -6182,25 +6210,46 @@ fn collect_vue3_declared_types_from_statements(
     analysis: &mut Vue3ScriptSetupAnalysis,
 ) {
     for statement in statements {
-        collect_vue3_declared_enum_type_from_statement(statement, analysis);
+        collect_vue3_predeclared_runtime_type_from_statement(statement, analysis);
     }
     for statement in statements {
         collect_vue3_declared_type_from_statement(source, statement, analysis);
     }
 }
 
-fn collect_vue3_declared_enum_type_from_statement(
+fn collect_vue3_predeclared_runtime_type_from_statement(
     statement: &Statement<'_>,
     analysis: &mut Vue3ScriptSetupAnalysis,
 ) {
     match statement {
+        Statement::ClassDeclaration(declaration) => {
+            if let Some(id) = &declaration.id {
+                register_vue3_class_type_name(analysis, id.name.as_str());
+            }
+        }
         Statement::TSEnumDeclaration(declaration) if !declaration.declare => {
             register_vue3_ts_enum_declaration(declaration, analysis);
         }
         Statement::ExportNamedDeclaration(declaration) => {
-            if let Some(Declaration::TSEnumDeclaration(declaration)) = &declaration.declaration {
-                if !declaration.declare {
-                    register_vue3_ts_enum_declaration(declaration, analysis);
+            if let Some(declaration) = &declaration.declaration {
+                match declaration {
+                    Declaration::ClassDeclaration(declaration) => {
+                        if let Some(id) = &declaration.id {
+                            register_vue3_class_type_name(analysis, id.name.as_str());
+                        }
+                    }
+                    Declaration::TSEnumDeclaration(declaration) if !declaration.declare => {
+                        register_vue3_ts_enum_declaration(declaration, analysis);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Statement::ExportDefaultDeclaration(declaration) => {
+            if let ExportDefaultDeclarationKind::ClassDeclaration(class) = &declaration.declaration
+            {
+                if let Some(id) = &class.id {
+                    register_vue3_class_type_name(analysis, id.name.as_str());
                 }
             }
         }
@@ -6347,6 +6396,11 @@ fn collect_vue3_declared_type_from_statement(
                 collect_vue3_declared_type_from_declaration(source, declaration, analysis);
             }
         }
+        Statement::ClassDeclaration(declaration) => {
+            if let Some(id) = &declaration.id {
+                register_vue3_class_type_name(analysis, id.name.as_str());
+            }
+        }
         Statement::TSEnumDeclaration(declaration) if !declaration.declare => {
             register_vue3_ts_enum_declaration(declaration, analysis);
         }
@@ -6413,6 +6467,11 @@ fn collect_vue3_declared_type_from_declaration(
         Declaration::TSModuleDeclaration(declaration) => {
             project_vue3_namespace_declaration(source, declaration, analysis);
         }
+        Declaration::ClassDeclaration(declaration) => {
+            if let Some(id) = &declaration.id {
+                register_vue3_class_type_name(analysis, id.name.as_str());
+            }
+        }
         Declaration::TSEnumDeclaration(declaration) if !declaration.declare => {
             register_vue3_ts_enum_declaration(declaration, analysis);
         }
@@ -6431,6 +6490,16 @@ fn register_vue3_ts_enum_declaration(
         .declared_types
         .insert(name.clone(), runtime.clone());
     analysis.define_model_declared_types.insert(name, runtime);
+}
+
+fn register_vue3_class_type_name(analysis: &mut Vue3ScriptSetupAnalysis, name: &str) {
+    register_vue3_local_type_name(analysis, name);
+    analysis
+        .declared_types
+        .insert(name.to_string(), vec!["Object".into()]);
+    analysis
+        .define_model_declared_types
+        .insert(name.to_string(), vec!["Object".into()]);
 }
 
 fn infer_vue3_enum_runtime_type(declaration: &TSEnumDeclaration<'_>) -> Vec<String> {
@@ -18055,6 +18124,83 @@ const model = defineModel<ModelValue>()
         ]
         .into_iter()
         .map(|name| normalize_path_string(&dir.path().join(name)))
+        .collect::<BTreeSet<_>>();
+        assert_eq!(deps, expected);
+        assert!(!script.deps.iter().any(|dep| dep.contains('\\')));
+    }
+
+    #[test]
+    fn vue3_compile_script_resolves_class_declaration_types_and_default_class_deps() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join("classes.ts"),
+            "export class NamedClass {}\nexport type Props = { named: NamedClass }\nexport default class DefaultClass {}",
+        )
+        .expect("write class types");
+        std::fs::write(
+            dir.path().join("leaf.ts"),
+            "export default class LeafClass {}",
+        )
+        .expect("write default class leaf");
+        std::fs::write(
+            dir.path().join("facade.ts"),
+            "export { default } from './leaf'",
+        )
+        .expect("write default class facade");
+        std::fs::write(
+            dir.path().join("named_facade.ts"),
+            "export { NamedClass as RenamedClass } from './classes'",
+        )
+        .expect("write named class facade");
+        let global = dir.path().join("global.d.ts");
+        std::fs::write(
+            &global,
+            "declare type GlobalProps = { global: GlobalClass }\ndeclare class GlobalClass {}",
+        )
+        .expect("write global class types");
+
+        let filename = dir.path().join("Comp.vue");
+        let source = r#"<script setup lang="ts">
+import DefaultClass from './facade'
+import { NamedClass, Props } from './classes'
+import { RenamedClass } from './named_facade'
+type LocalProps = { local: LocalClass, defaulted: DefaultClass, named: NamedClass, renamed: RenamedClass, props: Props }
+class LocalClass {}
+const props = defineProps<LocalProps & GlobalProps>()
+const model = defineModel<DefaultClass>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(
+            &descriptor,
+            SfcScriptCompileOptions {
+                global_type_files: vec![global.to_string_lossy().to_string()],
+                ..SfcScriptCompileOptions::default()
+            },
+        );
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        for prop in ["local", "defaulted", "named", "renamed", "props", "global"] {
+            assert!(
+                script
+                    .content
+                    .contains(&format!("{prop}: {{ type: Object, required: true }}")),
+                "{}",
+                script.content
+            );
+        }
+        assert!(script.content.contains("\"modelValue\": { type: Object },"));
+
+        let deps = script.deps.iter().cloned().collect::<BTreeSet<_>>();
+        let expected = [
+            dir.path().join("classes.ts"),
+            dir.path().join("leaf.ts"),
+            dir.path().join("facade.ts"),
+            dir.path().join("named_facade.ts"),
+            global,
+        ]
+        .into_iter()
+        .map(|path| normalize_path_string(&path))
         .collect::<BTreeSet<_>>();
         assert_eq!(deps, expected);
         assert!(!script.deps.iter().any(|dep| dep.contains('\\')));
