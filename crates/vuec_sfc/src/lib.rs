@@ -4294,6 +4294,7 @@ struct Vue27TypeContext {
     return_type_props_options_declarations: BTreeMap<String, Vue27TypeMembers>,
     generic_type_aliases: BTreeMap<String, Vue3GenericTypeAlias>,
     string_literal_type_declarations: BTreeMap<String, BTreeSet<String>>,
+    ordered_string_literal_type_declarations: BTreeMap<String, Vec<String>>,
     emits_type_declarations: BTreeMap<String, Vue27EmitsType>,
     type_sources: BTreeMap<String, String>,
     type_deps: BTreeMap<String, BTreeSet<String>>,
@@ -4772,6 +4773,7 @@ fn vue27_normal_script_type_context(descriptor: &SfcDescriptor) -> Vue27TypeCont
         return_type_props_options_declarations: BTreeMap::new(),
         generic_type_aliases: BTreeMap::new(),
         string_literal_type_declarations: BTreeMap::new(),
+        ordered_string_literal_type_declarations: BTreeMap::new(),
         emits_type_declarations: analysis.emits_type_declarations,
         type_sources: BTreeMap::new(),
         type_deps: BTreeMap::new(),
@@ -4814,6 +4816,7 @@ fn vue3_normal_script_type_context(
         return_type_props_options_declarations: context.return_type_props_options_declarations,
         generic_type_aliases: context.generic_type_aliases,
         string_literal_type_declarations: context.string_literal_type_declarations,
+        ordered_string_literal_type_declarations: context.ordered_string_literal_type_declarations,
         emits_type_declarations: context.emits_type_declarations,
         type_sources: context.type_sources,
         type_deps: context.type_deps,
@@ -4834,6 +4837,7 @@ fn vue3_normal_script_type_context(
         return_type_props_options_declarations: analysis.return_type_props_options_declarations,
         generic_type_aliases: analysis.generic_type_aliases,
         string_literal_type_declarations: analysis.string_literal_type_declarations,
+        ordered_string_literal_type_declarations: analysis.ordered_string_literal_type_declarations,
         emits_type_declarations: analysis.emits_type_declarations,
         type_sources: analysis.type_sources,
         type_deps: analysis.type_deps,
@@ -4899,6 +4903,8 @@ fn vue3_global_type_context_from_source(
         return_type_props_options_declarations: seed_context.return_type_props_options_declarations,
         generic_type_aliases: seed_context.generic_type_aliases,
         string_literal_type_declarations: seed_context.string_literal_type_declarations,
+        ordered_string_literal_type_declarations: seed_context
+            .ordered_string_literal_type_declarations,
         emits_type_declarations: seed_context.emits_type_declarations,
         type_sources: seed_context.type_sources,
         type_deps: seed_context.type_deps,
@@ -4917,6 +4923,7 @@ fn vue3_global_type_context_from_source(
         return_type_props_options_declarations: analysis.return_type_props_options_declarations,
         generic_type_aliases: analysis.generic_type_aliases,
         string_literal_type_declarations: analysis.string_literal_type_declarations,
+        ordered_string_literal_type_declarations: analysis.ordered_string_literal_type_declarations,
         emits_type_declarations: analysis.emits_type_declarations,
         type_sources: analysis.type_sources,
         type_deps: analysis.type_deps,
@@ -5126,6 +5133,9 @@ fn retain_vue3_type_context_names(context: &mut Vue27TypeContext, names: &BTreeS
         .string_literal_type_declarations
         .retain(|name, _| names.contains(name));
     context
+        .ordered_string_literal_type_declarations
+        .retain(|name, _| names.contains(name));
+    context
         .emits_type_declarations
         .retain(|name, _| names.contains(name));
     context.type_sources.retain(|name, _| names.contains(name));
@@ -5163,6 +5173,12 @@ fn merge_vue3_type_context_missing(target: &mut Vue27TypeContext, source: Vue27T
     for (name, keys) in source.string_literal_type_declarations {
         target
             .string_literal_type_declarations
+            .entry(name)
+            .or_insert(keys);
+    }
+    for (name, keys) in source.ordered_string_literal_type_declarations {
+        target
+            .ordered_string_literal_type_declarations
             .entry(name)
             .or_insert(keys);
     }
@@ -5300,6 +5316,8 @@ fn vue3_external_type_context_from_source_inner(
         seed_context.return_type_props_options_declarations;
     analysis.generic_type_aliases = seed_context.generic_type_aliases;
     analysis.string_literal_type_declarations = seed_context.string_literal_type_declarations;
+    analysis.ordered_string_literal_type_declarations =
+        seed_context.ordered_string_literal_type_declarations;
     analysis.emits_type_declarations = seed_context.emits_type_declarations;
     analysis.type_sources = seed_context.type_sources;
     analysis.type_deps = seed_context.type_deps;
@@ -5335,6 +5353,9 @@ fn vue3_external_type_context_from_source_inner(
             .string_literal_type_declarations
             .retain(|name, _| exported.contains(name));
         analysis
+            .ordered_string_literal_type_declarations
+            .retain(|name, _| exported.contains(name));
+        analysis
             .emits_type_declarations
             .retain(|name, _| exported.contains(name));
         analysis
@@ -5350,6 +5371,7 @@ fn vue3_external_type_context_from_source_inner(
         return_type_props_options_declarations: analysis.return_type_props_options_declarations,
         generic_type_aliases: analysis.generic_type_aliases,
         string_literal_type_declarations: analysis.string_literal_type_declarations,
+        ordered_string_literal_type_declarations: analysis.ordered_string_literal_type_declarations,
         emits_type_declarations: analysis.emits_type_declarations,
         type_sources: analysis.type_sources,
         type_deps: analysis.type_deps,
@@ -5718,6 +5740,9 @@ fn project_vue3_namespace_declaration_with_prefix(
                     .clone(),
                 generic_type_aliases: analysis.generic_type_aliases.clone(),
                 string_literal_type_declarations: analysis.string_literal_type_declarations.clone(),
+                ordered_string_literal_type_declarations: analysis
+                    .ordered_string_literal_type_declarations
+                    .clone(),
                 emits_type_declarations: analysis.emits_type_declarations.clone(),
                 type_sources: analysis.type_sources.clone(),
                 type_deps: analysis.type_deps.clone(),
@@ -5838,6 +5863,15 @@ fn insert_vue3_type_alias_from_analysis(
             .string_literal_type_declarations
             .insert(target_name.to_string(), value);
     }
+    if let Some(value) = source
+        .ordered_string_literal_type_declarations
+        .get(source_name)
+        .cloned()
+    {
+        target
+            .ordered_string_literal_type_declarations
+            .insert(target_name.to_string(), value);
+    }
     if let Some(value) = source.emits_type_declarations.get(source_name).cloned() {
         target
             .emits_type_declarations
@@ -5907,6 +5941,15 @@ fn insert_vue3_local_type_alias(
             .string_literal_type_declarations
             .insert(exported_name.to_string(), value);
     }
+    if let Some(value) = analysis
+        .ordered_string_literal_type_declarations
+        .get(local_name)
+        .cloned()
+    {
+        analysis
+            .ordered_string_literal_type_declarations
+            .insert(exported_name.to_string(), value);
+    }
     if let Some(value) = analysis.emits_type_declarations.get(local_name).cloned() {
         analysis
             .emits_type_declarations
@@ -5936,6 +5979,7 @@ fn project_vue3_export_all_type_context(
         .chain(imported.return_type_props_options_declarations.keys())
         .chain(imported.generic_type_aliases.keys())
         .chain(imported.string_literal_type_declarations.keys())
+        .chain(imported.ordered_string_literal_type_declarations.keys())
         .chain(imported.emits_type_declarations.keys())
         .cloned()
         .filter(|name| name != "default")
@@ -5989,6 +6033,14 @@ fn insert_vue3_re_exported_type_alias(
     if let Some(keys) = imported.string_literal_type_declarations.get(imported_name) {
         analysis
             .string_literal_type_declarations
+            .insert(exported_name.to_string(), keys.clone());
+    }
+    if let Some(keys) = imported
+        .ordered_string_literal_type_declarations
+        .get(imported_name)
+    {
+        analysis
+            .ordered_string_literal_type_declarations
             .insert(exported_name.to_string(), keys.clone());
     }
     if let Some(emits) = imported.emits_type_declarations.get(imported_name) {
@@ -6055,6 +6107,14 @@ fn insert_vue3_external_type_alias(
             .string_literal_type_declarations
             .insert(local_name.to_string(), keys.clone());
     }
+    if let Some(keys) = imported
+        .ordered_string_literal_type_declarations
+        .get(imported_name)
+    {
+        context
+            .ordered_string_literal_type_declarations
+            .insert(local_name.to_string(), keys.clone());
+    }
     if let Some(emits) = imported.emits_type_declarations.get(imported_name) {
         context
             .emits_type_declarations
@@ -6074,6 +6134,9 @@ fn insert_vue3_external_type_alias(
         || imported.generic_type_aliases.contains_key(imported_name)
         || imported
             .string_literal_type_declarations
+            .contains_key(imported_name)
+        || imported
+            .ordered_string_literal_type_declarations
             .contains_key(imported_name)
         || imported.emits_type_declarations.contains_key(imported_name)
     {
@@ -6112,6 +6175,7 @@ fn vue3_type_context_names(context: &Vue27TypeContext) -> BTreeSet<String> {
         .chain(context.return_type_props_options_declarations.keys())
         .chain(context.generic_type_aliases.keys())
         .chain(context.string_literal_type_declarations.keys())
+        .chain(context.ordered_string_literal_type_declarations.keys())
         .chain(context.emits_type_declarations.keys())
         .cloned()
         .collect()
@@ -6127,6 +6191,9 @@ fn vue3_type_context_has_name(context: &Vue27TypeContext, name: &str) -> bool {
             .contains_key(name)
         || context.generic_type_aliases.contains_key(name)
         || context.string_literal_type_declarations.contains_key(name)
+        || context
+            .ordered_string_literal_type_declarations
+            .contains_key(name)
         || context.emits_type_declarations.contains_key(name)
 }
 
@@ -6914,6 +6981,26 @@ fn refresh_vue3_type_alias_declaration(
         }
     }
 
+    match vue3_resolve_ordered_string_type_keys(&declaration.type_annotation, analysis) {
+        Some(keys) => {
+            if analysis.ordered_string_literal_type_declarations.get(&name) != Some(&keys) {
+                analysis
+                    .ordered_string_literal_type_declarations
+                    .insert(name.clone(), keys);
+                changed = true;
+            }
+        }
+        None => {
+            if analysis
+                .ordered_string_literal_type_declarations
+                .remove(&name)
+                .is_some()
+            {
+                changed = true;
+            }
+        }
+    }
+
     let runtime = infer_vue3_runtime_type(&declaration.type_annotation, analysis);
     if analysis.declared_types.get(&name) != Some(&runtime) {
         analysis.declared_types.insert(name.clone(), runtime);
@@ -7141,6 +7228,9 @@ fn register_vue3_local_type_name(analysis: &mut Vue3ScriptSetupAnalysis, name: &
     analysis.return_type_props_options_declarations.remove(name);
     analysis.generic_type_aliases.remove(name);
     analysis.string_literal_type_declarations.remove(name);
+    analysis
+        .ordered_string_literal_type_declarations
+        .remove(name);
 }
 
 fn collect_vue3_setup_local_bindings(
@@ -8015,11 +8105,35 @@ fn vue27_emits_type_from_interface_body(
     }
 }
 
-fn vue3_emits_type_from_literal(source: &str, literal: &TSTypeLiteral<'_>) -> Vue27EmitsType {
+fn vue3_emits_type_from_function(
+    source: &str,
+    function: &TSFunctionType<'_>,
+    analysis: &Vue3ScriptSetupAnalysis,
+) -> Vue27EmitsType {
+    let mut events = Vec::new();
+    collect_vue3_emits_from_parameters(&function.params.items, &mut events, analysis);
+    Vue27EmitsType {
+        source: source
+            .get(function.span.start as usize..function.span.end as usize)
+            .unwrap_or_default()
+            .to_string(),
+        events,
+        syntax: Vue3EmitsTypeSyntax {
+            has_call_signature: true,
+            has_property: false,
+        },
+    }
+}
+
+fn vue3_emits_type_from_literal(
+    source: &str,
+    literal: &TSTypeLiteral<'_>,
+    analysis: &Vue3ScriptSetupAnalysis,
+) -> Vue27EmitsType {
     let mut events = Vec::new();
     let mut syntax = Vue3EmitsTypeSyntax::default();
     for member in &literal.members {
-        collect_vue3_emits_type_member(source, member, &mut events, &mut syntax);
+        collect_vue3_emits_type_member(source, member, &mut events, &mut syntax, analysis);
     }
     Vue27EmitsType {
         source: source
@@ -8031,11 +8145,15 @@ fn vue3_emits_type_from_literal(source: &str, literal: &TSTypeLiteral<'_>) -> Vu
     }
 }
 
-fn vue3_emits_type_from_interface_body(source: &str, body: &TSInterfaceBody<'_>) -> Vue27EmitsType {
+fn vue3_emits_type_from_interface_body(
+    source: &str,
+    body: &TSInterfaceBody<'_>,
+    analysis: &Vue3ScriptSetupAnalysis,
+) -> Vue27EmitsType {
     let mut events = Vec::new();
     let mut syntax = Vue3EmitsTypeSyntax::default();
     for member in &body.body {
-        collect_vue3_emits_type_member(source, member, &mut events, &mut syntax);
+        collect_vue3_emits_type_member(source, member, &mut events, &mut syntax, analysis);
     }
     Vue27EmitsType {
         source: source
@@ -8052,16 +8170,76 @@ fn collect_vue3_emits_type_member(
     member: &TSSignature<'_>,
     events: &mut Vec<String>,
     syntax: &mut Vue3EmitsTypeSyntax,
+    analysis: &Vue3ScriptSetupAnalysis,
 ) {
     match member {
         TSSignature::TSCallSignatureDeclaration(signature) => {
             syntax.has_call_signature = true;
-            collect_vue27_emits_from_parameters(&signature.params.items, events);
+            collect_vue3_emits_from_parameters(&signature.params.items, events, analysis);
         }
         TSSignature::TSPropertySignature(property) if !property.computed => {
             if let Some(key) = vue27_property_key_static_name(&property.key) {
                 syntax.has_property = true;
                 push_unique(events, &key);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_vue3_emits_from_parameters(
+    parameters: &[FormalParameter<'_>],
+    names: &mut Vec<String>,
+    analysis: &Vue3ScriptSetupAnalysis,
+) {
+    let Some(parameter) = parameters.first() else {
+        return;
+    };
+    let Some(annotation) = parameter.type_annotation.as_ref() else {
+        return;
+    };
+    collect_vue3_emits_from_type(&annotation.type_annotation, names, analysis);
+}
+
+fn collect_vue3_emits_from_type(
+    ty: &TSType<'_>,
+    names: &mut Vec<String>,
+    analysis: &Vue3ScriptSetupAnalysis,
+) {
+    match ty {
+        TSType::TSLiteralType(literal) => {
+            if let Some(name) = vue3_literal_type_key(&literal.literal) {
+                push_unique(names, &name);
+            }
+        }
+        TSType::TSUnionType(union) => {
+            for ty in &union.types {
+                collect_vue3_emits_from_type(ty, names, analysis);
+            }
+        }
+        TSType::TSParenthesizedType(parenthesized) => {
+            collect_vue3_emits_from_type(&parenthesized.type_annotation, names, analysis);
+        }
+        TSType::TSTypeReference(reference) => {
+            if let Some(name) = vue3_ts_type_name_key(&reference.type_name) {
+                if let Some(keys) = analysis.ordered_string_literal_type_declarations.get(&name) {
+                    for key in keys {
+                        push_unique(names, key);
+                    }
+                }
+            }
+        }
+        TSType::TSImportType(import_type) => {
+            if let Some(resolved) = vue3_resolve_import_type(import_type, analysis) {
+                if let Some(keys) = resolved
+                    .context
+                    .ordered_string_literal_type_declarations
+                    .get(&resolved.name)
+                {
+                    for key in keys {
+                        push_unique(names, key);
+                    }
+                }
             }
         }
         _ => {}
@@ -11431,6 +11609,7 @@ struct Vue3ScriptSetupAnalysis {
     return_type_props_options_declarations: BTreeMap<String, Vue27TypeMembers>,
     generic_type_aliases: BTreeMap<String, Vue3GenericTypeAlias>,
     string_literal_type_declarations: BTreeMap<String, BTreeSet<String>>,
+    ordered_string_literal_type_declarations: BTreeMap<String, Vec<String>>,
     emits_type_declarations: BTreeMap<String, Vue27EmitsType>,
     type_sources: BTreeMap<String, String>,
     type_deps: BTreeMap<String, BTreeSet<String>>,
@@ -12231,6 +12410,8 @@ fn analyze_vue3_script_setup(
         return_type_props_options_declarations: type_context.return_type_props_options_declarations,
         generic_type_aliases: type_context.generic_type_aliases,
         string_literal_type_declarations: type_context.string_literal_type_declarations,
+        ordered_string_literal_type_declarations: type_context
+            .ordered_string_literal_type_declarations,
         emits_type_declarations: type_context.emits_type_declarations,
         type_sources: type_context.type_sources,
         type_deps: type_context.type_deps,
@@ -12251,6 +12432,8 @@ fn analyze_vue3_script_setup(
             .return_type_props_options_declarations,
         generic_type_aliases: type_analysis.generic_type_aliases,
         string_literal_type_declarations: type_analysis.string_literal_type_declarations,
+        ordered_string_literal_type_declarations: type_analysis
+            .ordered_string_literal_type_declarations,
         emits_type_declarations: type_analysis.emits_type_declarations,
         type_sources: type_analysis.type_sources,
         type_deps: type_analysis.type_deps,
@@ -13378,6 +13561,45 @@ fn vue3_resolve_string_type_keys(
     }
 }
 
+fn vue3_resolve_ordered_string_type_keys(
+    ty: &TSType<'_>,
+    analysis: &Vue3ScriptSetupAnalysis,
+) -> Option<Vec<String>> {
+    match ty {
+        TSType::TSLiteralType(literal) => {
+            vue3_literal_type_key(&literal.literal).map(|key| vec![key])
+        }
+        TSType::TSUnionType(union) => {
+            let mut keys = Vec::new();
+            for ty in &union.types {
+                for key in vue3_resolve_ordered_string_type_keys(ty, analysis)? {
+                    push_unique(&mut keys, &key);
+                }
+            }
+            Some(keys)
+        }
+        TSType::TSParenthesizedType(parenthesized) => {
+            vue3_resolve_ordered_string_type_keys(&parenthesized.type_annotation, analysis)
+        }
+        TSType::TSTypeReference(reference) => {
+            let name = vue3_ts_type_name_key(&reference.type_name)?;
+            analysis
+                .ordered_string_literal_type_declarations
+                .get(&name)
+                .cloned()
+        }
+        TSType::TSImportType(import_type) => {
+            let resolved = vue3_resolve_import_type(import_type, analysis)?;
+            resolved
+                .context
+                .ordered_string_literal_type_declarations
+                .get(&resolved.name)
+                .cloned()
+        }
+        _ => None,
+    }
+}
+
 fn vue3_literal_type_key(literal: &TSLiteral<'_>) -> Option<String> {
     match literal {
         TSLiteral::StringLiteral(literal) => Some(literal.value.to_string()),
@@ -13417,6 +13639,11 @@ fn vue3_resolve_generic_props_type_alias(
         if let Some(keys) = vue3_resolve_string_type_keys(argument, analysis) {
             scoped_analysis
                 .string_literal_type_declarations
+                .insert(param.clone(), keys);
+        }
+        if let Some(keys) = vue3_resolve_ordered_string_type_keys(argument, analysis) {
+            scoped_analysis
+                .ordered_string_literal_type_declarations
                 .insert(param.clone(), keys);
         }
         scoped_analysis
@@ -13949,7 +14176,7 @@ fn vue3_emits_type_from_interface(
     declaration: &TSInterfaceDeclaration<'_>,
     analysis: &Vue3ScriptSetupAnalysis,
 ) -> Vue27EmitsType {
-    let mut emits = vue3_emits_type_from_interface_body(source, &declaration.body);
+    let mut emits = vue3_emits_type_from_interface_body(source, &declaration.body, analysis);
     for heritage in &declaration.extends {
         let Some(base) = vue3_resolve_interface_heritage_emits_type(source, heritage, analysis)
         else {
@@ -15977,8 +16204,12 @@ fn vue3_resolve_emits_type<'a>(
     analysis: &Vue3ScriptSetupAnalysis,
 ) -> Option<Vue27EmitsType> {
     match type_argument {
-        TSType::TSFunctionType(function) => Some(vue27_emits_type_from_function(source, function)),
-        TSType::TSTypeLiteral(literal) => Some(vue3_emits_type_from_literal(source, literal)),
+        TSType::TSFunctionType(function) => {
+            Some(vue3_emits_type_from_function(source, function, analysis))
+        }
+        TSType::TSTypeLiteral(literal) => {
+            Some(vue3_emits_type_from_literal(source, literal, analysis))
+        }
         TSType::TSTypeReference(reference) => {
             let name = vue3_ts_type_name_key(&reference.type_name)?;
             analysis.emits_type_declarations.get(&name).cloned()
@@ -16010,6 +16241,32 @@ fn vue3_resolve_emits_type<'a>(
                 Some(Vue27EmitsType {
                     source: source
                         .get(intersection.span.start as usize..intersection.span.end as usize)
+                        .unwrap_or_default()
+                        .to_string(),
+                    events,
+                    syntax,
+                })
+            }
+        }
+        TSType::TSUnionType(union) => {
+            let mut events = Vec::new();
+            let mut syntax = Vue3EmitsTypeSyntax::default();
+            for ty in &union.types {
+                let Some(resolved) = vue3_resolve_emits_type(source, ty, analysis) else {
+                    continue;
+                };
+                syntax.has_call_signature |= resolved.syntax.has_call_signature;
+                syntax.has_property |= resolved.syntax.has_property;
+                for event in resolved.events {
+                    push_unique(&mut events, &event);
+                }
+            }
+            if events.is_empty() {
+                None
+            } else {
+                Some(Vue27EmitsType {
+                    source: source
+                        .get(union.span.start as usize..union.span.end as usize)
                         .unwrap_or_default()
                         .to_string(),
                     events,
@@ -20277,6 +20534,30 @@ const emit = defineEmits<Emits>()
         assert!(script
             .content
             .contains("emits: [\"foo\", \"bar\", \"foo:bar\"],"));
+        assert!(script.deps.is_empty(), "{:?}", script.deps);
+    }
+
+    #[test]
+    fn vue3_compile_script_resolves_define_emits_union_function_types() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "Comp.vue",
+            r#"<script setup lang="ts">
+type BaseEmit = 'change'
+type Emit = 'some' | 'emit' | BaseEmit
+type Emits =
+  ((e: 'foo' | 'bar') => void) |
+  ((e: Emit) => void) |
+  ((e: 'another', val: string) => void)
+const emit = defineEmits<Emits>()
+</script>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("emits: [\"foo\", \"bar\", \"some\", \"emit\", \"change\", \"another\"],"));
         assert!(script.deps.is_empty(), "{:?}", script.deps);
     }
 

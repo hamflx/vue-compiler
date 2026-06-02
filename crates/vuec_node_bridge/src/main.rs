@@ -5842,6 +5842,52 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_resolves_external_define_emits_union_function_deps() {
+        let dir = std::env::temp_dir().join(format!(
+            "vuec-node-bridge-emits-union-function-deps-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        std::fs::write(
+            dir.join("events.ts"),
+            concat!(
+                "export type BaseEmit = 'change'\n",
+                "export type Emit = 'some' | 'emit' | BaseEmit\n",
+                "export type Emits = ",
+                "((e: 'foo' | 'bar') => void) | ",
+                "((e: Emit) => void) | ",
+                "((e: 'another', val: string) => void)"
+            ),
+        )
+        .expect("write union emits");
+
+        let filename = dir.join("Comp.vue");
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "import type { Emits } from './events'\n",
+                    "const emit = defineEmits<Emits>()",
+                    "</script>"
+                ),
+                "filename": filename.to_string_lossy()
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = compiled["content"].as_str().unwrap_or_default();
+        let expected_dep = dir.join("events.ts").to_string_lossy().replace('\\', "/");
+        assert!(compiled["errors"].as_array().unwrap().is_empty());
+        assert!(content
+            .contains("emits: [\"foo\", \"bar\", \"some\", \"emit\", \"change\", \"another\"],"));
+        assert_eq!(compiled["deps"], json!([expected_dep]));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn vue3_sfc_bridge_compile_script_returns_re_exported_type_deps() {
         let dir = std::env::temp_dir().join(format!(
             "vuec-node-bridge-re-export-deps-{}",
