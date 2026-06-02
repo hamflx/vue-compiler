@@ -14,9 +14,10 @@ use oxc_ast::ast::{
     ExportNamedDeclaration, ExportSpecifier, Expression, ForStatementInit, ForStatementLeft,
     FormalParameter, FormalParameters, Function, ImportDeclarationSpecifier, ImportOrExportKind,
     ModuleExportName, ObjectExpression, ObjectProperty, ObjectPropertyKind, PropertyKey,
-    SimpleAssignmentTarget, Statement, TSEnumDeclaration, TSFunctionType, TSInterfaceBody,
-    TSLiteral, TSSignature, TSTupleElement, TSType, TSTypeAnnotation, TSTypeLiteral, TSTypeName,
-    VariableDeclaration, VariableDeclarationKind, WithStatement,
+    SimpleAssignmentTarget, Statement, TSEnumDeclaration, TSFunctionType, TSImportType,
+    TSImportTypeQualifier, TSInterfaceBody, TSLiteral, TSSignature, TSTupleElement, TSType,
+    TSTypeAnnotation, TSTypeLiteral, TSTypeName, VariableDeclaration, VariableDeclarationKind,
+    WithStatement,
 };
 use oxc_span::GetSpan;
 use serde::{Deserialize, Serialize};
@@ -4775,12 +4776,16 @@ fn vue3_normal_script_type_context(descriptor: &SfcDescriptor) -> Vue27TypeConte
     if parsed.panicked || !parsed.errors.is_empty() {
         return context;
     }
-    let mut analysis = Vue3ScriptSetupAnalysis::default();
+    let mut analysis = Vue3ScriptSetupAnalysis {
+        type_filename: Some(descriptor.filename.clone()),
+        ..Vue3ScriptSetupAnalysis::default()
+    };
     collect_vue3_declared_types_from_statements(
         script.content.as_str(),
         &parsed.program.body,
         &mut analysis,
     );
+    collect_vue3_declared_type_deps_from_statements(&parsed.program.body, &mut analysis);
     for name in analysis.declared_types.keys() {
         context.type_sources.remove(name);
         context.type_deps.remove(name);
@@ -4882,8 +4887,13 @@ fn vue3_external_type_context_from_source_inner(
     if parsed.panicked || !parsed.errors.is_empty() {
         return Vue27TypeContext::default();
     }
-    let mut analysis = Vue3ScriptSetupAnalysis::default();
+    let mut analysis = Vue3ScriptSetupAnalysis {
+        type_filename: Some(filename.to_string()),
+        type_seen: seen.clone(),
+        ..Vue3ScriptSetupAnalysis::default()
+    };
     collect_vue3_declared_types_from_statements(source, &parsed.program.body, &mut analysis);
+    collect_vue3_declared_type_deps_from_statements(&parsed.program.body, &mut analysis);
     project_vue3_default_type_exports(source, &parsed.program.body, &mut analysis);
     seed_vue3_external_type_deps(filename, &mut analysis);
     let re_exported =
@@ -5029,6 +5039,37 @@ fn vue3_external_type_context_from_relative_source(
     ))
 }
 
+struct Vue3ResolvedImportType {
+    name: String,
+    dependency: String,
+    context: Vue27TypeContext,
+}
+
+fn vue3_resolve_import_type(
+    import_type: &TSImportType<'_>,
+    analysis: &Vue3ScriptSetupAnalysis,
+) -> Option<Vue3ResolvedImportType> {
+    let source = import_type.source.value.as_str();
+    if !vue3_type_import_source_is_relative(source) {
+        return None;
+    }
+    let name = match import_type.qualifier.as_ref()? {
+        TSImportTypeQualifier::Identifier(identifier) => identifier.name.to_string(),
+        TSImportTypeQualifier::QualifiedName(_) => return None,
+    };
+    let filename = analysis.type_filename.as_deref()?;
+    let resolved = resolve_vue3_relative_type_import(filename, source)?;
+    let imported_source = std::fs::read_to_string(&resolved).ok()?;
+    let dependency = normalize_path_string(&resolved);
+    let mut seen = analysis.type_seen.clone();
+    let context = vue3_external_type_context_from_source(&imported_source, &dependency, &mut seen);
+    Some(Vue3ResolvedImportType {
+        name,
+        dependency,
+        context,
+    })
+}
+
 fn vue3_type_source_type(filename: &str) -> oxc_span::SourceType {
     match Path::new(filename)
         .extension()
@@ -5094,6 +5135,7 @@ fn project_vue3_default_type_exports(
         match &declaration.declaration {
             ExportDefaultDeclarationKind::TSInterfaceDeclaration(declaration) => {
                 let name = declaration.id.name.to_string();
+                let deps = collect_vue3_interface_body_type_deps(&declaration.body, analysis);
                 register_vue3_local_type_name(analysis, &name);
                 analysis
                     .declared_types
@@ -5108,6 +5150,7 @@ fn project_vue3_default_type_exports(
                 if !emits.events.is_empty() {
                     analysis.emits_type_declarations.insert(name.clone(), emits);
                 }
+                insert_vue3_declared_type_deps(analysis, &name, deps);
                 insert_vue3_local_type_alias(analysis, &name, "default");
             }
             ExportDefaultDeclarationKind::Identifier(identifier) => {
@@ -5423,6 +5466,87 @@ fn collect_vue3_declared_types_from_statements(
     }
 }
 
+fn collect_vue3_declared_type_deps_from_statements(
+    statements: &[Statement<'_>],
+    analysis: &mut Vue3ScriptSetupAnalysis,
+) {
+    for statement in statements {
+        collect_vue3_declared_type_deps_from_statement(statement, analysis);
+    }
+}
+
+fn collect_vue3_declared_type_deps_from_statement(
+    statement: &Statement<'_>,
+    analysis: &mut Vue3ScriptSetupAnalysis,
+) {
+    match statement {
+        Statement::TSInterfaceDeclaration(declaration) => {
+            let deps = collect_vue3_interface_body_type_deps(&declaration.body, analysis);
+            insert_vue3_declared_type_deps(analysis, declaration.id.name.as_str(), deps);
+        }
+        Statement::TSTypeAliasDeclaration(declaration) => {
+            let deps = collect_vue3_type_argument_deps(&declaration.type_annotation, analysis);
+            insert_vue3_declared_type_deps(analysis, declaration.id.name.as_str(), deps);
+        }
+        Statement::ExportNamedDeclaration(declaration) => {
+            if let Some(declaration) = &declaration.declaration {
+                collect_vue3_declared_type_deps_from_declaration(declaration, analysis);
+            }
+        }
+        Statement::ExportDefaultDeclaration(declaration) => {
+            if let ExportDefaultDeclarationKind::TSInterfaceDeclaration(declaration) =
+                &declaration.declaration
+            {
+                let deps = collect_vue3_interface_body_type_deps(&declaration.body, analysis);
+                insert_vue3_declared_type_deps(analysis, declaration.id.name.as_str(), deps);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_vue3_declared_type_deps_from_declaration(
+    declaration: &Declaration<'_>,
+    analysis: &mut Vue3ScriptSetupAnalysis,
+) {
+    match declaration {
+        Declaration::TSInterfaceDeclaration(declaration) => {
+            let deps = collect_vue3_interface_body_type_deps(&declaration.body, analysis);
+            insert_vue3_declared_type_deps(analysis, declaration.id.name.as_str(), deps);
+        }
+        Declaration::TSTypeAliasDeclaration(declaration) => {
+            let deps = collect_vue3_type_argument_deps(&declaration.type_annotation, analysis);
+            insert_vue3_declared_type_deps(analysis, declaration.id.name.as_str(), deps);
+        }
+        _ => {}
+    }
+}
+
+fn collect_vue3_interface_body_type_deps(
+    body: &TSInterfaceBody<'_>,
+    analysis: &Vue3ScriptSetupAnalysis,
+) -> BTreeSet<String> {
+    let mut deps = BTreeSet::new();
+    for signature in &body.body {
+        collect_vue3_signature_type_deps(signature, analysis, &mut deps);
+    }
+    deps
+}
+
+fn insert_vue3_declared_type_deps(
+    analysis: &mut Vue3ScriptSetupAnalysis,
+    name: &str,
+    deps: BTreeSet<String>,
+) {
+    if !deps.is_empty() {
+        analysis
+            .type_deps
+            .entry(name.to_string())
+            .or_default()
+            .extend(deps);
+    }
+}
+
 fn collect_vue3_declared_type_from_statement(
     source: &str,
     statement: &Statement<'_>,
@@ -5469,6 +5593,9 @@ fn collect_vue3_declared_type_from_statement(
                     if !emits.events.is_empty() {
                         analysis.emits_type_declarations.insert(name.clone(), emits);
                     }
+                }
+                TSType::TSImportType(import_type) => {
+                    project_vue3_import_type_alias_declarations(&name, import_type, analysis);
                 }
                 _ => {}
             }
@@ -5529,10 +5656,33 @@ fn collect_vue3_declared_type_from_declaration(
                         analysis.emits_type_declarations.insert(name.clone(), emits);
                     }
                 }
+                TSType::TSImportType(import_type) => {
+                    project_vue3_import_type_alias_declarations(&name, import_type, analysis);
+                }
                 _ => {}
             }
         }
         _ => {}
+    }
+}
+
+fn project_vue3_import_type_alias_declarations(
+    name: &str,
+    import_type: &TSImportType<'_>,
+    analysis: &mut Vue3ScriptSetupAnalysis,
+) {
+    let Some(resolved) = vue3_resolve_import_type(import_type, analysis) else {
+        return;
+    };
+    if let Some(props) = resolved.context.props_type_declarations.get(&resolved.name) {
+        analysis
+            .props_type_declarations
+            .insert(name.to_string(), props.clone());
+    }
+    if let Some(emits) = resolved.context.emits_type_declarations.get(&resolved.name) {
+        analysis
+            .emits_type_declarations
+            .insert(name.to_string(), emits.clone());
     }
 }
 
@@ -9733,6 +9883,8 @@ struct Vue3ScriptSetupAnalysis {
     emits_type_declarations: BTreeMap<String, Vue27EmitsType>,
     type_sources: BTreeMap<String, String>,
     type_deps: BTreeMap<String, BTreeSet<String>>,
+    type_filename: Option<String>,
+    type_seen: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -10526,9 +10678,11 @@ fn analyze_vue3_script_setup(
         emits_type_declarations: type_context.emits_type_declarations,
         type_sources: type_context.type_sources,
         type_deps: type_context.type_deps,
+        type_filename: Some(filename.to_string()),
         ..Vue3ScriptSetupAnalysis::default()
     };
     collect_vue3_declared_types_from_statements(source, &parsed.program.body, &mut type_analysis);
+    collect_vue3_declared_type_deps_from_statements(&parsed.program.body, &mut type_analysis);
     collect_vue3_setup_local_bindings(&parsed.program.body, is_ts, &mut type_analysis);
 
     let mut edits = SourceEdits::new(source);
@@ -10539,6 +10693,7 @@ fn analyze_vue3_script_setup(
         emits_type_declarations: type_analysis.emits_type_declarations,
         type_sources: type_analysis.type_sources,
         type_deps: type_analysis.type_deps,
+        type_filename: Some(filename.to_string()),
         local_setup_bindings: type_analysis.local_setup_bindings,
         local_setup_binding_types: type_analysis.local_setup_binding_types,
         vue_import_aliases: normal_vue_import_aliases.clone(),
@@ -11408,6 +11563,14 @@ fn vue3_resolve_props_type<'a>(
         TSType::TSParenthesizedType(parenthesized) => {
             vue3_resolve_props_type(source, &parenthesized.type_annotation, analysis)
         }
+        TSType::TSImportType(import_type) => {
+            let resolved = vue3_resolve_import_type(import_type, analysis)?;
+            resolved
+                .context
+                .props_type_declarations
+                .get(&resolved.name)
+                .cloned()
+        }
         _ => None,
     }
 }
@@ -11416,190 +11579,224 @@ fn record_vue3_type_argument_deps(
     type_argument: &TSType<'_>,
     analysis: &mut Vue3ScriptSetupAnalysis,
 ) {
+    analysis
+        .deps
+        .extend(collect_vue3_type_argument_deps(type_argument, analysis));
+}
+
+fn collect_vue3_type_argument_deps(
+    type_argument: &TSType<'_>,
+    analysis: &Vue3ScriptSetupAnalysis,
+) -> BTreeSet<String> {
+    let mut deps = BTreeSet::new();
+    collect_vue3_type_argument_deps_into(type_argument, analysis, &mut deps);
+    deps
+}
+
+fn collect_vue3_type_argument_deps_into(
+    type_argument: &TSType<'_>,
+    analysis: &Vue3ScriptSetupAnalysis,
+    deps: &mut BTreeSet<String>,
+) {
     match type_argument {
         TSType::TSTypeReference(reference) => {
             if let Some(name) = vue27_ts_type_name_identifier(&reference.type_name) {
-                if let Some(dependencies) = analysis.type_deps.get(name).cloned() {
-                    analysis.deps.extend(dependencies);
-                } else if let Some(dependency) = analysis.type_sources.get(name).cloned() {
-                    analysis.deps.insert(dependency);
+                if let Some(dependencies) = analysis.type_deps.get(name) {
+                    deps.extend(dependencies.iter().cloned());
+                } else if let Some(dependency) = analysis.type_sources.get(name) {
+                    deps.insert(dependency.clone());
                 }
             }
             if let Some(type_arguments) = reference.type_arguments.as_ref() {
                 for ty in &type_arguments.params {
-                    record_vue3_type_argument_deps(ty, analysis);
+                    collect_vue3_type_argument_deps_into(ty, analysis, deps);
                 }
             }
         }
         TSType::TSTypeLiteral(literal) => {
             for signature in &literal.members {
-                record_vue3_signature_type_deps(signature, analysis);
+                collect_vue3_signature_type_deps(signature, analysis, deps);
             }
         }
         TSType::TSUnionType(union) => {
             for ty in &union.types {
-                record_vue3_type_argument_deps(ty, analysis);
+                collect_vue3_type_argument_deps_into(ty, analysis, deps);
             }
         }
         TSType::TSIntersectionType(intersection) => {
             for ty in &intersection.types {
-                record_vue3_type_argument_deps(ty, analysis);
+                collect_vue3_type_argument_deps_into(ty, analysis, deps);
             }
         }
         TSType::TSArrayType(array) => {
-            record_vue3_type_argument_deps(&array.element_type, analysis);
+            collect_vue3_type_argument_deps_into(&array.element_type, analysis, deps);
         }
         TSType::TSTupleType(tuple) => {
             for element in &tuple.element_types {
-                record_vue3_tuple_element_type_deps(element, analysis);
+                collect_vue3_tuple_element_type_deps(element, analysis, deps);
             }
         }
         TSType::TSParenthesizedType(parenthesized) => {
-            record_vue3_type_argument_deps(&parenthesized.type_annotation, analysis);
+            collect_vue3_type_argument_deps_into(&parenthesized.type_annotation, analysis, deps);
         }
         TSType::TSTypeOperatorType(operator) => {
-            record_vue3_type_argument_deps(&operator.type_annotation, analysis);
+            collect_vue3_type_argument_deps_into(&operator.type_annotation, analysis, deps);
         }
         TSType::TSIndexedAccessType(indexed) => {
-            record_vue3_type_argument_deps(&indexed.object_type, analysis);
-            record_vue3_type_argument_deps(&indexed.index_type, analysis);
+            collect_vue3_type_argument_deps_into(&indexed.object_type, analysis, deps);
+            collect_vue3_type_argument_deps_into(&indexed.index_type, analysis, deps);
         }
         TSType::TSFunctionType(function) => {
-            record_vue3_formal_parameters_type_deps(&function.params, analysis);
-            record_vue3_type_annotation_deps(&function.return_type, analysis);
+            collect_vue3_formal_parameters_type_deps(&function.params, analysis, deps);
+            collect_vue3_type_annotation_deps(&function.return_type, analysis, deps);
         }
         TSType::TSConstructorType(constructor) => {
-            record_vue3_formal_parameters_type_deps(&constructor.params, analysis);
-            record_vue3_type_annotation_deps(&constructor.return_type, analysis);
+            collect_vue3_formal_parameters_type_deps(&constructor.params, analysis, deps);
+            collect_vue3_type_annotation_deps(&constructor.return_type, analysis, deps);
         }
         TSType::TSConditionalType(conditional) => {
-            record_vue3_type_argument_deps(&conditional.check_type, analysis);
-            record_vue3_type_argument_deps(&conditional.extends_type, analysis);
-            record_vue3_type_argument_deps(&conditional.true_type, analysis);
-            record_vue3_type_argument_deps(&conditional.false_type, analysis);
+            collect_vue3_type_argument_deps_into(&conditional.check_type, analysis, deps);
+            collect_vue3_type_argument_deps_into(&conditional.extends_type, analysis, deps);
+            collect_vue3_type_argument_deps_into(&conditional.true_type, analysis, deps);
+            collect_vue3_type_argument_deps_into(&conditional.false_type, analysis, deps);
         }
         TSType::TSMappedType(mapped) => {
-            record_vue3_type_argument_deps(&mapped.constraint, analysis);
+            collect_vue3_type_argument_deps_into(&mapped.constraint, analysis, deps);
             if let Some(name_type) = mapped.name_type.as_ref() {
-                record_vue3_type_argument_deps(name_type, analysis);
+                collect_vue3_type_argument_deps_into(name_type, analysis, deps);
             }
             if let Some(type_annotation) = mapped.type_annotation.as_ref() {
-                record_vue3_type_argument_deps(type_annotation, analysis);
+                collect_vue3_type_argument_deps_into(type_annotation, analysis, deps);
             }
         }
         TSType::TSTemplateLiteralType(template) => {
             for ty in &template.types {
-                record_vue3_type_argument_deps(ty, analysis);
+                collect_vue3_type_argument_deps_into(ty, analysis, deps);
             }
         }
         TSType::TSNamedTupleMember(member) => {
-            record_vue3_tuple_element_type_deps(&member.element_type, analysis);
+            collect_vue3_tuple_element_type_deps(&member.element_type, analysis, deps);
         }
         TSType::TSTypePredicate(predicate) => {
             if let Some(type_annotation) = predicate.type_annotation.as_ref() {
-                record_vue3_type_annotation_deps(type_annotation, analysis);
+                collect_vue3_type_annotation_deps(type_annotation, analysis, deps);
             }
         }
         TSType::TSTypeQuery(query) => {
             if let Some(type_arguments) = query.type_arguments.as_ref() {
                 for ty in &type_arguments.params {
-                    record_vue3_type_argument_deps(ty, analysis);
+                    collect_vue3_type_argument_deps_into(ty, analysis, deps);
                 }
             }
         }
         TSType::TSImportType(import_type) => {
+            if let Some(resolved) = vue3_resolve_import_type(import_type, analysis) {
+                deps.extend(
+                    resolved
+                        .context
+                        .type_deps
+                        .get(&resolved.name)
+                        .cloned()
+                        .unwrap_or_default(),
+                );
+                deps.insert(resolved.dependency);
+            }
             if let Some(type_arguments) = import_type.type_arguments.as_ref() {
                 for ty in &type_arguments.params {
-                    record_vue3_type_argument_deps(ty, analysis);
+                    collect_vue3_type_argument_deps_into(ty, analysis, deps);
                 }
             }
         }
         TSType::TSInferType(infer) => {
             if let Some(constraint) = infer.type_parameter.constraint.as_ref() {
-                record_vue3_type_argument_deps(constraint, analysis);
+                collect_vue3_type_argument_deps_into(constraint, analysis, deps);
             }
             if let Some(default) = infer.type_parameter.default.as_ref() {
-                record_vue3_type_argument_deps(default, analysis);
+                collect_vue3_type_argument_deps_into(default, analysis, deps);
             }
         }
         _ => {}
     }
 }
 
-fn record_vue3_signature_type_deps(
+fn collect_vue3_signature_type_deps(
     signature: &TSSignature<'_>,
-    analysis: &mut Vue3ScriptSetupAnalysis,
+    analysis: &Vue3ScriptSetupAnalysis,
+    deps: &mut BTreeSet<String>,
 ) {
     match signature {
         TSSignature::TSPropertySignature(property) => {
             if let Some(type_annotation) = property.type_annotation.as_ref() {
-                record_vue3_type_annotation_deps(type_annotation, analysis);
+                collect_vue3_type_annotation_deps(type_annotation, analysis, deps);
             }
         }
         TSSignature::TSMethodSignature(method) => {
-            record_vue3_formal_parameters_type_deps(&method.params, analysis);
+            collect_vue3_formal_parameters_type_deps(&method.params, analysis, deps);
             if let Some(return_type) = method.return_type.as_ref() {
-                record_vue3_type_annotation_deps(return_type, analysis);
+                collect_vue3_type_annotation_deps(return_type, analysis, deps);
             }
         }
         TSSignature::TSCallSignatureDeclaration(signature) => {
-            record_vue3_formal_parameters_type_deps(&signature.params, analysis);
+            collect_vue3_formal_parameters_type_deps(&signature.params, analysis, deps);
             if let Some(return_type) = signature.return_type.as_ref() {
-                record_vue3_type_annotation_deps(return_type, analysis);
+                collect_vue3_type_annotation_deps(return_type, analysis, deps);
             }
         }
         TSSignature::TSConstructSignatureDeclaration(signature) => {
-            record_vue3_formal_parameters_type_deps(&signature.params, analysis);
+            collect_vue3_formal_parameters_type_deps(&signature.params, analysis, deps);
             if let Some(return_type) = signature.return_type.as_ref() {
-                record_vue3_type_annotation_deps(return_type, analysis);
+                collect_vue3_type_annotation_deps(return_type, analysis, deps);
             }
         }
         TSSignature::TSIndexSignature(signature) => {
             for parameter in &signature.parameters {
-                record_vue3_type_annotation_deps(&parameter.type_annotation, analysis);
+                collect_vue3_type_annotation_deps(&parameter.type_annotation, analysis, deps);
             }
-            record_vue3_type_annotation_deps(&signature.type_annotation, analysis);
+            collect_vue3_type_annotation_deps(&signature.type_annotation, analysis, deps);
         }
     }
 }
 
-fn record_vue3_formal_parameters_type_deps(
+fn collect_vue3_formal_parameters_type_deps(
     parameters: &FormalParameters<'_>,
-    analysis: &mut Vue3ScriptSetupAnalysis,
+    analysis: &Vue3ScriptSetupAnalysis,
+    deps: &mut BTreeSet<String>,
 ) {
     for parameter in &parameters.items {
         if let Some(type_annotation) = parameter.type_annotation.as_ref() {
-            record_vue3_type_annotation_deps(type_annotation, analysis);
+            collect_vue3_type_annotation_deps(type_annotation, analysis, deps);
         }
     }
     if let Some(rest) = parameters.rest.as_ref() {
         if let Some(type_annotation) = rest.type_annotation.as_ref() {
-            record_vue3_type_annotation_deps(type_annotation, analysis);
+            collect_vue3_type_annotation_deps(type_annotation, analysis, deps);
         }
     }
 }
 
-fn record_vue3_type_annotation_deps(
+fn collect_vue3_type_annotation_deps(
     annotation: &TSTypeAnnotation<'_>,
-    analysis: &mut Vue3ScriptSetupAnalysis,
+    analysis: &Vue3ScriptSetupAnalysis,
+    deps: &mut BTreeSet<String>,
 ) {
-    record_vue3_type_argument_deps(&annotation.type_annotation, analysis);
+    collect_vue3_type_argument_deps_into(&annotation.type_annotation, analysis, deps);
 }
 
-fn record_vue3_tuple_element_type_deps(
+fn collect_vue3_tuple_element_type_deps(
     element: &TSTupleElement<'_>,
-    analysis: &mut Vue3ScriptSetupAnalysis,
+    analysis: &Vue3ScriptSetupAnalysis,
+    deps: &mut BTreeSet<String>,
 ) {
     match element {
         TSTupleElement::TSOptionalType(optional) => {
-            record_vue3_type_argument_deps(&optional.type_annotation, analysis);
+            collect_vue3_type_argument_deps_into(&optional.type_annotation, analysis, deps);
         }
         TSTupleElement::TSRestType(rest) => {
-            record_vue3_type_argument_deps(&rest.type_annotation, analysis);
+            collect_vue3_type_argument_deps_into(&rest.type_annotation, analysis, deps);
         }
         _ => {
             if let Some(ty) = element.as_ts_type() {
-                record_vue3_type_argument_deps(ty, analysis);
+                collect_vue3_type_argument_deps_into(ty, analysis, deps);
             }
         }
     }
@@ -11741,6 +11938,14 @@ fn infer_vue3_runtime_type(node: &TSType<'_>, analysis: &Vue3ScriptSetupAnalysis
             }
             vec!["null".into()]
         }
+        TSType::TSImportType(import_type) => {
+            if let Some(resolved) = vue3_resolve_import_type(import_type, analysis) {
+                if let Some(types) = resolved.context.declared_types.get(&resolved.name) {
+                    return types.clone();
+                }
+            }
+            vec!["null".into()]
+        }
         TSType::TSParenthesizedType(parenthesized) => {
             infer_vue3_runtime_type(&parenthesized.type_annotation, analysis)
         }
@@ -11824,6 +12029,18 @@ fn infer_vue3_define_model_runtime_type(
                     "Record" | "Partial" | "Readonly" | "Pick" | "Omit" | "Exclude" | "Extract"
                     | "Required" | "InstanceType" => return vec!["Object".into()],
                     _ => {}
+                }
+            }
+            vec!["Unknown".into()]
+        }
+        TSType::TSImportType(import_type) => {
+            if let Some(resolved) = vue3_resolve_import_type(import_type, analysis) {
+                if let Some(types) = resolved
+                    .context
+                    .define_model_declared_types
+                    .get(&resolved.name)
+                {
+                    return types.clone();
                 }
             }
             vec!["Unknown".into()]
@@ -13573,6 +13790,14 @@ fn vue3_resolve_emits_type<'a>(
         TSType::TSTypeReference(reference) => {
             let name = vue27_ts_type_name_identifier(&reference.type_name)?;
             analysis.emits_type_declarations.get(name).cloned()
+        }
+        TSType::TSImportType(import_type) => {
+            let resolved = vue3_resolve_import_type(import_type, analysis)?;
+            resolved
+                .context
+                .emits_type_declarations
+                .get(&resolved.name)
+                .cloned()
         }
         _ => None,
     }
@@ -16897,6 +17122,77 @@ const model = defineModel<ModelValue>()
             "renamed.ts",
             "events.ts",
             "model.ts",
+        ]
+        .into_iter()
+        .map(|name| normalize_path_string(&dir.path().join(name)))
+        .collect::<BTreeSet<_>>();
+        assert_eq!(deps, expected);
+        assert!(!script.deps.iter().any(|dep| dep.contains('\\')));
+    }
+
+    #[test]
+    fn vue3_compile_script_resolves_relative_dynamic_import_types_and_deps() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join("foo.ts"),
+            "export type Props = { foo: string, bar: import('./bar').N }",
+        )
+        .expect("write props type");
+        std::fs::write(dir.path().join("bar.ts"), "export type N = number")
+            .expect("write prop leaf type");
+        std::fs::write(
+            dir.path().join("events.ts"),
+            "export type Events = import('./event_leaf').Events",
+        )
+        .expect("write events type");
+        std::fs::write(
+            dir.path().join("event_leaf.ts"),
+            "export type Events = { (e: 'save'): void }",
+        )
+        .expect("write event leaf type");
+        std::fs::write(
+            dir.path().join("model.ts"),
+            "export type ModelValue = import('./model_leaf').ModelValue",
+        )
+        .expect("write model type");
+        std::fs::write(
+            dir.path().join("model_leaf.ts"),
+            "export type ModelValue = boolean | string",
+        )
+        .expect("write model leaf type");
+
+        let filename = dir.path().join("Comp.vue");
+        let source = r#"<script setup lang="ts">
+const props = defineProps<import('./foo').Props>()
+const emit = defineEmits<import('./events').Events>()
+const model = defineModel<import('./model').ModelValue>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("foo: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("bar: { type: Number, required: true }"));
+        assert!(script
+            .content
+            .contains("emits: /*@__PURE__*/_mergeModels([\"save\"], [\"update:modelValue\"]),"));
+        assert!(script
+            .content
+            .contains("\"modelValue\": { type: [Boolean, String] },"));
+
+        let deps = script.deps.iter().cloned().collect::<BTreeSet<_>>();
+        let expected = [
+            "foo.ts",
+            "bar.ts",
+            "events.ts",
+            "event_leaf.ts",
+            "model.ts",
+            "model_leaf.ts",
         ]
         .into_iter()
         .map(|name| normalize_path_string(&dir.path().join(name)))
