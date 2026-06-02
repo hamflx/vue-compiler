@@ -4835,13 +4835,12 @@ fn extend_vue3_type_context_from_external_imports(
         let Some(resolved) = resolve_vue3_relative_type_import(filename, import_source) else {
             continue;
         };
-        let Ok(imported_source) = std::fs::read_to_string(&resolved) else {
+        let mut seen = BTreeSet::new();
+        let Some(imported_context) = vue3_external_type_context_from_path(&resolved, &mut seen)
+        else {
             continue;
         };
         let normalized = normalize_path_string(&resolved);
-        let mut seen = BTreeSet::new();
-        let imported_context =
-            vue3_external_type_context_from_source(&imported_source, &normalized, &mut seen);
         for specifier in specifiers {
             let local = import_specifier_local(specifier);
             let imported = import_specifier_imported(specifier).unwrap_or_else(|| "default".into());
@@ -4859,15 +4858,16 @@ fn extend_vue3_type_context_from_external_imports(
     }
 }
 
-fn vue3_external_type_context_from_source(
+fn vue3_external_type_context_from_source_with_type(
     source: &str,
     filename: &str,
+    source_type: oxc_span::SourceType,
     seen: &mut BTreeSet<String>,
 ) -> Vue27TypeContext {
     if !seen.insert(filename.to_string()) {
         return Vue27TypeContext::default();
     }
-    let context = vue3_external_type_context_from_source_inner(source, filename, seen);
+    let context = vue3_external_type_context_from_source_inner(source, filename, source_type, seen);
     seen.remove(filename);
     context
 }
@@ -4875,10 +4875,11 @@ fn vue3_external_type_context_from_source(
 fn vue3_external_type_context_from_source_inner(
     source: &str,
     filename: &str,
+    source_type: oxc_span::SourceType,
     seen: &mut BTreeSet<String>,
 ) -> Vue27TypeContext {
     let allocator = oxc_allocator::Allocator::default();
-    let parsed = oxc_parser::Parser::new(&allocator, source, vue3_type_source_type(filename))
+    let parsed = oxc_parser::Parser::new(&allocator, source, source_type)
         .with_options(oxc_parser::ParseOptions {
             parse_regular_expression: true,
             ..oxc_parser::ParseOptions::default()
@@ -5030,13 +5031,75 @@ fn vue3_external_type_context_from_relative_source(
     seen: &mut BTreeSet<String>,
 ) -> Option<Vue27TypeContext> {
     let resolved = resolve_vue3_relative_type_import(filename, source)?;
-    let imported_source = std::fs::read_to_string(&resolved).ok()?;
-    let normalized = normalize_path_string(&resolved);
-    Some(vue3_external_type_context_from_source(
-        &imported_source,
+    vue3_external_type_context_from_path(&resolved, seen)
+}
+
+struct Vue3ExternalTypeSource {
+    source: String,
+    source_type: oxc_span::SourceType,
+}
+
+fn vue3_external_type_context_from_path(
+    path: &Path,
+    seen: &mut BTreeSet<String>,
+) -> Option<Vue27TypeContext> {
+    let source = vue3_external_type_source_from_path(path)?;
+    let normalized = normalize_path_string(path);
+    Some(vue3_external_type_context_from_source_with_type(
+        &source.source,
         &normalized,
+        source.source_type,
         seen,
     ))
+}
+
+fn vue3_external_type_source_from_path(path: &Path) -> Option<Vue3ExternalTypeSource> {
+    let source = std::fs::read_to_string(path).ok()?;
+    if path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("vue"))
+    {
+        return Some(vue3_external_vue_type_source(path, &source));
+    }
+    Some(Vue3ExternalTypeSource {
+        source,
+        source_type: vue3_type_source_type(&normalize_path_string(path)),
+    })
+}
+
+fn vue3_external_vue_type_source(path: &Path, source: &str) -> Vue3ExternalTypeSource {
+    let mut sources = SourceMap::default();
+    let source_file = sources.add_file(Some(path.to_path_buf()), source.to_string());
+    let options = Vue3SfcParseOptions::default();
+    let extracted = extract_sfc_blocks(
+        source,
+        source_file,
+        SfcBlockContentMode::Vue3 { options: &options },
+    );
+    let descriptor = vue3_descriptor_from_blocks(
+        normalize_path_string(path),
+        source,
+        source_file,
+        extracted.blocks,
+        &options,
+    )
+    .descriptor;
+    let mut blocks = Vec::new();
+    let mut source_type = oxc_span::SourceType::ts();
+    for block in [descriptor.script.as_ref(), descriptor.script_setup.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        if block.attrs.lang.as_deref() == Some("tsx") {
+            source_type = oxc_span::SourceType::tsx();
+        }
+        blocks.push(block.content.as_str());
+    }
+    Vue3ExternalTypeSource {
+        source: blocks.join("\n"),
+        source_type,
+    }
 }
 
 struct Vue3ResolvedImportType {
@@ -5059,10 +5122,9 @@ fn vue3_resolve_import_type(
     };
     let filename = analysis.type_filename.as_deref()?;
     let resolved = resolve_vue3_relative_type_import(filename, source)?;
-    let imported_source = std::fs::read_to_string(&resolved).ok()?;
     let dependency = normalize_path_string(&resolved);
     let mut seen = analysis.type_seen.clone();
-    let context = vue3_external_type_context_from_source(&imported_source, &dependency, &mut seen);
+    let context = vue3_external_type_context_from_path(&resolved, &mut seen)?;
     Some(Vue3ResolvedImportType {
         name,
         dependency,
@@ -5361,6 +5423,12 @@ fn resolve_vue3_type_import_path(candidate: &Path) -> Option<PathBuf> {
     let stem = candidate.with_extension("");
     let mut candidates = Vec::new();
     if !extension.is_empty() {
+        if !matches!(
+            extension,
+            "ts" | "tsx" | "mts" | "cts" | "js" | "jsx" | "mjs" | "cjs"
+        ) {
+            candidates.push(arbitrary_extension_type_candidate(&stem, extension));
+        }
         candidates.push(candidate.to_path_buf());
         if matches!(extension, "js" | "jsx" | "mjs" | "cjs") {
             candidates.extend(vue3_ts_resolution_candidates(&stem, extension));
@@ -5372,6 +5440,15 @@ fn resolve_vue3_type_import_path(candidate: &Path) -> Option<PathBuf> {
         candidates.push(candidate.join("index.d.ts"));
     }
     candidates.into_iter().find(|candidate| candidate.exists())
+}
+
+fn arbitrary_extension_type_candidate(stem: &Path, extension: &str) -> PathBuf {
+    let Some(file_name) = stem.file_name().and_then(|name| name.to_str()) else {
+        return stem.with_extension(format!("d.{extension}.ts"));
+    };
+    let mut candidate = stem.to_path_buf();
+    candidate.set_file_name(format!("{file_name}.d.{extension}.ts"));
+    candidate
 }
 
 fn vue3_ts_resolution_candidates(base: &Path, extension: &str) -> Vec<PathBuf> {
@@ -17197,6 +17274,132 @@ const model = defineModel<import('./model').ModelValue>()
         .into_iter()
         .map(|name| normalize_path_string(&dir.path().join(name)))
         .collect::<BTreeSet<_>>();
+        assert_eq!(deps, expected);
+        assert!(!script.deps.iter().any(|dep| dep.contains('\\')));
+    }
+
+    #[test]
+    fn vue3_compile_script_resolves_relative_vue_type_imports_and_deps() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join("foo.vue"),
+            "<template><div /></template><script lang=\"ts\">export type Props = { foo: number }</script>",
+        )
+        .expect("write foo vue");
+        std::fs::write(
+            dir.path().join("bar.vue"),
+            "<script setup lang=\"tsx\">export type ExtraProps = { bar: string }</script>",
+        )
+        .expect("write bar vue");
+        std::fs::write(
+            dir.path().join("events.vue"),
+            "<script setup lang=\"ts\">export type Events = { (e: 'save'): void }</script>",
+        )
+        .expect("write events vue");
+        std::fs::write(
+            dir.path().join("model.vue"),
+            "<script lang=\"ts\">export type ModelValue = boolean | string</script>",
+        )
+        .expect("write model vue");
+        std::fs::write(
+            dir.path().join("leaf.vue"),
+            "<script setup lang=\"ts\">export type LeafProps = { leaf?: boolean }</script>",
+        )
+        .expect("write leaf vue");
+        std::fs::write(
+            dir.path().join("facade.ts"),
+            "export { LeafProps } from './leaf.vue'",
+        )
+        .expect("write facade");
+
+        let filename = dir.path().join("Comp.vue");
+        let source = r#"<script setup lang="ts">
+import { Props } from './foo.vue'
+import { ExtraProps } from './bar.vue'
+import { LeafProps } from './facade'
+import { Events } from './events.vue'
+import { ModelValue } from './model.vue'
+const props = defineProps<Props & ExtraProps & LeafProps>()
+const emit = defineEmits<Events>()
+const model = defineModel<ModelValue>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("foo: { type: Number, required: true }"));
+        assert!(script
+            .content
+            .contains("bar: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("leaf: { type: Boolean, required: false }"));
+        assert!(script
+            .content
+            .contains("emits: /*@__PURE__*/_mergeModels([\"save\"], [\"update:modelValue\"]),"));
+        assert!(script
+            .content
+            .contains("\"modelValue\": { type: [Boolean, String] },"));
+
+        let deps = script.deps.iter().cloned().collect::<BTreeSet<_>>();
+        let expected = [
+            "foo.vue",
+            "bar.vue",
+            "facade.ts",
+            "leaf.vue",
+            "events.vue",
+            "model.vue",
+        ]
+        .into_iter()
+        .map(|name| normalize_path_string(&dir.path().join(name)))
+        .collect::<BTreeSet<_>>();
+        assert_eq!(deps, expected);
+        assert!(!script.deps.iter().any(|dep| dep.contains('\\')));
+    }
+
+    #[test]
+    fn vue3_compile_script_resolves_arbitrary_extension_type_sidecars() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join("foo.d.vue.ts"),
+            "export type FooProps = { foo: number }",
+        )
+        .expect("write vue sidecar");
+        std::fs::write(dir.path().join("foo.vue"), "<template><div /></template>")
+            .expect("write foo vue");
+        std::fs::write(
+            dir.path().join("bar.d.css.ts"),
+            "export type BarProps = { bar: string }",
+        )
+        .expect("write css sidecar");
+        std::fs::write(dir.path().join("bar.css"), ".bar { color: red; }").expect("write css");
+
+        let filename = dir.path().join("Comp.vue");
+        let source = r#"<script setup lang="ts">
+import { FooProps } from './foo.vue'
+import { BarProps } from './bar.css'
+defineProps<FooProps & BarProps>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("foo: { type: Number, required: true }"));
+        assert!(script
+            .content
+            .contains("bar: { type: String, required: true }"));
+
+        let deps = script.deps.iter().cloned().collect::<BTreeSet<_>>();
+        let expected = ["foo.d.vue.ts", "bar.d.css.ts"]
+            .into_iter()
+            .map(|name| normalize_path_string(&dir.path().join(name)))
+            .collect::<BTreeSet<_>>();
         assert_eq!(deps, expected);
         assert!(!script.deps.iter().any(|dep| dep.contains('\\')));
     }

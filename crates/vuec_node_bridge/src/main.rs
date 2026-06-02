@@ -5719,6 +5719,60 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_returns_vue_type_deps() {
+        let dir = std::env::temp_dir().join(format!(
+            "vuec-node-bridge-vue-type-deps-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        std::fs::write(
+            dir.join("foo.vue"),
+            "<template><div /></template><script lang=\"ts\">export type Props = { foo: string }</script>",
+        )
+        .expect("write foo vue");
+        std::fs::write(
+            dir.join("bar.vue"),
+            "<script setup lang=\"ts\">export type ExtraProps = { count?: number }</script>",
+        )
+        .expect("write bar vue");
+
+        let filename = dir.join("Comp.vue");
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "import { Props } from './foo.vue'\n",
+                    "import { ExtraProps } from './bar.vue'\n",
+                    "defineProps<Props & ExtraProps>()",
+                    "</script>"
+                ),
+                "filename": filename.to_string_lossy()
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = compiled["content"].as_str().unwrap_or_default();
+        let deps = compiled["deps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|dep| dep.as_str().unwrap().to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected = ["foo.vue", "bar.vue"]
+            .into_iter()
+            .map(|name| dir.join(name).to_string_lossy().replace('\\', "/"))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(compiled["errors"].as_array().unwrap().is_empty());
+        assert!(content.contains("foo: { type: String, required: true }"));
+        assert!(content.contains("count: { type: Number, required: false }"));
+        assert_eq!(deps, expected);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn vue3_sfc_bridge_compile_script_splits_define_model_transformers() {
         let compiled = dispatch(
             "sfc.compileScript",
