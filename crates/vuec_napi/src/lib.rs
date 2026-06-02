@@ -3847,6 +3847,17 @@ fn sfc_script_options(value: Option<&Value>) -> SfcScriptCompileOptions {
         "inlineTemplate",
         bool_option(value, "inline_template", options.inline_template),
     );
+    let nested_template_ssr = value
+        .get("templateOptions")
+        .or_else(|| value.get("template_options"))
+        .and_then(|template_options| template_options.get("ssr"))
+        .and_then(Value::as_bool)
+        .unwrap_or(options.inline_template_ssr);
+    options.inline_template_ssr = bool_option(
+        value,
+        "inlineTemplateSsr",
+        bool_option(value, "inline_template_ssr", nested_template_ssr),
+    );
     options.ref_sugar = bool_option(
         value,
         "refSugar",
@@ -4122,6 +4133,21 @@ mod tests {
         })));
 
         assert!(!options.transform_asset_urls);
+    }
+
+    #[test]
+    fn vue3_sfc_script_options_accept_inline_template_ssr() {
+        let options = sfc_script_options(Some(&json!({
+            "id": "xxxxxxxx",
+            "inlineTemplate": true,
+            "templateOptions": {
+                "ssr": true
+            }
+        })));
+
+        assert_eq!(options.id.as_deref(), Some("xxxxxxxx"));
+        assert!(options.inline_template);
+        assert!(options.inline_template_ssr);
     }
 
     #[test]

@@ -359,6 +359,7 @@ fn compile_sfc_command(args: CompileSfcArgs) -> Result<RunOutput> {
             SfcScriptCompileOptions {
                 id: args.id.clone(),
                 inline_template: args.inline_template,
+                inline_template_ssr: args.inline_template && args.ssr,
                 ..SfcScriptCompileOptions::default()
             },
         ))
@@ -1088,6 +1089,35 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("setup"));
+    }
+
+    #[test]
+    fn compiles_vue3_sfc_inline_ssr_json() {
+        let path = write_temp(
+            "vuec-cli-sfc-inline-ssr.vue",
+            concat!(
+                "<script setup>import { ref } from 'vue'; const count = ref(0)</script>",
+                "<template><div>{{ count }}</div></template>"
+            ),
+        );
+        let output = run_with_args([
+            "vuec",
+            "compile-sfc",
+            "--json",
+            "--inline-template",
+            "--ssr",
+            "--id",
+            "xxxxxxxx",
+            path.to_str().unwrap(),
+        ])
+        .expect("run");
+        let value: Value = serde_json::from_str(&output.stdout).expect("json");
+        let content = value["script"]["content"].as_str().unwrap_or_default();
+
+        assert_eq!(value["kind"], json!("vue3-sfc-ssr"));
+        assert!(content.contains("__ssrInlineRender: true,"));
+        assert!(content.contains("return (_ctx, _push, _parent, _attrs) => {"));
+        assert!(content.contains("_ssrInterpolate(count.value)"));
     }
 
     #[test]

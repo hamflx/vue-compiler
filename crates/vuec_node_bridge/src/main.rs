@@ -4172,6 +4172,17 @@ fn sfc_script_options(value: Option<&Value>) -> SfcScriptCompileOptions {
         "inlineTemplate",
         bool_option(value, "inline_template", options.inline_template),
     );
+    let nested_template_ssr = value
+        .get("templateOptions")
+        .or_else(|| value.get("template_options"))
+        .and_then(|template_options| template_options.get("ssr"))
+        .and_then(Value::as_bool)
+        .unwrap_or(options.inline_template_ssr);
+    options.inline_template_ssr = bool_option(
+        value,
+        "inlineTemplateSsr",
+        bool_option(value, "inline_template_ssr", nested_template_ssr),
+    );
     let nested_runtime_module_name = value
         .get("templateOptions")
         .or_else(|| value.get("template_options"))
@@ -4631,7 +4642,7 @@ mod tests {
         assert!(content.contains("const __returned__ = { slots, count, ref }"));
         assert!(!content.contains("defineSlots"));
         assert_eq!(compiled["bindings"]["slots"], json!("setup-const"));
-        assert_eq!(compiled["bindings"]["count"], json!("setup-maybe-ref"));
+        assert_eq!(compiled["bindings"]["count"], json!("setup-ref"));
         assert!(compiled["bindings"].get("defineSlots").is_none());
     }
 
@@ -5063,11 +5074,44 @@ mod tests {
         assert!(compiled["errors"].as_array().unwrap().is_empty());
         assert!(content.contains("toDisplayString as _toDisplayString"));
         assert!(content.contains("return (_ctx, _cache) => {"));
-        assert!(content.contains("_unref(count)"));
+        assert!(content.contains("count.value"));
         assert!(content.contains("_toDisplayString(__props.title)"));
         assert!(content.contains("_createVNode(ChildComp)"));
         assert!(!content.contains("const __returned__"));
         assert_eq!(compiled["bindings"]["heading"], json!("props-aliased"));
+    }
+
+    #[test]
+    fn vue3_sfc_bridge_compile_script_inlines_ssr_template_render() {
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup>",
+                    "import { ref } from 'vue'\n",
+                    "const count = ref(0)",
+                    "</script>",
+                    "<template><div>{{ count }}</div></template>"
+                ),
+                "filename": "FooBar.vue",
+                "options": {
+                    "id": "xxxxxxxx",
+                    "inlineTemplate": true,
+                    "templateOptions": {
+                        "ssr": true
+                    }
+                }
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = compiled["content"].as_str().unwrap_or_default();
+        assert!(compiled["errors"].as_array().unwrap().is_empty());
+        assert!(content.contains("ssrInterpolate as _ssrInterpolate"));
+        assert!(content.contains("__ssrInlineRender: true,"));
+        assert!(content.contains("return (_ctx, _push, _parent, _attrs) => {"));
+        assert!(content.contains("_ssrInterpolate(count.value)"));
+        assert!(!content.contains("const __returned__"));
     }
 
     #[test]
@@ -5133,7 +5177,7 @@ mod tests {
         assert_eq!(compiled["bindings"]["FooBaz"], json!("setup-maybe-ref"));
         assert_eq!(compiled["bindings"]["vMyDir"], json!("setup-maybe-ref"));
         assert_eq!(compiled["bindings"]["ref"], json!("setup-const"));
-        assert_eq!(compiled["bindings"]["local"], json!("setup-maybe-ref"));
+        assert_eq!(compiled["bindings"]["local"], json!("setup-ref"));
     }
 
     #[test]
@@ -5242,7 +5286,7 @@ mod tests {
         assert!(content.contains("__name: 'FooBar',"));
         assert!(content.contains("const __returned__ = { count, ref }"));
         assert!(!content.contains("defineOptions"));
-        assert_eq!(compiled["bindings"]["count"], json!("setup-maybe-ref"));
+        assert_eq!(compiled["bindings"]["count"], json!("setup-ref"));
         assert!(compiled["bindings"].get("defineOptions").is_none());
     }
 
