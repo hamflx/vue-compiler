@@ -5561,6 +5561,55 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_resolves_extract_prop_types_return_type_deps() {
+        let dir = std::env::temp_dir().join(format!(
+            "vuec-node-bridge-extract-props-deps-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        std::fs::write(
+            dir.join("upload.ts"),
+            concat!(
+                "import type { PropType } from 'vue'\n",
+                "export interface UploadFile<T> { raw: T }\n",
+                "export declare function uploadProps<T>(): {\n",
+                "  fileList: { type: PropType<UploadFile<T>[]>, default: UploadFile<T>[] }\n",
+                "}\n"
+            ),
+        )
+        .expect("write upload props");
+
+        let filename = dir.join("Comp.vue");
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "import { uploadProps } from './upload'\n",
+                    "declare const props: () => {\n",
+                    "  active: { type: BooleanConstructor, required: true }\n",
+                    "}\n",
+                    "type Props = Partial<import('vue').ExtractPropTypes<ReturnType<typeof props>>> & import('vue').ExtractPropTypes<ReturnType<typeof uploadProps>>\n",
+                    "defineProps<Props>()",
+                    "</script>"
+                ),
+                "filename": filename.to_string_lossy()
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = compiled["content"].as_str().unwrap_or_default();
+        let expected_dep = dir.join("upload.ts").to_string_lossy().replace('\\', "/");
+        assert!(compiled["errors"].as_array().unwrap().is_empty());
+        assert!(content.contains("active: { type: Boolean, required: false }"));
+        assert!(content.contains("fileList: { type: Array, required: false }"));
+        assert_eq!(compiled["deps"], json!([expected_dep]));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn vue3_sfc_bridge_compile_script_returns_re_exported_type_deps() {
         let dir = std::env::temp_dir().join(format!(
             "vuec-node-bridge-re-export-deps-{}",
