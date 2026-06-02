@@ -5648,6 +5648,50 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_resolves_external_mapped_template_literal_props_deps() {
+        let dir = std::env::temp_dir().join(format!(
+            "vuec-node-bridge-mapped-template-props-deps-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        std::fs::write(
+            dir.join("types.ts"),
+            concat!(
+                "type Breakpoints = 'sm' | 'md'\n",
+                "export type Props<T extends string, V> = {\n",
+                "  [K in Breakpoints as `${T}${Capitalize<K>}`]?: V\n",
+                "}"
+            ),
+        )
+        .expect("write mapped props");
+
+        let filename = dir.join("Comp.vue");
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "import type { Props } from './types'\n",
+                    "defineProps<Props<'cols', number>>()",
+                    "</script>"
+                ),
+                "filename": filename.to_string_lossy()
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = compiled["content"].as_str().unwrap_or_default();
+        let expected_dep = dir.join("types.ts").to_string_lossy().replace('\\', "/");
+        assert!(compiled["errors"].as_array().unwrap().is_empty());
+        assert!(content.contains("colsSm: { type: Number, required: false }"));
+        assert!(content.contains("colsMd: { type: Number, required: false }"));
+        assert_eq!(compiled["deps"], json!([expected_dep]));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn vue3_sfc_bridge_compile_script_resolves_external_interface_extends_type_deps() {
         let dir = std::env::temp_dir().join(format!(
             "vuec-node-bridge-interface-extends-deps-{}",

@@ -16,9 +16,10 @@ use oxc_ast::ast::{
     ModuleExportName, ObjectExpression, ObjectProperty, ObjectPropertyKind, PropertyKey,
     SimpleAssignmentTarget, Statement, TSEnumDeclaration, TSFunctionType, TSImportType,
     TSImportTypeQualifier, TSInterfaceBody, TSInterfaceDeclaration, TSInterfaceHeritage, TSLiteral,
-    TSModuleDeclaration, TSModuleDeclarationBody, TSModuleDeclarationName, TSSignature,
-    TSTupleElement, TSType, TSTypeAliasDeclaration, TSTypeAnnotation, TSTypeLiteral, TSTypeName,
-    TSTypeOperatorOperator, TSTypeQuery, TSTypeQueryExprName, TSTypeReference, VariableDeclaration,
+    TSMappedType, TSMappedTypeModifierOperator, TSModuleDeclaration, TSModuleDeclarationBody,
+    TSModuleDeclarationName, TSSignature, TSTemplateLiteralType, TSTupleElement, TSType,
+    TSTypeAliasDeclaration, TSTypeAnnotation, TSTypeLiteral, TSTypeName, TSTypeOperatorOperator,
+    TSTypeQuery, TSTypeQueryExprName, TSTypeReference, VariableDeclaration,
     VariableDeclarationKind, WithStatement,
 };
 use oxc_span::GetSpan;
@@ -4270,6 +4271,13 @@ struct Vue27TypeMembers {
 struct Vue3GenericTypeAlias {
     source: String,
     params: Vec<String>,
+    declared_types: BTreeMap<String, Vec<String>>,
+    define_model_declared_types: BTreeMap<String, Vec<String>>,
+    props_type_declarations: BTreeMap<String, Vue27TypeMembers>,
+    props_options_type_declarations: BTreeMap<String, Vue27TypeMembers>,
+    return_type_props_options_declarations: BTreeMap<String, Vue27TypeMembers>,
+    string_literal_type_declarations: BTreeMap<String, BTreeSet<String>>,
+    ordered_string_literal_type_declarations: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -5389,6 +5397,7 @@ fn seed_vue3_external_type_deps(filename: &str, analysis: &mut Vue3ScriptSetupAn
         .chain(analysis.return_type_props_options_declarations.keys())
         .chain(analysis.generic_type_aliases.keys())
         .chain(analysis.string_literal_type_declarations.keys())
+        .chain(analysis.ordered_string_literal_type_declarations.keys())
         .chain(analysis.emits_type_declarations.keys())
         .cloned()
         .collect::<BTreeSet<_>>();
@@ -6101,6 +6110,7 @@ fn insert_vue3_external_type_alias(
         context
             .generic_type_aliases
             .insert(local_name.to_string(), alias.clone());
+        insert_vue3_external_generic_alias_string_key_helpers(context, imported, dependency);
     }
     if let Some(keys) = imported.string_literal_type_declarations.get(imported_name) {
         context
@@ -6151,6 +6161,42 @@ fn insert_vue3_external_type_alias(
         deps.insert(dependency.to_string());
         context.type_deps.insert(local_name.to_string(), deps);
     }
+}
+
+fn insert_vue3_external_generic_alias_string_key_helpers(
+    context: &mut Vue27TypeContext,
+    imported: &Vue27TypeContext,
+    dependency: &str,
+) {
+    for (name, keys) in &imported.string_literal_type_declarations {
+        context
+            .string_literal_type_declarations
+            .entry(name.clone())
+            .or_insert_with(|| keys.clone());
+        insert_vue3_external_helper_type_dep(context, imported, name, dependency);
+    }
+    for (name, keys) in &imported.ordered_string_literal_type_declarations {
+        context
+            .ordered_string_literal_type_declarations
+            .entry(name.clone())
+            .or_insert_with(|| keys.clone());
+        insert_vue3_external_helper_type_dep(context, imported, name, dependency);
+    }
+}
+
+fn insert_vue3_external_helper_type_dep(
+    context: &mut Vue27TypeContext,
+    imported: &Vue27TypeContext,
+    name: &str,
+    dependency: &str,
+) {
+    context
+        .type_sources
+        .entry(name.to_string())
+        .or_insert_with(|| dependency.to_string());
+    let mut deps = imported.type_deps.get(name).cloned().unwrap_or_default();
+    deps.insert(dependency.to_string());
+    context.type_deps.entry(name.to_string()).or_insert(deps);
 }
 
 fn insert_vue3_external_namespace_types(
@@ -7087,6 +7133,17 @@ fn refresh_vue3_generic_type_alias(
     let alias = Vue3GenericTypeAlias {
         source: alias_source,
         params,
+        declared_types: analysis.declared_types.clone(),
+        define_model_declared_types: analysis.define_model_declared_types.clone(),
+        props_type_declarations: analysis.props_type_declarations.clone(),
+        props_options_type_declarations: analysis.props_options_type_declarations.clone(),
+        return_type_props_options_declarations: analysis
+            .return_type_props_options_declarations
+            .clone(),
+        string_literal_type_declarations: analysis.string_literal_type_declarations.clone(),
+        ordered_string_literal_type_declarations: analysis
+            .ordered_string_literal_type_declarations
+            .clone(),
     };
     if analysis
         .generic_type_aliases
@@ -13281,6 +13338,9 @@ fn vue3_resolve_props_type<'a>(
         TSType::TSTypeLiteral(literal) => {
             Some(vue3_type_members_from_literal(source, literal, analysis))
         }
+        TSType::TSMappedType(mapped) => {
+            vue3_type_members_from_mapped_type(source, mapped, analysis)
+        }
         TSType::TSTypeReference(reference) => {
             let name = vue3_ts_type_name_key(&reference.type_name)?;
             match name.as_str() {
@@ -13516,49 +13576,11 @@ fn vue3_resolve_string_type_keys(
     ty: &TSType<'_>,
     analysis: &Vue3ScriptSetupAnalysis,
 ) -> Option<BTreeSet<String>> {
-    match ty {
-        TSType::TSLiteralType(literal) => {
-            vue3_literal_type_key(&literal.literal).map(|key| BTreeSet::from([key]))
-        }
-        TSType::TSUnionType(union) => {
-            let mut keys = BTreeSet::new();
-            for ty in &union.types {
-                keys.extend(vue3_resolve_string_type_keys(ty, analysis)?);
-            }
-            Some(keys)
-        }
-        TSType::TSParenthesizedType(parenthesized) => {
-            vue3_resolve_string_type_keys(&parenthesized.type_annotation, analysis)
-        }
-        TSType::TSTypeReference(reference) => {
-            let name = vue3_ts_type_name_key(&reference.type_name)?;
-            analysis
-                .string_literal_type_declarations
-                .get(&name)
-                .cloned()
-        }
-        TSType::TSTypeOperatorType(operator)
-            if operator.operator == TSTypeOperatorOperator::Keyof =>
-        {
-            let members = vue3_resolve_props_type("", &operator.type_annotation, analysis)?;
-            Some(
-                members
-                    .members
-                    .into_iter()
-                    .map(|prop| prop.key)
-                    .collect::<BTreeSet<_>>(),
-            )
-        }
-        TSType::TSImportType(import_type) => {
-            let resolved = vue3_resolve_import_type(import_type, analysis)?;
-            resolved
-                .context
-                .string_literal_type_declarations
-                .get(&resolved.name)
-                .cloned()
-        }
-        _ => None,
-    }
+    Some(
+        vue3_resolve_ordered_string_type_keys(ty, analysis)?
+            .into_iter()
+            .collect(),
+    )
 }
 
 fn vue3_resolve_ordered_string_type_keys(
@@ -13578,15 +13600,69 @@ fn vue3_resolve_ordered_string_type_keys(
             }
             Some(keys)
         }
+        TSType::TSTemplateLiteralType(template) => {
+            vue3_resolve_template_literal_type_keys(template, analysis)
+        }
         TSType::TSParenthesizedType(parenthesized) => {
             vue3_resolve_ordered_string_type_keys(&parenthesized.type_annotation, analysis)
         }
         TSType::TSTypeReference(reference) => {
             let name = vue3_ts_type_name_key(&reference.type_name)?;
-            analysis
-                .ordered_string_literal_type_declarations
-                .get(&name)
-                .cloned()
+            match name.as_str() {
+                "Extract" => {
+                    let source = vue3_type_reference_type_argument(reference, 0)?;
+                    let filter = vue3_type_reference_type_argument(reference, 1)?;
+                    let source_keys = vue3_resolve_ordered_string_type_keys(source, analysis)?;
+                    let filter_keys = vue3_resolve_string_type_keys(filter, analysis)?;
+                    Some(
+                        source_keys
+                            .into_iter()
+                            .filter(|key| filter_keys.contains(key))
+                            .collect(),
+                    )
+                }
+                "Exclude" => {
+                    let source = vue3_type_reference_type_argument(reference, 0)?;
+                    let excluded = vue3_type_reference_type_argument(reference, 1)?;
+                    let source_keys = vue3_resolve_ordered_string_type_keys(source, analysis)?;
+                    let excluded_keys = vue3_resolve_string_type_keys(excluded, analysis)?;
+                    Some(
+                        source_keys
+                            .into_iter()
+                            .filter(|key| !excluded_keys.contains(key))
+                            .collect(),
+                    )
+                }
+                "Uppercase" | "Lowercase" | "Capitalize" | "Uncapitalize" => {
+                    let ty = vue3_type_reference_first_type_argument(reference)?;
+                    let mut keys = Vec::new();
+                    for key in vue3_resolve_ordered_string_type_keys(ty, analysis)? {
+                        let mapped = vue3_string_mapping_type(name.as_str(), &key);
+                        push_unique(&mut keys, &mapped);
+                    }
+                    Some(keys)
+                }
+                _ => analysis
+                    .ordered_string_literal_type_declarations
+                    .get(&name)
+                    .cloned()
+                    .or_else(|| {
+                        analysis
+                            .string_literal_type_declarations
+                            .get(&name)
+                            .map(|keys| keys.iter().cloned().collect())
+                    }),
+            }
+        }
+        TSType::TSTypeOperatorType(operator)
+            if operator.operator == TSTypeOperatorOperator::Keyof =>
+        {
+            let members = vue3_resolve_props_type("", &operator.type_annotation, analysis)?;
+            let mut keys = Vec::new();
+            for prop in members.members {
+                push_unique(&mut keys, &prop.key);
+            }
+            Some(keys)
         }
         TSType::TSImportType(import_type) => {
             let resolved = vue3_resolve_import_type(import_type, analysis)?;
@@ -13595,8 +13671,69 @@ fn vue3_resolve_ordered_string_type_keys(
                 .ordered_string_literal_type_declarations
                 .get(&resolved.name)
                 .cloned()
+                .or_else(|| {
+                    resolved
+                        .context
+                        .string_literal_type_declarations
+                        .get(&resolved.name)
+                        .map(|keys| keys.iter().cloned().collect())
+                })
         }
         _ => None,
+    }
+}
+
+fn vue3_resolve_template_literal_type_keys(
+    template: &TSTemplateLiteralType<'_>,
+    analysis: &Vue3ScriptSetupAnalysis,
+) -> Option<Vec<String>> {
+    let mut values = vec![vue3_template_type_quasi_value(template.quasis.first()?)];
+    for (index, ty) in template.types.iter().enumerate() {
+        let keys = vue3_resolve_ordered_string_type_keys(ty, analysis)?;
+        let suffix = vue3_template_type_quasi_value(template.quasis.get(index + 1)?);
+        let mut next = Vec::new();
+        for prefix in &values {
+            for key in &keys {
+                next.push(format!("{prefix}{key}{suffix}"));
+            }
+        }
+        values = next;
+    }
+    Some(values)
+}
+
+fn vue3_template_type_quasi_value(quasi: &oxc_ast::ast::TemplateElement<'_>) -> String {
+    quasi
+        .value
+        .cooked
+        .as_ref()
+        .map(|value| value.as_str().to_string())
+        .unwrap_or_else(|| quasi.value.raw.as_str().to_string())
+}
+
+fn vue3_string_mapping_type(name: &str, value: &str) -> String {
+    match name {
+        "Uppercase" => value.to_uppercase(),
+        "Lowercase" => value.to_lowercase(),
+        "Capitalize" => {
+            let mut chars = value.chars();
+            let Some(first) = chars.next() else {
+                return String::new();
+            };
+            let mut mapped = first.to_uppercase().collect::<String>();
+            mapped.push_str(chars.as_str());
+            mapped
+        }
+        "Uncapitalize" => {
+            let mut chars = value.chars();
+            let Some(first) = chars.next() else {
+                return String::new();
+            };
+            let mut mapped = first.to_lowercase().collect::<String>();
+            mapped.push_str(chars.as_str());
+            mapped
+        }
+        _ => value.to_string(),
     }
 }
 
@@ -13621,6 +13758,27 @@ fn vue3_resolve_generic_props_type_alias(
         return None;
     }
     let mut scoped_analysis = analysis.clone();
+    scoped_analysis
+        .declared_types
+        .extend(alias.declared_types.clone());
+    scoped_analysis
+        .define_model_declared_types
+        .extend(alias.define_model_declared_types.clone());
+    scoped_analysis
+        .props_type_declarations
+        .extend(alias.props_type_declarations.clone());
+    scoped_analysis
+        .props_options_type_declarations
+        .extend(alias.props_options_type_declarations.clone());
+    scoped_analysis
+        .return_type_props_options_declarations
+        .extend(alias.return_type_props_options_declarations.clone());
+    scoped_analysis
+        .string_literal_type_declarations
+        .extend(alias.string_literal_type_declarations.clone());
+    scoped_analysis
+        .ordered_string_literal_type_declarations
+        .extend(alias.ordered_string_literal_type_declarations.clone());
     scoped_analysis.generic_type_aliases.remove(&name);
     for (index, param) in alias.params.iter().enumerate() {
         let Some(argument) = type_arguments.params.get(index) else {
@@ -14110,6 +14268,64 @@ fn vue3_type_members_from_literal(
             .to_string(),
         members: vue3_runtime_props_from_signatures(source, &literal.members, analysis),
     }
+}
+
+fn vue3_type_members_from_mapped_type(
+    source: &str,
+    mapped: &TSMappedType<'_>,
+    analysis: &Vue3ScriptSetupAnalysis,
+) -> Option<Vue27TypeMembers> {
+    let constraint_keys = vue3_resolve_ordered_string_type_keys(&mapped.constraint, analysis)?;
+    let mut scoped_analysis = analysis.clone();
+    let key_param = mapped.key.name.to_string();
+    scoped_analysis.string_literal_type_declarations.insert(
+        key_param.clone(),
+        constraint_keys.iter().cloned().collect::<BTreeSet<_>>(),
+    );
+    scoped_analysis
+        .ordered_string_literal_type_declarations
+        .insert(key_param, constraint_keys.clone());
+
+    let keys = match mapped.name_type.as_ref() {
+        Some(name_type) => vue3_resolve_ordered_string_type_keys(name_type, &scoped_analysis)?,
+        None => constraint_keys,
+    };
+    let types = mapped
+        .type_annotation
+        .as_ref()
+        .map(|ty| infer_vue3_runtime_type(ty, &scoped_analysis))
+        .unwrap_or_else(|| vec!["null".into()]);
+    let required = !matches!(
+        mapped.optional,
+        Some(TSMappedTypeModifierOperator::True | TSMappedTypeModifierOperator::Plus)
+    );
+    let type_annotation_source = mapped.type_annotation.as_ref().and_then(|ty| {
+        source
+            .get(ty.span().start as usize..ty.span().end as usize)
+            .map(ToOwned::to_owned)
+    });
+    let member_source = source
+        .get(mapped.span.start as usize..mapped.span.end as usize)
+        .map(ToOwned::to_owned);
+
+    Some(Vue27TypeMembers {
+        source: source
+            .get(mapped.span.start as usize..mapped.span.end as usize)
+            .unwrap_or_default()
+            .to_string(),
+        members: keys
+            .into_iter()
+            .map(|key| Vue27RuntimeProp {
+                key,
+                types: types.clone(),
+                required,
+                default: None,
+                is_method: false,
+                type_annotation_source: type_annotation_source.clone(),
+                member_source: member_source.clone(),
+            })
+            .collect(),
+    })
 }
 
 fn vue3_type_members_from_interface_body(
@@ -20262,6 +20478,75 @@ defineProps<Props<Foo, Bar> & Box<string> & Optional<Test, 'one'> & Pick<Test, k
         assert!(script
             .content
             .contains("two: { type: String, required: true }"));
+        assert!(script.deps.is_empty(), "{:?}", script.deps);
+    }
+
+    #[test]
+    fn vue3_compile_script_resolves_mapped_template_literal_props() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "Comp.vue",
+            r#"<script setup lang="ts">
+type Flag = 'foo' | 'bar'
+type Breakpoints = 'sm' | 'md' | 'lg'
+type BreakpointFactory<T extends string, V> = {
+  [K in Breakpoints as `${T}${Capitalize<K>}`]?: V
+}
+type Props = {
+  [K in `_${Flag}_${Breakpoints}_`]: string
+} & {
+  [K in Flag as `${K}_flag`]: boolean
+} & {
+  [K in Uppercase<Extract<Flag, 'foo'>> as `upper${Capitalize<Lowercase<K>>}`]?: string
+} & {
+  [K in Lowercase<'LOUD'> as `${K}_lower`]: number
+} & {
+  [K in Uncapitalize<'Title'> as `${K}_name`]: boolean
+} & {
+  [K in Exclude<Flag, 'bar'> as `${K}_only`]: string
+} & BreakpointFactory<'cols', number>
+defineProps<Props>()
+</script>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("_foo_sm_: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("_foo_md_: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("_bar_lg_: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("foo_flag: { type: Boolean, required: true }"));
+        assert!(script
+            .content
+            .contains("bar_flag: { type: Boolean, required: true }"));
+        assert!(script
+            .content
+            .contains("upperFoo: { type: String, required: false }"));
+        assert!(script
+            .content
+            .contains("loud_lower: { type: Number, required: true }"));
+        assert!(script
+            .content
+            .contains("title_name: { type: Boolean, required: true }"));
+        assert!(script
+            .content
+            .contains("foo_only: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("colsSm: { type: Number, required: false }"));
+        assert!(script
+            .content
+            .contains("colsMd: { type: Number, required: false }"));
+        assert!(script
+            .content
+            .contains("colsLg: { type: Number, required: false }"));
         assert!(script.deps.is_empty(), "{:?}", script.deps);
     }
 
