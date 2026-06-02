@@ -4276,6 +4276,13 @@ struct Vue3GenericTypeAlias {
 struct Vue27EmitsType {
     source: String,
     events: Vec<String>,
+    syntax: Vue3EmitsTypeSyntax,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Vue3EmitsTypeSyntax {
+    has_call_signature: bool,
+    has_property: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -7960,13 +7967,19 @@ fn vue27_emits_type_from_function(source: &str, function: &TSFunctionType<'_>) -
             .unwrap_or_default()
             .to_string(),
         events,
+        syntax: Vue3EmitsTypeSyntax {
+            has_call_signature: true,
+            has_property: false,
+        },
     }
 }
 
 fn vue27_emits_type_from_literal(source: &str, literal: &TSTypeLiteral<'_>) -> Vue27EmitsType {
     let mut events = Vec::new();
+    let mut syntax = Vue3EmitsTypeSyntax::default();
     for member in &literal.members {
         if let TSSignature::TSCallSignatureDeclaration(signature) = member {
+            syntax.has_call_signature = true;
             collect_vue27_emits_from_parameters(&signature.params.items, &mut events);
         }
     }
@@ -7976,6 +7989,7 @@ fn vue27_emits_type_from_literal(source: &str, literal: &TSTypeLiteral<'_>) -> V
             .unwrap_or_default()
             .to_string(),
         events,
+        syntax,
     }
 }
 
@@ -7984,8 +7998,10 @@ fn vue27_emits_type_from_interface_body(
     body: &TSInterfaceBody<'_>,
 ) -> Vue27EmitsType {
     let mut events = Vec::new();
+    let mut syntax = Vue3EmitsTypeSyntax::default();
     for member in &body.body {
         if let TSSignature::TSCallSignatureDeclaration(signature) = member {
+            syntax.has_call_signature = true;
             collect_vue27_emits_from_parameters(&signature.params.items, &mut events);
         }
     }
@@ -7995,6 +8011,60 @@ fn vue27_emits_type_from_interface_body(
             .unwrap_or_default()
             .to_string(),
         events,
+        syntax,
+    }
+}
+
+fn vue3_emits_type_from_literal(source: &str, literal: &TSTypeLiteral<'_>) -> Vue27EmitsType {
+    let mut events = Vec::new();
+    let mut syntax = Vue3EmitsTypeSyntax::default();
+    for member in &literal.members {
+        collect_vue3_emits_type_member(source, member, &mut events, &mut syntax);
+    }
+    Vue27EmitsType {
+        source: source
+            .get(literal.span.start as usize..literal.span.end as usize)
+            .unwrap_or_default()
+            .to_string(),
+        events,
+        syntax,
+    }
+}
+
+fn vue3_emits_type_from_interface_body(source: &str, body: &TSInterfaceBody<'_>) -> Vue27EmitsType {
+    let mut events = Vec::new();
+    let mut syntax = Vue3EmitsTypeSyntax::default();
+    for member in &body.body {
+        collect_vue3_emits_type_member(source, member, &mut events, &mut syntax);
+    }
+    Vue27EmitsType {
+        source: source
+            .get(body.span.start as usize..body.span.end as usize)
+            .unwrap_or_default()
+            .to_string(),
+        events,
+        syntax,
+    }
+}
+
+fn collect_vue3_emits_type_member(
+    _source: &str,
+    member: &TSSignature<'_>,
+    events: &mut Vec<String>,
+    syntax: &mut Vue3EmitsTypeSyntax,
+) {
+    match member {
+        TSSignature::TSCallSignatureDeclaration(signature) => {
+            syntax.has_call_signature = true;
+            collect_vue27_emits_from_parameters(&signature.params.items, events);
+        }
+        TSSignature::TSPropertySignature(property) if !property.computed => {
+            if let Some(key) = vue27_property_key_static_name(&property.key) {
+                syntax.has_property = true;
+                push_unique(events, &key);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -13879,12 +13949,14 @@ fn vue3_emits_type_from_interface(
     declaration: &TSInterfaceDeclaration<'_>,
     analysis: &Vue3ScriptSetupAnalysis,
 ) -> Vue27EmitsType {
-    let mut emits = vue27_emits_type_from_interface_body(source, &declaration.body);
+    let mut emits = vue3_emits_type_from_interface_body(source, &declaration.body);
     for heritage in &declaration.extends {
         let Some(base) = vue3_resolve_interface_heritage_emits_type(source, heritage, analysis)
         else {
             continue;
         };
+        emits.syntax.has_call_signature |= base.syntax.has_call_signature;
+        emits.syntax.has_property |= base.syntax.has_property;
         for event in base.events {
             push_unique(&mut emits.events, &event);
         }
@@ -15881,6 +15953,11 @@ fn collect_vue3_define_emits_type(
     let Some(emits_type) = vue3_resolve_emits_type(source, type_argument, analysis) else {
         return;
     };
+    if emits_type.syntax.has_call_signature && emits_type.syntax.has_property {
+        analysis
+            .errors
+            .push("defineEmits() type cannot mixed call signature and property syntax.".into());
+    }
     if !emits_type.events.is_empty() {
         analysis.emits_runtime = Some(format!(
             "[{}]",
@@ -15901,7 +15978,7 @@ fn vue3_resolve_emits_type<'a>(
 ) -> Option<Vue27EmitsType> {
     match type_argument {
         TSType::TSFunctionType(function) => Some(vue27_emits_type_from_function(source, function)),
-        TSType::TSTypeLiteral(literal) => Some(vue27_emits_type_from_literal(source, literal)),
+        TSType::TSTypeLiteral(literal) => Some(vue3_emits_type_from_literal(source, literal)),
         TSType::TSTypeReference(reference) => {
             let name = vue3_ts_type_name_key(&reference.type_name)?;
             analysis.emits_type_declarations.get(&name).cloned()
@@ -15916,10 +15993,13 @@ fn vue3_resolve_emits_type<'a>(
         }
         TSType::TSIntersectionType(intersection) => {
             let mut events = Vec::new();
+            let mut syntax = Vue3EmitsTypeSyntax::default();
             for ty in &intersection.types {
                 let Some(resolved) = vue3_resolve_emits_type(source, ty, analysis) else {
                     continue;
                 };
+                syntax.has_call_signature |= resolved.syntax.has_call_signature;
+                syntax.has_property |= resolved.syntax.has_property;
                 for event in resolved.events {
                     push_unique(&mut events, &event);
                 }
@@ -15933,6 +16013,7 @@ fn vue3_resolve_emits_type<'a>(
                         .unwrap_or_default()
                         .to_string(),
                     events,
+                    syntax,
                 })
             }
         }
@@ -20174,6 +20255,48 @@ const emit = defineEmits<Emits>()
             .content
             .contains("emits: [\"base\", \"mid\", \"local\"],"));
         assert!(script.deps.is_empty(), "{:?}", script.deps);
+    }
+
+    #[test]
+    fn vue3_compile_script_resolves_define_emits_property_syntax() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "Comp.vue",
+            r#"<script setup lang="ts">
+type Emits = {
+  foo: []
+  bar: [id: number]
+  'foo:bar': []
+}
+const emit = defineEmits<Emits>()
+</script>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("emits: [\"foo\", \"bar\", \"foo:bar\"],"));
+        assert!(script.deps.is_empty(), "{:?}", script.deps);
+    }
+
+    #[test]
+    fn vue3_compile_script_reports_mixed_define_emits_type_syntax() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "Comp.vue",
+            r#"<script setup lang="ts">
+const emit = defineEmits<{
+  foo: []
+  (e: 'bar'): void
+}>()
+</script>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.iter().any(|error| {
+            error.contains("defineEmits() type cannot mixed call signature and property syntax.")
+        }));
     }
 
     #[test]
