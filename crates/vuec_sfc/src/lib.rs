@@ -6936,19 +6936,7 @@ fn refresh_vue3_type_alias_declaration(
         }
     }
 
-    let emits = match &declaration.type_annotation {
-        TSType::TSTypeLiteral(literal) => Some(vue27_emits_type_from_literal(source, literal)),
-        TSType::TSFunctionType(function) => Some(vue27_emits_type_from_function(source, function)),
-        TSType::TSImportType(import_type) => vue3_resolve_import_type(import_type, analysis)
-            .and_then(|resolved| {
-                resolved
-                    .context
-                    .emits_type_declarations
-                    .get(&resolved.name)
-                    .cloned()
-            }),
-        _ => None,
-    };
+    let emits = vue3_resolve_emits_type(source, &declaration.type_annotation, analysis);
     match emits {
         Some(emits) if !emits.events.is_empty() => {
             if analysis.emits_type_declarations.get(&name) != Some(&emits) {
@@ -15926,6 +15914,31 @@ fn vue3_resolve_emits_type<'a>(
                 .get(&resolved.name)
                 .cloned()
         }
+        TSType::TSIntersectionType(intersection) => {
+            let mut events = Vec::new();
+            for ty in &intersection.types {
+                let Some(resolved) = vue3_resolve_emits_type(source, ty, analysis) else {
+                    continue;
+                };
+                for event in resolved.events {
+                    push_unique(&mut events, &event);
+                }
+            }
+            if events.is_empty() {
+                None
+            } else {
+                Some(Vue27EmitsType {
+                    source: source
+                        .get(intersection.span.start as usize..intersection.span.end as usize)
+                        .unwrap_or_default()
+                        .to_string(),
+                    events,
+                })
+            }
+        }
+        TSType::TSParenthesizedType(parenthesized) => {
+            vue3_resolve_emits_type(source, &parenthesized.type_annotation, analysis)
+        }
         _ => None,
     }
 }
@@ -20134,6 +20147,66 @@ const emit = defineEmits<Emits>()
         assert!(script.errors.is_empty(), "{:?}", script.errors);
         assert!(script.content.contains("emits: [\"local\", \"base\"],"));
         assert!(script.deps.is_empty(), "{:?}", script.deps);
+    }
+
+    #[test]
+    fn vue3_compile_script_resolves_forward_type_alias_intersection_emits() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "Comp.vue",
+            r#"<script setup lang="ts">
+type Emits = Mid & {
+  (e: 'local'): void
+}
+type Mid = Base & {
+  (e: 'mid'): void
+}
+interface Base {
+  (e: 'base'): void
+}
+const emit = defineEmits<Emits>()
+</script>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("emits: [\"base\", \"mid\", \"local\"],"));
+        assert!(script.deps.is_empty(), "{:?}", script.deps);
+    }
+
+    #[test]
+    fn vue3_compile_script_resolves_external_forward_type_alias_intersection_emits_deps() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let types_file = dir.path().join("events.ts");
+        std::fs::write(
+            &types_file,
+            "export type Emits = Mid & { (e: 'local'): void }\nexport type Mid = Base & { (e: 'mid'): void }\nexport interface Base { (e: 'base'): void }",
+        )
+        .expect("write type alias emits");
+
+        let filename = dir.path().join("Comp.vue");
+        let source = r#"<script setup lang="ts">
+import type { Emits } from './events'
+const emit = defineEmits<Emits>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("emits: [\"base\", \"mid\", \"local\"],"));
+
+        let deps = script.deps.iter().cloned().collect::<BTreeSet<_>>();
+        let expected = [types_file]
+            .into_iter()
+            .map(|path| normalize_path_string(&path))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(deps, expected);
+        assert!(!script.deps.iter().any(|dep| dep.contains('\\')));
     }
 
     #[test]
