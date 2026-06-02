@@ -16256,6 +16256,41 @@ span { color: v-bind(style.color) }
     }
 
     #[test]
+    fn vue3_compile_script_source_map_maps_inline_bind_expression() {
+        let mut compiler = SfcCompiler::new();
+        let source = concat!(
+            "<script setup>\n",
+            "import { ref } from 'vue'\n",
+            "const count = ref(0)\n",
+            "</script>\n",
+            r#"<template><button :id="count"></button></template>"#
+        );
+        let descriptor = compiler.parse("FooBar.vue", source);
+        let script = compiler.compile_script(
+            &descriptor,
+            SfcScriptCompileOptions {
+                inline_template: true,
+                ..SfcScriptCompileOptions::default()
+            },
+        );
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(
+            script.content.contains("id: count.value"),
+            "{}",
+            script.content
+        );
+        let expression_original = generated_original_position(&script, "count.value");
+        let expression_expected = original_line_column(source, r#"count"></button>"#);
+        assert_eq!(expression_original.source, "FooBar.vue");
+        assert_eq!(
+            (expression_original.line, expression_original.column),
+            expression_expected
+        );
+        assert_eq!(expression_original.name.as_deref(), Some("count"));
+    }
+
+    #[test]
     fn vue27_prefix_identifiers_rewrites_render_scope_references() {
         let compiler = SfcCompiler::new();
         let source = "function render(){with(this){return _c('div',{style:{color}},[_v(_s(foo)),_l(list,function(i){return _c('p',[_v(_s(i))])})])}}";

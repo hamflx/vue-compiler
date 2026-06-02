@@ -22658,40 +22658,33 @@ fn add_element_prop_mappings(
                 }
             }
             Vue3Prop::Directive(dir) => {
-                if dir.name == "bind"
-                    && dir
+                if dir.name == "bind" {
+                    if dir
                         .arg
                         .as_ref()
                         .is_some_and(|arg| arg.source_string() == "class")
-                {
-                    if let Some(arg_span) = dir.arg_span {
-                        add_direct_mapping(
-                            code,
-                            source,
-                            "class:",
-                            arg_span.start.0.saturating_sub(base_offset),
-                            0,
-                            None,
-                            segments,
-                        );
+                    {
+                        if let Some(arg_span) = dir.arg_span {
+                            add_direct_mapping(
+                                code,
+                                source,
+                                "class:",
+                                arg_span.start.0.saturating_sub(base_offset),
+                                0,
+                                None,
+                                segments,
+                            );
+                        }
                     }
-                    if let (Some(exp), Some(span)) = (&dir.exp, dir.exp_span) {
-                        let expression = exp.source_string();
-                        let fallback_start = span.start.0.saturating_sub(base_offset);
-                        let (original_expression, original_start) =
-                            original_expression_from_span(source, span, base_offset)
-                                .unwrap_or((expression.trim(), fallback_start));
-                        add_expression_token_mappings(
-                            code,
-                            source,
-                            original_expression,
-                            original_start,
-                            0,
-                            uses_prefixed_identifiers(options),
-                            names,
-                            segments,
-                        );
-                    }
+                    add_directive_expression_token_mappings(
+                        code,
+                        source,
+                        dir,
+                        base_offset,
+                        options,
+                        names,
+                        segments,
+                    );
                 }
                 if dir.name == "on" && dir.arg.is_some() {
                     if let (Some(exp), Some(span)) = (&dir.exp, dir.exp_span) {
@@ -22734,6 +22727,35 @@ fn add_element_prop_mappings(
             }
         }
     }
+}
+
+fn add_directive_expression_token_mappings(
+    code: &str,
+    source: &str,
+    dir: &Vue3Directive,
+    base_offset: usize,
+    options: &Vue3CompilerOptions,
+    names: &mut Vec<String>,
+    segments: &mut Vec<SourceMapSegment>,
+) {
+    let (Some(exp), Some(span)) = (&dir.exp, dir.exp_span) else {
+        return;
+    };
+    let expression = exp.source_string();
+    let fallback_start = span.start.0.saturating_sub(base_offset);
+    let (original_expression, original_start) =
+        original_expression_from_span(source, span, base_offset)
+            .unwrap_or((expression.trim(), fallback_start));
+    add_expression_token_mappings(
+        code,
+        source,
+        original_expression,
+        original_start,
+        0,
+        uses_prefixed_identifiers(options),
+        names,
+        segments,
+    );
 }
 
 fn add_direct_mapping(
@@ -36120,6 +36142,52 @@ mod tests {
             .binding_metadata
             .insert("count".into(), "setup-ref".into());
         let source = "<button>{{ count }}</button>";
+        let result = base_compile(
+            TemplateSource {
+                filename: "FooBar.vue".into(),
+                source: source.into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            options,
+        );
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert!(result.code.contains("count.value"));
+        let generated_offset = result
+            .code
+            .find("count.value")
+            .expect("generated count ref");
+        let generated = loc_for_offset(&result.code, generated_offset).expect("generated loc");
+        let original = result
+            .map
+            .expect("source map")
+            .original_position(vuec_source::GeneratedPosition::new(
+                generated.0,
+                generated.1,
+            ))
+            .expect("source map lookup")
+            .expect("original position");
+        let expected = loc_for_offset(source, source.find("count").expect("source count"))
+            .expect("source loc");
+        assert_eq!(original.source, "FooBar.vue");
+        assert_eq!((original.line, original.column), expected);
+        assert_eq!(original.name.as_deref(), Some("count"));
+    }
+
+    #[test]
+    fn base_compile_source_map_maps_inline_setup_ref_static_bind_expression() {
+        let mut options = Vue3CompilerOptions {
+            prefix_identifiers: true,
+            mode: "module".into(),
+            inline: true,
+            source_map: true,
+            ..Vue3CompilerOptions::default()
+        };
+        options
+            .binding_metadata
+            .insert("count".into(), "setup-ref".into());
+        let source = r#"<button :id="count"></button>"#;
         let result = base_compile(
             TemplateSource {
                 filename: "FooBar.vue".into(),
