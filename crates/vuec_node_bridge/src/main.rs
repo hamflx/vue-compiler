@@ -5907,6 +5907,56 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_resolves_external_mapped_identity_runtime_types_deps() {
+        let dir = std::env::temp_dir().join(format!(
+            "vuec-node-bridge-mapped-identity-runtime-types-deps-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        std::fs::write(
+            dir.join("types.ts"),
+            concat!(
+                "export type RuntimeMirror<T> = { [K in keyof T]: T[K] }\n",
+                "export type Props = {\n",
+                "  label: RuntimeMirror<string | number>\n",
+                "  boxed: RuntimeMirror<{ value: boolean }>\n",
+                "  list: RuntimeMirror<ReadonlyArray<string>>\n",
+                "}\n",
+                "export type ModelValue = RuntimeMirror<string | boolean>"
+            ),
+        )
+        .expect("write mapped identity runtime props");
+
+        let filename = dir.join("Comp.vue");
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "import type { Props, ModelValue } from './types'\n",
+                    "defineProps<Props>()\n",
+                    "defineModel<ModelValue>()",
+                    "</script>"
+                ),
+                "filename": filename.to_string_lossy()
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = compiled["content"].as_str().unwrap_or_default();
+        let expected_dep = dir.join("types.ts").to_string_lossy().replace('\\', "/");
+        assert!(compiled["errors"].as_array().unwrap().is_empty());
+        assert!(content.contains("label: { type: [String, Number], required: true }"));
+        assert!(content.contains("boxed: { type: Object, required: true }"));
+        assert!(content.contains("list: { type: Array, required: true }"));
+        assert!(content.contains("\"modelValue\": { type: [String, Boolean] },"));
+        assert_eq!(compiled["deps"], json!([expected_dep]));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn vue3_sfc_bridge_compile_script_resolves_external_interface_extends_type_deps() {
         let dir = std::env::temp_dir().join(format!(
             "vuec-node-bridge-interface-extends-deps-{}",

@@ -11668,6 +11668,7 @@ struct Vue3ScriptSetupAnalysis {
     string_literal_type_declarations: BTreeMap<String, BTreeSet<String>>,
     ordered_string_literal_type_declarations: BTreeMap<String, Vec<String>>,
     emits_type_declarations: BTreeMap<String, Vue27EmitsType>,
+    generic_type_parameter_names: BTreeSet<String>,
     type_sources: BTreeMap<String, String>,
     type_deps: BTreeMap<String, BTreeSet<String>>,
     type_filename: Option<String>,
@@ -13805,6 +13806,9 @@ fn vue3_scoped_analysis_for_generic_type_alias(
         .ordered_string_literal_type_declarations
         .extend(alias.ordered_string_literal_type_declarations.clone());
     scoped_analysis.generic_type_aliases.remove(&name);
+    scoped_analysis
+        .generic_type_parameter_names
+        .extend(alias.params.iter().cloned());
     for (index, param) in alias.params.iter().enumerate() {
         let Some(argument) = type_arguments.params.get(index) else {
             continue;
@@ -14665,6 +14669,45 @@ fn vue3_runtime_props_from_signatures(
     props
 }
 
+fn vue3_mapped_identity_runtime_type_parameter(
+    mapped: &TSMappedType<'_>,
+    analysis: &Vue3ScriptSetupAnalysis,
+) -> Option<String> {
+    if analysis.generic_type_parameter_names.is_empty() {
+        return None;
+    }
+    let type_annotation = mapped.type_annotation.as_ref()?;
+    let TSType::TSIndexedAccessType(indexed) = type_annotation else {
+        return None;
+    };
+    let TSType::TSTypeOperatorType(operator) = &mapped.constraint else {
+        return None;
+    };
+    if operator.operator != TSTypeOperatorOperator::Keyof {
+        return None;
+    }
+    let TSType::TSTypeReference(constraint_reference) = &operator.type_annotation else {
+        return None;
+    };
+    let target_name = vue27_ts_type_name_identifier(&constraint_reference.type_name)?;
+    if !analysis.generic_type_parameter_names.contains(target_name) {
+        return None;
+    }
+    let TSType::TSTypeReference(object_reference) = &indexed.object_type else {
+        return None;
+    };
+    if vue27_ts_type_name_identifier(&object_reference.type_name)? != target_name {
+        return None;
+    }
+    let TSType::TSTypeReference(index_reference) = &indexed.index_type else {
+        return None;
+    };
+    if vue27_ts_type_name_identifier(&index_reference.type_name)? != mapped.key.name.as_str() {
+        return None;
+    }
+    Some(target_name.to_string())
+}
+
 fn infer_vue3_runtime_type(node: &TSType<'_>, analysis: &Vue3ScriptSetupAnalysis) -> Vec<String> {
     match node {
         TSType::TSStringKeyword(_) => vec!["String".into()],
@@ -14734,6 +14777,14 @@ fn infer_vue3_runtime_type(node: &TSType<'_>, analysis: &Vue3ScriptSetupAnalysis
                 }
             }
             types
+        }
+        TSType::TSMappedType(mapped) => {
+            if let Some(type_name) = vue3_mapped_identity_runtime_type_parameter(mapped, analysis) {
+                if let Some(types) = analysis.declared_types.get(&type_name) {
+                    return types.clone();
+                }
+            }
+            vec!["null".into()]
         }
         _ => vec!["null".into()],
     }
@@ -14892,6 +14943,14 @@ fn infer_vue3_define_model_runtime_type(
                 }
             }
             types
+        }
+        TSType::TSMappedType(mapped) => {
+            if let Some(type_name) = vue3_mapped_identity_runtime_type_parameter(mapped, analysis) {
+                if let Some(types) = analysis.define_model_declared_types.get(&type_name) {
+                    return types.clone();
+                }
+            }
+            vec!["Unknown".into()]
         }
         _ => vec!["Unknown".into()],
     }
@@ -21004,6 +21063,40 @@ defineModel<ReadonlyArray<string> | ReadonlyMap<string, number> | ReadonlySet<st
             script.bindings.get("getter").map(String::as_str),
             Some("props")
         );
+        assert!(script.deps.is_empty(), "{:?}", script.deps);
+    }
+
+    #[test]
+    fn vue3_compile_script_resolves_mapped_identity_runtime_types() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "Comp.vue",
+            r#"<script setup lang="ts">
+type RuntimeMirror<T> = { [K in keyof T]: T[K] }
+type Props = {
+  label: RuntimeMirror<string | number>
+  boxed: RuntimeMirror<{ value: boolean }>
+  list: RuntimeMirror<ReadonlyArray<string>>
+}
+defineProps<Props>()
+defineModel<RuntimeMirror<string | boolean>>()
+</script>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("label: { type: [String, Number], required: true }"));
+        assert!(script
+            .content
+            .contains("boxed: { type: Object, required: true }"));
+        assert!(script
+            .content
+            .contains("list: { type: Array, required: true }"));
+        assert!(script
+            .content
+            .contains("\"modelValue\": { type: [String, Boolean] },"));
         assert!(script.deps.is_empty(), "{:?}", script.deps);
     }
 
