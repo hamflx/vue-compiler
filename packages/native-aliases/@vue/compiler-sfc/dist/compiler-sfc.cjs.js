@@ -86,7 +86,7 @@ function compileTemplate(options) {
 }
 
 function compileScript(descriptor, options) {
-  return throwVue3CompileScriptErrors(native.compileScript(descriptor || {}, options || {}));
+  return hydrateVue3CompileScriptResult(native.compileScript(descriptor || {}, options || {}));
 }
 
 function compileStyle(options) {
@@ -164,6 +164,22 @@ function throwVue3CompileScriptErrors(result) {
   const first = result.errors[0];
   const message = typeof first === 'string' ? first : (first && first.message) || String(first);
   throw new Error(message.startsWith('[@vue/compiler-sfc]') ? message : `[@vue/compiler-sfc] ${message}`);
+}
+
+function hydrateVue3CompileScriptResult(result) {
+  result = throwVue3CompileScriptErrors(result);
+  if (!result || typeof result !== 'object') return result;
+  const bindings = result.bindings;
+  if (bindings && typeof bindings === 'object' && Object.prototype.hasOwnProperty.call(bindings, '__isScriptSetup')) {
+    const isScriptSetup = bindings.__isScriptSetup === true || bindings.__isScriptSetup === 'true';
+    delete bindings.__isScriptSetup;
+    Object.defineProperty(bindings, '__isScriptSetup', {
+      enumerable: false,
+      configurable: true,
+      value: isScriptSetup
+    });
+  }
+  return result;
 }
 
 function vue3SfcShouldForceReload(prevImports, descriptor) {

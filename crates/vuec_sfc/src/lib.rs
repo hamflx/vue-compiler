@@ -1003,14 +1003,15 @@ impl SfcCompiler {
             .or(descriptor.script_setup.as_ref())
             .map(|block| block.attrs.clone())
             .unwrap_or_default();
+        let base_bindings = vue3_script_base_binding_metadata(descriptor);
         let generated_content = script_content(
             descriptor,
             &raw_content,
             descriptor.filename.as_str(),
             &options,
-            &script_bindings(&summary.bindings),
+            &base_bindings,
         );
-        let mut bindings = script_bindings(&summary.bindings);
+        let mut bindings = base_bindings;
         bindings.extend(generated_content.bindings.clone());
         for removed in &generated_content.removed_bindings {
             bindings.remove(removed);
@@ -7714,6 +7715,52 @@ fn vue27_normal_script_binding_metadata(descriptor: &SfcDescriptor) -> BTreeMap<
     bindings
 }
 
+fn vue3_script_base_binding_metadata(descriptor: &SfcDescriptor) -> BTreeMap<String, String> {
+    if descriptor.script_setup.is_some() {
+        vue3_normal_script_options_binding_metadata(descriptor).unwrap_or_default()
+    } else {
+        vue3_normal_script_binding_metadata(descriptor)
+    }
+}
+
+fn vue3_normal_script_binding_metadata(descriptor: &SfcDescriptor) -> BTreeMap<String, String> {
+    let Some(mut bindings) = vue3_normal_script_options_binding_metadata(descriptor) else {
+        return BTreeMap::new();
+    };
+    bindings.insert("__isScriptSetup".into(), "false".into());
+    bindings
+}
+
+fn vue3_normal_script_options_binding_metadata(
+    descriptor: &SfcDescriptor,
+) -> Option<BTreeMap<String, String>> {
+    let script = descriptor.script.as_ref()?;
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(
+        &allocator,
+        &script.content,
+        script_source_type_from_attrs(&script.attrs),
+    )
+    .with_options(oxc_parser::ParseOptions {
+        parse_regular_expression: true,
+        ..oxc_parser::ParseOptions::default()
+    })
+    .parse();
+    if parsed.panicked || !parsed.errors.is_empty() {
+        return None;
+    }
+    for statement in &parsed.program.body {
+        if let Statement::ExportDefaultDeclaration(default) = statement {
+            if let ExportDefaultDeclarationKind::ObjectExpression(object) = &default.declaration {
+                let mut bindings = BTreeMap::new();
+                analyze_vue3_options_bindings(object, &mut bindings);
+                return Some(bindings);
+            }
+        }
+    }
+    None
+}
+
 fn vue27_script_options_binding_metadata(descriptor: &SfcDescriptor) -> BTreeMap<String, String> {
     let Some(script) = descriptor.script.as_ref() else {
         return BTreeMap::new();
@@ -7972,6 +8019,331 @@ fn collect_vue27_script_declaration_bindings(
     }
 }
 
+fn vue3_script_setup_script_binding_metadata(
+    descriptor: &SfcDescriptor,
+    vue_import_aliases: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let Some(script) = descriptor.script.as_ref() else {
+        return BTreeMap::new();
+    };
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(
+        &allocator,
+        &script.content,
+        script_source_type_from_attrs(&script.attrs),
+    )
+    .with_options(oxc_parser::ParseOptions {
+        parse_regular_expression: true,
+        ..oxc_parser::ParseOptions::default()
+    })
+    .parse();
+    if parsed.panicked || !parsed.errors.is_empty() {
+        return BTreeMap::new();
+    }
+    let mut bindings = BTreeMap::new();
+    for statement in &parsed.program.body {
+        collect_vue3_top_level_script_binding(statement, vue_import_aliases, &mut bindings);
+    }
+    bindings
+}
+
+fn collect_vue3_top_level_script_binding(
+    statement: &Statement<'_>,
+    vue_import_aliases: &BTreeMap<String, String>,
+    bindings: &mut BTreeMap<String, String>,
+) {
+    match statement {
+        Statement::VariableDeclaration(declaration) if !declaration.declare => {
+            collect_vue3_script_variable_declaration_bindings(
+                declaration,
+                vue_import_aliases,
+                bindings,
+            );
+        }
+        Statement::FunctionDeclaration(function) if !function.declare => {
+            if let Some(id) = &function.id {
+                bindings.insert(id.name.to_string(), "setup-const".into());
+            }
+        }
+        Statement::ClassDeclaration(class) if !class.declare => {
+            if let Some(id) = &class.id {
+                bindings.insert(id.name.to_string(), "setup-const".into());
+            }
+        }
+        Statement::TSEnumDeclaration(declaration) if !declaration.declare => {
+            bindings.insert(
+                declaration.id.name.to_string(),
+                vue3_ts_enum_binding_type(declaration).into(),
+            );
+        }
+        Statement::ExportNamedDeclaration(declaration)
+            if declaration.export_kind == ImportOrExportKind::Value =>
+        {
+            if let Some(declaration) = &declaration.declaration {
+                collect_vue3_script_declaration_binding(declaration, vue_import_aliases, bindings);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_vue3_script_declaration_binding(
+    declaration: &Declaration<'_>,
+    vue_import_aliases: &BTreeMap<String, String>,
+    bindings: &mut BTreeMap<String, String>,
+) {
+    match declaration {
+        Declaration::VariableDeclaration(declaration) if !declaration.declare => {
+            collect_vue3_script_variable_declaration_bindings(
+                declaration,
+                vue_import_aliases,
+                bindings,
+            );
+        }
+        Declaration::FunctionDeclaration(function) if !function.declare => {
+            if let Some(id) = &function.id {
+                bindings.insert(id.name.to_string(), "setup-const".into());
+            }
+        }
+        Declaration::ClassDeclaration(class) if !class.declare => {
+            if let Some(id) = &class.id {
+                bindings.insert(id.name.to_string(), "setup-const".into());
+            }
+        }
+        Declaration::TSEnumDeclaration(declaration) if !declaration.declare => {
+            bindings.insert(
+                declaration.id.name.to_string(),
+                vue3_ts_enum_binding_type(declaration).into(),
+            );
+        }
+        _ => {}
+    }
+}
+
+fn collect_vue3_script_variable_declaration_bindings(
+    declaration: &VariableDeclaration<'_>,
+    vue_import_aliases: &BTreeMap<String, String>,
+    bindings: &mut BTreeMap<String, String>,
+) {
+    let is_const = declaration.kind == VariableDeclarationKind::Const;
+    let is_all_literal = is_const
+        && declaration.declarations.iter().all(|declarator| {
+            matches!(declarator.id, BindingPattern::BindingIdentifier(_))
+                && declarator.init.as_ref().is_some_and(vue3_is_static_node)
+        });
+    for declarator in &declaration.declarations {
+        if matches!(declarator.id, BindingPattern::BindingIdentifier(_)) {
+            collect_pattern_binding_types(
+                &declarator.id,
+                vue3_script_binding_type(
+                    declaration.kind,
+                    declarator.init.as_ref(),
+                    is_all_literal,
+                    vue_import_aliases,
+                ),
+                bindings,
+            );
+        } else {
+            let is_const_macro_call = is_const
+                && declarator.init.as_ref().is_some_and(|init| {
+                    vue3_is_call_named_any(
+                        init,
+                        &["defineProps", "defineEmits", "withDefaults", "defineSlots"],
+                    )
+                });
+            collect_vue3_script_pattern_binding_types(
+                &declarator.id,
+                is_const,
+                is_const_macro_call,
+                bindings,
+            );
+        }
+    }
+}
+
+fn collect_vue3_script_pattern_binding_types(
+    pattern: &BindingPattern<'_>,
+    is_const: bool,
+    is_define_call: bool,
+    bindings: &mut BTreeMap<String, String>,
+) {
+    match pattern {
+        BindingPattern::BindingIdentifier(identifier) => {
+            bindings.insert(
+                identifier.name.to_string(),
+                vue3_script_pattern_binding_type(is_const, is_define_call).into(),
+            );
+        }
+        BindingPattern::ObjectPattern(pattern) => {
+            for property in &pattern.properties {
+                collect_vue3_script_pattern_binding_types(
+                    &property.value,
+                    is_const,
+                    is_define_call,
+                    bindings,
+                );
+            }
+            if let Some(rest) = &pattern.rest {
+                collect_vue3_script_rest_binding_type(&rest.argument, is_const, bindings);
+            }
+        }
+        BindingPattern::ArrayPattern(pattern) => {
+            for element in pattern.elements.iter().flatten() {
+                collect_vue3_script_pattern_binding_types(
+                    element,
+                    is_const,
+                    is_define_call,
+                    bindings,
+                );
+            }
+            if let Some(rest) = &pattern.rest {
+                collect_vue3_script_rest_binding_type(&rest.argument, is_const, bindings);
+            }
+        }
+        BindingPattern::AssignmentPattern(pattern) => {
+            if matches!(pattern.left, BindingPattern::BindingIdentifier(_)) {
+                collect_vue3_script_pattern_binding_types(
+                    &pattern.left,
+                    is_const,
+                    is_define_call,
+                    bindings,
+                );
+            } else {
+                collect_vue3_script_pattern_binding_types(&pattern.left, is_const, false, bindings);
+            }
+        }
+    }
+}
+
+fn collect_vue3_script_rest_binding_type(
+    pattern: &BindingPattern<'_>,
+    is_const: bool,
+    bindings: &mut BTreeMap<String, String>,
+) {
+    collect_pattern_binding_types(
+        pattern,
+        if is_const { "setup-const" } else { "setup-let" },
+        bindings,
+    );
+}
+
+fn vue3_script_pattern_binding_type(is_const: bool, is_define_call: bool) -> &'static str {
+    if is_define_call {
+        "setup-const"
+    } else if is_const {
+        "setup-maybe-ref"
+    } else {
+        "setup-let"
+    }
+}
+
+fn vue3_script_binding_type(
+    kind: VariableDeclarationKind,
+    init: Option<&Expression<'_>>,
+    is_all_literal: bool,
+    vue_import_aliases: &BTreeMap<String, String>,
+) -> &'static str {
+    if kind != VariableDeclarationKind::Const {
+        return "setup-let";
+    }
+    if is_all_literal || init.is_some_and(vue3_is_static_node) {
+        return "literal-const";
+    }
+    if init.is_some_and(|init| vue3_is_call_named_any(init, &["defineProps"])) {
+        return "setup-reactive-const";
+    }
+    if init.is_some_and(|init| {
+        vue3_is_call_named_any(init, &["defineEmits", "withDefaults", "defineSlots"])
+    }) {
+        return "setup-const";
+    }
+    if init.is_some_and(|init| {
+        vue3_is_call_named_alias(init, vue_import_aliases.get("reactive").map(String::as_str))
+    }) {
+        return "setup-reactive-const";
+    }
+    if init.is_some_and(|init| vue3_can_never_be_ref(init, vue_import_aliases)) {
+        return "setup-const";
+    }
+    if init.is_some_and(|init| vue3_is_ref_like_call(init, vue_import_aliases)) {
+        return "setup-ref";
+    }
+    "setup-maybe-ref"
+}
+
+fn vue3_can_never_be_ref(
+    expression: &Expression<'_>,
+    vue_import_aliases: &BTreeMap<String, String>,
+) -> bool {
+    let expression = unwrap_vue3_ts_expression(expression);
+    if vue3_is_call_named_alias(
+        expression,
+        vue_import_aliases.get("reactive").map(String::as_str),
+    ) {
+        return true;
+    }
+    match expression {
+        Expression::UnaryExpression(_)
+        | Expression::BinaryExpression(_)
+        | Expression::ArrayExpression(_)
+        | Expression::ObjectExpression(_)
+        | Expression::FunctionExpression(_)
+        | Expression::ArrowFunctionExpression(_)
+        | Expression::UpdateExpression(_)
+        | Expression::ClassExpression(_)
+        | Expression::TaggedTemplateExpression(_)
+        | Expression::TemplateLiteral(_)
+        | Expression::StringLiteral(_)
+        | Expression::NumericLiteral(_)
+        | Expression::BooleanLiteral(_)
+        | Expression::NullLiteral(_)
+        | Expression::BigIntLiteral(_)
+        | Expression::RegExpLiteral(_) => true,
+        Expression::SequenceExpression(expression) => expression
+            .expressions
+            .last()
+            .is_some_and(|expression| vue3_can_never_be_ref(expression, vue_import_aliases)),
+        _ => false,
+    }
+}
+
+fn vue3_is_ref_like_call(
+    expression: &Expression<'_>,
+    vue_import_aliases: &BTreeMap<String, String>,
+) -> bool {
+    let expression = unwrap_vue3_ts_expression(expression);
+    if vue3_is_call_named_any(expression, &["defineModel"]) {
+        return true;
+    }
+    [
+        "ref",
+        "computed",
+        "shallowRef",
+        "customRef",
+        "toRef",
+        "useTemplateRef",
+    ]
+    .iter()
+    .any(|imported| {
+        vue3_is_call_named_alias(
+            expression,
+            vue_import_aliases.get(*imported).map(String::as_str),
+        )
+    })
+}
+
+fn vue3_is_call_named_any(expression: &Expression<'_>, names: &[&str]) -> bool {
+    let expression = unwrap_vue3_ts_expression(expression);
+    matches!(expression, Expression::CallExpression(call) if names.iter().any(|name| is_call_named(call, name)))
+}
+
+fn vue3_is_call_named_alias(expression: &Expression<'_>, name: Option<&str>) -> bool {
+    let Some(name) = name else {
+        return false;
+    };
+    matches!(unwrap_vue3_ts_expression(expression), Expression::CallExpression(call) if is_call_named(call, name))
+}
+
 fn collect_pattern_return_bindings_from_declaration(
     declaration: &VariableDeclaration<'_>,
     bindings: &mut Vec<String>,
@@ -8025,6 +8397,49 @@ fn analyze_vue27_options_bindings(
         if key == "setup" || key == "data" {
             collect_returned_object_keys(&property.value, key.as_str(), bindings);
         }
+    }
+}
+
+fn analyze_vue3_options_bindings(
+    object: &ObjectExpression<'_>,
+    bindings: &mut BTreeMap<String, String>,
+) {
+    for property in &object.properties {
+        let Some(property) = property.as_property() else {
+            continue;
+        };
+        let Some(key) = vue3_normal_option_identifier_key(property) else {
+            continue;
+        };
+        match key {
+            "props" => {
+                collect_vue27_object_or_array_keys(&property.value, bindings, "props");
+            }
+            "inject" => {
+                collect_vue27_object_or_array_keys(&property.value, bindings, "options");
+            }
+            "computed" | "methods" => {
+                if let Expression::ObjectExpression(values) = &property.value {
+                    for key in object_expression_keys(values) {
+                        bindings.insert(key, "options".into());
+                    }
+                }
+            }
+            "setup" | "data" if property.method => {
+                collect_returned_object_keys(&property.value, key, bindings);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn vue3_normal_option_identifier_key<'a>(property: &'a ObjectProperty<'_>) -> Option<&'a str> {
+    if property.computed {
+        return None;
+    }
+    match &property.key {
+        PropertyKey::StaticIdentifier(identifier) => Some(identifier.name.as_str()),
+        _ => None,
     }
 }
 
@@ -8594,14 +9009,6 @@ fn escape_vue27_pug_attr(source: &str) -> String {
     source.replace('&', "&amp;").replace('"', "&quot;")
 }
 
-fn script_bindings(names: &[String]) -> BTreeMap<String, String> {
-    names
-        .iter()
-        .filter(|name| !name.starts_with("import:") && !name.starts_with("export:"))
-        .map(|name| (name.clone(), "literal-const".to_string()))
-        .collect()
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct GeneratedScriptContent {
     content: String,
@@ -8732,8 +9139,14 @@ fn script_content(
             .as_ref()
             .is_some_and(|script| script_is_typescript(&script.attrs));
     let return_bindings = vue3_script_setup_return_bindings(descriptor, &setup_analysis, is_ts);
-    let template_binding_metadata =
-        vue3_script_setup_template_binding_metadata(descriptor, base_bindings, &setup_analysis);
+    let script_binding_metadata =
+        vue3_script_setup_script_binding_metadata(descriptor, &setup_analysis.vue_import_aliases);
+    let template_binding_metadata = vue3_script_setup_template_binding_metadata(
+        descriptor,
+        base_bindings,
+        &script_binding_metadata,
+        &setup_analysis,
+    );
     let template_props_aliases = vue3_script_setup_template_props_aliases(&setup_analysis);
     let inline_render = vue3_inline_template_render(
         descriptor,
@@ -8756,6 +9169,7 @@ fn script_content(
         &vue3_script_setup_export(
             &setup_analysis,
             &return_bindings,
+            &script_binding_metadata,
             filename,
             &normal_script,
             is_ts,
@@ -8781,6 +9195,7 @@ fn script_content(
             );
         }
     }
+    bindings.extend(script_binding_metadata);
     bindings.extend(setup_analysis.setup_bindings.clone());
     for prop in &setup_analysis.props_bindings {
         bindings
@@ -8803,6 +9218,7 @@ fn script_content(
 fn vue3_script_setup_template_binding_metadata(
     descriptor: &SfcDescriptor,
     base_bindings: &BTreeMap<String, String>,
+    script_bindings: &BTreeMap<String, String>,
     setup_analysis: &Vue3ScriptSetupAnalysis,
 ) -> BTreeMap<String, String> {
     let mut bindings = base_bindings.clone();
@@ -8823,6 +9239,7 @@ fn vue3_script_setup_template_binding_metadata(
             );
         }
     }
+    bindings.extend(script_bindings.clone());
     bindings.extend(setup_analysis.setup_bindings.clone());
     for prop in &setup_analysis.props_bindings {
         bindings
@@ -12059,6 +12476,7 @@ fn rewrite_vue3_compile_script_named_default_export(
 fn vue3_script_setup_export(
     setup_analysis: &Vue3ScriptSetupAnalysis,
     bindings: &[Vue3ScriptSetupReturnBinding],
+    script_bindings: &BTreeMap<String, String>,
     filename: &str,
     normal_script: &Vue3NormalScriptAnalysis,
     is_ts: bool,
@@ -12068,7 +12486,13 @@ fn vue3_script_setup_export(
     let runtime_options =
         vue3_script_setup_runtime_options(filename, normal_script, setup_analysis, is_prod);
     let setup_params = vue3_script_setup_params(setup_analysis);
-    let setup_body = vue3_script_setup_body(setup_analysis, bindings, inline_render, is_ts);
+    let setup_body = vue3_script_setup_body(
+        setup_analysis,
+        bindings,
+        script_bindings,
+        inline_render,
+        is_ts,
+    );
     if is_ts {
         let options_spread = setup_analysis
             .options_runtime
@@ -12277,10 +12701,13 @@ fn vue3_script_setup_params(setup_analysis: &Vue3ScriptSetupAnalysis) -> String 
 fn vue3_script_setup_body(
     setup_analysis: &Vue3ScriptSetupAnalysis,
     bindings: &[Vue3ScriptSetupReturnBinding],
+    script_bindings: &BTreeMap<String, String>,
     inline_render: Option<&Vue3InlineTemplateRender>,
     is_ts: bool,
 ) -> String {
-    let returned = script_setup_returned_bindings(bindings, &setup_analysis.setup_bindings);
+    let mut returned_binding_types = script_bindings.clone();
+    returned_binding_types.extend(setup_analysis.setup_bindings.clone());
+    let returned = script_setup_returned_bindings(bindings, &returned_binding_types);
     let mut body = String::new();
     if inline_render.is_none() && !setup_analysis.has_define_expose {
         body.push_str("  __expose();\n");
@@ -13350,6 +13777,174 @@ mod tests {
                 .unwrap(),
             "const __default__ = interface Foo {}"
         );
+    }
+
+    #[test]
+    fn vue3_compile_script_reports_normal_script_option_bindings() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "Comp.vue",
+            r#"<script>
+const ignored = 2
+export default {
+  props: ['foo', 'bar'],
+  inject: { service: {} },
+  setup() {
+    return { fromSetup: 1 }
+  },
+  data() {
+    return { fromData: null }
+  },
+  methods: { save() {} },
+  computed: {
+    total() {},
+    named: { get() {}, set() {} }
+  }
+}
+</script>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert_eq!(
+            script.bindings.get("foo").map(String::as_str),
+            Some("props")
+        );
+        assert_eq!(
+            script.bindings.get("bar").map(String::as_str),
+            Some("props")
+        );
+        assert_eq!(
+            script.bindings.get("service").map(String::as_str),
+            Some("options")
+        );
+        assert_eq!(
+            script.bindings.get("fromSetup").map(String::as_str),
+            Some("setup-maybe-ref")
+        );
+        assert_eq!(
+            script.bindings.get("fromData").map(String::as_str),
+            Some("data")
+        );
+        assert_eq!(
+            script.bindings.get("save").map(String::as_str),
+            Some("options")
+        );
+        assert_eq!(
+            script.bindings.get("total").map(String::as_str),
+            Some("options")
+        );
+        assert_eq!(
+            script.bindings.get("named").map(String::as_str),
+            Some("options")
+        );
+        assert_eq!(
+            script.bindings.get("__isScriptSetup").map(String::as_str),
+            Some("false")
+        );
+        assert!(script.bindings.get("ignored").is_none());
+
+        let async_descriptor = compiler.parse(
+            "Comp.vue",
+            r#"<script>
+export default {
+  async setup() {
+    return { asyncSetup: 1 }
+  }
+}
+</script>"#,
+        );
+        let async_script =
+            compiler.compile_script(&async_descriptor, SfcScriptCompileOptions::default());
+        assert!(async_script.errors.is_empty(), "{:?}", async_script.errors);
+        assert_eq!(
+            async_script.bindings.get("asyncSetup").map(String::as_str),
+            Some("setup-maybe-ref")
+        );
+    }
+
+    #[test]
+    fn vue3_compile_script_normal_script_only_ignores_call_default_bindings() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "Comp.vue",
+            r#"<script>
+import { defineComponent } from 'vue'
+export default defineComponent({
+  props: ['foo'],
+  data() {
+    return { bar: 1 }
+  }
+})
+</script>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script.bindings.is_empty());
+    }
+
+    #[test]
+    fn vue3_compile_script_merges_normal_script_bindings_with_setup_metadata() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "Comp.vue",
+            r#"<script>
+import { ref as r } from 'vue'
+export const literal = 2
+let count = 0
+const objectValue = {}
+export default {
+  props: { foo: String },
+  data() {
+    return { dataValue: null }
+  },
+  methods: { save() {} }
+}
+</script>
+<script setup>
+const local = 1
+</script>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert_eq!(
+            script.bindings.get("literal").map(String::as_str),
+            Some("literal-const")
+        );
+        assert_eq!(
+            script.bindings.get("count").map(String::as_str),
+            Some("setup-let")
+        );
+        assert_eq!(
+            script.bindings.get("objectValue").map(String::as_str),
+            Some("setup-const")
+        );
+        assert_eq!(
+            script.bindings.get("local").map(String::as_str),
+            Some("literal-const")
+        );
+        assert_eq!(
+            script.bindings.get("foo").map(String::as_str),
+            Some("props")
+        );
+        assert_eq!(
+            script.bindings.get("dataValue").map(String::as_str),
+            Some("data")
+        );
+        assert_eq!(
+            script.bindings.get("save").map(String::as_str),
+            Some("options")
+        );
+        assert_eq!(
+            script.bindings.get("r").map(String::as_str),
+            Some("setup-const")
+        );
+        assert!(script.bindings.get("__isScriptSetup").is_none());
+        assert!(script
+            .content
+            .contains("get count() { return count }, set count(v) { count = v }"));
     }
 
     #[test]

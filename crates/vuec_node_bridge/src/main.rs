@@ -4547,6 +4547,35 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_reports_normal_script_bindings() {
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script>",
+                    "const ignored = 1\n",
+                    "export default {",
+                    "props: ['foo'],",
+                    "inject: { service: {} },",
+                    "data() { return { count: 1 } },",
+                    "methods: { save() {} }",
+                    "}",
+                    "</script>"
+                ),
+                "filename": "Comp.vue"
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        assert_eq!(compiled["bindings"]["foo"], json!("props"));
+        assert_eq!(compiled["bindings"]["service"], json!("options"));
+        assert_eq!(compiled["bindings"]["count"], json!("data"));
+        assert_eq!(compiled["bindings"]["save"], json!("options"));
+        assert_eq!(compiled["bindings"]["__isScriptSetup"], json!("false"));
+        assert!(compiled["bindings"].get("ignored").is_none());
+    }
+
+    #[test]
     fn vue3_sfc_bridge_compile_script_generates_runtime_macros() {
         let compiled = dispatch(
             "sfc.compileScript",

@@ -2462,7 +2462,7 @@ fn alias_function_expression(
             } else if is_vue3_sfc_parse {
                 format!("hydrateVue3SfcParseResult({call})")
             } else if target.kind == TargetKind::Vue3Sfc && export_name == "compileScript" {
-                format!("throwVue3CompileScriptErrors({call})")
+                format!("hydrateVue3CompileScriptResult({call})")
             } else if is_vue27_sfc_compile_script {
                 format!("hydrateVue27CompileScriptResult({call})")
             } else if is_vue3_ssr_compile {
@@ -7981,6 +7981,22 @@ function throwVue3CompileScriptErrors(result) {
   const first = result.errors[0];
   const message = typeof first === 'string' ? first : (first && first.message) || String(first);
   throw new Error(message.startsWith('[@vue/compiler-sfc]') ? message : `[@vue/compiler-sfc] ${message}`);
+}
+
+function hydrateVue3CompileScriptResult(result) {
+  result = throwVue3CompileScriptErrors(result);
+  if (!result || typeof result !== 'object') return result;
+  const bindings = result.bindings;
+  if (bindings && typeof bindings === 'object' && Object.prototype.hasOwnProperty.call(bindings, '__isScriptSetup')) {
+    const isScriptSetup = bindings.__isScriptSetup === true || bindings.__isScriptSetup === 'true';
+    delete bindings.__isScriptSetup;
+    Object.defineProperty(bindings, '__isScriptSetup', {
+      enumerable: false,
+      configurable: true,
+      value: isScriptSetup
+    });
+  }
+  return result;
 }
 
 function vue3SfcShouldForceReload(prevImports, descriptor) {
@@ -14204,7 +14220,7 @@ mod tests {
     }
 
     #[test]
-    fn vue3_sfc_compile_script_alias_throws_rust_errors() {
+    fn vue3_sfc_compile_script_alias_hydrates_binding_metadata_shape() {
         let target = TargetSpec {
             version_line: VersionLine::Vue3,
             package: "@vue/compiler-sfc",
@@ -14223,8 +14239,10 @@ mod tests {
         let expression = alias_export_expression(target, "compileScript", Some(&detail));
 
         assert!(expression.contains("sfc.compileScript"));
-        assert!(expression.contains("throwVue3CompileScriptErrors"));
+        assert!(expression.contains("hydrateVue3CompileScriptResult"));
+        assert!(ALIAS_RUNTIME_JS.contains("function hydrateVue3CompileScriptResult"));
         assert!(ALIAS_RUNTIME_JS.contains("function throwVue3CompileScriptErrors"));
+        assert!(ALIAS_RUNTIME_JS.contains("Object.defineProperty(bindings, '__isScriptSetup'"));
         assert!(ALIAS_RUNTIME_JS.contains("[@vue/compiler-sfc] ${message}"));
     }
 
@@ -14273,7 +14291,7 @@ mod tests {
     }
 
     #[test]
-    fn napi_vue3_sfc_native_alias_throws_compile_script_errors() {
+    fn napi_vue3_sfc_native_alias_hydrates_compile_script_bindings() {
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let source = fs::read_to_string(
             repo_root
@@ -14287,9 +14305,11 @@ mod tests {
         .unwrap();
 
         assert!(source.contains(
-            "return throwVue3CompileScriptErrors(native.compileScript(descriptor || {}, options || {}));"
+            "return hydrateVue3CompileScriptResult(native.compileScript(descriptor || {}, options || {}));"
         ));
+        assert!(source.contains("function hydrateVue3CompileScriptResult"));
         assert!(source.contains("function throwVue3CompileScriptErrors"));
+        assert!(source.contains("Object.defineProperty(bindings, '__isScriptSetup'"));
         assert!(source.contains("[@vue/compiler-sfc] ${message}"));
     }
 
