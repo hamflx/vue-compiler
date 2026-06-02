@@ -5719,6 +5719,71 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_returns_namespace_type_deps() {
+        let dir = std::env::temp_dir().join(format!(
+            "vuec-node-bridge-namespace-type-deps-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        std::fs::write(
+            dir.join("types.ts"),
+            "export type Props = { foo: string }\nexport type Events = { (e: 'save'): void }\nexport type ModelValue = boolean | string",
+        )
+        .expect("write namespace types");
+        std::fs::write(
+            dir.join("leaf.ts"),
+            "export namespace Nested { export type ExtraProps = { count?: number } }",
+        )
+        .expect("write leaf types");
+        std::fs::write(
+            dir.join("dynamic.ts"),
+            "export namespace Types { export type Props = { bar: number } }",
+        )
+        .expect("write dynamic types");
+
+        let filename = dir.join("Comp.vue");
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "import * as Types from './types'\n",
+                    "import * as Leaf from './leaf'\n",
+                    "const props = defineProps<Types.Props & Leaf.Nested.ExtraProps & import('./dynamic').Types.Props>()\n",
+                    "const emit = defineEmits<Types.Events>()\n",
+                    "const model = defineModel<Types.ModelValue>()",
+                    "</script>"
+                ),
+                "filename": filename.to_string_lossy()
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = compiled["content"].as_str().unwrap_or_default();
+        let deps = compiled["deps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|dep| dep.as_str().unwrap().to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected = ["types.ts", "leaf.ts", "dynamic.ts"]
+            .into_iter()
+            .map(|name| dir.join(name).to_string_lossy().replace('\\', "/"))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(compiled["errors"].as_array().unwrap().is_empty());
+        assert!(content.contains("foo: { type: String, required: true }"));
+        assert!(content.contains("count: { type: Number, required: false }"));
+        assert!(content.contains("bar: { type: Number, required: true }"));
+        assert!(content
+            .contains("emits: /*@__PURE__*/_mergeModels([\"save\"], [\"update:modelValue\"]),"));
+        assert!(content.contains("\"modelValue\": { type: [Boolean, String] },"));
+        assert_eq!(deps, expected);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn vue3_sfc_bridge_compile_script_returns_vue_type_deps() {
         let dir = std::env::temp_dir().join(format!(
             "vuec-node-bridge-vue-type-deps-{}",

@@ -15,7 +15,8 @@ use oxc_ast::ast::{
     FormalParameter, FormalParameters, Function, ImportDeclarationSpecifier, ImportOrExportKind,
     ModuleExportName, ObjectExpression, ObjectProperty, ObjectPropertyKind, PropertyKey,
     SimpleAssignmentTarget, Statement, TSEnumDeclaration, TSFunctionType, TSImportType,
-    TSImportTypeQualifier, TSInterfaceBody, TSLiteral, TSSignature, TSTupleElement, TSType,
+    TSImportTypeQualifier, TSInterfaceBody, TSLiteral, TSModuleDeclaration,
+    TSModuleDeclarationBody, TSModuleDeclarationName, TSSignature, TSTupleElement, TSType,
     TSTypeAnnotation, TSTypeLiteral, TSTypeName, VariableDeclaration, VariableDeclarationKind,
     WithStatement,
 };
@@ -4845,6 +4846,12 @@ fn extend_vue3_type_context_from_external_imports(
             let local = import_specifier_local(specifier);
             let imported = import_specifier_imported(specifier).unwrap_or_else(|| "default".into());
             if imported == "*" {
+                insert_vue3_external_namespace_types(
+                    context,
+                    &imported_context,
+                    &local,
+                    &normalized,
+                );
                 continue;
             }
             insert_vue3_external_type_alias(
@@ -5116,10 +5123,7 @@ fn vue3_resolve_import_type(
     if !vue3_type_import_source_is_relative(source) {
         return None;
     }
-    let name = match import_type.qualifier.as_ref()? {
-        TSImportTypeQualifier::Identifier(identifier) => identifier.name.to_string(),
-        TSImportTypeQualifier::QualifiedName(_) => return None,
-    };
+    let name = vue3_import_type_qualifier_key(import_type.qualifier.as_ref()?);
     let filename = analysis.type_filename.as_deref()?;
     let resolved = resolve_vue3_relative_type_import(filename, source)?;
     let dependency = normalize_path_string(&resolved);
@@ -5159,6 +5163,9 @@ fn vue3_exported_type_names(statements: &[Statement<'_>]) -> BTreeSet<String> {
                         }
                         Declaration::TSTypeAliasDeclaration(declaration) => {
                             names.insert(declaration.id.name.to_string());
+                        }
+                        Declaration::TSModuleDeclaration(declaration) => {
+                            names.extend(vue3_namespace_exported_type_names(declaration));
                         }
                         _ => {}
                     }
@@ -5246,6 +5253,133 @@ fn project_vue3_exported_type_specifiers(
             }
             insert_vue3_local_type_alias(analysis, local, exported);
         }
+    }
+}
+
+fn project_vue3_namespace_declaration(
+    source: &str,
+    declaration: &TSModuleDeclaration<'_>,
+    analysis: &mut Vue3ScriptSetupAnalysis,
+) {
+    let Some(namespace) = vue3_ts_module_declaration_name(declaration) else {
+        return;
+    };
+    project_vue3_namespace_declaration_with_prefix(source, declaration, &namespace, analysis);
+}
+
+fn project_vue3_namespace_declaration_with_prefix(
+    source: &str,
+    declaration: &TSModuleDeclaration<'_>,
+    prefix: &str,
+    analysis: &mut Vue3ScriptSetupAnalysis,
+) {
+    let Some(body) = declaration.body.as_ref() else {
+        return;
+    };
+    match body {
+        TSModuleDeclarationBody::TSModuleBlock(block) => {
+            let mut namespace_analysis = Vue3ScriptSetupAnalysis {
+                declared_types: analysis.declared_types.clone(),
+                define_model_declared_types: analysis.define_model_declared_types.clone(),
+                props_type_declarations: analysis.props_type_declarations.clone(),
+                emits_type_declarations: analysis.emits_type_declarations.clone(),
+                type_sources: analysis.type_sources.clone(),
+                type_deps: analysis.type_deps.clone(),
+                type_filename: analysis.type_filename.clone(),
+                type_seen: analysis.type_seen.clone(),
+                ..Vue3ScriptSetupAnalysis::default()
+            };
+            collect_vue3_declared_types_from_statements(
+                source,
+                &block.body,
+                &mut namespace_analysis,
+            );
+            collect_vue3_declared_type_deps_from_statements(&block.body, &mut namespace_analysis);
+            for name in vue3_exported_type_names(&block.body) {
+                let prefixed = format!("{prefix}.{name}");
+                insert_vue3_type_alias_from_analysis(
+                    analysis,
+                    &namespace_analysis,
+                    &name,
+                    &prefixed,
+                );
+            }
+        }
+        TSModuleDeclarationBody::TSModuleDeclaration(nested) => {
+            let Some(name) = vue3_ts_module_declaration_name(nested) else {
+                return;
+            };
+            let prefix = format!("{prefix}.{name}");
+            project_vue3_namespace_declaration_with_prefix(source, nested, &prefix, analysis);
+        }
+    }
+}
+
+fn vue3_ts_module_declaration_name(declaration: &TSModuleDeclaration<'_>) -> Option<String> {
+    match &declaration.id {
+        TSModuleDeclarationName::Identifier(identifier) => Some(identifier.name.to_string()),
+        TSModuleDeclarationName::StringLiteral(_) => None,
+    }
+}
+
+fn vue3_namespace_exported_type_names(declaration: &TSModuleDeclaration<'_>) -> BTreeSet<String> {
+    let Some(namespace) = vue3_ts_module_declaration_name(declaration) else {
+        return BTreeSet::new();
+    };
+    vue3_namespace_exported_type_names_with_prefix(declaration, &namespace)
+}
+
+fn vue3_namespace_exported_type_names_with_prefix(
+    declaration: &TSModuleDeclaration<'_>,
+    prefix: &str,
+) -> BTreeSet<String> {
+    let Some(body) = declaration.body.as_ref() else {
+        return BTreeSet::new();
+    };
+    match body {
+        TSModuleDeclarationBody::TSModuleBlock(block) => vue3_exported_type_names(&block.body)
+            .into_iter()
+            .map(|name| format!("{prefix}.{name}"))
+            .collect(),
+        TSModuleDeclarationBody::TSModuleDeclaration(nested) => {
+            let Some(name) = vue3_ts_module_declaration_name(nested) else {
+                return BTreeSet::new();
+            };
+            let prefix = format!("{prefix}.{name}");
+            vue3_namespace_exported_type_names_with_prefix(nested, &prefix)
+        }
+    }
+}
+
+fn insert_vue3_type_alias_from_analysis(
+    target: &mut Vue3ScriptSetupAnalysis,
+    source: &Vue3ScriptSetupAnalysis,
+    source_name: &str,
+    target_name: &str,
+) {
+    if let Some(value) = source.declared_types.get(source_name).cloned() {
+        target.declared_types.insert(target_name.to_string(), value);
+    }
+    if let Some(value) = source.define_model_declared_types.get(source_name).cloned() {
+        target
+            .define_model_declared_types
+            .insert(target_name.to_string(), value);
+    }
+    if let Some(value) = source.props_type_declarations.get(source_name).cloned() {
+        target
+            .props_type_declarations
+            .insert(target_name.to_string(), value);
+    }
+    if let Some(value) = source.emits_type_declarations.get(source_name).cloned() {
+        target
+            .emits_type_declarations
+            .insert(target_name.to_string(), value);
+    }
+    if let Some(value) = source.type_sources.get(source_name).cloned() {
+        target.type_sources.insert(target_name.to_string(), value);
+    }
+    if let Some(value) = source.type_deps.get(source_name).cloned() {
+        target.type_deps.insert(target_name.to_string(), value);
     }
 }
 
@@ -5394,6 +5528,29 @@ fn insert_vue3_external_type_alias(
         deps.insert(dependency.to_string());
         context.type_deps.insert(local_name.to_string(), deps);
     }
+}
+
+fn insert_vue3_external_namespace_types(
+    context: &mut Vue27TypeContext,
+    imported: &Vue27TypeContext,
+    namespace: &str,
+    dependency: &str,
+) {
+    for imported_name in vue3_type_context_names(imported) {
+        let local_name = format!("{namespace}.{imported_name}");
+        insert_vue3_external_type_alias(context, imported, &imported_name, &local_name, dependency);
+    }
+}
+
+fn vue3_type_context_names(context: &Vue27TypeContext) -> BTreeSet<String> {
+    context
+        .declared_types
+        .keys()
+        .chain(context.define_model_declared_types.keys())
+        .chain(context.props_type_declarations.keys())
+        .chain(context.emits_type_declarations.keys())
+        .cloned()
+        .collect()
 }
 
 fn vue3_type_context_has_name(context: &Vue27TypeContext, name: &str) -> bool {
@@ -5682,6 +5839,9 @@ fn collect_vue3_declared_type_from_statement(
                 collect_vue3_declared_type_from_declaration(source, declaration, analysis);
             }
         }
+        Statement::TSModuleDeclaration(declaration) => {
+            project_vue3_namespace_declaration(source, declaration, analysis);
+        }
         _ => {}
     }
 }
@@ -5738,6 +5898,9 @@ fn collect_vue3_declared_type_from_declaration(
                 }
                 _ => {}
             }
+        }
+        Declaration::TSModuleDeclaration(declaration) => {
+            project_vue3_namespace_declaration(source, declaration, analysis);
         }
         _ => {}
     }
@@ -6677,6 +6840,27 @@ fn vue27_ts_type_name_identifier<'a>(name: &'a TSTypeName<'a>) -> Option<&'a str
     match name {
         TSTypeName::IdentifierReference(identifier) => Some(identifier.name.as_str()),
         _ => None,
+    }
+}
+
+fn vue3_ts_type_name_key(name: &TSTypeName<'_>) -> Option<String> {
+    match name {
+        TSTypeName::IdentifierReference(identifier) => Some(identifier.name.to_string()),
+        TSTypeName::QualifiedName(qualified) => {
+            let left = vue3_ts_type_name_key(&qualified.left)?;
+            Some(format!("{left}.{}", qualified.right.name))
+        }
+        TSTypeName::ThisExpression(_) => None,
+    }
+}
+
+fn vue3_import_type_qualifier_key(qualifier: &TSImportTypeQualifier<'_>) -> String {
+    match qualifier {
+        TSImportTypeQualifier::Identifier(identifier) => identifier.name.to_string(),
+        TSImportTypeQualifier::QualifiedName(qualified) => {
+            let left = vue3_import_type_qualifier_key(&qualified.left);
+            format!("{left}.{}", qualified.right.name)
+        }
     }
 }
 
@@ -11615,8 +11799,8 @@ fn vue3_resolve_props_type<'a>(
             Some(vue3_type_members_from_literal(source, literal, analysis))
         }
         TSType::TSTypeReference(reference) => {
-            let name = vue27_ts_type_name_identifier(&reference.type_name)?;
-            analysis.props_type_declarations.get(name).cloned()
+            let name = vue3_ts_type_name_key(&reference.type_name)?;
+            analysis.props_type_declarations.get(&name).cloned()
         }
         TSType::TSIntersectionType(intersection) => {
             let mut members = Vec::new();
@@ -11677,10 +11861,10 @@ fn collect_vue3_type_argument_deps_into(
 ) {
     match type_argument {
         TSType::TSTypeReference(reference) => {
-            if let Some(name) = vue27_ts_type_name_identifier(&reference.type_name) {
-                if let Some(dependencies) = analysis.type_deps.get(name) {
+            if let Some(name) = vue3_ts_type_name_key(&reference.type_name) {
+                if let Some(dependencies) = analysis.type_deps.get(&name) {
                     deps.extend(dependencies.iter().cloned());
-                } else if let Some(dependency) = analysis.type_sources.get(name) {
+                } else if let Some(dependency) = analysis.type_sources.get(&name) {
                     deps.insert(dependency.clone());
                 }
             }
@@ -12001,13 +12185,13 @@ fn infer_vue3_runtime_type(node: &TSType<'_>, analysis: &Vue3ScriptSetupAnalysis
             _ => vec!["null".into()],
         },
         TSType::TSTypeReference(reference) => {
-            if let Some(name) = vue27_ts_type_name_identifier(&reference.type_name) {
-                if let Some(types) = analysis.declared_types.get(name) {
+            if let Some(name) = vue3_ts_type_name_key(&reference.type_name) {
+                if let Some(types) = analysis.declared_types.get(&name) {
                     return types.clone();
                 }
-                match name {
+                match name.as_str() {
                     "Array" | "Function" | "Object" | "Set" | "Map" | "WeakSet" | "WeakMap"
-                    | "Date" | "Promise" => return vec![name.to_string()],
+                    | "Date" | "Promise" => return vec![name],
                     "Record" | "Partial" | "Readonly" | "Pick" | "Omit" | "Exclude" | "Extract"
                     | "Required" | "InstanceType" => return vec!["Object".into()],
                     _ => {}
@@ -12096,13 +12280,13 @@ fn infer_vue3_define_model_runtime_type(
             _ => vec!["Unknown".into()],
         },
         TSType::TSTypeReference(reference) => {
-            if let Some(name) = vue27_ts_type_name_identifier(&reference.type_name) {
-                if let Some(types) = analysis.define_model_declared_types.get(name) {
+            if let Some(name) = vue3_ts_type_name_key(&reference.type_name) {
+                if let Some(types) = analysis.define_model_declared_types.get(&name) {
                     return types.clone();
                 }
-                match name {
+                match name.as_str() {
                     "Array" | "Function" | "Object" | "Set" | "Map" | "WeakSet" | "WeakMap"
-                    | "Date" | "Promise" => return vec![name.to_string()],
+                    | "Date" | "Promise" => return vec![name],
                     "Record" | "Partial" | "Readonly" | "Pick" | "Omit" | "Exclude" | "Extract"
                     | "Required" | "InstanceType" => return vec!["Object".into()],
                     _ => {}
@@ -13865,8 +14049,8 @@ fn vue3_resolve_emits_type<'a>(
         TSType::TSFunctionType(function) => Some(vue27_emits_type_from_function(source, function)),
         TSType::TSTypeLiteral(literal) => Some(vue27_emits_type_from_literal(source, literal)),
         TSType::TSTypeReference(reference) => {
-            let name = vue27_ts_type_name_identifier(&reference.type_name)?;
-            analysis.emits_type_declarations.get(name).cloned()
+            let name = vue3_ts_type_name_key(&reference.type_name)?;
+            analysis.emits_type_declarations.get(&name).cloned()
         }
         TSType::TSImportType(import_type) => {
             let resolved = vue3_resolve_import_type(import_type, analysis)?;
@@ -17276,6 +17460,66 @@ const model = defineModel<import('./model').ModelValue>()
         .collect::<BTreeSet<_>>();
         assert_eq!(deps, expected);
         assert!(!script.deps.iter().any(|dep| dep.contains('\\')));
+    }
+
+    #[test]
+    fn vue3_compile_script_resolves_relative_namespace_imported_types_and_deps() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join("types.ts"),
+            "export type Props = { foo: string }\nexport type Events = { (e: 'save'): void }\nexport type ModelValue = boolean | string\nexport type Unused = { nope: string }",
+        )
+        .expect("write namespace types");
+        std::fs::write(
+            dir.path().join("leaf.ts"),
+            "export namespace Nested { export type ExtraProps = { count?: number } }",
+        )
+        .expect("write nested namespace types");
+        std::fs::write(
+            dir.path().join("dynamic.ts"),
+            "export namespace Types { export type Props = { bar: number } }",
+        )
+        .expect("write dynamic namespace types");
+
+        let filename = dir.path().join("Comp.vue");
+        let source = r#"<script setup lang="ts">
+import * as Types from './types'
+import * as Leaf from './leaf'
+const props = defineProps<Types.Props & Leaf.Nested.ExtraProps & import('./dynamic').Types.Props>()
+const emit = defineEmits<Types.Events>()
+const model = defineModel<Types.ModelValue>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("foo: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("count: { type: Number, required: false }"));
+        assert!(script
+            .content
+            .contains("bar: { type: Number, required: true }"));
+        assert!(script
+            .content
+            .contains("emits: /*@__PURE__*/_mergeModels([\"save\"], [\"update:modelValue\"]),"));
+        assert!(script
+            .content
+            .contains("\"modelValue\": { type: [Boolean, String] },"));
+
+        let deps = script.deps.iter().cloned().collect::<BTreeSet<_>>();
+        let expected = ["types.ts", "leaf.ts", "dynamic.ts"]
+            .into_iter()
+            .map(|name| normalize_path_string(&dir.path().join(name)))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(deps, expected);
+        assert!(!script
+            .deps
+            .iter()
+            .any(|dep| dep.contains("unused") || dep.contains('\\')));
     }
 
     #[test]
