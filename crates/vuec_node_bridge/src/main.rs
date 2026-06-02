@@ -5557,6 +5557,60 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_returns_re_exported_type_deps() {
+        let dir = std::env::temp_dir().join(format!(
+            "vuec-node-bridge-re-export-deps-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        std::fs::write(dir.join("leaf.ts"), "export type Props = { foo: string }")
+            .expect("write leaf");
+        std::fs::write(
+            dir.join("bar.ts"),
+            "export { Props as PublicProps } from './leaf'",
+        )
+        .expect("write bar");
+        std::fs::write(
+            dir.join("foo.ts"),
+            "export { PublicProps as Props } from './bar'",
+        )
+        .expect("write foo");
+
+        let filename = dir.join("Comp.vue");
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "import type { Props } from './foo'\n",
+                    "defineProps<Props>()",
+                    "</script>"
+                ),
+                "filename": filename.to_string_lossy()
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = compiled["content"].as_str().unwrap_or_default();
+        let deps = compiled["deps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|dep| dep.as_str().unwrap().to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected = ["foo.ts", "bar.ts", "leaf.ts"]
+            .into_iter()
+            .map(|name| dir.join(name).to_string_lossy().replace('\\', "/"))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(compiled["errors"].as_array().unwrap().is_empty());
+        assert!(content.contains("foo: { type: String, required: true }"));
+        assert_eq!(deps, expected);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn vue3_sfc_bridge_compile_script_splits_define_model_transformers() {
         let compiled = dispatch(
             "sfc.compileScript",
