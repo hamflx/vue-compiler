@@ -4189,6 +4189,10 @@ fn sfc_script_options(value: Option<&Value>) -> SfcScriptCompileOptions {
         bool_option(value, "source_map", options.source_map),
     );
     options.props_destructure = props_destructure_option(value, options.props_destructure);
+    options.global_type_files = string_array_option(value, "globalTypeFiles");
+    if options.global_type_files.is_empty() {
+        options.global_type_files = string_array_option(value, "global_type_files");
+    }
     let nested_runtime_module_name = value
         .get("templateOptions")
         .or_else(|| value.get("template_options"))
@@ -5815,6 +5819,52 @@ mod tests {
         assert!(content.contains("ambient: { type: String, required: true }"));
         assert!(content.contains("\"modelValue\": { type: [Boolean, String] },"));
         assert_eq!(deps, expected);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn vue3_sfc_bridge_compile_script_returns_global_type_deps() {
+        let dir = std::env::temp_dir().join(format!(
+            "vuec-node-bridge-global-type-deps-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let global = dir.join("global.d.ts");
+        std::fs::write(
+            &global,
+            concat!(
+                "declare interface GlobalProps { msg: string }\n",
+                "declare type GlobalModel = boolean | string"
+            ),
+        )
+        .expect("write global types");
+
+        let filename = dir.join("Comp.vue");
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "defineProps<GlobalProps>()\n",
+                    "defineModel<GlobalModel>()",
+                    "</script>"
+                ),
+                "filename": filename.to_string_lossy(),
+                "options": {
+                    "globalTypeFiles": [global.to_string_lossy()]
+                }
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = compiled["content"].as_str().unwrap_or_default();
+        let expected_dep = global.to_string_lossy().replace('\\', "/");
+        assert!(compiled["errors"].as_array().unwrap().is_empty());
+        assert!(content.contains("msg: { type: String, required: true }"));
+        assert!(content.contains("\"modelValue\": { type: [Boolean, String] },"));
+        assert_eq!(compiled["deps"], json!([expected_dep]));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

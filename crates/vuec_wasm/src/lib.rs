@@ -415,6 +415,10 @@ fn sfc_script_options(value: &Value) -> SfcScriptCompileOptions {
         bool_option(value, "source_map", options.source_map),
     );
     options.props_destructure = props_destructure_option(value, options.props_destructure);
+    options.global_type_files = string_array_option(value, "globalTypeFiles");
+    if options.global_type_files.is_empty() {
+        options.global_type_files = string_array_option(value, "global_type_files");
+    }
     options.is_prod = bool_option(
         value,
         "isProd",
@@ -521,6 +525,17 @@ fn string_option(value: &Value, name: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+fn string_array_option(value: &Value, name: &str) -> Vec<String> {
+    value
+        .get(name)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -557,6 +572,7 @@ mod tests {
             "inlineTemplate": true,
             "sourceMap": false,
             "propsDestructure": "error",
+            "globalTypeFiles": ["global.d.ts"],
             "templateOptions": {
                 "ssr": true
             }
@@ -567,14 +583,17 @@ mod tests {
         assert!(options.inline_template_ssr);
         assert!(!options.source_map);
         assert_eq!(options.props_destructure, SfcPropsDestructureMode::Error);
+        assert_eq!(options.global_type_files, vec!["global.d.ts"]);
 
         let disabled = sfc_script_options(&json!({
-            "props_destructure": false
+            "props_destructure": false,
+            "global_type_files": ["ambient.d.ts"]
         }));
         assert_eq!(
             disabled.props_destructure,
             SfcPropsDestructureMode::Disabled
         );
+        assert_eq!(disabled.global_type_files, vec!["ambient.d.ts"]);
     }
 
     #[test]

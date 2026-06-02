@@ -3864,6 +3864,10 @@ fn sfc_script_options(value: Option<&Value>) -> SfcScriptCompileOptions {
         bool_option(value, "source_map", options.source_map),
     );
     options.props_destructure = props_destructure_option(value, options.props_destructure);
+    options.global_type_files = string_array_option(value, "globalTypeFiles");
+    if options.global_type_files.is_empty() {
+        options.global_type_files = string_array_option(value, "global_type_files");
+    }
     options.ref_sugar = bool_option(
         value,
         "refSugar",
@@ -4163,6 +4167,7 @@ mod tests {
             "inlineTemplate": true,
             "source_map": false,
             "propsDestructure": "error",
+            "globalTypeFiles": ["global.d.ts"],
             "templateOptions": {
                 "ssr": true
             }
@@ -4173,14 +4178,17 @@ mod tests {
         assert!(options.inline_template_ssr);
         assert!(!options.source_map);
         assert_eq!(options.props_destructure, SfcPropsDestructureMode::Error);
+        assert_eq!(options.global_type_files, vec!["global.d.ts"]);
 
         let disabled = sfc_script_options(Some(&json!({
-            "props_destructure": false
+            "props_destructure": false,
+            "global_type_files": ["ambient.d.ts"]
         })));
         assert_eq!(
             disabled.props_destructure,
             SfcPropsDestructureMode::Disabled
         );
+        assert_eq!(disabled.global_type_files, vec!["ambient.d.ts"]);
     }
 
     #[test]

@@ -90,6 +90,8 @@ struct CompileSfcArgs {
     inline_template: bool,
     #[arg(long, value_enum, default_value_t = CliPropsDestructureMode::Enabled)]
     props_destructure: CliPropsDestructureMode,
+    #[arg(long = "global-type-file", value_name = "PATH")]
+    global_type_files: Vec<PathBuf>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -374,17 +376,24 @@ fn compile_sfc_command(args: CompileSfcArgs) -> Result<RunOutput> {
         )
     });
     let script = if descriptor.script.is_some() || descriptor.script_setup.is_some() {
-        Some(compiler.compile_script(
-            &descriptor,
-            SfcScriptCompileOptions {
-                id: args.id.clone(),
-                inline_template: args.inline_template,
-                inline_template_ssr: args.inline_template && args.ssr,
-                source_map: args.source_map,
-                props_destructure: args.props_destructure.into(),
-                ..SfcScriptCompileOptions::default()
-            },
-        ))
+        Some(
+            compiler.compile_script(
+                &descriptor,
+                SfcScriptCompileOptions {
+                    id: args.id.clone(),
+                    inline_template: args.inline_template,
+                    inline_template_ssr: args.inline_template && args.ssr,
+                    source_map: args.source_map,
+                    props_destructure: args.props_destructure.into(),
+                    global_type_files: args
+                        .global_type_files
+                        .iter()
+                        .map(|path| path.to_string_lossy().to_string())
+                        .collect(),
+                    ..SfcScriptCompileOptions::default()
+                },
+            ),
+        )
     } else {
         None
     };
@@ -1140,6 +1149,49 @@ mod tests {
         assert!(content.contains("const { foo, bar: baz } = __props"));
         assert!(content.contains("const message = foo + baz"));
         assert!(!content.contains("__props.foo + __props.bar"));
+    }
+
+    #[test]
+    fn compiles_vue3_sfc_global_type_files_json() {
+        let sfc = write_temp(
+            "vuec-cli-sfc-global-types.vue",
+            concat!(
+                "<script setup lang=\"ts\">",
+                "defineProps<GlobalProps>()\n",
+                "defineModel<GlobalModel>()",
+                "</script>"
+            ),
+        );
+        let global = write_temp(
+            "vuec-cli-sfc-global-types.d.ts",
+            concat!(
+                "declare interface GlobalProps { msg: string }\n",
+                "declare type GlobalModel = boolean | string"
+            ),
+        );
+        let output = run_with_args([
+            "vuec",
+            "compile-sfc",
+            "--json",
+            "--global-type-file",
+            global.to_str().unwrap(),
+            sfc.to_str().unwrap(),
+        ])
+        .expect("run");
+        let value: Value = serde_json::from_str(&output.stdout).expect("json");
+        let content = value["script"]["content"].as_str().unwrap_or_default();
+        let deps = value["script"]["deps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|dep| dep.as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        let expected_dep = global.to_string_lossy().replace('\\', "/");
+
+        assert_eq!(value["kind"], json!("vue3-sfc"));
+        assert!(content.contains("msg: { type: String, required: true }"));
+        assert!(content.contains("\"modelValue\": { type: [Boolean, String] },"));
+        assert_eq!(deps, vec![expected_dep]);
     }
 
     #[test]
