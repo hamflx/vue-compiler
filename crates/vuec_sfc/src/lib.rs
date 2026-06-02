@@ -13749,11 +13749,33 @@ fn vue3_literal_type_key(literal: &TSLiteral<'_>) -> Option<String> {
     }
 }
 
-fn vue3_resolve_generic_props_type_alias(
+fn infer_vue3_indexed_access_runtime_type(
+    indexed: &oxc_ast::ast::TSIndexedAccessType<'_>,
+    analysis: &Vue3ScriptSetupAnalysis,
+) -> Option<Vec<String>> {
+    let members = vue3_resolve_props_type("", &indexed.object_type, analysis)?;
+    let keys = vue3_resolve_ordered_string_type_keys(&indexed.index_type, analysis)?;
+    let mut types = Vec::new();
+    for key in keys {
+        let Some(prop) = members.members.iter().find(|prop| prop.key == key) else {
+            continue;
+        };
+        for runtime_type in &prop.types {
+            push_unique(&mut types, runtime_type);
+        }
+    }
+    if types.is_empty() {
+        None
+    } else {
+        Some(types)
+    }
+}
+
+fn vue3_scoped_analysis_for_generic_type_alias(
     source: &str,
     reference: &TSTypeReference<'_>,
     analysis: &Vue3ScriptSetupAnalysis,
-) -> Option<Vue27TypeMembers> {
+) -> Option<(String, Vue3ScriptSetupAnalysis)> {
     let name = vue3_ts_type_name_key(&reference.type_name)?;
     let alias = analysis.generic_type_aliases.get(&name)?;
     let type_arguments = reference.type_arguments.as_ref()?;
@@ -13815,10 +13837,20 @@ fn vue3_resolve_generic_props_type_alias(
             infer_vue3_define_model_runtime_type(argument, analysis),
         );
     }
+    Some((alias.source.clone(), scoped_analysis))
+}
+
+fn vue3_resolve_generic_props_type_alias(
+    source: &str,
+    reference: &TSTypeReference<'_>,
+    analysis: &Vue3ScriptSetupAnalysis,
+) -> Option<Vue27TypeMembers> {
+    let (alias_source, scoped_analysis) =
+        vue3_scoped_analysis_for_generic_type_alias(source, reference, analysis)?;
     let allocator = oxc_allocator::Allocator::default();
     let parsed = oxc_parser::Parser::new(
         &allocator,
-        alias.source.as_str(),
+        alias_source.as_str(),
         oxc_span::SourceType::ts(),
     )
     .with_options(oxc_parser::ParseOptions {
@@ -13832,10 +13864,72 @@ fn vue3_resolve_generic_props_type_alias(
     for statement in &parsed.program.body {
         if let Statement::TSTypeAliasDeclaration(declaration) = statement {
             return vue3_resolve_props_type(
-                alias.source.as_str(),
+                alias_source.as_str(),
                 &declaration.type_annotation,
                 &scoped_analysis,
             );
+        }
+    }
+    None
+}
+
+fn infer_vue3_generic_type_alias_runtime_type(
+    reference: &TSTypeReference<'_>,
+    analysis: &Vue3ScriptSetupAnalysis,
+) -> Option<Vec<String>> {
+    let (alias_source, scoped_analysis) =
+        vue3_scoped_analysis_for_generic_type_alias("", reference, analysis)?;
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(
+        &allocator,
+        alias_source.as_str(),
+        oxc_span::SourceType::ts(),
+    )
+    .with_options(oxc_parser::ParseOptions {
+        parse_regular_expression: true,
+        ..oxc_parser::ParseOptions::default()
+    })
+    .parse();
+    if parsed.panicked || !parsed.errors.is_empty() {
+        return None;
+    }
+    for statement in &parsed.program.body {
+        if let Statement::TSTypeAliasDeclaration(declaration) = statement {
+            return Some(infer_vue3_runtime_type(
+                &declaration.type_annotation,
+                &scoped_analysis,
+            ));
+        }
+    }
+    None
+}
+
+fn infer_vue3_generic_define_model_runtime_type(
+    reference: &TSTypeReference<'_>,
+    analysis: &Vue3ScriptSetupAnalysis,
+) -> Option<Vec<String>> {
+    let (alias_source, scoped_analysis) =
+        vue3_scoped_analysis_for_generic_type_alias("", reference, analysis)?;
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(
+        &allocator,
+        alias_source.as_str(),
+        oxc_span::SourceType::ts(),
+    )
+    .with_options(oxc_parser::ParseOptions {
+        parse_regular_expression: true,
+        ..oxc_parser::ParseOptions::default()
+    })
+    .parse();
+    if parsed.panicked || !parsed.errors.is_empty() {
+        return None;
+    }
+    for statement in &parsed.program.body {
+        if let Statement::TSTypeAliasDeclaration(declaration) = statement {
+            return Some(infer_vue3_define_model_runtime_type(
+                &declaration.type_annotation,
+                &scoped_analysis,
+            ));
         }
     }
     None
@@ -14597,6 +14691,10 @@ fn infer_vue3_runtime_type(node: &TSType<'_>, analysis: &Vue3ScriptSetupAnalysis
         },
         TSType::TSTypeReference(reference) => {
             if let Some(name) = vue3_ts_type_name_key(&reference.type_name) {
+                if let Some(types) = infer_vue3_generic_type_alias_runtime_type(reference, analysis)
+                {
+                    return types;
+                }
                 if let Some(types) = analysis.declared_types.get(&name) {
                     return types.clone();
                 }
@@ -14620,6 +14718,10 @@ fn infer_vue3_runtime_type(node: &TSType<'_>, analysis: &Vue3ScriptSetupAnalysis
         }
         TSType::TSParenthesizedType(parenthesized) => {
             infer_vue3_runtime_type(&parenthesized.type_annotation, analysis)
+        }
+        TSType::TSIndexedAccessType(indexed) => {
+            infer_vue3_indexed_access_runtime_type(indexed, analysis)
+                .unwrap_or_else(|| vec!["null".into()])
         }
         TSType::TSUnionType(union) => {
             let mut types = Vec::new();
@@ -14692,6 +14794,11 @@ fn infer_vue3_define_model_runtime_type(
         },
         TSType::TSTypeReference(reference) => {
             if let Some(name) = vue3_ts_type_name_key(&reference.type_name) {
+                if let Some(types) =
+                    infer_vue3_generic_define_model_runtime_type(reference, analysis)
+                {
+                    return types;
+                }
                 if let Some(types) = analysis.define_model_declared_types.get(&name) {
                     return types.clone();
                 }
@@ -14719,6 +14826,10 @@ fn infer_vue3_define_model_runtime_type(
         }
         TSType::TSParenthesizedType(parenthesized) => {
             infer_vue3_define_model_runtime_type(&parenthesized.type_annotation, analysis)
+        }
+        TSType::TSIndexedAccessType(indexed) => {
+            infer_vue3_indexed_access_runtime_type(indexed, analysis)
+                .unwrap_or_else(|| vec!["Unknown".into()])
         }
         TSType::TSUnionType(union) => {
             let mut types = Vec::new();
@@ -20634,6 +20745,58 @@ defineProps<Props>()
         );
         assert_eq!(
             script.bindings.get("FOO").map(String::as_str),
+            Some("props")
+        );
+        assert!(script.deps.is_empty(), "{:?}", script.deps);
+    }
+
+    #[test]
+    fn vue3_compile_script_resolves_indexed_access_runtime_types() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "Comp.vue",
+            r#"<script setup lang="ts">
+type Base = {
+  name: string
+  count?: number
+  active: boolean
+  run: () => void
+}
+type ValueOf<T, K extends keyof T> = T[K]
+type Props = {
+  label: Base['name']
+  scalar: Base['name' | 'count']
+  method: Base['run']
+  generic: ValueOf<Base, 'active'>
+}
+defineProps<Props>()
+defineModel<Base['name' | 'active']>()
+</script>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("label: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("scalar: { type: [String, Number], required: true }"));
+        assert!(script
+            .content
+            .contains("method: { type: Function, required: true }"));
+        assert!(script
+            .content
+            .contains("generic: { type: Boolean, required: true }"));
+        assert!(script
+            .content
+            .contains("\"modelValue\": { type: [String, Boolean] },"));
+        assert_eq!(
+            script.bindings.get("label").map(String::as_str),
+            Some("props")
+        );
+        assert_eq!(
+            script.bindings.get("generic").map(String::as_str),
             Some("props")
         );
         assert!(script.deps.is_empty(), "{:?}", script.deps);
