@@ -822,7 +822,7 @@ impl SfcCompiler {
             filename: descriptor.filename.clone(),
             source: template.content.clone(),
             file_id: descriptor.source_file,
-            base_offset: template.loc.start,
+            base_offset: template.content_start,
         };
         if options.ssr {
             let result = compile_ssr(
@@ -9391,11 +9391,15 @@ fn add_inline_template_source_mappings(
         ) else {
             continue;
         };
-        builder.add_mapping(
+        let name = token
+            .get_name_id()
+            .and_then(|name_id| source_map.get_name(name_id).map(ToString::to_string));
+        builder.add_named_mapping(
             generated_line + 1,
             generated_column,
             Some(Span::new(descriptor.source_file, absolute, absolute)),
             Some(source_name.to_string()),
+            name,
         );
     }
 }
@@ -9475,7 +9479,7 @@ fn vue3_inline_template_render(
         filename: descriptor.filename.clone(),
         source: template.content.clone(),
         file_id: descriptor.source_file,
-        base_offset: template.loc.start,
+        base_offset: template.content_start,
     };
     if options.inline_template_ssr {
         core.ssr_css_vars = vue3_inline_ssr_css_vars(descriptor, options);
@@ -16240,6 +16244,15 @@ span { color: v-bind(style.color) }
                 && template_original.column <= template_end.1,
             "{template_original:?}"
         );
+
+        let expression_original = generated_original_position(&script, "count.value");
+        let expression_expected = original_line_column(source, "count }}</button>");
+        assert_eq!(expression_original.source, "FooBar.vue");
+        assert_eq!(
+            (expression_original.line, expression_original.column),
+            expression_expected
+        );
+        assert_eq!(expression_original.name.as_deref(), Some("count"));
     }
 
     #[test]

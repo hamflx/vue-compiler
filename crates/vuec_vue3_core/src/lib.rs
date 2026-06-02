@@ -22541,30 +22541,85 @@ fn add_interpolation_mapping(
     let Some(span) = node.span.source() else {
         return;
     };
-    let expression = interpolation.expression.source_string();
-    let local_start = span.start.0.saturating_sub(base_offset);
-    let local_end = span.end.0.saturating_sub(base_offset);
-    let Some(original_start) = source[local_start..local_end]
-        .find(expression.trim())
-        .map(|offset| local_start + offset)
+    let generated_expression = interpolation.expression.source_string();
+    let Some((original_expression, original_start)) =
+        original_interpolation_expression(source, span, base_offset, options)
     else {
         return;
     };
     add_expression_token_mappings(
         code,
         source,
-        expression.trim(),
+        original_expression,
         original_start,
         *cursor,
         uses_prefixed_identifiers(options),
         names,
         segments,
     );
-    if let Some(offset) = find_code_offset(code, expression.trim(), *cursor)
-        .or_else(|| find_code_offset(code, &format!("_ctx.{}", expression.trim()), *cursor))
+    if let Some(offset) =
+        find_code_offset(code, generated_expression.trim(), *cursor).or_else(|| {
+            find_code_offset(
+                code,
+                &format!("_ctx.{}", generated_expression.trim()),
+                *cursor,
+            )
+        })
     {
-        *cursor = offset + expression.trim().len();
+        *cursor = offset + generated_expression.trim().len();
     }
+}
+
+fn original_interpolation_expression<'a>(
+    source: &'a str,
+    span: Span,
+    base_offset: usize,
+    options: &Vue3CompilerOptions,
+) -> Option<(&'a str, usize)> {
+    let (local_start, local_end) = local_source_span_range(source, span, base_offset)?;
+    let node_source = source.get(local_start..local_end)?;
+    let (open_delimiter, close_delimiter) = options
+        .delimiters
+        .as_ref()
+        .map_or(("{{", "}}"), |items| (items[0].as_str(), items[1].as_str()));
+    if open_delimiter.is_empty() || close_delimiter.is_empty() {
+        return None;
+    }
+    let open_start = node_source.find(open_delimiter)?;
+    let expression_start = local_start + open_start + open_delimiter.len();
+    let expression_end = expression_start
+        + source
+            .get(expression_start..local_end)?
+            .find(close_delimiter)?;
+    trimmed_source_range(source, expression_start, expression_end)
+}
+
+fn original_expression_from_span(
+    source: &str,
+    span: Span,
+    base_offset: usize,
+) -> Option<(&str, usize)> {
+    let (local_start, local_end) = local_source_span_range(source, span, base_offset)?;
+    trimmed_source_range(source, local_start, local_end)
+}
+
+fn local_source_span_range(source: &str, span: Span, base_offset: usize) -> Option<(usize, usize)> {
+    let start = span.start.0.checked_sub(base_offset)?;
+    let end = span.end.0.checked_sub(base_offset)?;
+    if start > end
+        || end > source.len()
+        || !source.is_char_boundary(start)
+        || !source.is_char_boundary(end)
+    {
+        return None;
+    }
+    Some((start, end))
+}
+
+fn trimmed_source_range(source: &str, start: usize, end: usize) -> Option<(&str, usize)> {
+    let start = trim_start_offset(source, start, end);
+    let end = trim_end_offset(source, start, end);
+    Some((source.get(start..end)?, start))
 }
 
 fn add_element_prop_mappings(
@@ -22622,11 +22677,15 @@ fn add_element_prop_mappings(
                     }
                     if let (Some(exp), Some(span)) = (&dir.exp, dir.exp_span) {
                         let expression = exp.source_string();
+                        let fallback_start = span.start.0.saturating_sub(base_offset);
+                        let (original_expression, original_start) =
+                            original_expression_from_span(source, span, base_offset)
+                                .unwrap_or((expression.trim(), fallback_start));
                         add_expression_token_mappings(
                             code,
                             source,
-                            expression.trim(),
-                            span.start.0.saturating_sub(base_offset),
+                            original_expression,
+                            original_start,
                             0,
                             uses_prefixed_identifiers(options),
                             names,
@@ -22637,11 +22696,15 @@ fn add_element_prop_mappings(
                 if dir.name == "on" && dir.arg.is_some() {
                     if let (Some(exp), Some(span)) = (&dir.exp, dir.exp_span) {
                         let expression = exp.source_string();
+                        let fallback_start = span.start.0.saturating_sub(base_offset);
+                        let (original_expression, original_start) =
+                            original_expression_from_span(source, span, base_offset)
+                                .unwrap_or((expression.trim(), fallback_start));
                         add_event_handler_token_mappings(
                             code,
                             source,
-                            expression.trim(),
-                            span.start.0.saturating_sub(base_offset),
+                            original_expression,
+                            original_start,
                             0,
                             uses_prefixed_identifiers(options),
                             names,
@@ -22652,11 +22715,15 @@ fn add_element_prop_mappings(
                 if matches!(dir.name.as_str(), "if" | "else-if" | "for") {
                     if let (Some(exp), Some(span)) = (&dir.exp, dir.exp_span) {
                         let expression = exp.source_string();
+                        let fallback_start = span.start.0.saturating_sub(base_offset);
+                        let (original_expression, original_start) =
+                            original_expression_from_span(source, span, base_offset)
+                                .unwrap_or((expression.trim(), fallback_start));
                         add_expression_token_mappings(
                             code,
                             source,
-                            expression.trim(),
-                            span.start.0.saturating_sub(base_offset),
+                            original_expression,
+                            original_start,
                             0,
                             uses_prefixed_identifiers(options),
                             names,
@@ -36038,6 +36105,110 @@ mod tests {
         assert!(result.code.contains("$props.props"));
         assert!(result.code.contains("$setup.setup"));
         assert!(result.code.contains("$setup.literal"));
+    }
+
+    #[test]
+    fn base_compile_source_map_maps_inline_setup_ref_interpolation() {
+        let mut options = Vue3CompilerOptions {
+            prefix_identifiers: true,
+            mode: "module".into(),
+            inline: true,
+            source_map: true,
+            ..Vue3CompilerOptions::default()
+        };
+        options
+            .binding_metadata
+            .insert("count".into(), "setup-ref".into());
+        let source = "<button>{{ count }}</button>";
+        let result = base_compile(
+            TemplateSource {
+                filename: "FooBar.vue".into(),
+                source: source.into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            options,
+        );
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert!(result.code.contains("count.value"));
+        let generated_offset = result
+            .code
+            .find("count.value")
+            .expect("generated count ref");
+        let generated = loc_for_offset(&result.code, generated_offset).expect("generated loc");
+        let original = result
+            .map
+            .expect("source map")
+            .original_position(vuec_source::GeneratedPosition::new(
+                generated.0,
+                generated.1,
+            ))
+            .expect("source map lookup")
+            .expect("original position");
+        let expected = loc_for_offset(source, source.find("count").expect("source count"))
+            .expect("source loc");
+        assert_eq!(original.source, "FooBar.vue");
+        assert_eq!((original.line, original.column), expected);
+        assert_eq!(original.name.as_deref(), Some("count"));
+    }
+
+    #[test]
+    fn base_compile_source_map_maps_inline_setup_ref_interpolation_in_sfc_source() {
+        let sfc_source = concat!(
+            "<script setup>\n",
+            "const count = ref(0)\n",
+            "</script>\n",
+            "<template><button>{{ count }}</button></template>"
+        );
+        let template_source = "<button>{{ count }}</button>";
+        let template_start = sfc_source.find(template_source).expect("template content");
+        let mut options = Vue3CompilerOptions {
+            prefix_identifiers: true,
+            mode: "module".into(),
+            inline: true,
+            source_map: true,
+            source_map_source: Some(sfc_source.into()),
+            source_map_base_offset: 0,
+            ..Vue3CompilerOptions::default()
+        };
+        options
+            .binding_metadata
+            .insert("count".into(), "setup-ref".into());
+        let result = base_compile(
+            TemplateSource {
+                filename: "FooBar.vue".into(),
+                source: template_source.into(),
+                file_id: FileId(0),
+                base_offset: template_start,
+            },
+            options,
+        );
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert!(result.code.contains("count.value"));
+        let generated_offset = result
+            .code
+            .find("count.value")
+            .expect("generated count ref");
+        let generated = loc_for_offset(&result.code, generated_offset).expect("generated loc");
+        let original = result
+            .map
+            .expect("source map")
+            .original_position(vuec_source::GeneratedPosition::new(
+                generated.0,
+                generated.1,
+            ))
+            .expect("source map lookup")
+            .expect("original position");
+        let expected = loc_for_offset(
+            sfc_source,
+            sfc_source.find("count }}").expect("source count"),
+        )
+        .expect("source loc");
+        assert_eq!(original.source, "FooBar.vue");
+        assert_eq!((original.line, original.column), expected);
+        assert_eq!(original.name.as_deref(), Some("count"));
     }
 
     #[test]
