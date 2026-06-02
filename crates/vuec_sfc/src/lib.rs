@@ -7213,6 +7213,19 @@ fn refresh_vue3_interface_declaration(
 ) -> bool {
     let name = declaration.id.name.to_string();
     let mut changed = false;
+    let runtime = infer_vue3_runtime_type_from_signatures(&declaration.body.body, "Object");
+    if analysis.declared_types.get(&name) != Some(&runtime) {
+        analysis
+            .declared_types
+            .insert(name.clone(), runtime.clone());
+        changed = true;
+    }
+    if analysis.define_model_declared_types.get(&name) != Some(&runtime) {
+        analysis
+            .define_model_declared_types
+            .insert(name.clone(), runtime);
+        changed = true;
+    }
     let props = vue3_type_members_from_interface(source, declaration, analysis);
     if analysis.props_type_declarations.get(&name) != Some(&props) {
         analysis.props_type_declarations.insert(name.clone(), props);
@@ -15213,6 +15226,26 @@ fn infer_vue3_keyof_runtime_type(
     }
 }
 
+fn infer_vue3_runtime_type_from_signatures(
+    signatures: &[TSSignature<'_>],
+    empty_type: &str,
+) -> Vec<String> {
+    let mut types = Vec::new();
+    for signature in signatures {
+        let runtime_type = match signature {
+            TSSignature::TSCallSignatureDeclaration(_)
+            | TSSignature::TSConstructSignatureDeclaration(_) => "Function",
+            _ => "Object",
+        };
+        push_unique(&mut types, runtime_type);
+    }
+    if types.is_empty() {
+        vec![empty_type.into()]
+    } else {
+        types
+    }
+}
+
 fn infer_vue3_generic_keyof_runtime_type(
     reference: &TSTypeReference<'_>,
     analysis: &Vue3ScriptSetupAnalysis,
@@ -15285,8 +15318,11 @@ fn infer_vue3_runtime_type(node: &TSType<'_>, analysis: &Vue3ScriptSetupAnalysis
         TSType::TSStringKeyword(_) => vec!["String".into()],
         TSType::TSNumberKeyword(_) => vec!["Number".into()],
         TSType::TSBooleanKeyword(_) => vec!["Boolean".into()],
-        TSType::TSObjectKeyword(_) | TSType::TSTypeLiteral(_) | TSType::TSIntersectionType(_) => {
+        TSType::TSObjectKeyword(_) | TSType::TSIntersectionType(_) => {
             vec!["Object".into()]
+        }
+        TSType::TSTypeLiteral(literal) => {
+            infer_vue3_runtime_type_from_signatures(&literal.members, "Object")
         }
         TSType::TSFunctionType(_) | TSType::TSConstructorType(_) => vec!["Function".into()],
         TSType::TSArrayType(_) | TSType::TSTupleType(_) => vec!["Array".into()],
@@ -15432,20 +15468,7 @@ fn infer_vue3_define_model_runtime_type(
         TSType::TSBooleanKeyword(_) => vec!["Boolean".into()],
         TSType::TSObjectKeyword(_) => vec!["Object".into()],
         TSType::TSTypeLiteral(literal) => {
-            let mut types = Vec::new();
-            for member in &literal.members {
-                let runtime_type = match member {
-                    TSSignature::TSCallSignatureDeclaration(_)
-                    | TSSignature::TSConstructSignatureDeclaration(_) => "Function",
-                    _ => "Object",
-                };
-                push_unique(&mut types, runtime_type);
-            }
-            if types.is_empty() {
-                vec!["Object".into()]
-            } else {
-                types
-            }
+            infer_vue3_runtime_type_from_signatures(&literal.members, "Object")
         }
         TSType::TSIntersectionType(intersection) => {
             let mut types = Vec::new();
@@ -21798,6 +21821,57 @@ defineModel<typeof flag | typeof list>()
         assert!(script
             .content
             .contains("\"modelValue\": { type: [Boolean, Array] },"));
+        assert!(script.deps.is_empty(), "{:?}", script.deps);
+    }
+
+    #[test]
+    fn vue3_compile_script_resolves_signature_runtime_types() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "Comp.vue",
+            r#"<script setup lang="ts">
+type Callable = { (): string }
+type Constructable = { new (): object }
+type Mixed = { (): string; value: number }
+interface InterfaceCallable {
+  (): string
+}
+interface InterfaceMixed {
+  new (): object
+  value: number
+}
+type Props = {
+  call: Callable
+  ctor: Constructable
+  mixed: Mixed
+  ifaceCall: InterfaceCallable
+  ifaceMixed: InterfaceMixed
+}
+defineProps<Props>()
+defineModel<Callable | InterfaceMixed>()
+</script>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("call: { type: Function, required: true }"));
+        assert!(script
+            .content
+            .contains("ctor: { type: Function, required: true }"));
+        assert!(script
+            .content
+            .contains("mixed: { type: [Function, Object], required: true }"));
+        assert!(script
+            .content
+            .contains("ifaceCall: { type: Function, required: true }"));
+        assert!(script
+            .content
+            .contains("ifaceMixed: { type: [Function, Object], required: true }"));
+        assert!(script
+            .content
+            .contains("\"modelValue\": { type: [Function, Object] },"));
         assert!(script.deps.is_empty(), "{:?}", script.deps);
     }
 
