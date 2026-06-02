@@ -6307,6 +6307,94 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_reports_failed_interface_extends_and_honors_vue_ignore_deps()
+    {
+        let unresolved_dir = std::env::temp_dir().join(format!(
+            "vuec-node-bridge-failed-interface-extends-deps-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&unresolved_dir);
+        std::fs::create_dir_all(&unresolved_dir).expect("create temp dir");
+        std::fs::write(
+            unresolved_dir.join("types.ts"),
+            "import type Base from 'unknown'\nexport interface Props extends Base { local: number }",
+        )
+        .expect("write unresolved interface props");
+
+        let unresolved_filename = unresolved_dir.join("Comp.vue");
+        let unresolved = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "import type { Props } from './types'\n",
+                    "defineProps<Props>()",
+                    "</script>"
+                ),
+                "filename": unresolved_filename.to_string_lossy()
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let unresolved_content = unresolved["content"].as_str().unwrap_or_default();
+        let unresolved_expected_dep = unresolved_dir
+            .join("types.ts")
+            .to_string_lossy()
+            .replace('\\', "/");
+        assert!(unresolved["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| {
+                error.as_str().is_some_and(|error| {
+                    error.contains("Failed to resolve extends base type")
+                        && error.contains("@vue-ignore")
+                })
+            }));
+        assert!(unresolved_content.contains("local: { type: Number, required: true }"));
+        assert_eq!(unresolved["deps"], json!([unresolved_expected_dep]));
+        let _ = std::fs::remove_dir_all(&unresolved_dir);
+
+        let ignored_dir = std::env::temp_dir().join(format!(
+            "vuec-node-bridge-ignored-interface-extends-deps-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&ignored_dir);
+        std::fs::create_dir_all(&ignored_dir).expect("create temp dir");
+        std::fs::write(
+            ignored_dir.join("types.ts"),
+            "interface Base { skipped?: string }\nexport interface Props extends /*@vue-ignore*/ Base { local: number }",
+        )
+        .expect("write ignored interface props");
+
+        let ignored_filename = ignored_dir.join("Comp.vue");
+        let ignored = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "import type { Props } from './types'\n",
+                    "defineProps<Props>()",
+                    "</script>"
+                ),
+                "filename": ignored_filename.to_string_lossy()
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let ignored_content = ignored["content"].as_str().unwrap_or_default();
+        let ignored_expected_dep = ignored_dir
+            .join("types.ts")
+            .to_string_lossy()
+            .replace('\\', "/");
+        assert!(ignored["errors"].as_array().unwrap().is_empty());
+        assert!(ignored_content.contains("local: { type: Number, required: true }"));
+        assert!(!ignored_content.contains("skipped: {"));
+        assert_eq!(ignored["deps"], json!([ignored_expected_dep]));
+        let _ = std::fs::remove_dir_all(&ignored_dir);
+    }
+
+    #[test]
     fn vue3_sfc_bridge_compile_script_resolves_external_forward_type_alias_props_deps() {
         let dir = std::env::temp_dir().join(format!(
             "vuec-node-bridge-forward-type-alias-props-deps-{}",

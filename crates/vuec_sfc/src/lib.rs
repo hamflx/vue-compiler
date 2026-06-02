@@ -4265,6 +4265,7 @@ struct Vue27RuntimeDefaults {
 struct Vue27TypeMembers {
     source: String,
     members: Vec<Vue27RuntimeProp>,
+    errors: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -8106,6 +8107,7 @@ fn vue27_type_members_from_literal(
             .unwrap_or_default()
             .to_string(),
         members: vue27_runtime_props_from_signatures(source, &literal.members, analysis),
+        errors: Vec::new(),
     }
 }
 
@@ -8120,6 +8122,7 @@ fn vue27_type_members_from_interface_body(
             .unwrap_or_default()
             .to_string(),
         members: vue27_runtime_props_from_signatures(source, &body.body, analysis),
+        errors: Vec::new(),
     }
 }
 
@@ -13624,6 +13627,7 @@ fn collect_vue3_define_props_type(
     let Some(type_members) = vue3_resolve_props_type(source, type_argument, analysis) else {
         return;
     };
+    analysis.errors.extend(type_members.errors.clone());
     let default_map = defaults
         .as_ref()
         .and_then(|defaults| defaults.static_defaults.as_ref());
@@ -13720,24 +13724,24 @@ fn vue3_resolve_props_type<'a>(
             analysis.props_type_declarations.get(&name).cloned()
         }
         TSType::TSUnionType(union) => {
-            let members = vue3_merge_props_type_members(
+            let (members, errors) = vue3_merge_props_type_members(
                 union
                     .types
                     .iter()
                     .filter_map(|ty| vue3_resolve_props_type(source, ty, analysis)),
                 false,
             );
-            vue3_merged_type_members(source, union.span, members)
+            vue3_merged_type_members(source, union.span, members, errors)
         }
         TSType::TSIntersectionType(intersection) => {
-            let members = vue3_merge_props_type_members(
+            let (members, errors) = vue3_merge_props_type_members(
                 intersection
                     .types
                     .iter()
                     .filter_map(|ty| vue3_resolve_props_type(source, ty, analysis)),
                 true,
             );
-            vue3_merged_type_members(source, intersection.span, members)
+            vue3_merged_type_members(source, intersection.span, members, errors)
         }
         TSType::TSParenthesizedType(parenthesized) => {
             vue3_resolve_props_type(source, &parenthesized.type_annotation, analysis)
@@ -13769,8 +13773,9 @@ fn vue3_merged_type_members(
     source: &str,
     span: oxc_span::Span,
     members: Vec<Vue27RuntimeProp>,
+    errors: Vec<String>,
 ) -> Option<Vue27TypeMembers> {
-    if members.is_empty() {
+    if members.is_empty() && errors.is_empty() {
         None
     } else {
         Some(Vue27TypeMembers {
@@ -13779,6 +13784,7 @@ fn vue3_merged_type_members(
                 .unwrap_or_default()
                 .to_string(),
             members,
+            errors,
         })
     }
 }
@@ -13786,9 +13792,11 @@ fn vue3_merged_type_members(
 fn vue3_merge_props_type_members(
     members: impl IntoIterator<Item = Vue27TypeMembers>,
     filter_duplicate_unknown: bool,
-) -> Vec<Vue27RuntimeProp> {
+) -> (Vec<Vue27RuntimeProp>, Vec<String>) {
     let mut merged: Vec<Vue27RuntimeProp> = Vec::new();
+    let mut errors = Vec::new();
     for type_members in members {
+        errors.extend(type_members.errors);
         for prop in type_members.members {
             if let Some(index) = merged.iter().position(|existing| existing.key == prop.key) {
                 let existing = &mut merged[index];
@@ -13809,7 +13817,7 @@ fn vue3_merge_props_type_members(
             merged.push(prop);
         }
     }
-    merged
+    (merged, errors)
 }
 
 fn vue3_resolve_projectable_props_type(
@@ -14360,6 +14368,7 @@ fn vue3_props_options_type_members(
                 .unwrap_or_default()
                 .to_string(),
             members: vue3_runtime_props_options_from_signatures(source, &literal.members, analysis),
+            errors: Vec::new(),
         }),
         TSType::TSTypeReference(reference) => {
             let name = vue3_ts_type_name_key(&reference.type_name)?;
@@ -14777,6 +14786,7 @@ fn vue3_type_members_from_literal(
             .unwrap_or_default()
             .to_string(),
         members: vue3_runtime_props_from_signatures(source, &literal.members, analysis),
+        errors: Vec::new(),
     }
 }
 
@@ -14835,6 +14845,7 @@ fn vue3_type_members_from_mapped_type(
                 member_source: member_source.clone(),
             })
             .collect(),
+        errors: Vec::new(),
     })
 }
 
@@ -14874,6 +14885,7 @@ fn vue3_type_members_from_record_type(
                 member_source: member_source.clone(),
             })
             .collect(),
+        errors: Vec::new(),
     })
 }
 
@@ -14888,6 +14900,7 @@ fn vue3_type_members_from_interface_body(
             .unwrap_or_default()
             .to_string(),
         members: vue3_runtime_props_from_signatures(source, &body.body, analysis),
+        errors: Vec::new(),
     }
 }
 
@@ -14898,10 +14911,15 @@ fn vue3_type_members_from_interface(
 ) -> Vue27TypeMembers {
     let mut members = vue3_type_members_from_interface_body(source, &declaration.body, analysis);
     for heritage in &declaration.extends {
+        if vue3_interface_heritage_has_vue_ignore(source, heritage) {
+            continue;
+        }
         let Some(base) = vue3_resolve_interface_heritage_props_type(source, heritage, analysis)
         else {
+            members.errors.push(vue3_failed_extends_base_type_error());
             continue;
         };
+        members.errors.extend(base.errors);
         for prop in base.members {
             if !members.members.iter().any(|member| member.key == prop.key) {
                 members.members.push(prop);
@@ -14943,6 +14961,9 @@ fn vue3_emits_type_from_interface(
 ) -> Vue27EmitsType {
     let mut emits = vue3_emits_type_from_interface_body(source, &declaration.body, analysis);
     for heritage in &declaration.extends {
+        if vue3_interface_heritage_has_vue_ignore(source, heritage) {
+            continue;
+        }
         let Some(base) = vue3_resolve_interface_heritage_emits_type(source, heritage, analysis)
         else {
             continue;
@@ -14992,6 +15013,66 @@ fn vue3_interface_heritage_type_source(
         .map(|arguments| arguments.span.end as usize)
         .unwrap_or(heritage.expression.span().end as usize);
     source.get(start..end).map(str::trim).map(ToOwned::to_owned)
+}
+
+fn vue3_interface_heritage_has_vue_ignore(
+    source: &str,
+    heritage: &TSInterfaceHeritage<'_>,
+) -> bool {
+    if source
+        .get(heritage.span.start as usize..heritage.expression.span().start as usize)
+        .is_some_and(|prefix| prefix.contains("@vue-ignore"))
+    {
+        return true;
+    }
+    vue3_source_has_immediate_leading_vue_ignore_comment(
+        source,
+        heritage.expression.span().start as usize,
+    )
+}
+
+fn vue3_source_has_immediate_leading_vue_ignore_comment(source: &str, offset: usize) -> bool {
+    let mut cursor = offset.min(source.len());
+    loop {
+        cursor = trim_ascii_whitespace_before(source, cursor);
+        if cursor == 0 {
+            return false;
+        }
+        let before = &source[..cursor];
+        if before.ends_with("*/") {
+            let Some(start) = before.rfind("/*") else {
+                return false;
+            };
+            let comment = &source[start..cursor];
+            if comment.contains("@vue-ignore") {
+                return true;
+            }
+            cursor = start;
+            continue;
+        }
+        let line_start = before.rfind('\n').map(|index| index + 1).unwrap_or(0);
+        if let Some(start) = before[line_start..].rfind("//") {
+            let comment_start = line_start + start;
+            let comment = &source[comment_start..cursor];
+            if comment.contains("@vue-ignore") {
+                return true;
+            }
+            cursor = comment_start;
+            continue;
+        }
+        return false;
+    }
+}
+
+fn trim_ascii_whitespace_before(source: &str, mut cursor: usize) -> usize {
+    while cursor > 0 && source.as_bytes()[cursor - 1].is_ascii_whitespace() {
+        cursor -= 1;
+    }
+    cursor
+}
+
+fn vue3_failed_extends_base_type_error() -> String {
+    "Failed to resolve extends base type.\nIf this previously worked in 3.2, you can instruct the compiler to ignore this extend by adding /* @vue-ignore */ before it, for example:\n\ninterface Props extends /* @vue-ignore */ Base {}\n\nNote: both in 3.2 or with the ignore, the properties in the base type are treated as fallthrough attrs at runtime.".to_string()
 }
 
 fn vue3_interface_heritage_name(heritage: &TSInterfaceHeritage<'_>) -> Option<String> {
@@ -15086,6 +15167,9 @@ fn vue3_keyof_runtime_type_from_interface(
     let mut types = vue3_keyof_runtime_type_from_signatures(&declaration.body.body, analysis)
         .unwrap_or_default();
     for heritage in &declaration.extends {
+        if vue3_interface_heritage_has_vue_ignore(source, heritage) {
+            continue;
+        }
         let Some(base) =
             vue3_resolve_interface_heritage_keyof_runtime_type(source, heritage, analysis)
         else {
@@ -22142,6 +22226,63 @@ defineProps<Props>()
             Some("props")
         );
         assert!(script.deps.is_empty(), "{:?}", script.deps);
+    }
+
+    #[test]
+    fn vue3_compile_script_reports_failed_interface_extends_and_honors_vue_ignore() {
+        let mut compiler = SfcCompiler::new();
+        let unresolved = compiler.parse(
+            "Comp.vue",
+            r#"<script setup lang="ts">
+import type Base from 'unknown'
+interface Props extends Base {
+  local: string
+}
+defineProps<Props>()
+</script>"#,
+        );
+        let unresolved_script =
+            compiler.compile_script(&unresolved, SfcScriptCompileOptions::default());
+
+        assert!(
+            unresolved_script.errors.iter().any(|error| {
+                error.contains("Failed to resolve extends base type")
+                    && error.contains("@vue-ignore")
+            }),
+            "{:?}",
+            unresolved_script.errors
+        );
+        assert!(unresolved_script
+            .content
+            .contains("local: { type: String, required: true }"));
+
+        let ignored = compiler.parse(
+            "Comp.vue",
+            r#"<script setup lang="ts">
+interface Base { skipped?: number }
+interface Props extends /*@vue-ignore*/ Base {
+  foo: string
+}
+defineProps<Props>()
+</script>"#,
+        );
+        let ignored_script = compiler.compile_script(&ignored, SfcScriptCompileOptions::default());
+
+        assert!(
+            ignored_script.errors.is_empty(),
+            "{:?}",
+            ignored_script.errors
+        );
+        assert!(ignored_script
+            .content
+            .contains("foo: { type: String, required: true }"));
+        assert!(!ignored_script.content.contains("skipped: {"));
+        assert_eq!(
+            ignored_script.bindings.get("foo").map(String::as_str),
+            Some("props")
+        );
+        assert!(ignored_script.bindings.get("skipped").is_none());
+        assert!(ignored_script.deps.is_empty(), "{:?}", ignored_script.deps);
     }
 
     #[test]
