@@ -6499,6 +6499,7 @@ fn collect_vue3_declared_types_from_statements(
     for statement in statements {
         collect_vue3_declared_type_from_statement(source, statement, analysis);
     }
+    refresh_vue3_interface_declarations_from_statements(source, statements, analysis);
 }
 
 fn collect_vue3_predeclared_runtime_type_from_statement(
@@ -6741,6 +6742,88 @@ fn collect_vue3_declared_type_from_declaration(
     }
 }
 
+fn refresh_vue3_interface_declarations_from_statements(
+    source: &str,
+    statements: &[Statement<'_>],
+    analysis: &mut Vue3ScriptSetupAnalysis,
+) {
+    let limit = count_vue3_interface_declarations_in_statements(statements);
+    for _ in 0..limit {
+        if !refresh_vue3_interface_declarations_from_statements_once(source, statements, analysis) {
+            break;
+        }
+    }
+}
+
+fn refresh_vue3_interface_declarations_from_statements_once(
+    source: &str,
+    statements: &[Statement<'_>],
+    analysis: &mut Vue3ScriptSetupAnalysis,
+) -> bool {
+    let mut changed = false;
+    for statement in statements {
+        changed |= refresh_vue3_interface_declaration_from_statement(source, statement, analysis);
+    }
+    changed
+}
+
+fn refresh_vue3_interface_declaration_from_statement(
+    source: &str,
+    statement: &Statement<'_>,
+    analysis: &mut Vue3ScriptSetupAnalysis,
+) -> bool {
+    match statement {
+        Statement::TSInterfaceDeclaration(declaration) => {
+            refresh_vue3_interface_declaration(source, declaration, analysis)
+        }
+        Statement::ExportNamedDeclaration(declaration) => {
+            declaration.declaration.as_ref().is_some_and(|declaration| {
+                refresh_vue3_interface_declaration_from_declaration(source, declaration, analysis)
+            })
+        }
+        _ => false,
+    }
+}
+
+fn refresh_vue3_interface_declaration_from_declaration(
+    source: &str,
+    declaration: &Declaration<'_>,
+    analysis: &mut Vue3ScriptSetupAnalysis,
+) -> bool {
+    match declaration {
+        Declaration::TSInterfaceDeclaration(declaration) => {
+            refresh_vue3_interface_declaration(source, declaration, analysis)
+        }
+        _ => false,
+    }
+}
+
+fn count_vue3_interface_declarations_in_statements(statements: &[Statement<'_>]) -> usize {
+    statements
+        .iter()
+        .map(count_vue3_interface_declarations_in_statement)
+        .sum()
+}
+
+fn count_vue3_interface_declarations_in_statement(statement: &Statement<'_>) -> usize {
+    match statement {
+        Statement::TSInterfaceDeclaration(_) => 1,
+        Statement::ExportNamedDeclaration(declaration) => declaration
+            .declaration
+            .as_ref()
+            .map(count_vue3_interface_declarations_in_declaration)
+            .unwrap_or_default(),
+        _ => 0,
+    }
+}
+
+fn count_vue3_interface_declarations_in_declaration(declaration: &Declaration<'_>) -> usize {
+    match declaration {
+        Declaration::TSInterfaceDeclaration(_) => 1,
+        _ => 0,
+    }
+}
+
 fn register_vue3_interface_declaration(
     source: &str,
     declaration: &TSInterfaceDeclaration<'_>,
@@ -6754,12 +6837,31 @@ fn register_vue3_interface_declaration(
     analysis
         .define_model_declared_types
         .insert(name.clone(), vec!["Object".into()]);
+    refresh_vue3_interface_declaration(source, declaration, analysis);
+}
+
+fn refresh_vue3_interface_declaration(
+    source: &str,
+    declaration: &TSInterfaceDeclaration<'_>,
+    analysis: &mut Vue3ScriptSetupAnalysis,
+) -> bool {
+    let name = declaration.id.name.to_string();
+    let mut changed = false;
     let props = vue3_type_members_from_interface(source, declaration, analysis);
-    analysis.props_type_declarations.insert(name.clone(), props);
+    if analysis.props_type_declarations.get(&name) != Some(&props) {
+        analysis.props_type_declarations.insert(name.clone(), props);
+        changed = true;
+    }
     let emits = vue3_emits_type_from_interface(source, declaration, analysis);
     if !emits.events.is_empty() {
-        analysis.emits_type_declarations.insert(name, emits);
+        if analysis.emits_type_declarations.get(&name) != Some(&emits) {
+            analysis.emits_type_declarations.insert(name, emits);
+            changed = true;
+        }
+    } else if analysis.emits_type_declarations.remove(&name).is_some() {
+        changed = true;
     }
+    changed
 }
 
 fn register_vue3_type_alias_declaration(
@@ -19839,12 +19941,83 @@ defineProps<Props>()
     }
 
     #[test]
+    fn vue3_compile_script_resolves_forward_interface_extends_props() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "Comp.vue",
+            r#"<script setup lang="ts">
+interface Props extends Base {
+  own: string
+}
+interface Base {
+  inherited?: number
+}
+defineProps<Props>()
+</script>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("own: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("inherited: { type: Number, required: false }"));
+        assert_eq!(
+            script.bindings.get("own").map(String::as_str),
+            Some("props")
+        );
+        assert_eq!(
+            script.bindings.get("inherited").map(String::as_str),
+            Some("props")
+        );
+        assert!(script.deps.is_empty(), "{:?}", script.deps);
+    }
+
+    #[test]
     fn vue3_compile_script_resolves_external_interface_extends_type_deps() {
         let dir = tempfile::tempdir().expect("temp dir");
         let types_file = dir.path().join("types.ts");
         std::fs::write(
             &types_file,
             "export interface Base { ext?: string }\nexport interface Props extends Base { local: number }",
+        )
+        .expect("write interface props");
+
+        let filename = dir.path().join("Comp.vue");
+        let source = r#"<script setup lang="ts">
+import type { Props } from './types'
+defineProps<Props>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("ext: { type: String, required: false }"));
+        assert!(script
+            .content
+            .contains("local: { type: Number, required: true }"));
+
+        let deps = script.deps.iter().cloned().collect::<BTreeSet<_>>();
+        let expected = [types_file]
+            .into_iter()
+            .map(|path| normalize_path_string(&path))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(deps, expected);
+        assert!(!script.deps.iter().any(|dep| dep.contains('\\')));
+    }
+
+    #[test]
+    fn vue3_compile_script_resolves_external_forward_interface_extends_type_deps() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let types_file = dir.path().join("types.ts");
+        std::fs::write(
+            &types_file,
+            "export interface Props extends Base { local: number }\nexport interface Base { ext?: string }",
         )
         .expect("write interface props");
 
@@ -19889,6 +20062,24 @@ const emit = defineEmits<Emits>()
 
         assert!(script.errors.is_empty(), "{:?}", script.errors);
         assert!(script.content.contains("emits: [\"bar\", \"foo\"],"));
+        assert!(script.deps.is_empty(), "{:?}", script.deps);
+    }
+
+    #[test]
+    fn vue3_compile_script_resolves_forward_interface_extends_emits() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "Comp.vue",
+            r#"<script setup lang="ts">
+interface Emits extends Base { (e: 'local'): void }
+interface Base { (e: 'base'): void }
+const emit = defineEmits<Emits>()
+</script>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script.content.contains("emits: [\"local\", \"base\"],"));
         assert!(script.deps.is_empty(), "{:?}", script.deps);
     }
 
