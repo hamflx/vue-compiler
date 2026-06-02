@@ -5164,6 +5164,9 @@ fn vue3_exported_type_names(statements: &[Statement<'_>]) -> BTreeSet<String> {
                         Declaration::TSTypeAliasDeclaration(declaration) => {
                             names.insert(declaration.id.name.to_string());
                         }
+                        Declaration::TSEnumDeclaration(declaration) => {
+                            names.insert(declaration.id.name.to_string());
+                        }
                         Declaration::TSModuleDeclaration(declaration) => {
                             names.extend(vue3_namespace_exported_type_names(declaration));
                         }
@@ -5696,7 +5699,29 @@ fn collect_vue3_declared_types_from_statements(
     analysis: &mut Vue3ScriptSetupAnalysis,
 ) {
     for statement in statements {
+        collect_vue3_declared_enum_type_from_statement(statement, analysis);
+    }
+    for statement in statements {
         collect_vue3_declared_type_from_statement(source, statement, analysis);
+    }
+}
+
+fn collect_vue3_declared_enum_type_from_statement(
+    statement: &Statement<'_>,
+    analysis: &mut Vue3ScriptSetupAnalysis,
+) {
+    match statement {
+        Statement::TSEnumDeclaration(declaration) if !declaration.declare => {
+            register_vue3_ts_enum_declaration(declaration, analysis);
+        }
+        Statement::ExportNamedDeclaration(declaration) => {
+            if let Some(Declaration::TSEnumDeclaration(declaration)) = &declaration.declaration {
+                if !declaration.declare {
+                    register_vue3_ts_enum_declaration(declaration, analysis);
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -5839,6 +5864,9 @@ fn collect_vue3_declared_type_from_statement(
                 collect_vue3_declared_type_from_declaration(source, declaration, analysis);
             }
         }
+        Statement::TSEnumDeclaration(declaration) if !declaration.declare => {
+            register_vue3_ts_enum_declaration(declaration, analysis);
+        }
         Statement::TSModuleDeclaration(declaration) => {
             project_vue3_namespace_declaration(source, declaration, analysis);
         }
@@ -5902,7 +5930,39 @@ fn collect_vue3_declared_type_from_declaration(
         Declaration::TSModuleDeclaration(declaration) => {
             project_vue3_namespace_declaration(source, declaration, analysis);
         }
+        Declaration::TSEnumDeclaration(declaration) if !declaration.declare => {
+            register_vue3_ts_enum_declaration(declaration, analysis);
+        }
         _ => {}
+    }
+}
+
+fn register_vue3_ts_enum_declaration(
+    declaration: &TSEnumDeclaration<'_>,
+    analysis: &mut Vue3ScriptSetupAnalysis,
+) {
+    let name = declaration.id.name.to_string();
+    register_vue3_local_type_name(analysis, &name);
+    let runtime = infer_vue3_enum_runtime_type(declaration);
+    analysis
+        .declared_types
+        .insert(name.clone(), runtime.clone());
+    analysis.define_model_declared_types.insert(name, runtime);
+}
+
+fn infer_vue3_enum_runtime_type(declaration: &TSEnumDeclaration<'_>) -> Vec<String> {
+    let mut types = Vec::new();
+    for member in &declaration.body.members {
+        match member.initializer.as_ref() {
+            Some(Expression::StringLiteral(_)) => push_unique(&mut types, "String"),
+            Some(Expression::NumericLiteral(_)) => push_unique(&mut types, "Number"),
+            _ => {}
+        }
+    }
+    if types.is_empty() {
+        vec!["Number".into()]
+    } else {
+        types
     }
 }
 
@@ -17387,6 +17447,65 @@ const model = defineModel<ModelValue>()
         .into_iter()
         .map(|name| normalize_path_string(&dir.path().join(name)))
         .collect::<BTreeSet<_>>();
+        assert_eq!(deps, expected);
+        assert!(!script.deps.iter().any(|dep| dep.contains('\\')));
+    }
+
+    #[test]
+    fn vue3_compile_script_resolves_relative_enum_macro_types_and_deps() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join("enums.ts"),
+            "export enum Kind { A = 'a', B = 'b' }\nexport enum Code { A = 1, B = 2 }\nexport enum Mixed { A = 'a', B = 1 }\nexport enum Auto { A, B }\nexport type Props = { kind: Kind, code?: Code, mixed: Mixed, auto: Auto }\nexport type ModelValue = Kind | Code",
+        )
+        .expect("write enum types");
+        std::fs::write(
+            dir.path().join("facade.ts"),
+            "export { Props as FacadeProps, ModelValue as FacadeModel } from './enums'",
+        )
+        .expect("write enum facade");
+        std::fs::write(
+            dir.path().join("namespace.ts"),
+            "export namespace Nested { export enum Flag { Yes = 'yes', No = 'no' } export type Props = { flag: Flag } }",
+        )
+        .expect("write namespace enum types");
+
+        let filename = dir.path().join("Comp.vue");
+        let source = r#"<script setup lang="ts">
+import type { FacadeProps, FacadeModel } from './facade'
+import * as Ns from './namespace'
+const props = defineProps<FacadeProps & Ns.Nested.Props>()
+const model = defineModel<FacadeModel>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("kind: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("code: { type: Number, required: false }"));
+        assert!(script
+            .content
+            .contains("mixed: { type: [String, Number], required: true }"));
+        assert!(script
+            .content
+            .contains("auto: { type: Number, required: true }"));
+        assert!(script
+            .content
+            .contains("flag: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("\"modelValue\": { type: [String, Number] },"));
+
+        let deps = script.deps.iter().cloned().collect::<BTreeSet<_>>();
+        let expected = ["enums.ts", "facade.ts", "namespace.ts"]
+            .into_iter()
+            .map(|name| normalize_path_string(&dir.path().join(name)))
+            .collect::<BTreeSet<_>>();
         assert_eq!(deps, expected);
         assert!(!script.deps.iter().any(|dep| dep.contains('\\')));
     }
