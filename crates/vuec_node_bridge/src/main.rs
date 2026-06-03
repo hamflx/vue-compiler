@@ -5817,13 +5817,17 @@ mod tests {
             dir.join("types.ts"),
             concat!(
                 "export type Base = { name: string; count?: number; active: boolean }\n",
+                "export type A = (string | number)[]\n",
+                "export type TT = [foo: 1, bar: 'foo']\n",
                 "export type ValueOf<T, K extends keyof T> = T[K]\n",
                 "export type Props = {\n",
                 "  label: ValueOf<Base, 'name'>\n",
                 "  scalar: Base['name' | 'count']\n",
                 "  active: Base['active']\n",
+                "  arrayItem: A[number]\n",
+                "  tupleItem: TT[number]\n",
                 "}\n",
-                "export type ModelValue = Base['name' | 'active']"
+                "export type ModelValue = A[number] | TT[number]"
             ),
         )
         .expect("write indexed access props");
@@ -5850,7 +5854,9 @@ mod tests {
         assert!(content.contains("label: { type: String, required: true }"));
         assert!(content.contains("scalar: { type: [String, Number], required: true }"));
         assert!(content.contains("active: { type: Boolean, required: true }"));
-        assert!(content.contains("\"modelValue\": { type: [String, Boolean] },"));
+        assert!(content.contains("arrayItem: { type: [String, Number], required: true }"));
+        assert!(content.contains("tupleItem: { type: [Number, String], required: true }"));
+        assert!(content.contains("\"modelValue\": { type: [String, Number] },"));
         assert_eq!(compiled["deps"], json!([expected_dep]));
 
         let _ = std::fs::remove_dir_all(&dir);
