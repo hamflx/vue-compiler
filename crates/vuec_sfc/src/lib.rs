@@ -9504,6 +9504,7 @@ fn refresh_vue3_merged_interface_declarations(
         }
     }
     let props_parameter_tuple = infer_vue3_function_parameter_tuple_runtime_type_from_interfaces(
+        source,
         declarations,
         analysis,
         Vue3ArrayElementRuntimeMode::Props,
@@ -9515,6 +9516,7 @@ fn refresh_vue3_merged_interface_declarations(
     );
 
     let model_parameter_tuple = infer_vue3_function_parameter_tuple_runtime_type_from_interfaces(
+        source,
         declarations,
         analysis,
         Vue3ArrayElementRuntimeMode::DefineModel,
@@ -9527,6 +9529,7 @@ fn refresh_vue3_merged_interface_declarations(
 
     let props_constructor_parameter_tuple =
         infer_vue3_constructor_parameter_tuple_runtime_type_from_interfaces(
+            source,
             declarations,
             analysis,
             Vue3ArrayElementRuntimeMode::Props,
@@ -9539,6 +9542,7 @@ fn refresh_vue3_merged_interface_declarations(
 
     let model_constructor_parameter_tuple =
         infer_vue3_constructor_parameter_tuple_runtime_type_from_interfaces(
+            source,
             declarations,
             analysis,
             Vue3ArrayElementRuntimeMode::DefineModel,
@@ -17233,6 +17237,7 @@ fn infer_vue3_function_parameter_tuple_runtime_type(
 }
 
 fn infer_vue3_function_parameter_tuple_runtime_type_from_interfaces(
+    source: &str,
     declarations: &[&TSInterfaceDeclaration<'_>],
     analysis: &Vue3ScriptSetupAnalysis,
     mode: Vue3ArrayElementRuntimeMode,
@@ -17246,8 +17251,48 @@ fn infer_vue3_function_parameter_tuple_runtime_type_from_interfaces(
         ) {
             merge_vue3_runtime_type_tuple(&mut merged, tuple);
         }
+        for heritage in &declaration.extends {
+            if vue3_interface_heritage_has_vue_ignore(source, heritage) {
+                continue;
+            }
+            if let Some(tuple) = infer_vue3_function_parameter_tuple_runtime_type_from_heritage(
+                source, heritage, analysis, mode,
+            ) {
+                merge_vue3_runtime_type_tuple(&mut merged, tuple);
+            }
+        }
     }
     vue3_non_empty_runtime_tuple(merged)
+}
+
+fn infer_vue3_function_parameter_tuple_runtime_type_from_heritage(
+    source: &str,
+    heritage: &TSInterfaceHeritage<'_>,
+    analysis: &Vue3ScriptSetupAnalysis,
+    mode: Vue3ArrayElementRuntimeMode,
+) -> Option<Vue3RuntimeTypeTuple> {
+    let ty_source = vue3_interface_heritage_type_source(source, heritage)?;
+    let wrapped = format!("type __VuecResolved = {ty_source}");
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(&allocator, &wrapped, oxc_span::SourceType::ts())
+        .with_options(oxc_parser::ParseOptions {
+            parse_regular_expression: true,
+            ..oxc_parser::ParseOptions::default()
+        })
+        .parse();
+    if parsed.panicked || !parsed.errors.is_empty() {
+        return None;
+    }
+    for statement in &parsed.program.body {
+        if let Statement::TSTypeAliasDeclaration(declaration) = statement {
+            return infer_vue3_function_parameter_tuple_runtime_type(
+                &declaration.type_annotation,
+                analysis,
+                mode,
+            );
+        }
+    }
+    None
 }
 
 fn infer_vue3_function_parameter_tuple_runtime_type_from_signatures(
@@ -17315,6 +17360,7 @@ fn infer_vue3_constructor_parameter_tuple_runtime_type(
 }
 
 fn infer_vue3_constructor_parameter_tuple_runtime_type_from_interfaces(
+    source: &str,
     declarations: &[&TSInterfaceDeclaration<'_>],
     analysis: &Vue3ScriptSetupAnalysis,
     mode: Vue3ArrayElementRuntimeMode,
@@ -17328,8 +17374,48 @@ fn infer_vue3_constructor_parameter_tuple_runtime_type_from_interfaces(
         ) {
             merge_vue3_runtime_type_tuple(&mut merged, tuple);
         }
+        for heritage in &declaration.extends {
+            if vue3_interface_heritage_has_vue_ignore(source, heritage) {
+                continue;
+            }
+            if let Some(tuple) = infer_vue3_constructor_parameter_tuple_runtime_type_from_heritage(
+                source, heritage, analysis, mode,
+            ) {
+                merge_vue3_runtime_type_tuple(&mut merged, tuple);
+            }
+        }
     }
     vue3_non_empty_runtime_tuple(merged)
+}
+
+fn infer_vue3_constructor_parameter_tuple_runtime_type_from_heritage(
+    source: &str,
+    heritage: &TSInterfaceHeritage<'_>,
+    analysis: &Vue3ScriptSetupAnalysis,
+    mode: Vue3ArrayElementRuntimeMode,
+) -> Option<Vue3RuntimeTypeTuple> {
+    let ty_source = vue3_interface_heritage_type_source(source, heritage)?;
+    let wrapped = format!("type __VuecResolved = {ty_source}");
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(&allocator, &wrapped, oxc_span::SourceType::ts())
+        .with_options(oxc_parser::ParseOptions {
+            parse_regular_expression: true,
+            ..oxc_parser::ParseOptions::default()
+        })
+        .parse();
+    if parsed.panicked || !parsed.errors.is_empty() {
+        return None;
+    }
+    for statement in &parsed.program.body {
+        if let Statement::TSTypeAliasDeclaration(declaration) = statement {
+            return infer_vue3_constructor_parameter_tuple_runtime_type(
+                &declaration.type_annotation,
+                analysis,
+                mode,
+            );
+        }
+    }
+    None
 }
 
 fn infer_vue3_constructor_parameter_tuple_runtime_type_from_signatures(
@@ -26356,6 +26442,64 @@ defineModel<Parameters<Callable>[number] | ConstructorParameters<InterfaceNewabl
             .contains("\"modelValue\": { type: [String, Boolean, Number] },"));
         assert_eq!(
             script.bindings.get("callFirst").map(String::as_str),
+            Some("props")
+        );
+        assert_eq!(
+            script.bindings.get("newSecond").map(String::as_str),
+            Some("props")
+        );
+        assert!(script.deps.is_empty(), "{:?}", script.deps);
+    }
+
+    #[test]
+    fn vue3_compile_script_resolves_interface_extends_signature_parameter_tuple_utility_runtime_types(
+    ) {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "Comp.vue",
+            r#"<script setup lang="ts">
+interface Callable extends BaseCallable {
+  (active: boolean): void
+}
+interface BaseCallable {
+  (name: string, count: number): void
+}
+interface Newable extends BaseNewable {
+  new (label: string): object
+}
+interface BaseNewable {
+  new (id: number, done: () => void): object
+}
+type Props = {
+  callAny: Parameters<Callable>[number]
+  callSecond: Parameters<Callable>[1]
+  newAny: ConstructorParameters<Newable>[number]
+  newSecond: ConstructorParameters<Newable>[1]
+}
+defineProps<Props>()
+defineModel<Parameters<Callable>[number] | ConstructorParameters<Newable>[number]>()
+</script>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("callAny: { type: [Boolean, String, Number], required: true }"));
+        assert!(script
+            .content
+            .contains("callSecond: { type: Number, required: true }"));
+        assert!(script
+            .content
+            .contains("newAny: { type: [String, Number, Function], required: true }"));
+        assert!(script
+            .content
+            .contains("newSecond: { type: Function, required: true }"));
+        assert!(script
+            .content
+            .contains("\"modelValue\": { type: [Boolean, String, Number, Function] },"));
+        assert_eq!(
+            script.bindings.get("callAny").map(String::as_str),
             Some("props")
         );
         assert_eq!(
