@@ -5698,6 +5698,81 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_resolves_runtime_props_object_extract_prop_types_deps() {
+        let dir = std::env::temp_dir().join(format!(
+            "vuec-node-bridge-runtime-props-object-deps-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        std::fs::write(dir.join("user.ts"), "export interface User { id: string }")
+            .expect("write user type");
+        std::fs::write(
+            dir.join("props.ts"),
+            concat!(
+                "import type { PropType } from 'vue'\n",
+                "import type { User } from './user'\n",
+                "export const props = {\n",
+                "  name: String,\n",
+                "  active: { type: Boolean, required: true },\n",
+                "  score: { type: [Number, String] },\n",
+                "  user: Object as PropType<User>\n",
+                "}\n"
+            ),
+        )
+        .expect("write runtime props");
+        std::fs::write(
+            dir.join("default-props.ts"),
+            concat!(
+                "const props = {\n",
+                "  flag: Boolean,\n",
+                "  created: { type: Date, default: () => new Date() }\n",
+                "}\n",
+                "export { props as default }\n"
+            ),
+        )
+        .expect("write default runtime props");
+
+        let filename = dir.join("Comp.vue");
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "import { props as namedProps } from './props'\n",
+                    "import defaultProps from './default-props'\n",
+                    "type Props =\n",
+                    "  ExtractPropTypes<typeof namedProps> &\n",
+                    "  Partial<ExtractPropTypes<typeof defaultProps>>\n",
+                    "defineProps<Props>()",
+                    "</script>"
+                ),
+                "filename": filename.to_string_lossy()
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = compiled["content"].as_str().unwrap_or_default();
+        let expected_deps = json!([
+            dir.join("default-props.ts")
+                .to_string_lossy()
+                .replace('\\', "/"),
+            dir.join("props.ts").to_string_lossy().replace('\\', "/"),
+            dir.join("user.ts").to_string_lossy().replace('\\', "/")
+        ]);
+        assert!(compiled["errors"].as_array().unwrap().is_empty());
+        assert!(content.contains("name: { type: String, required: false }"));
+        assert!(content.contains("active: { type: Boolean, required: true }"));
+        assert!(content.contains("score: { type: [Number, String], required: false }"));
+        assert!(content.contains("user: { type: Object, required: false }"));
+        assert!(content.contains("flag: { type: Boolean, required: false }"));
+        assert!(content.contains("created: { type: Date, required: false }"));
+        assert_eq!(compiled["deps"], expected_deps);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn vue3_sfc_bridge_compile_script_resolves_external_generic_utility_type_deps() {
         let dir = std::env::temp_dir().join(format!(
             "vuec-node-bridge-generic-props-deps-{}",
