@@ -5933,6 +5933,7 @@ mod tests {
             dir.join("types.ts"),
             concat!(
                 "export type Base = { name: string; count?: number; active: boolean }\n",
+                "export type MethodBase = { method(): void; run: () => void; value: string }\n",
                 "export type A = (string | number)[]\n",
                 "export type TT = [foo: 1, bar: 'foo']\n",
                 "export type ValueOf<T, K extends keyof T> = T[K]\n",
@@ -5940,10 +5941,14 @@ mod tests {
                 "  label: ValueOf<Base, 'name'>\n",
                 "  scalar: Base['name' | 'count']\n",
                 "  active: Base['active']\n",
+                "  method: MethodBase['method']\n",
+                "  callable: MethodBase['run']\n",
+                "  methodOrCallable: MethodBase['method'] | MethodBase['run']\n",
+                "  methodOrLabel: MethodBase['method'] | MethodBase['value']\n",
                 "  arrayItem: A[number]\n",
                 "  tupleItem: TT[number]\n",
                 "}\n",
-                "export type ModelValue = A[number] | TT[number]"
+                "export type ModelValue = A[number] | TT[number] | MethodBase['method'] | MethodBase['run']"
             ),
         )
         .expect("write indexed access props");
@@ -5970,9 +5975,15 @@ mod tests {
         assert!(content.contains("label: { type: String, required: true }"));
         assert!(content.contains("scalar: { type: [String, Number], required: true }"));
         assert!(content.contains("active: { type: Boolean, required: true }"));
+        assert!(content.contains("method: { type: null, required: true }"));
+        assert!(content.contains("callable: { type: Function, required: true }"));
+        assert!(content
+            .contains("methodOrCallable: { type: Function, required: true, skipCheck: true }"));
+        assert!(content.contains("methodOrLabel: { type: null, required: true }"));
         assert!(content.contains("arrayItem: { type: [String, Number], required: true }"));
         assert!(content.contains("tupleItem: { type: [Number, String], required: true }"));
-        assert!(content.contains("\"modelValue\": { type: [String, Number] },"));
+        assert!(content
+            .contains("\"modelValue\": { type: [String, Number, Function], skipCheck: true },"));
         assert_eq!(compiled["deps"], json!([expected_dep]));
 
         let _ = std::fs::remove_dir_all(&dir);

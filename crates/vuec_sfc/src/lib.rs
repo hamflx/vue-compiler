@@ -17996,8 +17996,12 @@ fn infer_vue3_indexed_access_runtime_type(
         let Some(prop) = members.members.iter().find(|prop| prop.key == key) else {
             continue;
         };
-        for runtime_type in &prop.types {
-            push_unique(&mut types, runtime_type);
+        if prop.is_method {
+            push_unique(&mut types, "Unknown");
+        } else {
+            for runtime_type in &prop.types {
+                push_unique(&mut types, runtime_type);
+            }
         }
     }
     if types.is_empty() {
@@ -28685,6 +28689,7 @@ type Base = {
   name: string
   count?: number
   active: boolean
+  method(): void
   run: () => void
 }
 type A = (string | number)[]
@@ -28693,9 +28698,13 @@ type T = [1, 'foo']
 type TT = [foo: 1, bar: 'foo']
 type ValueOf<T, K extends keyof T> = T[K]
 type Props = {
+  directMethod(): void
   label: Base['name']
   scalar: Base['name' | 'count']
-  method: Base['run']
+  method: Base['method']
+  callable: Base['run']
+  methodOrCallable: Base['method'] | Base['run']
+  methodOrLabel: Base['method'] | Base['name']
   generic: ValueOf<Base, 'active'>
   arrayItem: A[number]
   genericArrayItem: AA[number]
@@ -28703,12 +28712,15 @@ type Props = {
   namedTupleItem: TT[number]
 }
 defineProps<Props>()
-defineModel<A[number] | TT[number]>()
+defineModel<A[number] | TT[number] | Base['method'] | Base['run']>()
 </script>"#,
         );
         let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
 
         assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("directMethod: { type: Function, required: true }"));
         assert!(script
             .content
             .contains("label: { type: String, required: true }"));
@@ -28717,7 +28729,16 @@ defineModel<A[number] | TT[number]>()
             .contains("scalar: { type: [String, Number], required: true }"));
         assert!(script
             .content
-            .contains("method: { type: Function, required: true }"));
+            .contains("method: { type: null, required: true }"));
+        assert!(script
+            .content
+            .contains("callable: { type: Function, required: true }"));
+        assert!(script
+            .content
+            .contains("methodOrCallable: { type: Function, required: true, skipCheck: true }"));
+        assert!(script
+            .content
+            .contains("methodOrLabel: { type: null, required: true }"));
         assert!(script
             .content
             .contains("generic: { type: Boolean, required: true }"));
@@ -28735,7 +28756,7 @@ defineModel<A[number] | TT[number]>()
             .contains("namedTupleItem: { type: [Number, String], required: true }"));
         assert!(script
             .content
-            .contains("\"modelValue\": { type: [String, Number] },"));
+            .contains("\"modelValue\": { type: [String, Number, Function], skipCheck: true },"));
         assert_eq!(
             script.bindings.get("label").map(String::as_str),
             Some("props")
