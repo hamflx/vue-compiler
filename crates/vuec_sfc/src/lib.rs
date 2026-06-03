@@ -9503,6 +9503,52 @@ fn refresh_vue3_merged_interface_declarations(
             }
         }
     }
+    let props_parameter_tuple = infer_vue3_function_parameter_tuple_runtime_type_from_interfaces(
+        declarations,
+        analysis,
+        Vue3ArrayElementRuntimeMode::Props,
+    );
+    changed |= refresh_vue3_runtime_type_tuple_declaration(
+        &mut analysis.parameter_tuple_runtime_type_declarations,
+        &name,
+        props_parameter_tuple,
+    );
+
+    let model_parameter_tuple = infer_vue3_function_parameter_tuple_runtime_type_from_interfaces(
+        declarations,
+        analysis,
+        Vue3ArrayElementRuntimeMode::DefineModel,
+    );
+    changed |= refresh_vue3_runtime_type_tuple_declaration(
+        &mut analysis.define_model_parameter_tuple_runtime_type_declarations,
+        &name,
+        model_parameter_tuple,
+    );
+
+    let props_constructor_parameter_tuple =
+        infer_vue3_constructor_parameter_tuple_runtime_type_from_interfaces(
+            declarations,
+            analysis,
+            Vue3ArrayElementRuntimeMode::Props,
+        );
+    changed |= refresh_vue3_runtime_type_tuple_declaration(
+        &mut analysis.constructor_parameter_tuple_runtime_type_declarations,
+        &name,
+        props_constructor_parameter_tuple,
+    );
+
+    let model_constructor_parameter_tuple =
+        infer_vue3_constructor_parameter_tuple_runtime_type_from_interfaces(
+            declarations,
+            analysis,
+            Vue3ArrayElementRuntimeMode::DefineModel,
+        );
+    changed |= refresh_vue3_runtime_type_tuple_declaration(
+        &mut analysis.define_model_constructor_parameter_tuple_runtime_type_declarations,
+        &name,
+        model_constructor_parameter_tuple,
+    );
+
     let emits = vue3_emits_type_from_interface_declarations(source, declarations, analysis);
     if !emits.events.is_empty() {
         if analysis.emits_type_declarations.get(&name) != Some(&emits) {
@@ -17152,6 +17198,13 @@ fn infer_vue3_function_parameter_tuple_runtime_type(
         TSType::TSFunctionType(function) => {
             infer_vue3_formal_parameters_tuple_runtime_type(&function.params, analysis, mode)
         }
+        TSType::TSTypeLiteral(literal) => {
+            infer_vue3_function_parameter_tuple_runtime_type_from_signatures(
+                &literal.members,
+                analysis,
+                mode,
+            )
+        }
         TSType::TSTypeReference(reference) => {
             let name = vue3_ts_type_name_key(&reference.type_name)?;
             vue3_parameter_tuple_declaration_for_mode(analysis, &name, mode)
@@ -17179,6 +17232,40 @@ fn infer_vue3_function_parameter_tuple_runtime_type(
     }
 }
 
+fn infer_vue3_function_parameter_tuple_runtime_type_from_interfaces(
+    declarations: &[&TSInterfaceDeclaration<'_>],
+    analysis: &Vue3ScriptSetupAnalysis,
+    mode: Vue3ArrayElementRuntimeMode,
+) -> Option<Vue3RuntimeTypeTuple> {
+    let mut merged = Vec::new();
+    for declaration in declarations {
+        if let Some(tuple) = infer_vue3_function_parameter_tuple_runtime_type_from_signatures(
+            &declaration.body.body,
+            analysis,
+            mode,
+        ) {
+            merge_vue3_runtime_type_tuple(&mut merged, tuple);
+        }
+    }
+    vue3_non_empty_runtime_tuple(merged)
+}
+
+fn infer_vue3_function_parameter_tuple_runtime_type_from_signatures(
+    signatures: &[TSSignature<'_>],
+    analysis: &Vue3ScriptSetupAnalysis,
+    mode: Vue3ArrayElementRuntimeMode,
+) -> Option<Vue3RuntimeTypeTuple> {
+    let mut merged = Vec::new();
+    for signature in signatures {
+        if let TSSignature::TSCallSignatureDeclaration(signature) = signature {
+            let tuple =
+                infer_vue3_formal_parameters_tuple_runtime_type(&signature.params, analysis, mode)?;
+            merge_vue3_runtime_type_tuple(&mut merged, tuple);
+        }
+    }
+    vue3_non_empty_runtime_tuple(merged)
+}
+
 fn infer_vue3_constructor_parameter_tuple_runtime_type(
     node: &TSType<'_>,
     analysis: &Vue3ScriptSetupAnalysis,
@@ -17187,6 +17274,13 @@ fn infer_vue3_constructor_parameter_tuple_runtime_type(
     match node {
         TSType::TSConstructorType(constructor) => {
             infer_vue3_formal_parameters_tuple_runtime_type(&constructor.params, analysis, mode)
+        }
+        TSType::TSTypeLiteral(literal) => {
+            infer_vue3_constructor_parameter_tuple_runtime_type_from_signatures(
+                &literal.members,
+                analysis,
+                mode,
+            )
         }
         TSType::TSTypeReference(reference) => {
             let name = vue3_ts_type_name_key(&reference.type_name)?;
@@ -17218,6 +17312,40 @@ fn infer_vue3_constructor_parameter_tuple_runtime_type(
         }
         _ => None,
     }
+}
+
+fn infer_vue3_constructor_parameter_tuple_runtime_type_from_interfaces(
+    declarations: &[&TSInterfaceDeclaration<'_>],
+    analysis: &Vue3ScriptSetupAnalysis,
+    mode: Vue3ArrayElementRuntimeMode,
+) -> Option<Vue3RuntimeTypeTuple> {
+    let mut merged = Vec::new();
+    for declaration in declarations {
+        if let Some(tuple) = infer_vue3_constructor_parameter_tuple_runtime_type_from_signatures(
+            &declaration.body.body,
+            analysis,
+            mode,
+        ) {
+            merge_vue3_runtime_type_tuple(&mut merged, tuple);
+        }
+    }
+    vue3_non_empty_runtime_tuple(merged)
+}
+
+fn infer_vue3_constructor_parameter_tuple_runtime_type_from_signatures(
+    signatures: &[TSSignature<'_>],
+    analysis: &Vue3ScriptSetupAnalysis,
+    mode: Vue3ArrayElementRuntimeMode,
+) -> Option<Vue3RuntimeTypeTuple> {
+    let mut merged = Vec::new();
+    for signature in signatures {
+        if let TSSignature::TSConstructSignatureDeclaration(signature) = signature {
+            let tuple =
+                infer_vue3_formal_parameters_tuple_runtime_type(&signature.params, analysis, mode)?;
+            merge_vue3_runtime_type_tuple(&mut merged, tuple);
+        }
+    }
+    vue3_non_empty_runtime_tuple(merged)
 }
 
 fn infer_vue3_formal_parameters_tuple_runtime_type(
@@ -26174,6 +26302,64 @@ defineModel<Parameters<Fn>[number] | ConstructorParameters<Ctor>[number]>()
         );
         assert_eq!(
             script.bindings.get("ctorAny").map(String::as_str),
+            Some("props")
+        );
+        assert!(script.deps.is_empty(), "{:?}", script.deps);
+    }
+
+    #[test]
+    fn vue3_compile_script_resolves_signature_parameter_tuple_utility_runtime_types() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "Comp.vue",
+            r#"<script setup lang="ts">
+type Callable = {
+  (value: string, count: number): void
+  (active: boolean): void
+}
+interface InterfaceCallable {
+  (name: string, flags: boolean[]): void
+}
+type Newable = {
+  new (id: number, done: () => void): object
+}
+interface InterfaceNewable {
+  new (label: string, enabled: boolean): object
+}
+type Props = {
+  callAny: Parameters<Callable>[number]
+  callFirst: Parameters<InterfaceCallable>[0]
+  newAny: ConstructorParameters<Newable>[number]
+  newSecond: ConstructorParameters<InterfaceNewable>[1]
+}
+defineProps<Props>()
+defineModel<Parameters<Callable>[number] | ConstructorParameters<InterfaceNewable>[number]>()
+</script>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("callAny: { type: [String, Boolean, Number], required: true }"));
+        assert!(script
+            .content
+            .contains("callFirst: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("newAny: { type: [Number, Function], required: true }"));
+        assert!(script
+            .content
+            .contains("newSecond: { type: Boolean, required: true }"));
+        assert!(script
+            .content
+            .contains("\"modelValue\": { type: [String, Boolean, Number] },"));
+        assert_eq!(
+            script.bindings.get("callFirst").map(String::as_str),
+            Some("props")
+        );
+        assert_eq!(
+            script.bindings.get("newSecond").map(String::as_str),
             Some("props")
         );
         assert!(script.deps.is_empty(), "{:?}", script.deps);
