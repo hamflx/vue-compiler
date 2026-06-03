@@ -5303,7 +5303,7 @@ fn vue3_declared_type_names_from_statement(statement: &Statement<'_>) -> BTreeSe
         Statement::TSEnumDeclaration(declaration) => {
             names.insert(declaration.id.name.to_string());
         }
-        Statement::FunctionDeclaration(function) if function.declare => {
+        Statement::FunctionDeclaration(function) if function.return_type.is_some() => {
             if let Some(id) = &function.id {
                 names.insert(id.name.to_string());
             }
@@ -5345,7 +5345,7 @@ fn vue3_declared_type_names_from_declaration(declaration: &Declaration<'_>) -> B
         Declaration::TSEnumDeclaration(declaration) => {
             names.insert(declaration.id.name.to_string());
         }
-        Declaration::FunctionDeclaration(function) if function.declare => {
+        Declaration::FunctionDeclaration(function) if function.return_type.is_some() => {
             if let Some(id) = &function.id {
                 names.insert(id.name.to_string());
             }
@@ -6174,7 +6174,9 @@ fn vue3_exported_type_names(statements: &[Statement<'_>]) -> BTreeSet<String> {
                         Declaration::TSEnumDeclaration(declaration) => {
                             names.insert(declaration.id.name.to_string());
                         }
-                        Declaration::FunctionDeclaration(function) if function.declare => {
+                        Declaration::FunctionDeclaration(function)
+                            if function.return_type.is_some() =>
+                        {
                             if let Some(id) = &function.id {
                                 names.insert(id.name.to_string());
                             }
@@ -6212,12 +6214,15 @@ fn vue3_exported_type_names(statements: &[Statement<'_>]) -> BTreeSet<String> {
 }
 
 fn vue3_default_export_may_be_type(declaration: &ExportDefaultDeclaration<'_>) -> bool {
-    matches!(
-        &declaration.declaration,
+    match &declaration.declaration {
         ExportDefaultDeclarationKind::TSInterfaceDeclaration(_)
-            | ExportDefaultDeclarationKind::ClassDeclaration(_)
-            | ExportDefaultDeclarationKind::Identifier(_)
-    )
+        | ExportDefaultDeclarationKind::ClassDeclaration(_)
+        | ExportDefaultDeclarationKind::Identifier(_) => true,
+        ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
+            function.return_type.is_some()
+        }
+        _ => false,
+    }
 }
 
 fn project_vue3_default_type_exports(
@@ -6239,6 +6244,33 @@ fn project_vue3_default_type_exports(
             }
             ExportDefaultDeclarationKind::Identifier(identifier) => {
                 insert_vue3_local_type_alias(analysis, identifier.name.as_str(), "default");
+            }
+            ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
+                if let Some(return_type) = function.return_type.as_ref() {
+                    if let Some(id) = &function.id {
+                        let name = id.name.as_str();
+                        register_vue3_declared_return_props_options(
+                            source,
+                            name,
+                            &return_type.type_annotation,
+                            analysis,
+                        );
+                        let deps =
+                            collect_vue3_type_argument_deps(&return_type.type_annotation, analysis);
+                        insert_vue3_declared_type_deps(analysis, name, deps);
+                        insert_vue3_local_type_alias(analysis, name, "default");
+                    } else {
+                        register_vue3_declared_return_props_options(
+                            source,
+                            "default",
+                            &return_type.type_annotation,
+                            analysis,
+                        );
+                        let deps =
+                            collect_vue3_type_argument_deps(&return_type.type_annotation, analysis);
+                        insert_vue3_declared_type_deps(analysis, "default", deps);
+                    }
+                }
             }
             ExportDefaultDeclarationKind::ClassDeclaration(class) => {
                 if let Some(id) = &class.id {
@@ -9253,7 +9285,7 @@ fn collect_vue3_declared_type_deps_from_statement(
             let deps = collect_vue3_type_argument_deps(&declaration.type_annotation, analysis);
             insert_vue3_declared_type_deps(analysis, declaration.id.name.as_str(), deps);
         }
-        Statement::FunctionDeclaration(function) if function.declare => {
+        Statement::FunctionDeclaration(function) if function.return_type.is_some() => {
             if let (Some(id), Some(return_type)) = (&function.id, function.return_type.as_ref()) {
                 let deps = collect_vue3_type_argument_deps(&return_type.type_annotation, analysis);
                 insert_vue3_declared_type_deps(analysis, id.name.as_str(), deps);
@@ -9302,7 +9334,7 @@ fn collect_vue3_declared_type_deps_from_declaration(
             let deps = collect_vue3_type_argument_deps(&declaration.type_annotation, analysis);
             insert_vue3_declared_type_deps(analysis, declaration.id.name.as_str(), deps);
         }
-        Declaration::FunctionDeclaration(function) if function.declare => {
+        Declaration::FunctionDeclaration(function) if function.return_type.is_some() => {
             if let (Some(id), Some(return_type)) = (&function.id, function.return_type.as_ref()) {
                 let deps = collect_vue3_type_argument_deps(&return_type.type_annotation, analysis);
                 insert_vue3_declared_type_deps(analysis, id.name.as_str(), deps);
@@ -9372,7 +9404,7 @@ fn collect_vue3_declared_type_from_statement(
         Statement::TSTypeAliasDeclaration(declaration) => {
             register_vue3_type_alias_declaration(source, declaration, analysis);
         }
-        Statement::FunctionDeclaration(function) if function.declare => {
+        Statement::FunctionDeclaration(function) if function.return_type.is_some() => {
             register_vue3_declared_function_return_props_options(source, function, analysis);
         }
         Statement::VariableDeclaration(declaration) if declaration.declare => {
@@ -9410,7 +9442,7 @@ fn collect_vue3_declared_type_from_declaration(
         Declaration::TSTypeAliasDeclaration(declaration) => {
             register_vue3_type_alias_declaration(source, declaration, analysis);
         }
-        Declaration::FunctionDeclaration(function) if function.declare => {
+        Declaration::FunctionDeclaration(function) if function.return_type.is_some() => {
             register_vue3_declared_function_return_props_options(source, function, analysis);
         }
         Declaration::VariableDeclaration(declaration) if declaration.declare => {
@@ -27746,6 +27778,59 @@ defineModel<ReturnType<typeof makeLabel> | ReturnType<BooleanFactory>>()
             Some("props")
         );
         assert!(script.deps.is_empty(), "{:?}", script.deps);
+    }
+
+    #[test]
+    fn vue3_compile_script_resolves_external_default_function_return_type_runtime_types() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join("named.ts"),
+            "export default function makeDefault(): string { return '' }\nexport function makeCount(): number { return 1 }",
+        )
+        .expect("write named default function type");
+        std::fs::write(
+            dir.path().join("anonymous.ts"),
+            "export default function(): boolean { return true }",
+        )
+        .expect("write anonymous default function type");
+
+        let filename = dir.path().join("Comp.vue");
+        let source = r#"<script setup lang="ts">
+import makeDefault, { makeCount } from './named'
+import makeFlag from './anonymous'
+type Props = {
+  label: ReturnType<typeof makeDefault>
+  count: ReturnType<typeof makeCount>
+  flag: ReturnType<typeof makeFlag>
+}
+defineProps<Props>()
+defineModel<ReturnType<typeof makeDefault> | ReturnType<typeof makeCount> | ReturnType<typeof makeFlag>>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("label: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("count: { type: Number, required: true }"));
+        assert!(script
+            .content
+            .contains("flag: { type: Boolean, required: true }"));
+        assert!(script
+            .content
+            .contains("\"modelValue\": { type: [String, Number, Boolean] },"));
+
+        let deps = script.deps.iter().cloned().collect::<BTreeSet<_>>();
+        let expected = ["named.ts", "anonymous.ts"]
+            .into_iter()
+            .map(|name| normalize_path_string(&dir.path().join(name)))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(deps, expected);
+        assert!(!script.deps.iter().any(|dep| dep.contains('\\')));
     }
 
     #[test]

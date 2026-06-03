@@ -6189,6 +6189,75 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_resolves_default_function_return_type_runtime_types_deps() {
+        let dir = std::env::temp_dir().join(format!(
+            "vuec-node-bridge-default-function-return-type-runtime-types-deps-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        std::fs::write(
+            dir.join("named.ts"),
+            concat!(
+                "export default function makeDefault(): string { return '' }\n",
+                "export function makeCount(): number { return 1 }"
+            ),
+        )
+        .expect("write named default function type");
+        std::fs::write(
+            dir.join("anonymous.ts"),
+            "export default function(): boolean { return true }",
+        )
+        .expect("write anonymous default function type");
+
+        let filename = dir.join("Comp.vue");
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "import makeDefault, { makeCount } from './named'\n",
+                    "import makeFlag from './anonymous'\n",
+                    "type Props = {\n",
+                    "  label: ReturnType<typeof makeDefault>\n",
+                    "  count: ReturnType<typeof makeCount>\n",
+                    "  flag: ReturnType<typeof makeFlag>\n",
+                    "}\n",
+                    "defineProps<Props>()\n",
+                    "defineModel<",
+                    "ReturnType<typeof makeDefault> | ",
+                    "ReturnType<typeof makeCount> | ",
+                    "ReturnType<typeof makeFlag>",
+                    ">()",
+                    "</script>"
+                ),
+                "filename": filename.to_string_lossy()
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = compiled["content"].as_str().unwrap_or_default();
+        let deps = compiled["deps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|dep| dep.as_str().unwrap().to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected = ["named.ts", "anonymous.ts"]
+            .into_iter()
+            .map(|name| dir.join(name).to_string_lossy().replace('\\', "/"))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(compiled["errors"].as_array().unwrap().is_empty());
+        assert!(content.contains("label: { type: String, required: true }"));
+        assert!(content.contains("count: { type: Number, required: true }"));
+        assert!(content.contains("flag: { type: Boolean, required: true }"));
+        assert!(content.contains("\"modelValue\": { type: [String, Number, Boolean] },"));
+        assert_eq!(deps, expected);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn vue3_sfc_bridge_compile_script_resolves_external_builtin_wrapper_types_deps() {
         let dir = std::env::temp_dir().join(format!(
             "vuec-node-bridge-builtin-wrapper-types-deps-{}",
