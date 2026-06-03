@@ -7064,6 +7064,104 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_resolves_tsconfig_path_type_deps() {
+        let dir = std::env::temp_dir().join(format!(
+            "vuec-node-bridge-tsconfig-path-deps-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src").join("components")).expect("create components");
+        std::fs::create_dir_all(dir.join("src").join("views")).expect("create views");
+        std::fs::create_dir_all(dir.join("tsconfigs")).expect("create tsconfigs");
+        std::fs::write(
+            dir.join("tsconfig.json"),
+            r#"{
+                "files": [],
+                "references": [{ "path": "./tsconfig.app.json" }],
+                "compilerOptions": {
+                    "paths": {
+                        "bar": ["./pp.ts"]
+                    }
+                }
+            }"#,
+        )
+        .expect("write root tsconfig");
+        std::fs::write(
+            dir.join("tsconfig.app.json"),
+            r#"{
+                "extends": ["./tsconfigs/base.json"]
+            }"#,
+        )
+        .expect("write app tsconfig");
+        std::fs::write(
+            dir.join("tsconfigs").join("base.json"),
+            r#"{
+                "compilerOptions": {
+                    "paths": {
+                        "@/*": ["${configDir}/src/*"]
+                    }
+                },
+                "include": ["${configDir}/src/**/*.ts", "${configDir}/src/**/*.vue"]
+            }"#,
+        )
+        .expect("write base tsconfig");
+        std::fs::write(dir.join("pp.ts"), "export type PathProps = { bar: string }")
+            .expect("write path type");
+        std::fs::write(
+            dir.join("src").join("types.ts"),
+            "export type BaseProps = { foo?: string; count: number }",
+        )
+        .expect("write aliased type");
+        std::fs::write(
+            dir.join("src").join("views").join("Aliased.vue"),
+            "<script lang=\"ts\">export type VueProps = { fromVue: string }</script>",
+        )
+        .expect("write aliased vue");
+
+        let filename = dir.join("src").join("components").join("Comp.vue");
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "import type { PathProps } from 'bar'\n",
+                    "import type { BaseProps } from '@/types.ts'\n",
+                    "import type { VueProps } from '@/views/Aliased.vue'\n",
+                    "defineProps<PathProps & BaseProps & VueProps>()",
+                    "</script>"
+                ),
+                "filename": filename.to_string_lossy()
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = compiled["content"].as_str().unwrap_or_default();
+        assert!(compiled["errors"].as_array().unwrap().is_empty());
+        assert!(content.contains("bar: { type: String, required: true }"));
+        assert!(content.contains("foo: { type: String, required: false }"));
+        assert!(content.contains("count: { type: Number, required: true }"));
+        assert!(content.contains("fromVue: { type: String, required: true }"));
+
+        let deps = compiled["deps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|dep| dep.as_str().unwrap().to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected = [
+            dir.join("pp.ts"),
+            dir.join("src").join("types.ts"),
+            dir.join("src").join("views").join("Aliased.vue"),
+        ]
+        .into_iter()
+        .map(|path| path.to_string_lossy().replace('\\', "/"))
+        .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(deps, expected);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn vue3_sfc_bridge_compile_script_returns_global_type_deps() {
         let dir = std::env::temp_dir().join(format!(
             "vuec-node-bridge-global-type-deps-{}",

@@ -6782,6 +6782,9 @@ fn resolve_vue3_type_import(filename: &str, source: &str) -> Option<PathBuf> {
     if vue3_type_import_source_is_relative(source) {
         return resolve_vue3_relative_type_import(filename, source);
     }
+    if let Some(resolved) = resolve_vue3_tsconfig_type_import(filename, source) {
+        return Some(resolved);
+    }
     resolve_vue3_bare_type_import(filename, source)
 }
 
@@ -6791,6 +6794,272 @@ fn resolve_vue3_relative_type_import(filename: &str, source: &str) -> Option<Pat
         .unwrap_or_else(|| Path::new(""));
     let candidate = normalize_path_components(base.join(source));
     resolve_vue3_type_import_path(&candidate)
+}
+
+#[derive(Clone, Debug)]
+struct Vue3TsconfigPathMapping {
+    pattern: String,
+    targets: Vec<String>,
+    target_base_dir: PathBuf,
+    template_config_dir: PathBuf,
+}
+
+#[derive(Clone, Debug)]
+struct Vue3TsconfigPathMatch<'a> {
+    mapping: &'a Vue3TsconfigPathMapping,
+    capture: String,
+    score: usize,
+    order: usize,
+}
+
+fn resolve_vue3_tsconfig_type_import(filename: &str, source: &str) -> Option<PathBuf> {
+    for config_path in vue3_tsconfig_search_paths(filename) {
+        let config_dir = config_path
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .to_path_buf();
+        let mut seen = BTreeSet::new();
+        let mappings =
+            vue3_tsconfig_path_mappings_from_config(&config_path, &config_dir, &mut seen);
+        if let Some(resolved) = resolve_vue3_tsconfig_path_mappings(&mappings, source) {
+            return Some(resolved);
+        }
+    }
+    None
+}
+
+fn vue3_tsconfig_search_paths(filename: &str) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let mut current = Path::new(filename).parent();
+    while let Some(dir) = current {
+        let candidate = normalize_path_components(dir.join("tsconfig.json"));
+        if candidate.is_file() {
+            paths.push(candidate);
+        }
+        current = dir.parent();
+    }
+    paths
+}
+
+fn vue3_tsconfig_path_mappings_from_config(
+    config_path: &Path,
+    template_config_dir: &Path,
+    seen: &mut BTreeSet<String>,
+) -> Vec<Vue3TsconfigPathMapping> {
+    let normalized = normalize_path_string(config_path);
+    if !seen.insert(normalized) {
+        return Vec::new();
+    }
+    let Ok(source) = std::fs::read_to_string(config_path) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&source) else {
+        return Vec::new();
+    };
+    let config_dir = config_path.parent().unwrap_or_else(|| Path::new(""));
+    let mut mappings = Vec::new();
+    for extended in vue3_tsconfig_extends_paths(&value, config_dir) {
+        mappings.extend(vue3_tsconfig_path_mappings_from_config(
+            &extended,
+            template_config_dir,
+            seen,
+        ));
+    }
+    let direct = vue3_tsconfig_direct_path_mappings(&value, config_dir, template_config_dir);
+    if !direct.is_empty() {
+        let direct_patterns = direct
+            .iter()
+            .map(|mapping| mapping.pattern.as_str())
+            .collect::<BTreeSet<_>>();
+        mappings.retain(|mapping| !direct_patterns.contains(mapping.pattern.as_str()));
+        mappings.extend(direct);
+    }
+    for reference in vue3_tsconfig_reference_paths(&value, config_dir) {
+        let reference_dir = reference.parent().unwrap_or_else(|| Path::new(""));
+        mappings.extend(vue3_tsconfig_path_mappings_from_config(
+            &reference,
+            reference_dir,
+            seen,
+        ));
+    }
+    mappings
+}
+
+fn vue3_tsconfig_extends_paths(value: &serde_json::Value, config_dir: &Path) -> Vec<PathBuf> {
+    match value.get("extends") {
+        Some(serde_json::Value::String(target)) => vue3_resolve_tsconfig_path(config_dir, target)
+            .into_iter()
+            .collect(),
+        Some(serde_json::Value::Array(targets)) => targets
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .filter_map(|target| vue3_resolve_tsconfig_path(config_dir, target))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn vue3_tsconfig_reference_paths(value: &serde_json::Value, config_dir: &Path) -> Vec<PathBuf> {
+    value
+        .get("references")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|reference| reference.get("path").and_then(serde_json::Value::as_str))
+        .filter_map(|target| vue3_resolve_tsconfig_path(config_dir, target))
+        .collect()
+}
+
+fn vue3_resolve_tsconfig_path(config_dir: &Path, target: &str) -> Option<PathBuf> {
+    if !vue3_tsconfig_path_is_relative(target) && !Path::new(target).is_absolute() {
+        return None;
+    }
+    let candidate = if Path::new(target).is_absolute() {
+        normalize_path_components(PathBuf::from(target))
+    } else {
+        normalize_path_components(config_dir.join(target))
+    };
+    let candidates = if candidate.extension().is_some() {
+        vec![candidate]
+    } else {
+        vec![
+            path_with_extension(&candidate, "json"),
+            candidate.join("tsconfig.json"),
+        ]
+    };
+    candidates.into_iter().find(|path| path.is_file())
+}
+
+fn vue3_tsconfig_path_is_relative(target: &str) -> bool {
+    target.starts_with("./") || target.starts_with("../")
+}
+
+fn vue3_tsconfig_direct_path_mappings(
+    value: &serde_json::Value,
+    config_dir: &Path,
+    template_config_dir: &Path,
+) -> Vec<Vue3TsconfigPathMapping> {
+    let Some(compiler_options) = value
+        .get("compilerOptions")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return Vec::new();
+    };
+    let target_base_dir = compiler_options
+        .get("baseUrl")
+        .and_then(serde_json::Value::as_str)
+        .map(|base_url| vue3_tsconfig_target_path(config_dir, template_config_dir, base_url, ""))
+        .unwrap_or_else(|| config_dir.to_path_buf());
+    let Some(paths) = compiler_options
+        .get("paths")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return Vec::new();
+    };
+    paths
+        .iter()
+        .filter_map(|(pattern, targets)| {
+            let targets = vue3_tsconfig_path_target_values(targets);
+            (!targets.is_empty()).then(|| Vue3TsconfigPathMapping {
+                pattern: pattern.clone(),
+                targets,
+                target_base_dir: target_base_dir.clone(),
+                template_config_dir: template_config_dir.to_path_buf(),
+            })
+        })
+        .collect()
+}
+
+fn vue3_tsconfig_path_target_values(value: &serde_json::Value) -> Vec<String> {
+    match value {
+        serde_json::Value::Array(targets) => targets
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_string)
+            .collect(),
+        serde_json::Value::String(target) => vec![target.to_string()],
+        _ => Vec::new(),
+    }
+}
+
+fn resolve_vue3_tsconfig_path_mappings(
+    mappings: &[Vue3TsconfigPathMapping],
+    source: &str,
+) -> Option<PathBuf> {
+    let mut matches = mappings
+        .iter()
+        .enumerate()
+        .filter_map(|(order, mapping)| {
+            vue3_tsconfig_path_pattern_capture(&mapping.pattern, source).map(|(score, capture)| {
+                Vue3TsconfigPathMatch {
+                    mapping,
+                    capture,
+                    score,
+                    order,
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    matches.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| left.order.cmp(&right.order))
+    });
+    for matched in matches {
+        for target in &matched.mapping.targets {
+            let candidate = vue3_tsconfig_target_path(
+                &matched.mapping.target_base_dir,
+                &matched.mapping.template_config_dir,
+                target,
+                &matched.capture,
+            );
+            if let Some(resolved) = resolve_vue3_type_import_path(&candidate) {
+                return Some(resolved);
+            }
+        }
+    }
+    None
+}
+
+fn vue3_tsconfig_path_pattern_capture(pattern: &str, source: &str) -> Option<(usize, String)> {
+    let Some(star) = pattern.find('*') else {
+        return (pattern == source).then(|| (usize::MAX, String::new()));
+    };
+    if pattern[star + 1..].contains('*') {
+        return None;
+    }
+    let prefix = &pattern[..star];
+    let suffix = &pattern[star + 1..];
+    if !source.starts_with(prefix)
+        || !source.ends_with(suffix)
+        || source.len() < prefix.len() + suffix.len()
+    {
+        return None;
+    }
+    Some((
+        prefix.len() + suffix.len(),
+        source[prefix.len()..source.len() - suffix.len()].to_string(),
+    ))
+}
+
+fn vue3_tsconfig_target_path(
+    target_base_dir: &Path,
+    template_config_dir: &Path,
+    target: &str,
+    capture: &str,
+) -> PathBuf {
+    let target = target.replace('*', capture);
+    let target = target.replace(
+        "${configDir}",
+        normalize_path_string(template_config_dir).as_str(),
+    );
+    let path = Path::new(&target);
+    if path.is_absolute() {
+        normalize_path_components(PathBuf::from(target))
+    } else {
+        normalize_path_components(target_base_dir.join(target))
+    }
 }
 
 fn resolve_vue3_bare_type_import(filename: &str, source: &str) -> Option<PathBuf> {
@@ -21940,6 +22209,146 @@ const model = defineModel<import('vuec-types-pkg').ModelValue>()
             exports_pkg.join("types").join("index.d.ts"),
             exports_pkg.join("types").join("feature").join("item.d.ts"),
             ambient_pkg.join("index.d.ts"),
+        ]
+        .into_iter()
+        .map(|path| normalize_path_string(&path))
+        .collect::<BTreeSet<_>>();
+        assert_eq!(deps, expected);
+        assert!(!script.deps.iter().any(|dep| dep.contains('\\')));
+    }
+
+    #[test]
+    fn vue3_compile_script_resolves_tsconfig_path_macro_types_and_deps() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let node_modules = dir.path().join("node_modules");
+        let types_pkg = node_modules.join("vuec-tsconfig-pkg");
+        std::fs::create_dir_all(&types_pkg).expect("create package");
+        std::fs::write(types_pkg.join("package.json"), r#"{"types":"index.d.ts"}"#)
+            .expect("write package manifest");
+        std::fs::write(
+            types_pkg.join("index.d.ts"),
+            "export type PackageProps = { packaged: boolean }",
+        )
+        .expect("write package types");
+
+        std::fs::create_dir_all(dir.path().join("web")).expect("create web dir");
+        std::fs::create_dir_all(dir.path().join("empty")).expect("create empty dir");
+        std::fs::create_dir_all(dir.path().join("tsconfigs")).expect("create tsconfigs dir");
+        std::fs::create_dir_all(dir.path().join("src").join("components"))
+            .expect("create component dir");
+        std::fs::create_dir_all(dir.path().join("src").join("views")).expect("create views dir");
+        std::fs::write(
+            dir.path().join("tsconfig.json"),
+            r#"{
+                "files": [],
+                "compilerOptions": {
+                    "paths": {
+                        "bar": ["./pp.ts"]
+                    }
+                },
+                "references": [
+                    { "path": "./tsconfig.app.json" },
+                    { "path": "./web" },
+                    { "path": "./empty" },
+                    { "path": "./noexists-should-ignore" }
+                ]
+            }"#,
+        )
+        .expect("write root tsconfig");
+        std::fs::write(
+            dir.path().join("tsconfig.app.json"),
+            r#"{
+                "include": ["**/*.ts", "**/*.vue"],
+                "extends": ["./tsconfigs/base.json"]
+            }"#,
+        )
+        .expect("write app tsconfig");
+        std::fs::write(
+            dir.path().join("tsconfigs").join("base.json"),
+            r#"{
+                "compilerOptions": {
+                    "paths": {
+                        "@/*": ["${configDir}/src/*"]
+                    }
+                },
+                "include": ["${configDir}/src/**/*.ts", "${configDir}/src/**/*.vue"]
+            }"#,
+        )
+        .expect("write base tsconfig");
+        std::fs::write(
+            dir.path().join("web").join("tsconfig.json"),
+            r#"{
+                "include": ["../**/*.ts", "../**/*.vue"],
+                "compilerOptions": {
+                    "composite": true,
+                    "paths": {
+                        "user": ["../user.ts"]
+                    }
+                },
+                "references": [
+                    { "path": "../tsconfig.json" }
+                ]
+            }"#,
+        )
+        .expect("write web tsconfig");
+        std::fs::write(
+            dir.path().join("empty").join("tsconfig.json"),
+            r#"{"compilerOptions":{"composite":true}}"#,
+        )
+        .expect("write empty tsconfig");
+        std::fs::write(
+            dir.path().join("pp.ts"),
+            "export type PathProps = { bar: string }",
+        )
+        .expect("write root path type");
+        std::fs::write(
+            dir.path().join("user.ts"),
+            "export type UserProps = { user: string }",
+        )
+        .expect("write referenced type");
+        std::fs::write(
+            dir.path().join("src").join("types.ts"),
+            "export type BaseProps = { foo?: string; count: number }",
+        )
+        .expect("write configDir type");
+        std::fs::write(
+            dir.path().join("src").join("views").join("Aliased.vue"),
+            "<script lang=\"ts\">export type VueProps = { fromVue: string }</script>",
+        )
+        .expect("write aliased vue");
+
+        let filename = dir.path().join("src").join("components").join("Comp.vue");
+        let source = r#"<script setup lang="ts">
+import type { PackageProps } from 'vuec-tsconfig-pkg'
+import type { PathProps } from 'bar'
+import type { UserProps } from 'user'
+import type { BaseProps } from '@/types.ts'
+import type { VueProps } from '@/views/Aliased.vue'
+const props = defineProps<PackageProps & PathProps & UserProps & BaseProps & VueProps>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        for expected_prop in [
+            "packaged: { type: Boolean, required: true }",
+            "bar: { type: String, required: true }",
+            "user: { type: String, required: true }",
+            "foo: { type: String, required: false }",
+            "count: { type: Number, required: true }",
+            "fromVue: { type: String, required: true }",
+        ] {
+            assert!(script.content.contains(expected_prop), "{}", script.content);
+        }
+
+        let deps = script.deps.iter().cloned().collect::<BTreeSet<_>>();
+        let expected = [
+            types_pkg.join("index.d.ts"),
+            dir.path().join("pp.ts"),
+            dir.path().join("user.ts"),
+            dir.path().join("src").join("types.ts"),
+            dir.path().join("src").join("views").join("Aliased.vue"),
         ]
         .into_iter()
         .map(|path| normalize_path_string(&path))
