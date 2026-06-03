@@ -6100,6 +6100,75 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_resolves_external_return_type_runtime_types_deps() {
+        let dir = std::env::temp_dir().join(format!(
+            "vuec-node-bridge-return-type-runtime-types-deps-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        std::fs::write(
+            dir.join("types.ts"),
+            concat!(
+                "export declare function makeLabel(): string\n",
+                "export declare const makeCount: () => number\n",
+                "export type BooleanFactory = () => boolean\n",
+                "export type Callable = {\n",
+                "  (value: string): Date\n",
+                "  (value: number): Error\n",
+                "}\n",
+                "export interface InterfaceFactory {\n",
+                "  (active: boolean): string[]\n",
+                "}\n",
+                "export interface ExtendedFactory extends InterfaceFactory {\n",
+                "  (value: number): boolean\n",
+                "}\n",
+                "export type Props = {\n",
+                "  label: ReturnType<typeof makeLabel>\n",
+                "  count: ReturnType<typeof makeCount>\n",
+                "  flag: ReturnType<BooleanFactory>\n",
+                "  mixed: ReturnType<Callable>\n",
+                "  list: ReturnType<InterfaceFactory>\n",
+                "  extended: ReturnType<ExtendedFactory>\n",
+                "}\n",
+                "export type ModelValue = ",
+                "ReturnType<typeof makeLabel> | ReturnType<BooleanFactory>"
+            ),
+        )
+        .expect("write return type props");
+
+        let filename = dir.join("Comp.vue");
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "import type { Props, ModelValue } from './types'\n",
+                    "defineProps<Props>()\n",
+                    "defineModel<ModelValue>()",
+                    "</script>"
+                ),
+                "filename": filename.to_string_lossy()
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = compiled["content"].as_str().unwrap_or_default();
+        let expected_dep = dir.join("types.ts").to_string_lossy().replace('\\', "/");
+        assert!(compiled["errors"].as_array().unwrap().is_empty());
+        assert!(content.contains("label: { type: String, required: true }"));
+        assert!(content.contains("count: { type: Number, required: true }"));
+        assert!(content.contains("flag: { type: Boolean, required: true }"));
+        assert!(content.contains("mixed: { type: [Date, Error], required: true }"));
+        assert!(content.contains("list: { type: Array, required: true }"));
+        assert!(content.contains("extended: { type: [Boolean, Array], required: true }"));
+        assert!(content.contains("\"modelValue\": { type: [String, Boolean] },"));
+        assert_eq!(compiled["deps"], json!([expected_dep]));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn vue3_sfc_bridge_compile_script_resolves_external_builtin_wrapper_types_deps() {
         let dir = std::env::temp_dir().join(format!(
             "vuec-node-bridge-builtin-wrapper-types-deps-{}",
