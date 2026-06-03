@@ -2422,6 +2422,8 @@ fn alias_function_expression(
                 target.kind == TargetKind::Vue27Sfc && export_name == "compileScript";
             let is_vue3_sfc_compile_script =
                 target.kind == TargetKind::Vue3Sfc && export_name == "compileScript";
+            let is_vue3_sfc_compile_template =
+                target.kind == TargetKind::Vue3Sfc && export_name == "compileTemplate";
             let is_vue3_sfc_parse = target.kind == TargetKind::Vue3Sfc && export_name == "parse";
             let is_vue3_ssr_compile = target.kind == TargetKind::Vue3Ssr && export_name == "compile";
             let is_sfc_compile_style = matches!(
@@ -2441,6 +2443,8 @@ fn alias_function_expression(
                 "vue27CompileScriptBridgePayload(__vuecPayload)"
             } else if is_vue3_sfc_compile_script {
                 "vue3CompileScriptBridgePayload(__vuecPayload)"
+            } else if is_vue3_sfc_compile_template {
+                "vue3SfcCompileTemplateBridgePayload(__vuecPayload)"
             } else if is_vue3_sfc_compile_style {
                 "vue3StyleBridgePayload(__vuecPayload)"
             } else {
@@ -2469,6 +2473,8 @@ fn alias_function_expression(
                 format!("hydrateVue3SfcParseResult(applyVue3SfcCustomCompilerParse({call}, __vuecPayload.source, __vuecPayload.options, __vuecPayload.filename))")
             } else if is_vue3_sfc_compile_script {
                 format!("hydrateVue3CompileScriptResult({call})")
+            } else if is_vue3_sfc_compile_template {
+                format!("(() => {{ const __vuecCustomTemplateResult = vue3SfcCustomCompileTemplateResult(__vuecPayload); if (__vuecCustomTemplateResult !== undefined) return __vuecCustomTemplateResult; return hydrateVue3SfcCompileTemplateResult({call}); }})()")
             } else if is_vue27_sfc_compile_script {
                 format!("hydrateVue27CompileScriptResult({call})")
             } else if is_vue3_ssr_compile {
@@ -4104,7 +4110,7 @@ const vue3CoreRuntime = (() => {
     }
     const out = {};
     for (const key of Object.keys(value)) {
-      if (key === 'loc' || key === 'start' || key === 'end' || key === 'offset' || key === 'line' || key === 'column' || key === 'type' || key === 'tag' || key === 'tagType' || key === 'content' || key === 'isStatic' || key === 'constType' || key === 'props' || key === 'children' || key === 'codegenNode' || key === 'patchFlag' || key === 'dynamicProps' || key === 'directives' || key === 'isBlock' || key === 'isComponent' || key === 'disableTracking' || key === 'branches' || key === 'source' || key === 'parseResult' || key === 'valueAlias' || key === 'keyAlias' || key === 'objectIndexAlias' || key === 'returns' || key === 'body' || key === 'params' || key === 'newline' || key === 'isSlot' || key === 'isNonScopedSlot' || key === 'needPauseTracking' || key === 'inVOnce' || key === 'needArraySpread' || key === 'index' || key === 'elements' || key === 'test' || key === 'consequent' || key === 'alternate' || key === 'left' || key === 'right' || key === 'expressions' || key === 'expression' || key === 'helpers' || key === 'ssrHelpers' || key === 'components' || key === 'directives' || key === 'imports' || key === 'path' || key === 'hoists' || key === 'cached' || key === 'temps' || key === 'properties' || key === 'key' || key === 'value' || key === 'arguments' || key === 'argument' || key === 'callee' || key === 'object' || key === 'property' || key === 'name' || key === 'arg' || key === 'exp' || key === 'modifiers' || key === 'program' || key === 'declarations' || key === 'declaration' || key === 'id' || key === 'init' || key === 'update' || key === 'computed' || key === 'shorthand' || key === 'kind' || key === 'declare' || key === 'operator' || key === 'prefix' || key === 'async' || key === 'cases' || key === 'discriminant' || key === 'handler' || key === 'finalizer' || key === 'block' || key === 'param' || key === 'parameter' || key === 'specifiers' || key === 'local' || key === 'imported' || key === 'superClass' || key === 'quasi') {
+      if (key === 'loc' || key === 'start' || key === 'end' || key === 'offset' || key === 'line' || key === 'column' || key === 'type' || key === 'tag' || key === 'tagType' || key === 'content' || key === 'isStatic' || key === 'constType' || key === 'props' || key === 'children' || key === 'codegenNode' || key === 'patchFlag' || key === 'dynamicProps' || key === 'directives' || key === 'isBlock' || key === 'isComponent' || key === 'disableTracking' || key === 'branches' || key === 'source' || key === 'transformed' || key === 'parseResult' || key === 'valueAlias' || key === 'keyAlias' || key === 'objectIndexAlias' || key === 'returns' || key === 'body' || key === 'params' || key === 'newline' || key === 'isSlot' || key === 'isNonScopedSlot' || key === 'needPauseTracking' || key === 'inVOnce' || key === 'needArraySpread' || key === 'index' || key === 'elements' || key === 'test' || key === 'consequent' || key === 'alternate' || key === 'left' || key === 'right' || key === 'expressions' || key === 'expression' || key === 'helpers' || key === 'ssrHelpers' || key === 'components' || key === 'directives' || key === 'imports' || key === 'path' || key === 'hoists' || key === 'cached' || key === 'temps' || key === 'properties' || key === 'key' || key === 'value' || key === 'arguments' || key === 'argument' || key === 'callee' || key === 'object' || key === 'property' || key === 'name' || key === 'arg' || key === 'exp' || key === 'modifiers' || key === 'program' || key === 'declarations' || key === 'declaration' || key === 'id' || key === 'init' || key === 'update' || key === 'computed' || key === 'shorthand' || key === 'kind' || key === 'declare' || key === 'operator' || key === 'prefix' || key === 'async' || key === 'cases' || key === 'discriminant' || key === 'handler' || key === 'finalizer' || key === 'block' || key === 'param' || key === 'parameter' || key === 'specifiers' || key === 'local' || key === 'imported' || key === 'superClass' || key === 'quasi') {
         out[key] = runtime.dehydrateForBridge(value[key], seen);
       }
     }
@@ -8013,6 +8019,113 @@ function vue3CompileScriptBridgePayload(payload) {
   }
   out.options = options;
   return out;
+}
+
+function vue3SfcCompileTemplateBridgePayload(payload) {
+  const out = Object.assign({}, payload || {});
+  const options = Object.assign({}, out.options || {});
+  const source = String(out.source || '');
+  const bridgeOptions = vue3SfcCompileTemplateOptionsForBridge(options, source);
+  if (options.ast) {
+    out.ast = vue3CoreRuntime.dehydrateForBridge(options.ast);
+    if (options.ast.source && !bridgeOptions.__vuecSourceMapSource) {
+      bridgeOptions.__vuecSourceMapSource = options.ast.source;
+      bridgeOptions.__vuecSourceMapBaseOffset = 0;
+    }
+  }
+  out.options = options;
+  out.bridgeOptions = bridgeOptions;
+  return out;
+}
+
+function vue3SfcCompileTemplateOptionsForBridge(options, source) {
+  const compilerOptions = options && options.compilerOptions && typeof options.compilerOptions === 'object'
+    ? options.compilerOptions
+    : {};
+  const bridgeOptions = Object.assign({}, normalizeVue3OptionsForBridge(options, source));
+  delete bridgeOptions.ast;
+  delete bridgeOptions.compiler;
+  delete bridgeOptions.compilerOptions;
+  Object.assign(bridgeOptions, {
+    mode: 'module',
+    prefixIdentifiers: true,
+    hoistStatic: true,
+    cacheHandlers: true,
+    sourceMap: true,
+  });
+  if (options && options.filename !== undefined) bridgeOptions.filename = options.filename;
+  if (options && options.id !== undefined) bridgeOptions.id = options.id;
+  if (options && options.scoped) {
+    const shortId = String(options.id || '').replace(/^data-v-/, '');
+    bridgeOptions.scopeId = `data-v-${shortId}`;
+    bridgeOptions.scoped = true;
+  } else {
+    delete bridgeOptions.scopeId;
+    delete bridgeOptions.scope_id;
+  }
+  if (options && options.slotted !== undefined) bridgeOptions.slotted = options.slotted;
+  if (options && options.ssr !== undefined) bridgeOptions.ssr = options.ssr;
+  if (options && options.ssrCssVars !== undefined) {
+    bridgeOptions.ssrCssVars = options.ssrCssVars;
+  }
+  if (options && options.isProd !== undefined) bridgeOptions.isProd = options.isProd;
+  if (options && options.preprocessLang !== undefined) bridgeOptions.preprocessLang = options.preprocessLang;
+  if (options && options.transformAssetUrls !== undefined) bridgeOptions.transformAssetUrls = options.transformAssetUrls;
+  Object.assign(bridgeOptions, normalizeVue3OptionsForBridge(compilerOptions, source));
+  bridgeOptions.hmr = !(options && options.isProd);
+  if (compilerOptions && compilerOptions.nodeTransforms && !Array.isArray(compilerOptions.nodeTransforms)) {
+    delete bridgeOptions.nodeTransforms;
+  }
+  return bridgeOptions;
+}
+
+function vue3SfcCustomCompileTemplateResult(payload) {
+  const options = payload && payload.options;
+  const compiler = options && options.compiler;
+  if (!compiler || typeof compiler.compile !== 'function') return undefined;
+  const source = String(payload && payload.source || '');
+  const compilerOptions = vue3SfcCompileTemplateOptionsForBridge(options, source);
+  const result = compiler.compile(source, compilerOptions) || {};
+  return hydrateVue3SfcCompileTemplateResult({
+    code: result.code || '',
+    ast: result.ast,
+    preamble: result.preamble,
+    map: result.map,
+    source,
+    errors: result.errors || [],
+    tips: result.tips || [],
+  });
+}
+
+function hydrateVue3SfcCompileTemplateResult(result) {
+  if (!result || typeof result !== 'object') return result;
+  const out = Object.assign({}, result);
+  if (typeof out.ast === 'string') {
+    try {
+      out.ast = JSON.parse(out.ast);
+    } catch (_) {}
+  }
+  if (out.ast && typeof out.ast === 'object' && out.ast.type === vue3CoreRuntime.NodeTypes.ROOT) {
+    out.ast = hydrateVue3Ast(out.ast, {});
+  }
+  if (Array.isArray(out.errors)) {
+    out.errors = out.errors.map(vue3SfcTemplateErrorForPublicApi);
+  } else {
+    out.errors = [];
+  }
+  if (!Array.isArray(out.tips)) out.tips = [];
+  return out;
+}
+
+function vue3SfcTemplateErrorForPublicApi(error) {
+  if (typeof error === 'string') return error;
+  if (!error || typeof error !== 'object') return error;
+  if (error instanceof Error) return error;
+  const message = error.message || error.msg || String(error);
+  const syntaxError = new SyntaxError(message);
+  if (error.code !== undefined) syntaxError.code = error.code;
+  if (error.loc !== undefined) syntaxError.loc = error.loc;
+  return syntaxError;
 }
 
 function vue3SfcShouldForceReload(prevImports, descriptor) {
@@ -12843,6 +12956,28 @@ fn rewrite_vue3_sfc_public_api_spec_imports(prepared_root: &Path) -> Result<()> 
         "from '@vue/compiler-sfc'",
     )?;
 
+    let compile_template_spec = tests.join("compileTemplate.spec.ts");
+    rewrite_text_file_import(
+        &compile_template_spec,
+        "from '../src/compileTemplate'",
+        "from '@vue/compiler-sfc'",
+    )?;
+    rewrite_text_file_import(
+        &compile_template_spec,
+        "from '../src/parse'",
+        "from '@vue/compiler-sfc'",
+    )?;
+    rewrite_text_file_import(
+        &compile_template_spec,
+        "import { compileScript } from '../src'",
+        "import { compileScript } from '@vue/compiler-sfc'",
+    )?;
+    rewrite_text_file_import(
+        &compile_template_spec,
+        "from './utils'",
+        "from './utils.public-api'",
+    )?;
+
     let css_vars_spec = tests.join("cssVars.spec.ts");
     rewrite_text_file_import(
         &css_vars_spec,
@@ -12854,7 +12989,7 @@ fn rewrite_vue3_sfc_public_api_spec_imports(prepared_root: &Path) -> Result<()> 
         "from './utils'",
         "from './utils.public-api'",
     )?;
-    if css_vars_spec.exists() {
+    if css_vars_spec.exists() || compile_template_spec.exists() {
         write_text(
             &tests.join("utils.public-api.ts"),
             r#"import {
@@ -12897,6 +13032,39 @@ export function assertCode(code: string): void {
     throw e
   }
   expect(code).toMatchSnapshot()
+}
+
+interface Pos {
+  line: number
+  column: number
+  name?: string
+}
+
+export function getPositionInCode(
+  code: string,
+  token: string,
+  expectName: string | boolean = false,
+): Pos {
+  const generatedOffset = code.indexOf(token)
+  let line = 1
+  let lastNewLinePos = -1
+  for (let i = 0; i < generatedOffset; i++) {
+    if (code.charCodeAt(i) === 10) {
+      line++
+      lastNewLinePos = i
+    }
+  }
+  const res: Pos = {
+    line,
+    column:
+      lastNewLinePos === -1
+        ? generatedOffset
+        : generatedOffset - lastNewLinePos - 1,
+  }
+  if (expectName) {
+    res.name = typeof expectName === 'string' ? expectName : token
+  }
+  return res
 }
 "#,
         )?;
@@ -13617,6 +13785,7 @@ fn conformance_coverage_file_kind(
         || path.ends_with("packages/compiler-sfc/__tests__/rewriteDefault.spec.ts")
         || path.ends_with("packages/compiler-sfc/__tests__/compileStyle.spec.ts")
         || path.ends_with("packages/compiler-sfc/__tests__/cssVars.spec.ts")
+        || path.ends_with("packages/compiler-sfc/__tests__/compileTemplate.spec.ts")
     {
         ConformanceCoverageKind::RustBacked
     } else if path.ends_with("packages/compiler-sfc/test/compileStyle.spec.ts") {
@@ -13676,6 +13845,12 @@ fn conformance_coverage_file_reason(
     default_reason: &str,
 ) -> String {
     match source {
+        ConformanceCoverageKind::RustBacked
+            if path.ends_with("packages/compiler-sfc/__tests__/compileTemplate.spec.ts") =>
+        {
+            "Official Vue 3 SFC compileTemplate file imports the public @vue/compiler-sfc API and routes ordinary DOM/SSR template compilation, preprocessing, AST reuse, diagnostics, asset URL transforms, and source maps through vuec_node_bridge into Rust; the generated JavaScript package boundary only materializes caller-provided custom compiler callbacks and hydrates/dehydrates public AST and error shapes."
+                .to_string()
+        }
         ConformanceCoverageKind::RustBacked
             if path.ends_with("packages/compiler-sfc/__tests__/compileStyle.spec.ts") =>
         {
@@ -14446,6 +14621,38 @@ mod tests {
         assert!(ALIAS_RUNTIME_JS.contains("__vuecEmitScriptSetupMarker = false"));
         assert!(ALIAS_RUNTIME_JS.contains("Object.defineProperty(bindings, '__isScriptSetup'"));
         assert!(ALIAS_RUNTIME_JS.contains("[@vue/compiler-sfc] ${message}"));
+    }
+
+    #[test]
+    fn vue3_sfc_compile_template_alias_projects_public_api_boundary() {
+        let target = TargetSpec {
+            version_line: VersionLine::Vue3,
+            package: "@vue/compiler-sfc",
+            entry: "@vue/compiler-sfc",
+            kind: TargetKind::Vue3Sfc,
+        };
+        let detail = ApiExportDetail {
+            kind: "function".into(),
+            tag: "[object Function]".into(),
+            name: Some("compileTemplate".into()),
+            function_arity: Some(1),
+            is_async_function: Some(false),
+            is_class_like: Some(false),
+            own_property_names: vec!["length".into(), "name".into(), "prototype".into()],
+        };
+        let expression = alias_export_expression(target, "compileTemplate", Some(&detail));
+
+        assert!(expression.contains("sfc.compileTemplate"));
+        assert!(expression.contains("vue3SfcCompileTemplateBridgePayload"));
+        assert!(expression.contains("vue3SfcCustomCompileTemplateResult"));
+        assert!(expression.contains("hydrateVue3SfcCompileTemplateResult"));
+        assert!(ALIAS_RUNTIME_JS.contains("function vue3SfcCompileTemplateBridgePayload"));
+        assert!(ALIAS_RUNTIME_JS.contains("function vue3SfcCustomCompileTemplateResult"));
+        assert!(ALIAS_RUNTIME_JS.contains("function hydrateVue3SfcCompileTemplateResult"));
+        assert!(ALIAS_RUNTIME_JS.contains("vue3CoreRuntime.dehydrateForBridge(options.ast)"));
+        assert!(ALIAS_RUNTIME_JS.contains("compiler.compile(source, compilerOptions)"));
+        assert!(ALIAS_RUNTIME_JS.contains("new SyntaxError(message)"));
+        assert!(ALIAS_RUNTIME_JS.contains("bridgeOptions.ssrCssVars = options.ssrCssVars"));
     }
 
     #[test]
@@ -15730,6 +15937,11 @@ mod tests {
         )
         .unwrap();
         fs::write(
+            tests.join("compileTemplate.spec.ts"),
+            "import {\n  type SFCTemplateCompileOptions,\n  compileTemplate,\n} from '../src/compileTemplate'\nimport { type SFCTemplateBlock, parse } from '../src/parse'\nimport { compileScript } from '../src'\nimport { getPositionInCode } from './utils'\n",
+        )
+        .unwrap();
+        fs::write(
             tests.join("cssVars.spec.ts"),
             "import { compileStyle, parse } from '../src'\nimport { assertCode, compileSFCScript, mockId } from './utils'\n",
         )
@@ -15760,6 +15972,18 @@ mod tests {
             .contains("import { compileStyle, compileStyleAsync } from '@vue/compiler-sfc'"));
         assert_eq!(compile_style_spec.matches("@vue/compiler-sfc").count(), 1);
 
+        let compile_template_spec =
+            fs::read_to_string(tests.join("compileTemplate.spec.ts")).unwrap();
+        assert!(compile_template_spec.contains("from '@vue/compiler-sfc'"));
+        assert!(compile_template_spec.contains("import { compileScript } from '@vue/compiler-sfc'"));
+        assert!(compile_template_spec.contains("from './utils.public-api'"));
+        assert!(!compile_template_spec.contains("../src/compileTemplate"));
+        assert!(!compile_template_spec.contains("../src/parse"));
+        assert_eq!(
+            compile_template_spec.matches("@vue/compiler-sfc").count(),
+            3
+        );
+
         let css_vars_spec = fs::read_to_string(tests.join("cssVars.spec.ts")).unwrap();
         assert!(css_vars_spec.contains("import { compileStyle, parse } from '@vue/compiler-sfc'"));
         assert!(
@@ -15773,6 +15997,7 @@ mod tests {
         assert!(public_utils.contains("from '@vue/compiler-sfc'"));
         assert!(public_utils.contains("export function compileSFCScript"));
         assert!(public_utils.contains("babelParse(code"));
+        assert!(public_utils.contains("export function getPositionInCode"));
         let _ = fs::remove_dir_all(temp);
     }
 
@@ -15843,7 +16068,28 @@ mod tests {
                 {
                   "name": "F:/repo/prepared/vue3-sfc/packages/compiler-sfc/__tests__/compileTemplate.spec.ts",
                   "assertionResults": [
-                    { "status": "failed" }
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" }
                   ]
                 }
               ]
@@ -15859,9 +16105,9 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             counts: ConformanceExecutionCounts {
-                total: 13,
-                pass: 12,
-                fail: 1,
+                total: 34,
+                pass: 34,
+                fail: 0,
                 skip: 0,
                 pending: 0,
             },
@@ -15874,8 +16120,8 @@ mod tests {
         );
 
         assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
-        assert_eq!(coverage.rust_backed_pass, 11);
-        assert_eq!(coverage.rust_backed_total, 11);
+        assert_eq!(coverage.rust_backed_pass, 33);
+        assert_eq!(coverage.rust_backed_total, 33);
         assert_eq!(
             coverage.files[0].source,
             ConformanceCoverageKind::RustBacked
@@ -15897,15 +16143,21 @@ mod tests {
         );
         assert!(coverage.files[3].reason.contains("Babel syntax assertion"));
         assert_eq!(coverage.files[4].source, ConformanceCoverageKind::Mixed);
-        assert_eq!(coverage.files[5].source, ConformanceCoverageKind::Mixed);
+        assert_eq!(
+            coverage.files[5].source,
+            ConformanceCoverageKind::RustBacked
+        );
+        assert!(coverage.files[5]
+            .reason
+            .contains("custom compiler callbacks"));
         assert_eq!(
             coverage
                 .counts_by_source
-                .get("mixed")
+                .get("rust-backed")
                 .copied()
                 .unwrap_or_default()
-                .fail,
-            1
+                .pass,
+            33
         );
         let _ = fs::remove_dir_all(temp);
     }

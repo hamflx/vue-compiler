@@ -24,10 +24,12 @@ use vuec_sfc::{
     SfcScriptBlock, SfcScriptCompileOptions, SfcStyleCompileOptions, SfcTemplateCompileOptions,
     Vue27ParseComponentOptions, Vue27PrefixIdentifiersOptions, Vue27RewriteDefaultOptions,
     Vue27SfcPad, Vue27TemplatePreprocessOptions, Vue3RewriteDefaultOptions, Vue3SfcPad,
-    Vue3SfcParseOptions, Vue3SfcParseProjectionOptions,
+    Vue3SfcParseOptions, Vue3SfcParseProjectionOptions, Vue3TemplatePreprocessOptions,
 };
 use vuec_source::FileId;
-use vuec_style::{compile_style, CssVarNameStyle, StyleCompileOptions};
+use vuec_style::{
+    compile_style, gen_css_var_name_with_style, CssVarNameStyle, StyleCompileOptions,
+};
 use vuec_vue2::{
     self, Vue2CompileOptions, Vue2CompiledResult, Vue2Element, Vue2Error,
     Vue2SfcAssetUrlTransformOptions, Vue2Warning,
@@ -416,9 +418,42 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
             let filename = string_field_or(&payload, "filename", "anonymous.vue");
             let compiler = SfcCompiler::new();
             let options = sfc_template_options(payload.get("options"));
-            Ok(serde_json::to_value(
-                compiler.compile_template_source(filename, &source, options),
-            )?)
+            let preprocessed = compiler.preprocess_vue3_template(
+                &source,
+                vue3_template_preprocess_options(payload.get("options"), &filename),
+            );
+            if !preprocessed.errors.is_empty() || !preprocessed.tips.is_empty() {
+                return Ok(json!({
+                    "ast": {},
+                    "code": "export default function render() {}",
+                    "source": source,
+                    "tips": preprocessed.tips,
+                    "errors": preprocessed.errors,
+                }));
+            }
+            let compile_source = if payload
+                .get("options")
+                .and_then(|options| options.get("preprocessLang"))
+                .is_some()
+            {
+                &preprocessed.source
+            } else {
+                &source
+            };
+            if payload.get("ast").is_some() {
+                return Ok(vue3_sfc_compile_template_value(
+                    &payload,
+                    &filename,
+                    compile_source,
+                    &source,
+                    &options,
+                ));
+            }
+            Ok(serde_json::to_value(compiler.compile_template_source(
+                filename,
+                compile_source,
+                options,
+            ))?)
         }
         "sfc.vue27.compileTemplate" => {
             let source = string_field(&payload, "source");
@@ -673,6 +708,26 @@ fn template_source_from_ast_payload(payload: &Value, filename: String) -> Option
         source: source.get(start..end).unwrap_or_default().to_string(),
         file_id: FileId(0),
         base_offset: start,
+    })
+}
+
+fn template_source_from_transformed_sfc_ast_payload(
+    payload: &Value,
+    filename: String,
+) -> Option<TemplateSource> {
+    let ast = payload.get("ast")?;
+    if ast.get("transformed").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    let source = ast.get("source").and_then(Value::as_str)?;
+    let mut compiler = SfcCompiler::new();
+    let descriptor = compiler.parse(filename.clone(), source);
+    let template = descriptor.template.as_ref()?;
+    Some(TemplateSource {
+        filename,
+        source: template.content.clone(),
+        file_id: descriptor.source_file,
+        base_offset: template.content_start,
     })
 }
 
@@ -1521,6 +1576,98 @@ fn vue3_ssr_compile_value(
             source.base_offset,
         ),
         "preamble": result.preamble,
+    })
+}
+
+fn vue3_sfc_compile_template_value(
+    payload: &Value,
+    filename: &str,
+    compile_source: &str,
+    public_source: &str,
+    sfc_options: &SfcTemplateCompileOptions,
+) -> Value {
+    let bridge_options = payload
+        .get("bridgeOptions")
+        .or_else(|| payload.get("options"))
+        .unwrap_or(&Value::Null);
+    let source = template_source_from_transformed_sfc_ast_payload(payload, filename.to_string())
+        .or_else(|| template_source_from_ast_payload(payload, filename.to_string()))
+        .unwrap_or_else(|| TemplateSource {
+            filename: filename.to_string(),
+            source: compile_source.to_string(),
+            file_id: FileId(0),
+            base_offset: 0,
+        });
+    let mut core = vue3_options(Some(bridge_options));
+    core.prefix_identifiers = true;
+    core.mode = "module".into();
+    core.hoist_static = true;
+    core.cache_handlers = true;
+    core.scope_id = sfc_options.scope_id.clone();
+    core.slotted = sfc_options.slotted;
+    core.source_map = true;
+    core.ssr = sfc_options.ssr;
+    if core.source_map_source.is_none() {
+        if let Some(ast_source) = payload
+            .get("ast")
+            .and_then(|ast| ast.get("source"))
+            .and_then(Value::as_str)
+        {
+            core.source_map_source = Some(ast_source.to_string());
+            core.source_map_base_offset = 0;
+        }
+    }
+    apply_bridge_dom_parser_defaults(&mut core, Some(bridge_options));
+
+    if sfc_options.ssr {
+        let result = vuec_vue3_ssr::compile(
+            source.clone(),
+            SsrCompilerOptions {
+                core,
+                scope_id: sfc_options.scope_id.clone(),
+                slotted: sfc_options.slotted,
+                slotted_is_explicit: true,
+                mode_is_explicit: true,
+                transform_asset_urls: sfc_options.transform_asset_urls,
+                asset_url_options: sfc_options.asset_url_options.clone(),
+            },
+        );
+        let errors =
+            vue3_compile_diagnostics_value(&result.diagnostics, &source.source, source.base_offset);
+        return json!({
+            "code": result.code,
+            "map": result.map,
+            "errors": errors,
+            "bindings": [],
+            "ast_summary": result.ast_summary,
+            "ast": {},
+            "preamble": result.preamble,
+            "source": public_source,
+            "tips": [],
+        });
+    }
+
+    let result = vuec_vue3_dom::compile(
+        source.clone(),
+        DomCompilerOptions {
+            core,
+            transform_asset_urls: sfc_options.transform_asset_urls,
+            asset_url_options: sfc_options.asset_url_options.clone(),
+            ..DomCompilerOptions::default()
+        },
+    );
+    let errors =
+        vue3_compile_diagnostics_value(&result.diagnostics, &source.source, source.base_offset);
+    json!({
+        "code": result.code,
+        "map": result.map,
+        "errors": errors,
+        "bindings": [],
+        "ast_summary": result.ast_summary,
+        "ast": {},
+        "preamble": result.preamble,
+        "source": public_source,
+        "tips": [],
     })
 }
 
@@ -3883,6 +4030,24 @@ fn vue27_template_preprocess_options(
     }
 }
 
+fn vue3_template_preprocess_options(
+    value: Option<&Value>,
+    filename: &str,
+) -> Vue3TemplatePreprocessOptions {
+    let lang = value
+        .and_then(|value| {
+            value
+                .get("preprocessLang")
+                .or_else(|| value.get("preprocess_lang"))
+        })
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    Vue3TemplatePreprocessOptions {
+        lang,
+        filename: Some(filename.to_string()),
+    }
+}
+
 fn vue27_sfc_asset_url_options(value: &Value) -> Vue2SfcAssetUrlTransformOptions {
     let mut options = Vue2SfcAssetUrlTransformOptions::default();
     if let Some(extra) = value.get("transformAssetUrlsOptions") {
@@ -4007,10 +4172,7 @@ fn vue3_options(value: Option<&Value>) -> Vue3CompilerOptions {
         .get("__vuecSourceMapBaseOffset")
         .and_then(Value::as_u64)
         .unwrap_or(0) as usize;
-    options.ssr_css_vars = value
-        .get("ssrCssVars")
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned);
+    options.ssr_css_vars = vue3_ssr_css_vars_option(value);
     options.comments = bool_option(value, "comments", options.comments);
     if let Some(mode) = value.get("mode").and_then(Value::as_str) {
         options.mode = mode.to_string();
@@ -4094,6 +4256,39 @@ fn vue3_options(value: Option<&Value>) -> Vue3CompilerOptions {
         }
     }
     options
+}
+
+fn vue3_ssr_css_vars_option(value: &Value) -> Option<String> {
+    match value.get("ssrCssVars") {
+        Some(Value::String(source)) => Some(source.clone()),
+        Some(Value::Array(items)) => {
+            let vars = items.iter().filter_map(Value::as_str).collect::<Vec<_>>();
+            if vars.is_empty() {
+                return Some(String::new());
+            }
+            let id = value.get("id").and_then(Value::as_str).unwrap_or_default();
+            let short_id = id.strip_prefix("data-v-").unwrap_or(id);
+            let is_prod = bool_option(value, "isProd", bool_option(value, "is_prod", false));
+            let entries = vars
+                .iter()
+                .map(|var| {
+                    let name = format!(
+                        ":--{}",
+                        gen_css_var_name_with_style(
+                            short_id,
+                            var,
+                            is_prod,
+                            CssVarNameStyle::Vue3Escaped,
+                        )
+                    );
+                    format!("{}: ({})", json!(name), var)
+                })
+                .collect::<Vec<_>>()
+                .join(",\n  ");
+            Some(format!("{{\n  {entries}\n}}"))
+        }
+        _ => None,
+    }
 }
 
 fn vue3_namespace_option_value(value: &Value) -> Option<vuec_ast::HtmlNamespace> {
@@ -4221,11 +4416,22 @@ fn sfc_template_options(value: Option<&Value>) -> SfcTemplateCompileOptions {
     options.transform_asset_urls =
         transform_asset_urls_enabled(value, options.transform_asset_urls);
     options.asset_url_options = asset_url_options(value, options.asset_url_options);
-    options.scope_id = value
+    let explicit_scope_id = value
         .get("scopeId")
         .or_else(|| value.get("scope_id"))
         .and_then(Value::as_str)
         .map(ToOwned::to_owned);
+    options.scope_id = explicit_scope_id.or_else(|| {
+        bool_option(value, "scoped", false).then(|| {
+            let short_id = options
+                .id
+                .as_deref()
+                .unwrap_or_default()
+                .strip_prefix("data-v-")
+                .unwrap_or_else(|| options.id.as_deref().unwrap_or_default());
+            format!("data-v-{short_id}")
+        })
+    });
     options
 }
 

@@ -493,11 +493,33 @@ pub struct Vue27TemplatePreprocessResult {
     pub tips: Vec<String>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Vue 3 template preprocessing options.
+pub struct Vue3TemplatePreprocessOptions {
+    /// Optional template language.
+    pub lang: Option<String>,
+    /// Optional filename.
+    pub filename: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Vue 3 template preprocessing result.
+pub struct Vue3TemplatePreprocessResult {
+    /// Preprocessed template source.
+    pub source: String,
+    /// Preprocess errors.
+    pub errors: Vec<String>,
+    /// Preprocess tips.
+    pub tips: Vec<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 /// SFC template compile error.
 pub struct SfcTemplateError {
     /// Numeric compiler error code.
     pub code: u32,
+    /// Compiler diagnostic message.
+    pub message: String,
     /// Source location for the error.
     pub loc: SfcSourceLocation,
 }
@@ -834,6 +856,7 @@ impl SfcCompiler {
                 map: None,
                 errors: vec![SfcTemplateError {
                     code: 0,
+                    message: "Template block is missing.".into(),
                     loc: SfcSourceLocation {
                         start: SfcPosition {
                             column: 1,
@@ -1319,6 +1342,15 @@ impl SfcCompiler {
         options: Vue27TemplatePreprocessOptions,
     ) -> Vue27TemplatePreprocessResult {
         preprocess_vue27_template(source, options)
+    }
+
+    /// Preprocesses Vue 3 template source.
+    pub fn preprocess_vue3_template(
+        &self,
+        source: &str,
+        options: Vue3TemplatePreprocessOptions,
+    ) -> Vue3TemplatePreprocessResult {
+        preprocess_vue3_template(source, options)
     }
 
     /// Returns the JavaScript side store used by SFC script compilation.
@@ -15155,6 +15187,7 @@ fn sfc_template_error_from_diagnostic(
     let end = span.end.0.min(source.len()).max(start);
     Some(SfcTemplateError {
         code: diagnostic.code.parse().unwrap_or(0),
+        message: diagnostic.message.clone(),
         loc: SfcSourceLocation {
             start: position_at(source, start)?,
             end: position_at(source, end)?,
@@ -15207,6 +15240,48 @@ fn preprocess_vue27_template(
     }
 }
 
+fn preprocess_vue3_template(
+    source: &str,
+    options: Vue3TemplatePreprocessOptions,
+) -> Vue3TemplatePreprocessResult {
+    let Some(lang) = options.lang.as_deref().filter(|lang| !lang.is_empty()) else {
+        return Vue3TemplatePreprocessResult {
+            source: source.to_string(),
+            errors: Vec::new(),
+            tips: Vec::new(),
+        };
+    };
+    let filename = options.filename.unwrap_or_else(|| "anonymous.vue".into());
+    match lang.to_ascii_lowercase().as_str() {
+        "html" => Vue3TemplatePreprocessResult {
+            source: source.to_string(),
+            errors: Vec::new(),
+            tips: Vec::new(),
+        },
+        "pug" | "jade" => match compile_vue3_pug_template(source, &filename) {
+            Ok(source) => Vue3TemplatePreprocessResult {
+                source,
+                errors: Vec::new(),
+                tips: Vec::new(),
+            },
+            Err(error) => Vue3TemplatePreprocessResult {
+                source: source.to_string(),
+                errors: vec![error],
+                tips: Vec::new(),
+            },
+        },
+        _ => Vue3TemplatePreprocessResult {
+            source: source.to_string(),
+            tips: vec![format!(
+                "Component {filename} uses lang {lang} for template. Please install the language preprocessor."
+            )],
+            errors: vec![format!(
+                "Component {filename} uses lang {lang} for template, however it is not installed."
+            )],
+        },
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Vue27PugNode {
     tag: String,
@@ -15255,6 +15330,59 @@ fn compile_vue27_pug_template(source: &str) -> Result<String, String> {
         stack.push((indent, path));
     }
     Ok(render_vue27_pug_nodes(&roots))
+}
+
+fn compile_vue3_pug_template(source: &str, filename: &str) -> Result<String, String> {
+    let mut roots = Vec::new();
+    let mut stack: Vec<(usize, Vec<usize>)> = Vec::new();
+    for (line_index, line) in source.lines().enumerate() {
+        let trimmed_end = line.trim_end();
+        let content = trimmed_end.trim_start();
+        if content.is_empty() || content.starts_with("//") {
+            continue;
+        }
+        let indent = vue27_pug_indent(trimmed_end);
+        let node = parse_vue27_pug_line(content).map_err(|error| {
+            let line_number = vue3_pug_public_line_number(source, line_index + 1);
+            format!(
+                "Error: {filename}:{line_number}:1\n{}",
+                vue3_pug_public_error_message(&error)
+            )
+        })?;
+        while stack
+            .last()
+            .is_some_and(|(parent_indent, _)| *parent_indent >= indent)
+        {
+            stack.pop();
+        }
+        let parent_path = stack
+            .last()
+            .map(|(_, path)| path.clone())
+            .unwrap_or_default();
+        let children = vue27_pug_children_at_path(&mut roots, &parent_path);
+        let index = children.len();
+        children.push(node);
+        let mut path = parent_path;
+        path.push(index);
+        stack.push((indent, path));
+    }
+    Ok(render_vue27_pug_nodes(&roots))
+}
+
+fn vue3_pug_public_line_number(source: &str, local_line_number: usize) -> usize {
+    if source.starts_with('\n') {
+        local_line_number + 1
+    } else {
+        local_line_number
+    }
+}
+
+fn vue3_pug_public_error_message(error: &str) -> String {
+    if error == "missing closing attribute paren" {
+        "The end of the string reached with no closing bracket ) found.".into()
+    } else {
+        error.to_string()
+    }
 }
 
 fn vue27_pug_indent(line: &str) -> usize {
@@ -15701,9 +15829,6 @@ fn script_content(
         &template_props_aliases,
     );
     let mut content = String::new();
-    if let Some(render) = inline_render.as_ref() {
-        append_vue3_module_chunk(&mut content, &render.preamble);
-    }
     if let Some(import) = vue3_script_setup_helper_import(
         &setup_analysis,
         options,
@@ -15715,6 +15840,9 @@ fn script_content(
     ) {
         append_vue3_module_chunk(&mut content, &import);
     }
+    if let Some(render) = inline_render.as_ref() {
+        append_vue3_module_chunk(&mut content, &render.preamble);
+    }
     append_vue3_module_chunk(&mut content, &normal_script.module_content);
     append_vue3_module_chunk(&mut content, &setup_analysis.module_content);
     if !content.is_empty()
@@ -15722,7 +15850,11 @@ fn script_content(
         && setup_analysis.module_content.is_empty()
         && setup_analysis.setup_content.starts_with('\n')
     {
-        content.push_str("\n\n");
+        if inline_render.is_some() {
+            content.push_str("\n\n\n");
+        } else {
+            content.push_str("\n\n");
+        }
     }
     append_vue3_module_chunk(
         &mut content,
@@ -23455,7 +23587,7 @@ fn vue3_script_setup_export(
         is_prod,
         inline_render,
     );
-    let setup_params = vue3_script_setup_params(setup_analysis);
+    let setup_params = vue3_script_setup_params(setup_analysis, inline_render.is_some());
     let setup_body = vue3_script_setup_body(
         setup_analysis,
         bindings,
@@ -23664,16 +23796,26 @@ fn vue3_model_modifiers_prop_name(name: &str) -> String {
     }
 }
 
-fn vue3_script_setup_params(setup_analysis: &Vue3ScriptSetupAnalysis) -> String {
+fn vue3_script_setup_params(
+    setup_analysis: &Vue3ScriptSetupAnalysis,
+    inline_template: bool,
+) -> String {
     let props = if setup_analysis.props_type_runtime {
         "__props: any"
     } else {
         "__props"
     };
+    let mut context_parts = Vec::new();
+    if setup_analysis.has_define_expose || !inline_template {
+        context_parts.push("expose: __expose");
+    }
     if setup_analysis.emit_binding.is_some() {
-        format!("{props}, {{ expose: __expose, emit: __emit }}")
+        context_parts.push("emit: __emit");
+    }
+    if context_parts.is_empty() {
+        props.to_string()
     } else {
-        format!("{props}, {{ expose: __expose }}")
+        format!("{props}, {{ {} }}", context_parts.join(", "))
     }
 }
 
@@ -23816,6 +23958,7 @@ fn side_effect_tag_errors(source: &str) -> Vec<SfcTemplateError> {
             let end_pos = position_at(source, end)?;
             Some(SfcTemplateError {
                 code: 64,
+                message: "Tags with side effect (<script> and <style>) are ignored in client component templates.".into(),
                 loc: SfcSourceLocation {
                     start: start_pos,
                     end: end_pos,
@@ -32117,6 +32260,50 @@ const { title: heading } = defineProps(['title'])
             script.bindings.get("heading").map(String::as_str),
             Some("props-aliased")
         );
+    }
+
+    #[test]
+    fn vue3_compile_script_inlines_template_props_member_component_tag() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "FooBar.vue",
+            r#"
+  <script setup lang="ts">
+    defineProps<{ Foo: { Bar: unknown } }>()
+  </script>
+  <template>
+    <Foo.Bar/>
+  </template>
+  "#,
+        );
+        let script = compiler.compile_script(
+            &descriptor,
+            SfcScriptCompileOptions {
+                id: Some("xxx".into()),
+                inline_template: true,
+                ..SfcScriptCompileOptions::default()
+            },
+        );
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        let define_component_import = script
+            .content
+            .find("import { defineComponent as _defineComponent } from 'vue'")
+            .expect("defineComponent import");
+        let render_helper_import = script
+            .content
+            .find("import { unref as _unref, openBlock as _openBlock, createBlock as _createBlock } from \"vue\"")
+            .expect("inline render helper import");
+        assert!(define_component_import < render_helper_import);
+        assert!(script.content.contains(
+            "import { unref as _unref, openBlock as _openBlock, createBlock as _createBlock } from \"vue\"\n\n\nexport default"
+        ));
+        assert!(script.content.contains("setup(__props: any)"));
+        assert!(!script.content.contains("setup(__props: any, { expose"));
+        assert!(script
+            .content
+            .contains("_createBlock(_unref(__props[\"Foo\"]).Bar)"));
+        assert!(!script.content.contains("const __returned__"));
     }
 
     #[test]
