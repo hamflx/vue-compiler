@@ -4332,6 +4332,19 @@ struct Vue27TypeContext {
     silent_unresolved_type_names: BTreeSet<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Vue3TypeResolverContext {
+    typescript_version: nodejs_semver::Version,
+}
+
+impl Default for Vue3TypeResolverContext {
+    fn default() -> Self {
+        Self {
+            typescript_version: vue3_package_typescript_baseline_version(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Vue27ScriptSetupContext {
     normal_types: Vue27TypeContext,
@@ -4823,8 +4836,10 @@ fn vue27_normal_script_type_context(descriptor: &SfcDescriptor) -> Vue27TypeCont
 fn vue3_normal_script_type_context(
     descriptor: &SfcDescriptor,
     global_type_files: &[String],
+    type_resolver: &Vue3TypeResolverContext,
 ) -> Vue27TypeContext {
-    let mut context = vue3_global_type_context(&descriptor.filename, global_type_files);
+    let mut context =
+        vue3_global_type_context(&descriptor.filename, global_type_files, type_resolver);
     let Some(script) = descriptor.script.as_ref() else {
         return context;
     };
@@ -4833,6 +4848,7 @@ fn vue3_normal_script_type_context(
         script.content.as_str(),
         script_source_type_from_attrs(&script.attrs),
         &mut context,
+        type_resolver,
     );
     let allocator = oxc_allocator::Allocator::default();
     let parsed = oxc_parser::Parser::new(
@@ -4870,6 +4886,7 @@ fn vue3_normal_script_type_context(
         unresolved_import_sources: context.unresolved_import_sources,
         silent_unresolved_type_names: context.silent_unresolved_type_names,
         type_filename: Some(descriptor.filename.clone()),
+        type_resolver: type_resolver.clone(),
         ..Vue3ScriptSetupAnalysis::default()
     };
     collect_vue3_declared_types_from_statements(
@@ -4902,17 +4919,25 @@ fn vue3_normal_script_type_context(
     }
 }
 
-fn vue3_global_type_context(filename: &str, global_type_files: &[String]) -> Vue27TypeContext {
+fn vue3_global_type_context(
+    filename: &str,
+    global_type_files: &[String],
+    type_resolver: &Vue3TypeResolverContext,
+) -> Vue27TypeContext {
     let mut context = Vue27TypeContext::default();
     for file in global_type_files {
         let path = normalize_path_components(PathBuf::from(file));
-        let Some(global_context) = vue3_global_type_context_from_path(&path, &context) else {
+        let Some(global_context) =
+            vue3_global_type_context_from_path(&path, &context, type_resolver)
+        else {
             continue;
         };
         merge_vue3_type_context_missing(&mut context, global_context);
     }
-    for path in vue3_tsconfig_global_type_files(filename) {
-        let Some(global_context) = vue3_global_type_context_from_path(&path, &context) else {
+    for path in vue3_tsconfig_global_type_files(filename, type_resolver) {
+        let Some(global_context) =
+            vue3_global_type_context_from_path(&path, &context, type_resolver)
+        else {
             continue;
         };
         merge_vue3_type_context_missing(&mut context, global_context);
@@ -4923,6 +4948,7 @@ fn vue3_global_type_context(filename: &str, global_type_files: &[String]) -> Vue
 fn vue3_global_type_context_from_path(
     path: &Path,
     base_context: &Vue27TypeContext,
+    type_resolver: &Vue3TypeResolverContext,
 ) -> Option<Vue27TypeContext> {
     let source = vue3_external_type_source_from_path(path)?;
     let normalized = normalize_path_string(path);
@@ -4931,6 +4957,7 @@ fn vue3_global_type_context_from_path(
         &normalized,
         source.source_type,
         base_context,
+        type_resolver,
     ))
 }
 
@@ -4939,6 +4966,7 @@ fn vue3_global_type_context_from_source(
     filename: &str,
     source_type: oxc_span::SourceType,
     base_context: &Vue27TypeContext,
+    type_resolver: &Vue3TypeResolverContext,
 ) -> Vue27TypeContext {
     let allocator = oxc_allocator::Allocator::default();
     let parsed = oxc_parser::Parser::new(&allocator, source, source_type)
@@ -4958,6 +4986,7 @@ fn vue3_global_type_context_from_source(
         source,
         source_type,
         &mut seed_context,
+        type_resolver,
     );
     let mut analysis = Vue3ScriptSetupAnalysis {
         declared_types: seed_context.declared_types,
@@ -4983,6 +5012,7 @@ fn vue3_global_type_context_from_source(
         unresolved_import_sources: seed_context.unresolved_import_sources,
         silent_unresolved_type_names: seed_context.silent_unresolved_type_names,
         type_filename: Some(filename.to_string()),
+        type_resolver: type_resolver.clone(),
         ..Vue3ScriptSetupAnalysis::default()
     };
     let mut global_names =
@@ -4991,6 +5021,7 @@ fn vue3_global_type_context_from_source(
         filename,
         &parsed.program.body,
         &mut analysis,
+        type_resolver,
     ));
     let global_import_names = vue3_global_type_file_import_names(&parsed.program.body);
     collect_vue3_global_type_deps_from_statements(&parsed.program.body, &mut analysis);
@@ -5076,6 +5107,7 @@ fn project_vue3_global_type_re_exports(
     filename: &str,
     statements: &[Statement<'_>],
     analysis: &mut Vue3ScriptSetupAnalysis,
+    type_resolver: &Vue3TypeResolverContext,
 ) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     let mut seen = BTreeSet::new();
@@ -5088,6 +5120,7 @@ fn project_vue3_global_type_re_exports(
             &global.body.body,
             analysis,
             &mut seen,
+            type_resolver,
         ));
         project_vue3_exported_type_specifiers(&global.body.body, analysis);
         names.extend(vue3_exported_type_names(&global.body.body));
@@ -5409,6 +5442,7 @@ fn extend_vue3_type_context_from_external_imports(
     source: &str,
     source_type: oxc_span::SourceType,
     context: &mut Vue27TypeContext,
+    type_resolver: &Vue3TypeResolverContext,
 ) {
     let mut seen = BTreeSet::new();
     extend_vue3_type_context_from_external_imports_with_seen(
@@ -5417,6 +5451,7 @@ fn extend_vue3_type_context_from_external_imports(
         source_type,
         context,
         &mut seen,
+        type_resolver,
     );
 }
 
@@ -5426,6 +5461,7 @@ fn extend_vue3_type_context_from_external_imports_with_seen(
     source_type: oxc_span::SourceType,
     context: &mut Vue27TypeContext,
     seen: &mut BTreeSet<String>,
+    type_resolver: &Vue3TypeResolverContext,
 ) {
     let allocator = oxc_allocator::Allocator::default();
     let parsed = oxc_parser::Parser::new(&allocator, source, source_type)
@@ -5445,7 +5481,8 @@ fn extend_vue3_type_context_from_external_imports_with_seen(
         let Some(specifiers) = &import.specifiers else {
             continue;
         };
-        let Some(resolved) = resolve_vue3_type_import(filename, import_source) else {
+        let Some(resolved) = resolve_vue3_type_import(filename, import_source, type_resolver)
+        else {
             for specifier in specifiers {
                 context
                     .unresolved_import_sources
@@ -5453,7 +5490,8 @@ fn extend_vue3_type_context_from_external_imports_with_seen(
             }
             continue;
         };
-        let Some(imported_context) = vue3_external_type_context_from_path(&resolved, &mut *seen)
+        let Some(imported_context) =
+            vue3_external_type_context_from_path(&resolved, &mut *seen, type_resolver)
         else {
             continue;
         };
@@ -5486,11 +5524,18 @@ fn vue3_external_type_context_from_source_with_type(
     filename: &str,
     source_type: oxc_span::SourceType,
     seen: &mut BTreeSet<String>,
+    type_resolver: &Vue3TypeResolverContext,
 ) -> Vue27TypeContext {
     if !seen.insert(filename.to_string()) {
         return Vue27TypeContext::default();
     }
-    let context = vue3_external_type_context_from_source_inner(source, filename, source_type, seen);
+    let context = vue3_external_type_context_from_source_inner(
+        source,
+        filename,
+        source_type,
+        seen,
+        type_resolver,
+    );
     seen.remove(filename);
     context
 }
@@ -5500,6 +5545,7 @@ fn vue3_external_type_context_from_source_inner(
     filename: &str,
     source_type: oxc_span::SourceType,
     seen: &mut BTreeSet<String>,
+    type_resolver: &Vue3TypeResolverContext,
 ) -> Vue27TypeContext {
     let allocator = oxc_allocator::Allocator::default();
     let parsed = oxc_parser::Parser::new(&allocator, source, source_type)
@@ -5514,6 +5560,7 @@ fn vue3_external_type_context_from_source_inner(
     let mut analysis = Vue3ScriptSetupAnalysis {
         type_filename: Some(filename.to_string()),
         type_seen: seen.clone(),
+        type_resolver: type_resolver.clone(),
         ..Vue3ScriptSetupAnalysis::default()
     };
     let mut seed_context = Vue27TypeContext::default();
@@ -5523,6 +5570,7 @@ fn vue3_external_type_context_from_source_inner(
         source_type,
         &mut seed_context,
         seen,
+        type_resolver,
     );
     analysis.declared_types = seed_context.declared_types;
     analysis.define_model_declared_types = seed_context.define_model_declared_types;
@@ -5552,8 +5600,13 @@ fn vue3_external_type_context_from_source_inner(
     collect_vue3_declared_type_deps_from_statements(&parsed.program.body, &mut analysis);
     project_vue3_default_type_exports(source, &parsed.program.body, &mut analysis);
     seed_vue3_external_type_deps(filename, &mut analysis);
-    let re_exported =
-        project_vue3_type_re_exports(filename, &parsed.program.body, &mut analysis, seen);
+    let re_exported = project_vue3_type_re_exports(
+        filename,
+        &parsed.program.body,
+        &mut analysis,
+        seen,
+        type_resolver,
+    );
     project_vue3_exported_type_specifiers(&parsed.program.body, &mut analysis);
     let mut exported = vue3_exported_type_names(&parsed.program.body);
     exported.extend(re_exported);
@@ -5680,6 +5733,7 @@ fn project_vue3_type_re_exports(
     statements: &[Statement<'_>],
     analysis: &mut Vue3ScriptSetupAnalysis,
     seen: &mut BTreeSet<String>,
+    type_resolver: &Vue3TypeResolverContext,
 ) -> BTreeSet<String> {
     let mut exported_names = BTreeSet::new();
     for statement in statements {
@@ -5689,13 +5743,17 @@ fn project_vue3_type_re_exports(
                     continue;
                 };
                 let import_source = source.value.as_str();
-                let Some(imported_context) =
-                    vue3_external_type_context_from_source(filename, import_source, seen)
-                else {
+                let Some(imported_context) = vue3_external_type_context_from_source(
+                    filename,
+                    import_source,
+                    seen,
+                    type_resolver,
+                ) else {
                     continue;
                 };
-                let Some(dependency) = resolve_vue3_type_import(filename, import_source)
-                    .map(|path| normalize_path_string(&path))
+                let Some(dependency) =
+                    resolve_vue3_type_import(filename, import_source, type_resolver)
+                        .map(|path| normalize_path_string(&path))
                 else {
                     continue;
                 };
@@ -5720,13 +5778,17 @@ fn project_vue3_type_re_exports(
             }
             Statement::ExportAllDeclaration(declaration) => {
                 let import_source = declaration.source.value.as_str();
-                let Some(imported_context) =
-                    vue3_external_type_context_from_source(filename, import_source, seen)
-                else {
+                let Some(imported_context) = vue3_external_type_context_from_source(
+                    filename,
+                    import_source,
+                    seen,
+                    type_resolver,
+                ) else {
                     continue;
                 };
-                let Some(dependency) = resolve_vue3_type_import(filename, import_source)
-                    .map(|path| normalize_path_string(&path))
+                let Some(dependency) =
+                    resolve_vue3_type_import(filename, import_source, type_resolver)
+                        .map(|path| normalize_path_string(&path))
                 else {
                     continue;
                 };
@@ -5746,9 +5808,10 @@ fn vue3_external_type_context_from_source(
     filename: &str,
     source: &str,
     seen: &mut BTreeSet<String>,
+    type_resolver: &Vue3TypeResolverContext,
 ) -> Option<Vue27TypeContext> {
-    let resolved = resolve_vue3_type_import(filename, source)?;
-    vue3_external_type_context_from_path(&resolved, seen)
+    let resolved = resolve_vue3_type_import(filename, source, type_resolver)?;
+    vue3_external_type_context_from_path(&resolved, seen, type_resolver)
 }
 
 struct Vue3ExternalTypeSource {
@@ -5759,6 +5822,7 @@ struct Vue3ExternalTypeSource {
 fn vue3_external_type_context_from_path(
     path: &Path,
     seen: &mut BTreeSet<String>,
+    type_resolver: &Vue3TypeResolverContext,
 ) -> Option<Vue27TypeContext> {
     let source = vue3_external_type_source_from_path(path)?;
     let normalized = normalize_path_string(path);
@@ -5767,6 +5831,7 @@ fn vue3_external_type_context_from_path(
         &normalized,
         source.source_type,
         seen,
+        type_resolver,
     ))
 }
 
@@ -5832,10 +5897,11 @@ fn vue3_resolve_import_type(
     let source = import_type.source.value.as_str();
     let name = vue3_import_type_qualifier_key(import_type.qualifier.as_ref()?);
     let filename = analysis.type_filename.as_deref()?;
-    let resolved = resolve_vue3_type_import(filename, source)?;
+    let resolved = resolve_vue3_type_import(filename, source, &analysis.type_resolver)?;
     let dependency = normalize_path_string(&resolved);
     let mut seen = analysis.type_seen.clone();
-    let context = vue3_external_type_context_from_path(&resolved, &mut seen)?;
+    let context =
+        vue3_external_type_context_from_path(&resolved, &mut seen, &analysis.type_resolver)?;
     Some(Vue3ResolvedImportType {
         name,
         dependency,
@@ -6813,22 +6879,30 @@ fn vue3_type_import_source_is_relative(source: &str) -> bool {
     source.starts_with("./") || source.starts_with("../")
 }
 
-fn resolve_vue3_type_import(filename: &str, source: &str) -> Option<PathBuf> {
+fn resolve_vue3_type_import(
+    filename: &str,
+    source: &str,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
     if vue3_type_import_source_is_relative(source) {
-        return resolve_vue3_relative_type_import(filename, source);
+        return resolve_vue3_relative_type_import(filename, source, type_resolver);
     }
-    if let Some(resolved) = resolve_vue3_tsconfig_type_import(filename, source) {
+    if let Some(resolved) = resolve_vue3_tsconfig_type_import(filename, source, type_resolver) {
         return Some(resolved);
     }
-    resolve_vue3_bare_type_import(filename, source)
+    resolve_vue3_bare_type_import(filename, source, type_resolver)
 }
 
-fn resolve_vue3_relative_type_import(filename: &str, source: &str) -> Option<PathBuf> {
+fn resolve_vue3_relative_type_import(
+    filename: &str,
+    source: &str,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
     let base = Path::new(filename)
         .parent()
         .unwrap_or_else(|| Path::new(""));
     let candidate = normalize_path_components(base.join(source));
-    resolve_vue3_type_import_path(&candidate)
+    resolve_vue3_type_import_path(&candidate, type_resolver)
 }
 
 #[derive(Clone, Debug)]
@@ -6847,7 +6921,11 @@ struct Vue3TsconfigPathMatch<'a> {
     order: usize,
 }
 
-fn resolve_vue3_tsconfig_type_import(filename: &str, source: &str) -> Option<PathBuf> {
+fn resolve_vue3_tsconfig_type_import(
+    filename: &str,
+    source: &str,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
     for config_path in vue3_tsconfig_search_paths(filename) {
         let config_dir = config_path
             .parent()
@@ -6856,7 +6934,9 @@ fn resolve_vue3_tsconfig_type_import(filename: &str, source: &str) -> Option<Pat
         let mut seen = BTreeSet::new();
         let mappings =
             vue3_tsconfig_path_mappings_from_config(&config_path, &config_dir, &mut seen);
-        if let Some(resolved) = resolve_vue3_tsconfig_path_mappings(&mappings, source) {
+        if let Some(resolved) =
+            resolve_vue3_tsconfig_path_mappings(&mappings, source, type_resolver)
+        {
             return Some(resolved);
         }
     }
@@ -6920,7 +7000,10 @@ fn vue3_tsconfig_path_mappings_from_config(
     mappings
 }
 
-fn vue3_tsconfig_global_type_files(filename: &str) -> Vec<PathBuf> {
+fn vue3_tsconfig_global_type_files(
+    filename: &str,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Vec<PathBuf> {
     let mut files = Vec::new();
     let mut seen_configs = BTreeSet::new();
     let mut seen_files = BTreeSet::new();
@@ -6932,6 +7015,7 @@ fn vue3_tsconfig_global_type_files(filename: &str) -> Vec<PathBuf> {
             &mut seen_configs,
             &mut seen_files,
             &mut files,
+            type_resolver,
         );
     }
     files
@@ -6943,6 +7027,7 @@ fn vue3_tsconfig_global_type_files_from_config(
     seen_configs: &mut BTreeSet<String>,
     seen_files: &mut BTreeSet<String>,
     files: &mut Vec<PathBuf>,
+    type_resolver: &Vue3TypeResolverContext,
 ) {
     let normalized = normalize_path_string(config_path);
     if !seen_configs.insert(normalized) {
@@ -6962,9 +7047,15 @@ fn vue3_tsconfig_global_type_files_from_config(
             seen_configs,
             seen_files,
             files,
+            type_resolver,
         );
     }
-    for file in vue3_tsconfig_direct_global_type_files(&value, config_dir, template_config_dir) {
+    for file in vue3_tsconfig_direct_global_type_files(
+        &value,
+        config_dir,
+        template_config_dir,
+        type_resolver,
+    ) {
         let normalized = normalize_path_string(&file);
         if seen_files.insert(normalized) {
             files.push(file);
@@ -6978,6 +7069,7 @@ fn vue3_tsconfig_global_type_files_from_config(
             seen_configs,
             seen_files,
             files,
+            type_resolver,
         );
     }
 }
@@ -6986,6 +7078,7 @@ fn vue3_tsconfig_direct_global_type_files(
     value: &serde_json::Value,
     config_dir: &Path,
     template_config_dir: &Path,
+    type_resolver: &Vue3TypeResolverContext,
 ) -> Vec<PathBuf> {
     let mut files = Vec::new();
     for target in vue3_tsconfig_string_array(value.get("files")) {
@@ -7005,6 +7098,7 @@ fn vue3_tsconfig_direct_global_type_files(
         value,
         config_dir,
         template_config_dir,
+        type_resolver,
     ));
     files
 }
@@ -7023,6 +7117,7 @@ fn vue3_tsconfig_compiler_option_global_type_files(
     value: &serde_json::Value,
     config_dir: &Path,
     template_config_dir: &Path,
+    type_resolver: &Vue3TypeResolverContext,
 ) -> Vec<PathBuf> {
     let compiler_options = value
         .get("compilerOptions")
@@ -7048,13 +7143,15 @@ fn vue3_tsconfig_compiler_option_global_type_files(
         return types
             .into_iter()
             .flat_map(|type_name| {
-                vue3_tsconfig_named_type_global_type_files(&type_roots, &type_name)
+                vue3_tsconfig_named_type_global_type_files(&type_roots, &type_name, type_resolver)
             })
             .collect();
     }
     type_roots
         .into_iter()
-        .flat_map(|type_root| vue3_tsconfig_all_type_root_global_type_files(&type_root))
+        .flat_map(|type_root| {
+            vue3_tsconfig_all_type_root_global_type_files(&type_root, type_resolver)
+        })
         .collect()
 }
 
@@ -7069,6 +7166,7 @@ fn vue3_tsconfig_default_type_roots(config_dir: &Path) -> Vec<PathBuf> {
 fn vue3_tsconfig_named_type_global_type_files(
     type_roots: &[PathBuf],
     type_name: &str,
+    type_resolver: &Vue3TypeResolverContext,
 ) -> Vec<PathBuf> {
     if !vue3_tsconfig_type_name_is_safe(type_name) {
         return Vec::new();
@@ -7076,7 +7174,9 @@ fn vue3_tsconfig_named_type_global_type_files(
     type_roots
         .iter()
         .flat_map(|type_root| vue3_tsconfig_type_name_package_dirs(type_root, type_name))
-        .filter_map(|package_dir| vue3_tsconfig_type_package_global_type_file(&package_dir))
+        .filter_map(|package_dir| {
+            vue3_tsconfig_type_package_global_type_file(&package_dir, type_resolver)
+        })
         .collect()
 }
 
@@ -7104,7 +7204,10 @@ fn vue3_tsconfig_type_name_package_dirs(type_root: &Path, type_name: &str) -> Ve
     vec![normalize_path_components(type_root.join(type_name))]
 }
 
-fn vue3_tsconfig_all_type_root_global_type_files(type_root: &Path) -> Vec<PathBuf> {
+fn vue3_tsconfig_all_type_root_global_type_files(
+    type_root: &Path,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(type_root) else {
         return Vec::new();
     };
@@ -7123,15 +7226,23 @@ fn vue3_tsconfig_all_type_root_global_type_files(type_root: &Path) -> Vec<PathBu
             continue;
         }
         if name.starts_with('@') {
-            files.extend(vue3_tsconfig_all_scoped_type_root_global_type_files(&entry));
-        } else if let Some(file) = vue3_tsconfig_type_package_global_type_file(&entry) {
+            files.extend(vue3_tsconfig_all_scoped_type_root_global_type_files(
+                &entry,
+                type_resolver,
+            ));
+        } else if let Some(file) =
+            vue3_tsconfig_type_package_global_type_file(&entry, type_resolver)
+        {
             files.push(file);
         }
     }
     files
 }
 
-fn vue3_tsconfig_all_scoped_type_root_global_type_files(scope_dir: &Path) -> Vec<PathBuf> {
+fn vue3_tsconfig_all_scoped_type_root_global_type_files(
+    scope_dir: &Path,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(scope_dir) else {
         return Vec::new();
     };
@@ -7149,12 +7260,15 @@ fn vue3_tsconfig_all_scoped_type_root_global_type_files(scope_dir: &Path) -> Vec
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| !name.is_empty() && !name.starts_with('.'))
         })
-        .filter_map(|entry| vue3_tsconfig_type_package_global_type_file(&entry))
+        .filter_map(|entry| vue3_tsconfig_type_package_global_type_file(&entry, type_resolver))
         .collect()
 }
 
-fn vue3_tsconfig_type_package_global_type_file(package_dir: &Path) -> Option<PathBuf> {
-    let path = resolve_vue3_package_type_entry(package_dir, None)?;
+fn vue3_tsconfig_type_package_global_type_file(
+    package_dir: &Path,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
+    let path = resolve_vue3_package_type_entry(package_dir, None, type_resolver)?;
     vue3_tsconfig_global_type_file_is_supported(&path).then_some(path)
 }
 
@@ -7631,6 +7745,7 @@ fn vue3_tsconfig_path_target_values(value: &serde_json::Value) -> Vec<String> {
 fn resolve_vue3_tsconfig_path_mappings(
     mappings: &[Vue3TsconfigPathMapping],
     source: &str,
+    type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
     let mut matches = mappings
         .iter()
@@ -7660,7 +7775,7 @@ fn resolve_vue3_tsconfig_path_mappings(
                 target,
                 &matched.capture,
             );
-            if let Some(resolved) = resolve_vue3_type_import_path(&candidate) {
+            if let Some(resolved) = resolve_vue3_type_import_path(&candidate, type_resolver) {
                 return Some(resolved);
             }
         }
@@ -7708,22 +7823,28 @@ fn vue3_tsconfig_target_path(
     }
 }
 
-fn resolve_vue3_bare_type_import(filename: &str, source: &str) -> Option<PathBuf> {
+fn resolve_vue3_bare_type_import(
+    filename: &str,
+    source: &str,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
     let (package_name, subpath) = vue3_package_import_parts(source)?;
     for node_modules in vue3_node_modules_search_paths(filename) {
         let package_dir = node_modules.join(&package_name);
         if package_dir.is_dir() {
             if let Some(resolved) =
-                resolve_vue3_package_type_entry(&package_dir, subpath.as_deref())
+                resolve_vue3_package_type_entry(&package_dir, subpath.as_deref(), type_resolver)
             {
                 return Some(resolved);
             }
         }
         let types_package_dir = node_modules.join(vue3_at_types_package_name(&package_name));
         if types_package_dir.is_dir() {
-            if let Some(resolved) =
-                resolve_vue3_package_type_entry(&types_package_dir, subpath.as_deref())
-            {
+            if let Some(resolved) = resolve_vue3_package_type_entry(
+                &types_package_dir,
+                subpath.as_deref(),
+                type_resolver,
+            ) {
                 return Some(resolved);
             }
         }
@@ -7771,6 +7892,32 @@ fn vue3_node_modules_search_paths_from_dir(start_dir: &Path) -> Vec<PathBuf> {
     paths
 }
 
+fn vue3_type_resolver_context_for_filename(filename: &str) -> Vue3TypeResolverContext {
+    Vue3TypeResolverContext {
+        typescript_version: vue3_typescript_version_for_filename(filename)
+            .unwrap_or_else(vue3_package_typescript_baseline_version),
+    }
+}
+
+fn vue3_typescript_version_for_filename(filename: &str) -> Option<nodejs_semver::Version> {
+    vue3_node_modules_search_paths(filename)
+        .into_iter()
+        .find_map(|node_modules| {
+            vue3_typescript_version_from_package_json(
+                &node_modules.join("typescript").join("package.json"),
+            )
+        })
+}
+
+fn vue3_typescript_version_from_package_json(
+    package_json: &Path,
+) -> Option<nodejs_semver::Version> {
+    let source = std::fs::read_to_string(package_json).ok()?;
+    let package = serde_json::from_str::<serde_json::Value>(&source).ok()?;
+    let version = package.get("version")?.as_str()?.trim();
+    nodejs_semver::Version::parse(version).ok()
+}
+
 fn vue3_at_types_package_name(package_name: &str) -> PathBuf {
     if let Some(scoped) = package_name.strip_prefix('@') {
         return PathBuf::from("@types").join(scoped.replace('/', "__"));
@@ -7778,8 +7925,12 @@ fn vue3_at_types_package_name(package_name: &str) -> PathBuf {
     PathBuf::from("@types").join(package_name)
 }
 
-fn resolve_vue3_package_type_entry(package_dir: &Path, subpath: Option<&str>) -> Option<PathBuf> {
-    match resolve_vue3_package_json_type_entry(package_dir, subpath) {
+fn resolve_vue3_package_type_entry(
+    package_dir: &Path,
+    subpath: Option<&str>,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
+    match resolve_vue3_package_json_type_entry(package_dir, subpath, type_resolver) {
         Vue3PackageJsonTypeResolution::Resolved(path) => return Some(path),
         Vue3PackageJsonTypeResolution::Blocked => return None,
         Vue3PackageJsonTypeResolution::NoPackageJson
@@ -7788,7 +7939,7 @@ fn resolve_vue3_package_type_entry(package_dir: &Path, subpath: Option<&str>) ->
     let candidate = subpath
         .map(|subpath| package_dir.join(subpath))
         .unwrap_or_else(|| package_dir.to_path_buf());
-    resolve_vue3_type_import_path(&candidate)
+    resolve_vue3_type_import_path(&candidate, type_resolver)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -7961,6 +8112,7 @@ impl<'de> Deserialize<'de> for Vue3PackageTypesVersionMappings {
 fn resolve_vue3_package_json_type_entry(
     package_dir: &Path,
     subpath: Option<&str>,
+    type_resolver: &Vue3TypeResolverContext,
 ) -> Vue3PackageJsonTypeResolution {
     let package_json = package_dir.join("package.json");
     let Ok(source) = std::fs::read_to_string(package_json) else {
@@ -7971,7 +8123,9 @@ fn resolve_vue3_package_json_type_entry(
     };
     if let Some(exports) = &manifest.exports {
         if let Some(target) = vue3_package_exports_type_target(exports, subpath) {
-            if let Some(resolved) = vue3_package_export_type_path(package_dir, &target) {
+            if let Some(resolved) =
+                vue3_package_export_type_path(package_dir, &target, type_resolver)
+            {
                 return Vue3PackageJsonTypeResolution::Resolved(resolved);
             }
             return Vue3PackageJsonTypeResolution::Blocked;
@@ -7999,12 +8153,14 @@ fn resolve_vue3_package_json_type_entry(
         &manifest.types_versions,
         subpath,
         root_type_target,
+        type_resolver,
     ) {
         return Vue3PackageJsonTypeResolution::Resolved(resolved);
     }
     if subpath.is_none() {
         if let Some(target) = root_type_target {
-            if let Some(resolved) = vue3_package_type_field_path(package_dir, target) {
+            if let Some(resolved) = vue3_package_type_field_path(package_dir, target, type_resolver)
+            {
                 return Vue3PackageJsonTypeResolution::Resolved(resolved);
             }
         }
@@ -8086,11 +8242,15 @@ fn vue3_package_export_pattern_capture(pattern: &str, key: &str) -> Option<Strin
     Some(key[prefix.len()..key.len() - suffix.len()].to_string())
 }
 
-fn vue3_package_export_type_path(package_dir: &Path, target: &str) -> Option<PathBuf> {
+fn vue3_package_export_type_path(
+    package_dir: &Path,
+    target: &str,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
     if !target.starts_with("./") {
         return None;
     }
-    vue3_package_type_target_path(package_dir, target)
+    vue3_package_type_target_path(package_dir, target, type_resolver)
 }
 
 fn vue3_package_types_versions_type_path(
@@ -8098,8 +8258,9 @@ fn vue3_package_types_versions_type_path(
     types_versions: &Vue3PackageTypesVersions,
     subpath: Option<&str>,
     root_type_target: Option<&str>,
+    type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
-    let mappings = vue3_package_types_versions_mapping(types_versions)?;
+    let mappings = vue3_package_types_versions_mapping(types_versions, type_resolver)?;
     let source = subpath
         .map(|subpath| subpath.trim_start_matches("./").to_string())
         .or_else(|| root_type_target.map(|target| target.trim_start_matches("./").to_string()))
@@ -8121,7 +8282,9 @@ fn vue3_package_types_versions_type_path(
     for (_, _, capture, targets) in matches {
         for target in targets {
             let target = target.replace('*', &capture);
-            if let Some(resolved) = vue3_package_type_field_path(package_dir, &target) {
+            if let Some(resolved) =
+                vue3_package_type_field_path(package_dir, &target, type_resolver)
+            {
                 return Some(resolved);
             }
         }
@@ -8129,39 +8292,62 @@ fn vue3_package_types_versions_type_path(
     None
 }
 
-fn vue3_package_types_versions_mapping(
-    types_versions: &Vue3PackageTypesVersions,
-) -> Option<&Vue3PackageTypesVersionMappings> {
+fn vue3_package_types_versions_mapping<'a>(
+    types_versions: &'a Vue3PackageTypesVersions,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<&'a Vue3PackageTypesVersionMappings> {
     types_versions
         .0
         .iter()
-        .find(|entry| vue3_package_types_version_selector_matches(&entry.selector))
+        .find(|entry| {
+            vue3_package_types_version_selector_matches_version(
+                &entry.selector,
+                &type_resolver.typescript_version,
+            )
+        })
         .map(|entry| &entry.mappings)
 }
 
+#[cfg(test)]
 fn vue3_package_types_version_selector_matches(selector: &str) -> bool {
+    vue3_package_types_version_selector_matches_version(
+        selector,
+        &vue3_package_typescript_baseline_version(),
+    )
+}
+
+fn vue3_package_types_version_selector_matches_version(
+    selector: &str,
+    typescript_version: &nodejs_semver::Version,
+) -> bool {
     let selector = selector.trim();
     if selector.is_empty() {
         return false;
     }
-    nodejs_semver::Range::parse(selector)
-        .is_ok_and(|range| range.satisfies(&vue3_package_typescript_version()))
+    nodejs_semver::Range::parse(selector).is_ok_and(|range| range.satisfies(typescript_version))
 }
 
-fn vue3_package_typescript_version() -> nodejs_semver::Version {
+fn vue3_package_typescript_baseline_version() -> nodejs_semver::Version {
     // Bounded SFC resolver baseline for the locked Vue 3 compiler-sfc harness.
-    // This intentionally avoids modeling the full TypeScript package resolver.
     (5, 0, 0).into()
 }
 
-fn vue3_package_type_field_path(package_dir: &Path, target: &str) -> Option<PathBuf> {
+fn vue3_package_type_field_path(
+    package_dir: &Path,
+    target: &str,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
     if Path::new(target).is_absolute() || target.starts_with("../") {
         return None;
     }
-    vue3_package_type_target_path(package_dir, target.trim_start_matches("./"))
+    vue3_package_type_target_path(package_dir, target.trim_start_matches("./"), type_resolver)
 }
 
-fn vue3_package_type_target_path(package_dir: &Path, target: &str) -> Option<PathBuf> {
+fn vue3_package_type_target_path(
+    package_dir: &Path,
+    target: &str,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
     let candidate = normalize_path_components(package_dir.join(target));
     if candidate
         .extension()
@@ -8180,10 +8366,13 @@ fn vue3_package_type_target_path(package_dir: &Path, target: &str) -> Option<Pat
             return Some(resolved);
         }
     }
-    resolve_vue3_type_import_path(&candidate)
+    resolve_vue3_type_import_path(&candidate, type_resolver)
 }
 
-fn resolve_vue3_type_import_path(candidate: &Path) -> Option<PathBuf> {
+fn resolve_vue3_type_import_path(
+    candidate: &Path,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
     let extension = candidate
         .extension()
         .and_then(|extension| extension.to_str())
@@ -8203,7 +8392,7 @@ fn resolve_vue3_type_import_path(candidate: &Path) -> Option<PathBuf> {
         }
     } else {
         if candidate.is_dir() {
-            match resolve_vue3_package_json_type_entry(candidate, None) {
+            match resolve_vue3_package_json_type_entry(candidate, None, type_resolver) {
                 Vue3PackageJsonTypeResolution::Resolved(path) => return Some(path),
                 Vue3PackageJsonTypeResolution::Blocked => return None,
                 Vue3PackageJsonTypeResolution::NoPackageJson
@@ -13633,6 +13822,7 @@ struct Vue3ScriptSetupAnalysis {
     silent_unresolved_type_names: BTreeSet<String>,
     type_filename: Option<String>,
     type_seen: BTreeSet<String>,
+    type_resolver: Vue3TypeResolverContext,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -13692,9 +13882,10 @@ fn script_content(
         };
     };
 
+    let type_resolver = vue3_type_resolver_context_for_filename(&descriptor.filename);
     let normal_script = analyze_vue3_normal_script_for_setup(descriptor);
     let normal_type_context =
-        vue3_normal_script_type_context(descriptor, &options.global_type_files);
+        vue3_normal_script_type_context(descriptor, &options.global_type_files, &type_resolver);
     let normal_vue_import_aliases = vue3_normal_script_vue_import_aliases(descriptor);
     let setup_analysis = analyze_vue3_script_setup(
         &descriptor.filename,
@@ -13702,6 +13893,7 @@ fn script_content(
         descriptor.script.is_none(),
         &normal_type_context,
         &normal_vue_import_aliases,
+        &type_resolver,
         options.props_destructure,
         options.is_prod,
     );
@@ -14389,6 +14581,7 @@ fn analyze_vue3_script_setup(
     hoist_static_literals: bool,
     normal_type_context: &Vue27TypeContext,
     normal_vue_import_aliases: &BTreeMap<String, String>,
+    type_resolver: &Vue3TypeResolverContext,
     props_destructure: SfcPropsDestructureMode,
     is_prod: bool,
 ) -> Vue3ScriptSetupAnalysis {
@@ -14419,6 +14612,7 @@ fn analyze_vue3_script_setup(
         source,
         script_source_type_from_attrs(&script_setup.attrs),
         &mut type_context,
+        type_resolver,
     );
     let mut type_analysis = Vue3ScriptSetupAnalysis {
         declared_types: type_context.declared_types,
@@ -14444,6 +14638,7 @@ fn analyze_vue3_script_setup(
         unresolved_import_sources: type_context.unresolved_import_sources,
         silent_unresolved_type_names: type_context.silent_unresolved_type_names,
         type_filename: Some(filename.to_string()),
+        type_resolver: type_resolver.clone(),
         ..Vue3ScriptSetupAnalysis::default()
     };
     collect_vue3_declared_types_from_statements(source, &parsed.program.body, &mut type_analysis);
@@ -14477,6 +14672,7 @@ fn analyze_vue3_script_setup(
         unresolved_import_sources: type_analysis.unresolved_import_sources,
         silent_unresolved_type_names: type_analysis.silent_unresolved_type_names,
         type_filename: Some(filename.to_string()),
+        type_resolver: type_resolver.clone(),
         local_setup_bindings: type_analysis.local_setup_bindings,
         local_setup_binding_types: type_analysis.local_setup_binding_types,
         vue_import_aliases: normal_vue_import_aliases.clone(),
@@ -23397,6 +23593,135 @@ defineModel<import('vuec-typesversions-pkg').ModelValue>()
     }
 
     #[test]
+    fn vue3_compile_script_resolves_package_types_versions_from_project_typescript() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let node_modules = dir.path().join("node_modules");
+        let typescript_pkg = node_modules.join("typescript");
+        std::fs::create_dir_all(&typescript_pkg).expect("create typescript package");
+        std::fs::write(
+            typescript_pkg.join("package.json"),
+            r#"{"version":"5.2.0"}"#,
+        )
+        .expect("write typescript manifest");
+
+        let versioned_pkg = node_modules.join("vuec-typesversions-project-ts");
+        std::fs::create_dir_all(versioned_pkg.join("dist")).expect("create dist types");
+        std::fs::create_dir_all(versioned_pkg.join("ts52").join("feature"))
+            .expect("create ts52 types");
+        std::fs::create_dir_all(versioned_pkg.join("ts50").join("feature"))
+            .expect("create ts50 types");
+        std::fs::create_dir_all(versioned_pkg.join("legacy").join("feature"))
+            .expect("create legacy types");
+        std::fs::write(
+            versioned_pkg.join("package.json"),
+            r#"{
+                "types": "dist/index.d.ts",
+                "typesVersions": {
+                    ">=5.1": {
+                        "dist/index.d.ts": ["ts52/index.d.ts"],
+                        "feature/*": ["ts52/feature/*.d.ts"]
+                    },
+                    ">=5.0": {
+                        "dist/index.d.ts": ["ts50/index.d.ts"],
+                        "feature/*": ["ts50/feature/*.d.ts"]
+                    },
+                    "*": {
+                        "dist/index.d.ts": ["legacy/index.d.ts"],
+                        "feature/*": ["legacy/feature/*.d.ts"]
+                    }
+                }
+            }"#,
+        )
+        .expect("write versioned package manifest");
+        std::fs::write(
+            versioned_pkg.join("dist").join("index.d.ts"),
+            "export interface Props { fallbackRoot: string }",
+        )
+        .expect("write dist fallback types");
+        std::fs::write(
+            versioned_pkg.join("legacy").join("index.d.ts"),
+            "export interface Props { legacyRoot: string }",
+        )
+        .expect("write legacy root types");
+        std::fs::write(
+            versioned_pkg
+                .join("legacy")
+                .join("feature")
+                .join("item.d.ts"),
+            "export type FeatureProps = { legacyFeature: string }",
+        )
+        .expect("write legacy feature types");
+        std::fs::write(
+            versioned_pkg.join("ts50").join("index.d.ts"),
+            "export interface Props { baselineRoot: string }\nexport type ModelValue = import('./model').ModelValue",
+        )
+        .expect("write ts50 root types");
+        std::fs::write(
+            versioned_pkg.join("ts50").join("feature").join("item.d.ts"),
+            "export type FeatureProps = { baselineFeature: boolean }",
+        )
+        .expect("write ts50 feature types");
+        std::fs::write(
+            versioned_pkg.join("ts50").join("model.d.ts"),
+            "export type ModelValue = boolean | string",
+        )
+        .expect("write ts50 model types");
+        std::fs::write(
+            versioned_pkg.join("ts52").join("index.d.ts"),
+            "export interface Props { futureRoot: string }\nexport type ModelValue = import('./model').ModelValue",
+        )
+        .expect("write ts52 root types");
+        std::fs::write(
+            versioned_pkg.join("ts52").join("feature").join("item.d.ts"),
+            "export type FeatureProps = { futureFeature?: number }",
+        )
+        .expect("write ts52 feature types");
+        std::fs::write(
+            versioned_pkg.join("ts52").join("model.d.ts"),
+            "export type ModelValue = number",
+        )
+        .expect("write ts52 model types");
+
+        std::fs::create_dir_all(dir.path().join("src").join("components"))
+            .expect("create component dir");
+        let filename = dir.path().join("src").join("components").join("Comp.vue");
+        let source = r#"<script setup lang="ts">
+import type { Props } from 'vuec-typesversions-project-ts'
+import type { FeatureProps } from 'vuec-typesversions-project-ts/feature/item'
+defineProps<Props & FeatureProps>()
+defineModel<import('vuec-typesversions-project-ts').ModelValue>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("futureRoot: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("futureFeature: { type: Number, required: false }"));
+        assert!(script.content.contains("\"modelValue\": { type: Number },"));
+        assert!(!script.content.contains("baselineRoot"));
+        assert!(!script.content.contains("baselineFeature"));
+        assert!(!script.content.contains("legacyRoot"));
+        assert!(!script.content.contains("legacyFeature"));
+
+        let deps = script.deps.iter().cloned().collect::<BTreeSet<_>>();
+        let expected = [
+            versioned_pkg.join("ts52").join("index.d.ts"),
+            versioned_pkg.join("ts52").join("feature").join("item.d.ts"),
+            versioned_pkg.join("ts52").join("model.d.ts"),
+        ]
+        .into_iter()
+        .map(|path| normalize_path_string(&path))
+        .collect::<BTreeSet<_>>();
+        assert_eq!(deps, expected);
+        assert!(!script.deps.iter().any(|dep| dep.contains('\\')));
+    }
+
+    #[test]
     fn vue3_compile_script_resolves_tsconfig_path_macro_types_and_deps() {
         let dir = tempfile::tempdir().expect("temp dir");
         let node_modules = dir.path().join("node_modules");
@@ -25921,7 +26246,9 @@ defineModel<GlobalModel>()
         .expect("write ignored global");
 
         let filename = dir.path().join("src").join("components").join("Comp.vue");
-        let discovered = vue3_tsconfig_global_type_files(&filename.to_string_lossy())
+        let filename_text = filename.to_string_lossy();
+        let type_resolver = vue3_type_resolver_context_for_filename(&filename_text);
+        let discovered = vue3_tsconfig_global_type_files(&filename_text, &type_resolver)
             .into_iter()
             .map(|path| normalize_path_string(&path))
             .collect::<BTreeSet<_>>();
@@ -26070,7 +26397,9 @@ defineModel<RefGlobalModel>()
         .expect("write default @types global");
 
         let filename = dir.path().join("src").join("components").join("Comp.vue");
-        let discovered = vue3_tsconfig_global_type_files(&filename.to_string_lossy())
+        let filename_text = filename.to_string_lossy();
+        let type_resolver = vue3_type_resolver_context_for_filename(&filename_text);
+        let discovered = vue3_tsconfig_global_type_files(&filename_text, &type_resolver)
             .into_iter()
             .map(|path| normalize_path_string(&path))
             .collect::<BTreeSet<_>>();
@@ -26159,7 +26488,9 @@ defineModel<ScopedGlobalModel>()
         .expect("write tsconfig");
 
         let filename = dir.path().join("src").join("components").join("Comp.vue");
-        let discovered = vue3_tsconfig_global_type_files(&filename.to_string_lossy());
+        let filename_text = filename.to_string_lossy();
+        let type_resolver = vue3_type_resolver_context_for_filename(&filename_text);
+        let discovered = vue3_tsconfig_global_type_files(&filename_text, &type_resolver);
         assert!(discovered.is_empty(), "{:?}", discovered);
 
         let source = r#"<script setup lang="ts">

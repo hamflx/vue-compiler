@@ -7303,6 +7303,147 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_resolves_package_types_versions_from_project_typescript() {
+        let dir = std::env::temp_dir().join(format!(
+            "vuec-node-bridge-package-types-versions-project-ts-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let node_modules = dir.join("node_modules");
+        let typescript_pkg = node_modules.join("typescript");
+        std::fs::create_dir_all(&typescript_pkg).expect("create typescript package");
+        std::fs::write(
+            typescript_pkg.join("package.json"),
+            r#"{"version":"5.2.0"}"#,
+        )
+        .expect("write typescript manifest");
+
+        let versioned_pkg = node_modules.join("vuec-bridge-typesversions-project-ts");
+        std::fs::create_dir_all(versioned_pkg.join("dist")).expect("create dist types");
+        std::fs::create_dir_all(versioned_pkg.join("ts52").join("feature"))
+            .expect("create ts52 types");
+        std::fs::create_dir_all(versioned_pkg.join("ts50").join("feature"))
+            .expect("create ts50 types");
+        std::fs::create_dir_all(versioned_pkg.join("legacy").join("feature"))
+            .expect("create legacy types");
+        std::fs::write(
+            versioned_pkg.join("package.json"),
+            r#"{
+                "types": "dist/index.d.ts",
+                "typesVersions": {
+                    ">=5.1": {
+                        "dist/index.d.ts": ["ts52/index.d.ts"],
+                        "feature/*": ["ts52/feature/*.d.ts"]
+                    },
+                    ">=5.0": {
+                        "dist/index.d.ts": ["ts50/index.d.ts"],
+                        "feature/*": ["ts50/feature/*.d.ts"]
+                    },
+                    "*": {
+                        "dist/index.d.ts": ["legacy/index.d.ts"],
+                        "feature/*": ["legacy/feature/*.d.ts"]
+                    }
+                }
+            }"#,
+        )
+        .expect("write versioned package manifest");
+        std::fs::write(
+            versioned_pkg.join("dist").join("index.d.ts"),
+            "export interface Props { fallbackRoot: string }",
+        )
+        .expect("write dist fallback types");
+        std::fs::write(
+            versioned_pkg.join("legacy").join("index.d.ts"),
+            "export interface Props { legacyRoot: string }",
+        )
+        .expect("write legacy root types");
+        std::fs::write(
+            versioned_pkg
+                .join("legacy")
+                .join("feature")
+                .join("item.d.ts"),
+            "export type FeatureProps = { legacyFeature: string }",
+        )
+        .expect("write legacy feature types");
+        std::fs::write(
+            versioned_pkg.join("ts50").join("index.d.ts"),
+            "export interface Props { baselineRoot: string }\nexport type ModelValue = import('./model').ModelValue",
+        )
+        .expect("write ts50 root types");
+        std::fs::write(
+            versioned_pkg.join("ts50").join("feature").join("item.d.ts"),
+            "export type FeatureProps = { baselineFeature: boolean }",
+        )
+        .expect("write ts50 feature types");
+        std::fs::write(
+            versioned_pkg.join("ts50").join("model.d.ts"),
+            "export type ModelValue = boolean | string",
+        )
+        .expect("write ts50 model types");
+        std::fs::write(
+            versioned_pkg.join("ts52").join("index.d.ts"),
+            "export interface Props { futureRoot: string }\nexport type ModelValue = import('./model').ModelValue",
+        )
+        .expect("write ts52 root types");
+        std::fs::write(
+            versioned_pkg.join("ts52").join("feature").join("item.d.ts"),
+            "export type FeatureProps = { futureFeature?: number }",
+        )
+        .expect("write ts52 feature types");
+        std::fs::write(
+            versioned_pkg.join("ts52").join("model.d.ts"),
+            "export type ModelValue = number",
+        )
+        .expect("write ts52 model types");
+
+        std::fs::create_dir_all(dir.join("src").join("components")).expect("create components");
+        let filename = dir.join("src").join("components").join("Comp.vue");
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "import type { Props } from 'vuec-bridge-typesversions-project-ts'\n",
+                    "import type { FeatureProps } from 'vuec-bridge-typesversions-project-ts/feature/item'\n",
+                    "defineProps<Props & FeatureProps>()\n",
+                    "defineModel<import('vuec-bridge-typesversions-project-ts').ModelValue>()",
+                    "</script>"
+                ),
+                "filename": filename.to_string_lossy()
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = compiled["content"].as_str().unwrap_or_default();
+        assert!(compiled["errors"].as_array().unwrap().is_empty());
+        assert!(content.contains("futureRoot: { type: String, required: true }"));
+        assert!(content.contains("futureFeature: { type: Number, required: false }"));
+        assert!(content.contains("\"modelValue\": { type: Number },"));
+        assert!(!content.contains("baselineRoot"));
+        assert!(!content.contains("baselineFeature"));
+        assert!(!content.contains("legacyRoot"));
+        assert!(!content.contains("legacyFeature"));
+
+        let deps = compiled["deps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|dep| dep.as_str().unwrap().to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected = [
+            versioned_pkg.join("ts52").join("index.d.ts"),
+            versioned_pkg.join("ts52").join("feature").join("item.d.ts"),
+            versioned_pkg.join("ts52").join("model.d.ts"),
+        ]
+        .into_iter()
+        .map(|path| path.to_string_lossy().replace('\\', "/"))
+        .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(deps, expected);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn vue3_sfc_bridge_compile_script_resolves_tsconfig_path_type_deps() {
         let dir = std::env::temp_dir().join(format!(
             "vuec-node-bridge-tsconfig-path-deps-{}",
