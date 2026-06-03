@@ -7000,6 +7000,11 @@ fn vue3_tsconfig_direct_global_type_files(
             &target,
         ));
     }
+    files.extend(vue3_tsconfig_compiler_option_global_type_files(
+        value,
+        config_dir,
+        template_config_dir,
+    ));
     files
 }
 
@@ -7011,6 +7016,145 @@ fn vue3_tsconfig_string_array(value: Option<&serde_json::Value>) -> Vec<String> 
         .filter_map(serde_json::Value::as_str)
         .map(str::to_string)
         .collect()
+}
+
+fn vue3_tsconfig_compiler_option_global_type_files(
+    value: &serde_json::Value,
+    config_dir: &Path,
+    template_config_dir: &Path,
+) -> Vec<PathBuf> {
+    let compiler_options = value
+        .get("compilerOptions")
+        .and_then(serde_json::Value::as_object);
+    let has_configured_type_roots =
+        compiler_options.is_some_and(|options| options.get("typeRoots").is_some());
+    let configured_type_roots =
+        vue3_tsconfig_string_array(compiler_options.and_then(|options| options.get("typeRoots")))
+            .into_iter()
+            .filter_map(|target| {
+                let path = vue3_tsconfig_target_path(config_dir, template_config_dir, &target, "");
+                path.is_dir().then_some(path)
+            })
+            .collect::<Vec<_>>();
+    let type_roots = if has_configured_type_roots {
+        configured_type_roots
+    } else {
+        vue3_tsconfig_default_type_roots(config_dir)
+    };
+    if compiler_options.is_some_and(|options| options.get("types").is_some()) {
+        let types =
+            vue3_tsconfig_string_array(compiler_options.and_then(|options| options.get("types")));
+        return types
+            .into_iter()
+            .flat_map(|type_name| {
+                vue3_tsconfig_named_type_global_type_files(&type_roots, &type_name)
+            })
+            .collect();
+    }
+    type_roots
+        .into_iter()
+        .flat_map(|type_root| vue3_tsconfig_all_type_root_global_type_files(&type_root))
+        .collect()
+}
+
+fn vue3_tsconfig_default_type_roots(config_dir: &Path) -> Vec<PathBuf> {
+    vue3_node_modules_search_paths_from_dir(config_dir)
+        .into_iter()
+        .map(|node_modules| normalize_path_components(node_modules.join("@types")))
+        .filter(|path| path.is_dir())
+        .collect()
+}
+
+fn vue3_tsconfig_named_type_global_type_files(
+    type_roots: &[PathBuf],
+    type_name: &str,
+) -> Vec<PathBuf> {
+    if !vue3_tsconfig_type_name_is_safe(type_name) {
+        return Vec::new();
+    }
+    type_roots
+        .iter()
+        .flat_map(|type_root| vue3_tsconfig_type_name_package_dirs(type_root, type_name))
+        .filter_map(|package_dir| vue3_tsconfig_type_package_global_type_file(&package_dir))
+        .collect()
+}
+
+fn vue3_tsconfig_type_name_is_safe(type_name: &str) -> bool {
+    !type_name.is_empty()
+        && !type_name.contains(':')
+        && !type_name.contains('\\')
+        && !Path::new(type_name).is_absolute()
+        && !type_name
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+}
+
+fn vue3_tsconfig_type_name_package_dirs(type_root: &Path, type_name: &str) -> Vec<PathBuf> {
+    if let Some(scoped) = type_name.strip_prefix('@') {
+        let parts = scoped.split('/').collect::<Vec<_>>();
+        if parts.len() == 2 {
+            return vec![
+                normalize_path_components(type_root.join(format!("@{}", parts[0])).join(parts[1])),
+                normalize_path_components(type_root.join(parts[0]).join(parts[1])),
+                normalize_path_components(type_root.join(format!("{}__{}", parts[0], parts[1]))),
+            ];
+        }
+    }
+    vec![normalize_path_components(type_root.join(type_name))]
+}
+
+fn vue3_tsconfig_all_type_root_global_type_files(type_root: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(type_root) else {
+        return Vec::new();
+    };
+    let mut entries = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    entries.sort();
+    let mut files = Vec::new();
+    for entry in entries {
+        let name = entry
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        if !entry.is_dir() || name.is_empty() || name.starts_with('.') {
+            continue;
+        }
+        if name.starts_with('@') {
+            files.extend(vue3_tsconfig_all_scoped_type_root_global_type_files(&entry));
+        } else if let Some(file) = vue3_tsconfig_type_package_global_type_file(&entry) {
+            files.push(file);
+        }
+    }
+    files
+}
+
+fn vue3_tsconfig_all_scoped_type_root_global_type_files(scope_dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(scope_dir) else {
+        return Vec::new();
+    };
+    let mut entries = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    entries.sort();
+    entries
+        .into_iter()
+        .filter(|entry| entry.is_dir())
+        .filter(|entry| {
+            entry
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| !name.is_empty() && !name.starts_with('.'))
+        })
+        .filter_map(|entry| vue3_tsconfig_type_package_global_type_file(&entry))
+        .collect()
+}
+
+fn vue3_tsconfig_type_package_global_type_file(package_dir: &Path) -> Option<PathBuf> {
+    let path = resolve_vue3_package_type_entry(package_dir, None)?;
+    vue3_tsconfig_global_type_file_is_supported(&path).then_some(path)
 }
 
 fn vue3_tsconfig_global_type_file_is_supported(path: &Path) -> bool {
@@ -25319,6 +25463,201 @@ defineModel<RefGlobalModel>()
             .deps
             .iter()
             .any(|dep| dep.contains("ignored") || dep.contains('\\')));
+    }
+
+    #[test]
+    fn vue3_compile_script_discovers_tsconfig_types_and_type_roots_global_deps() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir_all(dir.path().join("src").join("components"))
+            .expect("create component dir");
+        std::fs::create_dir_all(dir.path().join("typings").join("chosen"))
+            .expect("create chosen type root");
+        std::fs::create_dir_all(dir.path().join("typings").join("@scope").join("tool"))
+            .expect("create scoped type root");
+        std::fs::create_dir_all(dir.path().join("typings").join("ignored"))
+            .expect("create ignored type root");
+        std::fs::create_dir_all(dir.path().join("base-types").join("base-root"))
+            .expect("create base type root");
+        std::fs::create_dir_all(
+            dir.path()
+                .join("node_modules")
+                .join("@types")
+                .join("defaulted"),
+        )
+        .expect("create default @types root");
+        std::fs::create_dir_all(dir.path().join("config")).expect("create config dir");
+        std::fs::create_dir_all(dir.path().join("project")).expect("create project dir");
+        std::fs::write(
+            dir.path().join("tsconfig.json"),
+            r#"{
+                "extends": "./config/base.json",
+                "compilerOptions": {
+                    "types": ["chosen", "@scope/tool"],
+                    "typeRoots": ["./typings"]
+                },
+                "references": [{ "path": "./project" }]
+            }"#,
+        )
+        .expect("write root tsconfig");
+        std::fs::write(
+            dir.path().join("config").join("base.json"),
+            r#"{
+                "compilerOptions": {
+                    "typeRoots": ["${configDir}/base-types"]
+                }
+            }"#,
+        )
+        .expect("write base tsconfig");
+        std::fs::write(dir.path().join("project").join("tsconfig.json"), "{}")
+            .expect("write referenced tsconfig");
+        std::fs::write(
+            dir.path().join("typings").join("chosen").join("index.d.ts"),
+            "declare interface ChosenGlobalProps { chosen: string }",
+        )
+        .expect("write chosen global");
+        std::fs::write(
+            dir.path()
+                .join("typings")
+                .join("@scope")
+                .join("tool")
+                .join("index.d.ts"),
+            "declare type ScopedGlobalModel = number | boolean",
+        )
+        .expect("write scoped global");
+        std::fs::write(
+            dir.path()
+                .join("typings")
+                .join("ignored")
+                .join("index.d.ts"),
+            "declare interface IgnoredTypeRootGlobalProps { ignored: string }",
+        )
+        .expect("write ignored type root");
+        std::fs::write(
+            dir.path()
+                .join("base-types")
+                .join("base-root")
+                .join("index.d.ts"),
+            "declare interface BaseRootGlobalProps { baseRoot?: number }",
+        )
+        .expect("write base root global");
+        std::fs::write(
+            dir.path()
+                .join("node_modules")
+                .join("@types")
+                .join("defaulted")
+                .join("index.d.ts"),
+            "declare interface DefaultTypesGlobalProps { defaulted: boolean }",
+        )
+        .expect("write default @types global");
+
+        let filename = dir.path().join("src").join("components").join("Comp.vue");
+        let discovered = vue3_tsconfig_global_type_files(&filename.to_string_lossy())
+            .into_iter()
+            .map(|path| normalize_path_string(&path))
+            .collect::<BTreeSet<_>>();
+        let expected_discovered = [
+            dir.path()
+                .join("base-types")
+                .join("base-root")
+                .join("index.d.ts"),
+            dir.path().join("typings").join("chosen").join("index.d.ts"),
+            dir.path()
+                .join("typings")
+                .join("@scope")
+                .join("tool")
+                .join("index.d.ts"),
+            dir.path()
+                .join("node_modules")
+                .join("@types")
+                .join("defaulted")
+                .join("index.d.ts"),
+        ]
+        .into_iter()
+        .map(|path| normalize_path_string(&path))
+        .collect::<BTreeSet<_>>();
+        assert_eq!(discovered, expected_discovered);
+
+        let source = r#"<script setup lang="ts">
+defineProps<ChosenGlobalProps & BaseRootGlobalProps & DefaultTypesGlobalProps>()
+defineModel<ScopedGlobalModel>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("chosen: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("baseRoot: { type: Number, required: false }"));
+        assert!(script
+            .content
+            .contains("defaulted: { type: Boolean, required: true }"));
+        assert!(script
+            .content
+            .contains("\"modelValue\": { type: [Number, Boolean] },"));
+        assert!(!script.content.contains("ignored: { type: String"));
+
+        let deps = script.deps.iter().cloned().collect::<BTreeSet<_>>();
+        assert_eq!(deps, expected_discovered);
+        assert!(!script
+            .deps
+            .iter()
+            .any(|dep| dep.contains("ignored") || dep.contains('\\')));
+    }
+
+    #[test]
+    fn vue3_compile_script_respects_empty_configured_tsconfig_type_roots() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir_all(dir.path().join("src").join("components"))
+            .expect("create component dir");
+        std::fs::create_dir_all(
+            dir.path()
+                .join("node_modules")
+                .join("@types")
+                .join("defaulted"),
+        )
+        .expect("create default @types root");
+        std::fs::write(
+            dir.path()
+                .join("node_modules")
+                .join("@types")
+                .join("defaulted")
+                .join("index.d.ts"),
+            "declare interface DefaultTypesGlobalProps { defaulted: boolean }",
+        )
+        .expect("write default @types global");
+        std::fs::write(
+            dir.path().join("tsconfig.json"),
+            r#"{
+                "compilerOptions": {
+                    "typeRoots": ["./missing"]
+                }
+            }"#,
+        )
+        .expect("write tsconfig");
+
+        let filename = dir.path().join("src").join("components").join("Comp.vue");
+        let discovered = vue3_tsconfig_global_type_files(&filename.to_string_lossy());
+        assert!(discovered.is_empty(), "{:?}", discovered);
+
+        let source = r#"<script setup lang="ts">
+defineProps<DefaultTypesGlobalProps>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(
+            script.errors.iter().any(|error| error
+                .contains("Unresolvable type reference or unsupported built-in utility type")),
+            "{:?}",
+            script.errors
+        );
+        assert!(script.deps.is_empty(), "{:?}", script.deps);
+        assert!(!script.content.contains("defaulted: { type: Boolean"));
     }
 
     #[test]

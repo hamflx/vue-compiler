@@ -7535,6 +7535,185 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_discovers_tsconfig_types_type_roots_deps() {
+        let dir = std::env::temp_dir().join(format!(
+            "vuec-node-bridge-tsconfig-types-type-roots-deps-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src").join("components")).expect("create components");
+        std::fs::create_dir_all(dir.join("typings").join("chosen")).expect("create chosen");
+        std::fs::create_dir_all(dir.join("typings").join("@scope").join("tool"))
+            .expect("create scoped");
+        std::fs::create_dir_all(dir.join("typings").join("ignored")).expect("create ignored");
+        std::fs::create_dir_all(dir.join("base-types").join("base-root")).expect("create base");
+        std::fs::create_dir_all(dir.join("node_modules").join("@types").join("defaulted"))
+            .expect("create default @types");
+        std::fs::create_dir_all(dir.join("config")).expect("create config");
+        std::fs::create_dir_all(dir.join("project")).expect("create project");
+        std::fs::write(
+            dir.join("tsconfig.json"),
+            r#"{
+                "extends": "./config/base.json",
+                "compilerOptions": {
+                    "types": ["chosen", "@scope/tool"],
+                    "typeRoots": ["./typings"]
+                },
+                "references": [{ "path": "./project" }]
+            }"#,
+        )
+        .expect("write root tsconfig");
+        std::fs::write(
+            dir.join("config").join("base.json"),
+            r#"{
+                "compilerOptions": {
+                    "typeRoots": ["${configDir}/base-types"]
+                }
+            }"#,
+        )
+        .expect("write base tsconfig");
+        std::fs::write(dir.join("project").join("tsconfig.json"), "{}")
+            .expect("write referenced tsconfig");
+        std::fs::write(
+            dir.join("typings").join("chosen").join("index.d.ts"),
+            "declare interface ChosenGlobalProps { chosen: string }",
+        )
+        .expect("write chosen global");
+        std::fs::write(
+            dir.join("typings")
+                .join("@scope")
+                .join("tool")
+                .join("index.d.ts"),
+            "declare type ScopedGlobalModel = number | boolean",
+        )
+        .expect("write scoped global");
+        std::fs::write(
+            dir.join("typings").join("ignored").join("index.d.ts"),
+            "declare interface IgnoredTypeRootGlobalProps { ignored: string }",
+        )
+        .expect("write ignored global");
+        std::fs::write(
+            dir.join("base-types").join("base-root").join("index.d.ts"),
+            "declare interface BaseRootGlobalProps { baseRoot?: number }",
+        )
+        .expect("write base root global");
+        std::fs::write(
+            dir.join("node_modules")
+                .join("@types")
+                .join("defaulted")
+                .join("index.d.ts"),
+            "declare interface DefaultTypesGlobalProps { defaulted: boolean }",
+        )
+        .expect("write default @types global");
+
+        let filename = dir.join("src").join("components").join("Comp.vue");
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "defineProps<ChosenGlobalProps & BaseRootGlobalProps & DefaultTypesGlobalProps>()\n",
+                    "defineModel<ScopedGlobalModel>()",
+                    "</script>"
+                ),
+                "filename": filename.to_string_lossy()
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = compiled["content"].as_str().unwrap_or_default();
+        assert!(compiled["errors"].as_array().unwrap().is_empty());
+        assert!(content.contains("chosen: { type: String, required: true }"));
+        assert!(content.contains("baseRoot: { type: Number, required: false }"));
+        assert!(content.contains("defaulted: { type: Boolean, required: true }"));
+        assert!(content.contains("\"modelValue\": { type: [Number, Boolean] },"));
+        assert!(!content.contains("ignored: { type: String"));
+
+        let deps = compiled["deps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|dep| dep.as_str().unwrap().to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected = [
+            dir.join("base-types").join("base-root").join("index.d.ts"),
+            dir.join("typings").join("chosen").join("index.d.ts"),
+            dir.join("typings")
+                .join("@scope")
+                .join("tool")
+                .join("index.d.ts"),
+            dir.join("node_modules")
+                .join("@types")
+                .join("defaulted")
+                .join("index.d.ts"),
+        ]
+        .into_iter()
+        .map(|path| path.to_string_lossy().replace('\\', "/"))
+        .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(deps, expected);
+        assert!(!deps.iter().any(|dep| dep.contains("ignored")));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn vue3_sfc_bridge_compile_script_respects_empty_configured_tsconfig_type_roots() {
+        let dir = std::env::temp_dir().join(format!(
+            "vuec-node-bridge-empty-tsconfig-type-roots-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src").join("components")).expect("create components");
+        std::fs::create_dir_all(dir.join("node_modules").join("@types").join("defaulted"))
+            .expect("create default @types");
+        std::fs::write(
+            dir.join("node_modules")
+                .join("@types")
+                .join("defaulted")
+                .join("index.d.ts"),
+            "declare interface DefaultTypesGlobalProps { defaulted: boolean }",
+        )
+        .expect("write default @types global");
+        std::fs::write(
+            dir.join("tsconfig.json"),
+            r#"{
+                "compilerOptions": {
+                    "typeRoots": ["./missing"]
+                }
+            }"#,
+        )
+        .expect("write tsconfig");
+
+        let filename = dir.join("src").join("components").join("Comp.vue");
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "defineProps<DefaultTypesGlobalProps>()",
+                    "</script>"
+                ),
+                "filename": filename.to_string_lossy()
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let errors = compiled["errors"].as_array().unwrap();
+        assert!(errors
+            .iter()
+            .any(|error| error.as_str().is_some_and(|message| {
+                message.contains("Unresolvable type reference or unsupported built-in utility type")
+            })));
+        assert!(compiled["deps"].as_array().unwrap().is_empty());
+        assert!(!compiled["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("defaulted: { type: Boolean"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn vue3_sfc_bridge_compile_script_resolves_global_type_re_exports_deps() {
         let dir = std::env::temp_dir().join(format!(
             "vuec-node-bridge-global-re-export-deps-{}",
