@@ -11615,13 +11615,6 @@ fn vue3_type_query_name_key(query: &TSTypeQuery<'_>) -> Option<String> {
     }
 }
 
-fn vue3_type_query_identifier_key(query: &TSTypeQuery<'_>) -> Option<String> {
-    match &query.expr_name {
-        TSTypeQueryExprName::IdentifierReference(identifier) => Some(identifier.name.to_string()),
-        _ => None,
-    }
-}
-
 fn vue3_import_type_qualifier_key(qualifier: &TSImportTypeQualifier<'_>) -> String {
     match qualifier {
         TSImportTypeQualifier::Identifier(identifier) => identifier.name.to_string(),
@@ -19706,7 +19699,7 @@ fn infer_vue3_keyof_runtime_type(
                 .cloned()
         }
         TSType::TSTypeQuery(query) => {
-            let name = vue3_type_query_identifier_key(query)?;
+            let name = vue3_type_query_name_key(query)?;
             analysis.keyof_type_query_declared_types.get(&name).cloned()
         }
         TSType::TSParenthesizedType(parenthesized) => {
@@ -19927,7 +19920,7 @@ fn infer_vue3_runtime_type(node: &TSType<'_>, analysis: &Vue3ScriptSetupAnalysis
             vec!["Unknown".into()]
         }
         TSType::TSTypeQuery(query) => {
-            if let Some(name) = vue3_type_query_identifier_key(query) {
+            if let Some(name) = vue3_type_query_name_key(query) {
                 if let Some(types) = analysis.type_query_declared_types.get(&name) {
                     return types.clone();
                 }
@@ -20114,7 +20107,7 @@ fn infer_vue3_define_model_runtime_type(
             vec!["Unknown".into()]
         }
         TSType::TSTypeQuery(query) => {
-            if let Some(name) = vue3_type_query_identifier_key(query) {
+            if let Some(name) = vue3_type_query_name_key(query) {
                 if let Some(types) = analysis.define_model_type_query_declared_types.get(&name) {
                     return types.clone();
                 }
@@ -28439,6 +28432,44 @@ defineModel<typeof flag | typeof list>()
         assert!(script
             .content
             .contains("\"modelValue\": { type: [Boolean, Array] },"));
+        assert!(script.deps.is_empty(), "{:?}", script.deps);
+    }
+
+    #[test]
+    fn vue3_compile_script_resolves_qualified_type_query_runtime_types() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "Comp.vue",
+            r#"<script setup lang="ts">
+declare namespace Values {
+  export declare const text: string
+  export declare const boxed: { id: string }
+  export declare const list: string[]
+}
+type Props = {
+  text: typeof Values.text
+  keys: keyof typeof Values.boxed
+  list: typeof Values.list
+}
+defineProps<Props>()
+defineModel<typeof Values.text | typeof Values.list>()
+</script>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("text: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("keys: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("list: { type: Array, required: true }"));
+        assert!(script
+            .content
+            .contains("\"modelValue\": { type: [String, Array] },"));
         assert!(script.deps.is_empty(), "{:?}", script.deps);
     }
 
