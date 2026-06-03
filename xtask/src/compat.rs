@@ -12813,6 +12813,17 @@ fn rewrite_vue3_sfc_public_api_spec_imports(prepared_root: &Path) -> Result<()> 
         "import { rewriteDefault } from '../src'",
         "import { rewriteDefault } from '@vue/compiler-sfc'",
     )?;
+
+    let compile_style_spec = prepared_root
+        .join("packages")
+        .join("compiler-sfc")
+        .join("__tests__")
+        .join("compileStyle.spec.ts");
+    rewrite_text_file_import(
+        &compile_style_spec,
+        "from '../src/compileStyle'",
+        "from '@vue/compiler-sfc'",
+    )?;
     Ok(())
 }
 
@@ -13511,9 +13522,9 @@ fn conformance_coverage_files(
             let counts = json_conformance_file_counts(result);
             let file_source = conformance_coverage_file_kind(&path, source);
             files.push(ConformanceCoverageFile {
-                path,
+                path: path.clone(),
                 source: file_source,
-                reason: conformance_coverage_file_reason(file_source, reason),
+                reason: conformance_coverage_file_reason(&path, file_source, reason),
                 counts,
             });
         }
@@ -13527,6 +13538,7 @@ fn conformance_coverage_file_kind(
 ) -> ConformanceCoverageKind {
     if path.ends_with("packages/compiler-sfc/__tests__/parse.spec.ts")
         || path.ends_with("packages/compiler-sfc/__tests__/rewriteDefault.spec.ts")
+        || path.ends_with("packages/compiler-sfc/__tests__/compileStyle.spec.ts")
     {
         ConformanceCoverageKind::RustBacked
     } else if path.ends_with("packages/compiler-sfc/test/compileStyle.spec.ts") {
@@ -13581,10 +13593,17 @@ fn conformance_coverage_file_kind(
 }
 
 fn conformance_coverage_file_reason(
+    path: &str,
     source: ConformanceCoverageKind,
     default_reason: &str,
 ) -> String {
     match source {
+        ConformanceCoverageKind::RustBacked
+            if path.ends_with("packages/compiler-sfc/__tests__/compileStyle.spec.ts") =>
+        {
+            "Official Vue 3 SFC compileStyle file imports the public @vue/compiler-sfc API and routes CSS scoped/modules/preprocess compilation through vuec_node_bridge into Rust; the JavaScript package boundary only materializes caller-provided preprocess additionalData callbacks and normalizes public result shape."
+                .to_string()
+        }
         ConformanceCoverageKind::RustBacked => {
             "Official file exercises compiler behavior routed through vuec_node_bridge into Rust parser/transform/codegen or Rust-backed projection implementation; generated import shims only preserve official import paths and materialize Rust projection results."
                 .to_string()
@@ -15618,6 +15637,11 @@ mod tests {
             "import { rewriteDefault } from '../src'\nimport { rewriteDefaultAST } from '../src/rewriteDefault'\n",
         )
         .unwrap();
+        fs::write(
+            tests.join("compileStyle.spec.ts"),
+            "import { compileStyle, compileStyleAsync } from '../src/compileStyle'\n",
+        )
+        .unwrap();
 
         rewrite_vue3_sfc_public_api_spec_imports(&temp).unwrap();
         rewrite_vue3_sfc_public_api_spec_imports(&temp).unwrap();
@@ -15633,6 +15657,11 @@ mod tests {
         assert!(rewrite_default_spec
             .contains("import { rewriteDefaultAST } from '../src/rewriteDefault'"));
         assert_eq!(rewrite_default_spec.matches("@vue/compiler-sfc").count(), 1);
+
+        let compile_style_spec = fs::read_to_string(tests.join("compileStyle.spec.ts")).unwrap();
+        assert!(compile_style_spec
+            .contains("import { compileStyle, compileStyleAsync } from '@vue/compiler-sfc'"));
+        assert_eq!(compile_style_spec.matches("@vue/compiler-sfc").count(), 1);
         let _ = fs::remove_dir_all(temp);
     }
 
@@ -15678,6 +15707,14 @@ mod tests {
                   ]
                 },
                 {
+                  "name": "F:/repo/prepared/vue3-sfc/packages/compiler-sfc/__tests__/compileStyle.spec.ts",
+                  "assertionResults": [
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" }
+                  ]
+                },
+                {
                   "name": "F:/repo/prepared/vue3-sfc/packages/compiler-sfc/__tests__/compileScript.spec.ts",
                   "assertionResults": [
                     { "status": "passed" }
@@ -15702,8 +15739,8 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             counts: ConformanceExecutionCounts {
-                total: 6,
-                pass: 5,
+                total: 9,
+                pass: 8,
                 fail: 1,
                 skip: 0,
                 pending: 0,
@@ -15717,8 +15754,8 @@ mod tests {
         );
 
         assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
-        assert_eq!(coverage.rust_backed_pass, 4);
-        assert_eq!(coverage.rust_backed_total, 4);
+        assert_eq!(coverage.rust_backed_pass, 7);
+        assert_eq!(coverage.rust_backed_total, 7);
         assert_eq!(
             coverage.files[0].source,
             ConformanceCoverageKind::RustBacked
@@ -15727,8 +15764,15 @@ mod tests {
             coverage.files[1].source,
             ConformanceCoverageKind::RustBacked
         );
-        assert_eq!(coverage.files[2].source, ConformanceCoverageKind::Mixed);
+        assert_eq!(
+            coverage.files[2].source,
+            ConformanceCoverageKind::RustBacked
+        );
+        assert!(coverage.files[2]
+            .reason
+            .contains("additionalData callbacks"));
         assert_eq!(coverage.files[3].source, ConformanceCoverageKind::Mixed);
+        assert_eq!(coverage.files[4].source, ConformanceCoverageKind::Mixed);
         assert_eq!(
             coverage
                 .counts_by_source

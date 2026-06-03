@@ -478,12 +478,42 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
         "sfc.compileStyle" | "sfc.compileStyleAsync" => {
             let source = string_field(&payload, "source");
             let filename = string_field_or(&payload, "filename", "anonymous.vue");
-            let mut compiler = SfcCompiler::new();
-            let descriptor = compiler.parse(filename, &source);
             let options = sfc_style_options(payload.get("options"));
-            Ok(serde_json::to_value(
-                compiler.compile_style(&descriptor, options),
-            )?)
+            let style = compile_style(
+                &source,
+                StyleCompileOptions {
+                    id: options.id.clone(),
+                    scoped: options.scoped,
+                    vars: options.vars.clone(),
+                    is_prod: options.is_prod,
+                    css_var_name_style: options.css_var_name_style,
+                    css_var_ignore_line_comments: options.css_var_ignore_line_comments,
+                    filename: Some(filename),
+                    source_map_source: Some(source.clone()),
+                    source_map_file_id: Some(vuec_source::FileId(0)),
+                    source_map_base_offset: 0,
+                    source_map: options.source_map,
+                    modules: options.modules,
+                    modules_options: options.modules_options.clone(),
+                    preprocess_lang: options.preprocess_lang,
+                    preprocess_options: options.preprocess_options,
+                    warn_deprecated_scoped_selectors: options.warn_deprecated_scoped_selectors,
+                },
+            );
+            let mut value = json!({
+                "code": style.code,
+                "map": style.map,
+                "errors": style.errors,
+                "rawResult": ["postcss-result"],
+                "dependencies": style.dependencies,
+            });
+            if !style.diagnostics.is_empty() {
+                value["diagnostics"] = json!(style.diagnostics);
+            }
+            if let Some(modules) = style.modules {
+                value["modules"] = json!(modules);
+            }
+            Ok(value)
         }
         "sfc.vue27.compileStyle" | "sfc.vue27.compileStyleAsync" => {
             let source = string_field(&payload, "source");
@@ -4549,6 +4579,46 @@ mod tests {
         assert!(code.contains(".foo[data-v-test]"));
         assert!(code.contains("var(--test-color)"));
         assert!(code.contains("var(--test-font_size)"));
+    }
+
+    #[test]
+    fn vue3_sfc_bridge_compile_style_compiles_raw_css_source() {
+        let compiled = dispatch(
+            "sfc.compileStyle",
+            json!({
+                "source": ".foo { color: red; }",
+                "filename": "test.css",
+                "options": {
+                    "id": "data-v-test",
+                    "scoped": true
+                }
+            }),
+        )
+        .expect("vue3 style");
+
+        let code = compiled["code"].as_str().unwrap_or("");
+        assert!(code.contains(".foo[data-v-test] { color: red;"));
+        assert!(compiled["errors"].as_array().unwrap().is_empty());
+        assert_eq!(compiled["rawResult"], json!(["postcss-result"]));
+
+        let modules = dispatch(
+            "sfc.compileStyleAsync",
+            json!({
+                "source": ".red { color: red; } :global(.blue) { color: blue; }",
+                "filename": "test.css",
+                "options": {
+                    "id": "test",
+                    "modules": true
+                }
+            }),
+        )
+        .expect("vue3 style modules");
+
+        assert!(modules["modules"]["red"]
+            .as_str()
+            .unwrap_or("")
+            .contains("_red_"));
+        assert!(modules["modules"].get("blue").is_none());
     }
 
     #[test]

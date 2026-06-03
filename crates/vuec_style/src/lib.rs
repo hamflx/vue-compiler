@@ -216,6 +216,7 @@ pub fn compile_style(source: &str, options: StyleCompileOptions) -> StyleCompile
             Some(result.modules)
         }
     } else {
+        code = normalize_public_closing_brace_whitespace(&code);
         None
     };
     if let Some(diagnostic) = missing_import_diagnostic(source, &options) {
@@ -372,6 +373,101 @@ fn normalize_style_output(source: &str) -> String {
         .join("\n")
 }
 
+fn normalize_public_closing_brace_whitespace(source: &str) -> String {
+    let mut output = String::new();
+    let mut state = CssScannerState::Normal;
+    let mut index = 0usize;
+    while index < source.len() {
+        let Some(ch) = source[index..].chars().next() else {
+            break;
+        };
+        match state {
+            CssScannerState::Normal => {
+                if source[index..].starts_with("/*") {
+                    let Some(end_offset) = source[index + 2..].find("*/") else {
+                        output.push_str(&source[index..]);
+                        break;
+                    };
+                    let end = index + 2 + end_offset + 2;
+                    output.push_str(&source[index..end]);
+                    index = end;
+                    continue;
+                }
+                match ch {
+                    '\'' => state = CssScannerState::SingleQuote,
+                    '"' => state = CssScannerState::DoubleQuote,
+                    '}' => {
+                        normalize_pending_closing_brace_whitespace(&mut output);
+                        output.push('}');
+                        index += ch.len_utf8();
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+            CssScannerState::SingleQuote => {
+                if ch == '\\' {
+                    output.push(ch);
+                    index += ch.len_utf8();
+                    if index < source.len() {
+                        let escaped = source[index..].chars().next().expect("valid char boundary");
+                        output.push(escaped);
+                        index += escaped.len_utf8();
+                    }
+                    continue;
+                }
+                if ch == '\'' {
+                    state = CssScannerState::Normal;
+                }
+            }
+            CssScannerState::DoubleQuote => {
+                if ch == '\\' {
+                    output.push(ch);
+                    index += ch.len_utf8();
+                    if index < source.len() {
+                        let escaped = source[index..].chars().next().expect("valid char boundary");
+                        output.push(escaped);
+                        index += escaped.len_utf8();
+                    }
+                    continue;
+                }
+                if ch == '"' {
+                    state = CssScannerState::Normal;
+                }
+            }
+            CssScannerState::BlockComment => {}
+        }
+        output.push(ch);
+        index += ch.len_utf8();
+    }
+    output
+}
+
+fn normalize_pending_closing_brace_whitespace(output: &mut String) {
+    let line_start = output.rfind('\n').map_or(0, |index| index + 1);
+    let line_suffix = &output[line_start..];
+    if !line_suffix.is_empty()
+        && line_suffix
+            .chars()
+            .all(|ch| matches!(ch, ' ' | '\t' | '\r'))
+    {
+        output.truncate(line_start);
+        return;
+    }
+
+    let original_len = output.len();
+    while output.ends_with([' ', '\t', '\r']) {
+        output.pop();
+    }
+    if output.len() != original_len && !output.ends_with('\n') {
+        output.push('\n');
+    }
+}
+
+fn css_block_body_has_trailing_whitespace(body: &str) -> bool {
+    body.chars().next_back().is_some_and(char::is_whitespace)
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct PreprocessResult {
     code: String,
@@ -520,7 +616,7 @@ fn sass_dependencies(source: &str, options: &StyleCompileOptions) -> Vec<String>
     for import in sass_imports(source) {
         for candidate in sass_import_candidates(&base_dir, &import) {
             if candidate.exists() {
-                dependencies.push(normalize_dependency_path(
+                dependencies.push(normalize_native_dependency_path(
                     &std::fs::canonicalize(&candidate).unwrap_or(candidate),
                 ));
                 break;
@@ -595,6 +691,16 @@ fn sass_import_candidates(base_dir: &Path, import: &str) -> Vec<PathBuf> {
 fn normalize_dependency_path(path: &Path) -> String {
     let mut value = path.to_string_lossy().replace('\\', "/");
     if let Some(stripped) = value.strip_prefix("//?/") {
+        value = stripped.to_string();
+    }
+    value
+}
+
+fn normalize_native_dependency_path(path: &Path) -> String {
+    let mut value = path.to_string_lossy().to_string();
+    if let Some(stripped) = value.strip_prefix(r"\\?\") {
+        value = stripped.to_string();
+    } else if let Some(stripped) = value.strip_prefix("//?/") {
         value = stripped.to_string();
     }
     value
@@ -2002,7 +2108,9 @@ fn rewrite_css_items(
                 } else {
                     output.push_str(rewritten_body.trim());
                 }
-                output.push('\n');
+                if css_block_body_has_trailing_whitespace(body) {
+                    output.push('\n');
+                }
             } else {
                 output.push_str(&rewritten_body);
             }
@@ -2470,12 +2578,17 @@ fn rewrite_nested_scoped_rule_body(
     let mut declarations = String::new();
     let mut nested_blocks = Vec::new();
     let mut ordered_output = String::new();
+    let mut trim_wrapped_declaration_semicolon = false;
     let mut cursor = 0usize;
     while cursor < body.len() {
         let whitespace_start = cursor;
         cursor = skip_css_whitespace(body, cursor);
         if cursor > whitespace_start {
-            push_normalized_css_whitespace(&mut declarations, &body[whitespace_start..cursor]);
+            if wrap_declarations {
+                declarations.push_str(&body[whitespace_start..cursor]);
+            } else {
+                push_normalized_css_whitespace(&mut declarations, &body[whitespace_start..cursor]);
+            }
         }
         if cursor >= body.len() {
             break;
@@ -2516,6 +2629,7 @@ fn rewrite_nested_scoped_rule_body(
             cursor = end;
             continue;
         }
+        let nested_body = &body[delimiter + 1..close];
         if !wrap_declarations {
             flush_scoped_nested_declarations(
                 &mut ordered_output,
@@ -2523,8 +2637,10 @@ fn rewrite_nested_scoped_rule_body(
                 keyframes,
                 true,
             );
+        } else if nested_blocks.is_empty() {
+            trim_wrapped_declaration_semicolon =
+                nested_block_trims_previous_declaration_semicolon(prelude, nested_body);
         }
-        let nested_body = &body[delimiter + 1..close];
         if prelude.starts_with('@') {
             let rewritten_prelude = rewrite_at_rule_prelude(prelude, keyframes);
             let next_context = if is_keyframes_at_rule(prelude) {
@@ -2533,7 +2649,11 @@ fn rewrite_nested_scoped_rule_body(
                 CssBlockContext::Container
             };
             let nested_rewritten =
-                rewrite_css_items(nested_body, scope_id, keyframes, next_context);
+                if wrap_declarations && next_context == CssBlockContext::Container {
+                    rewrite_nested_scoped_rule_body(nested_body, scope_id, keyframes, true)
+                } else {
+                    rewrite_css_items(nested_body, scope_id, keyframes, next_context)
+                };
             let mut block = String::new();
             block.push_str(&rewritten_prelude);
             block.push_str(brace_spacing);
@@ -2595,9 +2715,11 @@ fn rewrite_nested_scoped_rule_body(
 
     let mut output = String::new();
     if wrap_declarations {
-        let declarations = rewrite_scoped_declaration_body(&declarations, keyframes);
-        let declarations = normalize_nested_scoped_declarations(&declarations);
-        if !declarations.trim().is_empty() {
+        if let Some(declarations) = format_scoped_nested_declarations(
+            &declarations,
+            keyframes,
+            trim_wrapped_declaration_semicolon,
+        ) {
             output.push_str("\n&[");
             output.push_str(scope_id);
             output.push_str("] {");
@@ -2637,6 +2759,196 @@ fn flush_scoped_nested_declarations(
 
 fn rewrite_scoped_declaration_body(body: &str, keyframes: &[(String, String)]) -> String {
     rewrite_animation_declarations(body, keyframes)
+}
+
+fn format_scoped_nested_declarations(
+    declarations: &str,
+    keyframes: &[(String, String)],
+    trim_last_semicolon: bool,
+) -> Option<String> {
+    let mut declarations = rewrite_scoped_declaration_body(declarations, keyframes);
+    if trim_last_semicolon {
+        declarations = remove_last_top_level_semicolon(&declarations);
+    }
+    if declarations.trim().is_empty() {
+        return None;
+    }
+    if declarations.contains('\n') || declarations.contains('\r') {
+        Some(declarations.trim_end().to_string())
+    } else {
+        Some(normalize_nested_scoped_declarations(&declarations))
+    }
+}
+
+fn nested_block_trims_previous_declaration_semicolon(prelude: &str, body: &str) -> bool {
+    if prelude.starts_with('@') {
+        if is_keyframes_at_rule(prelude) {
+            return false;
+        }
+        return first_nested_style_rule_has_terminal_semicolon(body).is_some_and(|has| !has);
+    }
+    top_level_declarations_have_terminal_semicolon(body).is_some_and(|has| !has)
+}
+
+fn first_nested_style_rule_has_terminal_semicolon(body: &str) -> Option<bool> {
+    let mut cursor = 0usize;
+    while cursor < body.len() {
+        cursor = skip_css_whitespace(body, cursor);
+        if cursor >= body.len() {
+            break;
+        }
+        if body[cursor..].starts_with("/*") {
+            let Some(end_offset) = body[cursor + 2..].find("*/") else {
+                break;
+            };
+            cursor += 2 + end_offset + 2;
+            continue;
+        }
+        let Some((delimiter, delimiter_ch)) = find_next_css_delimiter(body, cursor) else {
+            break;
+        };
+        if delimiter_ch == ';' {
+            cursor = delimiter + 1;
+            continue;
+        }
+        let prelude = body[cursor..delimiter].trim();
+        let Some(close) = find_matching_brace(body, delimiter) else {
+            break;
+        };
+        if css_prelude_is_block_declaration(prelude) {
+            cursor = css_block_declaration_end(body, close);
+            continue;
+        }
+        if prelude.starts_with('@') {
+            if let Some(has_semicolon) =
+                first_nested_style_rule_has_terminal_semicolon(&body[delimiter + 1..close])
+            {
+                return Some(has_semicolon);
+            }
+        } else {
+            return top_level_declarations_have_terminal_semicolon(&body[delimiter + 1..close]);
+        }
+        cursor = close + 1;
+    }
+    None
+}
+
+fn top_level_declarations_have_terminal_semicolon(body: &str) -> Option<bool> {
+    let mut cursor = 0usize;
+    let mut terminal_semicolon = None;
+    while cursor < body.len() {
+        let whitespace_start = cursor;
+        cursor = skip_css_whitespace(body, cursor);
+        if cursor >= body.len() {
+            break;
+        }
+        if body[cursor..].starts_with("/*") {
+            let Some(end_offset) = body[cursor + 2..].find("*/") else {
+                break;
+            };
+            cursor += 2 + end_offset + 2;
+            continue;
+        }
+        if cursor > whitespace_start && terminal_semicolon.is_none() {
+            terminal_semicolon = None;
+        }
+        let Some((delimiter, delimiter_ch)) = find_next_css_delimiter(body, cursor) else {
+            if !body[cursor..].trim().is_empty() {
+                terminal_semicolon = Some(false);
+            }
+            break;
+        };
+        if delimiter_ch == ';' {
+            terminal_semicolon = Some(true);
+            cursor = delimiter + 1;
+            continue;
+        }
+        let prelude = body[cursor..delimiter].trim();
+        let Some(close) = find_matching_brace(body, delimiter) else {
+            break;
+        };
+        if css_prelude_is_block_declaration(prelude) {
+            let end = css_block_declaration_end(body, close);
+            terminal_semicolon = Some(end > close + 1);
+            cursor = end;
+            continue;
+        }
+        break;
+    }
+    terminal_semicolon
+}
+
+fn remove_last_top_level_semicolon(source: &str) -> String {
+    let Some(index) = last_top_level_semicolon(source) else {
+        return source.to_string();
+    };
+    let mut output = String::with_capacity(source.len().saturating_sub(1));
+    output.push_str(&source[..index]);
+    output.push_str(&source[index + 1..]);
+    output
+}
+
+fn last_top_level_semicolon(source: &str) -> Option<usize> {
+    let mut state = CssScannerState::Normal;
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut last = None;
+    let mut index = 0usize;
+    while index < source.len() {
+        let ch = source[index..].chars().next()?;
+        match state {
+            CssScannerState::Normal => {
+                if source[index..].starts_with("/*") {
+                    state = CssScannerState::BlockComment;
+                    index += 2;
+                    continue;
+                }
+                match ch {
+                    '\'' => state = CssScannerState::SingleQuote,
+                    '"' => state = CssScannerState::DoubleQuote,
+                    '(' => paren_depth += 1,
+                    ')' if paren_depth > 0 => paren_depth -= 1,
+                    '[' => bracket_depth += 1,
+                    ']' if bracket_depth > 0 => bracket_depth -= 1,
+                    ';' if paren_depth == 0 && bracket_depth == 0 => last = Some(index),
+                    _ => {}
+                }
+            }
+            CssScannerState::SingleQuote => {
+                if ch == '\\' {
+                    index += ch.len_utf8();
+                    if index < source.len() {
+                        index += source[index..].chars().next()?.len_utf8();
+                    }
+                    continue;
+                }
+                if ch == '\'' {
+                    state = CssScannerState::Normal;
+                }
+            }
+            CssScannerState::DoubleQuote => {
+                if ch == '\\' {
+                    index += ch.len_utf8();
+                    if index < source.len() {
+                        index += source[index..].chars().next()?.len_utf8();
+                    }
+                    continue;
+                }
+                if ch == '"' {
+                    state = CssScannerState::Normal;
+                }
+            }
+            CssScannerState::BlockComment => {
+                if source[index..].starts_with("*/") {
+                    state = CssScannerState::Normal;
+                    index += 2;
+                    continue;
+                }
+            }
+        }
+        index += ch.len_utf8();
+    }
+    last
 }
 
 fn normalize_nested_scoped_declarations(declarations: &str) -> String {
@@ -7997,6 +8309,48 @@ mod tests {
     }
 
     #[test]
+    fn compile_style_matches_vue3_official_scoped_nested_output() {
+        let options = StyleCompileOptions {
+            id: Some("data-v-test".into()),
+            scoped: true,
+            ..StyleCompileOptions::default()
+        };
+
+        let direct_nested = compile_style(
+            "main {\n  width: 100%;\n  > * {\n    max-width: 200px;\n  }\n}",
+            options.clone(),
+        );
+        assert_eq!(
+            direct_nested.code,
+            "main {\n&[data-v-test] {\n  width: 100%;\n}\n> *[data-v-test] {\n    max-width: 200px;\n}\n}"
+        );
+
+        let nested_at_rule = compile_style(
+            "h1 {\ncolor: red;\n/*background-color: pink;*/\n@media only screen and (max-width: 800px) {\n  background-color: green;\n  .bar { color: white }\n}\n.foo { color: red; }\n}",
+            options.clone(),
+        );
+        assert_eq!(
+            nested_at_rule.code,
+            "h1 {\n&[data-v-test] {\ncolor: red\n/*background-color: pink;*/\n}\n@media only screen and (max-width: 800px) {\n&[data-v-test] {\n  background-color: green\n}\n.bar[data-v-test] { color: white\n}\n}\n.foo[data-v-test] { color: red;\n}\n}"
+        );
+
+        let media = compile_style("@media print { .foo { color: red }}", options.clone());
+        assert_eq!(
+            media.code,
+            "@media print {\n.foo[data-v-test] { color: red\n}}"
+        );
+
+        let supports = compile_style(
+            "@supports(display: grid) { .foo { display: grid }}",
+            options,
+        );
+        assert_eq!(
+            supports.code,
+            "@supports(display: grid) {\n.foo[data-v-test] { display: grid\n}}"
+        );
+    }
+
+    #[test]
     fn rewrites_vue27_scoped_deep_pseudo_and_keyframes() {
         let code = rewrite_scoped_selectors(
             r#"
@@ -10837,10 +11191,13 @@ $red: red;
         let resolved_import = std::fs::canonicalize(import)
             .expect("canonical import")
             .to_string_lossy()
-            .replace('\\', "/")
-            .trim_start_matches("//?/")
             .to_string();
-        assert_eq!(result.dependencies, vec![resolved_import]);
+        assert_eq!(
+            result.dependencies,
+            vec![normalize_native_dependency_path(Path::new(
+                &resolved_import
+            ))]
+        );
     }
 
     #[test]

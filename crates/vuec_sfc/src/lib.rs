@@ -33244,12 +33244,15 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         assert!(result.code.contains(".imported"));
         assert!(result.code.contains("width: 10px;"));
-        let resolved_import = std::fs::canonicalize(import)
+        let mut resolved_import = std::fs::canonicalize(import)
             .expect("canonical import")
             .to_string_lossy()
-            .replace('\\', "/")
-            .trim_start_matches("//?/")
             .to_string();
+        if let Some(stripped) = resolved_import.strip_prefix(r"\\?\") {
+            resolved_import = stripped.to_string();
+        } else if let Some(stripped) = resolved_import.strip_prefix("//?/") {
+            resolved_import = stripped.to_string();
+        }
         assert_eq!(result.dependencies, vec![resolved_import]);
     }
 
