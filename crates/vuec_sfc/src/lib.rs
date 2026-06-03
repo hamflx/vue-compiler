@@ -7820,12 +7820,22 @@ fn resolve_vue3_package_json_type_entry(
             return Vue3PackageJsonTypeResolution::Blocked;
         }
     }
+    let root_type_target = if subpath.is_none() {
+        ["types", "typings"]
+            .into_iter()
+            .find_map(|field| value.get(field).and_then(serde_json::Value::as_str))
+    } else {
+        None
+    };
+    if let Some(resolved) =
+        vue3_package_types_versions_type_path(package_dir, &value, subpath, root_type_target)
+    {
+        return Vue3PackageJsonTypeResolution::Resolved(resolved);
+    }
     if subpath.is_none() {
-        for field in ["types", "typings"] {
-            if let Some(target) = value.get(field).and_then(serde_json::Value::as_str) {
-                if let Some(resolved) = vue3_package_type_field_path(package_dir, target) {
-                    return Vue3PackageJsonTypeResolution::Resolved(resolved);
-                }
+        if let Some(target) = root_type_target {
+            if let Some(resolved) = vue3_package_type_field_path(package_dir, target) {
+                return Vue3PackageJsonTypeResolution::Resolved(resolved);
             }
         }
     }
@@ -7911,6 +7921,136 @@ fn vue3_package_export_type_path(package_dir: &Path, target: &str) -> Option<Pat
         return None;
     }
     vue3_package_type_target_path(package_dir, target)
+}
+
+fn vue3_package_types_versions_type_path(
+    package_dir: &Path,
+    package_json: &serde_json::Value,
+    subpath: Option<&str>,
+    root_type_target: Option<&str>,
+) -> Option<PathBuf> {
+    let mappings = vue3_package_types_versions_mapping(package_json)?;
+    let source = subpath
+        .map(|subpath| subpath.trim_start_matches("./").to_string())
+        .or_else(|| root_type_target.map(|target| target.trim_start_matches("./").to_string()))
+        .unwrap_or_else(|| "index.d.ts".to_string());
+    let mut matches = mappings
+        .iter()
+        .enumerate()
+        .filter_map(|(order, (pattern, targets))| {
+            let targets = vue3_tsconfig_path_target_values(targets);
+            if targets.is_empty() {
+                return None;
+            }
+            vue3_tsconfig_path_pattern_capture(pattern, &source)
+                .map(|(score, capture)| (score, order, capture, targets))
+        })
+        .collect::<Vec<_>>();
+    matches.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+    for (_, _, capture, targets) in matches {
+        for target in targets {
+            let target = target.replace('*', &capture);
+            if let Some(resolved) = vue3_package_type_field_path(package_dir, &target) {
+                return Some(resolved);
+            }
+        }
+    }
+    None
+}
+
+fn vue3_package_types_versions_mapping(
+    package_json: &serde_json::Value,
+) -> Option<&serde_json::Map<String, serde_json::Value>> {
+    let versions = package_json.get("typesVersions")?.as_object()?;
+    versions
+        .iter()
+        .filter_map(|(selector, mappings)| {
+            let mappings = mappings.as_object()?;
+            vue3_package_types_version_selector_matches(selector).then(|| {
+                (
+                    vue3_package_types_version_selector_score(selector),
+                    mappings,
+                )
+            })
+        })
+        .max_by(|left, right| left.0.cmp(&right.0))
+        .map(|(_, mappings)| mappings)
+}
+
+fn vue3_package_types_version_selector_matches(selector: &str) -> bool {
+    let selector = selector.trim();
+    if selector == "*" {
+        return true;
+    }
+    let constraints = selector.split_whitespace().collect::<Vec<_>>();
+    !constraints.is_empty()
+        && constraints
+            .into_iter()
+            .all(vue3_package_types_version_constraint_matches)
+}
+
+fn vue3_package_types_version_constraint_matches(constraint: &str) -> bool {
+    let (operator, version) = if let Some(version) = constraint.strip_prefix(">=") {
+        (">=", version)
+    } else if let Some(version) = constraint.strip_prefix("<=") {
+        ("<=", version)
+    } else if let Some(version) = constraint.strip_prefix('>') {
+        (">", version)
+    } else if let Some(version) = constraint.strip_prefix('<') {
+        ("<", version)
+    } else if let Some(version) = constraint.strip_prefix('=') {
+        ("=", version)
+    } else {
+        ("=", constraint)
+    };
+    let Some(version) = vue3_package_types_version_tuple(version) else {
+        return false;
+    };
+    let current = vue3_package_typescript_version_tuple();
+    match operator {
+        ">=" => current >= version,
+        ">" => current > version,
+        "<=" => current <= version,
+        "<" => current < version,
+        "=" => current == version,
+        _ => false,
+    }
+}
+
+fn vue3_package_types_version_selector_score(selector: &str) -> u32 {
+    if selector.trim() == "*" {
+        return 0;
+    }
+    selector
+        .split_whitespace()
+        .filter_map(|constraint| {
+            let version = constraint
+                .trim_start_matches(">=")
+                .trim_start_matches("<=")
+                .trim_start_matches('>')
+                .trim_start_matches('<')
+                .trim_start_matches('=');
+            vue3_package_types_version_tuple(version)
+        })
+        .map(|(major, minor)| 1000 + major * 100 + minor)
+        .max()
+        .unwrap_or(1)
+}
+
+fn vue3_package_typescript_version_tuple() -> (u32, u32) {
+    // Bounded SFC resolver baseline for the locked Vue 3 compiler-sfc harness.
+    // This intentionally avoids modeling the full TypeScript package resolver.
+    (5, 0)
+}
+
+fn vue3_package_types_version_tuple(version: &str) -> Option<(u32, u32)> {
+    let mut parts = version.trim().split('.');
+    let major = parts.next()?.parse::<u32>().ok()?;
+    let minor = parts
+        .next()
+        .map(|minor| minor.parse::<u32>().ok())
+        .unwrap_or(Some(0))?;
+    Some((major, minor))
 }
 
 fn vue3_package_type_field_path(package_dir: &Path, target: &str) -> Option<PathBuf> {
@@ -22869,6 +23009,181 @@ const model = defineModel<import('vuec-types-pkg').ModelValue>()
             exports_pkg.join("types").join("index.d.ts"),
             exports_pkg.join("types").join("feature").join("item.d.ts"),
             ambient_pkg.join("index.d.ts"),
+        ]
+        .into_iter()
+        .map(|path| normalize_path_string(&path))
+        .collect::<BTreeSet<_>>();
+        assert_eq!(deps, expected);
+        assert!(!script.deps.iter().any(|dep| dep.contains('\\')));
+    }
+
+    #[test]
+    fn vue3_compile_script_resolves_package_types_versions_type_deps() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let node_modules = dir.path().join("node_modules");
+        let versioned_pkg = node_modules.join("vuec-typesversions-pkg");
+        std::fs::create_dir_all(versioned_pkg.join("dist")).expect("create dist types");
+        std::fs::create_dir_all(versioned_pkg.join("ts5").join("feature"))
+            .expect("create ts5 types");
+        std::fs::create_dir_all(versioned_pkg.join("legacy").join("feature"))
+            .expect("create legacy types");
+        std::fs::write(
+            versioned_pkg.join("package.json"),
+            r#"{
+                "types": "dist/index.d.ts",
+                "typesVersions": {
+                    ">=5.0": {
+                        "dist/index.d.ts": ["ts5/index.d.ts"],
+                        "feature/*": ["ts5/feature/*.d.ts"]
+                    },
+                    "*": {
+                        "dist/index.d.ts": ["legacy/index.d.ts"],
+                        "feature/*": ["legacy/feature/*.d.ts"]
+                    }
+                }
+            }"#,
+        )
+        .expect("write versioned package manifest");
+        std::fs::write(
+            versioned_pkg.join("dist").join("index.d.ts"),
+            "export interface RootProps { fallbackRoot: string }",
+        )
+        .expect("write fallback root types");
+        std::fs::write(
+            versioned_pkg.join("legacy").join("index.d.ts"),
+            "export interface RootProps { legacyRoot: string }",
+        )
+        .expect("write legacy root types");
+        std::fs::write(
+            versioned_pkg
+                .join("legacy")
+                .join("feature")
+                .join("item.d.ts"),
+            "export type FeatureProps = { legacyFeature: string }",
+        )
+        .expect("write legacy feature types");
+        std::fs::write(
+            versioned_pkg.join("ts5").join("index.d.ts"),
+            "export interface RootProps { root: string }\nexport type ModelValue = import('./model').ModelValue",
+        )
+        .expect("write ts5 root types");
+        std::fs::write(
+            versioned_pkg.join("ts5").join("feature").join("item.d.ts"),
+            "export type FeatureProps = { feature?: number }",
+        )
+        .expect("write ts5 feature types");
+        std::fs::write(
+            versioned_pkg.join("ts5").join("model.d.ts"),
+            "export type ModelValue = boolean | string",
+        )
+        .expect("write ts5 model types");
+
+        let ambient_pkg = node_modules
+            .join("@types")
+            .join("vuec-typesversions-ambient");
+        std::fs::create_dir_all(ambient_pkg.join("ts5")).expect("create @types versioned");
+        std::fs::write(
+            ambient_pkg.join("package.json"),
+            r#"{
+                "types": "index.d.ts",
+                "typesVersions": {
+                    ">=5.0": {
+                        "index.d.ts": ["ts5/index.d.ts"]
+                    }
+                }
+            }"#,
+        )
+        .expect("write @types package manifest");
+        std::fs::write(
+            ambient_pkg.join("index.d.ts"),
+            "export type AmbientProps = { ambientFallback: number }",
+        )
+        .expect("write fallback @types");
+        std::fs::write(
+            ambient_pkg.join("ts5").join("index.d.ts"),
+            "export type AmbientProps = { ambient: boolean }",
+        )
+        .expect("write ts5 @types");
+
+        let type_root_pkg = dir.path().join("typings").join("versioned-global");
+        std::fs::create_dir_all(type_root_pkg.join("ts5")).expect("create type root package");
+        std::fs::write(
+            type_root_pkg.join("package.json"),
+            r#"{
+                "types": "index.d.ts",
+                "typesVersions": {
+                    ">=5.0": {
+                        "index.d.ts": ["ts5/index.d.ts"]
+                    }
+                }
+            }"#,
+        )
+        .expect("write type root package manifest");
+        std::fs::write(
+            type_root_pkg.join("index.d.ts"),
+            "declare interface TypeRootGlobalProps { typeRootFallback: number }",
+        )
+        .expect("write fallback type root global");
+        std::fs::write(
+            type_root_pkg.join("ts5").join("index.d.ts"),
+            "declare interface TypeRootGlobalProps { typeRoot: string }",
+        )
+        .expect("write ts5 type root global");
+
+        std::fs::create_dir_all(dir.path().join("src").join("components"))
+            .expect("create component dir");
+        std::fs::write(
+            dir.path().join("tsconfig.json"),
+            r#"{
+                "compilerOptions": {
+                    "types": ["versioned-global"],
+                    "typeRoots": ["./typings"]
+                }
+            }"#,
+        )
+        .expect("write tsconfig");
+
+        let filename = dir.path().join("src").join("components").join("Comp.vue");
+        let source = r#"<script setup lang="ts">
+import type { RootProps } from 'vuec-typesversions-pkg'
+import type { FeatureProps } from 'vuec-typesversions-pkg/feature/item'
+import type { AmbientProps } from 'vuec-typesversions-ambient'
+defineProps<RootProps & FeatureProps & AmbientProps & TypeRootGlobalProps>()
+defineModel<import('vuec-typesversions-pkg').ModelValue>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("root: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("feature: { type: Number, required: false }"));
+        assert!(script
+            .content
+            .contains("ambient: { type: Boolean, required: true }"));
+        assert!(script
+            .content
+            .contains("typeRoot: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("\"modelValue\": { type: [Boolean, String] },"));
+        assert!(!script.content.contains("fallbackRoot"));
+        assert!(!script.content.contains("legacyRoot"));
+        assert!(!script.content.contains("legacyFeature"));
+        assert!(!script.content.contains("ambientFallback"));
+        assert!(!script.content.contains("typeRootFallback"));
+
+        let deps = script.deps.iter().cloned().collect::<BTreeSet<_>>();
+        let expected = [
+            versioned_pkg.join("ts5").join("index.d.ts"),
+            versioned_pkg.join("ts5").join("feature").join("item.d.ts"),
+            versioned_pkg.join("ts5").join("model.d.ts"),
+            ambient_pkg.join("ts5").join("index.d.ts"),
+            type_root_pkg.join("ts5").join("index.d.ts"),
         ]
         .into_iter()
         .map(|path| normalize_path_string(&path))

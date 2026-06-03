@@ -7064,6 +7064,170 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_resolves_package_types_versions_deps() {
+        let dir = std::env::temp_dir().join(format!(
+            "vuec-node-bridge-package-types-versions-deps-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let node_modules = dir.join("node_modules");
+        let versioned_pkg = node_modules.join("vuec-bridge-typesversions");
+        std::fs::create_dir_all(versioned_pkg.join("dist")).expect("create dist types");
+        std::fs::create_dir_all(versioned_pkg.join("ts5").join("feature"))
+            .expect("create ts5 types");
+        std::fs::write(
+            versioned_pkg.join("package.json"),
+            r#"{
+                "types": "dist/index.d.ts",
+                "typesVersions": {
+                    ">=5.0": {
+                        "dist/index.d.ts": ["ts5/index.d.ts"],
+                        "feature/*": ["ts5/feature/*.d.ts"]
+                    },
+                    "*": {
+                        "dist/index.d.ts": ["legacy/index.d.ts"],
+                        "feature/*": ["legacy/feature/*.d.ts"]
+                    }
+                }
+            }"#,
+        )
+        .expect("write versioned package manifest");
+        std::fs::write(
+            versioned_pkg.join("dist").join("index.d.ts"),
+            "export interface Props { fallbackRoot: string }",
+        )
+        .expect("write fallback root types");
+        std::fs::write(
+            versioned_pkg.join("ts5").join("index.d.ts"),
+            "export interface Props { root: string }\nexport type ModelValue = import('./model').ModelValue",
+        )
+        .expect("write ts5 root types");
+        std::fs::write(
+            versioned_pkg.join("ts5").join("feature").join("item.d.ts"),
+            "export type FeatureProps = { feature?: number }",
+        )
+        .expect("write ts5 feature types");
+        std::fs::write(
+            versioned_pkg.join("ts5").join("model.d.ts"),
+            "export type ModelValue = boolean | string",
+        )
+        .expect("write ts5 model types");
+
+        let ambient_pkg = node_modules
+            .join("@types")
+            .join("vuec-bridge-typesversions-ambient");
+        std::fs::create_dir_all(ambient_pkg.join("ts5")).expect("create @types versioned");
+        std::fs::write(
+            ambient_pkg.join("package.json"),
+            r#"{
+                "types": "index.d.ts",
+                "typesVersions": {
+                    ">=5.0": {
+                        "index.d.ts": ["ts5/index.d.ts"]
+                    }
+                }
+            }"#,
+        )
+        .expect("write @types package manifest");
+        std::fs::write(
+            ambient_pkg.join("index.d.ts"),
+            "export type AmbientProps = { ambientFallback: number }",
+        )
+        .expect("write fallback @types");
+        std::fs::write(
+            ambient_pkg.join("ts5").join("index.d.ts"),
+            "export type AmbientProps = { ambient: boolean }",
+        )
+        .expect("write ts5 @types");
+
+        let type_root_pkg = dir.join("typings").join("versioned-global");
+        std::fs::create_dir_all(type_root_pkg.join("ts5")).expect("create type root package");
+        std::fs::write(
+            type_root_pkg.join("package.json"),
+            r#"{
+                "types": "index.d.ts",
+                "typesVersions": {
+                    ">=5.0": {
+                        "index.d.ts": ["ts5/index.d.ts"]
+                    }
+                }
+            }"#,
+        )
+        .expect("write type root package manifest");
+        std::fs::write(
+            type_root_pkg.join("index.d.ts"),
+            "declare interface TypeRootGlobalProps { typeRootFallback: number }",
+        )
+        .expect("write fallback type root global");
+        std::fs::write(
+            type_root_pkg.join("ts5").join("index.d.ts"),
+            "declare interface TypeRootGlobalProps { typeRoot: string }",
+        )
+        .expect("write ts5 type root global");
+
+        std::fs::create_dir_all(dir.join("src").join("components")).expect("create components");
+        std::fs::write(
+            dir.join("tsconfig.json"),
+            r#"{
+                "compilerOptions": {
+                    "types": ["versioned-global"],
+                    "typeRoots": ["./typings"]
+                }
+            }"#,
+        )
+        .expect("write tsconfig");
+
+        let filename = dir.join("src").join("components").join("Comp.vue");
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "import type { Props } from 'vuec-bridge-typesversions'\n",
+                    "import type { FeatureProps } from 'vuec-bridge-typesversions/feature/item'\n",
+                    "import type { AmbientProps } from 'vuec-bridge-typesversions-ambient'\n",
+                    "defineProps<Props & FeatureProps & AmbientProps & TypeRootGlobalProps>()\n",
+                    "defineModel<import('vuec-bridge-typesversions').ModelValue>()",
+                    "</script>"
+                ),
+                "filename": filename.to_string_lossy()
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = compiled["content"].as_str().unwrap_or_default();
+        assert!(compiled["errors"].as_array().unwrap().is_empty());
+        assert!(content.contains("root: { type: String, required: true }"));
+        assert!(content.contains("feature: { type: Number, required: false }"));
+        assert!(content.contains("ambient: { type: Boolean, required: true }"));
+        assert!(content.contains("typeRoot: { type: String, required: true }"));
+        assert!(content.contains("\"modelValue\": { type: [Boolean, String] },"));
+        assert!(!content.contains("fallbackRoot"));
+        assert!(!content.contains("ambientFallback"));
+        assert!(!content.contains("typeRootFallback"));
+
+        let deps = compiled["deps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|dep| dep.as_str().unwrap().to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected = [
+            versioned_pkg.join("ts5").join("index.d.ts"),
+            versioned_pkg.join("ts5").join("feature").join("item.d.ts"),
+            versioned_pkg.join("ts5").join("model.d.ts"),
+            ambient_pkg.join("ts5").join("index.d.ts"),
+            type_root_pkg.join("ts5").join("index.d.ts"),
+        ]
+        .into_iter()
+        .map(|path| path.to_string_lossy().replace('\\', "/"))
+        .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(deps, expected);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn vue3_sfc_bridge_compile_script_resolves_tsconfig_path_type_deps() {
         let dir = std::env::temp_dir().join(format!(
             "vuec-node-bridge-tsconfig-path-deps-{}",
