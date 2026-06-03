@@ -16034,6 +16034,17 @@ fn vue3_interface_heritage_has_vue_ignore(
     )
 }
 
+fn vue3_type_annotation_has_vue_ignore(source: &str, annotation: &TSTypeAnnotation<'_>) -> bool {
+    let type_start = annotation.type_annotation.span().start as usize;
+    if source
+        .get(annotation.span.start as usize..type_start)
+        .is_some_and(|prefix| prefix.contains("@vue-ignore"))
+    {
+        return true;
+    }
+    vue3_source_has_immediate_leading_vue_ignore_comment(source, type_start)
+}
+
 fn vue3_source_has_immediate_leading_vue_ignore_comment(source: &str, offset: usize) -> bool {
     let mut cursor = offset.min(source.len());
     loop {
@@ -16112,7 +16123,11 @@ fn vue3_runtime_props_from_signatures(
                     .type_annotation
                     .as_ref()
                     .map(|annotation| {
-                        infer_vue3_runtime_type(&annotation.type_annotation, analysis)
+                        if vue3_type_annotation_has_vue_ignore(source, annotation) {
+                            vec!["Unknown".into()]
+                        } else {
+                            infer_vue3_runtime_type(&annotation.type_annotation, analysis)
+                        }
                     })
                     .unwrap_or_else(|| vec!["null".into()]);
                 props.push(Vue27RuntimeProp {
@@ -23526,6 +23541,39 @@ defineProps<Props>()
         );
         assert!(ignored_script.bindings.get("skipped").is_none());
         assert!(ignored_script.deps.is_empty(), "{:?}", ignored_script.deps);
+    }
+
+    #[test]
+    fn vue3_compile_script_honors_vue_ignore_on_property_signature_type() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "Comp.vue",
+            r#"<script setup lang="ts">
+type Foo = string
+defineProps<{
+  foo: /* @vue-ignore */ Foo
+  bar?: Foo
+}>()
+</script>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("foo: { type: null, required: true }"));
+        assert!(script
+            .content
+            .contains("bar: { type: String, required: false }"));
+        assert_eq!(
+            script.bindings.get("foo").map(String::as_str),
+            Some("props")
+        );
+        assert_eq!(
+            script.bindings.get("bar").map(String::as_str),
+            Some("props")
+        );
+        assert!(script.deps.is_empty(), "{:?}", script.deps);
     }
 
     #[test]
