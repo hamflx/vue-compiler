@@ -4578,8 +4578,28 @@ mod tests {
         assert!(content.contains("const __default__ = { name: 'X' }"));
         assert!(content.contains("export default /*@__PURE__*/Object.assign(__default__, {"));
         assert!(content.contains("const a = 1\nconst __returned__ = { a }"));
-        assert!(compiled["scriptAst"].as_array().is_some());
-        assert!(compiled["scriptSetupAst"].as_array().is_some());
+
+        let script_ast = compiled["scriptAst"].as_array().expect("scriptAst array");
+        assert_eq!(script_ast.len(), 1);
+        assert_eq!(script_ast[0]["type"], json!("ExportDefaultDeclaration"));
+        assert_eq!(
+            script_ast[0]["source"],
+            json!("export default { name: 'X' }")
+        );
+        assert_eq!(
+            script_ast[0]["declaration"]["type"],
+            json!("ObjectExpression")
+        );
+        assert_eq!(script_ast[0]["loc"]["start"]["offset"], json!(0));
+
+        let setup_ast = compiled["scriptSetupAst"]
+            .as_array()
+            .expect("scriptSetupAst array");
+        assert_eq!(setup_ast.len(), 1);
+        assert_eq!(setup_ast[0]["type"], json!("VariableDeclaration"));
+        assert_eq!(setup_ast[0]["kind"], json!("const"));
+        assert_eq!(setup_ast[0]["source"], json!("const a = 1"));
+        assert_eq!(setup_ast[0]["declarations"][0]["id"]["name"], json!("a"));
     }
 
     #[test]
@@ -8922,7 +8942,14 @@ mod tests {
         )
         .expect("vue27 script");
 
-        assert!(compiled["scriptAst"].as_array().is_some());
+        let script_ast = compiled["scriptAst"].as_array().expect("scriptAst array");
+        assert_eq!(script_ast.len(), 1);
+        assert_eq!(script_ast[0]["type"], json!("ExportDefaultDeclaration"));
+        assert_eq!(
+            script_ast[0]["source"],
+            json!("export default { props: ['foo'] }")
+        );
+        assert_eq!(script_ast[0]["loc"]["start"]["offset"], json!(0));
         assert_eq!(compiled["bindings"]["foo"], json!("props"));
         assert_eq!(compiled["bindings"]["__isScriptSetup"], json!("false"));
     }
