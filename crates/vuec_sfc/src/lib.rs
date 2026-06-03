@@ -20,7 +20,7 @@ use oxc_ast::ast::{
     TSModuleDeclarationName, TSSignature, TSTemplateLiteralType, TSTupleElement, TSType,
     TSTypeAliasDeclaration, TSTypeAnnotation, TSTypeLiteral, TSTypeName, TSTypeOperatorOperator,
     TSTypeQuery, TSTypeQueryExprName, TSTypeReference, VariableDeclaration,
-    VariableDeclarationKind, WithStatement,
+    VariableDeclarationKind, VariableDeclarator, WithStatement,
 };
 use oxc_span::GetSpan;
 use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
@@ -5315,6 +5315,15 @@ fn vue3_declared_type_names_from_statement(statement: &Statement<'_>) -> BTreeSe
                 }
             }
         }
+        Statement::VariableDeclaration(declaration) => {
+            for declarator in &declaration.declarations {
+                if vue3_variable_declarator_function_return_type(declarator).is_some() {
+                    if let Some(name) = first_pattern_binding(&declarator.id) {
+                        names.insert(name);
+                    }
+                }
+            }
+        }
         Statement::ClassDeclaration(declaration) => {
             if let Some(id) = &declaration.id {
                 names.insert(id.name.to_string());
@@ -5354,6 +5363,15 @@ fn vue3_declared_type_names_from_declaration(declaration: &Declaration<'_>) -> B
             for declarator in &declaration.declarations {
                 if let Some(name) = first_pattern_binding(&declarator.id) {
                     names.insert(name);
+                }
+            }
+        }
+        Declaration::VariableDeclaration(declaration) => {
+            for declarator in &declaration.declarations {
+                if vue3_variable_declarator_function_return_type(declarator).is_some() {
+                    if let Some(name) = first_pattern_binding(&declarator.id) {
+                        names.insert(name);
+                    }
                 }
             }
         }
@@ -6188,6 +6206,17 @@ fn vue3_exported_type_names(statements: &[Statement<'_>]) -> BTreeSet<String> {
                                 }
                             }
                         }
+                        Declaration::VariableDeclaration(declaration) => {
+                            for declarator in &declaration.declarations {
+                                if vue3_variable_declarator_function_return_type(declarator)
+                                    .is_some()
+                                {
+                                    if let Some(name) = first_pattern_binding(&declarator.id) {
+                                        names.insert(name);
+                                    }
+                                }
+                            }
+                        }
                         Declaration::ClassDeclaration(declaration) => {
                             if let Some(id) = &declaration.id {
                                 names.insert(id.name.to_string());
@@ -6221,7 +6250,7 @@ fn vue3_default_export_may_be_type(declaration: &ExportDefaultDeclaration<'_>) -
         ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
             function.return_type.is_some()
         }
-        _ => false,
+        declaration => vue3_default_export_function_value_return_type(declaration).is_some(),
     }
 }
 
@@ -6271,6 +6300,20 @@ fn project_vue3_default_type_exports(
                         insert_vue3_declared_type_deps(analysis, "default", deps);
                     }
                 }
+            }
+            declaration
+                if vue3_default_export_function_value_return_type(declaration).is_some() =>
+            {
+                let return_type =
+                    vue3_default_export_function_value_return_type(declaration).expect("checked");
+                register_vue3_declared_return_props_options(
+                    source,
+                    "default",
+                    return_type,
+                    analysis,
+                );
+                let deps = collect_vue3_type_argument_deps(return_type, analysis);
+                insert_vue3_declared_type_deps(analysis, "default", deps);
             }
             ExportDefaultDeclarationKind::ClassDeclaration(class) => {
                 if let Some(id) = &class.id {
@@ -9304,6 +9347,9 @@ fn collect_vue3_declared_type_deps_from_statement(
                 insert_vue3_declared_type_deps(analysis, &name, deps);
             }
         }
+        Statement::VariableDeclaration(declaration) => {
+            collect_vue3_function_value_return_type_deps_from_variable(declaration, analysis);
+        }
         Statement::ExportNamedDeclaration(declaration) => {
             if let Some(declaration) = &declaration.declaration {
                 collect_vue3_declared_type_deps_from_declaration(declaration, analysis);
@@ -9352,6 +9398,9 @@ fn collect_vue3_declared_type_deps_from_declaration(
                     collect_vue3_type_argument_deps(&type_annotation.type_annotation, analysis);
                 insert_vue3_declared_type_deps(analysis, &name, deps);
             }
+        }
+        Declaration::VariableDeclaration(declaration) => {
+            collect_vue3_function_value_return_type_deps_from_variable(declaration, analysis);
         }
         _ => {}
     }
@@ -9410,6 +9459,9 @@ fn collect_vue3_declared_type_from_statement(
         Statement::VariableDeclaration(declaration) if declaration.declare => {
             register_vue3_declared_variable_props_options(source, declaration, analysis);
         }
+        Statement::VariableDeclaration(declaration) => {
+            register_vue3_function_value_return_props_options(source, declaration, analysis);
+        }
         Statement::ExportNamedDeclaration(declaration) => {
             if let Some(declaration) = &declaration.declaration {
                 collect_vue3_declared_type_from_declaration(source, declaration, analysis);
@@ -9447,6 +9499,9 @@ fn collect_vue3_declared_type_from_declaration(
         }
         Declaration::VariableDeclaration(declaration) if declaration.declare => {
             register_vue3_declared_variable_props_options(source, declaration, analysis);
+        }
+        Declaration::VariableDeclaration(declaration) => {
+            register_vue3_function_value_return_props_options(source, declaration, analysis);
         }
         Declaration::TSModuleDeclaration(declaration) => {
             project_vue3_namespace_declaration(source, declaration, analysis);
@@ -10242,6 +10297,72 @@ fn register_vue3_declared_function_return_props_options(
         &return_type.type_annotation,
         analysis,
     );
+}
+
+fn vue3_function_value_return_type<'a>(expression: &'a Expression<'a>) -> Option<&'a TSType<'a>> {
+    match unwrap_vue3_ts_expression(expression) {
+        Expression::ArrowFunctionExpression(function) => function
+            .return_type
+            .as_ref()
+            .map(|return_type| &return_type.type_annotation),
+        Expression::FunctionExpression(function) => function
+            .return_type
+            .as_ref()
+            .map(|return_type| &return_type.type_annotation),
+        _ => None,
+    }
+}
+
+fn vue3_default_export_function_value_return_type<'a>(
+    declaration: &'a ExportDefaultDeclarationKind<'a>,
+) -> Option<&'a TSType<'a>> {
+    vue3_function_value_return_type(declaration.as_expression()?)
+}
+
+fn vue3_variable_declarator_function_return_type<'a>(
+    declarator: &'a VariableDeclarator<'a>,
+) -> Option<&'a TSType<'a>> {
+    if let Some(type_annotation) = declarator.type_annotation.as_ref() {
+        if let TSType::TSFunctionType(function) = &type_annotation.type_annotation {
+            return Some(&function.return_type.type_annotation);
+        }
+    }
+    declarator
+        .init
+        .as_ref()
+        .and_then(vue3_function_value_return_type)
+}
+
+fn register_vue3_function_value_return_props_options(
+    source: &str,
+    declaration: &VariableDeclaration<'_>,
+    analysis: &mut Vue3ScriptSetupAnalysis,
+) {
+    for declarator in &declaration.declarations {
+        let Some(name) = first_pattern_binding(&declarator.id) else {
+            continue;
+        };
+        let Some(return_type) = vue3_variable_declarator_function_return_type(declarator) else {
+            continue;
+        };
+        register_vue3_declared_return_props_options(source, &name, return_type, analysis);
+    }
+}
+
+fn collect_vue3_function_value_return_type_deps_from_variable(
+    declaration: &VariableDeclaration<'_>,
+    analysis: &mut Vue3ScriptSetupAnalysis,
+) {
+    for declarator in &declaration.declarations {
+        let Some(name) = first_pattern_binding(&declarator.id) else {
+            continue;
+        };
+        let Some(return_type) = vue3_variable_declarator_function_return_type(declarator) else {
+            continue;
+        };
+        let deps = collect_vue3_type_argument_deps(return_type, analysis);
+        insert_vue3_declared_type_deps(analysis, &name, deps);
+    }
 }
 
 fn register_vue3_declared_variable_props_options(
@@ -27826,6 +27947,80 @@ defineModel<ReturnType<typeof makeDefault> | ReturnType<typeof makeCount> | Retu
 
         let deps = script.deps.iter().cloned().collect::<BTreeSet<_>>();
         let expected = ["named.ts", "anonymous.ts"]
+            .into_iter()
+            .map(|name| normalize_path_string(&dir.path().join(name)))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(deps, expected);
+        assert!(!script.deps.iter().any(|dep| dep.contains('\\')));
+    }
+
+    #[test]
+    fn vue3_compile_script_resolves_external_function_value_return_type_runtime_types() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join("factories.ts"),
+            concat!(
+                "export type Label = string\n",
+                "export type Count = number\n",
+                "export type Flag = boolean\n",
+                "export const makeLabel = (): Label => ''\n",
+                "export const makeCount: () => Count = () => 1\n",
+                "export const makeFlag = function(): Flag { return true }"
+            ),
+        )
+        .expect("write function value factories");
+        std::fs::write(
+            dir.path().join("arrow-default.ts"),
+            "export default ((): Date => new Date())",
+        )
+        .expect("write default arrow function value");
+        std::fs::write(
+            dir.path().join("function-default.ts"),
+            "export default (function(): Error { return new Error() })",
+        )
+        .expect("write default function expression value");
+
+        let filename = dir.path().join("Comp.vue");
+        let source = r#"<script setup lang="ts">
+import makeDate from './arrow-default'
+import makeError from './function-default'
+import { makeLabel, makeCount, makeFlag } from './factories'
+type Props = {
+  label: ReturnType<typeof makeLabel>
+  count: ReturnType<typeof makeCount>
+  flag: ReturnType<typeof makeFlag>
+  date: ReturnType<typeof makeDate>
+  error: ReturnType<typeof makeError>
+}
+defineProps<Props>()
+defineModel<ReturnType<typeof makeLabel> | ReturnType<typeof makeCount> | ReturnType<typeof makeFlag> | ReturnType<typeof makeDate> | ReturnType<typeof makeError>>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("label: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("count: { type: Number, required: true }"));
+        assert!(script
+            .content
+            .contains("flag: { type: Boolean, required: true }"));
+        assert!(script
+            .content
+            .contains("date: { type: Date, required: true }"));
+        assert!(script
+            .content
+            .contains("error: { type: Error, required: true }"));
+        assert!(script
+            .content
+            .contains("\"modelValue\": { type: [String, Number, Boolean, Date, Error] },"));
+
+        let deps = script.deps.iter().cloned().collect::<BTreeSet<_>>();
+        let expected = ["factories.ts", "arrow-default.ts", "function-default.ts"]
             .into_iter()
             .map(|name| normalize_path_string(&dir.path().join(name)))
             .collect::<BTreeSet<_>>();
