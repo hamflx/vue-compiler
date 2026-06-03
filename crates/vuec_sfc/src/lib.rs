@@ -20786,6 +20786,12 @@ fn infer_vue3_runtime_type(node: &TSType<'_>, analysis: &Vue3ScriptSetupAnalysis
             }
             vec!["Unknown".into()]
         }
+        TSType::TSConditionalType(conditional) => infer_vue3_conditional_runtime_type(
+            conditional,
+            analysis,
+            Vue3ArrayElementRuntimeMode::Props,
+        )
+        .unwrap_or_else(|| vec!["Unknown".into()]),
         _ => vec!["Unknown".into()],
     }
 }
@@ -20958,8 +20964,170 @@ fn infer_vue3_define_model_runtime_type(
             }
             vec!["Unknown".into()]
         }
+        TSType::TSConditionalType(conditional) => infer_vue3_conditional_runtime_type(
+            conditional,
+            analysis,
+            Vue3ArrayElementRuntimeMode::DefineModel,
+        )
+        .unwrap_or_else(|| vec!["Unknown".into()]),
         _ => vec!["Unknown".into()],
     }
+}
+
+fn infer_vue3_conditional_runtime_type(
+    conditional: &oxc_ast::ast::TSConditionalType<'_>,
+    analysis: &Vue3ScriptSetupAnalysis,
+    mode: Vue3ArrayElementRuntimeMode,
+) -> Option<Vec<String>> {
+    let outcome = vue3_static_conditional_type_outcome(
+        &conditional.check_type,
+        &conditional.extends_type,
+        analysis,
+    )?;
+    let branch = match outcome {
+        Vue3StaticConditionalTypeOutcome::True => &conditional.true_type,
+        Vue3StaticConditionalTypeOutcome::False => &conditional.false_type,
+    };
+    vue3_non_empty_runtime_types(vue3_runtime_types_for_mode(branch, analysis, mode))
+}
+
+#[derive(Clone, Copy)]
+enum Vue3StaticConditionalTypeOutcome {
+    True,
+    False,
+}
+
+fn vue3_static_conditional_type_outcome(
+    check_type: &TSType<'_>,
+    extends_type: &TSType<'_>,
+    analysis: &Vue3ScriptSetupAnalysis,
+) -> Option<Vue3StaticConditionalTypeOutcome> {
+    let check_set = vue3_static_conditional_type_set(check_type, analysis)?;
+    let extends_set = vue3_static_conditional_type_set(extends_type, analysis)?;
+    if check_set
+        .values
+        .iter()
+        .all(|value| extends_set.values.contains(value))
+    {
+        return Some(Vue3StaticConditionalTypeOutcome::True);
+    }
+    if !check_set.is_distributive
+        && check_set
+            .values
+            .iter()
+            .all(|value| !extends_set.values.contains(value))
+    {
+        return Some(Vue3StaticConditionalTypeOutcome::False);
+    }
+    None
+}
+
+struct Vue3StaticConditionalTypeSet {
+    values: BTreeSet<String>,
+    is_distributive: bool,
+}
+
+fn vue3_static_conditional_type_set(
+    ty: &TSType<'_>,
+    analysis: &Vue3ScriptSetupAnalysis,
+) -> Option<Vue3StaticConditionalTypeSet> {
+    match ty {
+        TSType::TSLiteralType(literal) => Some(Vue3StaticConditionalTypeSet {
+            values: vue3_static_conditional_literal_values(&literal.literal)?,
+            is_distributive: false,
+        }),
+        TSType::TSTypeReference(reference) => {
+            let name = vue3_ts_type_name_key(&reference.type_name)?;
+            if let Some(keys) = analysis.ordered_string_literal_type_declarations.get(&name) {
+                return Some(Vue3StaticConditionalTypeSet {
+                    values: keys
+                        .iter()
+                        .map(|key| vue3_static_conditional_string_value(key))
+                        .collect(),
+                    is_distributive: false,
+                });
+            }
+            if let Some(keys) = analysis.string_literal_type_declarations.get(&name) {
+                return Some(Vue3StaticConditionalTypeSet {
+                    values: keys
+                        .iter()
+                        .map(|key| vue3_static_conditional_string_value(key))
+                        .collect(),
+                    is_distributive: false,
+                });
+            }
+            match name.as_str() {
+                "Extract" | "Exclude" | "Uppercase" | "Lowercase" | "Capitalize"
+                | "Uncapitalize" => Some(Vue3StaticConditionalTypeSet {
+                    values: vue3_resolve_string_type_keys(ty, analysis)?
+                        .into_iter()
+                        .map(|key| vue3_static_conditional_string_value(&key))
+                        .collect(),
+                    is_distributive: false,
+                }),
+                _ => None,
+            }
+        }
+        TSType::TSUnionType(union) => {
+            let mut values = BTreeSet::new();
+            for ty in &union.types {
+                values.extend(vue3_static_conditional_type_set(ty, analysis)?.values);
+            }
+            Some(Vue3StaticConditionalTypeSet {
+                values,
+                is_distributive: true,
+            })
+        }
+        TSType::TSParenthesizedType(parenthesized) => {
+            vue3_static_conditional_type_set(&parenthesized.type_annotation, analysis)
+        }
+        TSType::TSTemplateLiteralType(template) => Some(Vue3StaticConditionalTypeSet {
+            values: vue3_resolve_template_literal_type_keys(template, analysis)?
+                .into_iter()
+                .map(|key| vue3_static_conditional_string_value(&key))
+                .collect(),
+            is_distributive: false,
+        }),
+        TSType::TSImportType(import_type) => {
+            let resolved = vue3_resolve_import_type(import_type, analysis)?;
+            let values = resolved
+                .context
+                .ordered_string_literal_type_declarations
+                .get(&resolved.name)
+                .cloned()
+                .or_else(|| {
+                    resolved
+                        .context
+                        .string_literal_type_declarations
+                        .get(&resolved.name)
+                        .map(|keys| keys.iter().cloned().collect())
+                })?;
+            Some(Vue3StaticConditionalTypeSet {
+                values: values
+                    .into_iter()
+                    .map(|key| vue3_static_conditional_string_value(&key))
+                    .collect(),
+                is_distributive: false,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn vue3_static_conditional_literal_values(literal: &TSLiteral<'_>) -> Option<BTreeSet<String>> {
+    match literal {
+        TSLiteral::StringLiteral(literal) => {
+            Some([vue3_static_conditional_string_value(literal.value.as_str())].into())
+        }
+        TSLiteral::BooleanLiteral(literal) => Some([format!("boolean:{}", literal.value)].into()),
+        TSLiteral::NumericLiteral(literal) => Some([format!("number:{}", literal.value)].into()),
+        TSLiteral::BigIntLiteral(literal) => Some([format!("bigint:{}", literal.value)].into()),
+        _ => None,
+    }
+}
+
+fn vue3_static_conditional_string_value(value: &str) -> String {
+    format!("string:{value}")
 }
 
 fn infer_vue3_define_model_runtime_utility_type(
@@ -29235,6 +29403,56 @@ defineModel<NonNullable<string | null> | Extract<number | boolean, boolean> | Ex
         );
         assert_eq!(
             script.bindings.get("extracted").map(String::as_str),
+            Some("props")
+        );
+        assert!(script.deps.is_empty(), "{:?}", script.deps);
+    }
+
+    #[test]
+    fn vue3_compile_script_resolves_static_conditional_runtime_types() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "Comp.vue",
+            r#"<script setup lang="ts">
+type Runtime<T> = T extends 'text' ? string : T extends 'count' ? number : boolean
+type Props = {
+  directTrue: 'on' extends 'on' ? boolean : string
+  directFalse: 'off' extends 'on' ? boolean : string
+  text: Runtime<'text'>
+  count: Runtime<'count'>
+  active: Runtime<'active'>
+  unresolved: Runtime<'text' | 'count'>
+}
+defineProps<Props>()
+defineModel<Runtime<'text'> | Runtime<'count'> | Runtime<'active'>>()
+</script>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("directTrue: { type: Boolean, required: true }"));
+        assert!(script
+            .content
+            .contains("directFalse: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("text: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("count: { type: Number, required: true }"));
+        assert!(script
+            .content
+            .contains("active: { type: Boolean, required: true }"));
+        assert!(script
+            .content
+            .contains("unresolved: { type: null, required: true }"));
+        assert!(script
+            .content
+            .contains("\"modelValue\": { type: [String, Number, Boolean] },"));
+        assert_eq!(
+            script.bindings.get("text").map(String::as_str),
             Some("props")
         );
         assert!(script.deps.is_empty(), "{:?}", script.deps);

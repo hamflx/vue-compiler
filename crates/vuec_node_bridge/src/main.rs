@@ -6650,6 +6650,64 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_resolves_external_static_conditional_runtime_types_deps() {
+        let dir = std::env::temp_dir().join(format!(
+            "vuec-node-bridge-conditional-runtime-types-deps-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        std::fs::write(
+            dir.join("types.ts"),
+            concat!(
+                "export type Runtime<T> = ",
+                "T extends 'text' ? string : ",
+                "T extends 'count' ? number : boolean\n",
+                "export type Props = {\n",
+                "  directTrue: 'on' extends 'on' ? boolean : string\n",
+                "  directFalse: 'off' extends 'on' ? boolean : string\n",
+                "  text: Runtime<'text'>\n",
+                "  count: Runtime<'count'>\n",
+                "  active: Runtime<'active'>\n",
+                "  unresolved: Runtime<'text' | 'count'>\n",
+                "}\n",
+                "export type ModelValue = Runtime<'text'> | Runtime<'count'> | Runtime<'active'>"
+            ),
+        )
+        .expect("write conditional runtime props");
+
+        let filename = dir.join("Comp.vue");
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "import type { Props, ModelValue } from './types'\n",
+                    "defineProps<Props>()\n",
+                    "defineModel<ModelValue>()",
+                    "</script>"
+                ),
+                "filename": filename.to_string_lossy()
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = compiled["content"].as_str().unwrap_or_default();
+        let expected_dep = dir.join("types.ts").to_string_lossy().replace('\\', "/");
+        assert!(compiled["errors"].as_array().unwrap().is_empty());
+        assert!(content.contains("directTrue: { type: Boolean, required: true }"));
+        assert!(content.contains("directFalse: { type: String, required: true }"));
+        assert!(content.contains("text: { type: String, required: true }"));
+        assert!(content.contains("count: { type: Number, required: true }"));
+        assert!(content.contains("active: { type: Boolean, required: true }"));
+        assert!(content.contains("unresolved: { type: null, required: true }"));
+        assert!(content.contains("\"modelValue\": { type: [String, Number, Boolean] },"));
+        assert_eq!(compiled["deps"], json!([expected_dep]));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn vue3_sfc_bridge_compile_script_resolves_external_type_operator_runtime_types_deps() {
         let dir = std::env::temp_dir().join(format!(
             "vuec-node-bridge-type-operator-runtime-types-deps-{}",
