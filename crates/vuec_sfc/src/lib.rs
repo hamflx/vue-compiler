@@ -44,7 +44,7 @@ use vuec_style::{
     collect_css_vars_with_options, compile_style, gen_css_var_name_with_style, CssModulesOptions,
     CssVarCollectOptions, CssVarNameStyle, StyleCompileOptions, StylePreprocessOptions,
 };
-use vuec_vue3_core::{TemplateSource, Vue3CompilerOptions};
+use vuec_vue3_core::{process_expression_projection, TemplateSource, Vue3CompilerOptions};
 use vuec_vue3_dom::{
     apply_dom_parser_defaults, compile as compile_dom, AssetUrlOptions, DomCompilerOptions,
 };
@@ -359,7 +359,7 @@ pub struct SfcScriptCompileOptions {
     pub ref_sugar: bool,
     /// Whether production compile behavior is requested.
     pub is_prod: bool,
-    /// Whether Vue 2.7 script setup returns should include the internal `__sfc` marker.
+    /// Whether script setup returns should include the internal non-enumerable marker.
     pub emit_script_setup_marker: bool,
 }
 
@@ -3677,6 +3677,15 @@ fn descriptor_css_vars(descriptor: &SfcDescriptor, options: CssVarCollectOptions
         }
     }
     vars
+}
+
+fn vue3_css_vars(descriptor: &SfcDescriptor) -> Vec<String> {
+    descriptor_css_vars(
+        descriptor,
+        CssVarCollectOptions {
+            ignore_line_comments: true,
+        },
+    )
 }
 
 fn add_style_block_mappings(
@@ -15628,7 +15637,7 @@ fn script_content(
     base_bindings: &BTreeMap<String, String>,
 ) -> GeneratedScriptContent {
     let Some(script_setup) = descriptor.script_setup.as_ref() else {
-        let content = raw_content.to_string();
+        let content = vue3_normal_script_content(descriptor, raw_content, options, base_bindings);
         return GeneratedScriptContent {
             map: options
                 .source_map
@@ -15685,15 +15694,36 @@ fn script_content(
         &template_props_aliases,
         is_ts,
     );
+    let css_vars_code = vue3_script_setup_css_vars_code(
+        descriptor,
+        options,
+        &template_binding_metadata,
+        &template_props_aliases,
+    );
     let mut content = String::new();
     if let Some(render) = inline_render.as_ref() {
         append_vue3_module_chunk(&mut content, &render.preamble);
     }
-    if let Some(import) = vue3_script_setup_helper_import(&setup_analysis, options, is_ts) {
+    if let Some(import) = vue3_script_setup_helper_import(
+        &setup_analysis,
+        options,
+        is_ts,
+        css_vars_code.is_some(),
+        inline_render
+            .as_ref()
+            .is_some_and(|render| render.preamble.contains("unref as _unref")),
+    ) {
         append_vue3_module_chunk(&mut content, &import);
     }
     append_vue3_module_chunk(&mut content, &normal_script.module_content);
     append_vue3_module_chunk(&mut content, &setup_analysis.module_content);
+    if !content.is_empty()
+        && normal_script.module_content.is_empty()
+        && setup_analysis.module_content.is_empty()
+        && setup_analysis.setup_content.starts_with('\n')
+    {
+        content.push_str("\n\n");
+    }
     append_vue3_module_chunk(
         &mut content,
         &vue3_script_setup_export(
@@ -15705,6 +15735,8 @@ fn script_content(
             is_ts,
             options.is_prod,
             inline_render.as_ref(),
+            css_vars_code.as_deref(),
+            options.emit_script_setup_marker,
         ),
     );
     let mut bindings = BTreeMap::new();
@@ -16064,7 +16096,7 @@ fn vue3_inline_ssr_css_vars(
     descriptor: &SfcDescriptor,
     options: &SfcScriptCompileOptions,
 ) -> Option<String> {
-    let vars = descriptor_css_vars(descriptor, CssVarCollectOptions::default());
+    let vars = vue3_css_vars(descriptor);
     if vars.is_empty() {
         return None;
     }
@@ -16088,6 +16120,182 @@ fn vue3_inline_ssr_css_vars(
     Some(format!("{{\n  {entries}\n}}"))
 }
 
+fn vue3_normal_script_content(
+    descriptor: &SfcDescriptor,
+    raw_content: &str,
+    options: &SfcScriptCompileOptions,
+    _base_bindings: &BTreeMap<String, String>,
+) -> String {
+    let css_vars = vue3_css_vars(descriptor);
+    if css_vars.is_empty() || options.inline_template_ssr {
+        return raw_content.to_string();
+    }
+    let Some(script) = descriptor.script.as_ref() else {
+        return raw_content.to_string();
+    };
+
+    let source = script.content.as_str();
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(
+        &allocator,
+        source,
+        script_source_type_from_attrs(&script.attrs),
+    )
+    .with_options(oxc_parser::ParseOptions {
+        parse_regular_expression: true,
+        ..oxc_parser::ParseOptions::default()
+    })
+    .parse();
+    if parsed.panicked || !parsed.errors.is_empty() {
+        return raw_content.to_string();
+    }
+
+    let mut edits = SourceEdits::new(source);
+    let mut has_default_export = false;
+    for statement in &parsed.program.body {
+        match statement {
+            Statement::ExportDefaultDeclaration(declaration) => {
+                has_default_export = true;
+                rewrite_vue3_export_default("__default__", declaration, &mut edits);
+            }
+            Statement::ExportNamedDeclaration(declaration) => {
+                if rewrite_vue3_compile_script_named_default_export(
+                    source,
+                    "__default__",
+                    declaration,
+                    &mut edits,
+                ) {
+                    has_default_export = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    if !has_default_export {
+        edits.append("\nconst __default__ = {}");
+    }
+
+    let content = trim_trailing_blank_lines(&edits.apply()).to_string();
+    format!(
+        "{}{}\nexport default __default__",
+        content,
+        vue3_normal_script_css_vars_code(&css_vars, options)
+    )
+}
+
+fn vue3_normal_script_css_vars_code(
+    css_vars: &[String],
+    options: &SfcScriptCompileOptions,
+) -> String {
+    format!(
+        "\nimport {{ useCssVars as _useCssVars }} from {}\nconst __injectCSSVars__ = () => {{\n{}}}\nconst __setup__ = __default__.setup\n__default__.setup = __setup__\n  ? (props, ctx) => {{ __injectCSSVars__();return __setup__(props, ctx) }}\n  : __injectCSSVars__\n",
+        vue3_script_setup_helper_import_source(options),
+        vue3_css_vars_code(css_vars, options, &BTreeMap::new(), &BTreeMap::new())
+    )
+}
+
+fn vue3_script_setup_css_vars_code(
+    descriptor: &SfcDescriptor,
+    options: &SfcScriptCompileOptions,
+    binding_metadata: &BTreeMap<String, String>,
+    props_aliases: &BTreeMap<String, String>,
+) -> Option<String> {
+    if options.inline_template_ssr {
+        return None;
+    }
+    let css_vars = vue3_css_vars(descriptor);
+    if css_vars.is_empty() {
+        return None;
+    }
+    Some(vue3_css_vars_code(
+        &css_vars,
+        options,
+        binding_metadata,
+        props_aliases,
+    ))
+}
+
+fn vue3_css_vars_code(
+    css_vars: &[String],
+    options: &SfcScriptCompileOptions,
+    binding_metadata: &BTreeMap<String, String>,
+    props_aliases: &BTreeMap<String, String>,
+) -> String {
+    let id = vue3_compile_script_short_id(options.id.as_deref());
+    let vars = css_vars
+        .iter()
+        .map(|var| {
+            let name = gen_css_var_name_with_style(
+                &id,
+                var,
+                options.is_prod,
+                CssVarNameStyle::Vue3Escaped,
+            );
+            format!("\"{}\": ({})", name, var)
+        })
+        .collect::<Vec<_>>()
+        .join(",\n  ");
+    let expression = format!("{{\n  {vars}\n}}");
+    let prefixed = vue3_css_vars_expression_code(&expression, binding_metadata, props_aliases);
+    format!("_useCssVars(_ctx => ({prefixed}))")
+}
+
+fn vue3_css_vars_expression_code(
+    expression: &str,
+    binding_metadata: &BTreeMap<String, String>,
+    props_aliases: &BTreeMap<String, String>,
+) -> String {
+    let mut metadata = serde_json::Map::new();
+    for (name, kind) in binding_metadata {
+        metadata.insert(name.clone(), json!(kind));
+    }
+    if !props_aliases.is_empty() {
+        metadata.insert("__propsAliases".to_string(), json!(props_aliases));
+    }
+    let projection = process_expression_projection(&json!({
+        "node": {
+            "type": 4,
+            "content": expression,
+            "isStatic": false,
+            "loc": {
+                "start": { "offset": 0, "line": 1, "column": 1 },
+                "end": { "offset": expression.len(), "line": 1, "column": expression.len() + 1 },
+                "source": expression,
+            }
+        },
+        "context": {
+            "prefixIdentifiers": true,
+            "inline": true,
+            "isTS": false,
+            "identifiers": {},
+            "bindingMetadata": metadata,
+        }
+    }));
+    vue3_projection_code(&projection).unwrap_or_else(|| expression.to_string())
+}
+
+fn vue3_projection_code(value: &Value) -> Option<String> {
+    match value.get("kind").and_then(Value::as_str) {
+        Some("simple") => value
+            .get("content")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        Some("compound") => {
+            let children = value.get("children")?.as_array()?;
+            let mut code = String::new();
+            for child in children {
+                if let Some(source) = child.as_str() {
+                    code.push_str(source);
+                } else if let Some(source) = vue3_projection_code(child) {
+                    code.push_str(&source);
+                }
+            }
+            Some(code)
+        }
+        _ => value.as_str().map(ToOwned::to_owned),
+    }
+}
+
 fn vue3_script_setup_template_props_aliases(
     setup_analysis: &Vue3ScriptSetupAnalysis,
 ) -> BTreeMap<String, String> {
@@ -16098,8 +16306,16 @@ fn vue3_script_setup_helper_import(
     setup_analysis: &Vue3ScriptSetupAnalysis,
     options: &SfcScriptCompileOptions,
     is_ts: bool,
+    needs_css_vars: bool,
+    inline_render_has_unref: bool,
 ) -> Option<String> {
     let mut helpers = Vec::new();
+    if needs_css_vars {
+        helpers.push("useCssVars as _useCssVars");
+        if !inline_render_has_unref {
+            helpers.push("unref as _unref");
+        }
+    }
     if setup_analysis.has_top_level_await {
         helpers.push("withAsyncContext as _withAsyncContext");
     }
@@ -23229,6 +23445,8 @@ fn vue3_script_setup_export(
     is_ts: bool,
     is_prod: bool,
     inline_render: Option<&Vue3InlineTemplateRender>,
+    css_vars_code: Option<&str>,
+    emit_script_setup_marker: bool,
 ) -> String {
     let runtime_options = vue3_script_setup_runtime_options(
         filename,
@@ -23243,6 +23461,8 @@ fn vue3_script_setup_export(
         bindings,
         script_bindings,
         inline_render,
+        css_vars_code,
+        emit_script_setup_marker,
         is_ts,
     );
     if is_ts {
@@ -23300,11 +23520,10 @@ fn vue3_script_setup_runtime_options(
     inline_render: Option<&Vue3InlineTemplateRender>,
 ) -> String {
     let mut runtime_options = String::new();
-    if !normal_script.has_default_export_name {
-        runtime_options.push_str(&format!(
-            "\n  __name: '{}',",
-            escape_js_single(&script_component_name(filename))
-        ));
+    if !normal_script.has_default_export_name && should_infer_vue3_script_name(filename) {
+        if let Some(name) = script_component_name(filename) {
+            runtime_options.push_str(&format!("\n  __name: '{}',", escape_js_single(&name)));
+        }
     }
     if inline_render.is_some_and(|render| render.ssr) {
         runtime_options.push_str("\n  __ssrInlineRender: true,");
@@ -23316,6 +23535,10 @@ fn vue3_script_setup_runtime_options(
         runtime_options.push_str(&format!("\n  emits: {},", emits.trim()));
     }
     runtime_options
+}
+
+fn should_infer_vue3_script_name(filename: &str) -> bool {
+    !filename.is_empty() && filename.replace('\\', "/") != "anonymous.vue"
 }
 
 fn vue3_script_setup_needs_merge_models(setup_analysis: &Vue3ScriptSetupAnalysis) -> bool {
@@ -23459,6 +23682,8 @@ fn vue3_script_setup_body(
     bindings: &[Vue3ScriptSetupReturnBinding],
     script_bindings: &BTreeMap<String, String>,
     inline_render: Option<&Vue3InlineTemplateRender>,
+    css_vars_code: Option<&str>,
+    emit_script_setup_marker: bool,
     is_ts: bool,
 ) -> String {
     let mut returned_binding_types = script_bindings.clone();
@@ -23475,11 +23700,27 @@ fn vue3_script_setup_body(
             body.push_str("let __temp, __restore\n");
         }
     }
-    if setup_analysis.setup_content.is_empty() {
+    let has_css_vars_code = css_vars_code.is_some();
+    if let Some(css_vars_code) = css_vars_code {
         body.push('\n');
+        body.push_str(css_vars_code);
+        body.push_str("\n\n");
+    }
+    if setup_analysis.setup_content.is_empty() {
+        if !has_css_vars_code {
+            body.push('\n');
+        }
     } else {
-        body.push_str(&setup_analysis.setup_content);
-        if !setup_analysis.setup_content.ends_with('\n') {
+        let setup_content = if has_css_vars_code {
+            setup_analysis
+                .setup_content
+                .strip_prefix('\n')
+                .unwrap_or(&setup_analysis.setup_content)
+        } else {
+            &setup_analysis.setup_content
+        };
+        body.push_str(setup_content);
+        if !setup_content.ends_with('\n') {
             body.push('\n');
         }
     }
@@ -23488,9 +23729,13 @@ fn vue3_script_setup_body(
         body.push_str(&render.code);
         return body;
     }
-    body.push_str(&format!(
-        "const __returned__ = {returned}\nObject.defineProperty(__returned__, '__isScriptSetup', {{ enumerable: false, value: true }})\nreturn __returned__"
-    ));
+    if emit_script_setup_marker {
+        body.push_str(&format!(
+            "const __returned__ = {returned}\nObject.defineProperty(__returned__, '__isScriptSetup', {{ enumerable: false, value: true }})\nreturn __returned__"
+        ));
+    } else {
+        body.push_str(&format!("return {returned}"));
+    }
     body
 }
 
@@ -23548,12 +23793,11 @@ fn append_vue3_module_chunk(output: &mut String, chunk: &str) {
     output.push_str(chunk);
 }
 
-fn script_component_name(filename: &str) -> String {
-    let stem = std::path::Path::new(filename)
+fn script_component_name(filename: &str) -> Option<String> {
+    std::path::Path::new(filename)
         .file_stem()
         .and_then(|stem| stem.to_str())
-        .unwrap_or("anonymous");
-    stem.to_string()
+        .map(ToOwned::to_owned)
 }
 
 fn quoted_import_path(source: &str) -> Option<&str> {
@@ -25485,6 +25729,164 @@ const local = 1
         assert!(script
             .content
             .contains("const a: number = 1\nconst __returned__ = { a }"));
+    }
+
+    #[test]
+    fn vue3_compile_script_injects_normal_script_css_vars() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "Comp.vue",
+            r#"<script>const a = 1</script>
+<style>
+div {
+  color: v-bind(color);
+  font-size: v-bind('font.size');
+}
+</style>"#,
+        );
+        let script = compiler.compile_script(
+            &descriptor,
+            SfcScriptCompileOptions {
+                id: Some("xxxxxxxx".into()),
+                ..SfcScriptCompileOptions::default()
+            },
+        );
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script.content.contains("const a = 1"));
+        assert!(script.content.contains("const __default__ = {}"));
+        assert!(script
+            .content
+            .contains("import { useCssVars as _useCssVars } from 'vue'"));
+        assert!(script.content.contains("_useCssVars(_ctx => ({"));
+        assert!(script.content.contains(r#""xxxxxxxx-color": (_ctx.color)"#));
+        assert!(script
+            .content
+            .contains(r#""xxxxxxxx-font\.size": (_ctx.font.size)"#));
+        assert!(script.content.contains("export default __default__"));
+    }
+
+    #[test]
+    fn vue3_compile_script_injects_script_setup_css_vars() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "Comp.vue",
+            r#"<script setup>
+import { ref } from 'vue'
+const color = 'red'
+const size = ref('10px')
+defineProps({ foo: String })
+</script>
+<style>
+div {
+  color: v-bind(color);
+  font-size: v-bind(size);
+  border: v-bind(foo);
+}
+</style>"#,
+        );
+        let script = compiler.compile_script(
+            &descriptor,
+            SfcScriptCompileOptions {
+                id: Some("xxxxxxxx".into()),
+                ..SfcScriptCompileOptions::default()
+            },
+        );
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("import { useCssVars as _useCssVars, unref as _unref } from 'vue'"));
+        assert!(script.content.contains("_useCssVars(_ctx => ({"));
+        assert!(script.content.contains(r#""xxxxxxxx-color": (color)"#));
+        assert!(script.content.contains(r#""xxxxxxxx-size": (size.value)"#));
+        assert!(script.content.contains(r#""xxxxxxxx-foo": (__props.foo)"#));
+        assert!(!script.content.contains(r#""xxxxxxxx-ignored": (ignored)"#));
+    }
+
+    #[test]
+    fn vue3_compile_script_can_omit_script_setup_marker_for_official_tests() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "Comp.vue",
+            r#"<script setup>const color = 'red'</script>
+<style>div { color: v-bind(color); }</style>"#,
+        );
+        let script = compiler.compile_script(
+            &descriptor,
+            SfcScriptCompileOptions {
+                id: Some("xxxxxxxx".into()),
+                emit_script_setup_marker: false,
+                ..SfcScriptCompileOptions::default()
+            },
+        );
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script.content.contains("_useCssVars(_ctx => ({"));
+        assert!(script.content.contains(r#""xxxxxxxx-color": (color)"#));
+        assert!(script.content.contains("return { color }"));
+        assert!(!script
+            .content
+            .contains("Object.defineProperty(__returned__"));
+    }
+
+    #[test]
+    fn vue3_compile_script_does_not_infer_name_for_default_filename() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "anonymous.vue",
+            r#"<script setup>const color = 'red'</script>
+<style>div { color: v-bind(color); }</style>"#,
+        );
+        let script = compiler.compile_script(
+            &descriptor,
+            SfcScriptCompileOptions {
+                id: Some("xxxxxxxx".into()),
+                emit_script_setup_marker: false,
+                ..SfcScriptCompileOptions::default()
+            },
+        );
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script.content.contains("export default {\n  setup("));
+        assert!(!script.content.contains("__name: 'anonymous'"));
+        assert!(!script.content.contains("__name:"));
+    }
+
+    #[test]
+    fn vue3_compile_script_css_vars_skip_line_comments_and_ssr() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "Comp.vue",
+            r#"<script setup>const color = 'red'; const width = 100</script>
+<style lang="scss">
+// div { color: v-bind(color); }
+div { width: v-bind(width); }
+</style>"#,
+        );
+        let script = compiler.compile_script(
+            &descriptor,
+            SfcScriptCompileOptions {
+                id: Some("xxxxxxxx".into()),
+                ..SfcScriptCompileOptions::default()
+            },
+        );
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(!script.content.contains(r#""xxxxxxxx-color""#));
+        assert!(script.content.contains(r#""xxxxxxxx-width": (width)"#));
+
+        let ssr = compiler.compile_script(
+            &descriptor,
+            SfcScriptCompileOptions {
+                id: Some("xxxxxxxx".into()),
+                inline_template_ssr: true,
+                ..SfcScriptCompileOptions::default()
+            },
+        );
+
+        assert!(ssr.errors.is_empty(), "{:?}", ssr.errors);
+        assert!(!ssr.content.contains("_useCssVars"));
     }
 
     #[test]

@@ -2420,6 +2420,8 @@ fn alias_function_expression(
             );
             let is_vue27_sfc_compile_script =
                 target.kind == TargetKind::Vue27Sfc && export_name == "compileScript";
+            let is_vue3_sfc_compile_script =
+                target.kind == TargetKind::Vue3Sfc && export_name == "compileScript";
             let is_vue3_sfc_parse = target.kind == TargetKind::Vue3Sfc && export_name == "parse";
             let is_vue3_ssr_compile = target.kind == TargetKind::Vue3Ssr && export_name == "compile";
             let is_sfc_compile_style = matches!(
@@ -2437,6 +2439,8 @@ fn alias_function_expression(
                 "vue3SfcParseBridgePayload(__vuecPayload)"
             } else if is_vue27_sfc_compile_script {
                 "vue27CompileScriptBridgePayload(__vuecPayload)"
+            } else if is_vue3_sfc_compile_script {
+                "vue3CompileScriptBridgePayload(__vuecPayload)"
             } else if is_vue3_sfc_compile_style {
                 "vue3StyleBridgePayload(__vuecPayload)"
             } else {
@@ -2463,7 +2467,7 @@ fn alias_function_expression(
                 )
             } else if is_vue3_sfc_parse {
                 format!("hydrateVue3SfcParseResult(applyVue3SfcCustomCompilerParse({call}, __vuecPayload.source, __vuecPayload.options, __vuecPayload.filename))")
-            } else if target.kind == TargetKind::Vue3Sfc && export_name == "compileScript" {
+            } else if is_vue3_sfc_compile_script {
                 format!("hydrateVue3CompileScriptResult({call})")
             } else if is_vue27_sfc_compile_script {
                 format!("hydrateVue27CompileScriptResult({call})")
@@ -8001,6 +8005,16 @@ function hydrateVue3CompileScriptResult(result) {
   return result;
 }
 
+function vue3CompileScriptBridgePayload(payload) {
+  const out = Object.assign({}, payload || {});
+  const options = Object.assign({}, out.options || {});
+  if (typeof __TEST__ !== 'undefined' && __TEST__ === true) {
+    options.__vuecEmitScriptSetupMarker = false;
+  }
+  out.options = options;
+  return out;
+}
+
 function vue3SfcShouldForceReload(prevImports, descriptor) {
   const scriptSetup = descriptor && descriptor.scriptSetup;
   if (!scriptSetup || (scriptSetup.lang !== 'ts' && scriptSetup.lang !== 'tsx')) {
@@ -12792,6 +12806,10 @@ fn patch_vue3_sfc_compile_template_asset_bridge(path: &Path) -> Result<()> {
 }
 
 fn rewrite_vue3_sfc_public_api_spec_imports(prepared_root: &Path) -> Result<()> {
+    let tests = prepared_root
+        .join("packages")
+        .join("compiler-sfc")
+        .join("__tests__");
     let parse_spec = prepared_root
         .join("packages")
         .join("compiler-sfc")
@@ -12824,6 +12842,65 @@ fn rewrite_vue3_sfc_public_api_spec_imports(prepared_root: &Path) -> Result<()> 
         "from '../src/compileStyle'",
         "from '@vue/compiler-sfc'",
     )?;
+
+    let css_vars_spec = tests.join("cssVars.spec.ts");
+    rewrite_text_file_import(
+        &css_vars_spec,
+        "import { compileStyle, parse } from '../src'",
+        "import { compileStyle, parse } from '@vue/compiler-sfc'",
+    )?;
+    rewrite_text_file_import(
+        &css_vars_spec,
+        "from './utils'",
+        "from './utils.public-api'",
+    )?;
+    if css_vars_spec.exists() {
+        write_text(
+            &tests.join("utils.public-api.ts"),
+            r#"import {
+  type SFCParseOptions,
+  type SFCScriptBlock,
+  type SFCScriptCompileOptions,
+  compileScript,
+  parse,
+} from '@vue/compiler-sfc'
+import { parse as babelParse } from '@babel/parser'
+
+export const mockId = 'xxxxxxxx'
+
+export function compileSFCScript(
+  src: string,
+  options?: Partial<SFCScriptCompileOptions>,
+  parseOptions?: SFCParseOptions,
+): SFCScriptBlock {
+  const { descriptor, errors } = parse(src, parseOptions)
+  if (errors.length) {
+    console.warn(errors[0])
+  }
+  return compileScript(descriptor, {
+    ...options,
+    id: mockId,
+  })
+}
+
+export function assertCode(code: string): void {
+  try {
+    babelParse(code, {
+      sourceType: 'module',
+      plugins: [
+        'typescript',
+        ['importAttributes', { deprecatedAssertSyntax: true }],
+      ],
+    })
+  } catch (e: any) {
+    console.log(code)
+    throw e
+  }
+  expect(code).toMatchSnapshot()
+}
+"#,
+        )?;
+    }
     Ok(())
 }
 
@@ -13539,6 +13616,7 @@ fn conformance_coverage_file_kind(
     if path.ends_with("packages/compiler-sfc/__tests__/parse.spec.ts")
         || path.ends_with("packages/compiler-sfc/__tests__/rewriteDefault.spec.ts")
         || path.ends_with("packages/compiler-sfc/__tests__/compileStyle.spec.ts")
+        || path.ends_with("packages/compiler-sfc/__tests__/cssVars.spec.ts")
     {
         ConformanceCoverageKind::RustBacked
     } else if path.ends_with("packages/compiler-sfc/test/compileStyle.spec.ts") {
@@ -13602,6 +13680,12 @@ fn conformance_coverage_file_reason(
             if path.ends_with("packages/compiler-sfc/__tests__/compileStyle.spec.ts") =>
         {
             "Official Vue 3 SFC compileStyle file imports the public @vue/compiler-sfc API and routes CSS scoped/modules/preprocess compilation through vuec_node_bridge into Rust; the JavaScript package boundary only materializes caller-provided preprocess additionalData callbacks and normalizes public result shape."
+                .to_string()
+        }
+        ConformanceCoverageKind::RustBacked
+            if path.ends_with("packages/compiler-sfc/__tests__/cssVars.spec.ts") =>
+        {
+            "Official Vue 3 SFC cssVars file imports the public @vue/compiler-sfc API and routes parse, compileStyle, and compileScript through vuec_node_bridge into Rust; the generated per-file helper only preserves the official test utility shape and Babel syntax assertion."
                 .to_string()
         }
         ConformanceCoverageKind::RustBacked => {
@@ -14355,8 +14439,11 @@ mod tests {
 
         assert!(expression.contains("sfc.compileScript"));
         assert!(expression.contains("hydrateVue3CompileScriptResult"));
+        assert!(expression.contains("vue3CompileScriptBridgePayload"));
         assert!(ALIAS_RUNTIME_JS.contains("function hydrateVue3CompileScriptResult"));
+        assert!(ALIAS_RUNTIME_JS.contains("function vue3CompileScriptBridgePayload"));
         assert!(ALIAS_RUNTIME_JS.contains("function throwVue3CompileScriptErrors"));
+        assert!(ALIAS_RUNTIME_JS.contains("__vuecEmitScriptSetupMarker = false"));
         assert!(ALIAS_RUNTIME_JS.contains("Object.defineProperty(bindings, '__isScriptSetup'"));
         assert!(ALIAS_RUNTIME_JS.contains("[@vue/compiler-sfc] ${message}"));
     }
@@ -15642,6 +15729,16 @@ mod tests {
             "import { compileStyle, compileStyleAsync } from '../src/compileStyle'\n",
         )
         .unwrap();
+        fs::write(
+            tests.join("cssVars.spec.ts"),
+            "import { compileStyle, parse } from '../src'\nimport { assertCode, compileSFCScript, mockId } from './utils'\n",
+        )
+        .unwrap();
+        fs::write(
+            tests.join("utils.ts"),
+            "import { compileScript, parse } from '../src'\n",
+        )
+        .unwrap();
 
         rewrite_vue3_sfc_public_api_spec_imports(&temp).unwrap();
         rewrite_vue3_sfc_public_api_spec_imports(&temp).unwrap();
@@ -15662,6 +15759,20 @@ mod tests {
         assert!(compile_style_spec
             .contains("import { compileStyle, compileStyleAsync } from '@vue/compiler-sfc'"));
         assert_eq!(compile_style_spec.matches("@vue/compiler-sfc").count(), 1);
+
+        let css_vars_spec = fs::read_to_string(tests.join("cssVars.spec.ts")).unwrap();
+        assert!(css_vars_spec.contains("import { compileStyle, parse } from '@vue/compiler-sfc'"));
+        assert!(
+            css_vars_spec.contains("from './utils.public-api'"),
+            "cssVars should use a dedicated helper so shared utils.ts remains scoped to mixed files"
+        );
+        assert_eq!(css_vars_spec.matches("@vue/compiler-sfc").count(), 1);
+        let shared_utils = fs::read_to_string(tests.join("utils.ts")).unwrap();
+        assert!(shared_utils.contains("from '../src'"));
+        let public_utils = fs::read_to_string(tests.join("utils.public-api.ts")).unwrap();
+        assert!(public_utils.contains("from '@vue/compiler-sfc'"));
+        assert!(public_utils.contains("export function compileSFCScript"));
+        assert!(public_utils.contains("babelParse(code"));
         let _ = fs::remove_dir_all(temp);
     }
 
@@ -15715,6 +15826,15 @@ mod tests {
                   ]
                 },
                 {
+                  "name": "F:/repo/prepared/vue3-sfc/packages/compiler-sfc/__tests__/cssVars.spec.ts",
+                  "assertionResults": [
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" }
+                  ]
+                },
+                {
                   "name": "F:/repo/prepared/vue3-sfc/packages/compiler-sfc/__tests__/compileScript.spec.ts",
                   "assertionResults": [
                     { "status": "passed" }
@@ -15739,8 +15859,8 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             counts: ConformanceExecutionCounts {
-                total: 9,
-                pass: 8,
+                total: 13,
+                pass: 12,
                 fail: 1,
                 skip: 0,
                 pending: 0,
@@ -15754,8 +15874,8 @@ mod tests {
         );
 
         assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
-        assert_eq!(coverage.rust_backed_pass, 7);
-        assert_eq!(coverage.rust_backed_total, 7);
+        assert_eq!(coverage.rust_backed_pass, 11);
+        assert_eq!(coverage.rust_backed_total, 11);
         assert_eq!(
             coverage.files[0].source,
             ConformanceCoverageKind::RustBacked
@@ -15771,8 +15891,13 @@ mod tests {
         assert!(coverage.files[2]
             .reason
             .contains("additionalData callbacks"));
-        assert_eq!(coverage.files[3].source, ConformanceCoverageKind::Mixed);
+        assert_eq!(
+            coverage.files[3].source,
+            ConformanceCoverageKind::RustBacked
+        );
+        assert!(coverage.files[3].reason.contains("Babel syntax assertion"));
         assert_eq!(coverage.files[4].source, ConformanceCoverageKind::Mixed);
+        assert_eq!(coverage.files[5].source, ConformanceCoverageKind::Mixed);
         assert_eq!(
             coverage
                 .counts_by_source
