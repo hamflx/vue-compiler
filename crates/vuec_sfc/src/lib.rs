@@ -4978,8 +4978,13 @@ fn vue3_global_type_context_from_source(
         type_filename: Some(filename.to_string()),
         ..Vue3ScriptSetupAnalysis::default()
     };
-    let global_names =
+    let mut global_names =
         collect_vue3_global_types_from_statements(source, &parsed.program.body, &mut analysis);
+    global_names.extend(project_vue3_global_type_re_exports(
+        filename,
+        &parsed.program.body,
+        &mut analysis,
+    ));
     let global_import_names = vue3_global_type_file_import_names(&parsed.program.body);
     collect_vue3_global_type_deps_from_statements(&parsed.program.body, &mut analysis);
     seed_vue3_external_type_deps(filename, &mut analysis);
@@ -5056,6 +5061,29 @@ fn collect_vue3_global_types_from_statements(
         };
         names.extend(vue3_declared_type_names_from_statements(&global.body.body));
         collect_vue3_declared_types_from_statements(source, &global.body.body, analysis);
+    }
+    names
+}
+
+fn project_vue3_global_type_re_exports(
+    filename: &str,
+    statements: &[Statement<'_>],
+    analysis: &mut Vue3ScriptSetupAnalysis,
+) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    let mut seen = BTreeSet::new();
+    for statement in statements {
+        let Statement::TSGlobalDeclaration(global) = statement else {
+            continue;
+        };
+        names.extend(project_vue3_type_re_exports(
+            filename,
+            &global.body.body,
+            analysis,
+            &mut seen,
+        ));
+        project_vue3_exported_type_specifiers(&global.body.body, analysis);
+        names.extend(vue3_exported_type_names(&global.body.body));
     }
     names
 }
@@ -7309,6 +7337,14 @@ fn resolve_vue3_type_import_path(candidate: &Path) -> Option<PathBuf> {
             candidates.extend(vue3_ts_resolution_candidates(&stem, extension));
         }
     } else {
+        if candidate.is_dir() {
+            match resolve_vue3_package_json_type_entry(candidate, None) {
+                Vue3PackageJsonTypeResolution::Resolved(path) => return Some(path),
+                Vue3PackageJsonTypeResolution::Blocked => return None,
+                Vue3PackageJsonTypeResolution::NoPackageJson
+                | Vue3PackageJsonTypeResolution::NoPackageTypeEntry => {}
+            }
+        }
         candidates.extend(vue3_ts_resolution_candidates(candidate, extension));
         candidates.push(candidate.join("index.ts"));
         candidates.push(candidate.join("index.tsx"));
@@ -24427,6 +24463,95 @@ defineModel<GlobalModel>()
 
         let deps = script.deps.iter().cloned().collect::<BTreeSet<_>>();
         let expected = [global, module_global]
+            .into_iter()
+            .map(|path| normalize_path_string(&path))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(deps, expected);
+        assert!(!script.deps.iter().any(|dep| dep.contains('\\')));
+    }
+
+    #[test]
+    fn vue3_compile_script_resolves_global_type_re_exports_and_deps() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let base = dir.path().join("base.ts");
+        std::fs::write(&base, "export interface Base { age: number }").expect("write base type");
+        let types = dir.path().join("types.ts");
+        std::fs::write(&types, "export type Name = string").expect("write helper type");
+        let foo = dir.path().join("foo.ts");
+        std::fs::write(
+            &foo,
+            concat!(
+                "import type { Base } from './base'\n",
+                "import type { Name } from './types'\n",
+                "export interface Foo extends Base { name: Name }"
+            ),
+        )
+        .expect("write foo type");
+        let bar = dir.path().join("bar.ts");
+        std::fs::write(&bar, "export interface Bar { bar: boolean }").expect("write bar type");
+        let baz = dir.path().join("baz.ts");
+        std::fs::write(&baz, "export interface Baz { baz: string }").expect("write baz type");
+        let package_dir = dir.path().join("node_modules").join("pkg");
+        std::fs::create_dir_all(package_dir.join("dist")).expect("create package dir");
+        std::fs::write(
+            package_dir.join("package.json"),
+            r#"{"types":"dist/index.d.ts"}"#,
+        )
+        .expect("write package manifest");
+        let package_types = package_dir.join("dist").join("index.d.ts");
+        std::fs::write(
+            &package_types,
+            "export interface PackageType { value: string }",
+        )
+        .expect("write package types");
+        let global = dir.path().join("global.d.ts");
+        std::fs::write(
+            &global,
+            concat!(
+                "declare global {\n",
+                "  export type { Foo } from './foo'\n",
+                "  export { Bar } from './bar'\n",
+                "  export * from './baz'\n",
+                "  export type { PackageType } from './node_modules/pkg'\n",
+                "}\n",
+                "export {}\n"
+            ),
+        )
+        .expect("write global re-exports");
+
+        let filename = dir.path().join("Comp.vue");
+        let source = r#"<script setup lang="ts">
+defineProps<Foo & Bar & Baz & PackageType>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(
+            &descriptor,
+            SfcScriptCompileOptions {
+                global_type_files: vec![global.to_string_lossy().to_string()],
+                ..SfcScriptCompileOptions::default()
+            },
+        );
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("age: { type: Number, required: true }"));
+        assert!(script
+            .content
+            .contains("name: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("bar: { type: Boolean, required: true }"));
+        assert!(script
+            .content
+            .contains("baz: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("value: { type: String, required: true }"));
+
+        let deps = script.deps.iter().cloned().collect::<BTreeSet<_>>();
+        let expected = [global, foo, base, types, bar, baz, package_types]
             .into_iter()
             .map(|path| normalize_path_string(&path))
             .collect::<BTreeSet<_>>();

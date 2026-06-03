@@ -7208,6 +7208,106 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_resolves_global_type_re_exports_deps() {
+        let dir = std::env::temp_dir().join(format!(
+            "vuec-node-bridge-global-re-export-deps-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("node_modules").join("pkg").join("dist"))
+            .expect("create package");
+        std::fs::write(dir.join("base.ts"), "export interface Base { age: number }")
+            .expect("write base type");
+        std::fs::write(dir.join("types.ts"), "export type Name = string")
+            .expect("write helper type");
+        std::fs::write(
+            dir.join("foo.ts"),
+            concat!(
+                "import type { Base } from './base'\n",
+                "import type { Name } from './types'\n",
+                "export interface Foo extends Base { name: Name }"
+            ),
+        )
+        .expect("write foo type");
+        std::fs::write(dir.join("bar.ts"), "export interface Bar { bar: boolean }")
+            .expect("write bar type");
+        std::fs::write(dir.join("baz.ts"), "export interface Baz { baz: string }")
+            .expect("write baz type");
+        let package_dir = dir.join("node_modules").join("pkg");
+        std::fs::write(
+            package_dir.join("package.json"),
+            r#"{"types":"dist/index.d.ts"}"#,
+        )
+        .expect("write package manifest");
+        std::fs::write(
+            package_dir.join("dist").join("index.d.ts"),
+            "export interface PackageType { value: string }",
+        )
+        .expect("write package types");
+        let global = dir.join("global.d.ts");
+        std::fs::write(
+            &global,
+            concat!(
+                "declare global {\n",
+                "  export type { Foo } from './foo'\n",
+                "  export { Bar } from './bar'\n",
+                "  export * from './baz'\n",
+                "  export type { PackageType } from './node_modules/pkg'\n",
+                "}\n",
+                "export {}\n"
+            ),
+        )
+        .expect("write global re-exports");
+
+        let filename = dir.join("Comp.vue");
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "defineProps<Foo & Bar & Baz & PackageType>()",
+                    "</script>"
+                ),
+                "filename": filename.to_string_lossy(),
+                "options": {
+                    "globalTypeFiles": [global.to_string_lossy()]
+                }
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = compiled["content"].as_str().unwrap_or_default();
+        assert!(compiled["errors"].as_array().unwrap().is_empty());
+        assert!(content.contains("age: { type: Number, required: true }"));
+        assert!(content.contains("name: { type: String, required: true }"));
+        assert!(content.contains("bar: { type: Boolean, required: true }"));
+        assert!(content.contains("baz: { type: String, required: true }"));
+        assert!(content.contains("value: { type: String, required: true }"));
+
+        let deps = compiled["deps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|dep| dep.as_str().unwrap().to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected = [
+            global,
+            dir.join("foo.ts"),
+            dir.join("base.ts"),
+            dir.join("types.ts"),
+            dir.join("bar.ts"),
+            dir.join("baz.ts"),
+            package_dir.join("dist").join("index.d.ts"),
+        ]
+        .into_iter()
+        .map(|path| path.to_string_lossy().replace('\\', "/"))
+        .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(deps, expected);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn vue3_sfc_bridge_compile_script_returns_dynamic_import_type_deps() {
         let dir = std::env::temp_dir().join(format!(
             "vuec-node-bridge-dynamic-import-type-deps-{}",
