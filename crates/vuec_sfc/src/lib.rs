@@ -6881,7 +6881,7 @@ fn vue3_tsconfig_path_mappings_from_config(
     let Ok(source) = std::fs::read_to_string(config_path) else {
         return Vec::new();
     };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&source) else {
+    let Some(value) = vue3_parse_tsconfig_jsonc(&source) else {
         return Vec::new();
     };
     let config_dir = config_path.parent().unwrap_or_else(|| Path::new(""));
@@ -6911,6 +6911,124 @@ fn vue3_tsconfig_path_mappings_from_config(
         ));
     }
     mappings
+}
+
+fn vue3_parse_tsconfig_jsonc(source: &str) -> Option<serde_json::Value> {
+    serde_json::from_str::<serde_json::Value>(source)
+        .ok()
+        .or_else(|| {
+            let normalized = vue3_normalize_tsconfig_jsonc(source);
+            serde_json::from_str::<serde_json::Value>(&normalized).ok()
+        })
+}
+
+fn vue3_normalize_tsconfig_jsonc(source: &str) -> String {
+    let without_comments = vue3_strip_jsonc_comments(source);
+    vue3_strip_jsonc_trailing_commas(&without_comments)
+}
+
+fn vue3_strip_jsonc_comments(source: &str) -> String {
+    let mut output = String::with_capacity(source.len());
+    let mut chars = source.chars().peekable();
+    let mut in_string = false;
+    let mut escaped = false;
+    while let Some(ch) = chars.next() {
+        if in_string {
+            output.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        if ch == '"' {
+            in_string = true;
+            output.push(ch);
+            continue;
+        }
+        if ch != '/' {
+            output.push(ch);
+            continue;
+        }
+        match chars.peek().copied() {
+            Some('/') => {
+                chars.next();
+                output.push(' ');
+                output.push(' ');
+                while let Some(comment) = chars.next() {
+                    if comment == '\n' || comment == '\r' {
+                        output.push(comment);
+                        break;
+                    }
+                    output.push(' ');
+                }
+            }
+            Some('*') => {
+                chars.next();
+                output.push(' ');
+                output.push(' ');
+                let mut prev_star = false;
+                while let Some(comment) = chars.next() {
+                    let ends_comment = prev_star && comment == '/';
+                    if comment == '\n' || comment == '\r' {
+                        output.push(comment);
+                    } else {
+                        output.push(' ');
+                    }
+                    if ends_comment {
+                        break;
+                    }
+                    prev_star = comment == '*';
+                }
+            }
+            _ => output.push(ch),
+        }
+    }
+    output
+}
+
+fn vue3_strip_jsonc_trailing_commas(source: &str) -> String {
+    let mut output = String::with_capacity(source.len());
+    let mut chars = source.chars().peekable();
+    let mut in_string = false;
+    let mut escaped = false;
+    while let Some(ch) = chars.next() {
+        if in_string {
+            output.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        if ch == '"' {
+            in_string = true;
+            output.push(ch);
+            continue;
+        }
+        if ch != ',' {
+            output.push(ch);
+            continue;
+        }
+        let mut lookahead = chars.clone();
+        while lookahead.peek().is_some_and(|next| next.is_whitespace()) {
+            lookahead.next();
+        }
+        if lookahead
+            .peek()
+            .is_some_and(|next| matches!(*next, '}' | ']'))
+        {
+            continue;
+        }
+        output.push(ch);
+    }
+    output
 }
 
 fn vue3_tsconfig_extends_paths(value: &serde_json::Value, config_dir: &Path) -> Vec<PathBuf> {
@@ -22391,6 +22509,146 @@ const props = defineProps<PackageProps & PathProps & UserProps & BaseProps & Vue
         .collect::<BTreeSet<_>>();
         assert_eq!(deps, expected);
         assert!(!script.deps.iter().any(|dep| dep.contains('\\')));
+    }
+
+    #[test]
+    fn vue3_compile_script_resolves_tsconfig_jsonc_paths_and_deps() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir_all(dir.path().join("src").join("components"))
+            .expect("create component dir");
+        std::fs::create_dir_all(dir.path().join("src").join("base")).expect("create base dir");
+        std::fs::create_dir_all(dir.path().join("config")).expect("create config dir");
+        std::fs::write(
+            dir.path().join("tsconfig.json"),
+            r#"{
+                // Root path mapping.
+                "compilerOptions": {
+                    "paths": {
+                        "root-alias": ["./root.ts",],
+                    },
+                },
+                "references": [
+                    { "path": "./tsconfig.app.json", },
+                ],
+            }"#,
+        )
+        .expect("write root tsconfig");
+        std::fs::write(
+            dir.path().join("tsconfig.app.json"),
+            r#"{
+                "extends": [
+                    "./config/base.json", // inherited alias
+                ],
+                "compilerOptions": {
+                    "paths": {
+                        "app-alias": ["./app.ts",],
+                    },
+                },
+            }"#,
+        )
+        .expect("write app tsconfig");
+        std::fs::write(
+            dir.path().join("config").join("base.json"),
+            r#"{
+                /* ${configDir} should still resolve from the referencing config. */
+                "compilerOptions": {
+                    "paths": {
+                        "@base/*": ["${configDir}/src/base/*",],
+                    },
+                },
+            }"#,
+        )
+        .expect("write base tsconfig");
+        std::fs::write(
+            dir.path().join("root.ts"),
+            "export type RootProps = { root: string }",
+        )
+        .expect("write root type");
+        std::fs::write(
+            dir.path().join("app.ts"),
+            "export type AppProps = { app?: number }",
+        )
+        .expect("write app type");
+        std::fs::write(
+            dir.path().join("src").join("base").join("types.ts"),
+            "export type BaseProps = { base: boolean }",
+        )
+        .expect("write base type");
+
+        let filename = dir.path().join("src").join("components").join("Comp.vue");
+        let source = r#"<script setup lang="ts">
+import type { RootProps } from 'root-alias'
+import type { AppProps } from 'app-alias'
+import type { BaseProps } from '@base/types'
+defineProps<RootProps & AppProps & BaseProps>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("root: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("app: { type: Number, required: false }"));
+        assert!(script
+            .content
+            .contains("base: { type: Boolean, required: true }"));
+
+        let deps = script.deps.iter().cloned().collect::<BTreeSet<_>>();
+        let expected = [
+            dir.path().join("root.ts"),
+            dir.path().join("app.ts"),
+            dir.path().join("src").join("base").join("types.ts"),
+        ]
+        .into_iter()
+        .map(|path| normalize_path_string(&path))
+        .collect::<BTreeSet<_>>();
+        assert_eq!(deps, expected);
+        assert!(!script.deps.iter().any(|dep| dep.contains('\\')));
+    }
+
+    #[test]
+    fn vue3_tsconfig_jsonc_preserves_string_literal_contents() {
+        let value = vue3_parse_tsconfig_jsonc(
+            r#"{
+                "compilerOptions": {
+                    "baseUrl": "./src,not-trailing",
+                    "paths": {
+                        "url/*": [
+                            "./literal//slash/*",
+                            "./literal/*block*/segment/*",
+                        ],
+                    },
+                },
+            }"#,
+        )
+        .expect("parse jsonc tsconfig");
+        let compiler_options = value
+            .get("compilerOptions")
+            .and_then(serde_json::Value::as_object)
+            .expect("compiler options");
+        assert_eq!(
+            compiler_options
+                .get("baseUrl")
+                .and_then(serde_json::Value::as_str),
+            Some("./src,not-trailing")
+        );
+        let targets = compiler_options
+            .get("paths")
+            .and_then(|paths| paths.get("url/*"))
+            .and_then(serde_json::Value::as_array)
+            .expect("paths target");
+        let targets = targets
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            targets,
+            vec!["./literal//slash/*", "./literal/*block*/segment/*"]
+        );
     }
 
     #[test]

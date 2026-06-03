@@ -7162,6 +7162,115 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_resolves_tsconfig_jsonc_type_deps() {
+        let dir = std::env::temp_dir().join(format!(
+            "vuec-node-bridge-tsconfig-jsonc-deps-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src").join("components")).expect("create components");
+        std::fs::create_dir_all(dir.join("src").join("base")).expect("create base");
+        std::fs::create_dir_all(dir.join("config")).expect("create config");
+        std::fs::write(
+            dir.join("tsconfig.json"),
+            r#"{
+                // Root alias survives comments and trailing commas.
+                "compilerOptions": {
+                    "paths": {
+                        "root-alias": ["./root.ts",],
+                    },
+                },
+                "references": [
+                    { "path": "./tsconfig.app.json", },
+                ],
+            }"#,
+        )
+        .expect("write root tsconfig");
+        std::fs::write(
+            dir.join("tsconfig.app.json"),
+            r#"{
+                "extends": [
+                    "./config/base.json", // inherited aliases
+                ],
+                "compilerOptions": {
+                    "paths": {
+                        "app-alias": ["./app.ts",],
+                    },
+                },
+            }"#,
+        )
+        .expect("write app tsconfig");
+        std::fs::write(
+            dir.join("config").join("base.json"),
+            r#"{
+                /* ${configDir} resolves from the referencing config directory. */
+                "compilerOptions": {
+                    "paths": {
+                        "@base/*": ["${configDir}/src/base/*",],
+                    },
+                },
+            }"#,
+        )
+        .expect("write base tsconfig");
+        std::fs::write(
+            dir.join("root.ts"),
+            "export type RootProps = { root: string }",
+        )
+        .expect("write root type");
+        std::fs::write(
+            dir.join("app.ts"),
+            "export type AppProps = { app?: number }",
+        )
+        .expect("write app type");
+        std::fs::write(
+            dir.join("src").join("base").join("types.ts"),
+            "export type BaseProps = { base: boolean }",
+        )
+        .expect("write base type");
+
+        let filename = dir.join("src").join("components").join("Comp.vue");
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "import type { RootProps } from 'root-alias'\n",
+                    "import type { AppProps } from 'app-alias'\n",
+                    "import type { BaseProps } from '@base/types'\n",
+                    "defineProps<RootProps & AppProps & BaseProps>()",
+                    "</script>"
+                ),
+                "filename": filename.to_string_lossy()
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = compiled["content"].as_str().unwrap_or_default();
+        assert!(compiled["errors"].as_array().unwrap().is_empty());
+        assert!(content.contains("root: { type: String, required: true }"));
+        assert!(content.contains("app: { type: Number, required: false }"));
+        assert!(content.contains("base: { type: Boolean, required: true }"));
+
+        let deps = compiled["deps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|dep| dep.as_str().unwrap().to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected = [
+            dir.join("root.ts"),
+            dir.join("app.ts"),
+            dir.join("src").join("base").join("types.ts"),
+        ]
+        .into_iter()
+        .map(|path| path.to_string_lossy().replace('\\', "/"))
+        .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(deps, expected);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn vue3_sfc_bridge_compile_script_returns_global_type_deps() {
         let dir = std::env::temp_dir().join(format!(
             "vuec-node-bridge-global-type-deps-{}",
