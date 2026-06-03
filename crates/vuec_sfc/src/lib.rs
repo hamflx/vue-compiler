@@ -6250,10 +6250,16 @@ fn vue3_default_export_may_be_type(declaration: &ExportDefaultDeclaration<'_>) -
         ExportDefaultDeclarationKind::TSInterfaceDeclaration(_)
         | ExportDefaultDeclarationKind::ClassDeclaration(_)
         | ExportDefaultDeclarationKind::Identifier(_) => true,
+        ExportDefaultDeclarationKind::ObjectExpression(object) => {
+            vue3_static_runtime_props_options_object_is_projectable(object)
+        }
         ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
             vue3_function_has_return_projection(function)
         }
-        declaration => vue3_default_export_function_value_has_return_projection(declaration),
+        declaration => {
+            vue3_default_export_function_value_has_return_projection(declaration)
+                || vue3_default_export_static_runtime_props_options_is_projectable(declaration)
+        }
     }
 }
 
@@ -6308,6 +6314,11 @@ fn project_vue3_default_type_exports(
                         insert_vue3_declared_type_deps(analysis, "default", deps);
                     }
                 }
+            }
+            declaration
+                if vue3_default_export_static_runtime_props_options_is_projectable(declaration) =>
+            {
+                register_vue3_default_static_runtime_props_options(source, declaration, analysis);
             }
             ExportDefaultDeclarationKind::ClassDeclaration(class) => {
                 if let Some(id) = &class.id {
@@ -10333,6 +10344,14 @@ fn vue3_default_export_function_value_has_return_projection(
         .is_some_and(vue3_function_value_has_return_projection)
 }
 
+fn vue3_default_export_static_runtime_props_options_is_projectable(
+    declaration: &ExportDefaultDeclarationKind<'_>,
+) -> bool {
+    declaration
+        .as_expression()
+        .is_some_and(vue3_static_runtime_props_options_is_projectable)
+}
+
 fn vue3_variable_declarator_has_function_return_projection(
     declarator: &VariableDeclarator<'_>,
 ) -> bool {
@@ -10355,6 +10374,10 @@ fn vue3_static_runtime_props_options_is_projectable(expression: &Expression<'_>)
     let Some(object) = vue3_static_runtime_props_options_object(expression) else {
         return false;
     };
+    vue3_static_runtime_props_options_object_is_projectable(object)
+}
+
+fn vue3_static_runtime_props_options_object_is_projectable(object: &ObjectExpression<'_>) -> bool {
     let mut has_property = false;
     for property in &object.properties {
         let ObjectPropertyKind::ObjectProperty(property) = property else {
@@ -10677,6 +10700,27 @@ fn register_vue3_static_runtime_props_options(
             .props_options_type_declarations
             .insert(name.to_string(), props_options);
     }
+}
+
+fn register_vue3_default_static_runtime_props_options(
+    source: &str,
+    declaration: &ExportDefaultDeclarationKind<'_>,
+    analysis: &mut Vue3ScriptSetupAnalysis,
+) {
+    let Some(expression) = declaration.as_expression() else {
+        return;
+    };
+    let Some(props_options) =
+        vue3_static_runtime_props_options_type_members(source, expression, analysis)
+    else {
+        return;
+    };
+    let deps = collect_vue3_static_runtime_props_options_deps(expression, analysis);
+    register_vue3_local_type_name(analysis, "default");
+    analysis
+        .props_options_type_declarations
+        .insert("default".into(), props_options);
+    insert_vue3_declared_type_deps(analysis, "default", deps);
 }
 
 fn collect_vue3_function_value_return_type_deps_from_variable(
@@ -28147,14 +28191,29 @@ const resolved = defineProps<Props>()
             ),
         )
         .expect("write default runtime props");
+        std::fs::write(
+            dir.path().join("direct-default-props.ts"),
+            concat!(
+                "import type { PropType } from 'vue'\n",
+                "import type { User } from './user'\n",
+                "export default {\n",
+                "  direct: { type: String, required: true },\n",
+                "  owner: Object as PropType<User>,\n",
+                "  mode: { type: [Boolean, Number] }\n",
+                "}\n"
+            ),
+        )
+        .expect("write direct default runtime props");
 
         let filename = dir.path().join("Comp.vue");
         let source = r#"<script setup lang="ts">
 import { props as namedProps } from './props'
 import defaultProps from './default-props'
+import directDefaultProps from './direct-default-props'
 type Props =
   ExtractPropTypes<typeof namedProps> &
-  Partial<ExtractPropTypes<typeof defaultProps>>
+  Partial<ExtractPropTypes<typeof defaultProps>> &
+  ExtractPropTypes<typeof directDefaultProps>
 defineProps<Props>()
 </script>"#;
         let mut compiler = SfcCompiler::new();
@@ -28180,12 +28239,26 @@ defineProps<Props>()
         assert!(script
             .content
             .contains("created: { type: Date, required: false }"));
+        assert!(script
+            .content
+            .contains("direct: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("owner: { type: Object, required: false }"));
+        assert!(script
+            .content
+            .contains("mode: { type: [Boolean, Number], required: false }"));
 
         let deps = script.deps.iter().cloned().collect::<BTreeSet<_>>();
-        let expected = ["user.ts", "props.ts", "default-props.ts"]
-            .into_iter()
-            .map(|name| normalize_path_string(&dir.path().join(name)))
-            .collect::<BTreeSet<_>>();
+        let expected = [
+            "user.ts",
+            "props.ts",
+            "default-props.ts",
+            "direct-default-props.ts",
+        ]
+        .into_iter()
+        .map(|name| normalize_path_string(&dir.path().join(name)))
+        .collect::<BTreeSet<_>>();
         assert_eq!(deps, expected);
         assert!(!script.deps.iter().any(|dep| dep.contains('\\')));
     }

@@ -5732,6 +5732,19 @@ mod tests {
             ),
         )
         .expect("write default runtime props");
+        std::fs::write(
+            dir.join("direct-default-props.ts"),
+            concat!(
+                "import type { PropType } from 'vue'\n",
+                "import type { User } from './user'\n",
+                "export default {\n",
+                "  direct: { type: String, required: true },\n",
+                "  owner: Object as PropType<User>,\n",
+                "  mode: { type: [Boolean, Number] }\n",
+                "}\n"
+            ),
+        )
+        .expect("write direct default runtime props");
 
         let filename = dir.join("Comp.vue");
         let compiled = dispatch(
@@ -5741,9 +5754,11 @@ mod tests {
                     "<script setup lang=\"ts\">",
                     "import { props as namedProps } from './props'\n",
                     "import defaultProps from './default-props'\n",
+                    "import directDefaultProps from './direct-default-props'\n",
                     "type Props =\n",
                     "  ExtractPropTypes<typeof namedProps> &\n",
-                    "  Partial<ExtractPropTypes<typeof defaultProps>>\n",
+                    "  Partial<ExtractPropTypes<typeof defaultProps>> &\n",
+                    "  ExtractPropTypes<typeof directDefaultProps>\n",
                     "defineProps<Props>()",
                     "</script>"
                 ),
@@ -5757,6 +5772,9 @@ mod tests {
             dir.join("default-props.ts")
                 .to_string_lossy()
                 .replace('\\', "/"),
+            dir.join("direct-default-props.ts")
+                .to_string_lossy()
+                .replace('\\', "/"),
             dir.join("props.ts").to_string_lossy().replace('\\', "/"),
             dir.join("user.ts").to_string_lossy().replace('\\', "/")
         ]);
@@ -5767,6 +5785,9 @@ mod tests {
         assert!(content.contains("user: { type: Object, required: false }"));
         assert!(content.contains("flag: { type: Boolean, required: false }"));
         assert!(content.contains("created: { type: Date, required: false }"));
+        assert!(content.contains("direct: { type: String, required: true }"));
+        assert!(content.contains("owner: { type: Object, required: false }"));
+        assert!(content.contains("mode: { type: [Boolean, Number], required: false }"));
         assert_eq!(compiled["deps"], expected_deps);
 
         let _ = std::fs::remove_dir_all(&dir);
