@@ -7414,22 +7414,69 @@ fn refresh_vue3_declared_type_declarations_from_statements_once(
     analysis: &mut Vue3ScriptSetupAnalysis,
 ) -> bool {
     let mut changed = false;
+    let interface_declarations = vue3_interface_declarations_by_name(statements);
+    let mut refreshed_interfaces = BTreeSet::new();
     for statement in statements {
-        changed |=
-            refresh_vue3_declared_type_declaration_from_statement(source, statement, analysis);
+        changed |= refresh_vue3_declared_type_declaration_from_statement(
+            source,
+            statement,
+            &interface_declarations,
+            &mut refreshed_interfaces,
+            analysis,
+        );
     }
     changed
+}
+
+fn vue3_interface_declarations_by_name<'a>(
+    statements: &'a [Statement<'a>],
+) -> BTreeMap<String, Vec<&'a TSInterfaceDeclaration<'a>>> {
+    let mut declarations = BTreeMap::new();
+    for statement in statements {
+        collect_vue3_interface_declarations_from_statement(statement, &mut declarations);
+    }
+    declarations
+}
+
+fn collect_vue3_interface_declarations_from_statement<'a>(
+    statement: &'a Statement<'a>,
+    declarations: &mut BTreeMap<String, Vec<&'a TSInterfaceDeclaration<'a>>>,
+) {
+    match statement {
+        Statement::TSInterfaceDeclaration(declaration) => {
+            declarations
+                .entry(declaration.id.name.to_string())
+                .or_default()
+                .push(declaration);
+        }
+        Statement::ExportNamedDeclaration(declaration) => {
+            if let Some(Declaration::TSInterfaceDeclaration(declaration)) = &declaration.declaration
+            {
+                declarations
+                    .entry(declaration.id.name.to_string())
+                    .or_default()
+                    .push(declaration);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn refresh_vue3_declared_type_declaration_from_statement(
     source: &str,
     statement: &Statement<'_>,
+    interface_declarations: &BTreeMap<String, Vec<&TSInterfaceDeclaration<'_>>>,
+    refreshed_interfaces: &mut BTreeSet<String>,
     analysis: &mut Vue3ScriptSetupAnalysis,
 ) -> bool {
     match statement {
-        Statement::TSInterfaceDeclaration(declaration) => {
-            refresh_vue3_interface_declaration(source, declaration, analysis)
-        }
+        Statement::TSInterfaceDeclaration(declaration) => refresh_vue3_interface_declaration_group(
+            source,
+            declaration,
+            interface_declarations,
+            refreshed_interfaces,
+            analysis,
+        ),
         Statement::TSTypeAliasDeclaration(declaration) => {
             refresh_vue3_type_alias_declaration(source, declaration, analysis)
         }
@@ -7438,6 +7485,8 @@ fn refresh_vue3_declared_type_declaration_from_statement(
                 refresh_vue3_declared_type_declaration_from_declaration(
                     source,
                     declaration,
+                    interface_declarations,
+                    refreshed_interfaces,
                     analysis,
                 )
             })
@@ -7449,11 +7498,19 @@ fn refresh_vue3_declared_type_declaration_from_statement(
 fn refresh_vue3_declared_type_declaration_from_declaration(
     source: &str,
     declaration: &Declaration<'_>,
+    interface_declarations: &BTreeMap<String, Vec<&TSInterfaceDeclaration<'_>>>,
+    refreshed_interfaces: &mut BTreeSet<String>,
     analysis: &mut Vue3ScriptSetupAnalysis,
 ) -> bool {
     match declaration {
         Declaration::TSInterfaceDeclaration(declaration) => {
-            refresh_vue3_interface_declaration(source, declaration, analysis)
+            refresh_vue3_interface_declaration_group(
+                source,
+                declaration,
+                interface_declarations,
+                refreshed_interfaces,
+                analysis,
+            )
         }
         Declaration::TSTypeAliasDeclaration(declaration) => {
             refresh_vue3_type_alias_declaration(source, declaration, analysis)
@@ -7509,9 +7566,37 @@ fn refresh_vue3_interface_declaration(
     declaration: &TSInterfaceDeclaration<'_>,
     analysis: &mut Vue3ScriptSetupAnalysis,
 ) -> bool {
+    refresh_vue3_merged_interface_declarations(source, &[declaration], analysis)
+}
+
+fn refresh_vue3_interface_declaration_group(
+    source: &str,
+    declaration: &TSInterfaceDeclaration<'_>,
+    interface_declarations: &BTreeMap<String, Vec<&TSInterfaceDeclaration<'_>>>,
+    refreshed_interfaces: &mut BTreeSet<String>,
+    analysis: &mut Vue3ScriptSetupAnalysis,
+) -> bool {
     let name = declaration.id.name.to_string();
+    if !refreshed_interfaces.insert(name.clone()) {
+        return false;
+    }
+    let Some(declarations) = interface_declarations.get(&name) else {
+        return refresh_vue3_interface_declaration(source, declaration, analysis);
+    };
+    refresh_vue3_merged_interface_declarations(source, declarations, analysis)
+}
+
+fn refresh_vue3_merged_interface_declarations(
+    source: &str,
+    declarations: &[&TSInterfaceDeclaration<'_>],
+    analysis: &mut Vue3ScriptSetupAnalysis,
+) -> bool {
+    let Some(first) = declarations.first() else {
+        return false;
+    };
+    let name = first.id.name.to_string();
     let mut changed = false;
-    let runtime = infer_vue3_runtime_type_from_signatures(&declaration.body.body, "Object");
+    let runtime = infer_vue3_runtime_type_from_interface_declarations(declarations);
     if analysis.declared_types.get(&name) != Some(&runtime) {
         analysis
             .declared_types
@@ -7524,12 +7609,12 @@ fn refresh_vue3_interface_declaration(
             .insert(name.clone(), runtime);
         changed = true;
     }
-    let props = vue3_type_members_from_interface(source, declaration, analysis);
+    let props = vue3_type_members_from_interface_declarations(source, declarations, analysis);
     if analysis.props_type_declarations.get(&name) != Some(&props) {
         analysis.props_type_declarations.insert(name.clone(), props);
         changed = true;
     }
-    match vue3_keyof_runtime_type_from_interface(source, declaration, analysis) {
+    match vue3_keyof_runtime_type_from_interface_declarations(source, declarations, analysis) {
         Some(types) => {
             if analysis.keyof_runtime_type_declarations.get(&name) != Some(&types) {
                 analysis
@@ -7548,7 +7633,7 @@ fn refresh_vue3_interface_declaration(
             }
         }
     }
-    let emits = vue3_emits_type_from_interface(source, declaration, analysis);
+    let emits = vue3_emits_type_from_interface_declarations(source, declarations, analysis);
     if !emits.events.is_empty() {
         if analysis.emits_type_declarations.get(&name) != Some(&emits) {
             analysis.emits_type_declarations.insert(name, emits);
@@ -7813,12 +7898,28 @@ fn register_vue3_ts_enum_declaration(
     analysis: &mut Vue3ScriptSetupAnalysis,
 ) {
     let name = declaration.id.name.to_string();
+    let merge_existing = analysis.local_ts_enum_type_names.contains(&name);
     register_vue3_local_type_name(analysis, &name);
     let runtime = infer_vue3_enum_runtime_type(declaration);
+    let mut merged_runtime = if merge_existing {
+        analysis
+            .declared_types
+            .get(&name)
+            .cloned()
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    for runtime_type in &runtime {
+        push_unique(&mut merged_runtime, runtime_type);
+    }
     analysis
         .declared_types
-        .insert(name.clone(), runtime.clone());
-    analysis.define_model_declared_types.insert(name, runtime);
+        .insert(name.clone(), merged_runtime.clone());
+    analysis
+        .define_model_declared_types
+        .insert(name.clone(), merged_runtime);
+    analysis.local_ts_enum_type_names.insert(name);
 }
 
 fn register_vue3_class_type_name(analysis: &mut Vue3ScriptSetupAnalysis, name: &str) {
@@ -7958,6 +8059,7 @@ fn register_vue3_local_type_name(analysis: &mut Vue3ScriptSetupAnalysis, name: &
     analysis
         .ordered_string_literal_type_declarations
         .remove(name);
+    analysis.local_ts_enum_type_names.remove(name);
 }
 
 fn collect_vue3_setup_local_bindings(
@@ -12353,6 +12455,7 @@ struct Vue3ScriptSetupAnalysis {
     string_literal_type_declarations: BTreeMap<String, BTreeSet<String>>,
     ordered_string_literal_type_declarations: BTreeMap<String, Vec<String>>,
     emits_type_declarations: BTreeMap<String, Vue27EmitsType>,
+    local_ts_enum_type_names: BTreeSet<String>,
     generic_type_parameter_names: BTreeSet<String>,
     type_sources: BTreeMap<String, String>,
     type_deps: BTreeMap<String, BTreeSet<String>>,
@@ -15755,6 +15858,59 @@ fn vue3_type_members_from_interface(
     members
 }
 
+fn infer_vue3_runtime_type_from_interface_declarations(
+    declarations: &[&TSInterfaceDeclaration<'_>],
+) -> Vec<String> {
+    let mut types = Vec::new();
+    for declaration in declarations {
+        for signature in &declaration.body.body {
+            let runtime_type = match signature {
+                TSSignature::TSCallSignatureDeclaration(_)
+                | TSSignature::TSConstructSignatureDeclaration(_) => "Function",
+                _ => "Object",
+            };
+            push_unique(&mut types, runtime_type);
+        }
+    }
+    if types.is_empty() {
+        vec!["Object".into()]
+    } else {
+        types
+    }
+}
+
+fn vue3_type_members_from_interface_declarations(
+    source: &str,
+    declarations: &[&TSInterfaceDeclaration<'_>],
+    analysis: &Vue3ScriptSetupAnalysis,
+) -> Vue27TypeMembers {
+    let source_text = vue3_interface_declarations_source(source, declarations);
+    let (members, errors) = vue3_merge_props_type_members(
+        declarations
+            .iter()
+            .map(|declaration| vue3_type_members_from_interface(source, declaration, analysis)),
+        false,
+    );
+    Vue27TypeMembers {
+        source: source_text,
+        members,
+        errors,
+    }
+}
+
+fn vue3_interface_declarations_source(
+    source: &str,
+    declarations: &[&TSInterfaceDeclaration<'_>],
+) -> String {
+    declarations
+        .iter()
+        .filter_map(|declaration| {
+            source.get(declaration.body.span.start as usize..declaration.body.span.end as usize)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn vue3_resolve_interface_heritage_props_type(
     source: &str,
     heritage: &TSInterfaceHeritage<'_>,
@@ -15801,6 +15957,27 @@ fn vue3_emits_type_from_interface(
         }
     }
     emits
+}
+
+fn vue3_emits_type_from_interface_declarations(
+    source: &str,
+    declarations: &[&TSInterfaceDeclaration<'_>],
+    analysis: &Vue3ScriptSetupAnalysis,
+) -> Vue27EmitsType {
+    let mut merged = Vue27EmitsType {
+        source: vue3_interface_declarations_source(source, declarations),
+        events: Vec::new(),
+        syntax: Vue3EmitsTypeSyntax::default(),
+    };
+    for declaration in declarations {
+        let emits = vue3_emits_type_from_interface(source, declaration, analysis);
+        merged.syntax.has_call_signature |= emits.syntax.has_call_signature;
+        merged.syntax.has_property |= emits.syntax.has_property;
+        for event in emits.events {
+            push_unique(&mut merged.events, &event);
+        }
+    }
+    merged
 }
 
 fn vue3_resolve_interface_heritage_emits_type(
@@ -16025,6 +16202,29 @@ fn vue3_keyof_runtime_type_from_interface(
             continue;
         };
         for runtime_type in base {
+            push_unique(&mut types, &runtime_type);
+        }
+    }
+    if types.is_empty() {
+        None
+    } else {
+        Some(types)
+    }
+}
+
+fn vue3_keyof_runtime_type_from_interface_declarations(
+    source: &str,
+    declarations: &[&TSInterfaceDeclaration<'_>],
+    analysis: &Vue3ScriptSetupAnalysis,
+) -> Option<Vec<String>> {
+    let mut types = Vec::new();
+    for declaration in declarations {
+        let Some(runtime_types) =
+            vue3_keyof_runtime_type_from_interface(source, declaration, analysis)
+        else {
+            continue;
+        };
+        for runtime_type in runtime_types {
             push_unique(&mut types, &runtime_type);
         }
     }
@@ -22651,6 +22851,83 @@ defineModel<A[number] | TT[number]>()
     }
 
     #[test]
+    fn vue3_compile_script_resolves_merged_type_declarations() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "Comp.vue",
+            r#"<script setup lang="ts">
+interface Foo {
+  a: string
+}
+interface Foo {
+  b: number
+}
+namespace Bar {
+  export type A = string
+}
+namespace Bar {
+  export type B = number
+}
+namespace Baz {
+  export type A = string
+}
+interface Baz {
+  b: number
+}
+enum Kind {
+  A = 1
+}
+enum Kind {
+  B = 'hi'
+}
+type Props = {
+  foo: Foo['a']
+  bar: Foo['b']
+  nsA: Bar.A
+  nsB: Bar.B
+  mixedNs: Baz.A
+  mixedInterface: Baz['b']
+  kind: Kind
+}
+defineProps<Props>()
+defineModel<Kind>()
+</script>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("foo: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("bar: { type: Number, required: true }"));
+        assert!(script
+            .content
+            .contains("nsA: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("nsB: { type: Number, required: true }"));
+        assert!(script
+            .content
+            .contains("mixedNs: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("mixedInterface: { type: Number, required: true }"));
+        assert!(script
+            .content
+            .contains("kind: { type: [Number, String], required: true }"));
+        assert!(script
+            .content
+            .contains("\"modelValue\": { type: [Number, String] },"));
+        assert_eq!(
+            script.bindings.get("mixedInterface").map(String::as_str),
+            Some("props")
+        );
+        assert!(script.deps.is_empty(), "{:?}", script.deps);
+    }
+
+    #[test]
     fn vue3_compile_script_reports_props_type_resolution_errors() {
         let mut compiler = SfcCompiler::new();
 
@@ -23611,15 +23888,17 @@ defineProps<Props>()
         let dir = tempfile::tempdir().expect("temp dir");
         std::fs::write(
             dir.path().join("props.ts"),
-            "export type Props = { imported: string }",
+            "export type Props = { imported: string }\nexport enum Kind { Imported = 'x' }",
         )
         .expect("write props type");
 
         let filename = dir.path().join("Comp.vue");
         let source = r#"<script setup lang="ts">
-import type { Props } from './props'
+import type { Props, Kind } from './props'
 type Props = { local: number }
+enum Kind { Local = 1 }
 defineProps<Props>()
+defineModel<Kind>()
 </script>"#;
         let mut compiler = SfcCompiler::new();
         let descriptor = compiler.parse(filename.to_string_lossy(), source);
@@ -23630,6 +23909,10 @@ defineProps<Props>()
             .content
             .contains("local: { type: Number, required: true }"));
         assert!(!script.content.contains("imported: { type: String"));
+        assert!(script.content.contains("\"modelValue\": { type: Number },"));
+        assert!(!script
+            .content
+            .contains("\"modelValue\": { type: [String, Number] },"));
         assert!(script.deps.is_empty(), "{:?}", script.deps);
     }
 

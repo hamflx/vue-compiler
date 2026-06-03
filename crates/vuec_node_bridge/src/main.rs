@@ -6859,6 +6859,80 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_resolves_external_merged_type_declarations() {
+        let dir = std::env::temp_dir().join(format!(
+            "vuec-node-bridge-merged-type-declarations-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        std::fs::write(
+            dir.join("types.ts"),
+            concat!(
+                "export interface Foo { a: string }\n",
+                "export interface Foo { b: number }\n",
+                "export namespace Bar { export type A = string }\n",
+                "export namespace Bar { export type B = number }\n",
+                "export namespace Baz { export type A = string }\n",
+                "export interface Baz { b: number }\n",
+                "export enum Kind { A = 1 }\n",
+                "export enum Kind { B = 'hi' }\n",
+                "export type Props = { ",
+                "foo: Foo['a'], ",
+                "bar: Foo['b'], ",
+                "nsA: Bar.A, ",
+                "nsB: Bar.B, ",
+                "mixedNs: Baz.A, ",
+                "mixedInterface: Baz['b'], ",
+                "kind: Kind ",
+                "}\n",
+                "export type ModelValue = Kind"
+            ),
+        )
+        .expect("write merged types");
+
+        let filename = dir.join("Comp.vue");
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "import type { Props, ModelValue } from './types'\n",
+                    "const props = defineProps<Props>()\n",
+                    "const model = defineModel<ModelValue>()",
+                    "</script>"
+                ),
+                "filename": filename.to_string_lossy()
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = compiled["content"].as_str().unwrap_or_default();
+        let deps = compiled["deps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|dep| dep.as_str().unwrap().to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected = ["types.ts"]
+            .into_iter()
+            .map(|name| dir.join(name).to_string_lossy().replace('\\', "/"))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(compiled["errors"].as_array().unwrap().is_empty());
+        assert!(content.contains("foo: { type: String, required: true }"));
+        assert!(content.contains("bar: { type: Number, required: true }"));
+        assert!(content.contains("nsA: { type: String, required: true }"));
+        assert!(content.contains("nsB: { type: Number, required: true }"));
+        assert!(content.contains("mixedNs: { type: String, required: true }"));
+        assert!(content.contains("mixedInterface: { type: Number, required: true }"));
+        assert!(content.contains("kind: { type: [Number, String], required: true }"));
+        assert!(content.contains("\"modelValue\": { type: [Number, String] },"));
+        assert_eq!(deps, expected);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn vue3_sfc_bridge_compile_script_returns_bare_package_type_deps() {
         let dir = std::env::temp_dir().join(format!(
             "vuec-node-bridge-package-type-deps-{}",
