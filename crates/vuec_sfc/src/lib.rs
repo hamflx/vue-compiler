@@ -7033,13 +7033,15 @@ fn vue3_strip_jsonc_trailing_commas(source: &str) -> String {
 
 fn vue3_tsconfig_extends_paths(value: &serde_json::Value, config_dir: &Path) -> Vec<PathBuf> {
     match value.get("extends") {
-        Some(serde_json::Value::String(target)) => vue3_resolve_tsconfig_path(config_dir, target)
-            .into_iter()
-            .collect(),
+        Some(serde_json::Value::String(target)) => {
+            vue3_resolve_tsconfig_extends_path(config_dir, target)
+                .into_iter()
+                .collect()
+        }
         Some(serde_json::Value::Array(targets)) => targets
             .iter()
             .filter_map(serde_json::Value::as_str)
-            .filter_map(|target| vue3_resolve_tsconfig_path(config_dir, target))
+            .filter_map(|target| vue3_resolve_tsconfig_extends_path(config_dir, target))
             .collect(),
         _ => Vec::new(),
     }
@@ -7056,6 +7058,13 @@ fn vue3_tsconfig_reference_paths(value: &serde_json::Value, config_dir: &Path) -
         .collect()
 }
 
+fn vue3_resolve_tsconfig_extends_path(config_dir: &Path, target: &str) -> Option<PathBuf> {
+    if vue3_tsconfig_path_is_relative(target) || Path::new(target).is_absolute() {
+        return vue3_resolve_tsconfig_path(config_dir, target);
+    }
+    resolve_vue3_package_tsconfig_extends(config_dir, target)
+}
+
 fn vue3_resolve_tsconfig_path(config_dir: &Path, target: &str) -> Option<PathBuf> {
     if !vue3_tsconfig_path_is_relative(target) && !Path::new(target).is_absolute() {
         return None;
@@ -7065,19 +7074,104 @@ fn vue3_resolve_tsconfig_path(config_dir: &Path, target: &str) -> Option<PathBuf
     } else {
         normalize_path_components(config_dir.join(target))
     };
-    let candidates = if candidate.extension().is_some() {
-        vec![candidate]
-    } else {
-        vec![
-            path_with_extension(&candidate, "json"),
-            candidate.join("tsconfig.json"),
-        ]
-    };
-    candidates.into_iter().find(|path| path.is_file())
+    resolve_vue3_tsconfig_candidate_path(&candidate, false)
 }
 
 fn vue3_tsconfig_path_is_relative(target: &str) -> bool {
     target.starts_with("./") || target.starts_with("../")
+}
+
+fn resolve_vue3_tsconfig_candidate_path(candidate: &Path, include_index: bool) -> Option<PathBuf> {
+    let mut candidates = if candidate.extension().is_some() {
+        vec![candidate.to_path_buf()]
+    } else {
+        vec![
+            path_with_extension(candidate, "json"),
+            candidate.join("tsconfig.json"),
+        ]
+    };
+    if include_index && candidate.extension().is_none() {
+        candidates.push(candidate.join("index.json"));
+    }
+    candidates.into_iter().find(|path| path.is_file())
+}
+
+fn resolve_vue3_package_tsconfig_extends(config_dir: &Path, target: &str) -> Option<PathBuf> {
+    let (package_name, subpath) = vue3_package_import_parts(target)?;
+    for node_modules in vue3_node_modules_search_paths_from_dir(config_dir) {
+        let package_dir = normalize_path_components(node_modules.join(&package_name));
+        if !package_dir.is_dir() {
+            continue;
+        }
+        if let Some(resolved) =
+            resolve_vue3_package_tsconfig_entry(&package_dir, subpath.as_deref())
+        {
+            return Some(resolved);
+        }
+    }
+    None
+}
+
+fn resolve_vue3_package_tsconfig_entry(
+    package_dir: &Path,
+    subpath: Option<&str>,
+) -> Option<PathBuf> {
+    if let Some(subpath) = subpath {
+        return vue3_package_tsconfig_subpath(package_dir, subpath);
+    }
+    vue3_package_json_tsconfig_entry(package_dir)
+        .or_else(|| resolve_vue3_tsconfig_candidate_path(&package_dir.join("tsconfig"), false))
+        .or_else(|| {
+            let index = package_dir.join("index.json");
+            index.is_file().then_some(index)
+        })
+}
+
+fn vue3_package_tsconfig_subpath(package_dir: &Path, subpath: &str) -> Option<PathBuf> {
+    if !vue3_package_tsconfig_subpath_is_safe(subpath) {
+        return None;
+    }
+    let candidate = normalize_path_components(package_dir.join(subpath));
+    resolve_vue3_tsconfig_candidate_path(&candidate, true)
+}
+
+fn vue3_package_json_tsconfig_entry(package_dir: &Path) -> Option<PathBuf> {
+    let package_json = package_dir.join("package.json");
+    let source = std::fs::read_to_string(package_json).ok()?;
+    let value = serde_json::from_str::<serde_json::Value>(&source).ok()?;
+    let target = value.get("tsconfig").and_then(serde_json::Value::as_str)?;
+    if !vue3_package_tsconfig_target_is_safe(target) {
+        return None;
+    }
+    let target = target.trim_start_matches("./");
+    let candidate = normalize_path_components(package_dir.join(target));
+    resolve_vue3_tsconfig_candidate_path(&candidate, true)
+}
+
+fn vue3_package_tsconfig_subpath_is_safe(subpath: &str) -> bool {
+    !subpath.is_empty()
+        && !subpath.contains(':')
+        && !subpath
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+        && Path::new(subpath).components().all(|component| {
+            matches!(
+                component,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        })
+}
+
+fn vue3_package_tsconfig_target_is_safe(target: &str) -> bool {
+    !target.is_empty()
+        && !target.contains(':')
+        && !Path::new(target).is_absolute()
+        && Path::new(target).components().all(|component| {
+            matches!(
+                component,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        })
 }
 
 fn vue3_tsconfig_direct_path_mappings(
@@ -7255,8 +7349,15 @@ fn vue3_package_import_parts(source: &str) -> Option<(String, Option<String>)> {
 }
 
 fn vue3_node_modules_search_paths(filename: &str) -> Vec<PathBuf> {
+    let Some(current) = Path::new(filename).parent() else {
+        return Vec::new();
+    };
+    vue3_node_modules_search_paths_from_dir(current)
+}
+
+fn vue3_node_modules_search_paths_from_dir(start_dir: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    let mut current = Path::new(filename).parent();
+    let mut current = Some(start_dir);
     while let Some(dir) = current {
         paths.push(normalize_path_components(dir.join("node_modules")));
         current = dir.parent();
@@ -22602,6 +22703,112 @@ defineProps<RootProps & AppProps & BaseProps>()
             dir.path().join("root.ts"),
             dir.path().join("app.ts"),
             dir.path().join("src").join("base").join("types.ts"),
+        ]
+        .into_iter()
+        .map(|path| normalize_path_string(&path))
+        .collect::<BTreeSet<_>>();
+        assert_eq!(deps, expected);
+        assert!(!script.deps.iter().any(|dep| dep.contains('\\')));
+    }
+
+    #[test]
+    fn vue3_compile_script_resolves_package_tsconfig_extends_paths_and_deps() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir_all(dir.path().join("src").join("components"))
+            .expect("create component dir");
+        let scoped_config_pkg = dir
+            .path()
+            .join("node_modules")
+            .join("@vuec")
+            .join("tsconfig");
+        std::fs::create_dir_all(&scoped_config_pkg).expect("create scoped config package");
+        std::fs::write(
+            scoped_config_pkg.join("package.json"),
+            r#"{"tsconfig":"base.json"}"#,
+        )
+        .expect("write scoped config package manifest");
+        std::fs::write(
+            scoped_config_pkg.join("base.json"),
+            r#"{
+                // Package config entries may be JSONC.
+                "compilerOptions": {
+                    "paths": {
+                        "pkg-root": ["${configDir}/root.ts",],
+                    },
+                },
+            }"#,
+        )
+        .expect("write scoped package config");
+
+        let preset_pkg = dir.path().join("node_modules").join("vuec-tsconfig-preset");
+        std::fs::create_dir_all(&preset_pkg).expect("create preset package");
+        std::fs::write(
+            preset_pkg.join("shared.json"),
+            r#"{
+                "compilerOptions": {
+                    "paths": {
+                        "pkg-shared": ["${configDir}/shared.ts"]
+                    }
+                }
+            }"#,
+        )
+        .expect("write preset subpath config");
+
+        std::fs::write(
+            dir.path().join("tsconfig.json"),
+            r#"{
+                "extends": ["@vuec/tsconfig", "vuec-tsconfig-preset/shared"],
+                "compilerOptions": {
+                    "paths": {
+                        "local-alias": ["./local.ts"]
+                    }
+                }
+            }"#,
+        )
+        .expect("write root tsconfig");
+        std::fs::write(
+            dir.path().join("root.ts"),
+            "export type RootProps = { root: string }",
+        )
+        .expect("write root type");
+        std::fs::write(
+            dir.path().join("shared.ts"),
+            "export type SharedProps = { shared?: number }",
+        )
+        .expect("write shared type");
+        std::fs::write(
+            dir.path().join("local.ts"),
+            "export type LocalProps = { local: boolean }",
+        )
+        .expect("write local type");
+
+        let filename = dir.path().join("src").join("components").join("Comp.vue");
+        let source = r#"<script setup lang="ts">
+import type { RootProps } from 'pkg-root'
+import type { SharedProps } from 'pkg-shared'
+import type { LocalProps } from 'local-alias'
+defineProps<RootProps & SharedProps & LocalProps>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("root: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("shared: { type: Number, required: false }"));
+        assert!(script
+            .content
+            .contains("local: { type: Boolean, required: true }"));
+
+        let deps = script.deps.iter().cloned().collect::<BTreeSet<_>>();
+        let expected = [
+            dir.path().join("root.ts"),
+            dir.path().join("shared.ts"),
+            dir.path().join("local.ts"),
         ]
         .into_iter()
         .map(|path| normalize_path_string(&path))
