@@ -1206,6 +1206,9 @@ fn vue3_sfc_template_ast_value(
     template: &SfcBlock,
     parse_options: Option<&Value>,
 ) -> Value {
+    if sfc_template_is_plain_text(template) {
+        return vue3_sfc_plain_template_ast_value(descriptor, template);
+    }
     let null = Value::Null;
     let template_options = parse_options
         .and_then(|options| options.get("templateParseOptions"))
@@ -1223,7 +1226,7 @@ fn vue3_sfc_template_ast_value(
             "decodeEntities",
             default_options.decode_entities,
         ),
-        is_custom_element: string_array_option(template_options, "isCustomElement"),
+        is_custom_element: Vec::new(),
     };
     let source = TemplateSource {
         filename: descriptor.filename.clone(),
@@ -1239,6 +1242,43 @@ fn vue3_sfc_template_ast_value(
         object.remove("__vuecDiagnostics");
     }
     value
+}
+
+fn sfc_template_is_plain_text(template: &SfcBlock) -> bool {
+    template
+        .attrs
+        .lang
+        .as_deref()
+        .is_some_and(|lang| !lang.is_empty() && lang != "html")
+}
+
+fn vue3_sfc_plain_template_ast_value(descriptor: &SfcDescriptor, template: &SfcBlock) -> Value {
+    let raw_content = descriptor
+        .source
+        .get(template.content_start..template.content_end)
+        .unwrap_or(&template.content);
+    json!({
+        "type": 0,
+        "source": descriptor.source,
+        "children": [{
+            "type": 2,
+            "content": raw_content,
+            "loc": vue3_source_loc_value(
+                &descriptor.source,
+                template.content_start,
+                template.content_end,
+            ),
+        }],
+        "helpers": [],
+        "components": [],
+        "directives": [],
+        "hoists": [],
+        "imports": [],
+        "cached": [],
+        "temps": 0,
+        "codegenNode": Value::Null,
+        "loc": vue3_loc_stub_value(),
+    })
 }
 
 fn vue27_template_code(render: &str, static_render_fns: &[String]) -> String {
@@ -1882,10 +1922,11 @@ fn sfc_plain_template_attrs(
 
 fn sfc_plain_template_lang(lang: &str, options: &Vue3CompilerOptions) -> bool {
     !lang.is_empty()
-        && options
-            .sfc_plain_template_langs
-            .iter()
-            .any(|candidate| candidate == lang)
+        && ((options.sfc_parse_mode && lang != "html")
+            || options
+                .sfc_plain_template_langs
+                .iter()
+                .any(|candidate| candidate == lang))
 }
 
 fn vue3_diagnostic_tag_namespace(
@@ -3970,7 +4011,7 @@ fn vue3_options(value: Option<&Value>) -> Vue3CompilerOptions {
     }
     if vue3_parse_mode_is_sfc(Some(value)) {
         options.sfc_parse_mode = true;
-        options.sfc_plain_template_langs = vec!["pug".to_string()];
+        options.sfc_plain_template_langs = vec!["pug".to_string(), "jade".to_string()];
     }
     options.void_tags = string_array_option(value, "__vuecVoidTags");
     options.pre_tags = string_array_option(value, "__vuecPreTags");
@@ -9321,6 +9362,59 @@ mod tests {
         assert_eq!(descriptor["customBlocks"][0]["type"], json!("i18n"));
         assert!(descriptor.get("script_setup").is_none());
         assert_eq!(parsed["errors"], json!([]));
+    }
+
+    #[test]
+    fn vue3_sfc_bridge_parse_projects_plain_template_lang_as_text_ast() {
+        let parsed = dispatch(
+            "sfc.parse",
+            json!({
+                "source": "<template lang=\"pug\">p(v-if=\"1 < 2\") test <div/></template>",
+                "filename": "Pug.vue",
+                "options": {
+                    "sourceMap": false
+                }
+            }),
+        )
+        .expect("vue3 sfc parse");
+
+        let ast = &parsed["descriptor"]["template"]["ast"];
+        assert_eq!(parsed["errors"], json!([]));
+        assert_eq!(ast["children"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            ast["children"][0]["content"],
+            json!("p(v-if=\"1 < 2\") test <div/>")
+        );
+    }
+
+    #[test]
+    fn vue3_sfc_bridge_parse_uses_dom_void_tags_and_template_options() {
+        let parsed = dispatch(
+            "sfc.parse",
+            json!({
+                "source": "<template><input><hello/></template><foo> <-& </foo>",
+                "filename": "TemplateOptions.vue",
+                "options": {
+                    "sourceMap": false,
+                    "templateParseOptions": {
+                        "__vuecCustomElements": ["hello"]
+                    }
+                }
+            }),
+        )
+        .expect("vue3 sfc parse");
+
+        let template_children = parsed["descriptor"]["template"]["ast"]["children"]
+            .as_array()
+            .unwrap();
+        assert_eq!(parsed["errors"], json!([]));
+        assert_eq!(template_children[0]["tag"], json!("input"));
+        assert_eq!(template_children[1]["tag"], json!("hello"));
+        assert_eq!(template_children[1]["tagType"], json!(0));
+        assert_eq!(
+            parsed["descriptor"]["customBlocks"][0]["content"],
+            json!(" <-& ")
+        );
     }
 
     #[test]

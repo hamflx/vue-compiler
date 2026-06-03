@@ -1376,6 +1376,10 @@ impl SfcBlockContentMode<'_> {
     fn decodes_attr_entities(&self) -> bool {
         matches!(self, SfcBlockContentMode::Vue3 { .. })
     }
+
+    fn is_void_tag(&self, name: &str) -> bool {
+        self.is_vue3() && vue3_sfc_dom_void_tag(name)
+    }
 }
 
 struct OpenSfcBlock {
@@ -1972,7 +1976,7 @@ fn extract_sfc_blocks(
                     });
                 }
 
-                if !self_closing {
+                if !self_closing && !mode.is_void_tag(&name) {
                     if depth == 0 && is_plain_text_sfc_tag(&name) {
                         consume_plain_text_element(
                             source,
@@ -2378,6 +2382,26 @@ fn attrs_from_html(attributes: &[HtmlAttribute], decode_entities: bool) -> SfcBl
 
 fn is_plain_text_sfc_tag(name: &str) -> bool {
     matches!(name, "script" | "style")
+}
+
+fn vue3_sfc_dom_void_tag(name: &str) -> bool {
+    matches!(
+        name,
+        "area"
+            | "base"
+            | "br"
+            | "col"
+            | "embed"
+            | "hr"
+            | "img"
+            | "input"
+            | "link"
+            | "meta"
+            | "param"
+            | "source"
+            | "track"
+            | "wbr"
+    )
 }
 
 fn should_vue27_deindent(block: &OpenSfcBlock, options: &Vue27ParseComponentOptions) -> bool {
@@ -24513,6 +24537,20 @@ mod tests {
         assert_eq!(custom.descriptor.custom_blocks[0].content, "");
         assert_eq!(custom.errors.len(), 1);
         assert_eq!(custom.errors[0].loc.as_ref().unwrap().start, 11);
+    }
+
+    #[test]
+    fn vue3_parse_uses_dom_void_tags_inside_template_blocks() {
+        let mut compiler = SfcCompiler::new();
+        let result =
+            compiler.parse_vue3("Void.vue", "<template><input></template><foo> <-& </foo>");
+
+        assert!(result.errors.is_empty());
+        assert_eq!(
+            result.descriptor.template.as_ref().unwrap().content,
+            "<input>"
+        );
+        assert_eq!(result.descriptor.custom_blocks[0].content, " <-& ");
     }
 
     #[test]

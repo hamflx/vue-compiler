@@ -27514,7 +27514,7 @@ fn prop_requires_dynamic_patch(
         return true;
     }
     if dir.name == "model" && vue3_dom_model_kind(element).is_some() {
-        return true;
+        return !native_model_update_can_skip_patch(dir, options, scope);
     }
     if dir.name == "html" || dir.name == "text" {
         return true;
@@ -27688,7 +27688,8 @@ fn dynamic_props_arg(
             Vue3Prop::Directive(dir)
                 if dir.name == "model" && vue3_dom_model_kind(element).is_some() =>
             {
-                Some("onUpdate:modelValue".into())
+                (!native_model_update_can_skip_patch(dir, options, scope))
+                    .then_some("onUpdate:modelValue".into())
             }
             Vue3Prop::Directive(dir) if dir.name == "html" => Some("innerHTML".into()),
             Vue3Prop::Directive(dir) if dir.name == "text" => Some("textContent".into()),
@@ -27707,6 +27708,19 @@ fn dynamic_props_arg(
                 .join(", ")
         )
     }
+}
+
+fn native_model_update_can_skip_patch(
+    dir: &Vue3Directive,
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+) -> bool {
+    let raw = dir
+        .exp
+        .as_ref()
+        .map(Vue3Expression::source_string)
+        .unwrap_or_default();
+    should_cache_model_update_exact(raw.trim(), options, scope)
 }
 
 fn event_directive_is_vnode_hook(dir: &Vue3Directive) -> bool {
@@ -32858,6 +32872,37 @@ mod tests {
         assert!(result.code.contains("({ count: count.value } = val)"));
         assert!(result.code.contains("[maybe.value] = val"));
         assert!(result.code.contains("({ lett: lett } = val)"));
+    }
+
+    #[test]
+    fn base_compile_marks_cached_native_v_model_need_patch() {
+        let mut options = Vue3CompilerOptions {
+            inline: true,
+            mode: "module".into(),
+            prefix_identifiers: true,
+            cache_handlers: true,
+            ..Vue3CompilerOptions::default()
+        };
+        options
+            .binding_metadata
+            .insert("count".into(), "setup-ref".into());
+        let result = Vue3Dialect::base_compile(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: r#"<input v-model="count">"#.into(),
+                file_id: FileId(91),
+                base_offset: 0,
+            },
+            options,
+        );
+
+        assert!(result.code.contains(
+            "\"onUpdate:modelValue\": _cache[0] || (_cache[0] = $event => ((count).value = $event))"
+        ));
+        assert!(result.code.contains("512 /* NEED_PATCH */"));
+        assert!(!result
+            .code
+            .contains("8 /* PROPS */, [\"onUpdate:modelValue\"]"));
     }
 
     #[test]

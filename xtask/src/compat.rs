@@ -2433,6 +2433,8 @@ fn alias_function_expression(
                 && matches!(export_name, "compileStyle" | "compileStyleAsync");
             let payload = if is_vue3_generate {
                 "Object.assign({}, __vuecPayload, { ast: vue3CoreRuntime.dehydrateForBridge(a0), source: '' })"
+            } else if is_vue3_sfc_parse {
+                "vue3SfcParseBridgePayload(__vuecPayload)"
             } else if is_vue27_sfc_compile_script {
                 "vue27CompileScriptBridgePayload(__vuecPayload)"
             } else if is_vue3_sfc_compile_style {
@@ -2460,7 +2462,7 @@ fn alias_function_expression(
                     "(() => {{ const __vuecGenerateResult = {call}; __vuecGenerateResult.ast = a0; return __vuecGenerateResult; }})()"
                 )
             } else if is_vue3_sfc_parse {
-                format!("hydrateVue3SfcParseResult({call})")
+                format!("hydrateVue3SfcParseResult(applyVue3SfcCustomCompilerParse({call}, __vuecPayload.source, __vuecPayload.options, __vuecPayload.filename))")
             } else if target.kind == TargetKind::Vue3Sfc && export_name == "compileScript" {
                 format!("hydrateVue3CompileScriptResult({call})")
             } else if is_vue27_sfc_compile_script {
@@ -8218,6 +8220,48 @@ function vue27CompileScriptBridgePayload(payload) {
   return out;
 }
 
+function vue3SfcParseBridgePayload(payload) {
+  const out = Object.assign({}, payload || {});
+  const source = String(out.source || '');
+  out.bridgeOptions = normalizeVue3SfcParseOptionsForBridge(out.options, source);
+  return out;
+}
+
+function normalizeVue3SfcParseOptionsForBridge(options, source) {
+  if (!options || typeof options !== 'object') return {};
+  const normalized = {};
+  for (const key of Object.keys(options)) {
+    if (key !== 'compiler' && typeof options[key] !== 'function') normalized[key] = options[key];
+  }
+  if (options.templateParseOptions && typeof options.templateParseOptions === 'object') {
+    normalized.templateParseOptions = normalizeVue3OptionsForBridge(
+      options.templateParseOptions,
+      source,
+    );
+  }
+  return normalized;
+}
+
+function applyVue3SfcCustomCompilerParse(result, source, options, filename) {
+  if (!result || typeof result !== 'object' || !result.descriptor) return result;
+  const compiler = options && options.compiler;
+  if (!compiler || typeof compiler.parse !== 'function') return result;
+  const customErrors = [];
+  const ast = compiler.parse(String(source || ''), Object.assign({}, options.templateParseOptions || {}, {
+    parseMode: 'sfc',
+    prefixIdentifiers: true,
+    onError: error => customErrors.push(error),
+  }));
+  const out = Object.assign({}, result);
+  out.errors = customErrors.concat(Array.isArray(result.errors) ? result.errors : []);
+  if (ast && Array.isArray(ast.children) && ast.children.length === 0) {
+    out.errors.push(new SyntaxError(
+      `At least one <template> or <script> is required in a single file component. ${filename || 'anonymous.vue'}`
+    ));
+  }
+  return out;
+}
+
 function vue3BridgePayload(source, filename, options) {
   warnIgnoredDecodeEntities(options);
   return {
@@ -12682,6 +12726,7 @@ fn prepare_vue3_sfc_conformance_suite(
         .join("compiler-sfc")
         .join("__tests__");
     copy_dir_recursive(&official_sfc_tests, &prepared_sfc_tests)?;
+    rewrite_vue3_sfc_public_parse_spec_import(&prepared_root)?;
 
     let official_sfc_src = official_root
         .join("packages")
@@ -12744,6 +12789,27 @@ fn patch_vue3_sfc_compile_template_asset_bridge(path: &Path) -> Result<()> {
         path,
         &source.replace("\r\n", "\n").replace(needle, replacement),
     )
+}
+
+fn rewrite_vue3_sfc_public_parse_spec_import(prepared_root: &Path) -> Result<()> {
+    let parse_spec = prepared_root
+        .join("packages")
+        .join("compiler-sfc")
+        .join("__tests__")
+        .join("parse.spec.ts");
+    if !parse_spec.exists() {
+        return Ok(());
+    }
+    let original = fs::read_to_string(&parse_spec)
+        .with_context(|| format!("failed to read {}", parse_spec.display()))?;
+    let rewritten = original.replace(
+        "import { parse } from '../src'",
+        "import { parse } from '@vue/compiler-sfc'",
+    );
+    if rewritten != original {
+        write_text(&parse_spec, &rewritten)?;
+    }
+    Ok(())
 }
 
 fn write_vue3_sfc_conformance_shims(prepared_root: &Path) -> Result<()> {
@@ -12812,6 +12878,8 @@ export default {
   test: {
     globals: true,
     pool: 'forks',
+    fileParallelism: false,
+    maxWorkers: 1,
     setupFiles: ['./vuec-vitest-setup.ts'],
     include: ['packages/compiler-sfc/__tests__/**/*.spec.ts'],
   },
@@ -13440,7 +13508,9 @@ fn conformance_coverage_file_kind(
     path: &str,
     default: ConformanceCoverageKind,
 ) -> ConformanceCoverageKind {
-    if path.ends_with("packages/compiler-sfc/test/compileStyle.spec.ts") {
+    if path.ends_with("packages/compiler-sfc/__tests__/parse.spec.ts") {
+        ConformanceCoverageKind::RustBacked
+    } else if path.ends_with("packages/compiler-sfc/test/compileStyle.spec.ts") {
         ConformanceCoverageKind::Mixed
     } else if path.ends_with("packages/compiler-sfc/test/compileScript.spec.ts")
         || path.ends_with("packages/compiler-sfc/test/compileTemplate.spec.ts")
@@ -14214,7 +14284,14 @@ mod tests {
 
         assert!(expression.contains("hydrateVue3SfcParseResult"));
         assert!(expression.contains("sfc.parse"));
+        assert!(expression.contains("vue3SfcParseBridgePayload"));
+        assert!(expression.contains("applyVue3SfcCustomCompilerParse"));
         assert!(ALIAS_RUNTIME_JS.contains("function hydrateVue3SfcParseResult"));
+        assert!(ALIAS_RUNTIME_JS.contains("function vue3SfcParseBridgePayload"));
+        assert!(ALIAS_RUNTIME_JS.contains("function normalizeVue3SfcParseOptionsForBridge"));
+        assert!(ALIAS_RUNTIME_JS.contains("function applyVue3SfcCustomCompilerParse"));
+        assert!(ALIAS_RUNTIME_JS.contains("options.templateParseOptions"));
+        assert!(ALIAS_RUNTIME_JS.contains("key !== 'compiler'"));
         assert!(ALIAS_RUNTIME_JS.contains("function vue3SfcShouldForceReload"));
         assert!(ALIAS_RUNTIME_JS.contains("function vue3SfcTemplateUsedIdentifiers"));
     }
@@ -15435,6 +15512,8 @@ mod tests {
         assert!(!config.contains("vitest/config"));
         assert!(config.contains("oxc:"));
         assert!(config.contains("target: 'es2020'"));
+        assert!(config.contains("fileParallelism: false"));
+        assert!(config.contains("maxWorkers: 1"));
         assert!(config.contains("include: ['packages/compiler-sfc/__tests__/**/*.spec.ts']"));
         assert!(config.contains(
             "'@vue/compiler-core': path.resolve(aliasRoot, 'node_modules/@vue/compiler-core/index.js')"
@@ -15500,6 +15579,33 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_parse_spec_rewrites_import_to_public_alias() {
+        let temp = std::env::temp_dir().join(format!(
+            "vuec-xtask-vue3-sfc-parse-import-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let tests = temp.join("packages").join("compiler-sfc").join("__tests__");
+        fs::create_dir_all(&tests).unwrap();
+        fs::write(
+            tests.join("parse.spec.ts"),
+            "import { parse } from '../src'\nimport { compileScript } from '../src'\n",
+        )
+        .unwrap();
+
+        rewrite_vue3_sfc_public_parse_spec_import(&temp).unwrap();
+        rewrite_vue3_sfc_public_parse_spec_import(&temp).unwrap();
+
+        let rewritten = fs::read_to_string(tests.join("parse.spec.ts")).unwrap();
+        assert!(rewritten.contains("import { parse } from '@vue/compiler-sfc'"));
+        assert!(rewritten.contains("import { compileScript } from '../src'"));
+        assert_eq!(rewritten.matches("@vue/compiler-sfc").count(), 1);
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
     fn vue3_sfc_conformance_coverage_is_mixed() {
         let coverage = conformance_coverage_report(
             suite_spec(ConformanceSuite::Vue3Sfc),
@@ -15509,6 +15615,88 @@ mod tests {
         assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
         assert!(coverage.reason.contains("official SFC TypeScript source"));
         assert!(coverage.reason.contains("not standalone Rust SFC parity"));
+    }
+
+    #[test]
+    fn vue3_sfc_coverage_marks_only_parse_spec_rust_backed() {
+        let temp = std::env::temp_dir().join(format!(
+            "vuec-xtask-vue3-sfc-coverage-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp).unwrap();
+        let report = temp.join("vitest-report.json");
+        fs::write(
+            &report,
+            r#"{
+              "testResults": [
+                {
+                  "name": "F:/repo/prepared/vue3-sfc/packages/compiler-sfc/__tests__/parse.spec.ts",
+                  "assertionResults": [
+                    { "status": "passed" },
+                    { "status": "passed" }
+                  ]
+                },
+                {
+                  "name": "F:/repo/prepared/vue3-sfc/packages/compiler-sfc/__tests__/compileScript.spec.ts",
+                  "assertionResults": [
+                    { "status": "passed" }
+                  ]
+                },
+                {
+                  "name": "F:/repo/prepared/vue3-sfc/packages/compiler-sfc/__tests__/compileTemplate.spec.ts",
+                  "assertionResults": [
+                    { "status": "failed" }
+                  ]
+                }
+              ]
+            }"#,
+        )
+        .unwrap();
+        let execution = ConformanceExecutionResult {
+            status: "failed".into(),
+            runner: "vitest".into(),
+            prepared_root: "prepared".into(),
+            output_file: report.display().to_string(),
+            exit_code: Some(1),
+            stdout: String::new(),
+            stderr: String::new(),
+            counts: ConformanceExecutionCounts {
+                total: 4,
+                pass: 3,
+                fail: 1,
+                skip: 0,
+                pending: 0,
+            },
+        };
+
+        let coverage = conformance_coverage_report(
+            suite_spec(ConformanceSuite::Vue3Sfc),
+            AliasBackend::Generated,
+            Some(&execution),
+        );
+
+        assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
+        assert_eq!(coverage.rust_backed_pass, 2);
+        assert_eq!(coverage.rust_backed_total, 2);
+        assert_eq!(
+            coverage.files[0].source,
+            ConformanceCoverageKind::RustBacked
+        );
+        assert_eq!(coverage.files[1].source, ConformanceCoverageKind::Mixed);
+        assert_eq!(coverage.files[2].source, ConformanceCoverageKind::Mixed);
+        assert_eq!(
+            coverage
+                .counts_by_source
+                .get("mixed")
+                .copied()
+                .unwrap_or_default()
+                .fail,
+            1
+        );
+        let _ = fs::remove_dir_all(temp);
     }
 
     #[test]

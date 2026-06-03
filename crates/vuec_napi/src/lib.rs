@@ -1435,7 +1435,7 @@ fn vue3_options(value: Option<&Value>) -> Vue3CompilerOptions {
     }
     if vue3_parse_mode_is_sfc(Some(value)) {
         options.sfc_parse_mode = true;
-        options.sfc_plain_template_langs = vec!["pug".to_string()];
+        options.sfc_plain_template_langs = vec!["pug".to_string(), "jade".to_string()];
     }
     options.void_tags = string_array_option(value, "__vuecVoidTags");
     options.pre_tags = string_array_option(value, "__vuecPreTags");
@@ -1576,6 +1576,9 @@ fn vue3_sfc_template_ast_value(
     template: &vuec_sfc::SfcBlock,
     parse_options: &Value,
 ) -> Value {
+    if sfc_template_is_plain_text(template) {
+        return vue3_sfc_plain_template_ast_value(descriptor, template);
+    }
     let null = Value::Null;
     let template_options = parse_options.get("templateParseOptions").unwrap_or(&null);
     let mut core = vue3_options(Some(template_options));
@@ -1591,7 +1594,7 @@ fn vue3_sfc_template_ast_value(
             "decodeEntities",
             default_options.decode_entities,
         ),
-        is_custom_element: string_array_option(template_options, "isCustomElement"),
+        is_custom_element: Vec::new(),
     };
     let source = TemplateSource {
         filename: descriptor.filename.clone(),
@@ -1607,6 +1610,46 @@ fn vue3_sfc_template_ast_value(
         object.remove("__vuecDiagnostics");
     }
     value
+}
+
+fn sfc_template_is_plain_text(template: &vuec_sfc::SfcBlock) -> bool {
+    template
+        .attrs
+        .lang
+        .as_deref()
+        .is_some_and(|lang| !lang.is_empty() && lang != "html")
+}
+
+fn vue3_sfc_plain_template_ast_value(
+    descriptor: &vuec_sfc::SfcDescriptor,
+    template: &vuec_sfc::SfcBlock,
+) -> Value {
+    let raw_content = descriptor
+        .source
+        .get(template.content_start..template.content_end)
+        .unwrap_or(&template.content);
+    json!({
+        "type": 0,
+        "source": descriptor.source,
+        "children": [{
+            "type": 2,
+            "content": raw_content,
+            "loc": vue3_source_loc_value(
+                &descriptor.source,
+                template.content_start,
+                template.content_end,
+            ),
+        }],
+        "helpers": [],
+        "components": [],
+        "directives": [],
+        "hoists": [],
+        "imports": [],
+        "cached": [],
+        "temps": 0,
+        "codegenNode": Value::Null,
+        "loc": vue3_loc_stub_value(),
+    })
 }
 
 fn vue3_public_parse_ast(
@@ -1862,10 +1905,11 @@ fn sfc_plain_template_attrs(
 
 fn sfc_plain_template_lang(lang: &str, options: &Vue3CompilerOptions) -> bool {
     !lang.is_empty()
-        && options
-            .sfc_plain_template_langs
-            .iter()
-            .any(|candidate| candidate == lang)
+        && ((options.sfc_parse_mode && lang != "html")
+            || options
+                .sfc_plain_template_langs
+                .iter()
+                .any(|candidate| candidate == lang))
 }
 
 fn vue3_diagnostic_tag_namespace(
@@ -4103,7 +4147,7 @@ mod tests {
         assert_eq!(options.custom_elements, vec!["x-thing"]);
         assert_eq!(options.built_in_components, vec!["Transition"]);
         assert!(options.sfc_parse_mode);
-        assert_eq!(options.sfc_plain_template_langs, vec!["pug"]);
+        assert_eq!(options.sfc_plain_template_langs, vec!["pug", "jade"]);
     }
 
     #[test]
