@@ -5863,6 +5863,61 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_resolves_external_parameter_tuple_runtime_types_deps() {
+        let dir = std::env::temp_dir().join(format!(
+            "vuec-node-bridge-parameter-tuple-types-deps-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        std::fs::write(
+            dir.join("types.ts"),
+            concat!(
+                "export type Fn = (value: string, count: number, active?: boolean) => void\n",
+                "export type Ctor = new (name: string, flags: boolean[]) => object\n",
+                "export type Props = {\n",
+                "  first: Parameters<Fn>[0]\n",
+                "  anyParam: Parameters<Fn>[number]\n",
+                "  ctorFirst: ConstructorParameters<Ctor>[0]\n",
+                "  ctorAny: ConstructorParameters<Ctor>[number]\n",
+                "  inlineParam: Parameters<(files: File[], done: () => void) => void>[number]\n",
+                "}\n",
+                "export type ModelValue = Parameters<Fn>[number] | ConstructorParameters<Ctor>[number]"
+            ),
+        )
+        .expect("write parameter tuple props");
+
+        let filename = dir.join("Comp.vue");
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "import type { Props, ModelValue } from './types'\n",
+                    "defineProps<Props>()\n",
+                    "defineModel<ModelValue>()",
+                    "</script>"
+                ),
+                "filename": filename.to_string_lossy()
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = compiled["content"].as_str().unwrap_or_default();
+        let expected_dep = dir.join("types.ts").to_string_lossy().replace('\\', "/");
+        assert!(compiled["errors"].as_array().unwrap().is_empty());
+        assert!(content.contains("first: { type: String, required: true }"));
+        assert!(content.contains("anyParam: { type: [String, Number, Boolean], required: true }"));
+        assert!(content.contains("ctorFirst: { type: String, required: true }"));
+        assert!(content.contains("ctorAny: { type: [String, Array], required: true }"));
+        assert!(content.contains("inlineParam: { type: [Array, Function], required: true }"));
+        assert!(content.contains("\"modelValue\": { type: [String, Number, Boolean, Array] },"));
+        assert_eq!(compiled["deps"], json!([expected_dep]));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn vue3_sfc_bridge_compile_script_resolves_external_runtime_utility_types_deps() {
         let dir = std::env::temp_dir().join(format!(
             "vuec-node-bridge-runtime-utility-types-deps-{}",
