@@ -7073,6 +7073,8 @@ mod tests {
         let node_modules = dir.join("node_modules");
         let versioned_pkg = node_modules.join("vuec-bridge-typesversions");
         std::fs::create_dir_all(versioned_pkg.join("dist")).expect("create dist types");
+        std::fs::create_dir_all(versioned_pkg.join("future").join("feature"))
+            .expect("create future types");
         std::fs::create_dir_all(versioned_pkg.join("ts5").join("feature"))
             .expect("create ts5 types");
         std::fs::write(
@@ -7080,7 +7082,11 @@ mod tests {
             r#"{
                 "types": "dist/index.d.ts",
                 "typesVersions": {
-                    ">=5.0": {
+                    ">=5.1": {
+                        "dist/index.d.ts": ["future/index.d.ts"],
+                        "feature/*": ["future/feature/*.d.ts"]
+                    },
+                    "5.* || ^4.8": {
                         "dist/index.d.ts": ["ts5/index.d.ts"],
                         "feature/*": ["ts5/feature/*.d.ts"]
                     },
@@ -7097,6 +7103,24 @@ mod tests {
             "export interface Props { fallbackRoot: string }",
         )
         .expect("write fallback root types");
+        std::fs::write(
+            versioned_pkg.join("future").join("index.d.ts"),
+            "export interface Props { futureRoot: string }\nexport type ModelValue = import('./model').ModelValue",
+        )
+        .expect("write future root types");
+        std::fs::write(
+            versioned_pkg
+                .join("future")
+                .join("feature")
+                .join("item.d.ts"),
+            "export type FeatureProps = { futureFeature: string }",
+        )
+        .expect("write future feature types");
+        std::fs::write(
+            versioned_pkg.join("future").join("model.d.ts"),
+            "export type ModelValue = number",
+        )
+        .expect("write future model types");
         std::fs::write(
             versioned_pkg.join("ts5").join("index.d.ts"),
             "export interface Props { root: string }\nexport type ModelValue = import('./model').ModelValue",
@@ -7122,7 +7146,7 @@ mod tests {
             r#"{
                 "types": "index.d.ts",
                 "typesVersions": {
-                    ">=5.0": {
+                    "~5.0": {
                         "index.d.ts": ["ts5/index.d.ts"]
                     }
                 }
@@ -7147,7 +7171,7 @@ mod tests {
             r#"{
                 "types": "index.d.ts",
                 "typesVersions": {
-                    ">=5.0": {
+                    "5.0 - 5.9": {
                         "index.d.ts": ["ts5/index.d.ts"]
                     }
                 }
@@ -7164,6 +7188,50 @@ mod tests {
             "declare interface TypeRootGlobalProps { typeRoot: string }",
         )
         .expect("write ts5 type root global");
+
+        let ordered_pkg = node_modules.join("vuec-bridge-typesversions-ordered");
+        std::fs::create_dir_all(ordered_pkg.join("first")).expect("create first ordered types");
+        std::fs::create_dir_all(ordered_pkg.join("second")).expect("create second ordered types");
+        std::fs::create_dir_all(ordered_pkg.join("fallback"))
+            .expect("create fallback ordered types");
+        std::fs::write(
+            ordered_pkg.join("package.json"),
+            r#"{
+                "types": "index.d.ts",
+                "typesVersions": {
+                    ">=4.8": {
+                        "index.d.ts": ["first/index.d.ts"]
+                    },
+                    ">=5.0": {
+                        "index.d.ts": ["second/index.d.ts"]
+                    },
+                    "*": {
+                        "index.d.ts": ["fallback/index.d.ts"]
+                    }
+                }
+            }"#,
+        )
+        .expect("write ordered package manifest");
+        std::fs::write(
+            ordered_pkg.join("index.d.ts"),
+            "export type OrderedProps = { orderedFallbackRoot: boolean }",
+        )
+        .expect("write ordered root fallback");
+        std::fs::write(
+            ordered_pkg.join("first").join("index.d.ts"),
+            "export type OrderedProps = { orderedFirst: string }",
+        )
+        .expect("write first ordered types");
+        std::fs::write(
+            ordered_pkg.join("second").join("index.d.ts"),
+            "export type OrderedProps = { orderedSecond: number }",
+        )
+        .expect("write second ordered types");
+        std::fs::write(
+            ordered_pkg.join("fallback").join("index.d.ts"),
+            "export type OrderedProps = { orderedFallback: boolean }",
+        )
+        .expect("write fallback ordered types");
 
         std::fs::create_dir_all(dir.join("src").join("components")).expect("create components");
         std::fs::write(
@@ -7186,7 +7254,8 @@ mod tests {
                     "import type { Props } from 'vuec-bridge-typesversions'\n",
                     "import type { FeatureProps } from 'vuec-bridge-typesversions/feature/item'\n",
                     "import type { AmbientProps } from 'vuec-bridge-typesversions-ambient'\n",
-                    "defineProps<Props & FeatureProps & AmbientProps & TypeRootGlobalProps>()\n",
+                    "import type { OrderedProps } from 'vuec-bridge-typesversions-ordered'\n",
+                    "defineProps<Props & FeatureProps & AmbientProps & TypeRootGlobalProps & OrderedProps>()\n",
                     "defineModel<import('vuec-bridge-typesversions').ModelValue>()",
                     "</script>"
                 ),
@@ -7201,10 +7270,15 @@ mod tests {
         assert!(content.contains("feature: { type: Number, required: false }"));
         assert!(content.contains("ambient: { type: Boolean, required: true }"));
         assert!(content.contains("typeRoot: { type: String, required: true }"));
+        assert!(content.contains("orderedFirst: { type: String, required: true }"));
         assert!(content.contains("\"modelValue\": { type: [Boolean, String] },"));
         assert!(!content.contains("fallbackRoot"));
+        assert!(!content.contains("futureRoot"));
+        assert!(!content.contains("futureFeature"));
         assert!(!content.contains("ambientFallback"));
         assert!(!content.contains("typeRootFallback"));
+        assert!(!content.contains("orderedSecond"));
+        assert!(!content.contains("orderedFallback"));
 
         let deps = compiled["deps"]
             .as_array()
@@ -7218,6 +7292,7 @@ mod tests {
             versioned_pkg.join("ts5").join("model.d.ts"),
             ambient_pkg.join("ts5").join("index.d.ts"),
             type_root_pkg.join("ts5").join("index.d.ts"),
+            ordered_pkg.join("first").join("index.d.ts"),
         ]
         .into_iter()
         .map(|path| path.to_string_lossy().replace('\\', "/"))

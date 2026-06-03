@@ -23,7 +23,8 @@ use oxc_ast::ast::{
     VariableDeclarationKind, WithStatement,
 };
 use oxc_span::GetSpan;
-use serde::{Deserialize, Serialize};
+use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::json;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet};
@@ -7798,6 +7799,165 @@ enum Vue3PackageJsonTypeResolution {
     Blocked,
 }
 
+#[derive(Debug, Deserialize)]
+struct Vue3PackageJsonTypeManifest {
+    #[serde(default)]
+    exports: Option<serde_json::Value>,
+    #[serde(default)]
+    types: Option<serde_json::Value>,
+    #[serde(default)]
+    typings: Option<serde_json::Value>,
+    #[serde(default, rename = "typesVersions")]
+    types_versions: Vue3PackageTypesVersions,
+}
+
+#[derive(Debug, Default)]
+struct Vue3PackageTypesVersions(Vec<Vue3PackageTypesVersionEntry>);
+
+#[derive(Debug)]
+struct Vue3PackageTypesVersionEntry {
+    selector: String,
+    mappings: Vue3PackageTypesVersionMappings,
+}
+
+#[derive(Debug, Default)]
+struct Vue3PackageTypesVersionMappings(Vec<(String, serde_json::Value)>);
+
+impl<'de> Deserialize<'de> for Vue3PackageTypesVersions {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct TypesVersionsVisitor;
+
+        impl<'de> Visitor<'de> for TypesVersionsVisitor {
+            type Value = Vue3PackageTypesVersions;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a package.json typesVersions object")
+            }
+
+            fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                let mut entries = Vec::new();
+                while let Some(selector) = map.next_key::<String>()? {
+                    let mappings = map.next_value::<Vue3PackageTypesVersionMappings>()?;
+                    if !mappings.0.is_empty() {
+                        entries.push(Vue3PackageTypesVersionEntry { selector, mappings });
+                    }
+                }
+                Ok(Vue3PackageTypesVersions(entries))
+            }
+
+            fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E> {
+                Ok(Vue3PackageTypesVersions::default())
+            }
+
+            fn visit_i64<E>(self, _: i64) -> Result<Self::Value, E> {
+                Ok(Vue3PackageTypesVersions::default())
+            }
+
+            fn visit_u64<E>(self, _: u64) -> Result<Self::Value, E> {
+                Ok(Vue3PackageTypesVersions::default())
+            }
+
+            fn visit_f64<E>(self, _: f64) -> Result<Self::Value, E> {
+                Ok(Vue3PackageTypesVersions::default())
+            }
+
+            fn visit_str<E>(self, _: &str) -> Result<Self::Value, E> {
+                Ok(Vue3PackageTypesVersions::default())
+            }
+
+            fn visit_none<E>(self) -> Result<Self::Value, E> {
+                Ok(Vue3PackageTypesVersions::default())
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E> {
+                Ok(Vue3PackageTypesVersions::default())
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                while seq.next_element::<IgnoredAny>()?.is_some() {}
+                Ok(Vue3PackageTypesVersions::default())
+            }
+        }
+
+        deserializer.deserialize_any(TypesVersionsVisitor)
+    }
+}
+
+impl<'de> Deserialize<'de> for Vue3PackageTypesVersionMappings {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct TypesVersionMappingsVisitor;
+
+        impl<'de> Visitor<'de> for TypesVersionMappingsVisitor {
+            type Value = Vue3PackageTypesVersionMappings;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a package.json typesVersions mapping object")
+            }
+
+            fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                let mut mappings = Vec::new();
+                while let Some(pattern) = map.next_key::<String>()? {
+                    mappings.push((pattern, map.next_value()?));
+                }
+                Ok(Vue3PackageTypesVersionMappings(mappings))
+            }
+
+            fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E> {
+                Ok(Vue3PackageTypesVersionMappings::default())
+            }
+
+            fn visit_i64<E>(self, _: i64) -> Result<Self::Value, E> {
+                Ok(Vue3PackageTypesVersionMappings::default())
+            }
+
+            fn visit_u64<E>(self, _: u64) -> Result<Self::Value, E> {
+                Ok(Vue3PackageTypesVersionMappings::default())
+            }
+
+            fn visit_f64<E>(self, _: f64) -> Result<Self::Value, E> {
+                Ok(Vue3PackageTypesVersionMappings::default())
+            }
+
+            fn visit_str<E>(self, _: &str) -> Result<Self::Value, E> {
+                Ok(Vue3PackageTypesVersionMappings::default())
+            }
+
+            fn visit_none<E>(self) -> Result<Self::Value, E> {
+                Ok(Vue3PackageTypesVersionMappings::default())
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E> {
+                Ok(Vue3PackageTypesVersionMappings::default())
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                while seq.next_element::<IgnoredAny>()?.is_some() {}
+                Ok(Vue3PackageTypesVersionMappings::default())
+            }
+        }
+
+        deserializer.deserialize_any(TypesVersionMappingsVisitor)
+    }
+}
+
 fn resolve_vue3_package_json_type_entry(
     package_dir: &Path,
     subpath: Option<&str>,
@@ -7806,10 +7966,10 @@ fn resolve_vue3_package_json_type_entry(
     let Ok(source) = std::fs::read_to_string(package_json) else {
         return Vue3PackageJsonTypeResolution::NoPackageJson;
     };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&source) else {
+    let Ok(manifest) = serde_json::from_str::<Vue3PackageJsonTypeManifest>(&source) else {
         return Vue3PackageJsonTypeResolution::NoPackageJson;
     };
-    if let Some(exports) = value.get("exports") {
+    if let Some(exports) = &manifest.exports {
         if let Some(target) = vue3_package_exports_type_target(exports, subpath) {
             if let Some(resolved) = vue3_package_export_type_path(package_dir, &target) {
                 return Vue3PackageJsonTypeResolution::Resolved(resolved);
@@ -7821,15 +7981,25 @@ fn resolve_vue3_package_json_type_entry(
         }
     }
     let root_type_target = if subpath.is_none() {
-        ["types", "typings"]
-            .into_iter()
-            .find_map(|field| value.get(field).and_then(serde_json::Value::as_str))
+        manifest
+            .types
+            .as_ref()
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| {
+                manifest
+                    .typings
+                    .as_ref()
+                    .and_then(serde_json::Value::as_str)
+            })
     } else {
         None
     };
-    if let Some(resolved) =
-        vue3_package_types_versions_type_path(package_dir, &value, subpath, root_type_target)
-    {
+    if let Some(resolved) = vue3_package_types_versions_type_path(
+        package_dir,
+        &manifest.types_versions,
+        subpath,
+        root_type_target,
+    ) {
         return Vue3PackageJsonTypeResolution::Resolved(resolved);
     }
     if subpath.is_none() {
@@ -7925,16 +8095,17 @@ fn vue3_package_export_type_path(package_dir: &Path, target: &str) -> Option<Pat
 
 fn vue3_package_types_versions_type_path(
     package_dir: &Path,
-    package_json: &serde_json::Value,
+    types_versions: &Vue3PackageTypesVersions,
     subpath: Option<&str>,
     root_type_target: Option<&str>,
 ) -> Option<PathBuf> {
-    let mappings = vue3_package_types_versions_mapping(package_json)?;
+    let mappings = vue3_package_types_versions_mapping(types_versions)?;
     let source = subpath
         .map(|subpath| subpath.trim_start_matches("./").to_string())
         .or_else(|| root_type_target.map(|target| target.trim_start_matches("./").to_string()))
         .unwrap_or_else(|| "index.d.ts".to_string());
     let mut matches = mappings
+        .0
         .iter()
         .enumerate()
         .filter_map(|(order, (pattern, targets))| {
@@ -7959,98 +8130,28 @@ fn vue3_package_types_versions_type_path(
 }
 
 fn vue3_package_types_versions_mapping(
-    package_json: &serde_json::Value,
-) -> Option<&serde_json::Map<String, serde_json::Value>> {
-    let versions = package_json.get("typesVersions")?.as_object()?;
-    versions
+    types_versions: &Vue3PackageTypesVersions,
+) -> Option<&Vue3PackageTypesVersionMappings> {
+    types_versions
+        .0
         .iter()
-        .filter_map(|(selector, mappings)| {
-            let mappings = mappings.as_object()?;
-            vue3_package_types_version_selector_matches(selector).then(|| {
-                (
-                    vue3_package_types_version_selector_score(selector),
-                    mappings,
-                )
-            })
-        })
-        .max_by(|left, right| left.0.cmp(&right.0))
-        .map(|(_, mappings)| mappings)
+        .find(|entry| vue3_package_types_version_selector_matches(&entry.selector))
+        .map(|entry| &entry.mappings)
 }
 
 fn vue3_package_types_version_selector_matches(selector: &str) -> bool {
     let selector = selector.trim();
-    if selector == "*" {
-        return true;
-    }
-    let constraints = selector.split_whitespace().collect::<Vec<_>>();
-    !constraints.is_empty()
-        && constraints
-            .into_iter()
-            .all(vue3_package_types_version_constraint_matches)
-}
-
-fn vue3_package_types_version_constraint_matches(constraint: &str) -> bool {
-    let (operator, version) = if let Some(version) = constraint.strip_prefix(">=") {
-        (">=", version)
-    } else if let Some(version) = constraint.strip_prefix("<=") {
-        ("<=", version)
-    } else if let Some(version) = constraint.strip_prefix('>') {
-        (">", version)
-    } else if let Some(version) = constraint.strip_prefix('<') {
-        ("<", version)
-    } else if let Some(version) = constraint.strip_prefix('=') {
-        ("=", version)
-    } else {
-        ("=", constraint)
-    };
-    let Some(version) = vue3_package_types_version_tuple(version) else {
+    if selector.is_empty() {
         return false;
-    };
-    let current = vue3_package_typescript_version_tuple();
-    match operator {
-        ">=" => current >= version,
-        ">" => current > version,
-        "<=" => current <= version,
-        "<" => current < version,
-        "=" => current == version,
-        _ => false,
     }
+    nodejs_semver::Range::parse(selector)
+        .is_ok_and(|range| range.satisfies(&vue3_package_typescript_version()))
 }
 
-fn vue3_package_types_version_selector_score(selector: &str) -> u32 {
-    if selector.trim() == "*" {
-        return 0;
-    }
-    selector
-        .split_whitespace()
-        .filter_map(|constraint| {
-            let version = constraint
-                .trim_start_matches(">=")
-                .trim_start_matches("<=")
-                .trim_start_matches('>')
-                .trim_start_matches('<')
-                .trim_start_matches('=');
-            vue3_package_types_version_tuple(version)
-        })
-        .map(|(major, minor)| 1000 + major * 100 + minor)
-        .max()
-        .unwrap_or(1)
-}
-
-fn vue3_package_typescript_version_tuple() -> (u32, u32) {
+fn vue3_package_typescript_version() -> nodejs_semver::Version {
     // Bounded SFC resolver baseline for the locked Vue 3 compiler-sfc harness.
     // This intentionally avoids modeling the full TypeScript package resolver.
-    (5, 0)
-}
-
-fn vue3_package_types_version_tuple(version: &str) -> Option<(u32, u32)> {
-    let mut parts = version.trim().split('.');
-    let major = parts.next()?.parse::<u32>().ok()?;
-    let minor = parts
-        .next()
-        .map(|minor| minor.parse::<u32>().ok())
-        .unwrap_or(Some(0))?;
-    Some((major, minor))
+    (5, 0, 0).into()
 }
 
 fn vue3_package_type_field_path(package_dir: &Path, target: &str) -> Option<PathBuf> {
@@ -23018,11 +23119,39 @@ const model = defineModel<import('vuec-types-pkg').ModelValue>()
     }
 
     #[test]
+    fn vue3_package_types_version_selector_supports_node_semver_ranges() {
+        for selector in [
+            "*",
+            "<=5.0",
+            "~5.0",
+            "^4.8 || >=5.0",
+            "5.0 - 5.9",
+            ">=4.8 <5.3",
+            "5.x",
+            "5.*",
+        ] {
+            assert!(
+                vue3_package_types_version_selector_matches(selector),
+                "{selector}"
+            );
+        }
+
+        for selector in ["", ">=5.1", "<5.0", "4.x", "4.*", "5.1 - 5.9"] {
+            assert!(
+                !vue3_package_types_version_selector_matches(selector),
+                "{selector}"
+            );
+        }
+    }
+
+    #[test]
     fn vue3_compile_script_resolves_package_types_versions_type_deps() {
         let dir = tempfile::tempdir().expect("temp dir");
         let node_modules = dir.path().join("node_modules");
         let versioned_pkg = node_modules.join("vuec-typesversions-pkg");
         std::fs::create_dir_all(versioned_pkg.join("dist")).expect("create dist types");
+        std::fs::create_dir_all(versioned_pkg.join("future").join("feature"))
+            .expect("create future types");
         std::fs::create_dir_all(versioned_pkg.join("ts5").join("feature"))
             .expect("create ts5 types");
         std::fs::create_dir_all(versioned_pkg.join("legacy").join("feature"))
@@ -23032,7 +23161,11 @@ const model = defineModel<import('vuec-types-pkg').ModelValue>()
             r#"{
                 "types": "dist/index.d.ts",
                 "typesVersions": {
-                    ">=5.0": {
+                    ">=5.1": {
+                        "dist/index.d.ts": ["future/index.d.ts"],
+                        "feature/*": ["future/feature/*.d.ts"]
+                    },
+                    "^4.8 || 5.x": {
                         "dist/index.d.ts": ["ts5/index.d.ts"],
                         "feature/*": ["ts5/feature/*.d.ts"]
                     },
@@ -23063,6 +23196,24 @@ const model = defineModel<import('vuec-types-pkg').ModelValue>()
         )
         .expect("write legacy feature types");
         std::fs::write(
+            versioned_pkg.join("future").join("index.d.ts"),
+            "export interface RootProps { futureRoot: string }\nexport type ModelValue = import('./model').ModelValue",
+        )
+        .expect("write future root types");
+        std::fs::write(
+            versioned_pkg
+                .join("future")
+                .join("feature")
+                .join("item.d.ts"),
+            "export type FeatureProps = { futureFeature: string }",
+        )
+        .expect("write future feature types");
+        std::fs::write(
+            versioned_pkg.join("future").join("model.d.ts"),
+            "export type ModelValue = number",
+        )
+        .expect("write future model types");
+        std::fs::write(
             versioned_pkg.join("ts5").join("index.d.ts"),
             "export interface RootProps { root: string }\nexport type ModelValue = import('./model').ModelValue",
         )
@@ -23087,7 +23238,7 @@ const model = defineModel<import('vuec-types-pkg').ModelValue>()
             r#"{
                 "types": "index.d.ts",
                 "typesVersions": {
-                    ">=5.0": {
+                    "~5.0": {
                         "index.d.ts": ["ts5/index.d.ts"]
                     }
                 }
@@ -23112,7 +23263,7 @@ const model = defineModel<import('vuec-types-pkg').ModelValue>()
             r#"{
                 "types": "index.d.ts",
                 "typesVersions": {
-                    ">=5.0": {
+                    "5.0 - 5.9": {
                         "index.d.ts": ["ts5/index.d.ts"]
                     }
                 }
@@ -23129,6 +23280,50 @@ const model = defineModel<import('vuec-types-pkg').ModelValue>()
             "declare interface TypeRootGlobalProps { typeRoot: string }",
         )
         .expect("write ts5 type root global");
+
+        let ordered_pkg = node_modules.join("vuec-typesversions-ordered");
+        std::fs::create_dir_all(ordered_pkg.join("first")).expect("create first ordered types");
+        std::fs::create_dir_all(ordered_pkg.join("second")).expect("create second ordered types");
+        std::fs::create_dir_all(ordered_pkg.join("fallback"))
+            .expect("create fallback ordered types");
+        std::fs::write(
+            ordered_pkg.join("package.json"),
+            r#"{
+                "types": "index.d.ts",
+                "typesVersions": {
+                    ">=4.8": {
+                        "index.d.ts": ["first/index.d.ts"]
+                    },
+                    ">=5.0": {
+                        "index.d.ts": ["second/index.d.ts"]
+                    },
+                    "*": {
+                        "index.d.ts": ["fallback/index.d.ts"]
+                    }
+                }
+            }"#,
+        )
+        .expect("write ordered package manifest");
+        std::fs::write(
+            ordered_pkg.join("index.d.ts"),
+            "export type OrderedProps = { orderedFallbackRoot: boolean }",
+        )
+        .expect("write ordered root fallback");
+        std::fs::write(
+            ordered_pkg.join("first").join("index.d.ts"),
+            "export type OrderedProps = { orderedFirst: string }",
+        )
+        .expect("write first ordered types");
+        std::fs::write(
+            ordered_pkg.join("second").join("index.d.ts"),
+            "export type OrderedProps = { orderedSecond: number }",
+        )
+        .expect("write second ordered types");
+        std::fs::write(
+            ordered_pkg.join("fallback").join("index.d.ts"),
+            "export type OrderedProps = { orderedFallback: boolean }",
+        )
+        .expect("write fallback ordered types");
 
         std::fs::create_dir_all(dir.path().join("src").join("components"))
             .expect("create component dir");
@@ -23148,7 +23343,8 @@ const model = defineModel<import('vuec-types-pkg').ModelValue>()
 import type { RootProps } from 'vuec-typesversions-pkg'
 import type { FeatureProps } from 'vuec-typesversions-pkg/feature/item'
 import type { AmbientProps } from 'vuec-typesversions-ambient'
-defineProps<RootProps & FeatureProps & AmbientProps & TypeRootGlobalProps>()
+import type { OrderedProps } from 'vuec-typesversions-ordered'
+defineProps<RootProps & FeatureProps & AmbientProps & TypeRootGlobalProps & OrderedProps>()
 defineModel<import('vuec-typesversions-pkg').ModelValue>()
 </script>"#;
         let mut compiler = SfcCompiler::new();
@@ -23170,12 +23366,19 @@ defineModel<import('vuec-typesversions-pkg').ModelValue>()
             .contains("typeRoot: { type: String, required: true }"));
         assert!(script
             .content
+            .contains("orderedFirst: { type: String, required: true }"));
+        assert!(script
+            .content
             .contains("\"modelValue\": { type: [Boolean, String] },"));
         assert!(!script.content.contains("fallbackRoot"));
+        assert!(!script.content.contains("futureRoot"));
+        assert!(!script.content.contains("futureFeature"));
         assert!(!script.content.contains("legacyRoot"));
         assert!(!script.content.contains("legacyFeature"));
         assert!(!script.content.contains("ambientFallback"));
         assert!(!script.content.contains("typeRootFallback"));
+        assert!(!script.content.contains("orderedSecond"));
+        assert!(!script.content.contains("orderedFallback"));
 
         let deps = script.deps.iter().cloned().collect::<BTreeSet<_>>();
         let expected = [
@@ -23184,6 +23387,7 @@ defineModel<import('vuec-typesversions-pkg').ModelValue>()
             versioned_pkg.join("ts5").join("model.d.ts"),
             ambient_pkg.join("ts5").join("index.d.ts"),
             type_root_pkg.join("ts5").join("index.d.ts"),
+            ordered_pkg.join("first").join("index.d.ts"),
         ]
         .into_iter()
         .map(|path| normalize_path_string(&path))
