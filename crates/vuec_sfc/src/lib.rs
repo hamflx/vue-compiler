@@ -12,15 +12,16 @@ use oxc_ast::ast::{
     Argument, ArrayExpressionElement, ArrowFunctionExpression, AssignmentTarget, BindingPattern,
     ClassElement, Declaration, ExportDefaultDeclaration, ExportDefaultDeclarationKind,
     ExportNamedDeclaration, ExportSpecifier, Expression, ForStatementInit, ForStatementLeft,
-    FormalParameter, FormalParameters, Function, ImportDeclarationSpecifier, ImportOrExportKind,
-    ModuleExportName, ObjectExpression, ObjectProperty, ObjectPropertyKind, PropertyKey,
-    SimpleAssignmentTarget, Statement, TSEnumDeclaration, TSFunctionType, TSImportType,
-    TSImportTypeQualifier, TSInterfaceBody, TSInterfaceDeclaration, TSInterfaceHeritage, TSLiteral,
-    TSMappedType, TSMappedTypeModifierOperator, TSModuleDeclaration, TSModuleDeclarationBody,
-    TSModuleDeclarationName, TSSignature, TSTemplateLiteralType, TSTupleElement, TSType,
-    TSTypeAliasDeclaration, TSTypeAnnotation, TSTypeLiteral, TSTypeName, TSTypeOperatorOperator,
-    TSTypeQuery, TSTypeQueryExprName, TSTypeReference, VariableDeclaration,
-    VariableDeclarationKind, VariableDeclarator, WithStatement,
+    FormalParameter, FormalParameters, Function, FunctionBody, ImportDeclarationSpecifier,
+    ImportOrExportKind, ModuleExportName, ObjectExpression, ObjectProperty, ObjectPropertyKind,
+    PropertyKey, SimpleAssignmentTarget, Statement, TSEnumDeclaration, TSFunctionType,
+    TSImportType, TSImportTypeQualifier, TSInterfaceBody, TSInterfaceDeclaration,
+    TSInterfaceHeritage, TSLiteral, TSMappedType, TSMappedTypeModifierOperator,
+    TSModuleDeclaration, TSModuleDeclarationBody, TSModuleDeclarationName, TSSignature,
+    TSTemplateLiteralType, TSTupleElement, TSType, TSTypeAliasDeclaration, TSTypeAnnotation,
+    TSTypeLiteral, TSTypeName, TSTypeOperatorOperator, TSTypeQuery, TSTypeQueryExprName,
+    TSTypeReference, VariableDeclaration, VariableDeclarationKind, VariableDeclarator,
+    WithStatement,
 };
 use oxc_span::GetSpan;
 use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
@@ -5303,7 +5304,9 @@ fn vue3_declared_type_names_from_statement(statement: &Statement<'_>) -> BTreeSe
         Statement::TSEnumDeclaration(declaration) => {
             names.insert(declaration.id.name.to_string());
         }
-        Statement::FunctionDeclaration(function) if function.return_type.is_some() => {
+        Statement::FunctionDeclaration(function)
+            if vue3_function_has_return_projection(function) =>
+        {
             if let Some(id) = &function.id {
                 names.insert(id.name.to_string());
             }
@@ -5317,7 +5320,7 @@ fn vue3_declared_type_names_from_statement(statement: &Statement<'_>) -> BTreeSe
         }
         Statement::VariableDeclaration(declaration) => {
             for declarator in &declaration.declarations {
-                if vue3_variable_declarator_function_return_type(declarator).is_some() {
+                if vue3_variable_declarator_has_function_return_projection(declarator) {
                     if let Some(name) = first_pattern_binding(&declarator.id) {
                         names.insert(name);
                     }
@@ -5354,7 +5357,9 @@ fn vue3_declared_type_names_from_declaration(declaration: &Declaration<'_>) -> B
         Declaration::TSEnumDeclaration(declaration) => {
             names.insert(declaration.id.name.to_string());
         }
-        Declaration::FunctionDeclaration(function) if function.return_type.is_some() => {
+        Declaration::FunctionDeclaration(function)
+            if vue3_function_has_return_projection(function) =>
+        {
             if let Some(id) = &function.id {
                 names.insert(id.name.to_string());
             }
@@ -5368,7 +5373,7 @@ fn vue3_declared_type_names_from_declaration(declaration: &Declaration<'_>) -> B
         }
         Declaration::VariableDeclaration(declaration) => {
             for declarator in &declaration.declarations {
-                if vue3_variable_declarator_function_return_type(declarator).is_some() {
+                if vue3_variable_declarator_has_function_return_projection(declarator) {
                     if let Some(name) = first_pattern_binding(&declarator.id) {
                         names.insert(name);
                     }
@@ -6193,7 +6198,7 @@ fn vue3_exported_type_names(statements: &[Statement<'_>]) -> BTreeSet<String> {
                             names.insert(declaration.id.name.to_string());
                         }
                         Declaration::FunctionDeclaration(function)
-                            if function.return_type.is_some() =>
+                            if vue3_function_has_return_projection(function) =>
                         {
                             if let Some(id) = &function.id {
                                 names.insert(id.name.to_string());
@@ -6208,9 +6213,9 @@ fn vue3_exported_type_names(statements: &[Statement<'_>]) -> BTreeSet<String> {
                         }
                         Declaration::VariableDeclaration(declaration) => {
                             for declarator in &declaration.declarations {
-                                if vue3_variable_declarator_function_return_type(declarator)
-                                    .is_some()
-                                {
+                                if vue3_variable_declarator_has_function_return_projection(
+                                    declarator,
+                                ) {
                                     if let Some(name) = first_pattern_binding(&declarator.id) {
                                         names.insert(name);
                                     }
@@ -6248,9 +6253,9 @@ fn vue3_default_export_may_be_type(declaration: &ExportDefaultDeclaration<'_>) -
         | ExportDefaultDeclarationKind::ClassDeclaration(_)
         | ExportDefaultDeclarationKind::Identifier(_) => true,
         ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
-            function.return_type.is_some()
+            vue3_function_has_return_projection(function)
         }
-        declaration => vue3_default_export_function_value_return_type(declaration).is_some(),
+        declaration => vue3_default_export_function_value_has_return_projection(declaration),
     }
 }
 
@@ -6275,26 +6280,18 @@ fn project_vue3_default_type_exports(
                 insert_vue3_local_type_alias(analysis, identifier.name.as_str(), "default");
             }
             ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
-                if let Some(return_type) = function.return_type.as_ref() {
-                    if let Some(id) = &function.id {
-                        let name = id.name.as_str();
-                        register_vue3_declared_return_props_options(
-                            source,
-                            name,
-                            &return_type.type_annotation,
-                            analysis,
-                        );
+                if let Some(id) = &function.id {
+                    let name = id.name.as_str();
+                    register_vue3_function_return_projection(source, name, function, analysis);
+                    if let Some(return_type) = function.return_type.as_ref() {
                         let deps =
                             collect_vue3_type_argument_deps(&return_type.type_annotation, analysis);
                         insert_vue3_declared_type_deps(analysis, name, deps);
-                        insert_vue3_local_type_alias(analysis, name, "default");
-                    } else {
-                        register_vue3_declared_return_props_options(
-                            source,
-                            "default",
-                            &return_type.type_annotation,
-                            analysis,
-                        );
+                    }
+                    insert_vue3_local_type_alias(analysis, name, "default");
+                } else {
+                    register_vue3_function_return_projection(source, "default", function, analysis);
+                    if let Some(return_type) = function.return_type.as_ref() {
                         let deps =
                             collect_vue3_type_argument_deps(&return_type.type_annotation, analysis);
                         insert_vue3_declared_type_deps(analysis, "default", deps);
@@ -6302,18 +6299,17 @@ fn project_vue3_default_type_exports(
                 }
             }
             declaration
-                if vue3_default_export_function_value_return_type(declaration).is_some() =>
+                if vue3_default_export_function_value_has_return_projection(declaration) =>
             {
-                let return_type =
-                    vue3_default_export_function_value_return_type(declaration).expect("checked");
-                register_vue3_declared_return_props_options(
-                    source,
-                    "default",
-                    return_type,
-                    analysis,
-                );
-                let deps = collect_vue3_type_argument_deps(return_type, analysis);
-                insert_vue3_declared_type_deps(analysis, "default", deps);
+                if let Some(expression) = declaration.as_expression() {
+                    register_vue3_function_value_expression_return_projection(
+                        source, "default", expression, analysis,
+                    );
+                    if let Some(return_type) = vue3_function_value_return_type(expression) {
+                        let deps = collect_vue3_type_argument_deps(return_type, analysis);
+                        insert_vue3_declared_type_deps(analysis, "default", deps);
+                    }
+                }
             }
             ExportDefaultDeclarationKind::ClassDeclaration(class) => {
                 if let Some(id) = &class.id {
@@ -9453,7 +9449,9 @@ fn collect_vue3_declared_type_from_statement(
         Statement::TSTypeAliasDeclaration(declaration) => {
             register_vue3_type_alias_declaration(source, declaration, analysis);
         }
-        Statement::FunctionDeclaration(function) if function.return_type.is_some() => {
+        Statement::FunctionDeclaration(function)
+            if vue3_function_has_return_projection(function) =>
+        {
             register_vue3_declared_function_return_props_options(source, function, analysis);
         }
         Statement::VariableDeclaration(declaration) if declaration.declare => {
@@ -9494,7 +9492,9 @@ fn collect_vue3_declared_type_from_declaration(
         Declaration::TSTypeAliasDeclaration(declaration) => {
             register_vue3_type_alias_declaration(source, declaration, analysis);
         }
-        Declaration::FunctionDeclaration(function) if function.return_type.is_some() => {
+        Declaration::FunctionDeclaration(function)
+            if vue3_function_has_return_projection(function) =>
+        {
             register_vue3_declared_function_return_props_options(source, function, analysis);
         }
         Declaration::VariableDeclaration(declaration) if declaration.declare => {
@@ -10288,15 +10288,14 @@ fn register_vue3_declared_function_return_props_options(
     function: &Function<'_>,
     analysis: &mut Vue3ScriptSetupAnalysis,
 ) {
-    let (Some(id), Some(return_type)) = (&function.id, function.return_type.as_ref()) else {
+    let Some(id) = &function.id else {
         return;
     };
-    register_vue3_declared_return_props_options(
-        source,
-        id.name.as_str(),
-        &return_type.type_annotation,
-        analysis,
-    );
+    register_vue3_function_return_projection(source, id.name.as_str(), function, analysis);
+}
+
+fn vue3_function_has_return_projection(function: &Function<'_>) -> bool {
+    function.return_type.is_some() || infer_vue3_function_runtime_return_types(function).is_some()
 }
 
 fn vue3_function_value_return_type<'a>(expression: &'a Expression<'a>) -> Option<&'a TSType<'a>> {
@@ -10313,10 +10312,33 @@ fn vue3_function_value_return_type<'a>(expression: &'a Expression<'a>) -> Option
     }
 }
 
-fn vue3_default_export_function_value_return_type<'a>(
-    declaration: &'a ExportDefaultDeclarationKind<'a>,
-) -> Option<&'a TSType<'a>> {
-    vue3_function_value_return_type(declaration.as_expression()?)
+fn vue3_function_value_has_return_projection(expression: &Expression<'_>) -> bool {
+    match unwrap_vue3_ts_expression(expression) {
+        Expression::ArrowFunctionExpression(function) => {
+            function.return_type.is_some()
+                || infer_vue3_arrow_function_runtime_return_types(function).is_some()
+        }
+        Expression::FunctionExpression(function) => vue3_function_has_return_projection(function),
+        _ => false,
+    }
+}
+
+fn vue3_default_export_function_value_has_return_projection(
+    declaration: &ExportDefaultDeclarationKind<'_>,
+) -> bool {
+    declaration
+        .as_expression()
+        .is_some_and(vue3_function_value_has_return_projection)
+}
+
+fn vue3_variable_declarator_has_function_return_projection(
+    declarator: &VariableDeclarator<'_>,
+) -> bool {
+    vue3_variable_declarator_function_return_type(declarator).is_some()
+        || declarator
+            .init
+            .as_ref()
+            .is_some_and(vue3_function_value_has_return_projection)
 }
 
 fn vue3_variable_declarator_function_return_type<'a>(
@@ -10333,6 +10355,159 @@ fn vue3_variable_declarator_function_return_type<'a>(
         .and_then(vue3_function_value_return_type)
 }
 
+fn infer_vue3_function_runtime_return_types(function: &Function<'_>) -> Option<Vec<String>> {
+    let body = function.body.as_ref()?;
+    infer_vue3_function_body_runtime_return_types(body)
+}
+
+fn infer_vue3_arrow_function_runtime_return_types(
+    function: &ArrowFunctionExpression<'_>,
+) -> Option<Vec<String>> {
+    if let Some(expression) = function.get_expression() {
+        return infer_vue3_return_expression_runtime_types(expression);
+    }
+    infer_vue3_function_body_runtime_return_types(&function.body)
+}
+
+fn infer_vue3_function_body_runtime_return_types(body: &FunctionBody<'_>) -> Option<Vec<String>> {
+    infer_vue3_return_statement_list_runtime_types(&body.statements)
+}
+
+fn infer_vue3_return_statement_list_runtime_types(
+    statements: &[Statement<'_>],
+) -> Option<Vec<String>> {
+    let [statement] = statements else {
+        return None;
+    };
+    infer_vue3_return_statement_runtime_types(statement)
+}
+
+fn infer_vue3_return_statement_runtime_types(statement: &Statement<'_>) -> Option<Vec<String>> {
+    match statement {
+        Statement::ReturnStatement(statement) => statement
+            .argument
+            .as_ref()
+            .and_then(infer_vue3_return_expression_runtime_types),
+        Statement::BlockStatement(block) => {
+            infer_vue3_return_statement_list_runtime_types(&block.body)
+        }
+        Statement::IfStatement(statement) => {
+            let alternate = statement.alternate.as_ref()?;
+            let mut types = infer_vue3_return_statement_runtime_types(&statement.consequent)?;
+            let alternate_types = infer_vue3_return_statement_runtime_types(alternate)?;
+            merge_vue3_runtime_types(&mut types, alternate_types);
+            vue3_non_empty_runtime_types(types)
+        }
+        _ => None,
+    }
+}
+
+fn infer_vue3_return_expression_runtime_types(expression: &Expression<'_>) -> Option<Vec<String>> {
+    match unwrap_vue3_ts_expression(expression) {
+        Expression::StringLiteral(_) | Expression::TemplateLiteral(_) => {
+            Some(vec!["String".into()])
+        }
+        Expression::NumericLiteral(_) => Some(vec!["Number".into()]),
+        Expression::BooleanLiteral(_) => Some(vec!["Boolean".into()]),
+        Expression::NullLiteral(_) => Some(vec!["null".into()]),
+        Expression::ArrayExpression(_) => Some(vec!["Array".into()]),
+        Expression::ObjectExpression(_) => Some(vec!["Object".into()]),
+        Expression::FunctionExpression(_) | Expression::ArrowFunctionExpression(_) => {
+            Some(vec!["Function".into()])
+        }
+        Expression::ConditionalExpression(expression) => {
+            let mut types = infer_vue3_return_expression_runtime_types(&expression.consequent)?;
+            let alternate_types =
+                infer_vue3_return_expression_runtime_types(&expression.alternate)?;
+            merge_vue3_runtime_types(&mut types, alternate_types);
+            vue3_non_empty_runtime_types(types)
+        }
+        Expression::NewExpression(expression) => {
+            let name = vue3_new_expression_runtime_constructor_name(&expression.callee)?;
+            Some(vec![name.to_string()])
+        }
+        _ => None,
+    }
+}
+
+fn vue3_new_expression_runtime_constructor_name(
+    expression: &Expression<'_>,
+) -> Option<&'static str> {
+    let name = match unwrap_vue3_ts_expression(expression) {
+        Expression::Identifier(identifier) => identifier.name.as_str(),
+        Expression::StaticMemberExpression(member) => member.property.name.as_str(),
+        _ => return None,
+    };
+    vue3_return_expression_constructor_runtime_name(name)
+}
+
+fn vue3_return_expression_constructor_runtime_name(name: &str) -> Option<&'static str> {
+    match name {
+        "String" => Some("String"),
+        "Number" => Some("Number"),
+        "Boolean" => Some("Boolean"),
+        "Array" => Some("Array"),
+        "Object" => Some("Object"),
+        "Function" => Some("Function"),
+        "Date" => Some("Date"),
+        "Error" => Some("Error"),
+        "Map" => Some("Map"),
+        "Set" => Some("Set"),
+        "WeakMap" => Some("WeakMap"),
+        "WeakSet" => Some("WeakSet"),
+        "Promise" => Some("Promise"),
+        _ => None,
+    }
+}
+
+fn register_vue3_function_return_projection(
+    source: &str,
+    name: &str,
+    function: &Function<'_>,
+    analysis: &mut Vue3ScriptSetupAnalysis,
+) {
+    if let Some(return_type) = function.return_type.as_ref() {
+        register_vue3_declared_return_props_options(
+            source,
+            name,
+            &return_type.type_annotation,
+            analysis,
+        );
+        return;
+    }
+    if let Some(types) = infer_vue3_function_runtime_return_types(function) {
+        register_vue3_declared_return_runtime_types(name, types, analysis);
+    }
+}
+
+fn register_vue3_function_value_expression_return_projection(
+    source: &str,
+    name: &str,
+    expression: &Expression<'_>,
+    analysis: &mut Vue3ScriptSetupAnalysis,
+) {
+    match unwrap_vue3_ts_expression(expression) {
+        Expression::ArrowFunctionExpression(function) => {
+            if let Some(return_type) = function.return_type.as_ref() {
+                register_vue3_declared_return_props_options(
+                    source,
+                    name,
+                    &return_type.type_annotation,
+                    analysis,
+                );
+                return;
+            }
+            if let Some(types) = infer_vue3_arrow_function_runtime_return_types(function) {
+                register_vue3_declared_return_runtime_types(name, types, analysis);
+            }
+        }
+        Expression::FunctionExpression(function) => {
+            register_vue3_function_return_projection(source, name, function, analysis);
+        }
+        _ => {}
+    }
+}
+
 fn register_vue3_function_value_return_props_options(
     source: &str,
     declaration: &VariableDeclaration<'_>,
@@ -10342,10 +10517,15 @@ fn register_vue3_function_value_return_props_options(
         let Some(name) = first_pattern_binding(&declarator.id) else {
             continue;
         };
-        let Some(return_type) = vue3_variable_declarator_function_return_type(declarator) else {
+        if let Some(return_type) = vue3_variable_declarator_function_return_type(declarator) {
+            register_vue3_declared_return_props_options(source, &name, return_type, analysis);
             continue;
-        };
-        register_vue3_declared_return_props_options(source, &name, return_type, analysis);
+        }
+        if let Some(init) = declarator.init.as_ref() {
+            register_vue3_function_value_expression_return_projection(
+                source, &name, init, analysis,
+            );
+        }
     }
 }
 
@@ -10467,6 +10647,23 @@ fn register_vue3_declared_return_annotation_runtime_types(
             .define_model_return_type_runtime_type_declarations
             .insert(name.to_string(), types);
     }
+}
+
+fn register_vue3_declared_return_runtime_types(
+    name: &str,
+    types: Vec<String>,
+    analysis: &mut Vue3ScriptSetupAnalysis,
+) {
+    register_vue3_local_type_name(analysis, name);
+    let Some(types) = vue3_non_empty_runtime_types(types) else {
+        return;
+    };
+    analysis
+        .return_type_runtime_type_declarations
+        .insert(name.to_string(), types.clone());
+    analysis
+        .define_model_return_type_runtime_type_declarations
+        .insert(name.to_string(), types);
 }
 
 fn register_vue3_declared_callable_return_runtime_types(
@@ -28126,6 +28323,91 @@ defineModel<ReturnType<typeof makeLabel> | ReturnType<typeof makeCount> | Return
 
         let deps = script.deps.iter().cloned().collect::<BTreeSet<_>>();
         let expected = ["factories.ts", "arrow-default.ts", "function-default.ts"]
+            .into_iter()
+            .map(|name| normalize_path_string(&dir.path().join(name)))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(deps, expected);
+        assert!(!script.deps.iter().any(|dep| dep.contains('\\')));
+    }
+
+    #[test]
+    fn vue3_compile_script_resolves_unannotated_function_return_runtime_types() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join("factories.ts"),
+            concat!(
+                "export function makeLabel() { return 'label' }\n",
+                "export const makeCount = () => 1\n",
+                "export const makeFlag = function() { return true }\n",
+                "export const makeList = () => []\n",
+                "export function makeBox() { return { label: 'box' } }"
+            ),
+        )
+        .expect("write unannotated factories");
+        std::fs::write(
+            dir.path().join("date.ts"),
+            "export default function makeDate() { return new Date() }",
+        )
+        .expect("write default unannotated function");
+        std::fs::write(
+            dir.path().join("error.ts"),
+            "export default (function() { return new Error('x') })",
+        )
+        .expect("write default unannotated function expression");
+
+        let filename = dir.path().join("Comp.vue");
+        let source = r#"<script setup lang="ts">
+import makeDate from './date'
+import makeError from './error'
+import { makeLabel, makeCount, makeFlag, makeList, makeBox } from './factories'
+type Props = {
+  label: ReturnType<typeof makeLabel>
+  count: ReturnType<typeof makeCount>
+  flag: ReturnType<typeof makeFlag>
+  list: ReturnType<typeof makeList>
+  box: ReturnType<typeof makeBox>
+  made: ReturnType<typeof import('./factories').makeFlag>
+  created: ReturnType<typeof makeDate>
+  error: ReturnType<typeof makeError>
+}
+defineProps<Props>()
+defineModel<ReturnType<typeof makeLabel> | ReturnType<typeof makeCount> | ReturnType<typeof makeFlag> | ReturnType<typeof makeList> | ReturnType<typeof makeBox> | ReturnType<typeof makeDate> | ReturnType<typeof makeError>>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("label: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("count: { type: Number, required: true }"));
+        assert!(script
+            .content
+            .contains("flag: { type: Boolean, required: true }"));
+        assert!(script
+            .content
+            .contains("list: { type: Array, required: true }"));
+        assert!(script
+            .content
+            .contains("box: { type: Object, required: true }"));
+        assert!(script
+            .content
+            .contains("made: { type: Boolean, required: true }"));
+        assert!(script
+            .content
+            .contains("created: { type: Date, required: true }"));
+        assert!(script
+            .content
+            .contains("error: { type: Error, required: true }"));
+        assert!(script.content.contains(
+            "\"modelValue\": { type: [String, Number, Boolean, Array, Object, Date, Error] },"
+        ));
+
+        let deps = script.deps.iter().cloned().collect::<BTreeSet<_>>();
+        let expected = ["factories.ts", "date.ts", "error.ts"]
             .into_iter()
             .map(|name| normalize_path_string(&dir.path().join(name)))
             .collect::<BTreeSet<_>>();

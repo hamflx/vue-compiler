@@ -6345,6 +6345,100 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_resolves_unannotated_return_type_runtime_types_deps() {
+        let dir = std::env::temp_dir().join(format!(
+            "vuec-node-bridge-unannotated-return-type-runtime-types-deps-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        std::fs::write(
+            dir.join("factories.ts"),
+            concat!(
+                "export function makeLabel() { return 'label' }\n",
+                "export const makeCount = () => 1\n",
+                "export const makeFlag = function() { return true }\n",
+                "export const makeList = () => []\n",
+                "export function makeBox() { return { label: 'box' } }"
+            ),
+        )
+        .expect("write unannotated factories");
+        std::fs::write(
+            dir.join("date.ts"),
+            "export default function makeDate() { return new Date() }",
+        )
+        .expect("write default unannotated function");
+        std::fs::write(
+            dir.join("error.ts"),
+            "export default (function() { return new Error('x') })",
+        )
+        .expect("write default unannotated function expression");
+
+        let filename = dir.join("Comp.vue");
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "import makeDate from './date'\n",
+                    "import makeError from './error'\n",
+                    "import { makeLabel, makeCount, makeFlag, makeList, makeBox } from './factories'\n",
+                    "type Props = {\n",
+                    "  label: ReturnType<typeof makeLabel>\n",
+                    "  count: ReturnType<typeof makeCount>\n",
+                    "  flag: ReturnType<typeof makeFlag>\n",
+                    "  list: ReturnType<typeof makeList>\n",
+                    "  box: ReturnType<typeof makeBox>\n",
+                    "  made: ReturnType<typeof import('./factories').makeFlag>\n",
+                    "  created: ReturnType<typeof makeDate>\n",
+                    "  error: ReturnType<typeof makeError>\n",
+                    "}\n",
+                    "defineProps<Props>()\n",
+                    "defineModel<",
+                    "ReturnType<typeof makeLabel> | ",
+                    "ReturnType<typeof makeCount> | ",
+                    "ReturnType<typeof makeFlag> | ",
+                    "ReturnType<typeof makeList> | ",
+                    "ReturnType<typeof makeBox> | ",
+                    "ReturnType<typeof makeDate> | ",
+                    "ReturnType<typeof makeError>",
+                    ">()",
+                    "</script>"
+                ),
+                "filename": filename.to_string_lossy()
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = compiled["content"].as_str().unwrap_or_default();
+        let deps = compiled["deps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|dep| dep.as_str().unwrap().to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected = ["factories.ts", "date.ts", "error.ts"]
+            .into_iter()
+            .map(|name| dir.join(name).to_string_lossy().replace('\\', "/"))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(compiled["errors"].as_array().unwrap().is_empty());
+        assert!(content.contains("label: { type: String, required: true }"));
+        assert!(content.contains("count: { type: Number, required: true }"));
+        assert!(content.contains("flag: { type: Boolean, required: true }"));
+        assert!(content.contains("list: { type: Array, required: true }"));
+        assert!(content.contains("box: { type: Object, required: true }"));
+        assert!(content.contains("made: { type: Boolean, required: true }"));
+        assert!(content.contains("created: { type: Date, required: true }"));
+        assert!(content.contains("error: { type: Error, required: true }"));
+        assert!(content.contains(
+            "\"modelValue\": { type: [String, Number, Boolean, Array, Object, Date, Error] },"
+        ));
+        assert_eq!(deps, expected);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn vue3_sfc_bridge_compile_script_resolves_external_builtin_wrapper_types_deps() {
         let dir = std::env::temp_dir().join(format!(
             "vuec-node-bridge-builtin-wrapper-types-deps-{}",
