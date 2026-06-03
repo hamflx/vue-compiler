@@ -6708,6 +6708,58 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_resolves_external_bigint_literal_runtime_types_deps() {
+        let dir = std::env::temp_dir().join(format!(
+            "vuec-node-bridge-bigint-literal-runtime-types-deps-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        std::fs::write(
+            dir.join("types.ts"),
+            concat!(
+                "export type Big = 1n\n",
+                "export type Props = {\n",
+                "  literal: 1n\n",
+                "  union: 1n | 'text'\n",
+                "  alias: Big\n",
+                "  keyword: bigint\n",
+                "}\n",
+                "export type ModelValue = 1n | 'text'"
+            ),
+        )
+        .expect("write bigint literal runtime props");
+
+        let filename = dir.join("Comp.vue");
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "import type { Props, ModelValue } from './types'\n",
+                    "defineProps<Props>()\n",
+                    "defineModel<ModelValue>()",
+                    "</script>"
+                ),
+                "filename": filename.to_string_lossy()
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = compiled["content"].as_str().unwrap_or_default();
+        let expected_dep = dir.join("types.ts").to_string_lossy().replace('\\', "/");
+        assert!(compiled["errors"].as_array().unwrap().is_empty());
+        assert!(content.contains("literal: { type: Number, required: true }"));
+        assert!(content.contains("union: { type: [Number, String], required: true }"));
+        assert!(content.contains("alias: { type: Number, required: true }"));
+        assert!(content.contains("keyword: { type: null, required: true }"));
+        assert!(content.contains("\"modelValue\": { type: [Number, String] },"));
+        assert_eq!(compiled["deps"], json!([expected_dep]));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn vue3_sfc_bridge_compile_script_resolves_external_type_operator_runtime_types_deps() {
         let dir = std::env::temp_dir().join(format!(
             "vuec-node-bridge-type-operator-runtime-types-deps-{}",

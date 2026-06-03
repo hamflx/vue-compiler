@@ -20701,7 +20701,7 @@ fn infer_vue3_runtime_type(node: &TSType<'_>, analysis: &Vue3ScriptSetupAnalysis
         TSType::TSLiteralType(literal) => match &literal.literal {
             TSLiteral::StringLiteral(_) => vec!["String".into()],
             TSLiteral::BooleanLiteral(_) => vec!["Boolean".into()],
-            TSLiteral::NumericLiteral(_) => vec!["Number".into()],
+            TSLiteral::NumericLiteral(_) | TSLiteral::BigIntLiteral(_) => vec!["Number".into()],
             _ => vec!["Unknown".into()],
         },
         TSType::TSTypeReference(reference) => {
@@ -29453,6 +29453,48 @@ defineModel<Runtime<'text'> | Runtime<'count'> | Runtime<'active'>>()
             .contains("\"modelValue\": { type: [String, Number, Boolean] },"));
         assert_eq!(
             script.bindings.get("text").map(String::as_str),
+            Some("props")
+        );
+        assert!(script.deps.is_empty(), "{:?}", script.deps);
+    }
+
+    #[test]
+    fn vue3_compile_script_resolves_bigint_literal_runtime_types() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "Comp.vue",
+            r#"<script setup lang="ts">
+type Big = 1n
+type Props = {
+  literal: 1n
+  union: 1n | 'text'
+  alias: Big
+  keyword: bigint
+}
+defineProps<Props>()
+defineModel<1n | 'text'>()
+</script>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("literal: { type: Number, required: true }"));
+        assert!(script
+            .content
+            .contains("union: { type: [Number, String], required: true }"));
+        assert!(script
+            .content
+            .contains("alias: { type: Number, required: true }"));
+        assert!(script
+            .content
+            .contains("keyword: { type: null, required: true }"));
+        assert!(script
+            .content
+            .contains("\"modelValue\": { type: [Number, String] },"));
+        assert_eq!(
+            script.bindings.get("literal").map(String::as_str),
             Some("props")
         );
         assert!(script.deps.is_empty(), "{:?}", script.deps);
