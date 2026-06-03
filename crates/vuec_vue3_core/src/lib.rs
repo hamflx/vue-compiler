@@ -3418,6 +3418,11 @@ fn vue3_dom_mir_dynamic_props(element: &Vue3Element) -> Vec<String> {
                 }
                 vue3_bind_directive_static_dom_key(dir, true)
             }
+            Vue3Prop::Directive(dir)
+                if dir.name == "model" && vue3_dom_model_kind(element).is_some() =>
+            {
+                Some("onUpdate:modelValue".into())
+            }
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -3454,6 +3459,11 @@ fn vue3_dom_mir_props_patch_names(element: &Vue3Element) -> Vec<String> {
                     return None;
                 }
                 vue3_bind_directive_static_dom_key(dir, true)
+            }
+            Vue3Prop::Directive(dir)
+                if dir.name == "model" && vue3_dom_model_kind(element).is_some() =>
+            {
+                Some("onUpdate:modelValue".into())
             }
             _ => None,
         })
@@ -27504,7 +27514,7 @@ fn prop_requires_dynamic_patch(
         return true;
     }
     if dir.name == "model" && vue3_dom_model_kind(element).is_some() {
-        return false;
+        return true;
     }
     if dir.name == "html" || dir.name == "text" {
         return true;
@@ -27674,6 +27684,11 @@ fn dynamic_props_arg(
                 if dir.name == "model" && element.tag_type == Vue3ElementType::Component =>
             {
                 Some(component_model_prop_name(dir))
+            }
+            Vue3Prop::Directive(dir)
+                if dir.name == "model" && vue3_dom_model_kind(element).is_some() =>
+            {
+                Some("onUpdate:modelValue".into())
             }
             Vue3Prop::Directive(dir) if dir.name == "html" => Some("innerHTML".into()),
             Vue3Prop::Directive(dir) if dir.name == "text" => Some("textContent".into()),
@@ -30873,10 +30888,10 @@ mod tests {
                 ..
             })]
         ));
-        assert_eq!(calls[0].patch_flag.bits, 512);
-        assert!(calls[0].dynamic_props.is_empty());
+        assert_eq!(calls[0].patch_flag.bits, 8);
+        assert_eq!(calls[0].dynamic_props, vec!["onUpdate:modelValue"]);
         assert_eq!(calls[3].patch_flag.bits, 8);
-        assert_eq!(calls[3].dynamic_props, vec!["type"]);
+        assert_eq!(calls[3].dynamic_props, vec!["type", "onUpdate:modelValue"]);
     }
 
     #[test]
@@ -32212,8 +32227,9 @@ mod tests {
         assert!(generated
             .code
             .contains("\"onUpdate:modelValue\": $event => ((_ctx.body) = $event)"));
-        assert!(generated.code.contains("512 /* NEED_PATCH */"));
-        assert!(!generated.code.contains("[\"onUpdate:modelValue\"]"));
+        assert!(generated
+            .code
+            .contains("8 /* PROPS */, [\"onUpdate:modelValue\"]"));
     }
 
     #[test]

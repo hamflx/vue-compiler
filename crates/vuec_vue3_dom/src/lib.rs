@@ -1787,6 +1787,13 @@ fn report_invalid_native_v_model(
         ) {
             continue;
         }
+        if options
+            .custom_elements
+            .iter()
+            .any(|custom| custom == &element.tag)
+        {
+            continue;
+        }
         let Some(model) = element.props.iter().find_map(|prop| match prop {
             Vue3Prop::Directive(dir) if dir.name == "model" => Some(dir),
             _ => None,
@@ -3199,6 +3206,25 @@ mod tests {
             result.diagnostics[0].span,
             Some(vuec_source::Span::new(FileId(0), 5, 18))
         );
+    }
+
+    #[test]
+    fn compile_allows_v_model_on_configured_custom_elements() {
+        let mut options = DomCompilerOptions::default();
+        options.core.custom_elements = vec!["my-input".into()];
+        let result = compile(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: r#"<my-input v-model="baz"/>"#.into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            options,
+        );
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert!(result.code.contains("vModelText"));
+        assert!(result.code.contains("_withDirectives"));
     }
 
     #[test]

@@ -9982,6 +9982,28 @@ mod tests {
     }
 
     #[test]
+    fn vue3_dom_bridge_allows_v_model_on_custom_elements() {
+        let compiled = dispatch(
+            "vue3.dom.compile",
+            json!({
+                "source": r#"<my-input v-model="value"/>"#,
+                "options": {
+                    "__vuecCustomElements": ["my-input"]
+                }
+            }),
+        )
+        .expect("dom compile");
+
+        assert!(compiled["diagnostics"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .is_empty());
+        let code = compiled["code"].as_str().unwrap_or("");
+        assert!(code.contains("vModelText"));
+        assert!(code.contains("_withDirectives"));
+    }
+
+    #[test]
     fn vue3_dom_bridge_respects_explicit_empty_dom_parser_predicates() {
         let parsed = dispatch(
             "vue3.dom.parse",
