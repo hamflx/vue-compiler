@@ -12726,7 +12726,7 @@ fn prepare_vue3_sfc_conformance_suite(
         .join("compiler-sfc")
         .join("__tests__");
     copy_dir_recursive(&official_sfc_tests, &prepared_sfc_tests)?;
-    rewrite_vue3_sfc_public_parse_spec_import(&prepared_root)?;
+    rewrite_vue3_sfc_public_api_spec_imports(&prepared_root)?;
 
     let official_sfc_src = official_root
         .join("packages")
@@ -12791,23 +12791,40 @@ fn patch_vue3_sfc_compile_template_asset_bridge(path: &Path) -> Result<()> {
     )
 }
 
-fn rewrite_vue3_sfc_public_parse_spec_import(prepared_root: &Path) -> Result<()> {
+fn rewrite_vue3_sfc_public_api_spec_imports(prepared_root: &Path) -> Result<()> {
     let parse_spec = prepared_root
         .join("packages")
         .join("compiler-sfc")
         .join("__tests__")
         .join("parse.spec.ts");
-    if !parse_spec.exists() {
-        return Ok(());
-    }
-    let original = fs::read_to_string(&parse_spec)
-        .with_context(|| format!("failed to read {}", parse_spec.display()))?;
-    let rewritten = original.replace(
+    rewrite_text_file_import(
+        &parse_spec,
         "import { parse } from '../src'",
         "import { parse } from '@vue/compiler-sfc'",
-    );
+    )?;
+
+    let rewrite_default_spec = prepared_root
+        .join("packages")
+        .join("compiler-sfc")
+        .join("__tests__")
+        .join("rewriteDefault.spec.ts");
+    rewrite_text_file_import(
+        &rewrite_default_spec,
+        "import { rewriteDefault } from '../src'",
+        "import { rewriteDefault } from '@vue/compiler-sfc'",
+    )?;
+    Ok(())
+}
+
+fn rewrite_text_file_import(path: &Path, from: &str, to: &str) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let original =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let rewritten = original.replace(from, to);
     if rewritten != original {
-        write_text(&parse_spec, &rewritten)?;
+        write_text(path, &rewritten)?;
     }
     Ok(())
 }
@@ -13508,7 +13525,9 @@ fn conformance_coverage_file_kind(
     path: &str,
     default: ConformanceCoverageKind,
 ) -> ConformanceCoverageKind {
-    if path.ends_with("packages/compiler-sfc/__tests__/parse.spec.ts") {
+    if path.ends_with("packages/compiler-sfc/__tests__/parse.spec.ts")
+        || path.ends_with("packages/compiler-sfc/__tests__/rewriteDefault.spec.ts")
+    {
         ConformanceCoverageKind::RustBacked
     } else if path.ends_with("packages/compiler-sfc/test/compileStyle.spec.ts") {
         ConformanceCoverageKind::Mixed
@@ -15579,9 +15598,9 @@ mod tests {
     }
 
     #[test]
-    fn vue3_sfc_parse_spec_rewrites_import_to_public_alias() {
+    fn vue3_sfc_public_api_specs_rewrite_imports_to_public_alias() {
         let temp = std::env::temp_dir().join(format!(
-            "vuec-xtask-vue3-sfc-parse-import-{}",
+            "vuec-xtask-vue3-sfc-public-api-import-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
@@ -15594,14 +15613,26 @@ mod tests {
             "import { parse } from '../src'\nimport { compileScript } from '../src'\n",
         )
         .unwrap();
+        fs::write(
+            tests.join("rewriteDefault.spec.ts"),
+            "import { rewriteDefault } from '../src'\nimport { rewriteDefaultAST } from '../src/rewriteDefault'\n",
+        )
+        .unwrap();
 
-        rewrite_vue3_sfc_public_parse_spec_import(&temp).unwrap();
-        rewrite_vue3_sfc_public_parse_spec_import(&temp).unwrap();
+        rewrite_vue3_sfc_public_api_spec_imports(&temp).unwrap();
+        rewrite_vue3_sfc_public_api_spec_imports(&temp).unwrap();
 
-        let rewritten = fs::read_to_string(tests.join("parse.spec.ts")).unwrap();
-        assert!(rewritten.contains("import { parse } from '@vue/compiler-sfc'"));
-        assert!(rewritten.contains("import { compileScript } from '../src'"));
-        assert_eq!(rewritten.matches("@vue/compiler-sfc").count(), 1);
+        let parse_spec = fs::read_to_string(tests.join("parse.spec.ts")).unwrap();
+        assert!(parse_spec.contains("import { parse } from '@vue/compiler-sfc'"));
+        assert!(parse_spec.contains("import { compileScript } from '../src'"));
+        assert_eq!(parse_spec.matches("@vue/compiler-sfc").count(), 1);
+
+        let rewrite_default_spec =
+            fs::read_to_string(tests.join("rewriteDefault.spec.ts")).unwrap();
+        assert!(rewrite_default_spec.contains("import { rewriteDefault } from '@vue/compiler-sfc'"));
+        assert!(rewrite_default_spec
+            .contains("import { rewriteDefaultAST } from '../src/rewriteDefault'"));
+        assert_eq!(rewrite_default_spec.matches("@vue/compiler-sfc").count(), 1);
         let _ = fs::remove_dir_all(temp);
     }
 
@@ -15618,7 +15649,7 @@ mod tests {
     }
 
     #[test]
-    fn vue3_sfc_coverage_marks_only_parse_spec_rust_backed() {
+    fn vue3_sfc_coverage_marks_public_parse_and_rewrite_default_rust_backed() {
         let temp = std::env::temp_dir().join(format!(
             "vuec-xtask-vue3-sfc-coverage-{}",
             SystemTime::now()
@@ -15634,6 +15665,13 @@ mod tests {
               "testResults": [
                 {
                   "name": "F:/repo/prepared/vue3-sfc/packages/compiler-sfc/__tests__/parse.spec.ts",
+                  "assertionResults": [
+                    { "status": "passed" },
+                    { "status": "passed" }
+                  ]
+                },
+                {
+                  "name": "F:/repo/prepared/vue3-sfc/packages/compiler-sfc/__tests__/rewriteDefault.spec.ts",
                   "assertionResults": [
                     { "status": "passed" },
                     { "status": "passed" }
@@ -15664,8 +15702,8 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             counts: ConformanceExecutionCounts {
-                total: 4,
-                pass: 3,
+                total: 6,
+                pass: 5,
                 fail: 1,
                 skip: 0,
                 pending: 0,
@@ -15679,14 +15717,18 @@ mod tests {
         );
 
         assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
-        assert_eq!(coverage.rust_backed_pass, 2);
-        assert_eq!(coverage.rust_backed_total, 2);
+        assert_eq!(coverage.rust_backed_pass, 4);
+        assert_eq!(coverage.rust_backed_total, 4);
         assert_eq!(
             coverage.files[0].source,
             ConformanceCoverageKind::RustBacked
         );
-        assert_eq!(coverage.files[1].source, ConformanceCoverageKind::Mixed);
+        assert_eq!(
+            coverage.files[1].source,
+            ConformanceCoverageKind::RustBacked
+        );
         assert_eq!(coverage.files[2].source, ConformanceCoverageKind::Mixed);
+        assert_eq!(coverage.files[3].source, ConformanceCoverageKind::Mixed);
         assert_eq!(
             coverage
                 .counts_by_source
