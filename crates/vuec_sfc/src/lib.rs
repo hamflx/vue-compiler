@@ -4823,7 +4823,7 @@ fn vue3_normal_script_type_context(
     descriptor: &SfcDescriptor,
     global_type_files: &[String],
 ) -> Vue27TypeContext {
-    let mut context = vue3_global_type_context(global_type_files);
+    let mut context = vue3_global_type_context(&descriptor.filename, global_type_files);
     let Some(script) = descriptor.script.as_ref() else {
         return context;
     };
@@ -4901,10 +4901,16 @@ fn vue3_normal_script_type_context(
     }
 }
 
-fn vue3_global_type_context(global_type_files: &[String]) -> Vue27TypeContext {
+fn vue3_global_type_context(filename: &str, global_type_files: &[String]) -> Vue27TypeContext {
     let mut context = Vue27TypeContext::default();
     for file in global_type_files {
         let path = normalize_path_components(PathBuf::from(file));
+        let Some(global_context) = vue3_global_type_context_from_path(&path, &context) else {
+            continue;
+        };
+        merge_vue3_type_context_missing(&mut context, global_context);
+    }
+    for path in vue3_tsconfig_global_type_files(filename) {
         let Some(global_context) = vue3_global_type_context_from_path(&path, &context) else {
             continue;
         };
@@ -6911,6 +6917,261 @@ fn vue3_tsconfig_path_mappings_from_config(
         ));
     }
     mappings
+}
+
+fn vue3_tsconfig_global_type_files(filename: &str) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let mut seen_configs = BTreeSet::new();
+    let mut seen_files = BTreeSet::new();
+    for config_path in vue3_tsconfig_search_paths(filename) {
+        let config_dir = config_path.parent().unwrap_or_else(|| Path::new(""));
+        vue3_tsconfig_global_type_files_from_config(
+            &config_path,
+            config_dir,
+            &mut seen_configs,
+            &mut seen_files,
+            &mut files,
+        );
+    }
+    files
+}
+
+fn vue3_tsconfig_global_type_files_from_config(
+    config_path: &Path,
+    template_config_dir: &Path,
+    seen_configs: &mut BTreeSet<String>,
+    seen_files: &mut BTreeSet<String>,
+    files: &mut Vec<PathBuf>,
+) {
+    let normalized = normalize_path_string(config_path);
+    if !seen_configs.insert(normalized) {
+        return;
+    }
+    let Ok(source) = std::fs::read_to_string(config_path) else {
+        return;
+    };
+    let Some(value) = vue3_parse_tsconfig_jsonc(&source) else {
+        return;
+    };
+    let config_dir = config_path.parent().unwrap_or_else(|| Path::new(""));
+    for extended in vue3_tsconfig_extends_paths(&value, config_dir) {
+        vue3_tsconfig_global_type_files_from_config(
+            &extended,
+            template_config_dir,
+            seen_configs,
+            seen_files,
+            files,
+        );
+    }
+    for file in vue3_tsconfig_direct_global_type_files(&value, config_dir, template_config_dir) {
+        let normalized = normalize_path_string(&file);
+        if seen_files.insert(normalized) {
+            files.push(file);
+        }
+    }
+    for reference in vue3_tsconfig_reference_paths(&value, config_dir) {
+        let reference_dir = reference.parent().unwrap_or_else(|| Path::new(""));
+        vue3_tsconfig_global_type_files_from_config(
+            &reference,
+            reference_dir,
+            seen_configs,
+            seen_files,
+            files,
+        );
+    }
+}
+
+fn vue3_tsconfig_direct_global_type_files(
+    value: &serde_json::Value,
+    config_dir: &Path,
+    template_config_dir: &Path,
+) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for target in vue3_tsconfig_string_array(value.get("files")) {
+        let path = vue3_tsconfig_target_path(config_dir, template_config_dir, &target, "");
+        if vue3_tsconfig_global_type_file_is_supported(&path) {
+            files.push(path);
+        }
+    }
+    for target in vue3_tsconfig_string_array(value.get("include")) {
+        files.extend(vue3_tsconfig_include_global_type_files(
+            config_dir,
+            template_config_dir,
+            &target,
+        ));
+    }
+    files
+}
+
+fn vue3_tsconfig_string_array(value: Option<&serde_json::Value>) -> Vec<String> {
+    value
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_string)
+        .collect()
+}
+
+fn vue3_tsconfig_global_type_file_is_supported(path: &Path) -> bool {
+    path.is_file()
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(".d.ts"))
+}
+
+fn vue3_tsconfig_include_global_type_files(
+    config_dir: &Path,
+    template_config_dir: &Path,
+    target: &str,
+) -> Vec<PathBuf> {
+    if !vue3_tsconfig_include_can_match_global_type_files(target) {
+        return Vec::new();
+    }
+    if !target.contains('*') && !target.contains('?') {
+        let path = vue3_tsconfig_target_path(config_dir, template_config_dir, target, "");
+        if vue3_tsconfig_global_type_file_is_supported(&path) {
+            return vec![path];
+        }
+        if path.is_dir() {
+            let mut files = Vec::new();
+            vue3_collect_global_type_files_from_dir(&path, &mut files);
+            return files;
+        }
+        return Vec::new();
+    }
+    let Some(root) = vue3_tsconfig_include_root_path(config_dir, template_config_dir, target)
+    else {
+        return Vec::new();
+    };
+    let pattern = vue3_tsconfig_include_pattern(config_dir, template_config_dir, target);
+    let mut files = Vec::new();
+    vue3_collect_global_type_files_from_dir(&root, &mut files);
+    files
+        .into_iter()
+        .filter(|file| vue3_tsconfig_glob_matches(&pattern, &normalize_path_string(file)))
+        .collect()
+}
+
+fn vue3_tsconfig_include_can_match_global_type_files(target: &str) -> bool {
+    let file_pattern = target.rsplit('/').next().unwrap_or(target);
+    if !file_pattern.contains('.') {
+        return true;
+    }
+    file_pattern.ends_with(".d.ts") || file_pattern.ends_with(".ts")
+}
+
+fn vue3_tsconfig_include_pattern(
+    config_dir: &Path,
+    template_config_dir: &Path,
+    target: &str,
+) -> String {
+    let target = target.replace(
+        "${configDir}",
+        normalize_path_string(template_config_dir).as_str(),
+    );
+    let path = Path::new(&target);
+    if path.is_absolute() {
+        normalize_path_string(&normalize_path_components(PathBuf::from(target)))
+    } else {
+        normalize_path_string(&normalize_path_components(config_dir.join(target)))
+    }
+}
+
+fn vue3_tsconfig_include_root_path(
+    config_dir: &Path,
+    template_config_dir: &Path,
+    target: &str,
+) -> Option<PathBuf> {
+    if target.is_empty() || target.contains('\\') || target.contains(':') {
+        return None;
+    }
+    let root = target
+        .split('/')
+        .take_while(|segment| !segment.contains('*') && !segment.contains('?'))
+        .filter(|segment| !segment.is_empty() && *segment != ".")
+        .collect::<Vec<_>>();
+    if root.iter().any(|segment| *segment == "..") {
+        return None;
+    }
+    let root = if root.is_empty() {
+        ".".to_string()
+    } else {
+        root.join("/")
+    };
+    let path = vue3_tsconfig_target_path(config_dir, template_config_dir, &root, "");
+    path.is_dir().then_some(path)
+}
+
+fn vue3_collect_global_type_files_from_dir(dir: &Path, files: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut entries = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    entries.sort();
+    for entry in entries {
+        let name = entry
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        if name == "node_modules" || name.starts_with('.') {
+            continue;
+        }
+        if entry.is_dir() {
+            vue3_collect_global_type_files_from_dir(&entry, files);
+        } else if vue3_tsconfig_global_type_file_is_supported(&entry) {
+            files.push(normalize_path_components(entry));
+        }
+    }
+}
+
+fn vue3_tsconfig_glob_matches(pattern: &str, path: &str) -> bool {
+    let pattern = pattern.replace('\\', "/");
+    let path = path.replace('\\', "/");
+    let pattern_parts = pattern.split('/').collect::<Vec<_>>();
+    let path_parts = path.split('/').collect::<Vec<_>>();
+    vue3_tsconfig_glob_parts_match(&pattern_parts, &path_parts)
+}
+
+fn vue3_tsconfig_glob_parts_match(pattern: &[&str], path: &[&str]) -> bool {
+    if pattern.is_empty() {
+        return path.is_empty();
+    }
+    if pattern[0] == "**" {
+        return vue3_tsconfig_glob_parts_match(&pattern[1..], path)
+            || (!path.is_empty() && vue3_tsconfig_glob_parts_match(pattern, &path[1..]));
+    }
+    if path.is_empty() || !vue3_tsconfig_glob_segment_match(pattern[0], path[0]) {
+        return false;
+    }
+    vue3_tsconfig_glob_parts_match(&pattern[1..], &path[1..])
+}
+
+fn vue3_tsconfig_glob_segment_match(pattern: &str, text: &str) -> bool {
+    let pattern = pattern.chars().collect::<Vec<_>>();
+    let text = text.chars().collect::<Vec<_>>();
+    let mut previous = vec![false; text.len() + 1];
+    previous[0] = true;
+    for pattern_ch in pattern {
+        let mut current = vec![false; text.len() + 1];
+        if pattern_ch == '*' {
+            current[0] = previous[0];
+            for index in 1..=text.len() {
+                current[index] = previous[index] || current[index - 1];
+            }
+        } else {
+            for index in 1..=text.len() {
+                current[index] =
+                    previous[index - 1] && (pattern_ch == '?' || pattern_ch == text[index - 1]);
+            }
+        }
+        previous = current;
+    }
+    previous[text.len()]
 }
 
 fn vue3_parse_tsconfig_jsonc(source: &str) -> Option<serde_json::Value> {
@@ -24933,6 +25194,131 @@ defineModel<GlobalModel>()
             .collect::<BTreeSet<_>>();
         assert_eq!(deps, expected);
         assert!(!script.deps.iter().any(|dep| dep.contains('\\')));
+    }
+
+    #[test]
+    fn vue3_compile_script_discovers_tsconfig_global_type_files_and_deps() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir_all(dir.path().join("src").join("components"))
+            .expect("create component dir");
+        std::fs::create_dir_all(dir.path().join("types").join("nested")).expect("create types dir");
+        std::fs::create_dir_all(dir.path().join("config")).expect("create config dir");
+        std::fs::create_dir_all(dir.path().join("project")).expect("create project dir");
+        std::fs::write(
+            dir.path().join("tsconfig.json"),
+            r#"{
+                "files": ["./types/root.d.ts"],
+                "include": ["./types/**/*.ts", "./src/**/*.vue"],
+                "extends": "./config/base.json",
+                "references": [{ "path": "./project" }]
+            }"#,
+        )
+        .expect("write root tsconfig");
+        std::fs::write(
+            dir.path().join("config").join("base.json"),
+            r#"{
+                "files": ["${configDir}/types/base.d.ts"]
+            }"#,
+        )
+        .expect("write base tsconfig");
+        std::fs::write(
+            dir.path().join("project").join("tsconfig.json"),
+            r#"{
+                "files": ["../types/ref.d.ts"]
+            }"#,
+        )
+        .expect("write referenced tsconfig");
+        std::fs::write(
+            dir.path().join("types").join("root.d.ts"),
+            "declare interface RootGlobalProps { root: string }",
+        )
+        .expect("write root global");
+        std::fs::write(
+            dir.path()
+                .join("types")
+                .join("nested")
+                .join("included.d.ts"),
+            "declare interface IncludedGlobalProps { included?: number }",
+        )
+        .expect("write included global");
+        std::fs::write(
+            dir.path().join("types").join("base.d.ts"),
+            "declare interface BaseGlobalProps { base: boolean }",
+        )
+        .expect("write base global");
+        std::fs::write(
+            dir.path().join("types").join("ref.d.ts"),
+            "declare type RefGlobalModel = boolean | string",
+        )
+        .expect("write referenced global");
+        std::fs::write(
+            dir.path().join("src").join("ignored.d.ts"),
+            "declare interface IgnoredByVueInclude { ignored: string }",
+        )
+        .expect("write ignored global");
+
+        let filename = dir.path().join("src").join("components").join("Comp.vue");
+        let discovered = vue3_tsconfig_global_type_files(&filename.to_string_lossy())
+            .into_iter()
+            .map(|path| normalize_path_string(&path))
+            .collect::<BTreeSet<_>>();
+        let expected_discovered = [
+            dir.path().join("types").join("base.d.ts"),
+            dir.path().join("types").join("root.d.ts"),
+            dir.path()
+                .join("types")
+                .join("nested")
+                .join("included.d.ts"),
+            dir.path().join("types").join("ref.d.ts"),
+        ]
+        .into_iter()
+        .map(|path| normalize_path_string(&path))
+        .collect::<BTreeSet<_>>();
+        assert_eq!(discovered, expected_discovered);
+
+        let source = r#"<script setup lang="ts">
+defineProps<RootGlobalProps & IncludedGlobalProps & BaseGlobalProps>()
+defineModel<RefGlobalModel>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("root: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("included: { type: Number, required: false }"));
+        assert!(script
+            .content
+            .contains("base: { type: Boolean, required: true }"));
+        assert!(script
+            .content
+            .contains("\"modelValue\": { type: [Boolean, String] },"));
+
+        let deps = script.deps.iter().cloned().collect::<BTreeSet<_>>();
+        let expected = [
+            dir.path().join("types").join("root.d.ts"),
+            dir.path()
+                .join("types")
+                .join("nested")
+                .join("included.d.ts"),
+            dir.path().join("types").join("base.d.ts"),
+            dir.path().join("types").join("ref.d.ts"),
+        ]
+        .into_iter()
+        .map(|path| normalize_path_string(&path))
+        .collect::<BTreeSet<_>>();
+        assert_eq!(deps, expected);
+        assert!(!script
+            .content
+            .contains("ignored: { type: String, required: true }"));
+        assert!(!script
+            .deps
+            .iter()
+            .any(|dep| dep.contains("ignored") || dep.contains('\\')));
     }
 
     #[test]

@@ -7430,6 +7430,111 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_discovers_tsconfig_global_type_deps() {
+        let dir = std::env::temp_dir().join(format!(
+            "vuec-node-bridge-tsconfig-global-type-deps-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src").join("components")).expect("create components");
+        std::fs::create_dir_all(dir.join("types").join("nested")).expect("create types");
+        std::fs::create_dir_all(dir.join("config")).expect("create config");
+        std::fs::create_dir_all(dir.join("project")).expect("create project");
+        std::fs::write(
+            dir.join("tsconfig.json"),
+            r#"{
+                "files": ["./types/root.d.ts"],
+                "include": ["./types/**/*.ts", "./src/**/*.vue"],
+                "extends": "./config/base.json",
+                "references": [{ "path": "./project" }]
+            }"#,
+        )
+        .expect("write root tsconfig");
+        std::fs::write(
+            dir.join("config").join("base.json"),
+            r#"{
+                "files": ["${configDir}/types/base.d.ts"]
+            }"#,
+        )
+        .expect("write base tsconfig");
+        std::fs::write(
+            dir.join("project").join("tsconfig.json"),
+            r#"{
+                "files": ["../types/ref.d.ts"]
+            }"#,
+        )
+        .expect("write referenced tsconfig");
+        std::fs::write(
+            dir.join("types").join("root.d.ts"),
+            "declare interface RootGlobalProps { root: string }",
+        )
+        .expect("write root global");
+        std::fs::write(
+            dir.join("types").join("nested").join("included.d.ts"),
+            "declare interface IncludedGlobalProps { included?: number }",
+        )
+        .expect("write included global");
+        std::fs::write(
+            dir.join("types").join("base.d.ts"),
+            "declare interface BaseGlobalProps { base: boolean }",
+        )
+        .expect("write base global");
+        std::fs::write(
+            dir.join("types").join("ref.d.ts"),
+            "declare type RefGlobalModel = boolean | string",
+        )
+        .expect("write referenced global");
+        std::fs::write(
+            dir.join("src").join("ignored.d.ts"),
+            "declare interface IgnoredByVueInclude { ignored: string }",
+        )
+        .expect("write ignored global");
+
+        let filename = dir.join("src").join("components").join("Comp.vue");
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "defineProps<RootGlobalProps & IncludedGlobalProps & BaseGlobalProps>()\n",
+                    "defineModel<RefGlobalModel>()",
+                    "</script>"
+                ),
+                "filename": filename.to_string_lossy()
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = compiled["content"].as_str().unwrap_or_default();
+        assert!(compiled["errors"].as_array().unwrap().is_empty());
+        assert!(content.contains("root: { type: String, required: true }"));
+        assert!(content.contains("included: { type: Number, required: false }"));
+        assert!(content.contains("base: { type: Boolean, required: true }"));
+        assert!(content.contains("\"modelValue\": { type: [Boolean, String] },"));
+        assert!(!content.contains("ignored: { type: String, required: true }"));
+
+        let deps = compiled["deps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|dep| dep.as_str().unwrap().to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected = [
+            dir.join("types").join("root.d.ts"),
+            dir.join("types").join("nested").join("included.d.ts"),
+            dir.join("types").join("base.d.ts"),
+            dir.join("types").join("ref.d.ts"),
+        ]
+        .into_iter()
+        .map(|path| path.to_string_lossy().replace('\\', "/"))
+        .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(deps, expected);
+        assert!(!deps.iter().any(|dep| dep.contains("ignored")));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn vue3_sfc_bridge_compile_script_resolves_global_type_re_exports_deps() {
         let dir = std::env::temp_dir().join(format!(
             "vuec-node-bridge-global-re-export-deps-{}",
