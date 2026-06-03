@@ -6641,6 +6641,81 @@ mod tests {
     }
 
     #[test]
+    fn vue3_sfc_bridge_compile_script_resolves_import_type_query_runtime_types_deps() {
+        let dir = std::env::temp_dir().join(format!(
+            "vuec-node-bridge-import-type-query-runtime-types-deps-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        std::fs::write(
+            dir.join("values.ts"),
+            concat!(
+                "export declare const text: string\n",
+                "export declare const boxed: { id: string }\n",
+                "export declare const list: string[]\n",
+                "export declare const options: { enabled: BooleanConstructor }\n",
+                "export function make(): boolean { return true }\n"
+            ),
+        )
+        .expect("write import type query values");
+        std::fs::write(
+            dir.join("types.ts"),
+            concat!(
+                "export type Props = ExtractPropTypes<typeof import('./values').options> & {\n",
+                "  text: typeof import('./values').text\n",
+                "  keys: keyof typeof import('./values').boxed\n",
+                "  list: typeof import('./values').list\n",
+                "  made: ReturnType<typeof import('./values').make>\n",
+                "}\n",
+                "export type ModelValue = ",
+                "typeof import('./values').text | ",
+                "ReturnType<typeof import('./values').make> | ",
+                "typeof import('./values').list"
+            ),
+        )
+        .expect("write import type query runtime props");
+
+        let filename = dir.join("Comp.vue");
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "import type { Props, ModelValue } from './types'\n",
+                    "defineProps<Props>()\n",
+                    "defineModel<ModelValue>()",
+                    "</script>"
+                ),
+                "filename": filename.to_string_lossy()
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = compiled["content"].as_str().unwrap_or_default();
+        let deps = compiled["deps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|dep| dep.as_str().unwrap().to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected = ["types.ts", "values.ts"]
+            .into_iter()
+            .map(|name| dir.join(name).to_string_lossy().replace('\\', "/"))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(compiled["errors"].as_array().unwrap().is_empty());
+        assert!(content.contains("enabled: { type: Boolean, required: false }"));
+        assert!(content.contains("text: { type: String, required: true }"));
+        assert!(content.contains("keys: { type: String, required: true }"));
+        assert!(content.contains("list: { type: Array, required: true }"));
+        assert!(content.contains("made: { type: Boolean, required: true }"));
+        assert!(content.contains("\"modelValue\": { type: [String, Boolean, Array] },"));
+        assert_eq!(deps, expected);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn vue3_sfc_bridge_compile_script_resolves_external_signature_runtime_types_deps() {
         let dir = std::env::temp_dir().join(format!(
             "vuec-node-bridge-signature-runtime-types-deps-{}",

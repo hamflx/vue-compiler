@@ -11615,6 +11615,136 @@ fn vue3_type_query_name_key(query: &TSTypeQuery<'_>) -> Option<String> {
     }
 }
 
+fn vue3_resolve_type_query_import_type(
+    query: &TSTypeQuery<'_>,
+    analysis: &Vue3ScriptSetupAnalysis,
+) -> Option<Vue3ResolvedImportType> {
+    match &query.expr_name {
+        TSTypeQueryExprName::TSImportType(import_type) => {
+            vue3_resolve_import_type(import_type, analysis)
+        }
+        _ => None,
+    }
+}
+
+fn vue3_type_query_props_options_declaration(
+    query: &TSTypeQuery<'_>,
+    analysis: &Vue3ScriptSetupAnalysis,
+) -> Option<Vue27TypeMembers> {
+    if let Some(name) = vue3_type_query_name_key(query) {
+        return analysis.props_options_type_declarations.get(&name).cloned();
+    }
+    let resolved = vue3_resolve_type_query_import_type(query, analysis)?;
+    resolved
+        .context
+        .props_options_type_declarations
+        .get(&resolved.name)
+        .cloned()
+}
+
+fn vue3_type_query_return_props_options_declaration(
+    query: &TSTypeQuery<'_>,
+    analysis: &Vue3ScriptSetupAnalysis,
+) -> Option<Vue27TypeMembers> {
+    if let Some(name) = vue3_type_query_name_key(query) {
+        return analysis
+            .return_type_props_options_declarations
+            .get(&name)
+            .cloned();
+    }
+    let resolved = vue3_resolve_type_query_import_type(query, analysis)?;
+    resolved
+        .context
+        .return_type_props_options_declarations
+        .get(&resolved.name)
+        .cloned()
+}
+
+fn vue3_type_query_runtime_type_declaration(
+    query: &TSTypeQuery<'_>,
+    analysis: &Vue3ScriptSetupAnalysis,
+) -> Option<Vec<String>> {
+    if let Some(name) = vue3_type_query_name_key(query) {
+        return analysis.type_query_declared_types.get(&name).cloned();
+    }
+    let resolved = vue3_resolve_type_query_import_type(query, analysis)?;
+    resolved
+        .context
+        .type_query_declared_types
+        .get(&resolved.name)
+        .cloned()
+}
+
+fn vue3_type_query_define_model_runtime_type_declaration(
+    query: &TSTypeQuery<'_>,
+    analysis: &Vue3ScriptSetupAnalysis,
+) -> Option<Vec<String>> {
+    if let Some(name) = vue3_type_query_name_key(query) {
+        return analysis
+            .define_model_type_query_declared_types
+            .get(&name)
+            .cloned();
+    }
+    let resolved = vue3_resolve_type_query_import_type(query, analysis)?;
+    resolved
+        .context
+        .define_model_type_query_declared_types
+        .get(&resolved.name)
+        .cloned()
+}
+
+fn vue3_type_query_keyof_runtime_type_declaration(
+    query: &TSTypeQuery<'_>,
+    analysis: &Vue3ScriptSetupAnalysis,
+) -> Option<Vec<String>> {
+    if let Some(name) = vue3_type_query_name_key(query) {
+        return analysis.keyof_type_query_declared_types.get(&name).cloned();
+    }
+    let resolved = vue3_resolve_type_query_import_type(query, analysis)?;
+    resolved
+        .context
+        .keyof_type_query_declared_types
+        .get(&resolved.name)
+        .cloned()
+}
+
+fn vue3_return_type_declaration_for_type_query(
+    query: &TSTypeQuery<'_>,
+    analysis: &Vue3ScriptSetupAnalysis,
+    mode: Vue3ArrayElementRuntimeMode,
+) -> Option<Vec<String>> {
+    if let Some(name) = vue3_type_query_name_key(query) {
+        return vue3_return_type_declaration_for_mode(analysis, &name, mode);
+    }
+    let resolved = vue3_resolve_type_query_import_type(query, analysis)?;
+    vue3_return_type_declaration_for_context(&resolved.context, &resolved.name, mode)
+}
+
+fn collect_vue3_type_query_deps(
+    query: &TSTypeQuery<'_>,
+    analysis: &Vue3ScriptSetupAnalysis,
+    deps: &mut BTreeSet<String>,
+) {
+    if let Some(name) = vue3_type_query_name_key(query) {
+        collect_vue3_named_type_deps(&name, analysis, deps);
+    } else if let Some(resolved) = vue3_resolve_type_query_import_type(query, analysis) {
+        deps.extend(
+            resolved
+                .context
+                .type_deps
+                .get(&resolved.name)
+                .cloned()
+                .unwrap_or_default(),
+        );
+        deps.insert(resolved.dependency);
+    }
+    if let Some(type_arguments) = query.type_arguments.as_ref() {
+        for ty in &type_arguments.params {
+            collect_vue3_type_argument_deps_into(ty, analysis, deps);
+        }
+    }
+}
+
 fn vue3_import_type_qualifier_key(qualifier: &TSImportTypeQualifier<'_>) -> String {
     match qualifier {
         TSImportTypeQualifier::Identifier(identifier) => identifier.name.to_string(),
@@ -16988,10 +17118,7 @@ fn vue3_resolve_props_options_type(
             }
             analysis.props_options_type_declarations.get(&name).cloned()
         }
-        TSType::TSTypeQuery(query) => {
-            let name = vue3_type_query_name_key(query)?;
-            analysis.props_options_type_declarations.get(&name).cloned()
-        }
+        TSType::TSTypeQuery(query) => vue3_type_query_props_options_declaration(query, analysis),
         TSType::TSParenthesizedType(parenthesized) => {
             vue3_resolve_props_options_type(source, &parenthesized.type_annotation, analysis)
         }
@@ -17014,11 +17141,7 @@ fn vue3_resolve_return_type_props_options(
 ) -> Option<Vue27TypeMembers> {
     match type_argument {
         TSType::TSTypeQuery(query) => {
-            let name = vue3_type_query_name_key(query)?;
-            analysis
-                .return_type_props_options_declarations
-                .get(&name)
-                .cloned()
+            vue3_type_query_return_props_options_declaration(query, analysis)
         }
         TSType::TSTypeReference(reference) => {
             let name = vue3_ts_type_name_key(&reference.type_name)?;
@@ -17900,8 +18023,7 @@ fn infer_vue3_return_runtime_type(
             vue3_return_type_declaration_for_context(&resolved.context, &resolved.name, mode)
         }
         TSType::TSTypeQuery(query) => {
-            let name = vue3_type_query_name_key(query)?;
-            vue3_return_type_declaration_for_mode(analysis, &name, mode)
+            vue3_return_type_declaration_for_type_query(query, analysis, mode)
         }
         TSType::TSParenthesizedType(parenthesized) => {
             infer_vue3_return_runtime_type(&parenthesized.type_annotation, analysis, mode)
@@ -18890,14 +19012,7 @@ fn collect_vue3_type_argument_deps_into(
             }
         }
         TSType::TSTypeQuery(query) => {
-            if let Some(name) = vue3_type_query_name_key(query) {
-                collect_vue3_named_type_deps(&name, analysis, deps);
-            }
-            if let Some(type_arguments) = query.type_arguments.as_ref() {
-                for ty in &type_arguments.params {
-                    collect_vue3_type_argument_deps_into(ty, analysis, deps);
-                }
-            }
+            collect_vue3_type_query_deps(query, analysis, deps);
         }
         TSType::TSImportType(import_type) => {
             if let Some(resolved) = vue3_resolve_import_type(import_type, analysis) {
@@ -19699,8 +19814,7 @@ fn infer_vue3_keyof_runtime_type(
                 .cloned()
         }
         TSType::TSTypeQuery(query) => {
-            let name = vue3_type_query_name_key(query)?;
-            analysis.keyof_type_query_declared_types.get(&name).cloned()
+            vue3_type_query_keyof_runtime_type_declaration(query, analysis)
         }
         TSType::TSParenthesizedType(parenthesized) => {
             infer_vue3_keyof_runtime_type(&parenthesized.type_annotation, analysis)
@@ -19920,10 +20034,8 @@ fn infer_vue3_runtime_type(node: &TSType<'_>, analysis: &Vue3ScriptSetupAnalysis
             vec!["Unknown".into()]
         }
         TSType::TSTypeQuery(query) => {
-            if let Some(name) = vue3_type_query_name_key(query) {
-                if let Some(types) = analysis.type_query_declared_types.get(&name) {
-                    return types.clone();
-                }
+            if let Some(types) = vue3_type_query_runtime_type_declaration(query, analysis) {
+                return types;
             }
             vec!["Unknown".into()]
         }
@@ -20107,10 +20219,10 @@ fn infer_vue3_define_model_runtime_type(
             vec!["Unknown".into()]
         }
         TSType::TSTypeQuery(query) => {
-            if let Some(name) = vue3_type_query_name_key(query) {
-                if let Some(types) = analysis.define_model_type_query_declared_types.get(&name) {
-                    return types.clone();
-                }
+            if let Some(types) =
+                vue3_type_query_define_model_runtime_type_declaration(query, analysis)
+            {
+                return types;
             }
             vec!["Unknown".into()]
         }
@@ -28471,6 +28583,67 @@ defineModel<typeof Values.text | typeof Values.list>()
             .content
             .contains("\"modelValue\": { type: [String, Array] },"));
         assert!(script.deps.is_empty(), "{:?}", script.deps);
+    }
+
+    #[test]
+    fn vue3_compile_script_resolves_import_type_query_runtime_types_deps() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let values_file = dir.path().join("values.ts");
+        std::fs::write(
+            &values_file,
+            concat!(
+                "export declare const text: string\n",
+                "export declare const boxed: { id: string }\n",
+                "export declare const list: string[]\n",
+                "export declare const options: { enabled: BooleanConstructor }\n",
+                "export function make(): boolean { return true }\n"
+            ),
+        )
+        .expect("write type query values");
+
+        let filename = dir.path().join("Comp.vue");
+        let source = r#"<script setup lang="ts">
+type Props =
+  ExtractPropTypes<typeof import('./values').options> & {
+    text: typeof import('./values').text
+    keys: keyof typeof import('./values').boxed
+    list: typeof import('./values').list
+    made: ReturnType<typeof import('./values').make>
+  }
+defineProps<Props>()
+defineModel<typeof import('./values').text | ReturnType<typeof import('./values').make> | typeof import('./values').list>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("enabled: { type: Boolean, required: false }"));
+        assert!(script
+            .content
+            .contains("text: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("keys: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("list: { type: Array, required: true }"));
+        assert!(script
+            .content
+            .contains("made: { type: Boolean, required: true }"));
+        assert!(script
+            .content
+            .contains("\"modelValue\": { type: [String, Boolean, Array] },"));
+
+        let deps = script.deps.iter().cloned().collect::<BTreeSet<_>>();
+        let expected = [values_file]
+            .into_iter()
+            .map(|path| normalize_path_string(&path))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(deps, expected);
+        assert!(!script.deps.iter().any(|dep| dep.contains('\\')));
     }
 
     #[test]
