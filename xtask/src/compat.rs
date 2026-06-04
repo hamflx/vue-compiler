@@ -12601,6 +12601,7 @@ fn write_vue3_core_conformance_shims(prepared_root: &Path) -> Result<()> {
     rewrite_vue3_core_v_for_public_api_spec(prepared_root)?;
     rewrite_vue3_core_v_if_public_api_spec(prepared_root)?;
     rewrite_vue3_core_transform_slot_outlet_public_api_spec(prepared_root)?;
+    rewrite_vue3_core_v_slot_public_api_spec(prepared_root)?;
     rewrite_vue3_core_transform_expressions_public_api_spec(prepared_root)?;
     rewrite_vue3_core_transform_text_public_api_spec(prepared_root)?;
     rewrite_vue3_core_v_once_public_api_spec(prepared_root)?;
@@ -13771,6 +13772,228 @@ function hydrateTransformSlotOutletAst(node: any): any {
     'key',
   ]) {
     hydrateTransformSlotOutletAst(node[key])
+  }
+  return node
+}
+
+function helperSymbol(name: string) {
+  return typeof name === 'string' ? runtime[name] : undefined
+}
+"#,
+    )?;
+    Ok(())
+}
+
+fn rewrite_vue3_core_v_slot_public_api_spec(prepared_root: &Path) -> Result<()> {
+    let transforms = prepared_root
+        .join("packages")
+        .join("compiler-core")
+        .join("__tests__")
+        .join("transforms");
+    let spec = transforms.join("vSlot.spec.ts");
+    if !spec.exists() {
+        return Ok(());
+    }
+    rewrite_text_file_block(
+        &spec,
+        r#"import {
+  type CompilerOptions,
+  type ComponentNode,
+  type ElementNode,
+  ErrorCodes,
+  type ForNode,
+  NodeTypes,
+  type ObjectExpression,
+  type RenderSlotCall,
+  type SimpleExpressionNode,
+  type SlotsExpression,
+  type VNodeCall,
+  generate,
+  baseParse as parse,
+  transform,
+} from '../../src'
+import { transformElement } from '../../src/transforms/transformElement'
+import { transformOn } from '../../src/transforms/vOn'
+import { transformBind } from '../../src/transforms/vBind'
+import { transformExpression } from '../../src/transforms/transformExpression'
+import { transformSlotOutlet } from '../../src/transforms/transformSlotOutlet'
+import {
+  trackSlotScopes,
+  trackVForSlotScopes,
+} from '../../src/transforms/vSlot'
+import { CREATE_SLOTS, RENDER_LIST } from '../../src/runtimeHelpers'
+import { createObjectMatcher } from '../testUtils'
+import { PatchFlags } from '@vue/shared'
+import { transformFor } from '../../src/transforms/vFor'
+import { transformIf } from '../../src/transforms/vIf'
+import { transformText } from '../../src/transforms/transformText'"#,
+        r#"import {
+  type CompilerOptions,
+  type ComponentNode,
+  type ElementNode,
+  ErrorCodes,
+  type ForNode,
+  NodeTypes,
+  type ObjectExpression,
+  type RenderSlotCall,
+  type SimpleExpressionNode,
+  type VNodeCall,
+  generate,
+} from '../../src'
+import { CREATE_SLOTS, RENDER_LIST } from '../../src/runtimeHelpers'
+import { createObjectMatcher } from '../testUtils'
+import { PatchFlags } from '@vue/shared'
+import { parseWithSlots } from './vSlot.rust-api'"#,
+        "Vue 3 core vSlot Rust API imports",
+    )?;
+    rewrite_text_file_block(
+        &spec,
+        r#"function parseWithSlots(
+  template: string,
+  options: CompilerOptions & { transformText?: boolean } = {},
+) {
+  const ast = parse(template, {
+    whitespace: options.whitespace,
+  })
+  transform(ast, {
+    nodeTransforms: [
+      transformIf,
+      transformFor,
+      ...(options.prefixIdentifiers
+        ? [trackVForSlotScopes, transformExpression]
+        : []),
+      transformSlotOutlet,
+      transformElement,
+      trackSlotScopes,
+      ...(options.transformText ? [transformText] : []),
+    ],
+    directiveTransforms: {
+      on: transformOn,
+      bind: transformBind,
+    },
+    ...options,
+  })
+  return {
+    root: ast,
+    slots:
+      ast.children[0].type === NodeTypes.ELEMENT
+        ? ((ast.children[0].codegenNode as VNodeCall)
+            .children as SlotsExpression)
+        : null,
+  }
+}
+"#,
+        "",
+        "Vue 3 core vSlot local transform helper",
+    )?;
+    write_text(
+        &transforms.join("vSlot.rust-api.ts"),
+        r#"import {
+  type CompilerOptions,
+  NodeTypes,
+  __vuecRuntime,
+} from '../../src'
+
+const runtime = __vuecRuntime as any
+
+export function parseWithSlots(
+  template: string,
+  options: CompilerOptions & { transformText?: boolean } = {},
+) {
+  const result = runtime.callBridge('vue3.core.transformSlotSuite', {
+    source: template,
+    options: normalizeOptions(options),
+  })
+  const root = result.root || result
+  hydrateVSlotAst(root)
+  hydrateVSlotAst(result.slots)
+  emitErrors(root, options)
+  return {
+    root,
+    slots: result.slots == null ? null : result.slots,
+  }
+}
+
+function normalizeOptions(options: CompilerOptions & { transformText?: boolean }) {
+  const normalized: Record<string, unknown> = {}
+  for (const key of Object.keys(options || {}) as Array<keyof typeof options>) {
+    const value = options[key]
+    if (typeof value !== 'function') normalized[key as string] = value
+  }
+  return normalized
+}
+
+function emitErrors(root: any, options: CompilerOptions) {
+  const onError = (options as any).onError
+  if (typeof onError !== 'function') return
+  for (const error of root.__vuecErrors || []) {
+    onError({ code: error.code, loc: error.loc })
+  }
+}
+
+function hydrateVSlotAst(node: any): any {
+  if (!node || typeof node !== 'object') return node
+  if (Array.isArray(node)) {
+    node.forEach(hydrateVSlotAst)
+    return node
+  }
+  if (node.type === NodeTypes.ROOT && Array.isArray(node.helpers)) {
+    node.helpers = new Set(node.helpers.map((name: string) => helperSymbol(name) || name))
+  }
+  if (
+    node.type === NodeTypes.JS_CALL_EXPRESSION &&
+    typeof node.callee === 'string'
+  ) {
+    node.callee = helperSymbol(node.callee) || node.callee
+  }
+  if (node.type === NodeTypes.VNODE_CALL) {
+    if (typeof node.tag === 'string') node.tag = helperSymbol(node.tag) || node.tag
+    for (const key of ['props', 'children', 'patchFlag', 'dynamicProps', 'directives']) {
+      if (node[key] == null) node[key] = undefined
+    }
+  }
+  if (node.type === NodeTypes.JS_FUNCTION_EXPRESSION) {
+    if (node.params == null) node.params = undefined
+  }
+  if (node.type === NodeTypes.FOR) {
+    for (const key of ['valueAlias', 'keyAlias', 'objectIndexAlias']) {
+      if (node[key] == null) delete node[key]
+    }
+  }
+  if (node.type === NodeTypes.IF_BRANCH) {
+    if (node.condition == null) delete node.condition
+    if (node.userKey == null) delete node.userKey
+  }
+  if (node.parseResult) {
+    for (const key of ['value', 'key', 'index']) {
+      if (node.parseResult[key] == null) delete node.parseResult[key]
+    }
+  }
+  for (const key of [
+    'children',
+    'props',
+    'content',
+    'codegenNode',
+    'arguments',
+    'returns',
+    'params',
+    'directives',
+    'source',
+    'valueAlias',
+    'keyAlias',
+    'objectIndexAlias',
+    'parseResult',
+    'branches',
+    'condition',
+    'test',
+    'consequent',
+    'alternate',
+    'value',
+    'elements',
+    'properties',
+    'key',
+  ]) {
+    hydrateVSlotAst(node[key])
   }
   return node
 }
@@ -15946,6 +16169,7 @@ fn conformance_coverage_file_kind(
         || path.ends_with("packages/compiler-core/__tests__/transforms/vMemo.spec.ts")
         || path.ends_with("packages/compiler-core/__tests__/transforms/vOn.spec.ts")
         || path.ends_with("packages/compiler-core/__tests__/transforms/vOnce.spec.ts")
+        || path.ends_with("packages/compiler-core/__tests__/transforms/vSlot.spec.ts")
         || path.ends_with("packages/compiler-dom/__tests__/index.spec.ts")
         || path.ends_with("packages/compiler-dom/__tests__/decoderHtmlBrowser.spec.ts")
         || path.ends_with("packages/compiler-dom/__tests__/parse.spec.ts")
@@ -16015,6 +16239,12 @@ fn conformance_coverage_file_reason(
             if path.ends_with("packages/compiler-core/__tests__/transforms/vIf.spec.ts") =>
         {
             "Official Vue 3 compiler-core vIf file imports a prepared Rust API helper that forwards parseWithIfTransform through @vue/compiler-core.__vuecRuntime into vuec_node_bridge command vue3.core.transformIfSuite; the helper only normalizes serializable options, hydrates public AST helper symbols, restores public undefined branch fields, and emits Rust-projected errors while Rust parser, transformVBindShorthand projection, transformIf/processIf projection, processExpression projection, transformBind projection, transformOn projection, transformSlotOutlet projection, public branch/codegen projection, key injection, prop merging, runtime directive materialization, and generate snapshots execute through Rust."
+                .to_string()
+        }
+        ConformanceCoverageKind::RustBacked
+            if path.ends_with("packages/compiler-core/__tests__/transforms/vSlot.spec.ts") =>
+        {
+            "Official Vue 3 compiler-core vSlot file imports a prepared Rust API helper that forwards parseWithSlots through @vue/compiler-core.__vuecRuntime into vuec_node_bridge command vue3.core.transformSlotSuite; the helper only normalizes serializable options, hydrates public AST helper symbols, restores public undefined fields, and emits Rust-projected errors while Rust parser, transformVBindShorthand projection, transformIf projection, transformFor projection, processExpression projection, trackSlotScopes/trackVForSlotScopes projection, transformSlotOutlet projection, buildSlots projection, public slot object/dynamic slot/codegen projection, forwarded slot flags, and root helper projection execute through Rust."
                 .to_string()
         }
         ConformanceCoverageKind::RustBacked
@@ -18309,6 +18539,81 @@ test('placeholder', () => {
 "#,
         )
         .unwrap();
+        fs::write(
+            transforms_tests.join("vSlot.spec.ts"),
+            r#"import {
+  type CompilerOptions,
+  type ComponentNode,
+  type ElementNode,
+  ErrorCodes,
+  type ForNode,
+  NodeTypes,
+  type ObjectExpression,
+  type RenderSlotCall,
+  type SimpleExpressionNode,
+  type SlotsExpression,
+  type VNodeCall,
+  generate,
+  baseParse as parse,
+  transform,
+} from '../../src'
+import { transformElement } from '../../src/transforms/transformElement'
+import { transformOn } from '../../src/transforms/vOn'
+import { transformBind } from '../../src/transforms/vBind'
+import { transformExpression } from '../../src/transforms/transformExpression'
+import { transformSlotOutlet } from '../../src/transforms/transformSlotOutlet'
+import {
+  trackSlotScopes,
+  trackVForSlotScopes,
+} from '../../src/transforms/vSlot'
+import { CREATE_SLOTS, RENDER_LIST } from '../../src/runtimeHelpers'
+import { createObjectMatcher } from '../testUtils'
+import { PatchFlags } from '@vue/shared'
+import { transformFor } from '../../src/transforms/vFor'
+import { transformIf } from '../../src/transforms/vIf'
+import { transformText } from '../../src/transforms/transformText'
+
+function parseWithSlots(
+  template: string,
+  options: CompilerOptions & { transformText?: boolean } = {},
+) {
+  const ast = parse(template, {
+    whitespace: options.whitespace,
+  })
+  transform(ast, {
+    nodeTransforms: [
+      transformIf,
+      transformFor,
+      ...(options.prefixIdentifiers
+        ? [trackVForSlotScopes, transformExpression]
+        : []),
+      transformSlotOutlet,
+      transformElement,
+      trackSlotScopes,
+      ...(options.transformText ? [transformText] : []),
+    ],
+    directiveTransforms: {
+      on: transformOn,
+      bind: transformBind,
+    },
+    ...options,
+  })
+  return {
+    root: ast,
+    slots:
+      ast.children[0].type === NodeTypes.ELEMENT
+        ? ((ast.children[0].codegenNode as VNodeCall)
+            .children as SlotsExpression)
+        : null,
+  }
+}
+
+test('placeholder', () => {
+  expect(parseWithSlots('<Comp><div/></Comp>')).toBeTruthy()
+})
+"#,
+        )
+        .unwrap();
         write_vue3_core_conformance_shims(&temp).unwrap();
 
         let parser = fs::read_to_string(
@@ -18419,6 +18724,18 @@ test('placeholder', () => {
         assert!(slot_api.contains("callBridge('vue3.core.transformSlotOutletSuite'"));
         assert!(slot_api.contains("emitErrors"));
         assert!(slot_api.contains("hydrateTransformSlotOutletAst"));
+        let v_slot_spec = fs::read_to_string(transforms_tests.join("vSlot.spec.ts")).unwrap();
+        assert!(v_slot_spec.contains("from './vSlot.rust-api'"));
+        assert!(!v_slot_spec.contains("baseParse as parse"));
+        assert!(!v_slot_spec.contains("transform(ast,"));
+        assert!(!v_slot_spec.contains("trackSlotScopes"));
+        assert!(!v_slot_spec.contains("trackVForSlotScopes"));
+        assert!(!v_slot_spec.contains("transformSlotOutlet"));
+        let v_slot_api = fs::read_to_string(transforms_tests.join("vSlot.rust-api.ts")).unwrap();
+        assert!(v_slot_api.contains("callBridge('vue3.core.transformSlotSuite'"));
+        assert!(v_slot_api.contains("emitErrors"));
+        assert!(v_slot_api.contains("hydrateVSlotAst"));
+        assert!(v_slot_api.contains("node.params = undefined"));
         let _ = fs::remove_dir_all(temp);
     }
 

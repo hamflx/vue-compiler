@@ -8769,6 +8769,7 @@ pub fn build_slots_projection(payload: &Value) -> Value {
     if let Some(slot) = on_component_slot {
         if slot
             .get("arg")
+            .filter(|arg| !arg.is_null())
             .is_some_and(|arg| !json_bool(arg, "isStatic"))
         {
             has_dynamic_slots = true;
@@ -9198,49 +9199,99 @@ fn vue3_node_source_contains_any(node: &Value, names: &[String]) -> bool {
     if node.is_null() {
         return false;
     }
-    if json_node_type(node) != Some(11) {
-        if let Some(content) = json_str(node, "content") {
-            if names
-                .iter()
-                .any(|name| source_contains_identifier(content, name))
+    match json_node_type(node) {
+        Some(1) => {
+            if node
+                .get("props")
+                .and_then(Value::as_array)
+                .is_some_and(|props| {
+                    props.iter().any(|prop| {
+                        json_node_type(prop) == Some(7)
+                            && (prop
+                                .get("arg")
+                                .is_some_and(|arg| vue3_node_source_contains_any(arg, names))
+                                || prop
+                                    .get("exp")
+                                    .is_some_and(|exp| vue3_node_source_contains_any(exp, names)))
+                    })
+                })
             {
                 return true;
             }
+            node.get("children")
+                .and_then(Value::as_array)
+                .is_some_and(|children| {
+                    children
+                        .iter()
+                        .any(|child| vue3_node_source_contains_any(child, names))
+                })
         }
-    }
-    if !matches!(
-        json_node_type(node),
-        Some(1) | Some(9) | Some(10) | Some(11)
-    ) {
-        if let Some(source) = node.get("loc").and_then(|loc| json_str(loc, "source")) {
-            if names
-                .iter()
-                .any(|name| source_contains_identifier(source, name))
+        Some(11) => {
+            if node
+                .get("source")
+                .is_some_and(|source| vue3_node_source_contains_any(source, names))
             {
                 return true;
             }
+            node.get("children")
+                .and_then(Value::as_array)
+                .is_some_and(|children| {
+                    children
+                        .iter()
+                        .any(|child| vue3_node_source_contains_any(child, names))
+                })
         }
-    }
-    if let Some(children) = node.get("children").and_then(Value::as_array) {
-        if children
-            .iter()
-            .any(|child| vue3_node_source_contains_any(child, names))
-        {
-            return true;
-        }
-    }
-    if matches!(json_node_type(node), Some(1)) {
-        if let Some(props) = node.get("props").and_then(Value::as_array) {
-            if props
-                .iter()
-                .filter(|prop| json_str(prop, "name") != Some("for"))
-                .any(|prop| vue3_node_source_contains_any(prop, names))
+        Some(9) => node
+            .get("branches")
+            .and_then(Value::as_array)
+            .is_some_and(|branches| {
+                branches
+                    .iter()
+                    .any(|branch| vue3_node_source_contains_any(branch, names))
+            }),
+        Some(10) => {
+            if node
+                .get("condition")
+                .is_some_and(|condition| vue3_node_source_contains_any(condition, names))
             {
                 return true;
             }
+            node.get("children")
+                .and_then(Value::as_array)
+                .is_some_and(|children| {
+                    children
+                        .iter()
+                        .any(|child| vue3_node_source_contains_any(child, names))
+                })
         }
+        Some(4) => {
+            let content = json_str(node, "content").unwrap_or("");
+            !json_bool(node, "isStatic")
+                && ((is_simple_identifier_ascii(content)
+                    && names.iter().any(|name| name == content))
+                    || node
+                        .get("loc")
+                        .and_then(|loc| json_str(loc, "source"))
+                        .is_some_and(|source| {
+                            is_simple_identifier_ascii(source)
+                                && names.iter().any(|name| name == source)
+                        }))
+        }
+        Some(8) => node
+            .get("children")
+            .and_then(Value::as_array)
+            .is_some_and(|children| {
+                children
+                    .iter()
+                    .filter(|child| child.is_object())
+                    .any(|child| vue3_node_source_contains_any(child, names))
+            }),
+        Some(5) | Some(12) => node
+            .get("content")
+            .is_some_and(|content| vue3_node_source_contains_any(content, names)),
+        Some(2) | Some(3) | Some(20) => false,
+        _ => false,
     }
-    false
 }
 
 fn source_contains_identifier(source: &str, name: &str) -> bool {

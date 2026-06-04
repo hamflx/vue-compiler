@@ -248,6 +248,7 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
         "vue3.core.transformBindSuite" => Ok(vue3_core_transform_bind_suite_value(&payload)),
         "vue3.core.transformOnceSuite" => Ok(vue3_core_transform_once_suite_value(&payload)),
         "vue3.core.transformIfSuite" => Ok(vue3_core_transform_if_suite_value(&payload)),
+        "vue3.core.transformSlotSuite" => Ok(vue3_core_transform_slot_suite_value(&payload)),
         "vue3.core.transformSlotOutletSuite" => {
             Ok(vue3_core_transform_slot_outlet_suite_value(&payload))
         }
@@ -1958,6 +1959,7 @@ struct Vue3ModelSuiteScope {
     identifiers: BTreeMap<String, usize>,
     in_v_once: bool,
     v_for_depth: usize,
+    v_slot_depth: usize,
 }
 
 #[derive(Default)]
@@ -4138,6 +4140,1186 @@ fn vue3_if_suite_collect_call_helpers(node: &Value, used: &mut Vec<&'static str>
     }
 }
 
+#[derive(Default)]
+struct Vue3SlotSuiteState {
+    errors: Vec<Value>,
+}
+
+fn vue3_core_transform_slot_suite_value(payload: &Value) -> Value {
+    let source = template_source(payload);
+    let options = vue3_options(payload.get("options"));
+    let transform_text = payload
+        .get("options")
+        .is_some_and(|options| bool_option(options, "transformText", false));
+    let ast = Vue3Dialect::base_parse(source.clone(), &options);
+    let mut root = vue3_parse_value(
+        &ast,
+        &source.source,
+        source.base_offset,
+        false,
+        &options,
+        false,
+    );
+    let mut state = Vue3SlotSuiteState::default();
+    let scope = Vue3ModelSuiteScope::default();
+    if let Some(children) = root.get_mut("children").and_then(Value::as_array_mut) {
+        *children = vue3_slot_suite_transform_children(
+            std::mem::take(children),
+            &options,
+            transform_text,
+            &mut state,
+            &scope,
+        );
+    }
+    if transform_text {
+        vue3_text_suite_apply_transform_text(&mut root, &options);
+    }
+    vue3_slot_suite_finalize_root(&mut root);
+    root["__vuecErrors"] = json!(state.errors);
+    let slots = root
+        .get("children")
+        .and_then(Value::as_array)
+        .and_then(|children| children.first())
+        .filter(|child| vue3_public_node_type(child) == Some(1))
+        .and_then(|child| child.get("codegenNode"))
+        .and_then(|codegen| codegen.get("children"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    json!({
+        "root": root,
+        "slots": slots,
+    })
+}
+
+fn vue3_slot_suite_transform_children(
+    children: Vec<Value>,
+    options: &Vue3CompilerOptions,
+    transform_text: bool,
+    state: &mut Vue3SlotSuiteState,
+    scope: &Vue3ModelSuiteScope,
+) -> Vec<Value> {
+    let mut transformed = Vec::new();
+    let mut index = 0usize;
+    let mut key_base = 0usize;
+    while index < children.len() {
+        let child = children[index].clone();
+        if vue3_public_node_type(&child) == Some(1)
+            && !vue3_slot_suite_is_template_slot(&child)
+            && vue3_text_suite_directive(&child, "if").is_some()
+        {
+            let (if_node, consumed) = vue3_slot_suite_transform_if_chain(
+                &children,
+                index,
+                key_base,
+                options,
+                transform_text,
+                state,
+                scope,
+            );
+            key_base += if_node
+                .get("branches")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or_default();
+            transformed.push(if_node);
+            index += consumed.max(1);
+            continue;
+        }
+        if vue3_public_node_type(&child) == Some(1)
+            && !vue3_slot_suite_is_template_slot(&child)
+            && (vue3_text_suite_directive(&child, "else").is_some()
+                || vue3_text_suite_directive(&child, "else-if").is_some())
+        {
+            state.errors.push(json!({
+                "code": 30,
+                "loc": child.get("loc").cloned().unwrap_or_else(vue3_loc_stub_value),
+            }));
+        }
+        transformed.push(vue3_slot_suite_transform_node(
+            child,
+            options,
+            transform_text,
+            state,
+            scope,
+        ));
+        index += 1;
+    }
+    transformed
+}
+
+fn vue3_slot_suite_transform_if_chain(
+    siblings: &[Value],
+    start: usize,
+    key_base: usize,
+    options: &Vue3CompilerOptions,
+    transform_text: bool,
+    state: &mut Vue3SlotSuiteState,
+    scope: &Vue3ModelSuiteScope,
+) -> (Value, usize) {
+    let first = siblings.get(start).cloned().unwrap_or(Value::Null);
+    let mut branches = Vec::new();
+    branches.push(vue3_slot_suite_branch_from_node(
+        first.clone(),
+        "if",
+        Vec::new(),
+        options,
+        transform_text,
+        state,
+        scope,
+    ));
+
+    let mut scan = start + 1;
+    let mut consumed = 1usize;
+    while scan < siblings.len() {
+        let mut gap = Vec::<Value>::new();
+        let mut candidate_index = scan;
+        while let Some(candidate) = siblings.get(candidate_index) {
+            if !vue3_if_suite_is_comment_or_ascii_whitespace(candidate) {
+                break;
+            }
+            if vue3_public_node_type(candidate) == Some(3) {
+                gap.push(candidate.clone());
+            }
+            candidate_index += 1;
+        }
+        let Some(candidate) = siblings.get(candidate_index) else {
+            break;
+        };
+        if vue3_slot_suite_is_template_slot(candidate) {
+            break;
+        }
+        let dir_name = if vue3_public_node_type(candidate) == Some(1)
+            && vue3_text_suite_directive(candidate, "else-if").is_some()
+        {
+            "else-if"
+        } else if vue3_public_node_type(candidate) == Some(1)
+            && vue3_text_suite_directive(candidate, "else").is_some()
+        {
+            "else"
+        } else {
+            break;
+        };
+        let branch = vue3_slot_suite_branch_from_node(
+            candidate.clone(),
+            dir_name,
+            gap,
+            options,
+            transform_text,
+            state,
+            scope,
+        );
+        if branches
+            .last()
+            .and_then(|branch| branch.get("condition"))
+            .is_some_and(Value::is_null)
+        {
+            state.errors.push(json!({
+                "code": 30,
+                "loc": branch.get("loc").cloned().unwrap_or_else(vue3_loc_stub_value),
+            }));
+        }
+        let current_key = branch.get("userKey").unwrap_or(&Value::Null);
+        if !current_key.is_null()
+            && branches.iter().any(|existing| {
+                vue3_if_suite_same_user_key(
+                    existing.get("userKey").unwrap_or(&Value::Null),
+                    current_key,
+                )
+            })
+        {
+            state.errors.push(json!({
+                "code": 29,
+                "loc": current_key
+                    .get("loc")
+                    .cloned()
+                    .unwrap_or_else(vue3_loc_stub_value),
+            }));
+        }
+        branches.push(branch);
+        consumed = candidate_index - start + 1;
+        scan = candidate_index + 1;
+    }
+
+    let loc = first
+        .get("loc")
+        .cloned()
+        .unwrap_or_else(vue3_loc_stub_value);
+    let mut if_node = json!({
+        "type": 9,
+        "branches": branches,
+        "codegenNode": Value::Null,
+        "loc": loc,
+    });
+    if_node["codegenNode"] = vue3_if_suite_if_codegen(&mut if_node, key_base);
+    if transform_text {
+        vue3_text_suite_apply_transform_text(&mut if_node, options);
+    }
+    (if_node, consumed)
+}
+
+fn vue3_slot_suite_branch_from_node(
+    mut node: Value,
+    dir_name: &str,
+    comments: Vec<Value>,
+    options: &Vue3CompilerOptions,
+    transform_text: bool,
+    state: &mut Vue3SlotSuiteState,
+    scope: &Vue3ModelSuiteScope,
+) -> Value {
+    vue3_slot_suite_apply_bind_shorthand(&mut node, state);
+    let dir = vue3_text_suite_directive(&node, dir_name).cloned();
+    let condition = vue3_slot_suite_if_condition(dir.as_ref(), &node, options, state, scope);
+    let user_key = vue3_if_suite_user_key(&node).unwrap_or(Value::Null);
+    let is_template_if = node.get("tagType").and_then(Value::as_u64) == Some(3);
+
+    vue3_text_suite_remove_directive(&mut node, "if");
+    vue3_text_suite_remove_directive(&mut node, "else-if");
+    vue3_text_suite_remove_directive(&mut node, "else");
+
+    let mut children = comments;
+    if is_template_if && vue3_text_suite_directive(&node, "for").is_none() {
+        let template_children = node
+            .get_mut("children")
+            .and_then(Value::as_array_mut)
+            .map(std::mem::take)
+            .unwrap_or_default();
+        children.extend(vue3_slot_suite_transform_children(
+            template_children,
+            options,
+            transform_text,
+            state,
+            scope,
+        ));
+    } else {
+        children.push(vue3_slot_suite_transform_node(
+            node.clone(),
+            options,
+            transform_text,
+            state,
+            scope,
+        ));
+    }
+
+    json!({
+        "type": 10,
+        "condition": condition,
+        "children": children,
+        "userKey": user_key,
+        "isTemplateIf": is_template_if,
+        "loc": node.get("loc").cloned().unwrap_or_else(vue3_loc_stub_value),
+    })
+}
+
+fn vue3_slot_suite_transform_node(
+    mut node: Value,
+    options: &Vue3CompilerOptions,
+    transform_text: bool,
+    state: &mut Vue3SlotSuiteState,
+    scope: &Vue3ModelSuiteScope,
+) -> Value {
+    if vue3_public_node_type(&node) == Some(1) {
+        vue3_slot_suite_apply_bind_shorthand(&mut node, state);
+        if !vue3_slot_suite_is_template_slot(&node)
+            && vue3_text_suite_directive(&node, "for").is_some()
+        {
+            return vue3_slot_suite_transform_for_node(node, options, transform_text, state, scope);
+        }
+    }
+
+    let mut child_scope = scope.clone();
+    if vue3_public_node_type(&node) == Some(1) {
+        vue3_slot_suite_track_v_for_slot_scope(&mut node, options, state, &mut child_scope);
+        vue3_slot_suite_process_directive_expressions(&mut node, options, state, &child_scope);
+        vue3_slot_suite_track_slot_scope(&node, &mut child_scope);
+    }
+
+    if let Some(children) = node.get_mut("children").and_then(Value::as_array_mut) {
+        *children = vue3_slot_suite_transform_children(
+            std::mem::take(children),
+            options,
+            transform_text,
+            state,
+            &child_scope,
+        );
+    }
+
+    if vue3_public_node_type(&node) == Some(5) {
+        vue3_for_suite_process_expression_node(&mut node, "content", options, scope);
+    }
+
+    if transform_text && matches!(vue3_public_node_type(&node), Some(1 | 10 | 11)) {
+        vue3_text_suite_apply_transform_text(&mut node, options);
+    }
+
+    if vue3_public_node_type(&node) == Some(1) {
+        node["codegenNode"] = vue3_slot_suite_element_codegen(&node, options, state, scope, false);
+    }
+    node
+}
+
+fn vue3_slot_suite_transform_for_node(
+    mut node: Value,
+    options: &Vue3CompilerOptions,
+    transform_text: bool,
+    state: &mut Vue3SlotSuiteState,
+    scope: &Vue3ModelSuiteScope,
+) -> Value {
+    let Some(dir) = vue3_text_suite_directive(&node, "for").cloned() else {
+        return vue3_slot_suite_transform_node(node, options, transform_text, state, scope);
+    };
+    let context = vue3_model_suite_transform_context(options, scope);
+    let projection = vuec_vue3_core::transform_for_projection(&json!({
+        "node": node,
+        "dir": dir,
+        "context": context,
+    }));
+    for error in projection
+        .get("errors")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        state.errors.push(vue3_model_suite_error_value(error, &dir));
+    }
+    for error in projection
+        .get("templateKeyErrors")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        state.errors.push(vue3_model_suite_error_value(error, &dir));
+    }
+    let parse_result = projection
+        .get("parseResult")
+        .filter(|value| !value.is_null())
+        .map(vue3_text_suite_materialize_for_parse_result)
+        .unwrap_or_else(|| {
+            dir.get("forParseResult")
+                .map(vue3_text_suite_materialize_for_parse_result)
+                .unwrap_or(Value::Null)
+        });
+
+    let mut child_scope = scope.clone();
+    vue3_model_suite_add_locals(&mut child_scope, projection.get("locals"));
+    child_scope.v_for_depth += 1;
+    let original_node = node.clone();
+    let fallback_loc = node.get("loc").cloned();
+    let children = if projection.get("children").and_then(Value::as_str) == Some("template") {
+        node.get_mut("children")
+            .and_then(Value::as_array_mut)
+            .map(std::mem::take)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|child| {
+                vue3_slot_suite_transform_node(child, options, transform_text, state, &child_scope)
+            })
+            .collect::<Vec<_>>()
+    } else {
+        vue3_text_suite_remove_directive(&mut node, "for");
+        vec![vue3_slot_suite_transform_node(
+            node,
+            options,
+            transform_text,
+            state,
+            &child_scope,
+        )]
+    };
+
+    let loc = dir
+        .get("loc")
+        .cloned()
+        .or(fallback_loc)
+        .unwrap_or_else(vue3_loc_stub_value);
+    let mut for_node = json!({
+        "type": 11,
+        "source": parse_result.get("source").cloned().unwrap_or(Value::Null),
+        "valueAlias": parse_result.get("value").cloned().unwrap_or(Value::Null),
+        "keyAlias": parse_result.get("key").cloned().unwrap_or(Value::Null),
+        "objectIndexAlias": parse_result.get("index").cloned().unwrap_or(Value::Null),
+        "parseResult": parse_result,
+        "children": children,
+        "codegenNode": Value::Null,
+        "loc": loc,
+    });
+    let mut for_state = Vue3ForSuiteState::default();
+    for_node["codegenNode"] = vue3_for_suite_for_codegen(
+        &original_node,
+        &mut for_node,
+        options,
+        &child_scope,
+        &mut for_state,
+    );
+    state.errors.extend(for_state.errors);
+    if transform_text {
+        vue3_text_suite_apply_transform_text(&mut for_node, options);
+    }
+    for_node
+}
+
+fn vue3_slot_suite_if_condition(
+    dir: Option<&Value>,
+    node: &Value,
+    options: &Vue3CompilerOptions,
+    state: &mut Vue3SlotSuiteState,
+    scope: &Vue3ModelSuiteScope,
+) -> Value {
+    let Some(dir) = dir else {
+        return Value::Null;
+    };
+    if dir.get("name").and_then(Value::as_str) == Some("else") {
+        return Value::Null;
+    }
+    let exp = dir.get("exp").filter(|value| !value.is_null());
+    let raw = exp
+        .and_then(|exp| exp.get("content"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if exp.is_none() || raw.trim().is_empty() {
+        state.errors.push(json!({
+            "code": 28,
+            "loc": dir.get("loc").cloned().unwrap_or_else(vue3_loc_stub_value),
+        }));
+        return json!({
+            "type": 4,
+            "content": "true",
+            "isStatic": false,
+            "constType": 0,
+            "loc": exp
+                .and_then(|exp| exp.get("loc"))
+                .cloned()
+                .or_else(|| node.get("loc").cloned())
+                .unwrap_or_else(vue3_loc_stub_value),
+        });
+    }
+    let current = exp.cloned().unwrap_or(Value::Null);
+    if !options.prefix_identifiers {
+        return current;
+    }
+    let projection = vuec_vue3_core::process_expression_projection(&json!({
+        "node": current,
+        "context": vue3_model_suite_transform_context(options, scope),
+    }));
+    vue3_slot_suite_materialize_process_projection(&projection, &current, state)
+}
+
+fn vue3_slot_suite_apply_bind_shorthand(node: &mut Value, state: &mut Vue3SlotSuiteState) {
+    let projection = vuec_vue3_core::transform_v_bind_shorthand_projection(&json!({
+        "node": node,
+        "context": { "browser": false },
+    }));
+    let operations = projection
+        .get("operations")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let Some(props) = node.get_mut("props").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for operation in operations {
+        let Some(index) = operation.get("index").and_then(Value::as_u64) else {
+            continue;
+        };
+        let Some(prop) = props.get_mut(index as usize) else {
+            continue;
+        };
+        for error in operation
+            .get("errors")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            state.errors.push(vue3_bind_suite_error_value(error, prop));
+        }
+        if operation.get("kind").and_then(Value::as_str) == Some("setExp") {
+            let exp = operation.get("exp").cloned().unwrap_or(Value::Null);
+            prop["exp"] = vue3_text_suite_materialize_process_projection(&exp, &exp);
+        }
+    }
+}
+
+fn vue3_slot_suite_process_directive_expressions(
+    node: &mut Value,
+    options: &Vue3CompilerOptions,
+    state: &mut Vue3SlotSuiteState,
+    scope: &Vue3ModelSuiteScope,
+) {
+    if !options.prefix_identifiers {
+        return;
+    }
+    let context = vue3_model_suite_transform_context(options, scope);
+    let Some(props) = node.get_mut("props").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for prop in props {
+        if vue3_public_node_type(prop) != Some(7) {
+            continue;
+        }
+        let is_slot = prop.get("name").and_then(Value::as_str) == Some("slot");
+        if let Some(current) = prop.get("exp").filter(|value| !value.is_null()).cloned() {
+            if vue3_public_node_type(&current) == Some(4) {
+                let projection = vuec_vue3_core::process_expression_projection(&json!({
+                    "node": current,
+                    "context": context,
+                    "asParams": is_slot,
+                }));
+                prop["exp"] =
+                    vue3_slot_suite_materialize_process_projection(&projection, &current, state);
+            }
+        }
+        if let Some(current) = prop.get("arg").filter(|value| !value.is_null()).cloned() {
+            if vue3_public_node_type(&current) == Some(4)
+                && !current
+                    .get("isStatic")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+            {
+                let projection = vuec_vue3_core::process_expression_projection(&json!({
+                    "node": current,
+                    "context": context,
+                }));
+                prop["arg"] =
+                    vue3_slot_suite_materialize_process_projection(&projection, &current, state);
+            }
+        }
+    }
+}
+
+fn vue3_slot_suite_materialize_process_projection(
+    projection: &Value,
+    current: &Value,
+    state: &mut Vue3SlotSuiteState,
+) -> Value {
+    if projection.get("kind").and_then(Value::as_str) == Some("error") {
+        state.errors.push(json!({
+            "code": projection.get("code").cloned().unwrap_or(json!(46)),
+            "message": projection
+                .get("message")
+                .cloned()
+                .unwrap_or_else(|| json!("Error parsing JavaScript expression: Unexpected token")),
+            "loc": projection
+                .get("loc")
+                .cloned()
+                .or_else(|| current.get("loc").cloned())
+                .unwrap_or_else(vue3_loc_stub_value),
+        }));
+        return current.clone();
+    }
+    vue3_text_suite_materialize_process_projection(projection, current)
+}
+
+fn vue3_slot_suite_track_v_for_slot_scope(
+    node: &mut Value,
+    options: &Vue3CompilerOptions,
+    state: &mut Vue3SlotSuiteState,
+    scope: &mut Vue3ModelSuiteScope,
+) {
+    if !options.prefix_identifiers || !vue3_slot_suite_is_template_slot(node) {
+        return;
+    }
+    let projection = vuec_vue3_core::track_v_for_slot_scopes_projection(&json!({
+        "node": node,
+        "context": vue3_model_suite_transform_context(options, scope),
+    }));
+    for error in projection
+        .get("errors")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        state.errors.push(json!({
+            "code": error.get("code").cloned().unwrap_or(json!(32)),
+            "loc": error
+                .get("loc")
+                .cloned()
+                .unwrap_or_else(|| node.get("loc").cloned().unwrap_or_else(vue3_loc_stub_value)),
+        }));
+    }
+    if !projection
+        .get("track")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return;
+    }
+    vue3_model_suite_add_locals(scope, projection.get("locals"));
+    if let Some(parse_result) = projection
+        .get("parseResult")
+        .filter(|value| !value.is_null())
+    {
+        let materialized = vue3_text_suite_materialize_for_parse_result(parse_result);
+        let Some(props) = node.get_mut("props").and_then(Value::as_array_mut) else {
+            return;
+        };
+        if let Some(dir) = props.iter_mut().find(|prop| {
+            vue3_public_node_type(prop) == Some(7)
+                && prop.get("name").and_then(Value::as_str) == Some("for")
+        }) {
+            dir["forParseResult"] = materialized;
+        }
+    }
+}
+
+fn vue3_slot_suite_track_slot_scope(node: &Value, scope: &mut Vue3ModelSuiteScope) {
+    if vue3_public_node_type(node) != Some(1) {
+        return;
+    }
+    let projection = vuec_vue3_core::track_slot_scopes_projection(&json!({ "node": node }));
+    if projection
+        .get("track")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        vue3_model_suite_add_locals(scope, projection.get("locals"));
+        scope.v_slot_depth += 1;
+    }
+}
+
+fn vue3_slot_suite_element_codegen(
+    node: &Value,
+    options: &Vue3CompilerOptions,
+    state: &mut Vue3SlotSuiteState,
+    scope: &Vue3ModelSuiteScope,
+    is_block: bool,
+) -> Value {
+    if let Some(slot) = vue3_text_suite_directive(node, "slot") {
+        if node.get("tagType").and_then(Value::as_u64) == Some(0) {
+            state.errors.push(json!({
+                "code": 40,
+                "loc": slot.get("loc").cloned().unwrap_or_else(vue3_loc_stub_value),
+            }));
+        }
+    }
+    match (
+        vue3_public_node_type(node),
+        node.get("tagType").and_then(Value::as_u64),
+    ) {
+        (Some(1), Some(1)) => {
+            vue3_slot_suite_component_codegen(node, options, state, scope, is_block)
+        }
+        (Some(1), Some(2)) => vue3_slot_suite_slot_outlet_codegen(node, options, state, scope),
+        (Some(1), Some(0)) => {
+            let mut if_state = Vue3IfSuiteState::default();
+            let codegen =
+                vue3_if_suite_element_codegen(node, options, &mut if_state, scope, is_block);
+            state.errors.extend(if_state.errors);
+            codegen
+        }
+        _ => Value::Null,
+    }
+}
+
+fn vue3_slot_suite_component_codegen(
+    node: &Value,
+    options: &Vue3CompilerOptions,
+    state: &mut Vue3SlotSuiteState,
+    scope: &Vue3ModelSuiteScope,
+    is_block: bool,
+) -> Value {
+    let mut if_state = Vue3IfSuiteState::default();
+    let (props, mut patch_flag, dynamic_props, directives) =
+        vue3_if_suite_props_codegen(node, options, &mut if_state, scope);
+    state.errors.extend(if_state.errors);
+
+    let children = node
+        .get("children")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let slot_children = if children.is_empty() {
+        Value::Null
+    } else {
+        vue3_slot_suite_build_slots(node, options, state, scope)
+    };
+    if !slot_children.is_null() {
+        let projection = vuec_vue3_core::build_slots_projection(&json!({
+            "node": node,
+            "context": vue3_model_suite_transform_context(options, scope),
+        }));
+        if projection
+            .get("hasDynamicSlots")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            let current = patch_flag.and_then(|flag| flag.as_u64()).unwrap_or(0);
+            patch_flag = Some(json!(current | 1024));
+        }
+    }
+
+    let tag = node.get("tag").and_then(Value::as_str).unwrap_or("");
+    let mut vnode = vue3_once_suite_vnode_call(
+        &vue3_once_suite_component_asset_id(tag),
+        props,
+        slot_children,
+        patch_flag,
+        dynamic_props,
+        is_block,
+        false,
+        true,
+    );
+    vnode["directives"] = directives;
+    vnode
+}
+
+fn vue3_slot_suite_slot_outlet_codegen(
+    node: &Value,
+    options: &Vue3CompilerOptions,
+    state: &mut Vue3SlotSuiteState,
+    scope: &Vue3ModelSuiteScope,
+) -> Value {
+    let projection = vuec_vue3_core::transform_slot_outlet_projection(&json!({
+        "node": node,
+        "context": vue3_for_suite_slot_outlet_context(options, scope),
+    }));
+    let non_name_props = projection
+        .get("process")
+        .and_then(|process| process.get("nonNameProps"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut slot_state = Vue3SlotOutletSuiteState::default();
+    let slot_props =
+        vue3_slot_outlet_suite_props_codegen(node, &non_name_props, options, &mut slot_state);
+    for error in slot_state.errors {
+        state.errors.push(error);
+    }
+    let slot_name = vue3_slot_outlet_suite_slot_name(node, projection.get("process"));
+    vue3_slot_outlet_suite_codegen(
+        node,
+        slot_name,
+        slot_props,
+        projection.get("codegen").unwrap_or(&Value::Null),
+    )
+}
+
+fn vue3_slot_suite_build_slots(
+    node: &Value,
+    options: &Vue3CompilerOptions,
+    state: &mut Vue3SlotSuiteState,
+    scope: &Vue3ModelSuiteScope,
+) -> Value {
+    let projection = vuec_vue3_core::build_slots_projection(&json!({
+        "node": node,
+        "context": vue3_model_suite_transform_context(options, scope),
+    }));
+    for error in projection
+        .get("errors")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        state.errors.push(json!({
+            "code": error.get("code").cloned().unwrap_or(json!(0)),
+            "loc": error.get("loc").cloned().unwrap_or_else(vue3_loc_stub_value),
+        }));
+    }
+    vue3_slot_suite_materialize_slots_projection(&projection, node)
+}
+
+fn vue3_slot_suite_materialize_slots_projection(projection: &Value, node: &Value) -> Value {
+    let mut properties = Vec::<Value>::new();
+    for property in projection
+        .get("properties")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        properties.push(vue3_once_suite_object_property(
+            vue3_slot_suite_projection_node(property.get("key").unwrap_or(&Value::Null), node),
+            vue3_slot_suite_slot_function(property, node),
+        ));
+    }
+    let slot_flag = projection
+        .get("slotFlag")
+        .and_then(Value::as_u64)
+        .unwrap_or(1);
+    let slot_flag_text = projection
+        .get("slotFlagText")
+        .and_then(Value::as_str)
+        .unwrap_or(match slot_flag {
+            2 => "DYNAMIC",
+            3 => "FORWARDED",
+            _ => "STABLE",
+        });
+    properties.push(vue3_once_suite_object_property(
+        vue3_once_suite_simple_expression("_", true),
+        vue3_once_suite_simple_expression(&format!("{slot_flag} /* {slot_flag_text} */"), false),
+    ));
+    let base = json!({
+        "type": 15,
+        "properties": properties,
+        "loc": node.get("loc").cloned().unwrap_or_else(vue3_loc_stub_value),
+    });
+    let dynamic_slots = projection
+        .get("dynamicSlots")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    if dynamic_slots.is_empty() {
+        return base;
+    }
+    vue3_text_suite_call(
+        "CREATE_SLOTS",
+        vec![
+            base,
+            json!({
+                "type": 17,
+                "elements": dynamic_slots
+                    .iter()
+                    .map(|slot| vue3_slot_suite_dynamic_slot(slot, node))
+                    .collect::<Vec<_>>(),
+                "loc": node.get("loc").cloned().unwrap_or_else(vue3_loc_stub_value),
+            }),
+        ],
+    )
+}
+
+fn vue3_slot_suite_slot_function(property: &Value, node: &Value) -> Value {
+    let returns = vue3_slot_suite_slot_children(property, node);
+    json!({
+        "type": 18,
+        "params": vue3_slot_suite_projection_node(property.get("params").unwrap_or(&Value::Null), node),
+        "returns": returns,
+        "newline": false,
+        "isSlot": true,
+        "loc": property
+            .get("loc")
+            .cloned()
+            .or_else(|| node.get("loc").cloned())
+            .unwrap_or_else(vue3_loc_stub_value),
+    })
+}
+
+fn vue3_slot_suite_slot_children(property: &Value, node: &Value) -> Value {
+    let mut out = Vec::<Value>::new();
+    let unwrap_template = property
+        .get("unwrapTemplate")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    for index in property
+        .get("indices")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_u64)
+        .map(|index| index as usize)
+    {
+        let Some(child) = node
+            .get("children")
+            .and_then(Value::as_array)
+            .and_then(|children| children.get(index))
+        else {
+            continue;
+        };
+        if unwrap_template
+            && vue3_public_node_type(child) == Some(1)
+            && child.get("tag").and_then(Value::as_str) == Some("template")
+        {
+            out.extend(
+                child
+                    .get("children")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default(),
+            );
+        } else {
+            out.push(child.clone());
+        }
+    }
+    Value::Array(out)
+}
+
+fn vue3_slot_suite_dynamic_slot(projection: &Value, node: &Value) -> Value {
+    match projection.get("kind").and_then(Value::as_str) {
+        Some("conditional") => json!({
+            "type": 19,
+            "test": vue3_slot_suite_projection_node(projection.get("test").unwrap_or(&Value::Null), node),
+            "consequent": vue3_slot_suite_dynamic_slot(projection.get("consequent").unwrap_or(&Value::Null), node),
+            "alternate": vue3_slot_suite_dynamic_slot(projection.get("alternate").unwrap_or(&Value::Null), node),
+            "newline": true,
+            "loc": node.get("loc").cloned().unwrap_or_else(vue3_loc_stub_value),
+        }),
+        Some("for") => {
+            let params = projection.get("params").unwrap_or(&Value::Null);
+            vue3_text_suite_call(
+                "RENDER_LIST",
+                vec![
+                    vue3_slot_suite_projection_node(
+                        projection.get("source").unwrap_or(&Value::Null),
+                        node,
+                    ),
+                    json!({
+                        "type": 18,
+                        "params": vue3_slot_suite_loop_params(params, node),
+                        "returns": vue3_slot_suite_dynamic_slot(projection.get("slot").unwrap_or(&Value::Null), node),
+                        "newline": true,
+                        "isSlot": false,
+                        "loc": node.get("loc").cloned().unwrap_or_else(vue3_loc_stub_value),
+                    }),
+                ],
+            )
+        }
+        Some("dynamicSlot") => {
+            let mut properties = vec![
+                vue3_once_suite_object_property(
+                    vue3_once_suite_simple_expression("name", true),
+                    vue3_slot_suite_projection_node(
+                        projection.get("name").unwrap_or(&Value::Null),
+                        node,
+                    ),
+                ),
+                vue3_once_suite_object_property(
+                    vue3_once_suite_simple_expression("fn", true),
+                    vue3_slot_suite_slot_function(
+                        projection.get("slot").unwrap_or(&Value::Null),
+                        node,
+                    ),
+                ),
+            ];
+            if let Some(key) = projection.get("key").and_then(Value::as_str) {
+                properties.push(vue3_once_suite_object_property(
+                    vue3_once_suite_simple_expression("key", true),
+                    vue3_once_suite_simple_expression(key, true),
+                ));
+            }
+            json!({
+                "type": 15,
+                "properties": properties,
+                "loc": node.get("loc").cloned().unwrap_or_else(vue3_loc_stub_value),
+            })
+        }
+        Some("simple") | Some("compound") | None => {
+            vue3_slot_suite_projection_node(projection, node)
+        }
+        _ => vue3_slot_suite_projection_node(projection, node),
+    }
+}
+
+fn vue3_slot_suite_loop_params(params: &Value, node: &Value) -> Vec<Value> {
+    let args = ["value", "key", "index"]
+        .into_iter()
+        .map(|key| {
+            params
+                .get(key)
+                .map(|value| vue3_slot_suite_projection_node(value, node))
+                .unwrap_or(Value::Null)
+        })
+        .collect::<Vec<_>>();
+    let Some(last) = args.iter().rposition(|arg| !arg.is_null()) else {
+        return Vec::new();
+    };
+    args.into_iter()
+        .take(last + 1)
+        .enumerate()
+        .map(|(index, arg)| {
+            if arg.is_null() {
+                vue3_once_suite_simple_expression(&"_".repeat(index + 1), false)
+            } else {
+                arg
+            }
+        })
+        .collect()
+}
+
+fn vue3_slot_suite_projection_node(projection: &Value, node: &Value) -> Value {
+    if projection.is_null()
+        || projection
+            .get("kind")
+            .and_then(Value::as_str)
+            .is_some_and(|kind| kind == "undefined" || kind == "unchanged")
+    {
+        return Value::Null;
+    }
+    if projection.is_string() || projection.get("type").is_some() {
+        return projection.clone();
+    }
+    match projection.get("kind").and_then(Value::as_str) {
+        Some("simple") => json!({
+            "type": 4,
+            "content": projection.get("content").and_then(Value::as_str).unwrap_or(""),
+            "isStatic": projection.get("isStatic").and_then(Value::as_bool).unwrap_or(false),
+            "constType": projection.get("constType").and_then(Value::as_u64).unwrap_or(0),
+            "loc": projection
+                .get("loc")
+                .cloned()
+                .or_else(|| node.get("loc").cloned())
+                .unwrap_or_else(vue3_loc_stub_value),
+        }),
+        Some("compound") => json!({
+            "type": 8,
+            "children": projection
+                .get("children")
+                .and_then(Value::as_array)
+                .map(|children| children
+                    .iter()
+                    .map(|child| vue3_slot_suite_projection_node(child, node))
+                    .collect::<Vec<_>>())
+                .unwrap_or_default(),
+            "loc": projection
+                .get("loc")
+                .cloned()
+                .or_else(|| node.get("loc").cloned())
+                .unwrap_or_else(vue3_loc_stub_value),
+        }),
+        _ => Value::Null,
+    }
+}
+
+fn vue3_slot_suite_is_template_slot(node: &Value) -> bool {
+    vue3_public_node_type(node) == Some(1)
+        && node.get("tagType").and_then(Value::as_u64) == Some(3)
+        && vue3_text_suite_directive(node, "slot").is_some()
+}
+
+fn vue3_slot_suite_finalize_root(root: &mut Value) {
+    vue3_once_suite_set_root_codegen(root);
+    root["components"] = json!(vue3_slot_suite_components(root));
+    root["directives"] = json!(vue3_if_suite_collect_directives(root));
+    root["helpers"] = json!(vue3_slot_suite_helpers(root));
+    root["hoists"] = json!([]);
+    root["cached"] = json!([]);
+    root["temps"] = json!(0);
+}
+
+fn vue3_slot_suite_helpers(root: &Value) -> Vec<String> {
+    let mut used = Vec::new();
+    vue3_slot_suite_collect_helpers(root, &mut used);
+    vue3_slot_suite_collect_helpers(root.get("codegenNode").unwrap_or(&Value::Null), &mut used);
+    if root
+        .get("components")
+        .and_then(Value::as_array)
+        .is_some_and(|components| !components.is_empty())
+    {
+        vue3_text_suite_add_helper(&mut used, "RESOLVE_COMPONENT");
+    }
+    if !vue3_if_suite_collect_directives(root).is_empty() {
+        vue3_text_suite_add_helper(&mut used, "RESOLVE_DIRECTIVE");
+    }
+    [
+        "TO_DISPLAY_STRING",
+        "CREATE_ELEMENT_VNODE",
+        "CREATE_TEXT",
+        "CREATE_COMMENT",
+        "RESOLVE_COMPONENT",
+        "WITH_CTX",
+        "RENDER_LIST",
+        "CREATE_SLOTS",
+        "CREATE_VNODE",
+        "OPEN_BLOCK",
+        "CREATE_BLOCK",
+        "CREATE_ELEMENT_BLOCK",
+        "FRAGMENT",
+        "RENDER_SLOT",
+        "MERGE_PROPS",
+        "NORMALIZE_PROPS",
+        "TO_HANDLERS",
+        "RESOLVE_DIRECTIVE",
+        "WITH_DIRECTIVES",
+    ]
+    .into_iter()
+    .filter(|helper| used.iter().any(|used| used == helper))
+    .map(str::to_string)
+    .collect()
+}
+
+fn vue3_slot_suite_collect_helpers(node: &Value, used: &mut Vec<&'static str>) {
+    match vue3_public_node_type(node) {
+        Some(3) => vue3_text_suite_add_helper(used, "CREATE_COMMENT"),
+        Some(5) => vue3_text_suite_add_helper(used, "TO_DISPLAY_STRING"),
+        Some(12) => {
+            if let Some(codegen) = node.get("codegenNode") {
+                vue3_slot_suite_collect_helpers(codegen, used);
+            }
+            if let Some(content) = node.get("content") {
+                vue3_slot_suite_collect_helpers(content, used);
+            }
+        }
+        Some(13) => {
+            if node.get("tag").and_then(Value::as_str) == Some("FRAGMENT") {
+                vue3_text_suite_add_helper(used, "FRAGMENT");
+            }
+            if node.get("directives").is_some_and(|value| !value.is_null()) {
+                vue3_text_suite_add_helper(used, "WITH_DIRECTIVES");
+            }
+            if node
+                .get("isBlock")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                vue3_text_suite_add_helper(used, "OPEN_BLOCK");
+                if node
+                    .get("isComponent")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    vue3_text_suite_add_helper(used, "CREATE_BLOCK");
+                } else {
+                    vue3_text_suite_add_helper(used, "CREATE_ELEMENT_BLOCK");
+                }
+            } else if node
+                .get("isComponent")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                vue3_text_suite_add_helper(used, "CREATE_VNODE");
+            } else {
+                vue3_text_suite_add_helper(used, "CREATE_ELEMENT_VNODE");
+            }
+        }
+        Some(14) => match node.get("callee").and_then(Value::as_str) {
+            Some("CREATE_TEXT") => vue3_text_suite_add_helper(used, "CREATE_TEXT"),
+            Some("CREATE_COMMENT") => vue3_text_suite_add_helper(used, "CREATE_COMMENT"),
+            Some("RENDER_LIST") => vue3_text_suite_add_helper(used, "RENDER_LIST"),
+            Some("CREATE_SLOTS") => vue3_text_suite_add_helper(used, "CREATE_SLOTS"),
+            Some("RENDER_SLOT") => vue3_text_suite_add_helper(used, "RENDER_SLOT"),
+            Some("MERGE_PROPS") => vue3_text_suite_add_helper(used, "MERGE_PROPS"),
+            Some("NORMALIZE_PROPS") => vue3_text_suite_add_helper(used, "NORMALIZE_PROPS"),
+            Some("TO_HANDLERS") => vue3_text_suite_add_helper(used, "TO_HANDLERS"),
+            _ => {}
+        },
+        Some(18) => {
+            if node.get("isSlot").and_then(Value::as_bool).unwrap_or(false) {
+                vue3_text_suite_add_helper(used, "WITH_CTX");
+            }
+        }
+        _ => {}
+    }
+    for key in [
+        "children",
+        "props",
+        "content",
+        "codegenNode",
+        "arguments",
+        "returns",
+        "params",
+        "directives",
+        "source",
+        "valueAlias",
+        "keyAlias",
+        "objectIndexAlias",
+        "parseResult",
+        "branches",
+        "condition",
+        "test",
+        "consequent",
+        "alternate",
+        "value",
+        "elements",
+        "properties",
+        "key",
+    ] {
+        let Some(value) = node.get(key) else {
+            continue;
+        };
+        if let Some(items) = value.as_array() {
+            for item in items {
+                vue3_slot_suite_collect_helpers(item, used);
+            }
+        } else if value.is_object() {
+            vue3_slot_suite_collect_helpers(value, used);
+        }
+    }
+}
+
 fn vue3_core_transform_model_suite_value(payload: &Value) -> Value {
     let source = template_source(payload);
     let options = vue3_options(payload.get("options"));
@@ -4783,6 +5965,7 @@ fn vue3_model_suite_transform_context(
     context["cacheHandlers"] = json!(options.cache_handlers);
     context["inVOnce"] = json!(scope.in_v_once);
     context["vForDepth"] = json!(scope.v_for_depth);
+    context["vSlotDepth"] = json!(scope.v_slot_depth);
     context["identifiers"] = Value::Object(
         scope
             .identifiers
@@ -5464,6 +6647,32 @@ fn vue3_slot_outlet_suite_props_codegen(
                     });
                 properties.push(vue3_once_suite_object_property(key, value));
             }
+            Some(7) if prop.get("name").and_then(Value::as_str) == Some("on") => {
+                let projection = vuec_vue3_core::transform_on_projection(&json!({
+                    "dir": prop,
+                    "node": node,
+                    "context": vue3_slot_outlet_suite_transform_context(options),
+                }));
+                for error in projection
+                    .get("errors")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    state.errors.push(vue3_model_suite_error_value(error, prop));
+                }
+                for projected_prop in projection
+                    .get("props")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    let key = vue3_on_suite_materialize_projection(projected_prop.get("key"), prop);
+                    let value =
+                        vue3_on_suite_materialize_projection(projected_prop.get("value"), prop);
+                    properties.push(vue3_once_suite_object_property(key, value));
+                }
+            }
             Some(7) => {
                 state.errors.push(json!({
                     "code": 36,
@@ -5473,7 +6682,6 @@ fn vue3_slot_outlet_suite_props_codegen(
             _ => {}
         }
     }
-    let _ = options;
     if properties.is_empty() {
         Value::Null
     } else {
@@ -6199,6 +7407,34 @@ fn vue3_once_suite_components(root: &Value) -> Vec<String> {
     let mut components = Vec::new();
     vue3_once_suite_collect_components(root, &mut components);
     components
+}
+
+fn vue3_slot_suite_components(root: &Value) -> Vec<String> {
+    let mut components = Vec::new();
+    vue3_slot_suite_collect_components(root, &mut components);
+    components
+}
+
+fn vue3_slot_suite_collect_components(node: &Value, components: &mut Vec<String>) {
+    for key in ["children", "branches"] {
+        let Some(value) = node.get(key) else {
+            continue;
+        };
+        if let Some(items) = value.as_array() {
+            for item in items {
+                vue3_slot_suite_collect_components(item, components);
+            }
+        }
+    }
+    if vue3_public_node_type(node) == Some(1)
+        && node.get("tagType").and_then(Value::as_u64) == Some(1)
+    {
+        if let Some(tag) = node.get("tag").and_then(Value::as_str) {
+            if !components.iter().any(|component| component == tag) {
+                components.push(tag.to_string());
+            }
+        }
+    }
 }
 
 fn vue3_once_suite_collect_components(node: &Value, components: &mut Vec<String>) {
@@ -10409,6 +11645,127 @@ mod tests {
         assert_eq!(arguments[1]["content"], json!("name"));
         assert_eq!(arguments[1]["isStatic"], json!(false));
         assert!(arguments[1].get("kind").is_none());
+    }
+
+    #[test]
+    fn vue3_transform_slot_suite_materializes_default_and_dynamic_slots() {
+        let transformed = dispatch(
+            "vue3.core.transformSlotSuite",
+            json!({ "source": "<Comp><div/></Comp>", "options": { "prefixIdentifiers": true } }),
+        )
+        .expect("transformSlot suite default slot");
+        let slots = &transformed["slots"];
+        assert_eq!(slots["type"], json!(15));
+        assert_eq!(slots["properties"][0]["key"]["content"], json!("default"));
+        assert_eq!(slots["properties"][0]["value"]["type"], json!(18));
+        assert!(slots["properties"][0]["value"]["params"].is_null());
+        assert_eq!(
+            slots["properties"][0]["value"]["returns"][0]["tag"],
+            json!("div")
+        );
+        assert_eq!(
+            slots["properties"][1]["value"]["content"],
+            json!("1 /* STABLE */")
+        );
+        assert_eq!(
+            transformed["root"]["helpers"],
+            json!([
+                "CREATE_ELEMENT_VNODE",
+                "RESOLVE_COMPONENT",
+                "WITH_CTX",
+                "OPEN_BLOCK",
+                "CREATE_BLOCK"
+            ])
+        );
+
+        let dynamic = dispatch(
+            "vue3.core.transformSlotSuite",
+            json!({ "source": r#"<Comp><template #one v-if="ok">hello</template></Comp>"#, "options": {} }),
+        )
+        .expect("transformSlot suite dynamic slot");
+        let dynamic_slots = &dynamic["slots"];
+        assert_eq!(dynamic_slots["type"], json!(14));
+        assert_eq!(dynamic_slots["callee"], json!("CREATE_SLOTS"));
+        assert_eq!(
+            dynamic_slots["arguments"][0]["properties"][0]["value"]["content"],
+            json!("2 /* DYNAMIC */")
+        );
+        let branch = &dynamic_slots["arguments"][1]["elements"][0];
+        assert_eq!(branch["type"], json!(19));
+        assert_eq!(branch["test"]["content"], json!("ok"));
+        assert_eq!(
+            branch["consequent"]["properties"][0]["value"]["content"],
+            json!("one")
+        );
+        assert_eq!(
+            branch["consequent"]["properties"][1]["value"]["returns"][0]["content"],
+            json!("hello")
+        );
+        assert_eq!(
+            branch["consequent"]["properties"][2]["value"]["content"],
+            json!("0")
+        );
+        assert_eq!(
+            dynamic["root"]["children"][0]["codegenNode"]["patchFlag"],
+            json!(1024)
+        );
+    }
+
+    #[test]
+    fn vue3_transform_slot_suite_tracks_nested_scope_and_forwarded_flag() {
+        let scoped = dispatch(
+            "vue3.core.transformSlotSuite",
+            json!({
+                "source": r#"<Comp><template #default="{ foo }"><Inner v-slot="{ bar }">{{ foo }}{{ bar }}{{ baz }}</Inner></template></Comp>"#,
+                "options": { "prefixIdentifiers": true },
+            }),
+        )
+        .expect("transformSlot suite nested scope");
+        assert_eq!(scoped["root"]["components"], json!(["Inner", "Comp"]));
+        let default_returns = &scoped["slots"]["properties"][0]["value"]["returns"];
+        let inner = &default_returns[0];
+        assert_eq!(inner["tag"], json!("Inner"));
+        assert_eq!(
+            inner["codegenNode"]["children"]["properties"][0]["value"]["returns"][0]["content"]
+                ["content"],
+            json!("foo")
+        );
+        assert_eq!(
+            inner["codegenNode"]["children"]["properties"][0]["value"]["returns"][1]["content"]
+                ["content"],
+            json!("bar")
+        );
+        assert_eq!(
+            inner["codegenNode"]["children"]["properties"][0]["value"]["returns"][2]["content"]
+                ["content"],
+            json!("_ctx.baz")
+        );
+        assert_eq!(inner["codegenNode"]["patchFlag"], json!(1024));
+
+        let forwarded = dispatch(
+            "vue3.core.transformSlotSuite",
+            json!({ "source": "<Comp><slot/></Comp>", "options": {} }),
+        )
+        .expect("transformSlot suite forwarded slot");
+        assert_eq!(
+            forwarded["slots"]["properties"][1]["value"]["content"],
+            json!("3 /* FORWARDED */")
+        );
+    }
+
+    #[test]
+    fn vue3_transform_slot_suite_reports_slot_errors() {
+        let transformed = dispatch(
+            "vue3.core.transformSlotSuite",
+            json!({ "source": "<Comp><template #default>foo</template>bar</Comp>", "options": {} }),
+        )
+        .expect("transformSlot suite slot errors");
+
+        assert_eq!(transformed["root"]["__vuecErrors"][0]["code"], json!(39));
+        assert_eq!(
+            transformed["root"]["__vuecErrors"][0]["loc"]["source"],
+            json!("bar")
+        );
     }
 
     #[test]
