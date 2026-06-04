@@ -12941,6 +12941,164 @@ fn patch_vue3_sfc_compile_template_asset_bridge(path: &Path) -> Result<()> {
     )
 }
 
+const VUE3_SFC_ASSET_TRANSFORM_INTERNAL_HELPER: &str = r#"import {
+  type TransformOptions,
+  baseParse,
+  generate,
+  transform,
+} from '@vue/compiler-core'
+import {
+  type AssetURLOptions,
+  createAssetUrlTransformWithOptions,
+  normalizeOptions,
+  transformAssetUrl,
+} from '../src/template/transformAssetUrl'
+import { transformElement } from '../../compiler-core/src/transforms/transformElement'
+import { transformBind } from '../../compiler-core/src/transforms/vBind'
+import { stringifyStatic } from '../../compiler-dom/src/transforms/stringifyStatic'
+
+function compileWithAssetUrls(
+  template: string,
+  options?: AssetURLOptions,
+  transformOptions?: TransformOptions,
+) {
+  const ast = baseParse(template)
+  const t = options
+    ? createAssetUrlTransformWithOptions(normalizeOptions(options))
+    : transformAssetUrl
+  transform(ast, {
+    nodeTransforms: [t, transformElement],
+    directiveTransforms: {
+      bind: transformBind,
+    },
+    ...transformOptions,
+  })
+  return generate(ast, { mode: 'module' })
+}
+"#;
+
+const VUE3_SFC_SRCSET_TRANSFORM_INTERNAL_HELPER: &str = r#"import {
+  type TransformOptions,
+  baseParse,
+  generate,
+  transform,
+} from '@vue/compiler-core'
+import {
+  createSrcsetTransformWithOptions,
+  transformSrcset,
+} from '../src/template/transformSrcset'
+import { transformElement } from '../../compiler-core/src/transforms/transformElement'
+import { transformBind } from '../../compiler-core/src/transforms/vBind'
+import {
+  type AssetURLOptions,
+  normalizeOptions,
+} from '../src/template/transformAssetUrl'
+import { stringifyStatic } from '../../compiler-dom/src/transforms/stringifyStatic'
+
+function compileWithSrcset(
+  template: string,
+  options?: AssetURLOptions,
+  transformOptions?: TransformOptions,
+) {
+  const ast = baseParse(template)
+  const srcsetTransform = options
+    ? createSrcsetTransformWithOptions(normalizeOptions(options))
+    : transformSrcset
+  transform(ast, {
+    hoistStatic: true,
+    nodeTransforms: [srcsetTransform, transformElement],
+    directiveTransforms: {
+      bind: transformBind,
+    },
+    ...transformOptions,
+  })
+  return generate(ast, { mode: 'module' })
+}
+"#;
+
+const VUE3_SFC_ASSET_TRANSFORM_PUBLIC_HELPER_IMPORT: &str = r#"import {
+  type AssetURLOptions,
+  type TransformOptions,
+  compileWithAssetUrls,
+  stringifyStatic,
+} from './templateTransforms.public-api'
+"#;
+
+const VUE3_SFC_SRCSET_TRANSFORM_PUBLIC_HELPER_IMPORT: &str = r#"import {
+  type AssetURLOptions,
+  type TransformOptions,
+  compileWithSrcset,
+  stringifyStatic,
+} from './templateTransforms.public-api'
+"#;
+
+const VUE3_SFC_TEMPLATE_TRANSFORMS_PUBLIC_API_HELPER: &str = r#"import { compileTemplate } from '@vue/compiler-sfc'
+
+export interface AssetURLOptions {
+  base?: string | null
+  includeAbsolute?: boolean
+  tags?: Record<string, string[]>
+}
+
+export interface TransformOptions {
+  hoistStatic?: boolean
+  transformHoist?: unknown
+}
+
+export function stringifyStatic(): void {}
+
+function compilePublic(
+  template: string,
+  transformAssetUrls: AssetURLOptions | undefined,
+  transformOptions: TransformOptions | undefined,
+  defaultHoistStatic: boolean,
+) {
+  const compilerOptions: Record<string, unknown> = {
+    hoistStatic:
+      transformOptions && transformOptions.hoistStatic !== undefined
+        ? transformOptions.hoistStatic
+        : defaultHoistStatic,
+  }
+  if (transformOptions && transformOptions.transformHoist !== undefined) {
+    compilerOptions.transformHoist = transformOptions.transformHoist
+  }
+  return compileTemplate({
+    source: template,
+    filename: 'template.vue',
+    id: 'data-v-template-transform',
+    transformAssetUrls,
+    compilerOptions,
+  } as any)
+}
+
+export function compileWithAssetUrls(
+  template: string,
+  options?: AssetURLOptions,
+  transformOptions?: TransformOptions,
+) {
+  return compilePublic(template, options, transformOptions, false)
+}
+
+export function compileWithSrcset(
+  template: string,
+  options?: AssetURLOptions,
+  transformOptions?: TransformOptions,
+) {
+  return compilePublic(
+    template,
+    {
+      ...(options || {}),
+      tags: {
+        img: [],
+        source: [],
+      },
+    },
+    transformOptions,
+    true,
+  )
+}
+"#;
+
 fn rewrite_vue3_sfc_public_api_spec_imports(prepared_root: &Path) -> Result<()> {
     let tests = prepared_root
         .join("packages")
@@ -13058,6 +13216,7 @@ export function isDataUrl(url: string): boolean {
 "#,
         )?;
     }
+    rewrite_vue3_sfc_template_transform_public_api_specs(&tests)?;
     if css_vars_spec.exists() || compile_template_spec.exists() {
         write_text(
             &tests.join("utils.public-api.ts"),
@@ -13141,6 +13300,32 @@ export function getPositionInCode(
     Ok(())
 }
 
+fn rewrite_vue3_sfc_template_transform_public_api_specs(tests: &Path) -> Result<()> {
+    let asset_transform_spec = tests.join("templateTransformAssetUrl.spec.ts");
+    rewrite_text_file_block(
+        &asset_transform_spec,
+        VUE3_SFC_ASSET_TRANSFORM_INTERNAL_HELPER,
+        VUE3_SFC_ASSET_TRANSFORM_PUBLIC_HELPER_IMPORT,
+        "Vue 3 SFC template asset transform public helper",
+    )?;
+
+    let srcset_transform_spec = tests.join("templateTransformSrcset.spec.ts");
+    rewrite_text_file_block(
+        &srcset_transform_spec,
+        VUE3_SFC_SRCSET_TRANSFORM_INTERNAL_HELPER,
+        VUE3_SFC_SRCSET_TRANSFORM_PUBLIC_HELPER_IMPORT,
+        "Vue 3 SFC template srcset transform public helper",
+    )?;
+
+    if asset_transform_spec.exists() || srcset_transform_spec.exists() {
+        write_text(
+            &tests.join("templateTransforms.public-api.ts"),
+            VUE3_SFC_TEMPLATE_TRANSFORMS_PUBLIC_API_HELPER,
+        )?;
+    }
+    Ok(())
+}
+
 fn rewrite_text_file_import(path: &Path, from: &str, to: &str) -> Result<()> {
     if !path.exists() {
         return Ok(());
@@ -13151,6 +13336,25 @@ fn rewrite_text_file_import(path: &Path, from: &str, to: &str) -> Result<()> {
     if rewritten != original {
         write_text(path, &rewritten)?;
     }
+    Ok(())
+}
+
+fn rewrite_text_file_block(path: &Path, from: &str, to: &str, label: &str) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let original =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let normalized = original.replace("\r\n", "\n");
+    if normalized.contains(from) {
+        return write_text(path, &normalized.replace(from, to));
+    }
+    ensure!(
+        normalized.contains(to),
+        "{} anchor not found in {}",
+        label,
+        path.display()
+    );
     Ok(())
 }
 
@@ -13856,6 +14060,8 @@ fn conformance_coverage_file_kind(
         || path.ends_with("packages/compiler-sfc/__tests__/cssVars.spec.ts")
         || path.ends_with("packages/compiler-sfc/__tests__/compileTemplate.spec.ts")
         || path.ends_with("packages/compiler-sfc/__tests__/templateUtils.spec.ts")
+        || path.ends_with("packages/compiler-sfc/__tests__/templateTransformAssetUrl.spec.ts")
+        || path.ends_with("packages/compiler-sfc/__tests__/templateTransformSrcset.spec.ts")
         || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineEmits.spec.ts")
         || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineExpose.spec.ts")
         || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineModel.spec.ts")
@@ -13948,6 +14154,13 @@ fn conformance_coverage_file_reason(
             if path.ends_with("packages/compiler-sfc/__tests__/templateUtils.spec.ts") =>
         {
             "Official Vue 3 SFC templateUtils file imports a prepared Rust API helper that forwards URL classification calls through the generated @vue/compiler-sfc alias runtime into vuec_node_bridge and the Rust vuec_vue3_asset implementation; the helper only preserves the official test import shape."
+                .to_string()
+        }
+        ConformanceCoverageKind::RustBacked
+            if path.ends_with("packages/compiler-sfc/__tests__/templateTransformAssetUrl.spec.ts")
+                || path.ends_with("packages/compiler-sfc/__tests__/templateTransformSrcset.spec.ts") =>
+        {
+            "Official Vue 3 SFC template asset/srcset transform file imports a prepared public API helper that maps the original local test helper arguments to public compileTemplate options, so asset URL/srcset transforms, hoistStatic, and stringifyStatic route through @vue/compiler-sfc, vuec_node_bridge, and the Rust SFC template compiler; the helper only materializes public API options and preserves the official test helper shape."
                 .to_string()
         }
         ConformanceCoverageKind::RustBacked
@@ -16081,6 +16294,22 @@ mod tests {
         )
         .unwrap();
         fs::write(
+            tests.join("templateTransformAssetUrl.spec.ts"),
+            format!(
+                "{}\ndescribe('asset url', () => {{ compileWithAssetUrls('<img src=\"./x.png\"/>') }})\n",
+                VUE3_SFC_ASSET_TRANSFORM_INTERNAL_HELPER
+            ),
+        )
+        .unwrap();
+        fs::write(
+            tests.join("templateTransformSrcset.spec.ts"),
+            format!(
+                "{}\ndescribe('srcset', () => {{ compileWithSrcset('<img srcset=\"./x.png 2x\"/>') }})\n",
+                VUE3_SFC_SRCSET_TRANSFORM_INTERNAL_HELPER
+            ),
+        )
+        .unwrap();
+        fs::write(
             tests.join("utils.ts"),
             "import { compileScript, parse } from '../src'\n",
         )
@@ -16141,6 +16370,30 @@ mod tests {
         assert!(template_utils_api.contains("sfc.templateUtils.isRelativeUrl"));
         assert!(template_utils_api.contains("sfc.templateUtils.isExternalUrl"));
         assert!(template_utils_api.contains("sfc.templateUtils.isDataUrl"));
+        let asset_transform_spec =
+            fs::read_to_string(tests.join("templateTransformAssetUrl.spec.ts")).unwrap();
+        assert!(asset_transform_spec.contains("from './templateTransforms.public-api'"));
+        assert!(asset_transform_spec.contains("compileWithAssetUrls"));
+        assert!(!asset_transform_spec.contains("@vue/compiler-core"));
+        assert!(!asset_transform_spec.contains("../src/template/transformAssetUrl"));
+        assert!(!asset_transform_spec.contains("../../compiler-dom/src/transforms/stringifyStatic"));
+        let srcset_transform_spec =
+            fs::read_to_string(tests.join("templateTransformSrcset.spec.ts")).unwrap();
+        assert!(srcset_transform_spec.contains("from './templateTransforms.public-api'"));
+        assert!(srcset_transform_spec.contains("compileWithSrcset"));
+        assert!(!srcset_transform_spec.contains("@vue/compiler-core"));
+        assert!(!srcset_transform_spec.contains("../src/template/transformSrcset"));
+        assert!(
+            !srcset_transform_spec.contains("../../compiler-dom/src/transforms/stringifyStatic")
+        );
+        let template_transforms_api =
+            fs::read_to_string(tests.join("templateTransforms.public-api.ts")).unwrap();
+        assert!(template_transforms_api.contains("compileTemplate"));
+        assert!(template_transforms_api.contains("export function compileWithAssetUrls"));
+        assert!(template_transforms_api.contains("export function compileWithSrcset"));
+        assert!(template_transforms_api.contains("compilerOptions"));
+        assert!(template_transforms_api.contains("transformAssetUrls"));
+        assert!(template_transforms_api.contains("img: []"));
         for compile_script_spec in [
             "defineProps.spec.ts",
             "definePropsDestructure.spec.ts",
@@ -16252,6 +16505,43 @@ mod tests {
                 },
                 {
                   "name": "F:/repo/prepared/vue3-sfc/packages/compiler-sfc/__tests__/templateUtils.spec.ts",
+                  "assertionResults": [
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" }
+                  ]
+                },
+                {
+                  "name": "F:/repo/prepared/vue3-sfc/packages/compiler-sfc/__tests__/templateTransformAssetUrl.spec.ts",
+                  "assertionResults": [
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" }
+                  ]
+                },
+                {
+                  "name": "F:/repo/prepared/vue3-sfc/packages/compiler-sfc/__tests__/templateTransformSrcset.spec.ts",
                   "assertionResults": [
                     { "status": "passed" },
                     { "status": "passed" },
@@ -16450,8 +16740,8 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             counts: ConformanceExecutionCounts {
-                total: 171,
-                pass: 171,
+                total: 198,
+                pass: 198,
                 fail: 0,
                 skip: 0,
                 pending: 0,
@@ -16465,8 +16755,8 @@ mod tests {
         );
 
         assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
-        assert_eq!(coverage.rust_backed_pass, 170);
-        assert_eq!(coverage.rust_backed_total, 170);
+        assert_eq!(coverage.rust_backed_pass, 197);
+        assert_eq!(coverage.rust_backed_total, 197);
         assert_eq!(
             coverage.files[0].source,
             ConformanceCoverageKind::RustBacked
@@ -16500,7 +16790,17 @@ mod tests {
             ConformanceCoverageKind::RustBacked
         );
         assert!(coverage.files[6].reason.contains("vuec_vue3_asset"));
-        for file in coverage.files.iter().skip(7).take(9) {
+        assert_eq!(
+            coverage.files[7].source,
+            ConformanceCoverageKind::RustBacked
+        );
+        assert!(coverage.files[7].reason.contains("asset/srcset transform"));
+        assert_eq!(
+            coverage.files[8].source,
+            ConformanceCoverageKind::RustBacked
+        );
+        assert!(coverage.files[8].reason.contains("asset/srcset transform"));
+        for file in coverage.files.iter().skip(9).take(9) {
             assert_eq!(file.source, ConformanceCoverageKind::RustBacked);
             assert!(file
                 .reason
@@ -16513,7 +16813,7 @@ mod tests {
                 .copied()
                 .unwrap_or_default()
                 .pass,
-            170
+            197
         );
         let _ = fs::remove_dir_all(temp);
     }

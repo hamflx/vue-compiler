@@ -3865,6 +3865,20 @@ fn sfc_template_options(value: Option<&Value>) -> SfcTemplateCompileOptions {
         "isProd",
         bool_option(value, "is_prod", options.is_prod),
     );
+    options.hoist_static = bool_option(
+        value,
+        "hoistStatic",
+        bool_option(value, "hoist_static", options.hoist_static),
+    );
+    options.stringify_static = bool_option(
+        value,
+        "stringifyStatic",
+        bool_option(
+            value,
+            "__vuecStringifyStatic",
+            bool_option(value, "stringify_static", options.stringify_static),
+        ),
+    );
     options.transform_asset_urls =
         transform_asset_urls_enabled_with_compiler_fallback(value, options.transform_asset_urls);
     options.asset_url_options =

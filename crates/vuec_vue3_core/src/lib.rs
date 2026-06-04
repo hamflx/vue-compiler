@@ -812,25 +812,28 @@ impl Vue3Dialect {
             let directive_declarations = render_directive_declarations(&directives);
             let imports = vue3_codegen_imports(ast);
             let mut memo_index = MemoIndex::default();
-            let static_props_hoists = collect_stringify_static_props_hoists(ast, options);
-            let scope =
-                RenderScope::default().with_static_props_hoists(static_props_hoists.clone());
+            let static_hoists = collect_static_hoists(ast, options);
+            let scope = RenderScope::default().with_static_hoists(static_hoists.clone());
             let expr = render_root_expr(ast, &root.children, options, &scope, &mut memo_index);
             let declarations = component_declarations
                 .iter()
                 .chain(directive_declarations.iter())
                 .cloned()
                 .collect::<Vec<_>>();
+            let static_hoist_declarations = static_hoist_declarations(ast, options, &static_hoists);
+            let helper_declarations = declarations
+                .iter()
+                .chain(static_hoist_declarations.iter())
+                .cloned()
+                .collect::<Vec<_>>();
             let mut helpers = vue3_codegen_helpers(
                 ast,
                 ctx,
-                &declarations,
+                &helper_declarations,
                 &expr,
                 !components.is_empty(),
                 options.stringify_static_preserve_helpers,
             );
-            let static_props_hoist_declarations =
-                stringify_static_props_hoist_declarations(ast, &static_props_hoists);
             if options.inline {
                 inline_preamble_helpers(&mut helpers, &expr);
                 if !helpers.is_empty() {
@@ -846,18 +849,20 @@ impl Vue3Dialect {
                         "import {{ {} }} from \"vue\"",
                         import_helper_aliases(&helpers)
                     ));
-                    writer.newline();
                 }
                 for import in &imports {
                     writer.push_line(import);
                 }
                 if !imports.is_empty() {
                     writer.newline();
+                    writer.newline();
+                } else if !helpers.is_empty() {
+                    writer.newline();
                 }
-                for hoist in &static_props_hoist_declarations {
+                for hoist in &static_hoist_declarations {
                     writer.push_line(hoist);
                 }
-                if !static_props_hoist_declarations.is_empty() {
+                if !static_hoist_declarations.is_empty() {
                     writer.newline();
                 }
                 writer.push_line("export function render(_ctx, _cache) {");
@@ -866,10 +871,10 @@ impl Vue3Dialect {
                     writer.push_line(&format!("const {{ {} }} = Vue", helper_aliases(&helpers)));
                     writer.newline();
                 }
-                for hoist in &static_props_hoist_declarations {
+                for hoist in &static_hoist_declarations {
                     writer.push_line(hoist);
                 }
-                if !static_props_hoist_declarations.is_empty() {
+                if !static_hoist_declarations.is_empty() {
                     writer.newline();
                 }
                 writer.push_line(&format!(
@@ -908,9 +913,9 @@ impl Vue3Dialect {
                 writer.newline();
             }
             if (options.inline || (!options.prefix_identifiers && options.mode != "module"))
-                && !static_props_hoist_declarations.is_empty()
+                && !static_hoist_declarations.is_empty()
             {
-                for hoist in &static_props_hoist_declarations {
+                for hoist in &static_hoist_declarations {
                     writer.push_line(hoist);
                 }
                 writer.newline();
@@ -21928,6 +21933,22 @@ fn apply_vue3_stringify_static_helper_order(
 }
 
 fn apply_vue3_plain_child_helper_order(helpers: &mut Vec<RuntimeHelper>) {
+    let fragment_child_order = [
+        RuntimeHelper::Vue3CreateElementVNode,
+        RuntimeHelper::Vue3Fragment,
+        RuntimeHelper::Vue3OpenBlock,
+        RuntimeHelper::Vue3CreateElementBlock,
+    ];
+    if helpers.len() == fragment_child_order.len()
+        && fragment_child_order
+            .iter()
+            .all(|helper| helpers.contains(helper))
+    {
+        helpers.clear();
+        helpers.extend(fragment_child_order);
+        return;
+    }
+
     let fragment_content_prop_order = [
         RuntimeHelper::Vue3ToDisplayString,
         RuntimeHelper::Vue3CreateElementVNode,
@@ -23026,7 +23047,9 @@ fn render_root_expr(
     memo_index: &mut MemoIndex,
 ) -> String {
     if options.hoist_static && options.stringify_static {
-        if let Some(root_static_call) = render_root_static_vnode_cache(ast, children, options) {
+        if let Some(root_static_call) =
+            render_root_static_vnode_cache(ast, children, options, scope)
+        {
             return render_cached_single_child(root_static_call, memo_index.alloc());
         }
     }
@@ -23161,7 +23184,7 @@ struct RenderScope {
     locals: Vec<String>,
     in_v_once: bool,
     memo_index_overrides: BTreeMap<vuec_ast::NodeId, usize>,
-    static_props_hoists: BTreeMap<vuec_ast::NodeId, usize>,
+    static_hoists: StaticHoists,
     disable_stringify_static_chunks: bool,
 }
 
@@ -23188,9 +23211,9 @@ impl RenderScope {
         next
     }
 
-    fn with_static_props_hoists(&self, hoists: BTreeMap<vuec_ast::NodeId, usize>) -> Self {
+    fn with_static_hoists(&self, hoists: StaticHoists) -> Self {
         let mut next = self.clone();
-        next.static_props_hoists = hoists;
+        next.static_hoists = hoists;
         next
     }
 
@@ -23199,6 +23222,68 @@ impl RenderScope {
         next.disable_stringify_static_chunks = true;
         next
     }
+}
+
+#[derive(Clone, Debug, Default)]
+struct StaticHoists {
+    declarations: Vec<StaticHoistDeclaration>,
+    props_by_node: BTreeMap<vuec_ast::NodeId, usize>,
+    bindings_by_node_prop: BTreeMap<(vuec_ast::NodeId, usize), usize>,
+}
+
+impl StaticHoists {
+    fn push_binding(
+        &mut self,
+        node_id: vuec_ast::NodeId,
+        prop_index: usize,
+        expression: String,
+        reuse_existing: bool,
+    ) -> usize {
+        if reuse_existing {
+            if let Some(index) = self
+                .declarations
+                .iter()
+                .position(|declaration| {
+                    matches!(
+                        declaration,
+                        StaticHoistDeclaration::BindingExpression { expression: existing }
+                            if existing == &expression
+                    )
+                })
+                .map(|index| index + 1)
+            {
+                self.bindings_by_node_prop
+                    .insert((node_id, prop_index), index);
+                return index;
+            }
+        }
+        self.declarations
+            .push(StaticHoistDeclaration::BindingExpression { expression });
+        let index = self.declarations.len();
+        self.bindings_by_node_prop
+            .insert((node_id, prop_index), index);
+        index
+    }
+
+    fn push_props_object(&mut self, node_id: vuec_ast::NodeId) -> usize {
+        self.declarations
+            .push(StaticHoistDeclaration::PropsObject { node_id });
+        let index = self.declarations.len();
+        self.props_by_node.insert(node_id, index);
+        index
+    }
+
+    fn binding_index(&self, node_id: vuec_ast::NodeId, prop_index: usize) -> Option<usize> {
+        self.bindings_by_node_prop
+            .get(&(node_id, prop_index))
+            .copied()
+    }
+}
+
+#[derive(Clone, Debug)]
+enum StaticHoistDeclaration {
+    PropsObject { node_id: vuec_ast::NodeId },
+    BindingExpression { expression: String },
 }
 
 #[derive(Clone, Debug, Default)]
@@ -23329,14 +23414,29 @@ fn render_plain_element(
         };
     let props = if branch_key.is_none() {
         element_scope
-            .static_props_hoists
+            .static_hoists
+            .props_by_node
             .get(&node_id)
             .map(|index| format!("_hoisted_{index}"))
             .unwrap_or_else(|| {
-                render_props(element, options, &element_scope, branch_key, memo_index)
+                render_props(
+                    node_id,
+                    element,
+                    options,
+                    &element_scope,
+                    branch_key,
+                    memo_index,
+                )
             })
     } else {
-        render_props(element, options, &element_scope, branch_key, memo_index)
+        render_props(
+            node_id,
+            element,
+            options,
+            &element_scope,
+            branch_key,
+            memo_index,
+        )
     };
     let static_content = render_static_content_directive_child(element, options);
     let children = if let Some(content) = static_content.as_ref() {
@@ -23504,7 +23604,7 @@ fn render_component_element(
     memo_index: &mut MemoIndex,
 ) -> String {
     let tag = render_component_tag_expr(element, options, scope);
-    let props = render_props(element, options, scope, branch_key, memo_index);
+    let props = render_props(node_id, element, options, scope, branch_key, memo_index);
     let attrs = if props.is_empty() { None } else { Some(props) };
     let children = render_component_slots(ast, node_id, options, scope, memo_index);
     let patch_flag = render_patch_flag_text(component_patch_flag_kind(
@@ -24427,7 +24527,7 @@ fn render_element_children(
         && !should_cache_children(ast, &child_nodes)
         && should_stringify_static_children(&child_nodes)
     {
-        if let Some(static_call) = render_static_vnode_cache(ast, &child_nodes, options) {
+        if let Some(static_call) = render_static_vnode_cache(ast, &child_nodes, options, scope) {
             return render_cached_children_array(vec![static_call], memo_index.alloc(), false);
         }
     }
@@ -24439,7 +24539,8 @@ fn render_element_children(
             .any(|child| static_tree_contains_comment(ast, child))
     {
         if options.stringify_static && !scope.disable_stringify_static_chunks {
-            if let Some(static_call) = render_static_vnode_cache(ast, &child_nodes, options) {
+            if let Some(static_call) = render_static_vnode_cache(ast, &child_nodes, options, scope)
+            {
                 return render_cached_children_array(vec![static_call], memo_index.alloc(), false);
             }
             if let Some(rendered) = render_static_vnode_chunked_children(
@@ -25677,8 +25778,9 @@ fn render_static_vnode_cache(
     ast: &Vue3Ast,
     children: &[&vuec_ast::Node<Vue3NodeKind>],
     options: &Vue3CompilerOptions,
+    scope: &RenderScope,
 ) -> Option<String> {
-    let analysis = analyze_static_html_chunk(ast, children, options)?;
+    let analysis = analyze_static_html_chunk(ast, children, options, scope)?;
     if analysis.meets_threshold() {
         Some(analysis.render_static_call())
     } else {
@@ -25690,6 +25792,7 @@ fn render_root_static_vnode_cache(
     ast: &Vue3Ast,
     children: &[vuec_ast::NodeId],
     options: &Vue3CompilerOptions,
+    scope: &RenderScope,
 ) -> Option<String> {
     if visible_child_ids(ast, children).len() < 2 {
         return None;
@@ -25698,7 +25801,7 @@ fn render_root_static_vnode_cache(
         .iter()
         .filter_map(|child_id| ast.node(*child_id))
         .collect::<Vec<_>>();
-    let analysis = analyze_static_html_chunk(ast, &child_nodes, options)?;
+    let analysis = analyze_static_html_chunk(ast, &child_nodes, options, scope)?;
     (analysis.dom_nodes > 1 || analysis.meets_threshold()).then(|| analysis.render_static_call())
 }
 
@@ -25710,7 +25813,7 @@ fn render_static_vnode_chunked_children(
     regular_mode: NodeRenderMode,
     memo_index: &mut MemoIndex,
 ) -> Option<Vec<String>> {
-    let chunks = static_vnode_chunks(ast, children, options);
+    let chunks = static_vnode_chunks(ast, children, options, scope);
     if chunks.is_empty() {
         return None;
     }
@@ -25746,54 +25849,83 @@ fn render_static_vnode_chunked_children(
     Some(rendered)
 }
 
-fn collect_stringify_static_props_hoists(
-    ast: &Vue3Ast,
-    options: &Vue3CompilerOptions,
-) -> BTreeMap<vuec_ast::NodeId, usize> {
-    let mut hoists = BTreeMap::new();
-    if options.hoist_static && options.stringify_static {
-        let mut next_index = 1usize;
-        collect_stringify_static_props_hoists_for_node(
-            ast,
-            ast.root,
-            options,
-            &mut next_index,
-            &mut hoists,
-        );
+fn collect_static_hoists(ast: &Vue3Ast, options: &Vue3CompilerOptions) -> StaticHoists {
+    let mut hoists = StaticHoists::default();
+    if !options.hoist_static {
+        return hoists;
     }
+    let do_not_hoist_root = ast
+        .root_node()
+        .and_then(|root| vue3_single_static_root_child(&root.children, ast));
+    collect_static_hoists_for_node(ast, ast.root, options, do_not_hoist_root, &mut hoists);
     hoists
 }
 
-fn collect_stringify_static_props_hoists_for_node(
+fn collect_static_hoists_for_node(
     ast: &Vue3Ast,
     node_id: vuec_ast::NodeId,
     options: &Vue3CompilerOptions,
-    next_index: &mut usize,
-    hoists: &mut BTreeMap<vuec_ast::NodeId, usize>,
+    do_not_hoist_root: Option<vuec_ast::NodeId>,
+    hoists: &mut StaticHoists,
 ) {
     let Some(node) = ast.node(node_id) else {
         return;
     };
     if let Vue3AstKind::Element(element) = &node.kind {
-        if stringify_static_should_hoist_element_props(ast, node, element, options) {
-            let index = *next_index;
-            *next_index += 1;
-            hoists.insert(node_id, index);
+        collect_static_asset_binding_hoists(node_id, element, hoists);
+        if static_props_should_hoist_element(ast, node, element, options, do_not_hoist_root) {
+            hoists.push_props_object(node_id);
         }
     }
     for child_id in &node.children {
-        collect_stringify_static_props_hoists_for_node(ast, *child_id, options, next_index, hoists);
+        collect_static_hoists_for_node(ast, *child_id, options, do_not_hoist_root, hoists);
     }
 }
 
-fn stringify_static_should_hoist_element_props(
+fn collect_static_asset_binding_hoists(
+    node_id: vuec_ast::NodeId,
+    element: &Vue3Element,
+    hoists: &mut StaticHoists,
+) {
+    for (prop_index, prop) in element.props.iter().enumerate() {
+        let Vue3Prop::Directive(dir) = prop else {
+            continue;
+        };
+        let Some(expression) = static_asset_binding_expression_to_hoist(dir) else {
+            continue;
+        };
+        let key = render_static_binding_prop_key(dir);
+        hoists.push_binding(node_id, prop_index, expression, key != "srcset");
+    }
+}
+
+fn static_asset_binding_expression_to_hoist(dir: &Vue3Directive) -> Option<String> {
+    if dir.name != "bind" || dir.is_dynamic_arg || !dir.modifiers.is_empty() {
+        return None;
+    }
+    let key = render_static_binding_prop_key(dir);
+    let expression = dir.exp.as_ref()?.source_string();
+    let expression = expression.trim();
+    if !expression_is_generated_asset_import(expression) {
+        return None;
+    }
+    (key == "srcset" || generated_asset_import_expression_has_literal(expression))
+        .then(|| expression.to_string())
+}
+
+fn static_props_should_hoist_element(
     ast: &Vue3Ast,
     node: &vuec_ast::Node<Vue3NodeKind>,
     element: &Vue3Element,
-    options: &Vue3CompilerOptions,
+    _options: &Vue3CompilerOptions,
+    do_not_hoist_root: Option<vuec_ast::NodeId>,
 ) -> bool {
     if element.props.is_empty()
         || element.tag_type != Vue3ElementType::Element
+        || directive_by_name(element, "if").is_some()
+        || directive_by_name(element, "else").is_some()
+        || directive_by_name(element, "else-if").is_some()
+        || directive_by_name(element, "for").is_some()
         || !element
             .props
             .iter()
@@ -25801,30 +25933,35 @@ fn stringify_static_should_hoist_element_props(
     {
         return false;
     }
-    if static_tree_contains_comment(ast, node) {
-        let children = node
-            .children
-            .iter()
-            .filter_map(|child_id| ast.node(*child_id))
-            .collect::<Vec<_>>();
-        return !static_vnode_chunks(ast, &children, options).is_empty();
-    }
-    false
+    do_not_hoist_root == Some(node.id) || !is_static_element_tree_for_cache(ast, node)
 }
 
-fn stringify_static_props_hoist_declarations(
+fn static_hoist_declarations(
     ast: &Vue3Ast,
-    hoists: &BTreeMap<vuec_ast::NodeId, usize>,
+    options: &Vue3CompilerOptions,
+    hoists: &StaticHoists,
 ) -> Vec<String> {
+    let scope = RenderScope::default().with_static_hoists(hoists.clone());
     hoists
+        .declarations
         .iter()
-        .filter_map(|(node_id, index)| {
-            let node = ast.node(*node_id)?;
-            let Vue3AstKind::Element(element) = &node.kind else {
-                return None;
-            };
-            let props = render_static_props_hoist_object(element)?;
-            Some(format!("const _hoisted_{index} = {props}"))
+        .enumerate()
+        .filter_map(|(declaration_index, declaration)| {
+            let index = declaration_index + 1;
+            match declaration {
+                StaticHoistDeclaration::BindingExpression { expression } => {
+                    Some(format!("const _hoisted_{index} = {expression}"))
+                }
+                StaticHoistDeclaration::PropsObject { node_id } => {
+                    let node = ast.node(*node_id)?;
+                    let Vue3AstKind::Element(element) = &node.kind else {
+                        return None;
+                    };
+                    let props =
+                        render_static_props_hoist_object(*node_id, element, options, &scope)?;
+                    Some(format!("const _hoisted_{index} = {props}"))
+                }
+            }
         })
         .collect()
 }
@@ -25840,6 +25977,7 @@ fn static_vnode_chunks(
     ast: &Vue3Ast,
     children: &[&vuec_ast::Node<Vue3NodeKind>],
     options: &Vue3CompilerOptions,
+    scope: &RenderScope,
 ) -> Vec<StaticVNodeChunk> {
     let mut chunks = Vec::new();
     let mut start = 0usize;
@@ -25850,7 +25988,7 @@ fn static_vnode_chunks(
         if matches!(child.kind, Vue3AstKind::Comment(_)) {
             blocked_by_comment = true;
         }
-        if let Some(analysis) = analyze_static_html_chunk(ast, &[*child], options) {
+        if let Some(analysis) = analyze_static_html_chunk(ast, &[*child], options, scope) {
             if chunk_analysis.is_none() {
                 start = index;
             }
@@ -25925,6 +26063,7 @@ fn analyze_static_html_chunk(
     ast: &Vue3Ast,
     children: &[&vuec_ast::Node<Vue3NodeKind>],
     options: &Vue3CompilerOptions,
+    scope: &RenderScope,
 ) -> Option<StaticHtmlAnalysis> {
     if children.is_empty() {
         return None;
@@ -25938,7 +26077,7 @@ fn analyze_static_html_chunk(
     for child in children {
         analysis
             .html
-            .append(static_html_for_node(ast, child, options)?);
+            .append(static_html_for_node(ast, child, options, scope)?);
     }
     accumulate_static_html_analysis(ast, children, &mut analysis)?;
     Some(analysis)
@@ -25948,9 +26087,12 @@ fn static_html_for_node(
     ast: &Vue3Ast,
     node: &vuec_ast::Node<Vue3NodeKind>,
     options: &Vue3CompilerOptions,
+    scope: &RenderScope,
 ) -> Option<StaticHtmlBuffer> {
     match &node.kind {
-        Vue3AstKind::Element(element) => static_html_for_element(ast, node, element, options),
+        Vue3AstKind::Element(element) => {
+            static_html_for_element(ast, node, element, options, scope)
+        }
         Vue3AstKind::Text(text) => Some(StaticHtmlBuffer::from_text(escape_static_html_text(
             &text.value,
         ))),
@@ -25969,6 +26111,7 @@ fn static_html_for_element(
     node: &vuec_ast::Node<Vue3NodeKind>,
     element: &Vue3Element,
     options: &Vue3CompilerOptions,
+    scope: &RenderScope,
 ) -> Option<StaticHtmlBuffer> {
     if element.tag == "slot"
         || element.tag_type != Vue3ElementType::Element
@@ -25987,7 +26130,7 @@ fn static_html_for_element(
     html.push_text("<");
     html.push_text(element.tag.as_str());
     let mut inner_html = None;
-    for prop in &element.props {
+    for (prop_index, prop) in element.props.iter().enumerate() {
         match prop {
             Vue3Prop::Attribute(attr) => {
                 if !static_html_attr_is_stringifiable(&attr.name, element.ns) {
@@ -26012,7 +26155,14 @@ fn static_html_for_element(
                 inner_html = Some(escape_static_html_text(&value.to_display_string()?));
             }
             Vue3Prop::Directive(dir) => {
-                let Some(rendered) = static_html_directive_attr(&element.tag, element.ns, dir)?
+                let Some(rendered) = static_html_directive_attr(
+                    &element.tag,
+                    element.ns,
+                    node.id,
+                    prop_index,
+                    dir,
+                    scope,
+                )?
                 else {
                     continue;
                 };
@@ -26040,7 +26190,7 @@ fn static_html_for_element(
         } else {
             for child_id in &node.children {
                 let child = ast.node(*child_id)?;
-                html.append(static_html_for_node(ast, child, options)?);
+                html.append(static_html_for_node(ast, child, options, scope)?);
             }
         }
         html.push_text("</");
@@ -26060,10 +26210,13 @@ struct StaticHtmlAttr {
 fn static_html_directive_attr(
     tag: &str,
     ns: vuec_ast::HtmlNamespace,
+    node_id: vuec_ast::NodeId,
+    prop_index: usize,
     dir: &Vue3Directive,
+    scope: &RenderScope,
 ) -> Option<Option<StaticHtmlAttr>> {
     match dir.name.as_str() {
-        "bind" => static_html_bind_attr(tag, ns, dir),
+        "bind" => static_html_bind_attr(tag, ns, node_id, prop_index, dir, scope),
         "html" | "text" => None,
         _ => None,
     }
@@ -26072,7 +26225,10 @@ fn static_html_directive_attr(
 fn static_html_bind_attr(
     tag: &str,
     ns: vuec_ast::HtmlNamespace,
+    node_id: vuec_ast::NodeId,
+    prop_index: usize,
     dir: &Vue3Directive,
+    scope: &RenderScope,
 ) -> Option<Option<StaticHtmlAttr>> {
     if dir.is_dynamic_arg || !dir.modifiers.is_empty() {
         return None;
@@ -26086,6 +26242,11 @@ fn static_html_bind_attr(
     }
     let source = dir.exp.as_ref()?.source_string();
     if is_asset_import_binding(dir) {
+        if let Some(index) = scope.static_hoists.binding_index(node_id, prop_index) {
+            let mut value = StaticHtmlBuffer::default();
+            value.push_expression(format!("_hoisted_{index}"));
+            return Some(Some(StaticHtmlAttr { name, value }));
+        }
         return Some(Some(StaticHtmlAttr {
             name,
             value: static_html_asset_import_expression(&source)?,
@@ -26776,6 +26937,7 @@ pub fn vue3_element_codegen_patch_flag(
 }
 
 fn render_props(
+    node_id: vuec_ast::NodeId,
     element: &Vue3Element,
     options: &Vue3CompilerOptions,
     scope: &RenderScope,
@@ -26783,6 +26945,7 @@ fn render_props(
     memo_index: &mut MemoIndex,
 ) -> String {
     render_props_for_target(
+        Some(node_id),
         element,
         options,
         scope,
@@ -26799,6 +26962,7 @@ fn render_slot_outlet_props(
     memo_index: &mut MemoIndex,
 ) -> String {
     render_props_for_target(
+        None,
         element,
         options,
         scope,
@@ -26829,6 +26993,7 @@ struct ExactPropsArg {
 }
 
 fn render_props_for_target(
+    node_id: Option<vuec_ast::NodeId>,
     element: &Vue3Element,
     options: &Vue3CompilerOptions,
     scope: &RenderScope,
@@ -26843,7 +27008,7 @@ fn render_props_for_target(
         object_entries.push(format!("key: {key}"));
     }
 
-    for prop in &element.props {
+    for (prop_index, prop) in element.props.iter().enumerate() {
         if !exact_props_include_prop(prop, target) {
             continue;
         }
@@ -26884,9 +27049,14 @@ fn render_props_for_target(
                 }
             }
             Vue3Prop::Directive(dir) if dir.name == "bind" => {
-                if let Some(binding) =
-                    render_binding_prop(dir, options, scope, use_runtime_prop_normalization)
-                {
+                if let Some(binding) = render_binding_prop(
+                    node_id,
+                    prop_index,
+                    dir,
+                    options,
+                    scope,
+                    use_runtime_prop_normalization,
+                ) {
                     object_entries.push(binding);
                 }
             }
@@ -27001,13 +27171,21 @@ fn render_plain_props(entries: &[String]) -> Option<String> {
     }
 }
 
-fn render_static_props_hoist_object(element: &Vue3Element) -> Option<String> {
+fn render_static_props_hoist_object(
+    node_id: vuec_ast::NodeId,
+    element: &Vue3Element,
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+) -> Option<String> {
     let entries = element
         .props
         .iter()
-        .filter_map(|prop| match prop {
+        .enumerate()
+        .filter_map(|(prop_index, prop)| match prop {
             Vue3Prop::Attribute(attr) => Some(render_attribute_prop(element, attr)),
-            Vue3Prop::Directive(dir) if dir.name == "bind" => render_static_binding_hoist_prop(dir),
+            Vue3Prop::Directive(dir) if dir.name == "bind" => {
+                render_static_binding_hoist_prop(node_id, prop_index, dir, options, scope)
+            }
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -27065,6 +27243,8 @@ fn render_object_listeners_prop(
 }
 
 fn render_binding_prop(
+    node_id: Option<vuec_ast::NodeId>,
+    prop_index: usize,
     dir: &Vue3Directive,
     options: &Vue3CompilerOptions,
     scope: &RenderScope,
@@ -27076,12 +27256,16 @@ fn render_binding_prop(
     if arg.is_empty() || value.is_empty() {
         return None;
     }
-    let expression = rewrite_expression_with_scope(value, options, scope);
     if dir.is_dynamic_arg {
+        let expression = rewrite_expression_with_scope(value, options, scope);
         let key = render_dynamic_binding_prop_key(dir, &arg, options, scope);
         return Some(format!("[{key}]: {expression}"));
     }
     let key = render_static_binding_prop_key(dir);
+    let expression = node_id
+        .and_then(|node_id| scope.static_hoists.binding_index(node_id, prop_index))
+        .map(|index| format!("_hoisted_{index}"))
+        .unwrap_or_else(|| rewrite_expression_with_scope(value, options, scope));
     if key == "class" && !use_runtime_prop_normalization {
         Some(format!("class: _normalizeClass({expression})"))
     } else if key == "style" && !use_runtime_prop_normalization {
@@ -27091,21 +27275,39 @@ fn render_binding_prop(
     }
 }
 
-fn render_static_binding_hoist_prop(dir: &Vue3Directive) -> Option<String> {
+fn render_static_binding_hoist_prop(
+    node_id: vuec_ast::NodeId,
+    prop_index: usize,
+    dir: &Vue3Directive,
+    _options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+) -> Option<String> {
     if dir.is_dynamic_arg || !dir.modifiers.is_empty() {
         return None;
     }
     let key = render_static_binding_prop_key(dir);
     let source = dir.exp.as_ref()?.source_string();
-    let value = static_const_eval_source(&source)?;
-    let rendered = match value {
-        StaticConstValue::String(value) => quote_string(&value),
-        StaticConstValue::Number(value) => value,
-        StaticConstValue::Bool(value) => value.to_string(),
-        StaticConstValue::Null => "null".into(),
-        StaticConstValue::Array(_) | StaticConstValue::Object(_) => return None,
+    let expression = if let Some(index) = scope.static_hoists.binding_index(node_id, prop_index) {
+        format!("_hoisted_{index}")
+    } else if expression_is_generated_asset_import(&source) {
+        source.trim().to_string()
+    } else {
+        let value = static_const_eval_source(&source)?;
+        match value {
+            StaticConstValue::String(value) => quote_string(&value),
+            StaticConstValue::Number(value) => value,
+            StaticConstValue::Bool(value) => value.to_string(),
+            StaticConstValue::Null => "null".into(),
+            StaticConstValue::Array(_) | StaticConstValue::Object(_) => return None,
+        }
     };
-    Some(format!("{}: {}", json_key(&key), rendered))
+    if key == "class" {
+        Some(format!("class: _normalizeClass({expression})"))
+    } else if key == "style" {
+        Some(format!("style: _normalizeStyle({expression})"))
+    } else {
+        Some(format!("{}: {}", json_key(&key), expression))
+    }
 }
 
 fn render_content_directive_prop(
@@ -27835,14 +28037,15 @@ fn vue3_prop_is_static_cacheable_for_hoist(prop: &Vue3Prop) -> bool {
     match prop {
         Vue3Prop::Attribute(_) => true,
         Vue3Prop::Directive(dir) => {
-            dir.name == "bind"
-                && !dir.is_dynamic_arg
-                && dir.modifiers.is_empty()
-                && dir.arg.is_some()
-                && dir
-                    .exp
-                    .as_ref()
-                    .is_some_and(|exp| static_const_eval_source(&exp.source_string()).is_some())
+            is_asset_import_binding(dir)
+                || dir.name == "bind"
+                    && !dir.is_dynamic_arg
+                    && dir.modifiers.is_empty()
+                    && dir.arg.is_some()
+                    && dir
+                        .exp
+                        .as_ref()
+                        .is_some_and(|exp| static_const_eval_source(&exp.source_string()).is_some())
         }
     }
 }
@@ -27894,6 +28097,14 @@ fn is_asset_import_binding(dir: &Vue3Directive) -> bool {
 
 fn expression_is_generated_asset_import(expression: &str) -> bool {
     generated_asset_import_expression_parts(expression).is_some()
+}
+
+fn generated_asset_import_expression_has_literal(expression: &str) -> bool {
+    generated_asset_import_expression_parts(expression).is_some_and(|parts| {
+        parts
+            .iter()
+            .any(|part| matches!(part, AssetImportExpressionPart::Literal(_)))
+    })
 }
 
 fn static_html_asset_import_expression(expression: &str) -> Option<StaticHtmlBuffer> {
@@ -31968,6 +32179,77 @@ mod tests {
         assert!(generated.code.contains("srcset: _imports_0 + ' 2x'"));
         assert!(!generated.code.contains("_ctx._imports_0"));
         assert!(!generated.code.contains("[\"src\""));
+    }
+
+    #[test]
+    fn base_compile_hoists_static_srcset_asset_import_binding() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<img :srcset="_imports_0 + ' 2x'">"#.into(),
+            file_id: FileId(26),
+            base_offset: 0,
+        };
+        let options = Vue3CompilerOptions {
+            mode: "module".into(),
+            prefix_identifiers: true,
+            hoist_static: true,
+            ..Vue3CompilerOptions::default()
+        };
+        let mut ast = Vue3Dialect::base_parse(source.clone(), &options);
+        if let Some(root_node) = ast.root_node_mut() {
+            if let Vue3AstKind::Root(root) = &mut root_node.kind {
+                root.imports.push(vuec_ast::Vue3ImportItem {
+                    name: "_imports_0".into(),
+                    path: "./logo.png".into(),
+                });
+            }
+        }
+        let mut ctx = TransformContext::default();
+        Vue3Dialect::transform(&mut ast, &mut ctx, &options);
+        let result = Vue3Dialect::finish_compile(ast, source, options, ctx);
+
+        assert!(result.code.contains("import _imports_0 from './logo.png'"));
+        assert!(result
+            .code
+            .contains("const _hoisted_1 = _imports_0 + ' 2x'"));
+        assert!(result.code.contains("srcset: _hoisted_1"));
+        assert!(!result.code.contains("_ctx._imports_0"));
+    }
+
+    #[test]
+    fn base_compile_reuses_static_asset_fragment_binding_hoist() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r##"<svg><use :href="_imports_0 + '#fragment'"></use><use :href="_imports_0 + '#fragment'"></use></svg>"##.into(),
+            file_id: FileId(26),
+            base_offset: 0,
+        };
+        let options = Vue3CompilerOptions {
+            mode: "module".into(),
+            prefix_identifiers: true,
+            hoist_static: true,
+            ..Vue3CompilerOptions::default()
+        };
+        let mut ast = Vue3Dialect::base_parse(source.clone(), &options);
+        if let Some(root_node) = ast.root_node_mut() {
+            if let Vue3AstKind::Root(root) = &mut root_node.kind {
+                root.imports.push(vuec_ast::Vue3ImportItem {
+                    name: "_imports_0".into(),
+                    path: "./icons.svg".into(),
+                });
+            }
+        }
+        let mut ctx = TransformContext::default();
+        Vue3Dialect::transform(&mut ast, &mut ctx, &options);
+        let result = Vue3Dialect::finish_compile(ast, source, options, ctx);
+
+        assert!(result.code.contains("import _imports_0 from './icons.svg'"));
+        assert!(result
+            .code
+            .contains("const _hoisted_1 = _imports_0 + '#fragment'"));
+        assert_eq!(result.code.matches("const _hoisted_").count(), 1);
+        assert_eq!(result.code.matches("href: _hoisted_1").count(), 2);
+        assert!(!result.code.contains("_ctx._imports_0"));
     }
 
     #[test]

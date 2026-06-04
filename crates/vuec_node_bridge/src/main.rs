@@ -429,7 +429,10 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
             let source = string_field(&payload, "source");
             let filename = string_field_or(&payload, "filename", "anonymous.vue");
             let compiler = SfcCompiler::new();
-            let options = sfc_template_options(payload.get("options"));
+            let template_options_value = payload
+                .get("bridgeOptions")
+                .or_else(|| payload.get("options"));
+            let options = sfc_template_options(template_options_value);
             let preprocessed = compiler.preprocess_vue3_template(
                 &source,
                 vue3_template_preprocess_options(payload.get("options"), &filename),
@@ -1613,7 +1616,7 @@ fn vue3_sfc_compile_template_value(
     let mut core = vue3_options(Some(bridge_options));
     core.prefix_identifiers = true;
     core.mode = "module".into();
-    core.hoist_static = true;
+    core.hoist_static = sfc_options.hoist_static;
     core.cache_handlers = true;
     core.scope_id = sfc_options.scope_id.clone();
     core.slotted = sfc_options.slotted;
@@ -4424,6 +4427,20 @@ fn sfc_template_options(value: Option<&Value>) -> SfcTemplateCompileOptions {
         value,
         "isProd",
         bool_option(value, "is_prod", options.is_prod),
+    );
+    options.hoist_static = bool_option(
+        value,
+        "hoistStatic",
+        bool_option(value, "hoist_static", options.hoist_static),
+    );
+    options.stringify_static = bool_option(
+        value,
+        "stringifyStatic",
+        bool_option(
+            value,
+            "__vuecStringifyStatic",
+            bool_option(value, "stringify_static", options.stringify_static),
+        ),
     );
     options.transform_asset_urls =
         transform_asset_urls_enabled(value, options.transform_asset_urls);
@@ -10663,6 +10680,35 @@ mod tests {
         .expect("dom parse");
 
         assert_eq!(parsed["imports"], json!([]));
+    }
+
+    #[test]
+    fn vue3_sfc_compile_template_uses_bridge_options_for_hoist_static() {
+        let compiled = dispatch(
+            "sfc.compileTemplate",
+            json!({
+                "source": r#"<div><img src="./bar.png"><span>ok</span></div>"#,
+                "filename": "template.vue",
+                "options": {
+                    "compilerOptions": {
+                        "hoistStatic": false
+                    }
+                },
+                "bridgeOptions": {
+                    "mode": "module",
+                    "prefixIdentifiers": true,
+                    "cacheHandlers": true,
+                    "sourceMap": true,
+                    "hoistStatic": false
+                }
+            }),
+        )
+        .expect("sfc compileTemplate");
+
+        let code = compiled["code"].as_str().unwrap_or("");
+        assert!(code.contains("import _imports_0 from './bar.png'"));
+        assert!(code.contains("src: _imports_0"));
+        assert!(!code.contains("_cache[0]"));
     }
 
     #[test]

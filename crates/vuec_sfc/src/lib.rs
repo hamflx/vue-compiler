@@ -314,6 +314,12 @@ pub struct SfcTemplateCompileOptions {
     pub slotted: bool,
     /// Whether production compile behavior is requested.
     pub is_prod: bool,
+    /// Whether static template subtrees should be hoisted.
+    #[serde(default = "default_template_hoist_static")]
+    pub hoist_static: bool,
+    /// Whether hoisted static subtrees should be stringified.
+    #[serde(default)]
+    pub stringify_static: bool,
     /// Whether asset URLs should be transformed.
     pub transform_asset_urls: bool,
     /// Asset URL transform options.
@@ -328,10 +334,16 @@ impl Default for SfcTemplateCompileOptions {
             scope_id: None,
             slotted: false,
             is_prod: false,
+            hoist_static: true,
+            stringify_static: false,
             transform_asset_urls: true,
             asset_url_options: AssetUrlOptions::default(),
         }
     }
+}
+
+fn default_template_hoist_static() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -903,7 +915,8 @@ impl SfcCompiler {
         let mut core = Vue3CompilerOptions {
             prefix_identifiers: true,
             mode: "module".into(),
-            hoist_static: true,
+            hoist_static: options.hoist_static,
+            stringify_static: options.stringify_static,
             cache_handlers: true,
             scope_id: options.scope_id.clone(),
             slotted: options.slotted,
@@ -986,7 +999,8 @@ impl SfcCompiler {
         let mut core = Vue3CompilerOptions {
             prefix_identifiers: true,
             mode: "module".into(),
-            hoist_static: true,
+            hoist_static: options.hoist_static,
+            stringify_static: options.stringify_static,
             cache_handlers: true,
             scope_id: options.scope_id.clone(),
             slotted: options.slotted,
@@ -35323,7 +35337,8 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
         assert!(template.code.contains("src: _imports_0"));
         assert!(template
             .code
-            .contains(r#"srcset: _imports_1 + ' 1x, ' + "/foo/logo.png" + ' 2x'"#));
+            .contains(r#"const _hoisted_1 = _imports_1 + ' 1x, ' + "/foo/logo.png" + ' 2x'"#));
+        assert!(template.code.contains("srcset: _hoisted_1"));
         assert!(!template.code.contains(r#"src: "~logo.png""#));
     }
 
@@ -35365,9 +35380,34 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
             .code
             .contains("import _imports_1 from '@theme/logo.png'"));
         assert!(template.code.contains("src: _imports_0"));
-        assert!(template.code.contains("srcset: _imports_0 + ' 2x'"));
+        assert!(template
+            .code
+            .contains("const _hoisted_1 = _imports_0 + ' 2x'"));
+        assert!(template.code.contains("srcset: _hoisted_1"));
         assert!(!template.code.contains("_ctx._imports_"));
         assert!(!template.code.contains("PROPS"));
+    }
+
+    #[test]
+    fn compile_template_honors_hoist_static_option() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "foo.vue",
+            r#"<template><div><img src="./logo.png"><span>ok</span></div></template>"#,
+        );
+        let hoisted = compiler.compile_template(&descriptor, SfcTemplateCompileOptions::default());
+        let unhoisted = compiler.compile_template(
+            &descriptor,
+            SfcTemplateCompileOptions {
+                hoist_static: false,
+                ..SfcTemplateCompileOptions::default()
+            },
+        );
+
+        assert!(hoisted.code.contains("_cache[0]"));
+        assert!(hoisted.code.contains("src: _imports_0"));
+        assert!(!unhoisted.code.contains("_cache[0]"));
+        assert!(unhoisted.code.contains("src: _imports_0"));
     }
 
     #[test]
