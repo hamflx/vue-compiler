@@ -4502,6 +4502,11 @@ fn sfc_script_options(value: Option<&Value>) -> SfcScriptCompileOptions {
         .and_then(Value::as_str)
         .or(nested_runtime_module_name)
         .map(ToOwned::to_owned);
+    options.hoist_static = bool_option(
+        value,
+        "hoistStatic",
+        bool_option(value, "hoist_static", options.hoist_static),
+    );
     options.ref_sugar = bool_option(
         value,
         "refSugar",

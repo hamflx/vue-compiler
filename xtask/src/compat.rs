@@ -12997,6 +12997,7 @@ fn rewrite_vue3_sfc_public_api_spec_imports(prepared_root: &Path) -> Result<()> 
         "defineModel.spec.ts",
         "defineOptions.spec.ts",
         "defineSlots.spec.ts",
+        "hoistStatic.spec.ts",
     ] {
         rewrite_text_file_import(
             &tests.join("compileScript").join(compile_script_spec),
@@ -13836,6 +13837,7 @@ fn conformance_coverage_file_kind(
         || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineModel.spec.ts")
         || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineOptions.spec.ts")
         || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineSlots.spec.ts")
+        || path.ends_with("packages/compiler-sfc/__tests__/compileScript/hoistStatic.spec.ts")
     {
         ConformanceCoverageKind::RustBacked
     } else if path.ends_with("packages/compiler-sfc/test/compileStyle.spec.ts") {
@@ -13924,9 +13926,10 @@ fn conformance_coverage_file_reason(
                 || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineExpose.spec.ts")
                 || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineModel.spec.ts")
                 || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineOptions.spec.ts")
-                || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineSlots.spec.ts") =>
+                || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineSlots.spec.ts")
+                || path.ends_with("packages/compiler-sfc/__tests__/compileScript/hoistStatic.spec.ts") =>
         {
-            "Official Vue 3 SFC compileScript macro file imports the prepared public API test helper, so parse and compileScript route through @vue/compiler-sfc, vuec_node_bridge, and the Rust vuec_sfc macro implementation; the helper only preserves official assertCode and compileSFCScript test utility shape."
+            "Official Vue 3 SFC compileScript file imports the prepared public API test helper, so parse and compileScript route through @vue/compiler-sfc, vuec_node_bridge, and the Rust vuec_sfc compileScript implementation; the helper only preserves official assertCode and compileSFCScript test utility shape."
                 .to_string()
         }
         ConformanceCoverageKind::RustBacked => {
@@ -16020,6 +16023,7 @@ mod tests {
             "defineModel.spec.ts",
             "defineOptions.spec.ts",
             "defineSlots.spec.ts",
+            "hoistStatic.spec.ts",
         ] {
             fs::write(
                 compile_script_tests.join(compile_script_spec),
@@ -16099,6 +16103,7 @@ mod tests {
             "defineModel.spec.ts",
             "defineOptions.spec.ts",
             "defineSlots.spec.ts",
+            "hoistStatic.spec.ts",
         ] {
             let spec = fs::read_to_string(compile_script_tests.join(compile_script_spec)).unwrap();
             assert!(spec.contains("from '../utils.public-api'"));
@@ -16279,6 +16284,21 @@ mod tests {
                     { "status": "passed" },
                     { "status": "passed" }
                   ]
+                },
+                {
+                  "name": "F:/repo/prepared/vue3-sfc/packages/compiler-sfc/__tests__/compileScript/hoistStatic.spec.ts",
+                  "assertionResults": [
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" }
+                  ]
                 }
               ]
             }"#,
@@ -16293,8 +16313,8 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             counts: ConformanceExecutionCounts {
-                total: 86,
-                pass: 86,
+                total: 96,
+                pass: 96,
                 fail: 0,
                 skip: 0,
                 pending: 0,
@@ -16308,8 +16328,8 @@ mod tests {
         );
 
         assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
-        assert_eq!(coverage.rust_backed_pass, 85);
-        assert_eq!(coverage.rust_backed_total, 85);
+        assert_eq!(coverage.rust_backed_pass, 95);
+        assert_eq!(coverage.rust_backed_total, 95);
         assert_eq!(
             coverage.files[0].source,
             ConformanceCoverageKind::RustBacked
@@ -16343,9 +16363,11 @@ mod tests {
             ConformanceCoverageKind::RustBacked
         );
         assert!(coverage.files[6].reason.contains("vuec_vue3_asset"));
-        for file in coverage.files.iter().skip(7).take(5) {
+        for file in coverage.files.iter().skip(7).take(6) {
             assert_eq!(file.source, ConformanceCoverageKind::RustBacked);
-            assert!(file.reason.contains("Rust vuec_sfc macro implementation"));
+            assert!(file
+                .reason
+                .contains("Rust vuec_sfc compileScript implementation"));
         }
         assert_eq!(
             coverage
@@ -16354,7 +16376,7 @@ mod tests {
                 .copied()
                 .unwrap_or_default()
                 .pass,
-            85
+            95
         );
         let _ = fs::remove_dir_all(temp);
     }

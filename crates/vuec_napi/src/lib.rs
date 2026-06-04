@@ -3912,6 +3912,11 @@ fn sfc_script_options(value: Option<&Value>) -> SfcScriptCompileOptions {
     if options.global_type_files.is_empty() {
         options.global_type_files = string_array_option(value, "global_type_files");
     }
+    options.hoist_static = bool_option(
+        value,
+        "hoistStatic",
+        bool_option(value, "hoist_static", options.hoist_static),
+    );
     options.ref_sugar = bool_option(
         value,
         "refSugar",
