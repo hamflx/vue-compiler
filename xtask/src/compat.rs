@@ -12596,6 +12596,7 @@ fn write_vue3_core_conformance_shims(prepared_root: &Path) -> Result<()> {
     write_vue3_core_source_shims(prepared_root)?;
     write_vue3_core_test_setup(prepared_root)?;
     rewrite_vue3_core_transform_text_public_api_spec(prepared_root)?;
+    rewrite_vue3_core_v_once_public_api_spec(prepared_root)?;
 
     let config = r#"
 import path from 'node:path'
@@ -12765,6 +12766,137 @@ function hydrateTransformTextAst(node: any): any {
     'parseResult',
   ]) {
     hydrateTransformTextAst(node[key])
+  }
+  return node
+}
+
+function helperSymbol(name: string) {
+  return typeof name === 'string' ? runtime[name] : undefined
+}
+"#,
+    )?;
+    Ok(())
+}
+
+fn rewrite_vue3_core_v_once_public_api_spec(prepared_root: &Path) -> Result<()> {
+    let transforms = prepared_root
+        .join("packages")
+        .join("compiler-core")
+        .join("__tests__")
+        .join("transforms");
+    let spec = transforms.join("vOnce.spec.ts");
+    if !spec.exists() {
+        return Ok(());
+    }
+    rewrite_text_file_block(
+        &spec,
+        r#"import {
+  type CompilerOptions,
+  NodeTypes,
+  generate,
+  getBaseTransformPreset,
+  baseParse as parse,
+  transform,
+} from '../../src'
+import { RENDER_SLOT, SET_BLOCK_TRACKING } from '../../src/runtimeHelpers'"#,
+        r#"import {
+  type CompilerOptions,
+  NodeTypes,
+  generate,
+} from '../../src'
+import { RENDER_SLOT, SET_BLOCK_TRACKING } from '../../src/runtimeHelpers'
+import { transformWithOnce } from './vOnce.rust-api'"#,
+        "Vue 3 core vOnce Rust API imports",
+    )?;
+    rewrite_text_file_block(
+        &spec,
+        r#"function transformWithOnce(template: string, options: CompilerOptions = {}) {
+  const ast = parse(template)
+  const [nodeTransforms, directiveTransforms] = getBaseTransformPreset()
+  transform(ast, {
+    nodeTransforms,
+    directiveTransforms,
+    ...options,
+  })
+  return ast
+}
+"#,
+        "",
+        "Vue 3 core vOnce local transform helper",
+    )?;
+    write_text(
+        &transforms.join("vOnce.rust-api.ts"),
+        r#"import {
+  type CompilerOptions,
+  NodeTypes,
+  __vuecRuntime,
+} from '../../src'
+
+const runtime = __vuecRuntime as any
+
+export function transformWithOnce(
+  template: string,
+  options: CompilerOptions = {},
+) {
+  const root = runtime.callBridge('vue3.core.transformOnceSuite', {
+    source: template,
+    options: normalizeOptions(options),
+  })
+  return hydrateTransformOnceAst(root)
+}
+
+function normalizeOptions(options: CompilerOptions) {
+  const normalized: Record<string, unknown> = {}
+  for (const key of Object.keys(options || {}) as Array<keyof CompilerOptions>) {
+    const value = options[key]
+    if (typeof value !== 'function') normalized[key as string] = value
+  }
+  return normalized
+}
+
+function hydrateTransformOnceAst(node: any): any {
+  if (!node || typeof node !== 'object') return node
+  if (Array.isArray(node)) {
+    node.forEach(hydrateTransformOnceAst)
+    return node
+  }
+  if (node.type === NodeTypes.ROOT && Array.isArray(node.helpers)) {
+    node.helpers = new Set(node.helpers.map((name: string) => helperSymbol(name) || name))
+  }
+  if (
+    node.type === NodeTypes.JS_CALL_EXPRESSION &&
+    typeof node.callee === 'string'
+  ) {
+    node.callee = helperSymbol(node.callee) || node.callee
+  }
+  if (node.type === NodeTypes.VNODE_CALL && typeof node.tag === 'string') {
+    node.tag = helperSymbol(node.tag) || node.tag
+  }
+  for (const key of [
+    'children',
+    'props',
+    'content',
+    'codegenNode',
+    'arguments',
+    'returns',
+    'params',
+    'directives',
+    'source',
+    'valueAlias',
+    'keyAlias',
+    'objectIndexAlias',
+    'parseResult',
+    'branches',
+    'condition',
+    'test',
+    'consequent',
+    'alternate',
+    'value',
+    'elements',
+    'properties',
+    'key',
+  ]) {
+    hydrateTransformOnceAst(node[key])
   }
   return node
 }
@@ -14509,6 +14641,7 @@ fn conformance_coverage_file_kind(
         || path.ends_with("packages/compiler-core/__tests__/utils.spec.ts")
         || path.ends_with("packages/compiler-core/__tests__/transforms/transformText.spec.ts")
         || path.ends_with("packages/compiler-core/__tests__/transforms/vMemo.spec.ts")
+        || path.ends_with("packages/compiler-core/__tests__/transforms/vOnce.spec.ts")
         || path.ends_with("packages/compiler-dom/__tests__/index.spec.ts")
         || path.ends_with("packages/compiler-dom/__tests__/decoderHtmlBrowser.spec.ts")
         || path.ends_with("packages/compiler-dom/__tests__/parse.spec.ts")
@@ -14554,6 +14687,12 @@ fn conformance_coverage_file_reason(
             if path.ends_with("packages/compiler-core/__tests__/transforms/transformText.spec.ts") =>
         {
             "Official Vue 3 compiler-core transformText file imports a prepared Rust API helper that forwards transformWithTextOpt through @vue/compiler-core.__vuecRuntime into vuec_node_bridge command vue3.core.transformTextSuite; the helper only hydrates public AST helper symbols while Rust parser, transformExpression/processFor/transformText projections, public AST codegen, and generate snapshots execute through Rust."
+                .to_string()
+        }
+        ConformanceCoverageKind::RustBacked
+            if path.ends_with("packages/compiler-core/__tests__/transforms/vOnce.spec.ts") =>
+        {
+            "Official Vue 3 compiler-core vOnce file imports a prepared Rust API helper that forwards transformWithOnce through @vue/compiler-core.__vuecRuntime into vuec_node_bridge command vue3.core.transformOnceSuite; the helper only hydrates public AST helper symbols while Rust parser, transformOnce cache intent, structural root/if/for public AST projection, and generate snapshots execute through Rust."
                 .to_string()
         }
         ConformanceCoverageKind::RustBacked
@@ -15825,6 +15964,19 @@ mod tests {
                   ]
                 },
                 {
+                  "name": "F:/repo/prepared/vue3-core/packages/compiler-core/__tests__/transforms/vOnce.spec.ts",
+                  "assertionResults": [
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" }
+                  ]
+                },
+                {
                   "name": "F:/repo/prepared/vue3-core/packages/compiler-core/__tests__/transforms/vOn.spec.ts",
                   "assertionResults": [
                     { "status": "passed" },
@@ -15844,8 +15996,8 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             counts: ConformanceExecutionCounts {
-                total: 27,
-                pass: 26,
+                total: 35,
+                pass: 34,
                 fail: 1,
                 skip: 0,
                 pending: 0,
@@ -15859,8 +16011,8 @@ mod tests {
         );
 
         assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
-        assert_eq!(coverage.rust_backed_pass, 25);
-        assert_eq!(coverage.rust_backed_total, 25);
+        assert_eq!(coverage.rust_backed_pass, 33);
+        assert_eq!(coverage.rust_backed_total, 33);
         assert_eq!(
             coverage
                 .counts_by_source
@@ -15868,7 +16020,7 @@ mod tests {
                 .copied()
                 .unwrap_or_default()
                 .pass,
-            25
+            33
         );
         assert_eq!(
             coverage
@@ -15901,7 +16053,12 @@ mod tests {
             ConformanceCoverageKind::RustBacked
         );
         assert!(coverage.files[4].reason.contains("transformTextSuite"));
-        assert_eq!(coverage.files[5].source, ConformanceCoverageKind::Mixed);
+        assert_eq!(
+            coverage.files[5].source,
+            ConformanceCoverageKind::RustBacked
+        );
+        assert!(coverage.files[5].reason.contains("transformOnceSuite"));
+        assert_eq!(coverage.files[6].source, ConformanceCoverageKind::Mixed);
         assert!(coverage.reason.contains("xtask/src/compat.rs"));
         let _ = fs::remove_dir_all(temp);
     }
@@ -16160,6 +16317,41 @@ mod tests {
                 .unwrap_or_default()
                 .as_nanos()
         ));
+        let transforms_tests = temp
+            .join("packages")
+            .join("compiler-core")
+            .join("__tests__")
+            .join("transforms");
+        fs::create_dir_all(&transforms_tests).unwrap();
+        fs::write(
+            transforms_tests.join("vOnce.spec.ts"),
+            r#"import {
+  type CompilerOptions,
+  NodeTypes,
+  generate,
+  getBaseTransformPreset,
+  baseParse as parse,
+  transform,
+} from '../../src'
+import { RENDER_SLOT, SET_BLOCK_TRACKING } from '../../src/runtimeHelpers'
+
+function transformWithOnce(template: string, options: CompilerOptions = {}) {
+  const ast = parse(template)
+  const [nodeTransforms, directiveTransforms] = getBaseTransformPreset()
+  transform(ast, {
+    nodeTransforms,
+    directiveTransforms,
+    ...options,
+  })
+  return ast
+}
+
+test('placeholder', () => {
+  expect(transformWithOnce('<div v-once />')).toBeTruthy()
+})
+"#,
+        )
+        .unwrap();
         write_vue3_core_conformance_shims(&temp).unwrap();
 
         let parser = fs::read_to_string(
@@ -16184,6 +16376,12 @@ mod tests {
         .unwrap();
         assert!(v_if.contains("__vuecRuntime"));
         assert!(v_if.contains("transformIf"));
+        let v_once_spec = fs::read_to_string(transforms_tests.join("vOnce.spec.ts")).unwrap();
+        assert!(v_once_spec.contains("from './vOnce.rust-api'"));
+        assert!(!v_once_spec.contains("getBaseTransformPreset"));
+        let v_once_api = fs::read_to_string(transforms_tests.join("vOnce.rust-api.ts")).unwrap();
+        assert!(v_once_api.contains("callBridge('vue3.core.transformOnceSuite'"));
+        assert!(v_once_api.contains("hydrateTransformOnceAst"));
         let _ = fs::remove_dir_all(temp);
     }
 
