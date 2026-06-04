@@ -5203,6 +5203,31 @@ mod tests {
         assert!(!runtime_content.contains("withDefaults"));
         assert!(!runtime_content.contains("defineProps"));
 
+        let destructure = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "const { foo } = withDefaults(defineProps<{ foo: string }>(), { foo: 'foo' })",
+                    "</script>"
+                ),
+                "filename": "FooBar.vue"
+            }),
+        )
+        .expect("vue3 compileScript");
+        let destructure_content = destructure["content"].as_str().unwrap_or_default();
+        assert!(destructure["errors"].as_array().unwrap().is_empty());
+        assert!(destructure["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| warning
+                .as_str()
+                .is_some_and(|warning| warning
+                    .contains("withDefaults() is unnecessary when using destructure"))));
+        assert!(destructure_content.contains("const { foo } = __props"));
+        assert_eq!(destructure["bindings"]["foo"], json!("setup-const"));
+
         let missing_defaults = dispatch(
             "sfc.compileScript",
             json!({
@@ -5579,6 +5604,9 @@ mod tests {
         ));
         assert!(content.contains("function read(foo) { return foo + __props.bar }"));
         assert!(content.contains(r#"console.log(message, payload, __props["foo.bar"])"#));
+        assert_eq!(compiled["propsAliases"]["baz"], json!("bar"));
+        assert_eq!(compiled["propsAliases"]["fooBar"], json!("foo.bar"));
+        assert!(compiled["propsAliases"].get("foo").is_none());
     }
 
     #[test]

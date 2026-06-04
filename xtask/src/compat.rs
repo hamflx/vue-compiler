@@ -8001,6 +8001,18 @@ function hydrateVue3CompileScriptResult(result) {
   result = throwVue3CompileScriptErrors(result);
   if (!result || typeof result !== 'object') return result;
   const bindings = result.bindings;
+  if (bindings && typeof bindings === 'object' && result.propsAliases && typeof result.propsAliases === 'object') {
+    bindings.__propsAliases = result.propsAliases;
+    delete result.propsAliases;
+  }
+  if (Array.isArray(result.warnings)) {
+    for (const warning of result.warnings) {
+      if (warning == null) continue;
+      const message = typeof warning === 'string' ? warning : (warning && warning.message) || String(warning);
+      console.warn(message.startsWith('[@vue/compiler-sfc]') ? message : `[@vue/compiler-sfc] ${message}`);
+    }
+    delete result.warnings;
+  }
   if (bindings && typeof bindings === 'object' && Object.prototype.hasOwnProperty.call(bindings, '__isScriptSetup')) {
     const isScriptSetup = bindings.__isScriptSetup === true || bindings.__isScriptSetup === 'true';
     delete bindings.__isScriptSetup;
@@ -13002,6 +13014,7 @@ fn rewrite_vue3_sfc_public_api_spec_imports(prepared_root: &Path) -> Result<()> 
     )?;
     for compile_script_spec in [
         "defineProps.spec.ts",
+        "definePropsDestructure.spec.ts",
         "defineEmits.spec.ts",
         "defineExpose.spec.ts",
         "defineModel.spec.ts",
@@ -13848,6 +13861,9 @@ fn conformance_coverage_file_kind(
         || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineModel.spec.ts")
         || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineOptions.spec.ts")
         || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineProps.spec.ts")
+        || path.ends_with(
+            "packages/compiler-sfc/__tests__/compileScript/definePropsDestructure.spec.ts",
+        )
         || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineSlots.spec.ts")
         || path.ends_with("packages/compiler-sfc/__tests__/compileScript/hoistStatic.spec.ts")
         || path.ends_with("packages/compiler-sfc/__tests__/compileScript/importUsageCheck.spec.ts")
@@ -13940,6 +13956,7 @@ fn conformance_coverage_file_reason(
                 || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineModel.spec.ts")
                 || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineOptions.spec.ts")
                 || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineProps.spec.ts")
+                || path.ends_with("packages/compiler-sfc/__tests__/compileScript/definePropsDestructure.spec.ts")
                 || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineSlots.spec.ts")
                 || path.ends_with("packages/compiler-sfc/__tests__/compileScript/hoistStatic.spec.ts")
                 || path.ends_with("packages/compiler-sfc/__tests__/compileScript/importUsageCheck.spec.ts") =>
@@ -14706,6 +14723,9 @@ mod tests {
         assert!(ALIAS_RUNTIME_JS
             .contains("options.__vuecCustomElement = !!options.customElement(filename)"));
         assert!(ALIAS_RUNTIME_JS.contains("delete options.customElement"));
+        assert!(ALIAS_RUNTIME_JS.contains("bindings.__propsAliases = result.propsAliases"));
+        assert!(ALIAS_RUNTIME_JS.contains("delete result.propsAliases"));
+        assert!(ALIAS_RUNTIME_JS.contains("Array.isArray(result.warnings)"));
         assert!(ALIAS_RUNTIME_JS.contains("Object.defineProperty(bindings, '__isScriptSetup'"));
         assert!(ALIAS_RUNTIME_JS.contains("[@vue/compiler-sfc] ${message}"));
     }
@@ -14805,6 +14825,9 @@ mod tests {
         ));
         assert!(source.contains("function hydrateVue3CompileScriptResult"));
         assert!(source.contains("function throwVue3CompileScriptErrors"));
+        assert!(source.contains("bindings.__propsAliases = result.propsAliases"));
+        assert!(source.contains("delete result.propsAliases"));
+        assert!(source.contains("Array.isArray(result.warnings)"));
         assert!(source.contains("Object.defineProperty(bindings, '__isScriptSetup'"));
         assert!(source.contains("[@vue/compiler-sfc] ${message}"));
     }
@@ -16037,6 +16060,7 @@ mod tests {
         fs::create_dir_all(&compile_script_tests).unwrap();
         for compile_script_spec in [
             "defineProps.spec.ts",
+            "definePropsDestructure.spec.ts",
             "defineEmits.spec.ts",
             "defineExpose.spec.ts",
             "defineModel.spec.ts",
@@ -16119,6 +16143,7 @@ mod tests {
         assert!(template_utils_api.contains("sfc.templateUtils.isDataUrl"));
         for compile_script_spec in [
             "defineProps.spec.ts",
+            "definePropsDestructure.spec.ts",
             "defineEmits.spec.ts",
             "defineExpose.spec.ts",
             "defineModel.spec.ts",
@@ -16334,6 +16359,41 @@ mod tests {
                   ]
                 },
                 {
+                  "name": "F:/repo/prepared/vue3-sfc/packages/compiler-sfc/__tests__/compileScript/definePropsDestructure.spec.ts",
+                  "assertionResults": [
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" }
+                  ]
+                },
+                {
                   "name": "F:/repo/prepared/vue3-sfc/packages/compiler-sfc/__tests__/compileScript/defineSlots.spec.ts",
                   "assertionResults": [
                     { "status": "passed" },
@@ -16390,8 +16450,8 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             counts: ConformanceExecutionCounts {
-                total: 141,
-                pass: 141,
+                total: 171,
+                pass: 171,
                 fail: 0,
                 skip: 0,
                 pending: 0,
@@ -16405,8 +16465,8 @@ mod tests {
         );
 
         assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
-        assert_eq!(coverage.rust_backed_pass, 140);
-        assert_eq!(coverage.rust_backed_total, 140);
+        assert_eq!(coverage.rust_backed_pass, 170);
+        assert_eq!(coverage.rust_backed_total, 170);
         assert_eq!(
             coverage.files[0].source,
             ConformanceCoverageKind::RustBacked
@@ -16440,7 +16500,7 @@ mod tests {
             ConformanceCoverageKind::RustBacked
         );
         assert!(coverage.files[6].reason.contains("vuec_vue3_asset"));
-        for file in coverage.files.iter().skip(7).take(8) {
+        for file in coverage.files.iter().skip(7).take(9) {
             assert_eq!(file.source, ConformanceCoverageKind::RustBacked);
             assert!(file
                 .reason
@@ -16453,7 +16513,7 @@ mod tests {
                 .copied()
                 .unwrap_or_default()
                 .pass,
-            140
+            170
         );
         let _ = fs::remove_dir_all(temp);
     }

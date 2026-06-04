@@ -170,6 +170,18 @@ function hydrateVue3CompileScriptResult(result) {
   result = throwVue3CompileScriptErrors(result);
   if (!result || typeof result !== 'object') return result;
   const bindings = result.bindings;
+  if (bindings && typeof bindings === 'object' && result.propsAliases && typeof result.propsAliases === 'object') {
+    bindings.__propsAliases = result.propsAliases;
+    delete result.propsAliases;
+  }
+  if (Array.isArray(result.warnings)) {
+    for (const warning of result.warnings) {
+      if (warning == null) continue;
+      const message = typeof warning === 'string' ? warning : (warning && warning.message) || String(warning);
+      console.warn(message.startsWith('[@vue/compiler-sfc]') ? message : `[@vue/compiler-sfc] ${message}`);
+    }
+    delete result.warnings;
+  }
   if (bindings && typeof bindings === 'object' && Object.prototype.hasOwnProperty.call(bindings, '__isScriptSetup')) {
     const isScriptSetup = bindings.__isScriptSetup === true || bindings.__isScriptSetup === 'true';
     delete bindings.__isScriptSetup;

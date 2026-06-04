@@ -575,10 +575,20 @@ pub struct SfcScriptBlock {
     pub lang: Option<String>,
     /// Binding metadata keyed by binding name.
     pub bindings: BTreeMap<String, String>,
+    /// Destructured props aliases keyed by local binding name.
+    #[serde(
+        rename = "propsAliases",
+        default,
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub props_aliases: BTreeMap<String, String>,
     /// Imported binding metadata keyed by local binding name.
     pub imports: BTreeMap<String, SfcScriptImportBinding>,
     /// Script compile errors.
     pub errors: Vec<String>,
+    /// Script compile warnings.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
     /// Optional source map artifact.
     pub map: Option<SourceMapArtifact>,
     /// Public normal script AST statement projection.
@@ -1128,8 +1138,10 @@ impl SfcCompiler {
                 .or(descriptor.script.as_ref())
                 .and_then(|block| block.attrs.lang.clone()),
             bindings,
+            props_aliases: generated_content.props_aliases,
             imports: generated_content.imports,
             errors,
+            warnings: generated_content.warnings,
             map: generated_content.map,
             script_ast,
             script_setup_ast,
@@ -1211,12 +1223,14 @@ impl SfcCompiler {
                 .or(descriptor.script.as_ref())
                 .and_then(|block| block.attrs.lang.clone()),
             bindings,
+            props_aliases: BTreeMap::new(),
             imports: BTreeMap::new(),
             errors: if script_errors.is_empty() {
                 summary.errors
             } else {
                 script_errors
             },
+            warnings: Vec::new(),
             map: None,
             script_ast,
             script_setup_ast,
@@ -15745,7 +15759,9 @@ fn escape_vue27_pug_attr(source: &str) -> String {
 struct GeneratedScriptContent {
     content: String,
     errors: Vec<String>,
+    warnings: Vec<String>,
     bindings: BTreeMap<String, String>,
+    props_aliases: BTreeMap<String, String>,
     imports: BTreeMap<String, SfcScriptImportBinding>,
     removed_bindings: BTreeSet<String>,
     deps: Vec<String>,
@@ -15793,6 +15809,7 @@ struct Vue3ScriptSetupAnalysis {
     needs_use_slots: bool,
     has_top_level_await: bool,
     errors: Vec<String>,
+    warnings: Vec<String>,
     local_setup_bindings: BTreeSet<String>,
     local_setup_binding_types: BTreeMap<String, String>,
     props_destructured_bindings: BTreeMap<String, String>,
@@ -15889,7 +15906,9 @@ fn script_content(
                 .then(|| vue3_compile_script_source_map(descriptor, &content, None)),
             content,
             errors: Vec::new(),
+            warnings: Vec::new(),
             bindings: BTreeMap::new(),
+            props_aliases: BTreeMap::new(),
             imports: BTreeMap::new(),
             removed_bindings: BTreeSet::new(),
             deps: Vec::new(),
@@ -15933,6 +15952,7 @@ fn script_content(
         options.inline_template,
     );
     let template_props_aliases = vue3_script_setup_template_props_aliases(&setup_analysis);
+    let public_props_aliases = vue3_script_setup_public_props_aliases(&setup_analysis);
     let inline_render = vue3_inline_template_render(
         descriptor,
         options,
@@ -16037,7 +16057,9 @@ fn script_content(
     GeneratedScriptContent {
         content,
         errors,
+        warnings: setup_analysis.warnings,
         bindings,
+        props_aliases: public_props_aliases,
         imports,
         removed_bindings: setup_analysis.removed_bindings,
         deps: setup_analysis.deps.iter().cloned().collect(),
@@ -16587,6 +16609,17 @@ fn vue3_script_setup_template_props_aliases(
     setup_analysis: &Vue3ScriptSetupAnalysis,
 ) -> BTreeMap<String, String> {
     setup_analysis.props_destructured_bindings.clone()
+}
+
+fn vue3_script_setup_public_props_aliases(
+    setup_analysis: &Vue3ScriptSetupAnalysis,
+) -> BTreeMap<String, String> {
+    setup_analysis
+        .props_destructured_bindings
+        .iter()
+        .filter(|(local, public_key)| *local != *public_key)
+        .map(|(local, public_key)| (local.clone(), public_key.clone()))
+        .collect()
 }
 
 fn vue3_script_setup_helper_import(
@@ -17293,6 +17326,12 @@ fn analyze_vue3_setup_variable_declaration(
             if is_call_named(call, "withDefaults")
                 && collect_vue3_with_defaults_call(source, call, analysis, is_prod, custom_element)
             {
+                if matches!(declarator.id, BindingPattern::ObjectPattern(_)) {
+                    analysis.warnings.push(
+                        "withDefaults() is unnecessary when using destructure with defineProps().\nReactive destructure will be disabled when using withDefaults().\nPrefer using destructure default values, e.g. const { foo = 1 } = defineProps(...)."
+                            .into(),
+                    );
+                }
                 collect_pattern_bindings(&declarator.id, &mut analysis.return_bindings);
                 collect_pattern_binding_types(
                     &declarator.id,
@@ -26987,6 +27026,10 @@ const { foo, bar: baz } = defineProps({ foo: String, bar: Number })
             script.bindings.get("baz").map(String::as_str),
             Some("props-aliased")
         );
+        assert_eq!(
+            script.props_aliases.get("baz").map(String::as_str),
+            Some("bar")
+        );
     }
 
     #[test]
@@ -27095,6 +27138,15 @@ console.log(message, payload, fooBar)
             script.bindings.get("fooBar").map(String::as_str),
             Some("props-aliased")
         );
+        assert_eq!(
+            script.props_aliases.get("baz").map(String::as_str),
+            Some("bar")
+        );
+        assert_eq!(
+            script.props_aliases.get("fooBar").map(String::as_str),
+            Some("foo.bar")
+        );
+        assert!(script.props_aliases.get("foo").is_none());
     }
 
     #[test]
@@ -32535,6 +32587,31 @@ const props = withDefaults(defineProps<{ foo?: string }>())
             .content
             .contains("foo: { type: String, required: false }"));
         assert!(!script.content.contains("withDefaults"));
+    }
+
+    #[test]
+    fn vue3_compile_script_warns_when_with_defaults_uses_destructure() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup lang="ts">
+const { foo } = withDefaults(defineProps<{ foo: string }>(), { foo: 'foo' })
+const read = foo
+</script>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script.warnings.iter().any(
+            |warning| warning.contains("withDefaults() is unnecessary when using destructure")
+        ));
+        assert!(script.content.contains("const { foo } = __props"));
+        assert!(script.content.contains("const read = foo"));
+        assert!(script.props_aliases.is_empty());
+        assert_eq!(
+            script.bindings.get("foo").map(String::as_str),
+            Some("setup-const")
+        );
     }
 
     #[test]
