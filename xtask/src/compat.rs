@@ -12994,6 +12994,7 @@ fn rewrite_vue3_sfc_public_api_spec_imports(prepared_root: &Path) -> Result<()> 
     for compile_script_spec in [
         "defineEmits.spec.ts",
         "defineExpose.spec.ts",
+        "defineModel.spec.ts",
         "defineOptions.spec.ts",
         "defineSlots.spec.ts",
     ] {
@@ -13832,6 +13833,7 @@ fn conformance_coverage_file_kind(
         || path.ends_with("packages/compiler-sfc/__tests__/templateUtils.spec.ts")
         || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineEmits.spec.ts")
         || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineExpose.spec.ts")
+        || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineModel.spec.ts")
         || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineOptions.spec.ts")
         || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineSlots.spec.ts")
     {
@@ -13920,6 +13922,7 @@ fn conformance_coverage_file_reason(
         ConformanceCoverageKind::RustBacked
             if path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineEmits.spec.ts")
                 || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineExpose.spec.ts")
+                || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineModel.spec.ts")
                 || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineOptions.spec.ts")
                 || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineSlots.spec.ts") =>
         {
@@ -16014,6 +16017,7 @@ mod tests {
         for compile_script_spec in [
             "defineEmits.spec.ts",
             "defineExpose.spec.ts",
+            "defineModel.spec.ts",
             "defineOptions.spec.ts",
             "defineSlots.spec.ts",
         ] {
@@ -16092,6 +16096,7 @@ mod tests {
         for compile_script_spec in [
             "defineEmits.spec.ts",
             "defineExpose.spec.ts",
+            "defineModel.spec.ts",
             "defineOptions.spec.ts",
             "defineSlots.spec.ts",
         ] {
@@ -16239,6 +16244,23 @@ mod tests {
                   ]
                 },
                 {
+                  "name": "F:/repo/prepared/vue3-sfc/packages/compiler-sfc/__tests__/compileScript/defineModel.spec.ts",
+                  "assertionResults": [
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" }
+                  ]
+                },
+                {
                   "name": "F:/repo/prepared/vue3-sfc/packages/compiler-sfc/__tests__/compileScript/defineOptions.spec.ts",
                   "assertionResults": [
                     { "status": "passed" },
@@ -16271,8 +16293,8 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             counts: ConformanceExecutionCounts {
-                total: 74,
-                pass: 74,
+                total: 86,
+                pass: 86,
                 fail: 0,
                 skip: 0,
                 pending: 0,
@@ -16286,8 +16308,8 @@ mod tests {
         );
 
         assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
-        assert_eq!(coverage.rust_backed_pass, 73);
-        assert_eq!(coverage.rust_backed_total, 73);
+        assert_eq!(coverage.rust_backed_pass, 85);
+        assert_eq!(coverage.rust_backed_total, 85);
         assert_eq!(
             coverage.files[0].source,
             ConformanceCoverageKind::RustBacked
@@ -16321,7 +16343,7 @@ mod tests {
             ConformanceCoverageKind::RustBacked
         );
         assert!(coverage.files[6].reason.contains("vuec_vue3_asset"));
-        for file in coverage.files.iter().skip(7).take(4) {
+        for file in coverage.files.iter().skip(7).take(5) {
             assert_eq!(file.source, ConformanceCoverageKind::RustBacked);
             assert!(file.reason.contains("Rust vuec_sfc macro implementation"));
         }
@@ -16332,7 +16354,7 @@ mod tests {
                 .copied()
                 .unwrap_or_default()
                 .pass,
-            73
+            85
         );
         let _ = fs::remove_dir_all(temp);
     }

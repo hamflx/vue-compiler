@@ -1,5 +1,10 @@
 # Memory
 
+- Current round: closed the Vue 3 SFC public `compileScript/defineModel.spec.ts` official conformance migration slice.
+- The prepared official `packages/compiler-sfc/__tests__/compileScript/defineModel.spec.ts` now imports the public API helper and routes `parse` / `compileScript` through generated `@vue/compiler-sfc` alias -> `vuec_node_bridge` -> Rust `vuec_sfc`. `xtask/src/compat.rs` only rewrites prepared imports, preserves the public helper/test utility shape, and records coverage classification; defineModel runtime/type semantics remain in Rust.
+- Rust `compileScript` covers the official defineModel file through existing macro/type machinery: runtime model props and modifiers, `update:*` emits, `_useModel` call rewrites, `_mergeModels` with props/emits, template-literal model names, TS runtime type inference and production erasure, get/set transformer option splitting, props destructure rewrite, and binding metadata.
+- Verification for this slice passes: `cargo test -p xtask -- --nocapture` (`60/60`), `cargo fmt --all -- --check`, and `cargo xtask run-conformance --suite vue3-sfc` (`461/461`). Coverage is now `rust-backed 161/161`, `mixed 300/300`, `shim-backed 0/0`; `compileScript/defineModel.spec.ts` contributes Rust-backed `12/12`.
+
 - Current round: closed the Vue 3 SFC public `compileScript/defineEmits.spec.ts` official conformance migration slice.
 - The prepared official `packages/compiler-sfc/__tests__/compileScript/defineEmits.spec.ts` now imports the public API helper and routes `parse` / `compileScript` through generated `@vue/compiler-sfc` alias -> `vuec_node_bridge` -> Rust `vuec_sfc`. `xtask/src/compat.rs` only rewrites prepared imports, preserves the public helper/test utility shape, and records coverage classification; defineEmits runtime/type semantics remain in Rust.
 - Rust `compileScript` covers the official defineEmits file through existing macro/type machinery: runtime emits options, TS call signatures, property syntax, union function types, interface inheritance, normal-script type declarations, setup binding metadata, and official type/runtime-argument diagnostics.
