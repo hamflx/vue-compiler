@@ -13099,6 +13099,222 @@ export function compileWithSrcset(
 }
 "#;
 
+const VUE3_SFC_RESOLVE_TYPE_INTERNAL_IMPORTS: &str = r#"import { normalize } from 'node:path'
+import type { Identifier } from '@babel/types'
+import { type SFCScriptCompileOptions, parse } from '../../src'
+import { ScriptCompileContext } from '../../src/script/context'
+import {
+  inferRuntimeType,
+  invalidateTypeCache,
+  recordImports,
+  registerTS,
+  resolveTypeElements,
+} from '../../src/script/resolveType'
+import { UNKNOWN_TYPE } from '../../src/script/utils'
+import ts from 'typescript'
+
+registerTS(() => ts)
+"#;
+
+const VUE3_SFC_RESOLVE_TYPE_PUBLIC_IMPORTS: &str = r#"import { normalize } from 'node:path'
+import { resolve, UNKNOWN_TYPE } from './resolveType.rust-api'
+"#;
+
+const VUE3_SFC_RESOLVE_TYPE_INTERNAL_HELPER: &str = r#"function resolve(
+  code: string,
+  files: Record<string, string> = {},
+  options?: Partial<SFCScriptCompileOptions>,
+  sourceFileName: string = '/Test.vue',
+  invalidateCache = true,
+) {
+  const { descriptor } = parse(`<script setup lang="ts">\n${code}\n</script>`, {
+    filename: sourceFileName,
+  })
+  const ctx = new ScriptCompileContext(descriptor, {
+    id: 'test',
+    fs: {
+      fileExists(file) {
+        return !!(files[file] ?? files[normalize(file)])
+      },
+      readFile(file) {
+        return files[file] ?? files[normalize(file)]
+      },
+    },
+    ...options,
+  })
+
+  if (invalidateCache) {
+    for (const file in files) {
+      invalidateTypeCache(file)
+    }
+  }
+
+  // ctx.userImports is collected when calling compileScript(), but we are
+  // skipping that here, so need to manually register imports
+  ctx.userImports = recordImports(ctx.scriptSetupAst!.body) as any
+
+  let target: any
+  for (const s of ctx.scriptSetupAst!.body) {
+    if (
+      s.type === 'ExpressionStatement' &&
+      s.expression.type === 'CallExpression' &&
+      (s.expression.callee as Identifier).name === 'defineProps'
+    ) {
+      target = s.expression.typeParameters!.params[0]
+    }
+  }
+  const raw = resolveTypeElements(ctx, target)
+  const props: Record<string, string[]> = {}
+  for (const key in raw.props) {
+    props[key] = inferRuntimeType(ctx, raw.props[key])
+  }
+  return {
+    props,
+    calls: raw.calls,
+    deps: ctx.deps,
+    raw,
+  }
+}
+"#;
+
+const VUE3_SFC_RESOLVE_TYPE_RUST_API_HELPER: &str = r#"import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
+import { __vuecRuntime } from '@vue/compiler-sfc'
+
+export const UNKNOWN_TYPE = 'Unknown'
+
+type ResolveOptions = {
+  globalTypeFiles?: string[]
+  [key: string]: unknown
+}
+
+type MaterializedFiles = {
+  root: string
+  virtualToReal: Map<string, string>
+  realToVirtual: Map<string, string>
+}
+
+function normalizeReal(file: string): string {
+  return path.resolve(file).replace(/\\/g, '/')
+}
+
+function normalizeVirtual(file: string): string {
+  return file.replace(/\\/g, '/')
+}
+
+function virtualRelativePath(file: string): string {
+  const normalized = normalizeVirtual(file)
+  const drive = /^([A-Za-z]):\/(.*)$/.exec(normalized)
+  if (drive) {
+    return path.join(`__drive_${drive[1].toUpperCase()}`, ...drive[2].split('/').filter(Boolean))
+  }
+  return path.join(...normalized.replace(/^\/+/, '').split('/').filter(Boolean))
+}
+
+function materializedPath(root: string, file: string): string {
+  const relative = virtualRelativePath(file)
+  return relative ? path.join(root, relative) : root
+}
+
+function materializeFiles(files: Record<string, string>): MaterializedFiles {
+  const root = mkdtempSync(path.join(tmpdir(), 'vuec-resolve-type-'))
+  const virtualToReal = new Map<string, string>()
+  const realToVirtual = new Map<string, string>()
+  for (const [virtual, source] of Object.entries(files)) {
+    const real = materializedPath(root, virtual)
+    mkdirSync(path.dirname(real), { recursive: true })
+    writeFileSync(real, source)
+    virtualToReal.set(virtual, real)
+    virtualToReal.set(normalizeVirtual(virtual), real)
+    realToVirtual.set(normalizeReal(real), virtual)
+  }
+  return { root, virtualToReal, realToVirtual }
+}
+
+function mapVirtualToReal(materialized: MaterializedFiles, file: string): string {
+  return materialized.virtualToReal.get(file)
+    || materialized.virtualToReal.get(normalizeVirtual(file))
+    || materializedPath(materialized.root, file)
+}
+
+function mapOptions(options: ResolveOptions | undefined, materialized: MaterializedFiles): ResolveOptions | undefined {
+  if (!options) {
+    return options
+  }
+  const mapped: ResolveOptions = { ...options }
+  if (Array.isArray(options.globalTypeFiles)) {
+    mapped.globalTypeFiles = options.globalTypeFiles.map(file => mapVirtualToReal(materialized, file))
+  }
+  return mapped
+}
+
+function mapDep(dep: string, materialized: MaterializedFiles): string {
+  const direct = materialized.realToVirtual.get(normalizeReal(dep))
+  if (direct) {
+    return direct
+  }
+  const relative = path.relative(materialized.root, dep).replace(/\\/g, '/')
+  if (!relative.startsWith('..') && !path.isAbsolute(relative)) {
+    const drive = /^__drive_([A-Z])\/(.*)$/.exec(relative)
+    return drive ? `${drive[1]}:/${drive[2]}` : `/${relative}`
+  }
+  return dep
+}
+
+function mapDeps(deps: string[] | undefined, materialized: MaterializedFiles): string[] {
+  const mapped: string[] = []
+  const seen = new Set<string>()
+  for (const dep of deps || []) {
+    const virtual = mapDep(dep, materialized)
+    if (!seen.has(virtual)) {
+      seen.add(virtual)
+      mapped.push(virtual)
+    }
+  }
+  return mapped
+}
+
+export function resolve(
+  code: string,
+  files: Record<string, string> = {},
+  options?: ResolveOptions,
+  sourceFileName: string = '/Test.vue',
+  _invalidateCache = true,
+) {
+  const materialized = materializeFiles(files)
+  try {
+    const filename = mapVirtualToReal(materialized, sourceFileName)
+    const parent = path.dirname(filename)
+    if (!existsSync(parent)) {
+      mkdirSync(parent, { recursive: true })
+    }
+    const result = __vuecRuntime.callBridge('sfc.resolveType', {
+      code,
+      filename,
+      options: mapOptions(options, materialized),
+    })
+    if (Array.isArray(result.errors) && result.errors.length > 0) {
+      throw new Error(String(result.errors[0]))
+    }
+    const calls = Array.isArray(result.calls) ? result.calls : []
+    const raw = result.raw || {}
+    return {
+      props: result.props || {},
+      calls,
+      deps: mapDeps(result.deps, materialized),
+      raw: {
+        ...raw,
+        props: raw.props || {},
+        calls: Array.isArray(raw.calls) ? raw.calls : calls,
+      },
+    }
+  } finally {
+    rmSync(materialized.root, { recursive: true, force: true })
+  }
+}
+"#;
+
 fn rewrite_vue3_sfc_public_api_spec_imports(prepared_root: &Path) -> Result<()> {
     let tests = prepared_root
         .join("packages")
@@ -13193,6 +13409,7 @@ fn rewrite_vue3_sfc_public_api_spec_imports(prepared_root: &Path) -> Result<()> 
             "from '../utils.public-api'",
         )?;
     }
+    rewrite_vue3_sfc_resolve_type_public_api_spec(&tests)?;
     let template_utils_spec = tests.join("templateUtils.spec.ts");
     rewrite_text_file_import(
         &template_utils_spec,
@@ -13317,6 +13534,29 @@ export function getPositionInCode(
   return res
 }
 "#,
+        )?;
+    }
+    Ok(())
+}
+
+fn rewrite_vue3_sfc_resolve_type_public_api_spec(tests: &Path) -> Result<()> {
+    let resolve_type_spec = tests.join("compileScript").join("resolveType.spec.ts");
+    rewrite_text_file_block(
+        &resolve_type_spec,
+        VUE3_SFC_RESOLVE_TYPE_INTERNAL_IMPORTS,
+        VUE3_SFC_RESOLVE_TYPE_PUBLIC_IMPORTS,
+        "Vue 3 SFC resolveType public Rust helper imports",
+    )?;
+    rewrite_text_file_block(
+        &resolve_type_spec,
+        VUE3_SFC_RESOLVE_TYPE_INTERNAL_HELPER,
+        "",
+        "Vue 3 SFC resolveType public Rust helper body",
+    )?;
+    if resolve_type_spec.exists() {
+        write_text(
+            &tests.join("compileScript").join("resolveType.rust-api.ts"),
+            VUE3_SFC_RESOLVE_TYPE_RUST_API_HELPER,
         )?;
     }
     Ok(())
@@ -13918,10 +14158,10 @@ fn conformance_coverage_report(
     execution: Option<&ConformanceExecutionResult>,
 ) -> ConformanceCoverageReport {
     let source = conformance_coverage_kind(spec, backend);
-    let reason = conformance_coverage_reason(spec, backend).to_string();
+    let default_reason = conformance_coverage_reason(spec, backend).to_string();
     let counts = execution.map(|result| result.counts).unwrap_or_default();
     let files = execution
-        .and_then(|result| conformance_coverage_files(result, source, &reason).ok())
+        .and_then(|result| conformance_coverage_files(result, source, &default_reason).ok())
         .unwrap_or_default();
     let mut counts_by_source = BTreeMap::new();
     for kind in [
@@ -13954,6 +14194,7 @@ fn conformance_coverage_report(
         .copied()
         .unwrap_or_default();
     let report_source = conformance_coverage_report_kind(source, &files);
+    let reason = conformance_coverage_report_reason(spec, backend, report_source, &default_reason);
     ConformanceCoverageReport {
         source: report_source,
         reason,
@@ -13961,6 +14202,21 @@ fn conformance_coverage_report(
         rust_backed_pass: rust_backed.pass,
         rust_backed_total: rust_backed.total,
         files,
+    }
+}
+
+fn conformance_coverage_report_reason(
+    spec: ConformanceSuiteSpec,
+    backend: AliasBackend,
+    report_source: ConformanceCoverageKind,
+    default_reason: &str,
+) -> String {
+    match (backend, spec.name, report_source) {
+        (AliasBackend::Generated, "vue3-sfc", ConformanceCoverageKind::RustBacked) => {
+            "Vue 3 compiler-sfc official tests run through a prepared Vitest suite whose files are all routed to public @vue/compiler-sfc helpers or Rust-backed projection helpers; generated import/API adapters only preserve official test import paths, materialize non-serializable test inputs, and hydrate public result shapes while compiler behavior routes through vuec_node_bridge into Rust."
+                .to_string()
+        }
+        _ => default_reason.to_string(),
     }
 }
 
@@ -14096,6 +14352,7 @@ fn conformance_coverage_file_kind(
         || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineSlots.spec.ts")
         || path.ends_with("packages/compiler-sfc/__tests__/compileScript/hoistStatic.spec.ts")
         || path.ends_with("packages/compiler-sfc/__tests__/compileScript/importUsageCheck.spec.ts")
+        || path.ends_with("packages/compiler-sfc/__tests__/compileScript/resolveType.spec.ts")
     {
         ConformanceCoverageKind::RustBacked
     } else if path.ends_with("packages/compiler-sfc/test/compileStyle.spec.ts") {
@@ -14184,6 +14441,12 @@ fn conformance_coverage_file_reason(
                 || path.ends_with("packages/compiler-sfc/__tests__/templateTransformSrcset.spec.ts") =>
         {
             "Official Vue 3 SFC template asset/srcset transform file imports a prepared public API helper that maps the original local test helper arguments to public compileTemplate options, so asset URL/srcset transforms, hoistStatic, and stringifyStatic route through @vue/compiler-sfc, vuec_node_bridge, and the Rust SFC template compiler; the helper only materializes public API options and preserves the official test helper shape."
+                .to_string()
+        }
+        ConformanceCoverageKind::RustBacked
+            if path.ends_with("packages/compiler-sfc/__tests__/compileScript/resolveType.spec.ts") =>
+        {
+            "Official Vue 3 SFC resolveType file imports a prepared public Rust API helper that forwards type-resolution calls through @vue/compiler-sfc, vuec_node_bridge, and Rust vuec_sfc::resolve_vue3_type; the helper only materializes virtual files, maps serializable options, and translates dependency paths back to the official test shape."
                 .to_string()
         }
         ConformanceCoverageKind::RustBacked
@@ -16318,6 +16581,15 @@ mod tests {
             .unwrap();
         }
         fs::write(
+            compile_script_tests.join("resolveType.spec.ts"),
+            format!(
+                "{}\ndescribe('resolveType', () => {{\n  test('type literal', () => {{\n    const {{ props, calls }} = resolve(`defineProps<{{ foo: number; (e: 'save'): void }}>()`)\n    expect(props).toStrictEqual({{ foo: ['Number'] }})\n    expect(calls?.length).toBe(1)\n    expect(UNKNOWN_TYPE).toBe('Unknown')\n  }})\n}})\n\n{}",
+                VUE3_SFC_RESOLVE_TYPE_INTERNAL_IMPORTS,
+                VUE3_SFC_RESOLVE_TYPE_INTERNAL_HELPER
+            ),
+        )
+        .unwrap();
+        fs::write(
             tests.join("templateUtils.spec.ts"),
             "import {\n  isDataUrl,\n  isExternalUrl,\n  isRelativeUrl,\n} from '../src/template/templateUtils'\n",
         )
@@ -16443,6 +16715,21 @@ mod tests {
             assert!(spec.contains("from '../utils.public-api'"));
             assert!(!spec.contains("from '../utils'"));
         }
+        let resolve_type_spec =
+            fs::read_to_string(compile_script_tests.join("resolveType.spec.ts")).unwrap();
+        assert!(resolve_type_spec.contains("from './resolveType.rust-api'"));
+        assert!(!resolve_type_spec.contains("../../src/script/resolveType"));
+        assert!(!resolve_type_spec.contains("../../src/script/context"));
+        assert!(!resolve_type_spec.contains("../../src/script/utils"));
+        assert!(!resolve_type_spec.contains("registerTS(() => ts)"));
+        assert!(!resolve_type_spec.contains("function resolve("));
+        let resolve_type_api =
+            fs::read_to_string(compile_script_tests.join("resolveType.rust-api.ts")).unwrap();
+        assert!(resolve_type_api.contains("from '@vue/compiler-sfc'"));
+        assert!(resolve_type_api.contains("__vuecRuntime"));
+        assert!(resolve_type_api.contains("sfc.resolveType"));
+        assert!(resolve_type_api.contains("globalTypeFiles"));
+        assert!(resolve_type_api.contains("materializeFiles"));
         let _ = fs::remove_dir_all(temp);
     }
 
@@ -16760,6 +17047,12 @@ mod tests {
                     { "status": "passed" },
                     { "status": "passed" }
                   ]
+                },
+                {
+                  "name": "F:/repo/prepared/vue3-sfc/packages/compiler-sfc/__tests__/compileScript/resolveType.spec.ts",
+                  "assertionResults": [
+                    { "status": "passed" }
+                  ]
                 }
               ]
             }"#,
@@ -16774,8 +17067,8 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             counts: ConformanceExecutionCounts {
-                total: 198,
-                pass: 198,
+                total: 199,
+                pass: 199,
                 fail: 0,
                 skip: 0,
                 pending: 0,
@@ -16789,8 +17082,8 @@ mod tests {
         );
 
         assert_eq!(coverage.source, ConformanceCoverageKind::RustBacked);
-        assert_eq!(coverage.rust_backed_pass, 198);
-        assert_eq!(coverage.rust_backed_total, 198);
+        assert_eq!(coverage.rust_backed_pass, 199);
+        assert_eq!(coverage.rust_backed_total, 199);
         assert_eq!(
             coverage.files[0].source,
             ConformanceCoverageKind::RustBacked
@@ -16847,13 +17140,18 @@ mod tests {
                 .contains("Rust vuec_sfc compileScript implementation"));
         }
         assert_eq!(
+            coverage.files[18].source,
+            ConformanceCoverageKind::RustBacked
+        );
+        assert!(coverage.files[18].reason.contains("resolve_vue3_type"));
+        assert_eq!(
             coverage
                 .counts_by_source
                 .get("rust-backed")
                 .copied()
                 .unwrap_or_default()
                 .pass,
-            198
+            199
         );
         let _ = fs::remove_dir_all(temp);
     }

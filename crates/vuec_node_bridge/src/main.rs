@@ -507,6 +507,15 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
                 compiler.compile_script(&descriptor, options),
             )?)
         }
+        "sfc.resolveType" => {
+            let code = string_field(&payload, "code");
+            let filename = string_field_or(&payload, "filename", "anonymous.vue");
+            let options = sfc_script_options(payload.get("options"));
+            let mut compiler = SfcCompiler::new();
+            Ok(serde_json::to_value(
+                compiler.resolve_vue3_type(filename, &code, options),
+            )?)
+        }
         "sfc.vue27.compileScript" => {
             let source = string_field(&payload, "source");
             let filename = string_field_or(&payload, "filename", "anonymous.vue");
@@ -6173,6 +6182,55 @@ mod tests {
         assert!(compiled["errors"].as_array().unwrap().is_empty());
         assert!(content.contains("foo: { type: String, required: true }"));
         assert_eq!(compiled["deps"], json!([expected_dep]));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn vue3_sfc_bridge_resolve_type_projects_props_calls_and_deps() {
+        let dir = std::env::temp_dir().join(format!(
+            "vuec-node-bridge-resolve-type-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        std::fs::write(
+            dir.join("props.ts"),
+            "export type Props = { foo: number; bar?: string; (e: 'save'): void }",
+        )
+        .expect("write props");
+
+        let filename = dir.join("Comp.vue");
+        let resolved = dispatch(
+            "sfc.resolveType",
+            json!({
+                "code": "import type { Props } from './props'\ndefineProps<Props>()",
+                "filename": filename.to_string_lossy()
+            }),
+        )
+        .expect("vue3 resolveType");
+
+        let expected_dep = dir.join("props.ts").to_string_lossy().replace('\\', "/");
+        assert!(resolved["errors"].as_array().unwrap().is_empty());
+        assert_eq!(resolved["props"]["foo"], json!(["Number"]));
+        assert_eq!(resolved["props"]["bar"], json!(["String"]));
+        assert_eq!(resolved["raw"]["props"]["bar"]["optional"], json!(true));
+        assert_eq!(resolved["calls"].as_array().unwrap().len(), 1);
+        assert_eq!(resolved["deps"], json!([expected_dep]));
+
+        let failed = dispatch(
+            "sfc.resolveType",
+            json!({
+                "code": "defineProps<Missing>()",
+                "filename": filename.to_string_lossy()
+            }),
+        )
+        .expect("vue3 resolveType failed projection");
+        assert!(failed["errors"].as_array().unwrap().iter().any(|error| {
+            error
+                .as_str()
+                .is_some_and(|error| error.contains("Unresolvable type reference"))
+        }));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
