@@ -4519,6 +4519,11 @@ fn sfc_script_options(value: Option<&Value>) -> SfcScriptCompileOptions {
         .and_then(Value::as_str)
         .or(nested_runtime_module_name)
         .map(ToOwned::to_owned);
+    options.gen_default_as = value
+        .get("genDefaultAs")
+        .or_else(|| value.get("gen_default_as"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
     options.hoist_static = bool_option(
         value,
         "hoistStatic",
@@ -4960,6 +4965,41 @@ mod tests {
         assert_eq!(setup_ast[0]["kind"], json!("const"));
         assert_eq!(setup_ast[0]["source"], json!("const a = 1"));
         assert_eq!(setup_ast[0]["declarations"][0]["id"]["name"], json!("a"));
+    }
+
+    #[test]
+    fn vue3_sfc_bridge_compile_script_honors_gen_default_as_option() {
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": "<script setup>const a = 1</script>",
+                "filename": "Comp.vue",
+                "options": {
+                    "genDefaultAs": "_sfc_"
+                }
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = compiled["content"].as_str().unwrap_or_default();
+        assert!(content.contains("const _sfc_ = {"));
+        assert!(!content.contains("export default"));
+
+        let snake_case = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": "<script>export default { name: 'X' }</script>",
+                "filename": "Comp.vue",
+                "options": {
+                    "gen_default_as": "_sfc_"
+                }
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = snake_case["content"].as_str().unwrap_or_default();
+        assert!(content.contains("const _sfc_ = { name: 'X' }"));
+        assert!(!content.contains("export default"));
     }
 
     #[test]

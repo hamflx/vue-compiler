@@ -3926,6 +3926,11 @@ fn sfc_script_options(value: Option<&Value>) -> SfcScriptCompileOptions {
     if options.global_type_files.is_empty() {
         options.global_type_files = string_array_option(value, "global_type_files");
     }
+    options.gen_default_as = value
+        .get("genDefaultAs")
+        .or_else(|| value.get("gen_default_as"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
     options.hoist_static = bool_option(
         value,
         "hoistStatic",
@@ -4231,6 +4236,7 @@ mod tests {
             "source_map": false,
             "propsDestructure": "error",
             "globalTypeFiles": ["global.d.ts"],
+            "genDefaultAs": "_sfc_",
             "templateOptions": {
                 "ssr": true
             }
@@ -4242,16 +4248,19 @@ mod tests {
         assert!(!options.source_map);
         assert_eq!(options.props_destructure, SfcPropsDestructureMode::Error);
         assert_eq!(options.global_type_files, vec!["global.d.ts"]);
+        assert_eq!(options.gen_default_as.as_deref(), Some("_sfc_"));
 
         let disabled = sfc_script_options(Some(&json!({
             "props_destructure": false,
-            "global_type_files": ["ambient.d.ts"]
+            "global_type_files": ["ambient.d.ts"],
+            "gen_default_as": "script"
         })));
         assert_eq!(
             disabled.props_destructure,
             SfcPropsDestructureMode::Disabled
         );
         assert_eq!(disabled.global_type_files, vec!["ambient.d.ts"]);
+        assert_eq!(disabled.gen_default_as.as_deref(), Some("script"));
     }
 
     #[test]
