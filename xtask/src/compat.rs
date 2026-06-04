@@ -2115,6 +2115,7 @@ fn write_alias_index(
     source.push_str(ALIAS_RUNTIME_JS);
     source.push('\n');
     if target.kind == TargetKind::Vue3Core {
+        source.push_str("Object.defineProperty(vue3CoreRuntime, 'callBridge', { value: callBridge, enumerable: false });\n");
         source.push_str("Object.defineProperty(exports, '__vuecRuntime', { value: vue3CoreRuntime, enumerable: false });\n");
     } else if target.kind == TargetKind::Vue3Dom {
         source.push_str("Object.defineProperty(exports, '__vuecRuntime', { value: Object.assign({}, vue3CoreRuntime, { decodeHtmlBrowser: vue3CoreRuntime.decodeHtmlBrowser, ignoreSideEffectTags: vue3CoreRuntime.ignoreSideEffectTags, transformOn: vue3CoreRuntime.transformDomOn, transformModel: vue3CoreRuntime.transformDomModel, transformTransition: vue3CoreRuntime.transformDomTransition, validateHtmlNesting: vue3CoreRuntime.validateHtmlNesting, isValidHTMLNesting: vue3CoreRuntime.isValidHTMLNesting }), enumerable: false });\n");
@@ -12594,6 +12595,7 @@ jasmine.execute()
 fn write_vue3_core_conformance_shims(prepared_root: &Path) -> Result<()> {
     write_vue3_core_source_shims(prepared_root)?;
     write_vue3_core_test_setup(prepared_root)?;
+    rewrite_vue3_core_transform_text_public_api_spec(prepared_root)?;
 
     let config = r#"
 import path from 'node:path'
@@ -12638,6 +12640,140 @@ export default {
 }
 "#;
     write_text(&prepared_root.join("vitest.config.ts"), config)?;
+    Ok(())
+}
+
+fn rewrite_vue3_core_transform_text_public_api_spec(prepared_root: &Path) -> Result<()> {
+    let transforms = prepared_root
+        .join("packages")
+        .join("compiler-core")
+        .join("__tests__")
+        .join("transforms");
+    let spec = transforms.join("transformText.spec.ts");
+    if !spec.exists() {
+        return Ok(());
+    }
+    rewrite_text_file_block(
+        &spec,
+        r#"import {
+  type CompilerOptions,
+  type ElementNode,
+  type ForNode,
+  NodeTypes,
+  generate,
+  isWhitespaceText,
+  baseParse as parse,
+  transform,
+} from '../../src'
+import { transformFor } from '../../src/transforms/vFor'
+import { transformText } from '../../src/transforms/transformText'
+import { transformExpression } from '../../src/transforms/transformExpression'
+import { transformElement } from '../../src/transforms/transformElement'
+import { CREATE_TEXT } from '../../src/runtimeHelpers'"#,
+        r#"import {
+  type CompilerOptions,
+  type ElementNode,
+  type ForNode,
+  NodeTypes,
+  generate,
+  isWhitespaceText,
+} from '../../src'
+import { CREATE_TEXT } from '../../src/runtimeHelpers'
+import { transformWithTextOpt } from './transformText.rust-api'"#,
+        "Vue 3 core transformText Rust API imports",
+    )?;
+    rewrite_text_file_block(
+        &spec,
+        r#"function transformWithTextOpt(template: string, options: CompilerOptions = {}) {
+  const ast = parse(template)
+  transform(ast, {
+    nodeTransforms: [
+      transformFor,
+      ...(options.prefixIdentifiers ? [transformExpression] : []),
+      transformElement,
+      transformText,
+    ],
+    ...options,
+  })
+  return ast
+}
+"#,
+        "",
+        "Vue 3 core transformText local transform helper",
+    )?;
+    write_text(
+        &transforms.join("transformText.rust-api.ts"),
+        r#"import {
+  type CompilerOptions,
+  NodeTypes,
+  __vuecRuntime,
+} from '../../src'
+
+const runtime = __vuecRuntime as any
+
+export function transformWithTextOpt(
+  template: string,
+  options: CompilerOptions = {},
+) {
+  const root = runtime.callBridge('vue3.core.transformTextSuite', {
+    source: template,
+    options: normalizeOptions(options),
+  })
+  return hydrateTransformTextAst(root)
+}
+
+function normalizeOptions(options: CompilerOptions) {
+  const normalized: Record<string, unknown> = {}
+  for (const key of Object.keys(options || {}) as Array<keyof CompilerOptions>) {
+    const value = options[key]
+    if (typeof value !== 'function') normalized[key as string] = value
+  }
+  return normalized
+}
+
+function hydrateTransformTextAst(node: any): any {
+  if (!node || typeof node !== 'object') return node
+  if (Array.isArray(node)) {
+    node.forEach(hydrateTransformTextAst)
+    return node
+  }
+  if (node.type === NodeTypes.ROOT && Array.isArray(node.helpers)) {
+    node.helpers = new Set(node.helpers.map((name: string) => helperSymbol(name) || name))
+  }
+  if (
+    node.type === NodeTypes.JS_CALL_EXPRESSION &&
+    typeof node.callee === 'string'
+  ) {
+    node.callee = helperSymbol(node.callee) || node.callee
+  }
+  if (node.type === NodeTypes.VNODE_CALL && typeof node.tag === 'string') {
+    node.tag = helperSymbol(node.tag) || node.tag
+  }
+  for (const key of [
+    'children',
+    'props',
+    'content',
+    'codegenNode',
+    'arguments',
+    'returns',
+    'params',
+    'directives',
+    'source',
+    'valueAlias',
+    'keyAlias',
+    'objectIndexAlias',
+    'parseResult',
+  ]) {
+    hydrateTransformTextAst(node[key])
+  }
+  return node
+}
+
+function helperSymbol(name: string) {
+  return typeof name === 'string' ? runtime[name] : undefined
+}
+"#,
+    )?;
     Ok(())
 }
 
@@ -14371,6 +14507,7 @@ fn conformance_coverage_file_kind(
         || path.ends_with("packages/compiler-core/__tests__/parse.spec.ts")
         || path.ends_with("packages/compiler-core/__tests__/scopeId.spec.ts")
         || path.ends_with("packages/compiler-core/__tests__/utils.spec.ts")
+        || path.ends_with("packages/compiler-core/__tests__/transforms/transformText.spec.ts")
         || path.ends_with("packages/compiler-core/__tests__/transforms/vMemo.spec.ts")
         || path.ends_with("packages/compiler-dom/__tests__/index.spec.ts")
         || path.ends_with("packages/compiler-dom/__tests__/decoderHtmlBrowser.spec.ts")
@@ -14413,6 +14550,12 @@ fn conformance_coverage_file_reason(
     default_reason: &str,
 ) -> String {
     match source {
+        ConformanceCoverageKind::RustBacked
+            if path.ends_with("packages/compiler-core/__tests__/transforms/transformText.spec.ts") =>
+        {
+            "Official Vue 3 compiler-core transformText file imports a prepared Rust API helper that forwards transformWithTextOpt through @vue/compiler-core.__vuecRuntime into vuec_node_bridge command vue3.core.transformTextSuite; the helper only hydrates public AST helper symbols while Rust parser, transformExpression/processFor/transformText projections, public AST codegen, and generate snapshots execute through Rust."
+                .to_string()
+        }
         ConformanceCoverageKind::RustBacked
             if path.ends_with("packages/compiler-core/__tests__/transforms/vMemo.spec.ts") =>
         {
@@ -15668,6 +15811,20 @@ mod tests {
                   ]
                 },
                 {
+                  "name": "F:/repo/prepared/vue3-core/packages/compiler-core/__tests__/transforms/transformText.spec.ts",
+                  "assertionResults": [
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" }
+                  ]
+                },
+                {
                   "name": "F:/repo/prepared/vue3-core/packages/compiler-core/__tests__/transforms/vOn.spec.ts",
                   "assertionResults": [
                     { "status": "passed" },
@@ -15687,8 +15844,8 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             counts: ConformanceExecutionCounts {
-                total: 18,
-                pass: 17,
+                total: 27,
+                pass: 26,
                 fail: 1,
                 skip: 0,
                 pending: 0,
@@ -15702,8 +15859,8 @@ mod tests {
         );
 
         assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
-        assert_eq!(coverage.rust_backed_pass, 16);
-        assert_eq!(coverage.rust_backed_total, 16);
+        assert_eq!(coverage.rust_backed_pass, 25);
+        assert_eq!(coverage.rust_backed_total, 25);
         assert_eq!(
             coverage
                 .counts_by_source
@@ -15711,7 +15868,7 @@ mod tests {
                 .copied()
                 .unwrap_or_default()
                 .pass,
-            16
+            25
         );
         assert_eq!(
             coverage
@@ -15739,7 +15896,12 @@ mod tests {
             ConformanceCoverageKind::RustBacked
         );
         assert!(coverage.files[3].reason.contains("public baseCompile"));
-        assert_eq!(coverage.files[4].source, ConformanceCoverageKind::Mixed);
+        assert_eq!(
+            coverage.files[4].source,
+            ConformanceCoverageKind::RustBacked
+        );
+        assert!(coverage.files[4].reason.contains("transformTextSuite"));
+        assert_eq!(coverage.files[5].source, ConformanceCoverageKind::Mixed);
         assert!(coverage.reason.contains("xtask/src/compat.rs"));
         let _ = fs::remove_dir_all(temp);
     }

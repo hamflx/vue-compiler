@@ -1,5 +1,10 @@
 # Memory
 
+- Current round: migrated Vue 3 compiler-core `packages/compiler-core/__tests__/transforms/transformText.spec.ts` to file-level Rust-backed coverage.
+- The prepared official `transformText.spec.ts` now imports `transformText.rust-api.ts`; that helper forwards `transformWithTextOpt()` through public `@vue/compiler-core.__vuecRuntime.callBridge` into `vuec_node_bridge` command `vue3.core.transformTextSuite`. The bridge parses with Rust `Vue3Dialect::base_parse`, applies Rust `process_expression_projection`, `transform_for_projection`, and `transform_text_projection`, then projects the public AST/codegen shape used by the official `generate()` snapshots.
+- `xtask/src/compat.rs` is adapter-only for this slice: prepared import/API helper materialization, serializable option normalization, public AST helper symbol hydration, and coverage classification. No compiler text-transform semantics were added to the JavaScript shim.
+- Verification for this slice passes: `cargo fmt --all -- --check`, `git diff --check`, `cargo build -p vuec_node_bridge`, `cargo test -p xtask -- --nocapture` (`60/60`), focused xtask shim/coverage tests, and `cargo xtask run-conformance --suite vue3-core` (`652/652`, coverage `rust-backed 215/215`, `mixed 437/437`, `shim-backed 0/0`).
+
 - Current round: migrated Vue 3 compiler-core `packages/compiler-core/__tests__/transforms/vMemo.spec.ts` to file-level Rust-backed coverage.
 - The official `vMemo.spec.ts` imports `baseCompile` from `../../src`; in the prepared tree `../../src` re-exports public `@vue/compiler-core`, and the generated public `baseCompile` alias routes through `vuec_node_bridge` into Rust `vuec_vue3_core` when no caller-provided JavaScript transform callbacks are present. The file only passes serializable `mode` / `prefixIdentifiers` options, so this is a Rust-backed public compile path rather than alias-runtime transform harness coverage.
 - `xtask/src/compat.rs` changes are coverage metadata and reason text only. No compiler semantics were added to the JavaScript alias/shim.
