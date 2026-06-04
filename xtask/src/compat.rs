@@ -12599,6 +12599,7 @@ fn write_vue3_core_conformance_shims(prepared_root: &Path) -> Result<()> {
     rewrite_vue3_core_v_model_public_api_spec(prepared_root)?;
     rewrite_vue3_core_v_on_public_api_spec(prepared_root)?;
     rewrite_vue3_core_v_for_public_api_spec(prepared_root)?;
+    rewrite_vue3_core_v_if_public_api_spec(prepared_root)?;
     rewrite_vue3_core_transform_slot_outlet_public_api_spec(prepared_root)?;
     rewrite_vue3_core_transform_expressions_public_api_spec(prepared_root)?;
     rewrite_vue3_core_transform_text_public_api_spec(prepared_root)?;
@@ -13221,6 +13222,230 @@ function hydrateVForAst(node: any): any {
     'key',
   ]) {
     hydrateVForAst(node[key])
+  }
+  return node
+}
+
+function helperSymbol(name: string) {
+  return typeof name === 'string' ? runtime[name] : undefined
+}
+"#,
+    )?;
+    Ok(())
+}
+
+fn rewrite_vue3_core_v_if_public_api_spec(prepared_root: &Path) -> Result<()> {
+    let transforms = prepared_root
+        .join("packages")
+        .join("compiler-core")
+        .join("__tests__")
+        .join("transforms");
+    let spec = transforms.join("vIf.spec.ts");
+    if !spec.exists() {
+        return Ok(());
+    }
+    rewrite_text_file_block(
+        &spec,
+        r#"import { baseParse as parse } from '../../src/parser'
+import { transform } from '../../src/transform'
+import { transformIf } from '../../src/transforms/vIf'
+import { transformElement } from '../../src/transforms/transformElement'
+import { transformSlotOutlet } from '../../src/transforms/transformSlotOutlet'
+import {
+  type CommentNode,
+  type ConditionalExpression,
+  type ElementNode,
+  ElementTypes,
+  type IfBranchNode,
+  type IfConditionalExpression,
+  type IfNode,
+  NodeTypes,
+  type SimpleExpressionNode,
+  type TextNode,
+  type VNodeCall,
+} from '../../src/ast'
+import { ErrorCodes } from '../../src/errors'
+import {
+  type CompilerOptions,
+  TO_HANDLERS,
+  generate,
+  transformVBindShorthand,
+} from '../../src'
+import {
+  CREATE_COMMENT,
+  FRAGMENT,
+  MERGE_PROPS,
+  NORMALIZE_PROPS,
+  RENDER_SLOT,
+} from '../../src/runtimeHelpers'
+import { createObjectMatcher } from '../testUtils'"#,
+        r#"import {
+  type CommentNode,
+  type ConditionalExpression,
+  type ElementNode,
+  ElementTypes,
+  type IfBranchNode,
+  type IfConditionalExpression,
+  type IfNode,
+  NodeTypes,
+  type SimpleExpressionNode,
+  type TextNode,
+  type VNodeCall,
+} from '../../src/ast'
+import { ErrorCodes } from '../../src/errors'
+import { type CompilerOptions, TO_HANDLERS, generate } from '../../src'
+import {
+  CREATE_COMMENT,
+  FRAGMENT,
+  MERGE_PROPS,
+  NORMALIZE_PROPS,
+  RENDER_SLOT,
+} from '../../src/runtimeHelpers'
+import { createObjectMatcher } from '../testUtils'
+import { parseWithIfTransform } from './vIf.rust-api'"#,
+        "Vue 3 core vIf Rust API imports",
+    )?;
+    rewrite_text_file_block(
+        &spec,
+        r#"function parseWithIfTransform(
+  template: string,
+  options: CompilerOptions = {},
+  returnIndex: number = 0,
+  childrenLen: number = 1,
+) {
+  const ast = parse(template, options)
+  transform(ast, {
+    nodeTransforms: [
+      transformVBindShorthand,
+      transformIf,
+      transformSlotOutlet,
+      transformElement,
+    ],
+    ...options,
+  })
+  if (!options.onError) {
+    expect(ast.children.length).toBe(childrenLen)
+    for (let i = 0; i < childrenLen; i++) {
+      expect(ast.children[i].type).toBe(NodeTypes.IF)
+    }
+  }
+  return {
+    root: ast,
+    node: ast.children[returnIndex] as IfNode & {
+      codegenNode: IfConditionalExpression
+    },
+  }
+}
+"#,
+        "",
+        "Vue 3 core vIf local transform helper",
+    )?;
+    write_text(
+        &transforms.join("vIf.rust-api.ts"),
+        r#"import {
+  type CompilerOptions,
+  type IfConditionalExpression,
+  type IfNode,
+  NodeTypes,
+  __vuecRuntime,
+} from '../../src'
+
+const runtime = __vuecRuntime as any
+
+export function parseWithIfTransform(
+  template: string,
+  options: CompilerOptions = {},
+  returnIndex: number = 0,
+  childrenLen: number = 1,
+) {
+  const result = runtime.callBridge('vue3.core.transformIfSuite', {
+    source: template,
+    options: normalizeOptions(options),
+  })
+  const root = result.root || result
+  hydrateVIfAst(root)
+  emitErrors(root, options)
+  if (!(options as any).onError) {
+    expect(root.children.length).toBe(childrenLen)
+    for (let i = 0; i < childrenLen; i++) {
+      expect(root.children[i].type).toBe(NodeTypes.IF)
+    }
+  }
+  return {
+    root,
+    node: root.children[returnIndex] as IfNode & {
+      codegenNode: IfConditionalExpression
+    },
+  }
+}
+
+function normalizeOptions(options: CompilerOptions) {
+  const normalized: Record<string, unknown> = {}
+  for (const key of Object.keys(options || {}) as Array<keyof CompilerOptions>) {
+    const value = options[key]
+    if (typeof value !== 'function') normalized[key as string] = value
+  }
+  return normalized
+}
+
+function emitErrors(root: any, options: CompilerOptions) {
+  const onError = (options as any).onError
+  if (typeof onError !== 'function') return
+  for (const error of root.__vuecErrors || []) {
+    onError({ code: error.code, loc: error.loc })
+  }
+}
+
+function hydrateVIfAst(node: any): any {
+  if (!node || typeof node !== 'object') return node
+  if (Array.isArray(node)) {
+    node.forEach(hydrateVIfAst)
+    return node
+  }
+  if (node.type === NodeTypes.ROOT && Array.isArray(node.helpers)) {
+    node.helpers = new Set(node.helpers.map((name: string) => helperSymbol(name) || name))
+  }
+  if (
+    node.type === NodeTypes.JS_CALL_EXPRESSION &&
+    typeof node.callee === 'string'
+  ) {
+    node.callee = helperSymbol(node.callee) || node.callee
+  }
+  if (node.type === NodeTypes.VNODE_CALL) {
+    if (typeof node.tag === 'string') node.tag = helperSymbol(node.tag) || node.tag
+    for (const key of ['props', 'children', 'patchFlag', 'dynamicProps', 'directives']) {
+      if (node[key] == null) node[key] = undefined
+    }
+  }
+  if (node.type === NodeTypes.IF_BRANCH) {
+    if (node.condition == null) delete node.condition
+    if (node.userKey == null) delete node.userKey
+  }
+  for (const key of [
+    'children',
+    'props',
+    'content',
+    'codegenNode',
+    'arguments',
+    'returns',
+    'params',
+    'directives',
+    'source',
+    'valueAlias',
+    'keyAlias',
+    'objectIndexAlias',
+    'parseResult',
+    'branches',
+    'condition',
+    'test',
+    'consequent',
+    'alternate',
+    'value',
+    'elements',
+    'properties',
+    'key',
+  ]) {
+    hydrateVIfAst(node[key])
   }
   return node
 }
@@ -15716,6 +15941,7 @@ fn conformance_coverage_file_kind(
         || path.ends_with("packages/compiler-core/__tests__/transforms/transformText.spec.ts")
         || path.ends_with("packages/compiler-core/__tests__/transforms/vBind.spec.ts")
         || path.ends_with("packages/compiler-core/__tests__/transforms/vFor.spec.ts")
+        || path.ends_with("packages/compiler-core/__tests__/transforms/vIf.spec.ts")
         || path.ends_with("packages/compiler-core/__tests__/transforms/vModel.spec.ts")
         || path.ends_with("packages/compiler-core/__tests__/transforms/vMemo.spec.ts")
         || path.ends_with("packages/compiler-core/__tests__/transforms/vOn.spec.ts")
@@ -15783,6 +16009,12 @@ fn conformance_coverage_file_reason(
             if path.ends_with("packages/compiler-core/__tests__/transforms/vFor.spec.ts") =>
         {
             "Official Vue 3 compiler-core vFor file imports a prepared Rust API helper that forwards parseWithForTransform through @vue/compiler-core.__vuecRuntime into vuec_node_bridge command vue3.core.transformForSuite; the helper only normalizes serializable options, hydrates public AST helper symbols, restores public undefined fields, and emits Rust-projected errors while Rust parser, transformVBindShorthand projection, transformIf projection, transformFor projection, processExpression projection, transformBind projection, transformSlotOutlet projection, public VNode props/codegen projection, key injection, fragment flags, ref_for marker materialization, and root helper projection execute through Rust."
+                .to_string()
+        }
+        ConformanceCoverageKind::RustBacked
+            if path.ends_with("packages/compiler-core/__tests__/transforms/vIf.spec.ts") =>
+        {
+            "Official Vue 3 compiler-core vIf file imports a prepared Rust API helper that forwards parseWithIfTransform through @vue/compiler-core.__vuecRuntime into vuec_node_bridge command vue3.core.transformIfSuite; the helper only normalizes serializable options, hydrates public AST helper symbols, restores public undefined branch fields, and emits Rust-projected errors while Rust parser, transformVBindShorthand projection, transformIf/processIf projection, processExpression projection, transformBind projection, transformOn projection, transformSlotOutlet projection, public branch/codegen projection, key injection, prop merging, runtime directive materialization, and generate snapshots execute through Rust."
                 .to_string()
         }
         ConformanceCoverageKind::RustBacked
@@ -17277,6 +17509,42 @@ mod tests {
                   ]
                 },
                 {
+                  "name": "F:/repo/prepared/vue3-core/packages/compiler-core/__tests__/transforms/vIf.spec.ts",
+                  "assertionResults": [
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" }
+                  ]
+                },
+                {
                   "name": "F:/repo/prepared/vue3-core/packages/compiler-core/__tests__/transforms/transformElement.spec.ts",
                   "assertionResults": [
                     { "status": "passed" },
@@ -17296,8 +17564,8 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             counts: ConformanceExecutionCounts {
-                total: 222,
-                pass: 221,
+                total: 253,
+                pass: 252,
                 fail: 1,
                 skip: 0,
                 pending: 0,
@@ -17311,8 +17579,8 @@ mod tests {
         );
 
         assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
-        assert_eq!(coverage.rust_backed_pass, 220);
-        assert_eq!(coverage.rust_backed_total, 220);
+        assert_eq!(coverage.rust_backed_pass, 251);
+        assert_eq!(coverage.rust_backed_total, 251);
         assert_eq!(
             coverage
                 .counts_by_source
@@ -17320,7 +17588,7 @@ mod tests {
                 .copied()
                 .unwrap_or_default()
                 .pass,
-            220
+            251
         );
         assert_eq!(
             coverage
@@ -17392,7 +17660,12 @@ mod tests {
             ConformanceCoverageKind::RustBacked
         );
         assert!(coverage.files[11].reason.contains("transformForSuite"));
-        assert_eq!(coverage.files[12].source, ConformanceCoverageKind::Mixed);
+        assert_eq!(
+            coverage.files[12].source,
+            ConformanceCoverageKind::RustBacked
+        );
+        assert!(coverage.files[12].reason.contains("transformIfSuite"));
+        assert_eq!(coverage.files[13].source, ConformanceCoverageKind::Mixed);
         assert!(coverage.reason.contains("xtask/src/compat.rs"));
         let _ = fs::remove_dir_all(temp);
     }
@@ -17880,8 +18153,80 @@ export function parseWithForTransform(
   }
 }
 
-test('placeholder', () => {
+        test('placeholder', () => {
   expect(parseWithForTransform('<div v-for="i in list" />')).toBeTruthy()
+})
+"#,
+        )
+        .unwrap();
+        fs::write(
+            transforms_tests.join("vIf.spec.ts"),
+            r#"import { baseParse as parse } from '../../src/parser'
+import { transform } from '../../src/transform'
+import { transformIf } from '../../src/transforms/vIf'
+import { transformElement } from '../../src/transforms/transformElement'
+import { transformSlotOutlet } from '../../src/transforms/transformSlotOutlet'
+import {
+  type CommentNode,
+  type ConditionalExpression,
+  type ElementNode,
+  ElementTypes,
+  type IfBranchNode,
+  type IfConditionalExpression,
+  type IfNode,
+  NodeTypes,
+  type SimpleExpressionNode,
+  type TextNode,
+  type VNodeCall,
+} from '../../src/ast'
+import { ErrorCodes } from '../../src/errors'
+import {
+  type CompilerOptions,
+  TO_HANDLERS,
+  generate,
+  transformVBindShorthand,
+} from '../../src'
+import {
+  CREATE_COMMENT,
+  FRAGMENT,
+  MERGE_PROPS,
+  NORMALIZE_PROPS,
+  RENDER_SLOT,
+} from '../../src/runtimeHelpers'
+import { createObjectMatcher } from '../testUtils'
+
+function parseWithIfTransform(
+  template: string,
+  options: CompilerOptions = {},
+  returnIndex: number = 0,
+  childrenLen: number = 1,
+) {
+  const ast = parse(template, options)
+  transform(ast, {
+    nodeTransforms: [
+      transformVBindShorthand,
+      transformIf,
+      transformSlotOutlet,
+      transformElement,
+    ],
+    ...options,
+  })
+  if (!options.onError) {
+    expect(ast.children.length).toBe(childrenLen)
+    for (let i = 0; i < childrenLen; i++) {
+      expect(ast.children[i].type).toBe(NodeTypes.IF)
+    }
+  }
+  return {
+    root: ast,
+    node: ast.children[returnIndex] as IfNode & {
+      codegenNode: IfConditionalExpression
+    },
+  }
+}
+
+test('placeholder', () => {
+  expect(parseWithIfTransform('<div v-if="ok" />')).toBeTruthy()
 })
 "#,
         )
@@ -18038,6 +18383,17 @@ test('placeholder', () => {
         assert!(v_for_api.contains("emitErrors"));
         assert!(v_for_api.contains("hydrateVForAst"));
         assert!(v_for_api.contains("node[key] = undefined"));
+        let v_if_spec = fs::read_to_string(transforms_tests.join("vIf.spec.ts")).unwrap();
+        assert!(v_if_spec.contains("from './vIf.rust-api'"));
+        assert!(!v_if_spec.contains("baseParse as parse"));
+        assert!(!v_if_spec.contains("transform(ast,"));
+        assert!(!v_if_spec.contains("transformIf } from '../../src/transforms/vIf'"));
+        assert!(!v_if_spec.contains("transformVBindShorthand"));
+        let v_if_api = fs::read_to_string(transforms_tests.join("vIf.rust-api.ts")).unwrap();
+        assert!(v_if_api.contains("callBridge('vue3.core.transformIfSuite'"));
+        assert!(v_if_api.contains("emitErrors"));
+        assert!(v_if_api.contains("hydrateVIfAst"));
+        assert!(v_if_api.contains("delete node.condition"));
         let expressions_spec =
             fs::read_to_string(transforms_tests.join("transformExpressions.spec.ts")).unwrap();
         assert!(expressions_spec.contains("from './transformExpressions.rust-api'"));
