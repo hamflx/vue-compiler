@@ -11016,7 +11016,7 @@ struct ConformanceExecutionResult {
     counts: ConformanceExecutionCounts,
 }
 
-#[derive(Clone, Copy, Debug, Default, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 struct ConformanceExecutionCounts {
     total: usize,
     pass: usize,
@@ -11025,7 +11025,7 @@ struct ConformanceExecutionCounts {
     pending: usize,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "kebab-case")]
 enum ConformanceCoverageKind {
     RustBacked,
@@ -11056,6 +11056,8 @@ struct ConformanceCoverageReport {
 #[derive(Clone, Debug, Serialize)]
 struct ConformanceCoverageFile {
     path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope: Option<String>,
     source: ConformanceCoverageKind,
     reason: String,
     counts: ConformanceExecutionCounts,
@@ -16119,23 +16121,30 @@ fn read_jasmine_counts(path: &Path) -> Result<ConformanceExecutionCounts> {
 }
 
 fn json_conformance_file_counts(result: &serde_json::Value) -> ConformanceExecutionCounts {
-    let mut counts = ConformanceExecutionCounts::default();
-    if let Some(assertions) = result
+    let Some(assertions) = result
         .get("assertionResults")
         .and_then(|value| value.as_array())
-    {
-        counts.total = assertions.len();
-        for assertion in assertions {
-            match assertion
-                .get("status")
-                .and_then(|value| value.as_str())
-                .unwrap_or_default()
-            {
-                "passed" => counts.pass += 1,
-                "failed" => counts.fail += 1,
-                "pending" | "todo" | "skipped" => counts.skip += 1,
-                _ => counts.pending += 1,
-            }
+    else {
+        return ConformanceExecutionCounts::default();
+    };
+    json_conformance_assertion_counts(assertions.iter())
+}
+
+fn json_conformance_assertion_counts<'a>(
+    assertions: impl Iterator<Item = &'a serde_json::Value>,
+) -> ConformanceExecutionCounts {
+    let mut counts = ConformanceExecutionCounts::default();
+    for assertion in assertions {
+        counts.total += 1;
+        match assertion
+            .get("status")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+        {
+            "passed" => counts.pass += 1,
+            "failed" => counts.fail += 1,
+            "pending" | "todo" | "skipped" => counts.skip += 1,
+            _ => counts.pending += 1,
         }
     }
     counts.pending = counts
@@ -16307,17 +16316,120 @@ fn conformance_coverage_files(
                 .and_then(|value| value.as_str())
                 .unwrap_or_default()
                 .replace('\\', "/");
-            let counts = json_conformance_file_counts(result);
-            let file_source = conformance_coverage_file_kind(&path, source);
-            files.push(ConformanceCoverageFile {
-                path: path.clone(),
-                source: file_source,
-                reason: conformance_coverage_file_reason(&path, file_source, reason),
-                counts,
-            });
+            files.extend(conformance_coverage_file_entries(
+                &path, result, source, reason,
+            ));
         }
     }
     Ok(files)
+}
+
+fn conformance_coverage_file_entries(
+    path: &str,
+    result: &serde_json::Value,
+    source: ConformanceCoverageKind,
+    reason: &str,
+) -> Vec<ConformanceCoverageFile> {
+    if path.ends_with("packages/compiler-core/__tests__/transforms/transformElement.spec.ts") {
+        let entries = conformance_coverage_transform_element_entries(path, result, reason);
+        if !entries.is_empty() {
+            return entries;
+        }
+    }
+
+    let counts = json_conformance_file_counts(result);
+    let file_source = conformance_coverage_file_kind(path, source);
+    vec![ConformanceCoverageFile {
+        path: path.to_string(),
+        scope: None,
+        source: file_source,
+        reason: conformance_coverage_file_reason(path, file_source, reason),
+        counts,
+    }]
+}
+
+fn conformance_coverage_transform_element_entries(
+    path: &str,
+    result: &serde_json::Value,
+    default_reason: &str,
+) -> Vec<ConformanceCoverageFile> {
+    let Some(assertions) = result
+        .get("assertionResults")
+        .and_then(|value| value.as_array())
+    else {
+        return Vec::new();
+    };
+
+    let mut grouped: BTreeMap<(&'static str, ConformanceCoverageKind), Vec<&serde_json::Value>> =
+        BTreeMap::new();
+    for assertion in assertions {
+        let Some(full_name) = assertion
+            .get("fullName")
+            .or_else(|| assertion.get("title"))
+            .and_then(|value| value.as_str())
+        else {
+            return Vec::new();
+        };
+        let (scope, source) = conformance_coverage_transform_element_assertion_kind(full_name);
+        grouped.entry((scope, source)).or_default().push(assertion);
+    }
+
+    grouped
+        .into_iter()
+        .map(|((scope, source), assertions)| ConformanceCoverageFile {
+            path: path.to_string(),
+            scope: Some(scope.to_string()),
+            source,
+            reason: conformance_coverage_transform_element_reason(scope, source, default_reason),
+            counts: json_conformance_assertion_counts(assertions.into_iter()),
+        })
+        .collect()
+}
+
+fn conformance_coverage_transform_element_assertion_kind(
+    full_name: &str,
+) -> (&'static str, ConformanceCoverageKind) {
+    if full_name.starts_with("compiler: v-for ") {
+        return ("imported v-for helper", ConformanceCoverageKind::RustBacked);
+    }
+    if matches!(
+        full_name,
+        "compiler: element transform directiveTransforms"
+            | "compiler: element transform directiveTransform with needRuntime: true"
+            | "compiler: element transform directiveTransform with needRuntime: Symbol"
+            | "compiler: element transform should process node when node has been replaced"
+    ) {
+        return ("js callback boundary", ConformanceCoverageKind::Mixed);
+    }
+    if full_name.starts_with("compiler: element transform ") {
+        return (
+            "element transform pending rust suite",
+            ConformanceCoverageKind::Mixed,
+        );
+    }
+    ("unclassified assertions", ConformanceCoverageKind::Mixed)
+}
+
+fn conformance_coverage_transform_element_reason(
+    scope: &str,
+    source: ConformanceCoverageKind,
+    default_reason: &str,
+) -> String {
+    match (scope, source) {
+        ("imported v-for helper", ConformanceCoverageKind::RustBacked) => {
+            "Official Vue 3 compiler-core transformElement file re-imports parseWithForTransform from the prepared vFor Rust API helper; these duplicated v-for assertions route through vuec_node_bridge command vue3.core.transformForSuite and Rust transformFor/codegen projections."
+                .to_string()
+        }
+        ("element transform pending rust suite", ConformanceCoverageKind::Mixed) => {
+            "Official Vue 3 compiler-core transformElement assertion group is split from unrelated imported v-for assertions, but remains mixed until the prepared helper routes ordinary element transform behavior through vuec_node_bridge command vue3.core.transformElementSuite and Rust parser/component resolution/props/children/text projections."
+                .to_string()
+        }
+        ("js callback boundary", ConformanceCoverageKind::Mixed) => {
+            "Official Vue 3 compiler-core transformElement assertion group exercises caller-provided JavaScript directiveTransforms or NodeTransform callbacks. Those callback extension points cannot be serialized into the Rust bridge and remain mixed coverage rather than Rust compiler completion evidence."
+                .to_string()
+        }
+        _ => default_reason.to_string(),
+    }
 }
 
 fn conformance_coverage_file_kind(
@@ -18131,6 +18243,129 @@ mod tests {
         assert!(coverage.files[13].reason.contains("cacheStaticSuite"));
         assert_eq!(coverage.files[14].source, ConformanceCoverageKind::Mixed);
         assert!(coverage.reason.contains("xtask/src/compat.rs"));
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn vue3_core_coverage_splits_transform_element_assertion_groups() {
+        let temp = std::env::temp_dir().join(format!(
+            "vuec-xtask-vue3-core-transform-element-coverage-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp).unwrap();
+        let report = temp.join("vitest-report.json");
+        fs::write(
+            &report,
+            r#"{
+              "testResults": [
+                {
+                  "name": "F:/repo/prepared/vue3-core/packages/compiler-core/__tests__/transforms/transformElement.spec.ts",
+                  "assertionResults": [
+                    {
+                      "fullName": "compiler: v-for transform value",
+                      "status": "passed"
+                    },
+                    {
+                      "fullName": "compiler: v-for codegen basic v-for",
+                      "status": "passed"
+                    },
+                    {
+                      "fullName": "compiler: element transform import + resolve component",
+                      "status": "passed"
+                    },
+                    {
+                      "fullName": "compiler: element transform static props",
+                      "status": "passed"
+                    },
+                    {
+                      "fullName": "compiler: element transform directiveTransforms",
+                      "status": "passed"
+                    },
+                    {
+                      "fullName": "compiler: element transform directiveTransform with needRuntime: true",
+                      "status": "passed"
+                    },
+                    {
+                      "fullName": "compiler: element transform should process node when node has been replaced",
+                      "status": "failed"
+                    }
+                  ]
+                }
+              ]
+            }"#,
+        )
+        .unwrap();
+        let execution = ConformanceExecutionResult {
+            status: "failed".into(),
+            runner: "vitest".into(),
+            prepared_root: "prepared".into(),
+            output_file: report.display().to_string(),
+            exit_code: Some(1),
+            stdout: String::new(),
+            stderr: String::new(),
+            counts: ConformanceExecutionCounts {
+                total: 7,
+                pass: 6,
+                fail: 1,
+                skip: 0,
+                pending: 0,
+            },
+        };
+
+        let coverage = conformance_coverage_report(
+            suite_spec(ConformanceSuite::Vue3Core),
+            AliasBackend::Generated,
+            Some(&execution),
+        );
+
+        assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
+        assert_eq!(coverage.files.len(), 3);
+        assert_eq!(coverage.rust_backed_total, 2);
+        assert_eq!(coverage.rust_backed_pass, 2);
+        assert_eq!(
+            coverage
+                .counts_by_source
+                .get("mixed")
+                .copied()
+                .unwrap_or_default(),
+            ConformanceExecutionCounts {
+                total: 5,
+                pass: 4,
+                fail: 1,
+                skip: 0,
+                pending: 0,
+            }
+        );
+        let imported_v_for = coverage
+            .files
+            .iter()
+            .find(|file| file.scope.as_deref() == Some("imported v-for helper"))
+            .expect("imported v-for coverage entry");
+        assert_eq!(imported_v_for.source, ConformanceCoverageKind::RustBacked);
+        assert_eq!(imported_v_for.counts.total, 2);
+
+        let element_suite = coverage
+            .files
+            .iter()
+            .find(|file| file.scope.as_deref() == Some("element transform pending rust suite"))
+            .expect("element transform coverage entry");
+        assert_eq!(element_suite.source, ConformanceCoverageKind::Mixed);
+        assert_eq!(element_suite.counts.total, 2);
+        assert!(element_suite.reason.contains("transformElementSuite"));
+
+        let callback_boundary = coverage
+            .files
+            .iter()
+            .find(|file| file.scope.as_deref() == Some("js callback boundary"))
+            .expect("callback boundary coverage entry");
+        assert_eq!(callback_boundary.source, ConformanceCoverageKind::Mixed);
+        assert_eq!(callback_boundary.counts.total, 3);
+        assert!(callback_boundary
+            .reason
+            .contains("caller-provided JavaScript"));
         let _ = fs::remove_dir_all(temp);
     }
 
