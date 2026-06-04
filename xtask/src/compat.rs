@@ -12595,6 +12595,7 @@ jasmine.execute()
 fn write_vue3_core_conformance_shims(prepared_root: &Path) -> Result<()> {
     write_vue3_core_source_shims(prepared_root)?;
     write_vue3_core_test_setup(prepared_root)?;
+    rewrite_vue3_core_v_bind_public_api_spec(prepared_root)?;
     rewrite_vue3_core_transform_slot_outlet_public_api_spec(prepared_root)?;
     rewrite_vue3_core_transform_text_public_api_spec(prepared_root)?;
     rewrite_vue3_core_v_once_public_api_spec(prepared_root)?;
@@ -12642,6 +12643,179 @@ export default {
 }
 "#;
     write_text(&prepared_root.join("vitest.config.ts"), config)?;
+    Ok(())
+}
+
+fn rewrite_vue3_core_v_bind_public_api_spec(prepared_root: &Path) -> Result<()> {
+    let transforms = prepared_root
+        .join("packages")
+        .join("compiler-core")
+        .join("__tests__")
+        .join("transforms");
+    let spec = transforms.join("vBind.spec.ts");
+    if !spec.exists() {
+        return Ok(());
+    }
+    rewrite_text_file_block(
+        &spec,
+        r#"import {
+  type CallExpression,
+  type CompilerOptions,
+  type ElementNode,
+  ErrorCodes,
+  NodeTypes,
+  type ObjectExpression,
+  type VNodeCall,
+  baseParse as parse,
+  transform,
+} from '../../src'
+import { transformBind } from '../../src/transforms/vBind'
+import { transformElement } from '../../src/transforms/transformElement'
+import {
+  CAMELIZE,
+  NORMALIZE_PROPS,
+  helperNameMap,
+} from '../../src/runtimeHelpers'
+import { transformExpression } from '../../src/transforms/transformExpression'
+import { transformVBindShorthand } from '../../src/transforms/transformVBindShorthand'"#,
+        r#"import {
+  type CallExpression,
+  type CompilerOptions,
+  type ElementNode,
+  ErrorCodes,
+  NodeTypes,
+  type ObjectExpression,
+  type VNodeCall,
+} from '../../src'
+import {
+  CAMELIZE,
+  NORMALIZE_PROPS,
+  helperNameMap,
+} from '../../src/runtimeHelpers'
+import { parseWithVBind } from './vBind.rust-api'"#,
+        "Vue 3 core vBind Rust API imports",
+    )?;
+    rewrite_text_file_block(
+        &spec,
+        r#"function parseWithVBind(
+  template: string,
+  options: CompilerOptions = {},
+): ElementNode {
+  const ast = parse(template)
+  transform(ast, {
+    nodeTransforms: [
+      transformVBindShorthand,
+      ...(options.prefixIdentifiers ? [transformExpression] : []),
+      transformElement,
+    ],
+    directiveTransforms: {
+      bind: transformBind,
+    },
+    ...options,
+  })
+  return ast.children[0] as ElementNode
+}
+"#,
+        "",
+        "Vue 3 core vBind local transform helper",
+    )?;
+    write_text(
+        &transforms.join("vBind.rust-api.ts"),
+        r#"import {
+  type CompilerOptions,
+  NodeTypes,
+  __vuecRuntime,
+} from '../../src'
+
+const runtime = __vuecRuntime as any
+
+export function parseWithVBind(
+  template: string,
+  options: CompilerOptions = {},
+) {
+  const node = runtime.callBridge('vue3.core.transformBindSuite', {
+    source: template,
+    options: normalizeOptions(options),
+  })
+  hydrateVBindAst(node)
+  emitErrors(node, options)
+  return node
+}
+
+function normalizeOptions(options: CompilerOptions) {
+  const normalized: Record<string, unknown> = {}
+  for (const key of Object.keys(options || {}) as Array<keyof CompilerOptions>) {
+    const value = options[key]
+    if (typeof value !== 'function') normalized[key as string] = value
+  }
+  normalized.__vuecBrowser = currentBrowserFlag()
+  return normalized
+}
+
+function currentBrowserFlag() {
+  return (
+    (typeof __BROWSER__ !== 'undefined' && !!__BROWSER__) ||
+    (typeof globalThis !== 'undefined' && !!(globalThis as any).__BROWSER__)
+  )
+}
+
+function emitErrors(node: any, options: CompilerOptions) {
+  const onError = (options as any).onError
+  if (typeof onError !== 'function') return
+  for (const error of node.__vuecErrors || []) {
+    onError({ code: error.code, loc: error.loc })
+  }
+}
+
+function hydrateVBindAst(node: any): any {
+  if (!node || typeof node !== 'object') return node
+  if (Array.isArray(node)) {
+    node.forEach(hydrateVBindAst)
+    return node
+  }
+  if (
+    node.type === NodeTypes.JS_CALL_EXPRESSION &&
+    typeof node.callee === 'string'
+  ) {
+    node.callee = helperSymbol(node.callee) || node.callee
+  }
+  if (node.type === NodeTypes.VNODE_CALL && typeof node.tag === 'string') {
+    node.tag = helperSymbol(node.tag) || node.tag
+  }
+  for (const key of [
+    'children',
+    'props',
+    'content',
+    'codegenNode',
+    'arguments',
+    'returns',
+    'params',
+    'directives',
+    'source',
+    'valueAlias',
+    'keyAlias',
+    'objectIndexAlias',
+    'parseResult',
+    'branches',
+    'condition',
+    'test',
+    'consequent',
+    'alternate',
+    'value',
+    'elements',
+    'properties',
+    'key',
+  ]) {
+    hydrateVBindAst(node[key])
+  }
+  return node
+}
+
+function helperSymbol(name: string) {
+  return typeof name === 'string' ? runtime[name] : undefined
+}
+"#,
+    )?;
     Ok(())
 }
 
@@ -14795,6 +14969,7 @@ fn conformance_coverage_file_kind(
         || path.ends_with("packages/compiler-core/__tests__/utils.spec.ts")
         || path.ends_with("packages/compiler-core/__tests__/transforms/transformSlotOutlet.spec.ts")
         || path.ends_with("packages/compiler-core/__tests__/transforms/transformText.spec.ts")
+        || path.ends_with("packages/compiler-core/__tests__/transforms/vBind.spec.ts")
         || path.ends_with("packages/compiler-core/__tests__/transforms/vMemo.spec.ts")
         || path.ends_with("packages/compiler-core/__tests__/transforms/vOnce.spec.ts")
         || path.ends_with("packages/compiler-dom/__tests__/index.spec.ts")
@@ -14838,6 +15013,12 @@ fn conformance_coverage_file_reason(
     default_reason: &str,
 ) -> String {
     match source {
+        ConformanceCoverageKind::RustBacked
+            if path.ends_with("packages/compiler-core/__tests__/transforms/vBind.spec.ts") =>
+        {
+            "Official Vue 3 compiler-core vBind file imports a prepared Rust API helper that forwards parseWithVBind through @vue/compiler-core.__vuecRuntime into vuec_node_bridge command vue3.core.transformBindSuite; the helper only hydrates public AST helper symbols and emits Rust-projected errors while Rust parser, transformVBindShorthand projection, processExpression projection, transformBind projection, public VNode props projection, and NORMALIZE_PROPS wrapping execute through Rust."
+                .to_string()
+        }
         ConformanceCoverageKind::RustBacked
             if path.ends_with("packages/compiler-core/__tests__/transforms/transformText.spec.ts") =>
         {
@@ -16157,6 +16338,30 @@ mod tests {
                   ]
                 },
                 {
+                  "name": "F:/repo/prepared/vue3-core/packages/compiler-core/__tests__/transforms/vBind.spec.ts",
+                  "assertionResults": [
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" }
+                  ]
+                },
+                {
                   "name": "F:/repo/prepared/vue3-core/packages/compiler-core/__tests__/transforms/vOn.spec.ts",
                   "assertionResults": [
                     { "status": "passed" },
@@ -16176,8 +16381,8 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             counts: ConformanceExecutionCounts {
-                total: 49,
-                pass: 48,
+                total: 68,
+                pass: 67,
                 fail: 1,
                 skip: 0,
                 pending: 0,
@@ -16191,8 +16396,8 @@ mod tests {
         );
 
         assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
-        assert_eq!(coverage.rust_backed_pass, 47);
-        assert_eq!(coverage.rust_backed_total, 47);
+        assert_eq!(coverage.rust_backed_pass, 66);
+        assert_eq!(coverage.rust_backed_total, 66);
         assert_eq!(
             coverage
                 .counts_by_source
@@ -16200,7 +16405,7 @@ mod tests {
                 .copied()
                 .unwrap_or_default()
                 .pass,
-            47
+            66
         );
         assert_eq!(
             coverage
@@ -16245,7 +16450,12 @@ mod tests {
             ConformanceCoverageKind::RustBacked
         );
         assert!(coverage.files[6].reason.contains("transformOnceSuite"));
-        assert_eq!(coverage.files[7].source, ConformanceCoverageKind::Mixed);
+        assert_eq!(
+            coverage.files[7].source,
+            ConformanceCoverageKind::RustBacked
+        );
+        assert!(coverage.files[7].reason.contains("transformBindSuite"));
+        assert_eq!(coverage.files[8].source, ConformanceCoverageKind::Mixed);
         assert!(coverage.reason.contains("xtask/src/compat.rs"));
         let _ = fs::remove_dir_all(temp);
     }
@@ -16540,6 +16750,54 @@ test('placeholder', () => {
         )
         .unwrap();
         fs::write(
+            transforms_tests.join("vBind.spec.ts"),
+            r#"import {
+  type CallExpression,
+  type CompilerOptions,
+  type ElementNode,
+  ErrorCodes,
+  NodeTypes,
+  type ObjectExpression,
+  type VNodeCall,
+  baseParse as parse,
+  transform,
+} from '../../src'
+import { transformBind } from '../../src/transforms/vBind'
+import { transformElement } from '../../src/transforms/transformElement'
+import {
+  CAMELIZE,
+  NORMALIZE_PROPS,
+  helperNameMap,
+} from '../../src/runtimeHelpers'
+import { transformExpression } from '../../src/transforms/transformExpression'
+import { transformVBindShorthand } from '../../src/transforms/transformVBindShorthand'
+
+function parseWithVBind(
+  template: string,
+  options: CompilerOptions = {},
+): ElementNode {
+  const ast = parse(template)
+  transform(ast, {
+    nodeTransforms: [
+      transformVBindShorthand,
+      ...(options.prefixIdentifiers ? [transformExpression] : []),
+      transformElement,
+    ],
+    directiveTransforms: {
+      bind: transformBind,
+    },
+    ...options,
+  })
+  return ast.children[0] as ElementNode
+}
+
+test('placeholder', () => {
+  expect(parseWithVBind('<div :id />')).toBeTruthy()
+})
+"#,
+        )
+        .unwrap();
+        fs::write(
             transforms_tests.join("transformSlotOutlet.spec.ts"),
             r#"import {
   type CompilerOptions,
@@ -16609,6 +16867,17 @@ test('placeholder', () => {
         let v_once_api = fs::read_to_string(transforms_tests.join("vOnce.rust-api.ts")).unwrap();
         assert!(v_once_api.contains("callBridge('vue3.core.transformOnceSuite'"));
         assert!(v_once_api.contains("hydrateTransformOnceAst"));
+        let v_bind_spec = fs::read_to_string(transforms_tests.join("vBind.spec.ts")).unwrap();
+        assert!(v_bind_spec.contains("from './vBind.rust-api'"));
+        assert!(!v_bind_spec.contains("baseParse as parse"));
+        assert!(!v_bind_spec.contains("transform(ast,"));
+        assert!(!v_bind_spec.contains("transformBind } from '../../src/transforms/vBind'"));
+        assert!(!v_bind_spec.contains("transformVBindShorthand"));
+        let v_bind_api = fs::read_to_string(transforms_tests.join("vBind.rust-api.ts")).unwrap();
+        assert!(v_bind_api.contains("callBridge('vue3.core.transformBindSuite'"));
+        assert!(v_bind_api.contains("emitErrors"));
+        assert!(v_bind_api.contains("hydrateVBindAst"));
+        assert!(v_bind_api.contains("__vuecBrowser"));
         let slot_spec =
             fs::read_to_string(transforms_tests.join("transformSlotOutlet.spec.ts")).unwrap();
         assert!(slot_spec.contains("from './transformSlotOutlet.rust-api'"));
