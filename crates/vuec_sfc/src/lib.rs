@@ -12869,7 +12869,12 @@ fn vue27_process_template_exp(exp: &str, is_ts: bool, directive: Option<&str>) -
         }
         return vue27_extract_js_identifiers(exp);
     }
-    vue27_strip_template_expression_strings(exp)
+    let identifiers = vue27_extract_js_identifiers(exp);
+    if identifiers.is_empty() {
+        vue27_strip_template_expression_strings(exp)
+    } else {
+        identifiers
+    }
 }
 
 fn vue27_template_exp_has_ts_syntax(exp: &str) -> bool {
@@ -26632,6 +26637,56 @@ function b() {}
         assert!(!script.content.contains("get Bar()"));
         assert!(!script.content.contains("get Qux()"));
         assert!(!script.content.contains("get Fred()"));
+    }
+
+    #[test]
+    fn vue3_compile_script_template_import_usage_handles_member_chains() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup lang="ts">
+import { Foo, Bar, Baz } from './foo'
+</script>
+<template>
+  <div>{{ Foo.Bar.Baz }}</div>
+  <div v-bind="{ ...Foo.Bar.Baz }"></div>
+  <div>{{ Foo . Bar . Baz }}</div>
+</template>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(
+            script
+                .content
+                .contains("const __returned__ = { get Foo() { return Foo } }"),
+            "content:\n{}\nimports:{:?}",
+            script.content,
+            script.imports
+        );
+        assert!(!script.content.contains("get Bar()"));
+        assert!(!script.content.contains("get Baz()"));
+        assert_eq!(
+            script
+                .imports
+                .get("Foo")
+                .map(|binding| binding.is_used_in_template),
+            Some(true)
+        );
+        assert_eq!(
+            script
+                .imports
+                .get("Bar")
+                .map(|binding| binding.is_used_in_template),
+            Some(false)
+        );
+        assert_eq!(
+            script
+                .imports
+                .get("Baz")
+                .map(|binding| binding.is_used_in_template),
+            Some(false)
+        );
     }
 
     #[test]
