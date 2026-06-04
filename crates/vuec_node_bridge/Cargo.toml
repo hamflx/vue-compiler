@@ -27,6 +27,7 @@ vuec_source = { path = "../vuec_source", version = "0.1.0" }
 vuec_pass = { path = "../vuec_pass", version = "0.1.0" }
 vuec_style = { path = "../vuec_style", version = "0.1.0" }
 vuec_vue2 = { path = "../vuec_vue2", version = "0.1.0" }
+vuec_vue3_asset = { path = "../vuec_vue3_asset", version = "0.1.0" }
 vuec_vue3_core = { path = "../vuec_vue3_core", version = "0.1.0" }
 vuec_vue3_dom = { path = "../vuec_vue3_dom", version = "0.1.0" }
 vuec_vue3_ssr = { path = "../vuec_vue3_ssr", version = "0.1.0" }

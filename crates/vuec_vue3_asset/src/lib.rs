@@ -506,15 +506,18 @@ fn parse_asset_url(value: &str) -> (String, String) {
     }
 }
 
-fn is_relative_url(url: &str) -> bool {
+/// Returns whether a URL is relative under Vue 3 SFC asset transform rules.
+pub fn is_relative_url(url: &str) -> bool {
     matches!(url.chars().next(), Some('.' | '~' | '@' | '#'))
 }
 
-fn is_external_url(url: &str) -> bool {
+/// Returns whether a URL is an external HTTP(S) or protocol-relative URL.
+pub fn is_external_url(url: &str) -> bool {
     url.starts_with("http://") || url.starts_with("https://") || url.starts_with("//")
 }
 
-fn is_data_url(url: &str) -> bool {
+/// Returns whether a URL is a data URL after trimming leading whitespace.
+pub fn is_data_url(url: &str) -> bool {
     url.trim_start().to_ascii_lowercase().starts_with("data:")
 }
 
@@ -549,6 +552,26 @@ mod tests {
             panic!("expected attribute prop, got {prop:?}");
         };
         attribute.value.as_deref().expect("attribute value")
+    }
+
+    #[test]
+    fn template_utils_public_url_predicates_match_vue3_sfc_rules() {
+        assert!(is_relative_url("./logo.png"));
+        assert!(is_relative_url("~/logo.png"));
+        assert!(is_relative_url("@/logo.png"));
+        assert!(is_relative_url("#src/assets/logo.svg"));
+        assert!(!is_relative_url("/logo.png"));
+        assert!(!is_relative_url("logo.png"));
+
+        assert!(is_external_url("http://vuejs.org/"));
+        assert!(is_external_url("https://vuejs.org/"));
+        assert!(is_external_url("//vuejs.org/"));
+        assert!(!is_external_url("/vuejs.org/"));
+
+        assert!(is_data_url("data:,i"));
+        assert!(is_data_url("data:image/png;base64,i"));
+        assert!(is_data_url("  DATA:image/png,i"));
+        assert!(!is_data_url("./data:image/png,i"));
     }
 
     #[test]

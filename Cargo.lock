@@ -1724,6 +1724,7 @@ dependencies = [
  "vuec_source",
  "vuec_style",
  "vuec_vue2",
+ "vuec_vue3_asset",
  "vuec_vue3_core",
  "vuec_vue3_dom",
  "vuec_vue3_ssr",

@@ -182,6 +182,18 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
             vuec_vue3_core::advance_position_with_mutation_projection(&payload),
         ),
         "vue3.core.toValidAssetId" => Ok(vuec_vue3_core::to_valid_asset_id_projection(&payload)),
+        "sfc.templateUtils.isRelativeUrl" => {
+            let url = string_field(&payload, "url");
+            Ok(json!(vuec_vue3_asset::is_relative_url(&url)))
+        }
+        "sfc.templateUtils.isExternalUrl" => {
+            let url = string_field(&payload, "url");
+            Ok(json!(vuec_vue3_asset::is_external_url(&url)))
+        }
+        "sfc.templateUtils.isDataUrl" => {
+            let url = string_field(&payload, "url");
+            Ok(json!(vuec_vue3_asset::is_data_url(&url)))
+        }
         "vue3.core.extractIdentifiers" => {
             Ok(vuec_vue3_core::extract_identifiers_projection(&payload))
         }
@@ -10257,6 +10269,42 @@ mod tests {
         )
         .expect("asset id projection");
         assert_eq!(asset["id"], json!("_component_test_2797935797_1"));
+    }
+
+    #[test]
+    fn vue3_sfc_bridge_projects_template_utils_url_predicates() {
+        assert_eq!(
+            dispatch(
+                "sfc.templateUtils.isRelativeUrl",
+                json!({ "url": "./logo.png" })
+            )
+            .expect("relative url"),
+            json!(true)
+        );
+        assert_eq!(
+            dispatch(
+                "sfc.templateUtils.isExternalUrl",
+                json!({ "url": "https://vuejs.org/" })
+            )
+            .expect("external url"),
+            json!(true)
+        );
+        assert_eq!(
+            dispatch(
+                "sfc.templateUtils.isDataUrl",
+                json!({ "url": "data:image/png;base64,i" })
+            )
+            .expect("data url"),
+            json!(true)
+        );
+        assert_eq!(
+            dispatch(
+                "sfc.templateUtils.isRelativeUrl",
+                json!({ "url": "/logo.png" })
+            )
+            .expect("absolute url"),
+            json!(false)
+        );
     }
 
     #[test]

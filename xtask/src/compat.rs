@@ -2123,6 +2123,8 @@ fn write_alias_index(
         TargetKind::Vue26Template | TargetKind::Vue27Template
     ) {
         source.push_str("Object.defineProperty(exports, '__vuecRuntime', { value: vuecBridgeRuntime, enumerable: false });\n");
+    } else if target.kind == TargetKind::Vue3Sfc {
+        source.push_str("Object.defineProperty(exports, '__vuecRuntime', { value: vuecBridgeRuntime, enumerable: false });\n");
     }
     for export_name in &manifest.exports {
         let detail = manifest.export_details.get(export_name);
@@ -12989,6 +12991,35 @@ fn rewrite_vue3_sfc_public_api_spec_imports(prepared_root: &Path) -> Result<()> 
         "from './utils'",
         "from './utils.public-api'",
     )?;
+    let template_utils_spec = tests.join("templateUtils.spec.ts");
+    rewrite_text_file_import(
+        &template_utils_spec,
+        "from '../src/template/templateUtils'",
+        "from './templateUtils.rust-api'",
+    )?;
+    if template_utils_spec.exists() {
+        write_text(
+            &tests.join("templateUtils.rust-api.ts"),
+            r#"import { __vuecRuntime } from '@vue/compiler-sfc'
+
+function callTemplateUtils(command: string, url: string): boolean {
+  return __vuecRuntime.callBridge(command, { url }) === true
+}
+
+export function isRelativeUrl(url: string): boolean {
+  return callTemplateUtils('sfc.templateUtils.isRelativeUrl', url)
+}
+
+export function isExternalUrl(url: string): boolean {
+  return callTemplateUtils('sfc.templateUtils.isExternalUrl', url)
+}
+
+export function isDataUrl(url: string): boolean {
+  return callTemplateUtils('sfc.templateUtils.isDataUrl', url)
+}
+"#,
+        )?;
+    }
     if css_vars_spec.exists() || compile_template_spec.exists() {
         write_text(
             &tests.join("utils.public-api.ts"),
@@ -13786,6 +13817,7 @@ fn conformance_coverage_file_kind(
         || path.ends_with("packages/compiler-sfc/__tests__/compileStyle.spec.ts")
         || path.ends_with("packages/compiler-sfc/__tests__/cssVars.spec.ts")
         || path.ends_with("packages/compiler-sfc/__tests__/compileTemplate.spec.ts")
+        || path.ends_with("packages/compiler-sfc/__tests__/templateUtils.spec.ts")
     {
         ConformanceCoverageKind::RustBacked
     } else if path.ends_with("packages/compiler-sfc/test/compileStyle.spec.ts") {
@@ -13861,6 +13893,12 @@ fn conformance_coverage_file_reason(
             if path.ends_with("packages/compiler-sfc/__tests__/cssVars.spec.ts") =>
         {
             "Official Vue 3 SFC cssVars file imports the public @vue/compiler-sfc API and routes parse, compileStyle, and compileScript through vuec_node_bridge into Rust; the generated per-file helper only preserves the official test utility shape and Babel syntax assertion."
+                .to_string()
+        }
+        ConformanceCoverageKind::RustBacked
+            if path.ends_with("packages/compiler-sfc/__tests__/templateUtils.spec.ts") =>
+        {
+            "Official Vue 3 SFC templateUtils file imports a prepared Rust API helper that forwards URL classification calls through the generated @vue/compiler-sfc alias runtime into vuec_node_bridge and the Rust vuec_vue3_asset implementation; the helper only preserves the official test import shape."
                 .to_string()
         }
         ConformanceCoverageKind::RustBacked => {
@@ -15947,6 +15985,11 @@ mod tests {
         )
         .unwrap();
         fs::write(
+            tests.join("templateUtils.spec.ts"),
+            "import {\n  isDataUrl,\n  isExternalUrl,\n  isRelativeUrl,\n} from '../src/template/templateUtils'\n",
+        )
+        .unwrap();
+        fs::write(
             tests.join("utils.ts"),
             "import { compileScript, parse } from '../src'\n",
         )
@@ -15998,6 +16041,15 @@ mod tests {
         assert!(public_utils.contains("export function compileSFCScript"));
         assert!(public_utils.contains("babelParse(code"));
         assert!(public_utils.contains("export function getPositionInCode"));
+        let template_utils_spec = fs::read_to_string(tests.join("templateUtils.spec.ts")).unwrap();
+        assert!(template_utils_spec.contains("from './templateUtils.rust-api'"));
+        assert!(!template_utils_spec.contains("../src/template/templateUtils"));
+        let template_utils_api =
+            fs::read_to_string(tests.join("templateUtils.rust-api.ts")).unwrap();
+        assert!(template_utils_api.contains("from '@vue/compiler-sfc'"));
+        assert!(template_utils_api.contains("sfc.templateUtils.isRelativeUrl"));
+        assert!(template_utils_api.contains("sfc.templateUtils.isExternalUrl"));
+        assert!(template_utils_api.contains("sfc.templateUtils.isDataUrl"));
         let _ = fs::remove_dir_all(temp);
     }
 
@@ -16091,6 +16143,20 @@ mod tests {
                     { "status": "passed" },
                     { "status": "passed" }
                   ]
+                },
+                {
+                  "name": "F:/repo/prepared/vue3-sfc/packages/compiler-sfc/__tests__/templateUtils.spec.ts",
+                  "assertionResults": [
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" }
+                  ]
                 }
               ]
             }"#,
@@ -16105,8 +16171,8 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             counts: ConformanceExecutionCounts {
-                total: 34,
-                pass: 34,
+                total: 43,
+                pass: 43,
                 fail: 0,
                 skip: 0,
                 pending: 0,
@@ -16120,8 +16186,8 @@ mod tests {
         );
 
         assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
-        assert_eq!(coverage.rust_backed_pass, 33);
-        assert_eq!(coverage.rust_backed_total, 33);
+        assert_eq!(coverage.rust_backed_pass, 42);
+        assert_eq!(coverage.rust_backed_total, 42);
         assert_eq!(
             coverage.files[0].source,
             ConformanceCoverageKind::RustBacked
@@ -16151,13 +16217,18 @@ mod tests {
             .reason
             .contains("custom compiler callbacks"));
         assert_eq!(
+            coverage.files[6].source,
+            ConformanceCoverageKind::RustBacked
+        );
+        assert!(coverage.files[6].reason.contains("vuec_vue3_asset"));
+        assert_eq!(
             coverage
                 .counts_by_source
                 .get("rust-backed")
                 .copied()
                 .unwrap_or_default()
                 .pass,
-            33
+            42
         );
         let _ = fs::remove_dir_all(temp);
     }
