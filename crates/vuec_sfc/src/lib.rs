@@ -15843,34 +15843,49 @@ fn script_content(
     if let Some(render) = inline_render.as_ref() {
         append_vue3_module_chunk(&mut content, &render.preamble);
     }
-    append_vue3_module_chunk(&mut content, &normal_script.module_content);
-    append_vue3_module_chunk(&mut content, &setup_analysis.module_content);
-    if !content.is_empty()
-        && normal_script.module_content.is_empty()
+    if descriptor
+        .script
+        .as_ref()
+        .is_some_and(|script| script.content_start < script_setup.content_start)
+    {
+        append_vue3_module_chunk(&mut content, &normal_script.module_content);
+        append_vue3_module_chunk(&mut content, &setup_analysis.module_content);
+    } else {
+        append_vue3_module_chunk(&mut content, &setup_analysis.module_content);
+        append_vue3_module_chunk(&mut content, &normal_script.module_content);
+    }
+    if normal_script.module_content.is_empty()
         && setup_analysis.module_content.is_empty()
         && setup_analysis.setup_content.starts_with('\n')
     {
-        if inline_render.is_some() {
+        if content.is_empty() {
+            content.push('\n');
+        } else if inline_render.is_some() {
             content.push_str("\n\n\n");
         } else {
             content.push_str("\n\n");
         }
     }
-    append_vue3_module_chunk(
-        &mut content,
-        &vue3_script_setup_export(
-            &setup_analysis,
-            &return_bindings,
-            &script_binding_metadata,
-            filename,
-            &normal_script,
-            is_ts,
-            options.is_prod,
-            inline_render.as_ref(),
-            css_vars_code.as_deref(),
-            options.emit_script_setup_marker,
-        ),
+    if !content.is_empty()
+        && !content.trim().is_empty()
+        && inline_render.is_none()
+        && vue3_script_setup_needs_blank_before_export(&setup_analysis)
+    {
+        ensure_vue3_blank_line_before_export(&mut content);
+    }
+    let export = vue3_script_setup_export(
+        &setup_analysis,
+        &return_bindings,
+        &script_binding_metadata,
+        filename,
+        &normal_script,
+        is_ts,
+        options.is_prod,
+        inline_render.as_ref(),
+        css_vars_code.as_deref(),
+        options.emit_script_setup_marker,
     );
+    append_vue3_export_chunk(&mut content, &export);
     let mut bindings = BTreeMap::new();
     let script_returns = descriptor
         .script
@@ -15901,7 +15916,7 @@ fn script_content(
     if let Some(render) = inline_render.as_ref() {
         errors.extend(render.errors.clone());
     }
-    let content = content.trim().to_string();
+    let content = trim_trailing_blank_lines(&content).to_string();
     let map = options
         .source_map
         .then(|| vue3_compile_script_source_map(descriptor, &content, inline_render.as_ref()));
@@ -15961,17 +15976,43 @@ fn vue3_compile_script_source_map(
     let source_name = descriptor.filename.replace('\\', "/");
     let mut builder = SourceMapBuilder::new().file(source_name.clone());
     builder.add_source_content(source_name.clone(), descriptor.source.clone());
-    if let Some(script) = descriptor.script.as_ref() {
-        add_script_block_source_mappings(&mut builder, descriptor, script, generated, &source_name);
-    }
-    if let Some(script_setup) = descriptor.script_setup.as_ref() {
-        add_script_block_source_mappings(
-            &mut builder,
-            descriptor,
-            script_setup,
-            generated,
-            &source_name,
-        );
+    match (descriptor.script.as_ref(), descriptor.script_setup.as_ref()) {
+        (Some(script), Some(script_setup)) if script_setup.content_start < script.content_start => {
+            add_script_block_source_mappings(
+                &mut builder,
+                descriptor,
+                script_setup,
+                generated,
+                &source_name,
+            );
+            add_script_block_source_mappings(
+                &mut builder,
+                descriptor,
+                script,
+                generated,
+                &source_name,
+            );
+        }
+        (script, script_setup) => {
+            if let Some(script) = script {
+                add_script_block_source_mappings(
+                    &mut builder,
+                    descriptor,
+                    script,
+                    generated,
+                    &source_name,
+                );
+            }
+            if let Some(script_setup) = script_setup {
+                add_script_block_source_mappings(
+                    &mut builder,
+                    descriptor,
+                    script_setup,
+                    generated,
+                    &source_name,
+                );
+            }
+        }
     }
     if let Some(render) = inline_render {
         add_inline_template_source_mappings(
@@ -23871,6 +23912,7 @@ fn vue3_script_setup_body(
         body.push_str(&render.code);
         return body;
     }
+    body.push_str(vue3_return_separator(setup_analysis, &body));
     if emit_script_setup_marker {
         body.push_str(&format!(
             "const __returned__ = {returned}\nObject.defineProperty(__returned__, '__isScriptSetup', {{ enumerable: false, value: true }})\nreturn __returned__"
@@ -23879,6 +23921,33 @@ fn vue3_script_setup_body(
         body.push_str(&format!("return {returned}"));
     }
     body
+}
+
+fn vue3_return_separator(
+    setup_analysis: &Vue3ScriptSetupAnalysis,
+    setup_body: &str,
+) -> &'static str {
+    if !setup_analysis.setup_content.starts_with('\n') {
+        return "";
+    }
+    if setup_body.is_empty() {
+        return "\n";
+    }
+    if setup_body.chars().all(|ch| matches!(ch, '\n' | '\r')) {
+        return "";
+    }
+    if !setup_body.ends_with('\n') {
+        return "\n";
+    }
+    let without_trailing_newlines = setup_body.trim_end_matches(['\n', '\r']);
+    let Some(last_line) = without_trailing_newlines.rsplit('\n').next() else {
+        return "";
+    };
+    if last_line.trim().is_empty() {
+        ""
+    } else {
+        "\n"
+    }
 }
 
 fn script_setup_returned_bindings(
@@ -23929,10 +23998,39 @@ fn append_vue3_module_chunk(output: &mut String, chunk: &str) {
     if chunk.is_empty() {
         return;
     }
+    if !output.is_empty() && !output.ends_with('\n') && !output_has_pending_blank_line(output) {
+        output.push('\n');
+    }
+    output.push_str(chunk);
+}
+
+fn append_vue3_export_chunk(output: &mut String, chunk: &str) {
+    let chunk = trim_trailing_blank_lines(chunk);
+    if chunk.is_empty() {
+        return;
+    }
     if !output.is_empty() && !output.ends_with('\n') {
         output.push('\n');
     }
     output.push_str(chunk);
+}
+
+fn vue3_script_setup_needs_blank_before_export(setup_analysis: &Vue3ScriptSetupAnalysis) -> bool {
+    setup_analysis.setup_content.starts_with('\n')
+        || (!setup_analysis.setup_content.is_empty()
+            && setup_analysis.setup_content.trim().is_empty()
+            && setup_analysis.setup_content.contains('\n'))
+}
+
+fn ensure_vue3_blank_line_before_export(output: &mut String) {
+    if output.ends_with("\n\n") || output_has_pending_blank_line(output) {
+        return;
+    }
+    if output.ends_with('\n') {
+        output.push('\n');
+    } else {
+        output.push_str("\n\n");
+    }
 }
 
 fn script_component_name(filename: &str) -> Option<String> {
@@ -25997,6 +26095,84 @@ div {
     }
 
     #[test]
+    fn vue3_compile_script_matches_public_macro_snapshot_spacing() {
+        let mut compiler = SfcCompiler::new();
+        let define_expose = compiler.parse(
+            "anonymous.vue",
+            r#"
+<script setup>
+defineExpose({ foo: 123 })
+</script>
+"#,
+        );
+        let script = compiler.compile_script(
+            &define_expose,
+            SfcScriptCompileOptions {
+                id: Some("xxxxxxxx".into()),
+                emit_script_setup_marker: false,
+                ..SfcScriptCompileOptions::default()
+            },
+        );
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script.content.starts_with("\nexport default {"));
+        assert!(script
+            .content
+            .contains("__expose({ foo: 123 })\n\nreturn {  }"));
+
+        let define_options = compiler.parse(
+            "anonymous.vue",
+            r#"
+      <script setup>
+      defineOptions({ name: 'FooApp' })
+      </script>
+    "#,
+        );
+        let script = compiler.compile_script(
+            &define_options,
+            SfcScriptCompileOptions {
+                id: Some("xxxxxxxx".into()),
+                emit_script_setup_marker: false,
+                ..SfcScriptCompileOptions::default()
+            },
+        );
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .starts_with("\nexport default /*@__PURE__*/Object.assign({ name: 'FooApp' }, {"));
+        assert!(script
+            .content
+            .contains("  __expose();\n\n      \n      \nreturn {  }"));
+
+        let script_after_setup = compiler.parse(
+            "anonymous.vue",
+            r#"
+  <script setup>
+  import { x } from './x'
+  </script>
+  <script>const n = 1</script>
+  "#,
+        );
+        let script = compiler.compile_script(
+            &script_after_setup,
+            SfcScriptCompileOptions {
+                id: Some("xxxxxxxx".into()),
+                emit_script_setup_marker: false,
+                ..SfcScriptCompileOptions::default()
+            },
+        );
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .starts_with("import { x } from './x'\n  const n = 1\n\nexport default {"));
+        assert!(script
+            .content
+            .contains("return { n, get x() { return x } }"));
+    }
+
+    #[test]
     fn vue3_compile_script_css_vars_skip_line_comments_and_ssr() {
         let mut compiler = SfcCompiler::new();
         let descriptor = compiler.parse(
@@ -26853,7 +27029,7 @@ const a: number = 1
         ));
         assert!(script
             .content
-            .contains("const a: number = 1\nconst __returned__ = { a }"));
+            .contains("const a: number = 1\n\nconst __returned__ = { a }"));
         assert!(!script.content.contains("defineOptions"));
     }
 
