@@ -19514,6 +19514,9 @@ fn vue3_indexed_access_member_keys(
     members: &Vue27TypeMembers,
     analysis: &Vue3ScriptSetupAnalysis,
 ) -> Option<Vec<String>> {
+    if let Some(keys) = vue3_resolve_ordered_string_type_keys(index_type, analysis) {
+        return Some(keys);
+    }
     if vue3_indexed_access_is_string_key(index_type, analysis) {
         let mut keys = Vec::new();
         for prop in &members.members {
@@ -19521,7 +19524,7 @@ fn vue3_indexed_access_member_keys(
         }
         return Some(keys);
     }
-    vue3_resolve_ordered_string_type_keys(index_type, analysis)
+    None
 }
 
 fn vue3_indexed_access_is_string_key(
