@@ -14,8 +14,8 @@ use oxc_ast::ast::{
     ExportNamedDeclaration, ExportSpecifier, Expression, ForStatementInit, ForStatementLeft,
     FormalParameter, FormalParameters, Function, FunctionBody, ImportDeclarationSpecifier,
     ImportOrExportKind, ModuleExportName, ObjectExpression, ObjectProperty, ObjectPropertyKind,
-    PropertyKey, SimpleAssignmentTarget, Statement, TSEnumDeclaration, TSFunctionType,
-    TSImportType, TSImportTypeQualifier, TSInterfaceBody, TSInterfaceDeclaration,
+    PropertyKey, PropertyKind, SimpleAssignmentTarget, Statement, TSEnumDeclaration,
+    TSFunctionType, TSImportType, TSImportTypeQualifier, TSInterfaceBody, TSInterfaceDeclaration,
     TSInterfaceHeritage, TSLiteral, TSMappedType, TSMappedTypeModifierOperator,
     TSModuleDeclaration, TSModuleDeclarationBody, TSModuleDeclarationName, TSSignature,
     TSTemplateLiteralType, TSTupleElement, TSType, TSTypeAliasDeclaration, TSTypeAnnotation,
@@ -362,6 +362,8 @@ pub struct SfcScriptCompileOptions {
     pub ref_sugar: bool,
     /// Whether production compile behavior is requested.
     pub is_prod: bool,
+    /// Whether the current SFC is compiled as a Vue custom element.
+    pub custom_element: bool,
     /// Whether script setup returns should include the internal non-enumerable marker.
     pub emit_script_setup_marker: bool,
 }
@@ -379,6 +381,7 @@ impl Default for SfcScriptCompileOptions {
             hoist_static: true,
             ref_sugar: false,
             is_prod: false,
+            custom_element: false,
             emit_script_setup_marker: true,
         }
     }
@@ -11802,6 +11805,103 @@ fn vue27_function_body_source<'a>(source: &'a str, expression: &Expression<'_>) 
     }
 }
 
+fn vue3_runtime_defaults_from_argument(
+    source: &str,
+    argument: &Argument<'_>,
+) -> Option<Vue27RuntimeDefaults> {
+    let expression = argument.to_expression();
+    let source_text = source
+        .get(expression.span().start as usize..expression.span().end as usize)?
+        .to_string();
+    let Expression::ObjectExpression(object) = expression else {
+        return Some(Vue27RuntimeDefaults {
+            source: source_text,
+            static_defaults: None,
+        });
+    };
+    let mut defaults = BTreeMap::new();
+    for property in &object.properties {
+        let ObjectPropertyKind::ObjectProperty(property) = property else {
+            return Some(Vue27RuntimeDefaults {
+                source: source_text,
+                static_defaults: None,
+            });
+        };
+        let Some(key) = vue3_runtime_default_property_key(&property.key, property.computed) else {
+            return Some(Vue27RuntimeDefaults {
+                source: source_text,
+                static_defaults: None,
+            });
+        };
+        let default_source = if property.method || property.kind != PropertyKind::Init {
+            vue3_runtime_default_method_source(source, property)
+        } else {
+            source
+                .get(property.value.span().start as usize..property.value.span().end as usize)
+                .map(|value| format!("default: {value}"))
+        };
+        if let Some(default_source) = default_source {
+            defaults.insert(key, default_source);
+        }
+    }
+    Some(Vue27RuntimeDefaults {
+        source: source_text,
+        static_defaults: Some(defaults),
+    })
+}
+
+fn vue3_runtime_default_property_key(key: &PropertyKey<'_>, computed: bool) -> Option<String> {
+    if !computed {
+        return vue27_property_key_static_name(key);
+    }
+    match key {
+        PropertyKey::StringLiteral(literal) => Some(literal.value.to_string()),
+        PropertyKey::NumericLiteral(literal) => Some(literal.value.to_string()),
+        PropertyKey::TemplateLiteral(template) if template.expressions.is_empty() => {
+            let mut key = String::new();
+            for quasi in &template.quasis {
+                key.push_str(&vue3_template_value(quasi));
+            }
+            Some(key)
+        }
+        _ => None,
+    }
+}
+
+fn vue3_runtime_default_method_source(
+    source: &str,
+    property: &ObjectProperty<'_>,
+) -> Option<String> {
+    let Expression::FunctionExpression(function) = &property.value else {
+        return source
+            .get(property.value.span().start as usize..property.value.span().end as usize)
+            .map(|value| format!("default: {value}"));
+    };
+    let body = function
+        .body
+        .as_ref()
+        .and_then(|body| source.get(body.span.start as usize..body.span.end as usize))?;
+    match property.kind {
+        PropertyKind::Get => Some(format!("get default() {body}")),
+        PropertyKind::Set => {
+            let params = vue3_function_params_source(source, function)?;
+            Some(format!("set default{params} {body}"))
+        }
+        PropertyKind::Init => {
+            let params = vue3_function_params_source(source, function)?;
+            let async_prefix = if function.r#async { "async " } else { "" };
+            let generator_prefix = if function.generator { "*" } else { "" };
+            Some(format!(
+                "{async_prefix}{generator_prefix}default{params} {body}"
+            ))
+        }
+    }
+}
+
+fn vue3_function_params_source<'a>(source: &'a str, function: &Function<'_>) -> Option<&'a str> {
+    source.get(function.params.span.start as usize..function.params.span.end as usize)
+}
+
 fn vue27_setup_props_type_source(
     source: &str,
     type_argument: &TSType<'_>,
@@ -15810,6 +15910,7 @@ fn script_content(
         &type_resolver,
         options.props_destructure,
         options.is_prod,
+        options.custom_element,
     );
     let is_ts = script_is_typescript(&script_setup.attrs)
         || descriptor
@@ -15860,17 +15961,8 @@ fn script_content(
     if let Some(render) = inline_render.as_ref() {
         append_vue3_module_chunk(&mut content, &render.preamble);
     }
-    if descriptor
-        .script
-        .as_ref()
-        .is_some_and(|script| script.content_start < script_setup.content_start)
-    {
-        append_vue3_module_chunk(&mut content, &normal_script.module_content);
-        append_vue3_module_chunk(&mut content, &setup_analysis.module_content);
-    } else {
-        append_vue3_module_chunk(&mut content, &setup_analysis.module_content);
-        append_vue3_module_chunk(&mut content, &normal_script.module_content);
-    }
+    append_vue3_module_chunk(&mut content, &setup_analysis.module_content);
+    append_vue3_module_chunk(&mut content, &normal_script.module_content);
     if normal_script.module_content.is_empty()
         && setup_analysis.module_content.is_empty()
         && setup_analysis.setup_content.starts_with('\n')
@@ -16755,6 +16847,7 @@ fn analyze_vue3_script_setup(
     type_resolver: &Vue3TypeResolverContext,
     props_destructure: SfcPropsDestructureMode,
     is_prod: bool,
+    custom_element: bool,
 ) -> Vue3ScriptSetupAnalysis {
     let source = script_setup.content.as_str();
     let is_ts = script_is_typescript(&script_setup.attrs);
@@ -16948,6 +17041,7 @@ fn analyze_vue3_script_setup(
                         &mut analysis,
                         props_destructure,
                         is_prod,
+                        custom_element,
                         hoist_static_literals,
                     );
                     edits.remove(start, end);
@@ -16960,6 +17054,7 @@ fn analyze_vue3_script_setup(
                     &mut analysis,
                     props_destructure,
                     is_prod,
+                    custom_element,
                     hoist_static_literals,
                 );
             }
@@ -16997,12 +17092,26 @@ fn analyze_vue3_script_setup(
                 }
             }
             Statement::ExpressionStatement(statement) => {
-                if let Expression::CallExpression(call) = &statement.expression {
+                if let Expression::CallExpression(call) =
+                    unwrap_vue3_ts_expression(&statement.expression)
+                {
                     if is_call_named(call, "defineProps") {
-                        collect_vue3_define_props_call(source, call, &mut analysis, is_prod);
+                        collect_vue3_define_props_call(
+                            source,
+                            call,
+                            &mut analysis,
+                            is_prod,
+                            custom_element,
+                        );
                         edits.remove(statement.span.start as usize, statement.span.end as usize);
                     } else if is_call_named(call, "withDefaults")
-                        && collect_vue3_with_defaults_call(source, call, &mut analysis, is_prod)
+                        && collect_vue3_with_defaults_call(
+                            source,
+                            call,
+                            &mut analysis,
+                            is_prod,
+                            custom_element,
+                        )
                     {
                         edits.remove(statement.span.start as usize, statement.span.end as usize);
                     } else if is_call_named(call, "defineEmits") {
@@ -17086,15 +17195,18 @@ fn analyze_vue3_setup_variable_declaration(
     analysis: &mut Vue3ScriptSetupAnalysis,
     props_destructure: SfcPropsDestructureMode,
     is_prod: bool,
+    custom_element: bool,
     literal_const_enabled: bool,
 ) {
     let mut macro_declarators = Vec::new();
     let is_all_static = vue3_variable_declaration_is_static_hoist(declaration);
     for (index, declarator) in declaration.declarations.iter().enumerate() {
-        if let Some(Expression::CallExpression(call)) = &declarator.init {
+        if let Some(Expression::CallExpression(call)) =
+            declarator.init.as_ref().map(unwrap_vue3_ts_expression)
+        {
             if is_call_named(call, "defineProps") {
                 if matches!(declarator.id, BindingPattern::BindingIdentifier(_)) {
-                    collect_vue3_define_props_call(source, call, analysis, is_prod);
+                    collect_vue3_define_props_call(source, call, analysis, is_prod, custom_element);
                     collect_pattern_bindings(&declarator.id, &mut analysis.return_bindings);
                     collect_pattern_binding_types(
                         &declarator.id,
@@ -17110,7 +17222,13 @@ fn analyze_vue3_setup_variable_declaration(
                                 &declarator.id,
                                 analysis,
                             );
-                            collect_vue3_define_props_call(source, call, analysis, is_prod);
+                            collect_vue3_define_props_call(
+                                source,
+                                call,
+                                analysis,
+                                is_prod,
+                                custom_element,
+                            );
                             if let Some(rest_id) = props_rest_id {
                                 rewrite_vue3_define_props_destructure_rest(
                                     &declarator.id,
@@ -17124,7 +17242,13 @@ fn analyze_vue3_setup_variable_declaration(
                             }
                         }
                         SfcPropsDestructureMode::Disabled => {
-                            collect_vue3_define_props_call(source, call, analysis, is_prod);
+                            collect_vue3_define_props_call(
+                                source,
+                                call,
+                                analysis,
+                                is_prod,
+                                custom_element,
+                            );
                             collect_pattern_bindings(&declarator.id, &mut analysis.return_bindings);
                             collect_vue3_script_pattern_binding_types(
                                 &declarator.id,
@@ -17139,7 +17263,13 @@ fn analyze_vue3_setup_variable_declaration(
                             );
                         }
                         SfcPropsDestructureMode::Error => {
-                            collect_vue3_define_props_call(source, call, analysis, is_prod);
+                            collect_vue3_define_props_call(
+                                source,
+                                call,
+                                analysis,
+                                is_prod,
+                                custom_element,
+                            );
                             analysis.errors.push(
                                 "Props destructure is explicitly prohibited via config.".into(),
                             );
@@ -17161,7 +17291,7 @@ fn analyze_vue3_setup_variable_declaration(
                 continue;
             }
             if is_call_named(call, "withDefaults")
-                && collect_vue3_with_defaults_call(source, call, analysis, is_prod)
+                && collect_vue3_with_defaults_call(source, call, analysis, is_prod, custom_element)
             {
                 collect_pattern_bindings(&declarator.id, &mut analysis.return_bindings);
                 collect_pattern_binding_types(
@@ -17574,6 +17704,7 @@ fn collect_vue3_define_props_call(
     call: &oxc_ast::ast::CallExpression<'_>,
     analysis: &mut Vue3ScriptSetupAnalysis,
     is_prod: bool,
+    custom_element: bool,
 ) {
     collect_vue3_define_props_call_seen(analysis);
     if let Some(type_argument) = call
@@ -17586,7 +17717,14 @@ fn collect_vue3_define_props_call(
                 .errors
                 .push(vue27_macro_type_and_runtime_error("defineProps"));
         }
-        collect_vue3_define_props_type(source, type_argument, None, analysis, is_prod);
+        collect_vue3_define_props_type(
+            source,
+            type_argument,
+            None,
+            analysis,
+            is_prod,
+            custom_element,
+        );
         return;
     }
     let Some(argument) = call.arguments.first() else {
@@ -17627,17 +17765,14 @@ fn collect_vue3_with_defaults_call(
     call: &oxc_ast::ast::CallExpression<'_>,
     analysis: &mut Vue3ScriptSetupAnalysis,
     is_prod: bool,
+    custom_element: bool,
 ) -> bool {
-    let Some(define_props_call) =
-        call.arguments
-            .first()
-            .and_then(|argument| match argument.to_expression() {
-                Expression::CallExpression(call) if is_call_named(call, "defineProps") => {
-                    Some(call)
-                }
-                _ => None,
-            })
-    else {
+    let Some(define_props_call) = call.arguments.first().and_then(|argument| {
+        match unwrap_vue3_ts_expression(argument.to_expression()) {
+            Expression::CallExpression(call) if is_call_named(call, "defineProps") => Some(call),
+            _ => None,
+        }
+    }) else {
         analysis
             .errors
             .push("withDefaults' first argument must be a defineProps call.".to_string());
@@ -17648,7 +17783,13 @@ fn collect_vue3_with_defaults_call(
         .as_ref()
         .and_then(|arguments| arguments.params.first())
     else {
-        collect_vue3_define_props_call(source, define_props_call, analysis, is_prod);
+        collect_vue3_define_props_call(
+            source,
+            define_props_call,
+            analysis,
+            is_prod,
+            custom_element,
+        );
         analysis.errors.push(
             "withDefaults can only be used with type-based defineProps declaration.".to_string(),
         );
@@ -17681,9 +17822,16 @@ fn collect_vue3_with_defaults_call(
                         .to_string(),
                 );
             }
-            vue27_runtime_defaults_from_argument(source, argument)
+            vue3_runtime_defaults_from_argument(source, argument)
         });
-    collect_vue3_define_props_type(source, type_argument, defaults, analysis, is_prod);
+    collect_vue3_define_props_type(
+        source,
+        type_argument,
+        defaults,
+        analysis,
+        is_prod,
+        custom_element,
+    );
     true
 }
 
@@ -17693,6 +17841,7 @@ fn collect_vue3_define_props_type(
     defaults: Option<Vue27RuntimeDefaults>,
     analysis: &mut Vue3ScriptSetupAnalysis,
     is_prod: bool,
+    custom_element: bool,
 ) {
     record_vue3_type_argument_deps(type_argument, analysis);
     let Some(type_members) = vue3_resolve_props_type_with_mode(
@@ -17728,7 +17877,8 @@ fn collect_vue3_define_props_type(
         props.push(prop);
     }
     analysis.props_type_runtime = true;
-    let props_runtime = gen_vue3_runtime_props(&props, is_prod, has_static_defaults);
+    let props_runtime =
+        gen_vue3_runtime_props(&props, is_prod, has_static_defaults, custom_element);
     analysis.props_runtime = if let Some(defaults) = dynamic_defaults {
         analysis.needs_merge_defaults = true;
         Some(format!(
@@ -21650,6 +21800,7 @@ fn gen_vue3_runtime_props(
     props: &[Vue27RuntimeProp],
     is_prod: bool,
     has_static_defaults: bool,
+    custom_element: bool,
 ) -> String {
     let mut entries = Vec::new();
     for prop in props {
@@ -21670,16 +21821,25 @@ fn gen_vue3_runtime_props(
             ));
             continue;
         }
-        let keep_prod_type = types.iter().any(|ty| {
-            ty == "Boolean"
-                || (ty == "Function" && (!has_static_defaults || prop.default.is_some()))
-        });
+        let keep_prod_type = custom_element
+            || types.iter().any(|ty| {
+                ty == "Boolean"
+                    || (ty == "Function" && (!has_static_defaults || prop.default.is_some()))
+            });
         match (keep_prod_type, prop.default.as_ref()) {
             (true, Some(default)) => {
-                entries.push(format!("{key}: {{ type: {type_string}, {default} }}"));
+                if custom_element {
+                    entries.push(format!("{key}: {{ {default}, type: {type_string} }}"));
+                } else {
+                    entries.push(format!("{key}: {{ type: {type_string}, {default} }}"));
+                }
             }
             (true, None) => {
-                entries.push(format!("{key}: {{ type: {type_string} }}"));
+                if custom_element {
+                    entries.push(format!("{key}: {{type: {type_string}}}"));
+                } else {
+                    entries.push(format!("{key}: {{ type: {type_string} }}"));
+                }
             }
             (false, Some(default)) => {
                 entries.push(format!("{key}: {{ {default} }}"));
@@ -21709,11 +21869,50 @@ fn vue3_runtime_prop_codegen_types(types: &[String]) -> (Vec<String>, bool) {
 }
 
 fn vue3_runtime_prop_key(key: &str) -> String {
-    if is_ascii_js_identifier(key) {
-        key.to_string()
-    } else {
+    if vue3_runtime_prop_key_needs_quote(key) {
         format!("\"{}\"", escape_js_double(key))
+    } else {
+        key.to_string()
     }
+}
+
+fn vue3_runtime_prop_key_needs_quote(key: &str) -> bool {
+    key.chars().any(|ch| {
+        matches!(
+            ch,
+            ' ' | '!'
+                | '"'
+                | '#'
+                | '$'
+                | '%'
+                | '&'
+                | '\''
+                | '('
+                | ')'
+                | '*'
+                | '+'
+                | ','
+                | '.'
+                | '/'
+                | ':'
+                | ';'
+                | '<'
+                | '='
+                | '>'
+                | '?'
+                | '@'
+                | '['
+                | '\\'
+                | ']'
+                | '^'
+                | '`'
+                | '{'
+                | '|'
+                | '}'
+                | '~'
+                | '-'
+        )
+    })
 }
 
 fn vue3_props_destructured_runtime_defaults(analysis: &Vue3ScriptSetupAnalysis) -> Option<String> {
@@ -30834,6 +31033,10 @@ defineProps<Props>()
         let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
 
         assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(
+            script.content.find("interface Bar extends Foo").unwrap()
+                < script.content.find("interface Foo").unwrap()
+        );
         assert!(script
             .content
             .contains("x: { type: Number, required: false }"));
@@ -32081,6 +32284,131 @@ const props = withDefaults(defineProps<{
             .content
             .contains("fn: { type: Function, default() {} }"));
         assert!(!prod.content.contains("required:"));
+    }
+
+    #[test]
+    fn vue3_compile_script_handles_ts_wrapped_define_props_macros() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup lang="ts">
+const props = defineProps(['foo'])! as any
+</script>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty());
+        assert!(script.content.contains("props: ['foo'],"));
+        assert!(script.content.contains("const props = __props! as any"));
+        assert!(!script.content.contains("defineProps"));
+        assert_eq!(
+            script.bindings.get("foo").map(String::as_str),
+            Some("props")
+        );
+    }
+
+    #[test]
+    fn vue3_compile_script_infers_static_computed_with_defaults() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup lang="ts">
+const props = withDefaults(defineProps<{
+  foo?: string
+  quux?: () => number
+  getter?: string
+  asyncer?: () => Promise<number>
+}>(), {
+  ['foo']: 'hi',
+  [`quux`]() { return 2 },
+  get getter() { return 'ok' },
+  async asyncer(value) { return value }
+})
+</script>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty());
+        assert!(!script.content.contains("_mergeDefaults"));
+        assert!(script
+            .content
+            .contains("foo: { type: String, required: false, default: 'hi' }"));
+        assert!(script
+            .content
+            .contains("quux: { type: Function, required: false, default() { return 2 } }"));
+        assert!(script
+            .content
+            .contains("getter: { type: String, required: false, get default() { return 'ok' } }"));
+        assert!(script.content.contains(
+            "asyncer: { type: Function, required: false, async default(value) { return value } }"
+        ));
+    }
+
+    #[test]
+    fn vue3_compile_script_retains_prod_prop_types_for_custom_elements() {
+        let mut compiler = SfcCompiler::new();
+        let typed = compiler.parse(
+            "Foo.ce.vue",
+            r#"<script setup lang="ts">
+defineProps<{ foo?: number; bar?: string; ok?: boolean }>()
+</script>"#,
+        );
+        let script = compiler.compile_script(
+            &typed,
+            SfcScriptCompileOptions {
+                is_prod: true,
+                custom_element: true,
+                ..SfcScriptCompileOptions::default()
+            },
+        );
+
+        assert!(script.errors.is_empty());
+        assert!(script.content.contains("foo: {type: Number}"));
+        assert!(script.content.contains("bar: {type: String}"));
+        assert!(script.content.contains("ok: {type: Boolean}"));
+
+        let with_default = compiler.parse(
+            "Foo.ce.vue",
+            r#"<script setup lang="ts">
+withDefaults(defineProps<{ foo?: number }>(), { foo: 5.5 })
+</script>"#,
+        );
+        let script = compiler.compile_script(
+            &with_default,
+            SfcScriptCompileOptions {
+                is_prod: true,
+                custom_element: true,
+                ..SfcScriptCompileOptions::default()
+            },
+        );
+
+        assert!(script.errors.is_empty());
+        assert!(script
+            .content
+            .contains("foo: { default: 5.5, type: Number }"));
+    }
+
+    #[test]
+    fn vue3_compile_script_quotes_runtime_prop_keys_with_symbols() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "FooBar.vue",
+            r#"<script setup lang="ts">
+defineProps<{
+  'dollar$sign': unknown
+  'da-sh': unknown
+}>()
+</script>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty());
+        assert!(script
+            .content
+            .contains("\"dollar$sign\": { type: null, required: true }"));
+        assert!(script
+            .content
+            .contains("\"da-sh\": { type: null, required: true }"));
     }
 
     #[test]

@@ -4517,6 +4517,15 @@ fn sfc_script_options(value: Option<&Value>) -> SfcScriptCompileOptions {
         "isProd",
         bool_option(value, "is_prod", options.is_prod),
     );
+    options.custom_element = bool_option(
+        value,
+        "customElement",
+        bool_option(
+            value,
+            "custom_element",
+            bool_option(value, "__vuecCustomElement", options.custom_element),
+        ),
+    );
     options.emit_script_setup_marker = bool_option(
         value,
         "__vuecEmitScriptSetupMarker",
@@ -5117,6 +5126,30 @@ mod tests {
         assert_eq!(compiled["bindings"]["cb"], json!("props"));
         assert_eq!(compiled["bindings"]["props"], json!("setup-const"));
         assert_eq!(compiled["bindings"]["emit"], json!("setup-const"));
+    }
+
+    #[test]
+    fn vue3_sfc_bridge_compile_script_passes_custom_element_prod_option() {
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": concat!(
+                    "<script setup lang=\"ts\">",
+                    "withDefaults(defineProps<{ foo?: number; bar?: string }>(), { foo: 5.5 })",
+                    "</script>"
+                ),
+                "filename": "Foo.ce.vue",
+                "options": {
+                    "isProd": true,
+                    "customElement": true
+                }
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        let content = compiled["content"].as_str().unwrap_or_default();
+        assert!(content.contains("foo: { default: 5.5, type: Number }"));
+        assert!(content.contains("bar: {type: String}"));
     }
 
     #[test]

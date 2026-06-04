@@ -673,7 +673,9 @@ impl SourceMapBuilder {
             .iter()
             .map(|name| encoded.add_name(name))
             .collect::<Vec<_>>();
-        for mapping in &self.mappings {
+        let mut mappings = self.mappings.iter().collect::<Vec<_>>();
+        mappings.sort_by_key(|mapping| (mapping.generated_line, mapping.generated_column));
+        for mapping in mappings {
             let source_id = mapping
                 .source_name
                 .as_ref()

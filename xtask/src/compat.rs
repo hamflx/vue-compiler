@@ -8016,6 +8016,15 @@ function hydrateVue3CompileScriptResult(result) {
 function vue3CompileScriptBridgePayload(payload) {
   const out = Object.assign({}, payload || {});
   const options = Object.assign({}, out.options || {});
+  const filename = options.filename !== undefined ? options.filename : out.filename;
+  if (typeof options.customElement === 'function') {
+    try {
+      options.__vuecCustomElement = !!options.customElement(filename);
+    } catch (_) {
+      options.__vuecCustomElement = false;
+    }
+    delete options.customElement;
+  }
   if (typeof __TEST__ !== 'undefined' && __TEST__ === true) {
     options.__vuecEmitScriptSetupMarker = false;
   }
@@ -12992,6 +13001,7 @@ fn rewrite_vue3_sfc_public_api_spec_imports(prepared_root: &Path) -> Result<()> 
         "from './utils.public-api'",
     )?;
     for compile_script_spec in [
+        "defineProps.spec.ts",
         "defineEmits.spec.ts",
         "defineExpose.spec.ts",
         "defineModel.spec.ts",
@@ -13837,6 +13847,7 @@ fn conformance_coverage_file_kind(
         || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineExpose.spec.ts")
         || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineModel.spec.ts")
         || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineOptions.spec.ts")
+        || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineProps.spec.ts")
         || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineSlots.spec.ts")
         || path.ends_with("packages/compiler-sfc/__tests__/compileScript/hoistStatic.spec.ts")
         || path.ends_with("packages/compiler-sfc/__tests__/compileScript/importUsageCheck.spec.ts")
@@ -13928,6 +13939,7 @@ fn conformance_coverage_file_reason(
                 || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineExpose.spec.ts")
                 || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineModel.spec.ts")
                 || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineOptions.spec.ts")
+                || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineProps.spec.ts")
                 || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineSlots.spec.ts")
                 || path.ends_with("packages/compiler-sfc/__tests__/compileScript/hoistStatic.spec.ts")
                 || path.ends_with("packages/compiler-sfc/__tests__/compileScript/importUsageCheck.spec.ts") =>
@@ -14691,6 +14703,9 @@ mod tests {
         assert!(ALIAS_RUNTIME_JS.contains("function vue3CompileScriptBridgePayload"));
         assert!(ALIAS_RUNTIME_JS.contains("function throwVue3CompileScriptErrors"));
         assert!(ALIAS_RUNTIME_JS.contains("__vuecEmitScriptSetupMarker = false"));
+        assert!(ALIAS_RUNTIME_JS
+            .contains("options.__vuecCustomElement = !!options.customElement(filename)"));
+        assert!(ALIAS_RUNTIME_JS.contains("delete options.customElement"));
         assert!(ALIAS_RUNTIME_JS.contains("Object.defineProperty(bindings, '__isScriptSetup'"));
         assert!(ALIAS_RUNTIME_JS.contains("[@vue/compiler-sfc] ${message}"));
     }
@@ -16021,6 +16036,7 @@ mod tests {
         let compile_script_tests = tests.join("compileScript");
         fs::create_dir_all(&compile_script_tests).unwrap();
         for compile_script_spec in [
+            "defineProps.spec.ts",
             "defineEmits.spec.ts",
             "defineExpose.spec.ts",
             "defineModel.spec.ts",
@@ -16102,6 +16118,7 @@ mod tests {
         assert!(template_utils_api.contains("sfc.templateUtils.isExternalUrl"));
         assert!(template_utils_api.contains("sfc.templateUtils.isDataUrl"));
         for compile_script_spec in [
+            "defineProps.spec.ts",
             "defineEmits.spec.ts",
             "defineExpose.spec.ts",
             "defineModel.spec.ts",
@@ -16283,6 +16300,40 @@ mod tests {
                   ]
                 },
                 {
+                  "name": "F:/repo/prepared/vue3-sfc/packages/compiler-sfc/__tests__/compileScript/defineProps.spec.ts",
+                  "assertionResults": [
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" }
+                  ]
+                },
+                {
                   "name": "F:/repo/prepared/vue3-sfc/packages/compiler-sfc/__tests__/compileScript/defineSlots.spec.ts",
                   "assertionResults": [
                     { "status": "passed" },
@@ -16339,8 +16390,8 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             counts: ConformanceExecutionCounts {
-                total: 112,
-                pass: 112,
+                total: 141,
+                pass: 141,
                 fail: 0,
                 skip: 0,
                 pending: 0,
@@ -16354,8 +16405,8 @@ mod tests {
         );
 
         assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
-        assert_eq!(coverage.rust_backed_pass, 111);
-        assert_eq!(coverage.rust_backed_total, 111);
+        assert_eq!(coverage.rust_backed_pass, 140);
+        assert_eq!(coverage.rust_backed_total, 140);
         assert_eq!(
             coverage.files[0].source,
             ConformanceCoverageKind::RustBacked
@@ -16389,7 +16440,7 @@ mod tests {
             ConformanceCoverageKind::RustBacked
         );
         assert!(coverage.files[6].reason.contains("vuec_vue3_asset"));
-        for file in coverage.files.iter().skip(7).take(7) {
+        for file in coverage.files.iter().skip(7).take(8) {
             assert_eq!(file.source, ConformanceCoverageKind::RustBacked);
             assert!(file
                 .reason
@@ -16402,7 +16453,7 @@ mod tests {
                 .copied()
                 .unwrap_or_default()
                 .pass,
-            111
+            140
         );
         let _ = fs::remove_dir_all(temp);
     }
