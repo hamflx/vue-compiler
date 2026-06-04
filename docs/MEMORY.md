@@ -1,5 +1,10 @@
 # Memory
 
+- Current round: migrated Vue 3 compiler-core `packages/compiler-core/__tests__/transforms/vMemo.spec.ts` to file-level Rust-backed coverage.
+- The official `vMemo.spec.ts` imports `baseCompile` from `../../src`; in the prepared tree `../../src` re-exports public `@vue/compiler-core`, and the generated public `baseCompile` alias routes through `vuec_node_bridge` into Rust `vuec_vue3_core` when no caller-provided JavaScript transform callbacks are present. The file only passes serializable `mode` / `prefixIdentifiers` options, so this is a Rust-backed public compile path rather than alias-runtime transform harness coverage.
+- `xtask/src/compat.rs` changes are coverage metadata and reason text only. No compiler semantics were added to the JavaScript alias/shim.
+- Verification for this slice passes: `cargo fmt --all -- --check`, `git diff --check`, `cargo test -p xtask -- --nocapture` (`60/60`), focused prepared official `vMemo.spec.ts` (`7/7`), and `cargo xtask run-conformance --suite vue3-core` (`652/652`, coverage `rust-backed 206/206`, `mixed 446/446`, `shim-backed 0/0`).
+
 - Current round: closed the Vue 3 SFC public `compileScript/resolveType.spec.ts` official conformance migration slice.
 - The prepared official `packages/compiler-sfc/__tests__/compileScript/resolveType.spec.ts` now imports `resolveType.rust-api.ts`, which forwards the test helper calls through generated `@vue/compiler-sfc` alias -> `vuec_node_bridge` command `sfc.resolveType` -> Rust `vuec_sfc::resolve_vue3_type`. The official file is classified as Rust-backed and passes `100/100`.
 - Rust `vuec_sfc` now exposes a public resolveType projection with runtime prop constructors, raw prop/call projection, deps, and diagnostics. The Rust type resolver covers the official resolveType slice including relative/package/tsconfig/global type graphs, `.d.ts` and JS declaration fallback, generic interfaces, indexed access and nested `keyof`, ambient namespace/global predeclaration, `@vue-ignore` intersection branches, call-signature counts, and direct dependency ordering.

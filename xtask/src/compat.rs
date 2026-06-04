@@ -14371,6 +14371,7 @@ fn conformance_coverage_file_kind(
         || path.ends_with("packages/compiler-core/__tests__/parse.spec.ts")
         || path.ends_with("packages/compiler-core/__tests__/scopeId.spec.ts")
         || path.ends_with("packages/compiler-core/__tests__/utils.spec.ts")
+        || path.ends_with("packages/compiler-core/__tests__/transforms/vMemo.spec.ts")
         || path.ends_with("packages/compiler-dom/__tests__/index.spec.ts")
         || path.ends_with("packages/compiler-dom/__tests__/decoderHtmlBrowser.spec.ts")
         || path.ends_with("packages/compiler-dom/__tests__/parse.spec.ts")
@@ -14412,6 +14413,12 @@ fn conformance_coverage_file_reason(
     default_reason: &str,
 ) -> String {
     match source {
+        ConformanceCoverageKind::RustBacked
+            if path.ends_with("packages/compiler-core/__tests__/transforms/vMemo.spec.ts") =>
+        {
+            "Official Vue 3 compiler-core vMemo file imports public baseCompile from ../../src, whose prepared source re-exports @vue/compiler-core; the public alias routes baseCompile through vuec_node_bridge into Rust when no caller-provided JavaScript transform callbacks are present, so v-memo codegen and snapshots are exercised by the Rust Vue 3 core compiler."
+                .to_string()
+        }
         ConformanceCoverageKind::RustBacked
             if path.ends_with("packages/compiler-sfc/__tests__/compileTemplate.spec.ts") =>
         {
@@ -15649,6 +15656,18 @@ mod tests {
                   ]
                 },
                 {
+                  "name": "F:/repo/prepared/vue3-core/packages/compiler-core/__tests__/transforms/vMemo.spec.ts",
+                  "assertionResults": [
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" }
+                  ]
+                },
+                {
                   "name": "F:/repo/prepared/vue3-core/packages/compiler-core/__tests__/transforms/vOn.spec.ts",
                   "assertionResults": [
                     { "status": "passed" },
@@ -15668,8 +15687,8 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             counts: ConformanceExecutionCounts {
-                total: 11,
-                pass: 10,
+                total: 18,
+                pass: 17,
                 fail: 1,
                 skip: 0,
                 pending: 0,
@@ -15683,8 +15702,8 @@ mod tests {
         );
 
         assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
-        assert_eq!(coverage.rust_backed_pass, 9);
-        assert_eq!(coverage.rust_backed_total, 9);
+        assert_eq!(coverage.rust_backed_pass, 16);
+        assert_eq!(coverage.rust_backed_total, 16);
         assert_eq!(
             coverage
                 .counts_by_source
@@ -15692,7 +15711,7 @@ mod tests {
                 .copied()
                 .unwrap_or_default()
                 .pass,
-            9
+            16
         );
         assert_eq!(
             coverage
@@ -15715,7 +15734,12 @@ mod tests {
             coverage.files[2].source,
             ConformanceCoverageKind::RustBacked
         );
-        assert_eq!(coverage.files[3].source, ConformanceCoverageKind::Mixed);
+        assert_eq!(
+            coverage.files[3].source,
+            ConformanceCoverageKind::RustBacked
+        );
+        assert!(coverage.files[3].reason.contains("public baseCompile"));
+        assert_eq!(coverage.files[4].source, ConformanceCoverageKind::Mixed);
         assert!(coverage.reason.contains("xtask/src/compat.rs"));
         let _ = fs::remove_dir_all(temp);
     }
