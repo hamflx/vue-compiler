@@ -12596,6 +12596,7 @@ fn write_vue3_core_conformance_shims(prepared_root: &Path) -> Result<()> {
     write_vue3_core_source_shims(prepared_root)?;
     write_vue3_core_test_setup(prepared_root)?;
     rewrite_vue3_core_v_bind_public_api_spec(prepared_root)?;
+    rewrite_vue3_core_v_model_public_api_spec(prepared_root)?;
     rewrite_vue3_core_transform_slot_outlet_public_api_spec(prepared_root)?;
     rewrite_vue3_core_transform_text_public_api_spec(prepared_root)?;
     rewrite_vue3_core_v_once_public_api_spec(prepared_root)?;
@@ -12807,6 +12808,178 @@ function hydrateVBindAst(node: any): any {
     'key',
   ]) {
     hydrateVBindAst(node[key])
+  }
+  return node
+}
+
+function helperSymbol(name: string) {
+  return typeof name === 'string' ? runtime[name] : undefined
+}
+"#,
+    )?;
+    Ok(())
+}
+
+fn rewrite_vue3_core_v_model_public_api_spec(prepared_root: &Path) -> Result<()> {
+    let transforms = prepared_root
+        .join("packages")
+        .join("compiler-core")
+        .join("__tests__")
+        .join("transforms");
+    let spec = transforms.join("vModel.spec.ts");
+    if !spec.exists() {
+        return Ok(());
+    }
+    rewrite_text_file_block(
+        &spec,
+        r#"import {
+  BindingTypes,
+  type CompilerOptions,
+  type ComponentNode,
+  type ElementNode,
+  type ForNode,
+  NORMALIZE_PROPS,
+  NodeTypes,
+  type ObjectExpression,
+  type PlainElementNode,
+  type VNodeCall,
+  generate,
+  baseParse as parse,
+  transform,
+} from '../../src'
+import { ErrorCodes } from '../../src/errors'
+import { transformModel } from '../../src/transforms/vModel'
+import { transformElement } from '../../src/transforms/transformElement'
+import { transformExpression } from '../../src/transforms/transformExpression'
+import { transformFor } from '../../src/transforms/vFor'
+import { trackSlotScopes } from '../../src/transforms/vSlot'
+import type { CallExpression } from '@babel/types'"#,
+        r#"import {
+  BindingTypes,
+  type CompilerOptions,
+  type ComponentNode,
+  type ElementNode,
+  type ForNode,
+  NORMALIZE_PROPS,
+  NodeTypes,
+  type ObjectExpression,
+  type PlainElementNode,
+  type VNodeCall,
+  generate,
+} from '../../src'
+import { ErrorCodes } from '../../src/errors'
+import type { CallExpression } from '@babel/types'
+import { parseWithVModel } from './vModel.rust-api'"#,
+        "Vue 3 core vModel Rust API imports",
+    )?;
+    rewrite_text_file_block(
+        &spec,
+        r#"function parseWithVModel(template: string, options: CompilerOptions = {}) {
+  const ast = parse(template)
+
+  transform(ast, {
+    nodeTransforms: [
+      transformFor,
+      transformExpression,
+      transformElement,
+      trackSlotScopes,
+    ],
+    directiveTransforms: {
+      ...options.directiveTransforms,
+      model: transformModel,
+    },
+    ...options,
+  })
+
+  return ast
+}
+"#,
+        "",
+        "Vue 3 core vModel local transform helper",
+    )?;
+    write_text(
+        &transforms.join("vModel.rust-api.ts"),
+        r#"import {
+  type CompilerOptions,
+  NodeTypes,
+  __vuecRuntime,
+} from '../../src'
+
+const runtime = __vuecRuntime as any
+
+export function parseWithVModel(
+  template: string,
+  options: CompilerOptions = {},
+) {
+  const root = runtime.callBridge('vue3.core.transformModelSuite', {
+    source: template,
+    options: normalizeOptions(options),
+  })
+  hydrateVModelAst(root)
+  emitErrors(root, options)
+  return root
+}
+
+function normalizeOptions(options: CompilerOptions) {
+  const normalized: Record<string, unknown> = {}
+  for (const key of Object.keys(options || {}) as Array<keyof CompilerOptions>) {
+    const value = options[key]
+    if (typeof value !== 'function') normalized[key as string] = value
+  }
+  return normalized
+}
+
+function emitErrors(root: any, options: CompilerOptions) {
+  const onError = (options as any).onError
+  if (typeof onError !== 'function') return
+  for (const error of root.__vuecErrors || []) {
+    onError({ code: error.code, loc: error.loc })
+  }
+}
+
+function hydrateVModelAst(node: any): any {
+  if (!node || typeof node !== 'object') return node
+  if (Array.isArray(node)) {
+    node.forEach(hydrateVModelAst)
+    return node
+  }
+  if (node.type === NodeTypes.ROOT && Array.isArray(node.helpers)) {
+    node.helpers = new Set(node.helpers.map((name: string) => helperSymbol(name) || name))
+  }
+  if (
+    node.type === NodeTypes.JS_CALL_EXPRESSION &&
+    typeof node.callee === 'string'
+  ) {
+    node.callee = helperSymbol(node.callee) || node.callee
+  }
+  if (node.type === NodeTypes.VNODE_CALL && typeof node.tag === 'string') {
+    node.tag = helperSymbol(node.tag) || node.tag
+  }
+  for (const key of [
+    'children',
+    'props',
+    'content',
+    'codegenNode',
+    'arguments',
+    'returns',
+    'params',
+    'directives',
+    'source',
+    'valueAlias',
+    'keyAlias',
+    'objectIndexAlias',
+    'parseResult',
+    'branches',
+    'condition',
+    'test',
+    'consequent',
+    'alternate',
+    'value',
+    'elements',
+    'properties',
+    'key',
+  ]) {
+    hydrateVModelAst(node[key])
   }
   return node
 }
@@ -14970,6 +15143,7 @@ fn conformance_coverage_file_kind(
         || path.ends_with("packages/compiler-core/__tests__/transforms/transformSlotOutlet.spec.ts")
         || path.ends_with("packages/compiler-core/__tests__/transforms/transformText.spec.ts")
         || path.ends_with("packages/compiler-core/__tests__/transforms/vBind.spec.ts")
+        || path.ends_with("packages/compiler-core/__tests__/transforms/vModel.spec.ts")
         || path.ends_with("packages/compiler-core/__tests__/transforms/vMemo.spec.ts")
         || path.ends_with("packages/compiler-core/__tests__/transforms/vOnce.spec.ts")
         || path.ends_with("packages/compiler-dom/__tests__/index.spec.ts")
@@ -15017,6 +15191,12 @@ fn conformance_coverage_file_reason(
             if path.ends_with("packages/compiler-core/__tests__/transforms/vBind.spec.ts") =>
         {
             "Official Vue 3 compiler-core vBind file imports a prepared Rust API helper that forwards parseWithVBind through @vue/compiler-core.__vuecRuntime into vuec_node_bridge command vue3.core.transformBindSuite; the helper only hydrates public AST helper symbols and emits Rust-projected errors while Rust parser, transformVBindShorthand projection, processExpression projection, transformBind projection, public VNode props projection, and NORMALIZE_PROPS wrapping execute through Rust."
+                .to_string()
+        }
+        ConformanceCoverageKind::RustBacked
+            if path.ends_with("packages/compiler-core/__tests__/transforms/vModel.spec.ts") =>
+        {
+            "Official Vue 3 compiler-core vModel file imports a prepared Rust API helper that forwards parseWithVModel through @vue/compiler-core.__vuecRuntime into vuec_node_bridge command vue3.core.transformModelSuite; the helper only normalizes serializable options, hydrates public AST helper symbols, and emits Rust-projected errors while Rust parser, transformFor projection, processExpression projection, trackSlotScopes projection, transformModel projection, cache handling, public VNode props projection, dynamicProps projection, and generate snapshots execute through Rust."
                 .to_string()
         }
         ConformanceCoverageKind::RustBacked
@@ -16362,6 +16542,32 @@ mod tests {
                   ]
                 },
                 {
+                  "name": "F:/repo/prepared/vue3-core/packages/compiler-core/__tests__/transforms/vModel.spec.ts",
+                  "assertionResults": [
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" }
+                  ]
+                },
+                {
                   "name": "F:/repo/prepared/vue3-core/packages/compiler-core/__tests__/transforms/vOn.spec.ts",
                   "assertionResults": [
                     { "status": "passed" },
@@ -16381,8 +16587,8 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             counts: ConformanceExecutionCounts {
-                total: 68,
-                pass: 67,
+                total: 89,
+                pass: 88,
                 fail: 1,
                 skip: 0,
                 pending: 0,
@@ -16396,8 +16602,8 @@ mod tests {
         );
 
         assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
-        assert_eq!(coverage.rust_backed_pass, 66);
-        assert_eq!(coverage.rust_backed_total, 66);
+        assert_eq!(coverage.rust_backed_pass, 87);
+        assert_eq!(coverage.rust_backed_total, 87);
         assert_eq!(
             coverage
                 .counts_by_source
@@ -16405,7 +16611,7 @@ mod tests {
                 .copied()
                 .unwrap_or_default()
                 .pass,
-            66
+            87
         );
         assert_eq!(
             coverage
@@ -16455,7 +16661,12 @@ mod tests {
             ConformanceCoverageKind::RustBacked
         );
         assert!(coverage.files[7].reason.contains("transformBindSuite"));
-        assert_eq!(coverage.files[8].source, ConformanceCoverageKind::Mixed);
+        assert_eq!(
+            coverage.files[8].source,
+            ConformanceCoverageKind::RustBacked
+        );
+        assert!(coverage.files[8].reason.contains("transformModelSuite"));
+        assert_eq!(coverage.files[9].source, ConformanceCoverageKind::Mixed);
         assert!(coverage.reason.contains("xtask/src/compat.rs"));
         let _ = fs::remove_dir_all(temp);
     }
@@ -16798,6 +17009,57 @@ test('placeholder', () => {
         )
         .unwrap();
         fs::write(
+            transforms_tests.join("vModel.spec.ts"),
+            r#"import {
+  BindingTypes,
+  type CompilerOptions,
+  type ComponentNode,
+  type ElementNode,
+  type ForNode,
+  NORMALIZE_PROPS,
+  NodeTypes,
+  type ObjectExpression,
+  type PlainElementNode,
+  type VNodeCall,
+  generate,
+  baseParse as parse,
+  transform,
+} from '../../src'
+import { ErrorCodes } from '../../src/errors'
+import { transformModel } from '../../src/transforms/vModel'
+import { transformElement } from '../../src/transforms/transformElement'
+import { transformExpression } from '../../src/transforms/transformExpression'
+import { transformFor } from '../../src/transforms/vFor'
+import { trackSlotScopes } from '../../src/transforms/vSlot'
+import type { CallExpression } from '@babel/types'
+
+function parseWithVModel(template: string, options: CompilerOptions = {}) {
+  const ast = parse(template)
+
+  transform(ast, {
+    nodeTransforms: [
+      transformFor,
+      transformExpression,
+      transformElement,
+      trackSlotScopes,
+    ],
+    directiveTransforms: {
+      ...options.directiveTransforms,
+      model: transformModel,
+    },
+    ...options,
+  })
+
+  return ast
+}
+
+test('placeholder', () => {
+  expect(parseWithVModel('<input v-model="model" />')).toBeTruthy()
+})
+"#,
+        )
+        .unwrap();
+        fs::write(
             transforms_tests.join("transformSlotOutlet.spec.ts"),
             r#"import {
   type CompilerOptions,
@@ -16878,6 +17140,16 @@ test('placeholder', () => {
         assert!(v_bind_api.contains("emitErrors"));
         assert!(v_bind_api.contains("hydrateVBindAst"));
         assert!(v_bind_api.contains("__vuecBrowser"));
+        let v_model_spec = fs::read_to_string(transforms_tests.join("vModel.spec.ts")).unwrap();
+        assert!(v_model_spec.contains("from './vModel.rust-api'"));
+        assert!(!v_model_spec.contains("baseParse as parse"));
+        assert!(!v_model_spec.contains("transform(ast,"));
+        assert!(!v_model_spec.contains("transformModel } from '../../src/transforms/vModel'"));
+        assert!(!v_model_spec.contains("trackSlotScopes"));
+        let v_model_api = fs::read_to_string(transforms_tests.join("vModel.rust-api.ts")).unwrap();
+        assert!(v_model_api.contains("callBridge('vue3.core.transformModelSuite'"));
+        assert!(v_model_api.contains("emitErrors"));
+        assert!(v_model_api.contains("hydrateVModelAst"));
         let slot_spec =
             fs::read_to_string(transforms_tests.join("transformSlotOutlet.spec.ts")).unwrap();
         assert!(slot_spec.contains("from './transformSlotOutlet.rust-api'"));
