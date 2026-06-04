@@ -12597,6 +12597,7 @@ fn write_vue3_core_conformance_shims(prepared_root: &Path) -> Result<()> {
     write_vue3_core_test_setup(prepared_root)?;
     rewrite_vue3_core_v_bind_public_api_spec(prepared_root)?;
     rewrite_vue3_core_v_model_public_api_spec(prepared_root)?;
+    rewrite_vue3_core_v_on_public_api_spec(prepared_root)?;
     rewrite_vue3_core_transform_slot_outlet_public_api_spec(prepared_root)?;
     rewrite_vue3_core_transform_text_public_api_spec(prepared_root)?;
     rewrite_vue3_core_v_once_public_api_spec(prepared_root)?;
@@ -12814,6 +12815,210 @@ function hydrateVBindAst(node: any): any {
 
 function helperSymbol(name: string) {
   return typeof name === 'string' ? runtime[name] : undefined
+}
+"#,
+    )?;
+    Ok(())
+}
+
+fn rewrite_vue3_core_v_on_public_api_spec(prepared_root: &Path) -> Result<()> {
+    let transforms = prepared_root
+        .join("packages")
+        .join("compiler-core")
+        .join("__tests__")
+        .join("transforms");
+    let spec = transforms.join("vOn.spec.ts");
+    if !spec.exists() {
+        return Ok(());
+    }
+    rewrite_text_file_block(
+        &spec,
+        r#"import {
+  type CompilerOptions,
+  type ElementNode,
+  ErrorCodes,
+  NodeTypes,
+  type ObjectExpression,
+  TO_HANDLER_KEY,
+  type VNodeCall,
+  helperNameMap,
+  baseParse as parse,
+  transform,
+} from '../../src'
+import { transformFor } from '../../src/transforms/vFor'
+import { transformOn } from '../../src/transforms/vOn'
+import { transformElement } from '../../src/transforms/transformElement'
+import { transformExpression } from '../../src/transforms/transformExpression'"#,
+        r#"import {
+  type CompilerOptions,
+  type ElementNode,
+  ErrorCodes,
+  NodeTypes,
+  type ObjectExpression,
+  TO_HANDLER_KEY,
+  type VNodeCall,
+  helperNameMap,
+} from '../../src'
+import { parseWithVOn } from './vOn.rust-api'"#,
+        "Vue 3 core vOn Rust API imports",
+    )?;
+    rewrite_text_file_block(
+        &spec,
+        r#"function parseWithVOn(template: string, options: CompilerOptions = {}) {
+  const ast = parse(template, options)
+  transform(ast, {
+    nodeTransforms: [transformExpression, transformElement, transformFor],
+    directiveTransforms: {
+      on: transformOn,
+    },
+    ...options,
+  })
+  return {
+    root: ast,
+    node: ast.children[0] as ElementNode,
+  }
+}
+"#,
+        "",
+        "Vue 3 core vOn local transform helper",
+    )?;
+    write_text(
+        &transforms.join("vOn.rust-api.ts"),
+        r#"import {
+  type CompilerOptions,
+  type ElementNode,
+  NodeTypes,
+  __vuecRuntime,
+} from '../../src'
+
+const runtime = __vuecRuntime as any
+
+export function parseWithVOn(
+  template: string,
+  options: CompilerOptions = {},
+) {
+  const result = runtime.callBridge('vue3.core.transformOnSuite', {
+    source: template,
+    options: normalizeOptions(options, template),
+  })
+  const root = result.root || result
+  hydrateVOnAst(root)
+  emitErrors(root, options)
+  return {
+    root,
+    node: root.children[0] as ElementNode,
+  }
+}
+
+function normalizeOptions(options: CompilerOptions, template: string) {
+  const normalized: Record<string, unknown> = {}
+  for (const key of Object.keys(options || {}) as Array<keyof CompilerOptions>) {
+    const value = options[key]
+    if (typeof value !== 'function') normalized[key as string] = value
+  }
+  const tags = extractVueTemplateTags(template)
+  if (hasPredicateOption(options, 'isNativeTag')) {
+    normalized.__vuecNativeTags = collectPredicateHits(
+      (options as any).isNativeTag,
+      tags,
+    )
+  }
+  return normalized
+}
+
+function emitErrors(root: any, options: CompilerOptions) {
+  const onError = (options as any).onError
+  if (typeof onError !== 'function') return
+  for (const error of root.__vuecErrors || []) {
+    onError({ code: error.code, loc: error.loc })
+  }
+}
+
+function hydrateVOnAst(node: any): any {
+  if (!node || typeof node !== 'object') return node
+  if (Array.isArray(node)) {
+    node.forEach(hydrateVOnAst)
+    return node
+  }
+  if (node.type === NodeTypes.ROOT && Array.isArray(node.helpers)) {
+    node.helpers = new Set(node.helpers.map((name: string) => helperSymbol(name) || name))
+  }
+  if (
+    node.type === NodeTypes.JS_CALL_EXPRESSION &&
+    typeof node.callee === 'string'
+  ) {
+    node.callee = helperSymbol(node.callee) || node.callee
+  }
+  if (node.type === NodeTypes.VNODE_CALL) {
+    if (typeof node.tag === 'string') node.tag = helperSymbol(node.tag) || node.tag
+    if (node.patchFlag == null) delete node.patchFlag
+  }
+  for (const key of [
+    'children',
+    'props',
+    'content',
+    'codegenNode',
+    'arguments',
+    'returns',
+    'params',
+    'directives',
+    'source',
+    'valueAlias',
+    'keyAlias',
+    'objectIndexAlias',
+    'parseResult',
+    'branches',
+    'condition',
+    'test',
+    'consequent',
+    'alternate',
+    'value',
+    'elements',
+    'properties',
+    'key',
+  ]) {
+    hydrateVOnAst(node[key])
+  }
+  return node
+}
+
+function helperSymbol(name: string) {
+  return typeof name === 'string' ? runtime[name] : undefined
+}
+
+function hasPredicateOption(options: CompilerOptions, name: string) {
+  return (
+    Object.prototype.hasOwnProperty.call(options || {}, name) &&
+    (typeof (options as any)[name] === 'function' ||
+      Array.isArray((options as any)[name]))
+  )
+}
+
+function extractVueTemplateTags(source: string) {
+  const tags: string[] = []
+  const seen = new Set<string>()
+  const pattern = /<\/?\s*([A-Za-z][A-Za-z0-9._:-]*)/g
+  let match: RegExpExecArray | null
+  while ((match = pattern.exec(source))) {
+    const tag = match[1]
+    if (!seen.has(tag)) {
+      seen.add(tag)
+      tags.push(tag)
+    }
+  }
+  return tags
+}
+
+function collectPredicateHits(predicate: unknown, values: string[]) {
+  if (Array.isArray(predicate)) return predicate.map(String)
+  if (typeof predicate !== 'function') return []
+  const hits: string[] = []
+  for (const value of values) {
+    try {
+      if (predicate(value)) hits.push(value)
+    } catch (_) {}
+  }
+  return hits
 }
 "#,
     )?;
@@ -15145,6 +15350,7 @@ fn conformance_coverage_file_kind(
         || path.ends_with("packages/compiler-core/__tests__/transforms/vBind.spec.ts")
         || path.ends_with("packages/compiler-core/__tests__/transforms/vModel.spec.ts")
         || path.ends_with("packages/compiler-core/__tests__/transforms/vMemo.spec.ts")
+        || path.ends_with("packages/compiler-core/__tests__/transforms/vOn.spec.ts")
         || path.ends_with("packages/compiler-core/__tests__/transforms/vOnce.spec.ts")
         || path.ends_with("packages/compiler-dom/__tests__/index.spec.ts")
         || path.ends_with("packages/compiler-dom/__tests__/decoderHtmlBrowser.spec.ts")
@@ -15197,6 +15403,12 @@ fn conformance_coverage_file_reason(
             if path.ends_with("packages/compiler-core/__tests__/transforms/vModel.spec.ts") =>
         {
             "Official Vue 3 compiler-core vModel file imports a prepared Rust API helper that forwards parseWithVModel through @vue/compiler-core.__vuecRuntime into vuec_node_bridge command vue3.core.transformModelSuite; the helper only normalizes serializable options, hydrates public AST helper symbols, and emits Rust-projected errors while Rust parser, transformFor projection, processExpression projection, trackSlotScopes projection, transformModel projection, cache handling, public VNode props projection, dynamicProps projection, and generate snapshots execute through Rust."
+                .to_string()
+        }
+        ConformanceCoverageKind::RustBacked
+            if path.ends_with("packages/compiler-core/__tests__/transforms/vOn.spec.ts") =>
+        {
+            "Official Vue 3 compiler-core vOn file imports a prepared Rust API helper that forwards parseWithVOn through @vue/compiler-core.__vuecRuntime into vuec_node_bridge command vue3.core.transformOnSuite; the helper only normalizes serializable options including isNativeTag predicate hits, hydrates public AST helper symbols, restores public undefined fields, and emits Rust-projected errors while Rust parser, transformFor projection, processExpression projection for dynamic event args, transformOn projection, cache/scope handling, public VNode props projection, and root codegen projection execute through Rust."
                 .to_string()
         }
         ConformanceCoverageKind::RustBacked
@@ -16571,6 +16783,44 @@ mod tests {
                   "name": "F:/repo/prepared/vue3-core/packages/compiler-core/__tests__/transforms/vOn.spec.ts",
                   "assertionResults": [
                     { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" }
+                  ]
+                },
+                {
+                  "name": "F:/repo/prepared/vue3-core/packages/compiler-core/__tests__/transforms/transformElement.spec.ts",
+                  "assertionResults": [
+                    { "status": "passed" },
                     { "status": "failed" }
                   ]
                 }
@@ -16587,8 +16837,8 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             counts: ConformanceExecutionCounts {
-                total: 89,
-                pass: 88,
+                total: 122,
+                pass: 121,
                 fail: 1,
                 skip: 0,
                 pending: 0,
@@ -16602,8 +16852,8 @@ mod tests {
         );
 
         assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
-        assert_eq!(coverage.rust_backed_pass, 87);
-        assert_eq!(coverage.rust_backed_total, 87);
+        assert_eq!(coverage.rust_backed_pass, 120);
+        assert_eq!(coverage.rust_backed_total, 120);
         assert_eq!(
             coverage
                 .counts_by_source
@@ -16611,7 +16861,7 @@ mod tests {
                 .copied()
                 .unwrap_or_default()
                 .pass,
-            87
+            120
         );
         assert_eq!(
             coverage
@@ -16666,7 +16916,12 @@ mod tests {
             ConformanceCoverageKind::RustBacked
         );
         assert!(coverage.files[8].reason.contains("transformModelSuite"));
-        assert_eq!(coverage.files[9].source, ConformanceCoverageKind::Mixed);
+        assert_eq!(
+            coverage.files[9].source,
+            ConformanceCoverageKind::RustBacked
+        );
+        assert!(coverage.files[9].reason.contains("transformOnSuite"));
+        assert_eq!(coverage.files[10].source, ConformanceCoverageKind::Mixed);
         assert!(coverage.reason.contains("xtask/src/compat.rs"));
         let _ = fs::remove_dir_all(temp);
     }
@@ -17060,6 +17315,46 @@ test('placeholder', () => {
         )
         .unwrap();
         fs::write(
+            transforms_tests.join("vOn.spec.ts"),
+            r#"import {
+  type CompilerOptions,
+  type ElementNode,
+  ErrorCodes,
+  NodeTypes,
+  type ObjectExpression,
+  TO_HANDLER_KEY,
+  type VNodeCall,
+  helperNameMap,
+  baseParse as parse,
+  transform,
+} from '../../src'
+import { transformFor } from '../../src/transforms/vFor'
+import { transformOn } from '../../src/transforms/vOn'
+import { transformElement } from '../../src/transforms/transformElement'
+import { transformExpression } from '../../src/transforms/transformExpression'
+
+function parseWithVOn(template: string, options: CompilerOptions = {}) {
+  const ast = parse(template, options)
+  transform(ast, {
+    nodeTransforms: [transformExpression, transformElement, transformFor],
+    directiveTransforms: {
+      on: transformOn,
+    },
+    ...options,
+  })
+  return {
+    root: ast,
+    node: ast.children[0] as ElementNode,
+  }
+}
+
+test('placeholder', () => {
+  expect(parseWithVOn('<div @click="foo" />')).toBeTruthy()
+})
+"#,
+        )
+        .unwrap();
+        fs::write(
             transforms_tests.join("transformSlotOutlet.spec.ts"),
             r#"import {
   type CompilerOptions,
@@ -17150,6 +17445,17 @@ test('placeholder', () => {
         assert!(v_model_api.contains("callBridge('vue3.core.transformModelSuite'"));
         assert!(v_model_api.contains("emitErrors"));
         assert!(v_model_api.contains("hydrateVModelAst"));
+        let v_on_spec = fs::read_to_string(transforms_tests.join("vOn.spec.ts")).unwrap();
+        assert!(v_on_spec.contains("from './vOn.rust-api'"));
+        assert!(!v_on_spec.contains("baseParse as parse"));
+        assert!(!v_on_spec.contains("transform(ast,"));
+        assert!(!v_on_spec.contains("transformOn } from '../../src/transforms/vOn'"));
+        let v_on_api = fs::read_to_string(transforms_tests.join("vOn.rust-api.ts")).unwrap();
+        assert!(v_on_api.contains("callBridge('vue3.core.transformOnSuite'"));
+        assert!(v_on_api.contains("emitErrors"));
+        assert!(v_on_api.contains("hydrateVOnAst"));
+        assert!(v_on_api.contains("__vuecNativeTags"));
+        assert!(v_on_api.contains("delete node.patchFlag"));
         let slot_spec =
             fs::read_to_string(transforms_tests.join("transformSlotOutlet.spec.ts")).unwrap();
         assert!(slot_spec.contains("from './transformSlotOutlet.rust-api'"));
