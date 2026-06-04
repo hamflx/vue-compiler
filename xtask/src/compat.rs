@@ -12992,6 +12992,7 @@ fn rewrite_vue3_sfc_public_api_spec_imports(prepared_root: &Path) -> Result<()> 
         "from './utils.public-api'",
     )?;
     for compile_script_spec in [
+        "defineEmits.spec.ts",
         "defineExpose.spec.ts",
         "defineOptions.spec.ts",
         "defineSlots.spec.ts",
@@ -13829,6 +13830,7 @@ fn conformance_coverage_file_kind(
         || path.ends_with("packages/compiler-sfc/__tests__/cssVars.spec.ts")
         || path.ends_with("packages/compiler-sfc/__tests__/compileTemplate.spec.ts")
         || path.ends_with("packages/compiler-sfc/__tests__/templateUtils.spec.ts")
+        || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineEmits.spec.ts")
         || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineExpose.spec.ts")
         || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineOptions.spec.ts")
         || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineSlots.spec.ts")
@@ -13916,7 +13918,8 @@ fn conformance_coverage_file_reason(
                 .to_string()
         }
         ConformanceCoverageKind::RustBacked
-            if path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineExpose.spec.ts")
+            if path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineEmits.spec.ts")
+                || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineExpose.spec.ts")
                 || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineOptions.spec.ts")
                 || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineSlots.spec.ts") =>
         {
@@ -16009,6 +16012,7 @@ mod tests {
         let compile_script_tests = tests.join("compileScript");
         fs::create_dir_all(&compile_script_tests).unwrap();
         for compile_script_spec in [
+            "defineEmits.spec.ts",
             "defineExpose.spec.ts",
             "defineOptions.spec.ts",
             "defineSlots.spec.ts",
@@ -16086,6 +16090,7 @@ mod tests {
         assert!(template_utils_api.contains("sfc.templateUtils.isExternalUrl"));
         assert!(template_utils_api.contains("sfc.templateUtils.isDataUrl"));
         for compile_script_spec in [
+            "defineEmits.spec.ts",
             "defineExpose.spec.ts",
             "defineOptions.spec.ts",
             "defineSlots.spec.ts",
@@ -16203,6 +16208,30 @@ mod tests {
                   ]
                 },
                 {
+                  "name": "F:/repo/prepared/vue3-sfc/packages/compiler-sfc/__tests__/compileScript/defineEmits.spec.ts",
+                  "assertionResults": [
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" },
+                    { "status": "passed" }
+                  ]
+                },
+                {
                   "name": "F:/repo/prepared/vue3-sfc/packages/compiler-sfc/__tests__/compileScript/defineExpose.spec.ts",
                   "assertionResults": [
                     { "status": "passed" },
@@ -16242,8 +16271,8 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             counts: ConformanceExecutionCounts {
-                total: 55,
-                pass: 55,
+                total: 74,
+                pass: 74,
                 fail: 0,
                 skip: 0,
                 pending: 0,
@@ -16257,8 +16286,8 @@ mod tests {
         );
 
         assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
-        assert_eq!(coverage.rust_backed_pass, 54);
-        assert_eq!(coverage.rust_backed_total, 54);
+        assert_eq!(coverage.rust_backed_pass, 73);
+        assert_eq!(coverage.rust_backed_total, 73);
         assert_eq!(
             coverage.files[0].source,
             ConformanceCoverageKind::RustBacked
@@ -16292,7 +16321,7 @@ mod tests {
             ConformanceCoverageKind::RustBacked
         );
         assert!(coverage.files[6].reason.contains("vuec_vue3_asset"));
-        for file in coverage.files.iter().skip(7).take(3) {
+        for file in coverage.files.iter().skip(7).take(4) {
             assert_eq!(file.source, ConformanceCoverageKind::RustBacked);
             assert!(file.reason.contains("Rust vuec_sfc macro implementation"));
         }
@@ -16303,7 +16332,7 @@ mod tests {
                 .copied()
                 .unwrap_or_default()
                 .pass,
-            54
+            73
         );
         let _ = fs::remove_dir_all(temp);
     }
