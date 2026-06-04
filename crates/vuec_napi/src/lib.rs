@@ -1349,6 +1349,36 @@ fn parser_plugin_name(value: &Value) -> Option<&str> {
     })
 }
 
+fn deprecated_import_assert_syntax_option(value: &Value) -> bool {
+    value
+        .get("babelParserPlugins")
+        .or_else(|| value.get("babel_parser_plugins"))
+        .or_else(|| value.get("parserPlugins"))
+        .or_else(|| value.get("parser_plugins"))
+        .is_some_and(deprecated_import_assert_syntax_plugin)
+}
+
+fn deprecated_import_assert_syntax_plugin(value: &Value) -> bool {
+    let plugins = value
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_else(|| std::slice::from_ref(value));
+    plugins.iter().any(|plugin| {
+        parser_plugin_name(plugin) == Some("importAttributes")
+            && plugin
+                .as_array()
+                .and_then(|items| items.get(1))
+                .and_then(Value::as_object)
+                .is_some_and(|options| {
+                    options
+                        .get("deprecatedAssertSyntax")
+                        .or_else(|| options.get("deprecated_assert_syntax"))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+                })
+    })
+}
+
 fn vue3_options(value: Option<&Value>) -> Vue3CompilerOptions {
     let mut options = Vue3CompilerOptions::default();
     let Some(value) = value else {
@@ -3955,6 +3985,7 @@ fn sfc_script_options(value: Option<&Value>) -> SfcScriptCompileOptions {
             options.emit_script_setup_marker,
         ),
     );
+    options.allow_deprecated_import_assert_syntax = deprecated_import_assert_syntax_option(value);
     options
 }
 
@@ -4237,6 +4268,9 @@ mod tests {
             "propsDestructure": "error",
             "globalTypeFiles": ["global.d.ts"],
             "genDefaultAs": "_sfc_",
+            "babelParserPlugins": [
+                ["importAttributes", { "deprecatedAssertSyntax": true }]
+            ],
             "templateOptions": {
                 "ssr": true
             }
@@ -4249,6 +4283,7 @@ mod tests {
         assert_eq!(options.props_destructure, SfcPropsDestructureMode::Error);
         assert_eq!(options.global_type_files, vec!["global.d.ts"]);
         assert_eq!(options.gen_default_as.as_deref(), Some("_sfc_"));
+        assert!(options.allow_deprecated_import_assert_syntax);
 
         let disabled = sfc_script_options(Some(&json!({
             "props_destructure": false,

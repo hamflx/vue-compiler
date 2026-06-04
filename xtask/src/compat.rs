@@ -13170,6 +13170,12 @@ fn rewrite_vue3_sfc_public_api_spec_imports(prepared_root: &Path) -> Result<()> 
         "from './utils'",
         "from './utils.public-api'",
     )?;
+    let compile_script_spec = tests.join("compileScript.spec.ts");
+    rewrite_text_file_import(
+        &compile_script_spec,
+        "from './utils'",
+        "from './utils.public-api'",
+    )?;
     for compile_script_spec in [
         "defineProps.spec.ts",
         "definePropsDestructure.spec.ts",
@@ -13217,7 +13223,7 @@ export function isDataUrl(url: string): boolean {
         )?;
     }
     rewrite_vue3_sfc_template_transform_public_api_specs(&tests)?;
-    if css_vars_spec.exists() || compile_template_spec.exists() {
+    if css_vars_spec.exists() || compile_template_spec.exists() || compile_script_spec.exists() {
         write_text(
             &tests.join("utils.public-api.ts"),
             r#"import {
@@ -13228,6 +13234,7 @@ export function isDataUrl(url: string): boolean {
   parse,
 } from '@vue/compiler-sfc'
 import { parse as babelParse } from '@babel/parser'
+import { warnOnce } from '../src/warn'
 
 export const mockId = 'xxxxxxxx'
 
@@ -13240,10 +13247,25 @@ export function compileSFCScript(
   if (errors.length) {
     console.warn(errors[0])
   }
-  return compileScript(descriptor, {
-    ...options,
-    id: mockId,
-  })
+  const warnings: string[] = []
+  const originalWarn = console.warn
+  console.warn = (...args: unknown[]) => {
+    const message = args.map(arg => String(arg)).join(' ')
+    warnings.push(message)
+    originalWarn(...args)
+  }
+  try {
+    return compileScript(descriptor, {
+      __vuecEmitScriptSetupMarker: false,
+      ...options,
+      id: mockId,
+    } as any)
+  } finally {
+    console.warn = originalWarn
+    for (const warning of warnings) {
+      warnOnce(warning)
+    }
+  }
 }
 
 export function assertCode(code: string): void {
@@ -14058,6 +14080,7 @@ fn conformance_coverage_file_kind(
         || path.ends_with("packages/compiler-sfc/__tests__/rewriteDefault.spec.ts")
         || path.ends_with("packages/compiler-sfc/__tests__/compileStyle.spec.ts")
         || path.ends_with("packages/compiler-sfc/__tests__/cssVars.spec.ts")
+        || path.ends_with("packages/compiler-sfc/__tests__/compileScript.spec.ts")
         || path.ends_with("packages/compiler-sfc/__tests__/compileTemplate.spec.ts")
         || path.ends_with("packages/compiler-sfc/__tests__/templateUtils.spec.ts")
         || path.ends_with("packages/compiler-sfc/__tests__/templateTransformAssetUrl.spec.ts")
@@ -14165,6 +14188,7 @@ fn conformance_coverage_file_reason(
         }
         ConformanceCoverageKind::RustBacked
             if path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineEmits.spec.ts")
+                || path.ends_with("packages/compiler-sfc/__tests__/compileScript.spec.ts")
                 || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineExpose.spec.ts")
                 || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineModel.spec.ts")
                 || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineOptions.spec.ts")
@@ -16269,6 +16293,11 @@ mod tests {
             "import { compileStyle, parse } from '../src'\nimport { assertCode, compileSFCScript, mockId } from './utils'\n",
         )
         .unwrap();
+        fs::write(
+            tests.join("compileScript.spec.ts"),
+            "import { assertCode, compileSFCScript as compile } from './utils'\n",
+        )
+        .unwrap();
         let compile_script_tests = tests.join("compileScript");
         fs::create_dir_all(&compile_script_tests).unwrap();
         for compile_script_spec in [
@@ -16354,11 +16383,16 @@ mod tests {
             "cssVars should use a dedicated helper so shared utils.ts remains scoped to mixed files"
         );
         assert_eq!(css_vars_spec.matches("@vue/compiler-sfc").count(), 1);
+        let root_compile_script_spec =
+            fs::read_to_string(tests.join("compileScript.spec.ts")).unwrap();
+        assert!(root_compile_script_spec.contains("from './utils.public-api'"));
+        assert!(!root_compile_script_spec.contains("from './utils'"));
         let shared_utils = fs::read_to_string(tests.join("utils.ts")).unwrap();
         assert!(shared_utils.contains("from '../src'"));
         let public_utils = fs::read_to_string(tests.join("utils.public-api.ts")).unwrap();
         assert!(public_utils.contains("from '@vue/compiler-sfc'"));
         assert!(public_utils.contains("export function compileSFCScript"));
+        assert!(public_utils.contains("__vuecEmitScriptSetupMarker: false"));
         assert!(public_utils.contains("babelParse(code"));
         assert!(public_utils.contains("export function getPositionInCode"));
         let template_utils_spec = fs::read_to_string(tests.join("templateUtils.spec.ts")).unwrap();
@@ -16754,9 +16788,9 @@ mod tests {
             Some(&execution),
         );
 
-        assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
-        assert_eq!(coverage.rust_backed_pass, 197);
-        assert_eq!(coverage.rust_backed_total, 197);
+        assert_eq!(coverage.source, ConformanceCoverageKind::RustBacked);
+        assert_eq!(coverage.rust_backed_pass, 198);
+        assert_eq!(coverage.rust_backed_total, 198);
         assert_eq!(
             coverage.files[0].source,
             ConformanceCoverageKind::RustBacked
@@ -16777,7 +16811,13 @@ mod tests {
             ConformanceCoverageKind::RustBacked
         );
         assert!(coverage.files[3].reason.contains("Babel syntax assertion"));
-        assert_eq!(coverage.files[4].source, ConformanceCoverageKind::Mixed);
+        assert_eq!(
+            coverage.files[4].source,
+            ConformanceCoverageKind::RustBacked
+        );
+        assert!(coverage.files[4]
+            .reason
+            .contains("Rust vuec_sfc compileScript implementation"));
         assert_eq!(
             coverage.files[5].source,
             ConformanceCoverageKind::RustBacked
@@ -16813,7 +16853,7 @@ mod tests {
                 .copied()
                 .unwrap_or_default()
                 .pass,
-            197
+            198
         );
         let _ = fs::remove_dir_all(temp);
     }

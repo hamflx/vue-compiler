@@ -21,7 +21,7 @@ use oxc_ast::ast::{
     TSTemplateLiteralType, TSTupleElement, TSType, TSTypeAliasDeclaration, TSTypeAnnotation,
     TSTypeLiteral, TSTypeName, TSTypeOperatorOperator, TSTypeQuery, TSTypeQueryExprName,
     TSTypeReference, VariableDeclaration, VariableDeclarationKind, VariableDeclarator,
-    WithStatement,
+    WithClauseKeyword, WithStatement,
 };
 use oxc_span::GetSpan;
 use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
@@ -380,6 +380,9 @@ pub struct SfcScriptCompileOptions {
     pub custom_element: bool,
     /// Whether script setup returns should include the internal non-enumerable marker.
     pub emit_script_setup_marker: bool,
+    /// Whether deprecated `import ... assert {}` syntax is accepted.
+    #[serde(default)]
+    pub allow_deprecated_import_assert_syntax: bool,
 }
 
 impl Default for SfcScriptCompileOptions {
@@ -398,6 +401,7 @@ impl Default for SfcScriptCompileOptions {
             is_prod: false,
             custom_element: false,
             emit_script_setup_marker: true,
+            allow_deprecated_import_assert_syntax: false,
         }
     }
 }
@@ -1125,7 +1129,7 @@ impl SfcCompiler {
                 script_setup_ast.extend(sfc_script_ast_body(&self.js, id, &script_setup.content));
             }
         }
-        let script_compile_errors = vue3_script_compile_errors(descriptor);
+        let script_compile_errors = vue3_script_compile_errors(descriptor, &options);
         let summary =
             if script_compile_errors.is_empty() && vue3_script_blocks_are_js_like(descriptor) {
                 self.js.summarize_program(&raw_content, source_type)
@@ -9341,9 +9345,9 @@ fn normalize_path_string(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-fn vue3_normal_script_vue_import_aliases(descriptor: &SfcDescriptor) -> BTreeMap<String, String> {
+fn vue3_normal_script_user_imports(descriptor: &SfcDescriptor) -> Vue3UserImports {
     let Some(script) = descriptor.script.as_ref() else {
-        return BTreeMap::new();
+        return Vue3UserImports::default();
     };
     let allocator = oxc_allocator::Allocator::default();
     let parsed = oxc_parser::Parser::new(
@@ -9357,25 +9361,28 @@ fn vue3_normal_script_vue_import_aliases(descriptor: &SfcDescriptor) -> BTreeMap
     })
     .parse();
     if parsed.panicked || !parsed.errors.is_empty() {
-        return BTreeMap::new();
+        return Vue3UserImports::default();
     }
-    let mut aliases = BTreeMap::new();
+    let mut user_imports = Vue3UserImports::default();
     for statement in &parsed.program.body {
         let Statement::ImportDeclaration(import) = statement else {
             continue;
         };
-        if import.source.value.as_str() != "vue" {
-            continue;
-        }
+        let source = import.source.value.as_str();
         if let Some(specifiers) = &import.specifiers {
             for specifier in specifiers {
                 if let Some(imported) = import_specifier_imported(specifier) {
-                    aliases.insert(imported, import_specifier_local(specifier));
+                    user_imports.record(Vue27ScriptImport {
+                        local: import_specifier_local(specifier),
+                        source: source.to_string(),
+                        imported,
+                        is_type: vue27_import_specifier_is_type(import, specifier),
+                    });
                 }
             }
         }
     }
-    aliases
+    user_imports
 }
 
 fn collect_vue3_declared_types_from_statements(
@@ -12656,6 +12663,7 @@ fn vue3_script_setup_kept_import_source(
     source_value: &str,
     statement_start: usize,
     statement_end: usize,
+    keep_specifier_indices: &[usize],
 ) -> Option<String> {
     let Some(specifiers) = import.specifiers.as_ref() else {
         return source
@@ -12664,7 +12672,9 @@ fn vue3_script_setup_kept_import_source(
     };
     let kept = specifiers
         .iter()
-        .filter(|specifier| vue3_import_specifier_compiler_macro(source_value, specifier).is_none())
+        .enumerate()
+        .filter(|(index, _)| keep_specifier_indices.contains(index))
+        .map(|(_, specifier)| specifier)
         .collect::<Vec<_>>();
     if kept.is_empty() {
         return None;
@@ -12715,6 +12725,39 @@ fn vue3_script_setup_kept_import_source(
     Some(format!(
         "import {import_clause} from '{source_value}'{trailing}"
     ))
+}
+
+fn collect_vue3_setup_import_aliases(
+    statements: &[Statement<'_>],
+    normal_user_imports: &Vue3UserImports,
+    analysis: &mut Vue3ScriptSetupAnalysis,
+) {
+    let mut user_imports = normal_user_imports.clone();
+    for statement in statements {
+        let Statement::ImportDeclaration(import) = statement else {
+            continue;
+        };
+        let source = import.source.value.as_str();
+        let Some(specifiers) = &import.specifiers else {
+            continue;
+        };
+        for specifier in specifiers {
+            if vue3_import_specifier_compiler_macro(source, specifier).is_some() {
+                continue;
+            }
+            let local = import_specifier_local(specifier);
+            if user_imports.existing(&local).is_some() {
+                continue;
+            }
+            user_imports.record(Vue27ScriptImport {
+                local,
+                source: source.to_string(),
+                imported: import_specifier_imported(specifier).unwrap_or_else(|| "default".into()),
+                is_type: vue27_import_specifier_is_type(import, specifier),
+            });
+        }
+    }
+    analysis.vue_import_aliases = user_imports.vue_aliases();
 }
 
 fn vue3_import_specifier_compiler_macro(
@@ -15813,6 +15856,7 @@ struct Vue3NormalScriptAnalysis {
     module_content: String,
     has_default_export: bool,
     has_default_export_name: bool,
+    moved_after_setup: bool,
     errors: Vec<String>,
 }
 
@@ -15820,6 +15864,7 @@ struct Vue3NormalScriptAnalysis {
 struct Vue3ScriptSetupAnalysis {
     module_content: String,
     setup_content: String,
+    removed_leading_import_padding: Option<String>,
     return_bindings: Vec<String>,
     imports: Vec<Vue27ScriptImport>,
     setup_bindings: BTreeMap<String, String>,
@@ -15841,6 +15886,7 @@ struct Vue3ScriptSetupAnalysis {
     has_top_level_await: bool,
     errors: Vec<String>,
     warnings: Vec<String>,
+    demoted_reactive_bindings: BTreeSet<String>,
     local_setup_bindings: BTreeSet<String>,
     local_setup_binding_types: BTreeMap<String, String>,
     props_destructured_bindings: BTreeMap<String, String>,
@@ -15887,6 +15933,29 @@ struct Vue3ScriptSetupAnalysis {
     type_resolver: Vue3TypeResolverContext,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Vue3UserImports {
+    imports: BTreeMap<String, Vue27ScriptImport>,
+}
+
+impl Vue3UserImports {
+    fn record(&mut self, import: Vue27ScriptImport) {
+        self.imports.entry(import.local.clone()).or_insert(import);
+    }
+
+    fn existing(&self, local: &str) -> Option<&Vue27ScriptImport> {
+        self.imports.get(local)
+    }
+
+    fn vue_aliases(&self) -> BTreeMap<String, String> {
+        self.imports
+            .values()
+            .filter(|import| import.source == "vue")
+            .map(|import| (import.imported.clone(), import.local.clone()))
+            .collect()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Vue3ScriptSetupReturnBinding {
     name: String,
@@ -15929,6 +15998,7 @@ fn script_content(
     options: &SfcScriptCompileOptions,
     base_bindings: &BTreeMap<String, String>,
 ) -> GeneratedScriptContent {
+    let script_errors = vue3_script_compile_errors(descriptor, options);
     let Some(script_setup) = descriptor.script_setup.as_ref() else {
         let content = vue3_normal_script_content(descriptor, raw_content, options, base_bindings);
         return GeneratedScriptContent {
@@ -15936,7 +16006,7 @@ fn script_content(
                 .source_map
                 .then(|| vue3_compile_script_source_map(descriptor, &content, None)),
             content,
-            errors: Vec::new(),
+            errors: script_errors,
             warnings: Vec::new(),
             bindings: BTreeMap::new(),
             props_aliases: BTreeMap::new(),
@@ -15945,7 +16015,6 @@ fn script_content(
             deps: Vec::new(),
         };
     };
-    let script_errors = vue3_script_compile_errors(descriptor);
     if !script_lang_is_js_like(&script_setup.attrs) && script_errors.is_empty() {
         return GeneratedScriptContent {
             map: options
@@ -15981,13 +16050,14 @@ fn script_content(
     let normal_script = analyze_vue3_normal_script_for_setup(descriptor);
     let normal_type_context =
         vue3_normal_script_type_context(descriptor, &options.global_type_files, &type_resolver);
-    let normal_vue_import_aliases = vue3_normal_script_vue_import_aliases(descriptor);
+    let normal_user_imports = vue3_normal_script_user_imports(descriptor);
     let setup_analysis = analyze_vue3_script_setup(
         &descriptor.filename,
+        descriptor,
         script_setup,
         options.hoist_static && descriptor.script.is_none(),
         &normal_type_context,
-        &normal_vue_import_aliases,
+        &normal_user_imports,
         &type_resolver,
         options.props_destructure,
         options.is_prod,
@@ -16029,7 +16099,7 @@ fn script_content(
         &template_props_aliases,
     );
     let mut content = String::new();
-    if let Some(import) = vue3_script_setup_helper_import(
+    let has_helper_import = if let Some(import) = vue3_script_setup_helper_import(
         &setup_analysis,
         options,
         is_ts,
@@ -16039,11 +16109,30 @@ fn script_content(
             .is_some_and(|render| render.preamble.contains("unref as _unref")),
     ) {
         append_vue3_module_chunk(&mut content, &import);
-    }
+        true
+    } else {
+        false
+    };
     if let Some(render) = inline_render.as_ref() {
         append_vue3_module_chunk(&mut content, &render.preamble);
+        if !render.preamble.is_empty()
+            && (!setup_analysis.module_content.is_empty()
+                || !normal_script.module_content.is_empty())
+            && !content.ends_with("\n\n")
+        {
+            content.push_str("\n\n");
+        }
     }
     append_vue3_module_chunk(&mut content, &setup_analysis.module_content);
+    if content.is_empty() && !normal_script.module_content.is_empty() {
+        if setup_analysis.removed_leading_import_padding.is_some() {
+            if let Some(padding) = vue3_trailing_blank_line_padding(&normal_script.module_content)
+                .or(setup_analysis.removed_leading_import_padding.as_deref())
+            {
+                content.push_str(padding);
+            }
+        }
+    }
     append_vue3_module_chunk(&mut content, &normal_script.module_content);
     if normal_script.module_content.is_empty()
         && setup_analysis.module_content.is_empty()
@@ -16062,12 +16151,32 @@ fn script_content(
             content.push_str("\n\n");
         }
     }
+    let moved_normal_script_had_pending_blank =
+        normal_script.moved_after_setup && output_has_pending_blank_line(&content);
     if !content.is_empty()
         && !content.trim().is_empty()
         && inline_render.is_none()
-        && vue3_script_setup_needs_blank_before_export(&setup_analysis)
+        && (vue3_script_setup_needs_blank_before_export(&setup_analysis)
+            || (has_helper_import
+                && setup_analysis.module_content.is_empty()
+                && normal_script.module_content.is_empty()))
     {
         ensure_vue3_blank_line_before_export(&mut content);
+    }
+    if normal_script.moved_after_setup
+        && inline_render.is_none()
+        && !normal_script.module_content.is_empty()
+        && (normal_script.has_default_export || moved_normal_script_had_pending_blank)
+    {
+        ensure_vue3_moved_normal_script_gap_before_export(&mut content);
+    }
+    if content.is_empty()
+        && setup_analysis.module_content.is_empty()
+        && normal_script.module_content.is_empty()
+        && !setup_analysis.setup_content.starts_with('\n')
+        && descriptor.script.is_none()
+    {
+        content.push('\n');
     }
     let export = vue3_script_setup_export(
         &setup_analysis,
@@ -16372,7 +16481,10 @@ fn vue3_inline_template_render(
         });
     }
 
-    let scope_id = vue3_compile_script_scope_id(options.id.as_deref());
+    let scoped = descriptor.styles.iter().any(|style| style.attrs.scoped);
+    let scope_id = scoped
+        .then(|| vue3_compile_script_scope_id(options.id.as_deref()))
+        .flatten();
     let mut core = Vue3CompilerOptions {
         prefix_identifiers: true,
         mode: "module".into(),
@@ -16901,6 +17013,9 @@ fn vue3_script_setup_import_is_returned(
     import: &Vue27ScriptImport,
     is_ts: bool,
 ) -> bool {
+    if import.source == "vue" {
+        return true;
+    }
     let Some(template) = descriptor.template.as_ref() else {
         return true;
     };
@@ -16946,9 +17061,19 @@ fn vue3_script_block_return_bindings(block: &SfcBlock) -> Vue27ScriptReturnBindi
     result
 }
 
-fn vue3_script_compile_errors(descriptor: &SfcDescriptor) -> Vec<String> {
+fn vue3_script_compile_errors(
+    descriptor: &SfcDescriptor,
+    options: &SfcScriptCompileOptions,
+) -> Vec<String> {
+    let mut errors = Vec::new();
     let Some(script_setup) = descriptor.script_setup.as_ref() else {
-        return Vec::new();
+        if let Some(script) = descriptor.script.as_ref() {
+            errors.extend(vue3_deprecated_import_assert_syntax_errors(
+                script,
+                options.allow_deprecated_import_assert_syntax,
+            ));
+        }
+        return errors;
     };
     if descriptor
         .script
@@ -16958,9 +17083,76 @@ fn vue3_script_compile_errors(descriptor: &SfcDescriptor) -> Vec<String> {
         return vec!["<script> and <script setup> must have the same language type.".to_string()];
     }
     if !script_lang_is_js_like(&script_setup.attrs) {
+        return errors;
+    }
+    if let Some(script) = descriptor.script.as_ref() {
+        errors.extend(vue3_deprecated_import_assert_syntax_errors(
+            script,
+            options.allow_deprecated_import_assert_syntax,
+        ));
+    }
+    errors.extend(vue3_deprecated_import_assert_syntax_errors(
+        script_setup,
+        options.allow_deprecated_import_assert_syntax,
+    ));
+    errors.extend(vue3_script_setup_module_export_errors(script_setup));
+    errors
+}
+
+fn vue3_deprecated_import_assert_syntax_errors(
+    block: &SfcBlock,
+    allow_deprecated_import_assert_syntax: bool,
+) -> Vec<String> {
+    if allow_deprecated_import_assert_syntax || !script_lang_is_js_like(&block.attrs) {
         return Vec::new();
     }
-    vue3_script_setup_module_export_errors(script_setup)
+    let source = block.content.as_str();
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(
+        &allocator,
+        source,
+        script_source_type_from_attrs(&block.attrs),
+    )
+    .with_options(oxc_parser::ParseOptions {
+        parse_regular_expression: true,
+        ..oxc_parser::ParseOptions::default()
+    })
+    .parse();
+    if parsed.panicked || !parsed.errors.is_empty() {
+        return Vec::new();
+    }
+    parsed
+        .program
+        .body
+        .iter()
+        .filter_map(|statement| match statement {
+            Statement::ImportDeclaration(declaration)
+                if declaration
+                    .with_clause
+                    .as_ref()
+                    .is_some_and(|clause| clause.keyword == WithClauseKeyword::Assert) =>
+            {
+                Some("The `assert` keyword in import attributes is deprecated. Use `with` instead, or enable the importAttributes parser plugin with deprecatedAssertSyntax.".to_string())
+            }
+            Statement::ExportNamedDeclaration(declaration)
+                if declaration
+                    .with_clause
+                    .as_ref()
+                    .is_some_and(|clause| clause.keyword == WithClauseKeyword::Assert) =>
+            {
+                Some("The `assert` keyword in export attributes is deprecated. Use `with` instead, or enable the importAttributes parser plugin with deprecatedAssertSyntax.".to_string())
+            }
+            Statement::ExportAllDeclaration(declaration)
+                if declaration
+                    .with_clause
+                    .as_ref()
+                    .is_some_and(|clause| clause.keyword == WithClauseKeyword::Assert) =>
+            {
+                Some("The `assert` keyword in export attributes is deprecated. Use `with` instead, or enable the importAttributes parser plugin with deprecatedAssertSyntax.".to_string())
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 fn vue3_script_setup_module_export_errors(script_setup: &SfcBlock) -> Vec<String> {
@@ -17004,10 +17196,11 @@ fn vue3_script_setup_module_export_errors(script_setup: &SfcBlock) -> Vec<String
 
 fn analyze_vue3_script_setup(
     filename: &str,
+    descriptor: &SfcDescriptor,
     script_setup: &SfcBlock,
     hoist_static_literals: bool,
     normal_type_context: &Vue27TypeContext,
-    normal_vue_import_aliases: &BTreeMap<String, String>,
+    normal_user_imports: &Vue3UserImports,
     type_resolver: &Vue3TypeResolverContext,
     props_destructure: SfcPropsDestructureMode,
     is_prod: bool,
@@ -17043,6 +17236,7 @@ fn analyze_vue3_script_setup(
         type_resolver,
     );
     let mut type_analysis = Vue3ScriptSetupAnalysis {
+        vue_import_aliases: normal_user_imports.vue_aliases(),
         declared_types: type_context.declared_types,
         define_model_declared_types: type_context.define_model_declared_types,
         type_query_declared_types: type_context.type_query_declared_types,
@@ -17083,6 +17277,11 @@ fn analyze_vue3_script_setup(
         type_resolver: type_resolver.clone(),
         ..Vue3ScriptSetupAnalysis::default()
     };
+    collect_vue3_setup_import_aliases(
+        &parsed.program.body,
+        normal_user_imports,
+        &mut type_analysis,
+    );
     collect_vue3_declared_types_from_statements(source, &parsed.program.body, &mut type_analysis);
     collect_vue3_declared_type_deps_from_statements(&parsed.program.body, &mut type_analysis);
     collect_vue3_setup_local_bindings(
@@ -17136,9 +17335,10 @@ fn analyze_vue3_script_setup(
         type_resolver: type_resolver.clone(),
         local_setup_bindings: type_analysis.local_setup_bindings,
         local_setup_binding_types: type_analysis.local_setup_binding_types,
-        vue_import_aliases: normal_vue_import_aliases.clone(),
+        vue_import_aliases: type_analysis.vue_import_aliases,
         ..Vue3ScriptSetupAnalysis::default()
     };
+    let mut user_imports = normal_user_imports.clone();
     let mut module_chunks = Vec::new();
     for statement in &parsed.program.body {
         match statement {
@@ -17150,8 +17350,12 @@ fn analyze_vue3_script_setup(
                     &parsed.program.comments,
                 );
                 let source_value = import.source.value.as_str();
+                let mut keep_specifier_indices = Vec::new();
                 if let Some(specifiers) = &import.specifiers {
-                    for specifier in specifiers {
+                    for (index, specifier) in specifiers.iter().enumerate() {
+                        let local = import_specifier_local(specifier);
+                        let imported = import_specifier_imported(specifier)
+                            .unwrap_or_else(|| "default".into());
                         if let Some((imported, local)) =
                             vue3_import_specifier_compiler_macro(source_value, specifier)
                         {
@@ -17163,29 +17367,52 @@ fn analyze_vue3_script_setup(
                             }
                             continue;
                         }
-                        if source_value == "vue" {
-                            if let Some(imported) = import_specifier_imported(specifier) {
-                                analysis
-                                    .vue_import_aliases
-                                    .insert(imported, import_specifier_local(specifier));
-                            }
-                        }
-                        analysis.imports.push(Vue27ScriptImport {
-                            local: import_specifier_local(specifier),
+                        let is_type = vue27_import_specifier_is_type(import, specifier);
+                        let import_binding = Vue27ScriptImport {
+                            local: local.clone(),
                             source: source_value.to_string(),
-                            imported: import_specifier_imported(specifier)
-                                .unwrap_or_else(|| "default".into()),
-                            is_type: vue27_import_specifier_is_type(import, specifier),
-                        });
+                            imported: imported.clone(),
+                            is_type,
+                        };
+                        if let Some(existing) = user_imports.existing(&local) {
+                            if existing.source == source_value
+                                && existing.imported == imported
+                                && existing.is_type == is_type
+                            {
+                                continue;
+                            }
+                            analysis
+                                .errors
+                                .push("different imports aliased to same local name.".into());
+                        }
+                        if source_value == "vue" {
+                            analysis
+                                .vue_import_aliases
+                                .insert(imported.clone(), local.clone());
+                        }
+                        user_imports.record(import_binding.clone());
+                        analysis.imports.push(import_binding);
+                        keep_specifier_indices.push(index);
                     }
                 }
-                if let Some(import_source) =
-                    vue3_script_setup_kept_import_source(source, import, source_value, start, end)
-                {
+                if let Some(import_source) = vue3_script_setup_kept_import_source(
+                    source,
+                    import,
+                    source_value,
+                    start,
+                    end,
+                    &keep_specifier_indices,
+                ) {
                     module_chunks.push(Vue27ModuleChunk {
                         start,
                         content: import_source,
                     });
+                } else if analysis.removed_leading_import_padding.is_none() {
+                    if let Some(padding) =
+                        vue3_removed_setup_import_leading_padding(source, statement)
+                    {
+                        analysis.removed_leading_import_padding = Some(padding);
+                    }
                 }
                 edits.remove(start, end);
             }
@@ -17328,6 +17555,12 @@ fn analyze_vue3_script_setup(
     let mut await_rewrite = Vue3TopLevelAwaitRewriter::new(source, &mut edits);
     await_rewrite.walk_program(&parsed.program.body);
     analysis.has_top_level_await = await_rewrite.has_await;
+    demote_vue3_reactive_const_v_model_bindings(
+        descriptor,
+        &mut analysis,
+        &parsed.program.body,
+        &mut edits,
+    );
 
     module_chunks.sort_by_key(|chunk| chunk.start);
     analysis.module_content = module_chunks
@@ -17342,6 +17575,94 @@ fn analyze_vue3_script_setup(
         }
     }
     analysis
+}
+
+fn demote_vue3_reactive_const_v_model_bindings(
+    descriptor: &SfcDescriptor,
+    analysis: &mut Vue3ScriptSetupAnalysis,
+    statements: &[Statement<'_>],
+    edits: &mut SourceEdits<'_>,
+) {
+    let v_model_ids = vue3_template_v_model_identifiers(descriptor);
+    if v_model_ids.is_empty() {
+        return;
+    }
+    let to_demote = v_model_ids
+        .into_iter()
+        .filter(|id| {
+            analysis
+                .setup_bindings
+                .get(id)
+                .is_some_and(|binding| binding == "setup-reactive-const")
+        })
+        .collect::<BTreeSet<_>>();
+    if to_demote.is_empty() {
+        return;
+    }
+    for statement in statements {
+        let Statement::VariableDeclaration(declaration) = statement else {
+            continue;
+        };
+        if declaration.declare || declaration.kind != VariableDeclarationKind::Const {
+            continue;
+        }
+        let mut demoted = Vec::new();
+        for declarator in &declaration.declarations {
+            let BindingPattern::BindingIdentifier(identifier) = &declarator.id else {
+                continue;
+            };
+            if to_demote.contains(identifier.name.as_str()) {
+                demoted.push(identifier.name.to_string());
+            }
+        }
+        if demoted.is_empty() {
+            continue;
+        }
+        edits.overwrite(
+            declaration.span.start as usize,
+            declaration.span.start as usize + "const".len(),
+            "let",
+        );
+        for id in demoted {
+            analysis
+                .setup_bindings
+                .insert(id.clone(), "setup-let".into());
+            analysis.demoted_reactive_bindings.insert(id.clone());
+            analysis.warnings.push(format!(
+                "`v-model` cannot update a `const` reactive binding `{id}`. The compiler has transformed it to `let` to make the update work."
+            ));
+        }
+    }
+}
+
+fn vue3_template_v_model_identifiers(descriptor: &SfcDescriptor) -> BTreeSet<String> {
+    let Some(template) = descriptor.template.as_ref() else {
+        return BTreeSet::new();
+    };
+    if template.attrs.src.is_some() {
+        return BTreeSet::new();
+    }
+    let mut identifiers = BTreeSet::new();
+    for token in HtmlTokenizer::new(&template.content).tokenize() {
+        let HtmlTokenKind::StartTag { attributes, .. } = token.kind else {
+            continue;
+        };
+        for attribute in attributes {
+            let name = attribute.name.as_str();
+            if !vue3_template_is_directive_attr(name)
+                || vue27_template_directive_base_name(name) != "model"
+            {
+                continue;
+            }
+            let Some(value) = attribute.value.as_deref().map(str::trim) else {
+                continue;
+            };
+            if value != "undefined" && is_ascii_js_identifier(value) {
+                identifiers.insert(value.to_string());
+            }
+        }
+    }
+    identifiers
 }
 
 fn vue3_variable_declaration_is_static_hoist(declaration: &VariableDeclaration<'_>) -> bool {
@@ -17513,14 +17834,27 @@ fn analyze_vue3_setup_variable_declaration(
                 continue;
             }
         }
-        let binding_type = vue3_setup_binding_type(
-            declaration.kind,
-            declarator.init.as_ref(),
-            is_all_static,
-            literal_const_enabled,
-            &analysis.vue_import_aliases,
-        );
-        collect_pattern_binding_types(&declarator.id, binding_type, &mut analysis.setup_bindings);
+        if matches!(declarator.id, BindingPattern::BindingIdentifier(_)) {
+            let binding_type = vue3_setup_binding_type(
+                declaration.kind,
+                declarator.init.as_ref(),
+                is_all_static,
+                literal_const_enabled,
+                &analysis.vue_import_aliases,
+            );
+            collect_pattern_binding_types(
+                &declarator.id,
+                binding_type,
+                &mut analysis.setup_bindings,
+            );
+        } else {
+            collect_vue3_script_pattern_binding_types(
+                &declarator.id,
+                declaration.kind == VariableDeclarationKind::Const,
+                false,
+                &mut analysis.setup_bindings,
+            );
+        }
         collect_pattern_bindings(&declarator.id, &mut analysis.return_bindings);
     }
     remove_vue27_macro_declarators(declaration, &macro_declarators, edits);
@@ -24016,9 +24350,14 @@ fn analyze_vue3_normal_script_for_setup(descriptor: &SfcDescriptor) -> Vue3Norma
     let Some(script) = descriptor.script.as_ref() else {
         return Vue3NormalScriptAnalysis::default();
     };
+    let moved_after_setup = descriptor
+        .script_setup
+        .as_ref()
+        .is_some_and(|script_setup| script.content_start > script_setup.content_start);
     if !script_lang_is_js_like(&script.attrs) {
         return Vue3NormalScriptAnalysis {
             module_content: script.content.clone(),
+            moved_after_setup,
             ..Vue3NormalScriptAnalysis::default()
         };
     }
@@ -24037,13 +24376,17 @@ fn analyze_vue3_normal_script_for_setup(descriptor: &SfcDescriptor) -> Vue3Norma
     if parsed.panicked || !parsed.errors.is_empty() {
         return Vue3NormalScriptAnalysis {
             module_content: source.to_string(),
+            moved_after_setup,
             errors: parsed.errors.iter().map(ToString::to_string).collect(),
             ..Vue3NormalScriptAnalysis::default()
         };
     }
 
     let mut edits = SourceEdits::new(source);
-    let mut analysis = Vue3NormalScriptAnalysis::default();
+    let mut analysis = Vue3NormalScriptAnalysis {
+        moved_after_setup,
+        ..Vue3NormalScriptAnalysis::default()
+    };
     for statement in &parsed.program.body {
         match statement {
             Statement::ExportDefaultDeclaration(declaration) => {
@@ -24387,6 +24730,9 @@ fn vue3_script_setup_body(
         body.push_str("  __expose();\n");
     }
     if setup_analysis.has_top_level_await {
+        if !body.is_empty() && !body.ends_with("\n\n") {
+            body.push('\n');
+        }
         if is_ts {
             body.push_str("let __temp: any, __restore: any\n");
         } else {
@@ -24523,6 +24869,35 @@ fn append_vue3_export_chunk(output: &mut String, chunk: &str) {
         output.push('\n');
     }
     output.push_str(chunk);
+}
+
+fn ensure_vue3_moved_normal_script_gap_before_export(output: &mut String) {
+    if output.is_empty() {
+        return;
+    }
+    if output.ends_with('\n') {
+        output.push('\n');
+    } else {
+        output.push_str("\n\n");
+    }
+}
+
+fn vue3_removed_setup_import_leading_padding(
+    source: &str,
+    statement: &Statement<'_>,
+) -> Option<String> {
+    let start = statement.span().start as usize;
+    let leading = source.get(..start)?;
+    if leading.is_empty() || !leading.trim().is_empty() {
+        return None;
+    }
+    Some(leading.to_string())
+}
+
+fn vue3_trailing_blank_line_padding(value: &str) -> Option<&str> {
+    let line_start = value.rfind('\n')?;
+    let trailing = &value[line_start..];
+    trailing.trim().is_empty().then_some(trailing)
 }
 
 fn vue3_script_setup_needs_blank_before_export(setup_analysis: &Vue3ScriptSetupAnalysis) -> bool {
@@ -26678,6 +27053,42 @@ const local = 1
         );
         let script = compiler.compile_script(&type_export, SfcScriptCompileOptions::default());
         assert!(script.errors.is_empty(), "{:?}", script.errors);
+    }
+
+    #[test]
+    fn vue3_compile_script_import_attributes_honor_deprecated_assert_option() {
+        let mut compiler = SfcCompiler::new();
+
+        let with_syntax = compiler.parse(
+            "Comp.vue",
+            "<script setup>import { foo } from './foo.js' with { type: 'json' }</script>",
+        );
+        let script = compiler.compile_script(&with_syntax, SfcScriptCompileOptions::default());
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("import { foo } from './foo.js' with { type: 'json' }"));
+
+        let assert_syntax = compiler.parse(
+            "Comp.vue",
+            "<script setup>import { foo } from './foo.js' assert { type: 'json' }</script>",
+        );
+        let script = compiler.compile_script(&assert_syntax, SfcScriptCompileOptions::default());
+        assert!(script.errors.iter().any(|error| {
+            error.contains("`assert` keyword in import attributes is deprecated")
+        }));
+
+        let script = compiler.compile_script(
+            &assert_syntax,
+            SfcScriptCompileOptions {
+                allow_deprecated_import_assert_syntax: true,
+                ..SfcScriptCompileOptions::default()
+            },
+        );
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("import { foo } from './foo.js' assert { type: 'json' }"));
     }
 
     #[test]

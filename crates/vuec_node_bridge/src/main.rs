@@ -4557,6 +4557,7 @@ fn sfc_script_options(value: Option<&Value>) -> SfcScriptCompileOptions {
             options.emit_script_setup_marker,
         ),
     );
+    options.allow_deprecated_import_assert_syntax = deprecated_import_assert_syntax_option(value);
     options
 }
 
@@ -4717,6 +4718,36 @@ fn parser_plugin_name(value: &Value) -> Option<&str> {
             .as_array()
             .and_then(|items| items.first())
             .and_then(Value::as_str)
+    })
+}
+
+fn deprecated_import_assert_syntax_option(value: &Value) -> bool {
+    value
+        .get("babelParserPlugins")
+        .or_else(|| value.get("babel_parser_plugins"))
+        .or_else(|| value.get("parserPlugins"))
+        .or_else(|| value.get("parser_plugins"))
+        .is_some_and(deprecated_import_assert_syntax_plugin)
+}
+
+fn deprecated_import_assert_syntax_plugin(value: &Value) -> bool {
+    let plugins = value
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_else(|| std::slice::from_ref(value));
+    plugins.iter().any(|plugin| {
+        parser_plugin_name(plugin) == Some("importAttributes")
+            && plugin
+                .as_array()
+                .and_then(|items| items.get(1))
+                .and_then(Value::as_object)
+                .is_some_and(|options| {
+                    options
+                        .get("deprecatedAssertSyntax")
+                        .or_else(|| options.get("deprecated_assert_syntax"))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+                })
     })
 }
 
@@ -5000,6 +5031,52 @@ mod tests {
         let content = snake_case["content"].as_str().unwrap_or_default();
         assert!(content.contains("const _sfc_ = { name: 'X' }"));
         assert!(!content.contains("export default"));
+    }
+
+    #[test]
+    fn vue3_sfc_bridge_compile_script_honors_import_attributes_parser_option() {
+        let with_syntax = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": "<script setup>import { foo } from './foo.js' with { type: 'json' }</script>",
+                "filename": "Comp.vue"
+            }),
+        )
+        .expect("vue3 compileScript");
+        assert!(with_syntax["errors"].as_array().unwrap().is_empty());
+
+        let assert_syntax = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": "<script setup>import { foo } from './foo.js' assert { type: 'json' }</script>",
+                "filename": "Comp.vue"
+            }),
+        )
+        .expect("vue3 compileScript");
+        assert!(assert_syntax["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| {
+                error
+                    .as_str()
+                    .is_some_and(|error| error.contains("import attributes is deprecated"))
+            }));
+
+        let overridden = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": "<script setup>import { foo } from './foo.js' assert { type: 'json' }</script>",
+                "filename": "Comp.vue",
+                "options": {
+                    "babelParserPlugins": [
+                        ["importAttributes", { "deprecatedAssertSyntax": true }]
+                    ]
+                }
+            }),
+        )
+        .expect("vue3 compileScript");
+        assert!(overridden["errors"].as_array().unwrap().is_empty());
     }
 
     #[test]
@@ -5817,7 +5894,7 @@ mod tests {
         let content = compiled["content"].as_str().unwrap_or_default();
         assert!(compiled["errors"].as_array().unwrap().is_empty());
         assert!(content.contains(
-            "const __returned__ = { local, get FooBar() { return FooBar }, get FooBaz() { return FooBaz }, get vMyDir() { return vMyDir } }"
+            "const __returned__ = { local, get FooBar() { return FooBar }, get FooBaz() { return FooBaz }, get vMyDir() { return vMyDir }, ref }"
         ));
         assert_eq!(compiled["bindings"]["FooBar"], json!("setup-maybe-ref"));
         assert_eq!(compiled["bindings"]["FooBaz"], json!("setup-maybe-ref"));
