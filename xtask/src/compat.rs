@@ -12602,6 +12602,7 @@ fn write_vue3_core_conformance_shims(prepared_root: &Path) -> Result<()> {
     rewrite_vue3_core_v_if_public_api_spec(prepared_root)?;
     rewrite_vue3_core_transform_slot_outlet_public_api_spec(prepared_root)?;
     rewrite_vue3_core_v_slot_public_api_spec(prepared_root)?;
+    rewrite_vue3_core_cache_static_public_api_spec(prepared_root)?;
     rewrite_vue3_core_transform_expressions_public_api_spec(prepared_root)?;
     rewrite_vue3_core_transform_text_public_api_spec(prepared_root)?;
     rewrite_vue3_core_v_once_public_api_spec(prepared_root)?;
@@ -13994,6 +13995,210 @@ function hydrateVSlotAst(node: any): any {
     'key',
   ]) {
     hydrateVSlotAst(node[key])
+  }
+  return node
+}
+
+function helperSymbol(name: string) {
+  return typeof name === 'string' ? runtime[name] : undefined
+}
+"#,
+    )?;
+    Ok(())
+}
+
+fn rewrite_vue3_core_cache_static_public_api_spec(prepared_root: &Path) -> Result<()> {
+    let transforms = prepared_root
+        .join("packages")
+        .join("compiler-core")
+        .join("__tests__")
+        .join("transforms");
+    let spec = transforms.join("cacheStatic.spec.ts");
+    if !spec.exists() {
+        return Ok(());
+    }
+    rewrite_text_file_block(
+        &spec,
+        r#"import {
+  type CompilerOptions,
+  ConstantTypes,
+  type ElementNode,
+  type ForNode,
+  type IfNode,
+  NodeTypes,
+  type VNodeCall,
+  generate,
+  baseParse as parse,
+  transform,
+} from '../../src'
+import {
+  FRAGMENT,
+  NORMALIZE_CLASS,
+  RENDER_LIST,
+} from '../../src/runtimeHelpers'
+import { transformElement } from '../../src/transforms/transformElement'
+import { transformExpression } from '../../src/transforms/transformExpression'
+import { transformIf } from '../../src/transforms/vIf'
+import { transformFor } from '../../src/transforms/vFor'
+import { transformBind } from '../../src/transforms/vBind'
+import { transformOn } from '../../src/transforms/vOn'
+import { createObjectMatcher } from '../testUtils'
+import { transformText } from '../../src/transforms/transformText'
+import { PatchFlags } from '@vue/shared'"#,
+        r#"import {
+  type CompilerOptions,
+  ConstantTypes,
+  type ElementNode,
+  type ForNode,
+  type IfNode,
+  NodeTypes,
+  type VNodeCall,
+  generate,
+} from '../../src'
+import {
+  FRAGMENT,
+  NORMALIZE_CLASS,
+  RENDER_LIST,
+} from '../../src/runtimeHelpers'
+import { createObjectMatcher } from '../testUtils'
+import { PatchFlags } from '@vue/shared'
+import { transformWithCache } from './cacheStatic.rust-api'"#,
+        "Vue 3 core cacheStatic Rust API imports",
+    )?;
+    rewrite_text_file_block(
+        &spec,
+        r#"function transformWithCache(template: string, options: CompilerOptions = {}) {
+  const ast = parse(template)
+  transform(ast, {
+    hoistStatic: true,
+    nodeTransforms: [
+      transformIf,
+      transformFor,
+      ...(options.prefixIdentifiers ? [transformExpression] : []),
+      transformElement,
+      transformText,
+    ],
+    directiveTransforms: {
+      on: transformOn,
+      bind: transformBind,
+    },
+    ...options,
+  })
+  expect(ast.codegenNode).toMatchObject({
+    type: NodeTypes.VNODE_CALL,
+    isBlock: true,
+  })
+  return ast
+}
+"#,
+        "",
+        "Vue 3 core cacheStatic local transform helper",
+    )?;
+    write_text(
+        &transforms.join("cacheStatic.rust-api.ts"),
+        r#"import {
+  type CompilerOptions,
+  NodeTypes,
+  __vuecRuntime,
+} from '../../src'
+
+const runtime = __vuecRuntime as any
+
+export function transformWithCache(
+  template: string,
+  options: CompilerOptions = {},
+) {
+  const root = runtime.callBridge('vue3.core.cacheStaticSuite', {
+    source: template,
+    options: normalizeOptions(options),
+  })
+  hydrateCacheStaticAst(root)
+  emitErrors(root, options)
+  expect(root.codegenNode).toMatchObject({
+    type: NodeTypes.VNODE_CALL,
+    isBlock: true,
+  })
+  return root
+}
+
+function normalizeOptions(options: CompilerOptions) {
+  const normalized: Record<string, unknown> = { hoistStatic: true }
+  for (const key of Object.keys(options || {}) as Array<keyof CompilerOptions>) {
+    const value = options[key]
+    if (typeof value !== 'function') normalized[key as string] = value
+  }
+  return normalized
+}
+
+function emitErrors(root: any, options: CompilerOptions) {
+  const onError = (options as any).onError
+  if (typeof onError !== 'function') return
+  for (const error of root.__vuecErrors || []) {
+    onError({ code: error.code, loc: error.loc })
+  }
+}
+
+function hydrateCacheStaticAst(node: any): any {
+  if (!node || typeof node !== 'object') return node
+  if (Array.isArray(node)) {
+    node.forEach(hydrateCacheStaticAst)
+    return node
+  }
+  if (node.type === NodeTypes.ROOT && Array.isArray(node.helpers)) {
+    node.helpers = new Set(node.helpers.map((name: string) => helperSymbol(name) || name))
+  }
+  if (
+    node.type === NodeTypes.JS_CALL_EXPRESSION &&
+    typeof node.callee === 'string'
+  ) {
+    node.callee = helperSymbol(node.callee) || node.callee
+  }
+  if (node.type === NodeTypes.VNODE_CALL) {
+    if (typeof node.tag === 'string') node.tag = helperSymbol(node.tag) || node.tag
+    for (const key of ['props', 'children', 'patchFlag', 'dynamicProps', 'directives']) {
+      if (node[key] == null) node[key] = undefined
+    }
+  }
+  if (node.type === NodeTypes.JS_FUNCTION_EXPRESSION) {
+    if (node.params == null) node.params = undefined
+  }
+  if (node.type === NodeTypes.FOR) {
+    for (const key of ['valueAlias', 'keyAlias', 'objectIndexAlias']) {
+      if (node[key] == null) delete node[key]
+    }
+  }
+  if (node.parseResult) {
+    for (const key of ['value', 'key', 'index']) {
+      if (node.parseResult[key] == null) delete node.parseResult[key]
+    }
+  }
+  for (const key of [
+    'children',
+    'props',
+    'content',
+    'codegenNode',
+    'arguments',
+    'returns',
+    'params',
+    'directives',
+    'source',
+    'valueAlias',
+    'keyAlias',
+    'objectIndexAlias',
+    'parseResult',
+    'branches',
+    'condition',
+    'test',
+    'consequent',
+    'alternate',
+    'value',
+    'elements',
+    'properties',
+    'key',
+    'hoists',
+    'cached',
+  ]) {
+    hydrateCacheStaticAst(node[key])
   }
   return node
 }
@@ -16163,6 +16368,7 @@ fn conformance_coverage_file_kind(
         || path.ends_with("packages/compiler-core/__tests__/transforms/transformSlotOutlet.spec.ts")
         || path.ends_with("packages/compiler-core/__tests__/transforms/transformText.spec.ts")
         || path.ends_with("packages/compiler-core/__tests__/transforms/vBind.spec.ts")
+        || path.ends_with("packages/compiler-core/__tests__/transforms/cacheStatic.spec.ts")
         || path.ends_with("packages/compiler-core/__tests__/transforms/vFor.spec.ts")
         || path.ends_with("packages/compiler-core/__tests__/transforms/vIf.spec.ts")
         || path.ends_with("packages/compiler-core/__tests__/transforms/vModel.spec.ts")
@@ -16215,6 +16421,12 @@ fn conformance_coverage_file_reason(
             if path.ends_with("packages/compiler-core/__tests__/transforms/vBind.spec.ts") =>
         {
             "Official Vue 3 compiler-core vBind file imports a prepared Rust API helper that forwards parseWithVBind through @vue/compiler-core.__vuecRuntime into vuec_node_bridge command vue3.core.transformBindSuite; the helper only hydrates public AST helper symbols and emits Rust-projected errors while Rust parser, transformVBindShorthand projection, processExpression projection, transformBind projection, public VNode props projection, and NORMALIZE_PROPS wrapping execute through Rust."
+                .to_string()
+        }
+        ConformanceCoverageKind::RustBacked
+            if path.ends_with("packages/compiler-core/__tests__/transforms/cacheStatic.spec.ts") =>
+        {
+            "Official Vue 3 compiler-core cacheStatic file imports a prepared Rust API helper that forwards transformWithCache through @vue/compiler-core.__vuecRuntime into vuec_node_bridge command vue3.core.cacheStaticSuite; the helper only normalizes serializable options, hydrates public AST helper symbols, restores public undefined fields, and emits Rust-projected errors while Rust parser, transformVBindShorthand projection, transformIf projection, transformFor projection, processExpression projection, transformElement projection, transformText projection, cacheStatic projection, getConstantType projection, cache materialization, and hoist materialization execute through Rust."
                 .to_string()
         }
         ConformanceCoverageKind::RustBacked
@@ -17775,6 +17987,23 @@ mod tests {
                   ]
                 },
                 {
+                  "name": "F:/repo/prepared/vue3-core/packages/compiler-core/__tests__/transforms/cacheStatic.spec.ts",
+                  "assertionResults": [
+                    { "status": "passed" }, { "status": "passed" }, { "status": "passed" },
+                    { "status": "passed" }, { "status": "passed" }, { "status": "passed" },
+                    { "status": "passed" }, { "status": "passed" }, { "status": "passed" },
+                    { "status": "passed" }, { "status": "passed" }, { "status": "passed" },
+                    { "status": "passed" }, { "status": "passed" }, { "status": "passed" },
+                    { "status": "passed" }, { "status": "passed" }, { "status": "passed" },
+                    { "status": "passed" }, { "status": "passed" }, { "status": "passed" },
+                    { "status": "passed" }, { "status": "passed" }, { "status": "passed" },
+                    { "status": "passed" }, { "status": "passed" }, { "status": "passed" },
+                    { "status": "passed" }, { "status": "passed" }, { "status": "passed" },
+                    { "status": "passed" }, { "status": "passed" }, { "status": "passed" },
+                    { "status": "passed" }
+                  ]
+                },
+                {
                   "name": "F:/repo/prepared/vue3-core/packages/compiler-core/__tests__/transforms/transformElement.spec.ts",
                   "assertionResults": [
                     { "status": "passed" },
@@ -17794,8 +18023,8 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             counts: ConformanceExecutionCounts {
-                total: 253,
-                pass: 252,
+                total: 287,
+                pass: 286,
                 fail: 1,
                 skip: 0,
                 pending: 0,
@@ -17809,8 +18038,8 @@ mod tests {
         );
 
         assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
-        assert_eq!(coverage.rust_backed_pass, 251);
-        assert_eq!(coverage.rust_backed_total, 251);
+        assert_eq!(coverage.rust_backed_pass, 285);
+        assert_eq!(coverage.rust_backed_total, 285);
         assert_eq!(
             coverage
                 .counts_by_source
@@ -17818,7 +18047,7 @@ mod tests {
                 .copied()
                 .unwrap_or_default()
                 .pass,
-            251
+            285
         );
         assert_eq!(
             coverage
@@ -17895,7 +18124,12 @@ mod tests {
             ConformanceCoverageKind::RustBacked
         );
         assert!(coverage.files[12].reason.contains("transformIfSuite"));
-        assert_eq!(coverage.files[13].source, ConformanceCoverageKind::Mixed);
+        assert_eq!(
+            coverage.files[13].source,
+            ConformanceCoverageKind::RustBacked
+        );
+        assert!(coverage.files[13].reason.contains("cacheStaticSuite"));
+        assert_eq!(coverage.files[14].source, ConformanceCoverageKind::Mixed);
         assert!(coverage.reason.contains("xtask/src/compat.rs"));
         let _ = fs::remove_dir_all(temp);
     }
@@ -18614,6 +18848,65 @@ test('placeholder', () => {
 "#,
         )
         .unwrap();
+        fs::write(
+            transforms_tests.join("cacheStatic.spec.ts"),
+            r#"import {
+  type CompilerOptions,
+  ConstantTypes,
+  type ElementNode,
+  type ForNode,
+  type IfNode,
+  NodeTypes,
+  type VNodeCall,
+  generate,
+  baseParse as parse,
+  transform,
+} from '../../src'
+import {
+  FRAGMENT,
+  NORMALIZE_CLASS,
+  RENDER_LIST,
+} from '../../src/runtimeHelpers'
+import { transformElement } from '../../src/transforms/transformElement'
+import { transformExpression } from '../../src/transforms/transformExpression'
+import { transformIf } from '../../src/transforms/vIf'
+import { transformFor } from '../../src/transforms/vFor'
+import { transformBind } from '../../src/transforms/vBind'
+import { transformOn } from '../../src/transforms/vOn'
+import { createObjectMatcher } from '../testUtils'
+import { transformText } from '../../src/transforms/transformText'
+import { PatchFlags } from '@vue/shared'
+
+function transformWithCache(template: string, options: CompilerOptions = {}) {
+  const ast = parse(template)
+  transform(ast, {
+    hoistStatic: true,
+    nodeTransforms: [
+      transformIf,
+      transformFor,
+      ...(options.prefixIdentifiers ? [transformExpression] : []),
+      transformElement,
+      transformText,
+    ],
+    directiveTransforms: {
+      on: transformOn,
+      bind: transformBind,
+    },
+    ...options,
+  })
+  expect(ast.codegenNode).toMatchObject({
+    type: NodeTypes.VNODE_CALL,
+    isBlock: true,
+  })
+  return ast
+}
+
+test('placeholder', () => {
+  expect(transformWithCache('<div><span/></div>')).toBeTruthy()
+})
+"#,
+        )
+        .unwrap();
         write_vue3_core_conformance_shims(&temp).unwrap();
 
         let parser = fs::read_to_string(
@@ -18736,6 +19029,18 @@ test('placeholder', () => {
         assert!(v_slot_api.contains("emitErrors"));
         assert!(v_slot_api.contains("hydrateVSlotAst"));
         assert!(v_slot_api.contains("node.params = undefined"));
+        let cache_static_spec =
+            fs::read_to_string(transforms_tests.join("cacheStatic.spec.ts")).unwrap();
+        assert!(cache_static_spec.contains("from './cacheStatic.rust-api'"));
+        assert!(!cache_static_spec.contains("baseParse as parse"));
+        assert!(!cache_static_spec.contains("transform(ast,"));
+        assert!(!cache_static_spec.contains("../../src/transforms/"));
+        let cache_static_api =
+            fs::read_to_string(transforms_tests.join("cacheStatic.rust-api.ts")).unwrap();
+        assert!(cache_static_api.contains("callBridge('vue3.core.cacheStaticSuite'"));
+        assert!(cache_static_api.contains("hydrateCacheStaticAst"));
+        assert!(cache_static_api.contains("node.helpers = new Set"));
+        assert!(cache_static_api.contains("node[key] = undefined"));
         let _ = fs::remove_dir_all(temp);
     }
 

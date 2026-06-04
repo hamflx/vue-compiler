@@ -8038,6 +8038,9 @@ fn vue3_generated_props_constant_type(node: &Value, context: &Value) -> u8 {
     else {
         return VUE3_CONSTANT_CAN_STRINGIFY;
     };
+    if props.is_null() {
+        return VUE3_CONSTANT_CAN_STRINGIFY;
+    }
     if json_node_type(props) != Some(15) {
         return VUE3_CONSTANT_NOT;
     }
@@ -9267,14 +9270,16 @@ fn vue3_node_source_contains_any(node: &Value, names: &[String]) -> bool {
         Some(4) => {
             let content = json_str(node, "content").unwrap_or("");
             !json_bool(node, "isStatic")
-                && ((is_simple_identifier_ascii(content)
-                    && names.iter().any(|name| name == content))
+                && (names
+                    .iter()
+                    .any(|name| source_contains_identifier(content, name))
                     || node
                         .get("loc")
                         .and_then(|loc| json_str(loc, "source"))
                         .is_some_and(|source| {
-                            is_simple_identifier_ascii(source)
-                                && names.iter().any(|name| name == source)
+                            names
+                                .iter()
+                                .any(|name| source_contains_identifier(source, name))
                         }))
         }
         Some(8) => node
@@ -37919,7 +37924,12 @@ mod tests {
             "{}",
             result.code
         );
-        assert!(result.code.contains(r##"_createStaticVNode("<img src=\"" + _imports_0 + "\" srcset=\"" + _imports_0 + ", " + _imports_1 + "#heart 2x\"><span class=\"foo\"></span>"##));
+        assert!(result
+            .code
+            .contains("const _hoisted_1 = _imports_0 + ', ' + _imports_1 + '#heart 2x'"));
+        assert!(result.code.contains(
+            r##"_createStaticVNode("<img src=\"" + _imports_0 + "\" srcset=\"" + _hoisted_1 + "\"><span class=\"foo\"></span>"##
+        ));
         assert!(!result.code.contains("_ctx._imports_0"));
         assert!(!result.code.contains("_ctx._imports_1"));
     }
