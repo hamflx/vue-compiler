@@ -3489,8 +3489,9 @@ impl PrefixIdentifiersContext<'_, '_> {
     }
 
     fn walk_object_property_kind(&mut self, property: &ObjectPropertyKind<'_>) {
-        if let ObjectPropertyKind::ObjectProperty(property) = property {
-            self.walk_object_property(property);
+        match property {
+            ObjectPropertyKind::ObjectProperty(property) => self.walk_object_property(property),
+            ObjectPropertyKind::SpreadProperty(spread) => self.walk_expression(&spread.argument),
         }
     }
 
@@ -35388,6 +35389,20 @@ span { color: v-bind(style.color) }
         assert_eq!(
             compiler.prefix_vue27_identifiers(source, options),
             "function render(){var _vm=this,_c=_vm._self._c,_setup=_vm._self._setupProxy;return _c('div',{attrs:{title:`Count ${_setup.count}`}})}"
+        );
+    }
+
+    #[test]
+    fn vue27_prefix_identifiers_rewrites_object_spread_references() {
+        let compiler = SfcCompiler::new();
+        let source = "function render(){with(this){return _l(items,function(item){return getNode(itemSlots.default,{...slotProps, option:item, labelKey, valueKey})})}}";
+
+        assert_eq!(
+            compiler.prefix_vue27_identifiers(
+                source,
+                Vue27PrefixIdentifiersOptions::default()
+            ),
+            "function render(){var _vm=this,_c=_vm._self._c;return _vm._l(_vm.items,function(item){return _vm.getNode(_vm.itemSlots.default,{..._vm.slotProps, option:item, labelKey: _vm.labelKey, valueKey: _vm.valueKey})})}"
         );
     }
 
