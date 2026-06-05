@@ -4333,6 +4333,7 @@ struct Vue3SlotSuiteState {
     transform_element_suite: bool,
     transform_element_bind: bool,
     transform_element_on: bool,
+    transform_element_noop_directives: Vec<String>,
     transform_element_self_name: Option<String>,
     transform_element_is_script_setup: Option<bool>,
     transform_element_components: Vec<String>,
@@ -4406,6 +4407,10 @@ fn vue3_core_transform_element_suite_value(payload: &Value) -> Value {
         transform_element_suite: true,
         transform_element_bind: bool_option(api_options, "transformBind", false),
         transform_element_on: bool_option(api_options, "transformOn", false),
+        transform_element_noop_directives: string_array_option(
+            api_options,
+            "noopDirectiveTransforms",
+        ),
         transform_element_self_name: vue3_transform_element_suite_self_name(&source.filename),
         transform_element_is_script_setup: api_options
             .get("bindingMetadata")
@@ -5663,6 +5668,13 @@ fn vue3_transform_element_suite_props_codegen(
                 if name == "slot" {
                     continue;
                 }
+                if state
+                    .transform_element_noop_directives
+                    .iter()
+                    .any(|directive| directive == name)
+                {
+                    continue;
+                }
                 if !vue3_text_suite_builtin_directive(name) {
                     prop_summaries.push(json!({ "kind": "runtimeDirective" }));
                     runtime_directives.push(vue3_transform_element_suite_runtime_directive(prop));
@@ -6121,11 +6133,26 @@ fn vue3_transform_element_suite_push_unique(items: &mut Vec<String>, value: Stri
 fn vue3_transform_element_suite_finalize_root(root: &mut Value, state: &Vue3SlotSuiteState) {
     vue3_once_suite_set_root_codegen(root);
     root["components"] = json!(state.transform_element_components.clone());
-    root["directives"] = json!(vue3_if_suite_collect_directives(root));
+    root["directives"] = json!(vue3_transform_element_suite_collect_directives(root, state));
     root["helpers"] = json!(vue3_transform_element_suite_helpers(root, state));
     root["hoists"] = json!([]);
     root["cached"] = Value::Array((0..state.cached).map(|_| Value::Null).collect());
     root["temps"] = json!(0);
+}
+
+fn vue3_transform_element_suite_collect_directives(
+    root: &Value,
+    state: &Vue3SlotSuiteState,
+) -> Vec<String> {
+    vue3_if_suite_collect_directives(root)
+        .into_iter()
+        .filter(|directive| {
+            !state
+                .transform_element_noop_directives
+                .iter()
+                .any(|noop| noop == directive)
+        })
+        .collect()
 }
 
 fn vue3_transform_element_suite_helpers(root: &Value, state: &Vue3SlotSuiteState) -> Vec<String> {
@@ -6140,7 +6167,7 @@ fn vue3_transform_element_suite_helpers(root: &Value, state: &Vue3SlotSuiteState
     if !state.transform_element_components.is_empty() {
         vue3_text_suite_add_helper(&mut used, "RESOLVE_COMPONENT");
     }
-    if !vue3_if_suite_collect_directives(root).is_empty() {
+    if !vue3_transform_element_suite_collect_directives(root, state).is_empty() {
         vue3_text_suite_add_helper(&mut used, "RESOLVE_DIRECTIVE");
     }
     [
@@ -14413,6 +14440,31 @@ mod tests {
         assert!(json_array_contains(
             &transformed["root"]["helpers"],
             "KEEP_ALIVE"
+        ));
+    }
+
+    #[test]
+    fn vue3_transform_element_suite_applies_serialized_noop_directive_transform() {
+        let transformed = dispatch(
+            "vue3.core.transformElementSuite",
+            json!({
+                "source": "<div><div v-noop/></div>",
+                "options": { "noopDirectiveTransforms": ["noop"] },
+            }),
+        )
+        .expect("transformElement suite noop directive");
+
+        assert!(transformed["node"]["props"].is_null());
+        assert!(transformed["node"]["directives"].is_null());
+        assert!(transformed["node"]["patchFlag"].is_null());
+        assert_eq!(transformed["root"]["directives"], json!([]));
+        assert!(!json_array_contains(
+            &transformed["root"]["helpers"],
+            "RESOLVE_DIRECTIVE"
+        ));
+        assert!(!json_array_contains(
+            &transformed["root"]["helpers"],
+            "WITH_DIRECTIVES"
         ));
     }
 

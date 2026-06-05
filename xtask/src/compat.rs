@@ -12823,6 +12823,7 @@ fn write_vue3_core_conformance_shims(prepared_root: &Path) -> Result<()> {
     rewrite_vue3_core_v_on_public_api_spec(prepared_root)?;
     rewrite_vue3_core_v_for_public_api_spec(prepared_root)?;
     rewrite_vue3_core_transform_element_public_api_spec(prepared_root)?;
+    rewrite_vue3_core_noop_directive_transform_public_api_spec(prepared_root)?;
     rewrite_vue3_core_transform_public_api_spec(prepared_root)?;
     rewrite_vue3_core_v_if_public_api_spec(prepared_root)?;
     rewrite_vue3_core_transform_slot_outlet_public_api_spec(prepared_root)?;
@@ -13990,6 +13991,110 @@ function collectPredicateHits(
             .join("__snapshots__")
             .join("transformElement.spec.ts.snap"),
         "compiler: v-for > codegen > ",
+    )?;
+    Ok(())
+}
+
+fn rewrite_vue3_core_noop_directive_transform_public_api_spec(prepared_root: &Path) -> Result<()> {
+    let transforms = prepared_root
+        .join("packages")
+        .join("compiler-core")
+        .join("__tests__")
+        .join("transforms");
+    let spec = transforms.join("noopDirectiveTransform.spec.ts");
+    if !spec.exists() {
+        return Ok(());
+    }
+    rewrite_text_file_block(
+        &spec,
+        r#"import {
+  type ElementNode,
+  type VNodeCall,
+  noopDirectiveTransform,
+  baseParse as parse,
+  transform,
+} from '../../src'
+import { transformElement } from '../../src/transforms/transformElement'"#,
+        r#"import {
+  type ElementNode,
+  type VNodeCall,
+} from '../../src'
+import { parseWithNoopDirectiveTransform } from './noopDirectiveTransform.rust-api'"#,
+        "Vue 3 core noopDirectiveTransform Rust API imports",
+    )?;
+    rewrite_text_file_block(
+        &spec,
+        r#"    const ast = parse(`<div v-noop/>`)
+    transform(ast, {
+      nodeTransforms: [transformElement],
+      directiveTransforms: {
+        noop: noopDirectiveTransform,
+      },
+    })
+    const node = ast.children[0] as ElementNode"#,
+        r#"    const node = parseWithNoopDirectiveTransform(`<div v-noop/>`) as ElementNode"#,
+        "Vue 3 core noopDirectiveTransform Rust helper",
+    )?;
+    write_text(
+        &transforms.join("noopDirectiveTransform.rust-api.ts"),
+        r#"import {
+  type ElementNode,
+  NodeTypes,
+  __vuecRuntime,
+} from '../../src'
+
+const runtime = __vuecRuntime as any
+
+export function parseWithNoopDirectiveTransform(template: string): ElementNode {
+  const result = runtime.callBridge('vue3.core.transformElementSuite', {
+    source: `<div>${template}</div>`,
+    options: {
+      noopDirectiveTransforms: ['noop'],
+    },
+  })
+  const root = result.root || result
+  hydrateAst(root)
+  const node = root.children?.[0]?.children?.[0] || null
+  hydrateAst(node)
+  if (node?.codegenNode?.type !== NodeTypes.VNODE_CALL) {
+    throw new Error('Expected Rust transformElementSuite to return a VNodeCall')
+  }
+  return node
+}
+
+function hydrateAst(node: any): any {
+  if (!node || typeof node !== 'object') return node
+  if (Array.isArray(node)) {
+    node.forEach(hydrateAst)
+    return node
+  }
+  if (node.type === NodeTypes.ROOT && Array.isArray(node.helpers)) {
+    node.helpers = new Set(node.helpers.map((name: string) => helperSymbol(name) || name))
+  }
+  if (node.type === NodeTypes.VNODE_CALL) {
+    if (typeof node.tag === 'string') node.tag = helperSymbol(node.tag) || node.tag
+    for (const key of ['props', 'children', 'patchFlag', 'dynamicProps', 'directives']) {
+      if (node[key] == null) node[key] = undefined
+    }
+  }
+  for (const key of [
+    'children',
+    'props',
+    'codegenNode',
+    'arguments',
+    'directives',
+    'elements',
+    'tag',
+  ]) {
+    hydrateAst(node[key])
+  }
+  return node
+}
+
+function helperSymbol(name: string) {
+  return typeof name === 'string' ? runtime[name] : undefined
+}
+"#,
     )?;
     Ok(())
 }
@@ -17175,6 +17280,10 @@ fn conformance_coverage_report_reason(
             "Vue 3 compiler-sfc official tests run through a prepared Vitest suite whose files are all routed to public @vue/compiler-sfc helpers or Rust-backed projection helpers; generated import/API adapters only preserve official test import paths, materialize non-serializable test inputs, and hydrate public result shapes while compiler behavior routes through vuec_node_bridge into Rust."
                 .to_string()
         }
+        (AliasBackend::Generated, "vue3-core", ConformanceCoverageKind::Mixed) => {
+            "Vue 3 compiler-core official tests now route serializable parser, transform, and codegen assertions through Rust-backed public APIs or vuec_node_bridge projection helpers. The remaining mixed coverage is limited to official tests that exercise caller-provided JavaScript NodeTransform/directiveTransform callbacks and mutable transform context APIs, which cannot be serialized into the Rust bridge and are not counted as Rust compiler completion evidence."
+                .to_string()
+        }
         _ => default_reason.to_string(),
     }
 }
@@ -17243,7 +17352,7 @@ fn conformance_coverage_reason(spec: ConformanceSuiteSpec, backend: AliasBackend
                 "Vue 2.7 compiler-sfc official tests execute through a prepared Vitest suite. Generated source-path import shims preserve official imports and route public vue/compiler-sfc calls into the Rust alias through vuec_node_bridge; compileStyle PostCSS plugin callbacks execute in the JavaScript API adapter because caller-provided plugins are JavaScript functions and cannot be serialized into Rust. Remaining failures are real Vue 2.7 SFC parity gaps, not not-wired pending status."
             }
             "vue3-core" => {
-                "Vue 3 compiler-core official tests run through generated import shims and the @vue/compiler-core alias runtime; public APIs call the Rust bridge, while many internal transform/codegen imports still execute JavaScript compatibility semantics in xtask/src/compat.rs."
+                "Vue 3 compiler-core official tests run through generated import shims and the @vue/compiler-core alias runtime; serializable compiler behavior is routed through Rust-backed public APIs or vuec_node_bridge projection helpers, while caller-provided JavaScript callback/context extension points remain mixed and are excluded from Rust compiler completion evidence."
             }
             "vue3-dom" => {
                 "Vue 3 compiler-dom official tests run through a prepared Vitest suite with official DOM source imports, generated compiler-core import shims, and the @vue/compiler-dom alias runtime. Public compile/parse exports call the Rust bridge, but internal DOM transform imports mostly execute official TypeScript source or compatibility adapter code; only explicitly bridged projections count as Rust-backed."
@@ -17525,6 +17634,8 @@ fn conformance_coverage_file_kind(
         || path.ends_with("packages/compiler-core/__tests__/parse.spec.ts")
         || path.ends_with("packages/compiler-core/__tests__/scopeId.spec.ts")
         || path.ends_with("packages/compiler-core/__tests__/utils.spec.ts")
+        || path
+            .ends_with("packages/compiler-core/__tests__/transforms/noopDirectiveTransform.spec.ts")
         || path
             .ends_with("packages/compiler-core/__tests__/transforms/transformExpressions.spec.ts")
         || path.ends_with("packages/compiler-core/__tests__/transforms/transformSlotOutlet.spec.ts")
@@ -18597,7 +18708,10 @@ mod tests {
         )
         .unwrap();
 
-        assert!(source.contains("hydrateVue3SfcParseResult(native.parseSfcResult"));
+        assert!(source.contains("const bridgePayload = vue3SfcParseBridgePayload(payload);"));
+        assert!(source.contains("callBridge('sfc.parse', bridgePayloadForCall(bridgePayload))"));
+        assert!(source
+            .contains("native.parseSfcResult(payload.source, bridgePayload.bridgeOptions || {})"));
         assert!(source.contains("function hydrateVue3SfcParseResult"));
         assert!(source.contains("function vue3SfcShouldForceReload"));
         assert!(source.contains("descriptor.shouldForceReload = function shouldForceReload"));
@@ -18617,10 +18731,15 @@ mod tests {
         )
         .unwrap();
 
-        assert!(source.contains(
-            "return hydrateVue3CompileScriptResult(native.compileScript(descriptor || {}, options || {}));"
-        ));
+        assert!(source.contains("const bridgePayload = vue3CompileScriptBridgePayload(payload);"));
+        assert!(
+            source.contains("callBridge('sfc.compileScript', bridgePayloadForCall(bridgePayload))")
+        );
+        assert!(
+            source.contains("native.compileScript(descriptor || {}, bridgePayload.options || {})")
+        );
         assert!(source.contains("function hydrateVue3CompileScriptResult"));
+        assert!(source.contains("function vue3CompileScriptBridgePayload"));
         assert!(source.contains("function throwVue3CompileScriptErrors"));
         assert!(source.contains("bindings.__propsAliases = result.propsAliases"));
         assert!(source.contains("delete result.propsAliases"));
@@ -19358,7 +19477,8 @@ mod tests {
         );
         assert!(coverage.files[13].reason.contains("cacheStaticSuite"));
         assert_eq!(coverage.files[14].source, ConformanceCoverageKind::Mixed);
-        assert!(coverage.reason.contains("xtask/src/compat.rs"));
+        assert!(coverage.reason.contains("remaining mixed coverage"));
+        assert!(coverage.reason.contains("JavaScript NodeTransform"));
         let _ = fs::remove_dir_all(temp);
     }
 
@@ -20671,6 +20791,31 @@ test('placeholder', () => {
 "#,
         )
         .unwrap();
+        fs::write(
+            transforms_tests.join("noopDirectiveTransform.spec.ts"),
+            r#"import {
+  type ElementNode,
+  type VNodeCall,
+  noopDirectiveTransform,
+  baseParse as parse,
+  transform,
+} from '../../src'
+import { transformElement } from '../../src/transforms/transformElement'
+
+test('placeholder', () => {
+    const ast = parse(`<div v-noop/>`)
+    transform(ast, {
+      nodeTransforms: [transformElement],
+      directiveTransforms: {
+        noop: noopDirectiveTransform,
+      },
+    })
+    const node = ast.children[0] as ElementNode
+    expect((node.codegenNode as VNodeCall).props).toBeUndefined()
+})
+"#,
+        )
+        .unwrap();
         write_vue3_core_conformance_shims(&temp).unwrap();
 
         let parser = fs::read_to_string(
@@ -20760,6 +20905,18 @@ test('placeholder', () => {
         assert!(transform_element_api.contains("emitErrors"));
         assert!(transform_element_api.contains("hydrateTransformElementAst"));
         assert!(transform_element_api.contains("__vuecNativeTags"));
+        let noop_spec =
+            fs::read_to_string(transforms_tests.join("noopDirectiveTransform.spec.ts")).unwrap();
+        assert!(noop_spec.contains("from './noopDirectiveTransform.rust-api'"));
+        assert!(noop_spec.contains("parseWithNoopDirectiveTransform"));
+        assert!(!noop_spec.contains("baseParse as parse"));
+        assert!(!noop_spec.contains("transform(ast,"));
+        assert!(!noop_spec.contains("noop: noopDirectiveTransform"));
+        let noop_api =
+            fs::read_to_string(transforms_tests.join("noopDirectiveTransform.rust-api.ts"))
+                .unwrap();
+        assert!(noop_api.contains("callBridge('vue3.core.transformElementSuite'"));
+        assert!(noop_api.contains("noopDirectiveTransforms: ['noop']"));
         let v_if_spec = fs::read_to_string(transforms_tests.join("vIf.spec.ts")).unwrap();
         assert!(v_if_spec.contains("from './vIf.rust-api'"));
         assert!(!v_if_spec.contains("baseParse as parse"));
