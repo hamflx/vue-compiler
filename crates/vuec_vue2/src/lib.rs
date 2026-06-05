@@ -2431,11 +2431,11 @@ fn gen_mir_props(
         .map(|attr| {
             let value = render_mir_expr(&attr.value, state);
             let value = match value_kind {
-                PropValueKind::StaticAttribute => {
+                PropValueKind::StaticAttribute if attr.static_attribute => {
                     let value = decode_newline_entities_for_attr(&attr.name, &value, options);
                     transform_special_newlines(&value)
                 }
-                PropValueKind::Expression => value,
+                PropValueKind::StaticAttribute | PropValueKind::Expression => value,
             };
             format!("{}:{value}", js_string(&attr.name))
         })
@@ -5750,6 +5750,25 @@ mod tests {
         );
         assert!(result.render.contains("_f(\"c\")(_f(\"b\")(a))"));
         assert!(result.render.contains("$event.stopPropagation();"));
+    }
+
+    #[test]
+    fn preserves_multiline_bound_attribute_expressions() {
+        let result = compile(
+            "<Radio\n\t:options=\"[\n\t\t{ text: 'hello', value: 1 },\n\t\t{ text: 'world', value: 2 }\n\t]\"\n/>",
+            options(),
+        );
+
+        assert_eq!(
+            result.render,
+            concat!(
+                "with(this){return _c('Radio',{attrs:{\"options\":[\n",
+                "\t\t{ text: 'hello', value: 1 },\n",
+                "\t\t{ text: 'world', value: 2 }\n",
+                "\t]}})}"
+            )
+        );
+        assert!(!result.render.contains("\\n"));
     }
 
     #[test]
