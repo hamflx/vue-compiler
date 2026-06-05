@@ -1652,13 +1652,17 @@ fn process_attrs(
                     }
                 }
             } else if is_on_name(&name_no_modifiers) {
-                let name = on_arg_name(&name_no_modifiers);
+                let mut name = on_arg_name(&name_no_modifiers);
+                let is_dynamic = is_dynamic_arg(&name);
                 if name.starts_with('[') {
                     warn_invalid_dynamic_arg(
                         name.trim_start_matches('[').trim_end_matches(']'),
                         attr.span,
                         diagnostics,
                     );
+                }
+                if is_dynamic {
+                    name = name[1..name.len() - 1].to_string();
                 }
                 let mut modifiers = modifiers;
                 let mut modifier_order = modifier_order;
@@ -1676,7 +1680,7 @@ fn process_attrs(
                     modifiers,
                     modifier_order,
                     has_modifier_object,
-                    false,
+                    is_dynamic,
                     false,
                     attr.span,
                 );
@@ -2635,28 +2639,39 @@ fn gen_mir_handlers(
     let prefix = if native { "nativeOn" } else { "on" };
     let mut entries = events.iter().collect::<Vec<_>>();
     entries.sort_by_key(|(name, handlers)| vue2_event_order_key(name, handlers));
-    let handlers = entries
-        .into_iter()
-        .map(|(name, handlers)| {
-            let code = if handlers.is_empty() {
-                "function(){}".into()
-            } else if handlers.len() == 1 {
-                gen_mir_handler(&handlers[0], state)
-            } else {
-                format!(
-                    "[{}]",
-                    handlers
-                        .iter()
-                        .map(|handler| gen_mir_handler(handler, state))
-                        .collect::<Vec<_>>()
-                        .join(",")
-                )
-            };
-            format!("{}:{code}", js_string(name))
-        })
-        .collect::<Vec<_>>()
-        .join(",");
-    format!("{prefix}:{{{handlers}}}")
+    let mut static_handlers = Vec::new();
+    let mut dynamic_handlers = Vec::new();
+    for (name, handlers) in entries {
+        let code = if handlers.is_empty() {
+            "function(){}".into()
+        } else if handlers.len() == 1 {
+            gen_mir_handler(&handlers[0], state)
+        } else {
+            format!(
+                "[{}]",
+                handlers
+                    .iter()
+                    .map(|handler| gen_mir_handler(handler, state))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        };
+        if handlers.len() == 1 && handlers[0].dynamic {
+            dynamic_handlers.push(name.clone());
+            dynamic_handlers.push(code);
+        } else {
+            static_handlers.push(format!("{}:{code}", js_string(name)));
+        }
+    }
+    let static_handlers = format!("{{{}}}", static_handlers.join(","));
+    if dynamic_handlers.is_empty() {
+        format!("{prefix}:{static_handlers}")
+    } else {
+        format!(
+            "{prefix}:_d({static_handlers},[{}])",
+            dynamic_handlers.join(",")
+        )
+    }
 }
 
 fn vue2_event_order_key<'a>(
@@ -5006,20 +5021,28 @@ fn add_handler(
     prepend: bool,
     span: Option<Span>,
 ) {
-    if modifiers.get("right").copied().unwrap_or(false) && name == "click" {
-        modifiers.remove("right");
-        name = "contextmenu".into();
-    } else if modifiers.get("middle").copied().unwrap_or(false) && name == "click" {
-        name = "mouseup".into();
+    if modifiers.get("right").copied().unwrap_or(false) {
+        if dynamic {
+            name = format!("({name})==='click'?'contextmenu':({name})");
+        } else if name == "click" {
+            modifiers.remove("right");
+            name = "contextmenu".into();
+        }
+    } else if modifiers.get("middle").copied().unwrap_or(false) {
+        if dynamic {
+            name = format!("({name})==='click'?'mouseup':({name})");
+        } else if name == "click" {
+            name = "mouseup".into();
+        }
     }
     if modifiers.remove("capture").is_some() {
-        name = format!("!{name}");
+        name = prepend_vue2_event_modifier_marker("!", &name, dynamic);
     }
     if modifiers.remove("once").is_some() {
-        name = format!("~{name}");
+        name = prepend_vue2_event_modifier_marker("~", &name, dynamic);
     }
     if modifiers.remove("passive").is_some() {
-        name = format!("&{name}");
+        name = prepend_vue2_event_modifier_marker("&", &name, dynamic);
     }
     let handler = Vue2EventHandler {
         value: value.trim().to_string(),
@@ -5034,6 +5057,14 @@ fn add_handler(
         handlers.insert(0, handler);
     } else {
         handlers.push(handler);
+    }
+}
+
+fn prepend_vue2_event_modifier_marker(symbol: &str, name: &str, dynamic: bool) -> String {
+    if dynamic {
+        format!("_p({name},{})", js_string(symbol))
+    } else {
+        format!("{symbol}{name}")
     }
 }
 
@@ -6461,6 +6492,51 @@ mod tests {
         assert_eq!(
             capture_once.render,
             r#"with(this){return _c('input',{on:{"~!input":function($event){return onInput.apply(null, arguments)}}})}"#
+        );
+    }
+
+    #[test]
+    fn generates_vue2_dynamic_event_handlers_like_official_codegen() {
+        let dynamic = compile(r#"<Comp @[event]="change"/>"#, options());
+        assert_eq!(
+            dynamic.render,
+            r#"with(this){return _c('Comp',{on:_d({},[event,change])})}"#
+        );
+
+        let mixed = compile(r#"<Comp @click="click" @[event]="change"/>"#, options());
+        assert_eq!(
+            mixed.render,
+            r#"with(this){return _c('Comp',{on:_d({"click":click},[event,change])})}"#
+        );
+
+        let native_prevent = compile(
+            r#"<Comp @[event].native.prevent="change(item, checked)"/>"#,
+            options(),
+        );
+        assert_eq!(
+            native_prevent.render,
+            r#"with(this){return _c('Comp',{nativeOn:_d({},[event,function($event){$event.preventDefault();return change(item, checked)}])})}"#
+        );
+
+        let prefixed = compile(
+            r#"<Comp @[event].capture.once.passive="change"/>"#,
+            options(),
+        );
+        assert_eq!(
+            prefixed.render,
+            r#"with(this){return _c('Comp',{on:_d({},[_p(_p(_p(event,"!"),"~"),"&"),function($event){return change.apply(null, arguments)}])})}"#
+        );
+
+        let right_click = compile(r#"<Comp @[event].right="change"/>"#, options());
+        assert_eq!(
+            right_click.render,
+            r#"with(this){return _c('Comp',{on:_d({},[(event)==='click'?'contextmenu':(event),function($event){if(!$event.type.indexOf('key')&&_k($event.keyCode,"right",39,$event.key,["Right","ArrowRight"]))return null;if('button' in $event && $event.button !== 2)return null;return change.apply(null, arguments)}])})}"#
+        );
+
+        let merged_same_name = compile(r#"<Comp @event="foo" @[event]="bar"/>"#, options());
+        assert_eq!(
+            merged_same_name.render,
+            r#"with(this){return _c('Comp',{on:{"event":[foo,bar]}})}"#
         );
     }
 
