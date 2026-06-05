@@ -124,8 +124,16 @@ enum Command {
     VerifyPublicApiDocs,
     VerifyCrateMetadata,
     VerifySupplyChain,
-    VerifyReleaseDryRun,
-    VerifyReleaseInstallSmoke,
+    VerifyReleaseDryRun {
+        #[arg(long)]
+        native_artifacts_dir: Option<PathBuf>,
+    },
+    VerifyReleaseInstallSmoke {
+        #[arg(long)]
+        native_artifacts_dir: Option<PathBuf>,
+        #[arg(long)]
+        current_platform_only: bool,
+    },
     Bench {
         #[arg(long, default_value_t = 10)]
         iterations: usize,
@@ -198,8 +206,13 @@ fn main() -> Result<()> {
         Command::VerifyPublicApiDocs => verify_public_api_docs()?,
         Command::VerifyCrateMetadata => verify_crate_metadata()?,
         Command::VerifySupplyChain => verify_supply_chain()?,
-        Command::VerifyReleaseDryRun => verify_release_dry_run()?,
-        Command::VerifyReleaseInstallSmoke => verify_release_install_smoke()?,
+        Command::VerifyReleaseDryRun {
+            native_artifacts_dir,
+        } => verify_release_dry_run(native_artifacts_dir.as_deref())?,
+        Command::VerifyReleaseInstallSmoke {
+            native_artifacts_dir,
+            current_platform_only,
+        } => verify_release_install_smoke(native_artifacts_dir.as_deref(), current_platform_only)?,
         Command::Bench {
             iterations,
             out_dir,
@@ -1636,7 +1649,7 @@ fn verify_supply_chain() -> Result<compat::JsonReport> {
     )
 }
 
-fn verify_release_dry_run() -> Result<compat::JsonReport> {
+fn verify_release_dry_run(native_artifacts_dir: Option<&Path>) -> Result<compat::JsonReport> {
     let mut items = Vec::new();
     let mut violations = Vec::new();
     let mut created = Vec::new();
@@ -1650,7 +1663,7 @@ fn verify_release_dry_run() -> Result<compat::JsonReport> {
         .with_context(|| format!("failed to create {}", staging_root.display()))?;
     created.push(staging_root.display().to_string());
 
-    match verify_release_npm_pack_dry_runs(&staging_root) {
+    match verify_release_npm_pack_dry_runs(&staging_root, native_artifacts_dir) {
         Ok((mut npm_items, mut npm_created)) => {
             items.append(&mut npm_items);
             created.append(&mut npm_created);
@@ -1696,10 +1709,13 @@ fn verify_release_dry_run() -> Result<compat::JsonReport> {
     .with_items(items)
     .with_created(created)
     .with_violations(violations)
-    .with_note("runs real npm pack dry-runs from staged package directories, verifies staged package file lists, runs cargo publish dry-run where crates.io can resolve dependencies, and marks first-release or cross-platform artifact constraints as pending instead of counting them as passed"))
+    .with_note("runs real npm pack dry-runs from staged package directories, verifies staged package file lists, accepts release-built native artifacts through --native-artifacts-dir, runs cargo publish dry-run where crates.io can resolve dependencies, and marks first-release or missing cross-platform artifact constraints as pending instead of counting them as passed"))
 }
 
-fn verify_release_install_smoke() -> Result<compat::JsonReport> {
+fn verify_release_install_smoke(
+    native_artifacts_dir: Option<&Path>,
+    current_platform_only: bool,
+) -> Result<compat::JsonReport> {
     let mut items = Vec::new();
     let mut violations = Vec::new();
     let mut created = Vec::new();
@@ -1720,7 +1736,7 @@ fn verify_release_install_smoke() -> Result<compat::JsonReport> {
     let mut package_violations = Vec::new();
     let mut npm_created = Vec::new();
     let current_platform = current_platform_package_name();
-    let package_result = prepare_release_install_packages(&package_root);
+    let package_result = prepare_release_install_packages(&package_root, native_artifacts_dir);
     match package_result {
         Ok(paths) => npm_created.extend(paths.into_iter().map(|path| path.display().to_string())),
         Err(err) => package_violations.push(format!("{err:#}")),
@@ -1768,13 +1784,27 @@ fn verify_release_install_smoke() -> Result<compat::JsonReport> {
     }
 
     let installed_platform = current_platform.unwrap_or("unsupported-platform");
-    for package_dir in collect_native_platform_package_dirs()? {
-        let package_name = read_package_display_name(&package_dir.join("package.json"))?;
-        if package_name != installed_platform {
+    if !current_platform_only {
+        for package_dir in collect_native_platform_package_dirs()? {
+            let package_name = read_package_display_name(&package_dir.join("package.json"))?;
+            if package_name == installed_platform {
+                continue;
+            }
+            let suffix = native_platform_suffix(&package_name)?;
+            let detail = find_native_artifact(native_artifacts_dir, suffix)?
+                .map(|artifact| {
+                    format!(
+                        "release artifact is available at {}, but executable install smoke still requires a matching target-platform host",
+                        artifact.display()
+                    )
+                })
+                .unwrap_or_else(|| {
+                    "non-current platform package install smoke requires a matching target-platform release artifact and host run".into()
+                });
             package_items.push(compat::ReportItem::new(
                 format!("install-smoke:{package_name}"),
                 compat::ReportStatus::Pending,
-                "non-current platform package install smoke requires a matching target-platform release artifact",
+                detail,
                 Some(package_dir),
             ));
         }
@@ -1798,30 +1828,18 @@ fn verify_release_install_smoke() -> Result<compat::JsonReport> {
     .with_items(items)
     .with_created(created)
     .with_violations(violations)
-    .with_note("packs release-built npm artifacts, installs them into clean projects, smoke-calls @vuec-rs/native through the current optional platform package and @vuec-rs/wasm through its published package entry, and marks non-current platform install smoke as pending"))
+    .with_note("packs release-built npm artifacts, installs them into clean projects, smoke-calls @vuec-rs/native through the current optional platform package and @vuec-rs/wasm through its published package entry, accepts the current platform native artifact through --native-artifacts-dir, and marks non-current platform install smoke as pending unless --current-platform-only is used for a matrix runner"))
 }
 
 fn verify_release_npm_pack_dry_runs(
     staging_root: &Path,
+    native_artifacts_dir: Option<&Path>,
 ) -> Result<(Vec<compat::ReportItem>, Vec<String>)> {
     let mut items = Vec::new();
     let mut created = Vec::new();
     let npm_root = staging_root.join("npm");
     fs::create_dir_all(&npm_root)
         .with_context(|| format!("failed to create {}", npm_root.display()))?;
-
-    let napi_release_ready = match build_napi_crate_release() {
-        Ok(()) => true,
-        Err(err) => {
-            items.push(compat::ReportItem::new(
-                "npm:@vuec-rs/native-current-platform-build",
-                compat::ReportStatus::Fail,
-                format!("failed to build current platform NAPI binding: {err:#}"),
-                Some(PathBuf::from("crates/vuec_napi")),
-            ));
-            false
-        }
-    };
 
     let wasm_release_ready = match build_wasm_release_packages() {
         Ok(paths) => {
@@ -1876,59 +1894,90 @@ fn verify_release_npm_pack_dry_runs(
     }
 
     let current_platform = current_platform_package_name();
+    let mut current_release_binding: Option<std::result::Result<PathBuf, String>> = None;
     for package_dir in collect_native_platform_package_dirs()? {
         let manifest_path = package_dir.join("package.json");
         let package_name = read_package_display_name(&manifest_path)?;
-        if Some(package_name.as_str()) == current_platform {
-            if napi_release_ready {
-                let stage_dir = npm_root
-                    .join("native-platforms")
-                    .join(native_platform_suffix(&package_name)?);
-                stage_package_dir(&package_dir, &stage_dir)?;
-                match copy_napi_release_binding(&stage_dir.join("vuec_napi.node")) {
-                    Ok(path) => {
-                        created.push(stage_dir.display().to_string());
-                        created.push(path.display().to_string());
-                        items.push(run_npm_pack_check(
-                            &package_name,
-                            &stage_dir,
-                            &["README.md", "package.json", "vuec_napi.node"],
-                        ));
-                    }
-                    Err(err) => items.push(compat::ReportItem::new(
-                        format!("npm:{package_name}"),
-                        compat::ReportStatus::Fail,
-                        format!("failed to stage release NAPI binding: {err:#}"),
-                        Some(package_dir),
-                    )),
-                }
-            } else {
-                items.push(compat::ReportItem::new(
-                    format!("npm:{package_name}"),
-                    compat::ReportStatus::Fail,
-                    "release NAPI binding was not rebuilt, so current platform npm pack dry-run was not run",
-                    Some(package_dir),
-                ));
+        let suffix = native_platform_suffix(&package_name)?;
+        let binding_source = match find_native_artifact(native_artifacts_dir, suffix)? {
+            Some(path) => Some(Ok((path, "external artifact"))),
+            None if Some(package_name.as_str()) == current_platform => {
+                let source = current_release_binding
+                    .get_or_insert_with(|| {
+                        build_napi_crate_release()
+                            .map(|()| napi_release_library_path())
+                            .map_err(|err| format!("{err:#}"))
+                    })
+                    .clone();
+                Some(source.map(|path| (path, "current cargo release build")))
             }
-        } else {
+            None => None,
+        };
+
+        let Some(binding_source) = binding_source else {
             items.push(compat::ReportItem::new(
                 format!("npm:{package_name}"),
                 compat::ReportStatus::Pending,
-                "non-current platform package requires its own release-build vuec_napi.node artifact before npm pack dry-run can prove publishability",
+                "non-current platform package requires its own release-build vuec_napi.node artifact before npm pack dry-run can prove publishability; pass --native-artifacts-dir with <platform>/vuec_napi.node or <platform>.node to verify it",
                 Some(package_dir),
             ));
+            continue;
+        };
+
+        let (binding_path, binding_source_label) = match binding_source {
+            Ok(source) => source,
+            Err(err) => {
+                items.push(compat::ReportItem::new(
+                    format!("npm:{package_name}"),
+                    compat::ReportStatus::Fail,
+                    format!(
+                        "failed to build current platform release NAPI binding and no external artifact was provided: {err}"
+                    ),
+                    Some(package_dir),
+                ));
+                continue;
+            }
+        };
+        let stage_dir = npm_root.join("native-platforms").join(suffix);
+        match stage_release_native_platform_package(&package_dir, &stage_dir, &binding_path) {
+            Ok(path) => {
+                created.push(stage_dir.display().to_string());
+                created.push(path.display().to_string());
+                let mut item = run_npm_pack_check(
+                    &package_name,
+                    &stage_dir,
+                    &["README.md", "package.json", "vuec_napi.node"],
+                );
+                if item.status == compat::ReportStatus::Pass {
+                    item.detail = format!(
+                        "{}; staged vuec_napi.node from {} ({})",
+                        item.detail,
+                        binding_source_label,
+                        native_binding_fingerprint(&binding_path)
+                    );
+                }
+                items.push(item);
+            }
+            Err(err) => items.push(compat::ReportItem::new(
+                format!("npm:{package_name}"),
+                compat::ReportStatus::Fail,
+                format!("failed to stage release NAPI binding: {err:#}"),
+                Some(package_dir),
+            )),
         }
     }
 
     Ok((items, created))
 }
 
-fn prepare_release_install_packages(package_root: &Path) -> Result<Vec<PathBuf>> {
+fn prepare_release_install_packages(
+    package_root: &Path,
+    native_artifacts_dir: Option<&Path>,
+) -> Result<Vec<PathBuf>> {
     let mut created = Vec::new();
     fs::create_dir_all(package_root)
         .with_context(|| format!("failed to create {}", package_root.display()))?;
 
-    build_napi_crate_release()?;
     build_wasm_release_packages()?;
 
     let native_stage = package_root.join("native");
@@ -1946,11 +1995,20 @@ fn prepare_release_install_packages(package_root: &Path) -> Result<Vec<PathBuf>>
             std::env::consts::ARCH
         )
     })?;
-    let platform_stage = package_root
-        .join("native-platforms")
-        .join(native_platform_suffix(platform_name)?);
-    stage_package_dir(&platform_template_dir(platform_name)?, &platform_stage)?;
-    copy_napi_release_binding(&platform_stage.join("vuec_napi.node"))?;
+    let platform_suffix = native_platform_suffix(platform_name)?;
+    let platform_artifact = find_native_artifact(native_artifacts_dir, platform_suffix)?;
+    let binding_source = if let Some(artifact) = platform_artifact {
+        artifact
+    } else {
+        build_napi_crate_release()?;
+        napi_release_library_path()
+    };
+    let platform_stage = package_root.join("native-platforms").join(platform_suffix);
+    stage_release_native_platform_package(
+        &platform_template_dir(platform_name)?,
+        &platform_stage,
+        &binding_source,
+    )?;
     created.push(platform_stage.clone());
 
     for stage in [&native_stage, &wasm_stage, &platform_stage] {
@@ -2100,6 +2158,115 @@ fn stage_package_dir(source: &Path, target: &Path) -> Result<()> {
             .with_context(|| format!("failed to remove {}", target.display()))?;
     }
     copy_dir_recursive(source, target)
+}
+
+fn stage_release_native_platform_package(
+    source: &Path,
+    target: &Path,
+    binding_source: &Path,
+) -> Result<PathBuf> {
+    stage_package_dir(source, target)?;
+    copy_napi_binding_from(binding_source, &target.join("vuec_napi.node"))
+}
+
+fn find_native_artifact(root: Option<&Path>, platform_suffix: &str) -> Result<Option<PathBuf>> {
+    let Some(root) = root else {
+        return Ok(None);
+    };
+    if !root.exists() {
+        anyhow::bail!(
+            "native artifact directory {} does not exist",
+            root.display()
+        );
+    }
+    if !root.is_dir() {
+        anyhow::bail!(
+            "native artifact path {} must be a directory",
+            root.display()
+        );
+    }
+
+    let mut matches = Vec::new();
+    for candidate in [
+        root.join(platform_suffix).join("vuec_napi.node"),
+        root.join(format!("{platform_suffix}.node")),
+    ] {
+        push_native_artifact_match(&mut matches, candidate, platform_suffix)?;
+    }
+    collect_native_artifact_matches(root, platform_suffix, &mut matches)?;
+    matches.sort();
+    matches.dedup();
+    match matches.as_slice() {
+        [] => Ok(None),
+        [path] => Ok(Some(path.clone())),
+        _ => anyhow::bail!(
+            "multiple native artifacts found for {platform_suffix}: {}",
+            matches
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+fn collect_native_artifact_matches(
+    root: &Path,
+    platform_suffix: &str,
+    matches: &mut Vec<PathBuf>,
+) -> Result<()> {
+    for entry in fs::read_dir(root).with_context(|| format!("failed to read {}", root.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_native_artifact_matches(&path, platform_suffix, matches)?;
+        } else {
+            push_native_artifact_match(matches, path, platform_suffix)?;
+        }
+    }
+    Ok(())
+}
+
+fn push_native_artifact_match(
+    matches: &mut Vec<PathBuf>,
+    candidate: PathBuf,
+    platform_suffix: &str,
+) -> Result<()> {
+    if !candidate.exists() {
+        return Ok(());
+    }
+    let file_name = candidate.file_name().and_then(|name| name.to_str());
+    let parent_name = candidate
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str());
+    let matches_platform = file_name == Some("vuec_napi.node")
+        && parent_name == Some(platform_suffix)
+        || file_name == Some(&format!("{platform_suffix}.node"));
+    if !matches_platform {
+        return Ok(());
+    }
+    if !candidate.is_file() {
+        anyhow::bail!("native artifact {} is not a file", candidate.display());
+    }
+    if candidate
+        .metadata()
+        .with_context(|| format!("failed to inspect {}", candidate.display()))?
+        .len()
+        == 0
+    {
+        anyhow::bail!("native artifact {} is empty", candidate.display());
+    }
+    matches.push(candidate);
+    Ok(())
+}
+
+fn native_binding_fingerprint(path: &Path) -> String {
+    let size = path.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+    let hash = sha256_file(path)
+        .map(|hash| hash.chars().take(16).collect::<String>())
+        .unwrap_or_else(|_| "unavailable".into());
+    format!("{size} bytes, sha256={hash}")
 }
 
 fn collect_native_platform_package_dirs() -> Result<Vec<PathBuf>> {
@@ -4597,11 +4764,6 @@ fn copy_napi_binding(target_path: &Path) -> Result<PathBuf> {
     copy_napi_binding_from(&source_path, target_path)
 }
 
-fn copy_napi_release_binding(target_path: &Path) -> Result<PathBuf> {
-    let source_path = napi_release_library_path();
-    copy_napi_binding_from(&source_path, target_path)
-}
-
 fn copy_napi_binding_from(source_path: &Path, target_path: &Path) -> Result<PathBuf> {
     let parent = target_path
         .parent()
@@ -5111,5 +5273,48 @@ mod tests {
             sha256_bytes(b"vuec"),
             "1fc8cc70af7ec7c20b935e8970e8641a6acc9fd856788a44a68507e33c8d561d"
         );
+    }
+
+    #[test]
+    fn native_artifact_lookup_accepts_platform_subdir() {
+        let root = unique_target_test_dir("native-artifact-subdir");
+        let artifact = root.join("linux-x64-gnu").join("vuec_napi.node");
+        fs::create_dir_all(artifact.parent().expect("artifact parent")).unwrap();
+        fs::write(&artifact, b"native").unwrap();
+
+        let found = find_native_artifact(Some(&root), "linux-x64-gnu")
+            .expect("artifact lookup")
+            .expect("artifact path");
+        assert_eq!(found, artifact);
+        assert!(find_native_artifact(Some(&root), "darwin-arm64")
+            .expect("missing artifact lookup")
+            .is_none());
+    }
+
+    #[test]
+    fn native_artifact_lookup_accepts_flat_node_file() {
+        let root = unique_target_test_dir("native-artifact-flat");
+        let artifact = root.join("darwin-arm64.node");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(&artifact, b"native").unwrap();
+
+        let found = find_native_artifact(Some(&root), "darwin-arm64")
+            .expect("artifact lookup")
+            .expect("artifact path");
+        assert_eq!(found, artifact);
+    }
+
+    fn unique_target_test_dir(name: &str) -> PathBuf {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root");
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock before unix epoch")
+            .as_nanos();
+        workspace
+            .join("target")
+            .join("xtask-tests")
+            .join(format!("{name}-{}-{stamp}", std::process::id()))
     }
 }

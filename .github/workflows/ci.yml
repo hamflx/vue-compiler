@@ -106,3 +106,96 @@ jobs:
           cargo xtask verify-public-api-docs
           cargo xtask verify-crate-metadata
           cargo xtask verify-supply-chain
+
+  release-smoke:
+    name: Release Install Smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install WASM release tooling
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo install wasm-bindgen-cli --version 0.2.122 --locked
+
+      - name: Verify current platform release install smoke
+        run: cargo xtask verify-release-install-smoke --current-platform-only
+
+      - name: Stage current native artifact
+        shell: pwsh
+        run: |
+          $key = "${{ runner.os }}-${{ runner.arch }}"
+          $suffix = switch ($key) {
+            "Linux-X64" { "linux-x64-gnu" }
+            "Linux-ARM64" { "linux-arm64-gnu" }
+            "macOS-X64" { "darwin-x64" }
+            "macOS-ARM64" { "darwin-arm64" }
+            "Windows-X64" { "win32-x64" }
+            "Windows-ARM64" { "win32-arm64" }
+            default { throw "Unsupported release artifact platform $key" }
+          }
+          $source = if ($IsWindows) {
+            "target/release/vuec_napi.dll"
+          } elseif ($IsMacOS) {
+            "target/release/libvuec_napi.dylib"
+          } else {
+            "target/release/libvuec_napi.so"
+          }
+          $target = "target/native-artifacts/$suffix/vuec_napi.node"
+          New-Item -ItemType Directory -Force -Path (Split-Path $target) | Out-Null
+          Copy-Item -LiteralPath $source -Destination $target
+
+      - name: Upload current native artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ runner.os }}-${{ runner.arch }}
+          path: target/native-artifacts/**/vuec_napi.node
+          if-no-files-found: error
+
+  release-dry-run:
+    name: Release Dry Run
+    runs-on: ubuntu-latest
+    needs: release-smoke
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install WASM release tooling
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo install wasm-bindgen-cli --version 0.2.122 --locked
+
+      - name: Download native artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          path: target/native-artifacts
+          merge-multiple: false
+
+      - name: Verify release dry-run with native artifacts
+        run: cargo xtask verify-release-dry-run --native-artifacts-dir target/native-artifacts
