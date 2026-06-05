@@ -3437,6 +3437,17 @@ impl PrefixIdentifiersContext<'_, '_> {
                     self.walk_expression(expression);
                 }
             }
+            Expression::TemplateLiteral(template) => {
+                for expression in &template.expressions {
+                    self.walk_expression(expression);
+                }
+            }
+            Expression::TaggedTemplateExpression(template) => {
+                self.walk_expression(&template.tag);
+                for expression in &template.quasi.expressions {
+                    self.walk_expression(expression);
+                }
+            }
             Expression::ParenthesizedExpression(parenthesized) => {
                 self.walk_expression(&parenthesized.expression);
             }
@@ -35333,6 +35344,50 @@ span { color: v-bind(style.color) }
         assert_eq!(
             compiler.prefix_vue27_identifiers(source, options),
             "function render(){var _vm=this,_c=_vm._self._c,_setup=_vm._self._setupProxy;return _c('div',{on:{click:function($event){_setup.count++}}},[_vm._v(_vm._s(_setup.count))])}"
+        );
+    }
+
+    #[test]
+    fn vue27_prefix_identifiers_rewrites_template_literal_references() {
+        let compiler = SfcCompiler::new();
+        let source = "function render(){with(this){return _c('div',{attrs:{class:`lvl${level}`,\"aria-label\":`Last Page, Page ${state.nbPages}`}},[_v(_s(label))])}}";
+
+        assert_eq!(
+            compiler.prefix_vue27_identifiers(
+                source,
+                Vue27PrefixIdentifiersOptions::default()
+            ),
+            "function render(){var _vm=this,_c=_vm._self._c;return _c('div',{attrs:{class:`lvl${_vm.level}`,\"aria-label\":`Last Page, Page ${_vm.state.nbPages}`}},[_vm._v(_vm._s(_vm.label))])}"
+        );
+    }
+
+    #[test]
+    fn vue27_prefix_identifiers_keeps_template_literal_locals() {
+        let compiler = SfcCompiler::new();
+        let source = "function render(){with(this){return _l(items,function(item){return _c('div',{attrs:{title:`item ${item.label} of ${total}`}})})}}";
+
+        assert_eq!(
+            compiler.prefix_vue27_identifiers(
+                source,
+                Vue27PrefixIdentifiersOptions::default()
+            ),
+            "function render(){var _vm=this,_c=_vm._self._c;return _vm._l(_vm.items,function(item){return _c('div',{attrs:{title:`item ${item.label} of ${_vm.total}`}})})}"
+        );
+    }
+
+    #[test]
+    fn vue27_prefix_identifiers_rewrites_template_literal_setup_bindings() {
+        let compiler = SfcCompiler::new();
+        let source =
+            "function render(){with(this){return _c('div',{attrs:{title:`Count ${count}`}})}}";
+        let options = Vue27PrefixIdentifiersOptions {
+            bindings: BTreeMap::from([("count".into(), "setup-ref".into())]),
+            ..Vue27PrefixIdentifiersOptions::default()
+        };
+
+        assert_eq!(
+            compiler.prefix_vue27_identifiers(source, options),
+            "function render(){var _vm=this,_c=_vm._self._c,_setup=_vm._self._setupProxy;return _c('div',{attrs:{title:`Count ${_setup.count}`}})}"
         );
     }
 
