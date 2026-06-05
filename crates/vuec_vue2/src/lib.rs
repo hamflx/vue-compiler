@@ -2543,13 +2543,15 @@ fn gen_mir_handler(
             "alt" => modifier_code.push_str("if(!$event.altKey)return null;"),
             "meta" => modifier_code.push_str("if(!$event.metaKey)return null;"),
             "left" => {
-                modifier_code.push_str("if('button' in $event && $event.button !== 0)return null;")
+                modifier_code.push_str("if('button' in $event && $event.button !== 0)return null;");
+                keys.push(key.clone());
             }
             "middle" => {
                 modifier_code.push_str("if('button' in $event && $event.button !== 1)return null;")
             }
             "right" => {
-                modifier_code.push_str("if('button' in $event && $event.button !== 2)return null;")
+                modifier_code.push_str("if('button' in $event && $event.button !== 2)return null;");
+                keys.push(key.clone());
             }
             "exact" => {
                 let guards = ["ctrl", "shift", "alt", "meta"]
@@ -2994,10 +2996,15 @@ fn gen_key_filter(keys: &[String]) -> String {
             .map(|key| {
                 key.parse::<u32>().map_or_else(
                     |_| match key.as_str() {
+                        "tab" => "_k($event.keyCode,\"tab\",9,$event.key,\"Tab\")".into(),
                         "enter" => "_k($event.keyCode,\"enter\",13,$event.key,\"Enter\")".into(),
                         "delete" => "_k($event.keyCode,\"delete\",[8,46],$event.key,[\"Backspace\",\"Delete\",\"Del\"])".into(),
                         "esc" => "_k($event.keyCode,\"esc\",27,$event.key,[\"Esc\",\"Escape\"])".into(),
                         "space" => "_k($event.keyCode,\"space\",32,$event.key,[\" \",\"Spacebar\"])".into(),
+                        "up" => "_k($event.keyCode,\"up\",38,$event.key,[\"Up\",\"ArrowUp\"])".into(),
+                        "left" => "_k($event.keyCode,\"left\",37,$event.key,[\"Left\",\"ArrowLeft\"])".into(),
+                        "right" => "_k($event.keyCode,\"right\",39,$event.key,[\"Right\",\"ArrowRight\"])".into(),
+                        "down" => "_k($event.keyCode,\"down\",40,$event.key,[\"Down\",\"ArrowDown\"])".into(),
                         _ => format!("_k($event.keyCode,{},{},$event.key,{})", js_string(key), "undefined", "undefined"),
                     },
                     |code| format!("$event.keyCode!=={code}"),
@@ -5747,6 +5754,15 @@ mod tests {
         assert_eq!(
             ordered_modifiers.render,
             r#"with(this){return _c('input',{on:{"input":function($event){$event.stopPropagation();$event.preventDefault();if($event.target !== $event.currentTarget)return null;return onInput.apply(null, arguments)}}})}"#
+        );
+
+        let left_exact = compile(
+            r#"<button @click.exact.left.prevent="go"></button>"#,
+            options(),
+        );
+        assert_eq!(
+            left_exact.render,
+            r#"with(this){return _c('button',{on:{"click":function($event){if(!$event.type.indexOf('key')&&_k($event.keyCode,"left",37,$event.key,["Left","ArrowLeft"]))return null;if($event.ctrlKey||$event.shiftKey||$event.altKey||$event.metaKey)return null;if('button' in $event && $event.button !== 0)return null;$event.preventDefault();return go.apply(null, arguments)}}})}"#
         );
 
         let capture_once = compile(r#"<input @input.capture.once="onInput">"#, options());
