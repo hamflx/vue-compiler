@@ -6,17 +6,23 @@ function parse(input) {
   const options = arguments.length > 1 ? arguments[1] : undefined;
   const opts = options || {};
   if (input && typeof input === 'object') {
-    return normalizeVue27ParseComponentResult(native.parseVue27SfcComponent(String(input.source || ''), {
+    const parseOptions = {
+      ...input,
       ...opts,
       filename: input.filename || opts.filename,
-    }));
+    };
+    return normalizeVue27ParseComponentResult(
+      native.parseVue27SfcComponent(String(input.source || ''), parseOptions),
+      parseOptions,
+    );
   }
-  return normalizeVue27ParseComponentResult(native.parseVue27SfcComponent(String(input || ''), opts));
+  return normalizeVue27ParseComponentResult(native.parseVue27SfcComponent(String(input || ''), opts), opts);
 }
 
 function parseComponent(source) {
   const options = arguments.length > 1 ? arguments[1] : undefined;
-  return normalizeVue27ParseComponentResult(native.parseVue27SfcComponent(String(source || ''), options || {}));
+  const opts = options || {};
+  return normalizeVue27ParseComponentResult(native.parseVue27SfcComponent(String(source || ''), opts), opts);
 }
 
 function compileTemplate(options) {
@@ -267,11 +273,24 @@ function normalizeVue27Descriptor(descriptor) {
   };
 }
 
-function normalizeVue27ParseComponentResult(result) {
+function normalizeVue27ParseComponentResult(result, options) {
   if (!result || typeof result !== 'object') return result;
   const descriptor = normalizeVue27Descriptor(result.descriptor || result);
-  descriptor.errors = Array.isArray(result.errors) ? result.errors : [];
+  descriptor.errors = normalizeVue27ParseErrors(result.errors, !!(options && options.outputSourceRange));
   return descriptor;
+}
+
+function normalizeVue27ParseErrors(errors, ranged) {
+  if (!Array.isArray(errors)) return [];
+  return errors.map(error => {
+    if (typeof error === 'string') return ranged ? { msg: error } : error;
+    if (!error || typeof error !== 'object') return ranged ? { msg: String(error) } : String(error);
+    if (!ranged) return String(error.msg || error.message || error);
+    const out = { msg: String(error.msg || error.message || error) };
+    if (error.start != null) out.start = error.start;
+    if (error.end != null) out.end = error.end;
+    return out;
+  });
 }
 
 function normalizeVue27Block(descriptor, block, style) {

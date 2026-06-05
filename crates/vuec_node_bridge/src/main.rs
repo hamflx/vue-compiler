@@ -396,26 +396,25 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
             let filename = string_field_or(&payload, "filename", "anonymous.vue");
             let source = string_field(&payload, "source");
             let mut compiler = SfcCompiler::new();
-            let result = compiler.parse_vue27_component_with_filename(
-                filename,
-                &source,
-                vue27_parse_component_options(payload.get("options")),
-            );
+            let options = vue27_parse_component_options(payload.get("options"));
+            let output_source_range = options.output_source_range;
+            let result = compiler.parse_vue27_component_with_filename(filename, &source, options);
             Ok(vue27_parse_component_value(
                 &result.descriptor,
                 &result.errors,
+                output_source_range,
             ))
         }
         "sfc.vue27.parseComponent" => {
             let source = string_field(&payload, "source");
             let mut compiler = SfcCompiler::new();
-            let result = compiler.parse_vue27_component(
-                &source,
-                vue27_parse_component_options(payload.get("options")),
-            );
+            let options = vue27_parse_component_options(payload.get("options"));
+            let output_source_range = options.output_source_range;
+            let result = compiler.parse_vue27_component(&source, options);
             Ok(vue27_parse_component_value(
                 &result.descriptor,
                 &result.errors,
+                output_source_range,
             ))
         }
         "sfc.vue27.rewriteDefault" => {
@@ -1166,10 +1165,25 @@ fn vue2_tips_value(tips: &[Vue2Warning], output_source_range: bool) -> Value {
 fn vue27_parse_component_value(
     descriptor: &SfcDescriptor,
     errors: &[vuec_sfc::Vue27SfcParseError],
+    output_source_range: bool,
 ) -> Value {
     let mut value = vue27_descriptor_value(descriptor);
-    value["errors"] = json!(errors);
+    value["errors"] = vue27_parse_errors_value(errors, output_source_range);
     value
+}
+
+fn vue27_parse_errors_value(
+    errors: &[vuec_sfc::Vue27SfcParseError],
+    output_source_range: bool,
+) -> Value {
+    if output_source_range {
+        json!(errors)
+    } else {
+        json!(errors
+            .iter()
+            .map(|error| error.msg.clone())
+            .collect::<Vec<_>>())
+    }
 }
 
 fn vue27_descriptor_value(descriptor: &SfcDescriptor) -> Value {
@@ -15396,6 +15410,47 @@ mod tests {
             parsed["template"]["content"],
             json!("\n<div id=\"app\">\n  <router-view />\n</div>\n")
         );
+    }
+
+    #[test]
+    fn vue27_bridge_parse_projects_errors_by_source_range_option() {
+        let source = r#"<template>
+<div>
+  <input>
+</div>
+</template>"#;
+        let default = dispatch(
+            "sfc.vue27.parse",
+            json!({
+                "source": source,
+                "filename": "test.vue"
+            }),
+        )
+        .expect("vue27 parse default errors");
+        assert_eq!(
+            default["errors"],
+            json!(["tag <input> has no matching end tag."])
+        );
+
+        let ranged = dispatch(
+            "sfc.vue27.parse",
+            json!({
+                "source": source,
+                "filename": "test.vue",
+                "options": {
+                    "outputSourceRange": true
+                }
+            }),
+        )
+        .expect("vue27 parse ranged errors");
+        let errors = ranged["errors"].as_array().expect("ranged errors");
+        assert_eq!(errors.len(), 1);
+        assert_eq!(
+            errors[0]["msg"],
+            json!("tag <input> has no matching end tag.")
+        );
+        assert!(errors[0]["start"].as_u64().is_some());
+        assert!(errors[0]["end"].as_u64().is_some());
     }
 
     #[test]
