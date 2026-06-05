@@ -2564,6 +2564,8 @@ fn alias_function_expression(
             );
             let is_vue27_sfc_compile_script =
                 target.kind == TargetKind::Vue27Sfc && export_name == "compileScript";
+            let is_vue27_sfc_compile_template =
+                target.kind == TargetKind::Vue27Sfc && export_name == "compileTemplate";
             let is_vue3_sfc_compile_script =
                 target.kind == TargetKind::Vue3Sfc && export_name == "compileScript";
             let is_vue3_sfc_compile_template =
@@ -2585,6 +2587,8 @@ fn alias_function_expression(
                 "vue3SfcParseBridgePayload(__vuecPayload)"
             } else if is_vue27_sfc_compile_script {
                 "vue27CompileScriptBridgePayload(__vuecPayload)"
+            } else if is_vue27_sfc_compile_template {
+                "vue27SfcCompileTemplateBridgePayload(__vuecPayload)"
             } else if is_vue3_sfc_compile_script {
                 "vue3CompileScriptBridgePayload(__vuecPayload)"
             } else if is_vue3_sfc_compile_template {
@@ -2621,6 +2625,10 @@ fn alias_function_expression(
                 format!("(() => {{ const __vuecCustomTemplateResult = vue3SfcCustomCompileTemplateResult(__vuecPayload); if (__vuecCustomTemplateResult !== undefined) return __vuecCustomTemplateResult; return hydrateVue3SfcCompileTemplateResult({call}); }})()")
             } else if is_vue27_sfc_compile_script {
                 format!("hydrateVue27CompileScriptResult({call})")
+            } else if is_vue27_sfc_compile_template {
+                format!(
+                    "prettifyVue27SfcTemplateResult({call}, __vuecBridgePayload.options, __vuecPayload.filename)"
+                )
             } else if is_vue3_ssr_compile {
                 format!("hydrateVue3SsrCompileResult({call})")
             } else if is_vue2_template_compile {
@@ -3878,6 +3886,10 @@ fn run_vue27_project_probe(
         .env("VUEC_PROJECT_OFFICIAL_ROOT", &official_root)
         .env("VUEC_PROJECT_RUST_ROOT", &rust_root)
         .env("VUEC_PROJECT_ROOT", &project_root)
+        .env(
+            "NODE_PATH",
+            conformance_node_path(&rust_root, &official_root),
+        )
         .env(
             "VUEC_PROJECT_FILES",
             serde_json::to_string(&relative_files)?,
@@ -9136,6 +9148,59 @@ function vue27CompileScriptBridgePayload(payload) {
   }
   out.options = options;
   return out;
+}
+
+function vue27SfcCompileTemplateBridgePayload(payload) {
+  const out = Object.assign({}, payload || {});
+  const options = Object.assign({}, out.options || {});
+  if (
+    options.isProduction === undefined &&
+    options.isProd === undefined &&
+    options.is_prod === undefined
+  ) {
+    options.isProduction = process.env.NODE_ENV === 'production';
+  }
+  out.options = options;
+  return out;
+}
+
+function prettifyVue27SfcTemplateResult(result, options, filename) {
+  if (!result || typeof result !== 'object') return result;
+  const out = Object.assign({}, result);
+  const errors = Array.isArray(out.errors) ? out.errors : [];
+  if (errors.length > 0) return out;
+  if (vue27SfcTemplateIsProduction(options)) return out;
+  if (!vue27SfcTemplatePrettifyEnabled(options)) return out;
+  const tips = Array.isArray(out.tips) ? out.tips.slice() : [];
+  try {
+    out.code = require('prettier').format(out.code || '', {
+      semi: false,
+      parser: 'babel'
+    });
+  } catch (error) {
+    if (error && error.code === 'MODULE_NOT_FOUND') {
+      tips.push(
+        'The `prettify` option is on, but the dependency `prettier` is not found.\n' +
+        'Please either turn off `prettify` or manually install `prettier`.'
+      );
+    }
+    tips.push(
+      `Failed to prettify component ${filename || (options && options.filename) || 'anonymous.vue'} template source after compilation.`
+    );
+    out.tips = tips;
+  }
+  return out;
+}
+
+function vue27SfcTemplateIsProduction(options) {
+  if (!options || typeof options !== 'object') return false;
+  return options.isProduction === true || options.isProd === true || options.is_prod === true;
+}
+
+function vue27SfcTemplatePrettifyEnabled(options) {
+  if (!options || typeof options !== 'object') return true;
+  if (!Object.prototype.hasOwnProperty.call(options, 'prettify')) return true;
+  return !!options.prettify;
 }
 
 function vue3SfcParseBridgePayload(payload) {
@@ -19402,6 +19467,67 @@ projects = []
         assert!(ALIAS_RUNTIME_JS.contains("function vue27CompileScriptBridgePayload"));
         assert!(ALIAS_RUNTIME_JS.contains("__vuecEmitScriptSetupMarker = false"));
         assert!(ALIAS_RUNTIME_JS.contains("Object.defineProperty(bindings, '__isScriptSetup'"));
+    }
+
+    #[test]
+    fn vue27_sfc_compile_template_alias_applies_official_prettify_boundary() {
+        let target = TargetSpec {
+            version_line: VersionLine::Vue27,
+            package: "vue",
+            entry: "vue/compiler-sfc",
+            kind: TargetKind::Vue27Sfc,
+        };
+        let detail = ApiExportDetail {
+            kind: "function".into(),
+            tag: "[object Function]".into(),
+            name: Some("compileTemplate".into()),
+            function_arity: Some(1),
+            is_async_function: Some(false),
+            is_class_like: Some(false),
+            own_property_names: vec!["length".into(), "name".into(), "prototype".into()],
+        };
+        let expression = alias_export_expression(target, "compileTemplate", Some(&detail));
+
+        assert!(expression.contains("sfc.vue27.compileTemplate"));
+        assert!(expression.contains("prettifyVue27SfcTemplateResult"));
+        assert!(expression.contains("__vuecPayload.filename"));
+        assert!(ALIAS_RUNTIME_JS.contains("function prettifyVue27SfcTemplateResult"));
+        assert!(ALIAS_RUNTIME_JS.contains("function vue27SfcTemplateIsProduction"));
+        assert!(ALIAS_RUNTIME_JS.contains("function vue27SfcTemplatePrettifyEnabled"));
+        assert!(ALIAS_RUNTIME_JS.contains("function vue27SfcCompileTemplateBridgePayload"));
+        assert!(ALIAS_RUNTIME_JS.contains("require('prettier').format(out.code || ''"));
+        assert!(ALIAS_RUNTIME_JS.contains("parser: 'babel'"));
+        assert!(ALIAS_RUNTIME_JS.contains("return !!options.prettify"));
+        assert!(ALIAS_RUNTIME_JS.contains("process.env.NODE_ENV === 'production'"));
+        assert!(ALIAS_RUNTIME_JS.contains("The `prettify` option is on"));
+        assert!(ALIAS_RUNTIME_JS.contains("Failed to prettify component"));
+    }
+
+    #[test]
+    fn napi_vue27_sfc_native_alias_applies_official_prettify_boundary() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let source = fs::read_to_string(
+            repo_root
+                .join("packages")
+                .join("native-aliases")
+                .join("vue")
+                .join("compiler-sfc")
+                .join("index.js"),
+        )
+        .unwrap();
+
+        assert!(source.contains("prettifyVue27SfcTemplateResult("));
+        assert!(source.contains("native.compileVue27SfcTemplate(source, opts)"));
+        assert!(source.contains("function prettifyVue27SfcTemplateResult"));
+        assert!(source.contains("function vue27SfcTemplateIsProduction"));
+        assert!(source.contains("function vue27SfcTemplatePrettifyEnabled"));
+        assert!(source.contains("function vue27SfcCompileTemplateOptions"));
+        assert!(source.contains("require('prettier').format(out.code || ''"));
+        assert!(source.contains("parser: 'babel'"));
+        assert!(source.contains("return !!options.prettify"));
+        assert!(source.contains("process.env.NODE_ENV === 'production'"));
+        assert!(source.contains("The `prettify` option is on"));
+        assert!(source.contains("Failed to prettify component"));
     }
 
     #[test]

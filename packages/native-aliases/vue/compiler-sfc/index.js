@@ -20,9 +20,13 @@ function parseComponent(source) {
 }
 
 function compileTemplate(options) {
-  const opts = options || {};
+  const opts = vue27SfcCompileTemplateOptions(options || {});
   const source = String(opts.source || '');
-  return native.compileVue27SfcTemplate(source, opts);
+  return prettifyVue27SfcTemplateResult(
+    native.compileVue27SfcTemplate(source, opts),
+    opts,
+    opts.filename || opts.id || 'template.vue.html',
+  );
 }
 
 function compileScript(descriptor) {
@@ -131,6 +135,57 @@ function vue27StylePostcssOptions(options) {
     if (postcssOptions.from === undefined) postcssOptions.from = filename;
   }
   return postcssOptions;
+}
+
+function vue27SfcCompileTemplateOptions(options) {
+  const out = { ...(options || {}) };
+  if (
+    out.isProduction === undefined &&
+    out.isProd === undefined &&
+    out.is_prod === undefined
+  ) {
+    out.isProduction = process.env.NODE_ENV === 'production';
+  }
+  return out;
+}
+
+function prettifyVue27SfcTemplateResult(result, options, filename) {
+  if (!result || typeof result !== 'object') return result;
+  const out = Object.assign({}, result);
+  const errors = Array.isArray(out.errors) ? out.errors : [];
+  if (errors.length > 0) return out;
+  if (vue27SfcTemplateIsProduction(options)) return out;
+  if (!vue27SfcTemplatePrettifyEnabled(options)) return out;
+  const tips = Array.isArray(out.tips) ? out.tips.slice() : [];
+  try {
+    out.code = require('prettier').format(out.code || '', {
+      semi: false,
+      parser: 'babel',
+    });
+  } catch (error) {
+    if (error && error.code === 'MODULE_NOT_FOUND') {
+      tips.push(
+        'The `prettify` option is on, but the dependency `prettier` is not found.\n' +
+          'Please either turn off `prettify` or manually install `prettier`.',
+      );
+    }
+    tips.push(
+      `Failed to prettify component ${filename || (options && options.filename) || 'anonymous.vue'} template source after compilation.`,
+    );
+    out.tips = tips;
+  }
+  return out;
+}
+
+function vue27SfcTemplateIsProduction(options) {
+  if (!options || typeof options !== 'object') return false;
+  return options.isProduction === true || options.isProd === true || options.is_prod === true;
+}
+
+function vue27SfcTemplatePrettifyEnabled(options) {
+  if (!options || typeof options !== 'object') return true;
+  if (!Object.prototype.hasOwnProperty.call(options, 'prettify')) return true;
+  return !!options.prettify;
 }
 
 function applyVue27StylePostcssSync(result, options) {
