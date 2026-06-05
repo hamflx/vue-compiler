@@ -1466,6 +1466,7 @@ fn process_attrs(
                             Vec::new(),
                             false,
                             false,
+                            false,
                             attr.span,
                         );
                         let hyphen_name = hyphenate(&name);
@@ -1476,6 +1477,7 @@ fn process_attrs(
                                 sync_code,
                                 BTreeMap::new(),
                                 Vec::new(),
+                                false,
                                 false,
                                 false,
                                 attr.span,
@@ -1508,6 +1510,7 @@ fn process_attrs(
                     modifiers,
                     modifier_order,
                     has_modifier_object,
+                    false,
                     false,
                     attr.span,
                 );
@@ -4731,6 +4734,7 @@ fn add_handler(
     modifier_order: Vec<String>,
     has_modifier_object: bool,
     dynamic: bool,
+    prepend: bool,
     span: Option<Span>,
 ) {
     if modifiers.get("right").copied().unwrap_or(false) && name == "click" {
@@ -4748,14 +4752,20 @@ fn add_handler(
     if modifiers.remove("passive").is_some() {
         name = format!("&{name}");
     }
-    events.entry(name).or_default().push(Vue2EventHandler {
+    let handler = Vue2EventHandler {
         value: value.trim().to_string(),
         modifiers,
         modifier_order,
         has_modifier_object,
         dynamic,
         span,
-    });
+    };
+    let handlers = events.entry(name).or_default();
+    if prepend {
+        handlers.insert(0, handler);
+    } else {
+        handlers.push(handler);
+    }
 }
 
 fn gen_component_model(element: &mut Vue2Element, value: &str, modifiers: &BTreeMap<String, bool>) {
@@ -4797,16 +4807,25 @@ fn gen_dom_model(
         assignment_value.into()
     };
     let assignment = gen_assignment_code(value, &assignment_value);
-    let mut handler = "if($event.target.composing)return;".to_string();
+    let event = if modifiers.get("lazy").copied().unwrap_or(false) {
+        "change"
+    } else {
+        "input"
+    };
+    let mut handler = String::new();
+    if event == "input" {
+        handler.push_str("if($event.target.composing)return;");
+    }
     handler.push_str(&assignment);
     add_handler(
         &mut element.events,
-        "input".into(),
+        event.into(),
         handler,
         BTreeMap::new(),
         Vec::new(),
         false,
         false,
+        true,
         element.span,
     );
     element.directives.push(Vue2Directive {
@@ -5767,6 +5786,24 @@ mod tests {
         assert!(component_model
             .render
             .contains("callback:function ($$v) {\n test \n=$$v}"));
+
+        let model_with_input = compile(
+            r#"<input @input="updateValue($event.target.value)" @change="emitChange" v-model="val" ref="input">"#,
+            options(),
+        );
+        assert_eq!(
+            model_with_input.render,
+            r#"with(this){return _c('input',{directives:[{name:"model",rawName:"v-model",value:(val),expression:"val"}],ref:"input",domProps:{"value":(val)},on:{"input":[function($event){if($event.target.composing)return;val=$event.target.value},function($event){return updateValue($event.target.value)}],"change":emitChange}})}"#
+        );
+
+        let lazy_model_with_change = compile(
+            r#"<input @change="emitChange" v-model.lazy="val">"#,
+            options(),
+        );
+        assert_eq!(
+            lazy_model_with_change.render,
+            r#"with(this){return _c('input',{directives:[{name:"model",rawName:"v-model.lazy",value:(val),expression:"val",modifiers:{"lazy":true}}],domProps:{"value":(val)},on:{"change":[function($event){val=$event.target.value},emitChange]}})}"#
+        );
     }
 
     #[test]
