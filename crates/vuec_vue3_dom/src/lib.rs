@@ -2744,7 +2744,20 @@ mod tests {
             "{}",
             result.code
         );
-        assert!(result.code.contains(r##"_createStaticVNode("<img src=\"" + _imports_0 + "\" srcset=\"" + _imports_0 + ", " + _imports_1 + "#heart 2x\"><span title=\"static\">ok</span>"##));
+        assert!(
+            result
+                .code
+                .contains("const _hoisted_1 = _imports_0 + ', ' + _imports_1 + '#heart' + ' 2x'"),
+            "{}",
+            result.code
+        );
+        assert!(
+            result.code.contains(
+                r##"_createStaticVNode("<img src=\"" + _imports_0 + "\" srcset=\"" + _hoisted_1 + "\"><span title=\"static\">ok</span>"##
+            ),
+            "{}",
+            result.code
+        );
         assert!(!result.code.contains("src: _imports_0"));
         assert!(!result.code.contains("_ctx._imports_0"));
         assert!(!result.code.contains("_ctx._imports_1"));
