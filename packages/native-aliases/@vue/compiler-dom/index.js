@@ -910,6 +910,7 @@ module.exports = {
 Object.defineProperty(module.exports, '__vuecRuntime', {
   value: {
     ...module.exports,
+    callBridge: core.__vuecRuntime && core.__vuecRuntime.callBridge,
     decodeHtmlBrowser,
     ignoreSideEffectTags,
     transformStyle,

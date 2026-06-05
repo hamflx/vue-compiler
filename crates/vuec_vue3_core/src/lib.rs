@@ -25910,10 +25910,18 @@ fn collect_static_hoists(ast: &Vue3Ast, options: &Vue3CompilerOptions) -> Static
     if !options.hoist_static {
         return hoists;
     }
+    let stringified_nodes = collect_stringified_static_node_ids(ast, options);
     let do_not_hoist_root = ast
         .root_node()
         .and_then(|root| vue3_single_static_root_child(&root.children, ast));
-    collect_static_hoists_for_node(ast, ast.root, options, do_not_hoist_root, &mut hoists);
+    collect_static_hoists_for_node(
+        ast,
+        ast.root,
+        options,
+        do_not_hoist_root,
+        &stringified_nodes,
+        &mut hoists,
+    );
     hoists
 }
 
@@ -25922,6 +25930,7 @@ fn collect_static_hoists_for_node(
     node_id: vuec_ast::NodeId,
     options: &Vue3CompilerOptions,
     do_not_hoist_root: Option<vuec_ast::NodeId>,
+    stringified_nodes: &BTreeSet<vuec_ast::NodeId>,
     hoists: &mut StaticHoists,
 ) {
     let Some(node) = ast.node(node_id) else {
@@ -25929,12 +25938,113 @@ fn collect_static_hoists_for_node(
     };
     if let Vue3AstKind::Element(element) = &node.kind {
         collect_static_asset_binding_hoists(node_id, element, hoists);
-        if static_props_should_hoist_element(ast, node, element, options, do_not_hoist_root) {
+        if !stringified_nodes.contains(&node_id)
+            && static_props_should_hoist_element(ast, node, element, options, do_not_hoist_root)
+        {
             hoists.push_props_object(node_id);
         }
     }
+    if stringified_nodes.contains(&node_id) {
+        for child_id in &node.children {
+            collect_static_asset_binding_hoists_for_subtree(ast, *child_id, hoists);
+        }
+        return;
+    }
     for child_id in &node.children {
-        collect_static_hoists_for_node(ast, *child_id, options, do_not_hoist_root, hoists);
+        collect_static_hoists_for_node(
+            ast,
+            *child_id,
+            options,
+            do_not_hoist_root,
+            stringified_nodes,
+            hoists,
+        );
+    }
+}
+
+fn collect_static_asset_binding_hoists_for_subtree(
+    ast: &Vue3Ast,
+    node_id: vuec_ast::NodeId,
+    hoists: &mut StaticHoists,
+) {
+    let Some(node) = ast.node(node_id) else {
+        return;
+    };
+    if let Vue3AstKind::Element(element) = &node.kind {
+        collect_static_asset_binding_hoists(node_id, element, hoists);
+    }
+    for child_id in &node.children {
+        collect_static_asset_binding_hoists_for_subtree(ast, *child_id, hoists);
+    }
+}
+
+fn collect_stringified_static_node_ids(
+    ast: &Vue3Ast,
+    options: &Vue3CompilerOptions,
+) -> BTreeSet<vuec_ast::NodeId> {
+    let mut ids = BTreeSet::new();
+    if !options.stringify_static {
+        return ids;
+    }
+    let scope = RenderScope::default();
+    if let Some(root) = ast.root_node() {
+        let root_children = root
+            .children
+            .iter()
+            .filter_map(|child_id| ast.node(*child_id))
+            .collect::<Vec<_>>();
+        if visible_child_ids(ast, &root.children).len() >= 2
+            && analyze_static_html_chunk(ast, &root_children, options, &scope)
+                .is_some_and(|analysis| analysis.dom_nodes > 1 || analysis.meets_threshold())
+        {
+            for child in &root_children {
+                collect_static_subtree_ids(ast, child.id, &mut ids);
+            }
+        }
+    }
+    collect_stringified_static_node_ids_for_parent(ast, ast.root, options, &scope, &mut ids);
+    ids
+}
+
+fn collect_stringified_static_node_ids_for_parent(
+    ast: &Vue3Ast,
+    parent_id: vuec_ast::NodeId,
+    options: &Vue3CompilerOptions,
+    scope: &RenderScope,
+    ids: &mut BTreeSet<vuec_ast::NodeId>,
+) {
+    let Some(parent) = ast.node(parent_id) else {
+        return;
+    };
+    let children = parent
+        .children
+        .iter()
+        .filter_map(|child_id| ast.node(*child_id))
+        .collect::<Vec<_>>();
+    for chunk in static_vnode_chunks(ast, &children, options, scope) {
+        for child in &children[chunk.start..chunk.end] {
+            collect_static_subtree_ids(ast, child.id, ids);
+        }
+    }
+    for child_id in &parent.children {
+        if !ids.contains(child_id) {
+            collect_stringified_static_node_ids_for_parent(ast, *child_id, options, scope, ids);
+        }
+    }
+}
+
+fn collect_static_subtree_ids(
+    ast: &Vue3Ast,
+    node_id: vuec_ast::NodeId,
+    ids: &mut BTreeSet<vuec_ast::NodeId>,
+) {
+    if !ids.insert(node_id) {
+        return;
+    }
+    if let Some(node) = ast.node(node_id) {
+        for child_id in &node.children {
+            collect_static_subtree_ids(ast, *child_id, ids);
+        }
     }
 }
 

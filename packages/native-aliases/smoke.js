@@ -104,6 +104,21 @@ const template = sfc.compileTemplate({
   id: 'data-v-alias',
 });
 assert.match(template.code, /export function render/);
+assert.strictEqual(Object.prototype.hasOwnProperty.call(template, 'ast_summary'), false);
+assert.strictEqual(Object.prototype.hasOwnProperty.call(template, 'bindings'), false);
+
+const templateWithSideEffects = sfc.compileTemplate({
+  source: '<template><div>{{ msg }}</div></template><script>const msg = 1</script><style>.a{}</style>',
+  filename: 'alias.vue',
+  id: 'data-v-alias',
+});
+assert.ok(Array.isArray(templateWithSideEffects.errors));
+if (templateWithSideEffects.errors.length > 0 && typeof templateWithSideEffects.errors[0] === 'object') {
+  assert.strictEqual(
+    Object.prototype.propertyIsEnumerable.call(templateWithSideEffects.errors[0], 'message'),
+    false
+  );
+}
 
 const script = sfc.compileScript(parsed.descriptor, {
   id: 'data-v-alias',

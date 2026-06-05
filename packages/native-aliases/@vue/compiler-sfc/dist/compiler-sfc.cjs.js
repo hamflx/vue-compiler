@@ -1,6 +1,8 @@
 'use strict';
 
+const cp = require('child_process');
 const native = require('@vuec-rs/native');
+let vue3CoreRuntime = null;
 
 let packageVersion = '0.0.0-vuec-napi';
 try {
@@ -78,15 +80,57 @@ function parse(source, options) {
 
 function parse$1(source) {
   const options = arguments.length > 1 ? arguments[1] : undefined;
-  return hydrateVue3SfcParseResult(native.parseSfcResult(String(source || ''), options || {}));
+  const payload = {
+    source: String(source || ''),
+    filename: options && options.filename,
+    options: options || {},
+  };
+  const bridgePayload = vue3SfcParseBridgePayload(payload);
+  const parsed = hasBridge()
+    ? callBridge('sfc.parse', bridgePayloadForCall(bridgePayload))
+    : native.parseSfcResult(payload.source, bridgePayload.bridgeOptions || {});
+  return hydrateVue3SfcParseResult(
+    applyVue3SfcCustomCompilerParse(parsed, payload.source, payload.options, payload.filename)
+  );
 }
 
 function compileTemplate(options) {
-  return native.compileTemplate(options || {});
+  const opts = options || {};
+  const payload = {
+    source: String(opts.source || ''),
+    filename: opts.filename || 'template.vue.html',
+    options: opts,
+  };
+  const customResult = vue3SfcCustomCompileTemplateResult(payload);
+  if (customResult !== undefined) {
+    return customResult;
+  }
+  const bridgePayload = vue3SfcCompileTemplateBridgePayload(payload);
+  if (hasBridge()) {
+    return hydrateVue3SfcCompileTemplateResult(
+      callBridge('sfc.compileTemplate', bridgePayloadForCall(bridgePayload))
+    );
+  }
+  return hydrateVue3SfcCompileTemplateResult(
+    native.compileTemplate(vue3SfcCompileTemplateNativeOptions(bridgePayload))
+  );
 }
 
 function compileScript(descriptor, options) {
-  return hydrateVue3CompileScriptResult(native.compileScript(descriptor || {}, options || {}));
+  const payload = {
+    source: descriptor && typeof descriptor.source === 'string' ? descriptor.source : '',
+    filename: descriptor && descriptor.filename,
+    options: options || {},
+  };
+  const bridgePayload = vue3CompileScriptBridgePayload(payload);
+  if (hasBridge()) {
+    return hydrateVue3CompileScriptResult(
+      callBridge('sfc.compileScript', bridgePayloadForCall(bridgePayload))
+    );
+  }
+  return hydrateVue3CompileScriptResult(
+    native.compileScript(descriptor || {}, bridgePayload.options || {})
+  );
 }
 
 function compileStyle(options) {
@@ -148,6 +192,276 @@ function normalizeVue3StyleResult(result) {
   return out;
 }
 
+function vue3CompileScriptBridgePayload(payload) {
+  const out = { ...(payload || {}) };
+  const options = { ...(out.options || {}) };
+  const filename = options.filename !== undefined ? options.filename : out.filename;
+  if (typeof options.customElement === 'function') {
+    try {
+      options.__vuecCustomElement = !!options.customElement(filename);
+    } catch (_) {
+      options.__vuecCustomElement = false;
+    }
+    delete options.customElement;
+  }
+  if (typeof __TEST__ !== 'undefined' && __TEST__ === true) {
+    options.__vuecEmitScriptSetupMarker = false;
+  }
+  out.options = options;
+  return out;
+}
+
+function hasBridge() {
+  return !!process.env.VUEC_NODE_BRIDGE;
+}
+
+function bridgePayloadForCall(payload) {
+  if (!payload || !Object.prototype.hasOwnProperty.call(payload, 'bridgeOptions')) return payload || {};
+  const bridgePayload = {};
+  for (const key of Object.keys(payload)) {
+    if (key === 'options') {
+      bridgePayload.options = payload.bridgeOptions;
+    } else if (key !== 'bridgeOptions') {
+      bridgePayload[key] = payload[key];
+    }
+  }
+  return bridgePayload;
+}
+
+function vue3SfcParseBridgePayload(payload) {
+  const out = { ...(payload || {}) };
+  const source = String(out.source || '');
+  out.bridgeOptions = normalizeVue3SfcParseOptionsForBridge(out.options, source);
+  return out;
+}
+
+function normalizeVue3SfcParseOptionsForBridge(options, source) {
+  if (!options || typeof options !== 'object') return {};
+  const normalized = {};
+  for (const key of Object.keys(options)) {
+    if (key !== 'compiler' && typeof options[key] !== 'function') normalized[key] = options[key];
+  }
+  if (options.templateParseOptions && typeof options.templateParseOptions === 'object') {
+    normalized.templateParseOptions = normalizeVue3OptionsForBridge(
+      options.templateParseOptions,
+      source
+    );
+  }
+  return normalized;
+}
+
+function applyVue3SfcCustomCompilerParse(result, source, options, filename) {
+  if (!result || typeof result !== 'object' || !result.descriptor) return result;
+  const compiler = options && options.compiler;
+  if (!compiler || typeof compiler.parse !== 'function') return result;
+  const customErrors = [];
+  const ast = compiler.parse(String(source || ''), {
+    ...(options.templateParseOptions || {}),
+    parseMode: 'sfc',
+    prefixIdentifiers: true,
+    onError: error => customErrors.push(error),
+  });
+  const out = { ...result };
+  out.errors = customErrors.concat(Array.isArray(result.errors) ? result.errors : []);
+  if (ast && Array.isArray(ast.children) && ast.children.length === 0) {
+    out.errors.push(new SyntaxError(
+      `At least one <template> or <script> is required in a single file component. ${filename || 'anonymous.vue'}`
+    ));
+  }
+  return out;
+}
+
+function vue3SfcCompileTemplateBridgePayload(payload) {
+  const out = { ...(payload || {}) };
+  const options = { ...(out.options || {}) };
+  const source = String(out.source || '');
+  const bridgeOptions = vue3SfcCompileTemplateOptionsForBridge(options, source);
+  if (options.ast) {
+    out.ast = dehydrateForBridge(options.ast);
+    if (options.ast.source && !bridgeOptions.__vuecSourceMapSource) {
+      bridgeOptions.__vuecSourceMapSource = options.ast.source;
+      bridgeOptions.__vuecSourceMapBaseOffset = 0;
+    }
+  }
+  out.options = options;
+  out.bridgeOptions = bridgeOptions;
+  return out;
+}
+
+function vue3SfcCompileTemplateOptionsForBridge(options, source) {
+  const compilerOptions = options && options.compilerOptions && typeof options.compilerOptions === 'object'
+    ? options.compilerOptions
+    : {};
+  const bridgeOptions = { ...normalizeVue3OptionsForBridge(options, source) };
+  delete bridgeOptions.ast;
+  delete bridgeOptions.compiler;
+  delete bridgeOptions.compilerOptions;
+  Object.assign(bridgeOptions, {
+    mode: 'module',
+    prefixIdentifiers: true,
+    hoistStatic: true,
+    cacheHandlers: true,
+    sourceMap: true,
+  });
+  if (options && options.filename !== undefined) bridgeOptions.filename = options.filename;
+  if (options && options.id !== undefined) bridgeOptions.id = options.id;
+  if (options && options.scoped) {
+    const shortId = String(options.id || '').replace(/^data-v-/, '');
+    bridgeOptions.scopeId = `data-v-${shortId}`;
+    bridgeOptions.scoped = true;
+  } else {
+    delete bridgeOptions.scopeId;
+    delete bridgeOptions.scope_id;
+  }
+  if (options && options.slotted !== undefined) bridgeOptions.slotted = options.slotted;
+  if (options && options.ssr !== undefined) bridgeOptions.ssr = options.ssr;
+  if (options && options.ssrCssVars !== undefined) bridgeOptions.ssrCssVars = options.ssrCssVars;
+  if (options && options.isProd !== undefined) bridgeOptions.isProd = options.isProd;
+  if (options && options.preprocessLang !== undefined) bridgeOptions.preprocessLang = options.preprocessLang;
+  if (options && options.transformAssetUrls !== undefined) bridgeOptions.transformAssetUrls = options.transformAssetUrls;
+  Object.assign(bridgeOptions, normalizeVue3OptionsForBridge(compilerOptions, source));
+  bridgeOptions.hmr = !(options && options.isProd);
+  if (compilerOptions && compilerOptions.nodeTransforms && !Array.isArray(compilerOptions.nodeTransforms)) {
+    delete bridgeOptions.nodeTransforms;
+  }
+  return bridgeOptions;
+}
+
+function vue3SfcCompileTemplateNativeOptions(payload) {
+  const bridgeOptions = payload && payload.bridgeOptions && typeof payload.bridgeOptions === 'object'
+    ? payload.bridgeOptions
+    : {};
+  const options = payload && payload.options && typeof payload.options === 'object'
+    ? payload.options
+    : {};
+  return {
+    ...options,
+    ...bridgeOptions,
+    source: String(payload && payload.source || ''),
+    filename: payload && payload.filename,
+  };
+}
+
+function vue3SfcCustomCompileTemplateResult(payload) {
+  const options = payload && payload.options;
+  const compiler = options && options.compiler;
+  if (!compiler || typeof compiler.compile !== 'function') return undefined;
+  const source = String(payload && payload.source || '');
+  const compilerOptions = vue3SfcCompileTemplateOptionsForBridge(options, source);
+  const result = compiler.compile(source, compilerOptions) || {};
+  return hydrateVue3SfcCompileTemplateResult({
+    code: result.code || '',
+    ast: result.ast,
+    preamble: result.preamble,
+    map: result.map,
+    source,
+    errors: result.errors || [],
+    tips: result.tips || [],
+  });
+}
+
+function normalizeVue3OptionsForBridge(options, source) {
+  if (!options || typeof options !== 'object') return {};
+  const normalized = {};
+  for (const key of Object.keys(options)) {
+    if (typeof options[key] !== 'function') normalized[key] = options[key];
+  }
+  const tags = extractVueTemplateTags(String(source || ''));
+  if (hasVuePredicateOption(options, 'isVoidTag')) {
+    normalized.__vuecVoidTags = collectVuePredicateHits(options.isVoidTag, tags);
+  }
+  if (hasVuePredicateOption(options, 'isPreTag')) {
+    normalized.__vuecPreTags = collectVuePredicateHits(options.isPreTag, tags);
+  }
+  if (hasVuePredicateOption(options, 'isIgnoreNewlineTag')) {
+    normalized.__vuecIgnoreNewlineTags = collectVuePredicateHits(options.isIgnoreNewlineTag, tags);
+  }
+  if (typeof options.getNamespace === 'function') {
+    normalized.__vuecNamespaces = collectVueNamespaceHits(options.getNamespace, tags);
+    normalized.__vuecDomNamespaces = true;
+  }
+  if (Object.prototype.hasOwnProperty.call(options, 'ns')) {
+    normalized.__vuecRootNamespace = options.ns;
+  }
+  if (hasVuePredicateOption(options, 'isNativeTag')) {
+    normalized.__vuecNativeTags = collectVuePredicateHits(options.isNativeTag, tags);
+  }
+  normalized.__vuecCustomElements = collectVuePredicateHits(options.isCustomElement, tags);
+  normalized.__vuecBuiltInComponents = collectVuePredicateHits(options.isBuiltInComponent, tags);
+  normalized.__vuecStringifyStatic = typeof options.transformHoist === 'function';
+  return normalized;
+}
+
+function hasVuePredicateOption(options, name) {
+  return Object.prototype.hasOwnProperty.call(options, name) &&
+    (typeof options[name] === 'function' || Array.isArray(options[name]));
+}
+
+function extractVueTemplateTags(source) {
+  const tags = [];
+  const seen = new Set();
+  const pattern = /<\/?\s*([A-Za-z][A-Za-z0-9._:-]*)/g;
+  let match;
+  while ((match = pattern.exec(source))) {
+    const tag = match[1];
+    if (!seen.has(tag)) {
+      seen.add(tag);
+      tags.push(tag);
+    }
+  }
+  return tags;
+}
+
+function collectVuePredicateHits(predicate, values) {
+  if (Array.isArray(predicate)) return predicate.map(String);
+  if (typeof predicate !== 'function') return [];
+  const hits = [];
+  for (const value of values) {
+    try {
+      if (predicate(value)) hits.push(value);
+    } catch (_) {}
+  }
+  return hits;
+}
+
+function collectVueNamespaceHits(getNamespace, values) {
+  if (!getNamespace || typeof getNamespace !== 'function') return {};
+  const namespaces = {};
+  for (const value of values) {
+    try {
+      const namespace = getNamespace(value);
+      if (namespace !== undefined && namespace !== null) namespaces[value] = namespace;
+    } catch (_) {}
+  }
+  return namespaces;
+}
+
+function getVue3CoreRuntime() {
+  if (vue3CoreRuntime) return vue3CoreRuntime;
+  try {
+    const core = require('@vue/compiler-core');
+    vue3CoreRuntime = core.__vuecRuntime || core;
+  } catch (_) {
+    vue3CoreRuntime = {};
+  }
+  return vue3CoreRuntime;
+}
+
+function hydrateVue3Ast(ast, options) {
+  const runtime = getVue3CoreRuntime();
+  return typeof runtime.hydrateVue3Ast === 'function'
+    ? runtime.hydrateVue3Ast(ast, options || {})
+    : ast;
+}
+
+function dehydrateForBridge(value) {
+  const runtime = getVue3CoreRuntime();
+  if (typeof runtime.dehydrateForBridge === 'function') {
+    return runtime.dehydrateForBridge(value);
+  }
+  return value;
+}
+
 function hydrateVue3SfcParseResult(result) {
   if (!result || typeof result !== 'object' || !result.descriptor) return result;
   const descriptor = result.descriptor;
@@ -192,6 +506,37 @@ function hydrateVue3CompileScriptResult(result) {
     });
   }
   return result;
+}
+
+function hydrateVue3SfcCompileTemplateResult(result) {
+  if (!result || typeof result !== 'object') return result;
+  const out = { ...result };
+  delete out.ast_summary;
+  delete out.astSummary;
+  delete out.bindings;
+  if (typeof out.ast === 'string') {
+    try {
+      out.ast = JSON.parse(out.ast);
+    } catch (_) {}
+  }
+  if (Array.isArray(out.errors)) {
+    out.errors = out.errors.map(vue3SfcTemplateErrorForPublicApi);
+  } else {
+    out.errors = [];
+  }
+  if (!Array.isArray(out.tips)) out.tips = [];
+  return out;
+}
+
+function vue3SfcTemplateErrorForPublicApi(error) {
+  if (typeof error === 'string') return error;
+  if (!error || typeof error !== 'object') return error;
+  if (error instanceof Error) return error;
+  const message = error.message || error.msg || String(error);
+  const syntaxError = new SyntaxError(message);
+  if (error.code !== undefined) syntaxError.code = error.code;
+  if (error.loc !== undefined) syntaxError.loc = error.loc;
+  return syntaxError;
 }
 
 function vue3SfcShouldForceReload(prevImports, descriptor) {
@@ -743,6 +1088,24 @@ function stringifyNode(node, ctx) {
   return undefined;
 }
 
+function callBridge(command, payload) {
+  const bridgeBin = process.env.VUEC_NODE_BRIDGE;
+  if (!bridgeBin) {
+    throw new Error('VUEC_NODE_BRIDGE is required for Vue compiler-sfc conformance bridge calls');
+  }
+  const result = cp.spawnSync(bridgeBin, [String(command || '')], {
+    input: JSON.stringify(payload || {}),
+    encoding: 'utf8',
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    const error = new Error(result.stderr || result.stdout || `vuec bridge command failed: ${command}`);
+    error.code = 'VUEC_BRIDGE_FAILED';
+    throw error;
+  }
+  return result.stdout.trim() ? JSON.parse(result.stdout) : undefined;
+}
+
 module.exports = {
   MagicString,
   babelParse: parse,
@@ -770,3 +1133,8 @@ module.exports = {
   walk,
   walkIdentifiers,
 };
+
+Object.defineProperty(module.exports, '__vuecRuntime', {
+  value: { callBridge },
+  enumerable: false,
+});

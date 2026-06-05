@@ -1,5 +1,6 @@
 'use strict';
 
+const cp = require('child_process');
 const native = require('@vuec-rs/native');
 
 const locStub = {
@@ -300,6 +301,24 @@ function callVue3CoreProjection(command, payload) {
   return native.callVue3CoreProjection(command, payload || {});
 }
 
+function callBridge(command, payload) {
+  const bridgeBin = process.env.VUEC_NODE_BRIDGE;
+  if (!bridgeBin) {
+    throw new Error('VUEC_NODE_BRIDGE is required for Vue compiler-core conformance bridge calls');
+  }
+  const result = cp.spawnSync(bridgeBin, [String(command || '')], {
+    input: JSON.stringify(payload || {}),
+    encoding: 'utf8',
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    const error = new Error(result.stderr || result.stdout || `vuec bridge command failed: ${command}`);
+    error.code = 'VUEC_BRIDGE_FAILED';
+    throw error;
+  }
+  return result.stdout.trim() ? JSON.parse(result.stdout) : undefined;
+}
+
 function helperSymbolFromProjection(name) {
   if (!name) return undefined;
   if (helperSymbols[name]) return helperSymbols[name];
@@ -419,6 +438,56 @@ function selfNameFromFilename(filename) {
 function warnIgnoredDecodeEntities(options) {
   if (!options || typeof options.decodeEntities !== 'function') return;
   console.warn('[Vue warn]: decodeEntities option is passed but will be ignored in non-browser builds.');
+}
+
+function projectionNameFromHelperSymbol(symbol) {
+  const helperName = helperNameMap[symbol];
+  if (helperName) return helperName;
+  for (const [name, value] of Object.entries(module.exports || {})) {
+    if (value === symbol) return name;
+  }
+  return symbol && symbol.description;
+}
+
+function dehydrateForBridge(value, seen = new WeakSet()) {
+  if (typeof value === 'symbol') {
+    return projectionNameFromHelperSymbol(value);
+  }
+  if (value === undefined || typeof value === 'function') {
+    return undefined;
+  }
+  if (value === null || typeof value !== 'object') {
+    return value;
+  }
+  if (seen.has(value)) {
+    return undefined;
+  }
+  seen.add(value);
+  if (value instanceof Set) {
+    const out = Array.from(value, item => {
+      const dehydrated = dehydrateForBridge(item, seen);
+      return dehydrated === undefined ? null : dehydrated;
+    });
+    seen.delete(value);
+    return out;
+  }
+  if (Array.isArray(value)) {
+    const out = value.map(item => {
+      const dehydrated = dehydrateForBridge(item, seen);
+      return dehydrated === undefined ? null : dehydrated;
+    });
+    seen.delete(value);
+    return out;
+  }
+  const out = {};
+  for (const key of Object.keys(value)) {
+    const dehydrated = dehydrateForBridge(value[key], seen);
+    if (dehydrated !== undefined) {
+      out[key] = dehydrated;
+    }
+  }
+  seen.delete(value);
+  return out;
 }
 
 function hydrateVue3Ast(ast, options) {
@@ -3712,6 +3781,9 @@ module.exports = {
 Object.defineProperty(module.exports, '__vuecRuntime', {
   value: {
     ...module.exports,
+    callBridge,
+    dehydrateForBridge,
+    hydrateVue3Ast,
     stringifyStatic,
     transformFor,
     transformIf,
