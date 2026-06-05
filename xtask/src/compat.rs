@@ -2625,7 +2625,7 @@ fn alias_function_expression(
                 format!("hydrateVue3SsrCompileResult({call})")
             } else if is_vue2_template_compile {
                 format!(
-                    "(() => {{ const __vuecVue2Result = {call}; emitVue2CompileWarnings(__vuecVue2Result, __vuecPayload.options); return __vuecVue2Result; }})()"
+                    "(() => {{ const __vuecVue2Result = {call}; emitVue2CompileWarnings(__vuecVue2Result, __vuecPayload.options); return hydrateVue2CompileResult(__vuecVue2Result); }})()"
                 )
             } else {
                 call
@@ -9257,6 +9257,40 @@ function emitVue2CompileWarnings(result, options) {
       console.error(message);
     }
   }
+}
+
+function hydrateVue2CompileResult(result) {
+  if (!result || typeof result !== 'object') return result;
+  const staticRenderFns = Array.isArray(result.staticRenderFns)
+    ? result.staticRenderFns
+    : Array.isArray(result.static_render_fns)
+      ? result.static_render_fns
+      : [];
+  const out = {
+    ast: result.ast_public !== undefined ? result.ast_public : result.ast,
+    render: result.render || '',
+    staticRenderFns,
+    errors: Array.isArray(result.errors) ? result.errors : [],
+    tips: Array.isArray(result.tips) ? result.tips : [],
+  };
+  for (const key of [
+    'ast_document',
+    'element_ast',
+    'ast_public',
+    'element_public_ast',
+    'static_render_fns',
+    'diagnostics',
+  ]) {
+    if (Object.prototype.hasOwnProperty.call(result, key)) {
+      Object.defineProperty(out, key, {
+        value: result[key],
+        enumerable: false,
+        configurable: true,
+        writable: true,
+      });
+    }
+  }
+  return out;
 }
 
 function normalizeVue3OptionsForBridge(options, source) {
@@ -22021,6 +22055,9 @@ test('placeholder', () => {
     #[test]
     fn vue2_alias_runtime_emits_compile_warnings() {
         assert!(ALIAS_RUNTIME_JS.contains("function emitVue2CompileWarnings(result, options)"));
+        assert!(ALIAS_RUNTIME_JS.contains("function hydrateVue2CompileResult(result)"));
+        assert!(ALIAS_RUNTIME_JS.contains("'element_public_ast'"));
+        assert!(ALIAS_RUNTIME_JS.contains("Object.defineProperty(out, key"));
         assert!(ALIAS_RUNTIME_JS.contains("__vuecSuppressWarnings"));
         assert!(ALIAS_RUNTIME_JS.contains("console.error(message)"));
         let target = TargetSpec {
@@ -22040,6 +22077,8 @@ test('placeholder', () => {
         };
         assert!(alias_export_expression(target, "compile", Some(&detail))
             .contains("emitVue2CompileWarnings(__vuecVue2Result, __vuecPayload.options)"));
+        assert!(alias_export_expression(target, "compile", Some(&detail))
+            .contains("return hydrateVue2CompileResult(__vuecVue2Result)"));
     }
 
     #[test]
