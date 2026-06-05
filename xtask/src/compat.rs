@@ -1491,6 +1491,73 @@ pub fn sync_official_tests(path: &Path, locked: bool, out_dir: &Path) -> JsonRep
     }
 }
 
+pub fn prepare_runtime_smoke(lock_path: &Path, vendor_dir: &Path) -> JsonReport {
+    let lock_hash = file_sha256(lock_path).ok();
+    match load_official_lock(lock_path) {
+        Ok(lock) => {
+            let mut items = Vec::new();
+            let mut violations = Vec::new();
+            let mut created = Vec::new();
+            for (version_line, baseline) in [
+                (VersionLine::Vue26, &lock.vue2_6),
+                (VersionLine::Vue27, &lock.vue2_7),
+                (VersionLine::Vue3, &lock.vue3),
+            ] {
+                match prepare_runtime_smoke_root(version_line, baseline, vendor_dir) {
+                    Ok(root) => {
+                        created.push(root.display().to_string());
+                        items.push(ReportItem::new(
+                            version_line.as_str(),
+                            ReportStatus::Pass,
+                            format!(
+                                "prepared official Vue runtime packages and jsdom for {}",
+                                version_line.as_str()
+                            ),
+                            Some(root),
+                        ));
+                    }
+                    Err(err) => {
+                        violations.push(format!(
+                            "{} runtime smoke dependency preparation failed: {err:#}",
+                            version_line.as_str()
+                        ));
+                        items.push(ReportItem::new(
+                            version_line.as_str(),
+                            ReportStatus::Fail,
+                            format!("{err:#}"),
+                            None,
+                        ));
+                    }
+                }
+            }
+            let mut report = JsonReport::new("prepare_runtime_smoke", ReportStatus::Pending);
+            report.metadata = report
+                .metadata
+                .with_lock_context(lock_hash.clone(), Some(&lock));
+            report
+                .with_items(items)
+                .with_created(created)
+                .with_violations(violations)
+                .with_note(format!(
+                    "lock: {}, vendor: {}",
+                    lock_path.display(),
+                    vendor_dir.display()
+                ))
+        }
+        Err(err) => {
+            let mut report = JsonReport::new("prepare_runtime_smoke", ReportStatus::Fail);
+            report.metadata = report.metadata.with_lock_context(lock_hash, None);
+            report
+                .with_violations(vec![format!("failed to read/parse lock file: {err}")])
+                .with_note(format!(
+                    "lock: {}, vendor: {}",
+                    lock_path.display(),
+                    vendor_dir.display()
+                ))
+        }
+    }
+}
+
 pub fn export_api(scope: &SelectionArgs) -> JsonReport {
     let targets = select_targets(scope);
     let mut items = Vec::new();
@@ -3092,6 +3159,126 @@ fn ensure_official_runner_dependencies(
     });
     write_json(&marker, &marker_body)?;
     Ok(install_root)
+}
+
+fn prepare_runtime_smoke_root(
+    version_line: VersionLine,
+    baseline: &BaselineLock,
+    vendor_dir: &Path,
+) -> Result<PathBuf> {
+    let install_root = ensure_official_npm_install(version_line, baseline)?;
+    ensure_runtime_smoke_dependencies(version_line, vendor_dir, &install_root)?;
+    let node_modules = install_root.join("node_modules");
+    verify_runtime_smoke_root(version_line, &node_modules)?;
+    Ok(node_modules)
+}
+
+fn ensure_runtime_smoke_dependencies(
+    version_line: VersionLine,
+    vendor_dir: &Path,
+    install_root: &Path,
+) -> Result<()> {
+    let specs = runtime_smoke_dependency_specs(version_line, vendor_dir)?;
+    let node_modules = install_root.join("node_modules");
+    let marker = install_root.join("runtime-smoke-install.json");
+    if node_modules.exists()
+        && official_install_marker_matches(&marker, &specs)
+        && node_dependency_available(&node_modules, "jsdom")
+    {
+        return Ok(());
+    }
+
+    let npm = resolve_program("npm");
+    let mut command = Command::new(npm);
+    command
+        .arg("install")
+        .arg("--ignore-scripts")
+        .arg("--no-audit")
+        .arg("--no-fund")
+        .arg("--package-lock=false")
+        .arg("--omit=dev")
+        .args(&specs)
+        .current_dir(install_root);
+    let output = command.output().with_context(|| {
+        format!(
+            "failed to spawn npm runtime smoke dependency install in {}",
+            install_root.display()
+        )
+    })?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "`npm install {}` failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
+            specs.join(" "),
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let marker_body = serde_json::json!({
+        "version_line": version_line,
+        "packages": specs,
+    });
+    write_json(&marker, &marker_body)?;
+    Ok(())
+}
+
+fn runtime_smoke_dependency_specs(
+    version_line: VersionLine,
+    vendor_dir: &Path,
+) -> Result<Vec<String>> {
+    let root = vendor_dir.join(version_line.as_str());
+    let package_json = root.join("package.json");
+    if !package_json.is_file() {
+        anyhow::bail!(
+            "{} is missing; run `cargo xtask sync-official-tests --locked` before preparing runtime smoke dependencies",
+            package_json.display()
+        );
+    }
+    let manifest = read_json::<serde_json::Value>(&package_json)?;
+    let mut specs = Vec::new();
+    for dependency in runtime_smoke_runner_dependencies() {
+        let version = locked_runner_dependency_version(&root, dependency)
+            .or_else(|| manifest_dependency_version(&manifest, dependency))
+            .or_else(|| fallback_runner_dependency_version(vendor_dir, version_line, dependency));
+        let Some(version) = version else {
+            anyhow::bail!(
+                "failed to resolve deterministic npm version for runtime smoke dependency {dependency} from {}",
+                root.display()
+            );
+        };
+        if is_unpublished_dependency_spec(&version) {
+            anyhow::bail!(
+                "runtime smoke dependency {dependency} resolved to unpublished spec {version:?}"
+            );
+        }
+        specs.push(format!("{dependency}@{version}"));
+    }
+    specs.sort();
+    specs.dedup();
+    Ok(specs)
+}
+
+fn runtime_smoke_runner_dependencies() -> &'static [&'static str] {
+    &["jsdom"]
+}
+
+fn verify_runtime_smoke_root(version_line: VersionLine, node_modules: &Path) -> Result<()> {
+    for dependency in runtime_smoke_required_node_dependencies(version_line) {
+        if !node_dependency_available(node_modules, dependency) {
+            anyhow::bail!(
+                "missing runtime smoke dependency {dependency} in {}",
+                node_modules.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn runtime_smoke_required_node_dependencies(version_line: VersionLine) -> &'static [&'static str] {
+    match version_line {
+        VersionLine::Vue26 | VersionLine::Vue27 => &["vue", "jsdom"],
+        VersionLine::Vue3 => &["vue", "@vue/compiler-ssr", "@vue/server-renderer", "jsdom"],
+    }
 }
 
 fn runner_dependency_specs(
@@ -21837,6 +22024,58 @@ test('placeholder', () => {
         assert!(alias_package_available(&temp, "vue/compiler-sfc"));
         assert!(!node_dependency_available(&node_modules, "vitest"));
         let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn runtime_smoke_dependency_specs_use_locked_jsdom_versions() {
+        let temp = std::env::temp_dir().join(format!(
+            "vuec-xtask-runtime-smoke-deps-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let root = temp.join("vue3");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("package.json"),
+            r#"{
+              "devDependencies": {
+                "jsdom": "^29.1.1"
+              }
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("pnpm-lock.yaml"),
+            r#"
+packages:
+  .
+snapshots:
+  jsdom@29.1.1: {}
+"#,
+        )
+        .unwrap();
+
+        let specs = runtime_smoke_dependency_specs(VersionLine::Vue3, &temp).unwrap();
+        assert_eq!(specs, vec!["jsdom@29.1.1"]);
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn runtime_smoke_required_dependencies_cover_vue3_ssr_runtime() {
+        assert_eq!(
+            runtime_smoke_required_node_dependencies(VersionLine::Vue26),
+            ["vue", "jsdom"]
+        );
+        assert_eq!(
+            runtime_smoke_required_node_dependencies(VersionLine::Vue27),
+            ["vue", "jsdom"]
+        );
+        assert_eq!(
+            runtime_smoke_required_node_dependencies(VersionLine::Vue3),
+            ["vue", "@vue/compiler-ssr", "@vue/server-renderer", "jsdom"]
+        );
     }
 
     #[test]

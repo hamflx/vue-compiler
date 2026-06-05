@@ -37,6 +37,15 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
 
+      - name: Verify official lock
+        run: cargo xtask verify-official-lock
+
+      - name: Sync official tests
+        run: cargo xtask sync-official-tests --locked
+
+      - name: Prepare runtime smoke dependencies
+        run: cargo xtask prepare-runtime-smoke
+
       - name: Run Rust tests
         shell: pwsh
         run: |
@@ -107,12 +116,6 @@ jobs:
           $escaped = $summary.Replace("%", "%25").Replace("`r", "%0D").Replace("`n", "%0A")
           Write-Host "::error title=Rust workspace tests failed::$escaped"
           exit $exitCode
-
-      - name: Verify official lock
-        run: cargo xtask verify-official-lock
-
-      - name: Sync official tests
-        run: cargo xtask sync-official-tests --locked
 
       - name: Verify vendored lock
         run: cargo xtask verify-official-lock --require-vendor

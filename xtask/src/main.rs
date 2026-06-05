@@ -13,9 +13,9 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use compat::{
     audit_option_matrix, diff_api, export_api, generate_option_matrix, generate_output_contract,
-    run_conformance, run_napi_conformance, run_napi_option_matrix, run_napi_output_contract,
-    run_option_matrix, run_output_contract, summarize_compat, sync_official_tests,
-    verify_npm_alias, verify_official_lock, ConformanceArgs, SelectionArgs,
+    prepare_runtime_smoke, run_conformance, run_napi_conformance, run_napi_option_matrix,
+    run_napi_output_contract, run_option_matrix, run_output_contract, summarize_compat,
+    sync_official_tests, verify_npm_alias, verify_official_lock, ConformanceArgs, SelectionArgs,
 };
 use serde::Serialize;
 use serde_json::{json, Value as JsonValue};
@@ -52,6 +52,12 @@ enum Command {
         locked: bool,
         #[arg(long, default_value = "vendor")]
         out_dir: PathBuf,
+    },
+    PrepareRuntimeSmoke {
+        #[arg(long, default_value = "compat/official-revisions.lock")]
+        lock: PathBuf,
+        #[arg(long, default_value = "vendor")]
+        vendor_dir: PathBuf,
     },
     ExportApi {
         #[command(flatten)]
@@ -165,6 +171,9 @@ fn main() -> Result<()> {
             locked,
             out_dir,
         } => sync_official_tests(&lock, locked, &out_dir),
+        Command::PrepareRuntimeSmoke { lock, vendor_dir } => {
+            prepare_runtime_smoke(&lock, &vendor_dir)
+        }
         Command::ExportApi { scope, out_dir } => {
             let report = export_api(&scope);
             ensure_dir(&out_dir)?;
