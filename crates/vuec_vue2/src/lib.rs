@@ -1538,7 +1538,21 @@ fn process_attrs(
                         groups: modifiers.keys().cloned().collect(),
                     });
                 }
-                if name == "bind" && arg.is_none() {
+                if name == "html" {
+                    element.props.push(Vue2Attribute {
+                        name: "innerHTML".into(),
+                        value: format!("_s({value})"),
+                        span: attr.span,
+                        dynamic: false,
+                    });
+                } else if name == "text" {
+                    element.props.push(Vue2Attribute {
+                        name: "textContent".into(),
+                        value: format!("_s({value})"),
+                        span: attr.span,
+                        dynamic: false,
+                    });
+                } else if name == "bind" && arg.is_none() {
                     element.wrap_data = Some(Vue2DataWrap::Bind {
                         value: value.clone(),
                         prop: modifiers.get("prop").copied().unwrap_or(false),
@@ -5815,6 +5829,20 @@ mod tests {
             dynamic_component.render,
             r#"with(this){return _c(tag,{tag:"component",attrs:{"value":label}})}"#
         );
+    }
+
+    #[test]
+    fn generates_vue2_html_and_text_directives_like_official_codegen() {
+        let compiled = compile(
+            r#"<div><p v-html="content"></p><span v-text="label"></span></div>"#,
+            options(),
+        );
+
+        assert_eq!(
+            compiled.render,
+            r#"with(this){return _c('div',[_c('p',{domProps:{"innerHTML":_s(content)}}),_c('span',{domProps:{"textContent":_s(label)}})])}"#
+        );
+        assert!(!compiled.render.contains("directives:"));
     }
 
     #[test]
