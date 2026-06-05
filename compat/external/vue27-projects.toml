@@ -1,0 +1,20 @@
+schema_version = 1
+min_projects = 15
+min_vue_files_per_project = 20
+projects = []
+
+# External Vue 2.7 production-corpus projects are fixed here by repository and
+# commit before running `cargo xtask verify-vue27-project-corpus`.
+#
+# Each project must be a public medium-sized Vue 2.7 application/library with a
+# package manifest declaring `vue` 2.7.x and at least 20 selected `.vue` files.
+# Use `include` / `exclude` to keep generated fixtures, docs examples, and
+# dependency folders out of the corpus.
+#
+# [[projects]]
+# name = "owner-repo"
+# repo = "https://github.com/owner/repo"
+# rev = "<full commit sha>"
+# package_json = "package.json"
+# include = ["src/**/*.vue"]
+# exclude = ["**/__tests__/**", "**/node_modules/**"]

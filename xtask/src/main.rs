@@ -15,7 +15,8 @@ use compat::{
     audit_option_matrix, diff_api, export_api, generate_option_matrix, generate_output_contract,
     prepare_runtime_smoke, run_conformance, run_napi_conformance, run_napi_option_matrix,
     run_napi_output_contract, run_option_matrix, run_output_contract, summarize_compat,
-    sync_official_tests, verify_npm_alias, verify_official_lock, ConformanceArgs, SelectionArgs,
+    sync_official_tests, verify_npm_alias, verify_official_lock, verify_vue27_project_corpus,
+    ConformanceArgs, SelectionArgs, Vue27ProjectCorpusArgs,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as JsonValue};
@@ -152,6 +153,10 @@ enum Command {
         #[arg(long)]
         current_platform_only: bool,
     },
+    VerifyVue27ProjectCorpus {
+        #[command(flatten)]
+        args: Vue27ProjectCorpusArgs,
+    },
     Bench {
         #[arg(long, default_value_t = 10)]
         iterations: usize,
@@ -247,6 +252,7 @@ fn main() -> Result<()> {
             native_artifacts_dir,
             current_platform_only,
         } => verify_release_install_smoke(native_artifacts_dir.as_deref(), current_platform_only)?,
+        Command::VerifyVue27ProjectCorpus { args } => verify_vue27_project_corpus(&args),
         Command::Bench {
             iterations,
             out_dir,

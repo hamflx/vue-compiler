@@ -2,6 +2,8 @@
 
 ## Current Stage
 
+- [x] Vue 2.7 external project corpus gate tooling slice: `cargo xtask verify-vue27-project-corpus` now reads `compat/external/vue27-projects.toml`, checks out fixed external projects, verifies Vue 2.7 package declarations, scans non-generated `.vue` files, applies include/exclude/max-file selection, compares generated Rust aliases against official Vue 2.7 `vue-template-compiler` and `vue/compiler-sfc` outputs, and writes per-project plus aggregate reports under `target/external/vue27-project-corpus`. The default manifest is intentionally empty with `min_projects = 15`, so the gate currently fails honestly until real projects are fixed in the corpus.
+- [ ] Vue 2.7 external 15-project production-corpus validation: find and pin 15 medium-sized open-source Vue 2.7 projects, record each full commit SHA in `compat/external/vue27-projects.toml`, run the corpus gate, root-cause every official-vs-Rust output difference, fix compiler semantics without shortcuts, and commit each completed major fix slice before the active objective can be considered complete.
 - [x] Normalize goals and compatibility acceptance criteria.
 - [x] Workspace bootstrap.
 - [x] Shared source and diagnostic crates.

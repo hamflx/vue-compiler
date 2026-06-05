@@ -90,6 +90,21 @@ pub struct ConformanceArgs {
     pub vendor_dir: PathBuf,
 }
 
+#[derive(Clone, Debug, Args, Serialize)]
+pub struct Vue27ProjectCorpusArgs {
+    #[arg(long, default_value = "compat/external/vue27-projects.toml")]
+    pub manifest: PathBuf,
+
+    #[arg(long, default_value = "target/external/vue27-project-corpus")]
+    pub out_dir: PathBuf,
+
+    #[arg(long)]
+    pub project: Option<String>,
+
+    #[arg(long, default_value_t = 0)]
+    pub max_files_per_project: usize,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReportStatus {
@@ -547,6 +562,65 @@ struct OutputContractFile {
     entry: String,
     required_modes: Vec<String>,
     status: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct Vue27ProjectCorpusManifest {
+    schema_version: u32,
+    min_projects: Option<usize>,
+    min_vue_files_per_project: Option<usize>,
+    projects: Vec<Vue27ProjectSpec>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct Vue27ProjectSpec {
+    name: String,
+    repo: String,
+    rev: String,
+    package_json: Option<String>,
+    include: Option<Vec<String>>,
+    exclude: Option<Vec<String>>,
+    min_vue_files: Option<usize>,
+    max_vue_files: Option<usize>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Vue27ProjectProbeFile {
+    path: String,
+    modes: usize,
+    diffs: Vec<serde_json::Value>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Vue27ProjectProbeCounts {
+    files: usize,
+    template_files: usize,
+    modes: usize,
+    pass: usize,
+    fail: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Vue27ProjectProbeReport {
+    status: String,
+    counts: Vue27ProjectProbeCounts,
+    files: Vec<Vue27ProjectProbeFile>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct Vue27ProjectCorpusProjectReport {
+    name: String,
+    repo: String,
+    rev: String,
+    package_json: String,
+    checkout: String,
+    vue_files: usize,
+    selected_vue_files: usize,
+    vue_dependency: Option<String>,
+    vue_template_compiler_dependency: Option<String>,
+    status: String,
+    detail: String,
+    report: Option<String>,
 }
 
 fn all_targets() -> &'static [TargetSpec] {
@@ -3621,6 +3695,479 @@ fn output_contract_counts_from_items(items: &[ReportItem]) -> serde_json::Value 
         "pending": items.iter().filter(|item| item.status == ReportStatus::Pending).count(),
         "fail": items.iter().filter(|item| item.status == ReportStatus::Fail).count(),
     })
+}
+
+fn vue27_project_corpus_targets() -> Vec<TargetSpec> {
+    all_targets()
+        .iter()
+        .copied()
+        .filter(|target| target.version_line == VersionLine::Vue27)
+        .collect()
+}
+
+fn read_json_or_toml<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
+    let text =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    if path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("toml"))
+    {
+        toml::from_str(&text).with_context(|| format!("failed to parse {}", path.display()))
+    } else {
+        serde_json::from_str(&text).with_context(|| format!("failed to parse {}", path.display()))
+    }
+}
+
+fn sanitize_path_segment(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string()
+}
+
+fn package_dependency_spec(package: &serde_json::Value, name: &str) -> Option<String> {
+    [
+        "dependencies",
+        "devDependencies",
+        "peerDependencies",
+        "optionalDependencies",
+    ]
+    .iter()
+    .find_map(|section| {
+        package
+            .get(*section)
+            .and_then(|value| value.get(name))
+            .and_then(|value| value.as_str())
+            .map(ToOwned::to_owned)
+    })
+}
+
+fn is_vue27_dependency(spec: Option<&str>) -> bool {
+    let Some(spec) = spec else {
+        return false;
+    };
+    let cleaned = spec
+        .trim()
+        .trim_start_matches('^')
+        .trim_start_matches('~')
+        .trim_start_matches(">=")
+        .trim_start_matches('=')
+        .trim();
+    cleaned.starts_with("2.7.")
+        || cleaned.starts_with("2.7")
+        || spec.contains("npm:vue@2.7")
+        || spec.contains("vue@2.7")
+}
+
+#[derive(Clone, Debug)]
+struct Vue27ProjectScan {
+    total: usize,
+    files: Vec<PathBuf>,
+}
+
+fn scan_project_vue_files(root: &Path, project: &Vue27ProjectSpec) -> Vue27ProjectScan {
+    let mut files = Vec::new();
+    let mut total = 0;
+    scan_project_vue_files_recursive(root, root, project, &mut files, &mut total);
+    files.sort();
+    Vue27ProjectScan { total, files }
+}
+
+fn scan_project_vue_files_recursive(
+    root: &Path,
+    dir: &Path,
+    project: &Vue27ProjectSpec,
+    files: &mut Vec<PathBuf>,
+    total: &mut usize,
+) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let file_name = entry.file_name();
+        let file_name = file_name.to_string_lossy();
+        if file_name == ".git" || file_name == "node_modules" || file_name == "dist" {
+            continue;
+        }
+        if path.is_dir() {
+            scan_project_vue_files_recursive(root, &path, project, files, total);
+        } else if path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("vue"))
+        {
+            *total += 1;
+            let relative = relative_slash_path(root, &path);
+            if project_path_selected(project, &relative) {
+                files.push(path);
+            }
+        }
+    }
+}
+
+fn project_path_selected(project: &Vue27ProjectSpec, path: &str) -> bool {
+    let included = project
+        .include
+        .as_ref()
+        .is_none_or(|patterns| patterns.iter().any(|pattern| wildcard_match(pattern, path)));
+    let excluded = project
+        .exclude
+        .as_ref()
+        .is_some_and(|patterns| patterns.iter().any(|pattern| wildcard_match(pattern, path)));
+    included && !excluded
+}
+
+fn wildcard_match(pattern: &str, value: &str) -> bool {
+    let pattern = pattern.replace('\\', "/");
+    wildcard_match_bytes(pattern.as_bytes(), value.as_bytes())
+}
+
+fn wildcard_match_bytes(pattern: &[u8], value: &[u8]) -> bool {
+    if pattern.is_empty() {
+        return value.is_empty();
+    }
+    if pattern[0] == b'*' {
+        return wildcard_match_bytes(&pattern[1..], value)
+            || (!value.is_empty() && wildcard_match_bytes(pattern, &value[1..]));
+    }
+    !value.is_empty() && pattern[0] == value[0] && wildcard_match_bytes(&pattern[1..], &value[1..])
+}
+
+fn relative_slash_path(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn limit_vue_files(files: Vec<PathBuf>, max_files: usize) -> Vec<PathBuf> {
+    if max_files == 0 || files.len() <= max_files {
+        return files;
+    }
+    files.into_iter().take(max_files).collect()
+}
+
+fn run_vue27_project_probe(
+    official_root: &Path,
+    rust_root: &Path,
+    project_root: &Path,
+    files: &[PathBuf],
+) -> Result<Vue27ProjectProbeReport> {
+    let official_root = absolute_path(official_root);
+    let rust_root = absolute_path(rust_root);
+    let project_root = absolute_path(project_root);
+    let relative_files = files
+        .iter()
+        .map(|path| relative_slash_path(&project_root, path))
+        .collect::<Vec<_>>();
+    let output = Command::new(resolve_program("node"))
+        .arg("-e")
+        .arg(VUE27_PROJECT_CORPUS_PROBE_SCRIPT)
+        .env("VUEC_PROJECT_OFFICIAL_ROOT", &official_root)
+        .env("VUEC_PROJECT_RUST_ROOT", &rust_root)
+        .env("VUEC_PROJECT_ROOT", &project_root)
+        .env(
+            "VUEC_PROJECT_FILES",
+            serde_json::to_string(&relative_files)?,
+        )
+        .output()
+        .with_context(|| "failed to spawn Vue 2.7 project corpus probe")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "Vue 2.7 project corpus probe failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    serde_json::from_slice(&output.stdout).context("failed to parse Vue 2.7 project probe output")
+}
+
+pub fn verify_vue27_project_corpus(args: &Vue27ProjectCorpusArgs) -> JsonReport {
+    let manifest_path = absolute_path(&args.manifest);
+    let out_dir = absolute_path(&args.out_dir);
+    let mut items = Vec::new();
+    let mut violations = Vec::new();
+    let mut created = Vec::new();
+    let mut project_reports = Vec::new();
+
+    let manifest = match read_json_or_toml::<Vue27ProjectCorpusManifest>(&manifest_path) {
+        Ok(manifest) => manifest,
+        Err(err) => {
+            return JsonReport::new("verify_vue27_project_corpus", ReportStatus::Fail)
+                .with_violations(vec![format!(
+                    "failed to read Vue 2.7 project corpus manifest {}: {err:#}",
+                    manifest_path.display()
+                )]);
+        }
+    };
+
+    if manifest.schema_version != 1 {
+        violations.push(format!(
+            "unsupported Vue 2.7 project corpus manifest schema {}; expected 1",
+            manifest.schema_version
+        ));
+    }
+
+    let selected_projects = manifest
+        .projects
+        .iter()
+        .filter(|project| {
+            args.project
+                .as_ref()
+                .is_none_or(|name| project.name == *name)
+        })
+        .collect::<Vec<_>>();
+    let required_projects = if args.project.is_some() {
+        1
+    } else {
+        manifest.min_projects.unwrap_or(15)
+    };
+    if selected_projects.len() < required_projects {
+        violations.push(format!(
+            "Vue 2.7 project corpus selected {} projects; expected at least {required_projects}",
+            selected_projects.len()
+        ));
+    }
+
+    let targets = vue27_project_corpus_targets();
+    let lock_path = PathBuf::from("compat/official-revisions.lock");
+    let lock_hash = file_sha256(&lock_path).ok();
+    let lock = match load_official_lock(&lock_path) {
+        Ok(lock) => lock,
+        Err(err) => {
+            return JsonReport::new("verify_vue27_project_corpus", ReportStatus::Fail)
+                .with_violations(vec![format!("failed to load official lock: {err:#}")]);
+        }
+    };
+    let metadata = ReportMetadata::capture().with_lock_context(lock_hash.clone(), Some(&lock));
+    let Some(baseline) = baseline_for(&lock, VersionLine::Vue27) else {
+        return JsonReport::new("verify_vue27_project_corpus", ReportStatus::Fail)
+            .with_violations(vec!["official Vue 2.7 baseline is missing".into()]);
+    };
+    let official_root = match ensure_official_npm_install(VersionLine::Vue27, baseline) {
+        Ok(root) => root,
+        Err(err) => {
+            return JsonReport::new("verify_vue27_project_corpus", ReportStatus::Fail)
+                .with_violations(vec![format!(
+                    "failed to prepare official Vue 2.7 packages: {err:#}"
+                )]);
+        }
+    };
+    match prepare_alias_backend(AliasBackend::Generated, &targets) {
+        Ok(paths) => created.extend(paths.into_iter().map(|path| path.display().to_string())),
+        Err(err) => {
+            return JsonReport::new("verify_vue27_project_corpus", ReportStatus::Fail)
+                .with_violations(vec![format!(
+                    "failed to prepare generated Vue 2.7 alias packages: {err:#}"
+                )]);
+        }
+    }
+    let rust_root = rust_alias_root(VersionLine::Vue27);
+
+    let checkout_root = out_dir.join("checkouts");
+    let report_root = out_dir.join("reports");
+    if let Err(err) = fs::create_dir_all(&checkout_root) {
+        violations.push(format!(
+            "failed to create checkout root {}: {err}",
+            checkout_root.display()
+        ));
+    }
+    if let Err(err) = fs::create_dir_all(&report_root) {
+        violations.push(format!(
+            "failed to create report root {}: {err}",
+            report_root.display()
+        ));
+    }
+
+    for project in selected_projects {
+        let package_json_rel = project
+            .package_json
+            .as_deref()
+            .unwrap_or("package.json")
+            .replace('\\', "/");
+        let checkout = checkout_root.join(sanitize_path_segment(&project.name));
+        let mut status = ReportStatus::Pass;
+        let detail: Option<String>;
+        let mut report_path = None;
+        let mut vue_files = 0usize;
+        let mut selected_vue_files = 0usize;
+        let mut vue_dependency = None;
+        let mut vue_template_compiler_dependency = None;
+
+        if let Err(err) = sync_git_checkout(&project.repo, &project.rev, &checkout) {
+            status = ReportStatus::Fail;
+            detail = Some(format!("checkout failed: {err:#}"));
+            violations.push(format!("{} checkout failed: {err:#}", project.name));
+        } else {
+            let package_json = checkout.join(&package_json_rel);
+            match read_json::<serde_json::Value>(&package_json) {
+                Ok(package) => {
+                    vue_dependency = package_dependency_spec(&package, "vue");
+                    vue_template_compiler_dependency =
+                        package_dependency_spec(&package, "vue-template-compiler");
+                    if !is_vue27_dependency(vue_dependency.as_deref()) {
+                        status = ReportStatus::Fail;
+                        detail = Some(format!(
+                            "package {} does not declare Vue 2.7 dependency; found {:?}",
+                            package_json_rel, vue_dependency
+                        ));
+                        violations.push(format!("{} is not pinned to Vue 2.7", project.name));
+                    } else {
+                        let discovered = scan_project_vue_files(&checkout, project);
+                        vue_files = discovered.total;
+                        let max_files = project.max_vue_files.unwrap_or(args.max_files_per_project);
+                        let selected = limit_vue_files(discovered.files, max_files);
+                        selected_vue_files = selected.len();
+                        let min_vue_files = project
+                            .min_vue_files
+                            .or(manifest.min_vue_files_per_project)
+                            .unwrap_or(20);
+                        if selected_vue_files < min_vue_files {
+                            status = ReportStatus::Fail;
+                            detail = Some(format!(
+                                "selected {selected_vue_files} Vue SFC files; expected at least {min_vue_files}"
+                            ));
+                            violations.push(format!(
+                                "{} selected too few Vue SFC files: {selected_vue_files}/{min_vue_files}",
+                                project.name
+                            ));
+                        } else {
+                            match run_vue27_project_probe(
+                                &official_root,
+                                &rust_root,
+                                &checkout,
+                                &selected,
+                            ) {
+                                Ok(probe) => {
+                                    let path = report_root.join(format!(
+                                        "{}.json",
+                                        sanitize_path_segment(&project.name)
+                                    ));
+                                    if let Err(err) = write_json(&path, &probe) {
+                                        status = ReportStatus::Fail;
+                                        detail = Some(format!(
+                                            "failed to write project report {}: {err}",
+                                            path.display()
+                                        ));
+                                        violations.push(format!(
+                                            "{} report write failed: {err}",
+                                            project.name
+                                        ));
+                                    } else {
+                                        created.push(path.display().to_string());
+                                        report_path = Some(path.display().to_string());
+                                        if probe.counts.fail > 0 {
+                                            status = ReportStatus::Fail;
+                                            detail = Some(format!(
+                                                "{} template modes passed, {} failed across {} template files",
+                                                probe.counts.pass,
+                                                probe.counts.fail,
+                                                probe.counts.template_files
+                                            ));
+                                            violations.push(format!(
+                                                "{} has {} compiler output mismatches",
+                                                project.name, probe.counts.fail
+                                            ));
+                                        } else {
+                                            detail = Some(format!(
+                                                "{} template modes passed across {} template files",
+                                                probe.counts.pass, probe.counts.template_files
+                                            ));
+                                        }
+                                    }
+                                }
+                                Err(err) => {
+                                    status = ReportStatus::Fail;
+                                    detail = Some(format!("project probe failed: {err:#}"));
+                                    violations.push(format!(
+                                        "{} project probe failed: {err:#}",
+                                        project.name
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(err) => {
+                    status = ReportStatus::Fail;
+                    detail = Some(format!(
+                        "failed to read package manifest {package_json_rel}: {err:#}"
+                    ));
+                    violations.push(format!(
+                        "{} package manifest is missing/invalid: {err:#}",
+                        project.name
+                    ));
+                }
+            }
+        }
+
+        let detail = detail.unwrap_or_else(|| "project validation did not run".into());
+        items.push(ReportItem::new(
+            project.name.clone(),
+            status,
+            detail.clone(),
+            Some(checkout.clone()),
+        ));
+        project_reports.push(Vue27ProjectCorpusProjectReport {
+            name: project.name.clone(),
+            repo: project.repo.clone(),
+            rev: project.rev.clone(),
+            package_json: package_json_rel,
+            checkout: checkout.display().to_string(),
+            vue_files,
+            selected_vue_files,
+            vue_dependency,
+            vue_template_compiler_dependency,
+            status: status.as_str().into(),
+            detail,
+            report: report_path,
+        });
+    }
+
+    let aggregate_path = out_dir.join("vue27-project-corpus.json");
+    let aggregate = serde_json::json!({
+        "command": "verify_vue27_project_corpus",
+        "metadata": metadata,
+        "manifest": manifest_path,
+        "official_root": official_root,
+        "rust_root": rust_root,
+        "projects": project_reports,
+        "counts": output_contract_counts_from_items(&items),
+    });
+    if let Some(parent) = aggregate_path.parent() {
+        if let Err(err) = fs::create_dir_all(parent) {
+            violations.push(format!("failed to create {}: {err}", parent.display()));
+        }
+    }
+    if let Err(err) = write_json(&aggregate_path, &aggregate) {
+        violations.push(format!(
+            "failed to write aggregate project corpus report {}: {err}",
+            aggregate_path.display()
+        ));
+    } else {
+        created.push(aggregate_path.display().to_string());
+    }
+
+    let mut report = JsonReport::new("verify_vue27_project_corpus", ReportStatus::Pending);
+    report.metadata = metadata;
+    report
+        .with_items(items)
+        .with_violations(violations)
+        .with_created(created)
+        .with_note("verifies fixed external Vue 2.7 project SFC templates by comparing official vue-template-compiler / vue/compiler-sfc output with generated Rust aliases")
 }
 
 fn compare_option_probe(
@@ -8889,6 +9436,196 @@ function namedArity(name, arity, fn) {
   Object.defineProperty(bound, 'length', { value: arity, configurable: true });
   return bound;
 }
+"#;
+
+const VUE27_PROJECT_CORPUS_PROBE_SCRIPT: &str = r#"
+const fs = require('fs');
+const path = require('path');
+const { createRequire } = require('module');
+
+const officialRoot = process.env.VUEC_PROJECT_OFFICIAL_ROOT;
+const rustRoot = process.env.VUEC_PROJECT_RUST_ROOT;
+const projectRoot = process.env.VUEC_PROJECT_ROOT;
+const files = JSON.parse(process.env.VUEC_PROJECT_FILES || '[]');
+
+const officialRequire = createRequire(path.join(officialRoot, 'package.json'));
+const rustRequire = createRequire(path.join(rustRoot, 'node_modules', '.vuec-probe.js'));
+const officialTemplate = officialRequire('vue-template-compiler');
+const rustTemplate = rustRequire('vue-template-compiler');
+const officialSfc = officialRequire('vue/compiler-sfc');
+const rustSfc = rustRequire('vue/compiler-sfc');
+
+function normalize(value) {
+  if (value == null) return value;
+  if (typeof value === 'function') return `[Function:${value.name || 'anonymous'}]`;
+  if (value instanceof Set) return Array.from(value).sort().map(normalize);
+  if (Array.isArray(value)) return value.map(normalize);
+  if (typeof value === 'object') {
+    const out = {};
+    for (const key of Object.keys(value).sort()) {
+      if (key === 'ast' || key === 'map' || key === 'rawResult') continue;
+      if (key.startsWith('__vuec')) continue;
+      out[key] = normalize(value[key]);
+    }
+    return out;
+  }
+  return value;
+}
+
+function normalizeCompile(result) {
+  const out = normalize(result) || {};
+  if (!Array.isArray(out.staticRenderFns)) out.staticRenderFns = [];
+  return out;
+}
+
+function normalizeDescriptor(result) {
+  const descriptor = result && result.descriptor ? result.descriptor : result;
+  if (!descriptor || typeof descriptor !== 'object') return descriptor;
+  return normalize({
+    template: descriptor.template && {
+      content: descriptor.template.content,
+      attrs: descriptor.template.attrs,
+      lang: descriptor.template.lang,
+      src: descriptor.template.src,
+    },
+    script: descriptor.script && {
+      content: descriptor.script.content,
+      attrs: descriptor.script.attrs,
+      lang: descriptor.script.lang,
+      src: descriptor.script.src,
+    },
+    scriptSetup: descriptor.scriptSetup && {
+      content: descriptor.scriptSetup.content,
+      attrs: descriptor.scriptSetup.attrs,
+      lang: descriptor.scriptSetup.lang,
+      src: descriptor.scriptSetup.src,
+    },
+    styles: Array.isArray(descriptor.styles)
+      ? descriptor.styles.map(style => ({
+          content: style.content,
+          attrs: style.attrs,
+          lang: style.lang,
+          scoped: style.scoped,
+          module: style.module,
+          src: style.src,
+        }))
+      : [],
+    customBlocks: Array.isArray(descriptor.customBlocks)
+      ? descriptor.customBlocks.map(block => ({
+          type: block.type,
+          content: block.content,
+          attrs: block.attrs,
+        }))
+      : [],
+    errors: descriptor.errors || (result && result.errors) || [],
+  });
+}
+
+function firstTemplate(result) {
+  const descriptor = result && result.descriptor ? result.descriptor : result;
+  return descriptor && descriptor.template && descriptor.template.content
+    ? descriptor.template.content
+    : null;
+}
+
+function capture(fn) {
+  try {
+    return { ok: true, value: normalize(fn()) };
+  } catch (error) {
+    return {
+      ok: false,
+      error: {
+        name: error && error.name ? String(error.name) : null,
+        message: error && error.message ? String(error.message) : String(error),
+      },
+    };
+  }
+}
+
+function compareMode(mode, official, rust) {
+  if (JSON.stringify(official) === JSON.stringify(rust)) return null;
+  return {
+    mode,
+    official,
+    rust,
+  };
+}
+
+const reports = [];
+let templateFiles = 0;
+let pass = 0;
+let fail = 0;
+let modes = 0;
+
+for (const file of files) {
+  const absolute = path.join(projectRoot, file);
+  const source = fs.readFileSync(absolute, 'utf8');
+  const parsedOfficial = capture(() => normalizeDescriptor(officialSfc.parse({ source, filename: file })));
+  const parsedRust = capture(() => normalizeDescriptor(rustSfc.parse({ source, filename: file })));
+  const diffs = [];
+  let fileModes = 0;
+
+  for (const diff of [
+    compareMode('sfc.parse', parsedOfficial, parsedRust),
+  ]) {
+    fileModes++;
+    modes++;
+    if (diff) {
+      fail++;
+      diffs.push(diff);
+    } else {
+      pass++;
+    }
+  }
+
+  const template = firstTemplate(officialSfc.parse({ source, filename: file }));
+  if (template != null && template.trim() !== '') {
+    templateFiles++;
+    const compileOptions = { outputSourceRange: true, comments: true };
+    const officialCompile = capture(() => normalizeCompile(officialTemplate.compile(template, compileOptions)));
+    const rustCompile = capture(() => normalizeCompile(rustTemplate.compile(template, compileOptions)));
+    const officialSfcTemplate = capture(() => normalize(officialSfc.compileTemplate({
+      source: template,
+      filename: file,
+      id: 'data-v-project',
+      scoped: source.includes('<style scoped'),
+    })));
+    const rustSfcTemplate = capture(() => normalize(rustSfc.compileTemplate({
+      source: template,
+      filename: file,
+      id: 'data-v-project',
+      scoped: source.includes('<style scoped'),
+    })));
+
+    for (const diff of [
+      compareMode('vue-template-compiler.compile', officialCompile, rustCompile),
+      compareMode('vue/compiler-sfc.compileTemplate', officialSfcTemplate, rustSfcTemplate),
+    ]) {
+      fileModes++;
+      modes++;
+      if (diff) {
+        fail++;
+        diffs.push(diff);
+      } else {
+        pass++;
+      }
+    }
+  }
+
+  reports.push({ path: file, modes: fileModes, diffs });
+}
+
+process.stdout.write(JSON.stringify({
+  status: fail === 0 ? 'pass' : 'fail',
+  counts: {
+    files: files.length,
+    template_files: templateFiles,
+    modes,
+    pass,
+    fail,
+  },
+  files: reports,
+}));
 "#;
 
 const OUTPUT_CONTRACT_PROBE_SCRIPT: &str = r#"
@@ -18202,6 +18939,125 @@ fn file_sha256(path: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vue27_project_corpus_manifest_parses_toml_schema() {
+        let manifest = toml::from_str::<Vue27ProjectCorpusManifest>(
+            r#"
+schema_version = 1
+min_projects = 15
+min_vue_files_per_project = 20
+projects = []
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(manifest.schema_version, 1);
+        assert_eq!(manifest.min_projects, Some(15));
+        assert_eq!(manifest.min_vue_files_per_project, Some(20));
+        assert!(manifest.projects.is_empty());
+    }
+
+    #[test]
+    fn vue27_project_dependency_detection_accepts_only_vue_27_specs() {
+        assert!(is_vue27_dependency(Some("^2.7.16")));
+        assert!(is_vue27_dependency(Some("~2.7.14")));
+        assert!(is_vue27_dependency(Some("npm:vue@2.7.16")));
+        assert!(is_vue27_dependency(Some("workspace:vue@2.7.16")));
+        assert!(!is_vue27_dependency(Some("2.6.14")));
+        assert!(!is_vue27_dependency(Some("^3.5.0")));
+        assert!(!is_vue27_dependency(None));
+    }
+
+    #[test]
+    fn vue27_project_dependency_lookup_checks_package_sections_in_order() {
+        let package = serde_json::json!({
+            "dependencies": {
+                "vue": "^2.7.16"
+            },
+            "devDependencies": {
+                "vue": "2.6.14",
+                "vue-template-compiler": "~2.7.16"
+            },
+            "peerDependencies": {
+                "vue-template-compiler": "2.6.14"
+            }
+        });
+
+        assert_eq!(
+            package_dependency_spec(&package, "vue"),
+            Some("^2.7.16".into())
+        );
+        assert_eq!(
+            package_dependency_spec(&package, "vue-template-compiler"),
+            Some("~2.7.16".into())
+        );
+        assert_eq!(package_dependency_spec(&package, "@vue/compiler-sfc"), None);
+    }
+
+    #[test]
+    fn vue27_project_scan_applies_include_exclude_and_skips_generated_dirs() {
+        let temp = std::env::temp_dir().join(format!(
+            "vuec-xtask-vue27-project-scan-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(temp.join("src/views")).unwrap();
+        fs::create_dir_all(temp.join("docs")).unwrap();
+        fs::create_dir_all(temp.join("node_modules/pkg")).unwrap();
+        fs::write(temp.join("src/App.vue"), "<template><div/></template>").unwrap();
+        fs::write(
+            temp.join("src/views/Home.vue"),
+            "<template><main/></template>",
+        )
+        .unwrap();
+        fs::write(temp.join("docs/Demo.vue"), "<template><p/></template>").unwrap();
+        fs::write(
+            temp.join("node_modules/pkg/Bad.vue"),
+            "<template><bad/></template>",
+        )
+        .unwrap();
+
+        let project = Vue27ProjectSpec {
+            name: "scan-fixture".into(),
+            repo: "https://example.invalid/repo.git".into(),
+            rev: "0123456789abcdef0123456789abcdef01234567".into(),
+            package_json: None,
+            include: Some(vec!["src/*.vue".into()]),
+            exclude: Some(vec!["src/views/*.vue".into()]),
+            min_vue_files: None,
+            max_vue_files: None,
+        };
+
+        let scan = scan_project_vue_files(&temp, &project);
+        let selected = scan
+            .files
+            .iter()
+            .map(|path| relative_slash_path(&temp, path))
+            .collect::<Vec<_>>();
+
+        assert_eq!(scan.total, 3);
+        assert_eq!(selected, vec!["src/App.vue"]);
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn vue27_project_file_limit_is_deterministic_and_zero_means_unlimited() {
+        let files = vec![
+            PathBuf::from("src/A.vue"),
+            PathBuf::from("src/B.vue"),
+            PathBuf::from("src/C.vue"),
+        ];
+
+        assert_eq!(limit_vue_files(files.clone(), 0), files);
+        assert_eq!(
+            limit_vue_files(files.clone(), 2),
+            vec![PathBuf::from("src/A.vue"), PathBuf::from("src/B.vue")]
+        );
+        assert_eq!(limit_vue_files(files.clone(), 4), files);
+    }
 
     #[test]
     fn api_manifest_side_selection_defaults_to_both_sides() {
