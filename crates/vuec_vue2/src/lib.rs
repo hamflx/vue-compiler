@@ -1965,6 +1965,7 @@ fn mark_static_element(element: &mut Vue2Element, options: &Vue2CompileOptions) 
             && element.for_exp.is_none()
             && !is_built_in_tag(&element.tag)
             && is_reserved_tag_with_options(&element.tag, options)
+            && element.ns.is_none()
             && element.key.is_none()
             && element.ref_name.is_none()
             && element.slot_target.is_none()
@@ -4921,6 +4922,9 @@ fn is_unary_tag(tag: &str) -> bool {
 }
 
 fn is_reserved_tag(tag: &str) -> bool {
+    if is_vue2_svg_tag(tag) {
+        return true;
+    }
     matches!(
         tag,
         "html"
@@ -5038,11 +5042,42 @@ fn is_reserved_tag(tag: &str) -> bool {
             | "blockquote"
             | "iframe"
             | "tfoot"
-            | "svg"
-            | "text"
+    )
+}
+
+fn is_vue2_svg_tag(tag: &str) -> bool {
+    matches!(
+        tag.to_ascii_lowercase().as_str(),
+        "svg"
+            | "animate"
             | "circle"
-            | "path"
+            | "clippath"
+            | "cursor"
+            | "defs"
+            | "desc"
+            | "ellipse"
+            | "filter"
+            | "font-face"
+            | "foreignobject"
             | "g"
+            | "glyph"
+            | "image"
+            | "line"
+            | "marker"
+            | "mask"
+            | "missing-glyph"
+            | "path"
+            | "pattern"
+            | "polygon"
+            | "polyline"
+            | "rect"
+            | "switch"
+            | "symbol"
+            | "text"
+            | "textpath"
+            | "tspan"
+            | "use"
+            | "view"
     )
 }
 
@@ -5054,7 +5089,7 @@ fn namespace_for_tag(tag: &str, options: &Vue2CompileOptions) -> Option<String> 
     if let Some(namespace) = options.tag_namespaces.get(tag) {
         return Some(namespace.clone());
     }
-    (options.use_default_tag_namespaces && tag == "svg").then(|| "svg".into())
+    (options.use_default_tag_namespaces && is_vue2_svg_tag(tag)).then(|| "svg".into())
 }
 
 fn is_reserved_tag_with_options(tag: &str, options: &Vue2CompileOptions) -> bool {
@@ -6241,6 +6276,49 @@ mod tests {
         optimizer_options.use_default_reserved_tags = false;
         optimize(&mut parsed, &optimizer_options);
         assert!(!parsed.static_node);
+    }
+
+    #[test]
+    fn generates_vue2_svg_reserved_tags_like_official_codegen() {
+        let mut compile_options = options();
+        compile_options.optimize = false;
+
+        let symbol = compile(
+            "<svg><symbol><path></path></symbol></svg>",
+            compile_options.clone(),
+        );
+        assert_eq!(
+            symbol.render,
+            r#"with(this){return _c('svg',[_c('symbol',[_c('path')])])}"#
+        );
+
+        let clip_path = compile(
+            "<svg><clipPath><rect></rect></clipPath></svg>",
+            compile_options.clone(),
+        );
+        assert_eq!(
+            clip_path.render,
+            r#"with(this){return _c('svg',[_c('clipPath',[_c('rect')])])}"#
+        );
+
+        let linear_gradient = compile(
+            "<svg><linearGradient><stop></stop></linearGradient></svg>",
+            compile_options,
+        );
+        assert_eq!(
+            linear_gradient.render,
+            r#"with(this){return _c('svg',[_c('linearGradient',[_c('stop')],1)],1)}"#
+        );
+
+        let optimized_slot_fallback = compile(
+            r#"<div v-if="state"><slot><svg style="display:none"><symbol><path></path></symbol></svg></slot></div>"#,
+            options(),
+        );
+        assert_eq!(
+            optimized_slot_fallback.render,
+            r#"with(this){return (state)?_c('div',[_t("default",function(){return [_c('svg',{staticStyle:{"display":"none"}},[_c('symbol',[_c('path')])])]})],2):_e()}"#
+        );
+        assert!(optimized_slot_fallback.static_render_fns.is_empty());
     }
 
     #[test]
