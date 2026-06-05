@@ -2610,8 +2610,7 @@ fn gen_mir_props(
             let value = render_mir_expr(&attr.value, state);
             let value = match value_kind {
                 PropValueKind::StaticAttribute if attr.static_attribute => {
-                    let value = decode_newline_entities_for_attr(&attr.name, &value, options);
-                    transform_special_newlines(&value)
+                    gen_vue2_static_attr_value(&attr.name, &value, options)
                 }
                 PropValueKind::StaticAttribute | PropValueKind::Expression => value,
             };
@@ -5768,33 +5767,66 @@ fn vue2_push_static_style_decl(style: &mut Vec<(String, String)>, item: &str) {
     }
 }
 
-fn transform_special_newlines(value: &str) -> String {
-    value
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t")
-        .replace('\u{2028}', "\\u2028")
-        .replace('\u{2029}', "\\u2029")
+fn gen_vue2_static_attr_value(name: &str, js_value: &str, options: &Vue2CompileOptions) -> String {
+    let Some(value) = static_attr_raw_value(js_value) else {
+        return js_value.to_string();
+    };
+    let value = decode_vue2_static_attr_entities(name, &value, options);
+    transform_vue2_js_special_newlines(&js_string(&value))
 }
 
-fn decode_newline_entities_for_attr(
+fn decode_vue2_static_attr_entities(
     name: &str,
     value: &str,
     options: &Vue2CompileOptions,
 ) -> String {
-    if (name == "href" && options.should_decode_newlines_for_href)
-        || (name != "href" && options.should_decode_newlines)
-    {
-        value
-            .replace("&#10;", "\n")
-            .replace("&#x0A;", "\n")
-            .replace("&#x0a;", "\n")
-            .replace("&#9;", "\t")
-            .replace("&#x09;", "\t")
-            .replace("&#x9;", "\t")
-    } else {
-        value.to_string()
+    let decode_newlines = (name == "href" && options.should_decode_newlines_for_href)
+        || (name != "href" && options.should_decode_newlines);
+    let mut decoded = String::with_capacity(value.len());
+    let mut cursor = 0usize;
+    while cursor < value.len() {
+        let rest = &value[cursor..];
+        if let Some((replacement, consumed)) =
+            vue2_static_attr_entity_replacement(rest, decode_newlines)
+        {
+            decoded.push_str(replacement);
+            cursor += consumed;
+        } else {
+            let ch = rest.chars().next().unwrap();
+            decoded.push(ch);
+            cursor += ch.len_utf8();
+        }
     }
+    decoded
+}
+
+fn vue2_static_attr_entity_replacement(
+    value: &str,
+    decode_newlines: bool,
+) -> Option<(&'static str, usize)> {
+    if value.starts_with("&lt;") {
+        Some(("<", "&lt;".len()))
+    } else if value.starts_with("&gt;") {
+        Some((">", "&gt;".len()))
+    } else if value.starts_with("&quot;") {
+        Some(("\"", "&quot;".len()))
+    } else if value.starts_with("&amp;") {
+        Some(("&", "&amp;".len()))
+    } else if value.starts_with("&#39;") {
+        Some(("'", "&#39;".len()))
+    } else if decode_newlines && value.starts_with("&#10;") {
+        Some(("\n", "&#10;".len()))
+    } else if decode_newlines && value.starts_with("&#9;") {
+        Some(("\t", "&#9;".len()))
+    } else {
+        None
+    }
+}
+
+fn transform_vue2_js_special_newlines(value: &str) -> String {
+    value
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
 }
 
 fn modifiers_json(modifiers: &BTreeMap<String, bool>) -> String {
@@ -6895,6 +6927,79 @@ mod tests {
             Vue2Node::Text(text) => assert_eq!(text.text, "&gt;<foo>&lt;&#10004;"),
             Vue2Node::Element(_) => panic!("script template content must stay raw text"),
         }
+    }
+
+    #[test]
+    fn decodes_vue2_static_attr_entities_like_official_parser() {
+        let no_optimize_options = || Vue2CompileOptions {
+            optimize: false,
+            ..options()
+        };
+        let attrs = compile(
+            r#"<div title="&quot; &amp; &lt; &gt; &#39; &apos; &copy; &rarr; &#34; &#x22; &#x27;"/>"#,
+            no_optimize_options(),
+        );
+        assert_eq!(
+            attrs.render,
+            r#"with(this){return _c('div',{attrs:{"title":"\" & < > ' &apos; &copy; &rarr; &#34; &#x22; &#x27;"}})}"#
+        );
+
+        let one_pass = compile(r#"<div title="&amp;quot;"/>"#, no_optimize_options());
+        assert_eq!(
+            one_pass.render,
+            r#"with(this){return _c('div',{attrs:{"title":"&quot;"}})}"#
+        );
+
+        let non_semicolon = compile(
+            r#"<div title="&quot &amp &lt &gt &#39"/>"#,
+            no_optimize_options(),
+        );
+        assert_eq!(
+            non_semicolon.render,
+            r#"with(this){return _c('div',{attrs:{"title":"&quot &amp &lt &gt &#39"}})}"#
+        );
+
+        let default_newlines = compile(
+            r#"<div title="a&#10;b&#9;c"><a href="x&#10;y&#9;z"/></div>"#,
+            no_optimize_options(),
+        );
+        assert_eq!(
+            default_newlines.render,
+            r#"with(this){return _c('div',{attrs:{"title":"a&#10;b&#9;c"}},[_c('a',{attrs:{"href":"x&#10;y&#9;z"}})])}"#
+        );
+
+        let decode_all_but_href = compile(
+            r#"<div title="a&#10;b&#9;c"><a href="x&#10;y&#9;z"/></div>"#,
+            Vue2CompileOptions {
+                should_decode_newlines: true,
+                ..no_optimize_options()
+            },
+        );
+        assert_eq!(
+            decode_all_but_href.render,
+            "with(this){return _c('div',{attrs:{\"title\":\"a\\nb\\tc\"}},[_c('a',{attrs:{\"href\":\"x&#10;y&#9;z\"}})])}"
+        );
+
+        let decode_href = compile(
+            r#"<div title="a&#10;b&#9;c"><a href="x&#10;y&#9;z"/></div>"#,
+            Vue2CompileOptions {
+                should_decode_newlines_for_href: true,
+                ..no_optimize_options()
+            },
+        );
+        assert_eq!(
+            decode_href.render,
+            "with(this){return _c('div',{attrs:{\"title\":\"a&#10;b&#9;c\"}},[_c('a',{attrs:{\"href\":\"x\\ny\\tz\"}})])}"
+        );
+
+        let dynamic = compile(
+            r#"<div :title="'&quot; &amp; &#39;'"/>"#,
+            no_optimize_options(),
+        );
+        assert_eq!(
+            dynamic.render,
+            r#"with(this){return _c('div',{attrs:{"title":'&quot; &amp; &#39;'}})}"#
+        );
     }
 
     #[test]
