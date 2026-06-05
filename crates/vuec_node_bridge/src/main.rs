@@ -396,8 +396,15 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
             let filename = string_field_or(&payload, "filename", "anonymous.vue");
             let source = string_field(&payload, "source");
             let mut compiler = SfcCompiler::new();
-            let descriptor = compiler.parse(filename, &source);
-            Ok(vue27_descriptor_value(&descriptor))
+            let result = compiler.parse_vue27_component_with_filename(
+                filename,
+                &source,
+                vue27_parse_component_options(payload.get("options")),
+            );
+            Ok(vue27_parse_component_value(
+                &result.descriptor,
+                &result.errors,
+            ))
         }
         "sfc.vue27.parseComponent" => {
             let source = string_field(&payload, "source");
@@ -15421,6 +15428,23 @@ mod tests {
         .expect("vue27 parse");
 
         assert_eq!(parsed["cssVars"], json!(["color", "font.size"]));
+    }
+
+    #[test]
+    fn vue27_bridge_parse_uses_legacy_deindent() {
+        let parsed = dispatch(
+            "sfc.vue27.parse",
+            json!({
+                "source": "<template>\n  <div id=\"app\">\n    <router-view />\n  </div>\n</template>",
+                "filename": "test.vue"
+            }),
+        )
+        .expect("vue27 parse");
+
+        assert_eq!(
+            parsed["template"]["content"],
+            json!("\n<div id=\"app\">\n  <router-view />\n</div>\n")
+        );
     }
 
     #[test]
