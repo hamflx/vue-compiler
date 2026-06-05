@@ -21,7 +21,7 @@ use vuec_ast::{
     Vue2RenderStatic, Vue2ScopedSlot, Vue2SlotOutlet, Vue2TextCall, Vue2ValidationData,
 };
 use vuec_diagnostics::{Diagnostic, DiagnosticSink, Severity};
-use vuec_html::{HtmlAttribute, HtmlTokenKind, HtmlTokenizer};
+use vuec_html::{decode_html_text_entities, HtmlAttribute, HtmlTokenKind, HtmlTokenizer};
 use vuec_js::{parse_vue2_filter_expression, rewrite_vue2_filter_expression, JsAstStore};
 use vuec_source::{FileId, Span};
 
@@ -1897,10 +1897,10 @@ fn push_text_node(
     in_v_pre: bool,
     in_pre_tag: bool,
 ) {
-    let mut text = if is_text_tag(&parent.tag) {
+    let mut text = if is_raw_text_tag(&parent.tag) {
         text.to_string()
     } else {
-        decode_basic_entities(text)
+        decode_html_text_entities(text)
     };
     if matches!(parent.tag.as_str(), "pre" | "textarea")
         && text.starts_with('\n')
@@ -4895,6 +4895,10 @@ fn is_text_tag(tag: &str) -> bool {
     matches!(tag, "script" | "style" | "textarea")
 }
 
+fn is_raw_text_tag(tag: &str) -> bool {
+    matches!(tag, "script" | "style")
+}
+
 fn is_forbidden_tag(element: &Vue2Element) -> bool {
     element.tag == "style"
         || (element.tag == "script"
@@ -5232,16 +5236,6 @@ fn is_identifier_start(ch: char) -> bool {
 
 fn is_identifier_continue(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$')
-}
-
-fn decode_basic_entities(value: &str) -> String {
-    value
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&amp;", "&")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&nbsp;", "\u{00a0}")
 }
 
 fn condense_whitespace(value: &str) -> String {
@@ -6186,6 +6180,38 @@ mod tests {
         assert_eq!(script.children.len(), 1);
         match &script.children[0] {
             Vue2Node::Text(text) => assert_eq!(text.text, "&gt;<foo>&lt;"),
+            Vue2Node::Element(_) => panic!("script template content must stay raw text"),
+        }
+    }
+
+    #[test]
+    fn decodes_vue2_text_entities_like_official_parser() {
+        let numeric = compile("<span>&#10004;&#x2714;</span>", options());
+        assert_eq!(
+            numeric.render,
+            r#"with(this){return _c('span',[_v("✔✔")])}"#
+        );
+
+        let text_mode = compile("<span>&ampersand;&Eacute;&#x80;&#0;</span>", options());
+        assert_eq!(
+            text_mode.render,
+            r#"with(this){return _c('span',[_v("&ersand;É€�")])}"#
+        );
+
+        let textarea = compile("<textarea>&#10004;</textarea>", options());
+        assert_eq!(
+            textarea.render,
+            r#"with(this){return _c('textarea',[_v("✔")])}"#
+        );
+
+        let script = compile(
+            r#"<script type="x/template">&gt;<foo>&lt;&#10004;</script>"#,
+            options(),
+        )
+        .element_ast
+        .unwrap();
+        match &script.children[0] {
+            Vue2Node::Text(text) => assert_eq!(text.text, "&gt;<foo>&lt;&#10004;"),
             Vue2Node::Element(_) => panic!("script template content must stay raw text"),
         }
     }
