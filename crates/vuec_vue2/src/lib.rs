@@ -1480,6 +1480,7 @@ fn process_attrs(
                             BTreeMap::new(),
                             Vec::new(),
                             false,
+                            false,
                             attr.span,
                         );
                         let hyphen_name = hyphenate(&name);
@@ -1490,6 +1491,7 @@ fn process_attrs(
                                 sync_code,
                                 BTreeMap::new(),
                                 Vec::new(),
+                                false,
                                 false,
                                 attr.span,
                             );
@@ -1505,12 +1507,22 @@ fn process_attrs(
                         diagnostics,
                     );
                 }
+                let mut modifiers = modifiers;
+                let mut modifier_order = modifier_order;
+                let has_modifier_object = !modifiers.is_empty();
+                let events = if modifiers.remove("native").is_some() {
+                    modifier_order.retain(|modifier| modifier != "native");
+                    &mut element.native_events
+                } else {
+                    &mut element.events
+                };
                 add_handler(
-                    &mut element.events,
+                    events,
                     name,
                     value,
                     modifiers,
                     modifier_order,
+                    has_modifier_object,
                     false,
                     attr.span,
                 );
@@ -4738,10 +4750,10 @@ fn add_handler(
     value: String,
     mut modifiers: BTreeMap<String, bool>,
     modifier_order: Vec<String>,
+    has_modifier_object: bool,
     dynamic: bool,
     span: Option<Span>,
 ) {
-    let has_modifier_object = !modifiers.is_empty();
     if modifiers.get("right").copied().unwrap_or(false) && name == "click" {
         modifiers.remove("right");
         name = "contextmenu".into();
@@ -4814,6 +4826,7 @@ fn gen_dom_model(
         handler,
         BTreeMap::new(),
         Vec::new(),
+        false,
         false,
         element.span,
     );
@@ -5890,6 +5903,44 @@ mod tests {
         assert_eq!(
             capture_once.render,
             r#"with(this){return _c('input',{on:{"~!input":function($event){return onInput.apply(null, arguments)}}})}"#
+        );
+    }
+
+    #[test]
+    fn generates_vue2_native_event_handlers_like_official_codegen() {
+        let native_prevent = compile(
+            r#"<my-button @click.native.prevent="submit"></my-button>"#,
+            options(),
+        );
+        assert_eq!(
+            native_prevent.render,
+            r#"with(this){return _c('my-button',{nativeOn:{"click":function($event){$event.preventDefault();return submit.apply(null, arguments)}}})}"#
+        );
+        assert!(!native_prevent.render.contains(r#""native""#));
+
+        let native_path = compile(
+            r#"<my-button @click.native="submit"></my-button>"#,
+            options(),
+        );
+        assert_eq!(
+            native_path.render,
+            r#"with(this){return _c('my-button',{nativeOn:{"click":function($event){return submit.apply(null, arguments)}}})}"#
+        );
+
+        let native_key = compile(
+            r#"<my-button @keyup.native.enter="submit"></my-button>"#,
+            options(),
+        );
+        assert_eq!(
+            native_key.render,
+            r#"with(this){return _c('my-button',{nativeOn:{"keyup":function($event){if(!$event.type.indexOf('key')&&_k($event.keyCode,"enter",13,$event.key,"Enter"))return null;return submit.apply(null, arguments)}}})}"#
+        );
+
+        let empty_native_prevent =
+            compile(r#"<el-form @submit.native.prevent></el-form>"#, options());
+        assert_eq!(
+            empty_native_prevent.render,
+            r#"with(this){return _c('el-form',{nativeOn:{"submit":function($event){$event.preventDefault();}}})}"#
         );
     }
 
