@@ -1381,7 +1381,7 @@ fn process_platform_modules(element: &mut Vue2Element, diagnostics: &mut Diagnos
         element.class_binding = Some(value);
     }
     if let Some(value) = remove_attr(element, "style") {
-        element.static_style = Some(js_string(&value));
+        element.static_style = Some(vue2_static_style_expression(&value));
     }
     if let Some(value) = get_binding_attr(element, "style", false) {
         element.style_binding = Some(value);
@@ -1472,15 +1472,28 @@ fn process_attrs(
                     }
                     if modifiers.get("sync").copied().unwrap_or(false) {
                         let sync_code = gen_assignment_code(&parsed_value, "$event");
+                        let camel_name = camelize(&name);
                         add_handler(
                             &mut element.events,
-                            format!("update:{}", camelize(&name)),
-                            sync_code,
+                            format!("update:{camel_name}"),
+                            sync_code.clone(),
                             BTreeMap::new(),
                             Vec::new(),
                             false,
                             attr.span,
                         );
+                        let hyphen_name = hyphenate(&name);
+                        if hyphen_name != camel_name {
+                            add_handler(
+                                &mut element.events,
+                                format!("update:{hyphen_name}"),
+                                sync_code,
+                                BTreeMap::new(),
+                                Vec::new(),
+                                false,
+                                attr.span,
+                            );
+                        }
                     }
                 }
             } else if is_on_name(&name_no_modifiers) {
@@ -2437,8 +2450,10 @@ fn gen_mir_handlers(
     state: &Vue2MirCodegenState<'_>,
 ) -> String {
     let prefix = if native { "nativeOn" } else { "on" };
-    let handlers = events
-        .iter()
+    let mut entries = events.iter().collect::<Vec<_>>();
+    entries.sort_by_key(|(name, handlers)| vue2_event_order_key(name, handlers));
+    let handlers = entries
+        .into_iter()
         .map(|(name, handlers)| {
             let code = if handlers.is_empty() {
                 "function(){}".into()
@@ -2459,6 +2474,29 @@ fn gen_mir_handlers(
         .collect::<Vec<_>>()
         .join(",");
     format!("{prefix}:{{{handlers}}}")
+}
+
+fn vue2_event_order_key<'a>(
+    name: &'a str,
+    handlers: &[vuec_ast::Vue2EventHandler],
+) -> (usize, usize, usize, &'a str) {
+    let span = handlers
+        .first()
+        .and_then(|handler| handler.span)
+        .map(|span| (span.start.0, span.end.0))
+        .unwrap_or((usize::MAX, usize::MAX));
+    (span.0, span.1, vue2_same_attr_event_rank(name), name)
+}
+
+fn vue2_same_attr_event_rank(name: &str) -> usize {
+    if name
+        .strip_prefix("update:")
+        .is_some_and(|event| event.contains('-'))
+    {
+        1
+    } else {
+        0
+    }
 }
 
 fn gen_mir_handler(
@@ -5117,6 +5155,62 @@ fn js_string_single(value: &str) -> String {
     format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"))
 }
 
+fn vue2_static_style_expression(value: &str) -> String {
+    let fields = vue2_parse_static_style(value)
+        .into_iter()
+        .map(|(name, value)| format!("{}:{}", js_string(&name), js_string(&value)))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("{{{fields}}}")
+}
+
+fn vue2_parse_static_style(value: &str) -> Vec<(String, String)> {
+    let mut style = Vec::new();
+    let mut current = String::new();
+    let mut paren_depth = 0usize;
+    for ch in value.chars() {
+        match ch {
+            '(' => {
+                paren_depth += 1;
+                current.push(ch);
+            }
+            ')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                current.push(ch);
+            }
+            ';' if paren_depth == 0 => {
+                vue2_push_static_style_decl(&mut style, &current);
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    vue2_push_static_style_decl(&mut style, &current);
+    style
+}
+
+fn vue2_push_static_style_decl(style: &mut Vec<(String, String)>, item: &str) {
+    if item.is_empty() {
+        return;
+    }
+    let Some(colon) = item.find(':') else {
+        return;
+    };
+    if colon + 1 >= item.len() {
+        return;
+    }
+    let name = item[..colon].trim();
+    let value = item[colon + 1..].trim();
+    if name.is_empty() || value.is_empty() {
+        return;
+    }
+    if let Some((_, existing)) = style.iter_mut().find(|(key, _)| key == name) {
+        *existing = value.to_string();
+    } else {
+        style.push((name.to_string(), value.to_string()));
+    }
+}
+
 fn transform_special_newlines(value: &str) -> String {
     value
         .replace('\n', "\\n")
@@ -5202,6 +5296,21 @@ fn camelize(value: &str) -> String {
         } else if uppercase_next {
             out.extend(ch.to_uppercase());
             uppercase_next = false;
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn hyphenate(value: &str) -> String {
+    let mut out = String::new();
+    for (index, ch) in value.char_indices() {
+        if ch.is_ascii_uppercase() {
+            if index > 0 {
+                out.push('-');
+            }
+            out.extend(ch.to_lowercase());
         } else {
             out.push(ch);
         }
@@ -5588,6 +5697,35 @@ mod tests {
         assert_eq!(
             capture_once.render,
             r#"with(this){return _c('input',{on:{"~!input":function($event){return onInput.apply(null, arguments)}}})}"#
+        );
+    }
+
+    #[test]
+    fn generates_vue2_static_style_sync_and_event_order_like_official_codegen() {
+        let pagination = compile(
+            r#"<el-pagination
+  :page-size.sync="page.size"
+  :total="page.total"
+  :current-page.sync="page.page"
+  style="margin-top: 8px;"
+  layout="total, prev, pager, next, sizes"
+  @size-change="crud.sizeChangeHandler($event)"
+  @current-change="crud.pageChangeHandler"
+/>"#,
+            options(),
+        );
+        assert_eq!(
+            pagination.render,
+            r#"with(this){return _c('el-pagination',{staticStyle:{"margin-top":"8px"},attrs:{"page-size":page.size,"total":page.total,"current-page":page.page,"layout":"total, prev, pager, next, sizes"},on:{"update:pageSize":function($event){return $set(page, "size", $event)},"update:page-size":function($event){return $set(page, "size", $event)},"update:currentPage":function($event){return $set(page, "page", $event)},"update:current-page":function($event){return $set(page, "page", $event)},"size-change":function($event){return crud.sizeChangeHandler($event)},"current-change":crud.pageChangeHandler}})}"#
+        );
+
+        let popover = compile(
+            r#"<div style="text-align: right; margin: 0" @show="onPopoverShow" @hide="onPopoverHide"></div>"#,
+            options(),
+        );
+        assert_eq!(
+            popover.render,
+            r#"with(this){return _c('div',{staticStyle:{"text-align":"right","margin":"0"},on:{"show":onPopoverShow,"hide":onPopoverHide}})}"#
         );
     }
 
