@@ -756,13 +756,30 @@ fn decode_html_entity_at(value: &str, mode: HtmlEntityDecodeMode) -> Option<(cha
     if let Some(decoded) = decode_numeric_html_entity_at(value) {
         return Some(decoded);
     }
-    const NAMED: [(&str, char); 7] = [
+    const NAMED: [(&str, char); 24] = [
         ("amp", '&'),
         ("lt", '<'),
         ("gt", '>'),
         ("nbsp", '\u{00a0}'),
         ("apos", '\''),
         ("quot", '"'),
+        ("copy", '\u{00a9}'),
+        ("reg", '\u{00ae}'),
+        ("trade", '\u{2122}'),
+        ("ndash", '\u{2013}'),
+        ("mdash", '\u{2014}'),
+        ("lsquo", '\u{2018}'),
+        ("rsquo", '\u{2019}'),
+        ("ldquo", '\u{201c}'),
+        ("rdquo", '\u{201d}'),
+        ("hellip", '\u{2026}'),
+        ("bull", '\u{2022}'),
+        ("laquo", '\u{00ab}'),
+        ("raquo", '\u{00bb}'),
+        ("larr", '\u{2190}'),
+        ("uarr", '\u{2191}'),
+        ("rarr", '\u{2192}'),
+        ("darr", '\u{2193}'),
         ("Eacute", '\u{00c9}'),
     ];
     for (name, decoded) in NAMED {
@@ -1019,6 +1036,14 @@ mod tests {
         assert_eq!(
             decode_html_text_entities("&ampersand;&Eacute;&#x80;&#0;"),
             "&ersand;É€�"
+        );
+        assert_eq!(
+            decode_html_text_entities("&larr;&uarr;&rarr;&darr;&mdash;&ndash;&copy;&reg;&trade;"),
+            "←↑→↓—–©®™"
+        );
+        assert_eq!(
+            decode_html_text_entities("&foo;&rarrx;&ampersand;"),
+            "&foo;&rarrx;&ersand;"
         );
         assert_eq!(decode_html_attr_entities("&amp;&amp=&amp!"), "&&amp=&!");
         assert_eq!(decode_html_attr_entities("&lt;"), "<");

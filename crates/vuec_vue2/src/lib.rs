@@ -6794,6 +6794,15 @@ mod tests {
             r#"with(this){return _c('span',[_v("&ersand;É€�")])}"#
         );
 
+        let named = compile(
+            "<span>&larr;&uarr;&rarr;&darr;&mdash;&ndash;&copy;&reg;&trade;</span>",
+            options(),
+        );
+        assert_eq!(
+            named.render,
+            r#"with(this){return _c('span',[_v("←↑→↓—–©®™")])}"#
+        );
+
         let textarea = compile("<textarea>&#10004;</textarea>", options());
         assert_eq!(
             textarea.render,
