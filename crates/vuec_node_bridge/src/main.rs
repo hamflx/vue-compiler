@@ -250,6 +250,7 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
         "vue3.core.transformIfSuite" => Ok(vue3_core_transform_if_suite_value(&payload)),
         "vue3.core.transformSlotSuite" => Ok(vue3_core_transform_slot_suite_value(&payload)),
         "vue3.core.transformElementSuite" => Ok(vue3_core_transform_element_suite_value(&payload)),
+        "vue3.core.transformSuite" => Ok(vue3_core_transform_suite_value(&payload)),
         "vue3.core.cacheStaticSuite" => Ok(vue3_core_cache_static_suite_value(&payload)),
         "vue3.core.transformSlotOutletSuite" => {
             Ok(vue3_core_transform_slot_outlet_suite_value(&payload))
@@ -4432,6 +4433,35 @@ fn vue3_core_transform_element_suite_value(payload: &Value) -> Value {
     })
 }
 
+fn vue3_core_transform_suite_value(payload: &Value) -> Value {
+    let source = template_source(payload);
+    let options = vue3_options(payload.get("options"));
+    let ast = Vue3Dialect::base_parse(source.clone(), &options);
+    let mut root = vue3_parse_value(
+        &ast,
+        &source.source,
+        source.base_offset,
+        false,
+        &options,
+        false,
+    );
+    let mut state = Vue3SlotSuiteState::default();
+    let scope = Vue3ModelSuiteScope::default();
+    if let Some(children) = root.get_mut("children").and_then(Value::as_array_mut) {
+        *children = vue3_slot_suite_transform_children(
+            std::mem::take(children),
+            &options,
+            true,
+            &mut state,
+            &scope,
+        );
+    }
+    vue3_slot_suite_apply_transform_text(&mut root, &options, &state);
+    vue3_transform_suite_finalize_root(&mut root, &state);
+    root["__vuecErrors"] = json!(state.errors);
+    root
+}
+
 fn vue3_transform_element_suite_text_directives(options: &Value) -> Vec<&'static str> {
     let mut directives = Vec::new();
     if bool_option(options, "transformBind", false) {
@@ -7676,6 +7706,82 @@ fn vue3_slot_suite_finalize_root(root: &mut Value, state: &Vue3SlotSuiteState) {
     root["hoists"] = json!([]);
     root["cached"] = Value::Array((0..state.cached).map(|_| Value::Null).collect());
     root["temps"] = json!(0);
+}
+
+fn vue3_transform_suite_finalize_root(root: &mut Value, state: &Vue3SlotSuiteState) {
+    vue3_transform_suite_set_root_codegen(root);
+    root["components"] = json!(vue3_slot_suite_components(root));
+    root["directives"] = json!(vue3_if_suite_collect_directives(root));
+    root["helpers"] = json!(vue3_slot_suite_helpers(root));
+    root["hoists"] = json!([]);
+    root["cached"] = Value::Array((0..state.cached).map(|_| Value::Null).collect());
+    root["temps"] = json!(0);
+}
+
+fn vue3_transform_suite_set_root_codegen(root: &mut Value) {
+    let children = root
+        .get("children")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    root["codegenNode"] = match children.as_slice() {
+        [] => Value::Null,
+        [_] => vue3_transform_suite_single_root_codegen(root),
+        _ => vue3_once_suite_vnode_call(
+            "FRAGMENT",
+            Value::Null,
+            Value::Array(children.clone()),
+            Some(json!(vue3_transform_suite_root_fragment_patch_flag(
+                &children
+            ))),
+            Value::Null,
+            true,
+            false,
+            false,
+        ),
+    };
+}
+
+fn vue3_transform_suite_single_root_codegen(root: &mut Value) -> Value {
+    let Some(child) = root
+        .get_mut("children")
+        .and_then(Value::as_array_mut)
+        .and_then(|children| children.first_mut())
+    else {
+        return Value::Null;
+    };
+    if vue3_transform_suite_is_single_element_root_child(child)
+        && child
+            .get("codegenNode")
+            .is_some_and(|codegen| !codegen.is_null())
+    {
+        if child.get("codegenNode").and_then(vue3_public_node_type) == Some(13) {
+            child["codegenNode"]["isBlock"] = json!(true);
+        }
+        return child.get("codegenNode").cloned().unwrap_or(Value::Null);
+    }
+    child.clone()
+}
+
+fn vue3_transform_suite_is_single_element_root_child(child: &Value) -> bool {
+    vue3_public_node_type(child) == Some(1)
+        && child.get("tagType").and_then(Value::as_u64) != Some(2)
+}
+
+fn vue3_transform_suite_root_fragment_patch_flag(children: &[Value]) -> u16 {
+    if children
+        .iter()
+        .filter(|child| vue3_public_node_type(child) != Some(3))
+        .count()
+        == 1
+        && children
+            .iter()
+            .any(|child| vue3_public_node_type(child) == Some(3))
+    {
+        64 | 2048
+    } else {
+        64
+    }
 }
 
 fn vue3_slot_suite_helpers(root: &Value) -> Vec<String> {
@@ -14308,6 +14414,56 @@ mod tests {
             &transformed["root"]["helpers"],
             "KEEP_ALIVE"
         ));
+    }
+
+    #[test]
+    fn vue3_transform_suite_materializes_root_codegen_contract() {
+        let empty = dispatch(
+            "vue3.core.transformSuite",
+            json!({ "source": "", "options": {} }),
+        )
+        .expect("transform suite empty root");
+        assert!(empty["codegenNode"].is_null());
+        assert_eq!(empty["helpers"], json!([]));
+
+        let slot = dispatch(
+            "vue3.core.transformSuite",
+            json!({ "source": "<slot/>", "options": {} }),
+        )
+        .expect("transform suite slot root");
+        assert_eq!(slot["codegenNode"]["type"], json!(1));
+        assert_eq!(
+            slot["codegenNode"]["codegenNode"]["callee"],
+            json!("RENDER_SLOT")
+        );
+        assert!(json_array_contains(&slot["helpers"], "RENDER_SLOT"));
+
+        let for_root = dispatch(
+            "vue3.core.transformSuite",
+            json!({ "source": r#"<div v-for="i in list" />"#, "options": {} }),
+        )
+        .expect("transform suite for root");
+        assert_eq!(for_root["codegenNode"]["type"], json!(11));
+        assert_eq!(for_root["codegenNode"]["source"]["content"], json!("list"));
+        assert_eq!(
+            for_root["codegenNode"]["codegenNode"]["children"]["callee"],
+            json!("RENDER_LIST")
+        );
+        assert!(json_array_contains(&for_root["helpers"], "RENDER_LIST"));
+
+        let comments = dispatch(
+            "vue3.core.transformSuite",
+            json!({ "source": "<!--foo--><div/><!--bar-->", "options": {} }),
+        )
+        .expect("transform suite comments root");
+        assert_eq!(comments["codegenNode"]["type"], json!(13));
+        assert_eq!(comments["codegenNode"]["tag"], json!("FRAGMENT"));
+        assert_eq!(comments["codegenNode"]["patchFlag"], json!(2112));
+        assert_eq!(comments["codegenNode"]["children"][0]["type"], json!(3));
+        assert_eq!(comments["codegenNode"]["children"][1]["tag"], json!("div"));
+        assert_eq!(comments["codegenNode"]["children"][2]["type"], json!(3));
+        assert!(json_array_contains(&comments["helpers"], "CREATE_COMMENT"));
+        assert!(json_array_contains(&comments["helpers"], "FRAGMENT"));
     }
 
     #[test]

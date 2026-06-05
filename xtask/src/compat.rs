@@ -12602,6 +12602,7 @@ fn write_vue3_core_conformance_shims(prepared_root: &Path) -> Result<()> {
     rewrite_vue3_core_v_on_public_api_spec(prepared_root)?;
     rewrite_vue3_core_v_for_public_api_spec(prepared_root)?;
     rewrite_vue3_core_transform_element_public_api_spec(prepared_root)?;
+    rewrite_vue3_core_transform_public_api_spec(prepared_root)?;
     rewrite_vue3_core_v_if_public_api_spec(prepared_root)?;
     rewrite_vue3_core_transform_slot_outlet_public_api_spec(prepared_root)?;
     rewrite_vue3_core_v_slot_public_api_spec(prepared_root)?;
@@ -13760,6 +13761,159 @@ function collectPredicateHits(
     } catch (_) {}
   }
   return Array.from(hits)
+}
+"#,
+    )?;
+    Ok(())
+}
+
+fn rewrite_vue3_core_transform_public_api_spec(prepared_root: &Path) -> Result<()> {
+    let tests = prepared_root
+        .join("packages")
+        .join("compiler-core")
+        .join("__tests__");
+    let spec = tests.join("transform.spec.ts");
+    if !spec.exists() {
+        return Ok(());
+    }
+    rewrite_text_file_block(
+        &spec,
+        r#"import { PatchFlags } from '@vue/shared'"#,
+        r#"import { PatchFlags } from '@vue/shared'
+import { transformWithCodegen } from './transform.rust-api'"#,
+        "Vue 3 core transform Rust API imports",
+    )?;
+    rewrite_text_file_block(
+        &spec,
+        r#"  test('should inject toString helper for interpolations', () => {
+    const ast = baseParse(`{{ foo }}`)
+    transform(ast, {})
+    expect(ast.helpers).toContain(TO_DISPLAY_STRING)
+  })"#,
+        r#"  test('should inject toString helper for interpolations', () => {
+    const ast = transformWithCodegen(`{{ foo }}`)
+    expect(ast.helpers).toContain(TO_DISPLAY_STRING)
+  })"#,
+        "Vue 3 core transform interpolation helper Rust path",
+    )?;
+    rewrite_text_file_block(
+        &spec,
+        r#"  test('should inject createVNode and Comment for comments', () => {
+    const ast = baseParse(`<!--foo-->`)
+    transform(ast, {})
+    expect(ast.helpers).toContain(CREATE_COMMENT)
+  })"#,
+        r#"  test('should inject createVNode and Comment for comments', () => {
+    const ast = transformWithCodegen(`<!--foo-->`)
+    expect(ast.helpers).toContain(CREATE_COMMENT)
+  })"#,
+        "Vue 3 core transform comment helper Rust path",
+    )?;
+    rewrite_text_file_block(
+        &spec,
+        r#"    function transformWithCodegen(template: string) {
+      const ast = baseParse(template)
+      transform(ast, {
+        nodeTransforms: [
+          transformIf,
+          transformFor,
+          transformText,
+          transformSlotOutlet,
+          transformElement,
+        ],
+      })
+      return ast
+    }
+"#,
+        "",
+        "Vue 3 core transform local codegen helper",
+    )?;
+    write_text(
+        &tests.join("transform.rust-api.ts"),
+        r#"import { NodeTypes, __vuecRuntime } from '../src'
+
+const runtime = __vuecRuntime as any
+
+export function transformWithCodegen(template: string) {
+  const root = runtime.callBridge('vue3.core.transformSuite', {
+    source: template,
+    options: {},
+  })
+  hydrateTransformAst(root)
+  return root
+}
+
+function hydrateTransformAst(node: any): any {
+  if (!node || typeof node !== 'object') return node
+  if (Array.isArray(node)) {
+    node.forEach(hydrateTransformAst)
+    return node
+  }
+  if (node.type === NodeTypes.ROOT) {
+    if (Array.isArray(node.helpers)) {
+      node.helpers = new Set(node.helpers.map((name: string) => helperSymbol(name) || name))
+    }
+    if (node.codegenNode == null) node.codegenNode = undefined
+  }
+  if (
+    node.type === NodeTypes.JS_CALL_EXPRESSION &&
+    typeof node.callee === 'string'
+  ) {
+    node.callee = helperSymbol(node.callee) || node.callee
+  }
+  if (node.type === NodeTypes.VNODE_CALL) {
+    if (typeof node.tag === 'string') node.tag = helperSymbol(node.tag) || node.tag
+    for (const key of ['props', 'children', 'patchFlag', 'dynamicProps', 'directives']) {
+      if (node[key] == null) node[key] = undefined
+    }
+  }
+  if (node.type === NodeTypes.JS_FUNCTION_EXPRESSION) {
+    if (node.params == null) node.params = undefined
+  }
+  if (node.type === NodeTypes.FOR) {
+    for (const key of ['valueAlias', 'keyAlias', 'objectIndexAlias']) {
+      if (node[key] == null) delete node[key]
+    }
+  }
+  if (node.parseResult) {
+    for (const key of ['value', 'key', 'index']) {
+      if (node.parseResult[key] == null) delete node.parseResult[key]
+    }
+  }
+  for (const key of [
+    'children',
+    'props',
+    'content',
+    'codegenNode',
+    'arguments',
+    'returns',
+    'params',
+    'directives',
+    'source',
+    'valueAlias',
+    'keyAlias',
+    'objectIndexAlias',
+    'parseResult',
+    'branches',
+    'condition',
+    'test',
+    'consequent',
+    'alternate',
+    'value',
+    'elements',
+    'properties',
+    'key',
+    'tag',
+    'hoists',
+    'cached',
+  ]) {
+    hydrateTransformAst(node[key])
+  }
+  return node
+}
+
+function helperSymbol(name: string) {
+  return typeof name === 'string' ? runtime[name] : undefined
 }
 "#,
     )?;
@@ -16864,6 +17018,12 @@ fn conformance_coverage_file_entries(
             return entries;
         }
     }
+    if path.ends_with("packages/compiler-core/__tests__/transform.spec.ts") {
+        let entries = conformance_coverage_transform_entries(path, result, reason);
+        if !entries.is_empty() {
+            return entries;
+        }
+    }
 
     let counts = json_conformance_file_counts(result);
     let file_source = conformance_coverage_file_kind(path, source);
@@ -16954,6 +17114,92 @@ fn conformance_coverage_transform_element_reason(
         }
         ("js callback boundary", ConformanceCoverageKind::Mixed) => {
             "Official Vue 3 compiler-core transformElement assertion group exercises caller-provided JavaScript directiveTransforms or NodeTransform callbacks. Those callback extension points cannot be serialized into the Rust bridge and remain mixed coverage rather than Rust compiler completion evidence."
+                .to_string()
+        }
+        _ => default_reason.to_string(),
+    }
+}
+
+fn conformance_coverage_transform_entries(
+    path: &str,
+    result: &serde_json::Value,
+    default_reason: &str,
+) -> Vec<ConformanceCoverageFile> {
+    let Some(assertions) = result
+        .get("assertionResults")
+        .and_then(|value| value.as_array())
+    else {
+        return Vec::new();
+    };
+
+    let mut grouped: BTreeMap<(&'static str, ConformanceCoverageKind), Vec<&serde_json::Value>> =
+        BTreeMap::new();
+    for assertion in assertions {
+        let Some(full_name) = assertion
+            .get("fullName")
+            .or_else(|| assertion.get("title"))
+            .and_then(|value| value.as_str())
+        else {
+            return Vec::new();
+        };
+        let (scope, source) = conformance_coverage_transform_assertion_kind(full_name);
+        grouped.entry((scope, source)).or_default().push(assertion);
+    }
+
+    grouped
+        .into_iter()
+        .map(|((scope, source), assertions)| ConformanceCoverageFile {
+            path: path.to_string(),
+            scope: Some(scope.to_string()),
+            source,
+            reason: conformance_coverage_transform_reason(scope, source, default_reason),
+            counts: json_conformance_assertion_counts(assertions.into_iter()),
+        })
+        .collect()
+}
+
+fn conformance_coverage_transform_assertion_kind(
+    full_name: &str,
+) -> (&'static str, ConformanceCoverageKind) {
+    if matches!(
+        full_name,
+        "compiler: transform should inject toString helper for interpolations"
+            | "compiler: transform should inject createVNode and Comment for comments"
+    ) || full_name.starts_with("compiler: transform root codegenNode ")
+    {
+        return ("transform rust suite", ConformanceCoverageKind::RustBacked);
+    }
+    if matches!(
+        full_name,
+        "compiler: transform context state"
+            | "compiler: transform context.replaceNode"
+            | "compiler: transform context.removeNode"
+            | "compiler: transform context.removeNode (prev sibling)"
+            | "compiler: transform context.removeNode (next sibling)"
+            | "compiler: transform context.hoist"
+            | "compiler: transform context.filename and selfName"
+            | "compiler: transform onError option"
+    ) {
+        return (
+            "js transform context boundary",
+            ConformanceCoverageKind::Mixed,
+        );
+    }
+    ("unclassified assertions", ConformanceCoverageKind::Mixed)
+}
+
+fn conformance_coverage_transform_reason(
+    scope: &str,
+    source: ConformanceCoverageKind,
+    default_reason: &str,
+) -> String {
+    match (scope, source) {
+        ("transform rust suite", ConformanceCoverageKind::RustBacked) => {
+            "Official Vue 3 compiler-core transform file imports a prepared Rust API helper that forwards helper-injection and root-codegen assertions through @vue/compiler-core.__vuecRuntime into vuec_node_bridge command vue3.core.transformSuite; the helper only hydrates public AST helper symbols and undefined fields while Rust parser, transformIf/transformFor/transformText/transformSlotOutlet/transformElement projections, helper collection, and createRootCodegen-compatible root projection execute through Rust."
+                .to_string()
+        }
+        ("js transform context boundary", ConformanceCoverageKind::Mixed) => {
+            "Official Vue 3 compiler-core transform assertion group exercises caller-provided JavaScript NodeTransform callbacks and mutable transform context APIs such as replaceNode, removeNode, hoist, filename/selfName, and onError. These extension points cannot be serialized into the Rust bridge and remain mixed coverage rather than Rust compiler completion evidence."
                 .to_string()
         }
         _ => default_reason.to_string(),
@@ -18894,6 +19140,198 @@ mod tests {
         assert!(callback_boundary
             .reason
             .contains("caller-provided JavaScript"));
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn vue3_core_coverage_splits_transform_assertion_groups() {
+        let temp = std::env::temp_dir().join(format!(
+            "vuec-xtask-vue3-core-transform-coverage-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp).unwrap();
+        let report = temp.join("vitest-report.json");
+        fs::write(
+            &report,
+            r#"{
+              "testResults": [
+                {
+                  "name": "F:/repo/prepared/vue3-core/packages/compiler-core/__tests__/transform.spec.ts",
+                  "assertionResults": [
+                    {
+                      "fullName": "compiler: transform context state",
+                      "status": "passed"
+                    },
+                    {
+                      "fullName": "compiler: transform context.replaceNode",
+                      "status": "passed"
+                    },
+                    {
+                      "fullName": "compiler: transform should inject toString helper for interpolations",
+                      "status": "passed"
+                    },
+                    {
+                      "fullName": "compiler: transform root codegenNode root v-for",
+                      "status": "passed"
+                    },
+                    {
+                      "fullName": "compiler: transform root codegenNode multiple children w/ single root + comments",
+                      "status": "failed"
+                    }
+                  ]
+                }
+              ]
+            }"#,
+        )
+        .unwrap();
+        let execution = ConformanceExecutionResult {
+            status: "failed".into(),
+            runner: "vitest".into(),
+            prepared_root: "prepared".into(),
+            output_file: report.display().to_string(),
+            exit_code: Some(1),
+            stdout: String::new(),
+            stderr: String::new(),
+            counts: ConformanceExecutionCounts {
+                total: 5,
+                pass: 4,
+                fail: 1,
+                skip: 0,
+                pending: 0,
+            },
+        };
+
+        let coverage = conformance_coverage_report(
+            suite_spec(ConformanceSuite::Vue3Core),
+            AliasBackend::Generated,
+            Some(&execution),
+        );
+
+        assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
+        assert_eq!(coverage.files.len(), 2);
+        assert_eq!(coverage.rust_backed_total, 3);
+        assert_eq!(coverage.rust_backed_pass, 2);
+
+        let transform_suite = coverage
+            .files
+            .iter()
+            .find(|file| file.scope.as_deref() == Some("transform rust suite"))
+            .expect("transform rust coverage entry");
+        assert_eq!(transform_suite.source, ConformanceCoverageKind::RustBacked);
+        assert_eq!(transform_suite.counts.total, 3);
+        assert!(transform_suite.reason.contains("transformSuite"));
+
+        let callback_boundary = coverage
+            .files
+            .iter()
+            .find(|file| file.scope.as_deref() == Some("js transform context boundary"))
+            .expect("transform context coverage entry");
+        assert_eq!(callback_boundary.source, ConformanceCoverageKind::Mixed);
+        assert_eq!(callback_boundary.counts.total, 2);
+        assert!(callback_boundary.reason.contains("NodeTransform callbacks"));
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn vue3_core_transform_spec_uses_prepared_rust_api_for_root_codegen() {
+        let temp = std::env::temp_dir().join(format!(
+            "vuec-xtask-vue3-core-transform-shim-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let tests = temp
+            .join("packages")
+            .join("compiler-core")
+            .join("__tests__");
+        fs::create_dir_all(&tests).unwrap();
+        fs::write(
+            tests.join("transform.spec.ts"),
+            r#"import { baseParse } from '../src/parser'
+import { type NodeTransform, transform } from '../src/transform'
+import {
+  type DirectiveNode,
+  type ElementNode,
+  type ExpressionNode,
+  NodeTypes,
+  type VNodeCall,
+} from '../src/ast'
+import { ErrorCodes, createCompilerError } from '../src/errors'
+import {
+  CREATE_COMMENT,
+  FRAGMENT,
+  RENDER_SLOT,
+  TO_DISPLAY_STRING,
+} from '../src/runtimeHelpers'
+import { transformIf } from '../src/transforms/vIf'
+import { transformFor } from '../src/transforms/vFor'
+import { transformElement } from '../src/transforms/transformElement'
+import { transformSlotOutlet } from '../src/transforms/transformSlotOutlet'
+import { transformText } from '../src/transforms/transformText'
+import { PatchFlags } from '@vue/shared'
+
+describe('compiler: transform', () => {
+  test('context state', () => {
+    const ast = baseParse(`<div>hello</div>`)
+    const plugin: NodeTransform = () => {}
+    transform(ast, { nodeTransforms: [plugin] })
+    expect(ast).toBeTruthy()
+  })
+
+  test('should inject toString helper for interpolations', () => {
+    const ast = baseParse(`{{ foo }}`)
+    transform(ast, {})
+    expect(ast.helpers).toContain(TO_DISPLAY_STRING)
+  })
+
+  test('should inject createVNode and Comment for comments', () => {
+    const ast = baseParse(`<!--foo-->`)
+    transform(ast, {})
+    expect(ast.helpers).toContain(CREATE_COMMENT)
+  })
+
+  describe('root codegenNode', () => {
+    function transformWithCodegen(template: string) {
+      const ast = baseParse(template)
+      transform(ast, {
+        nodeTransforms: [
+          transformIf,
+          transformFor,
+          transformText,
+          transformSlotOutlet,
+          transformElement,
+        ],
+      })
+      return ast
+    }
+
+    test('single element', () => {
+      const ast = transformWithCodegen(`<div/>`)
+      expect(ast.codegenNode).toMatchObject({ type: NodeTypes.VNODE_CALL })
+    })
+  })
+})
+"#,
+        )
+        .unwrap();
+
+        rewrite_vue3_core_transform_public_api_spec(&temp).unwrap();
+
+        let spec = fs::read_to_string(tests.join("transform.spec.ts")).unwrap();
+        assert!(spec.contains("from './transform.rust-api'"));
+        assert!(spec.contains("const ast = transformWithCodegen(`{{ foo }}`)"));
+        assert!(spec.contains("const ast = transformWithCodegen(`<!--foo-->`)"));
+        assert!(!spec.contains("function transformWithCodegen(template: string)"));
+        assert!(spec.contains("const plugin: NodeTransform = () => {}"));
+
+        let api = fs::read_to_string(tests.join("transform.rust-api.ts")).unwrap();
+        assert!(api.contains("callBridge('vue3.core.transformSuite'"));
+        assert!(api.contains("hydrateTransformAst"));
+        assert!(api.contains("node.codegenNode = undefined"));
         let _ = fs::remove_dir_all(temp);
     }
 
