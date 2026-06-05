@@ -38,7 +38,51 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Run Rust tests
-        run: cargo test --workspace
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP "cargo-test-workspace.log"
+          cargo test --workspace 2>&1 | Tee-Object -FilePath $log
+          $exitCode = $LASTEXITCODE
+          if ($exitCode -eq 0) {
+            exit 0
+          }
+
+          $lines = @(Get-Content -LiteralPath $log -ErrorAction SilentlyContinue)
+          $patterns = @(
+            "FAILED",
+            "failures:",
+            "panicked at",
+            "thread '",
+            "assertion failed",
+            "error: test failed",
+            "test result: FAILED"
+          )
+          $matches = @(
+            $lines | Where-Object {
+              $line = $_
+              $patterns | Where-Object { $line.Contains($_) } | Select-Object -First 1
+            } | Select-Object -Last 120
+          )
+          $tail = @($lines | Select-Object -Last 80)
+          $summaryLines = @(
+            "cargo test --workspace failed on $env:RUNNER_OS/$env:RUNNER_ARCH with exit code $exitCode",
+            "rustc: $(rustc --version)",
+            "cargo: $(cargo --version)",
+            "node: $(node --version)",
+            "",
+            "Matched failure lines:",
+            $matches,
+            "",
+            "Last log lines:",
+            $tail
+          )
+          $summary = ($summaryLines -join "`n").Trim()
+          if ($summary.Length -gt 30000) {
+            $summary = $summary.Substring($summary.Length - 30000)
+          }
+          $escaped = $summary.Replace("%", "%25").Replace("`r", "%0D").Replace("`n", "%0A")
+          Write-Host "::error title=Rust workspace tests failed::$escaped"
+          exit $exitCode
 
       - name: Verify official lock
         run: cargo xtask verify-official-lock
