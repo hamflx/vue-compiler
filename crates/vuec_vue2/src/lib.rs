@@ -2490,8 +2490,8 @@ fn vue2_event_order_key<'a>(
     handlers: &[vuec_ast::Vue2EventHandler],
 ) -> (usize, usize, usize, &'a str) {
     let span = handlers
-        .first()
-        .and_then(|handler| handler.span)
+        .iter()
+        .find_map(|handler| handler.span)
         .map(|span| (span.start.0, span.end.0))
         .unwrap_or((usize::MAX, usize::MAX));
     (span.0, span.1, vue2_same_attr_event_rank(name), name)
@@ -4826,7 +4826,7 @@ fn gen_dom_model(
         false,
         false,
         true,
-        element.span,
+        None,
     );
     element.directives.push(Vue2Directive {
         name: "model".into(),
@@ -5813,6 +5813,13 @@ mod tests {
         assert_eq!(
             model_with_input.render,
             r#"with(this){return _c('input',{directives:[{name:"model",rawName:"v-model",value:(val),expression:"val"}],ref:"input",domProps:{"value":(val)},on:{"input":[function($event){if($event.target.composing)return;val=$event.target.value},function($event){return updateValue($event.target.value)}],"change":emitChange}})}"#
+        );
+
+        let model_with_later_keyup =
+            compile(r#"<input v-model="val" @keyup.enter="submit">"#, options());
+        assert_eq!(
+            model_with_later_keyup.render,
+            r#"with(this){return _c('input',{directives:[{name:"model",rawName:"v-model",value:(val),expression:"val"}],domProps:{"value":(val)},on:{"keyup":function($event){if(!$event.type.indexOf('key')&&_k($event.keyCode,"enter",13,$event.key,"Enter"))return null;return submit.apply(null, arguments)},"input":function($event){if($event.target.composing)return;val=$event.target.value}}})}"#
         );
 
         let lazy_model_with_change = compile(
