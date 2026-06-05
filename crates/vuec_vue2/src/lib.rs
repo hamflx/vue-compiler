@@ -4701,10 +4701,20 @@ fn should_use_prop(
     if options.disable_default_must_use_prop {
         return false;
     }
+    if element.component.is_some() {
+        return false;
+    }
+    if name == "value" && vue2_tag_accepts_value_prop(&element.tag) {
+        return element.attrs_map.get("type").map(String::as_str) != Some("button");
+    }
     matches!(
         (element.tag.as_str(), name),
-        ("input", "value") | ("textarea", "value") | ("video", "muted")
+        ("option", "selected") | ("input", "checked") | ("video", "muted")
     )
+}
+
+fn vue2_tag_accepts_value_prop(tag: &str) -> bool {
+    matches!(tag, "input" | "textarea" | "option" | "select" | "progress")
 }
 
 fn add_handler(
@@ -5722,6 +5732,54 @@ mod tests {
         assert!(component_model
             .render
             .contains("callback:function ($$v) {\n test \n=$$v}"));
+    }
+
+    #[test]
+    fn generates_vue2_platform_must_use_props_like_official_codegen() {
+        let option = compile(
+            r#"<option :value="item.value" :selected="item.isRefined"></option>"#,
+            options(),
+        );
+        assert_eq!(
+            option.render,
+            r#"with(this){return _c('option',{domProps:{"value":item.value,"selected":item.isRefined}})}"#
+        );
+
+        let checkbox = compile(
+            r#"<input type="checkbox" :value="item.value" :checked="item.isRefined">"#,
+            options(),
+        );
+        assert_eq!(
+            checkbox.render,
+            r#"with(this){return _c('input',{attrs:{"type":"checkbox"},domProps:{"value":item.value,"checked":item.isRefined}})}"#
+        );
+
+        let select = compile(r#"<select :value="selected"></select>"#, options());
+        assert_eq!(
+            select.render,
+            r#"with(this){return _c('select',{domProps:{"value":selected}})}"#
+        );
+
+        let progress = compile(r#"<progress :value="n"></progress>"#, options());
+        assert_eq!(
+            progress.render,
+            r#"with(this){return _c('progress',{domProps:{"value":n}})}"#
+        );
+
+        let button_value = compile(r#"<input type="button" :value="label">"#, options());
+        assert_eq!(
+            button_value.render,
+            r#"with(this){return _c('input',{attrs:{"type":"button","value":label}})}"#
+        );
+
+        let dynamic_component = compile(
+            r#"<component :is="tag" :value="label"></component>"#,
+            options(),
+        );
+        assert_eq!(
+            dynamic_component.render,
+            r#"with(this){return _c(tag,{tag:"component",attrs:{"value":label}})}"#
+        );
     }
 
     #[test]
