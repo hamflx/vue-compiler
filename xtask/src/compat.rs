@@ -13985,6 +13985,12 @@ function collectPredicateHits(
 }
 "#,
     )?;
+    remove_snapshot_entries_by_key_prefix(
+        &transforms
+            .join("__snapshots__")
+            .join("transformElement.spec.ts.snap"),
+        "compiler: v-for > codegen > ",
+    )?;
     Ok(())
 }
 
@@ -16514,6 +16520,55 @@ fn rewrite_text_file_block(path: &Path, from: &str, to: &str, label: &str) -> Re
         label,
         path.display()
     );
+    Ok(())
+}
+
+fn remove_snapshot_entries_by_key_prefix(path: &Path, prefix: &str) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let original =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let normalized = original.replace("\r\n", "\n");
+    let marker = "exports[`";
+    let mut output = String::new();
+    let mut cursor = 0;
+    let mut removed = 0usize;
+    let mut kept = 0usize;
+
+    while let Some(relative_start) = normalized[cursor..].find(marker) {
+        let start = cursor + relative_start;
+        output.push_str(&normalized[cursor..start]);
+        let next_start = normalized[start + marker.len()..]
+            .find(marker)
+            .map(|relative| start + marker.len() + relative)
+            .unwrap_or(normalized.len());
+        let block = &normalized[start..next_start];
+        let key_start = marker.len();
+        let key_end = block[key_start..]
+            .find("`] = `")
+            .map(|index| key_start + index);
+        match key_end.map(|index| &block[key_start..index]) {
+            Some(key) if key.starts_with(prefix) => {
+                removed += 1;
+            }
+            _ => {
+                kept += 1;
+                output.push_str(block);
+            }
+        }
+        cursor = next_start;
+    }
+    output.push_str(&normalized[cursor..]);
+
+    if removed == 0 {
+        return Ok(());
+    }
+    if kept == 0 {
+        fs::remove_file(path).with_context(|| format!("failed to remove {}", path.display()))?;
+    } else {
+        write_text(path, &output)?;
+    }
     Ok(())
 }
 
@@ -19882,6 +19937,18 @@ describe('compiler: transform', () => {
             .join("__tests__")
             .join("transforms");
         fs::create_dir_all(&transforms_tests).unwrap();
+        let transform_snapshots = transforms_tests.join("__snapshots__");
+        fs::create_dir_all(&transform_snapshots).unwrap();
+        fs::write(
+            transform_snapshots.join("transformElement.spec.ts.snap"),
+            r#"// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`compiler: v-for > codegen > basic v-for 1`] = `
+"old duplicated transformElement v-for snapshot"
+`;
+"#,
+        )
+        .unwrap();
         fs::write(
             transforms_tests.join("vOnce.spec.ts"),
             r#"import {
@@ -20684,6 +20751,9 @@ test('placeholder', () => {
         assert!(transform_element_spec.contains("from './vFor.rust-api'"));
         assert!(transform_element_spec.contains("parseWithElementTransformOriginal"));
         assert!(!transform_element_spec.contains("from './vFor.spec'"));
+        assert!(!transform_snapshots
+            .join("transformElement.spec.ts.snap")
+            .exists());
         let transform_element_api =
             fs::read_to_string(transforms_tests.join("transformElement.rust-api.ts")).unwrap();
         assert!(transform_element_api.contains("callBridge('vue3.core.transformElementSuite'"));
