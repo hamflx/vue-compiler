@@ -494,10 +494,9 @@ pub fn compile_vue27_sfc_template(
             "errors": preprocessed.errors,
         }));
     }
-    let compiled = vuec_vue2::compile(
-        &preprocessed.source,
-        vue27_template_vue2_options(raw_options.clone()),
-    );
+    let compile_options = vue27_template_vue2_options(raw_options.clone());
+    let output_source_range = compile_options.output_source_range;
+    let compiled = vuec_vue2::compile(&preprocessed.source, compile_options);
     to_json_string(json!({
         "ast": null,
         "code": compiler.vue27_sfc_template_code(
@@ -507,8 +506,8 @@ pub fn compile_vue27_sfc_template(
             vue27_template_is_production(&raw_options),
         ),
         "source": source,
-        "tips": compiled.tips,
-        "errors": compiled.errors,
+        "tips": vue2_tips_value(&compiled.tips, output_source_range),
+        "errors": vue2_errors_value(&compiled.errors, output_source_range),
     }))
 }
 
@@ -1018,14 +1017,36 @@ fn vue2_errors_value(errors: &[Vue2Error], output_source_range: bool) -> Value {
 
 fn vue2_tips_value(tips: &[Vue2Warning], output_source_range: bool) -> Value {
     if output_source_range {
-        json!(tips)
+        Value::Array(tips.iter().map(vue2_tip_range_value).collect())
     } else {
         json!(tips.iter().map(|tip| tip.msg.clone()).collect::<Vec<_>>())
     }
 }
 
+fn vue2_tip_range_value(tip: &Vue2Warning) -> Value {
+    let mut value = Map::new();
+    value.insert("msg".into(), json!(tip.msg));
+    if let Some(start) = tip.start {
+        value.insert("start".into(), json!(start));
+    }
+    if let Some(end) = tip.end {
+        value.insert("end".into(), json!(end));
+    }
+    Value::Object(value)
+}
+
 fn vue27_template_vue2_options(value: Value) -> Vue2CompileOptions {
-    let mut options = vue2_options(value.clone());
+    let compiler_value = value
+        .get("compilerOptions")
+        .filter(|value| value.is_object())
+        .cloned()
+        .unwrap_or_else(|| value.clone());
+    let mut options = vue2_options(compiler_value);
+    options.output_source_range = bool_option(
+        &value,
+        "outputSourceRange",
+        bool_option(&value, "output_source_range", options.output_source_range),
+    );
     if let Some(bindings) = string_map_option(&value, "bindings") {
         options.bindings = bindings;
     }
@@ -4394,6 +4415,57 @@ mod tests {
         assert!(options.should_decode_newlines_for_href);
         assert!(options.warn);
         assert!(options.optimize);
+    }
+
+    #[test]
+    fn vue27_template_vue2_options_reads_compiler_options_and_public_ranges() {
+        let options = vue27_template_vue2_options(json!({
+            "compilerOptions": {
+                "comments": true,
+                "outputSourceRange": false,
+                "preserveWhitespace": false
+            },
+            "outputSourceRange": true,
+            "bindings": {
+                "Foo": "setup-const",
+                "__isScriptSetup": true
+            }
+        }));
+
+        assert!(options.comments);
+        assert!(options.output_source_range);
+        assert!(!options.preserve_whitespace);
+        assert_eq!(
+            options.bindings.get("Foo").map(String::as_str),
+            Some("setup-const")
+        );
+        assert!(options.bindings_is_script_setup);
+    }
+
+    #[test]
+    fn vue2_ranged_tips_use_public_message_range_shape() {
+        let tips = vec![Vue2Warning {
+            msg: "component lists rendered with v-for should have explicit keys.".into(),
+            start: Some(24),
+            end: Some(46),
+            tip: true,
+        }];
+
+        let ranged = vue2_tips_value(&tips, true);
+        assert_eq!(
+            ranged,
+            json!([{
+                "msg": "component lists rendered with v-for should have explicit keys.",
+                "start": 24,
+                "end": 46
+            }])
+        );
+
+        let plain = vue2_tips_value(&tips, false);
+        assert_eq!(
+            plain,
+            json!(["component lists rendered with v-for should have explicit keys."])
+        );
     }
 
     #[test]

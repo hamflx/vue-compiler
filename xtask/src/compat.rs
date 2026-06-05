@@ -8676,7 +8676,8 @@ function hydrateVue3Node(node) {
 function callBridge(command, payload) {
   const result = cp.spawnSync(BRIDGE_BIN, [command], {
     input: JSON.stringify(payload || {}),
-    encoding: 'utf8'
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024
   });
   if (result.error) {
     throw result.error;
@@ -13292,7 +13293,8 @@ const bridgeBin = process.env.VUEC_NODE_BRIDGE || path.resolve(process.cwd(), {}
 function callBridge(command, payload) {{
   const result = cp.spawnSync(bridgeBin, [command], {{
     input: JSON.stringify(payload || {{}}),
-    encoding: 'utf8'
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024
   }})
   if (result.error) throw result.error
   if (result.status !== 0) {{
@@ -19495,6 +19497,7 @@ projects = []
         assert!(ALIAS_RUNTIME_JS.contains("function vue27SfcTemplateIsProduction"));
         assert!(ALIAS_RUNTIME_JS.contains("function vue27SfcTemplatePrettifyEnabled"));
         assert!(ALIAS_RUNTIME_JS.contains("function vue27SfcCompileTemplateBridgePayload"));
+        assert!(ALIAS_RUNTIME_JS.contains("maxBuffer: 64 * 1024 * 1024"));
         assert!(ALIAS_RUNTIME_JS.contains("require('prettier').format(out.code || ''"));
         assert!(ALIAS_RUNTIME_JS.contains("parser: 'babel'"));
         assert!(ALIAS_RUNTIME_JS.contains("return !!options.prettify"));
@@ -19726,6 +19729,7 @@ projects = []
 
         assert!(source.contains("const bridgePayload = vue3SfcParseBridgePayload(payload);"));
         assert!(source.contains("callBridge('sfc.parse', bridgePayloadForCall(bridgePayload))"));
+        assert!(source.contains("maxBuffer: 64 * 1024 * 1024"));
         assert!(source
             .contains("native.parseSfcResult(payload.source, bridgePayload.bridgeOptions || {})"));
         assert!(source.contains("function hydrateVue3SfcParseResult"));
@@ -19762,6 +19766,23 @@ projects = []
         assert!(source.contains("Array.isArray(result.warnings)"));
         assert!(source.contains("Object.defineProperty(bindings, '__isScriptSetup'"));
         assert!(source.contains("[@vue/compiler-sfc] ${message}"));
+    }
+
+    #[test]
+    fn napi_vue3_compiler_core_native_alias_bridge_uses_large_stdout_buffer() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let source = fs::read_to_string(
+            repo_root
+                .join("packages")
+                .join("native-aliases")
+                .join("@vue")
+                .join("compiler-core")
+                .join("index.js"),
+        )
+        .unwrap();
+
+        assert!(source.contains("cp.spawnSync(bridgeBin"));
+        assert!(source.contains("maxBuffer: 64 * 1024 * 1024"));
     }
 
     #[test]

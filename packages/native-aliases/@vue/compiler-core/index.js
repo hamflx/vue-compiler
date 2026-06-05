@@ -309,6 +309,7 @@ function callBridge(command, payload) {
   const result = cp.spawnSync(bridgeBin, [String(command || '')], {
     input: JSON.stringify(payload || {}),
     encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
   });
   if (result.error) throw result.error;
   if (result.status !== 0) {

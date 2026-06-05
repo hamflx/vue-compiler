@@ -2548,6 +2548,9 @@ pub struct Vue2ScopedSlot {
     pub for_iterator2: Option<JsPatternId>,
     /// Whether the scoped slot collection needs force update.
     pub force_update: bool,
+    /// Whether stable scoped slots need a generated branch key.
+    #[serde(default)]
+    pub needs_key: bool,
 }
 
 /// Vue 2 text-call MIR payload.

@@ -498,6 +498,7 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
             let filename = string_field_or(&payload, "filename", "template.vue.html");
             let raw_options = payload.get("options").unwrap_or(&Value::Null);
             let options = vue27_sfc_template_vue2_options(payload.get("options"));
+            let output_source_range = options.output_source_range;
             let compiler = SfcCompiler::new();
             let preprocessed = compiler.preprocess_vue27_template(
                 &source,
@@ -522,8 +523,8 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
                     vue27_template_is_production(raw_options),
                 ),
                 "source": source,
-                "tips": compiled.tips,
-                "errors": compiled.errors,
+                "tips": vue2_tips_value(&compiled.tips, output_source_range),
+                "errors": vue2_errors_value(&compiled.errors, output_source_range),
             }))
         }
         "sfc.compileScript" => {
@@ -1156,10 +1157,22 @@ fn vue2_errors_value(errors: &[Vue2Error], output_source_range: bool) -> Value {
 
 fn vue2_tips_value(tips: &[Vue2Warning], output_source_range: bool) -> Value {
     if output_source_range {
-        json!(tips)
+        Value::Array(tips.iter().map(vue2_tip_range_value).collect())
     } else {
         json!(tips.iter().map(|tip| tip.msg.clone()).collect::<Vec<_>>())
     }
+}
+
+fn vue2_tip_range_value(tip: &Vue2Warning) -> Value {
+    let mut value = Map::new();
+    value.insert("msg".into(), json!(tip.msg));
+    if let Some(start) = tip.start {
+        value.insert("start".into(), json!(start));
+    }
+    if let Some(end) = tip.end {
+        value.insert("end".into(), json!(end));
+    }
+    Value::Object(value)
 }
 
 fn vue27_parse_component_value(
@@ -13433,10 +13446,20 @@ fn vue2_options(value: Option<&Value>) -> Vue2CompileOptions {
 }
 
 fn vue27_sfc_template_vue2_options(value: Option<&Value>) -> Vue2CompileOptions {
-    let mut options = Vue2CompileOptions::default();
     let Some(value) = value else {
-        return options;
+        return Vue2CompileOptions::default();
     };
+    let compiler_value = value
+        .get("compilerOptions")
+        .or_else(|| value.get("compiler_options"))
+        .filter(|value| value.is_object())
+        .unwrap_or(value);
+    let mut options = vue2_options(Some(compiler_value));
+    options.output_source_range = bool_option(
+        value,
+        "outputSourceRange",
+        bool_option(value, "output_source_range", options.output_source_range),
+    );
     options.bindings = string_map_option(value, "bindings").unwrap_or_default();
     if let Some(bindings) = value.get("bindings") {
         options.bindings_is_script_setup = bindings
@@ -21346,6 +21369,75 @@ mod tests {
             missing["code"],
             json!("var render = function () {}\nvar staticRenderFns = []\n")
         );
+    }
+
+    #[test]
+    fn vue27_bridge_compile_template_projects_vue2_tip_ranges_from_compiler_options() {
+        let plain = dispatch(
+            "sfc.vue27.compileTemplate",
+            json!({
+                "source": r#"<div><el-dropdown-item v-for="item in handle">{{ item.label }}</el-dropdown-item></div>"#,
+                "filename": "example.vue",
+                "options": {
+                    "compilerOptions": {
+                        "outputSourceRange": false
+                    }
+                }
+            }),
+        )
+        .expect("vue27 sfc compileTemplate");
+
+        assert_eq!(plain["tips"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            plain["tips"][0],
+            json!(
+                r#"<el-dropdown-item v-for="item in handle">: component lists rendered with v-for should have explicit keys. See https://v2.vuejs.org/v2/guide/list.html#key for more info."#
+            )
+        );
+
+        let ranged = dispatch(
+            "sfc.vue27.compileTemplate",
+            json!({
+                "source": r#"<div><el-dropdown-item v-for="item in handle">{{ item.label }}</el-dropdown-item></div>"#,
+                "filename": "example.vue",
+                "options": {
+                    "compilerOptions": {
+                        "outputSourceRange": true
+                    }
+                }
+            }),
+        )
+        .expect("vue27 sfc compileTemplate");
+
+        assert_eq!(ranged["tips"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            ranged["tips"][0]["msg"],
+            json!(
+                r#"<el-dropdown-item v-for="item in handle">: component lists rendered with v-for should have explicit keys. See https://v2.vuejs.org/v2/guide/list.html#key for more info."#
+            )
+        );
+        assert_eq!(ranged["tips"][0]["start"], json!(23));
+        assert_eq!(ranged["tips"][0]["end"], json!(45));
+        assert!(ranged["tips"][0].get("tip").is_none());
+
+        let leading = dispatch(
+            "sfc.vue27.compileTemplate",
+            json!({
+                "source": "\n<div><el-dropdown-item v-for=\"item in handle\">{{ item.label }}</el-dropdown-item></div>\n",
+                "filename": "example.vue",
+                "options": {
+                    "compilerOptions": {
+                        "outputSourceRange": true
+                    }
+                }
+            }),
+        )
+        .expect("vue27 sfc compileTemplate");
+
+        assert_eq!(leading["tips"].as_array().unwrap().len(), 1);
+        assert_eq!(leading["tips"][0]["start"], json!(24));
+        assert_eq!(leading["tips"][0]["end"], json!(46));
+        assert!(leading["tips"][0].get("tip").is_none());
     }
 
     #[test]

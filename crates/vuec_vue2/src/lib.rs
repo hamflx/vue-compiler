@@ -499,10 +499,12 @@ impl Vue2Compiler {
 
     /// Parses, optimizes, and generates a Vue 2 template.
     pub fn compile(&self, template: &str, options: Vue2CompileOptions) -> Vue2CompiledResult {
-        let template = template.trim();
+        let source = template;
+        let leading_space_len = source.len() - source.trim_start().len();
+        let template = source.trim();
         let mut diagnostics = DiagnosticSink::default();
         let mut element_ast = parse_element_tree(&mut diagnostics, template, &options);
-        collect_element_warnings(element_ast.as_ref(), &mut diagnostics);
+        collect_element_warnings(element_ast.as_ref(), &options, &mut diagnostics);
         if options.optimize {
             if let Some(root) = element_ast.as_mut() {
                 optimize(root, &options);
@@ -520,7 +522,7 @@ impl Vue2Compiler {
             .iter()
             .map(render_diagnostic_message)
             .collect();
-        let (errors, tips) = split_compilation_issues(&diagnostics);
+        let (errors, tips) = split_compilation_issues(&diagnostics, source, leading_space_len);
         Vue2CompiledResult {
             ast,
             element_ast,
@@ -1159,19 +1161,39 @@ fn cleanup_scoped_slot_children(element: &mut Vue2Element, in_pre_tag: bool) {
     }
 }
 
-fn collect_element_warnings(element: Option<&Vue2Element>, diagnostics: &mut DiagnosticSink) {
+fn collect_element_warnings(
+    element: Option<&Vue2Element>,
+    options: &Vue2CompileOptions,
+    diagnostics: &mut DiagnosticSink,
+) {
     let Some(element) = element else {
         return;
     };
-    collect_element_warning_node(element, diagnostics);
+    collect_element_warning_node(element, options, diagnostics);
 }
 
-fn collect_element_warning_node(element: &Vue2Element, diagnostics: &mut DiagnosticSink) {
+fn collect_element_warning_node(
+    element: &Vue2Element,
+    options: &Vue2CompileOptions,
+    diagnostics: &mut DiagnosticSink,
+) {
     if element.inline_template && element.children.len() != 1 {
         diagnostics.push(vue2_warning(
             "W_VUE2_INLINE_TEMPLATE_CHILDREN",
             "Inline-template components must have exactly one child element.",
             element.span,
+        ));
+    }
+    if element.for_exp.is_some()
+        && is_component(element, options)
+        && element.tag != "slot"
+        && element.tag != "template"
+        && element.key.is_none()
+    {
+        diagnostics.push(vue2_tip(
+            "T_VUE2_COMPONENT_V_FOR_KEY",
+            vue2_component_v_for_key_tip(element),
+            element.for_span,
         ));
     }
     if element.tag == "transition-group" {
@@ -1196,15 +1218,24 @@ fn collect_element_warning_node(element: &Vue2Element, diagnostics: &mut Diagnos
     }
     for child in &element.children {
         if let Vue2Node::Element(child) = child {
-            collect_element_warning_node(child, diagnostics);
+            collect_element_warning_node(child, options, diagnostics);
         }
     }
     for slot in element.scoped_slots.values() {
-        collect_element_warning_node(slot, diagnostics);
+        collect_element_warning_node(slot, options, diagnostics);
     }
     for condition in element.if_conditions.iter().skip(1) {
-        collect_element_warning_node(&condition.block, diagnostics);
+        collect_element_warning_node(&condition.block, options, diagnostics);
     }
+}
+
+fn vue2_component_v_for_key_tip(element: &Vue2Element) -> String {
+    let alias = element.alias.as_deref().unwrap_or("");
+    let exp = element.for_exp.as_deref().unwrap_or("");
+    format!(
+        "<{} v-for=\"{} in {}\">: component lists rendered with v-for should have explicit keys. See https://v2.vuejs.org/v2/guide/list.html#key for more info.",
+        element.tag, alias, exp
+    )
 }
 
 fn process_pre(element: &mut Vue2Element) {
@@ -2863,9 +2894,23 @@ fn gen_mir_scoped_slots(slots: &[Vue2ScopedSlot], state: &mut Vue2MirCodegenStat
         .join(",");
     if slots.iter().any(|slot| slot.force_update) {
         format!("scopedSlots:_u([{rendered}],null,true)")
+    } else if slots.iter().any(|slot| slot.needs_key) {
+        format!(
+            "scopedSlots:_u([{rendered}],null,false,{})",
+            vue2_hash_scoped_slots(&rendered)
+        )
     } else {
         format!("scopedSlots:_u([{rendered}])")
     }
+}
+
+fn vue2_hash_scoped_slots(value: &str) -> u32 {
+    let mut hash = 5381u32;
+    let units = value.encode_utf16().collect::<Vec<_>>();
+    for unit in units.iter().rev() {
+        hash = hash.wrapping_mul(33) ^ *unit as u32;
+    }
+    hash
 }
 
 fn gen_mir_scoped_slot(slot: &Vue2ScopedSlot, state: &mut Vue2MirCodegenState<'_>) -> String {
@@ -4030,7 +4075,7 @@ fn lower_vue2_plain_element_to_mir(
     };
     lower_vue2_child_sequence(&children, ast, hir_id, mir_id, state);
     lower_vue2_inline_template_to_mir(element, ast, ast_node, hir_id, mir_id, state);
-    lower_vue2_scoped_slots_to_mir(element, ast, hir_id, mir_id, state);
+    lower_vue2_scoped_slots_to_mir(element, ast_id, ast, hir_id, mir_id, state);
 
     if let Some(wrapper) = wrapper_mir {
         if let Some(node) = state.mir.node_mut(wrapper) {
@@ -4342,6 +4387,7 @@ fn lower_vue2_inline_template_to_mir(
 
 fn lower_vue2_scoped_slots_to_mir(
     element: &vuec_ast::Vue2Element,
+    element_id: NodeId,
     ast: &Vue2Ast,
     hir_parent: NodeId,
     mir_id: NodeId,
@@ -4351,8 +4397,11 @@ fn lower_vue2_scoped_slots_to_mir(
         return;
     }
 
+    let mut scoped_slots = element.scoped_slots.iter().collect::<Vec<_>>();
+    scoped_slots.sort_by_key(|(_, slot_id)| vue2_ast_node_source_order(ast, **slot_id));
+
     let mut slots = Vec::new();
-    for (key, slot_id) in &element.scoped_slots {
+    for (key, slot_id) in scoped_slots {
         let Some(slot_node) = ast.node(*slot_id) else {
             continue;
         };
@@ -4396,6 +4445,7 @@ fn lower_vue2_scoped_slots_to_mir(
                 for_iterator1: slot.iterator1,
                 for_iterator2: slot.iterator2,
                 force_update: false,
+                needs_key: false,
             }),
             slot_node.span.clone(),
         );
@@ -4415,9 +4465,11 @@ fn lower_vue2_scoped_slots_to_mir(
         }
     }
 
-    let force_update = slots.iter().any(|slot| slot.force_update);
+    let (force_update, needs_key) =
+        vue2_scoped_slot_stability(element_id, element, ast, &slots, state);
     for slot in &mut slots {
         slot.force_update = force_update;
+        slot.needs_key = !force_update && needs_key;
     }
     if let Some(Vue2MirKind::CreateElement(create)) =
         state.mir.node_mut(mir_id).map(|node| &mut node.kind)
@@ -4425,6 +4477,63 @@ fn lower_vue2_scoped_slots_to_mir(
         let data = create.data.get_or_insert_with(Vue2DataObject::default);
         data.scoped_slots = slots;
     }
+}
+
+fn vue2_ast_node_source_order(ast: &Vue2Ast, node_id: NodeId) -> (usize, usize, u32) {
+    ast.node(node_id)
+        .and_then(|node| {
+            node.span
+                .source()
+                .map(|span| (span.start.0, span.end.0, node_id.0))
+        })
+        .unwrap_or((usize::MAX, usize::MAX, node_id.0))
+}
+
+fn vue2_scoped_slot_stability(
+    element_id: NodeId,
+    element: &vuec_ast::Vue2Element,
+    ast: &Vue2Ast,
+    slots: &[Vue2ScopedSlot],
+    state: &Vue2LoweringState,
+) -> (bool, bool) {
+    let mut force_update = element.for_exp.is_some() || slots.iter().any(|slot| slot.force_update);
+    let mut needs_key = element.if_exp.is_some();
+
+    if !force_update {
+        let mut parent = ast.node(element_id).and_then(|node| node.parent);
+        while let Some(parent_id) = parent {
+            let Some(parent_node) = ast.node(parent_id) else {
+                break;
+            };
+            if let Vue2AstKind::Element(parent_element) = &parent_node.kind {
+                if vue2_scoped_slot_parent_scope_forces_update(parent_element, state)
+                    || parent_element.for_exp.is_some()
+                {
+                    force_update = true;
+                    break;
+                }
+                if parent_element.if_exp.is_some() {
+                    needs_key = true;
+                }
+            }
+            parent = parent_node.parent;
+        }
+    }
+
+    (force_update, needs_key)
+}
+
+fn vue2_scoped_slot_parent_scope_forces_update(
+    element: &vuec_ast::Vue2Element,
+    state: &Vue2LoweringState,
+) -> bool {
+    let Some(scope) = element.slot_scope else {
+        return false;
+    };
+    state
+        .js
+        .pattern_entry(scope)
+        .is_some_and(|entry| entry.source.as_str() != "_empty_")
 }
 
 fn lower_vue2_scoped_slot_body_to_mir(
@@ -5759,24 +5868,32 @@ fn vue2_warning(code: &str, message: impl Into<String>, span: Option<Span>) -> D
     Diagnostic::vue2_warning(code, message, span)
 }
 
+fn vue2_tip(code: &str, message: impl Into<String>, span: Option<Span>) -> Diagnostic {
+    Diagnostic::vue2_tip(code, message, span)
+}
+
 fn vue2_error(code: &str, message: impl Into<String>, span: Option<Span>) -> Diagnostic {
     Diagnostic::vue2_error(code, message, span)
 }
 
-fn split_compilation_issues(diagnostics: &DiagnosticSink) -> (Vec<Vue2Error>, Vec<Vue2Warning>) {
+fn split_compilation_issues(
+    diagnostics: &DiagnosticSink,
+    source: &str,
+    leading_space_len: usize,
+) -> (Vec<Vue2Error>, Vec<Vue2Warning>) {
     let mut errors = Vec::new();
     let mut tips = Vec::new();
     for diagnostic in diagnostics.as_slice() {
         match diagnostic.severity {
             Severity::Error | Severity::Warning => errors.push(Vue2Error {
                 msg: diagnostic.message.clone(),
-                start: diagnostic.span.map(|span| span.start.0),
-                end: vue2_issue_end(diagnostic),
+                start: vue2_issue_start(diagnostic, source, leading_space_len),
+                end: vue2_issue_end(diagnostic, source, leading_space_len),
             }),
             Severity::Tip | Severity::Note => tips.push(Vue2Warning {
                 msg: diagnostic.message.clone(),
-                start: diagnostic.span.map(|span| span.start.0),
-                end: vue2_issue_end(diagnostic),
+                start: vue2_issue_start(diagnostic, source, leading_space_len),
+                end: vue2_issue_end(diagnostic, source, leading_space_len),
                 tip: matches!(diagnostic.severity, Severity::Tip),
             }),
         }
@@ -5784,7 +5901,21 @@ fn split_compilation_issues(diagnostics: &DiagnosticSink) -> (Vec<Vue2Error>, Ve
     (errors, tips)
 }
 
-fn vue2_issue_end(diagnostic: &Diagnostic) -> Option<usize> {
+fn vue2_issue_start(
+    diagnostic: &Diagnostic,
+    source: &str,
+    leading_space_len: usize,
+) -> Option<usize> {
+    diagnostic
+        .span
+        .map(|span| vue2_public_source_offset(source, leading_space_len + span.start.0))
+}
+
+fn vue2_issue_end(
+    diagnostic: &Diagnostic,
+    source: &str,
+    leading_space_len: usize,
+) -> Option<usize> {
     if diagnostic.code == "W_VUE2_TEXT_OUTSIDE_ROOT"
         && diagnostic
             .message
@@ -5792,7 +5923,17 @@ fn vue2_issue_end(diagnostic: &Diagnostic) -> Option<usize> {
     {
         return None;
     }
-    diagnostic.span.map(|span| span.end.0)
+    diagnostic
+        .span
+        .map(|span| vue2_public_source_offset(source, leading_space_len + span.end.0))
+}
+
+fn vue2_public_source_offset(source: &str, byte_offset: usize) -> usize {
+    let mut offset = byte_offset.min(source.len());
+    while offset > 0 && !source.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    source[..offset].encode_utf16().count()
 }
 
 fn render_diagnostic_message(diagnostic: &Diagnostic) -> String {
@@ -6449,6 +6590,42 @@ mod tests {
             new_syntax_if.render,
             r#"with(this){return _c('foo',{scopedSlots:_u([(show)?{key:"default",fn:function(bar){return [_v(_s(bar))]}}:null],null,true)})}"#
         );
+
+        let parent_if_key = compile(
+            r#"<div v-if="ok"><foo><template #default="s"><span>{{ s.x }}</span></template></foo></div>"#,
+            options(),
+        );
+        assert_eq!(
+            parent_if_key.render,
+            r#"with(this){return (ok)?_c('div',[_c('foo',{scopedSlots:_u([{key:"default",fn:function(s){return [_c('span',[_v(_s(s.x))])]}}],null,false,2164623802)})],1):_e()}"#
+        );
+
+        let parent_for_force_update = compile(
+            r#"<div v-for="item in items"><foo><template #default="s"><span>{{ item }}{{ s.x }}</span></template></foo></div>"#,
+            options(),
+        );
+        assert_eq!(
+            parent_for_force_update.render,
+            r#"with(this){return _l((items),function(item){return _c('div',[_c('foo',{scopedSlots:_u([{key:"default",fn:function(s){return [_c('span',[_v(_s(item)+_s(s.x))])]}}],null,true)})],1)})}"#
+        );
+
+        let slot_for_force_update = compile(
+            r#"<foo><template v-for="item in items" #default="s"><span>{{ item }}{{ s.x }}</span></template></foo>"#,
+            options(),
+        );
+        assert_eq!(
+            slot_for_force_update.render,
+            r#"with(this){return _c('foo',{scopedSlots:_u([_l((items),function(item){return {key:"default",fn:function(s){return [_c('span',[_v(_s(item)+_s(s.x))])]}}})],null,true)})}"#
+        );
+
+        let contains_slot_child_force_update = compile(
+            r#"<foo><template #default="s"><slot></slot></template></foo>"#,
+            options(),
+        );
+        assert_eq!(
+            contains_slot_child_force_update.render,
+            r#"with(this){return _c('foo',{scopedSlots:_u([{key:"default",fn:function(s){return [_t("default")]}}],null,true)})}"#
+        );
     }
 
     #[test]
@@ -6752,6 +6929,38 @@ mod tests {
                 "{template}"
             );
         }
+    }
+
+    #[test]
+    fn tips_for_vue2_component_v_for_without_key_like_official_codegen() {
+        let result = compile(
+            r#"<div><el-dropdown-item v-for="item in handle">{{ item.label }}</el-dropdown-item><span v-for="item in handle">{{ item }}</span><slot v-for="item in handle"></slot><template v-for="item in handle"><foo/></template></div>"#,
+            options(),
+        );
+
+        assert_eq!(result.tips.len(), 1);
+        assert_eq!(
+            result.tips[0].msg,
+            r#"<el-dropdown-item v-for="item in handle">: component lists rendered with v-for should have explicit keys. See https://v2.vuejs.org/v2/guide/list.html#key for more info."#
+        );
+        assert!(result.tips[0].tip);
+        assert_eq!(result.tips[0].start, Some(23));
+        assert_eq!(result.tips[0].end, Some(45));
+        assert!(result.errors.is_empty());
+
+        let leading_whitespace = compile(
+            "\n<div><el-dropdown-item v-for=\"item in handle\">{{ item.label }}</el-dropdown-item></div>\n",
+            options(),
+        );
+        assert_eq!(leading_whitespace.tips.len(), 1);
+        assert_eq!(leading_whitespace.tips[0].start, Some(24));
+        assert_eq!(leading_whitespace.tips[0].end, Some(46));
+
+        let keyed = compile(
+            r#"<div><el-dropdown-item v-for="item in handle" :key="item.value">{{ item.label }}</el-dropdown-item></div>"#,
+            options(),
+        );
+        assert!(keyed.tips.is_empty());
     }
 
     #[test]
