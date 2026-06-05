@@ -3389,6 +3389,12 @@ impl PrefixIdentifiersContext<'_, '_> {
                     self.walk_argument(argument);
                 }
             }
+            Expression::NewExpression(expression) => {
+                self.walk_expression(&expression.callee);
+                for argument in &expression.arguments {
+                    self.walk_argument(argument);
+                }
+            }
             Expression::ArrayExpression(array) => {
                 for element in &array.elements {
                     match element {
@@ -35403,6 +35409,20 @@ span { color: v-bind(style.color) }
                 Vue27PrefixIdentifiersOptions::default()
             ),
             "function render(){var _vm=this,_c=_vm._self._c;return _vm._l(_vm.items,function(item){return _vm.getNode(_vm.itemSlots.default,{..._vm.slotProps, option:item, labelKey: _vm.labelKey, valueKey: _vm.valueKey})})}"
+        );
+    }
+
+    #[test]
+    fn vue27_prefix_identifiers_rewrites_new_expression_arguments() {
+        let compiler = SfcCompiler::new();
+        let source = "function render(){with(this){return _c('span',[_v(_s(new Date(value).toLocaleString())),_v(_s(new Formatter(locale)))])}}";
+
+        assert_eq!(
+            compiler.prefix_vue27_identifiers(
+                source,
+                Vue27PrefixIdentifiersOptions::default()
+            ),
+            "function render(){var _vm=this,_c=_vm._self._c;return _c('span',[_vm._v(_vm._s(new Date(_vm.value).toLocaleString())),_vm._v(_vm._s(new _vm.Formatter(_vm.locale)))])}"
         );
     }
 
