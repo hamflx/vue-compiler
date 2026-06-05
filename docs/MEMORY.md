@@ -1,5 +1,7 @@
 # Memory
 
+- Current round follow-up: fixed the CI diagnostics wrapper summary expansion after CI #58 showed `System.Object[]` instead of concrete matched failure lines. The wrapper now appends matched lines and log-tail lines one-by-one, also writes the same text to `$GITHUB_STEP_SUMMARY`, and still exits with the original `cargo test --workspace` status. Local simulation with a synthetic failing Rust-test log confirms the annotation body expands actual `FAILED` / `panicked at` / `error: test failed` lines. This remains CI observability only.
+
 - Current round: added a CI diagnostics wrapper around the compatibility job's `cargo test --workspace` step because macOS/Ubuntu GitHub Actions still fail with exit code 101 while local Windows and WSL Ubuntu runs pass and unauthenticated GitHub log URLs return 404. The wrapper still runs the same workspace Rust test gate, preserves the failing exit code, and only emits a GitHub `::error` annotation with matched failure lines, the log tail, and Rust/Cargo/Node versions so the next public Actions page exposes the real failing crate/test without weakening the gate.
 - Local verification for this diagnostics slice: confirmed PowerShell preserves native command exit codes through `Tee-Object`, ran focused `cargo test -p vuec_vue3_dom compile_stringifies_static_children_with_asset_url_imports` through the same pipeline (`LASTEXITCODE=0`), and reviewed the CI diff. This slice changes CI observability only; no compiler semantics, `xtask/src/compat.rs`, conformance classification, or AST/HIR/MIR structures changed.
 

@@ -64,21 +64,45 @@ jobs:
             } | Select-Object -Last 120
           )
           $tail = @($lines | Select-Object -Last 80)
-          $summaryLines = @(
+          $summaryLines = [System.Collections.Generic.List[string]]::new()
+          foreach ($line in @(
             "cargo test --workspace failed on $env:RUNNER_OS/$env:RUNNER_ARCH with exit code $exitCode",
             "rustc: $(rustc --version)",
             "cargo: $(cargo --version)",
             "node: $(node --version)",
             "",
-            "Matched failure lines:",
-            $matches,
-            "",
-            "Last log lines:",
-            $tail
-          )
+            "Matched failure lines:"
+          )) {
+            [void]$summaryLines.Add($line)
+          }
+          if ($matches.Count -eq 0) {
+            [void]$summaryLines.Add("<none>")
+          } else {
+            foreach ($line in $matches) {
+              [void]$summaryLines.Add([string]$line)
+            }
+          }
+          [void]$summaryLines.Add("")
+          [void]$summaryLines.Add("Last log lines:")
+          if ($tail.Count -eq 0) {
+            [void]$summaryLines.Add("<none>")
+          } else {
+            foreach ($line in $tail) {
+              [void]$summaryLines.Add([string]$line)
+            }
+          }
           $summary = ($summaryLines -join "`n").Trim()
           if ($summary.Length -gt 30000) {
             $summary = $summary.Substring($summary.Length - 30000)
+          }
+          if ($env:GITHUB_STEP_SUMMARY) {
+            @(
+              "## Rust workspace tests failed",
+              "",
+              '```text',
+              $summary,
+              '```'
+            ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
           }
           $escaped = $summary.Replace("%", "%25").Replace("`r", "%0D").Replace("`n", "%0A")
           Write-Host "::error title=Rust workspace tests failed::$escaped"
