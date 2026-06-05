@@ -1,7 +1,6 @@
 schema_version = 1
 min_projects = 15
 min_vue_files_per_project = 20
-projects = []
 
 # External Vue 2.7 production-corpus projects are fixed here by repository and
 # commit before running `cargo xtask verify-vue27-project-corpus`.
@@ -18,3 +17,123 @@ projects = []
 # package_json = "package.json"
 # include = ["src/**/*.vue"]
 # exclude = ["**/__tests__/**", "**/node_modules/**"]
+
+[[projects]]
+name = "tencentyun-TUIRoomKit-web-vue2"
+repo = "https://github.com/tencentyun/TUIRoomKit.git"
+rev = "7476537c5fba59b7132c8bfee5ca5c07d05fb78f"
+package_json = "Web/roomkit/vue2/package.json"
+include = ["Web/roomkit/vue2/*.vue"]
+exclude = ["**/node_modules/**", "**/dist/**", "**/coverage/**"]
+
+[[projects]]
+name = "vue-styleguidist"
+repo = "https://github.com/vue-styleguidist/vue-styleguidist.git"
+rev = "e10cdc51f19e54ca712ccaaaf5ac2567f15dcfcd"
+package_json = "package.json"
+include = ["examples/*.vue"]
+exclude = ["**/node_modules/**", "**/dist/**", "**/coverage/**"]
+
+[[projects]]
+name = "mitre-vulcan"
+repo = "https://github.com/mitre/vulcan.git"
+rev = "f24d2ad30d9522f06e21df41a6dd69b4c1ba4b0e"
+package_json = "package.json"
+include = ["app/javascript/*.vue"]
+exclude = ["**/node_modules/**", "**/dist/**", "**/coverage/**"]
+
+[[projects]]
+name = "elunez-eladmin-web"
+repo = "https://github.com/elunez/eladmin-web.git"
+rev = "6e20207bbaf9fac872623d2089803cfe143be73b"
+package_json = "package.json"
+include = ["src/*.vue"]
+exclude = ["**/node_modules/**", "**/dist/**", "**/coverage/**"]
+
+[[projects]]
+name = "Visnalize-win7-ui"
+repo = "https://github.com/Visnalize/win7-ui.git"
+rev = "277e68d67124de73a1ef2f2f65d20eb707d99cd5"
+package_json = "package.json"
+include = ["src/*.vue", "dev/*.vue"]
+exclude = ["**/node_modules/**", "**/dist/**", "**/coverage/**", "docs/*.vue"]
+
+[[projects]]
+name = "ConductionNL-nextcloud-vue"
+repo = "https://github.com/ConductionNL/nextcloud-vue.git"
+rev = "2c77ffd20fd6066ef914109555a3a744ffd74f61"
+package_json = "package.json"
+include = ["src/*.vue"]
+exclude = ["**/node_modules/**", "**/dist/**", "**/coverage/**"]
+
+[[projects]]
+name = "wsf1992-ymi-ui"
+repo = "https://github.com/wsf1992/ymi-ui.git"
+rev = "8acab215869d1499181bbe5befb42f500f29b868"
+package_json = "package.json"
+include = ["packages/*.vue", "src/*.vue"]
+exclude = ["**/node_modules/**", "**/dist/**", "**/coverage/**"]
+
+[[projects]]
+name = "heavenlybilly-vue-datatables-182"
+repo = "https://github.com/heavenlybilly/vue-datatables-182.git"
+rev = "0ecdbbe7264e8ede4f64da385609527c314fde3c"
+package_json = "package.json"
+include = ["src/*.vue"]
+exclude = ["**/node_modules/**", "**/dist/**", "**/coverage/**"]
+
+[[projects]]
+name = "Moerj-vant-ui"
+repo = "https://github.com/Moerj/vant-ui.git"
+rev = "89102625322f1c646f2883c6f450a7310f34d079"
+package_json = "package.json"
+include = ["src/*.vue"]
+exclude = ["**/node_modules/**", "**/dist/**", "**/coverage/**"]
+
+[[projects]]
+name = "algolia-vue-instantsearch"
+repo = "https://github.com/algolia/instantsearch.git"
+rev = "536280866f3a5b6eaf398fb5b1b4db145f89d6f6"
+package_json = "packages/vue-instantsearch/package.json"
+include = ["packages/vue-instantsearch/*.vue"]
+exclude = ["**/node_modules/**", "**/dist/**", "**/coverage/**"]
+
+[[projects]]
+name = "linx4200-vue-color"
+repo = "https://github.com/linx4200/vue-color.git"
+rev = "db9106f438c2d7d947fd0644dfe355936d3c57f6"
+package_json = "package.json"
+include = ["src/*.vue"]
+exclude = ["**/node_modules/**", "**/dist/**", "**/coverage/**"]
+
+[[projects]]
+name = "zhoukaiyue-vue2-h5-tmp"
+repo = "https://github.com/zhoukaiyue/vue2-h5-tmp.git"
+rev = "15e7d35cc15c297ef34a655f2cbeaad4dbe1738e"
+package_json = "package.json"
+include = ["src/*.vue"]
+exclude = ["**/node_modules/**", "**/dist/**", "**/coverage/**"]
+
+[[projects]]
+name = "Drswith-bun-plugin-vue2"
+repo = "https://github.com/Drswith/bun-plugin-vue2.git"
+rev = "0626e3f528d61515c7ee081c79b83f7ab44ad763"
+package_json = "package.json"
+include = ["playground/*.vue"]
+exclude = ["**/node_modules/**", "**/dist/**", "**/coverage/**"]
+
+[[projects]]
+name = "xiaohaiH-json-form-element-ui"
+repo = "https://github.com/xiaohaiH/json-form.git"
+rev = "bb81c3704d3b0e15b32de0029f478949d1b5be76"
+package_json = "packages/element-ui/package.json"
+include = ["packages/element-ui/*.vue"]
+exclude = ["**/node_modules/**", "**/dist/**", "**/coverage/**"]
+
+[[projects]]
+name = "xaboy-form-create-designer"
+repo = "https://github.com/xaboy/form-create-designer.git"
+rev = "639008f2926a224253cc329e926fb8888e580e07"
+package_json = "package.json"
+include = ["src/*.vue"]
+exclude = ["**/node_modules/**", "**/dist/**", "**/coverage/**"]
