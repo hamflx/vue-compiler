@@ -3047,6 +3047,7 @@ fn ensure_official_npm_install(
     if node_modules.exists() && official_install_marker_matches(&marker, &specs) {
         return Ok(install_root);
     }
+    reset_official_npm_node_modules(&install_root)?;
     fs::create_dir_all(&install_root)
         .with_context(|| format!("failed to create {}", install_root.display()))?;
     let package_json = serde_json::json!({
@@ -3055,35 +3056,13 @@ fn ensure_official_npm_install(
         "version": "0.0.0",
     });
     write_json(&install_root.join("package.json"), &package_json)?;
-
-    let npm = resolve_program("npm");
-    let mut command = Command::new(npm);
-    command
-        .arg("install")
-        .arg("--ignore-scripts")
-        .arg("--no-audit")
-        .arg("--no-fund")
-        .arg("--package-lock=false")
-        .arg("--omit=dev")
-        .args(&specs)
-        .current_dir(&install_root);
-    let output = command
-        .output()
-        .with_context(|| format!("failed to spawn npm install in {}", install_root.display()))?;
-    if !output.status.success() {
-        anyhow::bail!(
-            "`npm install {}` failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
-            specs.join(" "),
-            output.status.code(),
-            String::from_utf8_lossy(&output.stdout).trim(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
+    run_npm_install_specs(&install_root, &specs, "official npm package install")?;
 
     let marker_body = serde_json::json!({
         "version_line": version_line,
         "packages": specs,
         "rev": baseline.rev,
+        "platform": npm_install_platform_marker(),
     });
     write_json(&marker, &marker_body)?;
     Ok(install_root)
@@ -3101,6 +3080,55 @@ fn official_install_marker_matches(marker: &Path, specs: &[String]) -> bool {
         .filter_map(|value| value.as_str().map(ToOwned::to_owned))
         .collect::<Vec<_>>();
     actual == specs
+        && value
+            .get("platform")
+            .and_then(|value| value.as_str())
+            .is_some_and(|platform| platform == npm_install_platform_marker())
+}
+
+fn npm_install_platform_marker() -> String {
+    format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
+}
+
+fn reset_official_npm_node_modules(install_root: &Path) -> Result<()> {
+    ensure_target_compat_child(install_root, "npm")?;
+    let node_modules = install_root.join("node_modules");
+    if node_modules.exists() {
+        fs::remove_dir_all(&node_modules)
+            .with_context(|| format!("failed to remove {}", node_modules.display()))?;
+    }
+    Ok(())
+}
+
+fn run_npm_install_specs(install_root: &Path, specs: &[String], label: &str) -> Result<()> {
+    let npm = resolve_program("npm");
+    let mut command = Command::new(npm);
+    command
+        .arg("install")
+        .arg("--ignore-scripts")
+        .arg("--include=optional")
+        .arg("--no-audit")
+        .arg("--no-fund")
+        .arg("--package-lock=false")
+        .arg("--omit=dev")
+        .args(specs)
+        .current_dir(install_root);
+    let output = command.output().with_context(|| {
+        format!(
+            "failed to spawn npm install for {label} in {}",
+            install_root.display()
+        )
+    })?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "`npm install {}` for {label} failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
+            specs.join(" "),
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
 }
 
 fn ensure_official_runner_dependencies(
@@ -3120,35 +3148,32 @@ fn ensure_official_runner_dependencies(
         return Ok(install_root);
     }
     let marker = install_root.join(format!("runner-install-{}.json", spec.name));
-    if node_modules.exists() && official_install_marker_matches(&marker, &runner_specs) {
+    if node_modules.exists()
+        && official_install_marker_matches(&marker, &runner_specs)
+        && verify_conformance_runner_startup_dependencies(spec, &node_modules).is_ok()
+    {
         return Ok(install_root);
     }
 
-    let npm = resolve_program("npm");
-    let mut command = Command::new(npm);
-    command
-        .arg("install")
-        .arg("--ignore-scripts")
-        .arg("--no-audit")
-        .arg("--no-fund")
-        .arg("--package-lock=false")
-        .arg("--omit=dev")
-        .args(&runner_specs)
-        .current_dir(&install_root);
-    let output = command.output().with_context(|| {
-        format!(
-            "failed to spawn npm runner dependency install in {}",
-            install_root.display()
-        )
-    })?;
-    if !output.status.success() {
-        anyhow::bail!(
-            "`npm install {}` failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
-            runner_specs.join(" "),
-            output.status.code(),
-            String::from_utf8_lossy(&output.stdout).trim(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
+    run_npm_install_specs(
+        &install_root,
+        &runner_specs,
+        "official runner dependency install",
+    )?;
+    if let Err(first_err) = verify_conformance_runner_startup_dependencies(spec, &node_modules) {
+        reset_official_npm_node_modules(&install_root)?;
+        ensure_official_npm_install(spec.version_line, baseline)?;
+        run_npm_install_specs(
+            &install_root,
+            &runner_specs,
+            "official runner dependency reinstall",
+        )?;
+        verify_conformance_runner_startup_dependencies(spec, &node_modules).with_context(|| {
+            format!(
+                "{} runner dependencies still cannot start after reinstall; first failure: {first_err:#}",
+                spec.name
+            )
+        })?;
     }
 
     let marker_body = serde_json::json!({
@@ -3156,6 +3181,7 @@ fn ensure_official_runner_dependencies(
         "suite": spec.name,
         "packages": runner_specs,
         "rev": baseline.rev,
+        "platform": npm_install_platform_marker(),
     });
     write_json(&marker, &marker_body)?;
     Ok(install_root)
@@ -3188,35 +3214,11 @@ fn ensure_runtime_smoke_dependencies(
         return Ok(());
     }
 
-    let npm = resolve_program("npm");
-    let mut command = Command::new(npm);
-    command
-        .arg("install")
-        .arg("--ignore-scripts")
-        .arg("--no-audit")
-        .arg("--no-fund")
-        .arg("--package-lock=false")
-        .arg("--omit=dev")
-        .args(&specs)
-        .current_dir(install_root);
-    let output = command.output().with_context(|| {
-        format!(
-            "failed to spawn npm runtime smoke dependency install in {}",
-            install_root.display()
-        )
-    })?;
-    if !output.status.success() {
-        anyhow::bail!(
-            "`npm install {}` failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
-            specs.join(" "),
-            output.status.code(),
-            String::from_utf8_lossy(&output.stdout).trim(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
+    run_npm_install_specs(install_root, &specs, "runtime smoke dependency install")?;
     let marker_body = serde_json::json!({
         "version_line": version_line,
         "packages": specs,
+        "platform": npm_install_platform_marker(),
     });
     write_json(&marker, &marker_body)?;
     Ok(())
@@ -3765,6 +3767,37 @@ fn find_on_path(name: &str) -> Option<String> {
     }
     None
 }
+
+fn normalize_command_output(stdout: &[u8], stderr: &[u8]) -> String {
+    let mut text = String::new();
+    let stdout = String::from_utf8_lossy(stdout);
+    let stdout = stdout.trim();
+    if !stdout.is_empty() {
+        text.push_str(stdout);
+    }
+    let stderr = String::from_utf8_lossy(stderr);
+    let stderr = stderr.trim();
+    if !stderr.is_empty() {
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(stderr);
+    }
+    text.lines().take(40).collect::<Vec<_>>().join("\n")
+}
+
+const RUNNER_STARTUP_PROBE_SCRIPT: &str = r#"
+import { createRequire } from 'node:module';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+
+const nodeModules = process.env.VUEC_RUNNER_NODE_MODULES;
+const request = process.env.VUEC_RUNNER_PROBE_REQUEST;
+const rootRequire = createRequire(path.join(nodeModules, '__vuec_runner_probe__.cjs'));
+
+const resolved = rootRequire.resolve(request);
+await import(pathToFileURL(resolved).href);
+"#;
 
 const API_PROBE_SCRIPT: &str = r#"
 const fs = require('fs');
@@ -11433,6 +11466,7 @@ fn run_vitest_conformance(
         .arg(vitest_bin)
         .arg("run")
         .arg("--globals")
+        .arg("--testTimeout=30000")
         .arg("--reporter=json")
         .arg(format!("--outputFile={}", absolute_output_file.display()))
         .env("VUEC_NODE_BRIDGE", &absolute_bridge_bin)
@@ -17654,12 +17688,17 @@ fn conformance_readiness(
         .filter(|request| !alias_package_available(&alias_root, request))
         .map(|request| (*request).to_string())
         .collect::<Vec<_>>();
-    let missing_runner_dependencies = spec
+    let mut missing_runner_dependencies = spec
         .runner_dependencies
         .iter()
         .filter(|dependency| !node_dependency_available(&npm_root, dependency))
         .map(|dependency| (*dependency).to_string())
         .collect::<Vec<_>>();
+    if missing_runner_dependencies.is_empty() {
+        missing_runner_dependencies.extend(conformance_runner_startup_dependency_errors(
+            spec, &npm_root,
+        ));
+    }
     ConformanceReadiness {
         alias_ready: missing_alias_packages.is_empty(),
         runner_ready: missing_runner_dependencies.is_empty(),
@@ -17698,6 +17737,59 @@ fn node_dependency_available(node_modules: &Path, request: &str) -> bool {
         node_modules.join(segments[0])
     };
     package_dir.join("package.json").is_file() || package_dir.join("index.js").is_file()
+}
+
+fn verify_conformance_runner_startup_dependencies(
+    spec: ConformanceSuiteSpec,
+    node_modules: &Path,
+) -> Result<()> {
+    let errors = conformance_runner_startup_dependency_errors(spec, node_modules);
+    if errors.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!("{}", errors.join("; "))
+}
+
+fn conformance_runner_startup_dependency_errors(
+    spec: ConformanceSuiteSpec,
+    node_modules: &Path,
+) -> Vec<String> {
+    conformance_runner_startup_probe_requests(spec)
+        .into_iter()
+        .filter(|request| node_dependency_available(node_modules, request))
+        .filter_map(|request| {
+            probe_conformance_runner_startup_dependency(node_modules, request)
+                .err()
+                .map(|err| format!("runner-native:{request}: {err:#}"))
+        })
+        .collect()
+}
+
+fn conformance_runner_startup_probe_requests(spec: ConformanceSuiteSpec) -> Vec<&'static str> {
+    if !spec.runner_dependencies.contains(&"vitest") {
+        return Vec::new();
+    }
+    vec!["rollup", "rolldown"]
+}
+
+fn probe_conformance_runner_startup_dependency(node_modules: &Path, request: &str) -> Result<()> {
+    let node = resolve_program("node");
+    let output = Command::new(node)
+        .arg("--input-type=module")
+        .arg("-e")
+        .arg(RUNNER_STARTUP_PROBE_SCRIPT)
+        .env("VUEC_RUNNER_NODE_MODULES", absolute_path(node_modules))
+        .env("VUEC_RUNNER_PROBE_REQUEST", request)
+        .output()
+        .with_context(|| format!("failed to spawn node runner startup probe for {request}"))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "node runner startup probe failed with status {:?}: {}",
+            output.status.code(),
+            normalize_command_output(&output.stdout, &output.stderr)
+        );
+    }
+    Ok(())
 }
 
 fn conformance_item_detail(
@@ -22031,6 +22123,50 @@ test('placeholder', () => {
         ));
         assert!(alias_package_available(&temp, "vue/compiler-sfc"));
         assert!(!node_dependency_available(&node_modules, "vitest"));
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn official_install_marker_requires_current_platform() {
+        let temp = std::env::temp_dir().join(format!(
+            "vuec-xtask-platform-marker-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp).unwrap();
+        let marker = temp.join("official-install.json");
+        let specs = vec!["vue@3.5.34".to_string()];
+
+        write_json(
+            &marker,
+            &serde_json::json!({
+                "packages": specs,
+                "platform": npm_install_platform_marker(),
+            }),
+        )
+        .unwrap();
+        assert!(official_install_marker_matches(&marker, &specs));
+
+        write_json(
+            &marker,
+            &serde_json::json!({
+                "packages": specs,
+                "platform": "other-os-other-arch",
+            }),
+        )
+        .unwrap();
+        assert!(!official_install_marker_matches(&marker, &specs));
+
+        write_json(
+            &marker,
+            &serde_json::json!({
+                "packages": specs,
+            }),
+        )
+        .unwrap();
+        assert!(!official_install_marker_matches(&marker, &specs));
         let _ = fs::remove_dir_all(temp);
     }
 
