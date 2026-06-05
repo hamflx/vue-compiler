@@ -2513,6 +2513,10 @@ pub struct Vue2Once {
 pub struct Vue2SlotOutlet {
     /// Slot name expression.
     pub name: MirExpr,
+    /// Slot props passed as the third `_t` argument.
+    pub props: Vec<Vue2DataProp>,
+    /// Object `v-bind` passed as the fourth `_t` argument.
+    pub bind: Option<MirExpr>,
 }
 
 /// Vue 2 scoped slot payload.

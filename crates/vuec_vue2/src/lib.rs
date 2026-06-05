@@ -2638,11 +2638,25 @@ fn gen_mir_slot_outlet(
 ) -> String {
     let name = render_mir_expr(&slot.name, state);
     let children = gen_mir_children(id, state, false);
+    let props = (!slot.props.is_empty())
+        .then(|| gen_mir_props(&slot.props, state.options, PropValueKind::Expression, state));
+    let mut code = format!("_t({name}");
     if let Some(children) = children {
-        format!("_t({name},function(){{return {children}}})")
-    } else {
-        format!("_t({name})")
+        code.push_str(&format!(",function(){{return {children}}}"));
+    } else if props.is_some() || slot.bind.is_some() {
+        code.push_str(",null");
     }
+    if let Some(props) = props {
+        code.push_str(&format!(",{props}"));
+    }
+    if let Some(bind) = &slot.bind {
+        if slot.props.is_empty() {
+            code.push_str(",null");
+        }
+        code.push_str(&format!(",{}", render_mir_expr(bind, state)));
+    }
+    code.push(')');
+    code
 }
 
 fn gen_mir_inline_template(
@@ -3911,6 +3925,8 @@ fn lower_vue2_element_to_mir_kind(
                     ))
                 })
                 .unwrap_or_else(|| MirExpr::String("default".into())),
+            props: lower_vue2_slot_outlet_props(element, ast_node, state),
+            bind: lower_vue2_slot_outlet_bind(element, ast_node, state),
         });
     }
 
@@ -4079,6 +4095,46 @@ fn lower_vue2_data_props(
             static_attribute: !attr.dynamic && attr.value.trim_start().starts_with('"'),
         })
         .collect()
+}
+
+fn lower_vue2_slot_outlet_props(
+    element: &vuec_ast::Vue2Element,
+    ast_node: &vuec_ast::Node<Vue2NodeKind>,
+    state: &mut Vue2LoweringState,
+) -> Vec<Vue2DataProp> {
+    element
+        .attrs
+        .iter()
+        .chain(element.dynamic_attrs.iter())
+        .map(|attr| Vue2DataProp {
+            name: camelize(&attr.name),
+            value: MirExpr::JsExpr(state.js.register_expr(
+                attr.value.clone(),
+                attr.span.unwrap_or_else(|| ast_node_span(ast_node)),
+                SourceType::script(),
+            )),
+            dynamic: attr.dynamic,
+            static_attribute: !attr.dynamic && attr.value.trim_start().starts_with('"'),
+        })
+        .collect()
+}
+
+fn lower_vue2_slot_outlet_bind(
+    element: &vuec_ast::Vue2Element,
+    ast_node: &vuec_ast::Node<Vue2NodeKind>,
+    state: &mut Vue2LoweringState,
+) -> Option<MirExpr> {
+    let value = element.attrs_map.get("v-bind")?;
+    let span = element
+        .raw_attrs_map
+        .get("v-bind")
+        .and_then(|attr| attr.span)
+        .unwrap_or_else(|| ast_node_span(ast_node));
+    Some(MirExpr::JsExpr(state.js.register_expr(
+        value.clone(),
+        span,
+        SourceType::script(),
+    )))
 }
 
 fn lower_vue2_inline_template_to_mir(
@@ -5787,6 +5843,39 @@ mod tests {
         assert_eq!(
             new_syntax_if.render,
             r#"with(this){return _c('foo',{scopedSlots:_u([(show)?{key:"default",fn:function(bar){return [_v(_s(bar))]}}:null],null,true)})}"#
+        );
+    }
+
+    #[test]
+    fn generates_vue2_slot_outlet_props_like_official_codegen() {
+        let no_fallback = compile(
+            r#"<div><slot :has-refinements="canRefine" :refine="state.refine" /></div>"#,
+            options(),
+        );
+        assert_eq!(
+            no_fallback.render,
+            r#"with(this){return _c('div',[_t("default",null,{"hasRefinements":canRefine,"refine":state.refine})],2)}"#
+        );
+
+        let fallback = compile(
+            r#"<div><slot foo="bar" :has-refinements="canRefine"><span>x</span></slot></div>"#,
+            options(),
+        );
+        assert_eq!(
+            fallback.render,
+            r#"with(this){return _c('div',[_t("default",function(){return [_c('span',[_v("x")])]},{"foo":"bar","hasRefinements":canRefine})],2)}"#
+        );
+
+        let dynamic_prop = compile(r#"<div><slot v-bind:[foo]="bar | baz" /></div>"#, options());
+        assert_eq!(
+            dynamic_prop.render,
+            r#"with(this){return _c('div',[_t("default",null,_d({},[foo,_f("baz")(bar)]))],2)}"#
+        );
+
+        let bind_object = compile(r#"<div><slot v-bind="slotProps" /></div>"#, options());
+        assert_eq!(
+            bind_object.render,
+            r#"with(this){return _c('div',[_t("default",null,null,slotProps)],2)}"#
         );
     }
 
