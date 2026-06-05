@@ -17,7 +17,7 @@ use compat::{
     run_napi_output_contract, run_option_matrix, run_output_contract, summarize_compat,
     sync_official_tests, verify_npm_alias, verify_official_lock, ConformanceArgs, SelectionArgs,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as JsonValue};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -130,6 +130,18 @@ enum Command {
     VerifyPublicApiDocs,
     VerifyCrateMetadata,
     VerifySupplyChain,
+    VerifyCiStatus {
+        #[arg(long)]
+        repo: Option<String>,
+        #[arg(long)]
+        commit: Option<String>,
+        #[arg(long, default_value = "ci.yml")]
+        workflow: String,
+        #[arg(long)]
+        runs_json: Option<PathBuf>,
+        #[arg(long)]
+        jobs_json: Option<PathBuf>,
+    },
     VerifyReleaseDryRun {
         #[arg(long)]
         native_artifacts_dir: Option<PathBuf>,
@@ -215,6 +227,19 @@ fn main() -> Result<()> {
         Command::VerifyPublicApiDocs => verify_public_api_docs()?,
         Command::VerifyCrateMetadata => verify_crate_metadata()?,
         Command::VerifySupplyChain => verify_supply_chain()?,
+        Command::VerifyCiStatus {
+            repo,
+            commit,
+            workflow,
+            runs_json,
+            jobs_json,
+        } => verify_ci_status(
+            repo.as_deref(),
+            commit.as_deref(),
+            &workflow,
+            runs_json.as_deref(),
+            jobs_json.as_deref(),
+        )?,
         Command::VerifyReleaseDryRun {
             native_artifacts_dir,
         } => verify_release_dry_run(native_artifacts_dir.as_deref())?,
@@ -1656,6 +1681,351 @@ fn verify_supply_chain() -> Result<compat::JsonReport> {
             .with_violations(violations)
             .with_note("verifies M20 security/supply-chain release controls: lock files, pinned package manager, npm license metadata, exact dependency versions, stable package files, and Cargo metadata resolution"),
     )
+}
+
+const REQUIRED_CI_JOBS: &[&str] = &[
+    "Compatibility (ubuntu-latest)",
+    "Compatibility (macos-latest)",
+    "Compatibility (windows-latest)",
+    "Product Smoke",
+    "Release Install Smoke (ubuntu-latest)",
+    "Release Install Smoke (macos-latest)",
+    "Release Install Smoke (windows-latest)",
+    "Release Dry Run",
+];
+
+#[derive(Clone, Debug, Deserialize)]
+struct GithubWorkflowRun {
+    id: u64,
+    head_sha: Option<String>,
+    status: Option<String>,
+    conclusion: Option<String>,
+    html_url: Option<String>,
+    run_number: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct GithubJob {
+    name: String,
+    status: Option<String>,
+    conclusion: Option<String>,
+    html_url: Option<String>,
+}
+
+fn verify_ci_status(
+    repo: Option<&str>,
+    commit: Option<&str>,
+    workflow: &str,
+    runs_json: Option<&Path>,
+    jobs_json: Option<&Path>,
+) -> Result<compat::JsonReport> {
+    if runs_json.is_some() && jobs_json.is_none() {
+        anyhow::bail!("--jobs-json is required when --runs-json is supplied");
+    }
+
+    let repo = match repo.map(str::to_owned).or_else(default_github_repo) {
+        Some(repo) => repo,
+        None => {
+            return Ok(ci_status_pending_report(
+                "github-repository",
+                "GitHub repository could not be inferred; pass --repo owner/name",
+                None,
+            ));
+        }
+    };
+    let commit = match commit.map(str::to_owned).or_else(default_git_commit) {
+        Some(commit) => commit,
+        None => {
+            return Ok(ci_status_pending_report(
+                "git-commit",
+                "Git commit could not be inferred; pass --commit <sha>",
+                None,
+            ));
+        }
+    };
+
+    let runs_value = match runs_json {
+        Some(path) => read_json_file(path).with_context(|| {
+            format!("failed to read CI workflow runs fixture {}", path.display())
+        })?,
+        None => match github_api_json(
+            &repo,
+            &format!(
+                "actions/workflows/{}/runs?head_sha={}&per_page=10",
+                github_path_component(workflow),
+                github_path_component(&commit)
+            ),
+        ) {
+            Ok(value) => value,
+            Err(err) => {
+                return Ok(ci_status_pending_report(
+                    "github-actions-runs",
+                    format!("GitHub Actions workflow run evidence is unavailable: {err:#}"),
+                    None,
+                ));
+            }
+        },
+    };
+    let runs = parse_github_workflow_runs(runs_value)?;
+    let Some(run) = select_workflow_run_for_commit(&runs, &commit) else {
+        return Ok(ci_status_pending_report(
+            format!("workflow:{workflow}@{commit}"),
+            format!("no GitHub Actions workflow run for {repo}/{workflow} at commit {commit}"),
+            runs_json.map(Path::to_path_buf),
+        ));
+    };
+
+    let mut items = Vec::new();
+    let mut violations = Vec::new();
+    let run_status = ci_status_from_github(run.status.as_deref(), run.conclusion.as_deref());
+    let run_detail = ci_run_detail(&repo, workflow, &commit, run);
+    if run_status == compat::ReportStatus::Fail {
+        violations.push(format!("workflow run failed: {run_detail}"));
+    }
+    items.push(compat::ReportItem::new(
+        format!("workflow:{workflow}@{commit}"),
+        run_status,
+        run_detail,
+        runs_json.map(Path::to_path_buf),
+    ));
+
+    let jobs_value = match jobs_json {
+        Some(path) => read_json_file(path)
+            .with_context(|| format!("failed to read CI jobs fixture {}", path.display()))?,
+        None => match github_api_json(&repo, &format!("actions/runs/{}/jobs?per_page=100", run.id))
+        {
+            Ok(value) => value,
+            Err(err) => {
+                let detail = format!("GitHub Actions job evidence is unavailable: {err:#}");
+                for job in REQUIRED_CI_JOBS {
+                    items.push(compat::ReportItem::new(
+                        format!("job:{job}"),
+                        compat::ReportStatus::Pending,
+                        detail.clone(),
+                        None,
+                    ));
+                }
+                return Ok(compat::JsonReport::new(
+                    "verify_ci_status",
+                    compat::ReportStatus::Pending,
+                )
+                .with_items(items)
+                .with_note("verifies that the repository CI workflow has successful Windows, Linux, macOS compatibility jobs, product smoke, release install-smoke jobs, and release dry-run evidence for the requested commit"));
+            }
+        },
+    };
+    let jobs = parse_github_jobs(jobs_value)?;
+    for required in REQUIRED_CI_JOBS {
+        let matching = jobs.iter().find(|job| job.name == *required);
+        let (status, detail) = match matching {
+            Some(job) => (
+                ci_status_from_github(job.status.as_deref(), job.conclusion.as_deref()),
+                ci_job_detail(job),
+            ),
+            None => {
+                let status = if run.status.as_deref() == Some("completed") {
+                    compat::ReportStatus::Fail
+                } else {
+                    compat::ReportStatus::Pending
+                };
+                (
+                    status,
+                    format!(
+                        "required job `{required}` is missing from CI workflow run {}",
+                        run.id
+                    ),
+                )
+            }
+        };
+        if status == compat::ReportStatus::Fail {
+            violations.push(format!("{required}: {detail}"));
+        }
+        items.push(compat::ReportItem::new(
+            format!("job:{required}"),
+            status,
+            detail,
+            jobs_json.map(Path::to_path_buf),
+        ));
+    }
+
+    Ok(
+        compat::JsonReport::new("verify_ci_status", compat::ReportStatus::Pass)
+            .with_items(items)
+            .with_violations(violations)
+            .with_note(format!(
+                "verifies CI evidence for {repo}/{workflow} at {commit}; required jobs: {}",
+                REQUIRED_CI_JOBS.join(", ")
+            )),
+    )
+}
+
+fn ci_status_pending_report(
+    target: impl Into<String>,
+    detail: impl Into<String>,
+    path: Option<PathBuf>,
+) -> compat::JsonReport {
+    compat::JsonReport::new("verify_ci_status", compat::ReportStatus::Pending)
+        .with_items(vec![compat::ReportItem::new(
+            target,
+            compat::ReportStatus::Pending,
+            detail,
+            path,
+        )])
+        .with_note("verifies that the repository CI workflow has successful Windows, Linux, macOS compatibility jobs, product smoke, release install-smoke jobs, and release dry-run evidence for the requested commit")
+}
+
+fn parse_github_workflow_runs(value: JsonValue) -> Result<Vec<GithubWorkflowRun>> {
+    if value.is_array() {
+        return serde_json::from_value(value).context("failed to parse GitHub workflow run array");
+    }
+    let runs = value
+        .get("workflow_runs")
+        .cloned()
+        .context("GitHub workflow runs JSON missing workflow_runs")?;
+    serde_json::from_value(runs).context("failed to parse GitHub workflow_runs")
+}
+
+fn parse_github_jobs(value: JsonValue) -> Result<Vec<GithubJob>> {
+    if value.is_array() {
+        return serde_json::from_value(value).context("failed to parse GitHub job array");
+    }
+    let jobs = value
+        .get("jobs")
+        .cloned()
+        .context("GitHub jobs JSON missing jobs")?;
+    serde_json::from_value(jobs).context("failed to parse GitHub jobs")
+}
+
+fn select_workflow_run_for_commit<'a>(
+    runs: &'a [GithubWorkflowRun],
+    commit: &str,
+) -> Option<&'a GithubWorkflowRun> {
+    runs.iter()
+        .find(|run| run.head_sha.as_deref() == Some(commit))
+}
+
+fn ci_status_from_github(status: Option<&str>, conclusion: Option<&str>) -> compat::ReportStatus {
+    if status != Some("completed") {
+        return compat::ReportStatus::Pending;
+    }
+    match conclusion {
+        Some("success") => compat::ReportStatus::Pass,
+        None => compat::ReportStatus::Pending,
+        _ => compat::ReportStatus::Fail,
+    }
+}
+
+fn ci_run_detail(repo: &str, workflow: &str, commit: &str, run: &GithubWorkflowRun) -> String {
+    format!(
+        "repo={repo}, workflow={workflow}, commit={commit}, run_id={}, run_number={}, status={}, conclusion={}, url={}",
+        run.id,
+        run.run_number
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unknown".into()),
+        run.status.as_deref().unwrap_or("unknown"),
+        run.conclusion.as_deref().unwrap_or("unknown"),
+        run.html_url.as_deref().unwrap_or("unknown")
+    )
+}
+
+fn ci_job_detail(job: &GithubJob) -> String {
+    format!(
+        "job={}, status={}, conclusion={}, url={}",
+        job.name,
+        job.status.as_deref().unwrap_or("unknown"),
+        job.conclusion.as_deref().unwrap_or("unknown"),
+        job.html_url.as_deref().unwrap_or("unknown")
+    )
+}
+
+fn github_api_json(repo: &str, endpoint: &str) -> Result<JsonValue> {
+    let curl = resolve_program("curl")?;
+    let url = format!("https://api.github.com/repos/{repo}/{endpoint}");
+    let mut command = ProcessCommand::new(curl);
+    command
+        .args([
+            "-fsSL",
+            "-H",
+            "Accept: application/vnd.github+json",
+            "-H",
+            "X-GitHub-Api-Version: 2022-11-28",
+        ])
+        .arg("-H")
+        .arg("User-Agent: vuec-xtask")
+        .arg(&url);
+    if let Some(token) = std::env::var("GITHUB_TOKEN")
+        .ok()
+        .or_else(|| std::env::var("GH_TOKEN").ok())
+        .filter(|token| !token.trim().is_empty())
+    {
+        command
+            .arg("-H")
+            .arg(format!("Authorization: Bearer {token}"));
+    }
+    let output = command
+        .output()
+        .with_context(|| format!("failed to spawn curl for {url}"))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "GitHub API request failed for {url} with {:?}\nstdout:\n{}\nstderr:\n{}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    serde_json::from_slice(&output.stdout).with_context(|| {
+        format!(
+            "GitHub API response was not JSON for {url}:\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        )
+    })
+}
+
+fn github_path_component(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'-' | b'_' => {
+                encoded.push(byte as char)
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
+}
+
+fn default_github_repo() -> Option<String> {
+    std::env::var("GITHUB_REPOSITORY")
+        .ok()
+        .filter(|repo| !repo.trim().is_empty())
+        .or_else(|| {
+            command_output("git", &["remote", "get-url", "origin"])
+                .and_then(|remote| parse_github_remote_repo(&remote))
+        })
+}
+
+fn default_git_commit() -> Option<String> {
+    std::env::var("GITHUB_SHA")
+        .ok()
+        .filter(|sha| !sha.trim().is_empty())
+        .or_else(|| command_output("git", &["rev-parse", "HEAD"]))
+}
+
+fn parse_github_remote_repo(remote: &str) -> Option<String> {
+    let trimmed = remote.trim();
+    let repo = trimmed
+        .strip_prefix("git@github.com:")
+        .or_else(|| trimmed.strip_prefix("ssh://git@github.com/"))
+        .or_else(|| trimmed.strip_prefix("https://github.com/"))
+        .or_else(|| trimmed.strip_prefix("http://github.com/"))?;
+    let repo = repo.strip_suffix(".git").unwrap_or(repo);
+    let mut parts = repo.split('/');
+    let owner = parts.next()?;
+    let name = parts.next()?;
+    if owner.is_empty() || name.is_empty() {
+        return None;
+    }
+    Some(format!("{owner}/{name}"))
 }
 
 fn verify_release_dry_run(native_artifacts_dir: Option<&Path>) -> Result<compat::JsonReport> {
@@ -5313,6 +5683,140 @@ mod tests {
         assert_eq!(found, artifact);
     }
 
+    #[test]
+    fn ci_status_fixture_passes_when_required_jobs_succeed() {
+        let root = unique_target_test_dir("ci-status-pass");
+        let (runs, jobs) = write_ci_status_fixture(&root, "success", None);
+
+        let report = verify_ci_status(
+            Some("hamflx/vue-compiler"),
+            Some("abc123"),
+            "ci.yml",
+            Some(&runs),
+            Some(&jobs),
+        )
+        .expect("ci status report");
+
+        assert_eq!(report.status, "pass");
+        assert_eq!(report.summary.total, REQUIRED_CI_JOBS.len() + 1);
+        assert_eq!(report.summary.pass, REQUIRED_CI_JOBS.len() + 1);
+        assert!(report.violations.is_empty());
+    }
+
+    #[test]
+    fn ci_status_fixture_fails_when_required_job_fails() {
+        let root = unique_target_test_dir("ci-status-fail");
+        let (runs, jobs) = write_ci_status_fixture(
+            &root,
+            "success",
+            Some(("Compatibility (macos-latest)", "failure")),
+        );
+
+        let report = verify_ci_status(
+            Some("hamflx/vue-compiler"),
+            Some("abc123"),
+            "ci.yml",
+            Some(&runs),
+            Some(&jobs),
+        )
+        .expect("ci status report");
+
+        assert_eq!(report.status, "fail");
+        assert!(report
+            .violations
+            .iter()
+            .any(|violation| violation.contains("Compatibility (macos-latest)")));
+    }
+
+    #[test]
+    fn ci_status_fixture_fails_when_completed_run_misses_required_job() {
+        let root = unique_target_test_dir("ci-status-missing");
+        let runs = root.join("runs.json");
+        let jobs = root.join("jobs.json");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(&runs, ci_runs_fixture("success")).unwrap();
+        let jobs_json = json!({
+            "jobs": REQUIRED_CI_JOBS
+                .iter()
+                .filter(|job| **job != "Release Dry Run")
+                .map(|job| json!({
+                    "name": job,
+                    "status": "completed",
+                    "conclusion": "success",
+                    "html_url": format!("https://example.test/{job}")
+                }))
+                .collect::<Vec<_>>()
+        });
+        fs::write(&jobs, serde_json::to_vec_pretty(&jobs_json).unwrap()).unwrap();
+
+        let report = verify_ci_status(
+            Some("hamflx/vue-compiler"),
+            Some("abc123"),
+            "ci.yml",
+            Some(&runs),
+            Some(&jobs),
+        )
+        .expect("ci status report");
+
+        assert_eq!(report.status, "fail");
+        assert!(report
+            .items
+            .iter()
+            .any(|item| item.target == "job:Release Dry Run"
+                && item.status == compat::ReportStatus::Fail));
+    }
+
+    #[test]
+    fn ci_status_fixture_is_pending_when_workflow_is_not_completed() {
+        let root = unique_target_test_dir("ci-status-pending");
+        let runs = root.join("runs.json");
+        let jobs = root.join("jobs.json");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(&runs, ci_runs_fixture_with("in_progress", None)).unwrap();
+        let jobs_json = json!({
+            "jobs": REQUIRED_CI_JOBS
+                .iter()
+                .map(|job| json!({
+                    "name": job,
+                    "status": "queued",
+                    "conclusion": null,
+                    "html_url": format!("https://example.test/{job}")
+                }))
+                .collect::<Vec<_>>()
+        });
+        fs::write(&jobs, serde_json::to_vec_pretty(&jobs_json).unwrap()).unwrap();
+
+        let report = verify_ci_status(
+            Some("hamflx/vue-compiler"),
+            Some("abc123"),
+            "ci.yml",
+            Some(&runs),
+            Some(&jobs),
+        )
+        .expect("ci status report");
+
+        assert_eq!(report.status, "pending");
+        assert_eq!(report.summary.pending, REQUIRED_CI_JOBS.len() + 1);
+        assert!(report.violations.is_empty());
+    }
+
+    #[test]
+    fn github_remote_parser_accepts_common_origin_shapes() {
+        assert_eq!(
+            parse_github_remote_repo("git@github.com:hamflx/vue-compiler.git").as_deref(),
+            Some("hamflx/vue-compiler")
+        );
+        assert_eq!(
+            parse_github_remote_repo("https://github.com/hamflx/vue-compiler.git").as_deref(),
+            Some("hamflx/vue-compiler")
+        );
+        assert_eq!(
+            parse_github_remote_repo("ssh://git@github.com/hamflx/vue-compiler.git").as_deref(),
+            Some("hamflx/vue-compiler")
+        );
+        assert!(parse_github_remote_repo("https://example.com/hamflx/vue-compiler").is_none());
+    }
+
     fn unique_target_test_dir(name: &str) -> PathBuf {
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -5325,5 +5829,53 @@ mod tests {
             .join("target")
             .join("xtask-tests")
             .join(format!("{name}-{}-{stamp}", std::process::id()))
+    }
+
+    fn write_ci_status_fixture(
+        root: &Path,
+        default_conclusion: &str,
+        override_job: Option<(&str, &str)>,
+    ) -> (PathBuf, PathBuf) {
+        fs::create_dir_all(root).unwrap();
+        let runs = root.join("runs.json");
+        let jobs = root.join("jobs.json");
+        fs::write(&runs, ci_runs_fixture(default_conclusion)).unwrap();
+        let jobs_json = json!({
+            "jobs": REQUIRED_CI_JOBS
+                .iter()
+                .map(|job| {
+                    let conclusion = override_job
+                        .filter(|(name, _)| name == job)
+                        .map(|(_, conclusion)| conclusion)
+                        .unwrap_or(default_conclusion);
+                    json!({
+                        "name": job,
+                        "status": "completed",
+                        "conclusion": conclusion,
+                        "html_url": format!("https://example.test/{job}")
+                    })
+                })
+                .collect::<Vec<_>>()
+        });
+        fs::write(&jobs, serde_json::to_vec_pretty(&jobs_json).unwrap()).unwrap();
+        (runs, jobs)
+    }
+
+    fn ci_runs_fixture(conclusion: &str) -> Vec<u8> {
+        ci_runs_fixture_with("completed", Some(conclusion))
+    }
+
+    fn ci_runs_fixture_with(status: &str, conclusion: Option<&str>) -> Vec<u8> {
+        serde_json::to_vec_pretty(&json!({
+            "workflow_runs": [{
+                "id": 42,
+                "head_sha": "abc123",
+                "status": status,
+                "conclusion": conclusion,
+                "html_url": "https://example.test/run/42",
+                "run_number": 7
+            }]
+        }))
+        .unwrap()
     }
 }

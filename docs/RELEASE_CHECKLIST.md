@@ -13,6 +13,7 @@ Use this checklist before publishing a release candidate.
 - [ ] `cargo xtask verify-supply-chain`
 - [ ] `cargo xtask verify-release-dry-run --native-artifacts-dir <native-artifacts>`
 - [ ] `cargo xtask verify-release-install-smoke` on every required OS/arch/libc host; CI matrix runners may use `--current-platform-only`.
+- [ ] `cargo xtask verify-ci-status --commit <sha>` returns `pass` for the release candidate commit and required workflow jobs.
 - [ ] `cargo xtask summarize-compat --locked`
 - [ ] `cargo xtask bench --iterations 1`
 - [ ] Fill `docs/CONFORMANCE_REPORT_TEMPLATE.md` for the release candidate report.
@@ -37,6 +38,7 @@ Use this checklist before publishing a release candidate.
 - [ ] Run npm pack dry-runs for `packages/native`, all `packages/native-platforms/*`, and `packages/wasm`. Cross-platform native packages need release-built `vuec_napi.node` artifacts from their target platforms, provided as `<platform>/vuec_napi.node` or `<platform>.node`.
 - [ ] Run cargo publish dry-runs for published crates. On the first crates.io release, publish leaf crates first, then rerun dry-runs for crates that depend on already-published internal crates.
 - [ ] Install packed npm artifacts into clean temp projects and run Node smoke tests on each required target host: `cargo xtask verify-release-install-smoke`. Use `--current-platform-only` only for per-runner CI evidence; require the aggregated release evidence to have no `fail` or `pending` rows before publication.
+- [ ] Confirm `cargo xtask verify-ci-status --commit <sha>` reports `pass` for the final candidate commit, including Windows/Linux/macOS compatibility jobs, product smoke, Windows/Linux/macOS release install smoke jobs, and release dry-run.
 - [ ] Record the conformance report path, lock hash, and coverage classification in the release notes.
 
 ## Rollback
