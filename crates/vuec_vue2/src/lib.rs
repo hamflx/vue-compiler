@@ -885,6 +885,10 @@ fn parse_element_tree(
         );
     }
 
+    if let Some(root) = root.as_mut() {
+        mark_ref_in_for(root, false);
+    }
+
     root
 }
 
@@ -1158,6 +1162,24 @@ fn cleanup_scoped_slot_children(element: &mut Vue2Element, in_pre_tag: bool) {
     });
     if !in_pre_tag {
         trim_ending_whitespace(element);
+    }
+}
+
+fn mark_ref_in_for(element: &mut Vue2Element, in_for: bool) {
+    let current_in_for = in_for || element.for_exp.is_some();
+    if element.ref_name.is_some() && current_in_for {
+        element.ref_in_for = true;
+    }
+    for child in &mut element.children {
+        if let Vue2Node::Element(child) = child {
+            mark_ref_in_for(child, current_in_for);
+        }
+    }
+    for slot in element.scoped_slots.values_mut() {
+        mark_ref_in_for(slot, current_in_for);
+    }
+    for condition in &mut element.if_conditions {
+        mark_ref_in_for(&mut condition.block, in_for);
     }
 }
 
@@ -6280,6 +6302,24 @@ mod tests {
         assert_eq!(
             for_ref.render,
             r#"with(this){return _c('ul',_l((items),function(item){return _c('li',{ref:"component1",refInFor:true})}),0)}"#
+        );
+
+        let nested_static_ref = compile(
+            r#"<ul><li v-for="item in items"><span ref="component1"></span></li></ul>"#,
+            options(),
+        );
+        assert_eq!(
+            nested_static_ref.render,
+            r#"with(this){return _c('ul',_l((items),function(item){return _c('li',[_c('span',{ref:"component1",refInFor:true})])}),0)}"#
+        );
+
+        let nested_dynamic_ref = compile(
+            r#"<ul><li v-for="item in items"><CnCell :ref="'cell-' + item.id"/></li></ul>"#,
+            options(),
+        );
+        assert_eq!(
+            nested_dynamic_ref.render,
+            r#"with(this){return _c('ul',_l((items),function(item){return _c('li',[_c('CnCell',{ref:'cell-' + item.id,refInFor:true})],1)}),0)}"#
         );
 
         let model = compile(r#"<input v-model="test">"#, options());
