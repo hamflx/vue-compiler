@@ -5684,6 +5684,22 @@ mod tests {
     }
 
     #[test]
+    fn native_artifact_lookup_accepts_downloaded_github_artifact_layout() {
+        let root = unique_target_test_dir("native-artifact-github-download");
+        let artifact = root
+            .join("native-Linux-X64")
+            .join("linux-x64-gnu")
+            .join("vuec_napi.node");
+        fs::create_dir_all(artifact.parent().expect("artifact parent")).unwrap();
+        fs::write(&artifact, b"native").unwrap();
+
+        let found = find_native_artifact(Some(&root), "linux-x64-gnu")
+            .expect("artifact lookup")
+            .expect("artifact path");
+        assert_eq!(found, artifact);
+    }
+
+    #[test]
     fn ci_status_fixture_passes_when_required_jobs_succeed() {
         let root = unique_target_test_dir("ci-status-pass");
         let (runs, jobs) = write_ci_status_fixture(&root, "success", None);

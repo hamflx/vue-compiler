@@ -5,7 +5,8 @@
 `cargo xtask verify-release-dry-run` and
 `cargo xtask verify-release-install-smoke` are implemented. They now accept
 release-built native platform bindings through `--native-artifacts-dir`, using
-either `<platform>/vuec_napi.node` or `<platform>.node` artifact layout, and
+`<platform>/vuec_napi.node`, `<platform>.node`, or downloaded GitHub artifact
+wrapper layouts such as `native-Linux-X64/linux-x64-gnu/vuec_napi.node`, and
 `verify-release-install-smoke --current-platform-only` gives a CI matrix runner
 an honest current-host smoke gate. `.github/workflows/ci.yml` wires this into a
 Windows/Linux/macOS `release-smoke` matrix plus a `release-dry-run` artifact
