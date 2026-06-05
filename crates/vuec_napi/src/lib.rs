@@ -24,8 +24,9 @@ use vuec_js::JsAstStore;
 use vuec_sfc::{
     SfcCompiler, SfcCssVarNameStyle, SfcPropsDestructureMode, SfcScriptCompileOptions,
     SfcStyleCompileOptions, SfcTemplateCompileOptions, Vue27ParseComponentOptions,
-    Vue27RewriteDefaultOptions, Vue27SfcPad, Vue27TemplatePreprocessOptions,
-    Vue3RewriteDefaultOptions, Vue3SfcPad, Vue3SfcParseOptions, Vue3SfcParseProjectionOptions,
+    Vue27PrefixIdentifiersOptions, Vue27RewriteDefaultOptions, Vue27SfcPad,
+    Vue27TemplatePreprocessOptions, Vue3RewriteDefaultOptions, Vue3SfcPad, Vue3SfcParseOptions,
+    Vue3SfcParseProjectionOptions,
 };
 use vuec_source::{FileId, Span};
 use vuec_vue2::{
@@ -499,7 +500,12 @@ pub fn compile_vue27_sfc_template(
     );
     to_json_string(json!({
         "ast": null,
-        "code": vue27_template_code(&compiled.render, &compiled.static_render_fns),
+        "code": compiler.vue27_sfc_template_code(
+            &compiled.render,
+            &compiled.static_render_fns,
+            vue27_prefix_identifiers_options(&raw_options),
+            vue27_template_is_production(&raw_options),
+        ),
         "source": source,
         "tips": compiled.tips,
         "errors": compiled.errors,
@@ -1236,67 +1242,20 @@ fn vue27_template_preprocess_options(
     }
 }
 
-fn vue27_template_code(render: &str, static_render_fns: &[String]) -> String {
-    format!(
-        "var render = function render() {{\n  var _vm = this,\n    _c = _vm._self._c\n  return {}\n}}\nvar staticRenderFns = [{}]\nrender._withStripped = true\n",
-        vue27_template_expr(render),
-        static_render_fns
-            .iter()
-            .map(|render| format!("function(){{{render}}}"))
-            .collect::<Vec<_>>()
-            .join(",")
+fn vue27_prefix_identifiers_options(value: &Value) -> Vue27PrefixIdentifiersOptions {
+    Vue27PrefixIdentifiersOptions {
+        is_functional: bool_option(value, "isFunctional", false),
+        is_ts: bool_option(value, "isTS", false),
+        bindings: string_map_option(value, "bindings").unwrap_or_default(),
+    }
+}
+
+fn vue27_template_is_production(value: &Value) -> bool {
+    bool_option(
+        value,
+        "isProduction",
+        bool_option(value, "isProd", bool_option(value, "is_prod", false)),
     )
-}
-
-fn vue27_template_expr(render: &str) -> String {
-    let inner = render
-        .strip_prefix("with(this){return ")
-        .and_then(|value| value.strip_suffix('}'))
-        .unwrap_or(render);
-    let mut code = inner.to_string();
-    for (from, to) in [
-        ("_c(", "_c("),
-        ("_v(", "_vm._v("),
-        ("_s(", "_vm._s("),
-        ("_l(", "_vm._l("),
-        ("_e(", "_vm._e("),
-        ("_m(", "_vm._m("),
-        ("_t(", "_vm._t("),
-    ] {
-        code = code.replace(from, to);
-    }
-    code = prefix_simple_identifier_args(&code, "_vm._s(");
-    code = code.replace("_c('", "_c(\"");
-    code = code.replace("',", "\", ");
-    code = code.replace("')", "\")");
-    code = code.replace("{attrs:{", "{attrs: {");
-    code = code.replace("{domProps:{", "{domProps: {");
-    for key in ["href", "src", "srcset"] {
-        code = code.replace(&format!("\"{key}\":"), &format!("{key}: "));
-    }
-    code
-}
-
-fn prefix_simple_identifier_args(source: &str, callee: &str) -> String {
-    let mut output = String::new();
-    let mut rest = source;
-    while let Some(index) = rest.find(callee) {
-        output.push_str(&rest[..index + callee.len()]);
-        rest = &rest[index + callee.len()..];
-        let Some(end) = rest.find(')') else {
-            output.push_str(rest);
-            return output;
-        };
-        let arg = &rest[..end];
-        if is_simple_identifier(arg) {
-            output.push_str("_vm.");
-        }
-        output.push_str(arg);
-        output.push(')');
-        rest = &rest[end + 1..];
-    }
-    output.push_str(rest);
-    output
 }
 
 fn is_simple_identifier(value: &str) -> bool {
@@ -4439,9 +4398,14 @@ mod tests {
 
     #[test]
     fn vue27_sfc_template_code_wraps_vue2_render_shape() {
-        let code = vue27_template_code("with(this){return _c('div',[_v(_s(msg))])}", &[]);
-        assert!(code.contains("var _vm = this"));
-        assert!(code.contains("return _c(\"div\", [_vm._v(_vm._s(_vm.msg))])"));
+        let code = SfcCompiler::new().vue27_sfc_template_code(
+            "with(this){return _c('div',[_v(_s(msg))])}",
+            &[],
+            Vue27PrefixIdentifiersOptions::default(),
+            false,
+        );
+        assert!(code.contains("var _vm=this"));
+        assert!(code.contains("return _c('div',[_vm._v(_vm._s(_vm.msg))])"));
         assert!(code.contains("render._withStripped = true"));
     }
 

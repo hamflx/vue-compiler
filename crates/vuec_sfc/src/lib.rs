@@ -1459,6 +1459,17 @@ impl SfcCompiler {
         prefix_vue27_identifiers(input, options)
     }
 
+    /// Generates Vue 2.7 SFC `compileTemplate` render code from Vue 2 compiler output.
+    pub fn vue27_sfc_template_code(
+        &self,
+        render: &str,
+        static_render_fns: &[String],
+        options: Vue27PrefixIdentifiersOptions,
+        is_production: bool,
+    ) -> String {
+        vue27_sfc_template_code(render, static_render_fns, options, is_production)
+    }
+
     /// Preprocesses Vue 2.7 template source.
     pub fn preprocess_vue27_template(
         &self,
@@ -3176,6 +3187,47 @@ fn prefix_vue27_identifiers(input: &str, options: Vue27PrefixIdentifiersOptions)
         context.walk_statement(statement);
     }
     edits.apply()
+}
+
+fn vue27_sfc_template_code(
+    render: &str,
+    static_render_fns: &[String],
+    options: Vue27PrefixIdentifiersOptions,
+    is_production: bool,
+) -> String {
+    let render_args = if options.is_functional { "_c,_vm" } else { "" };
+    let prefixed_render = prefix_vue27_identifiers(
+        &format!("function render({render_args}){{{render}\n}}"),
+        options.clone(),
+    );
+    let prefixed_static = static_render_fns
+        .iter()
+        .map(|render| {
+            vue27_prefix_anonymous_function(
+                &format!("function ({render_args}){{{render}\n}}"),
+                options.clone(),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut code = format!(
+        "var __render__ = {prefixed_render}\nvar __staticRenderFns__ = [{prefixed_static}]\n"
+    );
+    code = code.replace(" __render__ ", " render ");
+    code = code.replace(" __staticRenderFns__ ", " staticRenderFns ");
+    if !is_production {
+        code.push_str("render._withStripped = true");
+    }
+    code
+}
+
+fn vue27_prefix_anonymous_function(source: &str, options: Vue27PrefixIdentifiersOptions) -> String {
+    let prefixed = prefix_vue27_identifiers(&format!("({source})"), options);
+    prefixed
+        .strip_prefix('(')
+        .and_then(|value| value.strip_suffix(')'))
+        .unwrap_or(&prefixed)
+        .to_string()
 }
 
 struct PrefixIdentifiersContext<'a, 'b> {
@@ -35282,6 +35334,41 @@ span { color: v-bind(style.color) }
             compiler.prefix_vue27_identifiers(source, options),
             "function render(){var _vm=this,_c=_vm._self._c,_setup=_vm._self._setupProxy;return _c('div',{on:{click:function($event){_setup.count++}}},[_vm._v(_vm._s(_setup.count))])}"
         );
+    }
+
+    #[test]
+    fn vue27_sfc_template_code_uses_official_identifier_prefixing() {
+        let compiler = SfcCompiler::new();
+        let render = "with(this){return _c('el-breadcrumb',_l((levelList),function(item,index){return _c('el-breadcrumb-item',{key:item.path},[_c('a',{on:{\"click\":function($event){$event.preventDefault();return handleLink(item)}}},[_v(_s(item.meta.title))])])}),1)}";
+
+        let code = compiler.vue27_sfc_template_code(
+            render,
+            &[],
+            Vue27PrefixIdentifiersOptions::default(),
+            false,
+        );
+
+        assert!(code.contains("_vm._l((_vm.levelList),function(item,index)"));
+        assert!(code.contains("return _vm.handleLink(item)"));
+        assert!(code.contains("_vm._s(item.meta.title)"));
+        assert!(!code.contains("_vm.item.meta.title"));
+        assert!(code.contains("render._withStripped = true"));
+    }
+
+    #[test]
+    fn vue27_sfc_template_code_prefixes_static_render_functions() {
+        let compiler = SfcCompiler::new();
+        let code = compiler.vue27_sfc_template_code(
+            "with(this){return _m(0)}",
+            &["with(this){return _c('div',[_v(_s(msg))])}".to_string()],
+            Vue27PrefixIdentifiersOptions::default(),
+            false,
+        );
+
+        assert!(code.contains("return _vm._m(0)"));
+        assert!(code.contains(
+            "function (){var _vm=this,_c=_vm._self._c;return _c('div',[_vm._v(_vm._s(_vm.msg))])"
+        ));
     }
 
     #[test]

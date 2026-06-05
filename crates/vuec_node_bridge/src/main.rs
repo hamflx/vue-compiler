@@ -497,6 +497,7 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
         "sfc.vue27.compileTemplate" => {
             let source = string_field(&payload, "source");
             let filename = string_field_or(&payload, "filename", "template.vue.html");
+            let raw_options = payload.get("options").unwrap_or(&Value::Null);
             let options = vue27_sfc_template_vue2_options(payload.get("options"));
             let compiler = SfcCompiler::new();
             let preprocessed = compiler.preprocess_vue27_template(
@@ -515,7 +516,12 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
             let compiled = vuec_vue2::compile(&preprocessed.source, options);
             Ok(json!({
                 "ast": vue27_template_ast_value(&compiled),
-                "code": vue27_template_code(&compiled.render, &compiled.static_render_fns),
+                "code": compiler.vue27_sfc_template_code(
+                    &compiled.render,
+                    &compiled.static_render_fns,
+                    vue27_prefix_identifiers_options(raw_options),
+                    vue27_template_is_production(raw_options),
+                ),
                 "source": source,
                 "tips": compiled.tips,
                 "errors": compiled.errors,
@@ -1412,69 +1418,6 @@ fn vue3_sfc_plain_template_ast_value(descriptor: &SfcDescriptor, template: &SfcB
         "codegenNode": Value::Null,
         "loc": vue3_loc_stub_value(),
     })
-}
-
-fn vue27_template_code(render: &str, static_render_fns: &[String]) -> String {
-    format!(
-        "var render = function render() {{\n  var _vm = this,\n    _c = _vm._self._c\n  return {}\n}}\nvar staticRenderFns = [{}]\nrender._withStripped = true\n",
-        vue27_template_expr(render),
-        static_render_fns
-            .iter()
-            .map(|render| format!("function(){{{render}}}"))
-            .collect::<Vec<_>>()
-            .join(",")
-    )
-}
-
-fn vue27_template_expr(render: &str) -> String {
-    let inner = render
-        .strip_prefix("with(this){return ")
-        .and_then(|value| value.strip_suffix('}'))
-        .unwrap_or(render);
-    let mut code = inner.to_string();
-    for (from, to) in [
-        ("_c(", "_c("),
-        ("_v(", "_vm._v("),
-        ("_s(", "_vm._s("),
-        ("_l(", "_vm._l("),
-        ("_e(", "_vm._e("),
-        ("_m(", "_vm._m("),
-        ("_t(", "_vm._t("),
-    ] {
-        code = code.replace(from, to);
-    }
-    code = prefix_simple_identifier_args(&code, "_vm._s(");
-    code = code.replace("_c('", "_c(\"");
-    code = code.replace("',", "\", ");
-    code = code.replace("')", "\")");
-    code = code.replace("{attrs:{", "{attrs: {");
-    code = code.replace("{domProps:{", "{domProps: {");
-    for key in ["href", "src", "srcset"] {
-        code = code.replace(&format!("\"{key}\":"), &format!("{key}: "));
-    }
-    code
-}
-
-fn prefix_simple_identifier_args(source: &str, callee: &str) -> String {
-    let mut output = String::new();
-    let mut rest = source;
-    while let Some(index) = rest.find(callee) {
-        output.push_str(&rest[..index + callee.len()]);
-        rest = &rest[index + callee.len()..];
-        let Some(end) = rest.find(')') else {
-            output.push_str(rest);
-            return output;
-        };
-        let arg = &rest[..end];
-        if is_simple_identifier(arg) {
-            output.push_str("_vm.");
-        }
-        output.push_str(arg);
-        output.push(')');
-        rest = &rest[end + 1..];
-    }
-    output.push_str(rest);
-    output
 }
 
 fn is_simple_identifier(value: &str) -> bool {
@@ -14230,6 +14173,14 @@ fn vue27_prefix_identifiers_options(value: &Value) -> Vue27PrefixIdentifiersOpti
     }
 }
 
+fn vue27_template_is_production(value: &Value) -> bool {
+    bool_option(
+        value,
+        "isProduction",
+        bool_option(value, "isProd", bool_option(value, "is_prod", false)),
+    )
+}
+
 fn bool_option(value: &Value, name: &str, fallback: bool) -> bool {
     value.get(name).and_then(Value::as_bool).unwrap_or(fallback)
 }
@@ -21271,9 +21222,9 @@ mod tests {
         .expect("vue27 sfc compileTemplate");
 
         let code = compiled["code"].as_str().unwrap_or("");
-        assert!(code.contains(r#"src: require("./logo.png")"#));
-        assert!(code.contains(r#"srcset: require("./logo.png") + " 2x""#));
-        assert!(code.contains(r##"href: require("@svg/file.svg") + "#fragment""##));
+        assert!(code.contains(r#""src":require("./logo.png")"#));
+        assert!(code.contains(r#""srcset":require("./logo.png") + " 2x""#));
+        assert!(code.contains(r##""href":require("@svg/file.svg") + "#fragment""##));
     }
 
     #[test]
