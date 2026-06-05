@@ -794,7 +794,9 @@ fn parse_element_tree(
                     process_raw_attrs(&mut element);
                 } else {
                     process_structural_directives(&mut element, diagnostics);
-                    process_element(&mut element, diagnostics, options);
+                    if !pre_transform_dynamic_input_model(&mut element, diagnostics, options) {
+                        process_element(&mut element, diagnostics, options);
+                    }
                 }
                 if self_closing || is_unary_tag(&element.tag) {
                     close_element(
@@ -1061,7 +1063,7 @@ fn close_element(
             process_if_conditions(element, parent, diagnostics);
         } else {
             let mut element = element;
-            if element.if_exp.is_some() {
+            if element.if_exp.is_some() && element.if_conditions.is_empty() {
                 element.if_conditions = vec![Vue2IfCondition {
                     exp: element.if_exp.clone(),
                     block: Box::new(element.clone_without_conditions()),
@@ -1123,7 +1125,7 @@ fn close_element(
             ));
         }
         let mut element = element;
-        if element.if_exp.is_some() {
+        if element.if_exp.is_some() && element.if_conditions.is_empty() {
             element.if_conditions = vec![Vue2IfCondition {
                 exp: element.if_exp.clone(),
                 block: Box::new(element.clone_without_conditions()),
@@ -1366,6 +1368,133 @@ fn process_component(element: &mut Vue2Element) {
     }
 }
 
+fn pre_transform_dynamic_input_model(
+    element: &mut Vue2Element,
+    diagnostics: &mut DiagnosticSink,
+    options: &Vue2CompileOptions,
+) -> bool {
+    if element.tag != "input" || !element.attrs_map.contains_key("v-model") {
+        return false;
+    }
+
+    let type_binding = if element.attrs_map.contains_key(":type")
+        || element.attrs_map.contains_key("v-bind:type")
+    {
+        get_binding_attr(element, "type", false)
+    } else if !element.attrs_map.contains_key("type") {
+        element
+            .attrs_map
+            .get("v-bind")
+            .map(|binding| format!("({binding}).type"))
+    } else {
+        None
+    };
+    let Some(type_binding) = type_binding else {
+        return false;
+    };
+
+    let original_if = element.if_exp.clone();
+    let original_if_span = element.if_span;
+    let original_elseif = element.elseif.clone();
+    let original_elseif_span = element.elseif_span;
+    let original_else = element.else_branch;
+    let original_else_span = element.else_span;
+    let if_condition_extra = original_if
+        .as_ref()
+        .map(|condition| format!("&&({condition})"))
+        .unwrap_or_default();
+
+    let mut branch0 = clone_input_model_branch(element);
+    add_raw_attr(&mut branch0, "type", "checkbox", element.span);
+    process_element(&mut branch0, diagnostics, options);
+    branch0.if_exp = Some(format!("({type_binding})==='checkbox'{if_condition_extra}"));
+    branch0.if_span = original_if_span.or(element.span);
+    branch0.elseif = original_elseif;
+    branch0.elseif_span = original_elseif_span;
+    branch0.else_branch = original_else;
+    branch0.else_span = original_else_span;
+    branch0.if_conditions = vec![Vue2IfCondition {
+        exp: branch0.if_exp.clone(),
+        block: Box::new(branch0.clone_without_conditions()),
+    }];
+
+    let mut branch1 = clone_input_model_branch(element);
+    clear_vue2_for_fields(&mut branch1);
+    clear_vue2_condition_fields(&mut branch1);
+    add_raw_attr(&mut branch1, "type", "radio", element.span);
+    process_element(&mut branch1, diagnostics, options);
+    branch0.if_conditions.push(Vue2IfCondition {
+        exp: Some(format!("({type_binding})==='radio'{if_condition_extra}")),
+        block: Box::new(branch1.clone_without_conditions()),
+    });
+
+    let mut branch2 = clone_input_model_branch(element);
+    clear_vue2_for_fields(&mut branch2);
+    clear_vue2_condition_fields(&mut branch2);
+    add_raw_attr(&mut branch2, ":type", &type_binding, element.span);
+    process_element(&mut branch2, diagnostics, options);
+    branch0.if_conditions.push(Vue2IfCondition {
+        exp: original_if,
+        block: Box::new(branch2.clone_without_conditions()),
+    });
+
+    *element = branch0;
+    true
+}
+
+fn clone_input_model_branch(element: &Vue2Element) -> Vue2Element {
+    let mut clone = element.clone();
+    rebuild_attr_maps_from_list(&mut clone);
+    clone
+}
+
+fn rebuild_attr_maps_from_list(element: &mut Vue2Element) {
+    element.attrs_map.clear();
+    element.raw_attrs_map.clear();
+    for attr in &element.attrs_list {
+        element
+            .attrs_map
+            .insert(attr.name.clone(), attr.value.clone());
+        element
+            .raw_attrs_map
+            .insert(attr.name.clone(), attr.clone());
+    }
+}
+
+fn add_raw_attr(element: &mut Vue2Element, name: &str, value: &str, span: Option<Span>) {
+    let attr = Vue2Attribute {
+        name: name.into(),
+        value: value.into(),
+        span,
+        dynamic: false,
+    };
+    element
+        .attrs_map
+        .insert(attr.name.clone(), attr.value.clone());
+    element
+        .raw_attrs_map
+        .insert(attr.name.clone(), attr.clone());
+    element.attrs_list.push(attr);
+}
+
+fn clear_vue2_for_fields(element: &mut Vue2Element) {
+    element.for_exp = None;
+    element.for_span = None;
+    element.alias = None;
+    element.iterator1 = None;
+    element.iterator2 = None;
+}
+
+fn clear_vue2_condition_fields(element: &mut Vue2Element) {
+    element.if_exp = None;
+    element.if_span = None;
+    element.elseif = None;
+    element.elseif_span = None;
+    element.else_branch = false;
+    element.else_span = None;
+    element.if_conditions = Vec::new();
+}
+
 fn process_platform_modules(element: &mut Vue2Element, diagnostics: &mut DiagnosticSink) {
     if let Some(value) = remove_attr(element, "class") {
         if value.contains("{{") {
@@ -1388,11 +1517,17 @@ fn process_platform_modules(element: &mut Vue2Element, diagnostics: &mut Diagnos
     }
 }
 
+struct PendingDomModel {
+    value: String,
+    modifiers: BTreeMap<String, bool>,
+}
+
 fn process_attrs(
     element: &mut Vue2Element,
     diagnostics: &mut DiagnosticSink,
     options: &Vue2CompileOptions,
 ) {
+    let mut pending_dom_model = None;
     let list = element.attrs_list.clone();
     for attr in list {
         if !element
@@ -1529,7 +1664,11 @@ fn process_attrs(
                     if is_component(element, options) {
                         gen_component_model(element, &value, &modifiers);
                     } else {
-                        gen_dom_model(element, &raw_name, &value, &modifiers);
+                        add_dom_model_directive(element, &raw_name, &value, &modifiers);
+                        pending_dom_model = Some(PendingDomModel {
+                            value: value.clone(),
+                            modifiers: modifiers.clone(),
+                        });
                     }
                 }
                 if name == "html" {
@@ -1591,6 +1730,10 @@ fn process_attrs(
             }
             remove_attr(element, &attr.name);
         }
+    }
+
+    if let Some(model) = pending_dom_model {
+        gen_dom_model(element, &model.value, &model.modifiers);
     }
 
     if options.warn && has_duplicate_attr(&element.raw_attrs_list) {
@@ -2488,13 +2631,30 @@ fn gen_mir_handlers(
 fn vue2_event_order_key<'a>(
     name: &'a str,
     handlers: &[vuec_ast::Vue2EventHandler],
-) -> (usize, usize, usize, &'a str) {
+) -> (usize, usize, usize, usize, &'a str) {
     let span = handlers
         .iter()
         .find_map(|handler| handler.span)
         .map(|span| (span.start.0, span.end.0))
         .unwrap_or((usize::MAX, usize::MAX));
-    (span.0, span.1, vue2_same_attr_event_rank(name), name)
+    (
+        span.0,
+        span.1,
+        vue2_generated_event_rank(name, span),
+        vue2_same_attr_event_rank(name),
+        name,
+    )
+}
+
+fn vue2_generated_event_rank(name: &str, span: (usize, usize)) -> usize {
+    if span != (usize::MAX, usize::MAX) {
+        return 0;
+    }
+    match name {
+        "input" | "change" | "__r" => 0,
+        "blur" => 1,
+        _ => 0,
+    }
 }
 
 fn vue2_same_attr_event_rank(name: &str) -> usize {
@@ -4784,18 +4944,138 @@ fn gen_component_model(element: &mut Vue2Element, value: &str, modifiers: &BTree
     });
 }
 
-fn gen_dom_model(
+fn add_dom_model_directive(
     element: &mut Vue2Element,
     raw_name: &str,
     value: &str,
     modifiers: &BTreeMap<String, bool>,
 ) {
+    element.directives.push(Vue2Directive {
+        name: "model".into(),
+        raw_name: raw_name.into(),
+        value: Some(value.into()),
+        arg: None,
+        is_dynamic_arg: false,
+        modifiers: modifiers.clone(),
+        span: element.span,
+    });
+}
+
+fn gen_dom_model(element: &mut Vue2Element, value: &str, modifiers: &BTreeMap<String, bool>) {
+    let input_type = element.attrs_map.get("type").map(String::as_str);
+    if element.tag == "select" {
+        gen_select_model(element, value, modifiers);
+    } else if element.tag == "input" && input_type == Some("checkbox") {
+        gen_checkbox_model(element, value, modifiers);
+    } else if element.tag == "input" && input_type == Some("radio") {
+        gen_radio_model(element, value, modifiers);
+    } else if matches!(element.tag.as_str(), "input" | "textarea") {
+        gen_default_model(element, value, modifiers);
+    }
+}
+
+fn add_dom_prop(element: &mut Vue2Element, name: &str, value: String) {
     element.props.push(Vue2Attribute {
-        name: "value".into(),
-        value: format!("({value})"),
+        name: name.into(),
+        value,
         span: element.span,
         dynamic: false,
     });
+}
+
+fn gen_checkbox_model(element: &mut Vue2Element, value: &str, modifiers: &BTreeMap<String, bool>) {
+    let value_binding = get_binding_attr(element, "value", true).unwrap_or_else(|| "null".into());
+    let true_value_binding =
+        get_binding_attr(element, "true-value", true).unwrap_or_else(|| "true".into());
+    let false_value_binding =
+        get_binding_attr(element, "false-value", true).unwrap_or_else(|| "false".into());
+    let checked = format!(
+        "Array.isArray({value})?_i({value},{value_binding})>-1{}",
+        if true_value_binding == "true" {
+            format!(":({value})")
+        } else {
+            format!(":_q({value},{true_value_binding})")
+        }
+    );
+    add_dom_prop(element, "checked", checked);
+
+    let array_value_binding = if modifiers.get("number").copied().unwrap_or(false) {
+        format!("_n({value_binding})")
+    } else {
+        value_binding.clone()
+    };
+    let add_assignment = gen_assignment_code(value, "$$a.concat([$$v])");
+    let remove_assignment = gen_assignment_code(value, "$$a.slice(0,$$i).concat($$a.slice($$i+1))");
+    let fallback_assignment = gen_assignment_code(value, "$$c");
+    let handler = format!(
+        "var $$a={value},$$el=$event.target,$$c=$$el.checked?({true_value_binding}):({false_value_binding});\
+if(Array.isArray($$a)){{var $$v={array_value_binding},$$i=_i($$a,$$v);\
+if($$el.checked){{$$i<0&&({add_assignment})}}else{{$$i>-1&&({remove_assignment})}}}}\
+else{{{fallback_assignment}}}"
+    );
+    add_handler(
+        &mut element.events,
+        "change".into(),
+        handler,
+        BTreeMap::new(),
+        Vec::new(),
+        false,
+        false,
+        true,
+        None,
+    );
+}
+
+fn gen_radio_model(element: &mut Vue2Element, value: &str, modifiers: &BTreeMap<String, bool>) {
+    let mut value_binding =
+        get_binding_attr(element, "value", true).unwrap_or_else(|| "null".into());
+    if modifiers.get("number").copied().unwrap_or(false) {
+        value_binding = format!("_n({value_binding})");
+    }
+    add_dom_prop(element, "checked", format!("_q({value},{value_binding})"));
+    add_handler(
+        &mut element.events,
+        "change".into(),
+        gen_assignment_code(value, &value_binding),
+        BTreeMap::new(),
+        Vec::new(),
+        false,
+        false,
+        true,
+        None,
+    );
+}
+
+fn gen_select_model(element: &mut Vue2Element, value: &str, modifiers: &BTreeMap<String, bool>) {
+    let selected_return = if modifiers.get("number").copied().unwrap_or(false) {
+        "_n(val)"
+    } else {
+        "val"
+    };
+    let selected_val = format!(
+        "Array.prototype.filter.call($event.target.options,function(o){{return o.selected}})\
+.map(function(o){{var val = \"_value\" in o ? o._value : o.value;return {selected_return}}})"
+    );
+    let assignment = gen_assignment_code(
+        value,
+        "$event.target.multiple ? $$selectedVal : $$selectedVal[0]",
+    );
+    let handler = format!("var $$selectedVal = {selected_val}; {assignment}");
+    add_handler(
+        &mut element.events,
+        "change".into(),
+        handler,
+        BTreeMap::new(),
+        Vec::new(),
+        false,
+        false,
+        true,
+        None,
+    );
+}
+
+fn gen_default_model(element: &mut Vue2Element, value: &str, modifiers: &BTreeMap<String, bool>) {
+    add_dom_prop(element, "value", format!("({value})"));
     let assignment_value = if modifiers.get("trim").copied().unwrap_or(false) {
         "$event.target.value.trim()"
     } else {
@@ -4809,11 +5089,15 @@ fn gen_dom_model(
     let assignment = gen_assignment_code(value, &assignment_value);
     let event = if modifiers.get("lazy").copied().unwrap_or(false) {
         "change"
+    } else if element.attrs_map.get("type").map(String::as_str) == Some("range") {
+        "__r"
     } else {
         "input"
     };
     let mut handler = String::new();
-    if event == "input" {
+    if !modifiers.get("lazy").copied().unwrap_or(false)
+        && element.attrs_map.get("type").map(String::as_str) != Some("range")
+    {
         handler.push_str("if($event.target.composing)return;");
     }
     handler.push_str(&assignment);
@@ -4828,15 +5112,21 @@ fn gen_dom_model(
         true,
         None,
     );
-    element.directives.push(Vue2Directive {
-        name: "model".into(),
-        raw_name: raw_name.into(),
-        value: Some(value.into()),
-        arg: None,
-        is_dynamic_arg: false,
-        modifiers: modifiers.clone(),
-        span: element.span,
-    });
+    if modifiers.get("trim").copied().unwrap_or(false)
+        || modifiers.get("number").copied().unwrap_or(false)
+    {
+        add_handler(
+            &mut element.events,
+            "blur".into(),
+            "$forceUpdate()".into(),
+            BTreeMap::new(),
+            Vec::new(),
+            false,
+            false,
+            false,
+            None,
+        );
+    }
 }
 
 fn gen_assignment_code(value: &str, assignment: &str) -> String {
@@ -5829,6 +6119,72 @@ mod tests {
         assert_eq!(
             lazy_model_with_change.render,
             r#"with(this){return _c('input',{directives:[{name:"model",rawName:"v-model.lazy",value:(val),expression:"val",modifiers:{"lazy":true}}],domProps:{"value":(val)},on:{"change":[function($event){val=$event.target.value},emitChange]}})}"#
+        );
+    }
+
+    #[test]
+    fn generates_vue2_dom_model_platform_branches_like_official_codegen() {
+        let checkbox = compile(r#"<input type="checkbox" v-model="checked">"#, options());
+        assert_eq!(
+            checkbox.render,
+            r#"with(this){return _c('input',{directives:[{name:"model",rawName:"v-model",value:(checked),expression:"checked"}],attrs:{"type":"checkbox"},domProps:{"checked":Array.isArray(checked)?_i(checked,null)>-1:(checked)},on:{"change":function($event){var $$a=checked,$$el=$event.target,$$c=$$el.checked?(true):(false);if(Array.isArray($$a)){var $$v=null,$$i=_i($$a,$$v);if($$el.checked){$$i<0&&(checked=$$a.concat([$$v]))}else{$$i>-1&&(checked=$$a.slice(0,$$i).concat($$a.slice($$i+1)))}}else{checked=$$c}}}})}"#
+        );
+
+        let checkbox_value = compile(
+            r#"<input type="checkbox" :value="item.value" v-model="checked">"#,
+            options(),
+        );
+        assert_eq!(
+            checkbox_value.render,
+            r#"with(this){return _c('input',{directives:[{name:"model",rawName:"v-model",value:(checked),expression:"checked"}],attrs:{"type":"checkbox"},domProps:{"value":item.value,"checked":Array.isArray(checked)?_i(checked,item.value)>-1:(checked)},on:{"change":function($event){var $$a=checked,$$el=$event.target,$$c=$$el.checked?(true):(false);if(Array.isArray($$a)){var $$v=item.value,$$i=_i($$a,$$v);if($$el.checked){$$i<0&&(checked=$$a.concat([$$v]))}else{$$i>-1&&(checked=$$a.slice(0,$$i).concat($$a.slice($$i+1)))}}else{checked=$$c}}}})}"#
+        );
+
+        let checkbox_custom_values = compile(
+            r#"<input type="checkbox" :value="item.value" :true-value="yes" :false-value="no" v-model.number="checked">"#,
+            options(),
+        );
+        assert_eq!(
+            checkbox_custom_values.render,
+            r#"with(this){return _c('input',{directives:[{name:"model",rawName:"v-model.number",value:(checked),expression:"checked",modifiers:{"number":true}}],attrs:{"type":"checkbox","true-value":yes,"false-value":no},domProps:{"value":item.value,"checked":Array.isArray(checked)?_i(checked,item.value)>-1:_q(checked,yes)},on:{"change":function($event){var $$a=checked,$$el=$event.target,$$c=$$el.checked?(yes):(no);if(Array.isArray($$a)){var $$v=_n(item.value),$$i=_i($$a,$$v);if($$el.checked){$$i<0&&(checked=$$a.concat([$$v]))}else{$$i>-1&&(checked=$$a.slice(0,$$i).concat($$a.slice($$i+1)))}}else{checked=$$c}}}})}"#
+        );
+
+        let radio = compile(
+            r#"<input type="radio" :value="nativeValue" v-model="picked">"#,
+            options(),
+        );
+        assert_eq!(
+            radio.render,
+            r#"with(this){return _c('input',{directives:[{name:"model",rawName:"v-model",value:(picked),expression:"picked"}],attrs:{"type":"radio"},domProps:{"value":nativeValue,"checked":_q(picked,nativeValue)},on:{"change":function($event){picked=nativeValue}}})}"#
+        );
+
+        let select = compile(
+            r#"<select v-model="selected"><option :value="item"></option></select>"#,
+            options(),
+        );
+        assert_eq!(
+            select.render,
+            r#"with(this){return _c('select',{directives:[{name:"model",rawName:"v-model",value:(selected),expression:"selected"}],on:{"change":function($event){var $$selectedVal = Array.prototype.filter.call($event.target.options,function(o){return o.selected}).map(function(o){var val = "_value" in o ? o._value : o.value;return val}); selected=$event.target.multiple ? $$selectedVal : $$selectedVal[0]}}},[_c('option',{domProps:{"value":item}})])}"#
+        );
+
+        let range = compile(r#"<input type="range" v-model="val">"#, options());
+        assert_eq!(
+            range.render,
+            r#"with(this){return _c('input',{directives:[{name:"model",rawName:"v-model",value:(val),expression:"val"}],attrs:{"type":"range"},domProps:{"value":(val)},on:{"__r":function($event){val=$event.target.value}}})}"#
+        );
+
+        let number = compile(r#"<input v-model.number="val">"#, options());
+        assert_eq!(
+            number.render,
+            r#"with(this){return _c('input',{directives:[{name:"model",rawName:"v-model.number",value:(val),expression:"val",modifiers:{"number":true}}],domProps:{"value":(val)},on:{"input":function($event){if($event.target.composing)return;val=_n($event.target.value)},"blur":function($event){return $forceUpdate()}}})}"#
+        );
+
+        let dynamic_type = compile(
+            r#"<input v-model="computedValue" :type="option.as" :value="option.nativeValue">"#,
+            options(),
+        );
+        assert_eq!(
+            dynamic_type.render,
+            r#"with(this){return ((option.as)==='checkbox')?_c('input',{directives:[{name:"model",rawName:"v-model",value:(computedValue),expression:"computedValue"}],attrs:{"type":"checkbox"},domProps:{"value":option.nativeValue,"checked":Array.isArray(computedValue)?_i(computedValue,option.nativeValue)>-1:(computedValue)},on:{"change":function($event){var $$a=computedValue,$$el=$event.target,$$c=$$el.checked?(true):(false);if(Array.isArray($$a)){var $$v=option.nativeValue,$$i=_i($$a,$$v);if($$el.checked){$$i<0&&(computedValue=$$a.concat([$$v]))}else{$$i>-1&&(computedValue=$$a.slice(0,$$i).concat($$a.slice($$i+1)))}}else{computedValue=$$c}}}}):((option.as)==='radio')?_c('input',{directives:[{name:"model",rawName:"v-model",value:(computedValue),expression:"computedValue"}],attrs:{"type":"radio"},domProps:{"value":option.nativeValue,"checked":_q(computedValue,option.nativeValue)},on:{"change":function($event){computedValue=option.nativeValue}}}):_c('input',{directives:[{name:"model",rawName:"v-model",value:(computedValue),expression:"computedValue"}],attrs:{"type":option.as},domProps:{"value":option.nativeValue,"value":(computedValue)},on:{"input":function($event){if($event.target.composing)return;computedValue=$event.target.value}}})}"#
         );
     }
 
