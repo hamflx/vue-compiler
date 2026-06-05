@@ -9692,7 +9692,7 @@ function invoke(api) {
       });
     }
     case 'compileStyle':
-      return capture(() => normalizeSfcStyleResult(api.compileStyle(optionObjectWithSource(side === 'official' ? extractStyleSource(fixture) : fixture))));
+      return capture(() => normalizeSfcStyleResult(api.compileStyle(optionObjectWithSource(extractStyleSource(fixture)))));
     case 'baseCompile':
       return capture(() => arg.present ? api.baseCompile(fixture, arg.value) : api.baseCompile(fixture));
     case 'baseParse':
@@ -18556,6 +18556,14 @@ mod tests {
     fn sfc_compile_style_alias_strips_public_source_map_option() {
         assert!(ALIAS_RUNTIME_JS.contains("key !== 'sourceMap' && key !== 'source_map'"));
         assert!(ALIAS_RUNTIME_JS.contains("key !== 'sourceMap'"));
+    }
+
+    #[test]
+    fn option_matrix_compile_style_passes_css_source_on_both_sides() {
+        assert!(OPTION_MATRIX_PROBE_SCRIPT
+            .contains("api.compileStyle(optionObjectWithSource(extractStyleSource(fixture)))"));
+        assert!(!OPTION_MATRIX_PROBE_SCRIPT
+            .contains("side === 'official' ? extractStyleSource(fixture) : fixture"));
     }
 
     #[test]
