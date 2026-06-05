@@ -4536,12 +4536,18 @@ fn vue2_scoped_slot_stability(
     let mut needs_key = element.if_exp.is_some();
 
     if !force_update {
+        let mut child_id = element_id;
         let mut parent = ast.node(element_id).and_then(|node| node.parent);
         while let Some(parent_id) = parent {
             let Some(parent_node) = ast.node(parent_id) else {
                 break;
             };
             if let Vue2AstKind::Element(parent_element) = &parent_node.kind {
+                if vue2_is_synthetic_if_branch_parent(parent_element, parent_id, child_id) {
+                    child_id = parent_id;
+                    parent = parent_node.parent;
+                    continue;
+                }
                 if vue2_scoped_slot_parent_scope_forces_update(parent_element, state)
                     || parent_element.for_exp.is_some()
                 {
@@ -4552,11 +4558,24 @@ fn vue2_scoped_slot_stability(
                     needs_key = true;
                 }
             }
+            child_id = parent_id;
             parent = parent_node.parent;
         }
     }
 
     (force_update, needs_key)
+}
+
+fn vue2_is_synthetic_if_branch_parent(
+    parent: &vuec_ast::Vue2Element,
+    parent_id: NodeId,
+    child_id: NodeId,
+) -> bool {
+    parent
+        .if_conditions
+        .iter()
+        .skip(1)
+        .any(|condition| condition.block == child_id && condition.block != parent_id)
 }
 
 fn vue2_scoped_slot_parent_scope_forces_update(
@@ -4614,7 +4633,19 @@ fn vue2_ast_contains_slot_child(ast_id: NodeId, ast: &Vue2Ast) -> bool {
     };
     match &node.kind {
         Vue2AstKind::Element(element) if element.tag == "slot" => true,
-        Vue2AstKind::Element(_) | Vue2AstKind::Root(_) => node
+        Vue2AstKind::Element(element) => {
+            let branch_blocks = element
+                .if_conditions
+                .iter()
+                .skip(1)
+                .map(|condition| condition.block)
+                .collect::<Vec<_>>();
+            node.children
+                .iter()
+                .filter(|child| !branch_blocks.contains(child))
+                .any(|child| vue2_ast_contains_slot_child(*child, ast))
+        }
+        Vue2AstKind::Root(_) => node
             .children
             .iter()
             .any(|child| vue2_ast_contains_slot_child(*child, ast)),
@@ -6746,6 +6777,15 @@ mod tests {
         assert_eq!(
             parent_if_key.render,
             r#"with(this){return (ok)?_c('div',[_c('foo',{scopedSlots:_u([{key:"default",fn:function(s){return [_c('span',[_v(_s(s.x))])]}}],null,false,2164623802)})],1):_e()}"#
+        );
+
+        let if_chain_slot_fallback = compile(
+            r#"<div v-if="loading"></div><div v-else-if="empty"><slot name="empty"><foo><template #icon><span/></template></foo></slot></div>"#,
+            options(),
+        );
+        assert_eq!(
+            if_chain_slot_fallback.render,
+            r#"with(this){return (loading)?_c('div'):(empty)?_c('div',[_t("empty",function(){return [_c('foo',{scopedSlots:_u([{key:"icon",fn:function(){return [_c('span')]},proxy:true}])})]})],2):_e()}"#
         );
 
         let parent_for_force_update = compile(
