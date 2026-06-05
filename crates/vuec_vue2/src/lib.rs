@@ -1386,21 +1386,6 @@ fn process_platform_modules(element: &mut Vue2Element, diagnostics: &mut Diagnos
     if let Some(value) = get_binding_attr(element, "style", false) {
         element.style_binding = Some(value);
     }
-    for name in [
-        "required",
-        "min",
-        "max",
-        "pattern",
-        "maxlength",
-        "minlength",
-    ] {
-        if let Some(rule) = remove_attr(element, name) {
-            element.validators.push(Vue2Validator {
-                name: name.into(),
-                rule,
-            });
-        }
-    }
 }
 
 fn process_attrs(
@@ -1543,12 +1528,6 @@ fn process_attrs(
                     } else {
                         gen_dom_model(element, &raw_name, &value, &modifiers);
                     }
-                }
-                if name == "validate" {
-                    element.validate = Some(Vue2Validation {
-                        field: arg.clone().unwrap_or_default(),
-                        groups: modifiers.keys().cloned().collect(),
-                    });
                 }
                 if name == "html" {
                     element.props.push(Vue2Attribute {
@@ -5842,6 +5821,31 @@ mod tests {
             dynamic_component.render,
             r#"with(this){return _c(tag,{tag:"component",attrs:{"value":label}})}"#
         );
+    }
+
+    #[test]
+    fn preserves_vue2_standard_validation_attrs_like_official_codegen() {
+        let component_attr = compile(r#"<el-input maxlength="50"></el-input>"#, options());
+        assert_eq!(
+            component_attr.render,
+            r#"with(this){return _c('el-input',{attrs:{"maxlength":"50"}})}"#
+        );
+
+        let input_attrs = compile(r#"<input maxlength="50" required>"#, options());
+        assert_eq!(
+            input_attrs.render,
+            r#"with(this){return _c('input',{attrs:{"maxlength":"50","required":""}})}"#
+        );
+
+        let custom_validate = compile(
+            r#"<input v-validate:field.required maxlength="50">"#,
+            options(),
+        );
+        assert_eq!(
+            custom_validate.render,
+            r#"with(this){return _c('input',{directives:[{name:"validate",rawName:"v-validate:field.required",arg:"field",modifiers:{"required":true}}],attrs:{"maxlength":"50"}})}"#
+        );
+        assert!(!custom_validate.render.contains("_c('validate'"));
     }
 
     #[test]
