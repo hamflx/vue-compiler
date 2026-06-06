@@ -11195,6 +11195,14 @@ fn run_conformance_with_backend(args: &ConformanceArgs, backend: AliasBackend) -
             .as_ref()
             .map(|result| result.status.as_str())
             .unwrap_or(if ready_to_execute { "ready" } else { "blocked" });
+        let prepared_test_manifest = execution_result
+            .as_ref()
+            .and_then(|result| result.prepared_manifest_file.as_deref())
+            .and_then(prepared_test_manifest_report);
+        let official_test_origin = prepared_test_manifest
+            .as_ref()
+            .map(|manifest| manifest.official_test_origin.as_str())
+            .unwrap_or("manifest-missing");
         let coverage = conformance_coverage_report(spec, backend, execution_result.as_ref());
         let report_path = PathBuf::from("target")
             .join("conformance")
@@ -11210,6 +11218,8 @@ fn run_conformance_with_backend(args: &ConformanceArgs, backend: AliasBackend) -
             "test_files": discovered,
             "counts": counts,
             "coverage": coverage,
+            "official_test_origin": official_test_origin,
+            "prepared_test_manifest": prepared_test_manifest,
             "execution": execution_status,
             "execution_result": execution_result,
             "readiness": readiness,
@@ -12195,11 +12205,71 @@ struct ConformanceExecutionResult {
     status: String,
     runner: String,
     prepared_root: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prepared_manifest_file: Option<String>,
     output_file: String,
     exit_code: Option<i32>,
     stdout: String,
     stderr: String,
     counts: ConformanceExecutionCounts,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PreparedTestManifest {
+    schema_version: u32,
+    suite: String,
+    official_test_origin: String,
+    entries: Vec<PreparedTestManifestEntry>,
+}
+
+impl PreparedTestManifest {
+    fn new(suite: &str) -> Self {
+        Self {
+            schema_version: 1,
+            suite: suite.to_string(),
+            official_test_origin: "unmodified-official".into(),
+            entries: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, entry: PreparedTestManifestEntry) {
+        self.entries.push(entry);
+        self.official_test_origin = self.derived_origin().to_string();
+    }
+
+    fn derived_origin(&self) -> &'static str {
+        if self.entries.is_empty() {
+            "unmodified-official"
+        } else {
+            "prepared-official"
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PreparedTestManifestEntry {
+    original_path: String,
+    prepared_path: String,
+    rewrite_kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    helper_path: Option<String>,
+    related_bridge_commands: Vec<String>,
+    expected_provenance: PreparedTestProvenanceExpectation,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PreparedTestProvenanceExpectation {
+    test_origin: String,
+    execution_path: String,
+    api_surface: String,
+    adapter_roles: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct PreparedTestManifestReport {
+    official_test_origin: String,
+    manifest_file: String,
+    entry_count: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
@@ -12314,6 +12384,7 @@ fn run_conformance_execution(
             status: "pending".into(),
             runner: "not-wired".into(),
             prepared_root: String::new(),
+            prepared_manifest_file: None,
             output_file: String::new(),
             exit_code: None,
             stdout: String::new(),
@@ -12464,6 +12535,7 @@ fn run_vitest_conformance(
         status: status.into(),
         runner: "vitest".into(),
         prepared_root: prepared_root.display().to_string(),
+        prepared_manifest_file: prepared_manifest_file(&prepared_root),
         output_file: output_file.display().to_string(),
         exit_code: output.status.code(),
         stdout,
@@ -12522,6 +12594,7 @@ fn run_jasmine_conformance(
         status: status.into(),
         runner: "jasmine".into(),
         prepared_root: prepared_root.display().to_string(),
+        prepared_manifest_file: prepared_manifest_file(&prepared_root),
         output_file: output_file.display().to_string(),
         exit_code: output.status.code(),
         stdout,
@@ -12550,6 +12623,7 @@ fn prepare_vue2_compiler_conformance_suite(
     copy_dir_recursive(&official_tests, &prepared_tests)?;
     write_vue2_compiler_source_shims(&prepared_root, false)?;
     write_vue2_jasmine_runner(&prepared_root)?;
+    write_prepared_test_manifest_for_suite(spec, &prepared_root)?;
     Ok(prepared_root)
 }
 
@@ -12573,6 +12647,7 @@ fn prepare_vue27_compiler_conformance_suite(
     copy_dir_recursive(&official_tests, &prepared_tests)?;
     write_vue2_compiler_source_shims(&prepared_root, true)?;
     write_vue27_compiler_conformance_shims(&prepared_root)?;
+    write_prepared_test_manifest_for_suite(spec, &prepared_root)?;
     Ok(prepared_root)
 }
 
@@ -12600,6 +12675,7 @@ fn prepare_vue27_sfc_conformance_suite(
     write_vue2_compiler_source_shims(&prepared_root, true)?;
     write_vue27_sfc_source_shims(&prepared_root)?;
     write_vue27_sfc_conformance_shims(&prepared_root)?;
+    write_prepared_test_manifest_for_suite(spec, &prepared_root)?;
     Ok(prepared_root)
 }
 
@@ -12620,6 +12696,7 @@ fn prepare_vue3_core_conformance_suite(
         .join("__tests__");
     copy_dir_recursive(&official_tests, &prepared_tests)?;
     write_vue3_core_conformance_shims(&prepared_root)?;
+    write_prepared_test_manifest_for_suite(spec, &prepared_root)?;
     Ok(prepared_root)
 }
 
@@ -12637,6 +12714,1021 @@ fn reset_prepared_root(prepared_root: &Path) -> Result<()> {
             .with_context(|| format!("failed to remove {}", prepared_root.display()))?;
     }
     Ok(())
+}
+
+fn prepared_test_manifest_path(prepared_root: &Path) -> PathBuf {
+    prepared_root.join("prepared-test-manifest.json")
+}
+
+fn prepared_manifest_file(prepared_root: &Path) -> Option<String> {
+    let path = prepared_test_manifest_path(prepared_root);
+    path.exists().then(|| path.display().to_string())
+}
+
+fn prepared_test_manifest_report(path: &str) -> Option<PreparedTestManifestReport> {
+    let path = Path::new(path);
+    let manifest = read_json::<PreparedTestManifest>(path).ok()?;
+    Some(PreparedTestManifestReport {
+        official_test_origin: manifest.derived_origin().to_string(),
+        manifest_file: path.display().to_string(),
+        entry_count: manifest.entries.len(),
+    })
+}
+
+fn write_prepared_test_manifest_for_suite(
+    spec: ConformanceSuiteSpec,
+    prepared_root: &Path,
+) -> Result<()> {
+    let manifest = prepared_test_manifest_for_suite(spec);
+    write_json(&prepared_test_manifest_path(prepared_root), &manifest)
+}
+
+fn prepared_test_manifest_for_suite(spec: ConformanceSuiteSpec) -> PreparedTestManifest {
+    let mut manifest = PreparedTestManifest::new(spec.name);
+    match spec.name {
+        "vue2-compiler" => {
+            add_vue2_compiler_manifest_entries(&mut manifest, false);
+            add_manifest_entry(
+                &mut manifest,
+                "generated/vuec-jasmine-runner.js",
+                "vuec-jasmine-runner.js",
+                "runner-shim",
+                None,
+                &[],
+                provenance(
+                    "prepared-official",
+                    "prepared-jasmine-runner",
+                    "runner-harness",
+                    &["runner-shim", "warning-matcher-adapter"],
+                ),
+            );
+        }
+        "vue27-compiler" => {
+            add_vue2_compiler_manifest_entries(&mut manifest, true);
+            add_manifest_entry(
+                &mut manifest,
+                "generated/vuec-vitest-setup.ts",
+                "vuec-vitest-setup.ts",
+                "runner-shim",
+                None,
+                &[],
+                provenance(
+                    "prepared-official",
+                    "prepared-vitest-runner",
+                    "runner-harness",
+                    &["runner-shim", "warning-matcher-adapter"],
+                ),
+            );
+            add_manifest_entry(
+                &mut manifest,
+                "generated/vitest.config.ts",
+                "vitest.config.ts",
+                "runner-config-alias",
+                None,
+                &[],
+                provenance(
+                    "prepared-official",
+                    "prepared-vitest-runner",
+                    "runner-harness",
+                    &["package-alias-config"],
+                ),
+            );
+        }
+        "vue27-sfc" => {
+            add_vue2_compiler_manifest_entries(&mut manifest, true);
+            add_vue27_sfc_manifest_entries(&mut manifest);
+        }
+        "vue3-core" => {
+            add_vue3_core_source_manifest_entries(&mut manifest);
+            add_vue3_core_prepared_spec_manifest_entries(&mut manifest);
+            add_vue3_vitest_manifest_entries(
+                &mut manifest,
+                "packages/compiler-core/__tests__/**/*.spec.ts",
+            );
+        }
+        "vue3-dom" => {
+            add_vue3_core_source_manifest_entries(&mut manifest);
+            add_vue3_dom_manifest_entries(&mut manifest);
+            add_vue3_vitest_manifest_entries(
+                &mut manifest,
+                "packages/compiler-dom/__tests__/**/*.spec.ts",
+            );
+        }
+        "vue3-sfc" => {
+            add_vue3_core_source_manifest_entries(&mut manifest);
+            add_vue3_sfc_manifest_entries(&mut manifest);
+            add_vue3_vitest_manifest_entries(
+                &mut manifest,
+                "packages/compiler-sfc/__tests__/**/*.spec.ts",
+            );
+        }
+        "vue3-ssr" => {
+            add_vue3_core_source_manifest_entries(&mut manifest);
+            add_vue3_ssr_manifest_entries(&mut manifest);
+            add_vue3_vitest_manifest_entries(
+                &mut manifest,
+                "packages/compiler-ssr/__tests__/**/*.spec.ts",
+            );
+        }
+        _ => {}
+    }
+    manifest
+}
+
+fn add_manifest_entry(
+    manifest: &mut PreparedTestManifest,
+    original_path: &str,
+    prepared_path: &str,
+    rewrite_kind: &str,
+    helper_path: Option<&str>,
+    related_bridge_commands: &[&str],
+    expected_provenance: PreparedTestProvenanceExpectation,
+) {
+    manifest.push(PreparedTestManifestEntry {
+        original_path: original_path.to_string(),
+        prepared_path: prepared_path.to_string(),
+        rewrite_kind: rewrite_kind.to_string(),
+        helper_path: helper_path.map(str::to_string),
+        related_bridge_commands: related_bridge_commands
+            .iter()
+            .map(|command| (*command).to_string())
+            .collect(),
+        expected_provenance,
+    });
+}
+
+fn provenance(
+    test_origin: &str,
+    execution_path: &str,
+    api_surface: &str,
+    adapter_roles: &[&str],
+) -> PreparedTestProvenanceExpectation {
+    PreparedTestProvenanceExpectation {
+        test_origin: test_origin.to_string(),
+        execution_path: execution_path.to_string(),
+        api_surface: api_surface.to_string(),
+        adapter_roles: adapter_roles
+            .iter()
+            .map(|role| (*role).to_string())
+            .collect(),
+    }
+}
+
+fn add_vue2_compiler_manifest_entries(manifest: &mut PreparedTestManifest, include_types: bool) {
+    for (prepared_path, commands, roles) in [
+        (
+            "src/compiler/parser/index.ts",
+            &["vue2.compile"][..],
+            &["source-path-shim", "public-ast-hydration"][..],
+        ),
+        (
+            "src/compiler/optimizer.ts",
+            &["vue2.optimize"][..],
+            &["source-path-shim", "rust-projection-helper"][..],
+        ),
+        (
+            "src/compiler/codegen.ts",
+            &["vue2.generate"][..],
+            &["source-path-shim", "public-ast-normalizer"][..],
+        ),
+        (
+            "src/compiler/codeframe.ts",
+            &["vue2.generateCodeFrame"][..],
+            &["source-path-shim", "public-api-reroute"][..],
+        ),
+        (
+            "src/compiler/helpers.ts",
+            &[][..],
+            &["source-path-shim", "test-helper-shape-adapter"][..],
+        ),
+        (
+            "src/platforms/web/compiler/index.ts",
+            &["vue2.compile"][..],
+            &["source-path-shim", "public-api-reroute"][..],
+        ),
+        (
+            "src/platforms/web/compiler/options.ts",
+            &[][..],
+            &["source-path-shim", "platform-option-adapter"][..],
+        ),
+    ] {
+        add_manifest_entry(
+            manifest,
+            prepared_path,
+            prepared_path,
+            "source-path-shim",
+            None,
+            commands,
+            provenance(
+                "prepared-official",
+                "source-path-shim-to-rust-bridge",
+                "public-and-projection-bridge",
+                roles,
+            ),
+        );
+    }
+    if include_types {
+        add_manifest_entry(
+            manifest,
+            "src/types/compiler.ts",
+            "src/types/compiler.ts",
+            "source-path-type-shim",
+            None,
+            &[],
+            provenance(
+                "prepared-official",
+                "type-only-source-shim",
+                "type-shape-adapter",
+                &["type-shim"],
+            ),
+        );
+    }
+}
+
+fn add_vue27_sfc_manifest_entries(manifest: &mut PreparedTestManifest) {
+    for (module, commands) in [
+        (
+            "index",
+            &[
+                "sfc.vue27.parse",
+                "sfc.vue27.compileTemplate",
+                "sfc.vue27.compileScript",
+                "sfc.vue27.compileStyle",
+            ][..],
+        ),
+        ("parse", &["sfc.vue27.parse"][..]),
+        ("parseComponent", &["sfc.vue27.parseComponent"][..]),
+        ("compileTemplate", &["sfc.vue27.compileTemplate"][..]),
+        ("compileScript", &["sfc.vue27.compileScript"][..]),
+        (
+            "compileStyle",
+            &["sfc.vue27.compileStyle", "sfc.vue27.compileStyleAsync"][..],
+        ),
+        ("cssVars", &["sfc.vue27.compileStyle"][..]),
+        ("rewriteDefault", &["sfc.vue27.rewriteDefault"][..]),
+    ] {
+        let path = format!("packages/compiler-sfc/src/{module}.ts");
+        add_manifest_entry(
+            manifest,
+            &path,
+            &path,
+            "sfc-source-path-public-alias-shim",
+            None,
+            commands,
+            provenance(
+                "prepared-official",
+                "source-path-shim-to-rust-bridge",
+                "public-sfc-api",
+                &["source-path-shim", "package-alias-adapter"],
+            ),
+        );
+    }
+    add_manifest_entry(
+        manifest,
+        "packages/compiler-sfc/src/prefixIdentifiers.ts",
+        "packages/compiler-sfc/src/prefixIdentifiers.ts",
+        "sfc-source-path-rust-helper-shim",
+        None,
+        &["sfc.vue27.prefixIdentifiers"],
+        provenance(
+            "prepared-official",
+            "source-path-shim-to-rust-bridge",
+            "projection-command",
+            &["source-path-shim", "bridge-shape-adapter"],
+        ),
+    );
+    add_manifest_entry(
+        manifest,
+        "generated/vuec-vitest-setup.ts",
+        "vuec-vitest-setup.ts",
+        "runner-shim",
+        None,
+        &[],
+        provenance(
+            "prepared-official",
+            "prepared-vitest-runner",
+            "runner-harness",
+            &["runner-shim", "warning-matcher-adapter"],
+        ),
+    );
+    add_manifest_entry(
+        manifest,
+        "generated/vitest.config.ts",
+        "vitest.config.ts",
+        "runner-config-alias",
+        None,
+        &[],
+        provenance(
+            "prepared-official",
+            "prepared-vitest-runner",
+            "runner-harness",
+            &["package-alias-config"],
+        ),
+    );
+}
+
+fn add_vue3_core_source_manifest_entries(manifest: &mut PreparedTestManifest) {
+    for (module, commands) in [
+        (
+            "index",
+            &[
+                "vue3.core.baseCompile",
+                "vue3.core.baseParse",
+                "vue3.core.generate",
+            ][..],
+        ),
+        ("ast", &[][..]),
+        ("codegen", &["vue3.core.generate"][..]),
+        ("compile", &["vue3.core.baseCompile"][..]),
+        ("errors", &[][..]),
+        ("options", &[][..]),
+        ("parser", &["vue3.core.baseParse"][..]),
+        ("runtimeHelpers", &[][..]),
+        ("transform", &["vue3.core.rootCodegen"][..]),
+        ("utils", &[][..]),
+    ] {
+        let path = format!("packages/compiler-core/src/{module}.ts");
+        add_manifest_entry(
+            manifest,
+            &path,
+            &path,
+            "vue3-core-source-path-public-alias-shim",
+            None,
+            commands,
+            provenance(
+                "prepared-official",
+                "source-path-shim-to-alias-runtime",
+                "public-or-projection-bridge",
+                &["source-path-shim", "package-api-adapter"],
+            ),
+        );
+    }
+
+    for (module, commands) in [
+        (
+            "transformElement",
+            &[
+                "vue3.core.transformElementProps",
+                "vue3.core.transformElementChildren",
+                "vue3.core.buildDirectiveArgs",
+                "vue3.core.resolveComponentType",
+            ][..],
+        ),
+        (
+            "transformExpression",
+            &[
+                "vue3.core.transformExpression",
+                "vue3.core.processExpression",
+            ][..],
+        ),
+        (
+            "transformSlotOutlet",
+            &["vue3.core.transformSlotOutlet"][..],
+        ),
+        ("transformText", &["vue3.core.transformText"][..]),
+        (
+            "transformVBindShorthand",
+            &["vue3.core.transformVBindShorthand"][..],
+        ),
+        ("vBind", &["vue3.core.transformBind"][..]),
+        ("vFor", &["vue3.core.transformFor"][..]),
+        ("vIf", &["vue3.core.transformIf"][..]),
+        ("vMemo", &["vue3.core.transformMemo"][..]),
+        ("vModel", &["vue3.core.transformModel"][..]),
+        ("vOn", &["vue3.core.transformOn"][..]),
+        ("vOnce", &["vue3.core.transformOnce"][..]),
+        (
+            "vSlot",
+            &[
+                "vue3.core.buildSlots",
+                "vue3.core.trackSlotScopes",
+                "vue3.core.trackVForSlotScopes",
+            ][..],
+        ),
+    ] {
+        let path = format!("packages/compiler-core/src/transforms/{module}.ts");
+        add_manifest_entry(
+            manifest,
+            &path,
+            &path,
+            "vue3-core-transform-runtime-shim",
+            None,
+            commands,
+            provenance(
+                "prepared-official",
+                "source-path-shim-to-alias-runtime",
+                "projection-command",
+                &["source-path-shim", "runtime-projection-adapter"],
+            ),
+        );
+    }
+
+    add_manifest_entry(
+        manifest,
+        "packages/compiler-dom/src/transforms/transformStyle.ts",
+        "packages/compiler-dom/src/transforms/transformStyle.ts",
+        "vue3-dom-transform-style-public-alias-shim",
+        None,
+        &["vue3.dom.transformStyle"],
+        provenance(
+            "prepared-official",
+            "source-path-shim-to-alias-runtime",
+            "projection-command",
+            &["source-path-shim", "cross-package-transform-shim"],
+        ),
+    );
+    add_manifest_entry(
+        manifest,
+        "packages/shared/src/index.ts",
+        "packages/shared/src/index.ts",
+        "shared-source-path-public-alias-shim",
+        None,
+        &[],
+        provenance(
+            "prepared-official",
+            "source-path-shim-to-official-shared",
+            "shared-runtime-boundary",
+            &["source-path-shim"],
+        ),
+    );
+}
+
+fn add_vue3_core_prepared_spec_manifest_entries(manifest: &mut PreparedTestManifest) {
+    for (spec, helper, commands) in [
+        (
+            "packages/compiler-core/__tests__/transforms/vBind.spec.ts",
+            "packages/compiler-core/__tests__/transforms/vBind.rust-api.ts",
+            &["vue3.core.transformBindSuite"][..],
+        ),
+        (
+            "packages/compiler-core/__tests__/transforms/vModel.spec.ts",
+            "packages/compiler-core/__tests__/transforms/vModel.rust-api.ts",
+            &["vue3.core.transformModelSuite"][..],
+        ),
+        (
+            "packages/compiler-core/__tests__/transforms/vOn.spec.ts",
+            "packages/compiler-core/__tests__/transforms/vOn.rust-api.ts",
+            &["vue3.core.transformOnSuite"][..],
+        ),
+        (
+            "packages/compiler-core/__tests__/transforms/vFor.spec.ts",
+            "packages/compiler-core/__tests__/transforms/vFor.rust-api.ts",
+            &["vue3.core.transformForSuite"][..],
+        ),
+        (
+            "packages/compiler-core/__tests__/transforms/transformElement.spec.ts",
+            "packages/compiler-core/__tests__/transforms/transformElement.rust-api.ts",
+            &[
+                "vue3.core.transformElementSuite",
+                "vue3.core.transformForSuite",
+            ][..],
+        ),
+        (
+            "packages/compiler-core/__tests__/transforms/noopDirectiveTransform.spec.ts",
+            "packages/compiler-core/__tests__/transforms/noopDirectiveTransform.rust-api.ts",
+            &["vue3.core.transformElementSuite"][..],
+        ),
+        (
+            "packages/compiler-core/__tests__/transform.spec.ts",
+            "packages/compiler-core/__tests__/transform.rust-api.ts",
+            &["vue3.core.transformSuite"][..],
+        ),
+        (
+            "packages/compiler-core/__tests__/transforms/vIf.spec.ts",
+            "packages/compiler-core/__tests__/transforms/vIf.rust-api.ts",
+            &["vue3.core.transformIfSuite"][..],
+        ),
+        (
+            "packages/compiler-core/__tests__/transforms/transformSlotOutlet.spec.ts",
+            "packages/compiler-core/__tests__/transforms/transformSlotOutlet.rust-api.ts",
+            &["vue3.core.transformSlotOutletSuite"][..],
+        ),
+        (
+            "packages/compiler-core/__tests__/transforms/vSlot.spec.ts",
+            "packages/compiler-core/__tests__/transforms/vSlot.rust-api.ts",
+            &["vue3.core.transformSlotSuite"][..],
+        ),
+        (
+            "packages/compiler-core/__tests__/transforms/cacheStatic.spec.ts",
+            "packages/compiler-core/__tests__/transforms/cacheStatic.rust-api.ts",
+            &["vue3.core.cacheStaticSuite"][..],
+        ),
+        (
+            "packages/compiler-core/__tests__/transforms/transformExpressions.spec.ts",
+            "packages/compiler-core/__tests__/transforms/transformExpressions.rust-api.ts",
+            &["vue3.core.transformExpressionSuite"][..],
+        ),
+        (
+            "packages/compiler-core/__tests__/transforms/transformText.spec.ts",
+            "packages/compiler-core/__tests__/transforms/transformText.rust-api.ts",
+            &["vue3.core.transformTextSuite"][..],
+        ),
+        (
+            "packages/compiler-core/__tests__/transforms/vOnce.spec.ts",
+            "packages/compiler-core/__tests__/transforms/vOnce.rust-api.ts",
+            &["vue3.core.transformOnceSuite"][..],
+        ),
+    ] {
+        add_manifest_entry(
+            manifest,
+            spec,
+            spec,
+            "test-spec-suite-helper-reroute",
+            Some(helper),
+            commands,
+            provenance(
+                "prepared-official",
+                "prepared-suite-helper-to-rust-bridge",
+                "suite-only-bridge-command",
+                &[
+                    "test-import-rewrite",
+                    "suite-helper",
+                    "bridge-shape-adapter",
+                ],
+            ),
+        );
+        add_manifest_entry(
+            manifest,
+            helper,
+            helper,
+            "generated-suite-helper",
+            None,
+            commands,
+            provenance(
+                "prepared-official",
+                "prepared-suite-helper-to-rust-bridge",
+                "suite-only-bridge-command",
+                &["suite-helper", "bridge-shape-adapter"],
+            ),
+        );
+    }
+}
+
+fn add_vue3_dom_manifest_entries(manifest: &mut PreparedTestManifest) {
+    add_manifest_entry(
+        manifest,
+        "packages/compiler-dom/src/**",
+        "packages/compiler-dom/src/**",
+        "copied-official-source-boundary",
+        None,
+        &[
+            "vue3.dom.compile",
+            "vue3.dom.parse",
+            "vue3.dom.transformStyle",
+            "vue3.dom.transformVHtml",
+            "vue3.dom.transformVText",
+            "vue3.dom.transformShow",
+            "vue3.dom.transformOn",
+            "vue3.dom.transformModel",
+        ],
+        provenance(
+            "prepared-official",
+            "official-dom-source-plus-alias-runtime",
+            "mixed-official-source-boundary",
+            &["official-source-boundary", "package-alias-config"],
+        ),
+    );
+    add_manifest_entry(
+        manifest,
+        "packages/compiler-dom/__tests__/index.spec.ts",
+        "packages/compiler-dom/__tests__/index.spec.ts",
+        "test-spec-public-api-import-rewrite",
+        None,
+        &["vue3.dom.compile"],
+        provenance(
+            "prepared-official",
+            "public-package-alias-to-rust-bridge",
+            "public-api",
+            &["test-import-rewrite", "package-alias-adapter"],
+        ),
+    );
+    for (path, commands) in [
+        (
+            "packages/compiler-dom/src/transforms/transformStyle.ts",
+            &["vue3.dom.transformStyle"][..],
+        ),
+        (
+            "packages/compiler-dom/src/transforms/stringifyStatic.ts",
+            &["vue3.core.stringifyStatic"][..],
+        ),
+        (
+            "packages/compiler-dom/src/transforms/vHtml.ts",
+            &["vue3.dom.transformVHtml"][..],
+        ),
+        (
+            "packages/compiler-dom/src/transforms/vText.ts",
+            &["vue3.dom.transformVText"][..],
+        ),
+        (
+            "packages/compiler-dom/src/transforms/vShow.ts",
+            &["vue3.dom.transformShow"][..],
+        ),
+        (
+            "packages/compiler-dom/src/transforms/vOn.ts",
+            &["vue3.dom.transformOn"][..],
+        ),
+        (
+            "packages/compiler-dom/src/transforms/vModel.ts",
+            &["vue3.dom.transformModel"][..],
+        ),
+        (
+            "packages/compiler-dom/src/transforms/Transition.ts",
+            &["vue3.dom.transformTransition"][..],
+        ),
+        (
+            "packages/compiler-dom/src/transforms/ignoreSideEffectTags.ts",
+            &["vue3.dom.ignoreSideEffectTags"][..],
+        ),
+        (
+            "packages/compiler-dom/src/transforms/validateHtmlNesting.ts",
+            &["vue3.dom.validateHtmlNesting"][..],
+        ),
+        (
+            "packages/compiler-dom/src/decodeHtmlBrowser.ts",
+            &["vue3.dom.decodeHtmlBrowser"][..],
+        ),
+        (
+            "packages/compiler-dom/src/htmlNesting.ts",
+            &["vue3.dom.isValidHTMLNesting"][..],
+        ),
+    ] {
+        add_manifest_entry(
+            manifest,
+            path,
+            path,
+            "dom-source-path-runtime-shim",
+            None,
+            commands,
+            provenance(
+                "prepared-official",
+                "source-path-shim-to-alias-runtime",
+                "projection-command",
+                &["source-path-shim", "runtime-projection-adapter"],
+            ),
+        );
+    }
+    add_manifest_entry(
+        manifest,
+        "packages/compiler-core/__tests__/testUtils.ts",
+        "packages/compiler-core/__tests__/testUtils.ts",
+        "copied-cross-suite-test-helper",
+        None,
+        &[],
+        provenance(
+            "prepared-official",
+            "copied-official-test-helper",
+            "test-helper-boundary",
+            &["official-helper-boundary"],
+        ),
+    );
+}
+
+fn add_vue3_sfc_manifest_entries(manifest: &mut PreparedTestManifest) {
+    add_manifest_entry(
+        manifest,
+        "packages/compiler-sfc/src/**",
+        "packages/compiler-sfc/src/**",
+        "copied-official-source-boundary",
+        None,
+        &[
+            "sfc.parse",
+            "sfc.compileTemplate",
+            "sfc.compileScript",
+            "sfc.compileStyle",
+            "sfc.resolveType",
+        ],
+        provenance(
+            "prepared-official",
+            "official-sfc-source-plus-alias-runtime",
+            "mixed-official-source-boundary",
+            &["official-source-boundary", "package-alias-config"],
+        ),
+    );
+    add_manifest_entry(
+        manifest,
+        "packages/compiler-sfc/src/compileTemplate.ts",
+        "packages/compiler-sfc/src/compileTemplate.ts",
+        "prepared-source-patch",
+        None,
+        &["sfc.compileTemplate"],
+        provenance(
+            "prepared-official",
+            "official-sfc-source-plus-prepared-patch",
+            "mixed-official-source-boundary",
+            &["official-source-boundary", "source-patch"],
+        ),
+    );
+
+    for (spec, helper, commands) in [
+        (
+            "packages/compiler-sfc/__tests__/parse.spec.ts",
+            None,
+            &["sfc.parse"][..],
+        ),
+        (
+            "packages/compiler-sfc/__tests__/rewriteDefault.spec.ts",
+            None,
+            &["sfc.rewriteDefault"][..],
+        ),
+        (
+            "packages/compiler-sfc/__tests__/compileStyle.spec.ts",
+            None,
+            &["sfc.compileStyle", "sfc.compileStyleAsync"][..],
+        ),
+        (
+            "packages/compiler-sfc/__tests__/compileTemplate.spec.ts",
+            Some("packages/compiler-sfc/__tests__/utils.public-api.ts"),
+            &["sfc.compileTemplate", "sfc.parse", "sfc.compileScript"][..],
+        ),
+        (
+            "packages/compiler-sfc/__tests__/cssVars.spec.ts",
+            Some("packages/compiler-sfc/__tests__/utils.public-api.ts"),
+            &["sfc.compileStyle", "sfc.parse", "sfc.compileScript"][..],
+        ),
+        (
+            "packages/compiler-sfc/__tests__/compileScript.spec.ts",
+            Some("packages/compiler-sfc/__tests__/utils.public-api.ts"),
+            &["sfc.compileScript", "sfc.parse"][..],
+        ),
+        (
+            "packages/compiler-sfc/__tests__/templateUtils.spec.ts",
+            Some("packages/compiler-sfc/__tests__/templateUtils.rust-api.ts"),
+            &[
+                "sfc.templateUtils.isRelativeUrl",
+                "sfc.templateUtils.isExternalUrl",
+                "sfc.templateUtils.isDataUrl",
+            ][..],
+        ),
+        (
+            "packages/compiler-sfc/__tests__/templateTransformAssetUrl.spec.ts",
+            Some("packages/compiler-sfc/__tests__/templateTransforms.public-api.ts"),
+            &["sfc.compileTemplate"][..],
+        ),
+        (
+            "packages/compiler-sfc/__tests__/templateTransformSrcset.spec.ts",
+            Some("packages/compiler-sfc/__tests__/templateTransforms.public-api.ts"),
+            &["sfc.compileTemplate"][..],
+        ),
+        (
+            "packages/compiler-sfc/__tests__/compileScript/resolveType.spec.ts",
+            Some("packages/compiler-sfc/__tests__/compileScript/resolveType.rust-api.ts"),
+            &["sfc.resolveType"][..],
+        ),
+    ] {
+        add_manifest_entry(
+            manifest,
+            spec,
+            spec,
+            "test-spec-public-api-import-rewrite",
+            helper,
+            commands,
+            provenance(
+                "prepared-official",
+                "public-package-alias-to-rust-bridge",
+                "public-api-or-rust-projection-helper",
+                &["test-import-rewrite", "helper-shape-adapter"],
+            ),
+        );
+    }
+
+    for spec in [
+        "defineProps.spec.ts",
+        "definePropsDestructure.spec.ts",
+        "defineEmits.spec.ts",
+        "defineExpose.spec.ts",
+        "defineModel.spec.ts",
+        "defineOptions.spec.ts",
+        "defineSlots.spec.ts",
+        "hoistStatic.spec.ts",
+        "importUsageCheck.spec.ts",
+    ] {
+        let path = format!("packages/compiler-sfc/__tests__/compileScript/{spec}");
+        add_manifest_entry(
+            manifest,
+            &path,
+            &path,
+            "test-spec-public-api-helper-rewrite",
+            Some("packages/compiler-sfc/__tests__/utils.public-api.ts"),
+            &["sfc.compileScript", "sfc.parse"],
+            provenance(
+                "prepared-official",
+                "public-package-alias-to-rust-bridge",
+                "public-api",
+                &["test-import-rewrite", "helper-shape-adapter"],
+            ),
+        );
+    }
+
+    for (helper, commands, roles) in [
+        (
+            "packages/compiler-sfc/__tests__/utils.public-api.ts",
+            &["sfc.parse", "sfc.compileScript"][..],
+            &["public-api-test-helper", "assertion-shape-adapter"][..],
+        ),
+        (
+            "packages/compiler-sfc/__tests__/templateUtils.rust-api.ts",
+            &[
+                "sfc.templateUtils.isRelativeUrl",
+                "sfc.templateUtils.isExternalUrl",
+                "sfc.templateUtils.isDataUrl",
+            ][..],
+            &["rust-projection-helper"][..],
+        ),
+        (
+            "packages/compiler-sfc/__tests__/templateTransforms.public-api.ts",
+            &["sfc.compileTemplate"][..],
+            &["public-api-test-helper", "option-shape-adapter"][..],
+        ),
+        (
+            "packages/compiler-sfc/__tests__/compileScript/resolveType.rust-api.ts",
+            &["sfc.resolveType"][..],
+            &["rust-projection-helper", "virtual-file-materializer"][..],
+        ),
+    ] {
+        add_manifest_entry(
+            manifest,
+            helper,
+            helper,
+            "generated-test-helper",
+            None,
+            commands,
+            provenance(
+                "prepared-official",
+                "prepared-helper-to-rust-bridge",
+                "public-api-or-projection-command",
+                roles,
+            ),
+        );
+    }
+
+    add_manifest_entry(
+        manifest,
+        "packages/compiler-dom/src/transforms/stringifyStatic.ts",
+        "packages/compiler-dom/src/transforms/stringifyStatic.ts",
+        "copied-official-source-boundary",
+        None,
+        &["vue3.core.stringifyStatic"],
+        provenance(
+            "prepared-official",
+            "copied-official-dom-source-helper",
+            "mixed-official-source-boundary",
+            &["official-source-boundary"],
+        ),
+    );
+    add_manifest_entry(
+        manifest,
+        "generated/package.json",
+        "package.json",
+        "runner-package-module-config",
+        None,
+        &[],
+        provenance(
+            "prepared-official",
+            "prepared-vitest-runner",
+            "runner-harness",
+            &["runner-shim"],
+        ),
+    );
+}
+
+fn add_vue3_ssr_manifest_entries(manifest: &mut PreparedTestManifest) {
+    add_manifest_entry(
+        manifest,
+        "packages/compiler-ssr/src/**",
+        "packages/compiler-ssr/src/**",
+        "copied-official-source-boundary",
+        None,
+        &["vue3.ssr.compile"],
+        provenance(
+            "prepared-official",
+            "official-ssr-source-plus-alias-runtime",
+            "mixed-official-source-boundary",
+            &["official-source-boundary", "package-alias-config"],
+        ),
+    );
+    add_manifest_entry(
+        manifest,
+        "packages/compiler-dom/src/**",
+        "packages/compiler-dom/src/**",
+        "copied-official-source-boundary",
+        None,
+        &["vue3.dom.compile", "vue3.dom.parse"],
+        provenance(
+            "prepared-official",
+            "official-dom-source-plus-ssr-source",
+            "mixed-official-source-boundary",
+            &["official-source-boundary", "package-alias-config"],
+        ),
+    );
+
+    for spec in [
+        "ssrVIf.spec.ts",
+        "ssrVFor.spec.ts",
+        "ssrScopeId.spec.ts",
+        "ssrFallthroughAttrs.spec.ts",
+        "ssrInjectCssVars.spec.ts",
+        "ssrVShow.spec.ts",
+        "ssrVModel.spec.ts",
+        "ssrSlotOutlet.spec.ts",
+        "ssrPortal.spec.ts",
+        "ssrSuspense.spec.ts",
+        "ssrTransition.spec.ts",
+        "ssrTransitionGroup.spec.ts",
+        "ssrComponent.spec.ts",
+    ] {
+        let path = format!("packages/compiler-ssr/__tests__/{spec}");
+        add_manifest_entry(
+            manifest,
+            &path,
+            &path,
+            "test-spec-public-ssr-compile-import-rewrite",
+            None,
+            &["vue3.ssr.compile"],
+            provenance(
+                "prepared-official",
+                "public-package-alias-to-rust-bridge",
+                "public-api",
+                &["test-import-rewrite", "package-alias-adapter"],
+            ),
+        );
+    }
+
+    for spec in ["ssrText.spec.ts", "ssrElement.spec.ts"] {
+        let path = format!("packages/compiler-ssr/__tests__/{spec}");
+        add_manifest_entry(
+            manifest,
+            &path,
+            &path,
+            "test-spec-public-ssr-compile-import-and-helper-rewrite",
+            Some("packages/compiler-ssr/__tests__/utils.rust-ssr-text.ts"),
+            &["vue3.ssr.compile"],
+            provenance(
+                "prepared-official",
+                "public-package-alias-to-rust-bridge",
+                "public-api",
+                &["test-import-rewrite", "helper-shape-adapter"],
+            ),
+        );
+    }
+    add_manifest_entry(
+        manifest,
+        "packages/compiler-ssr/__tests__/utils.ts",
+        "packages/compiler-ssr/__tests__/utils.rust-ssr-text.ts",
+        "generated-public-ssr-compile-helper",
+        None,
+        &["vue3.ssr.compile"],
+        provenance(
+            "prepared-official",
+            "prepared-helper-to-rust-bridge",
+            "public-api",
+            &["helper-shape-adapter"],
+        ),
+    );
+}
+
+fn add_vue3_vitest_manifest_entries(manifest: &mut PreparedTestManifest, include_glob: &str) {
+    add_manifest_entry(
+        manifest,
+        "generated/vuec-vitest-setup.ts",
+        "vuec-vitest-setup.ts",
+        "runner-shim",
+        None,
+        &[],
+        provenance(
+            "prepared-official",
+            "prepared-vitest-runner",
+            "runner-harness",
+            &["runner-shim", "warning-matcher-adapter"],
+        ),
+    );
+    add_manifest_entry(
+        manifest,
+        "generated/vitest.config.ts",
+        "vitest.config.ts",
+        "runner-config-alias",
+        None,
+        &[],
+        provenance(
+            "prepared-official",
+            "prepared-vitest-runner",
+            "runner-harness",
+            &["package-alias-config"],
+        ),
+    );
+    add_manifest_entry(
+        manifest,
+        include_glob,
+        include_glob,
+        "runner-include-glob",
+        None,
+        &[],
+        provenance(
+            "prepared-official",
+            "prepared-vitest-runner",
+            "runner-harness",
+            &["runner-config"],
+        ),
+    );
 }
 
 fn write_vue2_compiler_source_shims(prepared_root: &Path, include_types: bool) -> Result<()> {
@@ -16729,6 +17821,7 @@ fn prepare_vue3_dom_conformance_suite(
 
     write_vue3_core_source_shims(&prepared_root)?;
     write_vue3_dom_conformance_shims(&prepared_root)?;
+    write_prepared_test_manifest_for_suite(spec, &prepared_root)?;
     Ok(prepared_root)
 }
 
@@ -16891,6 +17984,7 @@ fn prepare_vue3_sfc_conformance_suite(
 
     write_vue3_core_source_shims(&prepared_root)?;
     write_vue3_sfc_conformance_shims(&prepared_root)?;
+    write_prepared_test_manifest_for_suite(spec, &prepared_root)?;
     Ok(prepared_root)
 }
 
@@ -17768,6 +18862,7 @@ fn prepare_vue3_ssr_conformance_suite(
     copy_dir_recursive(&official_dom_src, &prepared_dom_src)?;
     rewrite_vue3_ssr_rust_backed_public_compile_imports(&prepared_root)?;
     write_vue3_ssr_conformance_shims(&prepared_root)?;
+    write_prepared_test_manifest_for_suite(spec, &prepared_root)?;
     Ok(prepared_root)
 }
 
@@ -19172,6 +20267,224 @@ fn file_sha256(path: &Path) -> Result<String> {
 mod tests {
     use super::*;
 
+    fn manifest_entry<'a>(
+        manifest: &'a PreparedTestManifest,
+        prepared_path: &str,
+    ) -> &'a PreparedTestManifestEntry {
+        manifest
+            .entries
+            .iter()
+            .find(|entry| entry.prepared_path == prepared_path)
+            .unwrap_or_else(|| panic!("missing manifest entry for {prepared_path}"))
+    }
+
+    fn assert_manifest_command(entry: &PreparedTestManifestEntry, command: &str) {
+        assert!(
+            entry
+                .related_bridge_commands
+                .iter()
+                .any(|existing| existing == command),
+            "{} should include bridge command {command}",
+            entry.prepared_path
+        );
+    }
+
+    #[test]
+    fn prepared_manifest_writes_for_all_generated_alias_suites() {
+        let temp = std::env::temp_dir().join(format!(
+            "vuec-xtask-prepared-manifest-all-suites-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp).unwrap();
+
+        for suite in [
+            ConformanceSuite::Vue2Compiler,
+            ConformanceSuite::Vue27Compiler,
+            ConformanceSuite::Vue27Sfc,
+            ConformanceSuite::Vue3Core,
+            ConformanceSuite::Vue3Dom,
+            ConformanceSuite::Vue3Sfc,
+            ConformanceSuite::Vue3Ssr,
+        ] {
+            let spec = suite_spec(suite);
+            let prepared_root = temp.join(spec.name);
+            fs::create_dir_all(&prepared_root).unwrap();
+            write_prepared_test_manifest_for_suite(spec, &prepared_root).unwrap();
+
+            let manifest_path = prepared_test_manifest_path(&prepared_root);
+            assert!(manifest_path.exists(), "{} manifest exists", spec.name);
+
+            let report = prepared_test_manifest_report(&manifest_path.display().to_string())
+                .unwrap_or_else(|| panic!("{} manifest report", spec.name));
+            assert_eq!(report.official_test_origin, "prepared-official");
+            assert!(report.entry_count > 0, "{} manifest has entries", spec.name);
+        }
+
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn vue3_core_prepared_manifest_records_suite_helpers() {
+        let manifest = prepared_test_manifest_for_suite(suite_spec(ConformanceSuite::Vue3Core));
+
+        assert_eq!(manifest.schema_version, 1);
+        assert_eq!(manifest.suite, "vue3-core");
+        assert_eq!(manifest.official_test_origin, "prepared-official");
+
+        let v_bind = manifest_entry(
+            &manifest,
+            "packages/compiler-core/__tests__/transforms/vBind.spec.ts",
+        );
+        assert_eq!(v_bind.rewrite_kind, "test-spec-suite-helper-reroute");
+        assert_eq!(
+            v_bind.helper_path.as_deref(),
+            Some("packages/compiler-core/__tests__/transforms/vBind.rust-api.ts")
+        );
+        assert_manifest_command(v_bind, "vue3.core.transformBindSuite");
+        assert_eq!(
+            v_bind.expected_provenance.api_surface,
+            "suite-only-bridge-command"
+        );
+
+        let transform_element = manifest_entry(
+            &manifest,
+            "packages/compiler-core/__tests__/transforms/transformElement.spec.ts",
+        );
+        assert_manifest_command(transform_element, "vue3.core.transformElementSuite");
+        assert_manifest_command(transform_element, "vue3.core.transformForSuite");
+
+        let transform_helper = manifest_entry(
+            &manifest,
+            "packages/compiler-core/__tests__/transform.rust-api.ts",
+        );
+        assert_eq!(transform_helper.rewrite_kind, "generated-suite-helper");
+        assert_manifest_command(transform_helper, "vue3.core.transformSuite");
+
+        let runner_glob =
+            manifest_entry(&manifest, "packages/compiler-core/__tests__/**/*.spec.ts");
+        assert_eq!(runner_glob.rewrite_kind, "runner-include-glob");
+    }
+
+    #[test]
+    fn vue3_sfc_prepared_manifest_records_public_api_rewrites() {
+        let manifest = prepared_test_manifest_for_suite(suite_spec(ConformanceSuite::Vue3Sfc));
+
+        assert_eq!(manifest.suite, "vue3-sfc");
+        assert_eq!(manifest.official_test_origin, "prepared-official");
+
+        let compile_template = manifest_entry(
+            &manifest,
+            "packages/compiler-sfc/__tests__/compileTemplate.spec.ts",
+        );
+        assert_eq!(
+            compile_template.helper_path.as_deref(),
+            Some("packages/compiler-sfc/__tests__/utils.public-api.ts")
+        );
+        assert_manifest_command(compile_template, "sfc.compileTemplate");
+        assert_manifest_command(compile_template, "sfc.compileScript");
+
+        let resolve_type = manifest_entry(
+            &manifest,
+            "packages/compiler-sfc/__tests__/compileScript/resolveType.spec.ts",
+        );
+        assert_eq!(
+            resolve_type.helper_path.as_deref(),
+            Some("packages/compiler-sfc/__tests__/compileScript/resolveType.rust-api.ts")
+        );
+        assert_manifest_command(resolve_type, "sfc.resolveType");
+
+        let template_transform_helper = manifest_entry(
+            &manifest,
+            "packages/compiler-sfc/__tests__/templateTransforms.public-api.ts",
+        );
+        assert_eq!(
+            template_transform_helper.rewrite_kind,
+            "generated-test-helper"
+        );
+        assert_manifest_command(template_transform_helper, "sfc.compileTemplate");
+
+        let source_boundary = manifest_entry(&manifest, "packages/compiler-sfc/src/**");
+        assert_eq!(
+            source_boundary.rewrite_kind,
+            "copied-official-source-boundary"
+        );
+        assert_eq!(
+            source_boundary.expected_provenance.api_surface,
+            "mixed-official-source-boundary"
+        );
+    }
+
+    #[test]
+    fn vue3_ssr_prepared_manifest_records_public_compile_rewrites() {
+        let manifest = prepared_test_manifest_for_suite(suite_spec(ConformanceSuite::Vue3Ssr));
+
+        assert_eq!(manifest.suite, "vue3-ssr");
+        assert_eq!(manifest.official_test_origin, "prepared-official");
+
+        let ssr_text = manifest_entry(&manifest, "packages/compiler-ssr/__tests__/ssrText.spec.ts");
+        assert_eq!(
+            ssr_text.helper_path.as_deref(),
+            Some("packages/compiler-ssr/__tests__/utils.rust-ssr-text.ts")
+        );
+        assert_manifest_command(ssr_text, "vue3.ssr.compile");
+
+        let ssr_v_if = manifest_entry(&manifest, "packages/compiler-ssr/__tests__/ssrVIf.spec.ts");
+        assert_eq!(
+            ssr_v_if.rewrite_kind,
+            "test-spec-public-ssr-compile-import-rewrite"
+        );
+        assert_manifest_command(ssr_v_if, "vue3.ssr.compile");
+
+        let helper = manifest_entry(
+            &manifest,
+            "packages/compiler-ssr/__tests__/utils.rust-ssr-text.ts",
+        );
+        assert_eq!(helper.rewrite_kind, "generated-public-ssr-compile-helper");
+        assert_manifest_command(helper, "vue3.ssr.compile");
+
+        let ssr_source = manifest_entry(&manifest, "packages/compiler-ssr/src/**");
+        assert_eq!(ssr_source.rewrite_kind, "copied-official-source-boundary");
+        assert_eq!(
+            ssr_source.expected_provenance.api_surface,
+            "mixed-official-source-boundary"
+        );
+    }
+
+    #[test]
+    fn prepared_manifest_report_derives_official_origin_from_entries() {
+        let temp = std::env::temp_dir().join(format!(
+            "vuec-xtask-prepared-manifest-report-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp).unwrap();
+        write_prepared_test_manifest_for_suite(suite_spec(ConformanceSuite::Vue3Core), &temp)
+            .unwrap();
+
+        let report = prepared_test_manifest_report(
+            &prepared_test_manifest_path(&temp).display().to_string(),
+        )
+        .expect("prepared manifest report");
+        assert_eq!(report.official_test_origin, "prepared-official");
+        assert_eq!(
+            report.entry_count,
+            prepared_test_manifest_for_suite(suite_spec(ConformanceSuite::Vue3Core))
+                .entries
+                .len()
+        );
+        assert!(report
+            .manifest_file
+            .replace('\\', "/")
+            .ends_with("prepared-test-manifest.json"));
+
+        let _ = fs::remove_dir_all(temp);
+    }
+
     #[test]
     fn vue2_project_corpus_manifest_parses_toml_schema() {
         let manifest = toml::from_str::<Vue2ProjectCorpusManifest>(
@@ -20237,6 +21550,7 @@ projects = []
             status: "failed".into(),
             runner: "vitest".into(),
             prepared_root: "prepared".into(),
+            prepared_manifest_file: None,
             output_file: "report.json".into(),
             exit_code: Some(1),
             stdout: String::new(),
@@ -20588,6 +21902,7 @@ projects = []
             status: "failed".into(),
             runner: "vitest".into(),
             prepared_root: "prepared".into(),
+            prepared_manifest_file: None,
             output_file: report.display().to_string(),
             exit_code: Some(1),
             stdout: String::new(),
@@ -20761,6 +22076,7 @@ projects = []
             status: "failed".into(),
             runner: "vitest".into(),
             prepared_root: "prepared".into(),
+            prepared_manifest_file: None,
             output_file: report.display().to_string(),
             exit_code: Some(1),
             stdout: String::new(),
@@ -20876,6 +22192,7 @@ projects = []
             status: "failed".into(),
             runner: "vitest".into(),
             prepared_root: "prepared".into(),
+            prepared_manifest_file: None,
             output_file: report.display().to_string(),
             exit_code: Some(1),
             stdout: String::new(),
@@ -21057,6 +22374,7 @@ describe('compiler: transform', () => {
             status: "failed".into(),
             runner: "vitest".into(),
             prepared_root: "prepared".into(),
+            prepared_manifest_file: None,
             output_file: report.display().to_string(),
             exit_code: Some(1),
             stdout: String::new(),
@@ -21136,6 +22454,7 @@ describe('compiler: transform', () => {
             status: "failed".into(),
             runner: "jasmine".into(),
             prepared_root: "prepared".into(),
+            prepared_manifest_file: None,
             output_file: report.display().to_string(),
             exit_code: Some(1),
             stdout: String::new(),
@@ -22565,6 +23884,7 @@ test('placeholder', () => {
             status: "failed".into(),
             runner: "vitest".into(),
             prepared_root: "prepared".into(),
+            prepared_manifest_file: None,
             output_file: report.display().to_string(),
             exit_code: Some(1),
             stdout: String::new(),
@@ -23269,6 +24589,7 @@ test('placeholder', () => {
             status: "failed".into(),
             runner: "vitest".into(),
             prepared_root: "prepared".into(),
+            prepared_manifest_file: None,
             output_file: report.display().to_string(),
             exit_code: Some(1),
             stdout: String::new(),
