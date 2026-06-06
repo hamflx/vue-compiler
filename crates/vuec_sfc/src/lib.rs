@@ -1060,6 +1060,13 @@ impl<'a> std::ops::Deref for Vue3ScriptCompileContext<'a> {
 #[derive(Clone, Debug)]
 struct Vue27ScriptCompileContext<'a> {
     inner: SfcScriptCompileContext<'a>,
+    is_prod: bool,
+    script_setup_context: Option<Vue27ScriptSetupContext>,
+    script_setup_analysis: Option<Vue27ScriptSetupAnalysis>,
+    normal_script_analysis: Option<Vue27NormalScriptAnalysis>,
+    normal_script_bindings: Option<BTreeMap<String, String>>,
+    normal_script_return_bindings: Option<Vue27ScriptReturnBindings>,
+    setup_binding_metadata: Option<BTreeMap<String, String>>,
 }
 
 impl<'a> Vue27ScriptCompileContext<'a> {
@@ -1069,7 +1076,16 @@ impl<'a> Vue27ScriptCompileContext<'a> {
         js: &mut JsAstStore,
     ) -> Self {
         let inner = SfcScriptCompileContext::new(descriptor, options, js, false);
-        Self { inner }
+        Self {
+            inner,
+            is_prod: options.is_prod,
+            script_setup_context: None,
+            script_setup_analysis: None,
+            normal_script_analysis: None,
+            normal_script_bindings: None,
+            normal_script_return_bindings: None,
+            setup_binding_metadata: None,
+        }
     }
 
     fn into_script_ast(self) -> (Vec<Value>, Vec<Value>) {
@@ -1079,6 +1095,97 @@ impl<'a> Vue27ScriptCompileContext<'a> {
     fn template_usage_index(&mut self, is_ts: bool) -> Option<&TemplateUsageIndex> {
         self.inner
             .template_usage_index(TemplateUsageFlavor::Vue27, is_ts)
+    }
+
+    fn script_compile_errors(&mut self) -> Vec<String> {
+        let Some(script_setup) = self.script_setup.as_ref() else {
+            return Vec::new();
+        };
+        if self
+            .script
+            .as_ref()
+            .is_some_and(|script| script.block.attrs.lang != script_setup.block.attrs.lang)
+        {
+            return vec!["<script> and <script setup> must have the same language type.".into()];
+        }
+        self.script_setup_analysis().errors.clone()
+    }
+
+    fn script_setup_context(&mut self) -> Vue27ScriptSetupContext {
+        if self.script_setup_context.is_none() {
+            let normal_imports = self.normal_script_return_bindings().imports.clone();
+            self.script_setup_context = Some(Vue27ScriptSetupContext {
+                normal_types: vue27_normal_script_type_context(self.descriptor()),
+                normal_imports,
+            });
+        }
+        self.script_setup_context
+            .as_ref()
+            .expect("vue 2.7 script setup context")
+            .clone()
+    }
+
+    fn script_setup_analysis(&mut self) -> &Vue27ScriptSetupAnalysis {
+        if self.script_setup_analysis.is_none() {
+            let script_setup = self.script_setup.as_ref().map(|metadata| metadata.block);
+            let analysis = script_setup
+                .map(|script_setup| {
+                    let setup_context = self.script_setup_context();
+                    analyze_vue27_script_setup(script_setup, self.is_prod, &setup_context)
+                })
+                .unwrap_or_default();
+            self.script_setup_analysis = Some(analysis);
+        }
+        self.script_setup_analysis
+            .as_ref()
+            .expect("vue 2.7 script setup analysis")
+    }
+
+    fn normal_script_analysis(&mut self) -> &Vue27NormalScriptAnalysis {
+        if self.normal_script_analysis.is_none() {
+            self.normal_script_analysis =
+                Some(analyze_vue27_normal_script_for_setup(self.descriptor()));
+        }
+        self.normal_script_analysis
+            .as_ref()
+            .expect("vue 2.7 normal script analysis")
+    }
+
+    fn normal_script_bindings(&mut self) -> &BTreeMap<String, String> {
+        if self.normal_script_bindings.is_none() {
+            self.normal_script_bindings =
+                Some(vue27_script_setup_script_bindings(self.descriptor()));
+        }
+        self.normal_script_bindings
+            .as_ref()
+            .expect("vue 2.7 normal script bindings")
+    }
+
+    fn normal_script_return_bindings(&mut self) -> &Vue27ScriptReturnBindings {
+        if self.normal_script_return_bindings.is_none() {
+            self.normal_script_return_bindings =
+                Some(vue27_script_setup_script_return_bindings(self.descriptor()));
+        }
+        self.normal_script_return_bindings
+            .as_ref()
+            .expect("vue 2.7 normal script return bindings")
+    }
+
+    fn setup_binding_metadata(&mut self) -> BTreeMap<String, String> {
+        if self.setup_binding_metadata.is_none() {
+            let analysis = self.script_setup_analysis().clone();
+            let mut bindings = self.normal_script_bindings().clone();
+            bindings.extend(analysis.setup_bindings);
+            for prop in analysis.props_bindings {
+                bindings.insert(prop, "props".into());
+            }
+            bindings.insert("__isScriptSetup".into(), "true".into());
+            self.setup_binding_metadata = Some(bindings);
+        }
+        self.setup_binding_metadata
+            .as_ref()
+            .expect("vue 2.7 setup binding metadata")
+            .clone()
     }
 }
 
@@ -1538,18 +1645,30 @@ impl SfcCompiler {
                 ignore_line_comments: false,
             },
         );
-        let script_errors = vue27_script_compile_errors(context.descriptor());
+        let script_errors = context.script_compile_errors();
         let template_usage_index = vue27_compile_script_template_usage_index(&mut context);
-        let content = vue27_script_content(
-            context.descriptor(),
-            &options,
-            &css_vars,
-            template_usage_index.as_ref(),
-        );
         let bindings = if context.has_script_setup() {
-            vue27_setup_binding_metadata(context.descriptor())
+            context.setup_binding_metadata()
         } else {
             vue27_normal_script_binding_metadata(context.descriptor())
+        };
+        let content = if let Some(script_setup) = descriptor.script_setup.as_ref() {
+            let analysis = context.script_setup_analysis().clone();
+            let normal_script = context.normal_script_analysis().clone();
+            let normal_script_return_bindings = context.normal_script_return_bindings().clone();
+            vue27_script_setup_content(
+                descriptor,
+                script_setup,
+                &options,
+                &css_vars,
+                &bindings,
+                &analysis,
+                &normal_script,
+                &normal_script_return_bindings,
+                template_usage_index.as_ref(),
+            )
+        } else {
+            vue27_normal_script_content(descriptor, &options, &css_vars, &bindings)
         };
         let attrs = context.script_or_setup_attrs();
         let loc = context.script_or_setup_loc();
@@ -4211,21 +4330,12 @@ fn generated_line_count(source: &str) -> u32 {
     source.lines().count().max(1) as u32
 }
 
-fn vue27_script_content(
+fn vue27_normal_script_content(
     descriptor: &SfcDescriptor,
     options: &SfcScriptCompileOptions,
     css_vars: &[String],
-    template_usage_index: Option<&TemplateUsageIndex>,
+    bindings: &BTreeMap<String, String>,
 ) -> String {
-    if let Some(script_setup) = descriptor.script_setup.as_ref() {
-        return vue27_script_setup_content(
-            descriptor,
-            script_setup,
-            options,
-            css_vars,
-            template_usage_index,
-        );
-    }
     let Some(script) = descriptor.script.as_ref() else {
         return String::new();
     };
@@ -4233,7 +4343,6 @@ fn vue27_script_content(
         return script.content.clone();
     }
     let scope_id = vue27_scope_id(options.id.as_deref());
-    let bindings = vue27_normal_script_binding_metadata(descriptor);
     let content = rewrite_vue27_default(
         &script.content,
         "__default__",
@@ -4249,33 +4358,18 @@ fn vue27_script_content(
     )
 }
 
-fn vue27_script_compile_errors(descriptor: &SfcDescriptor) -> Vec<String> {
-    let Some(script_setup) = descriptor.script_setup.as_ref() else {
-        return Vec::new();
-    };
-    if descriptor
-        .script
-        .as_ref()
-        .is_some_and(|script| script.attrs.lang != script_setup.attrs.lang)
-    {
-        return vec!["<script> and <script setup> must have the same language type.".to_string()];
-    }
-    let setup_context = vue27_script_setup_context(descriptor);
-    analyze_vue27_script_setup(script_setup, false, &setup_context).errors
-}
-
 fn vue27_script_setup_content(
     descriptor: &SfcDescriptor,
     script_setup: &SfcBlock,
     options: &SfcScriptCompileOptions,
     css_vars: &[String],
+    bindings: &BTreeMap<String, String>,
+    analysis: &Vue27ScriptSetupAnalysis,
+    normal_script: &Vue27NormalScriptAnalysis,
+    normal_script_return_bindings: &Vue27ScriptReturnBindings,
     template_usage_index: Option<&TemplateUsageIndex>,
 ) -> String {
     let scope_id = vue27_scope_id(options.id.as_deref());
-    let setup_context = vue27_script_setup_context(descriptor);
-    let analysis = analyze_vue27_script_setup(script_setup, options.is_prod, &setup_context);
-    let normal_script = analyze_vue27_normal_script_for_setup(descriptor);
-    let bindings = vue27_setup_binding_metadata(descriptor);
     let is_ts = script_is_typescript(&script_setup.attrs);
     let css_vars_code = if css_vars.is_empty() {
         String::new()
@@ -4285,8 +4379,13 @@ fn vue27_script_setup_content(
             gen_vue27_css_vars_code(css_vars, &bindings, &scope_id, options.is_prod)
         )
     };
-    let return_bindings =
-        vue27_script_setup_return_bindings(descriptor, &analysis, is_ts, template_usage_index);
+    let return_bindings = vue27_script_setup_return_bindings(
+        descriptor,
+        normal_script_return_bindings,
+        analysis,
+        is_ts,
+        template_usage_index,
+    );
     let returned = if return_bindings.is_empty() {
         if options.emit_script_setup_marker {
             "{ __sfc: true, }".to_string()
@@ -4464,16 +4563,16 @@ fn vue27_script_setup_runtime_options(
 
 fn vue27_script_setup_return_bindings(
     descriptor: &SfcDescriptor,
+    normal_script_return_bindings: &Vue27ScriptReturnBindings,
     analysis: &Vue27ScriptSetupAnalysis,
     is_ts: bool,
     template_usage_index: Option<&TemplateUsageIndex>,
 ) -> Vec<String> {
-    let script_returns = vue27_script_setup_script_return_bindings(descriptor);
-    let mut bindings = script_returns.bindings;
+    let mut bindings = normal_script_return_bindings.bindings.clone();
     for value in &analysis.return_bindings {
         push_unique(&mut bindings, value);
     }
-    for import in &script_returns.imports {
+    for import in &normal_script_return_bindings.imports {
         if import.is_type {
             continue;
         }
@@ -5335,13 +5434,6 @@ fn collect_vue27_declared_type_from_declaration(
             }
         }
         _ => {}
-    }
-}
-
-fn vue27_script_setup_context(descriptor: &SfcDescriptor) -> Vue27ScriptSetupContext {
-    Vue27ScriptSetupContext {
-        normal_types: vue27_normal_script_type_context(descriptor),
-        normal_imports: vue27_script_setup_script_return_bindings(descriptor).imports,
     }
 }
 
@@ -15121,27 +15213,6 @@ fn leading_blank_line_indent(value: &str) -> Option<&str> {
     } else {
         None
     }
-}
-
-fn vue27_setup_binding_metadata(descriptor: &SfcDescriptor) -> BTreeMap<String, String> {
-    let mut bindings = descriptor
-        .script_setup
-        .as_ref()
-        .map(|script_setup| {
-            let setup_context = vue27_script_setup_context(descriptor);
-            analyze_vue27_script_setup(script_setup, false, &setup_context)
-        })
-        .map(|analysis| {
-            let mut bindings = vue27_script_setup_script_bindings(descriptor);
-            bindings.extend(analysis.setup_bindings);
-            for prop in analysis.props_bindings {
-                bindings.insert(prop, "props".into());
-            }
-            bindings
-        })
-        .unwrap_or_default();
-    bindings.insert("__isScriptSetup".into(), "true".into());
-    bindings
 }
 
 fn vue27_normal_script_binding_metadata(descriptor: &SfcDescriptor) -> BTreeMap<String, String> {

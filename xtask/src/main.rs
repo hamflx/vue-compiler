@@ -3607,17 +3607,17 @@ fn compile_script_setup_analysis_count(
         return 0;
     }
     match version {
-        CompileScriptProfileVersion::Vue27 => 4,
+        CompileScriptProfileVersion::Vue27 => 1,
         CompileScriptProfileVersion::Vue3 => 1,
     }
 }
 
 fn compile_script_error_analysis_count(
     version: CompileScriptProfileVersion,
-    descriptor: &vuec_sfc::SfcDescriptor,
+    _descriptor: &vuec_sfc::SfcDescriptor,
 ) -> usize {
     match version {
-        CompileScriptProfileVersion::Vue27 => usize::from(descriptor.script_setup.is_some()),
+        CompileScriptProfileVersion::Vue27 => 0,
         CompileScriptProfileVersion::Vue3 => 2,
     }
 }
@@ -6214,10 +6214,10 @@ const search = computed(() => formatCount(props.count))
         assert!(result.structural_counts.ast_projection_enabled);
         assert!(result.structural_counts.ast_projection_statement_count > 0);
         assert_eq!(result.structural_counts.template_usage_scan_count, 1);
-        assert_eq!(result.structural_counts.setup_analysis_count, 4);
+        assert_eq!(result.structural_counts.setup_analysis_count, 1);
         assert_eq!(
             result.structural_counts.script_compile_error_analysis_count,
-            1
+            0
         );
 
         let report = CompileScriptProfileReport {
@@ -6235,7 +6235,11 @@ const search = computed(() => formatCount(props.count))
         assert_eq!(value["buildProfile"], compile_script_build_profile());
         assert_eq!(
             value["results"][0]["structuralCounts"]["setupAnalysisCount"],
-            4
+            1
+        );
+        assert_eq!(
+            value["results"][0]["structuralCounts"]["scriptCompileErrorAnalysisCount"],
+            0
         );
         assert_eq!(
             value["results"][0]["structuralCounts"]["templateUsageScanCount"],
