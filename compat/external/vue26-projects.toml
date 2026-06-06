@@ -1,0 +1,136 @@
+schema_version = 1
+min_projects = 15
+min_vue_files_per_project = 20
+
+# External Vue 2.6-compatible production-corpus projects are fixed here by
+# repository and commit before running `cargo xtask verify-vue2-project-corpus`.
+#
+# Each project must be a public medium-sized Vue 2 application/library with a
+# package manifest declaring Vue 2.6 directly or a semver range that covers the
+# pinned Vue 2.6 target. The comparison still uses the official Vue 2.7 compiler
+# package boundary because Vue 2.7 is the official compiler line that supports
+# compiling Vue 2.6 projects.
+#
+# Use include/exclude rules to keep dependency, build, and coverage output out
+# of the corpus while selecting at least 20 real SFC files per project.
+
+[[projects]]
+name = "ElemeFE-element"
+repo = "https://github.com/ElemeFE/element.git"
+rev = "c345bb453bf11badb4831a6a3f600c9372b3a336"
+package_json = "package.json"
+submodules = false
+include = ["packages/*.vue", "examples/*.vue"]
+exclude = ["**/node_modules/**", "**/dist/**", "**/coverage/**", "**/lib/**", "**/es/**", "examples/components/theme/loader/**"]
+
+[[projects]]
+name = "PanJiaChen-vue-element-admin"
+repo = "https://github.com/PanJiaChen/vue-element-admin.git"
+rev = "6858a9ad67483025f6a9432a926beb9327037be3"
+package_json = "package.json"
+include = ["src/*.vue"]
+exclude = ["**/node_modules/**", "**/dist/**", "**/coverage/**"]
+
+[[projects]]
+name = "PanJiaChen-vue-admin-template"
+repo = "https://github.com/PanJiaChen/vue-admin-template.git"
+rev = "4c18a3f47bdb417ad8a25f09910f848cb574dee2"
+package_json = "package.json"
+include = ["src/*.vue"]
+exclude = ["**/node_modules/**", "**/dist/**", "**/coverage/**"]
+
+[[projects]]
+name = "iview-iview"
+repo = "https://github.com/iview/iview.git"
+rev = "c3f57f17716c2a631b2b0eb95c9c3ab8208b3be8"
+package_json = "package.json"
+include = ["src/*.vue", "examples/*.vue"]
+exclude = ["**/node_modules/**", "**/dist/**", "**/coverage/**", "**/lib/**"]
+
+[[projects]]
+name = "bootstrap-vue-bootstrap-vue"
+repo = "https://github.com/bootstrap-vue/bootstrap-vue.git"
+rev = "9a246f45fc813f161df291fc7d6197febf8afaf4"
+package_json = "package.json"
+include = ["docs/*.vue"]
+exclude = ["**/node_modules/**", "**/dist/**", "**/coverage/**"]
+
+[[projects]]
+name = "view-design-ViewUI"
+repo = "https://github.com/view-design/ViewUI.git"
+rev = "5619a557d035748d554fe4fbff6f66b0f1bf75b3"
+package_json = "package.json"
+include = ["src/*.vue", "examples/*.vue"]
+exclude = ["**/node_modules/**", "**/dist/**", "**/coverage/**", "**/lib/**", "**/es/**"]
+
+[[projects]]
+name = "buefy-buefy-v0"
+repo = "https://github.com/buefy/buefy.git"
+rev = "09207a4811476e1f4b1601d712812bcb4a265b7c"
+package_json = "package.json"
+include = ["src/*.vue", "docs/*.vue"]
+exclude = ["**/node_modules/**", "**/dist/**", "**/coverage/**"]
+
+[[projects]]
+name = "vuejs-vue-cli-ui"
+repo = "https://github.com/vuejs/vue-cli.git"
+rev = "7eb93c169c7520935252e2473387f923ef80d856"
+package_json = "packages/@vue/cli-ui/package.json"
+include = ["packages/@vue/cli-ui/*.vue"]
+exclude = ["**/node_modules/**", "**/dist/**", "**/coverage/**"]
+
+[[projects]]
+name = "sendya-ant-design-pro-vue"
+repo = "https://github.com/sendya/ant-design-pro-vue.git"
+rev = "616df9e063a42661144614a69aa059e140c367d6"
+package_json = "package.json"
+include = ["src/*.vue"]
+exclude = ["**/node_modules/**", "**/dist/**", "**/coverage/**"]
+
+[[projects]]
+name = "iczer-vue-antd-admin"
+repo = "https://github.com/iczer/vue-antd-admin.git"
+rev = "10a7613e6e94f80041712201ef709d47d76c4b80"
+package_json = "package.json"
+include = ["src/*.vue"]
+exclude = ["**/node_modules/**", "**/dist/**", "**/coverage/**"]
+
+[[projects]]
+name = "d2-projects-d2-admin-v1"
+repo = "https://github.com/d2-projects/d2-admin.git"
+rev = "6ffb7ffea56d2a3e106670f4d282dca6832acc6f"
+package_json = "package.json"
+include = ["src/*.vue"]
+exclude = ["**/node_modules/**", "**/dist/**", "**/coverage/**"]
+
+[[projects]]
+name = "coreui-free-vue-admin-template-v2"
+repo = "https://github.com/coreui/coreui-free-vue-admin-template.git"
+rev = "d7b960a599decd0f8875c9c2e74d68d3a167e032"
+package_json = "package.json"
+include = ["src/*.vue"]
+exclude = ["**/node_modules/**", "**/dist/**", "**/coverage/**"]
+
+[[projects]]
+name = "statping-statping"
+repo = "https://github.com/statping/statping.git"
+rev = "72673bdf829802b49631202cf74233bef08d95b8"
+package_json = "frontend/package.json"
+include = ["frontend/src/*.vue"]
+exclude = ["**/node_modules/**", "**/dist/**", "**/coverage/**"]
+
+[[projects]]
+name = "xaksis-vue-good-table"
+repo = "https://github.com/xaksis/vue-good-table.git"
+rev = "889962c5b67f5bb621caa0a9bf0b3852d4199235"
+package_json = "package.json"
+include = ["src/*.vue", "vp-docs/*.vue", "dev/*.vue"]
+exclude = ["**/node_modules/**", "**/dist/**", "**/coverage/**"]
+
+[[projects]]
+name = "Armour-vue-typescript-admin-template"
+repo = "https://github.com/Armour/vue-typescript-admin-template.git"
+rev = "bff134353b14aaff88ada097998f3268aa795969"
+package_json = "package.json"
+include = ["src/*.vue"]
+exclude = ["**/node_modules/**", "**/dist/**", "**/coverage/**"]

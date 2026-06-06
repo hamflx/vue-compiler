@@ -599,6 +599,7 @@ struct Vue2ProjectSpec {
     repo: String,
     rev: String,
     package_json: Option<String>,
+    submodules: Option<bool>,
     include: Option<Vec<String>>,
     exclude: Option<Vec<String>>,
     min_vue_files: Option<usize>,
@@ -1520,7 +1521,7 @@ pub fn sync_official_tests(path: &Path, locked: bool, out_dir: &Path) -> JsonRep
                 (VersionLine::Vue3, &lock.vue3),
             ] {
                 let dir = out_dir.join(version_line.as_str());
-                if let Err(err) = sync_git_checkout(&baseline.repo, &baseline.rev, &dir) {
+                if let Err(err) = sync_git_checkout(&baseline.repo, &baseline.rev, &dir, true) {
                     let mut report = JsonReport::new("sync_official_tests", ReportStatus::Fail);
                     report.metadata = report
                         .metadata
@@ -4126,7 +4127,12 @@ fn verify_vue2_project_corpus_with_command(
         let mut vue_dependency = None;
         let mut vue_template_compiler_dependency = None;
 
-        if let Err(err) = sync_git_checkout(&project.repo, &project.rev, &checkout) {
+        if let Err(err) = sync_git_checkout(
+            &project.repo,
+            &project.rev,
+            &checkout,
+            project.submodules.unwrap_or(true),
+        ) {
             status = ReportStatus::Fail;
             detail = Some(format!("checkout failed: {err:#}"));
             violations.push(format!("{} checkout failed: {err:#}", project.name));
@@ -19100,7 +19106,7 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
     Ok(value)
 }
 
-fn sync_git_checkout(repo: &str, rev: &str, dir: &Path) -> Result<()> {
+fn sync_git_checkout(repo: &str, rev: &str, dir: &Path, submodules: bool) -> Result<()> {
     if dir.join(".git").exists() {
         run_git(dir, &["fetch", "--tags", "--force", "origin"])?;
     } else {
@@ -19113,7 +19119,9 @@ fn sync_git_checkout(repo: &str, rev: &str, dir: &Path) -> Result<()> {
             .with_context(|| format!("failed to clone {repo} into {}", dir.display()))?;
     }
     run_git(dir, &["checkout", "--detach", rev])?;
-    run_git(dir, &["submodule", "update", "--init", "--recursive"])?;
+    if submodules {
+        run_git(dir, &["submodule", "update", "--init", "--recursive"])?;
+    }
     Ok(())
 }
 
@@ -19303,6 +19311,7 @@ projects = []
             repo: "https://example.invalid/repo.git".into(),
             rev: "0123456789abcdef0123456789abcdef01234567".into(),
             package_json: None,
+            submodules: None,
             include: Some(vec!["src/*.vue".into()]),
             exclude: Some(vec!["src/views/*.vue".into()]),
             min_vue_files: None,
