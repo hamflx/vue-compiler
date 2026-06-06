@@ -1,0 +1,15 @@
+[package]
+name = "vuec_bridge_registry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared registry for internal vuec JSON bridge commands."
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://github.com/hamflx/vue-compiler/tree/main/crates/vuec_bridge_registry"
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+publish = false
+
+[dependencies]

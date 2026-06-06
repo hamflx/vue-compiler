@@ -23,6 +23,7 @@ sha2.workspace = true
 sysinfo.workspace = true
 toml.workspace = true
 vuec_ast = { path = "../crates/vuec_ast", version = "0.1.0" }
+vuec_bridge_registry = { path = "../crates/vuec_bridge_registry", version = "0.1.0" }
 vuec_js = { path = "../crates/vuec_js", version = "0.1.0" }
 vuec_pass = { path = "../crates/vuec_pass", version = "0.1.0" }
 vuec_sfc = { path = "../crates/vuec_sfc", version = "0.1.0" }

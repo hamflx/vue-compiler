@@ -1621,6 +1621,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "vuec_bridge_registry"
+version = "0.1.0"
+
+[[package]]
 name = "vuec_cli"
 version = "0.1.0"
 dependencies = [
@@ -1716,6 +1720,7 @@ dependencies = [
  "serde",
  "serde_json",
  "vuec_ast",
+ "vuec_bridge_registry",
  "vuec_diagnostics",
  "vuec_html",
  "vuec_js",
@@ -2326,6 +2331,7 @@ dependencies = [
  "sysinfo",
  "toml",
  "vuec_ast",
+ "vuec_bridge_registry",
  "vuec_js",
  "vuec_pass",
  "vuec_sfc",

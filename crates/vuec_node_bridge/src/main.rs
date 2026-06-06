@@ -17,6 +17,7 @@ use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::io::{self, Read};
 use vuec_ast::{NodeSpan, Vue3Ast, Vue3AstKind, Vue3Expression, Vue3ImportItem, Vue3Prop};
+use vuec_bridge_registry::bridge_command;
 use vuec_html::{HtmlTokenKind, HtmlTokenizer};
 use vuec_js::JsAstStore;
 use vuec_sfc::{
@@ -64,6 +65,9 @@ fn run() -> Result<()> {
 }
 
 fn dispatch(command: &str, payload: Value) -> Result<Value> {
+    bridge_command(command).with_context(|| {
+        format!("bridge command `{command}` is missing from vuec_bridge_registry")
+    })?;
     match command {
         "vue2.compile" => {
             let template = string_field(&payload, "template");
@@ -14264,6 +14268,8 @@ fn json_string_map_option(value: &Value, name: &str) -> Option<BTreeMap<String, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
+    use vuec_bridge_registry::bridge_commands;
 
     fn first_projected_prop(source_text: &str) -> Value {
         let source = TemplateSource {
@@ -14289,6 +14295,56 @@ mod tests {
         value
             .as_array()
             .is_some_and(|items| items.iter().any(|item| item == expected))
+    }
+
+    fn dispatch_source_commands() -> BTreeSet<&'static str> {
+        let source = include_str!("main.rs");
+        let dispatch = source
+            .split("fn dispatch(command: &str, payload: Value) -> Result<Value> {")
+            .nth(1)
+            .expect("dispatch function source")
+            .split("\nfn apply_bridge_dom_parser_defaults")
+            .next()
+            .expect("dispatch function end");
+        let mut commands = BTreeSet::new();
+        for line in dispatch.lines() {
+            let line = line.trim_start();
+            if !line.starts_with('"') {
+                continue;
+            }
+            for (index, part) in line.split('"').enumerate() {
+                if index % 2 == 1 && part.contains('.') {
+                    commands.insert(part);
+                }
+            }
+        }
+        commands
+    }
+
+    #[test]
+    fn bridge_dispatch_commands_are_registered() {
+        let dispatch_commands = dispatch_source_commands();
+        let registry_commands: BTreeSet<_> = bridge_commands()
+            .iter()
+            .map(|command| command.name)
+            .collect();
+        let missing: Vec<_> = dispatch_commands
+            .difference(&registry_commands)
+            .copied()
+            .collect();
+        let stale: Vec<_> = registry_commands
+            .difference(&dispatch_commands)
+            .copied()
+            .collect();
+
+        assert!(
+            missing.is_empty(),
+            "dispatch command(s) missing from registry: {missing:?}"
+        );
+        assert!(
+            stale.is_empty(),
+            "registry command(s) missing from dispatch: {stale:?}"
+        );
     }
 
     #[test]

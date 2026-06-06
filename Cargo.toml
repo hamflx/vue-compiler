@@ -15,6 +15,7 @@ members = [
   "crates/vuec_vue3_core",
   "crates/vuec_vue3_ssr",
   "crates/vuec_source",
+  "crates/vuec_bridge_registry",
   "crates/vuec_node_bridge",
   "crates/vuec_cli",
   "crates/vuec_napi",

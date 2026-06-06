@@ -19,6 +19,7 @@ serde_json.workspace = true
 oxc_ast.workspace = true
 oxc_span.workspace = true
 vuec_ast = { path = "../vuec_ast", version = "0.1.0" }
+vuec_bridge_registry = { path = "../vuec_bridge_registry", version = "0.1.0" }
 vuec_diagnostics = { path = "../vuec_diagnostics", version = "0.1.0" }
 vuec_html = { path = "../vuec_html", version = "0.1.0" }
 vuec_js = { path = "../vuec_js", version = "0.1.0" }

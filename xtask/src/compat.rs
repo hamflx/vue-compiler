@@ -12,6 +12,7 @@ use std::{
     process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
+use vuec_bridge_registry::bridge_command_api_surface;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 pub enum VersionLine {
@@ -12573,7 +12574,10 @@ impl ConformanceCoverageProvenance {
 
     fn from_prepared_expectation(entry: &PreparedTestManifestEntry) -> Self {
         let adapter_roles = canonical_adapter_roles(&entry.expected_provenance.adapter_roles);
-        let api_surface = canonical_api_surface(&entry.expected_provenance.api_surface);
+        let api_surface = canonical_bridge_api_surface(
+            &entry.related_bridge_commands,
+            &entry.expected_provenance.api_surface,
+        );
         let execution_path =
             canonical_execution_path(&entry.expected_provenance, &adapter_roles, &api_surface);
         Self {
@@ -12602,6 +12606,7 @@ impl ConformanceCoverageProvenance {
                 has_semantic_js = true;
             }
         }
+        self.api_surface = canonical_bridge_api_surface(&self.bridge_commands, &self.api_surface);
         if has_callback_boundary {
             self.execution_path = "mixed-js-callback-boundary".into();
         } else if has_semantic_js {
@@ -12675,7 +12680,12 @@ fn canonical_adapter_roles(roles: &[String]) -> Vec<String> {
 }
 
 fn canonical_api_surface(api_surface: &str) -> String {
-    if api_surface == "suite-only-bridge-command" {
+    if matches!(
+        api_surface,
+        "public-command" | "projection-command" | "suite-only-bridge-command"
+    ) {
+        api_surface.into()
+    } else if api_surface == "suite-only-bridge-command" {
         "suite-only-bridge-command".into()
     } else if api_surface.contains("mixed-official-source-boundary")
         || api_surface.contains("projection")
@@ -12690,6 +12700,39 @@ fn canonical_api_surface(api_surface: &str) -> String {
     } else {
         "public-package-api".into()
     }
+}
+
+fn canonical_bridge_api_surface(commands: &[String], fallback_api_surface: &str) -> String {
+    if preserves_manifest_api_surface_boundary(fallback_api_surface) {
+        return canonical_api_surface(fallback_api_surface);
+    }
+    let mut has_suite = false;
+    let mut has_projection = false;
+    let mut has_public = false;
+    for command in commands {
+        match bridge_command_api_surface(command) {
+            Some("suite-only-bridge-command") => has_suite = true,
+            Some("projection-command") => has_projection = true,
+            Some("public-command") => has_public = true,
+            _ => {}
+        }
+    }
+    if has_suite {
+        "suite-only-bridge-command".into()
+    } else if has_projection {
+        "projection-command".into()
+    } else if has_public {
+        "public-command".into()
+    } else {
+        canonical_api_surface(fallback_api_surface)
+    }
+}
+
+fn preserves_manifest_api_surface_boundary(api_surface: &str) -> bool {
+    api_surface.contains("mixed-official-source-boundary")
+        || api_surface.contains("runner")
+        || api_surface.contains("type-shape")
+        || api_surface.contains("shared-runtime")
 }
 
 fn canonical_execution_path(
@@ -12718,7 +12761,10 @@ fn canonical_execution_path(
     {
         return "hybrid-js-adapter-rust-projection".into();
     }
-    if api_surface == "public-package-api" || api_surface == "public-rust-api" {
+    if matches!(
+        api_surface,
+        "public-command" | "public-package-api" | "public-rust-api"
+    ) {
         return "rust-bridge-shape-adapter".into();
     }
     "hybrid-js-adapter-rust-projection".into()
@@ -20778,6 +20824,19 @@ fn conformance_coverage_file_reason(
             "Official prepared test file routes assertions through {commands}. Rust parser/transform/codegen projections may execute, but the asserted surface is a prepared suite helper rather than the public Vue package API, so this is hybrid projection evidence rather than Rust-backed public API completion."
         );
     }
+    if source == ConformanceCoverageKind::Mixed && provenance.api_surface == "projection-command" {
+        let commands = if provenance.bridge_commands.is_empty() {
+            "vuec_node_bridge projection command".to_string()
+        } else {
+            format!(
+                "vuec_node_bridge projection command(s) {}",
+                provenance.bridge_commands.join(", ")
+            )
+        };
+        return format!(
+            "Official prepared test file routes assertions through {commands}. Rust implementation participates, but the asserted bridge surface is an internal projection/helper command rather than the public Vue package API, so this is projection evidence rather than Rust-backed public API completion."
+        );
+    }
     if source == ConformanceCoverageKind::Mixed
         && provenance.execution_path == "hybrid-js-adapter-rust-projection"
     {
@@ -22789,6 +22848,60 @@ projects = []
             .runtime_markers
             .iter()
             .any(|marker| marker == "callback.directiveTransform"));
+    }
+
+    #[test]
+    fn bridge_registry_drives_coverage_api_surface_without_overriding_source_boundaries() {
+        assert_eq!(
+            canonical_bridge_api_surface(&["sfc.compileScript".into()], "public-api"),
+            "public-command"
+        );
+        assert_eq!(
+            canonical_bridge_api_surface(
+                &["vue3.core.transformElementProps".into()],
+                "projection-command"
+            ),
+            "projection-command"
+        );
+        assert_eq!(
+            canonical_bridge_api_surface(&["vue3.core.transformBindSuite".into()], "public-api"),
+            "suite-only-bridge-command"
+        );
+        assert_eq!(
+            canonical_bridge_api_surface(
+                &["vue3.ssr.compile".into()],
+                "mixed-official-source-boundary"
+            ),
+            "internal-helper-import"
+        );
+
+        let vue3_sfc = prepared_test_manifest_for_suite(suite_spec(ConformanceSuite::Vue3Sfc));
+        let compile_template =
+            ConformanceCoverageProvenance::from_prepared_expectation(manifest_entry(
+                &vue3_sfc,
+                "packages/compiler-sfc/__tests__/compileTemplate.spec.ts",
+            ));
+        assert_eq!(compile_template.api_surface, "public-command");
+
+        let resolve_type =
+            ConformanceCoverageProvenance::from_prepared_expectation(manifest_entry(
+                &vue3_sfc,
+                "packages/compiler-sfc/__tests__/compileScript/resolveType.spec.ts",
+            ));
+        assert_eq!(resolve_type.api_surface, "projection-command");
+
+        let source_boundary = ConformanceCoverageProvenance::from_prepared_expectation(
+            manifest_entry(&vue3_sfc, "packages/compiler-sfc/src/**"),
+        );
+        assert_eq!(source_boundary.api_surface, "internal-helper-import");
+
+        let vue3_core = prepared_test_manifest_for_suite(suite_spec(ConformanceSuite::Vue3Core));
+        let suite_helper =
+            ConformanceCoverageProvenance::from_prepared_expectation(manifest_entry(
+                &vue3_core,
+                "packages/compiler-core/__tests__/transforms/vBind.spec.ts",
+            ));
+        assert_eq!(suite_helper.api_surface, "suite-only-bridge-command");
     }
 
     #[test]
@@ -25997,8 +26110,22 @@ test('placeholder', () => {
                 .copied()
                 .unwrap_or_default(),
             ConformanceExecutionCounts {
-                total: 196,
-                pass: 196,
+                total: 186,
+                pass: 186,
+                fail: 0,
+                skip: 0,
+                pending: 0,
+            }
+        );
+        assert_eq!(
+            coverage
+                .summary
+                .get("hybrid-js-adapter-rust-projection")
+                .copied()
+                .unwrap_or_default(),
+            ConformanceExecutionCounts {
+                total: 10,
+                pass: 10,
                 fail: 0,
                 skip: 0,
                 pending: 0,
@@ -26021,11 +26148,21 @@ test('placeholder', () => {
             ConformanceCoverageKind::RustBacked
         );
         assert!(coverage.files[5].reason.contains("compileTemplate file"));
+        assert_eq!(coverage.files[6].source, ConformanceCoverageKind::Mixed);
         assert_eq!(
-            coverage.files[6].source,
-            ConformanceCoverageKind::RustBacked
+            coverage.files[6].provenance.api_surface,
+            "projection-command"
         );
-        assert!(coverage.files[6].reason.contains("vuec_vue3_asset"));
+        assert_eq!(
+            coverage.files[6].provenance.execution_path,
+            "hybrid-js-adapter-rust-projection"
+        );
+        assert!(coverage.files[6].reason.contains("projection command"));
+        assert!(coverage.files[6]
+            .provenance
+            .bridge_commands
+            .iter()
+            .any(|command| command == "sfc.templateUtils.isRelativeUrl"));
         assert_eq!(
             coverage.files[7].source,
             ConformanceCoverageKind::RustBacked
@@ -26042,11 +26179,16 @@ test('placeholder', () => {
                 .reason
                 .contains("Rust vuec_sfc compileScript implementation"));
         }
+        assert_eq!(coverage.files[18].source, ConformanceCoverageKind::Mixed);
         assert_eq!(
-            coverage.files[18].source,
-            ConformanceCoverageKind::RustBacked
+            coverage.files[18].provenance.api_surface,
+            "projection-command"
         );
-        assert!(coverage.files[18].reason.contains("resolve_vue3_type"));
+        assert_eq!(
+            coverage.files[18].provenance.execution_path,
+            "hybrid-js-adapter-rust-projection"
+        );
+        assert!(coverage.files[18].reason.contains("sfc.resolveType"));
         assert_eq!(
             coverage
                 .counts_by_source
