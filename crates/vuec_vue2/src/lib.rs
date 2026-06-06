@@ -2614,7 +2614,7 @@ fn gen_mir_directives(
             if !directive.modifiers.is_empty() {
                 fields.push(format!(
                     "modifiers:{}",
-                    modifiers_json(&directive.modifiers)
+                    modifiers_json(&directive.modifiers, Some(&directive.raw_name))
                 ));
             }
             format!("{{{}}}", fields.join(","))
@@ -5960,13 +5960,45 @@ fn transform_vue2_js_special_newlines(value: &str) -> String {
         .replace('\u{2029}', "\\u2029")
 }
 
-fn modifiers_json(modifiers: &BTreeMap<String, bool>) -> String {
-    let body = modifiers
-        .keys()
+fn modifiers_json(modifiers: &BTreeMap<String, bool>, raw_name: Option<&str>) -> String {
+    let mut keys = Vec::new();
+    if let Some(raw_name) = raw_name {
+        let (_, _, modifier_order) = split_modifiers(raw_name);
+        for key in modifier_order {
+            if modifiers.contains_key(&key) && !keys.contains(&key) {
+                keys.push(key);
+            }
+        }
+    }
+    for key in modifiers.keys() {
+        if !keys.contains(key) {
+            keys.push(key.clone());
+        }
+    }
+    let mut array_index_keys = keys
+        .iter()
+        .filter_map(|key| vue2_js_array_index_key(key).map(|index| (index, key.clone())))
+        .collect::<Vec<_>>();
+    array_index_keys.sort_by_key(|(index, _)| *index);
+    let mut ordered_keys = array_index_keys
+        .into_iter()
+        .map(|(_, key)| key)
+        .collect::<Vec<_>>();
+    ordered_keys.extend(
+        keys.into_iter()
+            .filter(|key| vue2_js_array_index_key(key).is_none()),
+    );
+    let body = ordered_keys
+        .iter()
         .map(|key| format!("{}:true", js_string(key)))
         .collect::<Vec<_>>()
         .join(",");
     format!("{{{body}}}")
+}
+
+fn vue2_js_array_index_key(key: &str) -> Option<u32> {
+    let value = key.parse::<u32>().ok()?;
+    (value != u32::MAX && value.to_string() == key).then_some(value)
 }
 
 fn json_string_array(values: &[String]) -> String {
@@ -6647,6 +6679,24 @@ mod tests {
             r#"with(this){return _c('input',{directives:[{name:"validate",rawName:"v-validate:field.required",arg:"field",modifiers:{"required":true}}],attrs:{"maxlength":"50"}})}"#
         );
         assert!(!custom_validate.render.contains("_c('validate'"));
+
+        let ordered_directive_modifiers = compile(
+            r#"<button v-b-popover.hover.bottom="'I am Bottom'"></button>"#,
+            options(),
+        );
+        assert_eq!(
+            ordered_directive_modifiers.render,
+            r#"with(this){return _c('button',{directives:[{name:"b-popover",rawName:"v-b-popover.hover.bottom",value:('I am Bottom'),expression:"'I am Bottom'",modifiers:{"hover":true,"bottom":true}}]})}"#
+        );
+
+        let numeric_directive_modifier = compile(
+            r#"<div v-b-visible.once.1000="visibleHandler"></div>"#,
+            options(),
+        );
+        assert_eq!(
+            numeric_directive_modifier.render,
+            r#"with(this){return _c('div',{directives:[{name:"b-visible",rawName:"v-b-visible.once.1000",value:(visibleHandler),expression:"visibleHandler",modifiers:{"1000":true,"once":true}}]})}"#
+        );
     }
 
     #[test]
