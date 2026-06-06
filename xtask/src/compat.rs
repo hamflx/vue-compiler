@@ -3766,32 +3766,68 @@ fn sanitize_path_segment(value: &str) -> String {
 }
 
 fn package_dependency_spec(package: &serde_json::Value, name: &str) -> Option<String> {
+    package_dependency_specs(package, name).into_iter().next()
+}
+
+fn package_dependency_specs(package: &serde_json::Value, name: &str) -> Vec<String> {
     [
         "dependencies",
         "devDependencies",
         "peerDependencies",
         "optionalDependencies",
     ]
-    .iter()
-    .find_map(|section| {
+    .into_iter()
+    .filter_map(|section| {
         package
-            .get(*section)
+            .get(section)
             .and_then(|value| value.get(name))
             .and_then(|value| value.as_str())
             .map(ToOwned::to_owned)
     })
+    .collect()
 }
 
-fn is_vue_dependency_for_version(spec: Option<&str>, version_line: VersionLine) -> bool {
-    let Some(spec) = spec else {
-        return false;
-    };
+fn format_dependency_specs(specs: &[String]) -> Option<String> {
+    if specs.is_empty() {
+        None
+    } else {
+        Some(specs.join("; "))
+    }
+}
+
+fn any_vue_dependency_for_version(specs: &[String], version_line: VersionLine) -> bool {
+    specs
+        .iter()
+        .any(|spec| vue_dependency_spec_supports_version(spec, version_line))
+}
+
+fn vue_dependency_spec_supports_version(spec: &str, version_line: VersionLine) -> bool {
     let minor = match version_line {
         VersionLine::Vue26 => "2.6",
         VersionLine::Vue27 => "2.7",
         VersionLine::Vue3 => return false,
     };
+    let cleaned = clean_vue_dependency_spec(spec);
+    let mut simple = cleaned.as_str();
+    for prefix in ["^", "~", ">=", "="] {
+        if let Some(stripped) = simple.strip_prefix(prefix) {
+            simple = stripped.trim();
+            break;
+        }
+    }
+    simple == minor
+        || simple.starts_with(&format!("{minor}."))
+        || simple.starts_with(&format!("{minor} "))
+        || (version_line == VersionLine::Vue26 && vue26_semver_range_supports_vue26(&cleaned))
+}
 
+fn vue26_semver_range_supports_vue26(spec: &str) -> bool {
+    let target =
+        nodejs_semver::Version::parse("2.6.14").expect("hard-coded Vue 2.6 target must parse");
+    nodejs_semver::Range::parse(spec).is_ok_and(|range| range.satisfies(&target))
+}
+
+fn clean_vue_dependency_spec(spec: &str) -> String {
     let mut cleaned = spec.trim();
     if let Some(stripped) = cleaned.strip_prefix("workspace:") {
         cleaned = stripped.trim();
@@ -3802,15 +3838,7 @@ fn is_vue_dependency_for_version(spec: Option<&str>, version_line: VersionLine) 
     {
         cleaned = stripped.trim();
     }
-    for prefix in ["^", "~", ">=", "="] {
-        if let Some(stripped) = cleaned.strip_prefix(prefix) {
-            cleaned = stripped.trim();
-            break;
-        }
-    }
-    cleaned == minor
-        || cleaned.starts_with(&format!("{minor}."))
-        || cleaned.starts_with(&format!("{minor} "))
+    cleaned.to_string()
 }
 
 #[derive(Clone, Debug)]
@@ -4106,22 +4134,21 @@ fn verify_vue2_project_corpus_with_command(
             let package_json = checkout.join(&package_json_rel);
             match read_json::<serde_json::Value>(&package_json) {
                 Ok(package) => {
-                    vue_dependency = package_dependency_spec(&package, "vue");
+                    let vue_dependencies = package_dependency_specs(&package, "vue");
+                    vue_dependency = format_dependency_specs(&vue_dependencies);
                     vue_template_compiler_dependency =
                         package_dependency_spec(&package, "vue-template-compiler");
-                    if !is_vue_dependency_for_version(
-                        vue_dependency.as_deref(),
-                        args.project_vue_version,
-                    ) {
+                    if !any_vue_dependency_for_version(&vue_dependencies, args.project_vue_version)
+                    {
                         status = ReportStatus::Fail;
                         detail = Some(format!(
-                            "package {} does not declare {} dependency; found {:?}",
+                            "package {} does not declare support for {}; found {:?}",
                             package_json_rel,
                             args.project_vue_version.as_str(),
                             vue_dependency
                         ));
                         violations.push(format!(
-                            "{} is not pinned to {}",
+                            "{} does not declare support for {}",
                             project.name,
                             args.project_vue_version.as_str()
                         ));
@@ -19157,35 +19184,67 @@ projects = []
 
     #[test]
     fn vue2_project_dependency_detection_accepts_selected_vue2_specs() {
-        assert!(is_vue_dependency_for_version(
-            Some("^2.7.16"),
+        assert!(vue_dependency_spec_supports_version(
+            "^2.7.16",
             VersionLine::Vue27
         ));
-        assert!(is_vue_dependency_for_version(
-            Some("~2.7.14"),
+        assert!(vue_dependency_spec_supports_version(
+            "~2.7.14",
             VersionLine::Vue27
         ));
-        assert!(is_vue_dependency_for_version(
-            Some("npm:vue@2.7.16"),
+        assert!(vue_dependency_spec_supports_version(
+            "npm:vue@2.7.16",
             VersionLine::Vue27
         ));
-        assert!(is_vue_dependency_for_version(
-            Some("workspace:vue@2.7.16"),
+        assert!(vue_dependency_spec_supports_version(
+            "workspace:vue@2.7.16",
             VersionLine::Vue27
         ));
-        assert!(is_vue_dependency_for_version(
-            Some("^2.6.14"),
+        assert!(vue_dependency_spec_supports_version(
+            "^2.6.14",
             VersionLine::Vue26
         ));
-        assert!(!is_vue_dependency_for_version(
-            Some("2.6.14"),
+        assert!(vue_dependency_spec_supports_version(
+            "^2.5.17",
+            VersionLine::Vue26
+        ));
+        assert!(!vue_dependency_spec_supports_version(
+            "^2.5.17",
             VersionLine::Vue27
         ));
-        assert!(!is_vue_dependency_for_version(
-            Some("^3.5.0"),
+        assert!(!vue_dependency_spec_supports_version(
+            "2.5.21",
+            VersionLine::Vue26
+        ));
+        assert!(!vue_dependency_spec_supports_version(
+            "2.6.14",
             VersionLine::Vue27
         ));
-        assert!(!is_vue_dependency_for_version(None, VersionLine::Vue27));
+        assert!(!vue_dependency_spec_supports_version(
+            "^3.5.0",
+            VersionLine::Vue27
+        ));
+    }
+
+    #[test]
+    fn vue2_project_dependency_detection_accepts_any_compatible_vue_section() {
+        let package = serde_json::json!({
+            "devDependencies": {
+                "vue": "2.5.21"
+            },
+            "peerDependencies": {
+                "vue": "^2.5.17"
+            }
+        });
+        let specs = package_dependency_specs(&package, "vue");
+
+        assert_eq!(specs, vec!["2.5.21", "^2.5.17"]);
+        assert!(any_vue_dependency_for_version(&specs, VersionLine::Vue26));
+        assert!(!any_vue_dependency_for_version(&specs, VersionLine::Vue27));
+        assert_eq!(
+            format_dependency_specs(&specs),
+            Some("2.5.21; ^2.5.17".into())
+        );
     }
 
     #[test]

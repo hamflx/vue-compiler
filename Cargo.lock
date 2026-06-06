@@ -2318,6 +2318,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "nodejs-semver",
  "oxc_span",
  "serde",
  "serde_json",
