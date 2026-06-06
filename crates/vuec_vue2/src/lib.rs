@@ -7274,12 +7274,12 @@ mod tests {
         );
 
         let named = compile(
-            "<span>&larr;&uarr;&rarr;&darr;&mdash;&ndash;&copy;&reg;&trade;&plus;&times;</span>",
+            "<span>&larr;&uarr;&rarr;&darr;&mdash;&ndash;&copy;&reg;&trade;&plus;&times;&lsaquo;&rsaquo;</span>",
             options(),
         );
         assert_eq!(
             named.render,
-            r#"with(this){return _c('span',[_v("←↑→↓—–©®™+×")])}"#
+            r#"with(this){return _c('span',[_v("←↑→↓—–©®™+×‹›")])}"#
         );
 
         let textarea = compile("<textarea>&#10004;</textarea>", options());

@@ -756,7 +756,7 @@ fn decode_html_entity_at(value: &str, mode: HtmlEntityDecodeMode) -> Option<(cha
     if let Some(decoded) = decode_numeric_html_entity_at(value) {
         return Some(decoded);
     }
-    const NAMED: [(&str, char); 26] = [
+    const NAMED: [(&str, char); 28] = [
         ("amp", '&'),
         ("lt", '<'),
         ("gt", '>'),
@@ -778,6 +778,8 @@ fn decode_html_entity_at(value: &str, mode: HtmlEntityDecodeMode) -> Option<(cha
         ("bull", '\u{2022}'),
         ("laquo", '\u{00ab}'),
         ("raquo", '\u{00bb}'),
+        ("lsaquo", '\u{2039}'),
+        ("rsaquo", '\u{203a}'),
         ("larr", '\u{2190}'),
         ("uarr", '\u{2191}'),
         ("rarr", '\u{2192}'),
@@ -1040,8 +1042,10 @@ mod tests {
             "&ersand;É€�"
         );
         assert_eq!(
-            decode_html_text_entities("&larr;&uarr;&rarr;&darr;&mdash;&ndash;&copy;&reg;&trade;"),
-            "←↑→↓—–©®™"
+            decode_html_text_entities(
+                "&larr;&uarr;&rarr;&darr;&mdash;&ndash;&copy;&reg;&trade;&lsaquo;&rsaquo;"
+            ),
+            "←↑→↓—–©®™‹›"
         );
         assert_eq!(
             decode_html_text_entities("&foo;&rarrx;&ampersand;"),
