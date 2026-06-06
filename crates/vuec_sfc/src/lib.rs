@@ -814,14 +814,56 @@ impl SfcScriptAstMode {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TemplateUsageFlavor {
+    Vue27,
+    Vue3,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TemplateUsageCacheKey {
+    flavor: TemplateUsageFlavor,
+    is_ts: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TemplateUsageIndex {
+    usage: String,
+}
+
+impl TemplateUsageIndex {
+    fn new(template: &str, flavor: TemplateUsageFlavor, is_ts: bool) -> Self {
+        let usage = match flavor {
+            TemplateUsageFlavor::Vue27 => vue27_template_usage_check_string(template, is_ts),
+            TemplateUsageFlavor::Vue3 => vue3_template_usage_check_string(template, is_ts),
+        };
+        Self { usage }
+    }
+
+    fn contains(&self, local: &str) -> bool {
+        identifier_usage_contains(&self.usage, local)
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 struct TemplateUsageCacheSlot {
-    usage_check_source: Option<String>,
+    key: Option<TemplateUsageCacheKey>,
+    index: Option<TemplateUsageIndex>,
 }
 
 impl TemplateUsageCacheSlot {
-    fn is_empty(&self) -> bool {
-        self.usage_check_source.is_none()
+    fn index(
+        &mut self,
+        template: &SfcBlock,
+        flavor: TemplateUsageFlavor,
+        is_ts: bool,
+    ) -> &TemplateUsageIndex {
+        let key = TemplateUsageCacheKey { flavor, is_ts };
+        if self.key != Some(key) {
+            self.key = Some(key);
+            self.index = Some(TemplateUsageIndex::new(&template.content, flavor, is_ts));
+        }
+        self.index.as_ref().expect("template usage index")
     }
 }
 
@@ -969,8 +1011,16 @@ impl<'a> SfcScriptCompileContext<'a> {
         (self.script_ast, self.script_setup_ast)
     }
 
-    fn template_usage_cache_is_empty(&self) -> bool {
-        self.template_usage_cache.is_empty()
+    fn template_usage_index(
+        &mut self,
+        flavor: TemplateUsageFlavor,
+        is_ts: bool,
+    ) -> Option<&TemplateUsageIndex> {
+        let template = self.descriptor.template.as_ref()?;
+        if template.attrs.src.is_some() || template.attrs.lang.is_some() {
+            return None;
+        }
+        Some(self.template_usage_cache.index(template, flavor, is_ts))
     }
 }
 
@@ -986,12 +1036,16 @@ impl<'a> Vue3ScriptCompileContext<'a> {
         js: &mut JsAstStore,
     ) -> Self {
         let inner = SfcScriptCompileContext::new(descriptor, options, js, true);
-        debug_assert!(inner.template_usage_cache_is_empty());
         Self { inner }
     }
 
     fn into_script_ast(self) -> (Vec<Value>, Vec<Value>) {
         self.inner.into_script_ast()
+    }
+
+    fn template_usage_index(&mut self, is_ts: bool) -> Option<&TemplateUsageIndex> {
+        self.inner
+            .template_usage_index(TemplateUsageFlavor::Vue3, is_ts)
     }
 }
 
@@ -1015,12 +1069,16 @@ impl<'a> Vue27ScriptCompileContext<'a> {
         js: &mut JsAstStore,
     ) -> Self {
         let inner = SfcScriptCompileContext::new(descriptor, options, js, false);
-        debug_assert!(inner.template_usage_cache_is_empty());
         Self { inner }
     }
 
     fn into_script_ast(self) -> (Vec<Value>, Vec<Value>) {
         self.inner.into_script_ast()
+    }
+
+    fn template_usage_index(&mut self, is_ts: bool) -> Option<&TemplateUsageIndex> {
+        self.inner
+            .template_usage_index(TemplateUsageFlavor::Vue27, is_ts)
     }
 }
 
@@ -1030,6 +1088,32 @@ impl<'a> std::ops::Deref for Vue27ScriptCompileContext<'a> {
     fn deref(&self) -> &Self::Target {
         &self.inner
     }
+}
+
+fn vue3_compile_script_template_usage_index(
+    context: &mut Vue3ScriptCompileContext<'_>,
+    script_compile_errors: &[String],
+) -> Option<TemplateUsageIndex> {
+    let script_setup = context.script_setup.as_ref()?;
+    if !script_compile_errors.is_empty() || !script_setup.is_js_like {
+        return None;
+    }
+    let is_ts = script_is_typescript(&script_setup.block.attrs)
+        || context
+            .script
+            .as_ref()
+            .is_some_and(|script| script_is_typescript(&script.block.attrs));
+    context.template_usage_index(is_ts).cloned()
+}
+
+fn vue27_compile_script_template_usage_index(
+    context: &mut Vue27ScriptCompileContext<'_>,
+) -> Option<TemplateUsageIndex> {
+    let is_ts = context
+        .script_setup
+        .as_ref()
+        .map(|script_setup| script_is_typescript(&script_setup.block.attrs))?;
+    context.template_usage_index(is_ts).cloned()
 }
 
 impl SfcCompiler {
@@ -1370,7 +1454,7 @@ impl SfcCompiler {
         descriptor: &SfcDescriptor,
         options: SfcScriptCompileOptions,
     ) -> SfcScriptBlock {
-        let context = Vue3ScriptCompileContext::new(descriptor, &options, &mut self.js);
+        let mut context = Vue3ScriptCompileContext::new(descriptor, &options, &mut self.js);
         let script_compile_errors = vue3_script_compile_errors(context.descriptor(), &options);
         let summary = if script_compile_errors.is_empty() && context.all_script_blocks_are_js_like()
         {
@@ -1381,12 +1465,15 @@ impl SfcCompiler {
         };
         let attrs = context.script_or_setup_attrs();
         let base_bindings = vue3_script_base_binding_metadata(context.descriptor());
+        let template_usage_index =
+            vue3_compile_script_template_usage_index(&mut context, &script_compile_errors);
         let generated_content = script_content(
             context.descriptor(),
             context.raw_content(),
             context.filename(),
             &options,
             &base_bindings,
+            template_usage_index.as_ref(),
         );
         let mut bindings = base_bindings;
         bindings.extend(generated_content.bindings.clone());
@@ -1441,7 +1528,7 @@ impl SfcCompiler {
         descriptor: &SfcDescriptor,
         options: SfcScriptCompileOptions,
     ) -> SfcScriptBlock {
-        let context = Vue27ScriptCompileContext::new(descriptor, &options, &mut self.js);
+        let mut context = Vue27ScriptCompileContext::new(descriptor, &options, &mut self.js);
         let summary = self
             .js
             .summarize_program(context.raw_content(), context.source_type());
@@ -1452,7 +1539,13 @@ impl SfcCompiler {
             },
         );
         let script_errors = vue27_script_compile_errors(context.descriptor());
-        let content = vue27_script_content(context.descriptor(), &options, &css_vars);
+        let template_usage_index = vue27_compile_script_template_usage_index(&mut context);
+        let content = vue27_script_content(
+            context.descriptor(),
+            &options,
+            &css_vars,
+            template_usage_index.as_ref(),
+        );
         let bindings = if context.has_script_setup() {
             vue27_setup_binding_metadata(context.descriptor())
         } else {
@@ -4122,9 +4215,16 @@ fn vue27_script_content(
     descriptor: &SfcDescriptor,
     options: &SfcScriptCompileOptions,
     css_vars: &[String],
+    template_usage_index: Option<&TemplateUsageIndex>,
 ) -> String {
     if let Some(script_setup) = descriptor.script_setup.as_ref() {
-        return vue27_script_setup_content(descriptor, script_setup, options, css_vars);
+        return vue27_script_setup_content(
+            descriptor,
+            script_setup,
+            options,
+            css_vars,
+            template_usage_index,
+        );
     }
     let Some(script) = descriptor.script.as_ref() else {
         return String::new();
@@ -4169,6 +4269,7 @@ fn vue27_script_setup_content(
     script_setup: &SfcBlock,
     options: &SfcScriptCompileOptions,
     css_vars: &[String],
+    template_usage_index: Option<&TemplateUsageIndex>,
 ) -> String {
     let scope_id = vue27_scope_id(options.id.as_deref());
     let setup_context = vue27_script_setup_context(descriptor);
@@ -4184,7 +4285,8 @@ fn vue27_script_setup_content(
             gen_vue27_css_vars_code(css_vars, &bindings, &scope_id, options.is_prod)
         )
     };
-    let return_bindings = vue27_script_setup_return_bindings(descriptor, &analysis, is_ts);
+    let return_bindings =
+        vue27_script_setup_return_bindings(descriptor, &analysis, is_ts, template_usage_index);
     let returned = if return_bindings.is_empty() {
         if options.emit_script_setup_marker {
             "{ __sfc: true, }".to_string()
@@ -4364,6 +4466,7 @@ fn vue27_script_setup_return_bindings(
     descriptor: &SfcDescriptor,
     analysis: &Vue27ScriptSetupAnalysis,
     is_ts: bool,
+    template_usage_index: Option<&TemplateUsageIndex>,
 ) -> Vec<String> {
     let script_returns = vue27_script_setup_script_return_bindings(descriptor);
     let mut bindings = script_returns.bindings;
@@ -4374,7 +4477,7 @@ fn vue27_script_setup_return_bindings(
         if import.is_type {
             continue;
         }
-        if vue27_script_setup_import_is_returned(descriptor, import, is_ts) {
+        if vue27_script_setup_import_is_returned(descriptor, import, is_ts, template_usage_index) {
             push_unique(&mut bindings, &import.local);
         }
     }
@@ -4382,7 +4485,7 @@ fn vue27_script_setup_return_bindings(
         if import.is_type {
             continue;
         }
-        if vue27_script_setup_import_is_returned(descriptor, import, is_ts) {
+        if vue27_script_setup_import_is_returned(descriptor, import, is_ts, template_usage_index) {
             push_unique(&mut bindings, &import.local);
         }
     }
@@ -4401,6 +4504,7 @@ fn vue27_script_setup_import_is_returned(
     descriptor: &SfcDescriptor,
     import: &Vue27ScriptImport,
     is_ts: bool,
+    template_usage_index: Option<&TemplateUsageIndex>,
 ) -> bool {
     let Some(template) = descriptor.template.as_ref() else {
         return true;
@@ -4408,7 +4512,9 @@ fn vue27_script_setup_import_is_returned(
     if template.attrs.src.is_some() || template.attrs.lang.is_some() {
         return true;
     }
-    vue27_template_uses_identifier(&template.content, &import.local, is_ts)
+    template_usage_index
+        .map(|index| index.contains(&import.local))
+        .unwrap_or_else(|| vue27_template_uses_identifier(&template.content, &import.local, is_ts))
 }
 
 fn vue27_script_setup_params(analysis: &Vue27ScriptSetupAnalysis, is_ts: bool) -> String {
@@ -16815,6 +16921,7 @@ fn script_content(
     filename: &str,
     options: &SfcScriptCompileOptions,
     base_bindings: &BTreeMap<String, String>,
+    template_usage_index: Option<&TemplateUsageIndex>,
 ) -> GeneratedScriptContent {
     let script_errors = vue3_script_compile_errors(descriptor, options);
     let Some(script_setup) = descriptor.script_setup.as_ref() else {
@@ -16886,7 +16993,8 @@ fn script_content(
             .script
             .as_ref()
             .is_some_and(|script| script_is_typescript(&script.attrs));
-    let return_bindings = vue3_script_setup_return_bindings(descriptor, &setup_analysis, is_ts);
+    let return_bindings =
+        vue3_script_setup_return_bindings(descriptor, &setup_analysis, is_ts, template_usage_index);
     let script_binding_metadata =
         vue3_script_setup_script_binding_metadata(descriptor, &setup_analysis.vue_import_aliases);
     let template_binding_metadata = vue3_script_setup_template_binding_metadata(
@@ -16900,6 +17008,7 @@ fn script_content(
         &setup_analysis,
         is_ts,
         options.inline_template,
+        template_usage_index,
     );
     let template_props_aliases = vue3_script_setup_template_props_aliases(&setup_analysis);
     let public_props_aliases = vue3_script_setup_public_props_aliases(&setup_analysis);
@@ -17682,6 +17791,7 @@ fn vue3_script_setup_return_bindings(
     descriptor: &SfcDescriptor,
     setup_analysis: &Vue3ScriptSetupAnalysis,
     is_ts: bool,
+    template_usage_index: Option<&TemplateUsageIndex>,
 ) -> Vec<Vue3ScriptSetupReturnBinding> {
     let script_returns = descriptor
         .script
@@ -17716,7 +17826,7 @@ fn vue3_script_setup_return_bindings(
         if import.is_type {
             continue;
         }
-        if vue3_script_setup_import_is_returned(descriptor, import, is_ts) {
+        if vue3_script_setup_import_is_returned(descriptor, import, is_ts, template_usage_index) {
             push_unique_vue3_return_binding(
                 &mut bindings,
                 Vue3ScriptSetupReturnBinding {
@@ -17736,6 +17846,7 @@ fn vue3_script_setup_import_metadata(
     setup_analysis: &Vue3ScriptSetupAnalysis,
     is_ts: bool,
     inline_template: bool,
+    template_usage_index: Option<&TemplateUsageIndex>,
 ) -> BTreeMap<String, SfcScriptImportBinding> {
     let script_returns = descriptor
         .script
@@ -17751,6 +17862,7 @@ fn vue3_script_setup_import_metadata(
             false,
             is_ts,
             inline_template,
+            template_usage_index,
         );
     }
     for import in &setup_analysis.imports {
@@ -17761,6 +17873,7 @@ fn vue3_script_setup_import_metadata(
             true,
             is_ts,
             inline_template,
+            template_usage_index,
         );
     }
     imports
@@ -17773,6 +17886,7 @@ fn vue3_insert_script_import_metadata(
     is_from_setup: bool,
     is_ts: bool,
     inline_template: bool,
+    template_usage_index: Option<&TemplateUsageIndex>,
 ) {
     imports.entry(import.local.clone()).or_insert_with(|| {
         let is_used_in_template = vue3_script_import_is_used_in_template(
@@ -17780,6 +17894,7 @@ fn vue3_insert_script_import_metadata(
             &import.local,
             is_ts,
             inline_template,
+            template_usage_index,
         );
         SfcScriptImportBinding {
             is_type: import.is_type,
@@ -17797,6 +17912,7 @@ fn vue3_script_import_is_used_in_template(
     local: &str,
     is_ts: bool,
     inline_template: bool,
+    template_usage_index: Option<&TemplateUsageIndex>,
 ) -> bool {
     if inline_template {
         return false;
@@ -17810,7 +17926,9 @@ fn vue3_script_import_is_used_in_template(
     if template.attrs.src.is_some() || template.attrs.lang.is_some() {
         return true;
     }
-    vue3_template_uses_identifier(&template.content, local, is_ts)
+    template_usage_index
+        .map(|index| index.contains(local))
+        .unwrap_or_else(|| vue3_template_uses_identifier(&template.content, local, is_ts))
 }
 
 fn push_unique_vue3_return_binding(
@@ -17830,6 +17948,7 @@ fn vue3_script_setup_import_is_returned(
     descriptor: &SfcDescriptor,
     import: &Vue27ScriptImport,
     is_ts: bool,
+    template_usage_index: Option<&TemplateUsageIndex>,
 ) -> bool {
     if import.source == "vue" {
         return true;
@@ -17840,7 +17959,9 @@ fn vue3_script_setup_import_is_returned(
     if template.attrs.src.is_some() || template.attrs.lang.is_some() {
         return true;
     }
-    vue3_template_uses_identifier(&template.content, &import.local, is_ts)
+    template_usage_index
+        .map(|index| index.contains(&import.local))
+        .unwrap_or_else(|| vue3_template_uses_identifier(&template.content, &import.local, is_ts))
 }
 
 fn vue3_script_import_binding_type(import: &Vue27ScriptImport) -> &'static str {
@@ -26888,6 +27009,34 @@ mod tests {
         assert_eq!(binding.is_type, is_type);
         assert_eq!(binding.is_from_setup, is_from_setup);
         assert_eq!(binding.is_used_in_template, is_used_in_template);
+    }
+
+    #[test]
+    fn template_usage_index_applies_vue27_and_vue3_ts_rules() {
+        let vue27 = TemplateUsageIndex::new(
+            r#"{{ `${VAR}VAR2${VAR3}` }}"#,
+            TemplateUsageFlavor::Vue27,
+            true,
+        );
+        assert!(vue27.contains("VAR"));
+        assert!(vue27.contains("VAR3"));
+        assert!(!vue27.contains("VAR2"));
+
+        let vue3 = TemplateUsageIndex::new(
+            r#"<FooBar #[foo.slotName] />
+<div :[bar.attrName]="15"></div>
+<div>{{ a as Foo }}</div>
+<div>{{ Baz }}</div>
+<FooBar :msg />"#,
+            TemplateUsageFlavor::Vue3,
+            true,
+        );
+        assert!(vue3.contains("FooBar"));
+        assert!(vue3.contains("foo"));
+        assert!(vue3.contains("bar"));
+        assert!(vue3.contains("Baz"));
+        assert!(vue3.contains("msg"));
+        assert!(!vue3.contains("Foo"));
     }
 
     fn generated_original_position(

@@ -3579,50 +3579,23 @@ fn compile_script_template_usage_scan_count(
     version: CompileScriptProfileVersion,
     descriptor: &vuec_sfc::SfcDescriptor,
 ) -> usize {
+    if descriptor.script_setup.is_none() {
+        return 0;
+    }
     let Some(template) = descriptor.template.as_ref() else {
         return 0;
     };
     if template.attrs.src.is_some() || template.attrs.lang.is_some() {
         return 0;
     }
-    let normal_imports = descriptor
-        .script
-        .as_ref()
-        .map(|block| count_compile_script_import_bindings(&block.content, false))
-        .unwrap_or_default();
-    let setup_imports = descriptor
-        .script_setup
-        .as_ref()
-        .map(|block| count_compile_script_import_bindings(&block.content, false))
-        .unwrap_or_default();
     match version {
-        CompileScriptProfileVersion::Vue27 => normal_imports + setup_imports,
-        CompileScriptProfileVersion::Vue3 => {
-            let return_scans = descriptor
-                .script
+        CompileScriptProfileVersion::Vue27 => 1,
+        CompileScriptProfileVersion::Vue3 => usize::from(
+            descriptor
+                .script_setup
                 .as_ref()
-                .map(|block| count_compile_script_return_import_bindings(&block.content))
-                .unwrap_or_default()
-                + descriptor
-                    .script_setup
-                    .as_ref()
-                    .map(|block| count_compile_script_return_import_bindings(&block.content))
-                    .unwrap_or_default();
-            let is_ts = descriptor
-                .script
-                .as_ref()
-                .is_some_and(|block| compile_script_block_is_typescript(block))
-                || descriptor
-                    .script_setup
-                    .as_ref()
-                    .is_some_and(|block| compile_script_block_is_typescript(block));
-            let metadata_scans = if is_ts {
-                normal_imports + setup_imports
-            } else {
-                0
-            };
-            return_scans + metadata_scans
-        }
+                .is_some_and(compile_script_block_is_js_like),
+        ),
     }
 }
 
@@ -3649,73 +3622,6 @@ fn compile_script_error_analysis_count(
     }
 }
 
-fn count_compile_script_return_import_bindings(source: &str) -> usize {
-    compile_script_import_lines(source)
-        .into_iter()
-        .filter(|line| !compile_script_import_source_is_vue(line))
-        .map(|line| count_compile_script_import_line_bindings(line, false))
-        .sum()
-}
-
-fn count_compile_script_import_bindings(source: &str, include_type: bool) -> usize {
-    compile_script_import_lines(source)
-        .into_iter()
-        .map(|line| count_compile_script_import_line_bindings(line, include_type))
-        .sum()
-}
-
-fn compile_script_import_lines(source: &str) -> Vec<&str> {
-    source
-        .lines()
-        .map(str::trim)
-        .filter(|line| line.starts_with("import ") && line.contains(" from "))
-        .collect()
-}
-
-fn count_compile_script_import_line_bindings(line: &str, include_type: bool) -> usize {
-    if !include_type && line.starts_with("import type ") {
-        return 0;
-    }
-    let before_from = line.split(" from ").next().unwrap_or(line).trim();
-    let mut rest = before_from
-        .strip_prefix("import ")
-        .unwrap_or(before_from)
-        .trim();
-    if rest.is_empty() {
-        return 0;
-    }
-    let mut count = 0usize;
-    if rest.starts_with("* as ") {
-        return 1;
-    }
-    if let Some(named_start) = rest.find('{') {
-        let default_part = rest[..named_start].trim().trim_end_matches(',').trim();
-        if !default_part.is_empty() && default_part != "type" {
-            count += 1;
-        }
-        if let Some(named_end) = rest[named_start + 1..].find('}') {
-            let named = &rest[named_start + 1..named_start + 1 + named_end];
-            count += named
-                .split(',')
-                .map(str::trim)
-                .filter(|part| !part.is_empty())
-                .filter(|part| include_type || !part.starts_with("type "))
-                .count();
-        }
-        return count;
-    }
-    rest = rest.trim_end_matches(';').trim();
-    if rest.is_empty() || rest.starts_with('{') {
-        0
-    } else {
-        1
-    }
-}
-
-fn compile_script_import_source_is_vue(line: &str) -> bool {
-    line.contains(" from 'vue'") || line.contains(" from \"vue\"")
-}
-
 fn compile_script_block_is_js_like(block: &vuec_sfc::SfcBlock) -> bool {
     block
         .attrs
@@ -3723,15 +3629,6 @@ fn compile_script_block_is_js_like(block: &vuec_sfc::SfcBlock) -> bool {
         .as_deref()
         .map(|lang| matches!(lang, "js" | "jsx" | "ts" | "tsx"))
         .unwrap_or(true)
-}
-
-fn compile_script_block_is_typescript(block: &vuec_sfc::SfcBlock) -> bool {
-    block
-        .attrs
-        .lang
-        .as_deref()
-        .map(|lang| matches!(lang, "ts" | "tsx"))
-        .unwrap_or(false)
 }
 
 fn compile_script_fixture_block_sizes(source: &str) -> (usize, usize, usize) {
@@ -6316,7 +6213,7 @@ const search = computed(() => formatCount(props.count))
                 .unwrap();
         assert!(result.structural_counts.ast_projection_enabled);
         assert!(result.structural_counts.ast_projection_statement_count > 0);
-        assert!(result.structural_counts.template_usage_scan_count >= 4);
+        assert_eq!(result.structural_counts.template_usage_scan_count, 1);
         assert_eq!(result.structural_counts.setup_analysis_count, 4);
         assert_eq!(
             result.structural_counts.script_compile_error_analysis_count,
@@ -6339,6 +6236,10 @@ const search = computed(() => formatCount(props.count))
         assert_eq!(
             value["results"][0]["structuralCounts"]["setupAnalysisCount"],
             4
+        );
+        assert_eq!(
+            value["results"][0]["structuralCounts"]["templateUsageScanCount"],
+            1
         );
         assert!(value["results"][0]["parse"]["medianMicros"]
             .as_u64()
