@@ -12303,6 +12303,7 @@ impl ConformanceCoverageKind {
 struct ConformanceCoverageReport {
     source: ConformanceCoverageKind,
     reason: String,
+    summary: BTreeMap<String, ConformanceExecutionCounts>,
     counts_by_source: BTreeMap<String, ConformanceExecutionCounts>,
     rust_backed_pass: usize,
     rust_backed_total: usize,
@@ -12315,8 +12316,203 @@ struct ConformanceCoverageFile {
     #[serde(skip_serializing_if = "Option::is_none")]
     scope: Option<String>,
     source: ConformanceCoverageKind,
+    #[serde(flatten)]
+    provenance: ConformanceCoverageProvenance,
     reason: String,
     counts: ConformanceExecutionCounts,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+struct ConformanceCoverageProvenance {
+    test_origin: String,
+    execution_path: String,
+    api_surface: String,
+    adapter_roles: Vec<String>,
+    bridge_commands: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    runtime_markers: Vec<String>,
+}
+
+impl ConformanceCoverageProvenance {
+    fn new(
+        test_origin: &str,
+        execution_path: &str,
+        api_surface: &str,
+        adapter_roles: &[&str],
+        bridge_commands: &[&str],
+    ) -> Self {
+        Self {
+            test_origin: test_origin.to_string(),
+            execution_path: execution_path.to_string(),
+            api_surface: api_surface.to_string(),
+            adapter_roles: adapter_roles.iter().copied().map(str::to_string).collect(),
+            bridge_commands: bridge_commands
+                .iter()
+                .copied()
+                .map(str::to_string)
+                .collect(),
+            runtime_markers: Vec::new(),
+        }
+    }
+
+    fn from_prepared_expectation(entry: &PreparedTestManifestEntry) -> Self {
+        let adapter_roles = canonical_adapter_roles(&entry.expected_provenance.adapter_roles);
+        let api_surface = canonical_api_surface(&entry.expected_provenance.api_surface);
+        let execution_path =
+            canonical_execution_path(&entry.expected_provenance, &adapter_roles, &api_surface);
+        Self {
+            test_origin: entry.expected_provenance.test_origin.clone(),
+            execution_path,
+            api_surface,
+            adapter_roles,
+            bridge_commands: entry.related_bridge_commands.clone(),
+            runtime_markers: Vec::new(),
+        }
+    }
+
+    fn with_runtime_markers(mut self, markers: Vec<String>) -> Self {
+        for marker in &markers {
+            if marker_is_callback_boundary(marker) {
+                push_unique_string(&mut self.adapter_roles, "callback-materialization");
+                if self.execution_path != "shim-backed-semantic-js" {
+                    self.execution_path = "mixed-js-callback-boundary".into();
+                }
+            }
+            if marker_is_semantic_js(marker) {
+                push_unique_string(&mut self.adapter_roles, "semantic-shim");
+                self.execution_path = "shim-backed-semantic-js".into();
+            }
+        }
+        self.runtime_markers = markers;
+        self
+    }
+
+    fn legacy_source(&self) -> ConformanceCoverageKind {
+        if self
+            .adapter_roles
+            .iter()
+            .any(|role| role == "semantic-shim")
+            || self.execution_path == "shim-backed-semantic-js"
+        {
+            return ConformanceCoverageKind::ShimBacked;
+        }
+        if self
+            .adapter_roles
+            .iter()
+            .any(|role| role == "callback-materialization")
+            || self.api_surface == "suite-only-bridge-command"
+            || matches!(
+                self.execution_path.as_str(),
+                "hybrid-js-adapter-rust-projection" | "mixed-js-callback-boundary"
+            )
+        {
+            return ConformanceCoverageKind::Mixed;
+        }
+        if matches!(
+            self.execution_path.as_str(),
+            "pure-rust-public-api" | "rust-bridge-shape-adapter"
+        ) {
+            return ConformanceCoverageKind::RustBacked;
+        }
+        ConformanceCoverageKind::Mixed
+    }
+}
+
+fn push_unique_string(values: &mut Vec<String>, value: &str) {
+    if !values.iter().any(|existing| existing == value) {
+        values.push(value.to_string());
+    }
+}
+
+fn canonical_adapter_roles(roles: &[String]) -> Vec<String> {
+    let mut canonical = Vec::new();
+    for role in roles {
+        let mapped = if role.contains("runner") || role.contains("warning-matcher") {
+            "runner-support"
+        } else if role.contains("callback") || role.contains("postcss") {
+            "callback-materialization"
+        } else if role.contains("semantic") {
+            "semantic-shim"
+        } else if role.contains("rewrite")
+            || role.contains("source-path")
+            || role.contains("alias-config")
+            || role.contains("type-shim")
+        {
+            "import-rewrite"
+        } else {
+            "hydration-dehydration"
+        };
+        push_unique_string(&mut canonical, mapped);
+    }
+    if canonical.is_empty() {
+        canonical.push("hydration-dehydration".into());
+    }
+    canonical
+}
+
+fn canonical_api_surface(api_surface: &str) -> String {
+    if api_surface == "suite-only-bridge-command" {
+        "suite-only-bridge-command".into()
+    } else if api_surface.contains("mixed-official-source-boundary")
+        || api_surface.contains("projection")
+        || api_surface.contains("helper")
+        || api_surface.contains("runner")
+        || api_surface.contains("type-shape")
+        || api_surface.contains("shared-runtime")
+    {
+        "internal-helper-import".into()
+    } else if api_surface.contains("rust-api") {
+        "public-rust-api".into()
+    } else {
+        "public-package-api".into()
+    }
+}
+
+fn canonical_execution_path(
+    expected: &PreparedTestProvenanceExpectation,
+    adapter_roles: &[String],
+    api_surface: &str,
+) -> String {
+    if adapter_roles.iter().any(|role| role == "semantic-shim") {
+        return "shim-backed-semantic-js".into();
+    }
+    if adapter_roles
+        .iter()
+        .any(|role| role == "callback-materialization")
+        || expected.execution_path.contains("callback")
+        || expected.execution_path.contains("postcss")
+    {
+        return "mixed-js-callback-boundary".into();
+    }
+    if api_surface == "suite-only-bridge-command"
+        || expected
+            .api_surface
+            .contains("mixed-official-source-boundary")
+        || expected.execution_path.contains("official-")
+        || expected.execution_path.contains("copied-official")
+        || expected.execution_path.contains("prepared-suite-helper")
+    {
+        return "hybrid-js-adapter-rust-projection".into();
+    }
+    if api_surface == "public-package-api" || api_surface == "public-rust-api" {
+        return "rust-bridge-shape-adapter".into();
+    }
+    "hybrid-js-adapter-rust-projection".into()
+}
+
+fn marker_is_callback_boundary(marker: &str) -> bool {
+    marker.contains("callback")
+        || marker.contains("postcss")
+        || marker.contains("transformContext")
+        || marker.contains("directiveTransform")
+        || marker.contains("nodeTransform")
+}
+
+fn marker_is_semantic_js(marker: &str) -> bool {
+    marker.contains("semantic")
+        || marker.contains("shim")
+        || marker.contains("js.transformElement")
+        || marker.contains("js.compiler")
 }
 
 fn run_conformance_smokes(
@@ -13485,7 +13681,7 @@ fn add_vue3_sfc_manifest_entries(manifest: &mut PreparedTestManifest) {
             provenance(
                 "prepared-official",
                 "public-package-alias-to-rust-bridge",
-                "public-api-or-rust-projection-helper",
+                "public-api",
                 &["test-import-rewrite", "helper-shape-adapter"],
             ),
         );
@@ -19283,12 +19479,52 @@ fn conformance_coverage_report(
     backend: AliasBackend,
     execution: Option<&ConformanceExecutionResult>,
 ) -> ConformanceCoverageReport {
-    let source = conformance_coverage_kind(spec, backend);
+    let default_provenance = conformance_default_coverage_provenance(spec, backend);
+    let source = default_provenance.legacy_source();
     let default_reason = conformance_coverage_reason(spec, backend).to_string();
     let counts = execution.map(|result| result.counts).unwrap_or_default();
+    let prepared_manifest = execution
+        .and_then(|result| result.prepared_manifest_file.as_deref())
+        .and_then(|path| read_json::<PreparedTestManifest>(Path::new(path)).ok());
     let files = execution
-        .and_then(|result| conformance_coverage_files(result, source, &default_reason).ok())
+        .and_then(|result| {
+            conformance_coverage_files(
+                spec,
+                backend,
+                result,
+                prepared_manifest.as_ref(),
+                &default_reason,
+            )
+            .ok()
+        })
         .unwrap_or_default();
+    let report_source =
+        conformance_coverage_report_kind(source, &files, prepared_manifest.as_ref());
+    let counts_by_source =
+        conformance_counts_by_source(report_source, counts, &files, prepared_manifest.as_ref());
+    let summary = conformance_counts_by_execution_path(&default_provenance, counts, &files);
+    let rust_backed = counts_by_source
+        .get(ConformanceCoverageKind::RustBacked.as_str())
+        .copied()
+        .unwrap_or_default();
+    let reason = conformance_coverage_report_reason(spec, backend, report_source, &default_reason);
+    ConformanceCoverageReport {
+        source: report_source,
+        reason,
+        summary,
+        counts_by_source,
+        rust_backed_pass: rust_backed.pass,
+        rust_backed_total: rust_backed.total,
+        files,
+    }
+}
+
+fn conformance_counts_by_source(
+    report_source: ConformanceCoverageKind,
+    default_counts: ConformanceExecutionCounts,
+    files: &[ConformanceCoverageFile],
+    manifest: Option<&PreparedTestManifest>,
+) -> BTreeMap<String, ConformanceExecutionCounts> {
     let mut counts_by_source = BTreeMap::new();
     for kind in [
         ConformanceCoverageKind::RustBacked,
@@ -19300,35 +19536,60 @@ fn conformance_coverage_report(
             ConformanceExecutionCounts::default(),
         );
     }
-    if files.is_empty() {
-        if let Some(bucket) = counts_by_source.get_mut(source.as_str()) {
-            *bucket = counts;
+    if manifest.is_some_and(|manifest| manifest_contains_mixed_official_source_boundary(manifest))
+        || files.is_empty()
+    {
+        if let Some(bucket) = counts_by_source.get_mut(report_source.as_str()) {
+            *bucket = default_counts;
         }
     } else {
-        for file in &files {
+        for file in files {
             if let Some(bucket) = counts_by_source.get_mut(file.source.as_str()) {
-                bucket.total += file.counts.total;
-                bucket.pass += file.counts.pass;
-                bucket.fail += file.counts.fail;
-                bucket.skip += file.counts.skip;
-                bucket.pending += file.counts.pending;
+                accumulate_counts(bucket, file.counts);
             }
         }
     }
-    let rust_backed = counts_by_source
-        .get(ConformanceCoverageKind::RustBacked.as_str())
-        .copied()
-        .unwrap_or_default();
-    let report_source = conformance_coverage_report_kind(source, &files);
-    let reason = conformance_coverage_report_reason(spec, backend, report_source, &default_reason);
-    ConformanceCoverageReport {
-        source: report_source,
-        reason,
-        counts_by_source,
-        rust_backed_pass: rust_backed.pass,
-        rust_backed_total: rust_backed.total,
-        files,
+    counts_by_source
+}
+
+fn conformance_counts_by_execution_path(
+    default_provenance: &ConformanceCoverageProvenance,
+    default_counts: ConformanceExecutionCounts,
+    files: &[ConformanceCoverageFile],
+) -> BTreeMap<String, ConformanceExecutionCounts> {
+    let mut summary = BTreeMap::new();
+    for execution_path in [
+        "pure-rust-public-api",
+        "rust-bridge-shape-adapter",
+        "hybrid-js-adapter-rust-projection",
+        "mixed-js-callback-boundary",
+        "shim-backed-semantic-js",
+    ] {
+        summary.insert(
+            execution_path.to_string(),
+            ConformanceExecutionCounts::default(),
+        );
     }
+    if files.is_empty() {
+        if let Some(bucket) = summary.get_mut(&default_provenance.execution_path) {
+            *bucket = default_counts;
+        }
+    } else {
+        for file in files {
+            if let Some(bucket) = summary.get_mut(&file.provenance.execution_path) {
+                accumulate_counts(bucket, file.counts);
+            }
+        }
+    }
+    summary
+}
+
+fn accumulate_counts(target: &mut ConformanceExecutionCounts, counts: ConformanceExecutionCounts) {
+    target.total += counts.total;
+    target.pass += counts.pass;
+    target.fail += counts.fail;
+    target.skip += counts.skip;
+    target.pending += counts.pending;
 }
 
 fn conformance_coverage_report_reason(
@@ -19353,7 +19614,11 @@ fn conformance_coverage_report_reason(
 fn conformance_coverage_report_kind(
     default: ConformanceCoverageKind,
     files: &[ConformanceCoverageFile],
+    manifest: Option<&PreparedTestManifest>,
 ) -> ConformanceCoverageKind {
+    if manifest.is_some_and(|manifest| manifest_contains_mixed_official_source_boundary(manifest)) {
+        return ConformanceCoverageKind::Mixed;
+    }
     let Some(first) = files.first() else {
         return default;
     };
@@ -19364,15 +19629,63 @@ fn conformance_coverage_report_kind(
     }
 }
 
-fn conformance_coverage_kind(
+fn manifest_contains_mixed_official_source_boundary(manifest: &PreparedTestManifest) -> bool {
+    manifest.entries.iter().any(|entry| {
+        entry
+            .expected_provenance
+            .api_surface
+            .contains("mixed-official-source-boundary")
+    })
+}
+
+fn conformance_default_coverage_provenance(
     spec: ConformanceSuiteSpec,
     backend: AliasBackend,
-) -> ConformanceCoverageKind {
+) -> ConformanceCoverageProvenance {
     match backend {
-        AliasBackend::Napi => ConformanceCoverageKind::Mixed,
+        AliasBackend::Napi => ConformanceCoverageProvenance::new(
+            "prepared-official",
+            "hybrid-js-adapter-rust-projection",
+            "public-package-api",
+            &["import-rewrite", "runner-support"],
+            &[],
+        ),
         AliasBackend::Generated => match spec.name {
-            "vue3-core" | "vue3-dom" | "vue3-sfc" | "vue3-ssr" => ConformanceCoverageKind::Mixed,
-            _ => ConformanceCoverageKind::RustBacked,
+            "vue2-compiler" | "vue27-compiler" => ConformanceCoverageProvenance::new(
+                "prepared-official",
+                "rust-bridge-shape-adapter",
+                "public-package-api",
+                &["import-rewrite", "hydration-dehydration"],
+                &["vue2.compile"],
+            ),
+            "vue27-sfc" => ConformanceCoverageProvenance::new(
+                "prepared-official",
+                "hybrid-js-adapter-rust-projection",
+                "public-package-api",
+                &["import-rewrite", "hydration-dehydration"],
+                &[
+                    "sfc.vue27.parse",
+                    "sfc.vue27.compileTemplate",
+                    "sfc.vue27.compileScript",
+                    "sfc.vue27.compileStyle",
+                ],
+            ),
+            "vue3-core" | "vue3-dom" | "vue3-sfc" | "vue3-ssr" => {
+                ConformanceCoverageProvenance::new(
+                    "prepared-official",
+                    "hybrid-js-adapter-rust-projection",
+                    "internal-helper-import",
+                    &["import-rewrite", "hydration-dehydration"],
+                    &[],
+                )
+            }
+            _ => ConformanceCoverageProvenance::new(
+                "custom-regression",
+                "rust-bridge-shape-adapter",
+                "public-package-api",
+                &["hydration-dehydration"],
+                &[],
+            ),
         },
     }
 }
@@ -19431,12 +19744,15 @@ fn conformance_coverage_reason(spec: ConformanceSuiteSpec, backend: AliasBackend
 }
 
 fn conformance_coverage_files(
+    spec: ConformanceSuiteSpec,
+    backend: AliasBackend,
     execution: &ConformanceExecutionResult,
-    source: ConformanceCoverageKind,
+    manifest: Option<&PreparedTestManifest>,
     reason: &str,
 ) -> Result<Vec<ConformanceCoverageFile>> {
     let output_file = PathBuf::from(&execution.output_file);
     let value = read_json::<serde_json::Value>(&output_file)?;
+    let default_provenance = conformance_default_coverage_provenance(spec, backend);
     let mut files = Vec::new();
     if let Some(results) = value.get("testResults").and_then(|value| value.as_array()) {
         for result in results {
@@ -19446,7 +19762,13 @@ fn conformance_coverage_files(
                 .unwrap_or_default()
                 .replace('\\', "/");
             files.extend(conformance_coverage_file_entries(
-                &path, result, source, reason,
+                spec,
+                backend,
+                &path,
+                result,
+                manifest,
+                &default_provenance,
+                reason,
             ));
         }
     }
@@ -19454,9 +19776,12 @@ fn conformance_coverage_files(
 }
 
 fn conformance_coverage_file_entries(
+    spec: ConformanceSuiteSpec,
+    backend: AliasBackend,
     path: &str,
     result: &serde_json::Value,
-    source: ConformanceCoverageKind,
+    manifest: Option<&PreparedTestManifest>,
+    default_provenance: &ConformanceCoverageProvenance,
     reason: &str,
 ) -> Vec<ConformanceCoverageFile> {
     if path.ends_with("packages/compiler-core/__tests__/transforms/transformElement.spec.ts") {
@@ -19473,14 +19798,141 @@ fn conformance_coverage_file_entries(
     }
 
     let counts = json_conformance_file_counts(result);
-    let file_source = conformance_coverage_file_kind(path, source);
-    vec![ConformanceCoverageFile {
-        path: path.to_string(),
-        scope: None,
-        source: file_source,
-        reason: conformance_coverage_file_reason(path, file_source, reason),
+    let provenance =
+        conformance_file_provenance(spec, backend, path, result, manifest, default_provenance);
+    let file_reason = conformance_coverage_file_reason(path, &provenance, reason);
+    vec![conformance_coverage_file(
+        path,
+        None,
+        provenance,
+        file_reason,
         counts,
-    }]
+    )]
+}
+
+fn conformance_coverage_file(
+    path: &str,
+    scope: Option<&str>,
+    provenance: ConformanceCoverageProvenance,
+    reason: String,
+    counts: ConformanceExecutionCounts,
+) -> ConformanceCoverageFile {
+    let source = provenance.legacy_source();
+    ConformanceCoverageFile {
+        path: path.to_string(),
+        scope: scope.map(str::to_string),
+        source,
+        provenance,
+        reason,
+        counts,
+    }
+}
+
+fn conformance_file_provenance(
+    spec: ConformanceSuiteSpec,
+    backend: AliasBackend,
+    path: &str,
+    result: &serde_json::Value,
+    manifest: Option<&PreparedTestManifest>,
+    default_provenance: &ConformanceCoverageProvenance,
+) -> ConformanceCoverageProvenance {
+    let base = manifest
+        .and_then(|manifest| conformance_manifest_entry_for_path(manifest, path))
+        .map(ConformanceCoverageProvenance::from_prepared_expectation)
+        .unwrap_or_else(|| {
+            conformance_path_default_provenance(spec, backend, path, default_provenance)
+        });
+    base.with_runtime_markers(conformance_runtime_markers(result))
+}
+
+fn conformance_manifest_entry_for_path<'a>(
+    manifest: &'a PreparedTestManifest,
+    path: &str,
+) -> Option<&'a PreparedTestManifestEntry> {
+    let path = path.replace('\\', "/");
+    manifest
+        .entries
+        .iter()
+        .filter(|entry| !entry.prepared_path.contains("**/*.spec.ts"))
+        .filter(|entry| {
+            path_matches_manifest_entry(&path, &entry.prepared_path)
+                || entry
+                    .helper_path
+                    .as_deref()
+                    .is_some_and(|helper| path_matches_manifest_entry(&path, helper))
+        })
+        .max_by_key(|entry| entry.prepared_path.len())
+}
+
+fn path_matches_manifest_entry(path: &str, manifest_path: &str) -> bool {
+    let manifest_path = manifest_path.replace('\\', "/");
+    if let Some(prefix) = manifest_path.strip_suffix("/**") {
+        return path.contains(prefix);
+    }
+    path.ends_with(&manifest_path)
+}
+
+fn conformance_path_default_provenance(
+    spec: ConformanceSuiteSpec,
+    backend: AliasBackend,
+    path: &str,
+    default: &ConformanceCoverageProvenance,
+) -> ConformanceCoverageProvenance {
+    if backend == AliasBackend::Generated
+        && spec.name == "vue27-sfc"
+        && path.ends_with("packages/compiler-sfc/test/compileStyle.spec.ts")
+    {
+        return ConformanceCoverageProvenance::new(
+            "prepared-official",
+            "mixed-js-callback-boundary",
+            "public-package-api",
+            &[
+                "import-rewrite",
+                "hydration-dehydration",
+                "callback-materialization",
+            ],
+            &["sfc.vue27.compileStyle", "sfc.vue27.compileStyleAsync"],
+        );
+    }
+    default.clone()
+}
+
+fn conformance_runtime_markers(result: &serde_json::Value) -> Vec<String> {
+    let mut markers = Vec::new();
+    collect_conformance_runtime_markers(result.get("vuecProvenance"), &mut markers);
+    collect_conformance_runtime_markers(result.get("__vuecProvenance"), &mut markers);
+    collect_conformance_runtime_markers(result.get("coverageProvenance"), &mut markers);
+    if let Some(assertions) = result
+        .get("assertionResults")
+        .and_then(|value| value.as_array())
+    {
+        for assertion in assertions {
+            collect_conformance_runtime_markers(assertion.get("vuecProvenance"), &mut markers);
+            collect_conformance_runtime_markers(assertion.get("__vuecProvenance"), &mut markers);
+            collect_conformance_runtime_markers(assertion.get("coverageProvenance"), &mut markers);
+        }
+    }
+    markers
+}
+
+fn collect_conformance_runtime_markers(
+    value: Option<&serde_json::Value>,
+    markers: &mut Vec<String>,
+) {
+    match value {
+        Some(serde_json::Value::String(marker)) => push_unique_string(markers, marker),
+        Some(serde_json::Value::Array(values)) => {
+            for value in values {
+                collect_conformance_runtime_markers(Some(value), markers);
+            }
+        }
+        Some(serde_json::Value::Object(object)) => {
+            for key in ["runtime_markers", "runtimeMarkers", "markers"] {
+                collect_conformance_runtime_markers(object.get(key), markers);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn conformance_coverage_transform_element_entries(
@@ -19495,8 +19947,7 @@ fn conformance_coverage_transform_element_entries(
         return Vec::new();
     };
 
-    let mut grouped: BTreeMap<(&'static str, ConformanceCoverageKind), Vec<&serde_json::Value>> =
-        BTreeMap::new();
+    let mut grouped: BTreeMap<&'static str, Vec<&serde_json::Value>> = BTreeMap::new();
     for assertion in assertions {
         let Some(full_name) = assertion
             .get("fullName")
@@ -19505,27 +19956,81 @@ fn conformance_coverage_transform_element_entries(
         else {
             return Vec::new();
         };
-        let (scope, source) = conformance_coverage_transform_element_assertion_kind(full_name);
-        grouped.entry((scope, source)).or_default().push(assertion);
+        let scope = conformance_coverage_transform_element_assertion_scope(full_name);
+        grouped.entry(scope).or_default().push(assertion);
     }
 
     grouped
         .into_iter()
-        .map(|((scope, source), assertions)| ConformanceCoverageFile {
-            path: path.to_string(),
-            scope: Some(scope.to_string()),
-            source,
-            reason: conformance_coverage_transform_element_reason(scope, source, default_reason),
-            counts: json_conformance_assertion_counts(assertions.into_iter()),
+        .map(|(scope, assertions)| {
+            let provenance = conformance_transform_element_scope_provenance(scope);
+            let source = provenance.legacy_source();
+            let file_reason =
+                conformance_coverage_transform_element_reason(scope, source, default_reason);
+            conformance_coverage_file(
+                path,
+                Some(scope),
+                provenance,
+                file_reason,
+                json_conformance_assertion_counts(assertions.into_iter()),
+            )
         })
         .collect()
 }
 
-fn conformance_coverage_transform_element_assertion_kind(
-    full_name: &str,
-) -> (&'static str, ConformanceCoverageKind) {
+fn conformance_transform_element_scope_provenance(scope: &str) -> ConformanceCoverageProvenance {
+    match scope {
+        "imported v-for helper" => ConformanceCoverageProvenance::new(
+            "prepared-official",
+            "hybrid-js-adapter-rust-projection",
+            "suite-only-bridge-command",
+            &[
+                "test-import-rewrite",
+                "suite-helper",
+                "hydration-dehydration",
+            ],
+            &["vue3.core.transformForSuite"],
+        ),
+        "element transform rust suite" => ConformanceCoverageProvenance::new(
+            "prepared-official",
+            "hybrid-js-adapter-rust-projection",
+            "suite-only-bridge-command",
+            &[
+                "test-import-rewrite",
+                "suite-helper",
+                "hydration-dehydration",
+            ],
+            &["vue3.core.transformElementSuite"],
+        ),
+        "js callback boundary" => ConformanceCoverageProvenance::new(
+            "prepared-official",
+            "mixed-js-callback-boundary",
+            "suite-only-bridge-command",
+            &[
+                "test-import-rewrite",
+                "suite-helper",
+                "hydration-dehydration",
+                "callback-materialization",
+            ],
+            &["vue3.core.transformElementSuite"],
+        ),
+        _ => ConformanceCoverageProvenance::new(
+            "prepared-official",
+            "hybrid-js-adapter-rust-projection",
+            "suite-only-bridge-command",
+            &[
+                "test-import-rewrite",
+                "suite-helper",
+                "hydration-dehydration",
+            ],
+            &["vue3.core.transformElementSuite"],
+        ),
+    }
+}
+
+fn conformance_coverage_transform_element_assertion_scope(full_name: &str) -> &'static str {
     if full_name.starts_with("compiler: v-for ") {
-        return ("imported v-for helper", ConformanceCoverageKind::RustBacked);
+        return "imported v-for helper";
     }
     if matches!(
         full_name,
@@ -19534,15 +20039,12 @@ fn conformance_coverage_transform_element_assertion_kind(
             | "compiler: element transform directiveTransform with needRuntime: Symbol"
             | "compiler: element transform should process node when node has been replaced"
     ) {
-        return ("js callback boundary", ConformanceCoverageKind::Mixed);
+        return "js callback boundary";
     }
     if full_name.starts_with("compiler: element transform ") {
-        return (
-            "element transform rust suite",
-            ConformanceCoverageKind::RustBacked,
-        );
+        return "element transform rust suite";
     }
-    ("unclassified assertions", ConformanceCoverageKind::Mixed)
+    "unclassified assertions"
 }
 
 fn conformance_coverage_transform_element_reason(
@@ -19551,12 +20053,12 @@ fn conformance_coverage_transform_element_reason(
     default_reason: &str,
 ) -> String {
     match (scope, source) {
-        ("imported v-for helper", ConformanceCoverageKind::RustBacked) => {
-            "Official Vue 3 compiler-core transformElement file re-imports parseWithForTransform from the prepared vFor Rust API helper; these duplicated v-for assertions route through vuec_node_bridge command vue3.core.transformForSuite and Rust transformFor/codegen projections."
+        ("imported v-for helper", _) => {
+            "Official Vue 3 compiler-core transformElement file re-imports parseWithForTransform from the prepared vFor Rust API helper; these duplicated v-for assertions route through suite-only vuec_node_bridge command vue3.core.transformForSuite and Rust transformFor/codegen projections, so they are hybrid projection evidence rather than public API completion evidence."
                 .to_string()
         }
-        ("element transform rust suite", ConformanceCoverageKind::RustBacked) => {
-            "Official Vue 3 compiler-core transformElement file imports a prepared Rust API helper that forwards ordinary parseWithElementTransform/parseWithBind assertions through @vue/compiler-core.__vuecRuntime into vuec_node_bridge command vue3.core.transformElementSuite; the helper only normalizes serializable options, hydrates public AST helper symbols, restores public undefined fields, and emits Rust-projected errors while Rust parser, component resolution, props/children/text projections, runtime-directive materialization, dynamic component resolution, inline template-ref materialization, and root helper projection execute through Rust."
+        ("element transform rust suite", _) => {
+            "Official Vue 3 compiler-core transformElement file imports a prepared Rust API helper that forwards ordinary parseWithElementTransform/parseWithBind assertions through @vue/compiler-core.__vuecRuntime into suite-only vuec_node_bridge command vue3.core.transformElementSuite. Rust parser and transform projections execute, but the tested surface is a prepared suite helper rather than the public package API."
                 .to_string()
         }
         ("js callback boundary", ConformanceCoverageKind::Mixed) => {
@@ -19579,8 +20081,7 @@ fn conformance_coverage_transform_entries(
         return Vec::new();
     };
 
-    let mut grouped: BTreeMap<(&'static str, ConformanceCoverageKind), Vec<&serde_json::Value>> =
-        BTreeMap::new();
+    let mut grouped: BTreeMap<&'static str, Vec<&serde_json::Value>> = BTreeMap::new();
     for assertion in assertions {
         let Some(full_name) = assertion
             .get("fullName")
@@ -19589,32 +20090,74 @@ fn conformance_coverage_transform_entries(
         else {
             return Vec::new();
         };
-        let (scope, source) = conformance_coverage_transform_assertion_kind(full_name);
-        grouped.entry((scope, source)).or_default().push(assertion);
+        let scope = conformance_coverage_transform_assertion_scope(full_name);
+        grouped.entry(scope).or_default().push(assertion);
     }
 
     grouped
         .into_iter()
-        .map(|((scope, source), assertions)| ConformanceCoverageFile {
-            path: path.to_string(),
-            scope: Some(scope.to_string()),
-            source,
-            reason: conformance_coverage_transform_reason(scope, source, default_reason),
-            counts: json_conformance_assertion_counts(assertions.into_iter()),
+        .map(|(scope, assertions)| {
+            let provenance = conformance_transform_scope_provenance(scope);
+            let source = provenance.legacy_source();
+            let file_reason = conformance_coverage_transform_reason(scope, source, default_reason);
+            conformance_coverage_file(
+                path,
+                Some(scope),
+                provenance,
+                file_reason,
+                json_conformance_assertion_counts(assertions.into_iter()),
+            )
         })
         .collect()
 }
 
-fn conformance_coverage_transform_assertion_kind(
-    full_name: &str,
-) -> (&'static str, ConformanceCoverageKind) {
+fn conformance_transform_scope_provenance(scope: &str) -> ConformanceCoverageProvenance {
+    match scope {
+        "transform rust suite" => ConformanceCoverageProvenance::new(
+            "prepared-official",
+            "hybrid-js-adapter-rust-projection",
+            "suite-only-bridge-command",
+            &[
+                "test-import-rewrite",
+                "suite-helper",
+                "hydration-dehydration",
+            ],
+            &["vue3.core.transformSuite"],
+        ),
+        "js transform context boundary" => ConformanceCoverageProvenance::new(
+            "prepared-official",
+            "mixed-js-callback-boundary",
+            "suite-only-bridge-command",
+            &[
+                "test-import-rewrite",
+                "suite-helper",
+                "hydration-dehydration",
+                "callback-materialization",
+            ],
+            &["vue3.core.transformSuite"],
+        ),
+        _ => ConformanceCoverageProvenance::new(
+            "prepared-official",
+            "hybrid-js-adapter-rust-projection",
+            "suite-only-bridge-command",
+            &[
+                "test-import-rewrite",
+                "suite-helper",
+                "hydration-dehydration",
+            ],
+            &["vue3.core.transformSuite"],
+        ),
+    }
+}
+
+fn conformance_coverage_transform_assertion_scope(full_name: &str) -> &'static str {
     if matches!(
         full_name,
         "compiler: transform should inject toString helper for interpolations"
             | "compiler: transform should inject createVNode and Comment for comments"
     ) || full_name.starts_with("compiler: transform root codegenNode ")
     {
-        return ("transform rust suite", ConformanceCoverageKind::RustBacked);
+        return "transform rust suite";
     }
     if matches!(
         full_name,
@@ -19627,12 +20170,9 @@ fn conformance_coverage_transform_assertion_kind(
             | "compiler: transform context.filename and selfName"
             | "compiler: transform onError option"
     ) {
-        return (
-            "js transform context boundary",
-            ConformanceCoverageKind::Mixed,
-        );
+        return "js transform context boundary";
     }
-    ("unclassified assertions", ConformanceCoverageKind::Mixed)
+    "unclassified assertions"
 }
 
 fn conformance_coverage_transform_reason(
@@ -19645,6 +20185,10 @@ fn conformance_coverage_transform_reason(
             "Official Vue 3 compiler-core transform file imports a prepared Rust API helper that forwards helper-injection and root-codegen assertions through @vue/compiler-core.__vuecRuntime into vuec_node_bridge command vue3.core.transformSuite; the helper only hydrates public AST helper symbols and undefined fields while Rust parser, transformIf/transformFor/transformText/transformSlotOutlet/transformElement projections, helper collection, and createRootCodegen-compatible root projection execute through Rust."
                 .to_string()
         }
+        ("transform rust suite", ConformanceCoverageKind::Mixed) => {
+            "Official Vue 3 compiler-core transform file imports a prepared Rust API helper that forwards helper-injection and root-codegen assertions through @vue/compiler-core.__vuecRuntime into suite-only vuec_node_bridge command vue3.core.transformSuite. Rust parser and transform projections execute, but the tested surface is a prepared suite helper rather than the public package API, so this remains hybrid projection evidence."
+                .to_string()
+        }
         ("js transform context boundary", ConformanceCoverageKind::Mixed) => {
             "Official Vue 3 compiler-core transform assertion group exercises caller-provided JavaScript NodeTransform callbacks and mutable transform context APIs such as replaceNode, removeNode, hoist, filename/selfName, and onError. These extension points cannot be serialized into the Rust bridge and remain mixed coverage rather than Rust compiler completion evidence."
                 .to_string()
@@ -19653,104 +20197,48 @@ fn conformance_coverage_transform_reason(
     }
 }
 
-fn conformance_coverage_file_kind(
-    path: &str,
-    default: ConformanceCoverageKind,
-) -> ConformanceCoverageKind {
-    if path.ends_with("packages/compiler-sfc/__tests__/parse.spec.ts")
-        || path.ends_with("packages/compiler-sfc/__tests__/rewriteDefault.spec.ts")
-        || path.ends_with("packages/compiler-sfc/__tests__/compileStyle.spec.ts")
-        || path.ends_with("packages/compiler-sfc/__tests__/cssVars.spec.ts")
-        || path.ends_with("packages/compiler-sfc/__tests__/compileScript.spec.ts")
-        || path.ends_with("packages/compiler-sfc/__tests__/compileTemplate.spec.ts")
-        || path.ends_with("packages/compiler-sfc/__tests__/templateUtils.spec.ts")
-        || path.ends_with("packages/compiler-sfc/__tests__/templateTransformAssetUrl.spec.ts")
-        || path.ends_with("packages/compiler-sfc/__tests__/templateTransformSrcset.spec.ts")
-        || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineEmits.spec.ts")
-        || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineExpose.spec.ts")
-        || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineModel.spec.ts")
-        || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineOptions.spec.ts")
-        || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineProps.spec.ts")
-        || path.ends_with(
-            "packages/compiler-sfc/__tests__/compileScript/definePropsDestructure.spec.ts",
-        )
-        || path.ends_with("packages/compiler-sfc/__tests__/compileScript/defineSlots.spec.ts")
-        || path.ends_with("packages/compiler-sfc/__tests__/compileScript/hoistStatic.spec.ts")
-        || path.ends_with("packages/compiler-sfc/__tests__/compileScript/importUsageCheck.spec.ts")
-        || path.ends_with("packages/compiler-sfc/__tests__/compileScript/resolveType.spec.ts")
-    {
-        ConformanceCoverageKind::RustBacked
-    } else if path.ends_with("packages/compiler-sfc/test/compileStyle.spec.ts") {
-        ConformanceCoverageKind::Mixed
-    } else if path.ends_with("packages/compiler-sfc/test/compileScript.spec.ts")
-        || path.ends_with("packages/compiler-sfc/test/compileTemplate.spec.ts")
-        || path.ends_with("packages/compiler-sfc/test/cssVars.spec.ts")
-        || path.ends_with("packages/compiler-sfc/test/parseComponent.spec.ts")
-        || path.ends_with("packages/compiler-sfc/test/prefixIdentifiers.spec.ts")
-        || path.ends_with("packages/compiler-sfc/test/rewriteDefault.spec.ts")
-        || path.ends_with("packages/compiler-sfc/test/stylePluginScoped.spec.ts")
-    {
-        ConformanceCoverageKind::RustBacked
-    } else if path.ends_with("packages/compiler-core/__tests__/compile.spec.ts")
-        || path.ends_with("packages/compiler-core/__tests__/codegen.spec.ts")
-        || path.ends_with("packages/compiler-core/__tests__/parse.spec.ts")
-        || path.ends_with("packages/compiler-core/__tests__/scopeId.spec.ts")
-        || path.ends_with("packages/compiler-core/__tests__/utils.spec.ts")
-        || path
-            .ends_with("packages/compiler-core/__tests__/transforms/noopDirectiveTransform.spec.ts")
-        || path
-            .ends_with("packages/compiler-core/__tests__/transforms/transformExpressions.spec.ts")
-        || path.ends_with("packages/compiler-core/__tests__/transforms/transformSlotOutlet.spec.ts")
-        || path.ends_with("packages/compiler-core/__tests__/transforms/transformText.spec.ts")
-        || path.ends_with("packages/compiler-core/__tests__/transforms/vBind.spec.ts")
-        || path.ends_with("packages/compiler-core/__tests__/transforms/cacheStatic.spec.ts")
-        || path.ends_with("packages/compiler-core/__tests__/transforms/vFor.spec.ts")
-        || path.ends_with("packages/compiler-core/__tests__/transforms/vIf.spec.ts")
-        || path.ends_with("packages/compiler-core/__tests__/transforms/vModel.spec.ts")
-        || path.ends_with("packages/compiler-core/__tests__/transforms/vMemo.spec.ts")
-        || path.ends_with("packages/compiler-core/__tests__/transforms/vOn.spec.ts")
-        || path.ends_with("packages/compiler-core/__tests__/transforms/vOnce.spec.ts")
-        || path.ends_with("packages/compiler-core/__tests__/transforms/vSlot.spec.ts")
-        || path.ends_with("packages/compiler-dom/__tests__/index.spec.ts")
-        || path.ends_with("packages/compiler-dom/__tests__/decoderHtmlBrowser.spec.ts")
-        || path.ends_with("packages/compiler-dom/__tests__/parse.spec.ts")
-        || path.ends_with("packages/compiler-dom/__tests__/transforms/Transition.spec.ts")
-        || path.ends_with("packages/compiler-dom/__tests__/transforms/ignoreSideEffectTags.spec.ts")
-        || path.ends_with("packages/compiler-dom/__tests__/transforms/stringifyStatic.spec.ts")
-        || path.ends_with("packages/compiler-dom/__tests__/transforms/transformStyle.spec.ts")
-        || path.ends_with("packages/compiler-dom/__tests__/transforms/vHtml.spec.ts")
-        || path.ends_with("packages/compiler-dom/__tests__/transforms/vModel.spec.ts")
-        || path.ends_with("packages/compiler-dom/__tests__/transforms/vOn.spec.ts")
-        || path.ends_with("packages/compiler-dom/__tests__/transforms/vShow.spec.ts")
-        || path.ends_with("packages/compiler-dom/__tests__/transforms/vText.spec.ts")
-        || path.ends_with("packages/compiler-dom/__tests__/transforms/validateHtmlNesting.spec.ts")
-        || path.ends_with("packages/compiler-ssr/__tests__/ssrScopeId.spec.ts")
-        || path.ends_with("packages/compiler-ssr/__tests__/ssrFallthroughAttrs.spec.ts")
-        || path.ends_with("packages/compiler-ssr/__tests__/ssrInjectCssVars.spec.ts")
-        || path.ends_with("packages/compiler-ssr/__tests__/ssrElement.spec.ts")
-        || path.ends_with("packages/compiler-ssr/__tests__/ssrText.spec.ts")
-        || path.ends_with("packages/compiler-ssr/__tests__/ssrPortal.spec.ts")
-        || path.ends_with("packages/compiler-ssr/__tests__/ssrSlotOutlet.spec.ts")
-        || path.ends_with("packages/compiler-ssr/__tests__/ssrSuspense.spec.ts")
-        || path.ends_with("packages/compiler-ssr/__tests__/ssrTransition.spec.ts")
-        || path.ends_with("packages/compiler-ssr/__tests__/ssrTransitionGroup.spec.ts")
-        || path.ends_with("packages/compiler-ssr/__tests__/ssrComponent.spec.ts")
-        || path.ends_with("packages/compiler-ssr/__tests__/ssrVFor.spec.ts")
-        || path.ends_with("packages/compiler-ssr/__tests__/ssrVIf.spec.ts")
-        || path.ends_with("packages/compiler-ssr/__tests__/ssrVModel.spec.ts")
-        || path.ends_with("packages/compiler-ssr/__tests__/ssrVShow.spec.ts")
-    {
-        ConformanceCoverageKind::RustBacked
-    } else {
-        default
-    }
-}
-
 fn conformance_coverage_file_reason(
     path: &str,
-    source: ConformanceCoverageKind,
+    provenance: &ConformanceCoverageProvenance,
     default_reason: &str,
 ) -> String {
+    let source = provenance.legacy_source();
+    if source == ConformanceCoverageKind::Mixed
+        && provenance.execution_path == "mixed-js-callback-boundary"
+    {
+        if path.ends_with("packages/compiler-sfc/test/compileStyle.spec.ts")
+            || provenance
+                .runtime_markers
+                .iter()
+                .any(|marker| marker.contains("postcss") || marker.contains("PostCSS"))
+        {
+            return "Official file exercises a mixed path: Rust SFC style compilation participates, while caller-provided PostCSS plugin callbacks/options and Promise/LazyResult API behavior execute in the JavaScript adapter because those callbacks cannot cross the JSON bridge."
+                .to_string();
+        }
+        return "Official file exercises a mixed JavaScript callback boundary. Runtime provenance or prepared adapter metadata shows caller-provided JavaScript callbacks/context APIs participating, so this entry is not counted as Rust compiler completion evidence."
+            .to_string();
+    }
+    if source == ConformanceCoverageKind::Mixed
+        && provenance.api_surface == "suite-only-bridge-command"
+    {
+        let commands = if provenance.bridge_commands.is_empty() {
+            "suite-only vuec_node_bridge command".to_string()
+        } else {
+            format!(
+                "suite-only vuec_node_bridge command(s) {}",
+                provenance.bridge_commands.join(", ")
+            )
+        };
+        return format!(
+            "Official prepared test file routes assertions through {commands}. Rust parser/transform/codegen projections may execute, but the asserted surface is a prepared suite helper rather than the public Vue package API, so this is hybrid projection evidence rather than Rust-backed public API completion."
+        );
+    }
+    if source == ConformanceCoverageKind::Mixed
+        && provenance.execution_path == "hybrid-js-adapter-rust-projection"
+    {
+        return "Official prepared test file executes through generated import/helper adapters and Rust bridge projections. This is useful hybrid conformance evidence, but the file is not counted as Rust-backed public API completion because official source, helper imports, or adapter materialization still participate."
+            .to_string();
+    }
     match source {
         ConformanceCoverageKind::RustBacked
             if path.ends_with("packages/compiler-core/__tests__/transforms/vBind.spec.ts") =>
@@ -19827,13 +20315,13 @@ fn conformance_coverage_file_reason(
         ConformanceCoverageKind::RustBacked
             if path.ends_with("packages/compiler-sfc/__tests__/compileTemplate.spec.ts") =>
         {
-            "Official Vue 3 SFC compileTemplate file imports the public @vue/compiler-sfc API and routes ordinary DOM/SSR template compilation, preprocessing, AST reuse, diagnostics, asset URL transforms, and source maps through vuec_node_bridge into Rust; the generated JavaScript package boundary only materializes caller-provided custom compiler callbacks and hydrates/dehydrates public AST and error shapes."
+            "Official Vue 3 SFC compileTemplate file imports the public @vue/compiler-sfc API and, when no JavaScript callback provenance marker is observed for this entry, routes ordinary DOM/SSR template compilation, preprocessing, AST reuse, diagnostics, asset URL transforms, and source maps through vuec_node_bridge into Rust; the generated JavaScript package boundary only hydrates/dehydrates public AST and error shapes."
                 .to_string()
         }
         ConformanceCoverageKind::RustBacked
             if path.ends_with("packages/compiler-sfc/__tests__/compileStyle.spec.ts") =>
         {
-            "Official Vue 3 SFC compileStyle file imports the public @vue/compiler-sfc API and routes CSS scoped/modules/preprocess compilation through vuec_node_bridge into Rust; the JavaScript package boundary only materializes caller-provided preprocess additionalData callbacks and normalizes public result shape."
+            "Official Vue 3 SFC compileStyle file imports the public @vue/compiler-sfc API and, when no JavaScript callback provenance marker is observed for this entry, routes CSS scoped/modules/preprocess compilation through vuec_node_bridge into Rust; the generated JavaScript package boundary only normalizes the public result shape."
                 .to_string()
         }
         ConformanceCoverageKind::RustBacked
@@ -19878,10 +20366,6 @@ fn conformance_coverage_file_reason(
         }
         ConformanceCoverageKind::RustBacked => {
             "Official file exercises compiler behavior routed through vuec_node_bridge into Rust parser/transform/codegen or Rust-backed projection implementation; generated import shims only preserve official import paths and materialize Rust projection results."
-                .to_string()
-        }
-        ConformanceCoverageKind::Mixed if default_reason.contains("Vue 2.7 compiler-sfc") => {
-            "Official file exercises a mixed path: Rust vuec_node_bridge performs SFC style parsing, preprocessing, scoped/CSS-var transforms, maps, and diagnostics, while the generated JavaScript alias adapter executes caller-provided PostCSS plugin callbacks/options and Promise/LazyResult API behavior that cannot cross the JSON bridge."
                 .to_string()
         }
         ConformanceCoverageKind::ShimBacked | ConformanceCoverageKind::Mixed => default_reason.to_string(),
@@ -20287,6 +20771,12 @@ mod tests {
             "{} should include bridge command {command}",
             entry.prepared_path
         );
+    }
+
+    fn write_test_manifest(temp: &Path, manifest: PreparedTestManifest) -> Option<String> {
+        let path = temp.join("prepared-test-manifest.json");
+        write_json(&path, &manifest).unwrap();
+        Some(path.display().to_string())
     }
 
     #[test]
@@ -21923,8 +22413,8 @@ projects = []
         );
 
         assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
-        assert_eq!(coverage.rust_backed_pass, 285);
-        assert_eq!(coverage.rust_backed_total, 285);
+        assert_eq!(coverage.rust_backed_pass, 0);
+        assert_eq!(coverage.rust_backed_total, 0);
         assert_eq!(
             coverage
                 .counts_by_source
@@ -21932,7 +22422,7 @@ projects = []
                 .copied()
                 .unwrap_or_default()
                 .pass,
-            285
+            0
         );
         assert_eq!(
             coverage
@@ -21940,81 +22430,36 @@ projects = []
                 .get("mixed")
                 .copied()
                 .unwrap_or_default()
-                .pass,
-            1
+                .total,
+            287
+        );
+        assert!(coverage
+            .files
+            .iter()
+            .all(|file| file.source == ConformanceCoverageKind::Mixed));
+        assert_eq!(
+            coverage
+                .summary
+                .get("hybrid-js-adapter-rust-projection")
+                .copied()
+                .unwrap_or_default(),
+            ConformanceExecutionCounts {
+                total: 287,
+                pass: 286,
+                fail: 1,
+                skip: 0,
+                pending: 0,
+            }
         );
         assert_eq!(
-            coverage.files[0].source,
-            ConformanceCoverageKind::RustBacked
+            coverage
+                .summary
+                .get("rust-bridge-shape-adapter")
+                .copied()
+                .unwrap_or_default()
+                .total,
+            0
         );
-        assert_eq!(
-            coverage.files[1].source,
-            ConformanceCoverageKind::RustBacked
-        );
-        assert_eq!(
-            coverage.files[2].source,
-            ConformanceCoverageKind::RustBacked
-        );
-        assert_eq!(
-            coverage.files[3].source,
-            ConformanceCoverageKind::RustBacked
-        );
-        assert!(coverage.files[3].reason.contains("public baseCompile"));
-        assert_eq!(
-            coverage.files[4].source,
-            ConformanceCoverageKind::RustBacked
-        );
-        assert!(coverage.files[4]
-            .reason
-            .contains("transformExpressionSuite"));
-        assert_eq!(
-            coverage.files[5].source,
-            ConformanceCoverageKind::RustBacked
-        );
-        assert!(coverage.files[5]
-            .reason
-            .contains("transformSlotOutletSuite"));
-        assert_eq!(
-            coverage.files[6].source,
-            ConformanceCoverageKind::RustBacked
-        );
-        assert!(coverage.files[6].reason.contains("transformTextSuite"));
-        assert_eq!(
-            coverage.files[7].source,
-            ConformanceCoverageKind::RustBacked
-        );
-        assert!(coverage.files[7].reason.contains("transformOnceSuite"));
-        assert_eq!(
-            coverage.files[8].source,
-            ConformanceCoverageKind::RustBacked
-        );
-        assert!(coverage.files[8].reason.contains("transformBindSuite"));
-        assert_eq!(
-            coverage.files[9].source,
-            ConformanceCoverageKind::RustBacked
-        );
-        assert!(coverage.files[9].reason.contains("transformModelSuite"));
-        assert_eq!(
-            coverage.files[10].source,
-            ConformanceCoverageKind::RustBacked
-        );
-        assert!(coverage.files[10].reason.contains("transformOnSuite"));
-        assert_eq!(
-            coverage.files[11].source,
-            ConformanceCoverageKind::RustBacked
-        );
-        assert!(coverage.files[11].reason.contains("transformForSuite"));
-        assert_eq!(
-            coverage.files[12].source,
-            ConformanceCoverageKind::RustBacked
-        );
-        assert!(coverage.files[12].reason.contains("transformIfSuite"));
-        assert_eq!(
-            coverage.files[13].source,
-            ConformanceCoverageKind::RustBacked
-        );
-        assert!(coverage.files[13].reason.contains("cacheStaticSuite"));
-        assert_eq!(coverage.files[14].source, ConformanceCoverageKind::Mixed);
         assert!(coverage.reason.contains("remaining mixed coverage"));
         assert!(coverage.reason.contains("JavaScript NodeTransform"));
         let _ = fs::remove_dir_all(temp);
@@ -22098,12 +22543,40 @@ projects = []
 
         assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
         assert_eq!(coverage.files.len(), 3);
-        assert_eq!(coverage.rust_backed_total, 4);
-        assert_eq!(coverage.rust_backed_pass, 4);
+        assert_eq!(coverage.rust_backed_total, 0);
+        assert_eq!(coverage.rust_backed_pass, 0);
         assert_eq!(
             coverage
                 .counts_by_source
                 .get("mixed")
+                .copied()
+                .unwrap_or_default(),
+            ConformanceExecutionCounts {
+                total: 7,
+                pass: 6,
+                fail: 1,
+                skip: 0,
+                pending: 0,
+            }
+        );
+        assert_eq!(
+            coverage
+                .summary
+                .get("hybrid-js-adapter-rust-projection")
+                .copied()
+                .unwrap_or_default(),
+            ConformanceExecutionCounts {
+                total: 4,
+                pass: 4,
+                fail: 0,
+                skip: 0,
+                pending: 0,
+            }
+        );
+        assert_eq!(
+            coverage
+                .summary
+                .get("mixed-js-callback-boundary")
                 .copied()
                 .unwrap_or_default(),
             ConformanceExecutionCounts {
@@ -22119,7 +22592,11 @@ projects = []
             .iter()
             .find(|file| file.scope.as_deref() == Some("imported v-for helper"))
             .expect("imported v-for coverage entry");
-        assert_eq!(imported_v_for.source, ConformanceCoverageKind::RustBacked);
+        assert_eq!(imported_v_for.source, ConformanceCoverageKind::Mixed);
+        assert_eq!(
+            imported_v_for.provenance.api_surface,
+            "suite-only-bridge-command"
+        );
         assert_eq!(imported_v_for.counts.total, 2);
 
         let element_suite = coverage
@@ -22127,9 +22604,14 @@ projects = []
             .iter()
             .find(|file| file.scope.as_deref() == Some("element transform rust suite"))
             .expect("element transform coverage entry");
-        assert_eq!(element_suite.source, ConformanceCoverageKind::RustBacked);
+        assert_eq!(element_suite.source, ConformanceCoverageKind::Mixed);
+        assert_eq!(
+            element_suite.provenance.api_surface,
+            "suite-only-bridge-command"
+        );
         assert_eq!(element_suite.counts.total, 2);
         assert!(element_suite.reason.contains("transformElementSuite"));
+        assert!(element_suite.reason.contains("prepared suite helper"));
 
         let callback_boundary = coverage
             .files
@@ -22214,17 +22696,50 @@ projects = []
 
         assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
         assert_eq!(coverage.files.len(), 2);
-        assert_eq!(coverage.rust_backed_total, 3);
-        assert_eq!(coverage.rust_backed_pass, 2);
+        assert_eq!(coverage.rust_backed_total, 0);
+        assert_eq!(coverage.rust_backed_pass, 0);
+        assert_eq!(
+            coverage
+                .summary
+                .get("hybrid-js-adapter-rust-projection")
+                .copied()
+                .unwrap_or_default(),
+            ConformanceExecutionCounts {
+                total: 3,
+                pass: 2,
+                fail: 1,
+                skip: 0,
+                pending: 0,
+            }
+        );
+        assert_eq!(
+            coverage
+                .summary
+                .get("mixed-js-callback-boundary")
+                .copied()
+                .unwrap_or_default(),
+            ConformanceExecutionCounts {
+                total: 2,
+                pass: 2,
+                fail: 0,
+                skip: 0,
+                pending: 0,
+            }
+        );
 
         let transform_suite = coverage
             .files
             .iter()
             .find(|file| file.scope.as_deref() == Some("transform rust suite"))
             .expect("transform rust coverage entry");
-        assert_eq!(transform_suite.source, ConformanceCoverageKind::RustBacked);
+        assert_eq!(transform_suite.source, ConformanceCoverageKind::Mixed);
+        assert_eq!(
+            transform_suite.provenance.api_surface,
+            "suite-only-bridge-command"
+        );
         assert_eq!(transform_suite.counts.total, 3);
         assert!(transform_suite.reason.contains("transformSuite"));
+        assert!(transform_suite.reason.contains("prepared suite helper"));
 
         let callback_boundary = coverage
             .files
@@ -22395,8 +22910,8 @@ describe('compiler: transform', () => {
         );
 
         assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
-        assert_eq!(coverage.rust_backed_pass, 2);
-        assert_eq!(coverage.rust_backed_total, 2);
+        assert_eq!(coverage.rust_backed_pass, 0);
+        assert_eq!(coverage.rust_backed_total, 0);
         assert_eq!(
             coverage
                 .counts_by_source
@@ -22404,13 +22919,47 @@ describe('compiler: transform', () => {
                 .copied()
                 .unwrap_or_default()
                 .total,
-            2
+            4
         );
         assert_eq!(
-            coverage.files[0].source,
-            ConformanceCoverageKind::RustBacked
+            coverage
+                .summary
+                .get("hybrid-js-adapter-rust-projection")
+                .copied()
+                .unwrap_or_default(),
+            ConformanceExecutionCounts {
+                total: 2,
+                pass: 2,
+                fail: 0,
+                skip: 0,
+                pending: 0,
+            }
         );
+        assert_eq!(
+            coverage
+                .summary
+                .get("mixed-js-callback-boundary")
+                .copied()
+                .unwrap_or_default(),
+            ConformanceExecutionCounts {
+                total: 2,
+                pass: 1,
+                fail: 1,
+                skip: 0,
+                pending: 0,
+            }
+        );
+        assert_eq!(coverage.files[0].source, ConformanceCoverageKind::Mixed);
+        assert_eq!(
+            coverage.files[0].provenance.execution_path,
+            "hybrid-js-adapter-rust-projection"
+        );
+        assert!(!coverage.files[0].reason.contains("PostCSS"));
         assert_eq!(coverage.files[1].source, ConformanceCoverageKind::Mixed);
+        assert_eq!(
+            coverage.files[1].provenance.execution_path,
+            "mixed-js-callback-boundary"
+        );
         assert!(coverage.files[1]
             .reason
             .contains("PostCSS plugin callbacks"));
@@ -23773,7 +24322,7 @@ test('placeholder', () => {
     }
 
     #[test]
-    fn vue3_dom_coverage_counts_public_parse_as_rust_backed() {
+    fn vue3_dom_coverage_records_public_api_in_provenance_summary() {
         let temp = std::env::temp_dir().join(format!(
             "vuec-xtask-vue3-dom-coverage-{}",
             SystemTime::now()
@@ -23880,11 +24429,15 @@ test('placeholder', () => {
             }"#,
         )
         .unwrap();
+        let manifest_file = write_test_manifest(
+            &temp,
+            prepared_test_manifest_for_suite(suite_spec(ConformanceSuite::Vue3Dom)),
+        );
         let execution = ConformanceExecutionResult {
             status: "failed".into(),
             runner: "vitest".into(),
             prepared_root: "prepared".into(),
-            prepared_manifest_file: None,
+            prepared_manifest_file: manifest_file,
             output_file: report.display().to_string(),
             exit_code: Some(1),
             stdout: String::new(),
@@ -23904,61 +24457,64 @@ test('placeholder', () => {
             Some(&execution),
         );
 
-        assert_eq!(coverage.source, ConformanceCoverageKind::RustBacked);
-        assert_eq!(coverage.rust_backed_pass, 23);
-        assert_eq!(coverage.rust_backed_total, 24);
+        assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
+        assert_eq!(coverage.rust_backed_pass, 0);
+        assert_eq!(coverage.rust_backed_total, 0);
+        assert_eq!(
+            coverage
+                .counts_by_source
+                .get("mixed")
+                .copied()
+                .unwrap_or_default(),
+            ConformanceExecutionCounts {
+                total: 24,
+                pass: 23,
+                fail: 1,
+                skip: 0,
+                pending: 0,
+            }
+        );
+        assert_eq!(
+            coverage
+                .summary
+                .get("rust-bridge-shape-adapter")
+                .copied()
+                .unwrap_or_default(),
+            ConformanceExecutionCounts {
+                total: 1,
+                pass: 1,
+                fail: 0,
+                skip: 0,
+                pending: 0,
+            }
+        );
+        assert_eq!(
+            coverage
+                .summary
+                .get("hybrid-js-adapter-rust-projection")
+                .copied()
+                .unwrap_or_default(),
+            ConformanceExecutionCounts {
+                total: 23,
+                pass: 22,
+                fail: 1,
+                skip: 0,
+                pending: 0,
+            }
+        );
         assert_eq!(
             coverage.files[0].source,
             ConformanceCoverageKind::RustBacked
         );
         assert_eq!(
-            coverage.files[1].source,
-            ConformanceCoverageKind::RustBacked
+            coverage.files[0].provenance.execution_path,
+            "rust-bridge-shape-adapter"
         );
-        assert_eq!(
-            coverage.files[2].source,
-            ConformanceCoverageKind::RustBacked
-        );
-        assert_eq!(
-            coverage.files[3].source,
-            ConformanceCoverageKind::RustBacked
-        );
-        assert_eq!(
-            coverage.files[4].source,
-            ConformanceCoverageKind::RustBacked
-        );
-        assert_eq!(
-            coverage.files[5].source,
-            ConformanceCoverageKind::RustBacked
-        );
-        assert_eq!(
-            coverage.files[6].source,
-            ConformanceCoverageKind::RustBacked
-        );
-        assert_eq!(
-            coverage.files[7].source,
-            ConformanceCoverageKind::RustBacked
-        );
-        assert_eq!(
-            coverage.files[8].source,
-            ConformanceCoverageKind::RustBacked
-        );
-        assert_eq!(
-            coverage.files[9].source,
-            ConformanceCoverageKind::RustBacked
-        );
-        assert_eq!(
-            coverage.files[10].source,
-            ConformanceCoverageKind::RustBacked
-        );
-        assert_eq!(
-            coverage.files[11].source,
-            ConformanceCoverageKind::RustBacked
-        );
-        assert_eq!(
-            coverage.files[12].source,
-            ConformanceCoverageKind::RustBacked
-        );
+        assert_eq!(coverage.files[1].source, ConformanceCoverageKind::Mixed);
+        assert!(coverage.files.iter().skip(1).all(|file| {
+            file.source == ConformanceCoverageKind::Mixed
+                && file.provenance.execution_path == "hybrid-js-adapter-rust-projection"
+        }));
         assert!(coverage.files[0]
             .reason
             .contains("routed through vuec_node_bridge"));
@@ -24273,7 +24829,7 @@ test('placeholder', () => {
     }
 
     #[test]
-    fn vue3_sfc_coverage_marks_public_parse_and_rewrite_default_rust_backed() {
+    fn vue3_sfc_coverage_records_public_api_and_marker_downgrade() {
         let temp = std::env::temp_dir().join(format!(
             "vuec-xtask-vue3-sfc-coverage-{}",
             SystemTime::now()
@@ -24303,6 +24859,7 @@ test('placeholder', () => {
                 },
                 {
                   "name": "F:/repo/prepared/vue3-sfc/packages/compiler-sfc/__tests__/compileStyle.spec.ts",
+                  "coverageProvenance": ["callback.postcssPlugin"],
                   "assertionResults": [
                     { "status": "passed" },
                     { "status": "passed" },
@@ -24585,11 +25142,15 @@ test('placeholder', () => {
             }"#,
         )
         .unwrap();
+        let manifest_file = write_test_manifest(
+            &temp,
+            prepared_test_manifest_for_suite(suite_spec(ConformanceSuite::Vue3Sfc)),
+        );
         let execution = ConformanceExecutionResult {
             status: "failed".into(),
             runner: "vitest".into(),
             prepared_root: "prepared".into(),
-            prepared_manifest_file: None,
+            prepared_manifest_file: manifest_file,
             output_file: report.display().to_string(),
             exit_code: Some(1),
             stdout: String::new(),
@@ -24609,9 +25170,23 @@ test('placeholder', () => {
             Some(&execution),
         );
 
-        assert_eq!(coverage.source, ConformanceCoverageKind::RustBacked);
-        assert_eq!(coverage.rust_backed_pass, 199);
-        assert_eq!(coverage.rust_backed_total, 199);
+        assert_eq!(coverage.source, ConformanceCoverageKind::Mixed);
+        assert_eq!(coverage.rust_backed_pass, 0);
+        assert_eq!(coverage.rust_backed_total, 0);
+        assert_eq!(
+            coverage
+                .counts_by_source
+                .get("mixed")
+                .copied()
+                .unwrap_or_default(),
+            ConformanceExecutionCounts {
+                total: 199,
+                pass: 199,
+                fail: 0,
+                skip: 0,
+                pending: 0,
+            }
+        );
         assert_eq!(
             coverage.files[0].source,
             ConformanceCoverageKind::RustBacked
@@ -24620,13 +25195,47 @@ test('placeholder', () => {
             coverage.files[1].source,
             ConformanceCoverageKind::RustBacked
         );
+        assert_eq!(coverage.files[2].source, ConformanceCoverageKind::Mixed);
         assert_eq!(
-            coverage.files[2].source,
-            ConformanceCoverageKind::RustBacked
+            coverage.files[2].provenance.execution_path,
+            "mixed-js-callback-boundary"
         );
         assert!(coverage.files[2]
+            .provenance
+            .runtime_markers
+            .iter()
+            .any(|marker| marker == "callback.postcssPlugin"));
+        assert!(coverage.files[2]
             .reason
-            .contains("additionalData callbacks"));
+            .contains("PostCSS plugin callbacks"));
+        assert_eq!(
+            coverage
+                .summary
+                .get("mixed-js-callback-boundary")
+                .copied()
+                .unwrap_or_default(),
+            ConformanceExecutionCounts {
+                total: 3,
+                pass: 3,
+                fail: 0,
+                skip: 0,
+                pending: 0,
+            }
+        );
+        assert_eq!(
+            coverage
+                .summary
+                .get("rust-bridge-shape-adapter")
+                .copied()
+                .unwrap_or_default(),
+            ConformanceExecutionCounts {
+                total: 196,
+                pass: 196,
+                fail: 0,
+                skip: 0,
+                pending: 0,
+            }
+        );
         assert_eq!(
             coverage.files[3].source,
             ConformanceCoverageKind::RustBacked
@@ -24643,9 +25252,7 @@ test('placeholder', () => {
             coverage.files[5].source,
             ConformanceCoverageKind::RustBacked
         );
-        assert!(coverage.files[5]
-            .reason
-            .contains("custom compiler callbacks"));
+        assert!(coverage.files[5].reason.contains("compileTemplate file"));
         assert_eq!(
             coverage.files[6].source,
             ConformanceCoverageKind::RustBacked
@@ -24679,7 +25286,7 @@ test('placeholder', () => {
                 .copied()
                 .unwrap_or_default()
                 .pass,
-            199
+            0
         );
         let _ = fs::remove_dir_all(temp);
     }
