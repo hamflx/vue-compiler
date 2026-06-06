@@ -2536,6 +2536,9 @@ pub struct Vue2ScopedSlot {
     pub body_is_fragment: bool,
     /// New `v-slot` syntax condition that wraps the whole slot object.
     pub condition: Option<JsExprId>,
+    /// Following `v-else-if` / `v-else` slot-object branches for new `v-slot` syntax.
+    #[serde(default)]
+    pub branches: Vec<Vue2ScopedSlotBranch>,
     /// Legacy `slot-scope` condition that wraps the returned fragment body.
     pub legacy_condition: Option<JsExprId>,
     /// Optional scoped slot `v-for` source.
@@ -2551,6 +2554,15 @@ pub struct Vue2ScopedSlot {
     /// Whether stable scoped slots need a generated branch key.
     #[serde(default)]
     pub needs_key: bool,
+}
+
+/// Vue 2 scoped slot conditional branch payload.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue2ScopedSlotBranch {
+    /// Optional branch expression. `None` represents `v-else`.
+    pub condition: Option<JsExprId>,
+    /// Slot object emitted for this branch.
+    pub slot: Box<Vue2ScopedSlot>,
 }
 
 /// Vue 2 text-call MIR payload.

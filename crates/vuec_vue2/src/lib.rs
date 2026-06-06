@@ -18,7 +18,8 @@ use vuec_ast::{
     NodeId, NodeSpan, Vue2Ast, Vue2AstKind, Vue2BindWrap, Vue2ComponentModelMir, Vue2CreateElement,
     Vue2DataObject, Vue2DataProp, Vue2DirectiveRuntime, Vue2ForMir, Vue2IfMir, Vue2IfMirBranch,
     Vue2InlineTemplate, Vue2Mir, Vue2MirKind, Vue2NodeKind, Vue2NormalizationType, Vue2Once,
-    Vue2RenderStatic, Vue2ScopedSlot, Vue2SlotOutlet, Vue2TextCall, Vue2ValidationData,
+    Vue2RenderStatic, Vue2ScopedSlot, Vue2ScopedSlotBranch, Vue2SlotOutlet, Vue2TextCall,
+    Vue2ValidationData,
 };
 use vuec_diagnostics::{Diagnostic, DiagnosticSink, Severity};
 use vuec_html::{decode_html_text_entities, HtmlAttribute, HtmlTokenKind, HtmlTokenizer};
@@ -504,6 +505,7 @@ impl Vue2Compiler {
         let template = source.trim();
         let mut diagnostics = DiagnosticSink::default();
         let mut element_ast = parse_element_tree(&mut diagnostics, template, &options);
+        sync_scoped_slot_if_conditions(element_ast.as_mut());
         collect_element_warnings(element_ast.as_ref(), &options, &mut diagnostics);
         if options.optimize {
             if let Some(root) = element_ast.as_mut() {
@@ -1061,6 +1063,7 @@ fn close_element(
     if !in_pre_tag {
         trim_ending_whitespace(&mut element);
     }
+    normalize_component_v_slot(&mut element);
     cleanup_scoped_slot_children(&mut element, in_pre_tag);
     element.plain = element_generates_empty_data(&element);
 
@@ -1153,6 +1156,41 @@ fn close_element(
 
 fn is_ignorable_root_whitespace(_element: &Vue2Element) -> bool {
     false
+}
+
+fn normalize_component_v_slot(element: &mut Vue2Element) {
+    if element.tag == "template" || !element.slot_new_syntax || element.slot_scope.is_none() {
+        return;
+    }
+
+    let slot_target = element
+        .slot_target
+        .clone()
+        .unwrap_or_else(|| "\"default\"".into());
+    let slot_target_dynamic = element.slot_target_dynamic;
+    let slot_scope = element.slot_scope.clone();
+    let span = element.span.unwrap_or_else(|| Span::new(FileId(0), 0, 0));
+    let mut slot_container =
+        create_element("template".into(), Vec::new(), span.start.0, span.end.0);
+    slot_container.slot_target = Some(slot_target.clone());
+    slot_container.slot_target_dynamic = slot_target_dynamic;
+    slot_container.slot_scope = slot_scope;
+    slot_container.slot_new_syntax = true;
+    slot_container.children = std::mem::take(&mut element.children)
+        .into_iter()
+        .filter(|child| {
+            !matches!(
+                child,
+                Vue2Node::Element(child_element) if child_element.slot_scope.is_some()
+            )
+        })
+        .collect();
+
+    element.scoped_slots.insert(slot_target, slot_container);
+    element.slot_target = None;
+    element.slot_target_dynamic = false;
+    element.slot_scope = None;
+    element.slot_new_syntax = false;
 }
 
 fn push_vue2_warning_once(
@@ -2038,6 +2076,11 @@ fn process_if_conditions(
                         exp: element.elseif.clone(),
                         block: Box::new(element),
                     });
+                    if let Some((name, if_conditions)) = scoped_slot_if_conditions_update(prev) {
+                        if let Some(slot) = parent.scoped_slots.get_mut(&name) {
+                            slot.if_conditions = if_conditions;
+                        }
+                    }
                 } else {
                     diagnostics.push(vue2_warning(
                         "W_VUE2_ELSE_WITHOUT_IF",
@@ -2083,6 +2126,63 @@ fn process_if_conditions(
         ),
         element.span,
     ));
+}
+
+fn scoped_slot_if_conditions_update(
+    element: &Vue2Element,
+) -> Option<(String, Vec<Vue2IfCondition>)> {
+    if element.slot_scope.is_none() || element.if_conditions.is_empty() {
+        return None;
+    }
+    let name = element
+        .slot_target
+        .clone()
+        .unwrap_or_else(|| "\"default\"".into());
+    Some((name, element.if_conditions.clone()))
+}
+
+fn sync_scoped_slot_if_conditions(root: Option<&mut Vue2Element>) {
+    let Some(root) = root else {
+        return;
+    };
+    sync_scoped_slot_if_conditions_for_element(root);
+}
+
+fn sync_scoped_slot_if_conditions_for_element(element: &mut Vue2Element) {
+    let updates = element
+        .children
+        .iter()
+        .filter_map(|child| {
+            let Vue2Node::Element(child) = child else {
+                return None;
+            };
+            if child.slot_scope.is_none() || child.if_conditions.is_empty() {
+                return None;
+            }
+            let name = child
+                .slot_target
+                .clone()
+                .unwrap_or_else(|| "\"default\"".into());
+            Some((name, child.if_conditions.clone()))
+        })
+        .collect::<Vec<_>>();
+    for (name, if_conditions) in updates {
+        if let Some(slot) = element.scoped_slots.get_mut(&name) {
+            slot.if_conditions = if_conditions;
+        }
+    }
+
+    for child in &mut element.children {
+        if let Vue2Node::Element(child) = child {
+            sync_scoped_slot_if_conditions_for_element(child);
+        }
+    }
+    for slot in element.scoped_slots.values_mut() {
+        sync_scoped_slot_if_conditions_for_element(slot);
+    }
+    for condition in element.if_conditions.iter_mut().skip(1) {
+        sync_scoped_slot_if_conditions_for_element(&mut condition.block);
+    }
 }
 
 fn element_generates_empty_data(element: &Vue2Element) -> bool {
@@ -3001,8 +3101,9 @@ fn vue2_hash_scoped_slots(value: &str) -> u32 {
 
 fn gen_mir_scoped_slot(slot: &Vue2ScopedSlot, state: &mut Vue2MirCodegenState<'_>) -> String {
     if let Some(condition) = slot.condition {
+        let alternate = gen_mir_scoped_slot_branches(&slot.branches, state);
         return format!(
-            "({})?{}:null",
+            "({})?{}:{alternate}",
             render_js_expr(state.js, condition),
             gen_mir_scoped_slot_object(slot, state)
         );
@@ -3029,21 +3130,43 @@ fn gen_mir_scoped_slot(slot: &Vue2ScopedSlot, state: &mut Vue2MirCodegenState<'_
     gen_mir_scoped_slot_object(slot, state)
 }
 
+fn gen_mir_scoped_slot_branches(
+    branches: &[Vue2ScopedSlotBranch],
+    state: &mut Vue2MirCodegenState<'_>,
+) -> String {
+    let Some((first, rest)) = branches.split_first() else {
+        return "null".into();
+    };
+    if let Some(condition) = first.condition {
+        let alternate = gen_mir_scoped_slot_branches(rest, state);
+        format!(
+            "({})?{}:{alternate}",
+            render_js_expr(state.js, condition),
+            gen_mir_scoped_slot_object(&first.slot, state)
+        )
+    } else {
+        gen_mir_scoped_slot_object(&first.slot, state)
+    }
+}
+
 fn gen_mir_scoped_slot_object(
     slot: &Vue2ScopedSlot,
     state: &mut Vue2MirCodegenState<'_>,
 ) -> String {
-    let scope = slot
-        .params
-        .map(|params| render_js_pattern(state.js, params))
-        .unwrap_or_default();
-    let scope = if scope == "_empty_" {
-        ""
-    } else {
-        scope.as_str()
+    let scope = match slot.params {
+        Some(params) => {
+            let scope = render_js_pattern(state.js, params);
+            if scope == "_empty_" {
+                String::new()
+            } else {
+                scope
+            }
+        }
+        None if slot.proxy => String::new(),
+        None => "undefined".into(),
     };
     let body = gen_mir_scoped_slot_body(slot, state);
-    let proxy = if scope.is_empty() { ",proxy:true" } else { "" };
+    let proxy = if slot.proxy { ",proxy:true" } else { "" };
     format!(
         "{{key:{},fn:function({scope}){{return {body}}}{proxy}}}",
         render_mir_expr(&slot.name, state)
@@ -3483,7 +3606,9 @@ fn project_public_ast(
     };
     let root = projection.ast.root;
     if let Some(element) = element_ast {
-        projection.project_element(root, element);
+        let mut element = element.clone();
+        sync_scoped_slot_if_conditions(Some(&mut element));
+        projection.project_element(root, &element);
     }
     Vue2AstProjectionResult {
         ast: projection.ast,
@@ -4625,60 +4750,21 @@ fn lower_vue2_scoped_slots_to_mir(
         let Vue2AstKind::Element(slot) = &slot_node.kind else {
             continue;
         };
-        let slot_mir_id = state.mir.push_child(
+        if let Some(slot_payload) = lower_vue2_scoped_slot_to_mir(
+            key,
+            *slot_id,
+            slot,
+            ast,
+            hir_parent,
             mir_id,
-            Vue2MirKind::ScopedSlot(Vue2ScopedSlot {
-                name: slot
-                    .slot_target
-                    .as_ref()
-                    .map(|target| {
-                        MirExpr::JsExpr(state.js.register_expr(
-                            target,
-                            ast_node_span(slot_node),
-                            SourceType::script(),
-                        ))
-                    })
-                    .unwrap_or_else(|| {
-                        MirExpr::JsExpr(state.js.register_expr(
-                            key,
-                            ast_node_span(slot_node),
-                            SourceType::script(),
-                        ))
-                    }),
-                params: slot.slot_scope,
-                body: Vec::new(),
-                proxy: slot
-                    .slot_scope
-                    .and_then(|scope| state.js.pattern_entry(scope))
-                    .is_none_or(|entry| entry.source.as_str() == "_empty_"),
-                new_syntax: slot.slot_new_syntax,
-                body_is_fragment: slot.tag == "template",
-                condition: slot.if_exp.filter(|_| slot.slot_new_syntax),
-                legacy_condition: slot
-                    .if_exp
-                    .filter(|_| !slot.slot_new_syntax && slot.tag == "template"),
-                for_source: slot.for_exp,
-                for_alias: slot.alias,
-                for_iterator1: slot.iterator1,
-                for_iterator2: slot.iterator2,
-                force_update: false,
-                needs_key: false,
-            }),
-            slot_node.span.clone(),
-        );
-
-        let body =
-            lower_vue2_scoped_slot_body_to_mir(*slot_id, slot, ast, hir_parent, slot_mir_id, state);
-        if let Some(node) = state.mir.node_mut(slot_mir_id) {
-            if let Vue2MirKind::ScopedSlot(slot_payload) = &mut node.kind {
-                slot_payload.body = body;
-                slot_payload.force_update = element.for_exp.is_some()
-                    || slot.slot_target_dynamic
-                    || slot.if_exp.is_some()
-                    || slot.for_exp.is_some()
-                    || vue2_ast_contains_slot_child(*slot_id, ast);
-                slots.push(slot_payload.clone());
-            }
+            state,
+            slot.if_exp.filter(|_| slot.slot_new_syntax),
+            slot.if_exp
+                .filter(|_| !slot.slot_new_syntax && slot.tag == "template"),
+            slot.slot_new_syntax,
+            element.for_exp.is_some(),
+        ) {
+            slots.push(slot_payload);
         }
     }
 
@@ -4694,6 +4780,135 @@ fn lower_vue2_scoped_slots_to_mir(
         let data = create.data.get_or_insert_with(Vue2DataObject::default);
         data.scoped_slots = slots;
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_vue2_scoped_slot_to_mir(
+    key: &str,
+    slot_id: NodeId,
+    slot: &vuec_ast::Vue2Element,
+    ast: &Vue2Ast,
+    hir_parent: NodeId,
+    mir_parent: NodeId,
+    state: &mut Vue2LoweringState,
+    condition: Option<JsExprId>,
+    legacy_condition: Option<JsExprId>,
+    include_new_syntax_branches: bool,
+    parent_forces_update: bool,
+) -> Option<Vue2ScopedSlot> {
+    let slot_node = ast.node(slot_id)?;
+    let slot_mir_id = state.mir.push_child(
+        mir_parent,
+        Vue2MirKind::ScopedSlot(Vue2ScopedSlot {
+            name: slot
+                .slot_target
+                .as_ref()
+                .map(|target| {
+                    MirExpr::JsExpr(state.js.register_expr(
+                        target,
+                        ast_node_span(slot_node),
+                        SourceType::script(),
+                    ))
+                })
+                .unwrap_or_else(|| {
+                    MirExpr::JsExpr(state.js.register_expr(
+                        key,
+                        ast_node_span(slot_node),
+                        SourceType::script(),
+                    ))
+                }),
+            params: slot.slot_scope,
+            body: Vec::new(),
+            proxy: slot
+                .slot_scope
+                .and_then(|scope| state.js.pattern_entry(scope))
+                .is_some_and(|entry| entry.source.as_str() == "_empty_"),
+            new_syntax: slot.slot_new_syntax,
+            body_is_fragment: slot.tag == "template",
+            condition,
+            branches: Vec::new(),
+            legacy_condition,
+            for_source: slot.for_exp,
+            for_alias: slot.alias,
+            for_iterator1: slot.iterator1,
+            for_iterator2: slot.iterator2,
+            force_update: false,
+            needs_key: false,
+        }),
+        slot_node.span.clone(),
+    );
+
+    let body =
+        lower_vue2_scoped_slot_body_to_mir(slot_id, slot, ast, hir_parent, slot_mir_id, state);
+    let branches = if include_new_syntax_branches {
+        lower_vue2_scoped_slot_branches_to_mir(slot, ast, hir_parent, mir_parent, state)
+    } else {
+        Vec::new()
+    };
+    let force_update =
+        vue2_scoped_slot_forces_update(parent_forces_update, slot_id, slot, ast, &branches);
+
+    if let Some(node) = state.mir.node_mut(slot_mir_id) {
+        if let Vue2MirKind::ScopedSlot(slot_payload) = &mut node.kind {
+            slot_payload.body = body;
+            slot_payload.branches = branches;
+            slot_payload.force_update = force_update;
+            return Some(slot_payload.clone());
+        }
+    }
+    None
+}
+
+fn lower_vue2_scoped_slot_branches_to_mir(
+    slot: &vuec_ast::Vue2Element,
+    ast: &Vue2Ast,
+    hir_parent: NodeId,
+    mir_parent: NodeId,
+    state: &mut Vue2LoweringState,
+) -> Vec<Vue2ScopedSlotBranch> {
+    slot.if_conditions
+        .iter()
+        .skip(1)
+        .filter_map(|condition| {
+            let branch_node = ast.node(condition.block)?;
+            let Vue2AstKind::Element(branch_slot) = &branch_node.kind else {
+                return None;
+            };
+            let key = branch_slot.slot_target.as_deref().unwrap_or("\"default\"");
+            let slot = lower_vue2_scoped_slot_to_mir(
+                key,
+                condition.block,
+                branch_slot,
+                ast,
+                hir_parent,
+                mir_parent,
+                state,
+                None,
+                None,
+                false,
+                false,
+            )?;
+            Some(Vue2ScopedSlotBranch {
+                condition: condition.exp,
+                slot: Box::new(slot),
+            })
+        })
+        .collect()
+}
+
+fn vue2_scoped_slot_forces_update(
+    parent_forces_update: bool,
+    slot_id: NodeId,
+    slot: &vuec_ast::Vue2Element,
+    ast: &Vue2Ast,
+    branches: &[Vue2ScopedSlotBranch],
+) -> bool {
+    parent_forces_update
+        || slot.slot_target_dynamic
+        || slot.if_exp.is_some()
+        || slot.for_exp.is_some()
+        || vue2_ast_contains_slot_child(slot_id, ast)
+        || branches.iter().any(|branch| branch.slot.force_update)
 }
 
 fn vue2_ast_node_source_order(ast: &Vue2Ast, node_id: NodeId) -> (usize, usize, u32) {
@@ -7107,6 +7322,51 @@ mod tests {
         assert_eq!(
             new_syntax_if.render,
             r#"with(this){return _c('foo',{scopedSlots:_u([(show)?{key:"default",fn:function(bar){return [_v(_s(bar))]}}:null],null,true)})}"#
+        );
+
+        let new_syntax_if_else = compile(
+            r#"<foo><template #trigger v-if="isPublic"><button>a</button></template><template #trigger v-else><button>b</button></template></foo>"#,
+            options(),
+        );
+        assert_eq!(
+            new_syntax_if_else.render,
+            r#"with(this){return _c('foo',{scopedSlots:_u([(isPublic)?{key:"trigger",fn:function(){return [_c('button',[_v("a")])]},proxy:true}:{key:"trigger",fn:function(){return [_c('button',[_v("b")])]},proxy:true}],null,true)})}"#
+        );
+
+        let new_syntax_if_else_if = compile(
+            r#"<foo><template #trigger v-if="a"><button>a</button></template><template #trigger v-else-if="b"><button>b</button></template><template #trigger v-else><button>c</button></template></foo>"#,
+            options(),
+        );
+        assert_eq!(
+            new_syntax_if_else_if.render,
+            r#"with(this){return _c('foo',{scopedSlots:_u([(a)?{key:"trigger",fn:function(){return [_c('button',[_v("a")])]},proxy:true}:(b)?{key:"trigger",fn:function(){return [_c('button',[_v("b")])]},proxy:true}:{key:"trigger",fn:function(){return [_c('button',[_v("c")])]},proxy:true}],null,true)})}"#
+        );
+
+        let new_syntax_if_else_different_names = compile(
+            r#"<foo><template #a v-if="ok"><span>a</span></template><template #b v-else><span>b</span></template></foo>"#,
+            options(),
+        );
+        assert_eq!(
+            new_syntax_if_else_different_names.render,
+            r#"with(this){return _c('foo',{scopedSlots:_u([(ok)?{key:"a",fn:function(){return [_c('span',[_v("a")])]},proxy:true}:{key:"b",fn:function(){return [_c('span',[_v("b")])]},proxy:true}],null,true)})}"#
+        );
+
+        let new_syntax_else_without_slot_binding = compile(
+            r#"<foo><template #a v-if="ok"><span>a</span></template><template v-else><span>b</span></template></foo>"#,
+            options(),
+        );
+        assert_eq!(
+            new_syntax_else_without_slot_binding.render,
+            r#"with(this){return _c('foo',{scopedSlots:_u([(ok)?{key:"a",fn:function(){return [_c('span',[_v("a")])]},proxy:true}:{key:"default",fn:function(undefined){return [_c('span',[_v("b")])]}}],null,true)})}"#
+        );
+
+        let legacy_if_else = compile(
+            r#"<foo><template slot="trigger" slot-scope="s" v-if="isPublic"><button>a</button></template><template slot="trigger" slot-scope="s" v-else><button>b</button></template></foo>"#,
+            options(),
+        );
+        assert_eq!(
+            legacy_if_else.render,
+            r#"with(this){return _c('foo',{scopedSlots:_u([{key:"trigger",fn:function(s){return (isPublic)?[_c('button',[_v("a")])]:undefined}}],null,true)})}"#
         );
 
         let parent_if_key = compile(
