@@ -3809,7 +3809,14 @@ fn lower_vue2_ast_node_to_mir_inner(
         Vue2AstKind::Element(element) => {
             if allow_for && element.for_exp.is_some() {
                 return lower_vue2_for_to_mir(
-                    ast_id, element, ast, ast_node, hir_parent, mir_parent, state,
+                    ast_id,
+                    element,
+                    ast,
+                    ast_node,
+                    hir_parent,
+                    mir_parent,
+                    state,
+                    Vue2ForBodyMode::Normal,
                 );
             }
             if element.if_exp.is_some() && !element.if_conditions.is_empty() {
@@ -3905,6 +3912,12 @@ fn lower_vue2_ast_node_to_mir_inner(
     }
 }
 
+#[derive(Clone, Copy)]
+enum Vue2ForBodyMode {
+    Normal,
+    IfBranch,
+}
+
 fn lower_vue2_for_to_mir(
     ast_id: NodeId,
     element: &vuec_ast::Vue2Element,
@@ -3913,6 +3926,7 @@ fn lower_vue2_for_to_mir(
     hir_parent: NodeId,
     mir_parent: NodeId,
     state: &mut Vue2LoweringState,
+    body_mode: Vue2ForBodyMode,
 ) -> Option<(NodeId, NodeId)> {
     let source = element.for_exp?;
     let alias = element.alias.unwrap_or_else(|| {
@@ -3944,8 +3958,14 @@ fn lower_vue2_for_to_mir(
     );
     state.map.record_ast_to_hir(ast_id, hir_id);
     state.map.record_hir_to_mir(hir_id, mir_id);
-    let (body_hir, body_mir) =
-        lower_vue2_ast_node_to_mir_inner(ast_id, ast, hir_id, mir_id, state, false)?;
+    let (body_hir, body_mir) = match body_mode {
+        Vue2ForBodyMode::Normal => {
+            lower_vue2_ast_node_to_mir_inner(ast_id, ast, hir_id, mir_id, state, false)?
+        }
+        Vue2ForBodyMode::IfBranch => {
+            lower_vue2_if_branch_body_to_mir(ast_id, element, ast, ast_node, hir_id, mir_id, state)?
+        }
+    };
     if let Some(node) = state.hir.node_mut(hir_id) {
         if let HirNodeKind::For(for_node) = &mut node.kind {
             for_node.body = body_hir;
@@ -4025,10 +4045,45 @@ fn lower_vue2_branch_block_to_mir(
 ) -> Option<(NodeId, NodeId)> {
     let ast_node = ast.node(block)?;
     match &ast_node.kind {
-        Vue2AstKind::Element(element) => lower_vue2_plain_element_to_mir(
-            block, element, ast, ast_node, hir_parent, mir_parent, state,
-        ),
+        Vue2AstKind::Element(element) => {
+            if element.for_exp.is_some() {
+                lower_vue2_for_to_mir(
+                    block,
+                    element,
+                    ast,
+                    ast_node,
+                    hir_parent,
+                    mir_parent,
+                    state,
+                    Vue2ForBodyMode::IfBranch,
+                )
+            } else {
+                lower_vue2_if_branch_body_to_mir(
+                    block, element, ast, ast_node, hir_parent, mir_parent, state,
+                )
+            }
+        }
         _ => lower_vue2_ast_node_to_mir_inner(block, ast, hir_parent, mir_parent, state, false),
+    }
+}
+
+fn lower_vue2_if_branch_body_to_mir(
+    ast_id: NodeId,
+    element: &vuec_ast::Vue2Element,
+    ast: &Vue2Ast,
+    ast_node: &vuec_ast::Node<Vue2NodeKind>,
+    hir_parent: NodeId,
+    mir_parent: NodeId,
+    state: &mut Vue2LoweringState,
+) -> Option<(NodeId, NodeId)> {
+    if element.if_exp.is_some() && !element.if_conditions.is_empty() {
+        lower_vue2_if_to_mir(
+            ast_id, element, ast, ast_node, hir_parent, mir_parent, state,
+        )
+    } else {
+        lower_vue2_plain_element_to_mir(
+            ast_id, element, ast, ast_node, hir_parent, mir_parent, state,
+        )
     }
 }
 
@@ -6287,6 +6342,19 @@ mod tests {
         );
         assert!(result.render.contains("(show)?_c('p'"), "{}", result.render);
         assert!(result.render.contains(":_c('p'"), "{}", result.render);
+    }
+
+    #[test]
+    fn lowers_vue2_v_for_on_else_branch() {
+        let result = compile(
+            r#"<div><p v-if="empty">empty</p><p v-for="row in rows" v-else :key="row.id">{{ row.name }}</p></div>"#,
+            options(),
+        );
+
+        assert_eq!(
+            result.render,
+            r#"with(this){return _c('div',[(empty)?_c('p',[_v("empty")]):_l((rows),function(row){return _c('p',{key:row.id},[_v(_s(row.name))])})],2)}"#
+        );
     }
 
     #[test]
