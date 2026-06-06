@@ -26,7 +26,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, ExitStatus, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use std::{thread, time::Duration};
 use sysinfo::{Pid, ProcessesToUpdate, System};
 
@@ -172,6 +172,16 @@ enum Command {
         #[arg(long)]
         skip_official_js: bool,
     },
+    ProfileCompileScript {
+        #[arg(long, default_value = "vue2_7")]
+        version_line: String,
+        #[arg(long, default_value = "compat/perf/vue27-sfc")]
+        fixture_corpus: PathBuf,
+        #[arg(long, default_value_t = 60)]
+        iterations: usize,
+        #[arg(long, default_value = "target/perf/compile-script")]
+        out_dir: PathBuf,
+    },
     SummarizeCompat {
         #[arg(long)]
         locked: bool,
@@ -265,6 +275,12 @@ fn main() -> Result<()> {
             lock,
             skip_official_js,
         } => bench(iterations, &out_dir, &lock, skip_official_js)?,
+        Command::ProfileCompileScript {
+            version_line,
+            fixture_corpus,
+            iterations,
+            out_dir,
+        } => profile_compile_script(&version_line, &fixture_corpus, iterations, &out_dir)?,
         Command::SummarizeCompat { locked, lock } => summarize_compat(locked, &lock),
     };
     println!("{}", serde_json::to_string_pretty(&report)?);
@@ -3287,6 +3303,486 @@ fn bench(
     )
 }
 
+fn profile_compile_script(
+    version_line: &str,
+    fixture_corpus: &Path,
+    iterations: usize,
+    out_dir: &Path,
+) -> Result<compat::JsonReport> {
+    if iterations == 0 {
+        anyhow::bail!("--iterations must be greater than zero");
+    }
+    let version = CompileScriptProfileVersion::parse(version_line)?;
+    ensure_nested_target_child(out_dir, &["perf", "compile-script"])?;
+    fs::create_dir_all(out_dir)
+        .with_context(|| format!("failed to create {}", out_dir.display()))?;
+
+    let fixtures = load_compile_script_profile_fixtures(fixture_corpus)?;
+    let mut items = Vec::new();
+    let mut violations = Vec::new();
+    let mut results = Vec::new();
+
+    for fixture in &fixtures {
+        match compile_script_profile_fixture(version, fixture, iterations) {
+            Ok(result) => {
+                items.push(compat::ReportItem::new(
+                    format!("{}-{}", version.canonical(), fixture.name),
+                    compat::ReportStatus::Pass,
+                    serde_json::to_string(&json!({
+                        "versionLine": result.version_line,
+                        "iterations": result.iterations,
+                        "parseMedianMicros": result.parse.median_micros,
+                        "compileScriptMedianMicros": result.compile_script.median_micros,
+                        "serializeMedianMicros": result.serialize.median_micros,
+                        "structuralCounts": result.structural_counts,
+                    }))?,
+                    Some(fixture.path.clone()),
+                ));
+                results.push(result);
+            }
+            Err(err) => {
+                violations.push(format!(
+                    "compileScript profile {} failed: {err:#}",
+                    fixture.name
+                ));
+                items.push(compat::ReportItem::new(
+                    format!("{}-{}", version.canonical(), fixture.name),
+                    compat::ReportStatus::Fail,
+                    format!("{err:#}"),
+                    Some(fixture.path.clone()),
+                ));
+            }
+        }
+    }
+
+    let report = CompileScriptProfileReport {
+        status: if violations.is_empty() {
+            "pass".into()
+        } else {
+            "fail".into()
+        },
+        version_line: version.canonical().into(),
+        iterations,
+        build_profile: compile_script_build_profile().into(),
+        environment: bench_environment(Path::new("compat/official-revisions.lock")),
+        fixtures: fixtures
+            .iter()
+            .map(CompileScriptProfileFixtureReport::from)
+            .collect(),
+        results,
+    };
+    let report_path = out_dir.join(format!("{}.json", version.canonical()));
+    fs::write(&report_path, serde_json::to_string_pretty(&report)?)
+        .with_context(|| format!("failed to write {}", report_path.display()))?;
+
+    Ok(compat::JsonReport::new("profile_compile_script", compat::ReportStatus::Pass)
+        .with_items(items)
+        .with_violations(violations)
+        .with_created(vec![report_path.display().to_string()])
+        .with_note("profiles Rust compileScript parse, compile, and serialization phases for fixed SFC fixture corpora; structural counts are baseline estimates for the current code path until the SFC context phases add runtime instrumentation"))
+}
+
+fn load_compile_script_profile_fixtures(
+    fixture_corpus: &Path,
+) -> Result<Vec<CompileScriptProfileFixture>> {
+    if !fixture_corpus.is_dir() {
+        anyhow::bail!(
+            "compileScript fixture corpus {} is not a directory",
+            fixture_corpus.display()
+        );
+    }
+    let mut paths = Vec::new();
+    collect_compile_script_profile_fixture_paths(fixture_corpus, &mut paths)?;
+    paths.sort();
+    if paths.is_empty() {
+        anyhow::bail!(
+            "compileScript fixture corpus {} does not contain .vue files",
+            fixture_corpus.display()
+        );
+    }
+    paths
+        .into_iter()
+        .map(read_compile_script_profile_fixture)
+        .collect()
+}
+
+fn collect_compile_script_profile_fixture_paths(
+    root: &Path,
+    paths: &mut Vec<PathBuf>,
+) -> Result<()> {
+    for entry in fs::read_dir(root).with_context(|| format!("failed to read {}", root.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_compile_script_profile_fixture_paths(&path, paths)?;
+        } else if path.extension().and_then(|ext| ext.to_str()) == Some("vue") {
+            paths.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn read_compile_script_profile_fixture(path: PathBuf) -> Result<CompileScriptProfileFixture> {
+    let source =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    compile_script_profile_fixture_from_source(path, source)
+}
+
+fn compile_script_profile_fixture_from_source(
+    path: PathBuf,
+    source: String,
+) -> Result<CompileScriptProfileFixture> {
+    let name = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(ToOwned::to_owned)
+        .with_context(|| format!("fixture path {} has no UTF-8 file stem", path.display()))?;
+    let (template_bytes, script_bytes, script_setup_bytes) =
+        compile_script_fixture_block_sizes(&source);
+    Ok(CompileScriptProfileFixture {
+        name,
+        path,
+        sha256: sha256_bytes(source.as_bytes()),
+        source_bytes: source.len(),
+        template_bytes,
+        script_bytes,
+        script_setup_bytes,
+        source,
+    })
+}
+
+fn compile_script_profile_fixture(
+    version: CompileScriptProfileVersion,
+    fixture: &CompileScriptProfileFixture,
+    iterations: usize,
+) -> Result<CompileScriptProfileResult> {
+    let mut parse_samples = Vec::with_capacity(iterations);
+    let mut compile_samples = Vec::with_capacity(iterations);
+    let mut serialize_samples = Vec::with_capacity(iterations);
+    let mut total_samples = Vec::with_capacity(iterations);
+    let mut output_bytes = 0usize;
+    let mut errors = 0usize;
+    let mut warnings = 0usize;
+    let mut structural_counts = CompileScriptStructuralCounts::default();
+
+    for _ in 0..iterations {
+        let total_started = Instant::now();
+        let mut compiler = vuec_sfc::SfcCompiler::new();
+        let filename = fixture.path.display().to_string();
+
+        let parse_started = Instant::now();
+        let descriptor = match version {
+            CompileScriptProfileVersion::Vue27 => {
+                compiler
+                    .parse_vue27_component_with_filename(
+                        filename,
+                        &fixture.source,
+                        vuec_sfc::Vue27ParseComponentOptions::default(),
+                    )
+                    .descriptor
+            }
+            CompileScriptProfileVersion::Vue3 => {
+                compiler.parse_vue3(filename, &fixture.source).descriptor
+            }
+        };
+        parse_samples.push(parse_started.elapsed().as_micros());
+
+        let compile_started = Instant::now();
+        let script = match version {
+            CompileScriptProfileVersion::Vue27 => compiler
+                .compile_vue27_script(&descriptor, vuec_sfc::SfcScriptCompileOptions::default()),
+            CompileScriptProfileVersion::Vue3 => {
+                compiler.compile_script(&descriptor, vuec_sfc::SfcScriptCompileOptions::default())
+            }
+        };
+        compile_samples.push(compile_started.elapsed().as_micros());
+
+        let serialize_started = Instant::now();
+        let serialized = serde_json::to_vec(&script)?;
+        serialize_samples.push(serialize_started.elapsed().as_micros());
+        total_samples.push(total_started.elapsed().as_micros());
+
+        output_bytes = serialized.len();
+        errors = script.errors.len();
+        warnings = script.warnings.len();
+        structural_counts = compile_script_structural_counts(version, &descriptor, &script);
+    }
+
+    Ok(CompileScriptProfileResult {
+        name: fixture.name.clone(),
+        version_line: version.canonical().into(),
+        iterations,
+        parse: profile_phase(parse_samples),
+        compile_script: profile_phase(compile_samples),
+        serialize: profile_phase(serialize_samples),
+        total: profile_phase(total_samples),
+        output_bytes,
+        errors,
+        warnings,
+        structural_counts,
+        input_sha256: fixture.sha256.clone(),
+    })
+}
+
+fn profile_phase(samples: Vec<u128>) -> CompileScriptPhaseProfile {
+    CompileScriptPhaseProfile {
+        median_micros: median_micros(&samples),
+        p95_micros: p95_micros(&samples),
+    }
+}
+
+fn median_micros(samples: &[u128]) -> u128 {
+    let mut sorted = samples.to_vec();
+    sorted.sort_unstable();
+    match sorted.len() {
+        0 => 0,
+        len if len % 2 == 1 => sorted[len / 2],
+        len => (sorted[len / 2 - 1] + sorted[len / 2]) / 2,
+    }
+}
+
+fn p95_micros(samples: &[u128]) -> u128 {
+    let mut sorted = samples.to_vec();
+    sorted.sort_unstable();
+    if sorted.is_empty() {
+        return 0;
+    }
+    let index = ((sorted.len() * 95 + 99) / 100).saturating_sub(1);
+    sorted[index]
+}
+
+fn compile_script_structural_counts(
+    version: CompileScriptProfileVersion,
+    descriptor: &vuec_sfc::SfcDescriptor,
+    script: &vuec_sfc::SfcScriptBlock,
+) -> CompileScriptStructuralCounts {
+    let ast_projection_enabled = descriptor
+        .script
+        .as_ref()
+        .is_some_and(compile_script_block_is_js_like)
+        || descriptor
+            .script_setup
+            .as_ref()
+            .is_some_and(compile_script_block_is_js_like);
+    CompileScriptStructuralCounts {
+        ast_projection_enabled,
+        ast_projection_statement_count: script.script_ast.len() + script.script_setup_ast.len(),
+        template_usage_scan_count: compile_script_template_usage_scan_count(version, descriptor),
+        setup_analysis_count: compile_script_setup_analysis_count(version, descriptor),
+        script_compile_error_analysis_count: compile_script_error_analysis_count(
+            version, descriptor,
+        ),
+    }
+}
+
+fn compile_script_template_usage_scan_count(
+    version: CompileScriptProfileVersion,
+    descriptor: &vuec_sfc::SfcDescriptor,
+) -> usize {
+    let Some(template) = descriptor.template.as_ref() else {
+        return 0;
+    };
+    if template.attrs.src.is_some() || template.attrs.lang.is_some() {
+        return 0;
+    }
+    let normal_imports = descriptor
+        .script
+        .as_ref()
+        .map(|block| count_compile_script_import_bindings(&block.content, false))
+        .unwrap_or_default();
+    let setup_imports = descriptor
+        .script_setup
+        .as_ref()
+        .map(|block| count_compile_script_import_bindings(&block.content, false))
+        .unwrap_or_default();
+    match version {
+        CompileScriptProfileVersion::Vue27 => normal_imports + setup_imports,
+        CompileScriptProfileVersion::Vue3 => {
+            let return_scans = descriptor
+                .script
+                .as_ref()
+                .map(|block| count_compile_script_return_import_bindings(&block.content))
+                .unwrap_or_default()
+                + descriptor
+                    .script_setup
+                    .as_ref()
+                    .map(|block| count_compile_script_return_import_bindings(&block.content))
+                    .unwrap_or_default();
+            let is_ts = descriptor
+                .script
+                .as_ref()
+                .is_some_and(|block| compile_script_block_is_typescript(block))
+                || descriptor
+                    .script_setup
+                    .as_ref()
+                    .is_some_and(|block| compile_script_block_is_typescript(block));
+            let metadata_scans = if is_ts {
+                normal_imports + setup_imports
+            } else {
+                0
+            };
+            return_scans + metadata_scans
+        }
+    }
+}
+
+fn compile_script_setup_analysis_count(
+    version: CompileScriptProfileVersion,
+    descriptor: &vuec_sfc::SfcDescriptor,
+) -> usize {
+    if descriptor.script_setup.is_none() {
+        return 0;
+    }
+    match version {
+        CompileScriptProfileVersion::Vue27 => 4,
+        CompileScriptProfileVersion::Vue3 => 1,
+    }
+}
+
+fn compile_script_error_analysis_count(
+    version: CompileScriptProfileVersion,
+    descriptor: &vuec_sfc::SfcDescriptor,
+) -> usize {
+    match version {
+        CompileScriptProfileVersion::Vue27 => usize::from(descriptor.script_setup.is_some()),
+        CompileScriptProfileVersion::Vue3 => 2,
+    }
+}
+
+fn count_compile_script_return_import_bindings(source: &str) -> usize {
+    compile_script_import_lines(source)
+        .into_iter()
+        .filter(|line| !compile_script_import_source_is_vue(line))
+        .map(|line| count_compile_script_import_line_bindings(line, false))
+        .sum()
+}
+
+fn count_compile_script_import_bindings(source: &str, include_type: bool) -> usize {
+    compile_script_import_lines(source)
+        .into_iter()
+        .map(|line| count_compile_script_import_line_bindings(line, include_type))
+        .sum()
+}
+
+fn compile_script_import_lines(source: &str) -> Vec<&str> {
+    source
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("import ") && line.contains(" from "))
+        .collect()
+}
+
+fn count_compile_script_import_line_bindings(line: &str, include_type: bool) -> usize {
+    if !include_type && line.starts_with("import type ") {
+        return 0;
+    }
+    let before_from = line.split(" from ").next().unwrap_or(line).trim();
+    let mut rest = before_from
+        .strip_prefix("import ")
+        .unwrap_or(before_from)
+        .trim();
+    if rest.is_empty() {
+        return 0;
+    }
+    let mut count = 0usize;
+    if rest.starts_with("* as ") {
+        return 1;
+    }
+    if let Some(named_start) = rest.find('{') {
+        let default_part = rest[..named_start].trim().trim_end_matches(',').trim();
+        if !default_part.is_empty() && default_part != "type" {
+            count += 1;
+        }
+        if let Some(named_end) = rest[named_start + 1..].find('}') {
+            let named = &rest[named_start + 1..named_start + 1 + named_end];
+            count += named
+                .split(',')
+                .map(str::trim)
+                .filter(|part| !part.is_empty())
+                .filter(|part| include_type || !part.starts_with("type "))
+                .count();
+        }
+        return count;
+    }
+    rest = rest.trim_end_matches(';').trim();
+    if rest.is_empty() || rest.starts_with('{') {
+        0
+    } else {
+        1
+    }
+}
+
+fn compile_script_import_source_is_vue(line: &str) -> bool {
+    line.contains(" from 'vue'") || line.contains(" from \"vue\"")
+}
+
+fn compile_script_block_is_js_like(block: &vuec_sfc::SfcBlock) -> bool {
+    block
+        .attrs
+        .lang
+        .as_deref()
+        .map(|lang| matches!(lang, "js" | "jsx" | "ts" | "tsx"))
+        .unwrap_or(true)
+}
+
+fn compile_script_block_is_typescript(block: &vuec_sfc::SfcBlock) -> bool {
+    block
+        .attrs
+        .lang
+        .as_deref()
+        .map(|lang| matches!(lang, "ts" | "tsx"))
+        .unwrap_or(false)
+}
+
+fn compile_script_fixture_block_sizes(source: &str) -> (usize, usize, usize) {
+    (
+        sfc_block_content_bytes(source, "template", None),
+        sfc_block_content_bytes(source, "script", Some(false)),
+        sfc_block_content_bytes(source, "script", Some(true)),
+    )
+}
+
+fn sfc_block_content_bytes(source: &str, tag: &str, setup: Option<bool>) -> usize {
+    let lower = source.to_ascii_lowercase();
+    let mut cursor = 0usize;
+    let mut total = 0usize;
+    let open_tag = format!("<{tag}");
+    let close_tag = format!("</{tag}>");
+    while let Some(relative_start) = lower[cursor..].find(&open_tag) {
+        let start = cursor + relative_start;
+        let Some(relative_open_end) = lower[start..].find('>') else {
+            break;
+        };
+        let open_end = start + relative_open_end;
+        let open = &lower[start..=open_end];
+        if setup.is_none_or(|expected| sfc_script_open_has_setup(open) == expected) {
+            let content_start = open_end + 1;
+            let Some(relative_close_start) = lower[content_start..].find(&close_tag) else {
+                break;
+            };
+            let content_end = content_start + relative_close_start;
+            total += content_end.saturating_sub(content_start);
+            cursor = content_end + close_tag.len();
+        } else {
+            cursor = open_end + 1;
+        }
+    }
+    total
+}
+
+fn sfc_script_open_has_setup(open: &str) -> bool {
+    open.split(|ch: char| ch.is_ascii_whitespace() || matches!(ch, '>' | '/'))
+        .any(|part| part == "setup" || part.starts_with("setup="))
+}
+
+fn compile_script_build_profile() -> &'static str {
+    if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    }
+}
+
 fn run_cargo(args: &[&str]) -> Result<String> {
     let output = ProcessCommand::new("cargo")
         .args(args)
@@ -4503,6 +4999,114 @@ struct BenchReport {
     results: Vec<BenchResult>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CompileScriptProfileVersion {
+    Vue27,
+    Vue3,
+}
+
+impl CompileScriptProfileVersion {
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "vue2_7" | "vue27" => Ok(Self::Vue27),
+            "vue3" => Ok(Self::Vue3),
+            _ => anyhow::bail!("unsupported compileScript profile version-line {value}"),
+        }
+    }
+
+    const fn canonical(self) -> &'static str {
+        match self {
+            Self::Vue27 => "vue2_7",
+            Self::Vue3 => "vue3",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CompileScriptProfileFixture {
+    name: String,
+    path: PathBuf,
+    source: String,
+    sha256: String,
+    source_bytes: usize,
+    template_bytes: usize,
+    script_bytes: usize,
+    script_setup_bytes: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompileScriptProfileFixtureReport {
+    name: String,
+    path: String,
+    source_bytes: usize,
+    template_bytes: usize,
+    script_bytes: usize,
+    script_setup_bytes: usize,
+    sha256: String,
+}
+
+impl From<&CompileScriptProfileFixture> for CompileScriptProfileFixtureReport {
+    fn from(value: &CompileScriptProfileFixture) -> Self {
+        Self {
+            name: value.name.clone(),
+            path: value.path.display().to_string(),
+            source_bytes: value.source_bytes,
+            template_bytes: value.template_bytes,
+            script_bytes: value.script_bytes,
+            script_setup_bytes: value.script_setup_bytes,
+            sha256: value.sha256.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompileScriptStructuralCounts {
+    ast_projection_enabled: bool,
+    ast_projection_statement_count: usize,
+    template_usage_scan_count: usize,
+    setup_analysis_count: usize,
+    script_compile_error_analysis_count: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompileScriptPhaseProfile {
+    median_micros: u128,
+    p95_micros: u128,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompileScriptProfileResult {
+    name: String,
+    version_line: String,
+    iterations: usize,
+    parse: CompileScriptPhaseProfile,
+    compile_script: CompileScriptPhaseProfile,
+    serialize: CompileScriptPhaseProfile,
+    total: CompileScriptPhaseProfile,
+    output_bytes: usize,
+    errors: usize,
+    warnings: usize,
+    structural_counts: CompileScriptStructuralCounts,
+    input_sha256: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompileScriptProfileReport {
+    status: String,
+    version_line: String,
+    iterations: usize,
+    build_profile: String,
+    environment: BenchEnvironment,
+    fixtures: Vec<CompileScriptProfileFixtureReport>,
+    results: Vec<CompileScriptProfileResult>,
+}
+
 fn write_bench_fixtures(root: &Path) -> Result<Vec<BenchFixture>> {
     let specs = [
         (
@@ -5664,6 +6268,81 @@ mod tests {
             sha256_bytes(b"vuec"),
             "1fc8cc70af7ec7c20b935e8970e8641a6acc9fd856788a44a68507e33c8d561d"
         );
+    }
+
+    #[test]
+    fn compile_script_profile_version_parses_aliases() {
+        assert_eq!(
+            CompileScriptProfileVersion::parse("vue2_7").unwrap(),
+            CompileScriptProfileVersion::Vue27
+        );
+        assert_eq!(
+            CompileScriptProfileVersion::parse("vue27").unwrap(),
+            CompileScriptProfileVersion::Vue27
+        );
+        assert_eq!(
+            CompileScriptProfileVersion::parse("vue3").unwrap(),
+            CompileScriptProfileVersion::Vue3
+        );
+        assert!(CompileScriptProfileVersion::parse("vue2_6").is_err());
+    }
+
+    #[test]
+    fn compile_script_profile_schema_reports_structural_counts() {
+        let fixture = compile_script_profile_fixture_from_source(
+            PathBuf::from("ProfileFixture.vue"),
+            r#"<template>
+  <section>
+    <Foo :value="formatCount(count)" />
+    <Bar>{{ search }}</Bar>
+  </section>
+</template>
+<script setup lang="ts">
+import { computed } from 'vue'
+import Foo from './Foo.vue'
+import Bar from './Bar.vue'
+import { formatCount } from './format'
+import type { Item } from './types'
+
+const props = defineProps<{ count: number; item?: Item }>()
+const search = computed(() => formatCount(props.count))
+</script>"#
+                .to_string(),
+        )
+        .unwrap();
+
+        let result =
+            compile_script_profile_fixture(CompileScriptProfileVersion::Vue27, &fixture, 1)
+                .unwrap();
+        assert!(result.structural_counts.ast_projection_enabled);
+        assert!(result.structural_counts.ast_projection_statement_count > 0);
+        assert!(result.structural_counts.template_usage_scan_count >= 4);
+        assert_eq!(result.structural_counts.setup_analysis_count, 4);
+        assert_eq!(
+            result.structural_counts.script_compile_error_analysis_count,
+            1
+        );
+
+        let report = CompileScriptProfileReport {
+            status: "pass".into(),
+            version_line: "vue2_7".into(),
+            iterations: 1,
+            build_profile: compile_script_build_profile().into(),
+            environment: bench_environment(Path::new("compat/official-revisions.lock")),
+            fixtures: vec![CompileScriptProfileFixtureReport::from(&fixture)],
+            results: vec![result],
+        };
+        let value = serde_json::to_value(&report).unwrap();
+        assert_eq!(value["status"], "pass");
+        assert_eq!(value["versionLine"], "vue2_7");
+        assert_eq!(value["buildProfile"], compile_script_build_profile());
+        assert_eq!(
+            value["results"][0]["structuralCounts"]["setupAnalysisCount"],
+            4
+        );
+        assert!(value["results"][0]["parse"]["medianMicros"]
+            .as_u64()
+            .is_some());
     }
 
     #[test]
