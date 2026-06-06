@@ -197,6 +197,30 @@ impl ReportItem {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct ReportEvidenceGroup {
+    pub name: String,
+    pub summary: ReportSummary,
+    pub items: Vec<ReportItem>,
+    pub note: Option<String>,
+}
+
+impl ReportEvidenceGroup {
+    pub fn new(name: impl Into<String>, items: Vec<ReportItem>) -> Self {
+        Self {
+            name: name.into(),
+            summary: ReportSummary::from_items(&items),
+            items,
+            note: None,
+        }
+    }
+
+    pub fn with_note(mut self, note: impl Into<String>) -> Self {
+        self.note = Some(note.into());
+        self
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct JsonReport {
     pub command: String,
     pub status: String,
@@ -204,6 +228,8 @@ pub struct JsonReport {
     pub scope: Option<SelectionArgsSnapshot>,
     pub summary: ReportSummary,
     pub items: Vec<ReportItem>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub evidence_groups: Vec<ReportEvidenceGroup>,
     pub violations: Vec<String>,
     pub created: Vec<String>,
     pub note: Option<String>,
@@ -223,6 +249,7 @@ impl JsonReport {
                 fail: 0,
             },
             items: Vec::new(),
+            evidence_groups: Vec::new(),
             violations: Vec::new(),
             created: Vec::new(),
             note: None,
@@ -238,6 +265,11 @@ impl JsonReport {
         self.summary = ReportSummary::from_items(&items);
         self.status = aggregate_status(&items).as_str().to_string();
         self.items = items;
+        self
+    }
+
+    pub fn with_evidence_groups(mut self, evidence_groups: Vec<ReportEvidenceGroup>) -> Self {
+        self.evidence_groups = evidence_groups;
         self
     }
 
@@ -11813,16 +11845,110 @@ fn summarize_compat_at_root(locked: bool, path: &Path, root: &Path) -> JsonRepor
         ));
     }
 
+    let evidence_groups = vec![
+        ReportEvidenceGroup::new("official-conformance-gate", items.clone()).with_note(if locked {
+            "official/API/option/output/lock gate; this group determines summarize_compat top-level status"
+        } else {
+            "official/API/option/output gate; this group determines summarize_compat top-level status"
+        }),
+        ReportEvidenceGroup::new(
+            "production-corpus-evidence",
+            production_corpus_evidence_items(root),
+        )
+        .with_note(
+            "external project corpus evidence; reported separately and never overwrites official conformance target status",
+        ),
+    ];
+
     let mut report = JsonReport::new("summarize_compat", aggregate_status(&items));
     report.metadata = metadata;
     report
         .with_items(items)
+        .with_evidence_groups(evidence_groups)
         .with_violations(violations)
         .with_note(if locked {
-            "summary aggregates lock validation plus API, option, output, and conformance artifacts"
+            "summary status is the official conformance gate: lock validation plus API, option, output, and official conformance artifacts; production corpus evidence is reported in evidence_groups separately"
         } else {
-            "summary aggregates API, option, output, and conformance artifacts"
+            "summary status is the official conformance gate: API, option, output, and official conformance artifacts; production corpus evidence is reported in evidence_groups separately"
         })
+}
+
+fn production_corpus_evidence_items(root: &Path) -> Vec<ReportItem> {
+    [
+        (
+            "production-corpus::vue2_6-projects",
+            root.join("target")
+                .join("external")
+                .join("vue2-project-corpus")
+                .join("verify_vue2_project_corpus.json"),
+        ),
+        (
+            "production-corpus::vue2_7-projects",
+            root.join("target")
+                .join("external")
+                .join("vue27-project-corpus")
+                .join("verify_vue27_project_corpus.json"),
+        ),
+    ]
+    .into_iter()
+    .map(|(target, path)| production_corpus_evidence_item(target, path))
+    .collect()
+}
+
+fn production_corpus_evidence_item(target: &str, path: PathBuf) -> ReportItem {
+    let Ok(data) = fs::read_to_string(&path) else {
+        return ReportItem::new(
+            target,
+            ReportStatus::Pending,
+            "production corpus evidence report is missing; this is separate from official conformance",
+            Some(path),
+        );
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) else {
+        return ReportItem::new(
+            target,
+            ReportStatus::Fail,
+            "production corpus evidence report is invalid JSON; this is separate from official conformance",
+            Some(path),
+        );
+    };
+
+    let status = report_value_status(&value);
+    let project_vue_version = value
+        .get("project_vue_version")
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown");
+    let compiler_version_line = value
+        .get("compiler_version_line")
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown");
+    let counts = value.get("counts").and_then(|value| value.as_object());
+    let total = counts
+        .and_then(|counts| counts.get("total"))
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    let pass = counts
+        .and_then(|counts| counts.get("pass"))
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    let pending = counts
+        .and_then(|counts| counts.get("pending"))
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    let fail = counts
+        .and_then(|counts| counts.get("fail"))
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+
+    ReportItem::new(
+        target,
+        status,
+        format!(
+            "production corpus evidence, not official conformance; project_vue_version={}, compiler_version_line={}, projects pass={}, pending={}, fail={}, total={}",
+            project_vue_version, compiler_version_line, pass, pending, fail, total
+        ),
+        Some(path),
+    )
 }
 
 fn report_file_status(path: &Path) -> ReportStatus {
@@ -22706,6 +22832,158 @@ projects = []
         });
 
         assert_eq!(report_value_status(&value), ReportStatus::Pass);
+    }
+
+    #[test]
+    fn summarize_compat_reports_corpus_evidence_without_overwriting_official_gate() {
+        let root = std::env::temp_dir().join(format!(
+            "vuec-xtask-summary-evidence-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+
+        let lock_path = root.join("compat").join("official-revisions.lock");
+        fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+        fs::write(
+            &lock_path,
+            r#"[vue2_6]
+repo = "https://github.com/vuejs/vue"
+rev = "0123456789012345678901234567890123456789"
+
+[vue2_6.npm]
+vue = "2.6.14"
+"vue-template-compiler" = "2.6.14"
+
+[vue2_7]
+repo = "https://github.com/vuejs/vue"
+rev = "abcdefabcdefabcdefabcdefabcdefabcdefabcd"
+
+[vue2_7.npm]
+vue = "2.7.16"
+"vue-template-compiler" = "2.7.16"
+
+[vue2_7.exports]
+"vue/compiler-sfc" = "./compiler-sfc/index.js"
+
+[vue3]
+repo = "https://github.com/vuejs/core"
+rev = "57545e958ae28ed17aa9e0ed321abcd8dc99f752"
+
+[vue3.npm]
+vue = "3.5.34"
+"@vue/compiler-core" = "3.5.34"
+"@vue/compiler-dom" = "3.5.34"
+"@vue/compiler-ssr" = "3.5.34"
+"@vue/compiler-sfc" = "3.5.34"
+"#,
+        )
+        .unwrap();
+
+        let lock_hash = file_sha256(&lock_path).unwrap();
+        let conformance_root = root.join("target").join("conformance").join(lock_hash);
+        fs::create_dir_all(&conformance_root).unwrap();
+        write_json(
+            &conformance_root.join("option-matrix.json"),
+            &serde_json::json!({ "status": "pass" }),
+        )
+        .unwrap();
+        write_json(
+            &conformance_root.join("output-contract.json"),
+            &serde_json::json!({ "status": "pass" }),
+        )
+        .unwrap();
+
+        for target in all_targets() {
+            for side in [ApiManifestSide::Official, ApiManifestSide::Rust] {
+                let path = root.join(target.relative_api_manifest_path(side.as_str()));
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                write_json(&path, &serde_json::json!({ "status": "pass" })).unwrap();
+            }
+            write_json(
+                &conformance_root.join(conformance_report_name(*target)),
+                &serde_json::json!({
+                    "status": "pass",
+                    "counts": { "total": 1, "pass": 1, "pending": 0, "fail": 0 }
+                }),
+            )
+            .unwrap();
+        }
+
+        let vue26_corpus = root
+            .join("target")
+            .join("external")
+            .join("vue2-project-corpus")
+            .join("verify_vue2_project_corpus.json");
+        fs::create_dir_all(vue26_corpus.parent().unwrap()).unwrap();
+        write_json(
+            &vue26_corpus,
+            &serde_json::json!({
+                "command": "verify_vue2_project_corpus",
+                "project_vue_version": "vue2_6",
+                "compiler_version_line": "vue2_7",
+                "counts": { "total": 15, "pass": 14, "pending": 0, "fail": 1 }
+            }),
+        )
+        .unwrap();
+        let vue27_corpus = root
+            .join("target")
+            .join("external")
+            .join("vue27-project-corpus")
+            .join("verify_vue27_project_corpus.json");
+        fs::create_dir_all(vue27_corpus.parent().unwrap()).unwrap();
+        write_json(
+            &vue27_corpus,
+            &serde_json::json!({
+                "command": "verify_vue27_project_corpus",
+                "project_vue_version": "vue2_7",
+                "compiler_version_line": "vue2_7",
+                "counts": { "total": 15, "pass": 15, "pending": 0, "fail": 0 }
+            }),
+        )
+        .unwrap();
+
+        let report = summarize_compat_at_root(
+            true,
+            &PathBuf::from("compat/official-revisions.lock"),
+            &root,
+        );
+
+        assert_eq!(report.status, "pass");
+        assert_eq!(report.items.len(), all_targets().len());
+        assert!(report
+            .items
+            .iter()
+            .all(|item| !item.target.starts_with("production-corpus::")));
+
+        let official_group = report
+            .evidence_groups
+            .iter()
+            .find(|group| group.name == "official-conformance-gate")
+            .expect("official evidence group");
+        assert_eq!(official_group.summary.total, all_targets().len());
+        assert_eq!(official_group.summary.pass, all_targets().len());
+
+        let corpus_group = report
+            .evidence_groups
+            .iter()
+            .find(|group| group.name == "production-corpus-evidence")
+            .expect("production corpus evidence group");
+        assert_eq!(corpus_group.summary.total, 2);
+        assert_eq!(corpus_group.summary.pass, 1);
+        assert_eq!(corpus_group.summary.fail, 1);
+        assert!(corpus_group
+            .items
+            .iter()
+            .any(|item| item.detail.contains("not official conformance")));
+        assert!(report
+            .note
+            .as_deref()
+            .is_some_and(|note| note.contains("production corpus evidence is reported")));
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
