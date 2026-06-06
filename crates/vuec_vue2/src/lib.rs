@@ -642,6 +642,7 @@ pub fn lower_vue2_ast_to_mir(ast: &Vue2Ast, js: JsAstStore) -> Vue2LoweringResul
         js,
         static_render_index: 0,
         once_id: 0,
+        suppress_static_once_for: None,
     };
     state.map.record_ast_to_hir(ast.root, state.hir.root);
     state.map.record_hir_to_mir(state.hir.root, state.mir.root);
@@ -3048,6 +3049,10 @@ fn mir_for_child_can_skip_array(mir: &Vue2Mir, child: NodeId) -> bool {
                 !mir_node_is_template(mir, body) && !mir_node_is_slot_outlet(mir, body)
             })
         }
+        Some(Vue2MirKind::RenderStatic(render_static)) => render_static
+            .body
+            .is_some_and(|body| mir_for_child_can_skip_array(mir, body)),
+        Some(Vue2MirKind::Once(once)) => mir_for_child_can_skip_array(mir, once.body),
         _ => false,
     }
 }
@@ -3771,6 +3776,7 @@ struct Vue2LoweringState {
     js: JsAstStore,
     static_render_index: u32,
     once_id: u32,
+    suppress_static_once_for: Option<NodeId>,
 }
 
 fn lower_vue2_child_sequence(
@@ -3814,6 +3820,11 @@ fn lower_vue2_ast_node_to_mir_inner(
         Vue2AstKind::Root(_) => None,
         Vue2AstKind::Element(element) => {
             if allow_for && element.for_exp.is_some() {
+                if element.once && !element.static_in_for {
+                    return lower_vue2_once_for_to_mir(
+                        ast_id, element, ast, ast_node, hir_parent, mir_parent, state,
+                    );
+                }
                 return lower_vue2_for_to_mir(
                     ast_id,
                     element,
@@ -3924,6 +3935,48 @@ enum Vue2ForBodyMode {
     IfBranch,
 }
 
+fn lower_vue2_once_for_to_mir(
+    ast_id: NodeId,
+    element: &vuec_ast::Vue2Element,
+    ast: &Vue2Ast,
+    ast_node: &vuec_ast::Node<Vue2NodeKind>,
+    hir_parent: NodeId,
+    mir_parent: NodeId,
+    state: &mut Vue2LoweringState,
+) -> Option<(NodeId, NodeId)> {
+    let index = state.static_render_index;
+    state.static_render_index += 1;
+    let wrapper = state.mir.push_child(
+        mir_parent,
+        Vue2MirKind::RenderStatic(Vue2RenderStatic {
+            index,
+            body: None,
+            in_for: false,
+        }),
+        ast_node.span.clone(),
+    );
+    let previous = state.suppress_static_once_for.replace(ast_id);
+    let lowered = lower_vue2_for_to_mir(
+        ast_id,
+        element,
+        ast,
+        ast_node,
+        hir_parent,
+        wrapper,
+        state,
+        Vue2ForBodyMode::Normal,
+    );
+    state.suppress_static_once_for = previous;
+    let (hir_id, for_mir_id) = lowered?;
+    if let Some(node) = state.mir.node_mut(wrapper) {
+        if let Vue2MirKind::RenderStatic(render_static) = &mut node.kind {
+            render_static.body = Some(for_mir_id);
+        }
+    }
+    state.map.record_hir_to_mir(hir_id, wrapper);
+    Some((hir_id, wrapper))
+}
+
 fn lower_vue2_for_to_mir(
     ast_id: NodeId,
     element: &vuec_ast::Vue2Element,
@@ -3964,7 +4017,12 @@ fn lower_vue2_for_to_mir(
     );
     state.map.record_ast_to_hir(ast_id, hir_id);
     state.map.record_hir_to_mir(hir_id, mir_id);
-    let (body_hir, body_mir) = match body_mode {
+    let previous_suppressed = if element.once {
+        state.suppress_static_once_for.replace(ast_id)
+    } else {
+        state.suppress_static_once_for
+    };
+    let lowered_body = match body_mode {
         Vue2ForBodyMode::Normal => {
             lower_vue2_ast_node_to_mir_inner(ast_id, ast, hir_id, mir_id, state, false)?
         }
@@ -3972,6 +4030,10 @@ fn lower_vue2_for_to_mir(
             lower_vue2_if_branch_body_to_mir(ast_id, element, ast, ast_node, hir_id, mir_id, state)?
         }
     };
+    if element.once {
+        state.suppress_static_once_for = previous_suppressed;
+    }
+    let (body_hir, body_mir) = lowered_body;
     if let Some(node) = state.hir.node_mut(hir_id) {
         if let HirNodeKind::For(for_node) = &mut node.kind {
             for_node.body = body_hir;
@@ -4103,7 +4165,10 @@ fn lower_vue2_plain_element_to_mir(
     state: &mut Vue2LoweringState,
 ) -> Option<(NodeId, NodeId)> {
     let hir_kind = lower_vue2_element_to_hir_kind(element, ast_node, state);
-    let render_static = if element.static_root || (element.once && !element.static_in_for) {
+    let suppress_static_once = state.suppress_static_once_for == Some(ast_id);
+    let render_static = if !suppress_static_once
+        && (element.static_root || (element.once && !element.static_in_for))
+    {
         let index = state.static_render_index;
         state.static_render_index += 1;
         Some(Vue2RenderStatic {
@@ -4125,7 +4190,7 @@ fn lower_vue2_plain_element_to_mir(
             Vue2MirKind::RenderStatic(render_static),
             ast_node.span.clone(),
         ))
-    } else if element.once && element.static_in_for {
+    } else if !suppress_static_once && element.once && element.static_in_for {
         let once_id = state.once_id;
         state.once_id += 1;
         Some(state.mir.push_child(
@@ -6398,6 +6463,32 @@ mod tests {
             conditional.render,
             r#"with(this){return (show)?_c('Alert',[_c('template',{slot:"desc"},[_v("Content")])],2):_e()}"#
         );
+    }
+
+    #[test]
+    fn hoists_vue2_once_for_list_like_official_codegen() {
+        let result = compile(
+            r#"<div><i :class="`${prefix}-bar`" v-once v-for="i in 8" :key="`trigger-${i}`"></i></div>"#,
+            options(),
+        );
+
+        assert_eq!(result.render, r#"with(this){return _c('div',_m(0),0)}"#);
+        assert_eq!(
+            result.static_render_fns,
+            vec![
+                r#"with(this){return _l((8),function(i){return _c('i',{key:`trigger-${i}`,class:`${prefix}-bar`})})}"#
+            ]
+        );
+
+        let nested_for = compile(
+            r#"<div v-for="j in 2"><i v-once v-for="i in 8" :key="i">x</i></div>"#,
+            options(),
+        );
+        assert_eq!(
+            nested_for.render,
+            r#"with(this){return _l((2),function(j){return _c('div',_l((8),function(i){return _c('i',{key:i},[_v("x")])}),0)})}"#
+        );
+        assert!(nested_for.static_render_fns.is_empty());
     }
 
     #[test]
