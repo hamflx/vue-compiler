@@ -514,6 +514,17 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
                 }));
             }
             let compiled = vuec_vue2::compile(&preprocessed.source, options);
+            let tips = vue2_tips_value(&compiled.tips, output_source_range);
+            let errors = vue2_errors_value(&compiled.errors, output_source_range);
+            if !compiled.errors.is_empty() {
+                return Ok(json!({
+                    "ast": vue27_template_ast_value(&compiled),
+                    "code": "var render = function () {}\nvar staticRenderFns = []\n",
+                    "source": source,
+                    "tips": tips,
+                    "errors": errors,
+                }));
+            }
             Ok(json!({
                 "ast": vue27_template_ast_value(&compiled),
                 "code": compiler.vue27_sfc_template_code(
@@ -523,8 +534,8 @@ fn dispatch(command: &str, payload: Value) -> Result<Value> {
                     vue27_template_is_production(raw_options),
                 ),
                 "source": source,
-                "tips": vue2_tips_value(&compiled.tips, output_source_range),
-                "errors": vue2_errors_value(&compiled.errors, output_source_range),
+                "tips": tips,
+                "errors": errors,
             }))
         }
         "sfc.compileScript" => {
@@ -21369,6 +21380,55 @@ mod tests {
             missing["code"],
             json!("var render = function () {}\nvar staticRenderFns = []\n")
         );
+    }
+
+    #[test]
+    fn vue27_bridge_compile_template_returns_empty_render_on_vue2_errors() {
+        let plain = dispatch(
+            "sfc.vue27.compileTemplate",
+            json!({
+                "source": "<div></div><span></span><p></p>",
+                "filename": "example.vue",
+                "options": {
+                    "compilerOptions": {
+                        "outputSourceRange": false
+                    }
+                }
+            }),
+        )
+        .expect("vue27 sfc compileTemplate");
+
+        assert_eq!(
+            plain["code"],
+            json!("var render = function () {}\nvar staticRenderFns = []\n")
+        );
+        assert_eq!(plain["errors"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            plain["errors"][0],
+            json!("Component template should contain exactly one root element. If you are using v-if on multiple elements, use v-else-if to chain them instead.")
+        );
+
+        let ranged = dispatch(
+            "sfc.vue27.compileTemplate",
+            json!({
+                "source": "<div></div><span></span><p></p>",
+                "filename": "example.vue",
+                "options": {
+                    "compilerOptions": {
+                        "outputSourceRange": true
+                    }
+                }
+            }),
+        )
+        .expect("vue27 sfc compileTemplate");
+
+        assert_eq!(
+            ranged["code"],
+            json!("var render = function () {}\nvar staticRenderFns = []\n")
+        );
+        assert_eq!(ranged["errors"].as_array().unwrap().len(), 1);
+        assert_eq!(ranged["errors"][0]["start"], json!(11));
+        assert!(ranged["errors"][0].get("end").is_none());
     }
 
     #[test]

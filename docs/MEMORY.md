@@ -1,5 +1,8 @@
 # Memory
 
+- Current round: fixed a Vue 2.6 full-project corpus multi-root Vue 2.7 SFC `compileTemplate` mismatch class. Vue 2 compile diagnostics now mirror official `warnOnce` behavior for multiple root elements by reporting only the first root error and omitting `end` for that public range, while the Vue 2.7 SFC bridge now returns official empty render code when Vue 2 template compilation reports errors.
+- Verification for this multi-root SFC slice: focused `cargo test -p vuec_vue2 collects_vue2_source_ranges_like_official_compiler -- --nocapture`, focused `cargo test -p vuec_node_bridge vue27_bridge_compile_template_returns_empty_render_on_vue2_errors -- --nocapture`, full `cargo test -p vuec_vue2 --lib -- --nocapture` (`45/45`), full `cargo test -p vuec_node_bridge -- --nocapture` (`153/153`), and full-project focused corpus gates for `iview-iview` (`521` template modes across `173` files) and `view-design-ViewUI` (`516` template modes across `171` files) both passing.
+
 - Current round: fixed a Vue 2.6 full-project corpus `v-pre` descendant data mismatch class. Vue 2 MIR codegen now mirrors official `genElement` pre inheritance: descendants render under an inherited `v-pre` context, existing data objects include `pre:true`, component children under `v-pre` get a minimal `{pre:true}` data object, and plain ordinary descendants without data still omit the data object.
 - Verification for this `v-pre` inheritance slice: focused `cargo test -p vuec_vue2 generates_vue2_v_pre_template_like_official_codegen -- --nocapture`, full `cargo test -p vuec_vue2 --lib -- --nocapture` (`45/45`), `cargo fmt --all -- --check`, `git diff --check`, and full-project focused corpus gate for `statping-statping` (`183` template modes across `61` files) passing.
 

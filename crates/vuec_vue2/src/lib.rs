@@ -1107,11 +1107,12 @@ fn close_element(
                 block: Box::new(element),
             });
         } else if !is_ignorable_root_whitespace(&element) {
-            diagnostics.push(vue2_warning(
+            push_vue2_warning_once(
+                diagnostics,
                 "W_VUE2_MULTIPLE_ROOTS",
                 "Component template should contain exactly one root element. If you are using v-if on multiple elements, use v-else-if to chain them instead.",
                 element.span,
-            ));
+            );
         }
     } else {
         if matches!(element.tag.as_str(), "slot" | "template") {
@@ -1152,6 +1153,22 @@ fn close_element(
 
 fn is_ignorable_root_whitespace(_element: &Vue2Element) -> bool {
     false
+}
+
+fn push_vue2_warning_once(
+    diagnostics: &mut DiagnosticSink,
+    code: &str,
+    message: impl Into<String>,
+    span: Option<Span>,
+) {
+    if diagnostics
+        .as_slice()
+        .iter()
+        .any(|diagnostic| diagnostic.code == code)
+    {
+        return;
+    }
+    diagnostics.push(vue2_warning(code, message, span));
 }
 
 fn cleanup_scoped_slot_children(element: &mut Vue2Element, in_pre_tag: bool) {
@@ -6251,6 +6268,9 @@ fn vue2_issue_end(
     {
         return None;
     }
+    if diagnostic.code == "W_VUE2_MULTIPLE_ROOTS" {
+        return None;
+    }
     diagnostic
         .span
         .map(|span| vue2_public_source_offset(source, leading_space_len + span.end.0))
@@ -7603,6 +7623,11 @@ mod tests {
         assert_eq!(unclosed.errors.len(), 1);
         assert_eq!(unclosed.errors[0].start, Some(5));
         assert_eq!(unclosed.errors[0].end, Some(11));
+
+        let multiple_roots = compile("<div></div><span></span><p></p>", options());
+        assert_eq!(multiple_roots.errors.len(), 1);
+        assert_eq!(multiple_roots.errors[0].start, Some(11));
+        assert_eq!(multiple_roots.errors[0].end, None);
 
         let slot_key = compile(r#"<div><slot v-bind:key="key" /></div>"#, options());
         assert_eq!(slot_key.errors.len(), 1);
