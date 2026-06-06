@@ -4456,8 +4456,18 @@ fn lower_vue2_data_object(
         || data.wrap_data.is_some()
         || data.wrap_listeners.is_some()
         || element.slot_scope.is_some()
-        || element.inline_template)
-        .then_some(data)
+        || element.inline_template
+        || vue2_raw_empty_class_or_style_requires_data(element))
+    .then_some(data)
+}
+
+fn vue2_raw_empty_class_or_style_requires_data(element: &vuec_ast::Vue2Element) -> bool {
+    ["class", "style"].iter().any(|name| {
+        element
+            .raw_attrs_map
+            .get(*name)
+            .is_some_and(|attr| attr.value.is_empty())
+    })
 }
 
 fn lower_vue2_data_props(
@@ -6948,11 +6958,20 @@ mod tests {
         };
         let class_and_empty_style = compile(
             r#"<section><div class="el-button el-button--primary " style=""></div><span class=" "></span><i class=""></i></section>"#,
-            no_optimize_options,
+            no_optimize_options.clone(),
         );
         assert_eq!(
             class_and_empty_style.render,
-            r#"with(this){return _c('section',[_c('div',{staticClass:"el-button el-button--primary"}),_c('span',{staticClass:""}),_c('i')])}"#
+            r#"with(this){return _c('section',[_c('div',{staticClass:"el-button el-button--primary"}),_c('span',{staticClass:""}),_c('i',{})])}"#
+        );
+
+        let empty_class_and_style_data = compile(
+            r#"<section><div class=""><span>{{ message }}</span></div><div style=""><span>{{ message }}</span></div></section>"#,
+            no_optimize_options,
+        );
+        assert_eq!(
+            empty_class_and_style_data.render,
+            r#"with(this){return _c('section',[_c('div',{},[_c('span',[_v(_s(message))])]),_c('div',{},[_c('span',[_v(_s(message))])])])}"#
         );
 
         let pagination = compile(
