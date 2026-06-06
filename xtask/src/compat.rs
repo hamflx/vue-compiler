@@ -91,6 +91,27 @@ pub struct ConformanceArgs {
 }
 
 #[derive(Clone, Debug, Args, Serialize)]
+pub struct Vue2ProjectCorpusArgs {
+    #[arg(long, default_value = "compat/external/vue26-projects.toml")]
+    pub manifest: PathBuf,
+
+    #[arg(long, default_value = "target/external/vue2-project-corpus")]
+    pub out_dir: PathBuf,
+
+    #[arg(long, default_value = "vue2_6")]
+    pub project_vue_version: VersionLine,
+
+    #[arg(long, default_value = "vue2_7")]
+    pub compiler_version_line: VersionLine,
+
+    #[arg(long)]
+    pub project: Option<String>,
+
+    #[arg(long, default_value_t = 0)]
+    pub max_files_per_project: usize,
+}
+
+#[derive(Clone, Debug, Args, Serialize)]
 pub struct Vue27ProjectCorpusArgs {
     #[arg(long, default_value = "compat/external/vue27-projects.toml")]
     pub manifest: PathBuf,
@@ -565,15 +586,15 @@ struct OutputContractFile {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-struct Vue27ProjectCorpusManifest {
+struct Vue2ProjectCorpusManifest {
     schema_version: u32,
     min_projects: Option<usize>,
     min_vue_files_per_project: Option<usize>,
-    projects: Vec<Vue27ProjectSpec>,
+    projects: Vec<Vue2ProjectSpec>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
-struct Vue27ProjectSpec {
+struct Vue2ProjectSpec {
     name: String,
     repo: String,
     rev: String,
@@ -585,14 +606,14 @@ struct Vue27ProjectSpec {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct Vue27ProjectProbeFile {
+struct Vue2ProjectProbeFile {
     path: String,
     modes: usize,
     diffs: Vec<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct Vue27ProjectProbeCounts {
+struct Vue2ProjectProbeCounts {
     files: usize,
     template_files: usize,
     modes: usize,
@@ -601,19 +622,21 @@ struct Vue27ProjectProbeCounts {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct Vue27ProjectProbeReport {
+struct Vue2ProjectProbeReport {
     status: String,
-    counts: Vue27ProjectProbeCounts,
-    files: Vec<Vue27ProjectProbeFile>,
+    counts: Vue2ProjectProbeCounts,
+    files: Vec<Vue2ProjectProbeFile>,
 }
 
 #[derive(Clone, Debug, Serialize)]
-struct Vue27ProjectCorpusProjectReport {
+struct Vue2ProjectCorpusProjectReport {
     name: String,
     repo: String,
     rev: String,
     package_json: String,
     checkout: String,
+    project_vue_version: String,
+    compiler_version_line: String,
     vue_files: usize,
     selected_vue_files: usize,
     vue_dependency: Option<String>,
@@ -3705,11 +3728,11 @@ fn output_contract_counts_from_items(items: &[ReportItem]) -> serde_json::Value 
     })
 }
 
-fn vue27_project_corpus_targets() -> Vec<TargetSpec> {
+fn vue2_project_corpus_targets(compiler_version_line: VersionLine) -> Vec<TargetSpec> {
     all_targets()
         .iter()
         .copied()
-        .filter(|target| target.version_line == VersionLine::Vue27)
+        .filter(|target| target.version_line == compiler_version_line)
         .collect()
 }
 
@@ -3759,41 +3782,55 @@ fn package_dependency_spec(package: &serde_json::Value, name: &str) -> Option<St
     })
 }
 
-fn is_vue27_dependency(spec: Option<&str>) -> bool {
+fn is_vue_dependency_for_version(spec: Option<&str>, version_line: VersionLine) -> bool {
     let Some(spec) = spec else {
         return false;
     };
-    let cleaned = spec
-        .trim()
-        .trim_start_matches('^')
-        .trim_start_matches('~')
-        .trim_start_matches(">=")
-        .trim_start_matches('=')
-        .trim();
-    cleaned.starts_with("2.7.")
-        || cleaned.starts_with("2.7")
-        || spec.contains("npm:vue@2.7")
-        || spec.contains("vue@2.7")
+    let minor = match version_line {
+        VersionLine::Vue26 => "2.6",
+        VersionLine::Vue27 => "2.7",
+        VersionLine::Vue3 => return false,
+    };
+
+    let mut cleaned = spec.trim();
+    if let Some(stripped) = cleaned.strip_prefix("workspace:") {
+        cleaned = stripped.trim();
+    }
+    if let Some(stripped) = cleaned
+        .strip_prefix("npm:vue@")
+        .or_else(|| cleaned.strip_prefix("vue@"))
+    {
+        cleaned = stripped.trim();
+    }
+    for prefix in ["^", "~", ">=", "="] {
+        if let Some(stripped) = cleaned.strip_prefix(prefix) {
+            cleaned = stripped.trim();
+            break;
+        }
+    }
+    cleaned == minor
+        || cleaned.starts_with(&format!("{minor}."))
+        || cleaned.starts_with(&format!("{minor} "))
 }
 
 #[derive(Clone, Debug)]
-struct Vue27ProjectScan {
+struct Vue2ProjectScan {
     total: usize,
     files: Vec<PathBuf>,
 }
 
-fn scan_project_vue_files(root: &Path, project: &Vue27ProjectSpec) -> Vue27ProjectScan {
+fn scan_project_vue_files(root: &Path, project: &Vue2ProjectSpec) -> Vue2ProjectScan {
     let mut files = Vec::new();
     let mut total = 0;
     scan_project_vue_files_recursive(root, root, project, &mut files, &mut total);
     files.sort();
-    Vue27ProjectScan { total, files }
+    Vue2ProjectScan { total, files }
 }
 
 fn scan_project_vue_files_recursive(
     root: &Path,
     dir: &Path,
-    project: &Vue27ProjectSpec,
+    project: &Vue2ProjectSpec,
     files: &mut Vec<PathBuf>,
     total: &mut usize,
 ) {
@@ -3823,7 +3860,7 @@ fn scan_project_vue_files_recursive(
     }
 }
 
-fn project_path_selected(project: &Vue27ProjectSpec, path: &str) -> bool {
+fn project_path_selected(project: &Vue2ProjectSpec, path: &str) -> bool {
     let included = project
         .include
         .as_ref()
@@ -3867,12 +3904,12 @@ fn limit_vue_files(files: Vec<PathBuf>, max_files: usize) -> Vec<PathBuf> {
     files.into_iter().take(max_files).collect()
 }
 
-fn run_vue27_project_probe(
+fn run_vue2_project_probe(
     official_root: &Path,
     rust_root: &Path,
     project_root: &Path,
     files: &[PathBuf],
-) -> Result<Vue27ProjectProbeReport> {
+) -> Result<Vue2ProjectProbeReport> {
     let official_root = absolute_path(official_root);
     let rust_root = absolute_path(rust_root);
     let project_root = absolute_path(project_root);
@@ -3882,7 +3919,7 @@ fn run_vue27_project_probe(
         .collect::<Vec<_>>();
     let output = Command::new(resolve_program("node"))
         .arg("-e")
-        .arg(VUE27_PROJECT_CORPUS_PROBE_SCRIPT)
+        .arg(VUE2_PROJECT_CORPUS_PROBE_SCRIPT)
         .env("VUEC_PROJECT_OFFICIAL_ROOT", &official_root)
         .env("VUEC_PROJECT_RUST_ROOT", &rust_root)
         .env("VUEC_PROJECT_ROOT", &project_root)
@@ -3895,19 +3932,38 @@ fn run_vue27_project_probe(
             serde_json::to_string(&relative_files)?,
         )
         .output()
-        .with_context(|| "failed to spawn Vue 2.7 project corpus probe")?;
+        .with_context(|| "failed to spawn Vue 2 project corpus probe")?;
     if !output.status.success() {
         anyhow::bail!(
-            "Vue 2.7 project corpus probe failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
+            "Vue 2 project corpus probe failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
             output.status.code(),
             String::from_utf8_lossy(&output.stdout).trim(),
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
-    serde_json::from_slice(&output.stdout).context("failed to parse Vue 2.7 project probe output")
+    serde_json::from_slice(&output.stdout).context("failed to parse Vue 2 project probe output")
 }
 
 pub fn verify_vue27_project_corpus(args: &Vue27ProjectCorpusArgs) -> JsonReport {
+    let generic = Vue2ProjectCorpusArgs {
+        manifest: args.manifest.clone(),
+        out_dir: args.out_dir.clone(),
+        project_vue_version: VersionLine::Vue27,
+        compiler_version_line: VersionLine::Vue27,
+        project: args.project.clone(),
+        max_files_per_project: args.max_files_per_project,
+    };
+    verify_vue2_project_corpus_with_command(&generic, "verify_vue27_project_corpus")
+}
+
+pub fn verify_vue2_project_corpus(args: &Vue2ProjectCorpusArgs) -> JsonReport {
+    verify_vue2_project_corpus_with_command(args, "verify_vue2_project_corpus")
+}
+
+fn verify_vue2_project_corpus_with_command(
+    args: &Vue2ProjectCorpusArgs,
+    command_name: &str,
+) -> JsonReport {
     let manifest_path = absolute_path(&args.manifest);
     let out_dir = absolute_path(&args.out_dir);
     let mut items = Vec::new();
@@ -3915,20 +3971,37 @@ pub fn verify_vue27_project_corpus(args: &Vue27ProjectCorpusArgs) -> JsonReport 
     let mut created = Vec::new();
     let mut project_reports = Vec::new();
 
-    let manifest = match read_json_or_toml::<Vue27ProjectCorpusManifest>(&manifest_path) {
+    if !matches!(
+        args.project_vue_version,
+        VersionLine::Vue26 | VersionLine::Vue27
+    ) {
+        return JsonReport::new(command_name, ReportStatus::Fail).with_violations(vec![format!(
+            "project Vue version must be vue2_6 or vue2_7; got {}",
+            args.project_vue_version.as_str()
+        )]);
+    }
+    if args.compiler_version_line != VersionLine::Vue27 {
+        return JsonReport::new(command_name, ReportStatus::Fail).with_violations(vec![format!(
+            "Vue 2 project corpus comparison uses the official Vue 2.7 compiler package boundary; got compiler_version_line={}",
+            args.compiler_version_line.as_str()
+        )]);
+    }
+
+    let manifest = match read_json_or_toml::<Vue2ProjectCorpusManifest>(&manifest_path) {
         Ok(manifest) => manifest,
         Err(err) => {
-            return JsonReport::new("verify_vue27_project_corpus", ReportStatus::Fail)
-                .with_violations(vec![format!(
-                    "failed to read Vue 2.7 project corpus manifest {}: {err:#}",
+            return JsonReport::new(command_name, ReportStatus::Fail).with_violations(vec![
+                format!(
+                    "failed to read Vue 2 project corpus manifest {}: {err:#}",
                     manifest_path.display()
-                )]);
+                ),
+            ]);
         }
     };
 
     if manifest.schema_version != 1 {
         violations.push(format!(
-            "unsupported Vue 2.7 project corpus manifest schema {}; expected 1",
+            "unsupported Vue 2 project corpus manifest schema {}; expected 1",
             manifest.schema_version
         ));
     }
@@ -3949,45 +4022,51 @@ pub fn verify_vue27_project_corpus(args: &Vue27ProjectCorpusArgs) -> JsonReport 
     };
     if selected_projects.len() < required_projects {
         violations.push(format!(
-            "Vue 2.7 project corpus selected {} projects; expected at least {required_projects}",
+            "Vue 2 project corpus selected {} projects; expected at least {required_projects}",
             selected_projects.len()
         ));
     }
 
-    let targets = vue27_project_corpus_targets();
+    let targets = vue2_project_corpus_targets(args.compiler_version_line);
     let lock_path = PathBuf::from("compat/official-revisions.lock");
     let lock_hash = file_sha256(&lock_path).ok();
     let lock = match load_official_lock(&lock_path) {
         Ok(lock) => lock,
         Err(err) => {
-            return JsonReport::new("verify_vue27_project_corpus", ReportStatus::Fail)
+            return JsonReport::new(command_name, ReportStatus::Fail)
                 .with_violations(vec![format!("failed to load official lock: {err:#}")]);
         }
     };
     let metadata = ReportMetadata::capture().with_lock_context(lock_hash.clone(), Some(&lock));
-    let Some(baseline) = baseline_for(&lock, VersionLine::Vue27) else {
-        return JsonReport::new("verify_vue27_project_corpus", ReportStatus::Fail)
-            .with_violations(vec!["official Vue 2.7 baseline is missing".into()]);
+    let Some(baseline) = baseline_for(&lock, args.compiler_version_line) else {
+        return JsonReport::new(command_name, ReportStatus::Fail).with_violations(vec![format!(
+            "official {} baseline is missing",
+            args.compiler_version_line.as_str()
+        )]);
     };
-    let official_root = match ensure_official_npm_install(VersionLine::Vue27, baseline) {
+    let official_root = match ensure_official_npm_install(args.compiler_version_line, baseline) {
         Ok(root) => root,
         Err(err) => {
-            return JsonReport::new("verify_vue27_project_corpus", ReportStatus::Fail)
-                .with_violations(vec![format!(
-                    "failed to prepare official Vue 2.7 packages: {err:#}"
-                )]);
+            return JsonReport::new(command_name, ReportStatus::Fail).with_violations(vec![
+                format!(
+                    "failed to prepare official {} packages: {err:#}",
+                    args.compiler_version_line.as_str()
+                ),
+            ]);
         }
     };
     match prepare_alias_backend(AliasBackend::Generated, &targets) {
         Ok(paths) => created.extend(paths.into_iter().map(|path| path.display().to_string())),
         Err(err) => {
-            return JsonReport::new("verify_vue27_project_corpus", ReportStatus::Fail)
-                .with_violations(vec![format!(
-                    "failed to prepare generated Vue 2.7 alias packages: {err:#}"
-                )]);
+            return JsonReport::new(command_name, ReportStatus::Fail).with_violations(vec![
+                format!(
+                    "failed to prepare generated {} alias packages: {err:#}",
+                    args.compiler_version_line.as_str()
+                ),
+            ]);
         }
     }
-    let rust_root = rust_alias_root(VersionLine::Vue27);
+    let rust_root = rust_alias_root(args.compiler_version_line);
 
     let checkout_root = out_dir.join("checkouts");
     let report_root = out_dir.join("reports");
@@ -4030,13 +4109,22 @@ pub fn verify_vue27_project_corpus(args: &Vue27ProjectCorpusArgs) -> JsonReport 
                     vue_dependency = package_dependency_spec(&package, "vue");
                     vue_template_compiler_dependency =
                         package_dependency_spec(&package, "vue-template-compiler");
-                    if !is_vue27_dependency(vue_dependency.as_deref()) {
+                    if !is_vue_dependency_for_version(
+                        vue_dependency.as_deref(),
+                        args.project_vue_version,
+                    ) {
                         status = ReportStatus::Fail;
                         detail = Some(format!(
-                            "package {} does not declare Vue 2.7 dependency; found {:?}",
-                            package_json_rel, vue_dependency
+                            "package {} does not declare {} dependency; found {:?}",
+                            package_json_rel,
+                            args.project_vue_version.as_str(),
+                            vue_dependency
                         ));
-                        violations.push(format!("{} is not pinned to Vue 2.7", project.name));
+                        violations.push(format!(
+                            "{} is not pinned to {}",
+                            project.name,
+                            args.project_vue_version.as_str()
+                        ));
                     } else {
                         let discovered = scan_project_vue_files(&checkout, project);
                         vue_files = discovered.total;
@@ -4057,7 +4145,7 @@ pub fn verify_vue27_project_corpus(args: &Vue27ProjectCorpusArgs) -> JsonReport 
                                 project.name
                             ));
                         } else {
-                            match run_vue27_project_probe(
+                            match run_vue2_project_probe(
                                 &official_root,
                                 &rust_root,
                                 &checkout,
@@ -4133,12 +4221,14 @@ pub fn verify_vue27_project_corpus(args: &Vue27ProjectCorpusArgs) -> JsonReport 
             detail.clone(),
             Some(checkout.clone()),
         ));
-        project_reports.push(Vue27ProjectCorpusProjectReport {
+        project_reports.push(Vue2ProjectCorpusProjectReport {
             name: project.name.clone(),
             repo: project.repo.clone(),
             rev: project.rev.clone(),
             package_json: package_json_rel,
             checkout: checkout.display().to_string(),
+            project_vue_version: args.project_vue_version.as_str().into(),
+            compiler_version_line: args.compiler_version_line.as_str().into(),
             vue_files,
             selected_vue_files,
             vue_dependency,
@@ -4149,11 +4239,13 @@ pub fn verify_vue27_project_corpus(args: &Vue27ProjectCorpusArgs) -> JsonReport 
         });
     }
 
-    let aggregate_path = out_dir.join("vue27-project-corpus.json");
+    let aggregate_path = out_dir.join(format!("{command_name}.json"));
     let aggregate = serde_json::json!({
-        "command": "verify_vue27_project_corpus",
+        "command": command_name,
         "metadata": metadata,
         "manifest": manifest_path,
+        "project_vue_version": args.project_vue_version.as_str(),
+        "compiler_version_line": args.compiler_version_line.as_str(),
         "official_root": official_root,
         "rust_root": rust_root,
         "projects": project_reports,
@@ -4173,13 +4265,17 @@ pub fn verify_vue27_project_corpus(args: &Vue27ProjectCorpusArgs) -> JsonReport 
         created.push(aggregate_path.display().to_string());
     }
 
-    let mut report = JsonReport::new("verify_vue27_project_corpus", ReportStatus::Pending);
+    let mut report = JsonReport::new(command_name, ReportStatus::Pending);
     report.metadata = metadata;
     report
         .with_items(items)
         .with_violations(violations)
         .with_created(created)
-        .with_note("verifies fixed external Vue 2.7 project SFC templates by comparing official vue-template-compiler / vue/compiler-sfc output with generated Rust aliases")
+        .with_note(format!(
+            "verifies fixed external {} project SFC templates by comparing official {} vue-template-compiler / vue/compiler-sfc output with generated Rust aliases",
+            args.project_vue_version.as_str(),
+            args.compiler_version_line.as_str()
+        ))
 }
 
 fn compare_option_probe(
@@ -9538,7 +9634,7 @@ function namedArity(name, arity, fn) {
 }
 "#;
 
-const VUE27_PROJECT_CORPUS_PROBE_SCRIPT: &str = r#"
+const VUE2_PROJECT_CORPUS_PROBE_SCRIPT: &str = r#"
 const fs = require('fs');
 const path = require('path');
 const { createRequire } = require('module');
@@ -19042,8 +19138,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn vue27_project_corpus_manifest_parses_toml_schema() {
-        let manifest = toml::from_str::<Vue27ProjectCorpusManifest>(
+    fn vue2_project_corpus_manifest_parses_toml_schema() {
+        let manifest = toml::from_str::<Vue2ProjectCorpusManifest>(
             r#"
 schema_version = 1
 min_projects = 15
@@ -19060,18 +19156,40 @@ projects = []
     }
 
     #[test]
-    fn vue27_project_dependency_detection_accepts_only_vue_27_specs() {
-        assert!(is_vue27_dependency(Some("^2.7.16")));
-        assert!(is_vue27_dependency(Some("~2.7.14")));
-        assert!(is_vue27_dependency(Some("npm:vue@2.7.16")));
-        assert!(is_vue27_dependency(Some("workspace:vue@2.7.16")));
-        assert!(!is_vue27_dependency(Some("2.6.14")));
-        assert!(!is_vue27_dependency(Some("^3.5.0")));
-        assert!(!is_vue27_dependency(None));
+    fn vue2_project_dependency_detection_accepts_selected_vue2_specs() {
+        assert!(is_vue_dependency_for_version(
+            Some("^2.7.16"),
+            VersionLine::Vue27
+        ));
+        assert!(is_vue_dependency_for_version(
+            Some("~2.7.14"),
+            VersionLine::Vue27
+        ));
+        assert!(is_vue_dependency_for_version(
+            Some("npm:vue@2.7.16"),
+            VersionLine::Vue27
+        ));
+        assert!(is_vue_dependency_for_version(
+            Some("workspace:vue@2.7.16"),
+            VersionLine::Vue27
+        ));
+        assert!(is_vue_dependency_for_version(
+            Some("^2.6.14"),
+            VersionLine::Vue26
+        ));
+        assert!(!is_vue_dependency_for_version(
+            Some("2.6.14"),
+            VersionLine::Vue27
+        ));
+        assert!(!is_vue_dependency_for_version(
+            Some("^3.5.0"),
+            VersionLine::Vue27
+        ));
+        assert!(!is_vue_dependency_for_version(None, VersionLine::Vue27));
     }
 
     #[test]
-    fn vue27_project_dependency_lookup_checks_package_sections_in_order() {
+    fn vue2_project_dependency_lookup_checks_package_sections_in_order() {
         let package = serde_json::json!({
             "dependencies": {
                 "vue": "^2.7.16"
@@ -19097,9 +19215,9 @@ projects = []
     }
 
     #[test]
-    fn vue27_project_scan_applies_include_exclude_and_skips_generated_dirs() {
+    fn vue2_project_scan_applies_include_exclude_and_skips_generated_dirs() {
         let temp = std::env::temp_dir().join(format!(
-            "vuec-xtask-vue27-project-scan-{}",
+            "vuec-xtask-vue2-project-scan-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
@@ -19121,7 +19239,7 @@ projects = []
         )
         .unwrap();
 
-        let project = Vue27ProjectSpec {
+        let project = Vue2ProjectSpec {
             name: "scan-fixture".into(),
             repo: "https://example.invalid/repo.git".into(),
             rev: "0123456789abcdef0123456789abcdef01234567".into(),
@@ -19145,7 +19263,7 @@ projects = []
     }
 
     #[test]
-    fn vue27_project_file_limit_is_deterministic_and_zero_means_unlimited() {
+    fn vue2_project_file_limit_is_deterministic_and_zero_means_unlimited() {
         let files = vec![
             PathBuf::from("src/A.vue"),
             PathBuf::from("src/B.vue"),
