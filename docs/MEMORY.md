@@ -1,5 +1,8 @@
 # Memory
 
+- Final Vue 2.6 production-corpus status: `cargo xtask verify-vue2-project-corpus` now passes the full pinned 15-project corpus (`15` pass / `0` fail / `0` pending), using the official Vue 2.7 `vue-template-compiler` and `vue/compiler-sfc` package boundary against the Rust aliases. The passing set includes `ElemeFE-element` (`element-ui`) and totals `5014` matching template modes across `1652` template files in the reported project details.
+- Final verification artifact: `target/external/vue2-project-corpus/verify_vue2_project_corpus.json` records the run commit, lock hash, Node/Rust versions, and pinned official Vue commits for the full corpus gate.
+
 - Current round: fixed the final Vue 2.6 full-project corpus scoped slot mismatch class in `buefy-buefy-v0`. New `v-slot` conditions now preserve official Vue 2 slot-object branch semantics for `v-if` / `v-else-if` / `v-else`, including branch-specific slot names/scopes, while legacy `slot-scope` keeps the official body-level conditional behavior. Component-level `v-slot` also now belongs to the component itself instead of being lifted to the parent scoped slot collection.
 - Verification for this scoped slot branch slice: focused `cargo test -p vuec_vue2 generates_vue2_scoped_slots_like_official_codegen -- --nocapture`, full `cargo test -p vuec_vue2 --lib -- --nocapture` (`45/45`), `cargo fmt --all -- --check`, `git diff --check`, and full-project focused corpus gate for `buefy-buefy-v0` (`1133` template modes across `375` files) passing.
 
