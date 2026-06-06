@@ -151,9 +151,23 @@ Vue 2 project corpus 应作为单独 release gate 报告：
 
 ## CompileScript 架构方案
 
+### 0. 版本范围
+
+这里不应该只按 Vue 2.7 单点设计。当前代码里：
+
+- Vue 2.6 没有 Vue 2.7 / Vue 3 这种 SFC `compileScript` 和 script setup 编译入口，主要走 `vuec_vue2` 的 template compiler / `compileToFunctions` 路径。因此它不应纳入 `SfcScriptCompileContext`，否则会把模板编译问题和 SFC script 问题混在一起。
+- Vue 2.7 有明确问题：`compile_vue27_script()` 同时急切生成 `scriptAst` / `scriptSetupAst`，并在 script errors、content、binding metadata 路径重复跑 setup analysis；return bindings 还会对每个 import 重扫 template。
+- Vue 3 也有同类问题：`compile_script()` 同样急切生成 `scriptAst` / `scriptSetupAst`；`script_content()` 内部会再跑 `vue3_script_compile_errors()`；Vue 3 的 return bindings 和 import metadata 也会通过 `vue3_template_uses_identifier()` 对 template usage 做重复计算。Vue 3 还多了 type resolver、props destructure、inline template 等更复杂状态，更需要统一 context。
+
+因此重构方向应是通用 `SfcScriptCompileContext` 骨架 + 版本特化上下文：
+
+- `Vue27ScriptCompileContext`：优先解决 setup analysis 去重、template usage index、normal script return bindings 缓存。
+- `Vue3ScriptCompileContext`：复用 AST projection mode、template usage index、normal/setup parse 结果，并把 type resolver、normal type context、user imports、setup analysis、inline template 所需 binding metadata 收敛到同一个上下文。
+- Vue 2.6：不进入这个 context；如果后续发现模板编译重复 parse/analysis，再在 Vue 2 template compiler 侧单独设计上下文。
+
 ### 1. 引入 Script Compile Context
 
-为 `compile_vue27_script()` 建一个 `Vue27ScriptCompileContext`，或者更通用的 `SfcScriptCompileContext`，每次 compile 只构建一次。
+先建一个通用 `SfcScriptCompileContext` 思路，再落到 `Vue27ScriptCompileContext` 和 `Vue3ScriptCompileContext` 两个实现。每次 compile 只构建一次。
 
 它应该保存或引用：
 

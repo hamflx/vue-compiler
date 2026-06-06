@@ -151,9 +151,23 @@ The Vue 2 project corpus should be reported as a separate release gate:
 
 ## CompileScript Architecture Proposal
 
+### 0. Version Scope
+
+This should not be designed as a Vue 2.7-only optimization. In the current code:
+
+- Vue 2.6 does not have the Vue 2.7 / Vue 3 SFC `compileScript` and script setup entry point. It mainly uses the `vuec_vue2` template compiler / `compileToFunctions` path. It should not be forced into `SfcScriptCompileContext`; template compiler caching should be handled separately if needed.
+- Vue 2.7 has the clearest issue: `compile_vue27_script()` eagerly builds `scriptAst` / `scriptSetupAst`, repeats setup analysis through script errors, generated content, and binding metadata, and rescans template usage for each import while computing return bindings.
+- Vue 3 has related issues too: `compile_script()` also eagerly builds `scriptAst` / `scriptSetupAst`; `script_content()` calls `vue3_script_compile_errors()` again; Vue 3 return bindings and import metadata can both call `vue3_template_uses_identifier()`, rebuilding template usage work. Vue 3 also has more state around type resolution, props destructure, and inline template generation, so it benefits from a shared context even more.
+
+The refactor should therefore use a shared `SfcScriptCompileContext` shape with version-specific contexts:
+
+- `Vue27ScriptCompileContext`: prioritize setup analysis reuse, template usage indexing, and cached normal-script return bindings.
+- `Vue3ScriptCompileContext`: reuse AST projection mode, template usage indexing, normal/setup parse results, type resolver state, normal type context, user imports, setup analysis, and inline-template binding metadata.
+- Vue 2.6: keep it out of this context; if repeated work appears in the template compiler, design a separate Vue 2 template compile context.
+
 ### 1. Introduce A Script Compile Context
 
-Add a `Vue27ScriptCompileContext` or broader `SfcScriptCompileContext` that is built once per `compile_vue27_script()` call.
+Add a shared `SfcScriptCompileContext` shape, then implement `Vue27ScriptCompileContext` and `Vue3ScriptCompileContext` around the version-specific state. Each compile call should build its context once.
 
 It should own or reference:
 
