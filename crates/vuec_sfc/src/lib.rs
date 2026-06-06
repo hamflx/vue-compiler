@@ -803,6 +803,235 @@ fn source_hash(source: &str) -> u64 {
     hasher.finish()
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SfcScriptAstMode {
+    Full,
+}
+
+impl SfcScriptAstMode {
+    fn from_options(_options: &SfcScriptCompileOptions) -> Self {
+        Self::Full
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct TemplateUsageCacheSlot {
+    usage_check_source: Option<String>,
+}
+
+impl TemplateUsageCacheSlot {
+    fn is_empty(&self) -> bool {
+        self.usage_check_source.is_none()
+    }
+}
+
+#[derive(Clone, Debug)]
+struct SfcScriptBlockMetadata<'a> {
+    block: &'a SfcBlock,
+    is_js_like: bool,
+}
+
+impl<'a> SfcScriptBlockMetadata<'a> {
+    fn new(block: &'a SfcBlock) -> Self {
+        Self {
+            block,
+            is_js_like: script_lang_is_js_like(&block.attrs),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct SfcScriptCompileContext<'a> {
+    descriptor: &'a SfcDescriptor,
+    script: Option<SfcScriptBlockMetadata<'a>>,
+    script_setup: Option<SfcScriptBlockMetadata<'a>>,
+    raw_content: String,
+    source_type: oxc_span::SourceType,
+    ast_mode: SfcScriptAstMode,
+    template_usage_cache: TemplateUsageCacheSlot,
+    script_ast: Vec<Value>,
+    script_setup_ast: Vec<Value>,
+}
+
+impl<'a> SfcScriptCompileContext<'a> {
+    fn new(
+        descriptor: &'a SfcDescriptor,
+        options: &'a SfcScriptCompileOptions,
+        js: &mut JsAstStore,
+        vue3_js_like_only: bool,
+    ) -> Self {
+        let script = descriptor.script.as_ref().map(SfcScriptBlockMetadata::new);
+        let script_setup = descriptor
+            .script_setup
+            .as_ref()
+            .map(SfcScriptBlockMetadata::new);
+        let source_type = script_source_type(descriptor);
+        let ast_mode = SfcScriptAstMode::from_options(options);
+        let mut context = Self {
+            descriptor,
+            script,
+            script_setup,
+            raw_content: String::new(),
+            source_type,
+            ast_mode,
+            template_usage_cache: TemplateUsageCacheSlot::default(),
+            script_ast: Vec::new(),
+            script_setup_ast: Vec::new(),
+        };
+        context.collect_raw_content_and_ast(js, vue3_js_like_only);
+        context
+    }
+
+    fn collect_raw_content_and_ast(&mut self, js: &mut JsAstStore, vue3_js_like_only: bool) {
+        if let Some(script) = self.script.as_ref() {
+            self.raw_content.push_str(&script.block.content);
+            if !vue3_js_like_only || script.is_js_like {
+                self.script_ast = self.project_block_ast(js, script.block);
+            }
+        }
+        if let Some(script_setup) = self.script_setup.as_ref() {
+            if !self.raw_content.is_empty() {
+                self.raw_content.push('\n');
+            }
+            self.raw_content.push_str(&script_setup.block.content);
+            if !vue3_js_like_only || script_setup.is_js_like {
+                self.script_setup_ast = self.project_block_ast(js, script_setup.block);
+            }
+        }
+    }
+
+    fn project_block_ast(&self, js: &mut JsAstStore, block: &SfcBlock) -> Vec<Value> {
+        match self.ast_mode {
+            SfcScriptAstMode::Full => {
+                let id = js.register_program(
+                    block.content.clone(),
+                    Span::new(self.descriptor.source_file, block.loc.start, block.loc.end),
+                    script_mode(&block.attrs),
+                    self.source_type,
+                );
+                sfc_script_ast_body(js, id, &block.content)
+            }
+        }
+    }
+
+    fn descriptor(&self) -> &'a SfcDescriptor {
+        self.descriptor
+    }
+
+    fn raw_content(&self) -> &str {
+        &self.raw_content
+    }
+
+    fn source_type(&self) -> oxc_span::SourceType {
+        self.source_type
+    }
+
+    fn filename(&self) -> &str {
+        self.descriptor.filename.as_str()
+    }
+
+    fn has_script_setup(&self) -> bool {
+        self.script_setup.is_some()
+    }
+
+    fn script_or_setup_attrs(&self) -> SfcBlockAttrs {
+        self.script
+            .as_ref()
+            .or(self.script_setup.as_ref())
+            .map(|metadata| metadata.block.attrs.clone())
+            .unwrap_or_default()
+    }
+
+    fn script_or_setup_loc(&self) -> Option<SfcBlockLocation> {
+        self.script
+            .as_ref()
+            .or(self.script_setup.as_ref())
+            .map(|metadata| metadata.block.loc.clone())
+    }
+
+    fn setup_or_script_lang(&self) -> Option<String> {
+        self.script_setup
+            .as_ref()
+            .or(self.script.as_ref())
+            .and_then(|metadata| metadata.block.attrs.lang.clone())
+    }
+
+    fn all_script_blocks_are_js_like(&self) -> bool {
+        self.script
+            .as_ref()
+            .into_iter()
+            .chain(self.script_setup.as_ref())
+            .all(|metadata| metadata.is_js_like)
+            && (self.script.is_some() || self.script_setup.is_some())
+    }
+
+    fn into_script_ast(self) -> (Vec<Value>, Vec<Value>) {
+        (self.script_ast, self.script_setup_ast)
+    }
+
+    fn template_usage_cache_is_empty(&self) -> bool {
+        self.template_usage_cache.is_empty()
+    }
+}
+
+#[derive(Clone, Debug)]
+struct Vue3ScriptCompileContext<'a> {
+    inner: SfcScriptCompileContext<'a>,
+}
+
+impl<'a> Vue3ScriptCompileContext<'a> {
+    fn new(
+        descriptor: &'a SfcDescriptor,
+        options: &'a SfcScriptCompileOptions,
+        js: &mut JsAstStore,
+    ) -> Self {
+        let inner = SfcScriptCompileContext::new(descriptor, options, js, true);
+        debug_assert!(inner.template_usage_cache_is_empty());
+        Self { inner }
+    }
+
+    fn into_script_ast(self) -> (Vec<Value>, Vec<Value>) {
+        self.inner.into_script_ast()
+    }
+}
+
+impl<'a> std::ops::Deref for Vue3ScriptCompileContext<'a> {
+    type Target = SfcScriptCompileContext<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+#[derive(Clone, Debug)]
+struct Vue27ScriptCompileContext<'a> {
+    inner: SfcScriptCompileContext<'a>,
+}
+
+impl<'a> Vue27ScriptCompileContext<'a> {
+    fn new(
+        descriptor: &'a SfcDescriptor,
+        options: &'a SfcScriptCompileOptions,
+        js: &mut JsAstStore,
+    ) -> Self {
+        let inner = SfcScriptCompileContext::new(descriptor, options, js, false);
+        debug_assert!(inner.template_usage_cache_is_empty());
+        Self { inner }
+    }
+
+    fn into_script_ast(self) -> (Vec<Value>, Vec<Value>) {
+        self.inner.into_script_ast()
+    }
+}
+
+impl<'a> std::ops::Deref for Vue27ScriptCompileContext<'a> {
+    type Target = SfcScriptCompileContext<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
 impl SfcCompiler {
     /// Creates a new SFC compiler facade.
     pub fn new() -> Self {
@@ -1141,59 +1370,21 @@ impl SfcCompiler {
         descriptor: &SfcDescriptor,
         options: SfcScriptCompileOptions,
     ) -> SfcScriptBlock {
-        let mut raw_content = String::new();
-        let mut script_ast = Vec::new();
-        let mut script_setup_ast = Vec::new();
-        let source_type = script_source_type(descriptor);
-        if let Some(script) = descriptor.script.as_ref() {
-            raw_content.push_str(&script.content);
-            if script_lang_is_js_like(&script.attrs) {
-                let id = self.js.register_program(
-                    script.content.clone(),
-                    Span::new(descriptor.source_file, script.loc.start, script.loc.end),
-                    script_mode(&script.attrs),
-                    source_type,
-                );
-                script_ast.extend(sfc_script_ast_body(&self.js, id, &script.content));
-            }
-        }
-        if let Some(script_setup) = descriptor.script_setup.as_ref() {
-            if !raw_content.is_empty() {
-                raw_content.push('\n');
-            }
-            raw_content.push_str(&script_setup.content);
-            if script_lang_is_js_like(&script_setup.attrs) {
-                let id = self.js.register_program(
-                    script_setup.content.clone(),
-                    Span::new(
-                        descriptor.source_file,
-                        script_setup.loc.start,
-                        script_setup.loc.end,
-                    ),
-                    script_mode(&script_setup.attrs),
-                    source_type,
-                );
-                script_setup_ast.extend(sfc_script_ast_body(&self.js, id, &script_setup.content));
-            }
-        }
-        let script_compile_errors = vue3_script_compile_errors(descriptor, &options);
-        let summary =
-            if script_compile_errors.is_empty() && vue3_script_blocks_are_js_like(descriptor) {
-                self.js.summarize_program(&raw_content, source_type)
-            } else {
-                Default::default()
-            };
-        let attrs = descriptor
-            .script
-            .as_ref()
-            .or(descriptor.script_setup.as_ref())
-            .map(|block| block.attrs.clone())
-            .unwrap_or_default();
-        let base_bindings = vue3_script_base_binding_metadata(descriptor);
+        let context = Vue3ScriptCompileContext::new(descriptor, &options, &mut self.js);
+        let script_compile_errors = vue3_script_compile_errors(context.descriptor(), &options);
+        let summary = if script_compile_errors.is_empty() && context.all_script_blocks_are_js_like()
+        {
+            self.js
+                .summarize_program(context.raw_content(), context.source_type())
+        } else {
+            Default::default()
+        };
+        let attrs = context.script_or_setup_attrs();
+        let base_bindings = vue3_script_base_binding_metadata(context.descriptor());
         let generated_content = script_content(
-            descriptor,
-            &raw_content,
-            descriptor.filename.as_str(),
+            context.descriptor(),
+            context.raw_content(),
+            context.filename(),
             &options,
             &base_bindings,
         );
@@ -1204,21 +1395,17 @@ impl SfcCompiler {
         }
         let mut errors = summary.errors;
         errors.extend(generated_content.errors);
+        let loc = context.script_or_setup_loc();
+        let setup = context.has_script_setup();
+        let lang = context.setup_or_script_lang();
+        let (script_ast, script_setup_ast) = context.into_script_ast();
         SfcScriptBlock {
             type_name: "script".into(),
             content: generated_content.content,
-            loc: descriptor
-                .script
-                .as_ref()
-                .or(descriptor.script_setup.as_ref())
-                .map(|block| block.loc.clone()),
+            loc,
             attrs,
-            setup: descriptor.script_setup.is_some(),
-            lang: descriptor
-                .script_setup
-                .as_ref()
-                .or(descriptor.script.as_ref())
-                .and_then(|block| block.attrs.lang.clone()),
+            setup,
+            lang,
             bindings,
             props_aliases: generated_content.props_aliases,
             imports: generated_content.imports,
@@ -1254,73 +1441,36 @@ impl SfcCompiler {
         descriptor: &SfcDescriptor,
         options: SfcScriptCompileOptions,
     ) -> SfcScriptBlock {
-        let mut raw_content = String::new();
-        let mut script_ast = Vec::new();
-        let mut script_setup_ast = Vec::new();
-        let source_type = script_source_type(descriptor);
-        if let Some(script) = descriptor.script.as_ref() {
-            raw_content.push_str(&script.content);
-            let id = self.js.register_program(
-                script.content.clone(),
-                Span::new(descriptor.source_file, script.loc.start, script.loc.end),
-                script_mode(&script.attrs),
-                source_type,
-            );
-            script_ast.extend(sfc_script_ast_body(&self.js, id, &script.content));
-        }
-        if let Some(script_setup) = descriptor.script_setup.as_ref() {
-            if !raw_content.is_empty() {
-                raw_content.push('\n');
-            }
-            raw_content.push_str(&script_setup.content);
-            let id = self.js.register_program(
-                script_setup.content.clone(),
-                Span::new(
-                    descriptor.source_file,
-                    script_setup.loc.start,
-                    script_setup.loc.end,
-                ),
-                script_mode(&script_setup.attrs),
-                source_type,
-            );
-            script_setup_ast.extend(sfc_script_ast_body(&self.js, id, &script_setup.content));
-        }
-        let summary = self.js.summarize_program(&raw_content, source_type);
+        let context = Vue27ScriptCompileContext::new(descriptor, &options, &mut self.js);
+        let summary = self
+            .js
+            .summarize_program(context.raw_content(), context.source_type());
         let css_vars = descriptor_css_vars(
-            descriptor,
+            context.descriptor(),
             CssVarCollectOptions {
                 ignore_line_comments: false,
             },
         );
-        let script_errors = vue27_script_compile_errors(descriptor);
-        let content = vue27_script_content(descriptor, &options, &css_vars);
-        let bindings = if descriptor.script_setup.is_some() {
-            vue27_setup_binding_metadata(descriptor)
+        let script_errors = vue27_script_compile_errors(context.descriptor());
+        let content = vue27_script_content(context.descriptor(), &options, &css_vars);
+        let bindings = if context.has_script_setup() {
+            vue27_setup_binding_metadata(context.descriptor())
         } else {
-            vue27_normal_script_binding_metadata(descriptor)
+            vue27_normal_script_binding_metadata(context.descriptor())
         };
-        let attrs = descriptor
-            .script
-            .as_ref()
-            .or(descriptor.script_setup.as_ref())
-            .map(|block| block.attrs.clone())
-            .unwrap_or_default();
+        let attrs = context.script_or_setup_attrs();
+        let loc = context.script_or_setup_loc();
+        let setup = context.has_script_setup();
+        let lang = context.setup_or_script_lang();
+        let (script_ast, script_setup_ast) = context.into_script_ast();
 
         SfcScriptBlock {
             type_name: "script".into(),
             content,
-            loc: descriptor
-                .script
-                .as_ref()
-                .or(descriptor.script_setup.as_ref())
-                .map(|block| block.loc.clone()),
+            loc,
             attrs,
-            setup: descriptor.script_setup.is_some(),
-            lang: descriptor
-                .script_setup
-                .as_ref()
-                .or(descriptor.script.as_ref())
-                .and_then(|block| block.attrs.lang.clone()),
+            setup,
+            lang,
             bindings,
             props_aliases: BTreeMap::new(),
             imports: BTreeMap::new(),
@@ -26701,22 +26851,6 @@ fn script_lang_is_js_like(attrs: &SfcBlockAttrs) -> bool {
         attrs.lang.as_deref(),
         None | Some("js" | "jsx" | "ts" | "tsx")
     )
-}
-
-fn vue3_script_blocks_are_js_like(descriptor: &SfcDescriptor) -> bool {
-    let mut has_script = false;
-    for block in descriptor
-        .script
-        .as_ref()
-        .into_iter()
-        .chain(descriptor.script_setup.as_ref())
-    {
-        has_script = true;
-        if !script_lang_is_js_like(&block.attrs) {
-            return false;
-        }
-    }
-    has_script
 }
 
 fn script_mode(attrs: &SfcBlockAttrs) -> JsParseMode {
