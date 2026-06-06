@@ -4619,7 +4619,91 @@ try {
 process.stdout.write(JSON.stringify(out));
 "#;
 
+const ALIAS_RUNTIME_FRAGMENT_CALLBACK_PROVENANCE_MARKER: &str =
+    "vuec-runtime-fragment: callback-boundary/provenance-runtime";
+const ALIAS_RUNTIME_FRAGMENT_SEMANTIC_JS_MARKER: &str =
+    "vuec-runtime-fragment: semantic-js-shim/vue3-core-runtime";
+const ALIAS_RUNTIME_FRAGMENT_BRIDGE_SHAPE_MARKER: &str =
+    "vuec-runtime-fragment: bridge-shape-adapter/node-bridge-call";
+const ALIAS_RUNTIME_FRAGMENT_SUITE_HELPER_MARKER: &str =
+    "vuec-runtime-fragment: suite-helper/runtime-entrypoint";
+const ALIAS_RUNTIME_FRAGMENT_PACKAGE_API_MARKER: &str =
+    "vuec-runtime-fragment: package-api-adapter/public-package-shapes";
+const ALIAS_RUNTIME_FRAGMENT_CALLBACK_MATERIALIZATION_MARKER: &str =
+    "vuec-runtime-fragment: callback-boundary/js-callback-materialization";
+
+#[derive(Clone, Copy, Debug)]
+struct AliasRuntimeFragmentSpec {
+    order: u32,
+    name: &'static str,
+    role: &'static str,
+    source: &'static str,
+    source_anchor: &'static str,
+    execution_path: &'static str,
+    migration_note: Option<&'static str>,
+}
+
+const ALIAS_RUNTIME_FRAGMENT_SPECS: &[AliasRuntimeFragmentSpec] = &[
+    AliasRuntimeFragmentSpec {
+        order: 10,
+        name: "provenance-runtime",
+        role: "callback-boundary",
+        source: "generated-alias-runtime",
+        source_anchor: ALIAS_RUNTIME_FRAGMENT_CALLBACK_PROVENANCE_MARKER,
+        execution_path: "mixed-js-callback-boundary",
+        migration_note: None,
+    },
+    AliasRuntimeFragmentSpec {
+        order: 20,
+        name: "vue3-core-runtime",
+        role: "semantic-js-shim",
+        source: "generated-alias-runtime",
+        source_anchor: ALIAS_RUNTIME_FRAGMENT_SEMANTIC_JS_MARKER,
+        execution_path: "shim-backed-semantic-js",
+        migration_note: Some(
+            "Migrate createTransformContext, transform traversal, baseCompile fallback, transformElement prop/directive materialization, and related helper semantics into Rust compiler-core projections before counting these paths as pure Rust.",
+        ),
+    },
+    AliasRuntimeFragmentSpec {
+        order: 30,
+        name: "node-bridge-call",
+        role: "bridge-shape-adapter",
+        source: "generated-alias-runtime",
+        source_anchor: ALIAS_RUNTIME_FRAGMENT_BRIDGE_SHAPE_MARKER,
+        execution_path: "rust-bridge-shape-adapter",
+        migration_note: None,
+    },
+    AliasRuntimeFragmentSpec {
+        order: 40,
+        name: "runtime-entrypoint",
+        role: "suite-helper",
+        source: "generated-alias-runtime",
+        source_anchor: ALIAS_RUNTIME_FRAGMENT_SUITE_HELPER_MARKER,
+        execution_path: "hybrid-js-adapter-rust-projection",
+        migration_note: None,
+    },
+    AliasRuntimeFragmentSpec {
+        order: 50,
+        name: "public-package-shapes",
+        role: "package-api-adapter",
+        source: "generated-alias-runtime",
+        source_anchor: ALIAS_RUNTIME_FRAGMENT_PACKAGE_API_MARKER,
+        execution_path: "rust-bridge-shape-adapter",
+        migration_note: None,
+    },
+    AliasRuntimeFragmentSpec {
+        order: 60,
+        name: "js-callback-materialization",
+        role: "callback-boundary",
+        source: "generated-alias-runtime",
+        source_anchor: ALIAS_RUNTIME_FRAGMENT_CALLBACK_MATERIALIZATION_MARKER,
+        execution_path: "mixed-js-callback-boundary",
+        migration_note: None,
+    },
+];
+
 const ALIAS_RUNTIME_JS: &str = r#"
+/* vuec-runtime-fragment: callback-boundary/provenance-runtime */
 const VUEC_PROVENANCE_STATE = '__vuecProvenanceState';
 function vuecProvenanceState() {
   const root = globalThis;
@@ -4669,6 +4753,7 @@ Object.defineProperty(globalThis, '__vuecRecordProvenance', { value: recordVuecP
 Object.defineProperty(globalThis, '__vuecFlushProvenance', { value: flushVuecProvenance, configurable: true });
 Object.defineProperty(globalThis, '__vuecPeekProvenance', { value: peekVuecProvenance, configurable: true });
 
+/* vuec-runtime-fragment: semantic-js-shim/vue3-core-runtime */
 const vue3CoreRuntime = (() => {
   const enumObject = entries => {
     const out = {};
@@ -8888,6 +8973,7 @@ function hydrateVue3Node(node) {
   return node;
 }
 
+/* vuec-runtime-fragment: bridge-shape-adapter/node-bridge-call */
 function callBridge(command, payload) {
   recordVuecProvenance(`bridge:${command}`);
   const result = cp.spawnSync(BRIDGE_BIN, [command], {
@@ -8906,8 +8992,10 @@ function callBridge(command, payload) {
   return result.stdout.trim() ? JSON.parse(result.stdout) : undefined;
 }
 
+/* vuec-runtime-fragment: suite-helper/runtime-entrypoint */
 const vuecBridgeRuntime = { callBridge };
 
+/* vuec-runtime-fragment: package-api-adapter/public-package-shapes */
 function normalizeArgs(payload) {
   return payload || {};
 }
@@ -9285,6 +9373,7 @@ function vue27StylePostcssOptions(options) {
   return postcssOptions;
 }
 
+/* vuec-runtime-fragment: callback-boundary/js-callback-materialization */
 function applyVue27StylePostcssSync(result, options) {
   if (!vue27StylePostcssRequired(options)) return normalizeStyleAliasResult(result);
   const out = Object.assign({}, result);
@@ -12304,10 +12393,46 @@ struct ConformanceExecutionResult {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+struct AliasRuntimeFragmentManifestEntry {
+    order: u32,
+    name: String,
+    role: String,
+    source: String,
+    source_anchor: String,
+    execution_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    migration_note: Option<String>,
+}
+
+impl From<AliasRuntimeFragmentSpec> for AliasRuntimeFragmentManifestEntry {
+    fn from(spec: AliasRuntimeFragmentSpec) -> Self {
+        Self {
+            order: spec.order,
+            name: spec.name.to_string(),
+            role: spec.role.to_string(),
+            source: spec.source.to_string(),
+            source_anchor: spec.source_anchor.to_string(),
+            execution_path: spec.execution_path.to_string(),
+            migration_note: spec.migration_note.map(str::to_string),
+        }
+    }
+}
+
+fn alias_runtime_fragment_manifest_entries() -> Vec<AliasRuntimeFragmentManifestEntry> {
+    ALIAS_RUNTIME_FRAGMENT_SPECS
+        .iter()
+        .copied()
+        .map(AliasRuntimeFragmentManifestEntry::from)
+        .collect()
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct PreparedTestManifest {
     schema_version: u32,
     suite: String,
     official_test_origin: String,
+    #[serde(default)]
+    alias_runtime_fragments: Vec<AliasRuntimeFragmentManifestEntry>,
     entries: Vec<PreparedTestManifestEntry>,
 }
 
@@ -12317,6 +12442,7 @@ impl PreparedTestManifest {
             schema_version: 1,
             suite: suite.to_string(),
             official_test_origin: "unmodified-official".into(),
+            alias_runtime_fragments: alias_runtime_fragment_manifest_entries(),
             entries: Vec::new(),
         }
     }
@@ -12359,6 +12485,7 @@ struct PreparedTestManifestReport {
     official_test_origin: String,
     manifest_file: String,
     entry_count: usize,
+    alias_runtime_fragments: Vec<AliasRuntimeFragmentManifestEntry>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
@@ -13029,6 +13156,7 @@ fn prepared_test_manifest_report(path: &str) -> Option<PreparedTestManifestRepor
         official_test_origin: manifest.derived_origin().to_string(),
         manifest_file: path.display().to_string(),
         entry_count: manifest.entries.len(),
+        alias_runtime_fragments: manifest.alias_runtime_fragments,
     })
 }
 
@@ -21196,6 +21324,16 @@ mod tests {
         Some(path.display().to_string())
     }
 
+    fn alias_runtime_fragment<'a>(
+        fragments: &'a [AliasRuntimeFragmentManifestEntry],
+        name: &str,
+    ) -> &'a AliasRuntimeFragmentManifestEntry {
+        fragments
+            .iter()
+            .find(|fragment| fragment.name == name)
+            .unwrap_or_else(|| panic!("missing alias runtime fragment {name}"))
+    }
+
     #[test]
     fn prepared_manifest_writes_for_all_generated_alias_suites() {
         let temp = std::env::temp_dir().join(format!(
@@ -21229,6 +21367,101 @@ mod tests {
             assert_eq!(report.official_test_origin, "prepared-official");
             assert!(report.entry_count > 0, "{} manifest has entries", spec.name);
         }
+
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn alias_runtime_fragments_have_stable_roles_and_source_anchors() {
+        let fragments = alias_runtime_fragment_manifest_entries();
+
+        assert_eq!(fragments.len(), ALIAS_RUNTIME_FRAGMENT_SPECS.len());
+        assert!(fragments
+            .windows(2)
+            .all(|window| window[0].order < window[1].order));
+
+        for fragment in &fragments {
+            assert!(
+                ALIAS_RUNTIME_JS.contains(&fragment.source_anchor),
+                "{} should have source anchor {}",
+                fragment.name,
+                fragment.source_anchor
+            );
+        }
+
+        let roles: Vec<_> = fragments
+            .iter()
+            .map(|fragment| fragment.role.as_str())
+            .collect();
+        for role in [
+            "package-api-adapter",
+            "bridge-shape-adapter",
+            "callback-boundary",
+            "semantic-js-shim",
+            "suite-helper",
+        ] {
+            assert!(roles.contains(&role), "missing alias runtime role {role}");
+        }
+
+        let semantic = alias_runtime_fragment(&fragments, "vue3-core-runtime");
+        assert_eq!(semantic.role, "semantic-js-shim");
+        assert_eq!(semantic.execution_path, "shim-backed-semantic-js");
+        assert!(semantic
+            .migration_note
+            .as_deref()
+            .is_some_and(|note| note.contains("Rust compiler-core projections")));
+
+        let callback = alias_runtime_fragment(&fragments, "js-callback-materialization");
+        assert_eq!(callback.role, "callback-boundary");
+        assert_eq!(callback.execution_path, "mixed-js-callback-boundary");
+    }
+
+    #[test]
+    fn prepared_manifest_reports_alias_runtime_fragment_roles() {
+        let temp = std::env::temp_dir().join(format!(
+            "vuec-xtask-alias-runtime-fragment-report-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp).unwrap();
+        write_prepared_test_manifest_for_suite(suite_spec(ConformanceSuite::Vue3Core), &temp)
+            .unwrap();
+
+        let manifest: PreparedTestManifest =
+            read_json(&prepared_test_manifest_path(&temp)).expect("prepared manifest json");
+        assert_eq!(
+            manifest.alias_runtime_fragments.len(),
+            ALIAS_RUNTIME_FRAGMENT_SPECS.len()
+        );
+        assert_eq!(
+            alias_runtime_fragment(&manifest.alias_runtime_fragments, "node-bridge-call").role,
+            "bridge-shape-adapter"
+        );
+        assert_eq!(
+            alias_runtime_fragment(&manifest.alias_runtime_fragments, "runtime-entrypoint").role,
+            "suite-helper"
+        );
+
+        let report = prepared_test_manifest_report(
+            &prepared_test_manifest_path(&temp).display().to_string(),
+        )
+        .expect("prepared manifest report");
+        assert_eq!(
+            report.alias_runtime_fragments.len(),
+            ALIAS_RUNTIME_FRAGMENT_SPECS.len()
+        );
+        assert_eq!(
+            alias_runtime_fragment(&report.alias_runtime_fragments, "public-package-shapes").role,
+            "package-api-adapter"
+        );
+        assert!(report
+            .alias_runtime_fragments
+            .iter()
+            .any(
+                |fragment| fragment.role == "semantic-js-shim" && fragment.migration_note.is_some()
+            ));
 
         let _ = fs::remove_dir_all(temp);
     }
