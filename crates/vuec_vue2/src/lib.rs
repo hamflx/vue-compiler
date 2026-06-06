@@ -4907,8 +4907,7 @@ fn js_span(span: Option<Span>) -> Span {
 }
 
 fn single_default_interpolation(text: &str) -> Option<&str> {
-    let trimmed = text.trim();
-    let inner = trimmed.strip_prefix("{{")?.strip_suffix("}}")?.trim();
+    let inner = text.strip_prefix("{{")?.strip_suffix("}}")?.trim();
     (!inner.contains("{{") && !inner.contains("}}")).then_some(inner)
 }
 
@@ -6442,6 +6441,12 @@ mod tests {
         );
         assert!(result.render.contains("_f(\"c\")(_f(\"b\")(a))"));
         assert!(result.render.contains("$event.stopPropagation();"));
+
+        let spaced_filter = compile("<div>\n  {{ d | e }}\n</div>", options());
+        assert_eq!(
+            spaced_filter.render,
+            "with(this){return _c('div',[_v(\"\\n  \"+_s(_f(\"e\")(d))+\"\\n\")])}"
+        );
     }
 
     #[test]
