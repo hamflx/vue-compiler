@@ -1,5 +1,8 @@
 # Memory
 
+- Current round: fixed a Vue 2.6 full-project corpus `v-pre` descendant data mismatch class. Vue 2 MIR codegen now mirrors official `genElement` pre inheritance: descendants render under an inherited `v-pre` context, existing data objects include `pre:true`, component children under `v-pre` get a minimal `{pre:true}` data object, and plain ordinary descendants without data still omit the data object.
+- Verification for this `v-pre` inheritance slice: focused `cargo test -p vuec_vue2 generates_vue2_v_pre_template_like_official_codegen -- --nocapture`, full `cargo test -p vuec_vue2 --lib -- --nocapture` (`45/45`), `cargo fmt --all -- --check`, `git diff --check`, and full-project focused corpus gate for `statping-statping` (`183` template modes across `61` files) passing.
+
 - Current round: fixed a Vue 2.6 full-project corpus named text entity mismatch class. The shared HTML text entity decoder now covers `&lsaquo;` and `&rsaquo;`, matching official Vue 2 text-node decoding for single guillemets used by CoreUI button toolbar templates.
 - Verification for this named entity slice: focused `cargo test -p vuec_html decodes_text_and_attribute_entities_like_vue_modes -- --nocapture`, focused `cargo test -p vuec_vue2 decodes_vue2_text_entities_like_official_parser -- --nocapture`, full `cargo test -p vuec_html --lib -- --nocapture` (`14/14`), full `cargo test -p vuec_vue2 --lib -- --nocapture` (`45/45`), and full-project focused corpus gate for `coreui-free-vue-admin-template-v2` (`151` template modes across `46` files) passing.
 

@@ -2248,6 +2248,7 @@ fn generate_render_mir(
         options,
         static_render_fns,
         pre: false,
+        parent_pre: false,
     };
     let code = mir
         .root_node()
@@ -2269,6 +2270,7 @@ struct Vue2MirCodegenState<'a> {
     options: &'a Vue2CompileOptions,
     static_render_fns: &'a mut Vec<String>,
     pre: bool,
+    parent_pre: bool,
 }
 
 fn gen_mir_node(id: NodeId, state: &mut Vue2MirCodegenState<'_>) -> String {
@@ -2311,10 +2313,22 @@ fn gen_mir_create_element(
         return gen_mir_children(id, state, false).unwrap_or_else(|| "void 0".into());
     }
 
+    let effective_pre = state.parent_pre || create.data.as_ref().is_some_and(|data| data.pre);
+    let maybe_component = mir_create_is_component(create, state.options);
     let data = create
         .data
         .as_ref()
-        .map(|data| gen_mir_data(data, mir_create_tag_literal(create), state));
+        .map(|data| gen_mir_data(data, mir_create_tag_literal(create), state, effective_pre))
+        .or_else(|| {
+            (effective_pre && maybe_component).then(|| {
+                gen_mir_data(
+                    &Vue2DataObject::default(),
+                    mir_create_tag_literal(create),
+                    state,
+                    true,
+                )
+            })
+        });
     let children = if create
         .data
         .as_ref()
@@ -2323,7 +2337,11 @@ fn gen_mir_create_element(
     {
         None
     } else {
-        gen_mir_children(id, state, true)
+        let original_parent_pre = state.parent_pre;
+        state.parent_pre = effective_pre;
+        let children = gen_mir_children(id, state, true);
+        state.parent_pre = original_parent_pre;
+        children
     };
     let tag = gen_mir_create_tag(create, state);
     let code = match (data, children) {
@@ -2366,6 +2384,14 @@ fn mir_create_tag_literal(create: &Vue2CreateElement) -> Option<&str> {
         })
 }
 
+fn mir_create_is_component(create: &Vue2CreateElement, options: &Vue2CompileOptions) -> bool {
+    create.is_component
+        || match &create.tag {
+            MirExpr::String(tag) => !is_reserved_tag_with_options(tag, options),
+            _ => true,
+        }
+}
+
 fn gen_mir_text(id: NodeId, text: &Vue2TextCall, state: &Vue2MirCodegenState<'_>) -> String {
     let mut expression = render_mir_expr(&text.value, state);
     let mut filtered = false;
@@ -2399,7 +2425,7 @@ fn gen_mir_static(render_static: &Vue2RenderStatic, state: &mut Vue2MirCodegenSt
         return format!("_m({})", render_static.index);
     };
     let original_pre = state.pre;
-    if mir_node_pre(state.mir, body) {
+    if state.parent_pre || mir_node_pre(state.mir, body) {
         state.pre = true;
     }
     let code = gen_mir_node(body, state);
@@ -2454,6 +2480,7 @@ fn gen_mir_data(
     data: &Vue2DataObject,
     tag_literal: Option<&str>,
     state: &mut Vue2MirCodegenState<'_>,
+    effective_pre: bool,
 ) -> String {
     let mut parts = Vec::new();
     if let Some(dirs) = gen_mir_directives(&data.directives, state) {
@@ -2468,7 +2495,7 @@ fn gen_mir_data(
     if data.ref_in_for {
         parts.push("refInFor:true".into());
     }
-    if data.pre {
+    if effective_pre {
         parts.push("pre:true".into());
     }
     if let Some(tag) = &data.tag {
@@ -2914,6 +2941,7 @@ fn gen_mir_inline_template(
         options: state.options,
         static_render_fns: &mut static_render_fns,
         pre: false,
+        parent_pre: false,
     };
     let code = gen_mir_node(body, &mut nested);
     let render = format!("with(this){{return {code}}}");
@@ -7227,6 +7255,33 @@ mod tests {
                     .to_string()
             ]
         );
+
+        let inherited_data = compile(
+            r#"<div v-pre><p id="x"><img alt="a"></p><span>{{msg}}</span></div>"#,
+            options(),
+        );
+        assert_eq!(inherited_data.render, r#"with(this){return _m(0)}"#);
+        assert_eq!(
+            inherited_data.static_render_fns,
+            vec![
+                r#"with(this){return _c('div',{pre:true},[_c('p',{pre:true,attrs:{"id":"x"}},[_c('img',{pre:true,attrs:{"alt":"a"}})]),_c('span',[_v("{{msg}}")])])}"#
+                    .to_string()
+            ]
+        );
+
+        let plain_child = compile(r#"<div v-pre><p></p></div>"#, options());
+        assert_eq!(plain_child.render, r#"with(this){return _m(0)}"#);
+        assert_eq!(
+            plain_child.static_render_fns,
+            vec![r#"with(this){return _c('div',{pre:true},[_c('p')])}"#.to_string()]
+        );
+
+        let component_child = compile(r#"<div v-pre><my-widget></my-widget></div>"#, options());
+        assert_eq!(
+            component_child.render,
+            r#"with(this){return _c('div',{pre:true},[_c('my-widget',{pre:true})],1)}"#
+        );
+        assert!(component_child.static_render_fns.is_empty());
     }
 
     #[test]
