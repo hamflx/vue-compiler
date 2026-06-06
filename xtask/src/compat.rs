@@ -4620,6 +4620,55 @@ process.stdout.write(JSON.stringify(out));
 "#;
 
 const ALIAS_RUNTIME_JS: &str = r#"
+const VUEC_PROVENANCE_STATE = '__vuecProvenanceState';
+function vuecProvenanceState() {
+  const root = globalThis;
+  if (!root[VUEC_PROVENANCE_STATE]) {
+    Object.defineProperty(root, VUEC_PROVENANCE_STATE, {
+      value: { markers: new Set() },
+      configurable: true,
+      enumerable: false,
+    });
+  }
+  return root[VUEC_PROVENANCE_STATE];
+}
+function recordVuecProvenance(marker) {
+  if (marker === undefined || marker === null) return;
+  const value = String(marker);
+  if (!value) return;
+  vuecProvenanceState().markers.add(value);
+}
+function flushVuecProvenance() {
+  const state = vuecProvenanceState();
+  const markers = Array.from(state.markers);
+  state.markers.clear();
+  return markers;
+}
+function peekVuecProvenance() {
+  return Array.from(vuecProvenanceState().markers);
+}
+function markVuecRuntimeCallback(callback) {
+  if (typeof callback === 'function' && !callback.__vuecRuntimeCallback) {
+    Object.defineProperty(callback, '__vuecRuntimeCallback', {
+      value: true,
+      configurable: true,
+      enumerable: false,
+    });
+  }
+  return callback;
+}
+function isVuecRuntimeCallback(callback) {
+  return !!(callback && callback.__vuecRuntimeCallback);
+}
+function recordVuecExternalCallback(marker, callback) {
+  if (typeof callback === 'function' && !isVuecRuntimeCallback(callback)) {
+    recordVuecProvenance(marker);
+  }
+}
+Object.defineProperty(globalThis, '__vuecRecordProvenance', { value: recordVuecProvenance, configurable: true });
+Object.defineProperty(globalThis, '__vuecFlushProvenance', { value: flushVuecProvenance, configurable: true });
+Object.defineProperty(globalThis, '__vuecPeekProvenance', { value: peekVuecProvenance, configurable: true });
+
 const vue3CoreRuntime = (() => {
   const enumObject = entries => {
     const out = {};
@@ -5472,11 +5521,13 @@ const vue3CoreRuntime = (() => {
         return `_${runtime.helperNameMap[context.helper(name)]}`;
       },
       replaceNode(node) {
+        recordVuecProvenance('js.transformContext.replaceNode');
         if (!context.currentNode) throw new Error('Node being replaced is already removed.');
         if (!context.parent) throw new Error('Cannot replace root node.');
         context.parent.children[context.childIndex] = context.currentNode = node;
       },
       removeNode(node) {
+        recordVuecProvenance('js.transformContext.removeNode');
         if (!context.parent) throw new Error('Cannot remove root node.');
         const list = context.parent.children;
         const removalIndex = node ? list.indexOf(node) : context.currentNode ? context.childIndex : -1;
@@ -5504,6 +5555,7 @@ const vue3CoreRuntime = (() => {
         }
       },
       hoist(exp) {
+        recordVuecProvenance('js.transformContext.hoist');
         if (typeof exp === 'string') exp = runtime.createSimpleExpression(exp);
         context.hoists.push(exp);
         const identifier = runtime.createSimpleExpression(`_hoisted_${context.hoists.length}`, false, exp.loc, ConstantTypes.CAN_CACHE);
@@ -5511,6 +5563,7 @@ const vue3CoreRuntime = (() => {
         return identifier;
       },
       cache(exp, isVNode = false, inVOnce = false) {
+        recordVuecProvenance('js.transformContext.cache');
         const cacheExp = runtime.createCacheExpression(context.cached.length, exp, isVNode, inVOnce);
         context.cached.push(cacheExp);
         return cacheExp;
@@ -5523,6 +5576,7 @@ const vue3CoreRuntime = (() => {
     context.currentNode = node;
     const exitFns = [];
     for (const transform of context.nodeTransforms || []) {
+      recordVuecExternalCallback('callback.nodeTransform', transform);
       const onExit = transform(node, context);
       if (Array.isArray(onExit)) exitFns.push(...onExit);
       else if (onExit) exitFns.push(onExit);
@@ -5563,6 +5617,7 @@ const vue3CoreRuntime = (() => {
     }
   };
   runtime.transform = function transform(root, options = {}) {
+    recordVuecProvenance('js.compiler.transformTraversal');
     const context = runtime.createTransformContext(root, options);
     runtime.traverseNode(root, context);
     if (options.hoistStatic) runtime.cacheStatic(root, context);
@@ -6309,6 +6364,7 @@ const vue3CoreRuntime = (() => {
   };
   runtime.transformElement = function transformElement(node, context) {
     return () => {
+      recordVuecProvenance('js.transformElement.props');
       node = context.currentNode;
       if (!node || node.type !== NodeTypes.ELEMENT) return;
       if (node.tagType !== ElementTypes.ELEMENT && node.tagType !== ElementTypes.COMPONENT) return;
@@ -6364,6 +6420,7 @@ const vue3CoreRuntime = (() => {
               if (runtime.isStaticArgOf(prop.arg, 'key')) propSummaries.push({ kind: 'directiveProp', forceBlock: true });
               continue;
             }
+            recordVuecExternalCallback('callback.directiveTransform', transform);
             const result = transform(prop, node, context);
             objectProps.push(...((result && result.props) || []));
             propSummaries.push(...vue3ElementDirectivePropSummaries(prop, result, {
@@ -6374,6 +6431,7 @@ const vue3CoreRuntime = (() => {
             else if (prop.arg.isStatic) dynamicProps.push(prop.arg.content);
           } else if (prop.name === 'on' && prop.arg) {
             const transform = context.directiveTransforms && context.directiveTransforms.on;
+            recordVuecExternalCallback('callback.directiveTransform', transform);
             const result = transform ? transform(prop, node, context) : undefined;
             objectProps.push(...((result && result.props) || []));
             if (!result && node.children && node.children.length && runtime.isStaticArgOf(prop.arg, 'vue:before-update')) {
@@ -6402,6 +6460,7 @@ const vue3CoreRuntime = (() => {
               context.onError(runtime.createCompilerError(ErrorCodes.X_V_ON_NO_EXPRESSION, prop.loc));
             }
           } else if (prop.name === 'model' && context.directiveTransforms && context.directiveTransforms.model) {
+            recordVuecExternalCallback('callback.directiveTransform', context.directiveTransforms.model);
             const result = context.directiveTransforms.model(prop, node, context);
             const modelProps = (result && result.props) || [];
             objectProps.push(...modelProps);
@@ -6426,6 +6485,7 @@ const vue3CoreRuntime = (() => {
             if (!isComponent) context.onError(runtime.createCompilerError(ErrorCodes.X_V_SLOT_MISPLACED, prop.loc));
             continue;
           } else if (context.directiveTransforms && context.directiveTransforms[prop.name]) {
+            recordVuecExternalCallback('callback.directiveTransform', context.directiveTransforms[prop.name]);
             const result = context.directiveTransforms[prop.name](prop, node, context);
             objectProps.push(...((result && result.props) || []));
             propSummaries.push(...vue3ElementDirectivePropSummaries(prop, result));
@@ -7346,6 +7406,32 @@ const vue3CoreRuntime = (() => {
       ? projection.decoded
       : source;
   };
+  [
+    runtime.transformOnce,
+    runtime.transformIf,
+    runtime.transformMemo,
+    runtime.transformFor,
+    runtime.trackVForSlotScopes,
+    runtime.transformExpression,
+    runtime.transformSlotOutlet,
+    runtime.transformElement,
+    runtime.trackSlotScopes,
+    runtime.transformText,
+    runtime.transformDomTransition,
+    runtime.ignoreSideEffectTags,
+    runtime.validateHtmlNesting,
+  ].forEach(markVuecRuntimeCallback);
+  [
+    runtime.transformOn,
+    runtime.transformBind,
+    runtime.transformModel,
+    runtime.transformDomOn,
+    runtime.transformDomModel,
+    runtime.transformShow,
+    runtime.transformVHtml,
+    runtime.transformVText,
+    runtime.transformStyle,
+  ].forEach(markVuecRuntimeCallback);
   return runtime;
 })();
 
@@ -8803,6 +8889,7 @@ function hydrateVue3Node(node) {
 }
 
 function callBridge(command, payload) {
+  recordVuecProvenance(`bridge:${command}`);
   const result = cp.spawnSync(BRIDGE_BIN, [command], {
     input: JSON.stringify(payload || {}),
     encoding: 'utf8',
@@ -9205,6 +9292,7 @@ function applyVue27StylePostcssSync(result, options) {
   let rawResult;
   try {
     const postcss = require('postcss');
+    recordVuecProvenance('callback.postcssPlugin');
     rawResult = postcss((options && options.postcssPlugins) || []).process(
       out.code || '',
       vue27StylePostcssOptions(options)
@@ -9227,6 +9315,7 @@ function applyVue27StylePostcssAsync(result, options) {
   }
   try {
     const postcss = require('postcss');
+    recordVuecProvenance('callback.postcssPlugin');
     const rawResult = postcss((options && options.postcssPlugins) || []).process(
       out.code || '',
       vue27StylePostcssOptions(options)
@@ -12371,31 +12460,31 @@ impl ConformanceCoverageProvenance {
     }
 
     fn with_runtime_markers(mut self, markers: Vec<String>) -> Self {
+        let mut has_callback_boundary = false;
+        let mut has_semantic_js = false;
         for marker in &markers {
+            if let Some(command) = marker.strip_prefix("bridge:") {
+                push_unique_string(&mut self.bridge_commands, command);
+            }
             if marker_is_callback_boundary(marker) {
                 push_unique_string(&mut self.adapter_roles, "callback-materialization");
-                if self.execution_path != "shim-backed-semantic-js" {
-                    self.execution_path = "mixed-js-callback-boundary".into();
-                }
+                has_callback_boundary = true;
             }
             if marker_is_semantic_js(marker) {
                 push_unique_string(&mut self.adapter_roles, "semantic-shim");
-                self.execution_path = "shim-backed-semantic-js".into();
+                has_semantic_js = true;
             }
+        }
+        if has_callback_boundary {
+            self.execution_path = "mixed-js-callback-boundary".into();
+        } else if has_semantic_js {
+            self.execution_path = "shim-backed-semantic-js".into();
         }
         self.runtime_markers = markers;
         self
     }
 
     fn legacy_source(&self) -> ConformanceCoverageKind {
-        if self
-            .adapter_roles
-            .iter()
-            .any(|role| role == "semantic-shim")
-            || self.execution_path == "shim-backed-semantic-js"
-        {
-            return ConformanceCoverageKind::ShimBacked;
-        }
         if self
             .adapter_roles
             .iter()
@@ -12407,6 +12496,14 @@ impl ConformanceCoverageProvenance {
             )
         {
             return ConformanceCoverageKind::Mixed;
+        }
+        if self
+            .adapter_roles
+            .iter()
+            .any(|role| role == "semantic-shim")
+            || self.execution_path == "shim-backed-semantic-js"
+        {
+            return ConformanceCoverageKind::ShimBacked;
         }
         if matches!(
             self.execution_path.as_str(),
@@ -12688,6 +12785,8 @@ fn run_vitest_conformance(
     let absolute_prepared_root = absolute_path(&prepared_root);
     let absolute_output_file = absolute_path(&output_file);
     let absolute_bridge_bin = absolute_path(&ensure_node_bridge_binary()?);
+    let provenance_sidecar_base = absolute_prepared_root.join("vuec-provenance");
+    remove_vitest_provenance_sidecars(&absolute_prepared_root)?;
     let node_modules = absolute_npm_root.join("node_modules");
     let vitest_bin = node_modules
         .join("vitest")
@@ -12706,6 +12805,7 @@ fn run_vitest_conformance(
         .env("VUEC_ALIAS_ROOT", &absolute_alias_root)
         .env("VUEC_RUST_ALIAS_ROOT", &absolute_alias_root)
         .env("VUEC_OFFICIAL_NPM_ROOT", &absolute_npm_root)
+        .env("VUEC_PROVENANCE_SIDECAR", &provenance_sidecar_base)
         .env(
             "NODE_PATH",
             conformance_node_path(&absolute_alias_root, &absolute_npm_root),
@@ -12715,6 +12815,7 @@ fn run_vitest_conformance(
         .with_context(|| format!("failed to spawn Vitest for {}", spec.name))?;
     let stdout = normalize_conformance_output(&String::from_utf8_lossy(&output.stdout));
     let stderr = normalize_conformance_output(&String::from_utf8_lossy(&output.stderr));
+    merge_vitest_provenance_sidecars(&output_file, &absolute_output_file, &absolute_prepared_root)?;
     let counts = read_vitest_counts(&output_file)
         .or_else(|_| read_vitest_counts(&absolute_output_file))
         .unwrap_or_else(|_| ConformanceExecutionCounts {
@@ -12989,10 +13090,12 @@ fn prepared_test_manifest_for_suite(spec: ConformanceSuiteSpec) -> PreparedTestM
                     &["package-alias-config"],
                 ),
             );
+            add_vitest_provenance_manifest_entry(&mut manifest);
         }
         "vue27-sfc" => {
             add_vue2_compiler_manifest_entries(&mut manifest, true);
             add_vue27_sfc_manifest_entries(&mut manifest);
+            add_vitest_provenance_manifest_entry(&mut manifest);
         }
         "vue3-core" => {
             add_vue3_core_source_manifest_entries(&mut manifest);
@@ -13051,6 +13154,23 @@ fn add_manifest_entry(
             .collect(),
         expected_provenance,
     });
+}
+
+fn add_vitest_provenance_manifest_entry(manifest: &mut PreparedTestManifest) {
+    add_manifest_entry(
+        manifest,
+        "generated/vuec-vitest-provenance.ts",
+        "vuec-vitest-provenance.ts",
+        "runner-provenance-flush",
+        None,
+        &[],
+        provenance(
+            "prepared-official",
+            "prepared-vitest-runner",
+            "runner-harness",
+            &["runner-shim", "provenance-flush"],
+        ),
+    );
 }
 
 fn provenance(
@@ -13883,6 +14003,7 @@ fn add_vue3_ssr_manifest_entries(manifest: &mut PreparedTestManifest) {
 }
 
 fn add_vue3_vitest_manifest_entries(manifest: &mut PreparedTestManifest, include_glob: &str) {
+    add_vitest_provenance_manifest_entry(manifest);
     add_manifest_entry(
         manifest,
         "generated/vuec-vitest-setup.ts",
@@ -14818,9 +14939,11 @@ export default {
 }
 
 fn write_vue2_vitest_setup(prepared_root: &Path) -> Result<()> {
+    write_vuec_vitest_provenance_setup(prepared_root)?;
     write_text(
         &prepared_root.join("vuec-vitest-setup.ts"),
         r#"
+import './vuec-vitest-provenance'
 import { beforeEach, expect } from 'vitest'
 
 const warnings: string[] = []
@@ -14850,6 +14973,46 @@ expect.extend({
       message: () => `expected ${JSON.stringify(expected)} ${pass ? 'not ' : ''}to have been warned`,
     }
   },
+})
+"#,
+    )
+}
+
+fn write_vuec_vitest_provenance_setup(prepared_root: &Path) -> Result<()> {
+    write_text(
+        &prepared_root.join("vuec-vitest-provenance.ts"),
+        r#"
+import fs from 'node:fs'
+import { afterEach, expect } from 'vitest'
+
+const sidecarBase = process.env.VUEC_PROVENANCE_SIDECAR
+const sidecarPath = sidecarBase ? `${sidecarBase}.${process.pid}.ndjson` : ''
+
+function normalizePath(value: unknown): string {
+  return String(value || '').replace(/\\/g, '/')
+}
+
+function flushVuecProvenance(): string[] {
+  const flush = (globalThis as any).__vuecFlushProvenance
+  if (typeof flush !== 'function') return []
+  try {
+    return flush().map((marker: unknown) => String(marker)).filter(Boolean)
+  } catch {
+    return []
+  }
+}
+
+afterEach(() => {
+  const markers = flushVuecProvenance()
+  if (!sidecarPath || markers.length === 0) return
+  const state = typeof expect.getState === 'function' ? expect.getState() : ({} as any)
+  const record = {
+    testPath: normalizePath((state as any).testPath),
+    fullName: String((state as any).currentTestName || ''),
+    title: String((state as any).currentTestName || ''),
+    markers,
+  }
+  fs.appendFileSync(sidecarPath, `${JSON.stringify(record)}\n`)
 })
 "#,
     )
@@ -15044,6 +15207,16 @@ function reportStatus(status) {
   return 'pending'
 }
 
+function flushVuecProvenance() {
+  const flush = globalThis.__vuecFlushProvenance
+  if (typeof flush !== 'function') return []
+  try {
+    return flush().map(marker => String(marker)).filter(Boolean)
+  } catch {
+    return []
+  }
+}
+
 const counts = { total: 0, pass: 0, fail: 0, skip: 0, pending: 0 }
 jasmine.addReporter({
   specDone(result) {
@@ -15053,11 +15226,14 @@ jasmine.addReporter({
     else if (result.status === 'pending' || result.status === 'disabled' || result.status === 'excluded') counts.skip += 1
     else counts.pending += 1
     const sourceFile = specFileById.get(result.id) || '<unknown>'
-    fileResult(sourceFile).assertionResults.push({
+    const coverageProvenance = flushVuecProvenance()
+    const assertion = {
       title: result.fullName || result.description || '',
       status: reportStatus(result.status),
       failureMessages: (result.failedExpectations || []).map(expectation => expectation.message || '').filter(Boolean),
-    })
+    }
+    if (coverageProvenance.length) assertion.coverageProvenance = coverageProvenance
+    fileResult(sourceFile).assertionResults.push(assertion)
   },
   jasmineDone() {
     counts.pending = Math.max(0, counts.total - counts.pass - counts.fail - counts.skip)
@@ -19204,9 +19380,11 @@ export default {
 fn write_vue3_core_test_setup(prepared_root: &Path) -> Result<()> {
     fs::create_dir_all(prepared_root)
         .with_context(|| format!("failed to create {}", prepared_root.display()))?;
+    write_vuec_vitest_provenance_setup(prepared_root)?;
     write_text(
         &prepared_root.join("vuec-vitest-setup.ts"),
         r#"
+import './vuec-vitest-provenance'
 import { beforeEach, expect } from 'vitest'
 
 const vuecWarnings: string[] = []
@@ -19410,6 +19588,237 @@ fn normalize_conformance_output(output: &str) -> String {
         .take(200)
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn remove_vitest_provenance_sidecars(prepared_root: &Path) -> Result<()> {
+    if !prepared_root.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(prepared_root)
+        .with_context(|| format!("failed to read {}", prepared_root.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if name.starts_with("vuec-provenance.") && name.ends_with(".ndjson") {
+            fs::remove_file(&path)
+                .with_context(|| format!("failed to remove {}", path.display()))?;
+        }
+    }
+    Ok(())
+}
+
+fn merge_vitest_provenance_sidecars(
+    output_file: &Path,
+    absolute_output_file: &Path,
+    prepared_root: &Path,
+) -> Result<()> {
+    let report_path = if output_file.exists() {
+        output_file
+    } else {
+        absolute_output_file
+    };
+    if !report_path.exists() || !prepared_root.exists() {
+        return Ok(());
+    }
+
+    let sidecars = vitest_provenance_sidecars(prepared_root)?;
+    if sidecars.is_empty() {
+        return Ok(());
+    }
+
+    let mut report = read_json::<serde_json::Value>(report_path)?;
+    for sidecar in sidecars {
+        let data = fs::read_to_string(&sidecar)
+            .with_context(|| format!("failed to read {}", sidecar.display()))?;
+        for (index, line) in data.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let record: serde_json::Value = serde_json::from_str(line).with_context(|| {
+                format!(
+                    "failed to parse provenance sidecar {} line {}",
+                    sidecar.display(),
+                    index + 1
+                )
+            })?;
+            merge_vitest_provenance_record(&mut report, &record);
+        }
+    }
+
+    write_json(report_path, &report)?;
+    Ok(())
+}
+
+fn vitest_provenance_sidecars(prepared_root: &Path) -> Result<Vec<PathBuf>> {
+    let mut sidecars = Vec::new();
+    for entry in fs::read_dir(prepared_root)
+        .with_context(|| format!("failed to read {}", prepared_root.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if name.starts_with("vuec-provenance.") && name.ends_with(".ndjson") {
+            sidecars.push(path);
+        }
+    }
+    sidecars.sort();
+    Ok(sidecars)
+}
+
+fn merge_vitest_provenance_record(report: &mut serde_json::Value, record: &serde_json::Value) {
+    let markers = conformance_record_markers(record);
+    if markers.is_empty() {
+        return;
+    }
+    let test_path = normalize_conformance_path(
+        record
+            .get("testPath")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default(),
+    );
+    let full_name = record
+        .get("fullName")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let title = record
+        .get("title")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+
+    let Some(results) = report
+        .get_mut("testResults")
+        .and_then(|value| value.as_array_mut())
+    else {
+        return;
+    };
+
+    let file_index = results
+        .iter()
+        .position(|result| vitest_result_matches_record_path(result, &test_path));
+    let Some(index) = file_index else {
+        return;
+    };
+    let result = &mut results[index];
+    if merge_provenance_markers_into_matching_assertion(result, full_name, title, &markers) {
+        return;
+    }
+    merge_provenance_markers(result, &markers);
+}
+
+fn conformance_record_markers(record: &serde_json::Value) -> Vec<String> {
+    let mut markers = Vec::new();
+    collect_conformance_runtime_markers(record.get("markers"), &mut markers);
+    markers
+}
+
+fn normalize_conformance_path(path: &str) -> String {
+    path.replace('\\', "/")
+}
+
+fn vitest_result_matches_record_path(result: &serde_json::Value, test_path: &str) -> bool {
+    if test_path.is_empty() {
+        return false;
+    }
+    let result_path = normalize_conformance_path(
+        result
+            .get("name")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default(),
+    );
+    if result_path.is_empty() {
+        return false;
+    }
+    result_path == test_path
+        || result_path.ends_with(test_path)
+        || test_path.ends_with(&result_path)
+}
+
+fn merge_provenance_markers_into_matching_assertion(
+    result: &mut serde_json::Value,
+    full_name: &str,
+    title: &str,
+    markers: &[String],
+) -> bool {
+    let Some(assertions) = result
+        .get_mut("assertionResults")
+        .and_then(|value| value.as_array_mut())
+    else {
+        return false;
+    };
+    let full_name = normalize_conformance_test_name(full_name);
+    let title = normalize_conformance_test_name(title);
+    let assertion_index = assertions.iter().position(|assertion| {
+        let assertion_full_name =
+            normalize_conformance_test_name(&vitest_assertion_full_name(assertion));
+        let assertion_title = normalize_conformance_test_name(
+            assertion
+                .get("title")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default(),
+        );
+        (!full_name.is_empty() && assertion_full_name == full_name)
+            || (!title.is_empty() && assertion_title == title)
+            || (!full_name.is_empty() && assertion_title == full_name)
+    });
+    let Some(index) = assertion_index else {
+        return false;
+    };
+    merge_provenance_markers(&mut assertions[index], markers);
+    true
+}
+
+fn vitest_assertion_full_name(assertion: &serde_json::Value) -> String {
+    if let Some(full_name) = assertion.get("fullName").and_then(|value| value.as_str()) {
+        return full_name.to_string();
+    }
+    let mut parts = Vec::new();
+    if let Some(ancestors) = assertion
+        .get("ancestorTitles")
+        .and_then(|value| value.as_array())
+    {
+        for ancestor in ancestors {
+            if let Some(value) = ancestor.as_str() {
+                parts.push(value);
+            }
+        }
+    }
+    if let Some(title) = assertion.get("title").and_then(|value| value.as_str()) {
+        parts.push(title);
+    }
+    parts.join(" ")
+}
+
+fn normalize_conformance_test_name(name: &str) -> String {
+    name.replace(" > ", " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn merge_provenance_markers(target: &mut serde_json::Value, markers: &[String]) {
+    if !target.is_object() {
+        return;
+    }
+    if target.get("coverageProvenance").is_none() {
+        target["coverageProvenance"] = serde_json::Value::Array(Vec::new());
+    }
+    let Some(values) = target
+        .get_mut("coverageProvenance")
+        .and_then(|value| value.as_array_mut())
+    else {
+        return;
+    };
+    for marker in markers {
+        if !values.iter().any(|value| value.as_str() == Some(marker)) {
+            values.push(serde_json::Value::String(marker.clone()));
+        }
+    }
 }
 
 fn read_vitest_counts(path: &Path) -> Result<ConformanceExecutionCounts> {
@@ -19915,6 +20324,16 @@ fn conformance_runtime_markers(result: &serde_json::Value) -> Vec<String> {
     markers
 }
 
+fn conformance_runtime_markers_from_assertions(assertions: &[&serde_json::Value]) -> Vec<String> {
+    let mut markers = Vec::new();
+    for assertion in assertions {
+        collect_conformance_runtime_markers(assertion.get("vuecProvenance"), &mut markers);
+        collect_conformance_runtime_markers(assertion.get("__vuecProvenance"), &mut markers);
+        collect_conformance_runtime_markers(assertion.get("coverageProvenance"), &mut markers);
+    }
+    markers
+}
+
 fn collect_conformance_runtime_markers(
     value: Option<&serde_json::Value>,
     markers: &mut Vec<String>,
@@ -19949,21 +20368,20 @@ fn conformance_coverage_transform_element_entries(
 
     let mut grouped: BTreeMap<&'static str, Vec<&serde_json::Value>> = BTreeMap::new();
     for assertion in assertions {
-        let Some(full_name) = assertion
-            .get("fullName")
-            .or_else(|| assertion.get("title"))
-            .and_then(|value| value.as_str())
-        else {
+        let full_name = vitest_assertion_full_name(assertion);
+        if full_name.is_empty() {
             return Vec::new();
-        };
-        let scope = conformance_coverage_transform_element_assertion_scope(full_name);
+        }
+        let scope = conformance_coverage_transform_element_assertion_scope(&full_name);
         grouped.entry(scope).or_default().push(assertion);
     }
 
     grouped
         .into_iter()
         .map(|(scope, assertions)| {
-            let provenance = conformance_transform_element_scope_provenance(scope);
+            let markers = conformance_runtime_markers_from_assertions(&assertions);
+            let provenance =
+                conformance_transform_element_scope_provenance(scope).with_runtime_markers(markers);
             let source = provenance.legacy_source();
             let file_reason =
                 conformance_coverage_transform_element_reason(scope, source, default_reason);
@@ -19972,7 +20390,7 @@ fn conformance_coverage_transform_element_entries(
                 Some(scope),
                 provenance,
                 file_reason,
-                json_conformance_assertion_counts(assertions.into_iter()),
+                json_conformance_assertion_counts(assertions.iter().copied()),
             )
         })
         .collect()
@@ -20083,21 +20501,20 @@ fn conformance_coverage_transform_entries(
 
     let mut grouped: BTreeMap<&'static str, Vec<&serde_json::Value>> = BTreeMap::new();
     for assertion in assertions {
-        let Some(full_name) = assertion
-            .get("fullName")
-            .or_else(|| assertion.get("title"))
-            .and_then(|value| value.as_str())
-        else {
+        let full_name = vitest_assertion_full_name(assertion);
+        if full_name.is_empty() {
             return Vec::new();
-        };
-        let scope = conformance_coverage_transform_assertion_scope(full_name);
+        }
+        let scope = conformance_coverage_transform_assertion_scope(&full_name);
         grouped.entry(scope).or_default().push(assertion);
     }
 
     grouped
         .into_iter()
         .map(|(scope, assertions)| {
-            let provenance = conformance_transform_scope_provenance(scope);
+            let markers = conformance_runtime_markers_from_assertions(&assertions);
+            let provenance =
+                conformance_transform_scope_provenance(scope).with_runtime_markers(markers);
             let source = provenance.legacy_source();
             let file_reason = conformance_coverage_transform_reason(scope, source, default_reason);
             conformance_coverage_file(
@@ -20105,7 +20522,7 @@ fn conformance_coverage_transform_entries(
                 Some(scope),
                 provenance,
                 file_reason,
-                json_conformance_assertion_counts(assertions.into_iter()),
+                json_conformance_assertion_counts(assertions.iter().copied()),
             )
         })
         .collect()
@@ -22031,6 +22448,117 @@ projects = []
     }
 
     #[test]
+    fn vitest_provenance_sidecars_merge_assertion_markers() {
+        let temp = std::env::temp_dir().join(format!(
+            "vuec-xtask-vitest-provenance-sidecar-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp).unwrap();
+        let report = temp.join("vitest-report.json");
+        fs::write(
+            &report,
+            r#"{
+              "testResults": [
+                {
+                  "name": "F:/repo/prepared/vue3-core/packages/compiler-core/__tests__/transform.spec.ts",
+                  "assertionResults": [
+                    {
+                      "ancestorTitles": ["compiler: transform"],
+                      "title": "context.replaceNode",
+                      "status": "passed",
+                      "coverageProvenance": ["bridge:vue3.core.transformSuite"]
+                    },
+                    {
+                      "ancestorTitles": ["compiler: transform"],
+                      "title": "context.removeNode",
+                      "status": "passed"
+                    }
+                  ]
+                }
+              ]
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            temp.join("vuec-provenance.123.ndjson"),
+            r#"{"testPath":"F:\\repo\\prepared\\vue3-core\\packages\\compiler-core\\__tests__\\transform.spec.ts","fullName":"compiler: transform > context.replaceNode","title":"compiler: transform > context.replaceNode","markers":["bridge:vue3.core.transformSuite","callback.nodeTransform","js.transformContext.replaceNode"]}
+"#,
+        )
+        .unwrap();
+
+        merge_vitest_provenance_sidecars(&report, &report, &temp).unwrap();
+
+        let merged = read_json::<serde_json::Value>(&report).unwrap();
+        let markers = merged["testResults"][0]["assertionResults"][0]["coverageProvenance"]
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            markers
+                .iter()
+                .filter(|marker| marker.as_str() == Some("bridge:vue3.core.transformSuite"))
+                .count(),
+            1
+        );
+        assert!(markers
+            .iter()
+            .any(|marker| marker.as_str() == Some("callback.nodeTransform")));
+        assert!(markers
+            .iter()
+            .any(|marker| marker.as_str() == Some("js.transformContext.replaceNode")));
+        assert!(merged["testResults"][0]["assertionResults"][1]
+            .get("coverageProvenance")
+            .is_none());
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn runtime_markers_keep_bridge_evidence_and_callback_priority() {
+        let base = ConformanceCoverageProvenance::new(
+            "prepared-official",
+            "hybrid-js-adapter-rust-projection",
+            "suite-only-bridge-command",
+            &["suite-helper"],
+            &[],
+        );
+
+        let bridge_only = base
+            .clone()
+            .with_runtime_markers(vec!["bridge:vue3.core.transformElementSuite".into()]);
+        assert!(bridge_only
+            .bridge_commands
+            .iter()
+            .any(|command| command == "vue3.core.transformElementSuite"));
+        assert_eq!(
+            bridge_only.execution_path,
+            "hybrid-js-adapter-rust-projection"
+        );
+        assert_eq!(bridge_only.legacy_source(), ConformanceCoverageKind::Mixed);
+
+        let callback = base.with_runtime_markers(vec![
+            "bridge:vue3.core.transformElementSuite".into(),
+            "js.transformElement.props".into(),
+            "callback.directiveTransform".into(),
+        ]);
+        assert_eq!(callback.execution_path, "mixed-js-callback-boundary");
+        assert_eq!(callback.legacy_source(), ConformanceCoverageKind::Mixed);
+        assert!(callback
+            .adapter_roles
+            .iter()
+            .any(|role| role == "callback-materialization"));
+        assert!(callback
+            .adapter_roles
+            .iter()
+            .any(|role| role == "semantic-shim"));
+        assert!(callback
+            .runtime_markers
+            .iter()
+            .any(|marker| marker == "callback.directiveTransform"));
+    }
+
+    #[test]
     fn conformance_item_detail_uses_execution_counts() {
         let readiness = conformance_readiness(
             suite_spec(ConformanceSuite::Vue3Core),
@@ -23119,12 +23647,19 @@ describe('compiler: transform', () => {
         assert!(runner.contains("t.identifier('__vuecInteropDefault')"));
         assert!(runner.contains("testResults: Array.from(testResultsByFile.values())"));
         assert!(runner.contains("compiler-options.spec.js"));
+        assert!(runner.contains("__vuecFlushProvenance"));
+        assert!(runner.contains("coverageProvenance"));
         let vue2_specs = suite_spec(ConformanceSuite::Vue2Compiler);
         assert!(vue2_specs.runner_dependencies.contains(&"jsdom"));
         let setup = fs::read_to_string(temp.join("vuec-vitest-setup.ts")).unwrap();
+        assert!(setup.contains("import './vuec-vitest-provenance'"));
         assert!(setup.contains("warnMock"));
         assert!(setup.contains("mock.calls"));
         assert!(setup.contains("(console.error as any).mock"));
+        let provenance_setup = fs::read_to_string(temp.join("vuec-vitest-provenance.ts")).unwrap();
+        assert!(provenance_setup.contains("VUEC_PROVENANCE_SIDECAR"));
+        assert!(provenance_setup.contains("__vuecFlushProvenance"));
+        assert!(provenance_setup.contains("afterEach"));
 
         let specs = suite_spec(ConformanceSuite::Vue27Compiler);
         assert!(specs.runner_dependencies.contains(&"jsdom"));
