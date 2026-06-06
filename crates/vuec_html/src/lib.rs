@@ -756,13 +756,15 @@ fn decode_html_entity_at(value: &str, mode: HtmlEntityDecodeMode) -> Option<(cha
     if let Some(decoded) = decode_numeric_html_entity_at(value) {
         return Some(decoded);
     }
-    const NAMED: [(&str, char); 24] = [
+    const NAMED: [(&str, char); 26] = [
         ("amp", '&'),
         ("lt", '<'),
         ("gt", '>'),
         ("nbsp", '\u{00a0}'),
         ("apos", '\''),
         ("quot", '"'),
+        ("plus", '+'),
+        ("times", '\u{00d7}'),
         ("copy", '\u{00a9}'),
         ("reg", '\u{00ae}'),
         ("trade", '\u{2122}'),

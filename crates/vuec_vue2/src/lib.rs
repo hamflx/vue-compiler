@@ -1557,13 +1557,17 @@ fn process_platform_modules(element: &mut Vue2Element, diagnostics: &mut Diagnos
                 element.span,
             ));
         }
-        element.static_class = Some(js_string(&value));
+        if !value.is_empty() {
+            element.static_class = Some(js_string(&normalize_vue2_static_class(&value)));
+        }
     }
     if let Some(value) = get_binding_attr(element, "class", false) {
         element.class_binding = Some(value);
     }
     if let Some(value) = remove_attr(element, "style") {
-        element.static_style = Some(vue2_static_style_expression(&value));
+        if !value.is_empty() {
+            element.static_style = Some(vue2_static_style_expression(&value));
+        }
     }
     if let Some(value) = get_binding_attr(element, "style", false) {
         element.style_binding = Some(value);
@@ -5821,6 +5825,23 @@ fn js_string_single(value: &str) -> String {
     format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"))
 }
 
+fn normalize_vue2_static_class(value: &str) -> String {
+    let mut normalized = String::new();
+    let mut pending_space = false;
+    for ch in value.chars() {
+        if ch.is_whitespace() {
+            pending_space = true;
+        } else {
+            if !normalized.is_empty() && pending_space {
+                normalized.push(' ');
+            }
+            normalized.push(ch);
+            pending_space = false;
+        }
+    }
+    normalized
+}
+
 fn vue2_static_style_expression(value: &str) -> String {
     let fields = vue2_parse_static_style(value)
         .into_iter()
@@ -6775,6 +6796,19 @@ mod tests {
 
     #[test]
     fn generates_vue2_static_style_sync_and_event_order_like_official_codegen() {
+        let no_optimize_options = Vue2CompileOptions {
+            optimize: false,
+            ..options()
+        };
+        let class_and_empty_style = compile(
+            r#"<section><div class="el-button el-button--primary " style=""></div><span class=" "></span><i class=""></i></section>"#,
+            no_optimize_options,
+        );
+        assert_eq!(
+            class_and_empty_style.render,
+            r#"with(this){return _c('section',[_c('div',{staticClass:"el-button el-button--primary"}),_c('span',{staticClass:""}),_c('i')])}"#
+        );
+
         let pagination = compile(
             r#"<el-pagination
   :page-size.sync="page.size"
@@ -7075,12 +7109,12 @@ mod tests {
         );
 
         let named = compile(
-            "<span>&larr;&uarr;&rarr;&darr;&mdash;&ndash;&copy;&reg;&trade;</span>",
+            "<span>&larr;&uarr;&rarr;&darr;&mdash;&ndash;&copy;&reg;&trade;&plus;&times;</span>",
             options(),
         );
         assert_eq!(
             named.render,
-            r#"with(this){return _c('span',[_v("←↑→↓—–©®™")])}"#
+            r#"with(this){return _c('span',[_v("←↑→↓—–©®™+×")])}"#
         );
 
         let textarea = compile("<textarea>&#10004;</textarea>", options());
