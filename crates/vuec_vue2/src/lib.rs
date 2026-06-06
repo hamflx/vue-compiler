@@ -3119,7 +3119,9 @@ fn mir_node_pre(mir: &Vue2Mir, id: NodeId) -> bool {
 
 fn mir_node_is_template(mir: &Vue2Mir, id: NodeId) -> bool {
     match mir.node(id).map(|node| &node.kind) {
-        Some(Vue2MirKind::CreateElement(create)) => create.is_template,
+        Some(Vue2MirKind::CreateElement(create)) => {
+            create.is_template || matches!(&create.tag, MirExpr::String(tag) if tag == "template")
+        }
         Some(Vue2MirKind::If(if_node)) => if_node
             .branches
             .iter()
@@ -6321,6 +6323,28 @@ mod tests {
         assert_eq!(
             result.render,
             "with(this){return _c('div',[(ok)?_l((1),function(i){return _c('foo',{key:i})}):_e()],2)}"
+        );
+    }
+
+    #[test]
+    fn normalizes_legacy_named_slot_template_children() {
+        let result = compile(
+            r#"<Alert><template slot="desc">Content</template></Alert>"#,
+            options(),
+        );
+
+        assert_eq!(
+            result.render,
+            r#"with(this){return _c('Alert',[_c('template',{slot:"desc"},[_v("Content")])],2)}"#
+        );
+
+        let conditional = compile(
+            r#"<Alert v-if="show"><template slot="desc">Content</template></Alert>"#,
+            options(),
+        );
+        assert_eq!(
+            conditional.render,
+            r#"with(this){return (show)?_c('Alert',[_c('template',{slot:"desc"},[_v("Content")])],2):_e()}"#
         );
     }
 
