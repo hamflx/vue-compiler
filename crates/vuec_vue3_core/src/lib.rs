@@ -29464,25 +29464,12 @@ fn expression_diagnostics(ast: &Vue3Ast, options: &Vue3CompilerOptions) -> Vec<D
             Vue3AstKind::Element(element) => {
                 for prop in &element.props {
                     if let Vue3Prop::Directive(dir) = prop {
-                        if let Some(expression) = dir.exp.as_ref() {
-                            if dir.name == "on" && dir.arg.is_some() {
-                                push_event_handler_parse_diagnostic(
-                                    &store,
-                                    &expression.source_string(),
-                                    dir.exp_span,
-                                    source_type,
-                                    &mut diagnostics,
-                                );
-                            } else {
-                                push_expression_parse_diagnostic(
-                                    &store,
-                                    &expression.source_string(),
-                                    dir.exp_span,
-                                    source_type,
-                                    &mut diagnostics,
-                                );
-                            }
-                        }
+                        push_directive_expression_diagnostic(
+                            &store,
+                            dir,
+                            source_type,
+                            &mut diagnostics,
+                        );
                         if dir.name == "model" {
                             push_model_binding_diagnostic(element, dir, options, &mut diagnostics);
                         }
@@ -29493,6 +29480,76 @@ fn expression_diagnostics(ast: &Vue3Ast, options: &Vue3CompilerOptions) -> Vec<D
         }
     }
     diagnostics
+}
+
+fn push_directive_expression_diagnostic(
+    store: &JsAstStore,
+    dir: &Vue3Directive,
+    source_type: oxc_span::SourceType,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    match dir.name.as_str() {
+        "for" => push_for_expression_diagnostic(store, dir, source_type, diagnostics),
+        "on" if dir.arg.is_some() => {
+            if let Some(expression) = dir.exp.as_ref() {
+                push_event_handler_parse_diagnostic(
+                    store,
+                    &expression.source_string(),
+                    dir.exp_span,
+                    source_type,
+                    diagnostics,
+                );
+            }
+        }
+        _ => {
+            if let Some(expression) = dir.exp.as_ref() {
+                push_expression_parse_diagnostic(
+                    store,
+                    &expression.source_string(),
+                    dir.exp_span,
+                    source_type,
+                    diagnostics,
+                );
+            }
+        }
+    }
+}
+
+fn push_for_expression_diagnostic(
+    store: &JsAstStore,
+    dir: &Vue3Directive,
+    source_type: oxc_span::SourceType,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let Some(expression) = dir.exp.as_ref() else {
+        diagnostics.push(vue3_for_diagnostic(
+            Vue3ErrorCode::XVForNoExpression,
+            "v-for is missing expression.",
+            dir.span,
+        ));
+        return;
+    };
+    let expression = expression.source_string();
+    let expression = expression.trim();
+    if expression.is_empty() {
+        diagnostics.push(vue3_for_diagnostic(
+            Vue3ErrorCode::XVForNoExpression,
+            "v-for is missing expression.",
+            dir.exp_span.or(dir.span),
+        ));
+        return;
+    }
+    if store.parse_for_expression(expression, source_type).is_err() {
+        diagnostics.push(vue3_for_diagnostic(
+            Vue3ErrorCode::XVForMalformedExpression,
+            "v-for has invalid expression.",
+            dir.exp_span.or(dir.span),
+        ));
+    }
+}
+
+fn vue3_for_diagnostic(code: Vue3ErrorCode, message: &str, span: Option<Span>) -> Diagnostic {
+    Diagnostic::vue3_error(code, message, span)
 }
 
 fn push_model_binding_diagnostic(
@@ -37078,6 +37135,64 @@ mod tests {
         );
         assert!(scoped.diagnostics.is_empty());
         assert!(scoped.code.contains("`${item}:${_ctx.msg}`"));
+    }
+
+    #[test]
+    fn base_compile_accepts_v_for_of_expression_with_v_memo() {
+        let result = base_compile(
+            TemplateSource {
+                filename: "memo.vue".into(),
+                source:
+                    r#"<span v-for="data of tableData" :key="getId(data)" v-memo="getLetter(data)"></span>"#
+                        .into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                mode: "module".into(),
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert!(result.code.contains("_renderList(_ctx.tableData, (data"));
+        assert!(result.code.contains("const _memo = (_ctx.getLetter(data))"));
+    }
+
+    #[test]
+    fn base_compile_reports_v_for_structural_expression_diagnostics() {
+        let missing = base_compile(
+            TemplateSource {
+                filename: "bad.vue".into(),
+                source: r#"<span v-for />"#.into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions::default(),
+        );
+        assert!(missing
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "31"));
+
+        let malformed = base_compile(
+            TemplateSource {
+                filename: "bad.vue".into(),
+                source: r#"<span v-for="item in" />"#.into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions::default(),
+        );
+        assert!(malformed
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "32"));
+        assert!(!malformed
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "46"));
     }
 
     #[test]
