@@ -3581,7 +3581,7 @@ fn compile_script_structural_counts(
         ast_projection_enabled,
         ast_projection_mode: compile_script_ast_mode_name(ast_mode).into(),
         ast_projection_loc_strategy: if ast_projection_enabled {
-            "position-scan".into()
+            "line-index".into()
         } else {
             "not-run".into()
         },
@@ -6298,6 +6298,32 @@ const search = computed(() => formatCount(props.count))
         assert!(value["results"][0]["parse"]["medianMicros"]
             .as_u64()
             .is_some());
+    }
+
+    #[test]
+    fn compile_script_profile_structural_counts_reports_line_index_for_ast_projection() {
+        let mut compiler = vuec_sfc::SfcCompiler::new();
+        let descriptor = compiler
+            .parse_vue3("ProfileFixture.vue", "<script setup>const x = 1</script>")
+            .descriptor;
+        let script =
+            compiler.compile_script(&descriptor, vuec_sfc::SfcScriptCompileOptions::default());
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+
+        let counts = compile_script_structural_counts(
+            CompileScriptProfileVersion::Vue3,
+            &descriptor,
+            &script,
+            vuec_sfc::SfcScriptAstMode::Full,
+        );
+        assert!(counts.ast_projection_enabled);
+        assert_eq!(counts.ast_projection_mode, "full");
+        assert_eq!(counts.ast_projection_loc_strategy, "line-index");
+        assert_eq!(
+            counts.ast_projection_statement_count,
+            script.script_ast.len() + script.script_setup_ast.len()
+        );
+        assert!(counts.ast_projection_statement_count > 0);
     }
 
     #[test]

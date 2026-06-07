@@ -26499,6 +26499,7 @@ fn sfc_script_ast_body(
     source: &str,
     mode: SfcScriptAstMode,
 ) -> Vec<Value> {
+    let context = SfcScriptAstProjectionContext::new(source);
     store
         .parse_registered_program(id)
         .ok()
@@ -26510,11 +26511,11 @@ fn sfc_script_ast_body(
                 .map(|statement| match mode {
                     SfcScriptAstMode::None => Value::Null,
                     SfcScriptAstMode::TopLevel => sfc_script_ast_base_value(
-                        source,
+                        &context,
                         sfc_script_statement_type_name(statement),
                         statement.span(),
                     ),
-                    SfcScriptAstMode::Full => sfc_script_statement_ast_value(source, statement),
+                    SfcScriptAstMode::Full => sfc_script_statement_ast_value(&context, statement),
                 })
                 .filter(|value| !value.is_null())
                 .collect()
@@ -26522,9 +26523,87 @@ fn sfc_script_ast_body(
         .unwrap_or_default()
 }
 
-fn sfc_script_statement_ast_value(source: &str, statement: &Statement<'_>) -> Value {
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SfcScriptAstProjectionContext<'a> {
+    source: &'a str,
+    line_index: SfcScriptLineIndex,
+}
+
+impl<'a> SfcScriptAstProjectionContext<'a> {
+    fn new(source: &'a str) -> Self {
+        Self {
+            source,
+            line_index: SfcScriptLineIndex::new(source),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SfcScriptLineIndex {
+    break_offsets: Vec<usize>,
+    line_starts: Vec<usize>,
+}
+
+impl SfcScriptLineIndex {
+    fn new(source: &str) -> Self {
+        let mut break_offsets = Vec::new();
+        let mut line_starts = vec![0];
+        let bytes = source.as_bytes();
+        let mut index = 0usize;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'\r' => {
+                    break_offsets.push(index);
+                    if bytes.get(index + 1) == Some(&b'\n') {
+                        index += 1;
+                    }
+                    line_starts.push(index + 1);
+                }
+                b'\n' => {
+                    break_offsets.push(index);
+                    line_starts.push(index + 1);
+                }
+                _ => {}
+            }
+            index += 1;
+        }
+        Self {
+            break_offsets,
+            line_starts,
+        }
+    }
+
+    fn position_at(&self, source: &str, offset: usize) -> Option<SfcPosition> {
+        if offset > source.len() || !source.is_char_boundary(offset) {
+            return None;
+        }
+        let line_index = self
+            .break_offsets
+            .partition_point(|break_offset| *break_offset < offset);
+        let bytes = source.as_bytes();
+        let line_start = if offset > 0
+            && offset < bytes.len()
+            && bytes[offset] == b'\n'
+            && bytes[offset - 1] == b'\r'
+        {
+            offset
+        } else {
+            self.line_starts.get(line_index).copied().unwrap_or(0)
+        };
+        Some(SfcPosition {
+            column: source[line_start..offset].encode_utf16().count() + 1,
+            line: line_index + 1,
+            offset,
+        })
+    }
+}
+
+fn sfc_script_statement_ast_value(
+    context: &SfcScriptAstProjectionContext<'_>,
+    statement: &Statement<'_>,
+) -> Value {
     let mut value = sfc_script_ast_base_value(
-        source,
+        context,
         sfc_script_statement_type_name(statement),
         statement.span(),
     );
@@ -26533,42 +26612,42 @@ fn sfc_script_statement_ast_value(source: &str, statement: &Statement<'_>) -> Va
             value["body"] = json!(block
                 .body
                 .iter()
-                .map(|statement| sfc_script_statement_ast_value(source, statement))
+                .map(|statement| sfc_script_statement_ast_value(context, statement))
                 .collect::<Vec<_>>());
         }
         Statement::ExpressionStatement(statement) => {
-            value["expression"] = sfc_script_expression_ast_value(source, &statement.expression);
+            value["expression"] = sfc_script_expression_ast_value(context, &statement.expression);
         }
         Statement::IfStatement(statement) => {
-            value["test"] = sfc_script_expression_ast_value(source, &statement.test);
-            value["consequent"] = sfc_script_statement_ast_value(source, &statement.consequent);
+            value["test"] = sfc_script_expression_ast_value(context, &statement.test);
+            value["consequent"] = sfc_script_statement_ast_value(context, &statement.consequent);
             value["alternate"] = statement
                 .alternate
                 .as_ref()
-                .map(|statement| sfc_script_statement_ast_value(source, statement))
+                .map(|statement| sfc_script_statement_ast_value(context, statement))
                 .unwrap_or(Value::Null);
         }
         Statement::ReturnStatement(statement) => {
             value["argument"] = statement
                 .argument
                 .as_ref()
-                .map(|argument| sfc_script_expression_ast_value(source, argument))
+                .map(|argument| sfc_script_expression_ast_value(context, argument))
                 .unwrap_or(Value::Null);
         }
         Statement::ThrowStatement(statement) => {
-            value["argument"] = sfc_script_expression_ast_value(source, &statement.argument);
+            value["argument"] = sfc_script_expression_ast_value(context, &statement.argument);
         }
         Statement::VariableDeclaration(declaration) => {
-            sfc_script_add_variable_declaration_ast_fields(source, &mut value, declaration);
+            sfc_script_add_variable_declaration_ast_fields(context, &mut value, declaration);
         }
         Statement::FunctionDeclaration(function) => {
-            sfc_script_add_function_ast_fields(source, &mut value, function);
+            sfc_script_add_function_ast_fields(context, &mut value, function);
         }
         Statement::ClassDeclaration(class) => {
-            sfc_script_add_class_ast_fields(source, &mut value, class);
+            sfc_script_add_class_ast_fields(context, &mut value, class);
         }
         Statement::ImportDeclaration(import) => {
-            value["moduleSource"] = sfc_script_string_literal_ast_value(source, &import.source);
+            value["moduleSource"] = sfc_script_string_literal_ast_value(context, &import.source);
             value["importKind"] = json!(sfc_script_import_export_kind(import.import_kind));
             value["specifiers"] = json!(import
                 .specifiers
@@ -26576,41 +26655,41 @@ fn sfc_script_statement_ast_value(source: &str, statement: &Statement<'_>) -> Va
                 .map(|specifiers| {
                     specifiers
                         .iter()
-                        .map(|specifier| sfc_script_import_specifier_ast_value(source, specifier))
+                        .map(|specifier| sfc_script_import_specifier_ast_value(context, specifier))
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default());
         }
         Statement::ExportDefaultDeclaration(declaration) => {
             value["declaration"] =
-                sfc_script_export_default_declaration_ast_value(source, declaration);
+                sfc_script_export_default_declaration_ast_value(context, declaration);
         }
         Statement::ExportNamedDeclaration(declaration) => {
             value["exportKind"] = json!(sfc_script_import_export_kind(declaration.export_kind));
             value["moduleSource"] = declaration
                 .source
                 .as_ref()
-                .map(|source_literal| sfc_script_string_literal_ast_value(source, source_literal))
+                .map(|source_literal| sfc_script_string_literal_ast_value(context, source_literal))
                 .unwrap_or(Value::Null);
             value["declaration"] = declaration
                 .declaration
                 .as_ref()
-                .map(|declaration| sfc_script_declaration_ast_value(source, declaration))
+                .map(|declaration| sfc_script_declaration_ast_value(context, declaration))
                 .unwrap_or(Value::Null);
             value["specifiers"] = json!(declaration
                 .specifiers
                 .iter()
-                .map(|specifier| sfc_script_export_specifier_ast_value(source, specifier))
+                .map(|specifier| sfc_script_export_specifier_ast_value(context, specifier))
                 .collect::<Vec<_>>());
         }
         Statement::ExportAllDeclaration(declaration) => {
             value["exportKind"] = json!(sfc_script_import_export_kind(declaration.export_kind));
             value["moduleSource"] =
-                sfc_script_string_literal_ast_value(source, &declaration.source);
+                sfc_script_string_literal_ast_value(context, &declaration.source);
             value["exported"] = declaration
                 .exported
                 .as_ref()
-                .map(|exported| sfc_script_module_export_name_ast_value(source, exported))
+                .map(|exported| sfc_script_module_export_name_ast_value(context, exported))
                 .unwrap_or(Value::Null);
         }
         _ => {}
@@ -26618,26 +26697,34 @@ fn sfc_script_statement_ast_value(source: &str, statement: &Statement<'_>) -> Va
     value
 }
 
-fn sfc_script_ast_base_value(source: &str, type_name: &str, span: oxc_span::Span) -> Value {
+fn sfc_script_ast_base_value(
+    context: &SfcScriptAstProjectionContext<'_>,
+    type_name: &str,
+    span: oxc_span::Span,
+) -> Value {
     let start = span.start as usize;
     let end = span.end as usize;
     json!({
         "type": type_name,
         "start": start,
         "end": end,
-        "loc": sfc_script_loc_value(source, start, end),
-        "source": sfc_script_source_slice(source, start, end),
+        "loc": sfc_script_loc_value(context, start, end),
+        "source": sfc_script_source_slice(context.source, start, end),
     })
 }
 
-fn sfc_script_loc_value(source: &str, start: usize, end: usize) -> Value {
+fn sfc_script_loc_value(
+    context: &SfcScriptAstProjectionContext<'_>,
+    start: usize,
+    end: usize,
+) -> Value {
     json!({
-        "start": position_at(source, start).unwrap_or(SfcPosition {
+        "start": context.line_index.position_at(context.source, start).unwrap_or(SfcPosition {
             line: 1,
             column: 1,
             offset: start,
         }),
-        "end": position_at(source, end).unwrap_or(SfcPosition {
+        "end": context.line_index.position_at(context.source, end).unwrap_or(SfcPosition {
             line: 1,
             column: 1,
             offset: end,
@@ -26687,9 +26774,12 @@ fn sfc_script_statement_type_name(statement: &Statement<'_>) -> &'static str {
     }
 }
 
-fn sfc_script_expression_ast_value(source: &str, expression: &Expression<'_>) -> Value {
+fn sfc_script_expression_ast_value(
+    context: &SfcScriptAstProjectionContext<'_>,
+    expression: &Expression<'_>,
+) -> Value {
     let mut value = sfc_script_ast_base_value(
-        source,
+        context,
         sfc_script_expression_type_name(expression),
         expression.span(),
     );
@@ -26713,48 +26803,48 @@ fn sfc_script_expression_ast_value(source: &str, expression: &Expression<'_>) ->
             value["properties"] = json!(object
                 .properties
                 .iter()
-                .map(|property| sfc_script_object_property_ast_value(source, property))
+                .map(|property| sfc_script_object_property_ast_value(context, property))
                 .collect::<Vec<_>>());
         }
         Expression::ArrayExpression(array) => {
             value["elements"] = json!(array
                 .elements
                 .iter()
-                .map(|element| sfc_script_array_element_ast_value(source, element))
+                .map(|element| sfc_script_array_element_ast_value(context, element))
                 .collect::<Vec<_>>());
         }
         Expression::CallExpression(call) => {
-            value["callee"] = sfc_script_expression_ast_value(source, &call.callee);
+            value["callee"] = sfc_script_expression_ast_value(context, &call.callee);
             value["arguments"] = json!(call
                 .arguments
                 .iter()
-                .map(|argument| sfc_script_argument_ast_value(source, argument))
+                .map(|argument| sfc_script_argument_ast_value(context, argument))
                 .collect::<Vec<_>>());
             value["optional"] = json!(call.optional);
         }
         Expression::StaticMemberExpression(member) => {
             value["type"] = json!("MemberExpression");
-            value["object"] = sfc_script_expression_ast_value(source, &member.object);
-            value["property"] = sfc_script_identifier_name_ast_value(source, &member.property);
+            value["object"] = sfc_script_expression_ast_value(context, &member.object);
+            value["property"] = sfc_script_identifier_name_ast_value(context, &member.property);
             value["computed"] = json!(false);
             value["optional"] = json!(member.optional);
         }
         Expression::ComputedMemberExpression(member) => {
             value["type"] = json!("MemberExpression");
-            value["object"] = sfc_script_expression_ast_value(source, &member.object);
-            value["property"] = sfc_script_expression_ast_value(source, &member.expression);
+            value["object"] = sfc_script_expression_ast_value(context, &member.object);
+            value["property"] = sfc_script_expression_ast_value(context, &member.expression);
             value["computed"] = json!(true);
             value["optional"] = json!(member.optional);
         }
         Expression::FunctionExpression(function) => {
-            sfc_script_add_function_ast_fields(source, &mut value, function);
+            sfc_script_add_function_ast_fields(context, &mut value, function);
         }
         Expression::ClassExpression(class) => {
-            sfc_script_add_class_ast_fields(source, &mut value, class);
+            sfc_script_add_class_ast_fields(context, &mut value, class);
         }
         Expression::ParenthesizedExpression(parenthesized) => {
             value["expression"] =
-                sfc_script_expression_ast_value(source, &parenthesized.expression);
+                sfc_script_expression_ast_value(context, &parenthesized.expression);
         }
         _ => {}
     }
@@ -26810,7 +26900,7 @@ fn sfc_script_expression_type_name(expression: &Expression<'_>) -> &'static str 
 }
 
 fn sfc_script_add_variable_declaration_ast_fields(
-    source: &str,
+    context: &SfcScriptAstProjectionContext<'_>,
     value: &mut Value,
     declaration: &VariableDeclaration<'_>,
 ) {
@@ -26820,12 +26910,12 @@ fn sfc_script_add_variable_declaration_ast_fields(
         .iter()
         .map(|declarator| {
             let mut value =
-                sfc_script_ast_base_value(source, "VariableDeclarator", declarator.span);
-            value["id"] = sfc_script_binding_pattern_ast_value(source, &declarator.id);
+                sfc_script_ast_base_value(context, "VariableDeclarator", declarator.span);
+            value["id"] = sfc_script_binding_pattern_ast_value(context, &declarator.id);
             value["init"] = declarator
                 .init
                 .as_ref()
-                .map(|init| sfc_script_expression_ast_value(source, init))
+                .map(|init| sfc_script_expression_ast_value(context, init))
                 .unwrap_or(Value::Null);
             value
         })
@@ -26842,138 +26932,150 @@ fn sfc_script_variable_kind(kind: VariableDeclarationKind) -> &'static str {
     }
 }
 
-fn sfc_script_add_function_ast_fields(source: &str, value: &mut Value, function: &Function<'_>) {
+fn sfc_script_add_function_ast_fields(
+    context: &SfcScriptAstProjectionContext<'_>,
+    value: &mut Value,
+    function: &Function<'_>,
+) {
     value["id"] = function
         .id
         .as_ref()
-        .map(|id| sfc_script_binding_identifier_ast_value(source, id))
+        .map(|id| sfc_script_binding_identifier_ast_value(context, id))
         .unwrap_or(Value::Null);
     value["params"] = json!(function
         .params
         .items
         .iter()
-        .map(|parameter| sfc_script_formal_parameter_ast_value(source, parameter))
+        .map(|parameter| sfc_script_formal_parameter_ast_value(context, parameter))
         .collect::<Vec<_>>());
     value["generator"] = json!(function.generator);
     value["async"] = json!(function.r#async);
 }
 
 fn sfc_script_add_class_ast_fields(
-    source: &str,
+    context: &SfcScriptAstProjectionContext<'_>,
     value: &mut Value,
     class: &oxc_ast::ast::Class<'_>,
 ) {
     value["id"] = class
         .id
         .as_ref()
-        .map(|id| sfc_script_binding_identifier_ast_value(source, id))
+        .map(|id| sfc_script_binding_identifier_ast_value(context, id))
         .unwrap_or(Value::Null);
     value["superClass"] = class
         .super_class
         .as_ref()
-        .map(|super_class| sfc_script_expression_ast_value(source, super_class))
+        .map(|super_class| sfc_script_expression_ast_value(context, super_class))
         .unwrap_or(Value::Null);
 }
 
-fn sfc_script_declaration_ast_value(source: &str, declaration: &Declaration<'_>) -> Value {
+fn sfc_script_declaration_ast_value(
+    context: &SfcScriptAstProjectionContext<'_>,
+    declaration: &Declaration<'_>,
+) -> Value {
     match declaration {
         Declaration::VariableDeclaration(declaration) => {
             let mut value =
-                sfc_script_ast_base_value(source, "VariableDeclaration", declaration.span);
-            sfc_script_add_variable_declaration_ast_fields(source, &mut value, declaration);
+                sfc_script_ast_base_value(context, "VariableDeclaration", declaration.span);
+            sfc_script_add_variable_declaration_ast_fields(context, &mut value, declaration);
             value
         }
         Declaration::FunctionDeclaration(function) => {
-            let mut value = sfc_script_ast_base_value(source, "FunctionDeclaration", function.span);
-            sfc_script_add_function_ast_fields(source, &mut value, function);
+            let mut value =
+                sfc_script_ast_base_value(context, "FunctionDeclaration", function.span);
+            sfc_script_add_function_ast_fields(context, &mut value, function);
             value
         }
         Declaration::ClassDeclaration(class) => {
-            let mut value = sfc_script_ast_base_value(source, "ClassDeclaration", class.span);
-            sfc_script_add_class_ast_fields(source, &mut value, class);
+            let mut value = sfc_script_ast_base_value(context, "ClassDeclaration", class.span);
+            sfc_script_add_class_ast_fields(context, &mut value, class);
             value
         }
         Declaration::TSTypeAliasDeclaration(declaration) => {
-            sfc_script_ast_base_value(source, "TSTypeAliasDeclaration", declaration.span)
+            sfc_script_ast_base_value(context, "TSTypeAliasDeclaration", declaration.span)
         }
         Declaration::TSInterfaceDeclaration(declaration) => {
-            sfc_script_ast_base_value(source, "TSInterfaceDeclaration", declaration.span)
+            sfc_script_ast_base_value(context, "TSInterfaceDeclaration", declaration.span)
         }
         Declaration::TSEnumDeclaration(declaration) => {
-            sfc_script_ast_base_value(source, "TSEnumDeclaration", declaration.span)
+            sfc_script_ast_base_value(context, "TSEnumDeclaration", declaration.span)
         }
         Declaration::TSModuleDeclaration(declaration) => {
-            sfc_script_ast_base_value(source, "TSModuleDeclaration", declaration.span)
+            sfc_script_ast_base_value(context, "TSModuleDeclaration", declaration.span)
         }
         Declaration::TSGlobalDeclaration(declaration) => {
-            sfc_script_ast_base_value(source, "TSGlobalDeclaration", declaration.span)
+            sfc_script_ast_base_value(context, "TSGlobalDeclaration", declaration.span)
         }
         Declaration::TSImportEqualsDeclaration(declaration) => {
-            sfc_script_ast_base_value(source, "TSImportEqualsDeclaration", declaration.span)
+            sfc_script_ast_base_value(context, "TSImportEqualsDeclaration", declaration.span)
         }
     }
 }
 
 fn sfc_script_export_default_declaration_ast_value(
-    source: &str,
+    context: &SfcScriptAstProjectionContext<'_>,
     declaration: &ExportDefaultDeclaration<'_>,
 ) -> Value {
     match &declaration.declaration {
         ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
-            let mut value = sfc_script_ast_base_value(source, "FunctionDeclaration", function.span);
-            sfc_script_add_function_ast_fields(source, &mut value, function);
+            let mut value =
+                sfc_script_ast_base_value(context, "FunctionDeclaration", function.span);
+            sfc_script_add_function_ast_fields(context, &mut value, function);
             value
         }
         ExportDefaultDeclarationKind::ClassDeclaration(class) => {
-            let mut value = sfc_script_ast_base_value(source, "ClassDeclaration", class.span);
-            sfc_script_add_class_ast_fields(source, &mut value, class);
+            let mut value = sfc_script_ast_base_value(context, "ClassDeclaration", class.span);
+            sfc_script_add_class_ast_fields(context, &mut value, class);
             value
         }
         ExportDefaultDeclarationKind::TSInterfaceDeclaration(declaration) => {
-            sfc_script_ast_base_value(source, "TSInterfaceDeclaration", declaration.span)
+            sfc_script_ast_base_value(context, "TSInterfaceDeclaration", declaration.span)
         }
         _ => {
             if let Some(expression) = declaration.declaration.as_expression() {
-                sfc_script_expression_ast_value(source, expression)
+                sfc_script_expression_ast_value(context, expression)
             } else {
-                sfc_script_ast_base_value(source, "Declaration", declaration.declaration.span())
+                sfc_script_ast_base_value(context, "Declaration", declaration.declaration.span())
             }
         }
     }
 }
 
 fn sfc_script_import_specifier_ast_value(
-    source: &str,
+    context: &SfcScriptAstProjectionContext<'_>,
     specifier: &ImportDeclarationSpecifier<'_>,
 ) -> Value {
     match specifier {
         ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
-            let mut value = sfc_script_ast_base_value(source, "ImportSpecifier", specifier.span);
+            let mut value = sfc_script_ast_base_value(context, "ImportSpecifier", specifier.span);
             value["imported"] =
-                sfc_script_module_export_name_ast_value(source, &specifier.imported);
-            value["local"] = sfc_script_binding_identifier_ast_value(source, &specifier.local);
+                sfc_script_module_export_name_ast_value(context, &specifier.imported);
+            value["local"] = sfc_script_binding_identifier_ast_value(context, &specifier.local);
             value["importKind"] = json!(sfc_script_import_export_kind(specifier.import_kind));
             value
         }
         ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
             let mut value =
-                sfc_script_ast_base_value(source, "ImportDefaultSpecifier", specifier.span);
-            value["local"] = sfc_script_binding_identifier_ast_value(source, &specifier.local);
+                sfc_script_ast_base_value(context, "ImportDefaultSpecifier", specifier.span);
+            value["local"] = sfc_script_binding_identifier_ast_value(context, &specifier.local);
             value
         }
         ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
             let mut value =
-                sfc_script_ast_base_value(source, "ImportNamespaceSpecifier", specifier.span);
-            value["local"] = sfc_script_binding_identifier_ast_value(source, &specifier.local);
+                sfc_script_ast_base_value(context, "ImportNamespaceSpecifier", specifier.span);
+            value["local"] = sfc_script_binding_identifier_ast_value(context, &specifier.local);
             value
         }
     }
 }
 
-fn sfc_script_export_specifier_ast_value(source: &str, specifier: &ExportSpecifier<'_>) -> Value {
-    let mut value = sfc_script_ast_base_value(source, "ExportSpecifier", specifier.span);
-    value["local"] = sfc_script_module_export_name_ast_value(source, &specifier.local);
-    value["exported"] = sfc_script_module_export_name_ast_value(source, &specifier.exported);
+fn sfc_script_export_specifier_ast_value(
+    context: &SfcScriptAstProjectionContext<'_>,
+    specifier: &ExportSpecifier<'_>,
+) -> Value {
+    let mut value = sfc_script_ast_base_value(context, "ExportSpecifier", specifier.span);
+    value["local"] = sfc_script_module_export_name_ast_value(context, &specifier.local);
+    value["exported"] = sfc_script_module_export_name_ast_value(context, &specifier.exported);
     value["exportKind"] = json!(sfc_script_import_export_kind(specifier.export_kind));
     value
 }
@@ -26985,20 +27087,23 @@ fn sfc_script_import_export_kind(kind: ImportOrExportKind) -> &'static str {
     }
 }
 
-fn sfc_script_binding_pattern_ast_value(source: &str, pattern: &BindingPattern<'_>) -> Value {
+fn sfc_script_binding_pattern_ast_value(
+    context: &SfcScriptAstProjectionContext<'_>,
+    pattern: &BindingPattern<'_>,
+) -> Value {
     match pattern {
         BindingPattern::BindingIdentifier(identifier) => {
-            sfc_script_binding_identifier_ast_value(source, identifier)
+            sfc_script_binding_identifier_ast_value(context, identifier)
         }
         BindingPattern::ObjectPattern(pattern) => {
-            let mut value = sfc_script_ast_base_value(source, "ObjectPattern", pattern.span);
+            let mut value = sfc_script_ast_base_value(context, "ObjectPattern", pattern.span);
             value["properties"] = json!(pattern
                 .properties
                 .iter()
                 .map(|property| {
-                    let mut value = sfc_script_ast_base_value(source, "Property", property.span);
-                    value["key"] = sfc_script_property_key_ast_value(source, &property.key);
-                    value["value"] = sfc_script_binding_pattern_ast_value(source, &property.value);
+                    let mut value = sfc_script_ast_base_value(context, "Property", property.span);
+                    value["key"] = sfc_script_property_key_ast_value(context, &property.key);
+                    value["value"] = sfc_script_binding_pattern_ast_value(context, &property.value);
                     value["computed"] = json!(property.computed);
                     value["shorthand"] = json!(property.shorthand);
                     value
@@ -27007,143 +27112,162 @@ fn sfc_script_binding_pattern_ast_value(source: &str, pattern: &BindingPattern<'
             value
         }
         BindingPattern::ArrayPattern(pattern) => {
-            let mut value = sfc_script_ast_base_value(source, "ArrayPattern", pattern.span);
+            let mut value = sfc_script_ast_base_value(context, "ArrayPattern", pattern.span);
             value["elements"] = json!(pattern
                 .elements
                 .iter()
                 .map(|element| {
                     element
                         .as_ref()
-                        .map(|element| sfc_script_binding_pattern_ast_value(source, element))
+                        .map(|element| sfc_script_binding_pattern_ast_value(context, element))
                         .unwrap_or(Value::Null)
                 })
                 .collect::<Vec<_>>());
             value
         }
         BindingPattern::AssignmentPattern(pattern) => {
-            let mut value = sfc_script_ast_base_value(source, "AssignmentPattern", pattern.span);
-            value["left"] = sfc_script_binding_pattern_ast_value(source, &pattern.left);
-            value["right"] = sfc_script_expression_ast_value(source, &pattern.right);
+            let mut value = sfc_script_ast_base_value(context, "AssignmentPattern", pattern.span);
+            value["left"] = sfc_script_binding_pattern_ast_value(context, &pattern.left);
+            value["right"] = sfc_script_expression_ast_value(context, &pattern.right);
             value
         }
     }
 }
 
 fn sfc_script_binding_identifier_ast_value(
-    source: &str,
+    context: &SfcScriptAstProjectionContext<'_>,
     identifier: &oxc_ast::ast::BindingIdentifier<'_>,
 ) -> Value {
-    let mut value = sfc_script_ast_base_value(source, "Identifier", identifier.span);
+    let mut value = sfc_script_ast_base_value(context, "Identifier", identifier.span);
     value["name"] = json!(identifier.name.as_str());
     value
 }
 
 fn sfc_script_identifier_name_ast_value(
-    source: &str,
+    context: &SfcScriptAstProjectionContext<'_>,
     identifier: &oxc_ast::ast::IdentifierName<'_>,
 ) -> Value {
-    let mut value = sfc_script_ast_base_value(source, "Identifier", identifier.span);
+    let mut value = sfc_script_ast_base_value(context, "Identifier", identifier.span);
     value["name"] = json!(identifier.name.as_str());
     value
 }
 
-fn sfc_script_module_export_name_ast_value(source: &str, name: &ModuleExportName<'_>) -> Value {
+fn sfc_script_module_export_name_ast_value(
+    context: &SfcScriptAstProjectionContext<'_>,
+    name: &ModuleExportName<'_>,
+) -> Value {
     match name {
         ModuleExportName::IdentifierName(identifier) => {
-            sfc_script_identifier_name_ast_value(source, identifier)
+            sfc_script_identifier_name_ast_value(context, identifier)
         }
         ModuleExportName::IdentifierReference(identifier) => {
-            let mut value = sfc_script_ast_base_value(source, "Identifier", identifier.span);
+            let mut value = sfc_script_ast_base_value(context, "Identifier", identifier.span);
             value["name"] = json!(identifier.name.as_str());
             value
         }
         ModuleExportName::StringLiteral(literal) => {
-            sfc_script_string_literal_ast_value(source, literal)
+            sfc_script_string_literal_ast_value(context, literal)
         }
     }
 }
 
 fn sfc_script_string_literal_ast_value(
-    source: &str,
+    context: &SfcScriptAstProjectionContext<'_>,
     literal: &oxc_ast::ast::StringLiteral<'_>,
 ) -> Value {
-    let mut value = sfc_script_ast_base_value(source, "StringLiteral", literal.span);
+    let mut value = sfc_script_ast_base_value(context, "StringLiteral", literal.span);
     value["value"] = json!(literal.value.as_str());
     value
 }
 
-fn sfc_script_formal_parameter_ast_value(source: &str, parameter: &FormalParameter<'_>) -> Value {
-    let mut value = sfc_script_binding_pattern_ast_value(source, &parameter.pattern);
+fn sfc_script_formal_parameter_ast_value(
+    context: &SfcScriptAstProjectionContext<'_>,
+    parameter: &FormalParameter<'_>,
+) -> Value {
+    let mut value = sfc_script_binding_pattern_ast_value(context, &parameter.pattern);
     if let Some(initializer) = &parameter.initializer {
-        let mut assignment = sfc_script_ast_base_value(source, "AssignmentPattern", parameter.span);
+        let mut assignment =
+            sfc_script_ast_base_value(context, "AssignmentPattern", parameter.span);
         assignment["left"] = value;
-        assignment["right"] = sfc_script_expression_ast_value(source, initializer);
+        assignment["right"] = sfc_script_expression_ast_value(context, initializer);
         value = assignment;
     }
     value
 }
 
-fn sfc_script_object_property_ast_value(source: &str, property: &ObjectPropertyKind<'_>) -> Value {
+fn sfc_script_object_property_ast_value(
+    context: &SfcScriptAstProjectionContext<'_>,
+    property: &ObjectPropertyKind<'_>,
+) -> Value {
     match property {
         ObjectPropertyKind::ObjectProperty(property) => {
-            let mut value = sfc_script_ast_base_value(source, "Property", property.span);
-            value["key"] = sfc_script_property_key_ast_value(source, &property.key);
-            value["value"] = sfc_script_expression_ast_value(source, &property.value);
+            let mut value = sfc_script_ast_base_value(context, "Property", property.span);
+            value["key"] = sfc_script_property_key_ast_value(context, &property.key);
+            value["value"] = sfc_script_expression_ast_value(context, &property.value);
             value["computed"] = json!(property.computed);
             value["shorthand"] = json!(property.shorthand);
             value
         }
         ObjectPropertyKind::SpreadProperty(spread) => {
-            let mut value = sfc_script_ast_base_value(source, "SpreadElement", spread.span);
-            value["argument"] = sfc_script_expression_ast_value(source, &spread.argument);
+            let mut value = sfc_script_ast_base_value(context, "SpreadElement", spread.span);
+            value["argument"] = sfc_script_expression_ast_value(context, &spread.argument);
             value
         }
     }
 }
 
-fn sfc_script_property_key_ast_value(source: &str, key: &PropertyKey<'_>) -> Value {
+fn sfc_script_property_key_ast_value(
+    context: &SfcScriptAstProjectionContext<'_>,
+    key: &PropertyKey<'_>,
+) -> Value {
     match key {
         PropertyKey::StaticIdentifier(identifier) => {
-            sfc_script_identifier_name_ast_value(source, identifier)
+            sfc_script_identifier_name_ast_value(context, identifier)
         }
         PropertyKey::PrivateIdentifier(identifier) => {
-            let mut value = sfc_script_ast_base_value(source, "PrivateName", identifier.span);
+            let mut value = sfc_script_ast_base_value(context, "PrivateName", identifier.span);
             value["name"] = json!(identifier.name.as_str());
             value
         }
         _ => key
             .as_expression()
-            .map(|expression| sfc_script_expression_ast_value(source, expression))
-            .unwrap_or_else(|| sfc_script_ast_base_value(source, "Identifier", key.span())),
+            .map(|expression| sfc_script_expression_ast_value(context, expression))
+            .unwrap_or_else(|| sfc_script_ast_base_value(context, "Identifier", key.span())),
     }
 }
 
-fn sfc_script_array_element_ast_value(source: &str, element: &ArrayExpressionElement<'_>) -> Value {
+fn sfc_script_array_element_ast_value(
+    context: &SfcScriptAstProjectionContext<'_>,
+    element: &ArrayExpressionElement<'_>,
+) -> Value {
     match element {
         ArrayExpressionElement::SpreadElement(spread) => {
-            let mut value = sfc_script_ast_base_value(source, "SpreadElement", spread.span);
-            value["argument"] = sfc_script_expression_ast_value(source, &spread.argument);
+            let mut value = sfc_script_ast_base_value(context, "SpreadElement", spread.span);
+            value["argument"] = sfc_script_expression_ast_value(context, &spread.argument);
             value
         }
         ArrayExpressionElement::Elision(_) => Value::Null,
         _ => element
             .as_expression()
-            .map(|expression| sfc_script_expression_ast_value(source, expression))
-            .unwrap_or_else(|| sfc_script_ast_base_value(source, "Expression", element.span())),
+            .map(|expression| sfc_script_expression_ast_value(context, expression))
+            .unwrap_or_else(|| sfc_script_ast_base_value(context, "Expression", element.span())),
     }
 }
 
-fn sfc_script_argument_ast_value(source: &str, argument: &Argument<'_>) -> Value {
+fn sfc_script_argument_ast_value(
+    context: &SfcScriptAstProjectionContext<'_>,
+    argument: &Argument<'_>,
+) -> Value {
     match argument {
         Argument::SpreadElement(spread) => {
-            let mut value = sfc_script_ast_base_value(source, "SpreadElement", spread.span);
-            value["argument"] = sfc_script_expression_ast_value(source, &spread.argument);
+            let mut value = sfc_script_ast_base_value(context, "SpreadElement", spread.span);
+            value["argument"] = sfc_script_expression_ast_value(context, &spread.argument);
             value
         }
         _ => argument
             .as_expression()
-            .map(|expression| sfc_script_expression_ast_value(source, expression))
-            .unwrap_or_else(|| sfc_script_ast_base_value(source, "Expression", argument.span())),
+            .map(|expression| sfc_script_expression_ast_value(context, expression))
+            .unwrap_or_else(|| sfc_script_ast_base_value(context, "Expression", argument.span())),
     }
 }
 
@@ -28607,6 +28731,58 @@ const local = 1
             json!("const a = call()")
         );
         assert!(top_level.script_setup_ast[0].get("declarations").is_none());
+    }
+
+    #[test]
+    fn script_ast_line_index_matches_position_scan() {
+        for source in [
+            "",
+            "alpha",
+            "a\nb",
+            "a\rb",
+            "a\r\nb",
+            "const face = \"\u{1F600}\"\r\nconst name = face\nconst done = true\rface",
+        ] {
+            let index = SfcScriptLineIndex::new(source);
+            for offset in 0..=source.len() {
+                assert_eq!(
+                    index.position_at(source, offset),
+                    position_at(source, offset),
+                    "source {source:?} offset {offset}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn vue3_compile_script_script_ast_loc_preserves_utf16_columns() {
+        let script_source = "const first = 1\r\nconst emoji = \"\u{1F600}\"\nconst last = emoji";
+        let sfc_source = format!("<script setup>{script_source}</script>");
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse("Comp.vue", &sfc_source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert_eq!(script.script_setup_ast.len(), 3);
+
+        let emoji_statement = &script.script_setup_ast[1];
+        let emoji_source = "const emoji = \"\u{1F600}\"";
+        let emoji_start = script_source.find(emoji_source).expect("emoji statement");
+        let emoji_end = emoji_start + emoji_source.len();
+        assert_eq!(emoji_statement["source"], json!(emoji_source));
+        assert_eq!(emoji_statement["start"], json!(emoji_start));
+        assert_eq!(emoji_statement["end"], json!(emoji_end));
+        assert_eq!(
+            emoji_statement["loc"]["start"],
+            json!({ "column": 1, "line": 2, "offset": emoji_start })
+        );
+        assert_eq!(
+            emoji_statement["loc"]["end"],
+            json!({
+                "column": emoji_source.encode_utf16().count() + 1,
+                "line": 2,
+                "offset": emoji_end,
+            })
+        );
     }
 
     #[test]
