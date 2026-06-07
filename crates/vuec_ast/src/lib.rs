@@ -216,12 +216,19 @@ impl<K> AstDocument<K> {
     }
 
     /// Sets the document root node.
-    pub fn set_root(&mut self, id: NodeId) {
+    ///
+    /// Returns `false` and leaves the current root unchanged when `id` does not
+    /// reference an arena node.
+    pub fn set_root(&mut self, id: NodeId) -> bool {
+        if self.node(id).is_none() {
+            return false;
+        }
         self.root = id;
         if let Some(root_node) = self.node_mut(id) {
             root_node.parent = None;
             root_node.index_in_parent = 0;
         }
+        true
     }
 
     /// Returns a node by id.
@@ -803,6 +810,16 @@ where
     /// Projects the arena tree into a nested public tree.
     pub fn project_nested(&self) -> Option<PublicNode<K>> {
         self.project_nested_node(self.root)
+    }
+
+    /// Projects the arena tree into a nested public tree after validating the root.
+    pub fn try_project_public(&self) -> Result<PublicNode<K>, AstInvariantError> {
+        if self.node(self.root).is_none() {
+            return Err(AstInvariantError::MissingRoot { root: self.root });
+        }
+        Ok(self
+            .project_nested()
+            .expect("validated AstDocument root should project"))
     }
 
     fn project_nested_node(&self, id: NodeId) -> Option<PublicNode<K>> {
@@ -3401,6 +3418,28 @@ mod tests {
         assert_eq!(doc.node(child).unwrap().index_in_parent, 0);
         let json = serde_json::to_string(&projected).unwrap();
         assert!(json.contains("Generated"));
+    }
+
+    #[test]
+    fn set_root_rejects_missing_node_id() {
+        let mut doc = Vue3Ast::new(Vue3NodeKind::root(), None);
+        let original_root = doc.root;
+
+        assert!(!doc.set_root(NodeId(99)));
+
+        assert_eq!(doc.root, original_root);
+        assert_eq!(doc.validate_tree(), Ok(()));
+    }
+
+    #[test]
+    fn try_project_public_reports_invalid_external_root() {
+        let mut doc = Vue3Ast::new(Vue3NodeKind::root(), None);
+        doc.root = NodeId(99);
+
+        assert_eq!(
+            doc.try_project_public(),
+            Err(AstInvariantError::MissingRoot { root: NodeId(99) })
+        );
     }
 
     #[test]

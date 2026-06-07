@@ -438,8 +438,11 @@ impl TargetSpec {
     }
 
     fn relative_api_manifest_path(&self, side: &str) -> PathBuf {
-        PathBuf::from("compat")
-            .join("api")
+        self.api_manifest_path_in(Path::new("compat"), side)
+    }
+
+    fn api_manifest_path_in(&self, root: &Path, side: &str) -> PathBuf {
+        root.join("api")
             .join(side)
             .join(self.version_line.as_str())
             .join(sanitize_segment(self.package))
@@ -447,16 +450,22 @@ impl TargetSpec {
     }
 
     fn relative_option_matrix_path(&self) -> PathBuf {
-        PathBuf::from("compat")
-            .join("options")
+        self.option_matrix_path_in(Path::new("compat"))
+    }
+
+    fn option_matrix_path_in(&self, root: &Path) -> PathBuf {
+        root.join("options")
             .join(self.version_line.as_str())
             .join(sanitize_segment(self.package))
             .join(format!("{}.json", sanitize_segment(self.entry)))
     }
 
     fn relative_output_contract_path(&self) -> PathBuf {
-        PathBuf::from("compat")
-            .join("output")
+        self.output_contract_path_in(Path::new("compat"))
+    }
+
+    fn output_contract_path_in(&self, root: &Path) -> PathBuf {
+        root.join("output")
             .join(self.version_line.as_str())
             .join(sanitize_segment(self.package))
             .join(format!("{}.json", sanitize_segment(self.entry)))
@@ -1689,7 +1698,7 @@ pub fn prepare_runtime_smoke(lock_path: &Path, vendor_dir: &Path) -> JsonReport 
     }
 }
 
-pub fn export_api(scope: &SelectionArgs) -> JsonReport {
+pub fn export_api(scope: &SelectionArgs, out_dir: &Path) -> JsonReport {
     let targets = select_targets(scope);
     let mut items = Vec::new();
     let mut created = Vec::new();
@@ -1710,7 +1719,7 @@ pub fn export_api(scope: &SelectionArgs) -> JsonReport {
 
     for target in targets {
         for side in &sides {
-            let path = target.relative_api_manifest_path(side.as_str());
+            let path = target.api_manifest_path_in(out_dir, side.as_str());
             let manifest_result = match side {
                 ApiManifestSide::Official => {
                     export_official_api_manifest(target, lock.as_ref(), lock_hash.clone())
@@ -10928,12 +10937,12 @@ const normalized = {
 process.stdout.write(JSON.stringify(normalized));
 "#;
 
-pub fn generate_option_matrix(scope: &SelectionArgs) -> JsonReport {
+pub fn generate_option_matrix(scope: &SelectionArgs, out_dir: &Path) -> JsonReport {
     let targets = select_targets(scope);
     let mut created = Vec::new();
     let mut items = Vec::new();
     for target in targets {
-        let path = target.relative_option_matrix_path();
+        let path = target.option_matrix_path_in(out_dir);
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
         }
@@ -11495,12 +11504,12 @@ fn run_conformance_with_backend(args: &ConformanceArgs, backend: AliasBackend) -
         .with_note(backend.conformance_note())
 }
 
-pub fn generate_output_contract(scope: &SelectionArgs) -> JsonReport {
+pub fn generate_output_contract(scope: &SelectionArgs, out_dir: &Path) -> JsonReport {
     let targets = select_targets(scope);
     let mut created = Vec::new();
     let mut items = Vec::new();
     for target in targets {
-        let path = target.relative_output_contract_path();
+        let path = target.output_contract_path_in(out_dir);
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
         }
@@ -12451,6 +12460,11 @@ pub fn sanitize_segment(segment: &str) -> String {
 }
 
 fn select_targets(scope: &SelectionArgs) -> Vec<TargetSpec> {
+    if scope.all {
+        return all_targets().to_vec();
+    }
+    let has_filter =
+        scope.version_line.is_some() || scope.package.is_some() || scope.entry.is_some();
     let mut targets = Vec::new();
     for target in all_targets() {
         if let Some(version_line) = scope.version_line {
@@ -12470,10 +12484,7 @@ fn select_targets(scope: &SelectionArgs) -> Vec<TargetSpec> {
         }
         targets.push(*target);
     }
-    if targets.is_empty() && scope.all {
-        targets.extend_from_slice(all_targets());
-    }
-    if targets.is_empty() {
+    if targets.is_empty() && !has_filter {
         targets.extend_from_slice(all_targets());
     }
     targets
@@ -21417,6 +21428,7 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
 
 fn sync_git_checkout(repo: &str, rev: &str, dir: &Path, submodules: bool) -> Result<()> {
     if dir.join(".git").exists() {
+        ensure_existing_git_checkout_matches(repo, dir)?;
         run_git(dir, &["fetch", "--tags", "--force", "origin"])?;
     } else {
         if let Some(parent) = dir.parent() {
@@ -21432,6 +21444,49 @@ fn sync_git_checkout(repo: &str, rev: &str, dir: &Path, submodules: bool) -> Res
         run_git(dir, &["submodule", "update", "--init", "--recursive"])?;
     }
     Ok(())
+}
+
+fn ensure_existing_git_checkout_matches(expected_repo: &str, dir: &Path) -> Result<()> {
+    let actual_repo = git_output(dir, &["remote", "get-url", "origin"])
+        .with_context(|| format!("failed to inspect origin for {}", dir.display()))?;
+    ensure!(
+        normalize_git_remote_url(&actual_repo) == normalize_git_remote_url(expected_repo),
+        "refusing to reuse {}; origin is {}, expected {}",
+        dir.display(),
+        actual_repo,
+        expected_repo
+    );
+
+    let status = git_output(dir, &["status", "--porcelain"])
+        .with_context(|| format!("failed to inspect git status for {}", dir.display()))?;
+    let dirty_lines = official_sync_dirty_status_lines(&status);
+    ensure!(
+        dirty_lines.is_empty(),
+        "refusing to checkout {} because it has local changes",
+        dir.display()
+    );
+    Ok(())
+}
+
+fn official_sync_dirty_status_lines(status: &str) -> Vec<&str> {
+    status
+        .lines()
+        .filter(|line| !is_official_sync_metadata_status_line(line))
+        .collect()
+}
+
+fn is_official_sync_metadata_status_line(line: &str) -> bool {
+    line.get(3..).map(str::trim).is_some_and(|path| {
+        path == "official-revision.json" || path == "\"official-revision.json\""
+    })
+}
+
+fn normalize_git_remote_url(url: &str) -> String {
+    let mut normalized = url.trim().trim_end_matches('/').to_string();
+    if let Some(stripped) = normalized.strip_suffix(".git") {
+        normalized = stripped.to_string();
+    }
+    normalized
 }
 
 fn run_git(dir: &Path, args: &[&str]) -> Result<()> {
@@ -22009,6 +22064,110 @@ projects = []
             selected_api_manifest_sides(&rust_only),
             vec![ApiManifestSide::Rust]
         );
+    }
+
+    #[test]
+    fn generation_paths_respect_custom_out_dir() {
+        let target = TargetSpec {
+            version_line: VersionLine::Vue3,
+            package: "@vue/compiler-sfc",
+            entry: "@vue/compiler-sfc",
+            kind: TargetKind::Vue3Sfc,
+        };
+        let out_dir = PathBuf::from("target/custom-compat");
+
+        assert_eq!(
+            target.api_manifest_path_in(&out_dir, "official"),
+            PathBuf::from(
+                "target/custom-compat/api/official/vue3/_vue_compiler-sfc/_vue_compiler-sfc.json"
+            )
+        );
+        assert_eq!(
+            target.option_matrix_path_in(&out_dir),
+            PathBuf::from(
+                "target/custom-compat/options/vue3/_vue_compiler-sfc/_vue_compiler-sfc.json"
+            )
+        );
+        assert_eq!(
+            target.output_contract_path_in(&out_dir),
+            PathBuf::from(
+                "target/custom-compat/output/vue3/_vue_compiler-sfc/_vue_compiler-sfc.json"
+            )
+        );
+        assert_eq!(
+            target.relative_option_matrix_path(),
+            PathBuf::from("compat/options/vue3/_vue_compiler-sfc/_vue_compiler-sfc.json")
+        );
+    }
+
+    #[test]
+    fn target_selection_does_not_expand_filtered_misses_to_all_targets() {
+        let filtered_miss = SelectionArgs {
+            version_line: Some(VersionLine::Vue3),
+            package: Some("@vue/compiler-sfc".into()),
+            entry: Some("@vue/compiler-sfc".into()),
+            ..SelectionArgs::default()
+        };
+        assert!(select_targets(&filtered_miss).is_empty());
+
+        let default_scope = SelectionArgs::default();
+        assert_eq!(select_targets(&default_scope).len(), all_targets().len());
+
+        let all_scope = SelectionArgs {
+            all: true,
+            version_line: Some(VersionLine::Vue3),
+            package: Some("@vue/compiler-sfc".into()),
+            entry: Some("@vue/compiler-sfc".into()),
+            ..SelectionArgs::default()
+        };
+        assert_eq!(select_targets(&all_scope).len(), all_targets().len());
+    }
+
+    #[test]
+    fn existing_git_checkout_must_match_origin_and_be_clean() {
+        let temp = std::env::temp_dir().join(format!(
+            "vuec-xtask-existing-checkout-guard-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let checkout = temp.join("checkout");
+        fs::create_dir_all(&checkout).unwrap();
+        run_command("git", &["init"], Some(&checkout)).unwrap();
+        run_git(
+            &checkout,
+            &["remote", "add", "origin", "https://example.com/vue.git"],
+        )
+        .unwrap();
+
+        let mismatch =
+            ensure_existing_git_checkout_matches("https://github.com/vuejs/vue", &checkout)
+                .unwrap_err()
+                .to_string();
+        assert!(mismatch.contains("refusing to reuse"));
+
+        run_git(
+            &checkout,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "https://github.com/vuejs/vue.git",
+            ],
+        )
+        .unwrap();
+        fs::write(checkout.join("official-revision.json"), "{}").unwrap();
+        ensure_existing_git_checkout_matches("https://github.com/vuejs/vue", &checkout).unwrap();
+
+        fs::write(checkout.join("local.txt"), "dirty").unwrap();
+
+        let dirty = ensure_existing_git_checkout_matches("https://github.com/vuejs/vue", &checkout)
+            .unwrap_err()
+            .to_string();
+        assert!(dirty.contains("local changes"));
+
+        let _ = fs::remove_dir_all(temp);
     }
 
     #[test]

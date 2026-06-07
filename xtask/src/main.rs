@@ -206,16 +206,10 @@ fn main() -> Result<()> {
         Command::PrepareRuntimeSmoke { lock, vendor_dir } => {
             prepare_runtime_smoke(&lock, &vendor_dir)
         }
-        Command::ExportApi { scope, out_dir } => {
-            let report = export_api(&scope);
-            ensure_dir(&out_dir)?;
-            report
-        }
+        Command::ExportApi { scope, out_dir } => export_api(&scope, &out_dir),
         Command::DiffApi { scope } => diff_api(&scope),
         Command::GenerateOptionMatrix { scope, out_dir } => {
-            let report = generate_option_matrix(&scope);
-            ensure_dir(&out_dir)?;
-            report
+            generate_option_matrix(&scope, &out_dir)
         }
         Command::AuditOptionMatrix { scope } => audit_option_matrix(&scope),
         Command::RunOptionMatrix { scope } => run_option_matrix(&scope),
@@ -223,9 +217,7 @@ fn main() -> Result<()> {
         Command::RunConformance { args } => run_conformance(&args),
         Command::RunNapiConformance { args } => run_napi_conformance(&args),
         Command::GenerateOutputContract { scope, out_dir } => {
-            let report = generate_output_contract(&scope);
-            ensure_dir(&out_dir)?;
-            report
+            generate_output_contract(&scope, &out_dir)
         }
         Command::RunOutputContract { scope } => run_output_contract(&scope),
         Command::RunNapiOutputContract { scope } => run_napi_output_contract(&scope),
@@ -684,11 +676,6 @@ fn verify_napi_alias() -> Result<compat::JsonReport> {
             .with_violations(violations)
             .with_note("builds vuec_napi, installs @vuec-rs/native plus official package-name alias templates under target/napi-alias, and requires them from Node"),
     )
-}
-
-fn ensure_dir(path: &PathBuf) -> Result<()> {
-    std::fs::create_dir_all(path)?;
-    Ok(())
 }
 
 fn verify_napi() -> Result<compat::JsonReport> {
