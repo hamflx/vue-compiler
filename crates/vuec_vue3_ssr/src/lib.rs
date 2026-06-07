@@ -13,8 +13,8 @@ use vuec_vue3_asset::transform_asset_url_props;
 /// Asset URL transform options re-exported for SSR compiler callers.
 pub use vuec_vue3_asset::AssetUrlOptions;
 use vuec_vue3_core::{
-    generate_vue3_ssr_mir, lower_vue3_ast_to_ssr_mir, source_map_for_render, CodegenResult,
-    TemplateSource, Vue3CompilerOptions, Vue3Dialect,
+    generate_vue3_ssr_mir, lower_vue3_ast_to_ssr_mir, source_map_for_render,
+    vue3_parser_diagnostics, CodegenResult, TemplateSource, Vue3CompilerOptions, Vue3Dialect,
 };
 
 /// Options for the Vue 3 SSR compiler facade.
@@ -97,6 +97,8 @@ pub fn compile(source: TemplateSource, options: SsrCompilerOptions) -> SsrCompil
     if options.core.source_map {
         generated.map = source_map_for_render(&generated.code, &ast, &source, &options.core);
     }
+    let mut diagnostics = vue3_parser_diagnostics(&ast);
+    diagnostics.extend(generated.diagnostics);
     SsrCompileResult {
         ast_helpers: vue3_ssr_public_ast_helpers(&generated.code, &generated.preamble),
         code: generated.code,
@@ -110,7 +112,7 @@ pub fn compile(source: TemplateSource, options: SsrCompilerOptions) -> SsrCompil
             summary.teleports,
             summary.suspenses
         ),
-        diagnostics: generated.diagnostics,
+        diagnostics,
         preamble: generated.preamble,
     }
 }
@@ -424,5 +426,24 @@ mod tests {
 
         assert!(result.code.contains("data-v-x"));
         assert!(!result.code.contains("data-vuec-slotted"));
+    }
+
+    #[test]
+    fn compile_includes_core_structural_parser_diagnostics() {
+        let result = compile(
+            TemplateSource {
+                filename: "bad.vue".into(),
+                source: "<div><span></div>".into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            SsrCompilerOptions::default(),
+        );
+
+        assert!(result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "24"
+                && diagnostic.message == "Element is missing end tag."));
     }
 }

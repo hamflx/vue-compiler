@@ -3581,4 +3581,23 @@ mod tests {
         );
         assert_eq!(projection["props"][0]["valueConstant"], json!(true));
     }
+
+    #[test]
+    fn compile_includes_core_structural_parser_diagnostics() {
+        let result = compile(
+            TemplateSource {
+                filename: "bad.vue".into(),
+                source: "<div><span></div>".into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            DomCompilerOptions::default(),
+        );
+
+        assert!(result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "24"
+                && diagnostic.message == "Element is missing end tag."));
+    }
 }

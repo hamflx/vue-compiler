@@ -26,12 +26,12 @@ use vuec_ast::{
     Vue3DomObjectBinding, Vue3DomObjectListeners, Vue3DomPropSegment, Vue3DomProps,
     Vue3DomPropsNormalize, Vue3DomRoot, Vue3DomSlotName, Vue3DomStaticAttr, Vue3DomTag,
     Vue3Element, Vue3ElementType, Vue3Expression, Vue3ForMemo, Vue3ForMir, Vue3NodeKind,
-    Vue3PatchFlags, Vue3Prop, Vue3Root, Vue3SlotFlag, Vue3SsrAttrs, Vue3SsrComponent,
-    Vue3SsrContent, Vue3SsrFor, Vue3SsrMir, Vue3SsrMirKind, Vue3SsrModel, Vue3SsrModelKind,
-    Vue3SsrRoot, Vue3SsrSuspense, Vue3SsrTeleport, Vue3VNodeCall,
+    Vue3ParserDiagnostic, Vue3PatchFlags, Vue3Prop, Vue3Root, Vue3SlotFlag, Vue3SsrAttrs,
+    Vue3SsrComponent, Vue3SsrContent, Vue3SsrFor, Vue3SsrMir, Vue3SsrMirKind, Vue3SsrModel,
+    Vue3SsrModelKind, Vue3SsrRoot, Vue3SsrSuspense, Vue3SsrTeleport, Vue3VNodeCall,
 };
 use vuec_codegen::{CodeWriter, SourceMapArtifact, SourceMapSegment};
-use vuec_diagnostics::Diagnostic;
+use vuec_diagnostics::{Diagnostic, Vue3ErrorCode};
 pub use vuec_html::find_matching_raw_text_end;
 use vuec_html::{
     decode_html_attr_entities, decode_html_text_entities, raw_text_mode_for_tag,
@@ -352,6 +352,14 @@ impl Vue3Dialect {
                 } => {
                     let incomplete =
                         vue3_start_tag_is_incomplete(&source.source, token.start, token.end);
+                    if incomplete && token.end == source.source.len() {
+                        push_vue3_parser_diagnostic(
+                            &mut ast,
+                            Vue3ErrorCode::EofInTag,
+                            source.file_id,
+                            source.base_offset + token.end,
+                        );
+                    }
                     if incomplete
                         && token.end == source.source.len()
                         && !stack_is_root_only(&stack, root)
@@ -525,6 +533,12 @@ impl Vue3Dialect {
                         continue;
                     }
                     if !stack_has_matching_element(&ast, &stack, &name) {
+                        push_vue3_parser_diagnostic(
+                            &mut ast,
+                            Vue3ErrorCode::XInvalidEndTag,
+                            source.file_id,
+                            source.base_offset + token.start,
+                        );
                         extend_open_element_spans_to(
                             &mut ast,
                             &stack,
@@ -552,10 +566,22 @@ impl Vue3Dialect {
                                     v_pre_depth -= 1;
                                 }
                                 break;
-                            } else if let Some(node) = ast.node_mut(node_id) {
-                                if let Some(span) = node.span.source_mut() {
-                                    span.end =
-                                        vuec_source::BytePos(source.base_offset + token.start);
+                            } else {
+                                let missing_start = ast
+                                    .node(node_id)
+                                    .and_then(|node| node.span.source().map(|span| span.start.0))
+                                    .unwrap_or(source.base_offset + token.start);
+                                push_vue3_parser_diagnostic(
+                                    &mut ast,
+                                    Vue3ErrorCode::XMissingEndTag,
+                                    source.file_id,
+                                    missing_start,
+                                );
+                                if let Some(node) = ast.node_mut(node_id) {
+                                    if let Some(span) = node.span.source_mut() {
+                                        span.end =
+                                            vuec_source::BytePos(source.base_offset + token.start);
+                                    }
                                 }
                                 if v_pre_depth > 0 {
                                     v_pre_depth -= 1;
@@ -582,6 +608,23 @@ impl Vue3Dialect {
                 HtmlTokenKind::Doctype(_) | HtmlTokenKind::Eof => {}
             }
             if eof {
+                let missing_starts = stack
+                    .iter()
+                    .copied()
+                    .skip(1)
+                    .filter_map(|node_id| {
+                        ast.node(node_id)
+                            .and_then(|node| node.span.source().map(|span| span.start.0))
+                    })
+                    .collect::<Vec<_>>();
+                for start in missing_starts {
+                    push_vue3_parser_diagnostic(
+                        &mut ast,
+                        Vue3ErrorCode::XMissingEndTag,
+                        source.file_id,
+                        start,
+                    );
+                }
                 extend_open_element_spans_to(
                     &mut ast,
                     &stack,
@@ -957,7 +1000,10 @@ impl Vue3Dialect {
         if options.source_map {
             result.map = source_map_for_render(&result.code, &ast, &source, &options);
         }
-        result.diagnostics = expression_diagnostics(&ast, &options);
+        result.diagnostics = vue3_parser_diagnostics(&ast);
+        result
+            .diagnostics
+            .extend(expression_diagnostics(&ast, &options));
         result.diagnostics.extend(ctx.diagnostics.into_vec());
         result
     }
@@ -29348,6 +29394,58 @@ fn render_props_access(base: &str, key: &str) -> String {
     }
 }
 
+fn push_vue3_parser_diagnostic(
+    ast: &mut Vue3Ast,
+    code: Vue3ErrorCode,
+    file_id: FileId,
+    offset: usize,
+) {
+    let diagnostic = Vue3ParserDiagnostic {
+        code: code.as_u16(),
+        message: vue3_parse_error_message(code).into(),
+        span: Some(Span::new(file_id, offset, offset)),
+    };
+    if let Some(root_node) = ast.root_node_mut() {
+        if let Vue3AstKind::Root(root) = &mut root_node.kind {
+            if !root.parser_diagnostics.iter().any(|existing| {
+                existing.code == diagnostic.code && existing.span == diagnostic.span
+            }) {
+                root.parser_diagnostics.push(diagnostic);
+            }
+        }
+    }
+}
+
+/// Returns Vue 3 parser diagnostics recorded on the AST root.
+pub fn vue3_parser_diagnostics(ast: &Vue3Ast) -> Vec<Diagnostic> {
+    ast.root_node()
+        .and_then(|node| match &node.kind {
+            Vue3AstKind::Root(root) => Some(root.parser_diagnostics.as_slice()),
+            _ => None,
+        })
+        .into_iter()
+        .flatten()
+        .map(|diagnostic| {
+            Diagnostic::error(diagnostic.code.to_string(), diagnostic.message.clone())
+                .with_span(diagnostic.span)
+        })
+        .collect()
+}
+
+fn vue3_parse_error_message(code: Vue3ErrorCode) -> &'static str {
+    match code {
+        Vue3ErrorCode::DuplicateAttribute => "Duplicate attribute.",
+        Vue3ErrorCode::EofBeforeTagName => "Unexpected EOF in tag.",
+        Vue3ErrorCode::EofInTag => "Unexpected EOF in tag.",
+        Vue3ErrorCode::MissingEndTagName => "End tag name was expected.",
+        Vue3ErrorCode::XInvalidEndTag => "Invalid end tag.",
+        Vue3ErrorCode::XMissingEndTag => "Element is missing end tag.",
+        Vue3ErrorCode::XMissingInterpolationEnd => "Interpolation end sign was not found.",
+        Vue3ErrorCode::XMissingDirectiveName => "Legal directive name was expected.",
+        _ => "Vue compiler parse error",
+    }
+}
+
 fn expression_diagnostics(ast: &Vue3Ast, options: &Vue3CompilerOptions) -> Vec<Diagnostic> {
     let store = JsAstStore::new();
     let source_type = expression_source_type(options);
@@ -36980,6 +37078,38 @@ mod tests {
         );
         assert!(scoped.diagnostics.is_empty());
         assert!(scoped.code.contains("`${item}:${_ctx.msg}`"));
+    }
+
+    #[test]
+    fn base_compile_reports_structural_parser_diagnostics() {
+        let missing = base_compile(
+            TemplateSource {
+                filename: "bad.vue".into(),
+                source: "<div><span></div>".into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions::default(),
+        );
+        assert!(missing
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "24"
+                && diagnostic.message == "Element is missing end tag."));
+
+        let invalid = base_compile(
+            TemplateSource {
+                filename: "bad.vue".into(),
+                source: "</span><div></div>".into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions::default(),
+        );
+        assert!(invalid
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "23" && diagnostic.message == "Invalid end tag."));
     }
 
     #[test]

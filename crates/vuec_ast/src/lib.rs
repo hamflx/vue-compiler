@@ -1735,6 +1735,9 @@ impl Vue3AstKind {
 pub struct Vue3Root {
     /// Source file id for this template, when known.
     pub source_id: Option<FileId>,
+    /// Parser diagnostics collected while recovering the Vue 3 template tree.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parser_diagnostics: Vec<Vue3ParserDiagnostic>,
     /// Runtime helpers requested by transforms.
     pub helpers: BTreeSet<RuntimeHelper>,
     /// Component asset names referenced by the template.
@@ -1757,6 +1760,7 @@ impl Default for Vue3Root {
     fn default() -> Self {
         Self {
             source_id: None,
+            parser_diagnostics: Vec::new(),
             helpers: BTreeSet::new(),
             components: BTreeSet::new(),
             directives: BTreeSet::new(),
@@ -1767,6 +1771,17 @@ impl Default for Vue3Root {
             codegen_node: None,
         }
     }
+}
+
+/// Lightweight Vue 3 parser diagnostic stored on the AST root.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vue3ParserDiagnostic {
+    /// Stable Vue 3 compiler error code.
+    pub code: u16,
+    /// Public compiler error message.
+    pub message: String,
+    /// Optional source span for the parser recovery point.
+    pub span: Option<Span>,
 }
 
 /// Vue 3 element node payload.
