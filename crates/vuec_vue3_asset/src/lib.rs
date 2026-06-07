@@ -203,29 +203,25 @@ fn transform_srcset_with_base(
     for (url, descriptor) in &mut candidates {
         if url.starts_with('.') {
             *url = join_asset_base(base, url);
-            if descriptor.is_empty() {
-                rewritten_items.push(url.clone());
-            } else {
-                rewritten_items.push(format!("{url} {descriptor}"));
-            }
         } else if should_process_asset_url(url, options) {
             need_import_transform = true;
-        } else if descriptor.is_empty() {
-            rewritten_items.push(url.clone());
-        } else {
-            rewritten_items.push(format!("{url} {descriptor}"));
         }
+        rewritten_items.push(format_srcset_candidate(url, descriptor));
     }
 
-    if !need_import_transform {
+    if !need_import_transform || !enable_imports {
         return Some(SrcsetTransform::Static(rewritten_items.join(", ")));
     }
 
-    if enable_imports {
-        asset_srcset_import_expression_from_candidates(&candidates, options, imports)
-            .map(SrcsetTransform::Expression)
+    asset_srcset_import_expression_from_candidates(&candidates, options, imports)
+        .map(SrcsetTransform::Expression)
+}
+
+fn format_srcset_candidate(url: &str, descriptor: &str) -> String {
+    if descriptor.is_empty() {
+        url.to_string()
     } else {
-        None
+        format!("{url} {descriptor}")
     }
 }
 
@@ -644,6 +640,29 @@ mod tests {
             r#"_imports_0 + ' 1x, ' + "/foo/logo.png" + ' 2x'"#
         );
         assert_eq!(imports[0].path, "@/logo.png");
+    }
+
+    #[test]
+    fn explicit_base_srcset_rewrites_dot_candidates_when_imports_disabled() {
+        let mut props = vec![attr("srcset", "./local.png 1x, @/logo.png 2x")];
+        let mut imports = Vec::new();
+
+        transform_asset_url_props(
+            "img",
+            &mut props,
+            &AssetUrlOptions {
+                base: Some("/foo/".into()),
+                ..AssetUrlOptions::default()
+            },
+            false,
+            &mut imports,
+        );
+
+        assert_eq!(
+            attribute_value(&props[0]),
+            "/foo/local.png 1x, @/logo.png 2x"
+        );
+        assert!(imports.is_empty());
     }
 
     #[test]

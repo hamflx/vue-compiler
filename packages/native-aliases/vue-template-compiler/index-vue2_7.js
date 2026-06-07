@@ -29,7 +29,12 @@ const ssrCompileToFunctions = function compileToFunctions(template, options, vm)
 };
 
 function parseComponent(source) {
-  return native.parseSfc(String(source || ''), {});
+  const options = arguments.length > 1 ? arguments[1] : undefined;
+  const opts = options || {};
+  return normalizeVue27ParseComponentResult(
+    native.parseVue27SfcComponent(String(source || ''), opts),
+    opts,
+  );
 }
 
 function generateCodeFrame(source) {
@@ -69,6 +74,96 @@ function normalizeIssues(issues, ranged) {
     if (issue.end != null) out.end = issue.end;
     return out;
   });
+}
+
+function normalizeVue27ParseComponentResult(result, options) {
+  if (!result || typeof result !== 'object') return result;
+  const descriptor = normalizeVue27Descriptor(result.descriptor || result);
+  descriptor.errors = normalizeIssues(result.errors, !!(options && options.outputSourceRange));
+  return descriptor;
+}
+
+function normalizeVue27Descriptor(descriptor) {
+  if (!descriptor || typeof descriptor !== 'object') return descriptor;
+  return {
+    source: descriptor.source || '',
+    filename: descriptor.filename || 'anonymous.vue',
+    template: descriptor.template ? normalizeVue27Block(descriptor, descriptor.template, false) : null,
+    script: descriptor.script ? normalizeVue27Block(descriptor, descriptor.script, false) : null,
+    scriptSetup: descriptor.script_setup ? normalizeVue27Block(descriptor, descriptor.script_setup, false) : null,
+    styles: Array.isArray(descriptor.styles)
+      ? descriptor.styles.map(block => normalizeVue27Block(descriptor, block, true))
+      : [],
+    customBlocks: Array.isArray(descriptor.custom_blocks)
+      ? descriptor.custom_blocks.map(block => normalizeVue27Block(descriptor, block, false))
+      : [],
+    errors: [],
+  };
+}
+
+function normalizeVue27Block(descriptor, block, style) {
+  const out = {
+    type: block.type_name || block.type || '',
+    content: block.content || '',
+    start: blockContentStart(block, descriptor),
+    end: blockContentEnd(block, descriptor),
+    attrs: vue27Attrs(block.attrs),
+  };
+  if (out.type === 'script' || out.type === 'style') {
+    out.map = vue27BlockMap(descriptor);
+  }
+  if (block.attrs && block.attrs.setup) out.setup = true;
+  if (block.attrs && block.attrs.lang) out.lang = block.attrs.lang;
+  if (block.attrs && block.attrs.src) out.src = block.attrs.src;
+  if (block.attrs && block.attrs.module != null) out.module = block.attrs.module === '' ? true : block.attrs.module;
+  if (style && block.attrs && block.attrs.scoped) out.scoped = true;
+  return out;
+}
+
+function vue27Attrs(attrs) {
+  const raw = attrs && attrs.raw && typeof attrs.raw === 'object' ? attrs.raw : {};
+  const out = {};
+  for (const key of Object.keys(raw)) {
+    out[key] = raw[key];
+  }
+  if (attrs && attrs.scoped) out.scoped = true;
+  if (attrs && attrs.setup) out.setup = true;
+  if (attrs && attrs.lang) out.lang = attrs.lang;
+  if (attrs && attrs.src) out.src = attrs.src;
+  if (attrs && attrs.module != null) out.module = attrs.module === '' ? true : attrs.module;
+  return out;
+}
+
+function blockContentStart(block, descriptor) {
+  if (typeof block.content_start === 'number') return block.content_start;
+  const source = descriptor && typeof descriptor.source === 'string' ? descriptor.source : '';
+  if (block && block.loc && typeof block.loc.start === 'number') {
+    const openEnd = source.indexOf('>', block.loc.start);
+    if (openEnd >= 0 && openEnd < block.loc.end) return openEnd + 1;
+    return block.loc.start;
+  }
+  return 0;
+}
+
+function blockContentEnd(block, descriptor) {
+  if (typeof block.content_end === 'number') return block.content_end;
+  const start = blockContentStart(block, descriptor);
+  if (block && typeof block.content === 'string') return start + block.content.length;
+  return block && block.loc && typeof block.loc.end === 'number' ? block.loc.end : 0;
+}
+
+function vue27BlockMap(descriptor) {
+  const filename = descriptor && descriptor.filename ? descriptor.filename : 'anonymous.vue';
+  const source = descriptor && descriptor.source ? descriptor.source : '';
+  return {
+    version: 3,
+    sources: [filename],
+    names: [],
+    mappings: 'AAAA',
+    file: filename,
+    sourceRoot: '',
+    sourcesContent: [source],
+  };
 }
 
 function emitVue2CompileWarnings(result, options) {

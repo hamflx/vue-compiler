@@ -319,9 +319,14 @@ impl<'a> HtmlTokenizer<'a> {
         self.interpolation_close = close.into();
     }
 
-    /// Moves the tokenizer cursor to `cursor`, clamped to the source length.
+    /// Moves the tokenizer cursor to `cursor`, clamped to the source length and
+    /// the nearest previous UTF-8 character boundary.
     pub fn set_cursor(&mut self, cursor: usize) {
-        self.cursor = cursor.min(self.source.len());
+        let mut cursor = cursor.min(self.source.len());
+        while cursor > 0 && !self.source.is_char_boundary(cursor) {
+            cursor -= 1;
+        }
+        self.cursor = cursor;
     }
 
     /// Returns the current byte cursor.
@@ -1023,6 +1028,15 @@ mod tests {
         assert!(matches!(tokens[2].kind, HtmlTokenKind::EndTag { ref name } if name.is_empty()));
         assert_eq!(tokens[2].end, "<template>a </ b</template>".len());
         assert!(matches!(tokens[3].kind, HtmlTokenKind::Eof));
+    }
+
+    #[test]
+    fn set_cursor_clamps_to_utf8_boundary() {
+        let mut tokenizer = HtmlTokenizer::new("aé<b>");
+        tokenizer.set_cursor(2);
+
+        assert_eq!(tokenizer.cursor(), 1);
+        assert!(matches!(tokenizer.next_token().kind, HtmlTokenKind::Text(text) if text == "é"));
     }
 
     #[test]

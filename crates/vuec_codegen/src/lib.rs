@@ -698,16 +698,19 @@ impl SourceMapBuilder {
                     })
                 })
             });
+            let (original_line, original_column, token_source_id, token_name_id) =
+                if let Some((line, column)) = original_loc {
+                    (line, column, source_id, name_id)
+                } else {
+                    (0, 0, None, None)
+                };
             encoded.add_token(
                 mapping.generated_line.saturating_sub(1) as u32,
                 mapping.generated_column as u32,
-                original_loc
-                    .map(|(line, _)| line)
-                    .or_else(|| mapping.original.map(|span| span.start.0 as u32))
-                    .unwrap_or_default(),
-                original_loc.map(|(_, column)| column).unwrap_or_default(),
-                source_id,
-                name_id,
+                original_line,
+                original_column,
+                token_source_id,
+                token_name_id,
             );
         }
         let json = encoded.into_sourcemap().to_json();
@@ -1138,6 +1141,25 @@ mod tests {
                 .unwrap()
                 .source,
             "src.vue"
+        );
+    }
+
+    #[test]
+    fn source_map_builder_omits_unlocatable_original_mapping() {
+        let mut builder = SourceMapBuilder::new().file("test.js");
+        builder.add_mapping(
+            1,
+            0,
+            Some(Span::new(FileId(0), 42, 45)),
+            Some("src.vue".into()),
+        );
+
+        let map = builder.build();
+
+        assert_eq!(map.sources, vec!["src.vue"]);
+        assert_eq!(
+            map.original_position(GeneratedPosition::new(0, 0)).unwrap(),
+            None
         );
     }
 

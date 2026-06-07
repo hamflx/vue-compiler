@@ -66,6 +66,8 @@ assert.match(style.code, /data-v-smoke/);
 
 const manifest = native.apiManifest();
 assert.ok(manifest.exports.includes('compileVue2'));
+assert.ok(manifest.exports.includes('parseSfcResult'));
+assert.strictEqual(typeof native.parseSfcResult, 'function');
 
 process.stdout.write(JSON.stringify({
   status: 'pass',

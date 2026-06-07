@@ -4137,6 +4137,7 @@ pub fn api_manifest() -> Result<String> {
                 "parseVue3Dom",
                 "compileVue3Ssr",
                 "parseSfc",
+                "parseSfcResult",
                 "parseVue27SfcComponent",
                 "compileSfcTemplate",
                 "compileSfcTemplateSource",
@@ -4151,6 +4152,16 @@ pub fn api_manifest() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn api_manifest_lists_public_package_exports() {
+        let manifest: Value = serde_json::from_str(&api_manifest().unwrap()).unwrap();
+        let exports = manifest["exports"].as_array().unwrap();
+
+        assert!(exports.contains(&json!("parseSfc")));
+        assert!(exports.contains(&json!("parseSfcResult")));
+        assert!(exports.contains(&json!("parseVue27SfcComponent")));
+    }
 
     #[test]
     fn vue3_options_accepts_public_keys() {

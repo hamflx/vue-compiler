@@ -39,6 +39,12 @@ const vue27RangedDescriptor = vue27Sfc.parseComponent(vue27InvalidSource, {
 assert.strictEqual(vue27RangedDescriptor.errors[0].msg, 'tag <input> has no matching end tag.');
 assert.strictEqual(typeof vue27RangedDescriptor.errors[0].start, 'number');
 assert.strictEqual(typeof vue27RangedDescriptor.errors[0].end, 'number');
+const vue27TemplateCompilerRangedDescriptor = vue2.parseComponent(vue27InvalidSource, {
+  outputSourceRange: true,
+});
+assert.strictEqual(vue27TemplateCompilerRangedDescriptor.errors[0].msg, 'tag <input> has no matching end tag.');
+assert.strictEqual(typeof vue27TemplateCompilerRangedDescriptor.errors[0].start, 'number');
+assert.strictEqual(typeof vue27TemplateCompilerRangedDescriptor.errors[0].end, 'number');
 
 const coreResult = core.baseCompile('<div>{{ msg }}</div>', {
   mode: 'module',
