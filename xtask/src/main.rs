@@ -3379,7 +3379,7 @@ fn profile_compile_script(
         .with_items(items)
         .with_violations(violations)
         .with_created(vec![report_path.display().to_string()])
-        .with_note("profiles Rust compileScript parse, compile, and serialization phases for fixed SFC fixture corpora; structural counts are baseline estimates for the current code path until the SFC context phases add runtime instrumentation"))
+        .with_note("profiles Rust compileScript parse, compile, and serialization phases for fixed SFC fixture corpora using the internal no-AST projection mode; structural counts describe the selected compileScript mode"))
 }
 
 fn load_compile_script_profile_fixtures(
@@ -3456,6 +3456,7 @@ fn compile_script_profile_fixture(
     fixture: &CompileScriptProfileFixture,
     iterations: usize,
 ) -> Result<CompileScriptProfileResult> {
+    let script_ast_mode = vuec_sfc::SfcScriptAstMode::None;
     let mut parse_samples = Vec::with_capacity(iterations);
     let mut compile_samples = Vec::with_capacity(iterations);
     let mut serialize_samples = Vec::with_capacity(iterations);
@@ -3489,10 +3490,11 @@ fn compile_script_profile_fixture(
 
         let compile_started = Instant::now();
         let script = match version {
-            CompileScriptProfileVersion::Vue27 => compiler
-                .compile_vue27_script(&descriptor, vuec_sfc::SfcScriptCompileOptions::default()),
+            CompileScriptProfileVersion::Vue27 => {
+                compiler.compile_vue27_script(&descriptor, compile_script_profile_options())
+            }
             CompileScriptProfileVersion::Vue3 => {
-                compiler.compile_script(&descriptor, vuec_sfc::SfcScriptCompileOptions::default())
+                compiler.compile_script(&descriptor, compile_script_profile_options())
             }
         };
         compile_samples.push(compile_started.elapsed().as_micros());
@@ -3505,7 +3507,8 @@ fn compile_script_profile_fixture(
         output_bytes = serialized.len();
         errors = script.errors.len();
         warnings = script.warnings.len();
-        structural_counts = compile_script_structural_counts(version, &descriptor, &script);
+        structural_counts =
+            compile_script_structural_counts(version, &descriptor, &script, script_ast_mode);
     }
 
     Ok(CompileScriptProfileResult {
@@ -3522,6 +3525,13 @@ fn compile_script_profile_fixture(
         structural_counts,
         input_sha256: fixture.sha256.clone(),
     })
+}
+
+fn compile_script_profile_options() -> vuec_sfc::SfcScriptCompileOptions {
+    vuec_sfc::SfcScriptCompileOptions {
+        script_ast_mode: vuec_sfc::SfcScriptAstMode::None,
+        ..vuec_sfc::SfcScriptCompileOptions::default()
+    }
 }
 
 fn profile_phase(samples: Vec<u128>) -> CompileScriptPhaseProfile {
@@ -3555,8 +3565,9 @@ fn compile_script_structural_counts(
     version: CompileScriptProfileVersion,
     descriptor: &vuec_sfc::SfcDescriptor,
     script: &vuec_sfc::SfcScriptBlock,
+    ast_mode: vuec_sfc::SfcScriptAstMode,
 ) -> CompileScriptStructuralCounts {
-    let ast_projection_enabled = descriptor
+    let has_js_like_script = descriptor
         .script
         .as_ref()
         .is_some_and(compile_script_block_is_js_like)
@@ -3564,14 +3575,30 @@ fn compile_script_structural_counts(
             .script_setup
             .as_ref()
             .is_some_and(compile_script_block_is_js_like);
+    let ast_projection_enabled =
+        has_js_like_script && !matches!(ast_mode, vuec_sfc::SfcScriptAstMode::None);
     CompileScriptStructuralCounts {
         ast_projection_enabled,
+        ast_projection_mode: compile_script_ast_mode_name(ast_mode).into(),
+        ast_projection_loc_strategy: if ast_projection_enabled {
+            "position-scan".into()
+        } else {
+            "not-run".into()
+        },
         ast_projection_statement_count: script.script_ast.len() + script.script_setup_ast.len(),
         template_usage_scan_count: compile_script_template_usage_scan_count(version, descriptor),
         setup_analysis_count: compile_script_setup_analysis_count(version, descriptor),
         script_compile_error_analysis_count: compile_script_error_analysis_count(
             version, descriptor,
         ),
+    }
+}
+
+fn compile_script_ast_mode_name(mode: vuec_sfc::SfcScriptAstMode) -> &'static str {
+    match mode {
+        vuec_sfc::SfcScriptAstMode::None => "none",
+        vuec_sfc::SfcScriptAstMode::TopLevel => "top-level",
+        vuec_sfc::SfcScriptAstMode::Full => "full",
     }
 }
 
@@ -4962,6 +4989,8 @@ impl From<&CompileScriptProfileFixture> for CompileScriptProfileFixtureReport {
 #[serde(rename_all = "camelCase")]
 struct CompileScriptStructuralCounts {
     ast_projection_enabled: bool,
+    ast_projection_mode: String,
+    ast_projection_loc_strategy: String,
     ast_projection_statement_count: usize,
     template_usage_scan_count: usize,
     setup_analysis_count: usize,
@@ -6211,8 +6240,13 @@ const search = computed(() => formatCount(props.count))
         let result =
             compile_script_profile_fixture(CompileScriptProfileVersion::Vue27, &fixture, 1)
                 .unwrap();
-        assert!(result.structural_counts.ast_projection_enabled);
-        assert!(result.structural_counts.ast_projection_statement_count > 0);
+        assert!(!result.structural_counts.ast_projection_enabled);
+        assert_eq!(result.structural_counts.ast_projection_mode, "none");
+        assert_eq!(
+            result.structural_counts.ast_projection_loc_strategy,
+            "not-run"
+        );
+        assert_eq!(result.structural_counts.ast_projection_statement_count, 0);
         assert_eq!(result.structural_counts.template_usage_scan_count, 1);
         assert_eq!(result.structural_counts.setup_analysis_count, 1);
         assert_eq!(
@@ -6233,6 +6267,22 @@ const search = computed(() => formatCount(props.count))
         assert_eq!(value["status"], "pass");
         assert_eq!(value["versionLine"], "vue2_7");
         assert_eq!(value["buildProfile"], compile_script_build_profile());
+        assert_eq!(
+            value["results"][0]["structuralCounts"]["astProjectionEnabled"],
+            false
+        );
+        assert_eq!(
+            value["results"][0]["structuralCounts"]["astProjectionMode"],
+            "none"
+        );
+        assert_eq!(
+            value["results"][0]["structuralCounts"]["astProjectionLocStrategy"],
+            "not-run"
+        );
+        assert_eq!(
+            value["results"][0]["structuralCounts"]["astProjectionStatementCount"],
+            0
+        );
         assert_eq!(
             value["results"][0]["structuralCounts"]["setupAnalysisCount"],
             1

@@ -383,6 +383,9 @@ pub struct SfcScriptCompileOptions {
     /// Whether deprecated `import ... assert {}` syntax is accepted.
     #[serde(default)]
     pub allow_deprecated_import_assert_syntax: bool,
+    /// Internal public AST projection mode. Public package APIs keep the default full mode.
+    #[serde(skip)]
+    pub script_ast_mode: SfcScriptAstMode,
 }
 
 impl Default for SfcScriptCompileOptions {
@@ -402,6 +405,7 @@ impl Default for SfcScriptCompileOptions {
             custom_element: false,
             emit_script_setup_marker: true,
             allow_deprecated_import_assert_syntax: false,
+            script_ast_mode: SfcScriptAstMode::Full,
         }
     }
 }
@@ -803,14 +807,21 @@ fn source_hash(source: &str) -> u64 {
     hasher.finish()
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SfcScriptAstMode {
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// Controls public script AST projection during SFC script compilation.
+pub enum SfcScriptAstMode {
+    /// Do not project public script AST statements.
+    None,
+    /// Project only top-level statement metadata without recursive child nodes.
+    TopLevel,
+    /// Project the full public script AST shape.
+    #[default]
     Full,
 }
 
 impl SfcScriptAstMode {
-    fn from_options(_options: &SfcScriptCompileOptions) -> Self {
-        Self::Full
+    fn from_options(options: &SfcScriptCompileOptions) -> Self {
+        options.script_ast_mode
     }
 }
 
@@ -944,6 +955,16 @@ impl<'a> SfcScriptCompileContext<'a> {
 
     fn project_block_ast(&self, js: &mut JsAstStore, block: &SfcBlock) -> Vec<Value> {
         match self.ast_mode {
+            SfcScriptAstMode::None => Vec::new(),
+            SfcScriptAstMode::TopLevel => {
+                let id = js.register_program(
+                    block.content.clone(),
+                    Span::new(self.descriptor.source_file, block.loc.start, block.loc.end),
+                    script_mode(&block.attrs),
+                    self.source_type,
+                );
+                sfc_script_ast_body(js, id, &block.content, self.ast_mode)
+            }
             SfcScriptAstMode::Full => {
                 let id = js.register_program(
                     block.content.clone(),
@@ -951,7 +972,7 @@ impl<'a> SfcScriptCompileContext<'a> {
                     script_mode(&block.attrs),
                     self.source_type,
                 );
-                sfc_script_ast_body(js, id, &block.content)
+                sfc_script_ast_body(js, id, &block.content, self.ast_mode)
             }
         }
     }
@@ -26472,7 +26493,12 @@ fn side_effect_tag_ranges(source: &str) -> Vec<(usize, usize, &'static str)> {
     ranges
 }
 
-fn sfc_script_ast_body(store: &JsAstStore, id: JsProgramId, source: &str) -> Vec<Value> {
+fn sfc_script_ast_body(
+    store: &JsAstStore,
+    id: JsProgramId,
+    source: &str,
+    mode: SfcScriptAstMode,
+) -> Vec<Value> {
     store
         .parse_registered_program(id)
         .ok()
@@ -26481,7 +26507,16 @@ fn sfc_script_ast_body(store: &JsAstStore, id: JsProgramId, source: &str) -> Vec
                 .program
                 .body
                 .iter()
-                .map(|statement| sfc_script_statement_ast_value(source, statement))
+                .map(|statement| match mode {
+                    SfcScriptAstMode::None => Value::Null,
+                    SfcScriptAstMode::TopLevel => sfc_script_ast_base_value(
+                        source,
+                        sfc_script_statement_type_name(statement),
+                        statement.span(),
+                    ),
+                    SfcScriptAstMode::Full => sfc_script_statement_ast_value(source, statement),
+                })
+                .filter(|value| !value.is_null())
                 .collect()
         })
         .unwrap_or_default()
@@ -28510,6 +28545,68 @@ const local = 1
         let script_json = serde_json::to_value(&script).expect("script json");
         assert!(script_json.get("scriptAst").is_none());
         assert!(script_json.get("scriptSetupAst").is_none());
+    }
+
+    #[test]
+    fn vue3_compile_script_script_ast_modes_control_public_projection() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "Comp.vue",
+            r#"<script>export default { name: 'X' }</script><script setup>const a = call()</script>"#,
+        );
+
+        let full = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+        assert_eq!(full.script_ast.len(), 1);
+        assert_eq!(
+            full.script_ast[0]["declaration"]["type"],
+            json!("ObjectExpression")
+        );
+        assert_eq!(full.script_setup_ast.len(), 1);
+        assert_eq!(
+            full.script_setup_ast[0]["declarations"][0]["id"]["name"],
+            json!("a")
+        );
+
+        let none = compiler.compile_script(
+            &descriptor,
+            SfcScriptCompileOptions {
+                script_ast_mode: SfcScriptAstMode::None,
+                ..SfcScriptCompileOptions::default()
+            },
+        );
+        assert!(none.script_ast.is_empty());
+        assert!(none.script_setup_ast.is_empty());
+        let none_json = serde_json::to_value(&none).expect("none script json");
+        assert!(none_json.get("scriptAst").is_none());
+        assert!(none_json.get("scriptSetupAst").is_none());
+
+        let top_level = compiler.compile_script(
+            &descriptor,
+            SfcScriptCompileOptions {
+                script_ast_mode: SfcScriptAstMode::TopLevel,
+                ..SfcScriptCompileOptions::default()
+            },
+        );
+        assert_eq!(top_level.script_ast.len(), 1);
+        assert_eq!(
+            top_level.script_ast[0]["type"],
+            json!("ExportDefaultDeclaration")
+        );
+        assert_eq!(
+            top_level.script_ast[0]["source"],
+            json!("export default { name: 'X' }")
+        );
+        assert!(top_level.script_ast[0].get("declaration").is_none());
+        assert_eq!(top_level.script_setup_ast.len(), 1);
+        assert_eq!(
+            top_level.script_setup_ast[0]["type"],
+            json!("VariableDeclaration")
+        );
+        assert_eq!(
+            top_level.script_setup_ast[0]["source"],
+            json!("const a = call()")
+        );
+        assert!(top_level.script_setup_ast[0].get("declarations").is_none());
     }
 
     #[test]
