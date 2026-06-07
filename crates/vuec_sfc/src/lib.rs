@@ -820,6 +820,16 @@ pub enum SfcScriptAstMode {
 }
 
 impl SfcScriptAstMode {
+    /// Parses an internal script AST projection mode option.
+    pub fn from_option_str(value: &str) -> Option<Self> {
+        match value {
+            "none" => Some(Self::None),
+            "top-level" | "topLevel" | "top_level" => Some(Self::TopLevel),
+            "full" => Some(Self::Full),
+            _ => None,
+        }
+    }
+
     fn from_options(options: &SfcScriptCompileOptions) -> Self {
         options.script_ast_mode
     }

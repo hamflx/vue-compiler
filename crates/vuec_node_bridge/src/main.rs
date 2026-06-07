@@ -22,10 +22,11 @@ use vuec_html::{HtmlTokenKind, HtmlTokenizer};
 use vuec_js::JsAstStore;
 use vuec_sfc::{
     SfcAttrValue, SfcBlock, SfcBlockAttrs, SfcCompiler, SfcDescriptor, SfcPropsDestructureMode,
-    SfcScriptBlock, SfcScriptCompileOptions, SfcStyleCompileOptions, SfcTemplateCompileOptions,
-    Vue27ParseComponentOptions, Vue27PrefixIdentifiersOptions, Vue27RewriteDefaultOptions,
-    Vue27SfcPad, Vue27TemplatePreprocessOptions, Vue3RewriteDefaultOptions, Vue3SfcPad,
-    Vue3SfcParseOptions, Vue3SfcParseProjectionOptions, Vue3TemplatePreprocessOptions,
+    SfcScriptAstMode, SfcScriptBlock, SfcScriptCompileOptions, SfcStyleCompileOptions,
+    SfcTemplateCompileOptions, Vue27ParseComponentOptions, Vue27PrefixIdentifiersOptions,
+    Vue27RewriteDefaultOptions, Vue27SfcPad, Vue27TemplatePreprocessOptions,
+    Vue3RewriteDefaultOptions, Vue3SfcPad, Vue3SfcParseOptions, Vue3SfcParseProjectionOptions,
+    Vue3TemplatePreprocessOptions,
 };
 use vuec_source::FileId;
 use vuec_style::{
@@ -14023,6 +14024,7 @@ fn sfc_script_options(value: Option<&Value>) -> SfcScriptCompileOptions {
             options.emit_script_setup_marker,
         ),
     );
+    options.script_ast_mode = sfc_script_ast_mode_option(value, options.script_ast_mode);
     options.allow_deprecated_import_assert_syntax = deprecated_import_assert_syntax_option(value);
     options
 }
@@ -14250,6 +14252,16 @@ fn props_destructure_option(
         Some(Value::String(mode)) if mode == "error" => SfcPropsDestructureMode::Error,
         _ => fallback,
     }
+}
+
+fn sfc_script_ast_mode_option(value: &Value, fallback: SfcScriptAstMode) -> SfcScriptAstMode {
+    value
+        .get("__vuecScriptAstMode")
+        .or_else(|| value.get("scriptAstMode"))
+        .or_else(|| value.get("script_ast_mode"))
+        .and_then(Value::as_str)
+        .and_then(SfcScriptAstMode::from_option_str)
+        .unwrap_or(fallback)
 }
 
 fn json_string_map_option(value: &Value, name: &str) -> Option<BTreeMap<String, String>> {
@@ -15619,6 +15631,39 @@ mod tests {
         assert_eq!(setup_ast[0]["kind"], json!("const"));
         assert_eq!(setup_ast[0]["source"], json!("const a = 1"));
         assert_eq!(setup_ast[0]["declarations"][0]["id"]["name"], json!("a"));
+    }
+
+    #[test]
+    fn vue3_sfc_bridge_compile_script_honors_internal_script_ast_mode() {
+        let compiled = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": "<script>export default { name: 'X' }</script><script setup>const a = 1</script>",
+                "filename": "Comp.vue",
+                "options": {
+                    "__vuecScriptAstMode": "none"
+                }
+            }),
+        )
+        .expect("vue3 compileScript");
+
+        assert!(compiled.get("scriptAst").is_none());
+        assert!(compiled.get("scriptSetupAst").is_none());
+
+        let top_level = dispatch(
+            "sfc.compileScript",
+            json!({
+                "source": "<script>export default { name: 'X' }</script>",
+                "filename": "Comp.vue",
+                "options": {
+                    "scriptAstMode": "top-level"
+                }
+            }),
+        )
+        .expect("vue3 compileScript top-level AST");
+        let script_ast = top_level["scriptAst"].as_array().expect("scriptAst array");
+        assert_eq!(script_ast[0]["type"], json!("ExportDefaultDeclaration"));
+        assert!(script_ast[0].get("declaration").is_none());
     }
 
     #[test]
@@ -20818,6 +20863,25 @@ mod tests {
         assert_eq!(script_ast[0]["loc"]["start"]["offset"], json!(0));
         assert_eq!(compiled["bindings"]["foo"], json!("props"));
         assert_eq!(compiled["bindings"]["__isScriptSetup"], json!("false"));
+    }
+
+    #[test]
+    fn vue27_bridge_compile_script_honors_internal_script_ast_mode() {
+        let compiled = dispatch(
+            "sfc.vue27.compileScript",
+            json!({
+                "source": "<script>export default { props: ['foo'] }</script>",
+                "filename": "test.vue",
+                "options": {
+                    "__vuecScriptAstMode": "none"
+                }
+            }),
+        )
+        .expect("vue27 script");
+
+        assert!(compiled.get("scriptAst").is_none());
+        assert!(compiled.get("scriptSetupAst").is_none());
+        assert_eq!(compiled["bindings"]["foo"], json!("props"));
     }
 
     #[test]

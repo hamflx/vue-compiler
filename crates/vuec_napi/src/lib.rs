@@ -22,11 +22,11 @@ use vuec_ast::{NodeSpan, Vue3Ast, Vue3AstKind, Vue3Expression, Vue3Prop};
 use vuec_html::{HtmlTokenKind, HtmlTokenizer};
 use vuec_js::JsAstStore;
 use vuec_sfc::{
-    SfcCompiler, SfcCssVarNameStyle, SfcPropsDestructureMode, SfcScriptCompileOptions,
-    SfcStyleCompileOptions, SfcTemplateCompileOptions, Vue27ParseComponentOptions,
-    Vue27PrefixIdentifiersOptions, Vue27RewriteDefaultOptions, Vue27SfcPad,
-    Vue27TemplatePreprocessOptions, Vue3RewriteDefaultOptions, Vue3SfcPad, Vue3SfcParseOptions,
-    Vue3SfcParseProjectionOptions,
+    SfcCompiler, SfcCssVarNameStyle, SfcPropsDestructureMode, SfcScriptAstMode,
+    SfcScriptCompileOptions, SfcStyleCompileOptions, SfcTemplateCompileOptions,
+    Vue27ParseComponentOptions, Vue27PrefixIdentifiersOptions, Vue27RewriteDefaultOptions,
+    Vue27SfcPad, Vue27TemplatePreprocessOptions, Vue3RewriteDefaultOptions, Vue3SfcPad,
+    Vue3SfcParseOptions, Vue3SfcParseProjectionOptions,
 };
 use vuec_source::{FileId, Span};
 use vuec_vue2::{
@@ -3965,6 +3965,7 @@ fn sfc_script_options(value: Option<&Value>) -> SfcScriptCompileOptions {
             options.emit_script_setup_marker,
         ),
     );
+    options.script_ast_mode = sfc_script_ast_mode_option(value, options.script_ast_mode);
     options.allow_deprecated_import_assert_syntax = deprecated_import_assert_syntax_option(value);
     options
 }
@@ -4083,6 +4084,16 @@ fn props_destructure_option(
         Some(Value::String(mode)) if mode == "error" => SfcPropsDestructureMode::Error,
         _ => fallback,
     }
+}
+
+fn sfc_script_ast_mode_option(value: &Value, fallback: SfcScriptAstMode) -> SfcScriptAstMode {
+    value
+        .get("__vuecScriptAstMode")
+        .or_else(|| value.get("scriptAstMode"))
+        .or_else(|| value.get("script_ast_mode"))
+        .and_then(Value::as_str)
+        .and_then(SfcScriptAstMode::from_option_str)
+        .unwrap_or(fallback)
 }
 
 fn string_option(value: &Value, name: &str, fallback: &str) -> String {
@@ -4287,6 +4298,31 @@ mod tests {
         );
         assert_eq!(disabled.global_type_files, vec!["ambient.d.ts"]);
         assert_eq!(disabled.gen_default_as.as_deref(), Some("script"));
+    }
+
+    #[test]
+    fn vue3_sfc_script_options_accept_internal_ast_mode() {
+        assert_eq!(
+            sfc_script_options(Some(&json!({
+                "__vuecScriptAstMode": "none"
+            })))
+            .script_ast_mode,
+            SfcScriptAstMode::None
+        );
+        assert_eq!(
+            sfc_script_options(Some(&json!({
+                "scriptAstMode": "topLevel"
+            })))
+            .script_ast_mode,
+            SfcScriptAstMode::TopLevel
+        );
+        assert_eq!(
+            sfc_script_options(Some(&json!({
+                "script_ast_mode": "unknown"
+            })))
+            .script_ast_mode,
+            SfcScriptAstMode::Full
+        );
     }
 
     #[test]
