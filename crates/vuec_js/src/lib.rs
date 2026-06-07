@@ -1019,28 +1019,30 @@ pub enum JsParseResult<'a> {
 }
 
 fn split_for_expression(source_text: &str) -> Option<(&str, &str)> {
-    let mut depth = 0usize;
     let mut index = 0usize;
+    let mut state = JsScanState::default();
+    let mut prev = '\0';
     while index < source_text.len() {
         let ch = source_text[index..].chars().next()?;
-        match ch {
-            '(' | '[' | '{' => depth += 1,
-            ')' | ']' | '}' => depth = depth.saturating_sub(1),
-            ' ' if depth == 0 => {
-                let rest = &source_text[index..];
-                if rest.starts_with(" in ") {
-                    let left = source_text[..index].trim();
-                    let right = source_text[index + 4..].trim();
-                    return Some((left, right));
-                }
-                if rest.starts_with(" of ") {
-                    let left = source_text[..index].trim();
-                    let right = source_text[index + 4..].trim();
-                    return Some((left, right));
-                }
-            }
-            _ => {}
+        if state.consume(source_text, index, ch, prev) {
+            prev = ch;
+            index += ch.len_utf8();
+            continue;
         }
+        if ch == ' ' && state.depth_is_zero() {
+            let rest = &source_text[index..];
+            if rest.starts_with(" in ") {
+                let left = source_text[..index].trim();
+                let right = source_text[index + 4..].trim();
+                return Some((left, right));
+            }
+            if rest.starts_with(" of ") {
+                let left = source_text[..index].trim();
+                let right = source_text[index + 4..].trim();
+                return Some((left, right));
+            }
+        }
+        prev = ch;
         index += ch.len_utf8();
     }
     None
@@ -1048,21 +1050,22 @@ fn split_for_expression(source_text: &str) -> Option<(&str, &str)> {
 
 fn split_top_level(source_text: &str, separator: char) -> Vec<&str> {
     let mut items = Vec::new();
-    let mut depth = 0usize;
+    let mut state = JsScanState::default();
+    let mut prev = '\0';
     let mut start = 0usize;
     for (index, ch) in source_text.char_indices() {
-        match ch {
-            '(' | '[' | '{' => depth += 1,
-            ')' | ']' | '}' => depth = depth.saturating_sub(1),
-            _ if ch == separator && depth == 0 => {
-                let item = source_text[start..index].trim();
-                if !item.is_empty() {
-                    items.push(item);
-                }
-                start = index + ch.len_utf8();
-            }
-            _ => {}
+        if state.consume(source_text, index, ch, prev) {
+            prev = ch;
+            continue;
         }
+        if ch == separator && state.depth_is_zero() {
+            let item = source_text[start..index].trim();
+            if !item.is_empty() {
+                items.push(item);
+            }
+            start = index + ch.len_utf8();
+        }
+        prev = ch;
     }
     let tail = source_text[start..].trim();
     if !tail.is_empty() {
@@ -1457,6 +1460,23 @@ mod tests {
     }
 
     #[test]
+    fn parses_v_for_aliases_without_splitting_literal_commas() {
+        let store = JsAstStore::new();
+        let parsed = store
+            .parse_for_expression(
+                "item, label = 'a,b', matcher = /x,y/g in rows",
+                SourceType::script(),
+            )
+            .expect("v-for");
+
+        assert_eq!(parsed.aliases, "item, label = 'a,b', matcher = /x,y/g");
+        assert_eq!(
+            parsed.items,
+            vec!["item", "label = 'a,b'", "matcher = /x,y/g"]
+        );
+    }
+
+    #[test]
     fn registers_and_parses_expression_by_id() {
         let mut store = JsAstStore::new();
         let id = store.register_expr(
@@ -1608,6 +1628,19 @@ mod tests {
     }
 
     #[test]
+    fn parses_params_without_splitting_literal_commas() {
+        let store = JsAstStore::new();
+        let parsed = store
+            .parse_params("first = ',', second = /a,b/g, third = `x,y`, fourth")
+            .expect("params");
+
+        assert_eq!(
+            parsed.items,
+            vec!["first = ','", "second = /a,b/g", "third = `x,y`", "fourth"]
+        );
+    }
+
+    #[test]
     fn parse_mode_checks_program_errors() {
         let store = JsAstStore::new();
         assert!(store
@@ -1670,6 +1703,27 @@ mod tests {
         assert_eq!(
             rewrite_vue2_filter_expression("message | append('!', count + 1)"),
             "_f(\"append\")(message,'!', count + 1)"
+        );
+    }
+
+    #[test]
+    fn parses_vue2_filter_args_without_splitting_literal_commas() {
+        let store = JsAstStore::new();
+        let parsed = store
+            .parse_vue2_filter_expression(
+                "message | append(',', `x,y`, /a,b/g, count)",
+                SourceType::script(),
+            )
+            .expect("filter chain");
+
+        assert_eq!(parsed.filters.len(), 1);
+        assert_eq!(
+            parsed.filters[0].args,
+            vec!["','", "`x,y`", "/a,b/g", "count"]
+        );
+        assert_eq!(
+            rewrite_vue2_filter_expression("message | append(',', `x,y`, /a,b/g, count)"),
+            "_f(\"append\")(message,',', `x,y`, /a,b/g, count)"
         );
     }
 
