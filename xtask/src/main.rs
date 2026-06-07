@@ -22,6 +22,7 @@ use compat::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as JsonValue};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -184,6 +185,18 @@ enum Command {
         #[arg(long, default_value = "target/perf/compile-script")]
         out_dir: PathBuf,
     },
+    CompareCompileScriptProfile {
+        #[arg(long)]
+        full: PathBuf,
+        #[arg(long)]
+        top_level: PathBuf,
+        #[arg(long)]
+        none: PathBuf,
+        #[arg(long, default_value = "target/perf/compile-script-comparison")]
+        out_dir: PathBuf,
+        #[arg(long, default_value_t = 1.2)]
+        min_full_to_none_compile_ratio: f64,
+    },
     SummarizeCompat {
         #[arg(long)]
         locked: bool,
@@ -281,6 +294,19 @@ fn main() -> Result<()> {
             iterations,
             script_ast_mode.into(),
             &out_dir,
+        )?,
+        Command::CompareCompileScriptProfile {
+            full,
+            top_level,
+            none,
+            out_dir,
+            min_full_to_none_compile_ratio,
+        } => compare_compile_script_profile(
+            &full,
+            &top_level,
+            &none,
+            &out_dir,
+            min_full_to_none_compile_ratio,
         )?,
         Command::SummarizeCompat { locked, lock } => summarize_compat(locked, &lock),
     };
@@ -3384,6 +3410,258 @@ fn profile_compile_script(
         .with_note("profiles Rust compileScript parse, compile, and serialization phases for fixed SFC fixture corpora; --script-ast-mode selects full, top-level, or no public AST projection for root-cause comparisons"))
 }
 
+fn compare_compile_script_profile(
+    full_path: &Path,
+    top_level_path: &Path,
+    none_path: &Path,
+    out_dir: &Path,
+    min_full_to_none_compile_ratio: f64,
+) -> Result<compat::JsonReport> {
+    ensure_nested_target_child(out_dir, &["perf", "compile-script-comparison"])?;
+    fs::create_dir_all(out_dir)
+        .with_context(|| format!("failed to create {}", out_dir.display()))?;
+    let full = read_compile_script_profile_report(full_path)?;
+    let top_level = read_compile_script_profile_report(top_level_path)?;
+    let none = read_compile_script_profile_report(none_path)?;
+    validate_compile_script_profile_mode(&full, "full", full_path)?;
+    validate_compile_script_profile_mode(&top_level, "top-level", top_level_path)?;
+    validate_compile_script_profile_mode(&none, "none", none_path)?;
+    validate_compile_script_profile_compatible(&full, &top_level, "top-level")?;
+    validate_compile_script_profile_compatible(&full, &none, "none")?;
+
+    let mut comparisons = Vec::new();
+    let mut items = Vec::new();
+    let mut violations = Vec::new();
+    for full_result in &full.results {
+        let top_level_result = find_compile_script_profile_result(&top_level, full_result)?;
+        let none_result = find_compile_script_profile_result(&none, full_result)?;
+        let comparison = compare_compile_script_profile_result(
+            &full.version_line,
+            full_result,
+            top_level_result,
+            none_result,
+            min_full_to_none_compile_ratio,
+        );
+        if !comparison.ast_projection_problem_confirmed {
+            violations.push(format!(
+                "{} full/none compileScript ratio {:.3} is below threshold {:.3}",
+                comparison.name,
+                comparison.full_to_none_compile_ratio,
+                min_full_to_none_compile_ratio
+            ));
+        }
+        items.push(compat::ReportItem::new(
+            format!("{}-{}", full.version_line, comparison.name),
+            if comparison.ast_projection_problem_confirmed {
+                compat::ReportStatus::Pass
+            } else {
+                compat::ReportStatus::Fail
+            },
+            serde_json::to_string(&comparison)?,
+            Some(none_path.to_path_buf()),
+        ));
+        comparisons.push(comparison);
+    }
+
+    let report = CompileScriptProfileComparisonReport {
+        status: if violations.is_empty() {
+            "pass".into()
+        } else {
+            "fail".into()
+        },
+        version_line: full.version_line.clone(),
+        build_profile: full.build_profile.clone(),
+        iterations: full.iterations,
+        min_full_to_none_compile_ratio,
+        full_report: full_path.display().to_string(),
+        top_level_report: top_level_path.display().to_string(),
+        none_report: none_path.display().to_string(),
+        comparisons,
+    };
+    let json_path = out_dir.join(format!("{}.comparison.json", full.version_line));
+    let markdown_path = out_dir.join(format!("{}.comparison.md", full.version_line));
+    fs::write(&json_path, serde_json::to_string_pretty(&report)?)
+        .with_context(|| format!("failed to write {}", json_path.display()))?;
+    fs::write(
+        &markdown_path,
+        render_compile_script_profile_comparison_markdown(&report),
+    )
+    .with_context(|| format!("failed to write {}", markdown_path.display()))?;
+
+    Ok(
+        compat::JsonReport::new("compare_compile_script_profile", compat::ReportStatus::Pass)
+            .with_items(items)
+            .with_violations(violations)
+            .with_created(vec![
+                json_path.display().to_string(),
+                markdown_path.display().to_string(),
+            ])
+            .with_note("compares full, top-level, and no-AST compileScript profiles; pass means full public AST projection is measurably slower than no-AST for each fixture at the configured threshold"),
+    )
+}
+
+fn read_compile_script_profile_report(path: &Path) -> Result<CompileScriptProfileReport> {
+    let source =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    serde_json::from_str(&source)
+        .with_context(|| format!("failed to parse compileScript profile {}", path.display()))
+}
+
+fn validate_compile_script_profile_mode(
+    report: &CompileScriptProfileReport,
+    expected: &str,
+    path: &Path,
+) -> Result<()> {
+    if report.script_ast_mode != expected {
+        anyhow::bail!(
+            "{} has scriptAstMode {}, expected {}",
+            path.display(),
+            report.script_ast_mode,
+            expected
+        );
+    }
+    Ok(())
+}
+
+fn validate_compile_script_profile_compatible(
+    expected: &CompileScriptProfileReport,
+    actual: &CompileScriptProfileReport,
+    label: &str,
+) -> Result<()> {
+    if actual.version_line != expected.version_line {
+        anyhow::bail!(
+            "{label} profile versionLine {} does not match full profile {}",
+            actual.version_line,
+            expected.version_line
+        );
+    }
+    if actual.build_profile != expected.build_profile {
+        anyhow::bail!(
+            "{label} profile buildProfile {} does not match full profile {}",
+            actual.build_profile,
+            expected.build_profile
+        );
+    }
+    let expected_fixtures = expected
+        .fixtures
+        .iter()
+        .map(|fixture| (&fixture.name, &fixture.sha256))
+        .collect::<BTreeMap<_, _>>();
+    let actual_fixtures = actual
+        .fixtures
+        .iter()
+        .map(|fixture| (&fixture.name, &fixture.sha256))
+        .collect::<BTreeMap<_, _>>();
+    if actual_fixtures != expected_fixtures {
+        anyhow::bail!("{label} profile fixtures do not match full profile");
+    }
+    Ok(())
+}
+
+fn find_compile_script_profile_result<'a>(
+    report: &'a CompileScriptProfileReport,
+    needle: &CompileScriptProfileResult,
+) -> Result<&'a CompileScriptProfileResult> {
+    report
+        .results
+        .iter()
+        .find(|result| result.name == needle.name && result.input_sha256 == needle.input_sha256)
+        .with_context(|| {
+            format!(
+                "profile {} is missing fixture {} ({})",
+                report.script_ast_mode, needle.name, needle.input_sha256
+            )
+        })
+}
+
+fn compare_compile_script_profile_result(
+    version_line: &str,
+    full: &CompileScriptProfileResult,
+    top_level: &CompileScriptProfileResult,
+    none: &CompileScriptProfileResult,
+    min_full_to_none_compile_ratio: f64,
+) -> CompileScriptProfileComparison {
+    let full_compile = full.compile_script.median_micros;
+    let top_level_compile = top_level.compile_script.median_micros;
+    let none_compile = none.compile_script.median_micros;
+    let full_to_none_compile_ratio = ratio(full_compile, none_compile);
+    let full_to_top_level_compile_ratio = ratio(full_compile, top_level_compile);
+    CompileScriptProfileComparison {
+        name: full.name.clone(),
+        version_line: version_line.into(),
+        input_sha256: full.input_sha256.clone(),
+        full_compile_median_micros: full_compile,
+        top_level_compile_median_micros: top_level_compile,
+        none_compile_median_micros: none_compile,
+        full_to_none_compile_ratio,
+        full_to_top_level_compile_ratio,
+        none_compile_improvement_percent: percent_reduction(full_compile, none_compile),
+        top_level_compile_improvement_percent: percent_reduction(full_compile, top_level_compile),
+        full_serialize_median_micros: full.serialize.median_micros,
+        none_serialize_median_micros: none.serialize.median_micros,
+        full_to_none_serialize_ratio: ratio(
+            full.serialize.median_micros,
+            none.serialize.median_micros,
+        ),
+        full_total_median_micros: full.total.median_micros,
+        none_total_median_micros: none.total.median_micros,
+        full_to_none_total_ratio: ratio(full.total.median_micros, none.total.median_micros),
+        ast_projection_statement_count: full.structural_counts.ast_projection_statement_count,
+        template_usage_scan_count: none.structural_counts.template_usage_scan_count,
+        setup_analysis_count: none.structural_counts.setup_analysis_count,
+        ast_projection_problem_confirmed: full_to_none_compile_ratio
+            >= min_full_to_none_compile_ratio
+            && full.structural_counts.ast_projection_enabled
+            && !none.structural_counts.ast_projection_enabled,
+    }
+}
+
+fn ratio(numerator: u128, denominator: u128) -> f64 {
+    if denominator == 0 {
+        return f64::INFINITY;
+    }
+    numerator as f64 / denominator as f64
+}
+
+fn percent_reduction(before: u128, after: u128) -> f64 {
+    if before == 0 {
+        return 0.0;
+    }
+    ((before as f64 - after as f64) / before as f64) * 100.0
+}
+
+fn render_compile_script_profile_comparison_markdown(
+    report: &CompileScriptProfileComparisonReport,
+) -> String {
+    let mut out = String::new();
+    out.push_str("# compileScript profile comparison\n\n");
+    out.push_str(&format!(
+        "- status: `{}`\n- version line: `{}`\n- build profile: `{}`\n- iterations: `{}`\n- minimum full/no-AST compile ratio: `{:.3}`\n\n",
+        report.status,
+        report.version_line,
+        report.build_profile,
+        report.iterations,
+        report.min_full_to_none_compile_ratio
+    ));
+    out.push_str("| Fixture | full compile us | top-level compile us | no-AST compile us | full/no-AST | no-AST improvement | AST statements | template scans | setup analyses |\n");
+    out.push_str("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n");
+    for comparison in &report.comparisons {
+        out.push_str(&format!(
+            "| `{}` | {} | {} | {} | {:.3}x | {:.1}% | {} | {} | {} |\n",
+            comparison.name,
+            comparison.full_compile_median_micros,
+            comparison.top_level_compile_median_micros,
+            comparison.none_compile_median_micros,
+            comparison.full_to_none_compile_ratio,
+            comparison.none_compile_improvement_percent,
+            comparison.ast_projection_statement_count,
+            comparison.template_usage_scan_count,
+            comparison.setup_analysis_count
+        ));
+    }
+    out
+}
+
 fn load_compile_script_profile_fixtures(
     fixture_corpus: &Path,
 ) -> Result<Vec<CompileScriptProfileFixture>> {
@@ -4899,7 +5177,7 @@ struct BenchResult {
     output_bytes: Option<u64>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BenchEnvironment {
     git_commit: Option<String>,
@@ -4978,7 +5256,7 @@ struct CompileScriptProfileFixture {
     script_setup_bytes: usize,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CompileScriptProfileFixtureReport {
     name: String,
@@ -5004,7 +5282,7 @@ impl From<&CompileScriptProfileFixture> for CompileScriptProfileFixtureReport {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CompileScriptStructuralCounts {
     ast_projection_enabled: bool,
@@ -5016,14 +5294,14 @@ struct CompileScriptStructuralCounts {
     script_compile_error_analysis_count: usize,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CompileScriptPhaseProfile {
     median_micros: u128,
     p95_micros: u128,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CompileScriptProfileResult {
     name: String,
@@ -5040,7 +5318,7 @@ struct CompileScriptProfileResult {
     input_sha256: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CompileScriptProfileReport {
     status: String,
@@ -5051,6 +5329,45 @@ struct CompileScriptProfileReport {
     environment: BenchEnvironment,
     fixtures: Vec<CompileScriptProfileFixtureReport>,
     results: Vec<CompileScriptProfileResult>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CompileScriptProfileComparison {
+    name: String,
+    version_line: String,
+    input_sha256: String,
+    full_compile_median_micros: u128,
+    top_level_compile_median_micros: u128,
+    none_compile_median_micros: u128,
+    full_to_none_compile_ratio: f64,
+    full_to_top_level_compile_ratio: f64,
+    none_compile_improvement_percent: f64,
+    top_level_compile_improvement_percent: f64,
+    full_serialize_median_micros: u128,
+    none_serialize_median_micros: u128,
+    full_to_none_serialize_ratio: f64,
+    full_total_median_micros: u128,
+    none_total_median_micros: u128,
+    full_to_none_total_ratio: f64,
+    ast_projection_statement_count: usize,
+    template_usage_scan_count: usize,
+    setup_analysis_count: usize,
+    ast_projection_problem_confirmed: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CompileScriptProfileComparisonReport {
+    status: String,
+    version_line: String,
+    build_profile: String,
+    iterations: usize,
+    min_full_to_none_compile_ratio: f64,
+    full_report: String,
+    top_level_report: String,
+    none_report: String,
+    comparisons: Vec<CompileScriptProfileComparison>,
 }
 
 fn write_bench_fixtures(root: &Path) -> Result<Vec<BenchFixture>> {
@@ -6385,6 +6702,85 @@ const search = computed(() => formatCount(props.count))
             script.script_ast.len() + script.script_setup_ast.len()
         );
         assert!(counts.ast_projection_statement_count > 0);
+    }
+
+    #[test]
+    fn compile_script_profile_comparison_confirms_ast_projection_cost() {
+        let full = compile_script_profile_result_fixture("profile.vue", "full", 400, 120, 600);
+        let top_level =
+            compile_script_profile_result_fixture("profile.vue", "top-level", 220, 40, 360);
+        let none = compile_script_profile_result_fixture("profile.vue", "none", 160, 20, 260);
+
+        let comparison =
+            compare_compile_script_profile_result("vue2_7", &full, &top_level, &none, 1.2);
+
+        assert!(comparison.ast_projection_problem_confirmed);
+        assert_eq!(comparison.full_to_none_compile_ratio, 2.5);
+        assert_eq!(comparison.ast_projection_statement_count, 3);
+        assert_eq!(comparison.template_usage_scan_count, 1);
+        assert_eq!(comparison.setup_analysis_count, 1);
+
+        let report = CompileScriptProfileComparisonReport {
+            status: "pass".into(),
+            version_line: "vue2_7".into(),
+            build_profile: "debug".into(),
+            iterations: 20,
+            min_full_to_none_compile_ratio: 1.2,
+            full_report: "full.json".into(),
+            top_level_report: "top-level.json".into(),
+            none_report: "none.json".into(),
+            comparisons: vec![comparison],
+        };
+        let markdown = render_compile_script_profile_comparison_markdown(&report);
+        assert!(markdown.contains("full/no-AST"));
+        assert!(markdown.contains("2.500x"));
+    }
+
+    fn compile_script_profile_result_fixture(
+        name: &str,
+        ast_mode: &str,
+        compile_micros: u128,
+        serialize_micros: u128,
+        total_micros: u128,
+    ) -> CompileScriptProfileResult {
+        CompileScriptProfileResult {
+            name: name.into(),
+            version_line: "vue2_7".into(),
+            iterations: 20,
+            parse: CompileScriptPhaseProfile {
+                median_micros: 50,
+                p95_micros: 60,
+            },
+            compile_script: CompileScriptPhaseProfile {
+                median_micros: compile_micros,
+                p95_micros: compile_micros + 10,
+            },
+            serialize: CompileScriptPhaseProfile {
+                median_micros: serialize_micros,
+                p95_micros: serialize_micros + 10,
+            },
+            total: CompileScriptPhaseProfile {
+                median_micros: total_micros,
+                p95_micros: total_micros + 10,
+            },
+            output_bytes: 1,
+            errors: 0,
+            warnings: 0,
+            structural_counts: CompileScriptStructuralCounts {
+                ast_projection_enabled: ast_mode != "none",
+                ast_projection_mode: ast_mode.into(),
+                ast_projection_loc_strategy: if ast_mode == "none" {
+                    "not-run".into()
+                } else {
+                    "line-index".into()
+                },
+                ast_projection_statement_count: if ast_mode == "none" { 0 } else { 3 },
+                template_usage_scan_count: 1,
+                setup_analysis_count: 1,
+                script_compile_error_analysis_count: 0,
+            },
+            input_sha256: "sha".into(),
+        }
     }
 
     #[test]
