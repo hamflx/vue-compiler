@@ -158,10 +158,8 @@ pub fn compile_style(source: &str, options: StyleCompileOptions) -> StyleCompile
             result.code
         }
         Err(error) => {
-            diagnostics.push(unsupported_preprocessor_diagnostic(
-                &error, source, &options,
-            ));
-            errors.push(error);
+            diagnostics.push(preprocess_error_diagnostic(&error, source, &options));
+            errors.push(error.message);
             source.to_string()
         }
     };
@@ -219,10 +217,6 @@ pub fn compile_style(source: &str, options: StyleCompileOptions) -> StyleCompile
         code = normalize_public_closing_brace_whitespace(&code);
         None
     };
-    if let Some(diagnostic) = missing_import_diagnostic(source, &options) {
-        errors.push(diagnostic.message.clone());
-        diagnostics.push(diagnostic);
-    }
     let map = if options.source_map {
         Some(style_source_map(&code, source, &options))
     } else {
@@ -240,67 +234,43 @@ pub fn compile_style(source: &str, options: StyleCompileOptions) -> StyleCompile
     }
 }
 
-fn unsupported_preprocessor_diagnostic(
-    message: &str,
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StylePreprocessError {
+    code: &'static str,
+    message: String,
+    span: Option<(usize, usize)>,
+}
+
+impl StylePreprocessError {
+    fn unsupported(message: impl Into<String>) -> Self {
+        Self {
+            code: "VUEC_STYLE_UNSUPPORTED_PREPROCESSOR",
+            message: message.into(),
+            span: None,
+        }
+    }
+
+    fn import_resolve(message: impl Into<String>, span: Option<(usize, usize)>) -> Self {
+        Self {
+            code: "VUEC_STYLE_IMPORT_RESOLVE",
+            message: message.into(),
+            span,
+        }
+    }
+}
+
+fn preprocess_error_diagnostic(
+    error: &StylePreprocessError,
     source: &str,
     options: &StyleCompileOptions,
 ) -> Diagnostic {
-    Diagnostic::error("VUEC_STYLE_UNSUPPORTED_PREPROCESSOR", message)
-        .with_span(Some(style_source_span(options, 0, first_span_end(source))))
+    let span = error.span.unwrap_or_else(|| (0, first_span_end(source)));
+    Diagnostic::error(error.code, &error.message)
+        .with_span(Some(style_source_span(options, span.0, span.1)))
 }
 
 fn first_span_end(source: &str) -> usize {
     source.chars().next().map_or(0, char::len_utf8)
-}
-
-fn missing_import_diagnostic(source: &str, options: &StyleCompileOptions) -> Option<Diagnostic> {
-    let (start, end) = missing_import_span(source)?;
-    Some(
-        Diagnostic::error(
-            "VUEC_STYLE_IMPORT_RESOLVE",
-            "style import could not be resolved",
-        )
-        .with_span(Some(style_source_span(options, start, end))),
-    )
-}
-
-fn missing_import_span(source: &str) -> Option<(usize, usize)> {
-    let mut line_start = 0usize;
-    for line in source.split_inclusive('\n') {
-        let mut content_end = line_start + line.len();
-        while content_end > line_start
-            && matches!(source.as_bytes().get(content_end - 1), Some(b'\n' | b'\r'))
-        {
-            content_end -= 1;
-        }
-        let content = &source[line_start..content_end];
-        let trimmed = content.trim_start();
-        if trimmed.starts_with("@import") && trimmed.contains("missing") {
-            let import_offset = content.find("@import")?;
-            let import_start = line_start + import_offset;
-            let import_text = &source[import_start..content_end];
-            let import_end = import_text
-                .find(';')
-                .map(|offset| import_start + offset + 1)
-                .unwrap_or(content_end);
-            return Some((import_start, import_end));
-        }
-        line_start += line.len();
-    }
-    if line_start < source.len() {
-        let content = &source[line_start..];
-        let trimmed = content.trim_start();
-        if trimmed.starts_with("@import") && trimmed.contains("missing") {
-            let import_offset = content.find("@import")?;
-            let import_start = line_start + import_offset;
-            let import_end = content[import_offset..]
-                .find(';')
-                .map(|offset| import_start + offset + 1)
-                .unwrap_or(source.len());
-            return Some((import_start, import_end));
-        }
-    }
-    None
 }
 
 fn style_source_span(options: &StyleCompileOptions, local_start: usize, local_end: usize) -> Span {
@@ -477,7 +447,7 @@ struct PreprocessResult {
 fn preprocess_style(
     source: &str,
     options: &StyleCompileOptions,
-) -> Result<PreprocessResult, String> {
+) -> Result<PreprocessResult, StylePreprocessError> {
     let lang = options.preprocess_lang.as_deref();
     let Some(lang) = lang.filter(|lang| !lang.is_empty()) else {
         return Ok(PreprocessResult {
@@ -486,28 +456,29 @@ fn preprocess_style(
         });
     };
     let prepared = apply_additional_style_data(source, &options.preprocess_options);
-    let result =
-        match lang.to_ascii_lowercase().as_str() {
-            "css" => Ok(PreprocessResult {
-                code: prepared.clone(),
-                dependencies: Vec::new(),
+    let result = match lang.to_ascii_lowercase().as_str() {
+        "css" => Ok(PreprocessResult {
+            code: prepared.clone(),
+            dependencies: Vec::new(),
+        }),
+        "less" => preprocess_less(&prepared, options),
+        "scss" => preprocess_sass_with_grass(&prepared, options, grass::InputSyntax::Scss)
+            .map_err(StylePreprocessError::unsupported)
+            .map(|code| PreprocessResult {
+                code,
+                dependencies: sass_dependencies(source, options),
             }),
-            "less" => preprocess_less(&prepared, options),
-            "scss" => preprocess_sass_with_grass(&prepared, options, grass::InputSyntax::Scss).map(
-                |code| PreprocessResult {
-                    code,
-                    dependencies: sass_dependencies(source, options),
-                },
-            ),
-            "sass" => preprocess_sass_with_grass(&prepared, options, grass::InputSyntax::Sass).map(
-                |code| PreprocessResult {
-                    code,
-                    dependencies: sass_dependencies(source, options),
-                },
-            ),
-            "styl" | "stylus" => preprocess_stylus(&prepared, options),
-            _ => Err(format!("unsupported style preprocessor `{lang}`")),
-        }?;
+        "sass" => preprocess_sass_with_grass(&prepared, options, grass::InputSyntax::Sass)
+            .map_err(StylePreprocessError::unsupported)
+            .map(|code| PreprocessResult {
+                code,
+                dependencies: sass_dependencies(source, options),
+            }),
+        "styl" | "stylus" => preprocess_stylus(&prepared, options),
+        _ => Err(StylePreprocessError::unsupported(format!(
+            "unsupported style preprocessor `{lang}`"
+        ))),
+    }?;
     Ok(result)
 }
 
@@ -709,15 +680,15 @@ fn normalize_native_dependency_path(path: &Path) -> String {
 fn preprocess_less(
     source: &str,
     options: &StyleCompileOptions,
-) -> Result<PreprocessResult, String> {
+) -> Result<PreprocessResult, StylePreprocessError> {
     let mut context = LessImportContext::new(options);
     let base_dir = options
         .filename
         .as_deref()
         .and_then(|filename| Path::new(filename).parent())
         .map(Path::to_path_buf);
-    let inlined = inline_less_imports(source, base_dir.as_deref(), &mut context)?;
-    let nodes = parse_less_nodes(&inlined)?;
+    let inlined = inline_less_imports(source, base_dir.as_deref(), &mut context, true)?;
+    let nodes = parse_less_nodes(&inlined).map_err(StylePreprocessError::unsupported)?;
     Ok(PreprocessResult {
         code: render_less_nodes(&nodes, None, &[], StyleVariableSyntax::LessAt),
         dependencies: context.dependencies(),
@@ -805,7 +776,8 @@ fn inline_less_imports(
     source: &str,
     base_dir: Option<&Path>,
     context: &mut LessImportContext,
-) -> Result<String, String> {
+    spans_apply_to_source: bool,
+) -> Result<String, StylePreprocessError> {
     let mut output = String::new();
     let mut cursor = 0usize;
     while cursor < source.len() {
@@ -825,6 +797,13 @@ fn inline_less_imports(
 
         let statement = &source[cursor..=delimiter];
         let prelude = &source[cursor..delimiter];
+        let import_span = if spans_apply_to_source {
+            prelude
+                .find("@import")
+                .map(|start| (cursor + start, delimiter + delimiter_ch.len_utf8()))
+        } else {
+            None
+        };
         let Some(import) = parse_less_import_statement(prelude) else {
             output.push_str(statement);
             cursor = delimiter + 1;
@@ -839,7 +818,10 @@ fn inline_less_imports(
         let leading_whitespace_len = prelude.len() - prelude.trim_start().len();
         output.push_str(&prelude[..leading_whitespace_len]);
         let Some(resolved) = resolve_less_import(&import, base_dir, context) else {
-            return Err(format!("Less import could not be resolved: {import}"));
+            return Err(StylePreprocessError::import_resolve(
+                format!("Less import could not be resolved: {import}"),
+                import_span,
+            ));
         };
         let canonical = std::fs::canonicalize(&resolved).unwrap_or(resolved);
         context.push_dependency(&canonical);
@@ -848,10 +830,14 @@ fn inline_less_imports(
             continue;
         }
         context.active_paths.push(canonical.clone());
-        let imported = std::fs::read_to_string(&canonical)
-            .map_err(|error| format!("Less import could not be read: {import}: {error}"))?;
+        let imported = std::fs::read_to_string(&canonical).map_err(|error| {
+            StylePreprocessError::import_resolve(
+                format!("Less import could not be read: {import}: {error}"),
+                import_span,
+            )
+        })?;
         let imported_base = canonical.parent();
-        let inlined = inline_less_imports(&imported, imported_base, context)?;
+        let inlined = inline_less_imports(&imported, imported_base, context, false)?;
         context.active_paths.pop();
         output.push_str(&inlined);
         if !output.ends_with('\n') {
@@ -1305,15 +1291,15 @@ fn indent_less_css(source: &str) -> String {
 fn preprocess_stylus(
     source: &str,
     options: &StyleCompileOptions,
-) -> Result<PreprocessResult, String> {
+) -> Result<PreprocessResult, StylePreprocessError> {
     let mut context = LessImportContext::new(options);
     let base_dir = options
         .filename
         .as_deref()
         .and_then(|filename| Path::new(filename).parent())
         .map(Path::to_path_buf);
-    let inlined = inline_stylus_imports(source, base_dir.as_deref(), &mut context)?;
-    let nodes = parse_stylus_nodes(&inlined)?;
+    let inlined = inline_stylus_imports(source, base_dir.as_deref(), &mut context, true)?;
+    let nodes = parse_stylus_nodes(&inlined).map_err(StylePreprocessError::unsupported)?;
     Ok(PreprocessResult {
         code: render_less_nodes(&nodes, None, &[], StyleVariableSyntax::StylusBare)
             .replace("#ff0000", "#f00"),
@@ -1325,37 +1311,62 @@ fn inline_stylus_imports(
     source: &str,
     base_dir: Option<&Path>,
     context: &mut LessImportContext,
-) -> Result<String, String> {
+    spans_apply_to_source: bool,
+) -> Result<String, StylePreprocessError> {
     let mut output = String::new();
-    for line in source.lines() {
+    let mut line_start = 0usize;
+    for line in source.split_inclusive('\n') {
+        let content = line.trim_end_matches(['\r', '\n']);
         let Some(import) = parse_stylus_import_statement(line) else {
             output.push_str(line);
-            output.push('\n');
+            if !line.ends_with('\n') {
+                output.push('\n');
+            }
+            line_start += line.len();
             continue;
+        };
+        let import_span = if spans_apply_to_source {
+            content
+                .find("@import")
+                .map(|start| (line_start + start, line_start + content.len()))
+        } else {
+            None
         };
         if is_css_import(&import) {
             output.push_str(line);
-            output.push('\n');
+            if !line.ends_with('\n') {
+                output.push('\n');
+            }
+            line_start += line.len();
             continue;
         }
         let Some(resolved) = resolve_stylus_import(&import, base_dir, context) else {
-            return Err(format!("Stylus import could not be resolved: {import}"));
+            return Err(StylePreprocessError::import_resolve(
+                format!("Stylus import could not be resolved: {import}"),
+                import_span,
+            ));
         };
         let canonical = std::fs::canonicalize(&resolved).unwrap_or(resolved);
         context.push_dependency(&canonical);
         if context.is_active(&canonical) {
+            line_start += line.len();
             continue;
         }
         context.active_paths.push(canonical.clone());
-        let imported = std::fs::read_to_string(&canonical)
-            .map_err(|error| format!("Stylus import could not be read: {import}: {error}"))?;
+        let imported = std::fs::read_to_string(&canonical).map_err(|error| {
+            StylePreprocessError::import_resolve(
+                format!("Stylus import could not be read: {import}: {error}"),
+                import_span,
+            )
+        })?;
         let imported_base = canonical.parent();
-        let inlined = inline_stylus_imports(&imported, imported_base, context)?;
+        let inlined = inline_stylus_imports(&imported, imported_base, context, false)?;
         context.active_paths.pop();
         output.push_str(&inlined);
         if !output.ends_with('\n') {
             output.push('\n');
         }
+        line_start += line.len();
     }
     Ok(output)
 }
@@ -10847,23 +10858,38 @@ mod tests {
     }
 
     #[test]
-    fn reports_missing_import_with_source_span() {
-        let source = ".a { color: red; }\n  @import \"missing.css\";\n.b { color: blue; }";
+    fn preserves_plain_css_imports_without_missing_import_diagnostics() {
+        let source = ".a { color: red; }\n@import \"./not-missing.css\";\n@import \"missing.css\";";
+        let result = compile_style(source, StyleCompileOptions::default());
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert!(result.code.contains("@import \"./not-missing.css\";"));
+        assert!(result.code.contains("@import \"missing.css\";"));
+    }
+
+    #[test]
+    fn less_unresolved_import_reports_resolver_source_span() {
+        let source = ".a { color: red; }\n  @import \"./theme\";\n.b { color: blue; }";
         let result = compile_style(
             source,
             StyleCompileOptions {
+                preprocess_lang: Some("less".into()),
                 source_map_file_id: Some(FileId(9)),
                 source_map_base_offset: 100,
                 ..StyleCompileOptions::default()
             },
         );
 
-        assert_eq!(result.errors, vec!["style import could not be resolved"]);
+        assert_eq!(
+            result.errors,
+            vec!["Less import could not be resolved: ./theme"]
+        );
         assert_eq!(result.diagnostics.len(), 1);
         let diagnostic = &result.diagnostics[0];
         assert_eq!(diagnostic.code, "VUEC_STYLE_IMPORT_RESOLVE");
         let start = ".a { color: red; }\n  ".len();
-        let end = start + "@import \"missing.css\";".len();
+        let end = start + "@import \"./theme\";".len();
         assert_eq!(
             diagnostic.span,
             Some(Span::new(FileId(9), 100 + start, 100 + end))

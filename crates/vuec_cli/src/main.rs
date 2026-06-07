@@ -1282,7 +1282,8 @@ mod tests {
 
     #[test]
     fn prints_sfc_style_diagnostic_source_range() {
-        let source = "<template><div/></template>\n<style>\n@import \"missing.css\";\n</style>";
+        let source =
+            "<template><div/></template>\n<style lang=\"less\">\n@import \"./theme\";\n</style>";
         let path = write_temp("vuec-cli-style-diagnostic.vue", source);
         let output = run_with_args([
             "vuec",
@@ -1292,7 +1293,7 @@ mod tests {
         ])
         .expect("run");
         let import_start = source.find("@import").expect("import start");
-        let import_end = import_start + "@import \"missing.css\";".len();
+        let import_end = import_start + "@import \"./theme\";".len();
 
         assert!(output.stderr.contains("VUEC_STYLE_IMPORT_RESOLVE"));
         assert!(output
