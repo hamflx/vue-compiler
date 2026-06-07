@@ -636,6 +636,17 @@ impl JsAstStore {
             .map_err(|diagnostics: Vec<OxcDiagnostic>| JsParseError::from_diagnostics(diagnostics))
     }
 
+    /// Validates source text as one complete JavaScript expression.
+    pub fn validate_expression(
+        &self,
+        source_text: &str,
+        source_type: SourceType,
+    ) -> Result<(), JsParseError> {
+        let wrapped = format!("({source_text});");
+        self.parse_program_checked(&wrapped, source_type)
+            .map(|_| ())
+    }
+
     /// Parses a registered expression by id.
     pub fn parse_expr(&self, id: JsExprId) -> Result<Expression<'_>, JsParseError> {
         let entry = self
@@ -734,15 +745,44 @@ impl JsAstStore {
         }
     }
 
-    /// Parses a Vue 2 filter chain and validates the base expression with Oxc.
+    /// Parses a Vue 2 filter chain and validates the base and argument expressions with Oxc.
     pub fn parse_vue2_filter_expression<'a>(
         &'a self,
         source_text: &'a str,
         source_type: SourceType,
     ) -> Result<Vue2FilterExpression<'a>, JsParseError> {
         let parsed = parse_vue2_filter_expression(source_text);
-        self.parse_expression(parsed.base, source_type)?;
+        self.validate_expression(parsed.base, source_type)?;
+        for filter in &parsed.filters {
+            self.validate_vue2_filter_call(filter, source_type)?;
+            for arg in &filter.args {
+                self.validate_expression(arg, source_type)?;
+            }
+        }
         Ok(parsed)
+    }
+
+    fn validate_vue2_filter_call(
+        &self,
+        filter: &Vue2FilterCall<'_>,
+        source_type: SourceType,
+    ) -> Result<(), JsParseError> {
+        let Some(open) = filter_call_open_paren(filter.raw) else {
+            return Ok(());
+        };
+        let wrapped = format!("__vuec_filter__({}", &filter.raw[open + 1..]);
+        self.validate_expression(&wrapped, source_type)
+    }
+
+    /// Validates JavaScript source as a Vue event handler function body.
+    pub fn validate_function_body(
+        &self,
+        source_text: &str,
+        source_type: SourceType,
+    ) -> Result<(), JsParseError> {
+        let wrapped = format!("function __vuec__($event){{\n{source_text}\n}}");
+        self.parse_program_checked(&wrapped, source_type)
+            .map(|_| ())
     }
 
     /// Converts a Vue 2 filter chain into the official runtime helper shape.
@@ -775,7 +815,7 @@ impl JsAstStore {
     ) -> Result<ParsedForExpression<'a>, JsParseError> {
         let (aliases, iterable) = split_for_expression(source_text)
             .ok_or_else(|| JsParseError::new("missing `in`/`of` in v-for expression"))?;
-        let _iterable = self.parse_expression(iterable, source_type)?;
+        self.validate_expression(iterable, source_type)?;
         Ok(ParsedForExpression {
             raw: source_text,
             aliases,
@@ -1449,6 +1489,26 @@ mod tests {
     }
 
     #[test]
+    fn validates_complete_expression_source() {
+        let store = JsAstStore::new();
+        assert!(store
+            .validate_expression("{ foo: bar }", SourceType::script())
+            .is_ok());
+        assert!(store
+            .validate_expression("a----", SourceType::script())
+            .is_err());
+        assert!(store
+            .validate_expression("foo(", SourceType::script())
+            .is_err());
+        assert!(store
+            .validate_expression("foo(); bar()", SourceType::script())
+            .is_err());
+        assert!(store
+            .validate_function_body("foo(); bar()", SourceType::script())
+            .is_ok());
+    }
+
+    #[test]
     fn parses_v_for_shape() {
         let store = JsAstStore::new();
         let parsed = store
@@ -1725,6 +1785,17 @@ mod tests {
             rewrite_vue2_filter_expression("message | append(',', `x,y`, /a,b/g, count)"),
             "_f(\"append\")(message,',', `x,y`, /a,b/g, count)"
         );
+    }
+
+    #[test]
+    fn rejects_invalid_vue2_filter_arguments() {
+        let store = JsAstStore::new();
+        assert!(store
+            .parse_vue2_filter_expression("message | append(foo()", SourceType::script())
+            .is_err());
+        assert!(store
+            .parse_vue2_filter_expression("message | append(ok, nope }", SourceType::script())
+            .is_err());
     }
 
     #[test]

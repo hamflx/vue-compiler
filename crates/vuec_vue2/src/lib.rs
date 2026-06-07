@@ -513,7 +513,7 @@ impl Vue2Compiler {
             }
         }
         let mut static_render_fns = Vec::new();
-        validate_expressions(element_ast.as_ref(), &mut diagnostics);
+        validate_expressions(element_ast.as_ref(), &self.js, &mut diagnostics);
         let projection = project_public_ast(template, element_ast.as_ref());
         let lowered = lower_vue2_ast_to_mir(&projection.ast, projection.js);
         let render =
@@ -3444,27 +3444,51 @@ fn gen_key_filter(keys: &[String]) -> String {
     )
 }
 
-fn validate_expressions(root: Option<&Vue2Element>, diagnostics: &mut DiagnosticSink) {
+fn validate_expressions(
+    root: Option<&Vue2Element>,
+    js: &JsAstStore,
+    diagnostics: &mut DiagnosticSink,
+) {
     let Some(root) = root else {
         return;
     };
-    validate_element_expressions(root, diagnostics);
+    validate_element_expressions(root, js, diagnostics);
 }
 
-fn validate_element_expressions(element: &Vue2Element, diagnostics: &mut DiagnosticSink) {
+fn validate_element_expressions(
+    element: &Vue2Element,
+    js: &JsAstStore,
+    diagnostics: &mut DiagnosticSink,
+) {
     for (raw, expr, span) in [
         ("v-if", element.if_exp.as_deref(), element.if_span),
+        ("v-else-if", element.elseif.as_deref(), element.elseif_span),
         ("v-for", element.for_exp.as_deref(), element.for_span),
     ] {
-        if let Some(expr) = expr {
-            if is_invalid_js_expression(expr) {
-                diagnostics.push(vue2_error(
-                    "E_VUE2_INVALID_EXPRESSION",
-                    format!("Raw expression: {raw}=\"{expr}\""),
-                    span.or(element.span),
-                ));
-            }
-        }
+        validate_vue2_expression_field(js, raw, expr, span.or(element.span), diagnostics);
+    }
+    if element.for_exp.is_some() {
+        validate_vue2_params_field(
+            js,
+            "v-for alias",
+            vue2_for_alias_params(element).as_deref(),
+            element.for_span.or(element.span),
+            diagnostics,
+        );
+    }
+    for (raw, expr, span) in [
+        (
+            "key",
+            element.key.as_deref(),
+            element.key_span.or(element.span),
+        ),
+        ("ref", element.ref_name.as_deref(), element.span),
+        ("slot", element.slot_target.as_deref(), element.span),
+        ("is", element.component.as_deref(), element.span),
+        ("class", element.class_binding.as_deref(), element.span),
+        ("style", element.style_binding.as_deref(), element.span),
+    ] {
+        validate_vue2_expression_field(js, raw, expr, span, diagnostics);
     }
     for attr in element
         .attrs
@@ -3472,23 +3496,72 @@ fn validate_element_expressions(element: &Vue2Element, diagnostics: &mut Diagnos
         .chain(element.props.iter())
         .chain(element.dynamic_attrs.iter())
     {
-        if attr.value.trim().is_empty() || attr.value.starts_with('"') {
-            continue;
-        }
-        if is_invalid_js_expression(&attr.value) {
-            diagnostics.push(vue2_error(
-                "E_VUE2_INVALID_EXPRESSION",
-                format!("Raw expression: {}=\"{}\"", attr.name, attr.value),
-                attr.span,
-            ));
+        validate_vue2_expression_field(
+            js,
+            &attr.name,
+            Some(&attr.value),
+            attr.span.or(element.span),
+            diagnostics,
+        );
+        if attr.dynamic {
+            validate_vue2_expression_field(
+                js,
+                "dynamic argument",
+                Some(&attr.name),
+                attr.span.or(element.span),
+                diagnostics,
+            );
         }
     }
+    validate_vue2_directives(element, js, diagnostics);
+    validate_vue2_events(&element.events, js, diagnostics);
+    validate_vue2_events(&element.native_events, js, diagnostics);
+    if let Some(wrap) = &element.wrap_data {
+        match wrap {
+            Vue2DataWrap::Bind { value, .. } => {
+                validate_vue2_expression_field(js, "v-bind", Some(value), element.span, diagnostics)
+            }
+        }
+    }
+    validate_vue2_expression_field(
+        js,
+        "v-on",
+        element.wrap_listeners.as_deref(),
+        element.span,
+        diagnostics,
+    );
+    if let Some(model) = &element.model {
+        let raw = serde_json::from_str::<String>(&model.expression).unwrap_or_else(|_| {
+            model
+                .value
+                .trim()
+                .strip_prefix('(')
+                .and_then(|value| value.strip_suffix(')'))
+                .unwrap_or(model.value.as_str())
+                .to_string()
+        });
+        validate_vue2_expression_field(js, "v-model", Some(&raw), element.span, diagnostics);
+        validate_vue2_assignment_field(
+            js,
+            "v-model assignment",
+            Some(&raw),
+            element.span,
+            diagnostics,
+        );
+    }
+    validate_vue2_params_field(
+        js,
+        "slot-scope",
+        element.slot_scope.as_deref(),
+        element.span,
+        diagnostics,
+    );
     for child in &element.children {
         match child {
-            Vue2Node::Element(child) => validate_element_expressions(child, diagnostics),
+            Vue2Node::Element(child) => validate_element_expressions(child, js, diagnostics),
             Vue2Node::Text(text) => {
                 if let Some(expression) = &text.expression {
-                    if is_invalid_js_expression(expression) {
+                    if !is_valid_vue2_interpolation_expression(js, expression) {
                         diagnostics.push(vue2_error(
                             "E_VUE2_INVALID_EXPRESSION",
                             format!("Raw expression: {}", text.text),
@@ -3500,13 +3573,189 @@ fn validate_element_expressions(element: &Vue2Element, diagnostics: &mut Diagnos
         }
     }
     for condition in element.if_conditions.iter().skip(1) {
-        validate_element_expressions(&condition.block, diagnostics);
+        validate_element_expressions(&condition.block, js, diagnostics);
+    }
+    for slot in element.scoped_slots.values() {
+        validate_element_expressions(slot, js, diagnostics);
     }
 }
 
-fn is_invalid_js_expression(expr: &str) -> bool {
-    let expr = expr.trim();
-    expr.contains("----") || expr.contains("++++")
+fn is_valid_vue2_expression(js: &JsAstStore, expr: &str) -> bool {
+    js.parse_vue2_filter_expression(expr.trim(), SourceType::script())
+        .is_ok()
+}
+
+fn validate_vue2_directives(
+    element: &Vue2Element,
+    js: &JsAstStore,
+    diagnostics: &mut DiagnosticSink,
+) {
+    for directive in &element.directives {
+        validate_vue2_expression_field(
+            js,
+            &directive.raw_name,
+            directive.value.as_deref(),
+            directive.span.or(element.span),
+            diagnostics,
+        );
+        if directive.is_dynamic_arg {
+            validate_vue2_expression_field(
+                js,
+                "dynamic directive argument",
+                directive.arg.as_deref(),
+                directive.span.or(element.span),
+                diagnostics,
+            );
+        }
+        if directive.name == "model" {
+            validate_vue2_assignment_field(
+                js,
+                "v-model assignment",
+                directive.value.as_deref(),
+                directive.span.or(element.span),
+                diagnostics,
+            );
+        }
+    }
+}
+
+fn validate_vue2_events(
+    events: &BTreeMap<String, Vec<Vue2EventHandler>>,
+    js: &JsAstStore,
+    diagnostics: &mut DiagnosticSink,
+) {
+    for (name, handlers) in events {
+        for handler in handlers {
+            if handler.span.is_none() {
+                continue;
+            }
+            if handler.dynamic {
+                validate_vue2_expression_field(
+                    js,
+                    "dynamic event",
+                    Some(name),
+                    handler.span,
+                    diagnostics,
+                );
+            }
+            validate_vue2_handler_field(js, name, Some(&handler.value), handler.span, diagnostics);
+        }
+    }
+}
+
+fn validate_vue2_expression_field(
+    js: &JsAstStore,
+    raw: &str,
+    expr: Option<&str>,
+    span: Option<Span>,
+    diagnostics: &mut DiagnosticSink,
+) {
+    let Some(expr) = expr.map(str::trim).filter(|expr| !expr.is_empty()) else {
+        return;
+    };
+    if !is_valid_vue2_expression(js, expr) {
+        diagnostics.push(vue2_error(
+            "E_VUE2_INVALID_EXPRESSION",
+            format!("Raw expression: {raw}=\"{expr}\""),
+            span,
+        ));
+    }
+}
+
+fn validate_vue2_handler_field(
+    js: &JsAstStore,
+    raw: &str,
+    expr: Option<&str>,
+    span: Option<Span>,
+    diagnostics: &mut DiagnosticSink,
+) {
+    let Some(expr) = expr.map(str::trim) else {
+        return;
+    };
+    if is_valid_vue2_handler(js, expr) {
+        return;
+    }
+    diagnostics.push(vue2_error(
+        "E_VUE2_INVALID_EXPRESSION",
+        format!("Raw expression: @{raw}=\"{expr}\""),
+        span,
+    ));
+}
+
+fn validate_vue2_params_field(
+    js: &JsAstStore,
+    raw: &str,
+    expr: Option<&str>,
+    span: Option<Span>,
+    diagnostics: &mut DiagnosticSink,
+) {
+    let Some(expr) = expr.map(str::trim).filter(|expr| !expr.is_empty()) else {
+        return;
+    };
+    if js.parse_params(expr).is_ok() {
+        return;
+    }
+    diagnostics.push(vue2_error(
+        "E_VUE2_INVALID_EXPRESSION",
+        format!("Raw expression: {raw}=\"{expr}\""),
+        span,
+    ));
+}
+
+fn validate_vue2_assignment_field(
+    js: &JsAstStore,
+    raw: &str,
+    expr: Option<&str>,
+    span: Option<Span>,
+    diagnostics: &mut DiagnosticSink,
+) {
+    let Some(expr) = expr.map(str::trim).filter(|expr| !expr.is_empty()) else {
+        return;
+    };
+    if !is_valid_vue2_expression(js, expr) || is_valid_vue2_assignment_target(js, expr) {
+        return;
+    }
+    diagnostics.push(vue2_error(
+        "E_VUE2_INVALID_EXPRESSION",
+        format!("Raw expression: {raw}=\"{expr}\""),
+        span,
+    ));
+}
+
+fn is_valid_vue2_handler(js: &JsAstStore, expr: &str) -> bool {
+    expr.is_empty()
+        || js.validate_expression(expr, SourceType::script()).is_ok()
+        || js
+            .validate_function_body(expr, SourceType::script())
+            .is_ok()
+}
+
+fn is_valid_vue2_assignment_target(js: &JsAstStore, expr: &str) -> bool {
+    js.validate_function_body(&format!("{expr}=__vuec_value__;"), SourceType::script())
+        .is_ok()
+}
+
+fn vue2_for_alias_params(element: &Vue2Element) -> Option<String> {
+    let mut params = Vec::new();
+    params.push(element.alias.as_deref()?.trim());
+    if let Some(iterator) = element.iterator1.as_deref().map(str::trim) {
+        params.push(iterator);
+    }
+    if let Some(iterator) = element.iterator2.as_deref().map(str::trim) {
+        params.push(iterator);
+    }
+    Some(params.join(","))
+}
+
+fn is_valid_vue2_interpolation_expression(js: &JsAstStore, expression: &str) -> bool {
+    let Some(raw) = expression
+        .trim()
+        .strip_prefix("_s(")
+        .and_then(|value| value.strip_suffix(')'))
+    else {
+        return is_valid_vue2_expression(js, expression);
+    };
+    is_valid_vue2_expression(js, raw)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -7893,6 +8142,57 @@ mod tests {
         assert_eq!(slot_key.errors.len(), 1);
         assert_eq!(slot_key.errors[0].start, Some(11));
         assert_eq!(slot_key.errors[0].end, Some(27));
+    }
+
+    #[test]
+    fn validates_vue2_template_expressions_with_parser() {
+        for (template, expected) in [
+            (r#"<div>{{ foo( }}</div>"#, "Raw expression: {{ foo( }}"),
+            (r#"<div :id="foo("></div>"#, r#"Raw expression: id="foo(""#),
+            (
+                r#"<div v-show="ok &&"></div>"#,
+                r#"Raw expression: v-show="ok &&""#,
+            ),
+            (
+                r#"<button @click="foo( }"></button>"#,
+                r#"Raw expression: @click="foo( }""#,
+            ),
+            (
+                r#"<div v-for="item in list("></div>"#,
+                r#"Raw expression: v-for="list(""#,
+            ),
+            (
+                r#"<div v-for="(item, invalid-) in list"></div>"#,
+                r#"Raw expression: v-for alias="item,invalid-""#,
+            ),
+            (
+                r#"<input v-model="foo()">"#,
+                r#"Raw expression: v-model assignment="foo()""#,
+            ),
+            (
+                r#"<div>{{ msg | append(foo() }}</div>"#,
+                "Raw expression: {{ msg | append(foo() }}",
+            ),
+        ] {
+            let result = compile(template, options());
+            assert!(
+                result
+                    .errors
+                    .iter()
+                    .any(|error| error.msg.contains(expected)),
+                "{template}: {:#?}",
+                result.errors
+            );
+        }
+
+        for template in [
+            r#"<input @input="onInput1();onInput2()">"#,
+            r#"<div :payload="{ a: 1, b: foo ? bar : baz }"></div>"#,
+            r#"<div>{{ msg | append(',', `x,y`, /a,b/g, count) }}</div>"#,
+        ] {
+            let result = compile(template, options());
+            assert!(result.errors.is_empty(), "{template}: {:#?}", result.errors);
+        }
     }
 
     #[test]
