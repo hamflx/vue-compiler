@@ -6,6 +6,8 @@
 #![deny(missing_docs)]
 #![forbid(unsafe_code)]
 
+mod html_entities;
+
 use serde::{Deserialize, Serialize};
 
 /// HTML integration namespace for parsed elements.
@@ -144,7 +146,7 @@ pub fn decode_html_entities(text: &str, mode: HtmlEntityDecodeMode) -> String {
         let amp = cursor + offset;
         output.push_str(&text[cursor..amp]);
         if let Some((decoded, consumed)) = decode_html_entity_at(&text[amp..], mode) {
-            output.push(decoded);
+            output.push_str(&decoded);
             cursor = amp + consumed;
         } else {
             output.push('&');
@@ -757,63 +759,71 @@ impl<'a> HtmlTokenizer<'a> {
     }
 }
 
-fn decode_html_entity_at(value: &str, mode: HtmlEntityDecodeMode) -> Option<(char, usize)> {
+fn decode_html_entity_at(value: &str, mode: HtmlEntityDecodeMode) -> Option<(String, usize)> {
     if let Some(decoded) = decode_numeric_html_entity_at(value) {
-        return Some(decoded);
+        return Some((decoded.0.to_string(), decoded.1));
     }
-    const NAMED: [(&str, char); 28] = [
-        ("amp", '&'),
-        ("lt", '<'),
-        ("gt", '>'),
-        ("nbsp", '\u{00a0}'),
-        ("apos", '\''),
-        ("quot", '"'),
-        ("plus", '+'),
-        ("times", '\u{00d7}'),
-        ("copy", '\u{00a9}'),
-        ("reg", '\u{00ae}'),
-        ("trade", '\u{2122}'),
-        ("ndash", '\u{2013}'),
-        ("mdash", '\u{2014}'),
-        ("lsquo", '\u{2018}'),
-        ("rsquo", '\u{2019}'),
-        ("ldquo", '\u{201c}'),
-        ("rdquo", '\u{201d}'),
-        ("hellip", '\u{2026}'),
-        ("bull", '\u{2022}'),
-        ("laquo", '\u{00ab}'),
-        ("raquo", '\u{00bb}'),
-        ("lsaquo", '\u{2039}'),
-        ("rsaquo", '\u{203a}'),
-        ("larr", '\u{2190}'),
-        ("uarr", '\u{2191}'),
-        ("rarr", '\u{2192}'),
-        ("darr", '\u{2193}'),
-        ("Eacute", '\u{00c9}'),
-    ];
-    for (name, decoded) in NAMED {
-        let prefix = format!("&{name}");
-        if !value.starts_with(&prefix) {
+    let mut candidate_end = 1usize;
+    while let Some(byte) = value.as_bytes().get(candidate_end).copied() {
+        if byte == b';' {
+            candidate_end += 1;
+            break;
+        }
+        if !byte.is_ascii_alphanumeric() {
+            break;
+        }
+        candidate_end += 1;
+    }
+    while candidate_end > 1 {
+        let name = &value[1..candidate_end];
+        let Some(entity) = html_named_entity(name) else {
+            candidate_end = previous_html_entity_candidate_end(value, candidate_end);
             continue;
-        }
-        let after_name = prefix.len();
-        if value.as_bytes().get(after_name) == Some(&b';') {
-            return Some((decoded, after_name + 1));
-        }
-        if matches!(mode, HtmlEntityDecodeMode::Text) && matches!(name, "amp" | "lt" | "gt") {
-            return Some((decoded, after_name));
-        }
-        if matches!(mode, HtmlEntityDecodeMode::Attribute)
-            && name == "amp"
+        };
+        let has_semicolon = value.as_bytes().get(candidate_end - 1) == Some(&b';');
+        if !has_semicolon
+            && matches!(mode, HtmlEntityDecodeMode::Attribute)
             && value
                 .as_bytes()
-                .get(after_name)
-                .is_some_and(|byte| !byte.is_ascii_alphanumeric() && *byte != b'=')
+                .get(candidate_end)
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'=')
         {
-            return Some((decoded, after_name));
+            return None;
         }
+        return Some((
+            html_named_entity_string(entity.first, entity.second),
+            candidate_end,
+        ));
     }
     None
+}
+
+fn html_named_entity(name: &str) -> Option<html_entities::HtmlNamedEntity> {
+    html_entities::HTML_NAMED_ENTITIES
+        .binary_search_by_key(&name, |entry| entry.name)
+        .ok()
+        .map(|index| html_entities::HTML_NAMED_ENTITIES[index])
+}
+
+fn previous_html_entity_candidate_end(value: &str, end: usize) -> usize {
+    if end <= 1 {
+        return 1;
+    }
+    let previous = value[..end]
+        .char_indices()
+        .next_back()
+        .map(|(index, _)| index)
+        .unwrap_or(1);
+    previous.max(1)
+}
+
+fn html_named_entity_string(first: u32, second: u32) -> String {
+    let mut decoded = String::new();
+    decoded.push(char::from_u32(first).unwrap_or('\u{fffd}'));
+    if second != 0 {
+        decoded.push(char::from_u32(second).unwrap_or('\u{fffd}'));
+    }
+    decoded
 }
 
 fn decode_numeric_html_entity_at(value: &str) -> Option<(char, usize)> {
@@ -1067,6 +1077,23 @@ mod tests {
         );
         assert_eq!(decode_html_attr_entities("&amp;&amp=&amp!"), "&&amp=&!");
         assert_eq!(decode_html_attr_entities("&lt;"), "<");
+        assert_eq!(
+            decode_html_text_entities("&sect;&yen;&euro;&alpha;&Omega;&sum;&ne;&NotEqualTilde;"),
+            "§¥€αΩ∑≠≂̸"
+        );
+        assert_eq!(
+            decode_html_attr_entities("&copy=1&copyx&copy;&notin;"),
+            "&copy=1&copyx©∉"
+        );
+    }
+
+    #[test]
+    fn named_entity_table_is_binary_searchable() {
+        assert!(html_entities::HTML_NAMED_ENTITIES
+            .windows(2)
+            .all(|pair| pair[0].name < pair[1].name));
+        assert_eq!(html_named_entity("NotEqualTilde;").unwrap().second, 824);
+        assert_eq!(html_named_entity("copy").unwrap().first, 169);
     }
 
     #[test]
