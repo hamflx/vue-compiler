@@ -10,7 +10,7 @@
 mod compat;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use compat::{
     audit_option_matrix, diff_api, export_api, generate_option_matrix, generate_output_contract,
     prepare_runtime_smoke, run_conformance, run_napi_conformance, run_napi_option_matrix,
@@ -179,6 +179,8 @@ enum Command {
         fixture_corpus: PathBuf,
         #[arg(long, default_value_t = 60)]
         iterations: usize,
+        #[arg(long, default_value = "none")]
+        script_ast_mode: CompileScriptProfileAstMode,
         #[arg(long, default_value = "target/perf/compile-script")]
         out_dir: PathBuf,
     },
@@ -271,8 +273,15 @@ fn main() -> Result<()> {
             version_line,
             fixture_corpus,
             iterations,
+            script_ast_mode,
             out_dir,
-        } => profile_compile_script(&version_line, &fixture_corpus, iterations, &out_dir)?,
+        } => profile_compile_script(
+            &version_line,
+            &fixture_corpus,
+            iterations,
+            script_ast_mode.into(),
+            &out_dir,
+        )?,
         Command::SummarizeCompat { locked, lock } => summarize_compat(locked, &lock),
     };
     println!("{}", serde_json::to_string_pretty(&report)?);
@@ -3294,6 +3303,7 @@ fn profile_compile_script(
     version_line: &str,
     fixture_corpus: &Path,
     iterations: usize,
+    script_ast_mode: vuec_sfc::SfcScriptAstMode,
     out_dir: &Path,
 ) -> Result<compat::JsonReport> {
     if iterations == 0 {
@@ -3310,7 +3320,7 @@ fn profile_compile_script(
     let mut results = Vec::new();
 
     for fixture in &fixtures {
-        match compile_script_profile_fixture(version, fixture, iterations) {
+        match compile_script_profile_fixture(version, fixture, iterations, script_ast_mode) {
             Ok(result) => {
                 items.push(compat::ReportItem::new(
                     format!("{}-{}", version.canonical(), fixture.name),
@@ -3351,6 +3361,7 @@ fn profile_compile_script(
         version_line: version.canonical().into(),
         iterations,
         build_profile: compile_script_build_profile().into(),
+        script_ast_mode: compile_script_ast_mode_name(script_ast_mode).into(),
         environment: bench_environment(Path::new("compat/official-revisions.lock")),
         fixtures: fixtures
             .iter()
@@ -3358,7 +3369,11 @@ fn profile_compile_script(
             .collect(),
         results,
     };
-    let report_path = out_dir.join(format!("{}.json", version.canonical()));
+    let report_path = out_dir.join(format!(
+        "{}.{}.json",
+        version.canonical(),
+        compile_script_ast_mode_name(script_ast_mode)
+    ));
     fs::write(&report_path, serde_json::to_string_pretty(&report)?)
         .with_context(|| format!("failed to write {}", report_path.display()))?;
 
@@ -3366,7 +3381,7 @@ fn profile_compile_script(
         .with_items(items)
         .with_violations(violations)
         .with_created(vec![report_path.display().to_string()])
-        .with_note("profiles Rust compileScript parse, compile, and serialization phases for fixed SFC fixture corpora using the internal no-AST projection mode; structural counts describe the selected compileScript mode"))
+        .with_note("profiles Rust compileScript parse, compile, and serialization phases for fixed SFC fixture corpora; --script-ast-mode selects full, top-level, or no public AST projection for root-cause comparisons"))
 }
 
 fn load_compile_script_profile_fixtures(
@@ -3442,8 +3457,8 @@ fn compile_script_profile_fixture(
     version: CompileScriptProfileVersion,
     fixture: &CompileScriptProfileFixture,
     iterations: usize,
+    script_ast_mode: vuec_sfc::SfcScriptAstMode,
 ) -> Result<CompileScriptProfileResult> {
-    let script_ast_mode = vuec_sfc::SfcScriptAstMode::None;
     let mut parse_samples = Vec::with_capacity(iterations);
     let mut compile_samples = Vec::with_capacity(iterations);
     let mut serialize_samples = Vec::with_capacity(iterations);
@@ -3477,12 +3492,10 @@ fn compile_script_profile_fixture(
 
         let compile_started = Instant::now();
         let script = match version {
-            CompileScriptProfileVersion::Vue27 => {
-                compiler.compile_vue27_script(&descriptor, compile_script_profile_options())
-            }
-            CompileScriptProfileVersion::Vue3 => {
-                compiler.compile_script(&descriptor, compile_script_profile_options())
-            }
+            CompileScriptProfileVersion::Vue27 => compiler
+                .compile_vue27_script(&descriptor, compile_script_profile_options(script_ast_mode)),
+            CompileScriptProfileVersion::Vue3 => compiler
+                .compile_script(&descriptor, compile_script_profile_options(script_ast_mode)),
         };
         compile_samples.push(compile_started.elapsed().as_micros());
 
@@ -3514,9 +3527,11 @@ fn compile_script_profile_fixture(
     })
 }
 
-fn compile_script_profile_options() -> vuec_sfc::SfcScriptCompileOptions {
+fn compile_script_profile_options(
+    script_ast_mode: vuec_sfc::SfcScriptAstMode,
+) -> vuec_sfc::SfcScriptCompileOptions {
     vuec_sfc::SfcScriptCompileOptions {
-        script_ast_mode: vuec_sfc::SfcScriptAstMode::None,
+        script_ast_mode,
         ..vuec_sfc::SfcScriptCompileOptions::default()
     }
 }
@@ -4934,6 +4949,23 @@ impl CompileScriptProfileVersion {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum CompileScriptProfileAstMode {
+    None,
+    TopLevel,
+    Full,
+}
+
+impl From<CompileScriptProfileAstMode> for vuec_sfc::SfcScriptAstMode {
+    fn from(value: CompileScriptProfileAstMode) -> Self {
+        match value {
+            CompileScriptProfileAstMode::None => Self::None,
+            CompileScriptProfileAstMode::TopLevel => Self::TopLevel,
+            CompileScriptProfileAstMode::Full => Self::Full,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct CompileScriptProfileFixture {
     name: String,
@@ -5015,6 +5047,7 @@ struct CompileScriptProfileReport {
     version_line: String,
     iterations: usize,
     build_profile: String,
+    script_ast_mode: String,
     environment: BenchEnvironment,
     fixtures: Vec<CompileScriptProfileFixtureReport>,
     results: Vec<CompileScriptProfileResult>,
@@ -6201,6 +6234,26 @@ mod tests {
     }
 
     #[test]
+    fn compile_script_profile_ast_mode_maps_to_sfc_options() {
+        assert_eq!(
+            vuec_sfc::SfcScriptAstMode::from(CompileScriptProfileAstMode::None),
+            vuec_sfc::SfcScriptAstMode::None
+        );
+        assert_eq!(
+            vuec_sfc::SfcScriptAstMode::from(CompileScriptProfileAstMode::TopLevel),
+            vuec_sfc::SfcScriptAstMode::TopLevel
+        );
+        assert_eq!(
+            vuec_sfc::SfcScriptAstMode::from(CompileScriptProfileAstMode::Full),
+            vuec_sfc::SfcScriptAstMode::Full
+        );
+        assert_eq!(
+            compile_script_profile_options(vuec_sfc::SfcScriptAstMode::TopLevel).script_ast_mode,
+            vuec_sfc::SfcScriptAstMode::TopLevel
+        );
+    }
+
+    #[test]
     fn compile_script_profile_schema_reports_structural_counts() {
         let fixture = compile_script_profile_fixture_from_source(
             PathBuf::from("ProfileFixture.vue"),
@@ -6224,9 +6277,13 @@ const search = computed(() => formatCount(props.count))
         )
         .unwrap();
 
-        let result =
-            compile_script_profile_fixture(CompileScriptProfileVersion::Vue27, &fixture, 1)
-                .unwrap();
+        let result = compile_script_profile_fixture(
+            CompileScriptProfileVersion::Vue27,
+            &fixture,
+            1,
+            vuec_sfc::SfcScriptAstMode::None,
+        )
+        .unwrap();
         assert!(!result.structural_counts.ast_projection_enabled);
         assert_eq!(result.structural_counts.ast_projection_mode, "none");
         assert_eq!(
@@ -6246,6 +6303,7 @@ const search = computed(() => formatCount(props.count))
             version_line: "vue2_7".into(),
             iterations: 1,
             build_profile: compile_script_build_profile().into(),
+            script_ast_mode: "none".into(),
             environment: bench_environment(Path::new("compat/official-revisions.lock")),
             fixtures: vec![CompileScriptProfileFixtureReport::from(&fixture)],
             results: vec![result],
@@ -6254,6 +6312,7 @@ const search = computed(() => formatCount(props.count))
         assert_eq!(value["status"], "pass");
         assert_eq!(value["versionLine"], "vue2_7");
         assert_eq!(value["buildProfile"], compile_script_build_profile());
+        assert_eq!(value["scriptAstMode"], "none");
         assert_eq!(
             value["results"][0]["structuralCounts"]["astProjectionEnabled"],
             false
@@ -6285,6 +6344,21 @@ const search = computed(() => formatCount(props.count))
         assert!(value["results"][0]["parse"]["medianMicros"]
             .as_u64()
             .is_some());
+
+        let full = compile_script_profile_fixture(
+            CompileScriptProfileVersion::Vue27,
+            &fixture,
+            1,
+            vuec_sfc::SfcScriptAstMode::Full,
+        )
+        .unwrap();
+        assert!(full.structural_counts.ast_projection_enabled);
+        assert_eq!(full.structural_counts.ast_projection_mode, "full");
+        assert_eq!(
+            full.structural_counts.ast_projection_loc_strategy,
+            "line-index"
+        );
+        assert!(full.structural_counts.ast_projection_statement_count > 0);
     }
 
     #[test]
