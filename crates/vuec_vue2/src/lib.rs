@@ -773,7 +773,7 @@ fn parse_element_tree(
                 attributes,
                 self_closing,
             } => {
-                let mut element = create_element(name, attributes, token.start, token.end);
+                let mut element = create_element(name, attributes, token.start, token.end, options);
                 if let Some(namespace) = namespace_for_tag(&element.tag, options) {
                     element.ns = Some(namespace);
                 } else if let Some(parent) = stack.last() {
@@ -969,12 +969,18 @@ fn create_element(
     attributes: Vec<HtmlAttribute>,
     start: usize,
     end: usize,
+    options: &Vue2CompileOptions,
 ) -> Vue2Element {
     let attrs_list = attributes
         .into_iter()
         .map(|attr| Vue2Attribute {
+            value: decode_vue2_attr_entities(
+                &tag,
+                &attr.name,
+                &attr.value.unwrap_or_default(),
+                options,
+            ),
             name: attr.name,
-            value: attr.value.unwrap_or_default(),
             span: Some(Span::new(FileId(0), attr.start, attr.end)),
             dynamic: false,
         })
@@ -1170,8 +1176,13 @@ fn normalize_component_v_slot(element: &mut Vue2Element) {
     let slot_target_dynamic = element.slot_target_dynamic;
     let slot_scope = element.slot_scope.clone();
     let span = element.span.unwrap_or_else(|| Span::new(FileId(0), 0, 0));
-    let mut slot_container =
-        create_element("template".into(), Vec::new(), span.start.0, span.end.0);
+    let mut slot_container = create_element(
+        "template".into(),
+        Vec::new(),
+        span.start.0,
+        span.end.0,
+        &Vue2CompileOptions::default(),
+    );
     slot_container.slot_target = Some(slot_target.clone());
     slot_container.slot_target_dynamic = slot_target_dynamic;
     slot_container.slot_scope = slot_scope;
@@ -2639,23 +2650,13 @@ fn gen_mir_data(
     if !data.attrs.is_empty() {
         parts.push(format!(
             "attrs:{}",
-            gen_mir_props(
-                &data.attrs,
-                state.options,
-                PropValueKind::StaticAttribute,
-                state
-            )
+            gen_mir_props(&data.attrs, PropValueKind::StaticAttribute, state)
         ));
     }
     if !data.dom_props.is_empty() {
         parts.push(format!(
             "domProps:{}",
-            gen_mir_props(
-                &data.dom_props,
-                state.options,
-                PropValueKind::Expression,
-                state
-            )
+            gen_mir_props(&data.dom_props, PropValueKind::Expression, state)
         ));
     }
     if !data.events.is_empty() {
@@ -2703,12 +2704,7 @@ fn gen_mir_data(
         rendered = format!(
             "_b({rendered},{},{} )",
             js_string(tag),
-            gen_mir_props(
-                &data.dynamic_attrs,
-                state.options,
-                PropValueKind::Expression,
-                state
-            )
+            gen_mir_props(&data.dynamic_attrs, PropValueKind::Expression, state)
         )
         .replace("} )", "})");
     }
@@ -2770,7 +2766,6 @@ fn gen_mir_directives(
 
 fn gen_mir_props(
     attrs: &[Vue2DataProp],
-    options: &Vue2CompileOptions,
     value_kind: PropValueKind,
     state: &Vue2MirCodegenState<'_>,
 ) -> String {
@@ -2780,10 +2775,8 @@ fn gen_mir_props(
         .map(|attr| {
             let value = render_mir_expr(&attr.value, state);
             let value = match value_kind {
-                PropValueKind::StaticAttribute if attr.static_attribute => {
-                    gen_vue2_static_attr_value(&attr.name, &value, options)
-                }
-                PropValueKind::StaticAttribute | PropValueKind::Expression => value,
+                PropValueKind::StaticAttribute => transform_vue2_js_special_newlines(&value),
+                PropValueKind::Expression => value,
             };
             format!("{}:{value}", js_string(&attr.name))
         })
@@ -3026,7 +3019,7 @@ fn gen_mir_slot_outlet(
     let name = render_mir_expr(&slot.name, state);
     let children = gen_mir_children(id, state, false);
     let props = (!slot.props.is_empty())
-        .then(|| gen_mir_props(&slot.props, state.options, PropValueKind::Expression, state));
+        .then(|| gen_mir_props(&slot.props, PropValueKind::Expression, state));
     let mut code = format!("_t({name}");
     if let Some(children) = children {
         code.push_str(&format!(",function(){{return {children}}}"));
@@ -5287,7 +5280,10 @@ fn vue2_ast_contains_slot_child(ast_id: NodeId, ast: &Vue2Ast) -> bool {
                 .collect::<Vec<_>>();
             node.children
                 .iter()
-                .filter(|child| !branch_blocks.contains(child))
+                .filter(|child| {
+                    !branch_blocks.contains(child)
+                        && !element.scoped_slots.values().any(|slot| slot == *child)
+                })
                 .any(|child| vue2_ast_contains_slot_child(*child, ast))
         }
         Vue2AstKind::Root(_) => node
@@ -6291,15 +6287,58 @@ fn is_simple_path(value: &str) -> bool {
     if value.is_empty() {
         return false;
     }
-    let mut chars = value.chars();
-    let Some(first) = chars.next() else {
-        return false;
+    let mut rest = match vue2_simple_path_ident(value) {
+        Some(rest) => rest,
+        None => return false,
     };
-    (first.is_ascii_alphabetic() || matches!(first, '_' | '$'))
-        && chars.all(|ch| {
-            ch.is_ascii_alphanumeric()
-                || matches!(ch, '_' | '$' | '.' | '[' | ']' | '\'' | '"' | '0'..='9')
-        })
+    while !rest.is_empty() {
+        if let Some(after_dot) = rest.strip_prefix('.') {
+            rest = match vue2_simple_path_ident(after_dot) {
+                Some(rest) => rest,
+                None => return false,
+            };
+        } else if let Some(after_bracket) = rest.strip_prefix('[') {
+            rest = match vue2_simple_path_bracket(after_bracket) {
+                Some(rest) => rest,
+                None => return false,
+            };
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
+fn vue2_simple_path_ident(value: &str) -> Option<&str> {
+    let mut chars = value.char_indices();
+    let (_, first) = chars.next()?;
+    if !is_identifier_start(first) {
+        return None;
+    }
+    for (index, ch) in chars {
+        if !is_identifier_continue(ch) {
+            return Some(&value[index..]);
+        }
+    }
+    Some("")
+}
+
+fn vue2_simple_path_bracket(value: &str) -> Option<&str> {
+    if let Some(rest) = value.strip_prefix('\'') {
+        let end = rest.find("']")?;
+        return Some(&rest[end + 2..]);
+    }
+    if let Some(rest) = value.strip_prefix('"') {
+        let end = rest.find("\"]")?;
+        return Some(&rest[end + 2..]);
+    }
+    let close = value.find(']')?;
+    let inner = &value[..close];
+    if inner.chars().all(|ch| ch.is_ascii_digit()) || vue2_simple_path_ident(inner) == Some("") {
+        Some(&value[close + 1..])
+    } else {
+        None
+    }
 }
 
 fn is_function_expression(value: &str) -> bool {
@@ -6481,21 +6520,14 @@ fn vue2_push_static_style_decl(style: &mut Vec<(String, String)>, item: &str) {
     }
 }
 
-fn gen_vue2_static_attr_value(name: &str, js_value: &str, options: &Vue2CompileOptions) -> String {
-    let Some(value) = static_attr_raw_value(js_value) else {
-        return js_value.to_string();
-    };
-    let value = decode_vue2_static_attr_entities(name, &value, options);
-    transform_vue2_js_special_newlines(&js_string(&value))
-}
-
-fn decode_vue2_static_attr_entities(
+fn decode_vue2_attr_entities(
+    tag: &str,
     name: &str,
     value: &str,
     options: &Vue2CompileOptions,
 ) -> String {
-    let decode_newlines = (name == "href" && options.should_decode_newlines_for_href)
-        || (name != "href" && options.should_decode_newlines);
+    let decode_newlines = (tag == "a" && name == "href" && options.should_decode_newlines_for_href)
+        || (!(tag == "a" && name == "href") && options.should_decode_newlines);
     let mut decoded = String::with_capacity(value.len());
     let mut cursor = 0usize;
     while cursor < value.len() {
@@ -7339,6 +7371,15 @@ mod tests {
             r#"with(this){return _c('input',{on:{"input":function($event){return functionName()}}})}"#
         );
 
+        let computed_ref_call = compile(
+            r#"<button @click="$refs[scope.row.id].doClose()">x</button>"#,
+            options(),
+        );
+        assert_eq!(
+            computed_ref_call.render,
+            r#"with(this){return _c('button',{on:{"click":function($event){$refs[scope.row.id].doClose()}}},[_v("x")])}"#
+        );
+
         let tricky_call = compile(r#"<input @input="onInput(');[\'());');">"#, options());
         assert_eq!(
             tricky_call.render,
@@ -7662,6 +7703,15 @@ mod tests {
             contains_slot_child_force_update.render,
             r#"with(this){return _c('foo',{scopedSlots:_u([{key:"default",fn:function(s){return [_t("default")]}}],null,true)})}"#
         );
+
+        let nested_scoped_slot_force_update_stays_inner = compile(
+            r#"<van-field><template v-slot:button><ui-page><template v-slot:header><div v-if="multiple"><slot></slot></div>single<div v-else></div></template></ui-page></template></van-field>"#,
+            options(),
+        );
+        assert_eq!(
+            nested_scoped_slot_force_update_stays_inner.render,
+            r#"with(this){return _c('van-field',{scopedSlots:_u([{key:"button",fn:function(){return [_c('ui-page',{scopedSlots:_u([{key:"header",fn:function(){return [(multiple)?_c('div',[_t("default")],2):_c('div')]},proxy:true}],null,true)})]},proxy:true}])})}"#
+        );
     }
 
     #[test]
@@ -7885,7 +7935,7 @@ mod tests {
     }
 
     #[test]
-    fn decodes_vue2_static_attr_entities_like_official_parser() {
+    fn decodes_vue2_attr_entities_like_official_parser() {
         let no_optimize_options = || Vue2CompileOptions {
             optimize: false,
             ..options()
@@ -7953,7 +8003,16 @@ mod tests {
         );
         assert_eq!(
             dynamic.render,
-            r#"with(this){return _c('div',{attrs:{"title":'&quot; &amp; &#39;'}})}"#
+            r#"with(this){return _c('div',{attrs:{"title":'" & ''}})}"#
+        );
+
+        let dynamic_component = compile(
+            r#"<Comp :empty-text="'No properties found. Click &quot;Add property&quot; to create one.'"/>"#,
+            no_optimize_options(),
+        );
+        assert_eq!(
+            dynamic_component.render,
+            r#"with(this){return _c('Comp',{attrs:{"empty-text":'No properties found. Click "Add property" to create one.'}})}"#
         );
     }
 
