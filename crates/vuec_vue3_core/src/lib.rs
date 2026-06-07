@@ -28663,7 +28663,13 @@ fn rewrite_js_like_expression_into(
                 }
             }
         }
-        if ch == '\'' || ch == '"' || ch == '`' {
+        if ch == '`' {
+            index =
+                rewrite_template_literal_into(expression, &chars, index, options, &scopes, output);
+            previous = TokenKind::Other;
+            continue;
+        }
+        if ch == '\'' || ch == '"' {
             let quote = ch;
             output.push(ch);
             index += 1;
@@ -28909,6 +28915,147 @@ fn rewrite_js_like_expression_into(
         }
         index += 1;
     }
+}
+
+fn rewrite_template_literal_into(
+    expression: &str,
+    chars: &[(usize, char)],
+    mut index: usize,
+    options: &Vue3CompilerOptions,
+    scopes: &[Scope],
+    output: &mut String,
+) -> usize {
+    output.push('`');
+    index += 1;
+    while index < chars.len() {
+        let ch = chars[index].1;
+        output.push(ch);
+        index += 1;
+        if ch == '\\' && index < chars.len() {
+            output.push(chars[index].1);
+            index += 1;
+            continue;
+        }
+        if ch == '`' {
+            break;
+        }
+        if ch == '$' && index < chars.len() && chars[index].1 == '{' {
+            if let Some(close) = find_template_literal_expression_close(expression, chars, index) {
+                output.push('{');
+                let inner_start = chars[index].0 + '{'.len_utf8();
+                let inner_end = chars[close].0;
+                if let Some(inner) = expression.get(inner_start..inner_end) {
+                    let locals = scopes
+                        .iter()
+                        .flat_map(|scope| scope.locals.iter().cloned())
+                        .collect::<Vec<_>>();
+                    rewrite_js_like_expression_into(inner, options, locals, output);
+                }
+                output.push('}');
+                index = close + 1;
+            }
+        }
+    }
+    index
+}
+
+fn find_template_literal_expression_close(
+    expression: &str,
+    chars: &[(usize, char)],
+    mut index: usize,
+) -> Option<usize> {
+    let mut depth = 0usize;
+    while index < chars.len() {
+        let byte = chars[index].0;
+        let ch = chars[index].1;
+        if ch == '\'' || ch == '"' {
+            index = skip_quoted_chars(chars, index, ch);
+            continue;
+        }
+        if ch == '`' {
+            index = skip_template_literal_chars(expression, chars, index);
+            continue;
+        }
+        if ch == '/'
+            && expression
+                .get(byte..)
+                .is_some_and(|tail| tail.starts_with("//"))
+        {
+            index += 2;
+            while index < chars.len() && !matches!(chars[index].1, '\n' | '\r') {
+                index += 1;
+            }
+            continue;
+        }
+        if ch == '/'
+            && expression
+                .get(byte..)
+                .is_some_and(|tail| tail.starts_with("/*"))
+        {
+            index += 2;
+            while index < chars.len() {
+                if chars[index].1 == '*' && index + 1 < chars.len() && chars[index + 1].1 == '/' {
+                    index += 2;
+                    break;
+                }
+                index += 1;
+            }
+            continue;
+        }
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+fn skip_quoted_chars(chars: &[(usize, char)], mut index: usize, quote: char) -> usize {
+    index += 1;
+    while index < chars.len() {
+        let ch = chars[index].1;
+        index += 1;
+        if ch == '\\' && index < chars.len() {
+            index += 1;
+            continue;
+        }
+        if ch == quote {
+            break;
+        }
+    }
+    index
+}
+
+fn skip_template_literal_chars(
+    expression: &str,
+    chars: &[(usize, char)],
+    mut index: usize,
+) -> usize {
+    index += 1;
+    while index < chars.len() {
+        let ch = chars[index].1;
+        index += 1;
+        if ch == '\\' && index < chars.len() {
+            index += 1;
+            continue;
+        }
+        if ch == '`' {
+            break;
+        }
+        if ch == '$' && index < chars.len() && chars[index].1 == '{' {
+            if let Some(close) = find_template_literal_expression_close(expression, chars, index) {
+                index = close + 1;
+            }
+        }
+    }
+    index
 }
 
 fn rewrite_js_like_assignment(
@@ -36786,6 +36933,53 @@ mod tests {
         assert_eq!(original.source, "FooBar.vue");
         assert_eq!((original.line, original.column), expected);
         assert_eq!(original.name.as_deref(), Some("count"));
+    }
+
+    #[test]
+    fn base_compile_prefixes_template_literal_placeholders() {
+        let options = Vue3CompilerOptions {
+            prefix_identifiers: true,
+            mode: "module".into(),
+            ..Vue3CompilerOptions::default()
+        };
+
+        let interpolation = base_compile(
+            TemplateSource {
+                filename: "literal.vue".into(),
+                source: r#"<div>{{ `Hello ${msg}` }}</div>"#.into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            options.clone(),
+        );
+        assert!(interpolation.diagnostics.is_empty());
+        assert!(interpolation
+            .code
+            .contains("_toDisplayString(`Hello ${_ctx.msg}`)"));
+
+        let directive = base_compile(
+            TemplateSource {
+                filename: "literal.vue".into(),
+                source: r#"<div :title="`Hello ${msg}`"></div>"#.into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            options.clone(),
+        );
+        assert!(directive.diagnostics.is_empty());
+        assert!(directive.code.contains("title: `Hello ${_ctx.msg}`"));
+
+        let scoped = base_compile(
+            TemplateSource {
+                filename: "literal.vue".into(),
+                source: r#"<div v-for="item in rows">{{ `${item}:${msg}` }}</div>"#.into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            options,
+        );
+        assert!(scoped.diagnostics.is_empty());
+        assert!(scoped.code.contains("`${item}:${_ctx.msg}`"));
     }
 
     #[test]
