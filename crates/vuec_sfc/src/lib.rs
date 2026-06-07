@@ -1027,6 +1027,16 @@ impl<'a> SfcScriptCompileContext<'a> {
 #[derive(Clone, Debug)]
 struct Vue3ScriptCompileContext<'a> {
     inner: SfcScriptCompileContext<'a>,
+    options: SfcScriptCompileOptions,
+    script_compile_errors: Option<Vec<String>>,
+    type_resolver: Option<Vue3TypeResolverContext>,
+    normal_type_context: Option<Vue27TypeContext>,
+    normal_user_imports: Option<Vue3UserImports>,
+    script_setup_analysis: Option<Vue3ScriptSetupAnalysis>,
+    normal_script_analysis: Option<Vue3NormalScriptAnalysis>,
+    normal_script_return_bindings: Option<Vue27ScriptReturnBindings>,
+    normal_script_option_bindings: Option<Option<BTreeMap<String, String>>>,
+    script_binding_metadata: Option<BTreeMap<String, String>>,
 }
 
 impl<'a> Vue3ScriptCompileContext<'a> {
@@ -1036,7 +1046,19 @@ impl<'a> Vue3ScriptCompileContext<'a> {
         js: &mut JsAstStore,
     ) -> Self {
         let inner = SfcScriptCompileContext::new(descriptor, options, js, true);
-        Self { inner }
+        Self {
+            inner,
+            options: options.clone(),
+            script_compile_errors: None,
+            type_resolver: None,
+            normal_type_context: None,
+            normal_user_imports: None,
+            script_setup_analysis: None,
+            normal_script_analysis: None,
+            normal_script_return_bindings: None,
+            normal_script_option_bindings: None,
+            script_binding_metadata: None,
+        }
     }
 
     fn into_script_ast(self) -> (Vec<Value>, Vec<Value>) {
@@ -1046,6 +1068,149 @@ impl<'a> Vue3ScriptCompileContext<'a> {
     fn template_usage_index(&mut self, is_ts: bool) -> Option<&TemplateUsageIndex> {
         self.inner
             .template_usage_index(TemplateUsageFlavor::Vue3, is_ts)
+    }
+
+    fn script_compile_errors(&mut self) -> Vec<String> {
+        if self.script_compile_errors.is_none() {
+            self.script_compile_errors =
+                Some(vue3_script_compile_errors(self.descriptor(), &self.options));
+        }
+        self.script_compile_errors
+            .as_ref()
+            .expect("vue 3 script compile errors")
+            .clone()
+    }
+
+    fn type_resolver(&mut self) -> Vue3TypeResolverContext {
+        if self.type_resolver.is_none() {
+            self.type_resolver = Some(vue3_type_resolver_context_for_filename(
+                &self.descriptor().filename,
+            ));
+        }
+        self.type_resolver
+            .as_ref()
+            .expect("vue 3 type resolver")
+            .clone()
+    }
+
+    fn normal_type_context(&mut self) -> Vue27TypeContext {
+        if self.normal_type_context.is_none() {
+            let type_resolver = self.type_resolver();
+            self.normal_type_context = Some(vue3_normal_script_type_context(
+                self.descriptor(),
+                &self.options.global_type_files,
+                &type_resolver,
+            ));
+        }
+        self.normal_type_context
+            .as_ref()
+            .expect("vue 3 normal type context")
+            .clone()
+    }
+
+    fn normal_user_imports(&mut self) -> Vue3UserImports {
+        if self.normal_user_imports.is_none() {
+            self.normal_user_imports = Some(vue3_normal_script_user_imports(self.descriptor()));
+        }
+        self.normal_user_imports
+            .as_ref()
+            .expect("vue 3 normal user imports")
+            .clone()
+    }
+
+    fn script_setup_analysis(&mut self) -> Vue3ScriptSetupAnalysis {
+        if self.script_setup_analysis.is_none() {
+            let script_setup = self.script_setup.as_ref().map(|metadata| metadata.block);
+            let analysis = script_setup
+                .map(|script_setup| {
+                    let normal_type_context = self.normal_type_context();
+                    let normal_user_imports = self.normal_user_imports();
+                    let type_resolver = self.type_resolver();
+                    analyze_vue3_script_setup(
+                        &self.descriptor().filename,
+                        self.descriptor(),
+                        script_setup,
+                        self.options.hoist_static && self.script.is_none(),
+                        &normal_type_context,
+                        &normal_user_imports,
+                        &type_resolver,
+                        self.options.props_destructure,
+                        self.options.is_prod,
+                        self.options.custom_element,
+                    )
+                })
+                .unwrap_or_default();
+            self.script_setup_analysis = Some(analysis);
+        }
+        self.script_setup_analysis
+            .as_ref()
+            .expect("vue 3 script setup analysis")
+            .clone()
+    }
+
+    fn normal_script_analysis(&mut self) -> Vue3NormalScriptAnalysis {
+        if self.normal_script_analysis.is_none() {
+            self.normal_script_analysis =
+                Some(analyze_vue3_normal_script_for_setup(self.descriptor()));
+        }
+        self.normal_script_analysis
+            .as_ref()
+            .expect("vue 3 normal script analysis")
+            .clone()
+    }
+
+    fn normal_script_return_bindings(&mut self) -> Vue27ScriptReturnBindings {
+        if self.normal_script_return_bindings.is_none() {
+            self.normal_script_return_bindings = Some(
+                self.script
+                    .as_ref()
+                    .map(|script| vue3_script_block_return_bindings(script.block))
+                    .unwrap_or_default(),
+            );
+        }
+        self.normal_script_return_bindings
+            .as_ref()
+            .expect("vue 3 normal script return bindings")
+            .clone()
+    }
+
+    fn normal_script_option_bindings(&mut self) -> Option<BTreeMap<String, String>> {
+        if self.normal_script_option_bindings.is_none() {
+            self.normal_script_option_bindings = Some(vue3_normal_script_options_binding_metadata(
+                self.descriptor(),
+            ));
+        }
+        self.normal_script_option_bindings
+            .as_ref()
+            .expect("vue 3 normal script option bindings")
+            .clone()
+    }
+
+    fn base_binding_metadata(&mut self) -> BTreeMap<String, String> {
+        if self.has_script_setup() {
+            return self.normal_script_option_bindings().unwrap_or_default();
+        }
+        let Some(mut bindings) = self.normal_script_option_bindings() else {
+            return BTreeMap::new();
+        };
+        bindings.insert("__isScriptSetup".into(), "false".into());
+        bindings
+    }
+
+    fn script_binding_metadata(
+        &mut self,
+        setup_analysis: &Vue3ScriptSetupAnalysis,
+    ) -> BTreeMap<String, String> {
+        if self.script_binding_metadata.is_none() {
+            self.script_binding_metadata = Some(vue3_script_setup_script_binding_metadata(
+                self.descriptor(),
+                &setup_analysis.vue_import_aliases,
+            ));
+        }
+        self.script_binding_metadata
+            .as_ref()
+            .expect("vue 3 script binding metadata")
+            .clone()
     }
 }
 
@@ -1562,7 +1727,7 @@ impl SfcCompiler {
         options: SfcScriptCompileOptions,
     ) -> SfcScriptBlock {
         let mut context = Vue3ScriptCompileContext::new(descriptor, &options, &mut self.js);
-        let script_compile_errors = vue3_script_compile_errors(context.descriptor(), &options);
+        let script_compile_errors = context.script_compile_errors();
         let summary = if script_compile_errors.is_empty() && context.all_script_blocks_are_js_like()
         {
             self.js
@@ -1571,15 +1736,14 @@ impl SfcCompiler {
             Default::default()
         };
         let attrs = context.script_or_setup_attrs();
-        let base_bindings = vue3_script_base_binding_metadata(context.descriptor());
+        let base_bindings = context.base_binding_metadata();
         let template_usage_index =
             vue3_compile_script_template_usage_index(&mut context, &script_compile_errors);
         let generated_content = script_content(
-            context.descriptor(),
-            context.raw_content(),
-            context.filename(),
+            &mut context,
             &options,
             &base_bindings,
+            &script_compile_errors,
             template_usage_index.as_ref(),
         );
         let mut bindings = base_bindings;
@@ -15221,22 +15385,6 @@ fn vue27_normal_script_binding_metadata(descriptor: &SfcDescriptor) -> BTreeMap<
     bindings
 }
 
-fn vue3_script_base_binding_metadata(descriptor: &SfcDescriptor) -> BTreeMap<String, String> {
-    if descriptor.script_setup.is_some() {
-        vue3_normal_script_options_binding_metadata(descriptor).unwrap_or_default()
-    } else {
-        vue3_normal_script_binding_metadata(descriptor)
-    }
-}
-
-fn vue3_normal_script_binding_metadata(descriptor: &SfcDescriptor) -> BTreeMap<String, String> {
-    let Some(mut bindings) = vue3_normal_script_options_binding_metadata(descriptor) else {
-        return BTreeMap::new();
-    };
-    bindings.insert("__isScriptSetup".into(), "false".into());
-    bindings
-}
-
 fn vue3_normal_script_options_binding_metadata(
     descriptor: &SfcDescriptor,
 ) -> Option<BTreeMap<String, String>> {
@@ -16987,95 +17135,95 @@ fn vue3_resolve_type_call_count(
 }
 
 fn script_content(
-    descriptor: &SfcDescriptor,
-    raw_content: &str,
-    filename: &str,
+    context: &mut Vue3ScriptCompileContext<'_>,
     options: &SfcScriptCompileOptions,
     base_bindings: &BTreeMap<String, String>,
+    script_errors: &[String],
     template_usage_index: Option<&TemplateUsageIndex>,
 ) -> GeneratedScriptContent {
-    let script_errors = vue3_script_compile_errors(descriptor, options);
-    let Some(script_setup) = descriptor.script_setup.as_ref() else {
-        let content = vue3_normal_script_content(descriptor, raw_content, options, base_bindings);
-        return GeneratedScriptContent {
-            map: options
-                .source_map
-                .then(|| vue3_compile_script_source_map(descriptor, &content, None)),
-            content,
-            errors: script_errors,
-            warnings: Vec::new(),
-            bindings: BTreeMap::new(),
-            props_aliases: BTreeMap::new(),
-            imports: BTreeMap::new(),
-            removed_bindings: BTreeSet::new(),
-            deps: Vec::new(),
+    {
+        let descriptor = context.descriptor();
+        let raw_content = context.raw_content();
+        let Some(script_setup) = descriptor.script_setup.as_ref() else {
+            let content =
+                vue3_normal_script_content(descriptor, raw_content, options, base_bindings);
+            return GeneratedScriptContent {
+                map: options
+                    .source_map
+                    .then(|| vue3_compile_script_source_map(descriptor, &content, None)),
+                content,
+                errors: script_errors.to_vec(),
+                warnings: Vec::new(),
+                bindings: BTreeMap::new(),
+                props_aliases: BTreeMap::new(),
+                imports: BTreeMap::new(),
+                removed_bindings: BTreeSet::new(),
+                deps: Vec::new(),
+            };
         };
-    };
-    if !script_lang_is_js_like(&script_setup.attrs) && script_errors.is_empty() {
-        return GeneratedScriptContent {
-            map: options
-                .source_map
-                .then(|| vue3_compile_script_source_map(descriptor, raw_content, None)),
-            content: raw_content.to_string(),
-            errors: Vec::new(),
-            warnings: Vec::new(),
-            bindings: BTreeMap::new(),
-            props_aliases: BTreeMap::new(),
-            imports: BTreeMap::new(),
-            removed_bindings: BTreeSet::new(),
-            deps: Vec::new(),
-        };
-    }
-    if !script_errors.is_empty() {
-        return GeneratedScriptContent {
-            map: options
-                .source_map
-                .then(|| vue3_compile_script_source_map(descriptor, raw_content, None)),
-            content: raw_content.to_string(),
-            errors: script_errors,
-            warnings: Vec::new(),
-            bindings: BTreeMap::new(),
-            props_aliases: BTreeMap::new(),
-            imports: BTreeMap::new(),
-            removed_bindings: BTreeSet::new(),
-            deps: Vec::new(),
-        };
+        if !script_lang_is_js_like(&script_setup.attrs) && script_errors.is_empty() {
+            return GeneratedScriptContent {
+                map: options
+                    .source_map
+                    .then(|| vue3_compile_script_source_map(descriptor, raw_content, None)),
+                content: raw_content.to_string(),
+                errors: Vec::new(),
+                warnings: Vec::new(),
+                bindings: BTreeMap::new(),
+                props_aliases: BTreeMap::new(),
+                imports: BTreeMap::new(),
+                removed_bindings: BTreeSet::new(),
+                deps: Vec::new(),
+            };
+        }
+        if !script_errors.is_empty() {
+            return GeneratedScriptContent {
+                map: options
+                    .source_map
+                    .then(|| vue3_compile_script_source_map(descriptor, raw_content, None)),
+                content: raw_content.to_string(),
+                errors: script_errors.to_vec(),
+                warnings: Vec::new(),
+                bindings: BTreeMap::new(),
+                props_aliases: BTreeMap::new(),
+                imports: BTreeMap::new(),
+                removed_bindings: BTreeSet::new(),
+                deps: Vec::new(),
+            };
+        }
     }
 
-    let type_resolver = vue3_type_resolver_context_for_filename(&descriptor.filename);
-    let normal_script = analyze_vue3_normal_script_for_setup(descriptor);
-    let normal_type_context =
-        vue3_normal_script_type_context(descriptor, &options.global_type_files, &type_resolver);
-    let normal_user_imports = vue3_normal_script_user_imports(descriptor);
-    let setup_analysis = analyze_vue3_script_setup(
-        &descriptor.filename,
-        descriptor,
-        script_setup,
-        options.hoist_static && descriptor.script.is_none(),
-        &normal_type_context,
-        &normal_user_imports,
-        &type_resolver,
-        options.props_destructure,
-        options.is_prod,
-        options.custom_element,
-    );
+    let setup_analysis = context.script_setup_analysis();
+    let normal_script = context.normal_script_analysis();
+    let normal_script_return_bindings = context.normal_script_return_bindings();
+    let script_binding_metadata = context.script_binding_metadata(&setup_analysis);
+    let descriptor = context.descriptor();
+    let filename = context.filename();
+    let script_setup = descriptor
+        .script_setup
+        .as_ref()
+        .expect("vue 3 script setup block");
     let is_ts = script_is_typescript(&script_setup.attrs)
         || descriptor
             .script
             .as_ref()
             .is_some_and(|script| script_is_typescript(&script.attrs));
-    let return_bindings =
-        vue3_script_setup_return_bindings(descriptor, &setup_analysis, is_ts, template_usage_index);
-    let script_binding_metadata =
-        vue3_script_setup_script_binding_metadata(descriptor, &setup_analysis.vue_import_aliases);
-    let template_binding_metadata = vue3_script_setup_template_binding_metadata(
+    let return_bindings = vue3_script_setup_return_bindings(
         descriptor,
+        &normal_script_return_bindings,
+        &setup_analysis,
+        is_ts,
+        template_usage_index,
+    );
+    let template_binding_metadata = vue3_script_setup_template_binding_metadata(
+        &normal_script_return_bindings,
         base_bindings,
         &script_binding_metadata,
         &setup_analysis,
     );
     let imports = vue3_script_setup_import_metadata(
         descriptor,
+        &normal_script_return_bindings,
         &setup_analysis,
         is_ts,
         options.inline_template,
@@ -17191,12 +17339,7 @@ fn script_content(
     );
     append_vue3_export_chunk(&mut content, &export);
     let mut bindings = BTreeMap::new();
-    let script_returns = descriptor
-        .script
-        .as_ref()
-        .map(vue3_script_block_return_bindings)
-        .unwrap_or_default();
-    for import in script_returns
+    for import in normal_script_return_bindings
         .imports
         .iter()
         .chain(setup_analysis.imports.iter())
@@ -17238,18 +17381,13 @@ fn script_content(
 }
 
 fn vue3_script_setup_template_binding_metadata(
-    descriptor: &SfcDescriptor,
+    normal_script_return_bindings: &Vue27ScriptReturnBindings,
     base_bindings: &BTreeMap<String, String>,
     script_bindings: &BTreeMap<String, String>,
     setup_analysis: &Vue3ScriptSetupAnalysis,
 ) -> BTreeMap<String, String> {
     let mut bindings = base_bindings.clone();
-    let script_returns = descriptor
-        .script
-        .as_ref()
-        .map(vue3_script_block_return_bindings)
-        .unwrap_or_default();
-    for import in script_returns
+    for import in normal_script_return_bindings
         .imports
         .iter()
         .chain(setup_analysis.imports.iter())
@@ -17860,22 +17998,17 @@ fn vue3_script_setup_helper_import_source(options: &SfcScriptCompileOptions) -> 
 
 fn vue3_script_setup_return_bindings(
     descriptor: &SfcDescriptor,
+    normal_script_return_bindings: &Vue27ScriptReturnBindings,
     setup_analysis: &Vue3ScriptSetupAnalysis,
     is_ts: bool,
     template_usage_index: Option<&TemplateUsageIndex>,
 ) -> Vec<Vue3ScriptSetupReturnBinding> {
-    let script_returns = descriptor
-        .script
-        .as_ref()
-        .map(vue3_script_block_return_bindings)
-        .unwrap_or_default();
-
     let mut bindings = Vec::new();
-    for binding in script_returns.bindings {
+    for binding in &normal_script_return_bindings.bindings {
         push_unique_vue3_return_binding(
             &mut bindings,
             Vue3ScriptSetupReturnBinding {
-                name: binding,
+                name: binding.clone(),
                 kind: Vue3ScriptSetupReturnBindingKind::Local,
             },
         );
@@ -17889,7 +18022,7 @@ fn vue3_script_setup_return_bindings(
             },
         );
     }
-    for import in script_returns
+    for import in normal_script_return_bindings
         .imports
         .iter()
         .chain(setup_analysis.imports.iter())
@@ -17914,18 +18047,14 @@ fn vue3_script_setup_return_bindings(
 
 fn vue3_script_setup_import_metadata(
     descriptor: &SfcDescriptor,
+    normal_script_return_bindings: &Vue27ScriptReturnBindings,
     setup_analysis: &Vue3ScriptSetupAnalysis,
     is_ts: bool,
     inline_template: bool,
     template_usage_index: Option<&TemplateUsageIndex>,
 ) -> BTreeMap<String, SfcScriptImportBinding> {
-    let script_returns = descriptor
-        .script
-        .as_ref()
-        .map(vue3_script_block_return_bindings)
-        .unwrap_or_default();
     let mut imports = BTreeMap::new();
-    for import in &script_returns.imports {
+    for import in &normal_script_return_bindings.imports {
         vue3_insert_script_import_metadata(
             &mut imports,
             descriptor,

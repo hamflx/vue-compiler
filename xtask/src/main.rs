@@ -3618,7 +3618,7 @@ fn compile_script_error_analysis_count(
 ) -> usize {
     match version {
         CompileScriptProfileVersion::Vue27 => 0,
-        CompileScriptProfileVersion::Vue3 => 2,
+        CompileScriptProfileVersion::Vue3 => 1,
     }
 }
 
