@@ -235,6 +235,7 @@ function baseCompile(source) {
     return baseCompileVue3WithJsNodeTransforms(template, options);
   }
   const result = native.baseCompileVue3(template, vue3NativeOptions(options, template));
+  emitVue3CompileDiagnostics(result, options, template);
   if (result && typeof result === 'object' && !result.ast) {
     const ast = baseParse(template, options);
     transform(ast, vue3BaseCompileTransformOptions(options));
@@ -287,6 +288,7 @@ function generate(ast) {
   const options = normalizeOptions(arguments[1]);
   const hydrated = hydrateVue3Ast(ast || {}, options);
   const result = native.generateVue3Core(hydrated, options);
+  emitVue3CompileDiagnostics(result, options, hydrated.source || '');
   if (result && typeof result === 'object' && !Object.prototype.hasOwnProperty.call(result, 'ast')) {
     result.ast = hydrated;
   }
@@ -509,6 +511,93 @@ function emitVue3ParseDiagnostics(ast, options) {
     onError(error);
   }
   delete ast.__vuecDiagnostics;
+}
+
+function emitVue3CompileDiagnostics(result, options, source) {
+  if (!result || !Array.isArray(result.diagnostics)) return;
+  const onError = options && typeof options.onError === 'function'
+    ? options.onError
+    : null;
+  const onWarn = options && typeof options.onWarn === 'function'
+    ? options.onWarn
+    : null;
+  for (const diagnostic of result.diagnostics) {
+    const severity = String(diagnostic && diagnostic.severity || 'error').toLowerCase();
+    if (severity === 'warning') {
+      if (onWarn) onWarn(vue3DiagnosticError(diagnostic, source));
+      continue;
+    }
+    const error = vue3DiagnosticError(diagnostic, source);
+    if (onError) {
+      onError(error);
+    } else {
+      throw error;
+    }
+  }
+  delete result.diagnostics;
+}
+
+function vue3DiagnosticError(diagnostic, source) {
+  if (typeof diagnostic === 'string') {
+    return new SyntaxError(diagnostic);
+  }
+  const code = diagnostic && diagnostic.code != null
+    ? Number(diagnostic.code)
+    : 0;
+  const loc = vue3DiagnosticLoc(diagnostic, source);
+  const error = new SyntaxError(String(diagnostic && diagnostic.message || 'Vue compiler error'));
+  error.code = Number.isNaN(code) ? diagnostic.code : code;
+  error.loc = loc;
+  return error;
+}
+
+function vue3DiagnosticLoc(diagnostic, source) {
+  if (diagnostic && diagnostic.loc) return diagnostic.loc;
+  const span = diagnostic && diagnostic.span;
+  if (!span || span.start == null || span.end == null) {
+    return {
+      start: { line: 1, column: 1, offset: 0 },
+      end: { line: 1, column: 1, offset: 0 },
+      source: '',
+    };
+  }
+  const start = Number(span.start) || 0;
+  const end = Math.max(start, Number(span.end) || start);
+  return vue3SourceLocValue(String(source || ''), start, end);
+}
+
+function vue3SourceLocValue(source, start, end) {
+  const localStart = Math.min(start, source.length);
+  const localEnd = Math.max(localStart, Math.min(end, source.length));
+  return {
+    start: vue3Position(source, start),
+    end: vue3Position(source, end),
+    source: source.slice(localStart, localEnd),
+  };
+}
+
+function vue3Position(source, offset) {
+  let line = 1;
+  let column = 1;
+  let utf16Offset = 0;
+  for (let index = 0; index < source.length && index < offset;) {
+    const codePoint = source.codePointAt(index);
+    const size = codePoint > 0xffff ? 2 : 1;
+    if (codePoint === 10) {
+      line += 1;
+      column = 1;
+    } else {
+      column += size;
+    }
+    utf16Offset += size;
+    index += size;
+  }
+  if (offset > source.length) {
+    const extra = offset - source.length;
+    column += extra;
+    utf16Offset += extra;
+  }
+  return { offset: utf16Offset, line, column };
 }
 
 function hydrateVue3Node(node) {
@@ -3784,6 +3873,7 @@ Object.defineProperty(module.exports, '__vuecRuntime', {
     ...module.exports,
     callBridge,
     dehydrateForBridge,
+    emitVue3CompileDiagnostics,
     hydrateVue3Ast,
     stringifyStatic,
     transformFor,

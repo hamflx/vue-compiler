@@ -1,22 +1,26 @@
 'use strict';
 
+const core = require('@vue/compiler-core');
 const native = require('@vuec-rs/native');
 
 function compile(source) {
   const options = arguments.length > 1 ? arguments[1] : undefined;
   let result;
+  let template;
   if (source && typeof source === 'object' && source.type === 0 && Array.isArray(source.children)) {
     const payload = vue3AstCompilePayload(source, options);
+    template = payload.source;
     result = native.compileVue3Ssr(payload.source, payload.options);
   } else {
-    const template = String(source || '');
+    template = String(source || '');
     result = native.compileVue3Ssr(template, vue3SsrNativeOptions(options, template));
   }
-  return hydrateCompileResult(result);
+  return hydrateCompileResult(result, options, template);
 }
 
-function hydrateCompileResult(result) {
+function hydrateCompileResult(result, options, source) {
   if (!result || typeof result !== 'object') return result;
+  core.__vuecRuntime.emitVue3CompileDiagnostics(result, options, source);
   if (Array.isArray(result.ast_helpers)) {
     const helpers = new Set(result.ast_helpers.map(name => Symbol(name)));
     delete result.ast_helpers;

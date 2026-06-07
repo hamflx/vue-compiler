@@ -52,6 +52,21 @@ const coreResult = core.baseCompile('<div>{{ msg }}</div>', {
 });
 assert.match(coreResult.code, /export function render/);
 assert.match(coreResult.code, /_ctx\.msg/);
+assert.strictEqual(Object.prototype.hasOwnProperty.call(coreResult, 'diagnostics'), false);
+
+const coreErrors = [];
+const coreDiagnosticResult = core.baseCompile('<div><span></div>', {
+  onError(error) {
+    coreErrors.push(error);
+  },
+});
+assert.strictEqual(Object.prototype.hasOwnProperty.call(coreDiagnosticResult, 'diagnostics'), false);
+assert.ok(coreErrors.some(error => error.code === 24));
+assert.match(coreErrors.find(error => error.code === 24).message, /missing end tag/i);
+assert.throws(
+  () => core.baseCompile('<div><span></div>'),
+  error => error instanceof SyntaxError && error.code === 24,
+);
 
 const coreAst = core.baseParse('<div>{{ msg }}</div>');
 assert.strictEqual(coreAst.type, core.NodeTypes.ROOT);
@@ -104,6 +119,15 @@ const domResult = dom.compile('<input v-model="msg">', {
 assert.match(domResult.code, /export function render/);
 assert.match(domResult.code, /modelValue/);
 
+const domErrors = [];
+const domDiagnosticResult = dom.compile('<div><span></div>', {
+  onError(error) {
+    domErrors.push(error);
+  },
+});
+assert.strictEqual(Object.prototype.hasOwnProperty.call(domDiagnosticResult, 'diagnostics'), false);
+assert.ok(domErrors.some(error => error.code === 24));
+
 const domAst = dom.parse('<textarea>{{ msg }}</textarea>');
 assert.strictEqual(domAst.type, dom.NodeTypes.ROOT);
 assert.strictEqual(domAst.children[0].tag, 'textarea');
@@ -114,6 +138,19 @@ const ssrResult = ssrCompiler.compile('<div>{{ msg }}</div>', {
 });
 assert.match(ssrResult.code, /export function ssrRender/);
 assert.match(ssrResult.code, /_ssrInterpolate\(_ctx\.msg\)/);
+
+const ssrErrors = [];
+const ssrDiagnosticResult = ssrCompiler.compile('<div><span></div>', {
+  onError(error) {
+    ssrErrors.push(error);
+  },
+});
+assert.strictEqual(Object.prototype.hasOwnProperty.call(ssrDiagnosticResult, 'diagnostics'), false);
+assert.ok(ssrErrors.some(error => error.code === 24));
+assert.throws(
+  () => ssrCompiler.compile('<div><span></div>'),
+  error => error instanceof SyntaxError && error.code === 24,
+);
 
 const parsed = sfc.parse('<template><div>{{ msg }}</div></template><script setup>const msg = 1</script>');
 assert.ok(parsed.descriptor.template);

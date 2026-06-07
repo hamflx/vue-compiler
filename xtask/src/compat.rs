@@ -2594,13 +2594,13 @@ fn alias_function_expression(
     };
     let body = match command {
         Some("vue3.core.baseCompile") => format!(
-            "{argument_bindings} const __vuecPayload = normalizeArgs({}); preflightAliasCall({}, __vuecPayload); if (usesAliasRuntimeCompile(__vuecPayload.options)) return vue3CoreRuntime.baseCompile(__vuecPayload.source, __vuecPayload.options || {{}}); return callBridge({}, bridgePayloadForCall(__vuecPayload));",
+            "{argument_bindings} const __vuecPayload = normalizeArgs({}); preflightAliasCall({}, __vuecPayload); if (usesAliasRuntimeCompile(__vuecPayload.options)) return vue3CoreRuntime.baseCompile(__vuecPayload.source, __vuecPayload.options || {{}}); const __vuecResult = callBridge({}, bridgePayloadForCall(__vuecPayload)); emitVue3CompileDiagnostics(__vuecResult, __vuecPayload.options, __vuecPayload.source); return __vuecResult;",
             alias_argument_object(target, export_name, body_arity),
             js_string_literal(alias_preflight_name(target, export_name)),
             js_string_literal("vue3.core.baseCompile"),
         ),
         Some("vue3.dom.compile") => format!(
-            "{argument_bindings} const __vuecPayload = normalizeArgs({}); preflightAliasCall({}, __vuecPayload); const __vuecResult = callBridge({}, bridgePayloadForCall(__vuecPayload)); emitVue3CompileDiagnostics(__vuecResult, __vuecPayload.options); return __vuecResult;",
+            "{argument_bindings} const __vuecPayload = normalizeArgs({}); preflightAliasCall({}, __vuecPayload); const __vuecResult = callBridge({}, bridgePayloadForCall(__vuecPayload)); emitVue3CompileDiagnostics(__vuecResult, __vuecPayload.options, __vuecPayload.source); return __vuecResult;",
             alias_argument_object(target, export_name, body_arity),
             js_string_literal(alias_preflight_name(target, export_name)),
             js_string_literal("vue3.dom.compile"),
@@ -2681,7 +2681,7 @@ fn alias_function_expression(
                 )
             } else if is_vue3_generate {
                 format!(
-                    "(() => {{ const __vuecGenerateResult = {call}; __vuecGenerateResult.ast = a0; return __vuecGenerateResult; }})()"
+                    "(() => {{ const __vuecGenerateResult = {call}; emitVue3CompileDiagnostics(__vuecGenerateResult, __vuecPayload.options, __vuecPayload.source); __vuecGenerateResult.ast = a0; return __vuecGenerateResult; }})()"
                 )
             } else if is_vue3_sfc_parse {
                 format!("hydrateVue3SfcParseResult(applyVue3SfcCustomCompilerParse({call}, __vuecPayload.source, __vuecPayload.options, __vuecPayload.filename))")
@@ -2696,7 +2696,7 @@ fn alias_function_expression(
                     "prettifyVue27SfcTemplateResult({call}, __vuecBridgePayload.options, __vuecPayload.filename)"
                 )
             } else if is_vue3_ssr_compile {
-                format!("hydrateVue3SsrCompileResult({call})")
+                format!("hydrateVue3SsrCompileResult({call}, __vuecPayload.options, __vuecPayload.source)")
             } else if is_vue2_template_compile {
                 format!(
                     "(() => {{ const __vuecVue2Result = {call}; emitVue2CompileWarnings(__vuecVue2Result, __vuecPayload.options); return hydrateVue2CompileResult(__vuecVue2Result); }})()"
@@ -9388,8 +9388,9 @@ function vue3SfcIsDomBuiltInComponent(tag) {
   return tag === 'Transition' || tag === 'transition' || tag === 'TransitionGroup' || tag === 'transition-group';
 }
 
-function hydrateVue3SsrCompileResult(result) {
+function hydrateVue3SsrCompileResult(result, options, source) {
   if (!result || typeof result !== 'object') return result;
+  emitVue3CompileDiagnostics(result, options, source);
   if (Array.isArray(result.ast_helpers)) {
     const helpers = new Set(result.ast_helpers.map(name => Symbol(name)));
     delete result.ast_helpers;
@@ -9795,18 +9796,81 @@ function usesAliasRuntimeCompile(options) {
   return typeof options.transformHoist === 'function';
 }
 
-function emitVue3CompileDiagnostics(result, options) {
-  if (!result || !Array.isArray(result.diagnostics) || !result.diagnostics.length) return;
+function emitVue3CompileDiagnostics(result, options, source) {
+  if (!result || !Array.isArray(result.diagnostics)) return;
   const onError = options && typeof options.onError === 'function'
     ? options.onError
-    : error => { throw error; };
+    : null;
+  const onWarn = options && typeof options.onWarn === 'function'
+    ? options.onWarn
+    : null;
   for (const diagnostic of result.diagnostics) {
-    const message = typeof diagnostic === 'string' ? diagnostic : diagnostic && diagnostic.message;
-    const error = new SyntaxError(message || 'Vue compiler error');
-    error.code = diagnostic && diagnostic.code !== undefined ? diagnostic.code : 64;
-    error.loc = diagnostic && diagnostic.loc !== undefined ? diagnostic.loc : undefined;
-    onError(error);
+    const severity = String(diagnostic && diagnostic.severity || 'error').toLowerCase();
+    if (severity === 'warning') {
+      if (onWarn) onWarn(vue3DiagnosticError(diagnostic, source));
+      continue;
+    }
+    const error = vue3DiagnosticError(diagnostic, source);
+    if (onError) {
+      onError(error);
+    } else {
+      throw error;
+    }
   }
+  delete result.diagnostics;
+}
+
+function vue3DiagnosticError(diagnostic, source) {
+  if (typeof diagnostic === 'string') return new SyntaxError(diagnostic);
+  const message = diagnostic && diagnostic.message;
+  const error = new SyntaxError(message || 'Vue compiler error');
+  const code = diagnostic && diagnostic.code !== undefined ? Number(diagnostic.code) : 64;
+  error.code = Number.isNaN(code) ? diagnostic.code : code;
+  error.loc = vue3DiagnosticLoc(diagnostic, source);
+  return error;
+}
+
+function vue3DiagnosticLoc(diagnostic, source) {
+  if (diagnostic && diagnostic.loc) return diagnostic.loc;
+  const span = diagnostic && diagnostic.span;
+  if (!span || span.start == null || span.end == null) return undefined;
+  const start = Number(span.start) || 0;
+  const end = Math.max(start, Number(span.end) || start);
+  return vue3SourceLocValue(String(source || ''), start, end);
+}
+
+function vue3SourceLocValue(source, start, end) {
+  const localStart = Math.min(start, source.length);
+  const localEnd = Math.max(localStart, Math.min(end, source.length));
+  return {
+    start: vue3Position(source, start),
+    end: vue3Position(source, end),
+    source: source.slice(localStart, localEnd),
+  };
+}
+
+function vue3Position(source, offset) {
+  let line = 1;
+  let column = 1;
+  let utf16Offset = 0;
+  for (let index = 0; index < source.length && index < offset;) {
+    const codePoint = source.codePointAt(index);
+    const size = codePoint > 0xffff ? 2 : 1;
+    if (codePoint === 10) {
+      line += 1;
+      column = 1;
+    } else {
+      column += size;
+    }
+    utf16Offset += size;
+    index += size;
+  }
+  if (offset > source.length) {
+    const extra = offset - source.length;
+    column += extra;
+    utf16Offset += extra;
+  }
+  return { offset: utf16Offset, line, column };
 }
 
 function emitVue3StyleWarnings(result) {
@@ -22811,9 +22875,84 @@ projects = []
         let expression = alias_export_expression(target, "compile", Some(&detail));
 
         assert!(expression.contains("hydrateVue3SsrCompileResult"));
+        assert!(expression.contains("hydrateVue3SsrCompileResult("));
+        assert!(expression.contains("__vuecPayload.options"));
+        assert!(expression.contains("__vuecPayload.source"));
         assert!(expression.contains("vue3.ssr.compile"));
         assert!(ALIAS_RUNTIME_JS.contains("function hydrateVue3SsrCompileResult"));
+        assert!(ALIAS_RUNTIME_JS.contains("emitVue3CompileDiagnostics(result, options, source)"));
         assert!(ALIAS_RUNTIME_JS.contains("new Set(result.ast_helpers.map(name => Symbol(name)))"));
+    }
+
+    #[test]
+    fn vue3_compile_aliases_consume_public_diagnostics() {
+        let function_detail = ApiExportDetail {
+            kind: "function".into(),
+            tag: "[object Function]".into(),
+            name: None,
+            function_arity: Some(2),
+            is_async_function: Some(false),
+            is_class_like: Some(false),
+            own_property_names: vec!["length".into(), "name".into(), "prototype".into()],
+        };
+        let core_base_compile = alias_export_expression(
+            TargetSpec {
+                version_line: VersionLine::Vue3,
+                package: "@vue/compiler-core",
+                entry: "@vue/compiler-core",
+                kind: TargetKind::Vue3Core,
+            },
+            "baseCompile",
+            Some(&function_detail),
+        );
+        let core_generate = alias_export_expression(
+            TargetSpec {
+                version_line: VersionLine::Vue3,
+                package: "@vue/compiler-core",
+                entry: "@vue/compiler-core",
+                kind: TargetKind::Vue3Core,
+            },
+            "generate",
+            Some(&function_detail),
+        );
+        let dom_compile = alias_export_expression(
+            TargetSpec {
+                version_line: VersionLine::Vue3,
+                package: "@vue/compiler-dom",
+                entry: "@vue/compiler-dom",
+                kind: TargetKind::Vue3Dom,
+            },
+            "compile",
+            Some(&function_detail),
+        );
+        let ssr_compile = alias_export_expression(
+            TargetSpec {
+                version_line: VersionLine::Vue3,
+                package: "@vue/compiler-ssr",
+                entry: "@vue/compiler-ssr",
+                kind: TargetKind::Vue3Ssr,
+            },
+            "compile",
+            Some(&function_detail),
+        );
+
+        assert!(core_base_compile.contains(
+            "emitVue3CompileDiagnostics(__vuecResult, __vuecPayload.options, __vuecPayload.source)"
+        ));
+        assert!(core_generate
+            .contains("emitVue3CompileDiagnostics(__vuecGenerateResult, __vuecPayload.options, __vuecPayload.source)"));
+        assert!(dom_compile.contains(
+            "emitVue3CompileDiagnostics(__vuecResult, __vuecPayload.options, __vuecPayload.source)"
+        ));
+        assert!(ssr_compile.contains("hydrateVue3SsrCompileResult"));
+        assert!(ssr_compile.contains("__vuecPayload.options"));
+        assert!(ssr_compile.contains("__vuecPayload.source"));
+        assert!(ALIAS_RUNTIME_JS
+            .contains("function emitVue3CompileDiagnostics(result, options, source)"));
+        assert!(ALIAS_RUNTIME_JS
+            .contains("const onWarn = options && typeof options.onWarn === 'function'"));
+        assert!(ALIAS_RUNTIME_JS.contains("delete result.diagnostics"));
+        assert!(ALIAS_RUNTIME_JS.contains("function vue3DiagnosticLoc(diagnostic, source)"));
     }
 
     #[test]
