@@ -2050,6 +2050,18 @@ impl SfcCompiler {
         self.descriptor_cache.len()
     }
 
+    /// Clears descriptor, source, JavaScript, and cache-stat state.
+    ///
+    /// This is intended for long-lived compiler services that want to release
+    /// retained source text and parser arena allocations between independent
+    /// compile batches.
+    pub fn clear_caches(&mut self) {
+        self.sources = SourceMap::default();
+        self.js.clear();
+        self.descriptor_cache.clear();
+        self.cache_stats = SfcCacheStats::default();
+    }
+
     fn invalidate_stale_descriptor_entries(&mut self, filename: &str, mode: &SfcParseCacheMode) {
         let before = self.descriptor_cache.len();
         self.descriptor_cache
@@ -27344,6 +27356,7 @@ fn script_mode(attrs: &SfcBlockAttrs) -> JsParseMode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vuec_js::JsStringInternerStats;
 
     fn compact_js_whitespace(source: &str) -> String {
         source.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -27951,6 +27964,44 @@ mod tests {
                 descriptor_misses: 2,
                 descriptor_invalidations: 1,
             }
+        );
+    }
+
+    #[test]
+    fn clear_caches_releases_descriptor_and_js_lifecycle_state() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(
+            "state.vue",
+            r#"<script setup>const count = 1</script><template>{{ count }}</template>"#,
+        );
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert_eq!(compiler.descriptor_cache_len(), 1);
+        assert!(!script.script_setup_ast.is_empty());
+        assert!(compiler.js().string_interner_stats().entries > 0);
+        assert_eq!(
+            compiler.cache_stats(),
+            SfcCacheStats {
+                descriptor_hits: 0,
+                descriptor_misses: 1,
+                descriptor_invalidations: 0,
+            }
+        );
+
+        compiler.clear_caches();
+
+        assert_eq!(compiler.descriptor_cache_len(), 0);
+        assert_eq!(
+            compiler.js().string_interner_stats(),
+            JsStringInternerStats::default()
+        );
+        assert_eq!(compiler.cache_stats(), SfcCacheStats::default());
+
+        let reparsed = compiler.parse("state.vue", r#"<template><span>fresh</span></template>"#);
+        assert_eq!(compiler.descriptor_cache_len(), 1);
+        assert_eq!(
+            reparsed.template.as_ref().unwrap().content,
+            "<span>fresh</span>"
         );
     }
 
@@ -38106,20 +38157,16 @@ const emit = defineEmits<((e: 'foo') => void) | ((e: 'bar') => void)>()
     }
 
     #[test]
-    fn compile_style_diagnostics_map_to_vue_source_offsets() {
+    fn compile_style_preserves_plain_css_imports_without_resolve_diagnostics() {
         let mut compiler = SfcCompiler::new();
-        let source = "<template><div/></template>\n<style>\n.a { color: red; }\n@import \"missing.css\";\n</style>";
+        let source = "<template><div/></template>\n<style>\n.a { color: red; }\n@import \"./not-missing.css\";\n@import \"missing.css\";\n</style>";
         let descriptor = compiler.parse("diagnostic.vue", source);
         let result = compiler.compile_style(&descriptor, SfcStyleCompileOptions::default());
 
-        assert_eq!(result.errors, vec!["style import could not be resolved"]);
-        assert_eq!(result.diagnostics.len(), 1);
-        let import_start = source.find("@import").expect("import start");
-        let import_end = import_start + "@import \"missing.css\";".len();
-        assert_eq!(
-            result.diagnostics[0].span,
-            Some(Span::new(descriptor.source_file, import_start, import_end))
-        );
+        assert!(result.errors.is_empty());
+        assert!(result.diagnostics.is_empty());
+        assert!(result.code.contains("@import \"./not-missing.css\";"));
+        assert!(result.code.contains("@import \"missing.css\";"));
     }
 
     #[test]

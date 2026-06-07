@@ -550,6 +550,34 @@ impl JsAstStore {
         }
     }
 
+    /// Clears registered JavaScript snippets and interned source strings.
+    ///
+    /// This invalidates all ids returned by prior `register_*` calls, but does
+    /// not reset parser arena allocations by itself.
+    pub fn clear_registered(&mut self) {
+        self.sources.clear();
+        self.interner_hits = 0;
+        self.interner_misses = 0;
+        self.expressions.clear();
+        self.statements.clear();
+        self.patterns.clear();
+        self.programs.clear();
+    }
+
+    /// Replaces the Oxc parse arena used by subsequent parse calls.
+    ///
+    /// Previously returned Oxc AST references must not be used after calling
+    /// this method.
+    pub fn clear_parse_arena(&mut self) {
+        self.allocator = Allocator::default();
+    }
+
+    /// Clears registered snippets, interned strings, and parse arena state.
+    pub fn clear(&mut self) {
+        self.clear_registered();
+        self.clear_parse_arena();
+    }
+
     /// Returns whether two entries share the same interned source allocation.
     pub fn interned_source_ptr_eq(&self, left: &JsEntry, right: &JsEntry) -> bool {
         left.source.ptr_eq(&right.source)
@@ -1586,6 +1614,28 @@ mod tests {
 
         let serialized = serde_json::to_value(first_entry).unwrap();
         assert_eq!(serialized["source"], "item.count");
+    }
+
+    #[test]
+    fn clear_drops_registered_sources_and_restarts_ids() {
+        let mut store = JsAstStore::new();
+        let old = store.register_expr("old", Span::new(FileId(0), 0, 3), SourceType::script());
+        assert_eq!(old, JsExprId(0));
+        assert_eq!(store.string_interner_stats().entries, 1);
+        assert!(store
+            .parse_expression("old + value", SourceType::script())
+            .is_ok());
+
+        store.clear();
+
+        assert!(store.expr_entry(old).is_none());
+        assert_eq!(
+            store.string_interner_stats(),
+            JsStringInternerStats::default()
+        );
+        let new = store.register_expr("new", Span::new(FileId(0), 4, 7), SourceType::script());
+        assert_eq!(new, JsExprId(0));
+        assert_eq!(store.expr_entry(new).unwrap().source, "new");
     }
 
     #[test]
