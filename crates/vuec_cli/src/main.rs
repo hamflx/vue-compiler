@@ -482,7 +482,7 @@ fn compile_batch_command(args: CompileBatchArgs) -> Result<RunOutput> {
     let worker_count = batch_worker_count(args.jobs, args.inputs.len());
     let started = Instant::now();
     let results = compile_batch_parallel(args.inputs, args.target, worker_count)?;
-    let has_errors = results.iter().any(|result| result.item.status == "error");
+    let has_errors = results.iter().any(batch_item_failed);
     let payload = json!({
         "kind": "compile-batch",
         "target": args.target.as_str(),
@@ -862,8 +862,43 @@ fn emit_result(
     Ok(RunOutput {
         stdout,
         stderr,
-        code: 0,
+        code: if has_error_diagnostic(&diagnostics) {
+            1
+        } else {
+            0
+        },
     })
+}
+
+fn has_error_diagnostic(diagnostics: &[CliDiagnostic]) -> bool {
+    diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.severity == "error")
+}
+
+fn batch_item_failed(result: &BatchCompiled) -> bool {
+    if result.item.status == "error" {
+        return true;
+    }
+    result
+        .item
+        .result
+        .as_ref()
+        .is_some_and(value_has_error_diagnostic)
+}
+
+fn value_has_error_diagnostic(value: &Value) -> bool {
+    value
+        .get("diagnostics")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|diagnostic| {
+            diagnostic
+                .get("severity")
+                .and_then(Value::as_str)
+                .is_some_and(|severity| severity == "error")
+        })
 }
 
 fn write_optional_map(path: Option<&Path>, map: Option<&SourceMapArtifact>) -> Result<()> {
@@ -1263,6 +1298,7 @@ mod tests {
         assert!(output
             .stderr
             .contains(&format!("@{import_start}-{import_end}")));
+        assert_eq!(output.code, 1);
     }
 
     #[test]
@@ -1379,6 +1415,50 @@ mod tests {
     }
 
     #[test]
+    fn compile_template_exits_non_zero_for_error_diagnostics() {
+        let path = write_temp("vuec-cli-error-diagnostic.html", r#"<div v-model="baz"/>"#);
+        let output = run_with_args([
+            "vuec",
+            "compile-template",
+            "--target",
+            "vue3",
+            "--json",
+            path.to_str().unwrap(),
+        ])
+        .expect("run");
+        let value: Value = serde_json::from_str(&output.stdout).expect("json");
+
+        assert_eq!(output.code, 1);
+        assert_eq!(value["diagnostics"][0]["severity"], json!("error"));
+        assert!(output.stderr.is_empty());
+    }
+
+    #[test]
+    fn compile_batch_exits_non_zero_for_error_diagnostics() {
+        let path = write_temp(
+            "vuec-cli-batch-error-diagnostic.html",
+            r#"<div v-model="baz"/>"#,
+        );
+        let output = run_with_args([
+            "vuec",
+            "compile-batch",
+            "--target",
+            "vue3-template",
+            "--json",
+            path.to_str().unwrap(),
+        ])
+        .expect("run");
+        let value: Value = serde_json::from_str(&output.stdout).expect("json");
+
+        assert_eq!(output.code, 1);
+        assert_eq!(value["results"][0]["status"], json!("ok"));
+        assert_eq!(
+            value["results"][0]["result"]["diagnostics"][0]["severity"],
+            json!("error")
+        );
+    }
+
+    #[test]
     fn writes_source_map_for_vue3_template() {
         let path = write_temp("vuec-cli-map.html", "<div>{{ msg }}</div>");
         let map_path = write_temp("vuec-cli-map.json", "");
@@ -1415,6 +1495,7 @@ mod tests {
             path.to_str().unwrap(),
         ])
         .expect("run");
+        assert_eq!(output.code, 1);
         assert!(output.stderr.contains("[error]"));
         assert!(output.stderr.contains("v-model can only be used"));
     }
