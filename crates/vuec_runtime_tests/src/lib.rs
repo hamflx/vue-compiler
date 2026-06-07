@@ -419,6 +419,11 @@ function transformModuleSource(source) {
     .replace(/import\s+\{([\s\S]*?)\}\s+from\s+["']vue\/server-renderer["'];?\s*/g, (_, specifiers) => {
       return `const { ${specifiers.replace(/\s+as\s+/g, ': ')} } = serverRenderer;\n`;
     })
+    .replace(/import\s+([A-Za-z_$][\w$]*)\s+from\s+["']([^"']+)["'];?\s*/g, (_, local, request) => {
+      if (request === 'vue') return `const ${local} = Vue;\n`;
+      if (request === 'vue/server-renderer') return `const ${local} = serverRenderer;\n`;
+      return `const ${local} = ${JSON.stringify('__vuec_asset__:' + request)};\n`;
+    })
     .replace(/export\s+function\s+(render|ssrRender)/g, 'function $1');
 }
 
@@ -538,6 +543,18 @@ mod tests {
             assert_eq!(result.html, fixture.vue3_dom_html);
             assert!(result.warnings.is_empty());
         }
+    }
+
+    #[test]
+    fn vue3_generated_render_mounts_asset_import_template() {
+        let result = compile_vue3_and_mount(r#"<img src="./logo.png">"#).expect("asset import");
+
+        assert_eq!(result.kind, "vue3-mount");
+        assert_eq!(
+            result.html,
+            r#"<div id="app" data-v-app=""><img src="__vuec_asset__:./logo.png"></div>"#
+        );
+        assert!(result.warnings.is_empty());
     }
 
     #[test]
