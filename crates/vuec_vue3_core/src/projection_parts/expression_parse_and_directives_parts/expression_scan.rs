@@ -1,0 +1,376 @@
+pub(crate) fn process_expression_arrow_body_end(raw: &str, body_start: usize) -> usize {
+    if raw[body_start..].starts_with('{') {
+        return find_matching_forward(raw, body_start, '{', '}')
+            .map(|end| end + 1)
+            .unwrap_or(raw.len());
+    }
+    let mut quote = None::<char>;
+    let mut escaped = false;
+    let mut depth = 0usize;
+    for (offset, ch) in raw[body_start..].char_indices() {
+        let absolute = body_start + offset;
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(ch, '\'' | '"' | '`') {
+            quote = Some(ch);
+            continue;
+        }
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' if depth == 0 => return absolute,
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            ',' | ';' if depth == 0 => return absolute,
+            _ => {}
+        }
+    }
+    raw.len()
+}
+
+pub(crate) fn process_expression_assignment_rhs<'a>(
+    raw: &'a str,
+    start: usize,
+    end: usize,
+) -> Option<ProcessExpressionAssignmentRhs<'a>> {
+    if !process_expression_assignment_can_start(raw, start) {
+        return None;
+    }
+    let operator_start = skip_ws_forward(raw, end);
+    let operator = process_expression_assignment_operator(raw, operator_start)?;
+    let rhs_start = skip_ws_forward(raw, operator_start + operator.len());
+    let rhs_end = process_expression_assignment_rhs_end(raw, rhs_start);
+    let source = raw.get(rhs_start..rhs_end)?.trim();
+    (!source.is_empty()).then_some(ProcessExpressionAssignmentRhs { operator, source })
+}
+
+pub(crate) fn process_expression_assignment_can_start(raw: &str, start: usize) -> bool {
+    if previous_non_ws(raw, start).is_none_or(|prev| matches!(prev, '(' | '{' | '[' | ',' | ';')) {
+        return true;
+    }
+    let Some((prev_index, prev)) = previous_non_ws_index(raw, start) else {
+        return true;
+    };
+    if !raw[prev_index + prev.len_utf8()..start]
+        .chars()
+        .any(is_line_terminator)
+    {
+        return false;
+    }
+    process_expression_token_can_end_statement(raw, prev_index, prev)
+}
+
+pub(crate) fn process_expression_token_can_end_statement(
+    raw: &str,
+    index: usize,
+    ch: char,
+) -> bool {
+    ch == ')'
+        || ch == ']'
+        || ch == '}'
+        || ch == '\''
+        || ch == '"'
+        || ch == '`'
+        || is_identifier_continue(ch)
+        || ch.is_ascii_digit()
+        || raw[..index + ch.len_utf8()].trim_end().ends_with("++")
+        || raw[..index + ch.len_utf8()].trim_end().ends_with("--")
+}
+
+pub(crate) fn process_expression_assignment_operator(raw: &str, start: usize) -> Option<&str> {
+    [
+        ">>>=", "<<=", ">>=", "**=", "&&=", "||=", "??=", "+=", "-=", "*=", "/=", "%=", "&=", "|=",
+        "^=", "=",
+    ]
+    .into_iter()
+    .find(|operator| raw[start..].starts_with(operator) && !raw[start..].starts_with("=>"))
+}
+
+pub(crate) fn process_expression_assignment_rhs_end(raw: &str, rhs_start: usize) -> usize {
+    let mut quote = None::<char>;
+    let mut escaped = false;
+    let mut depth = 0usize;
+    for (offset, ch) in raw[rhs_start..].char_indices() {
+        let absolute = rhs_start + offset;
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(ch, '\'' | '"' | '`') {
+            quote = Some(ch);
+            continue;
+        }
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' if depth == 0 => return raw[..absolute].trim_end().len(),
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            ',' | ';' if depth == 0 => return raw[..absolute].trim_end().len(),
+            '\n' | '\r'
+                if depth == 0
+                    && process_expression_line_terminator_can_end_rhs(raw, rhs_start, absolute) =>
+            {
+                return raw[..absolute].trim_end().len();
+            }
+            _ => {}
+        }
+    }
+    raw.trim_end().len()
+}
+
+pub(crate) fn process_expression_line_terminator_can_end_rhs(
+    raw: &str,
+    rhs_start: usize,
+    offset: usize,
+) -> bool {
+    if raw[rhs_start..offset].trim().is_empty() {
+        return false;
+    }
+    let mut next_offset = offset;
+    while next_offset < raw.len() {
+        let Some(ch) = raw[next_offset..].chars().next() else {
+            break;
+        };
+        if !is_line_terminator(ch) {
+            break;
+        }
+        next_offset += ch.len_utf8();
+    }
+    !next_non_ws(raw, next_offset).is_some_and(process_expression_token_continues_expression)
+}
+
+pub(crate) fn process_expression_token_continues_expression(ch: char) -> bool {
+    matches!(
+        ch,
+        '.' | '?'
+            | ':'
+            | '+'
+            | '-'
+            | '*'
+            | '/'
+            | '%'
+            | '&'
+            | '|'
+            | '^'
+            | '='
+            | '<'
+            | '>'
+            | '('
+            | '['
+    )
+}
+
+pub(crate) fn is_line_terminator(ch: char) -> bool {
+    matches!(ch, '\n' | '\r')
+}
+
+pub(crate) fn process_expression_is_destructure_assignment(raw: &str, start: usize) -> bool {
+    let Some(open) = process_expression_destructure_open_before(raw, start) else {
+        return false;
+    };
+    let close_ch = match raw.as_bytes().get(open) {
+        Some(b'{') => '}',
+        Some(b'[') => ']',
+        _ => return false,
+    };
+    let Some(close) = find_matching_forward(raw, open, raw.as_bytes()[open] as char, close_ch)
+    else {
+        return false;
+    };
+    if !(open < start && start < close) {
+        return false;
+    }
+    next_non_ws(raw, close + close_ch.len_utf8()) == Some('=')
+}
+
+pub(crate) fn process_expression_destructure_open_before(raw: &str, start: usize) -> Option<usize> {
+    let mut quote = None::<char>;
+    let mut escaped = false;
+    let mut stack = Vec::<(usize, char)>::new();
+    for (offset, ch) in raw[..start].char_indices() {
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(ch, '\'' | '"' | '`') {
+            quote = Some(ch);
+            continue;
+        }
+        match ch {
+            '(' | '[' | '{' => stack.push((offset, ch)),
+            ')' => pop_matching_open(&mut stack, '('),
+            ']' => pop_matching_open(&mut stack, '['),
+            '}' => pop_matching_open(&mut stack, '{'),
+            _ => {}
+        }
+    }
+    stack
+        .into_iter()
+        .rev()
+        .find_map(|(offset, ch)| matches!(ch, '{' | '[').then_some(offset))
+}
+
+pub(crate) fn pop_matching_open(stack: &mut Vec<(usize, char)>, expected: char) {
+    if stack.last().is_some_and(|(_, ch)| *ch == expected) {
+        stack.pop();
+    }
+}
+
+pub(crate) fn process_expression_dynamic_static_reference(
+    raw: &str,
+    start: usize,
+    end: usize,
+) -> bool {
+    next_non_ws(raw, end) == Some('(') || process_expression_preceded_by_new(raw, start)
+}
+
+pub(crate) fn process_expression_preceded_by_new(raw: &str, start: usize) -> bool {
+    let prefix = raw[..start].trim_end();
+    prefix.strip_suffix("new").is_some_and(|before| {
+        before
+            .chars()
+            .last()
+            .is_none_or(|ch| !is_identifier_continue(ch))
+    })
+}
+
+pub(crate) fn skip_ws_forward(raw: &str, mut offset: usize) -> usize {
+    while offset < raw.len() {
+        let Some(ch) = raw[offset..].chars().next() else {
+            break;
+        };
+        if !ch.is_whitespace() {
+            break;
+        }
+        offset += ch.len_utf8();
+    }
+    offset
+}
+
+pub(crate) fn previous_non_ws_index(source: &str, offset: usize) -> Option<(usize, char)> {
+    source[..offset]
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| !ch.is_whitespace())
+}
+
+pub(crate) fn next_non_ws_index(source: &str, offset: usize) -> Option<(usize, char)> {
+    source[offset..]
+        .char_indices()
+        .find(|(_, ch)| !ch.is_whitespace())
+        .map(|(relative, ch)| (offset + relative, ch))
+}
+
+pub(crate) fn previous_char(source: &str, offset: usize) -> Option<(usize, char)> {
+    source[..offset].char_indices().next_back()
+}
+
+pub(crate) fn find_matching_forward(
+    raw: &str,
+    open: usize,
+    open_ch: char,
+    close_ch: char,
+) -> Option<usize> {
+    let mut quote = None::<char>;
+    let mut escaped = false;
+    let mut depth = 0usize;
+    for (offset, ch) in raw[open..].char_indices() {
+        let absolute = open + offset;
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(ch, '\'' | '"' | '`') {
+            quote = Some(ch);
+            continue;
+        }
+        if ch == open_ch {
+            depth += 1;
+        } else if ch == close_ch {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                return Some(absolute);
+            }
+        }
+    }
+    None
+}
+
+pub(crate) fn find_matching_backward(
+    raw: &str,
+    close: usize,
+    open_ch: char,
+    close_ch: char,
+) -> Option<usize> {
+    let mut depth = 0usize;
+    for (offset, ch) in raw[..=close].char_indices().rev() {
+        if ch == close_ch {
+            depth += 1;
+        } else if ch == open_ch {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                return Some(offset);
+            }
+        }
+    }
+    None
+}
+
+pub(crate) fn process_expression_update_argument(
+    raw: &str,
+    start: usize,
+    end: usize,
+) -> Option<ProcessExpressionUpdate> {
+    if let Some(tail) = raw.get(end..).map(str::trim_start) {
+        if tail.starts_with("++") {
+            return Some(ProcessExpressionUpdate {
+                operator: "++",
+                prefix: false,
+            });
+        }
+        if tail.starts_with("--") {
+            return Some(ProcessExpressionUpdate {
+                operator: "--",
+                prefix: false,
+            });
+        }
+    }
+    if let Some(head) = raw.get(..start).map(str::trim_end) {
+        if head.ends_with("++") {
+            return Some(ProcessExpressionUpdate {
+                operator: "++",
+                prefix: true,
+            });
+        }
+        if head.ends_with("--") {
+            return Some(ProcessExpressionUpdate {
+                operator: "--",
+                prefix: true,
+            });
+        }
+    }
+    None
+}
