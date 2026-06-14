@@ -28,7 +28,8 @@ const ssrCompileToFunctions = function compileToFunctions(template, options, vm)
   return result;
 };
 
-function parseComponent(source, options) {
+function parseComponent(source) {
+  const options = arguments.length > 1 ? arguments[1] : undefined;
   const opts = options || {};
   return normalizeVue27ParseComponentResult(
     native.parseVue27SfcComponent(String(source || ''), opts),

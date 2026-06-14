@@ -1063,7 +1063,7 @@ fn vue27_sfc_cases(_target: TargetSpec) -> Vec<OptionMatrixCase> {
             "vue27-sfc-template",
             r#"<template><div>{{ msg }}</div></template><script>export default {}</script><style scoped>.a{ color: v-bind(color); }</style>"#,
             Some(
-                serde_json::json!({"id": "data-v-contract", "scopeId": "data-v-contract", "ssr": false, "slotted": false}),
+                serde_json::json!({"id": "data-v-contract", "scopeId": "data-v-contract", "ssr": false, "slotted": false, "prettify": false}),
             ),
             false,
         ),
@@ -14797,6 +14797,15 @@ function normalizeVue2InternalNodeForBridge(node) {
 
 function normalizeVue2PublicElementForBridge(node) {
   const scopedSlots = normalizeVue2ScopedSlotsForBridge(node.scopedSlots || node.scoped_slots)
+  const directives = normalizeVue2DirectivesForBridge(node.directives)
+  const model = normalizeVue2ElementModelForBridge(node)
+  const domModel = model && !isVue2ComponentElementForBridge(node)
+  if (domModel) {
+    directives.push(model)
+  }
+  const props = normalizeVue2AttrsForBridge(node.props)
+  const events = normalizeVue2EventsForBridge(node.events)
+  if (domModel) applyVue2DomModelForBridge(node, model, props, events)
   return {
     tag: String(node.tag || ''),
     attrs_list: normalizeVue2RawAttrsForBridge(node.attrsList || node.attrs_list),
@@ -14804,10 +14813,10 @@ function normalizeVue2PublicElementForBridge(node) {
     attrs_map: normalizeVue2AttrsMapForBridge(node.attrsMap || node.attrs_map, node.attrsList || node.attrs_list),
     raw_attrs_map: normalizeVue2RawAttrsMapForBridge(node.rawAttrsMap || node.raw_attrs_map, node.attrsList || node.attrs_list),
     attrs: normalizeVue2AttrsForBridge(node.attrs),
-    props: normalizeVue2AttrsForBridge(node.props),
+    props,
     dynamic_attrs: normalizeVue2AttrsForBridge(node.dynamicAttrs || node.dynamic_attrs),
-    directives: normalizeVue2DirectivesForBridge(node.directives),
-    events: normalizeVue2EventsForBridge(node.events),
+    directives,
+    events,
     native_events: normalizeVue2EventsForBridge(node.nativeEvents || node.native_events),
     children: Array.isArray(node.children) ? node.children.map(normalizeVue2PublicNodeForBridge) : [],
     ns: node.ns,
@@ -14844,7 +14853,7 @@ function normalizeVue2PublicElementForBridge(node) {
     class_binding: node.classBinding ?? node.class_binding,
     static_style: node.staticStyle ?? node.static_style,
     style_binding: node.styleBinding ?? node.style_binding,
-    model: node.model,
+    model: model && !domModel ? node.model : undefined,
     wrap_data: node.wrapData ?? node.wrap_data,
     wrap_listeners: node.wrapListeners ?? node.wrap_listeners,
     validate: node.validate,
@@ -14853,6 +14862,97 @@ function normalizeVue2PublicElementForBridge(node) {
     static_root: Boolean(node.staticRoot ?? node.static_root),
     static_in_for: Boolean(node.staticInFor ?? node.static_in_for),
   }
+}
+
+function applyVue2DomModelForBridge(node, model, props, events) {
+  const tag = String(node && node.tag || '')
+  if (tag !== 'input' && tag !== 'textarea') return
+  const attrsMap = node.attrsMap || node.attrs_map || {}
+  const type = String(attrsMap.type || '').toLowerCase()
+  if (type === 'checkbox' || type === 'radio') return
+  const modifiers = vue2ModelModifiersForBridge(model.raw_name || model.rawName)
+  const value = vue2ModelExpressionForBridge(model)
+  props.push({ name: 'value', value: `(${value})`, dynamic: false })
+  let assignmentValue = modifiers.trim ? '$event.target.value.trim()' : '$event.target.value'
+  if (modifiers.number) assignmentValue = `_n(${assignmentValue})`
+  const event = modifiers.lazy ? 'change' : type === 'range' ? '__r' : 'input'
+  const guard = !modifiers.lazy && type !== 'range' ? 'if($event.target.composing)return;' : ''
+  const handler = {
+    value: `${guard}${vue2AssignmentCodeForBridge(value, assignmentValue)}`,
+    modifiers: {},
+    modifier_order: [],
+    has_modifier_object: false,
+    dynamic: false,
+  }
+  if (Array.isArray(events[event])) {
+    events[event].unshift(handler)
+  } else {
+    events[event] = [handler]
+  }
+  if (modifiers.trim || modifiers.number) {
+    events.blur = events.blur || []
+    events.blur.push({
+      value: 'return $forceUpdate()',
+      modifiers: {},
+      modifier_order: [],
+      has_modifier_object: false,
+      dynamic: false,
+    })
+  }
+}
+
+function vue2ModelModifiersForBridge(rawName) {
+  const modifiers = {}
+  for (const part of String(rawName || '').split('.').slice(1)) {
+    if (part) modifiers[part] = true
+  }
+  return modifiers
+}
+
+function vue2AssignmentCodeForBridge(value, assignment) {
+  const parsed = String(value || '').trim()
+  const dot = parsed.lastIndexOf('.')
+  if (dot > 0 && !parsed.slice(dot + 1).includes(']') && !parsed.slice(dot + 1).includes('[')) {
+    return `$set(${parsed.slice(0, dot)}, ${JSON.stringify(parsed.slice(dot + 1))}, ${assignment})`
+  }
+  return `${parsed}=${assignment}`
+}
+
+function isVue2ComponentElementForBridge(node) {
+  if (!node || typeof node !== 'object') return false
+  if (node.component) return true
+  const tag = String(node.tag || '')
+  return !!tag && tag.includes('-')
+}
+
+function normalizeVue2ElementModelForBridge(node) {
+  const model = node && node.model
+  if (!model || typeof model !== 'object') return null
+  const rawName = Array.isArray(node.directives)
+    ? (node.directives.find(directive => directive && directive.name === 'model') || {}).rawName
+    : undefined
+  return {
+    name: 'model',
+    raw_name: String(rawName || 'v-model'),
+    value: vue2ModelExpressionForBridge(model),
+    arg: null,
+    is_dynamic_arg: false,
+    modifiers: {},
+  }
+}
+
+function vue2ModelExpressionForBridge(model) {
+  const expression = model && model.expression
+  if (typeof expression === 'string') {
+    try {
+      return JSON.parse(expression)
+    } catch (_) {
+      return expression
+    }
+  }
+  const value = model && model.value
+  if (typeof value === 'string') return value.replace(/^\(([\s\S]*)\)$/, '$1')
+  return ''
 }
 
 function normalizeVue2NodeForBridge(node) {
@@ -15048,8 +15148,112 @@ export function getAndRemoveAttr(el, name) {
     write_text(
         &web_compiler.join("index.ts"),
         r#"
-import { compile } from 'vue-template-compiler'
-export { compile }
+import * as vueTemplateCompiler from 'vue-template-compiler'
+import { parse } from 'compiler/parser'
+import { optimize } from 'compiler/optimizer'
+import { generate } from 'compiler/codegen'
+
+export function compile(template, options = {}) {
+  if (!usesVue2JavascriptCompilerCallbacks(options)) {
+    return vueTemplateCompiler.compile(template, options)
+  }
+  const ast = parse(template, Object.assign({}, options, { optimize: false }))
+  if (!ast) return vueTemplateCompiler.compile(template, options)
+  runVue2CompileModuleTransforms(ast, options, 'transformNode')
+  runVue2DirectiveTransforms(ast, options)
+  optimize(ast, options)
+  const generated = generate(ast, options)
+  return {
+    ast,
+    render: generated.render,
+    staticRenderFns: generated.staticRenderFns || [],
+    errors: [],
+    tips: [],
+  }
+}
+
+function usesVue2JavascriptCompilerCallbacks(options) {
+  if (!options || typeof options !== 'object') return false
+  if (Array.isArray(options.modules)) {
+    for (const module of options.modules) {
+      if (!module || typeof module !== 'object') continue
+      if (
+        typeof module.transformNode === 'function' ||
+        typeof module.preTransformNode === 'function' ||
+        typeof module.postTransformNode === 'function' ||
+        typeof module.genData === 'function' ||
+        typeof module.transformCode === 'function'
+      ) {
+        return true
+      }
+    }
+  }
+  if (options.directives && typeof options.directives === 'object') {
+    for (const directive of Object.values(options.directives)) {
+      if (typeof directive === 'function') return true
+    }
+  }
+  return false
+}
+
+function runVue2CompileModuleTransforms(ast, options, hook) {
+  if (!ast || !options || !Array.isArray(options.modules)) return
+  walkVue2CompileElements(ast, element => {
+    for (const module of options.modules) {
+      const transform = module && module[hook]
+      if (typeof transform === 'function') transform(element, options)
+    }
+    syncVue2RawAttrsFromPublicAttrs(element)
+  })
+}
+
+function runVue2DirectiveTransforms(ast, options) {
+  if (!ast || !options || !options.directives || typeof options.directives !== 'object') return
+  walkVue2CompileElements(ast, element => {
+    if (!Array.isArray(element.directives)) return
+    element.directives = element.directives.filter(directive => {
+      const transform = options.directives[directive && directive.name]
+      if (typeof transform !== 'function') return true
+      return !!transform(element, directive, options)
+    })
+  })
+}
+
+function walkVue2CompileElements(node, visit) {
+  if (!node || typeof node !== 'object') return
+  if ('Element' in node) return walkVue2CompileElements(node.Element, visit)
+  if (typeof node.tag !== 'string') return
+  visit(node)
+  if (Array.isArray(node.children)) {
+    for (const child of node.children) walkVue2CompileElements(child && (child.Element || child), visit)
+  }
+  const conditions = node.ifConditions || node.if_conditions
+  if (Array.isArray(conditions)) {
+    for (const condition of conditions) walkVue2CompileElements(condition && condition.block, visit)
+  }
+  const scopedSlots = node.scopedSlots || node.scoped_slots
+  if (scopedSlots && typeof scopedSlots === 'object') {
+    for (const slot of Object.values(scopedSlots)) walkVue2CompileElements(slot, visit)
+  }
+}
+
+function syncVue2RawAttrsFromPublicAttrs(element) {
+  if (!element || typeof element !== 'object' || !Array.isArray(element.attrsList)) return
+  const names = new Set(element.attrsList.map(attr => attr && attr.name).filter(Boolean))
+  if (element.attrsMap && typeof element.attrsMap === 'object') {
+    for (const name of Object.keys(element.attrsMap)) {
+      if (!names.has(name)) delete element.attrsMap[name]
+    }
+  }
+  if (element.rawAttrsMap && typeof element.rawAttrsMap === 'object') {
+    for (const name of Object.keys(element.rawAttrsMap)) {
+      if (!names.has(name)) delete element.rawAttrsMap[name]
+    }
+  }
+  if (Array.isArray(element.attrs)) {
+    element.attrs = element.attrs.filter(attr => attr && names.has(attr.name))
+  }
+}
 "#,
     )?;
     write_text(

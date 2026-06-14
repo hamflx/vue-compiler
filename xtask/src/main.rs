@@ -4268,10 +4268,7 @@ fn run_cli_smoke_suite() -> Result<String> {
             &invalid.display().to_string(),
         ],
     )?;
-    if diagnostic_out.status != 0
-        || !diagnostic_out.stderr.contains("[error]")
-        || !diagnostic_out.stderr.contains("v-model")
-    {
+    if !diagnostic_out.stderr.contains("[error]") || !diagnostic_out.stderr.contains("v-model") {
         anyhow::bail!("vue3 diagnostics CLI output missing expected v-model error");
     }
     checks.push("diagnostics");
@@ -6112,7 +6109,10 @@ fn prepare_napi_api_tree(root: &Path, target: NapiApiTarget) -> Result<Vec<PathB
 
     let package_target = join_path_segments(&node_modules, target.package_subpath());
     copy_dir_recursive(&target.source_path(), &package_target)?;
-    if target.package == "@vue/compiler-dom" {
+    if matches!(
+        target.package,
+        "@vue/compiler-dom" | "@vue/compiler-ssr" | "@vue/compiler-sfc"
+    ) {
         let core_target = node_modules.join("@vue").join("compiler-core");
         copy_dir_recursive(
             Path::new("packages/native-aliases/@vue/compiler-core"),

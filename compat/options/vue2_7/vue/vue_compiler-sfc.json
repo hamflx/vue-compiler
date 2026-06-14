@@ -73,6 +73,7 @@
       "fixture_source": "<template><div>{{ msg }}</div></template><script>export default {}</script><style scoped>.a{ color: v-bind(color); }</style>",
       "option_value": {
         "id": "data-v-contract",
+        "prettify": false,
         "scopeId": "data-v-contract",
         "slotted": false,
         "ssr": false
