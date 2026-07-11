@@ -2,6 +2,7 @@
 name = "vuec_napi"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "NAPI binding crate for the vuec Rust Vue compiler."
 repository.workspace = true

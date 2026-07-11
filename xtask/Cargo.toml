@@ -2,6 +2,7 @@
 name = "xtask"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "Internal development, conformance, and release verification tasks for vuec."
 repository.workspace = true

@@ -2,6 +2,7 @@
 name = "vuec_ast"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "AST, HIR, and MIR arena structures for the vuec Rust Vue compiler."
 repository.workspace = true

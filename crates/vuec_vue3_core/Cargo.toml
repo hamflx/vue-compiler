@@ -2,6 +2,7 @@
 name = "vuec_vue3_core"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "Vue 3 compiler-core parser, transform, and codegen implementation for vuec."
 repository.workspace = true

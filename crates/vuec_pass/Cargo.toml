@@ -2,6 +2,7 @@
 name = "vuec_pass"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "Shared transform pass types for the vuec Rust Vue compiler."
 repository.workspace = true

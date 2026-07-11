@@ -2,6 +2,7 @@
 name = "vuec_html"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "HTML tokenizer and template parsing primitives for the vuec Rust Vue compiler."
 repository.workspace = true

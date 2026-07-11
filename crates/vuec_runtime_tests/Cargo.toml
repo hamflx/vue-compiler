@@ -2,6 +2,7 @@
 name = "vuec_runtime_tests"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "Internal runtime smoke helpers for vuec generated render output."
 repository.workspace = true

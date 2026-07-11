@@ -2,6 +2,7 @@
 name = "vuec_wasm"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "WASM binding crate for the vuec Rust Vue compiler."
 repository.workspace = true

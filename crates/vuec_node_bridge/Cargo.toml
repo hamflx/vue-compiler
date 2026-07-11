@@ -2,6 +2,7 @@
 name = "vuec_node_bridge"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "Internal JSON bridge binary used by vuec conformance tooling."
 repository.workspace = true

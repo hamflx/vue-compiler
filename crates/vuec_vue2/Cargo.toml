@@ -2,6 +2,7 @@
 name = "vuec_vue2"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "Vue 2.6 and Vue 2.7 template compiler implementation for the vuec Rust Vue compiler."
 repository.workspace = true

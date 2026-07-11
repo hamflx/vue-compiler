@@ -2,6 +2,7 @@
 name = "vuec_source"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "Source text, span, and source identity types for the vuec Rust Vue compiler."
 repository.workspace = true

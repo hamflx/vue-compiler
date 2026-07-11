@@ -2,6 +2,7 @@
 name = "vuec_style"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "Vue SFC style compilation, scoped CSS, and CSS variable helpers for vuec."
 repository.workspace = true

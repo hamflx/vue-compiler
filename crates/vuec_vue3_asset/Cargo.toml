@@ -2,6 +2,7 @@
 name = "vuec_vue3_asset"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "Vue 3 asset URL and srcset transform helpers for the vuec Rust Vue compiler."
 repository.workspace = true
