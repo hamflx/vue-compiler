@@ -177,6 +177,103 @@
     }
 
     #[test]
+    fn base_compile_source_map_maps_each_repeated_interpolation_identifier() {
+        let source = "<div>{{ value + value }}</div>";
+        let result = base_compile(
+            TemplateSource {
+                filename: "Repeated.vue".into(),
+                source: source.into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                mode: "module".into(),
+                source_map: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        let generated_offsets = result
+            .code
+            .match_indices("_ctx.value")
+            .map(|(offset, _)| offset)
+            .collect::<Vec<_>>();
+        let original_offsets = source
+            .match_indices("value")
+            .map(|(offset, _)| offset)
+            .collect::<Vec<_>>();
+        assert_eq!(generated_offsets.len(), 2);
+        assert_eq!(original_offsets.len(), 2);
+
+        let map = result.map.expect("source map");
+        assert_eq!(map.names, vec!["value"]);
+        for (generated_offset, original_offset) in
+            generated_offsets.into_iter().zip(original_offsets)
+        {
+            let generated = loc_for_offset(&result.code, generated_offset).expect("generated loc");
+            let original = map
+                .original_position(vuec_source::GeneratedPosition::new(
+                    generated.0,
+                    generated.1,
+                ))
+                .expect("source map lookup")
+                .expect("original position");
+            let expected = loc_for_offset(source, original_offset).expect("source loc");
+            assert_eq!((original.line, original.column), expected);
+            assert_eq!(original.name.as_deref(), Some("value"));
+        }
+    }
+
+    #[test]
+    fn base_compile_source_map_advances_across_repeated_interpolations() {
+        let source = "<div>{{ value + value }} / {{ value }}</div>";
+        let result = base_compile(
+            TemplateSource {
+                filename: "Repeated.vue".into(),
+                source: source.into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                mode: "module".into(),
+                source_map: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        let generated_offsets = result
+            .code
+            .match_indices("_ctx.value")
+            .map(|(offset, _)| offset)
+            .collect::<Vec<_>>();
+        let original_offsets = source
+            .match_indices("value")
+            .map(|(offset, _)| offset)
+            .collect::<Vec<_>>();
+        assert_eq!(generated_offsets.len(), 3);
+        assert_eq!(original_offsets.len(), 3);
+
+        let map = result.map.expect("source map");
+        for (generated_offset, original_offset) in
+            generated_offsets.into_iter().zip(original_offsets)
+        {
+            let generated = loc_for_offset(&result.code, generated_offset).expect("generated loc");
+            let original = map
+                .original_position(vuec_source::GeneratedPosition::new(
+                    generated.0,
+                    generated.1,
+                ))
+                .expect("source map lookup")
+                .expect("original position");
+            let expected = loc_for_offset(source, original_offset).expect("source loc");
+            assert_eq!((original.line, original.column), expected);
+            assert_eq!(original.name.as_deref(), Some("value"));
+        }
+    }
+
+    #[test]
     fn base_compile_prefixes_template_literal_placeholders() {
         let options = Vue3CompilerOptions {
             prefix_identifiers: true,

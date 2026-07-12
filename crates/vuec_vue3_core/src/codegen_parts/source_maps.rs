@@ -205,19 +205,18 @@ pub(crate) fn add_interpolation_mapping(
     segments: &mut Vec<SourceMapSegment>,
     cursor: &mut usize,
 ) {
-    let Vue3AstKind::Interpolation(interpolation) = &node.kind else {
+    let Vue3AstKind::Interpolation(_) = &node.kind else {
         return;
     };
     let Some(span) = node.span.source() else {
         return;
     };
-    let generated_expression = interpolation.expression.source_string();
     let Some((original_expression, original_start)) =
         original_interpolation_expression(source, span, base_offset, options)
     else {
         return;
     };
-    add_expression_token_mappings(
+    *cursor = add_expression_token_mappings(
         code,
         source,
         original_expression,
@@ -227,17 +226,6 @@ pub(crate) fn add_interpolation_mapping(
         names,
         segments,
     );
-    if let Some(offset) =
-        find_code_offset(code, generated_expression.trim(), *cursor).or_else(|| {
-            find_code_offset(
-                code,
-                &format!("_ctx.{}", generated_expression.trim()),
-                *cursor,
-            )
-        })
-    {
-        *cursor = offset + generated_expression.trim().len();
-    }
 }
 
 pub(crate) fn original_interpolation_expression<'a>(
@@ -473,7 +461,7 @@ pub(crate) fn add_expression_token_mappings(
     precise_members: bool,
     names: &mut Vec<String>,
     segments: &mut Vec<SourceMapSegment>,
-) {
+) -> usize {
     add_expression_token_mappings_with_options(
         code,
         source,
@@ -484,7 +472,7 @@ pub(crate) fn add_expression_token_mappings(
         false,
         names,
         segments,
-    );
+    )
 }
 
 pub(crate) fn add_event_handler_token_mappings(
@@ -496,7 +484,7 @@ pub(crate) fn add_event_handler_token_mappings(
     precise_members: bool,
     names: &mut Vec<String>,
     segments: &mut Vec<SourceMapSegment>,
-) {
+) -> usize {
     add_expression_token_mappings_with_options(
         code,
         source,
@@ -507,7 +495,7 @@ pub(crate) fn add_event_handler_token_mappings(
         true,
         names,
         segments,
-    );
+    )
 }
 
 pub(crate) fn add_expression_token_mappings_with_options(
@@ -520,24 +508,32 @@ pub(crate) fn add_expression_token_mappings_with_options(
     include_globals: bool,
     names: &mut Vec<String>,
     segments: &mut Vec<SourceMapSegment>,
-) {
+) -> usize {
     let tokens = expression_source_map_tokens(expression, include_globals);
-    for token in tokens.iter().copied() {
+    let mut token_cursors = BTreeMap::new();
+    let mut generated_end = generated_from;
+    let mut single_token_end = None;
+    for (original_relative, token) in tokens.iter().copied() {
+        let token_cursor = token_cursors.get(token).copied().unwrap_or(generated_from);
         let generated_needles = if uses_ctx_prefix_for_generated(code, token) {
             vec![format!("_ctx.{token}"), token.to_string()]
         } else {
             vec![token.to_string(), format!("_ctx.{token}")]
         };
-        let generated_offset = generated_needles
-            .iter()
-            .find_map(|needle| find_code_offset(code, needle, generated_from));
-        let Some(generated_offset) = generated_offset else {
+        let generated_match = generated_needles.iter().find_map(|needle| {
+            find_code_offset(code, needle, token_cursor)
+                .map(|offset| (offset, needle.len()))
+        });
+        let Some((generated_offset, generated_len)) = generated_match else {
             continue;
         };
-        let Some(original_relative) = expression.find(token) else {
-            continue;
-        };
-        let original_offset = if precise_members || !is_member_tail_token(expression, token) {
+        let token_end = generated_offset + generated_len;
+        token_cursors.insert(token, token_end);
+        generated_end = generated_end.max(token_end);
+        single_token_end = Some(token_end);
+        let original_offset = if precise_members
+            || !is_member_tail_token(expression, original_relative)
+        {
             original_expression_start + original_relative
         } else {
             original_expression_start
@@ -559,26 +555,17 @@ pub(crate) fn add_expression_token_mappings_with_options(
         });
     }
     if tokens.len() == 1 {
-        let token = tokens[0];
-        let generated_needles = if uses_ctx_prefix_for_generated(code, token) {
-            vec![format!("_ctx.{token}"), token.to_string()]
-        } else {
-            vec![token.to_string(), format!("_ctx.{token}")]
-        };
-        if let Some((generated_offset, generated_len)) =
-            generated_needles.iter().find_map(|needle| {
-                find_code_offset(code, needle, generated_from).map(|offset| (offset, needle.len()))
-            })
-        {
+        if let Some(generated_end) = single_token_end {
             add_expression_end_mapping(
                 code,
                 source,
-                generated_offset + generated_len,
+                generated_end,
                 original_expression_start + expression.len(),
                 segments,
             );
         }
     }
+    generated_end
 }
 
 pub(crate) fn add_expression_end_mapping(
@@ -607,13 +594,14 @@ pub(crate) fn uses_ctx_prefix_for_generated(code: &str, token: &str) -> bool {
     code.contains(&format!("_ctx.{token}"))
 }
 
-pub(crate) fn is_member_tail_token(expression: &str, token: &str) -> bool {
-    expression
-        .match_indices(token)
-        .any(|(index, _)| index > 0 && expression[..index].ends_with('.'))
+pub(crate) fn is_member_tail_token(expression: &str, token_start: usize) -> bool {
+    token_start > 0 && expression[..token_start].ends_with('.')
 }
 
-pub(crate) fn expression_source_map_tokens(expression: &str, include_globals: bool) -> Vec<&str> {
+pub(crate) fn expression_source_map_tokens(
+    expression: &str,
+    include_globals: bool,
+) -> Vec<(usize, &str)> {
     let mut tokens = Vec::new();
     for (index, ch) in expression.char_indices() {
         if !is_identifier_start(ch) {
@@ -635,11 +623,11 @@ pub(crate) fn expression_source_map_tokens(expression: &str, include_globals: bo
             .unwrap_or(expression.len());
         let token = &expression[index..end];
         if !is_keyword(token) && (include_globals || !is_global_or_literal(token)) {
-            tokens.push(token);
+            tokens.push((index, token));
         }
     }
     if tokens.is_empty() && !expression.is_empty() {
-        tokens.push(expression);
+        tokens.push((0, expression));
     }
     tokens
 }
