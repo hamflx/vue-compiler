@@ -2,6 +2,7 @@
 
 const assert = require('assert');
 const native = require('./index.js');
+const rawBinding = require('./vuec_napi.node');
 
 assert.strictEqual(typeof native.version(), 'string');
 assert.ok(['local', 'platform', 'env'].includes(native.bindingInfo().source));
@@ -21,6 +22,54 @@ assert.strictEqual(dom.map.version, 3);
 assert.deepStrictEqual(dom.map.sources, ['anonymous.vue']);
 assert.strictEqual(typeof dom.map.mappings, 'string');
 assert.deepStrictEqual(dom.map.sourcesContent, ['<div>{{ msg }}</div>']);
+
+const rawDom = JSON.parse(rawBinding.compileVue3Dom('<div>{{ msg }}</div>', {
+  mode: 'module',
+  prefixIdentifiers: true,
+  sourceMap: true,
+}));
+assert.match(rawDom.code, /export function render/);
+assert.ok(rawDom.map);
+
+const sharedOption = { enabled: true };
+const rawDomWithSharedOptions = JSON.parse(rawBinding.compileVue3Dom('<div/>', {
+  mode: 'module',
+  prefixIdentifiers: true,
+  first: sharedOption,
+  second: sharedOption,
+  bytes: new Uint8Array([1, 2]),
+  omitted: undefined,
+}));
+assert.match(rawDomWithSharedOptions.code, /export function render/);
+
+const cyclicOptions = {};
+cyclicOptions.self = cyclicOptions;
+assert.throws(
+  () => rawBinding.compileVue3Dom('<div/>', cyclicOptions),
+  /circular reference detected/,
+);
+
+const deeplyNestedOptions = {};
+let nestedCursor = deeplyNestedOptions;
+for (let depth = 0; depth < 600; depth += 1) {
+  nestedCursor.child = {};
+  nestedCursor = nestedCursor.child;
+}
+assert.throws(
+  () => rawBinding.compileVue3Dom('<div/>', deeplyNestedOptions),
+  /maximum nesting depth of 512 exceeded/,
+);
+
+assert.throws(
+  () => rawBinding.compileVue3Dom('<div/>', new Array(100000)),
+  /maximum node count of 100000 exceeded/,
+);
+
+const rawDomAfterRejectedInput = JSON.parse(rawBinding.compileVue3Dom('<p/>', {
+  mode: 'module',
+  prefixIdentifiers: true,
+}));
+assert.match(rawDomAfterRejectedInput.code, /export function render/);
 
 const domAst = native.parseVue3Dom('<div>{{ msg }}</div>');
 assert.strictEqual(domAst.children[0].tag, 'div');

@@ -8,7 +8,10 @@
 #![deny(missing_docs)]
 #![deny(unsafe_code)]
 
-use napi::{bindgen_prelude::Unknown, Env, Result};
+use napi::{
+    bindgen_prelude::{FromNapiValue, JsObjectValue, Object, Unknown},
+    Env, JsValue, Result, Status, ValueType,
+};
 use napi_derive::napi;
 use oxc_ast::ast::{
     Argument, ArrayExpressionElement, AssignmentTarget, BindingPattern, ChainElement, Expression,
