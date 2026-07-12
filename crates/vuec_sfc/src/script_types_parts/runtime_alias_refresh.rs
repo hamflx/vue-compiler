@@ -295,7 +295,6 @@ pub(crate) fn refresh_vue3_generic_type_alias(
         alias_source,
         Vue3GenericTypeAliasKind::TypeAlias,
         params,
-        analysis,
     );
     if analysis
         .generic_type_aliases
@@ -315,60 +314,179 @@ pub(crate) fn vue3_generic_type_alias(
     source: String,
     kind: Vue3GenericTypeAliasKind,
     params: Vec<String>,
-    analysis: &Vue3ScriptSetupAnalysis,
 ) -> Vue3GenericTypeAlias {
     Vue3GenericTypeAlias {
         source,
         kind,
         params,
-        declared_types: analysis.declared_types.clone(),
-        define_model_declared_types: analysis.define_model_declared_types.clone(),
-        type_query_declared_types: analysis.type_query_declared_types.clone(),
-        define_model_type_query_declared_types: analysis
-            .define_model_type_query_declared_types
-            .clone(),
-        keyof_type_query_declared_types: analysis.keyof_type_query_declared_types.clone(),
-        props_type_declarations: analysis.props_type_declarations.clone(),
-        keyof_runtime_type_declarations: analysis.keyof_runtime_type_declarations.clone(),
-        tuple_runtime_type_declarations: analysis.tuple_runtime_type_declarations.clone(),
-        define_model_tuple_runtime_type_declarations: analysis
-            .define_model_tuple_runtime_type_declarations
-            .clone(),
-        array_element_runtime_type_declarations: analysis
-            .array_element_runtime_type_declarations
-            .clone(),
-        define_model_array_element_runtime_type_declarations: analysis
-            .define_model_array_element_runtime_type_declarations
-            .clone(),
-        parameter_tuple_runtime_type_declarations: analysis
-            .parameter_tuple_runtime_type_declarations
-            .clone(),
-        define_model_parameter_tuple_runtime_type_declarations: analysis
-            .define_model_parameter_tuple_runtime_type_declarations
-            .clone(),
-        constructor_parameter_tuple_runtime_type_declarations: analysis
-            .constructor_parameter_tuple_runtime_type_declarations
-            .clone(),
-        define_model_constructor_parameter_tuple_runtime_type_declarations: analysis
-            .define_model_constructor_parameter_tuple_runtime_type_declarations
-            .clone(),
-        return_type_runtime_type_declarations: analysis
-            .return_type_runtime_type_declarations
-            .clone(),
-        define_model_return_type_runtime_type_declarations: analysis
-            .define_model_return_type_runtime_type_declarations
-            .clone(),
-        props_options_type_declarations: analysis.props_options_type_declarations.clone(),
-        return_type_props_options_declarations: analysis
-            .return_type_props_options_declarations
-            .clone(),
-        string_literal_type_declarations: analysis.string_literal_type_declarations.clone(),
-        ordered_string_literal_type_declarations: analysis
-            .ordered_string_literal_type_declarations
-            .clone(),
-        unresolved_import_sources: analysis.unresolved_import_sources.clone(),
-        silent_unresolved_type_names: analysis.silent_unresolved_type_names.clone(),
+        scope: Vue3GenericTypeScope::Local,
     }
+}
+
+impl Vue3GenericTypeEnvironment {
+    pub(crate) fn from_analysis(analysis: &Vue3ScriptSetupAnalysis) -> Self {
+        Self {
+            definition_filename: analysis.type_filename.clone(),
+            declared_types: analysis.declared_types.clone(),
+            define_model_declared_types: analysis.define_model_declared_types.clone(),
+            type_query_declared_types: analysis.type_query_declared_types.clone(),
+            define_model_type_query_declared_types: analysis
+                .define_model_type_query_declared_types
+                .clone(),
+            keyof_type_query_declared_types: analysis.keyof_type_query_declared_types.clone(),
+            props_type_declarations: analysis.props_type_declarations.clone(),
+            keyof_runtime_type_declarations: analysis.keyof_runtime_type_declarations.clone(),
+            tuple_runtime_type_declarations: analysis.tuple_runtime_type_declarations.clone(),
+            define_model_tuple_runtime_type_declarations: analysis
+                .define_model_tuple_runtime_type_declarations
+                .clone(),
+            array_element_runtime_type_declarations: analysis
+                .array_element_runtime_type_declarations
+                .clone(),
+            define_model_array_element_runtime_type_declarations: analysis
+                .define_model_array_element_runtime_type_declarations
+                .clone(),
+            parameter_tuple_runtime_type_declarations: analysis
+                .parameter_tuple_runtime_type_declarations
+                .clone(),
+            define_model_parameter_tuple_runtime_type_declarations: analysis
+                .define_model_parameter_tuple_runtime_type_declarations
+                .clone(),
+            constructor_parameter_tuple_runtime_type_declarations: analysis
+                .constructor_parameter_tuple_runtime_type_declarations
+                .clone(),
+            define_model_constructor_parameter_tuple_runtime_type_declarations: analysis
+                .define_model_constructor_parameter_tuple_runtime_type_declarations
+                .clone(),
+            return_type_runtime_type_declarations: analysis
+                .return_type_runtime_type_declarations
+                .clone(),
+            define_model_return_type_runtime_type_declarations: analysis
+                .define_model_return_type_runtime_type_declarations
+                .clone(),
+            props_options_type_declarations: analysis.props_options_type_declarations.clone(),
+            return_type_props_options_declarations: analysis
+                .return_type_props_options_declarations
+                .clone(),
+            string_literal_type_declarations: analysis
+                .string_literal_type_declarations
+                .clone(),
+            ordered_string_literal_type_declarations: analysis
+                .ordered_string_literal_type_declarations
+                .clone(),
+            unresolved_import_sources: analysis.unresolved_import_sources.clone(),
+            silent_unresolved_type_names: analysis.silent_unresolved_type_names.clone(),
+        }
+    }
+
+    pub(crate) fn overlay_analysis(&self, analysis: &mut Vue3ScriptSetupAnalysis) {
+        analysis.declared_types.extend(self.declared_types.clone());
+        analysis
+            .define_model_declared_types
+            .extend(self.define_model_declared_types.clone());
+        analysis
+            .type_query_declared_types
+            .extend(self.type_query_declared_types.clone());
+        analysis
+            .define_model_type_query_declared_types
+            .extend(self.define_model_type_query_declared_types.clone());
+        analysis
+            .keyof_type_query_declared_types
+            .extend(self.keyof_type_query_declared_types.clone());
+        analysis
+            .props_type_declarations
+            .extend(self.props_type_declarations.clone());
+        analysis
+            .keyof_runtime_type_declarations
+            .extend(self.keyof_runtime_type_declarations.clone());
+        analysis
+            .tuple_runtime_type_declarations
+            .extend(self.tuple_runtime_type_declarations.clone());
+        analysis
+            .define_model_tuple_runtime_type_declarations
+            .extend(self.define_model_tuple_runtime_type_declarations.clone());
+        analysis
+            .array_element_runtime_type_declarations
+            .extend(self.array_element_runtime_type_declarations.clone());
+        analysis
+            .define_model_array_element_runtime_type_declarations
+            .extend(self.define_model_array_element_runtime_type_declarations.clone());
+        analysis
+            .parameter_tuple_runtime_type_declarations
+            .extend(self.parameter_tuple_runtime_type_declarations.clone());
+        analysis
+            .define_model_parameter_tuple_runtime_type_declarations
+            .extend(self.define_model_parameter_tuple_runtime_type_declarations.clone());
+        analysis
+            .constructor_parameter_tuple_runtime_type_declarations
+            .extend(self.constructor_parameter_tuple_runtime_type_declarations.clone());
+        analysis
+            .define_model_constructor_parameter_tuple_runtime_type_declarations
+            .extend(
+                self.define_model_constructor_parameter_tuple_runtime_type_declarations
+                    .clone(),
+            );
+        analysis
+            .return_type_runtime_type_declarations
+            .extend(self.return_type_runtime_type_declarations.clone());
+        analysis
+            .define_model_return_type_runtime_type_declarations
+            .extend(self.define_model_return_type_runtime_type_declarations.clone());
+        analysis
+            .props_options_type_declarations
+            .extend(self.props_options_type_declarations.clone());
+        analysis
+            .return_type_props_options_declarations
+            .extend(self.return_type_props_options_declarations.clone());
+        analysis
+            .string_literal_type_declarations
+            .extend(self.string_literal_type_declarations.clone());
+        analysis
+            .ordered_string_literal_type_declarations
+            .extend(self.ordered_string_literal_type_declarations.clone());
+        analysis
+            .unresolved_import_sources
+            .extend(self.unresolved_import_sources.clone());
+        analysis
+            .silent_unresolved_type_names
+            .extend(self.silent_unresolved_type_names.iter().cloned());
+        analysis.type_filename = self.definition_filename.clone();
+    }
+}
+
+pub(crate) fn finalize_vue3_local_generic_alias_scopes(analysis: &mut Vue3ScriptSetupAnalysis) {
+    if !analysis
+        .generic_type_aliases
+        .values()
+        .any(|alias| matches!(&alias.scope, Vue3GenericTypeScope::Local))
+    {
+        return;
+    }
+    let environment = std::sync::Arc::new(Vue3GenericTypeEnvironment::from_analysis(analysis));
+    for alias in analysis.generic_type_aliases.values_mut() {
+        if matches!(&alias.scope, Vue3GenericTypeScope::Local) {
+            alias.scope = Vue3GenericTypeScope::Captured(environment.clone());
+        }
+    }
+}
+
+pub(crate) fn captured_vue3_generic_aliases_for_child_scope(
+    analysis: &Vue3ScriptSetupAnalysis,
+) -> BTreeMap<String, Vue3GenericTypeAlias> {
+    let mut aliases = analysis.generic_type_aliases.clone();
+    if !aliases
+        .values()
+        .any(|alias| matches!(&alias.scope, Vue3GenericTypeScope::Local))
+    {
+        return aliases;
+    }
+    let environment = std::sync::Arc::new(Vue3GenericTypeEnvironment::from_analysis(analysis));
+    for alias in aliases.values_mut() {
+        if matches!(&alias.scope, Vue3GenericTypeScope::Local) {
+            alias.scope = Vue3GenericTypeScope::Captured(environment.clone());
+        }
+    }
+    aliases
 }
 
 pub(crate) fn register_vue3_ts_enum_declaration(

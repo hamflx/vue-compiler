@@ -155,6 +155,7 @@ fn vue3_external_type_context_from_source_inner(
     collect_vue3_declared_types_from_statements(source, &parsed.program.body, &mut analysis);
     collect_vue3_declared_type_deps_from_statements(&parsed.program.body, &mut analysis);
     project_vue3_default_type_exports(source, &parsed.program.body, &mut analysis);
+    finalize_vue3_local_generic_alias_scopes(&mut analysis);
     seed_vue3_external_type_deps(filename, &mut analysis);
     let re_exported = project_vue3_type_re_exports(
         filename,
@@ -751,7 +752,7 @@ pub(crate) fn project_vue3_namespace_declaration_with_prefix(
                 return_type_props_options_declarations: analysis
                     .return_type_props_options_declarations
                     .clone(),
-                generic_type_aliases: analysis.generic_type_aliases.clone(),
+                generic_type_aliases: captured_vue3_generic_aliases_for_child_scope(analysis),
                 string_literal_type_declarations: analysis.string_literal_type_declarations.clone(),
                 ordered_string_literal_type_declarations: analysis
                     .ordered_string_literal_type_declarations
@@ -774,6 +775,7 @@ pub(crate) fn project_vue3_namespace_declaration_with_prefix(
                 &mut namespace_analysis,
             );
             collect_vue3_declared_type_deps_from_statements(&block.body, &mut namespace_analysis);
+            finalize_vue3_local_generic_alias_scopes(&mut namespace_analysis);
             let names = if declaration.declare {
                 vue3_declared_type_names_from_statements(&block.body)
             } else {

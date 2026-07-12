@@ -58,90 +58,118 @@ fn vue3_external_runtime_tuple_cache_cost(tuple: &Vue3RuntimeTypeTuple) -> usize
     })
 }
 
-fn vue3_external_generic_alias_cache_cost(alias: &Vue3GenericTypeAlias) -> usize {
+fn vue3_external_generic_environment_cache_cost(
+    environment: &Vue3GenericTypeEnvironment,
+) -> usize {
     [
-        alias.source.len(),
-        vue3_external_string_vec_cost(&alias.params),
-        vue3_external_string_map_cost(&alias.declared_types, |types| {
+        environment.definition_filename.as_ref().map_or(0, String::len),
+        vue3_external_string_map_cost(&environment.declared_types, |types| {
             vue3_external_string_vec_cost(types)
         }),
-        vue3_external_string_map_cost(&alias.define_model_declared_types, |types| {
+        vue3_external_string_map_cost(&environment.define_model_declared_types, |types| {
             vue3_external_string_vec_cost(types)
         }),
-        vue3_external_string_map_cost(&alias.type_query_declared_types, |types| {
-            vue3_external_string_vec_cost(types)
-        }),
-        vue3_external_string_map_cost(&alias.define_model_type_query_declared_types, |types| {
-            vue3_external_string_vec_cost(types)
-        }),
-        vue3_external_string_map_cost(&alias.keyof_type_query_declared_types, |types| {
+        vue3_external_string_map_cost(&environment.type_query_declared_types, |types| {
             vue3_external_string_vec_cost(types)
         }),
         vue3_external_string_map_cost(
-            &alias.props_type_declarations,
-            vue3_external_type_members_cache_cost,
-        ),
-        vue3_external_string_map_cost(&alias.keyof_runtime_type_declarations, |types| {
-            vue3_external_string_vec_cost(types)
-        }),
-        vue3_external_string_map_cost(
-            &alias.tuple_runtime_type_declarations,
-            vue3_external_runtime_tuple_cache_cost,
-        ),
-        vue3_external_string_map_cost(
-            &alias.define_model_tuple_runtime_type_declarations,
-            vue3_external_runtime_tuple_cache_cost,
-        ),
-        vue3_external_string_map_cost(&alias.array_element_runtime_type_declarations, |types| {
-            vue3_external_string_vec_cost(types)
-        }),
-        vue3_external_string_map_cost(
-            &alias.define_model_array_element_runtime_type_declarations,
+            &environment.define_model_type_query_declared_types,
             |types| vue3_external_string_vec_cost(types),
         ),
         vue3_external_string_map_cost(
-            &alias.parameter_tuple_runtime_type_declarations,
-            vue3_external_runtime_tuple_cache_cost,
-        ),
-        vue3_external_string_map_cost(
-            &alias.define_model_parameter_tuple_runtime_type_declarations,
-            vue3_external_runtime_tuple_cache_cost,
-        ),
-        vue3_external_string_map_cost(
-            &alias.constructor_parameter_tuple_runtime_type_declarations,
-            vue3_external_runtime_tuple_cache_cost,
-        ),
-        vue3_external_string_map_cost(
-            &alias.define_model_constructor_parameter_tuple_runtime_type_declarations,
-            vue3_external_runtime_tuple_cache_cost,
-        ),
-        vue3_external_string_map_cost(&alias.return_type_runtime_type_declarations, |types| {
-            vue3_external_string_vec_cost(types)
-        }),
-        vue3_external_string_map_cost(
-            &alias.define_model_return_type_runtime_type_declarations,
+            &environment.keyof_type_query_declared_types,
             |types| vue3_external_string_vec_cost(types),
         ),
         vue3_external_string_map_cost(
-            &alias.props_options_type_declarations,
+            &environment.props_type_declarations,
             vue3_external_type_members_cache_cost,
         ),
-        vue3_external_string_map_cost(
-            &alias.return_type_props_options_declarations,
-            vue3_external_type_members_cache_cost,
-        ),
-        vue3_external_string_map_cost(&alias.string_literal_type_declarations, |values| {
-            vue3_external_string_set_cost(values)
+        vue3_external_string_map_cost(&environment.keyof_runtime_type_declarations, |types| {
+            vue3_external_string_vec_cost(types)
         }),
         vue3_external_string_map_cost(
-            &alias.ordered_string_literal_type_declarations,
+            &environment.tuple_runtime_type_declarations,
+            vue3_external_runtime_tuple_cache_cost,
+        ),
+        vue3_external_string_map_cost(
+            &environment.define_model_tuple_runtime_type_declarations,
+            vue3_external_runtime_tuple_cache_cost,
+        ),
+        vue3_external_string_map_cost(
+            &environment.array_element_runtime_type_declarations,
+            |types| vue3_external_string_vec_cost(types),
+        ),
+        vue3_external_string_map_cost(
+            &environment.define_model_array_element_runtime_type_declarations,
+            |types| vue3_external_string_vec_cost(types),
+        ),
+        vue3_external_string_map_cost(
+            &environment.parameter_tuple_runtime_type_declarations,
+            vue3_external_runtime_tuple_cache_cost,
+        ),
+        vue3_external_string_map_cost(
+            &environment.define_model_parameter_tuple_runtime_type_declarations,
+            vue3_external_runtime_tuple_cache_cost,
+        ),
+        vue3_external_string_map_cost(
+            &environment.constructor_parameter_tuple_runtime_type_declarations,
+            vue3_external_runtime_tuple_cache_cost,
+        ),
+        vue3_external_string_map_cost(
+            &environment.define_model_constructor_parameter_tuple_runtime_type_declarations,
+            vue3_external_runtime_tuple_cache_cost,
+        ),
+        vue3_external_string_map_cost(
+            &environment.return_type_runtime_type_declarations,
+            |types| vue3_external_string_vec_cost(types),
+        ),
+        vue3_external_string_map_cost(
+            &environment.define_model_return_type_runtime_type_declarations,
+            |types| vue3_external_string_vec_cost(types),
+        ),
+        vue3_external_string_map_cost(
+            &environment.props_options_type_declarations,
+            vue3_external_type_members_cache_cost,
+        ),
+        vue3_external_string_map_cost(
+            &environment.return_type_props_options_declarations,
+            vue3_external_type_members_cache_cost,
+        ),
+        vue3_external_string_map_cost(
+            &environment.string_literal_type_declarations,
+            vue3_external_string_set_cost,
+        ),
+        vue3_external_string_map_cost(
+            &environment.ordered_string_literal_type_declarations,
             |values| vue3_external_string_vec_cost(values),
         ),
-        vue3_external_string_map_cost(&alias.unresolved_import_sources, String::len),
-        vue3_external_string_set_cost(&alias.silent_unresolved_type_names),
+        vue3_external_string_map_cost(&environment.unresolved_import_sources, String::len),
+        vue3_external_string_set_cost(&environment.silent_unresolved_type_names),
     ]
     .into_iter()
     .fold(0usize, usize::saturating_add)
+}
+
+fn vue3_external_generic_aliases_cache_cost(
+    aliases: &BTreeMap<String, Vue3GenericTypeAlias>,
+) -> usize {
+    let mut environments = BTreeSet::new();
+    aliases.iter().fold(0usize, |cost, (name, alias)| {
+        let cost = cost
+            .saturating_add(name.len())
+            .saturating_add(alias.source.len())
+            .saturating_add(vue3_external_string_vec_cost(&alias.params));
+        let Vue3GenericTypeScope::Captured(environment) = &alias.scope else {
+            debug_assert!(false, "cached generic alias retained a local scope");
+            return cost;
+        };
+        let identity = std::sync::Arc::as_ptr(environment) as usize;
+        if environments.insert(identity) {
+            cost.saturating_add(vue3_external_generic_environment_cache_cost(environment))
+        } else {
+            cost
+        }
+    })
 }
 
 fn vue3_external_emits_cache_cost(emits: &Vue27EmitsType) -> usize {
@@ -152,6 +180,8 @@ fn vue3_external_emits_cache_cost(emits: &Vue27EmitsType) -> usize {
 }
 
 fn vue3_external_type_context_cache_cost(context: &Vue27TypeContext) -> usize {
+    let generic_aliases_cost =
+        vue3_external_generic_aliases_cache_cost(&context.generic_type_aliases);
     [
         vue3_external_string_map_cost(&context.declared_types, |types| {
             vue3_external_string_vec_cost(types)
@@ -221,10 +251,7 @@ fn vue3_external_type_context_cache_cost(context: &Vue27TypeContext) -> usize {
             &context.return_type_props_options_declarations,
             vue3_external_type_members_cache_cost,
         ),
-        vue3_external_string_map_cost(
-            &context.generic_type_aliases,
-            vue3_external_generic_alias_cache_cost,
-        ),
+        generic_aliases_cost,
         vue3_external_string_map_cost(&context.string_literal_type_declarations, |values| {
             vue3_external_string_set_cost(values)
         }),

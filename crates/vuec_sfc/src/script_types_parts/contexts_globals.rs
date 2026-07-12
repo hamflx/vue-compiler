@@ -131,6 +131,7 @@ pub(crate) fn vue3_normal_script_type_context(
         &mut analysis,
     );
     collect_vue3_declared_type_deps_from_statements(&parsed.program.body, &mut analysis);
+    finalize_vue3_local_generic_alias_scopes(&mut analysis);
     Vue27TypeContext {
         declared_types: analysis.declared_types,
         define_model_declared_types: analysis.define_model_declared_types,
@@ -303,6 +304,7 @@ pub(crate) fn vue3_global_type_context_from_source(
     };
     let mut global_names =
         collect_vue3_global_types_from_statements(source, &parsed.program.body, &mut analysis);
+    finalize_vue3_local_generic_alias_scopes(&mut analysis);
     global_names.extend(project_vue3_global_type_re_exports(
         filename,
         &parsed.program.body,

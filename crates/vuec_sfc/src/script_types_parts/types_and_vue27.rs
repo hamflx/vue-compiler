@@ -62,11 +62,70 @@ pub(crate) enum Vue3PropsTypeResolveMode {
 
 pub(crate) type Vue3RuntimeTypeTuple = Vec<Vec<String>>;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 pub(crate) struct Vue3GenericTypeAlias {
     pub(crate) source: String,
     pub(crate) kind: Vue3GenericTypeAliasKind,
     pub(crate) params: Vec<String>,
+    pub(crate) scope: Vue3GenericTypeScope,
+}
+
+impl std::fmt::Debug for Vue3GenericTypeAlias {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Vue3GenericTypeAlias")
+            .field("source", &self.source)
+            .field("kind", &self.kind)
+            .field("params", &self.params)
+            .field("scope", &self.scope)
+            .finish()
+    }
+}
+
+impl PartialEq for Vue3GenericTypeAlias {
+    fn eq(&self, other: &Self) -> bool {
+        self.source == other.source
+            && self.kind == other.kind
+            && self.params == other.params
+            && self.scope == other.scope
+    }
+}
+
+impl Eq for Vue3GenericTypeAlias {}
+
+#[derive(Clone)]
+pub(crate) enum Vue3GenericTypeScope {
+    Local,
+    Captured(std::sync::Arc<Vue3GenericTypeEnvironment>),
+}
+
+impl std::fmt::Debug for Vue3GenericTypeScope {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Local => formatter.write_str("Local"),
+            Self::Captured(environment) => formatter
+                .debug_tuple("Captured")
+                .field(&(std::sync::Arc::as_ptr(environment) as usize))
+                .finish(),
+        }
+    }
+}
+
+impl PartialEq for Vue3GenericTypeScope {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Local, Self::Local) => true,
+            (Self::Captured(left), Self::Captured(right)) => std::sync::Arc::ptr_eq(left, right),
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Vue3GenericTypeScope {}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Vue3GenericTypeEnvironment {
+    pub(crate) definition_filename: Option<String>,
     pub(crate) declared_types: BTreeMap<String, Vec<String>>,
     pub(crate) define_model_declared_types: BTreeMap<String, Vec<String>>,
     pub(crate) type_query_declared_types: BTreeMap<String, Vec<String>>,

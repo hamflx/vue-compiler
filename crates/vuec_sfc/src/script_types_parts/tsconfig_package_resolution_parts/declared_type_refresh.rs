@@ -57,7 +57,6 @@ pub(crate) fn refresh_vue3_generic_interface_declaration(
         alias_source,
         Vue3GenericTypeAliasKind::Interface,
         params,
-        analysis,
     );
     if analysis.generic_type_aliases.get(name) != Some(&alias) {
         analysis
