@@ -111,18 +111,7 @@ pub(crate) struct Vue3ExternalTypeLoadStats {
     pub(crate) tsconfig_discovery_files: usize,
 }
 
-#[derive(Clone, Debug)]
-enum Vue3ExternalTypeSourceCacheEntry {
-    Loading,
-    Ready(std::sync::Arc<Vue3ExternalTypeSource>),
-    Failed,
-}
-
-#[derive(Clone, Copy)]
-enum Vue3ExternalTypeSourceKind {
-    Import,
-    Global,
-}
+include!("external_type_loading_parts/source_single_flight.rs");
 
 #[derive(Clone, Debug)]
 enum Vue3ExternalTypeContextCacheEntry {
@@ -144,6 +133,9 @@ struct Vue3ExternalTypeLoadState {
     tsconfig_node_states: BTreeSet<(PathBuf, PathBuf, PathBuf)>,
     active_package_resolutions:
         std::collections::HashMap<std::thread::ThreadId, Vec<PathBuf>>,
+    next_source_flight_id: u64,
+    reserved_import_bytes: usize,
+    reserved_global_bytes: usize,
     metadata_blocked: bool,
     stats: Vue3ExternalTypeLoadStats,
     // Parent contexts are cached only when every recursive load completed.
@@ -163,6 +155,9 @@ impl Vue3ExternalTypeLoadState {
             package_json_cache: BTreeMap::new(),
             tsconfig_node_states: BTreeSet::new(),
             active_package_resolutions: std::collections::HashMap::new(),
+            next_source_flight_id: 0,
+            reserved_import_bytes: 0,
+            reserved_global_bytes: 0,
             metadata_blocked: false,
             stats: Vue3ExternalTypeLoadStats::default(),
             failure_epoch: 0,
@@ -232,79 +227,14 @@ impl Vue3ExternalTypeLoadSession {
         kind: Vue3ExternalTypeSourceKind,
     ) -> Option<std::sync::Arc<Vue3ExternalTypeSource>> {
         let cache_key = vue3_external_type_source_cache_key(path, kind);
-        let max_bytes = {
-            let mut state = self.lock();
-            match state.source_cache.get(&cache_key).cloned() {
-                Some(Vue3ExternalTypeSourceCacheEntry::Ready(source)) => {
-                    state.stats.source_cache_hits += 1;
-                    return Some(source);
-                }
-                Some(
-                    Vue3ExternalTypeSourceCacheEntry::Loading
-                    | Vue3ExternalTypeSourceCacheEntry::Failed,
-                ) => {
-                    state.failure_epoch += 1;
-                    return None;
-                }
-                None => {}
+        match self.begin_source_load(cache_key, kind) {
+            Vue3ExternalTypeSourceLoad::Ready(source) => Some(source),
+            Vue3ExternalTypeSourceLoad::Wait(waiter) => waiter.wait(),
+            Vue3ExternalTypeSourceLoad::Start(mut owner) => {
+                let source = read_vue3_external_type_source(path, &mut owner);
+                owner.complete(source)
             }
-            let (files_read, max_files, bytes_read, max_total_bytes) = match kind {
-                Vue3ExternalTypeSourceKind::Import => (
-                    state.stats.import_files_read,
-                    state.limits.max_import_files,
-                    state.stats.import_bytes,
-                    state.limits.max_import_bytes,
-                ),
-                Vue3ExternalTypeSourceKind::Global => (
-                    state.stats.global_files_read,
-                    state.limits.max_global_files,
-                    state.stats.global_bytes,
-                    state.limits.max_global_bytes,
-                ),
-            };
-            if files_read >= max_files {
-                state.failure_epoch += 1;
-                return None;
-            }
-            let remaining = max_total_bytes.saturating_sub(bytes_read);
-            match kind {
-                Vue3ExternalTypeSourceKind::Import => state.stats.import_files_read += 1,
-                Vue3ExternalTypeSourceKind::Global => state.stats.global_files_read += 1,
-            }
-            state
-                .source_cache
-                .insert(cache_key.clone(), Vue3ExternalTypeSourceCacheEntry::Loading);
-            state.limits.max_file_bytes.min(remaining)
-        };
-
-        let (loaded, bytes_read) = read_vue3_external_type_source(path, max_bytes);
-        let mut state = self.lock();
-        let (total_after_read, max_total_bytes) = match kind {
-            Vue3ExternalTypeSourceKind::Import => {
-                state.stats.import_bytes = state.stats.import_bytes.saturating_add(bytes_read);
-                (state.stats.import_bytes, state.limits.max_import_bytes)
-            }
-            Vue3ExternalTypeSourceKind::Global => {
-                state.stats.global_bytes = state.stats.global_bytes.saturating_add(bytes_read);
-                (state.stats.global_bytes, state.limits.max_global_bytes)
-            }
-        };
-        match loaded {
-            Some(source) if total_after_read <= max_total_bytes => {
-                let source = std::sync::Arc::new(source);
-                state.source_cache.insert(
-                    cache_key,
-                    Vue3ExternalTypeSourceCacheEntry::Ready(source.clone()),
-                );
-                Some(source)
-            }
-            _ => {
-                state
-                    .source_cache
-                    .insert(cache_key, Vue3ExternalTypeSourceCacheEntry::Failed);
-                state.failure_epoch += 1;
-                None
-            }
+            Vue3ExternalTypeSourceLoad::Failed => None,
         }
     }
 
@@ -575,47 +505,47 @@ pub(crate) fn vue3_external_global_type_source_from_path(
 
 fn read_vue3_external_type_source(
     path: &Path,
-    max_bytes: usize,
-) -> (Option<Vue3ExternalTypeSource>, usize) {
-    let Some(file) = std::fs::File::open(path).ok() else {
-        return (None, 0);
-    };
-    let Some(metadata) = file.metadata().ok() else {
-        return (None, 0);
-    };
-    if metadata.len() > max_bytes as u64 {
-        return (None, 0);
+    owner: &mut Vue3ExternalTypeSourceOwner,
+) -> Option<Vue3ExternalTypeSource> {
+    let mut file = std::fs::File::open(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() {
+        return None;
     }
-    let mut bytes = Vec::with_capacity(max_bytes.min(64 * 1024));
-    let mut limited = std::io::Read::take(file, max_bytes.saturating_add(1) as u64);
-    if std::io::Read::read_to_end(&mut limited, &mut bytes).is_err() {
-        let bytes_read = bytes.len();
-        return (None, bytes_read);
+    let declared_len_u64 = metadata.len();
+    let declared_len = usize::try_from(declared_len_u64).ok()?;
+    if !owner.reserve_bytes(declared_len) {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(declared_len.min(64 * 1024));
+    let read_failed = {
+        let mut limited = std::io::Read::take(&mut file, declared_len as u64);
+        std::io::Read::read_to_end(&mut limited, &mut bytes).is_err()
+    };
+    if read_failed {
+        owner.record_bytes_read(bytes.len());
+        return None;
     }
     let bytes_read = bytes.len();
-    if bytes.len() > max_bytes {
-        return (None, bytes_read);
+    owner.record_bytes_read(bytes_read);
+    let length_changed = file
+        .metadata()
+        .map_or(true, |metadata| metadata.len() != declared_len_u64);
+    if bytes_read != declared_len || length_changed {
+        return None;
     }
-    let Some(source) = String::from_utf8(bytes).ok() else {
-        return (None, bytes_read);
-    };
+    let source = String::from_utf8(bytes).ok()?;
     if path
         .extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case("vue"))
     {
-        return (
-            Some(vue3_external_vue_type_source(path, &source)),
-            bytes_read,
-        );
+        return Some(vue3_external_vue_type_source(path, &source));
     }
-    (
-        Some(Vue3ExternalTypeSource {
-            source,
-            source_type: vue3_type_source_type(&normalize_path_string(path)),
-        }),
-        bytes_read,
-    )
+    Some(Vue3ExternalTypeSource {
+        source,
+        source_type: vue3_type_source_type(&normalize_path_string(path)),
+    })
 }
 
 pub(crate) fn vue3_external_vue_type_source(path: &Path, source: &str) -> Vue3ExternalTypeSource {
