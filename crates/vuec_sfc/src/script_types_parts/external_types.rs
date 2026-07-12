@@ -432,114 +432,68 @@ pub(crate) fn vue3_external_type_context_from_source(
     source: &str,
     seen: &mut BTreeSet<String>,
     type_resolver: &Vue3TypeResolverContext,
-) -> Option<Vue27TypeContext> {
+) -> Option<std::sync::Arc<Vue27TypeContext>> {
     let resolved = resolve_vue3_type_import(filename, source, type_resolver)?;
     vue3_external_type_context_from_path(&resolved, seen, type_resolver)
-}
-
-pub(crate) struct Vue3ExternalTypeSource {
-    pub(crate) source: String,
-    pub(crate) source_type: oxc_span::SourceType,
-}
-
-pub(crate) const VUE3_EXTERNAL_TYPE_MAX_ACTIVE_FILES: usize = 64;
-
-pub(crate) fn vue3_external_type_path_identity(path: &Path) -> String {
-    let identity = std::fs::canonicalize(path).unwrap_or_else(|_| {
-        let absolute = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            std::env::current_dir()
-                .map(|current| current.join(path))
-                .unwrap_or_else(|_| path.to_path_buf())
-        };
-        normalize_path_components(absolute)
-    });
-    let normalized = normalize_path_string(&identity);
-    if cfg!(windows) {
-        normalized.to_lowercase()
-    } else {
-        normalized
-    }
 }
 
 pub(crate) fn vue3_external_type_context_from_path(
     path: &Path,
     seen: &mut BTreeSet<String>,
     type_resolver: &Vue3TypeResolverContext,
-) -> Option<Vue27TypeContext> {
+) -> Option<std::sync::Arc<Vue27TypeContext>> {
     let identity = vue3_external_type_path_identity(path);
-    if seen.len() >= VUE3_EXTERNAL_TYPE_MAX_ACTIVE_FILES || !seen.insert(identity.clone()) {
+    if seen.len() >= VUE3_EXTERNAL_TYPE_MAX_ACTIVE_FILES || seen.contains(&identity) {
+        type_resolver
+            .external_type_session
+            .record_context_failure();
         return None;
     }
-    let context = (|| {
-        let source = vue3_external_type_source_from_path(path)?;
-        let normalized = normalize_path_string(path);
-        Some(vue3_external_type_context_from_source_inner(
-            &source.source,
-            &normalized,
-            source.source_type,
-            seen,
-            type_resolver,
-        ))
-    })();
+    let cache_key = vue3_external_type_context_cache_key(path);
+    let failure_epoch = match type_resolver
+        .external_type_session
+        .begin_context_load(&cache_key)
+    {
+        Vue3ExternalTypeContextLoad::Ready(context) => return Some(context),
+        Vue3ExternalTypeContextLoad::Failed => return None,
+        Vue3ExternalTypeContextLoad::Start { failure_epoch } => failure_epoch,
+    };
+    seen.insert(identity.clone());
+    let Some(source) = vue3_external_type_source_from_path(path, type_resolver) else {
+        seen.remove(&identity);
+        return type_resolver.external_type_session.finish_context_load(
+            cache_key,
+            None,
+            failure_epoch,
+        );
+    };
+    if !type_resolver
+        .external_type_session
+        .reserve_context_build_weight(&cache_key, source.source.len())
+    {
+        seen.remove(&identity);
+        return None;
+    }
+    let normalized = normalize_path_string(path);
+    let context = std::sync::Arc::new(vue3_external_type_context_from_source_inner(
+        &source.source,
+        &normalized,
+        source.source_type,
+        seen,
+        type_resolver,
+    ));
     seen.remove(&identity);
-    context
-}
-
-pub(crate) fn vue3_external_type_source_from_path(path: &Path) -> Option<Vue3ExternalTypeSource> {
-    let source = std::fs::read_to_string(path).ok()?;
-    if path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("vue"))
-    {
-        return Some(vue3_external_vue_type_source(path, &source));
-    }
-    Some(Vue3ExternalTypeSource {
-        source,
-        source_type: vue3_type_source_type(&normalize_path_string(path)),
-    })
-}
-
-pub(crate) fn vue3_external_vue_type_source(path: &Path, source: &str) -> Vue3ExternalTypeSource {
-    let mut sources = SourceMap::default();
-    let source_file = sources.add_file(Some(path.to_path_buf()), source.to_string());
-    let options = Vue3SfcParseOptions::default();
-    let extracted = extract_sfc_blocks(
-        source,
-        source_file,
-        SfcBlockContentMode::Vue3 { options: &options },
-    );
-    let descriptor = vue3_descriptor_from_blocks(
-        normalize_path_string(path),
-        source,
-        source_file,
-        extracted.blocks,
-        &options,
+    type_resolver.external_type_session.finish_context_load(
+        cache_key,
+        Some(context),
+        failure_epoch,
     )
-    .descriptor;
-    let mut blocks = Vec::new();
-    let mut source_type = oxc_span::SourceType::ts();
-    for block in [descriptor.script.as_ref(), descriptor.script_setup.as_ref()]
-        .into_iter()
-        .flatten()
-    {
-        if block.attrs.lang.as_deref() == Some("tsx") {
-            source_type = oxc_span::SourceType::tsx();
-        }
-        blocks.push(block.content.as_str());
-    }
-    Vue3ExternalTypeSource {
-        source: blocks.join("\n"),
-        source_type,
-    }
 }
 
 pub(crate) struct Vue3ResolvedImportType {
     pub(crate) name: String,
     pub(crate) dependency: String,
-    pub(crate) context: Vue27TypeContext,
+    pub(crate) context: std::sync::Arc<Vue27TypeContext>,
 }
 
 pub(crate) fn vue3_resolve_import_type(
@@ -559,10 +513,6 @@ pub(crate) fn vue3_resolve_import_type(
         dependency,
         context,
     })
-}
-
-pub(crate) fn vue3_type_source_type(filename: &str) -> oxc_span::SourceType {
-    oxc_span::SourceType::from_path(filename).unwrap_or_else(|_| oxc_span::SourceType::ts())
 }
 
 pub(crate) fn vue3_exported_type_names(statements: &[Statement<'_>]) -> BTreeSet<String> {
@@ -825,6 +775,7 @@ pub(crate) fn project_vue3_namespace_declaration_with_prefix(
                 silent_unresolved_type_names: analysis.silent_unresolved_type_names.clone(),
                 type_filename: analysis.type_filename.clone(),
                 type_seen: analysis.type_seen.clone(),
+                type_resolver: analysis.type_resolver.clone(),
                 ..Vue3ScriptSetupAnalysis::default()
             };
             seed_vue3_namespace_type_names(prefix, &block.body, &mut namespace_analysis);

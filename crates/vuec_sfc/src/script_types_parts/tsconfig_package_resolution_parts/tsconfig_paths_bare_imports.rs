@@ -203,6 +203,7 @@ pub(crate) fn vue3_type_resolver_context_for_filename(filename: &str) -> Vue3Typ
     Vue3TypeResolverContext {
         typescript_version: vue3_typescript_version_for_filename(filename)
             .unwrap_or_else(vue3_package_typescript_baseline_version),
+        external_type_session: Vue3ExternalTypeLoadSession::default(),
     }
 }
 

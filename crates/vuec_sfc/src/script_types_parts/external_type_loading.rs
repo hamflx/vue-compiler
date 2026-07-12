@@ -1,0 +1,572 @@
+#[derive(Clone, Debug)]
+pub(crate) struct Vue3ExternalTypeSource {
+    pub(crate) source: String,
+    pub(crate) source_type: oxc_span::SourceType,
+}
+
+pub(crate) const VUE3_EXTERNAL_TYPE_MAX_ACTIVE_FILES: usize = 64;
+pub(crate) const VUE3_EXTERNAL_TYPE_MAX_IMPORT_FILES: usize = 512;
+pub(crate) const VUE3_EXTERNAL_TYPE_MAX_GLOBAL_FILES: usize = 16_384;
+pub(crate) const VUE3_EXTERNAL_TYPE_MAX_FILE_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const VUE3_EXTERNAL_TYPE_MAX_IMPORT_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const VUE3_EXTERNAL_TYPE_MAX_GLOBAL_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const VUE3_EXTERNAL_TYPE_MAX_CONTEXT_LOOKUPS: usize = 16_384;
+pub(crate) const VUE3_EXTERNAL_TYPE_MAX_CONTEXT_BUILDS: usize = 2048;
+pub(crate) const VUE3_EXTERNAL_TYPE_MAX_CONTEXT_BUILD_WEIGHT: usize = 64 * 1024 * 1024;
+pub(crate) const VUE3_EXTERNAL_TYPE_MAX_CONTEXT_CACHE_WEIGHT: usize = 8 * 1024 * 1024;
+pub(crate) const VUE3_EXTERNAL_TYPE_MAX_CONTEXT_CACHE_ENTRY_WEIGHT: usize = 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Vue3ExternalTypeLoadLimits {
+    pub(crate) max_import_files: usize,
+    pub(crate) max_global_files: usize,
+    pub(crate) max_file_bytes: usize,
+    pub(crate) max_import_bytes: usize,
+    pub(crate) max_global_bytes: usize,
+    pub(crate) max_context_lookups: usize,
+    pub(crate) max_context_builds: usize,
+    pub(crate) max_context_build_weight: usize,
+    pub(crate) max_context_cache_weight: usize,
+    pub(crate) max_context_cache_entry_weight: usize,
+}
+
+impl Default for Vue3ExternalTypeLoadLimits {
+    fn default() -> Self {
+        Self {
+            max_import_files: VUE3_EXTERNAL_TYPE_MAX_IMPORT_FILES,
+            max_global_files: VUE3_EXTERNAL_TYPE_MAX_GLOBAL_FILES,
+            max_file_bytes: VUE3_EXTERNAL_TYPE_MAX_FILE_BYTES,
+            max_import_bytes: VUE3_EXTERNAL_TYPE_MAX_IMPORT_BYTES,
+            max_global_bytes: VUE3_EXTERNAL_TYPE_MAX_GLOBAL_BYTES,
+            max_context_lookups: VUE3_EXTERNAL_TYPE_MAX_CONTEXT_LOOKUPS,
+            max_context_builds: VUE3_EXTERNAL_TYPE_MAX_CONTEXT_BUILDS,
+            max_context_build_weight: VUE3_EXTERNAL_TYPE_MAX_CONTEXT_BUILD_WEIGHT,
+            max_context_cache_weight: VUE3_EXTERNAL_TYPE_MAX_CONTEXT_CACHE_WEIGHT,
+            max_context_cache_entry_weight: VUE3_EXTERNAL_TYPE_MAX_CONTEXT_CACHE_ENTRY_WEIGHT,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Vue3ExternalTypeLoadStats {
+    pub(crate) import_files_read: usize,
+    pub(crate) global_files_read: usize,
+    pub(crate) import_bytes: usize,
+    pub(crate) global_bytes: usize,
+    pub(crate) source_cache_hits: usize,
+    pub(crate) context_lookups: usize,
+    pub(crate) context_builds: usize,
+    pub(crate) context_build_weight: usize,
+    pub(crate) context_cache_hits: usize,
+    pub(crate) cached_context_weight: usize,
+}
+
+#[derive(Clone, Debug)]
+enum Vue3ExternalTypeSourceCacheEntry {
+    Loading,
+    Ready(std::sync::Arc<Vue3ExternalTypeSource>),
+    Failed,
+}
+
+#[derive(Clone, Copy)]
+enum Vue3ExternalTypeSourceKind {
+    Import,
+    Global,
+}
+
+#[derive(Clone, Debug)]
+enum Vue3ExternalTypeContextCacheEntry {
+    Loading,
+    Ready(std::sync::Arc<Vue27TypeContext>),
+}
+
+#[derive(Debug)]
+struct Vue3ExternalTypeLoadState {
+    limits: Vue3ExternalTypeLoadLimits,
+    source_cache: BTreeMap<String, Vue3ExternalTypeSourceCacheEntry>,
+    context_cache: BTreeMap<String, Vue3ExternalTypeContextCacheEntry>,
+    stats: Vue3ExternalTypeLoadStats,
+    // Parent contexts are cached only when every recursive load completed.
+    failure_epoch: usize,
+}
+
+impl Vue3ExternalTypeLoadState {
+    fn new(limits: Vue3ExternalTypeLoadLimits) -> Self {
+        Self {
+            limits,
+            source_cache: BTreeMap::new(),
+            context_cache: BTreeMap::new(),
+            stats: Vue3ExternalTypeLoadStats::default(),
+            failure_epoch: 0,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct Vue3ExternalTypeLoadSession {
+    state: std::sync::Arc<std::sync::Mutex<Vue3ExternalTypeLoadState>>,
+}
+
+impl std::fmt::Debug for Vue3ExternalTypeLoadSession {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let state = self.lock();
+        formatter
+            .debug_struct("Vue3ExternalTypeLoadSession")
+            .field("limits", &state.limits)
+            .field("stats", &state.stats)
+            .field("source_cache_entries", &state.source_cache.len())
+            .field("context_cache_entries", &state.context_cache.len())
+            .finish()
+    }
+}
+
+enum Vue3ExternalTypeContextLoad {
+    Ready(std::sync::Arc<Vue27TypeContext>),
+    Failed,
+    Start { failure_epoch: usize },
+}
+
+impl Vue3ExternalTypeLoadSession {
+    pub(crate) fn with_limits(limits: Vue3ExternalTypeLoadLimits) -> Self {
+        Self {
+            state: std::sync::Arc::new(std::sync::Mutex::new(
+                Vue3ExternalTypeLoadState::new(limits),
+            )),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Vue3ExternalTypeLoadState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stats(&self) -> Vue3ExternalTypeLoadStats {
+        self.lock().stats
+    }
+
+    pub(crate) fn limits(&self) -> Vue3ExternalTypeLoadLimits {
+        self.lock().limits
+    }
+
+    fn source_from_path(
+        &self,
+        path: &Path,
+        kind: Vue3ExternalTypeSourceKind,
+    ) -> Option<std::sync::Arc<Vue3ExternalTypeSource>> {
+        let cache_key = vue3_external_type_source_cache_key(path, kind);
+        let max_bytes = {
+            let mut state = self.lock();
+            match state.source_cache.get(&cache_key).cloned() {
+                Some(Vue3ExternalTypeSourceCacheEntry::Ready(source)) => {
+                    state.stats.source_cache_hits += 1;
+                    return Some(source);
+                }
+                Some(
+                    Vue3ExternalTypeSourceCacheEntry::Loading
+                    | Vue3ExternalTypeSourceCacheEntry::Failed,
+                ) => {
+                    state.failure_epoch += 1;
+                    return None;
+                }
+                None => {}
+            }
+            let (files_read, max_files, bytes_read, max_total_bytes) = match kind {
+                Vue3ExternalTypeSourceKind::Import => (
+                    state.stats.import_files_read,
+                    state.limits.max_import_files,
+                    state.stats.import_bytes,
+                    state.limits.max_import_bytes,
+                ),
+                Vue3ExternalTypeSourceKind::Global => (
+                    state.stats.global_files_read,
+                    state.limits.max_global_files,
+                    state.stats.global_bytes,
+                    state.limits.max_global_bytes,
+                ),
+            };
+            if files_read >= max_files {
+                state.failure_epoch += 1;
+                return None;
+            }
+            let remaining = max_total_bytes.saturating_sub(bytes_read);
+            match kind {
+                Vue3ExternalTypeSourceKind::Import => state.stats.import_files_read += 1,
+                Vue3ExternalTypeSourceKind::Global => state.stats.global_files_read += 1,
+            }
+            state
+                .source_cache
+                .insert(cache_key.clone(), Vue3ExternalTypeSourceCacheEntry::Loading);
+            state.limits.max_file_bytes.min(remaining)
+        };
+
+        let (loaded, bytes_read) = read_vue3_external_type_source(path, max_bytes);
+        let mut state = self.lock();
+        let (total_after_read, max_total_bytes) = match kind {
+            Vue3ExternalTypeSourceKind::Import => {
+                state.stats.import_bytes = state.stats.import_bytes.saturating_add(bytes_read);
+                (state.stats.import_bytes, state.limits.max_import_bytes)
+            }
+            Vue3ExternalTypeSourceKind::Global => {
+                state.stats.global_bytes = state.stats.global_bytes.saturating_add(bytes_read);
+                (state.stats.global_bytes, state.limits.max_global_bytes)
+            }
+        };
+        match loaded {
+            Some(source) if total_after_read <= max_total_bytes => {
+                let source = std::sync::Arc::new(source);
+                state.source_cache.insert(
+                    cache_key,
+                    Vue3ExternalTypeSourceCacheEntry::Ready(source.clone()),
+                );
+                Some(source)
+            }
+            _ => {
+                state
+                    .source_cache
+                    .insert(cache_key, Vue3ExternalTypeSourceCacheEntry::Failed);
+                state.failure_epoch += 1;
+                None
+            }
+        }
+    }
+
+    fn begin_context_load(&self, cache_key: &str) -> Vue3ExternalTypeContextLoad {
+        let mut state = self.lock();
+        if state.stats.context_lookups >= state.limits.max_context_lookups {
+            state.failure_epoch += 1;
+            return Vue3ExternalTypeContextLoad::Failed;
+        }
+        state.stats.context_lookups += 1;
+        match state.context_cache.get(cache_key).cloned() {
+            Some(Vue3ExternalTypeContextCacheEntry::Ready(context)) => {
+                state.stats.context_cache_hits += 1;
+                return Vue3ExternalTypeContextLoad::Ready(context);
+            }
+            Some(Vue3ExternalTypeContextCacheEntry::Loading) => {
+                state.failure_epoch += 1;
+                return Vue3ExternalTypeContextLoad::Failed;
+            }
+            None => {}
+        }
+        if state.stats.context_builds >= state.limits.max_context_builds
+            || state.stats.context_build_weight >= state.limits.max_context_build_weight
+        {
+            state.failure_epoch += 1;
+            return Vue3ExternalTypeContextLoad::Failed;
+        }
+        state.stats.context_builds += 1;
+        let failure_epoch = state.failure_epoch;
+        state.context_cache.insert(
+            cache_key.to_string(),
+            Vue3ExternalTypeContextCacheEntry::Loading,
+        );
+        Vue3ExternalTypeContextLoad::Start { failure_epoch }
+    }
+
+    fn record_context_failure(&self) {
+        self.lock().failure_epoch += 1;
+    }
+
+    fn has_context_build_capacity(&self) -> bool {
+        let state = self.lock();
+        state.stats.context_lookups < state.limits.max_context_lookups
+            && state.stats.context_builds < state.limits.max_context_builds
+            && state.stats.context_build_weight < state.limits.max_context_build_weight
+    }
+
+    fn reserve_context_build_weight(&self, cache_key: &str, weight: usize) -> bool {
+        let mut state = self.lock();
+        let remaining = state
+            .limits
+            .max_context_build_weight
+            .saturating_sub(state.stats.context_build_weight);
+        if weight > remaining {
+            state.stats.context_build_weight = state.limits.max_context_build_weight;
+            state.context_cache.remove(cache_key);
+            state.failure_epoch += 1;
+            return false;
+        }
+        state.stats.context_build_weight += weight;
+        true
+    }
+
+    fn begin_uncached_context_load(&self, source_weight: usize) -> bool {
+        let mut state = self.lock();
+        if state.stats.context_lookups >= state.limits.max_context_lookups {
+            state.failure_epoch += 1;
+            return false;
+        }
+        state.stats.context_lookups += 1;
+        if state.stats.context_builds >= state.limits.max_context_builds {
+            state.failure_epoch += 1;
+            return false;
+        }
+        let remaining = state
+            .limits
+            .max_context_build_weight
+            .saturating_sub(state.stats.context_build_weight);
+        if source_weight > remaining {
+            state.stats.context_build_weight = state.limits.max_context_build_weight;
+            state.failure_epoch += 1;
+            return false;
+        }
+        state.stats.context_builds += 1;
+        state.stats.context_build_weight += source_weight;
+        true
+    }
+
+    fn finish_uncached_context_load(
+        &self,
+        context: Vue27TypeContext,
+    ) -> Option<Vue27TypeContext> {
+        let context_weight = vue3_external_type_context_cache_cost(&context);
+        let mut state = self.lock();
+        let remaining = state
+            .limits
+            .max_context_build_weight
+            .saturating_sub(state.stats.context_build_weight);
+        if context_weight > remaining {
+            state.stats.context_build_weight = state.limits.max_context_build_weight;
+            state.failure_epoch += 1;
+            return None;
+        }
+        state.stats.context_build_weight += context_weight;
+        Some(context)
+    }
+
+    fn finish_context_load(
+        &self,
+        cache_key: String,
+        context: Option<std::sync::Arc<Vue27TypeContext>>,
+        failure_epoch: usize,
+    ) -> Option<std::sync::Arc<Vue27TypeContext>> {
+        let context_weight = context
+            .as_ref()
+            .map(|context| vue3_external_type_context_cache_cost(context.as_ref()));
+        let mut state = self.lock();
+        let remaining = state
+            .limits
+            .max_context_build_weight
+            .saturating_sub(state.stats.context_build_weight);
+        if context_weight.is_some_and(|weight| weight > remaining) {
+            state.stats.context_build_weight = state.limits.max_context_build_weight;
+            state.context_cache.remove(&cache_key);
+            state.failure_epoch += 1;
+            return None;
+        }
+        state.stats.context_build_weight += context_weight.unwrap_or_default();
+        match context {
+            Some(context)
+                if state.failure_epoch == failure_epoch
+                    && context_weight.is_some_and(|weight| {
+                        weight <= state.limits.max_context_cache_entry_weight
+                            && state.stats.cached_context_weight.saturating_add(weight)
+                                <= state.limits.max_context_cache_weight
+                    }) =>
+            {
+                state.stats.cached_context_weight += context_weight.unwrap_or_default();
+                state.context_cache.insert(
+                    cache_key,
+                    Vue3ExternalTypeContextCacheEntry::Ready(context.clone()),
+                );
+                Some(context)
+            }
+            Some(context) => {
+                state.context_cache.remove(&cache_key);
+                Some(context)
+            }
+            None => {
+                state.context_cache.remove(&cache_key);
+                state.failure_epoch += 1;
+                None
+            }
+        }
+    }
+}
+
+impl Default for Vue3ExternalTypeLoadSession {
+    fn default() -> Self {
+        Self::with_limits(Vue3ExternalTypeLoadLimits::default())
+    }
+}
+
+include!("external_type_loading_parts/context_cost.rs");
+
+pub(crate) fn vue3_external_type_path_identity(path: &Path) -> String {
+    let identity = std::fs::canonicalize(path).unwrap_or_else(|_| {
+        let absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map(|current| current.join(path))
+                .unwrap_or_else(|_| path.to_path_buf())
+        };
+        normalize_path_components(absolute)
+    });
+    let normalized = normalize_path_string(&identity);
+    if cfg!(windows) {
+        normalized.to_lowercase()
+    } else {
+        normalized
+    }
+}
+
+fn vue3_external_type_context_cache_key(path: &Path) -> String {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|current| current.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+    let normalized = normalize_path_string(&normalize_path_components(absolute));
+    if cfg!(windows) {
+        normalized.to_lowercase()
+    } else {
+        normalized
+    }
+}
+
+fn vue3_external_type_source_cache_key(
+    path: &Path,
+    kind: Vue3ExternalTypeSourceKind,
+) -> String {
+    let kind = match kind {
+        Vue3ExternalTypeSourceKind::Import => "import",
+        Vue3ExternalTypeSourceKind::Global => "global",
+    };
+    format!(
+        "{kind}\0{}\0{}",
+        vue3_external_type_path_identity(path),
+        vue3_external_type_source_mode(path),
+    )
+}
+
+fn vue3_external_type_source_mode(path: &Path) -> String {
+    if path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("vue"))
+    {
+        return "vue".to_string();
+    }
+    let source_type = vue3_type_source_type(&normalize_path_string(path));
+    let language = if source_type.is_typescript_definition() {
+        "dts"
+    } else if source_type.is_typescript() {
+        "ts"
+    } else {
+        "js"
+    };
+    let module = match source_type.module_kind() {
+        oxc_span::ModuleKind::Script => "script",
+        oxc_span::ModuleKind::Module => "module",
+        oxc_span::ModuleKind::Unambiguous => "unambiguous",
+        oxc_span::ModuleKind::CommonJS => "commonjs",
+    };
+    let variant = if source_type.is_jsx() { "jsx" } else { "plain" };
+    format!("{language}:{module}:{variant}")
+}
+
+pub(crate) fn vue3_external_type_source_from_path(
+    path: &Path,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<std::sync::Arc<Vue3ExternalTypeSource>> {
+    type_resolver
+        .external_type_session
+        .source_from_path(path, Vue3ExternalTypeSourceKind::Import)
+}
+
+pub(crate) fn vue3_external_global_type_source_from_path(
+    path: &Path,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<std::sync::Arc<Vue3ExternalTypeSource>> {
+    type_resolver
+        .external_type_session
+        .source_from_path(path, Vue3ExternalTypeSourceKind::Global)
+}
+
+fn read_vue3_external_type_source(
+    path: &Path,
+    max_bytes: usize,
+) -> (Option<Vue3ExternalTypeSource>, usize) {
+    let Some(file) = std::fs::File::open(path).ok() else {
+        return (None, 0);
+    };
+    let Some(metadata) = file.metadata().ok() else {
+        return (None, 0);
+    };
+    if metadata.len() > max_bytes as u64 {
+        return (None, 0);
+    }
+    let mut bytes = Vec::with_capacity(max_bytes.min(64 * 1024));
+    let mut limited = std::io::Read::take(file, max_bytes.saturating_add(1) as u64);
+    if std::io::Read::read_to_end(&mut limited, &mut bytes).is_err() {
+        let bytes_read = bytes.len();
+        return (None, bytes_read);
+    }
+    let bytes_read = bytes.len();
+    if bytes.len() > max_bytes {
+        return (None, bytes_read);
+    }
+    let Some(source) = String::from_utf8(bytes).ok() else {
+        return (None, bytes_read);
+    };
+    if path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("vue"))
+    {
+        return (
+            Some(vue3_external_vue_type_source(path, &source)),
+            bytes_read,
+        );
+    }
+    (
+        Some(Vue3ExternalTypeSource {
+            source,
+            source_type: vue3_type_source_type(&normalize_path_string(path)),
+        }),
+        bytes_read,
+    )
+}
+
+pub(crate) fn vue3_external_vue_type_source(path: &Path, source: &str) -> Vue3ExternalTypeSource {
+    let mut sources = SourceMap::default();
+    let source_file = sources.add_file(Some(path.to_path_buf()), source.to_string());
+    let options = Vue3SfcParseOptions::default();
+    let extracted = extract_sfc_blocks(
+        source,
+        source_file,
+        SfcBlockContentMode::Vue3 { options: &options },
+    );
+    let descriptor = vue3_descriptor_from_blocks(
+        normalize_path_string(path),
+        source,
+        source_file,
+        extracted.blocks,
+        &options,
+    )
+    .descriptor;
+    let mut blocks = Vec::new();
+    let mut source_type = oxc_span::SourceType::ts();
+    for block in [descriptor.script.as_ref(), descriptor.script_setup.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        if block.attrs.lang.as_deref() == Some("tsx") {
+            source_type = oxc_span::SourceType::tsx();
+        }
+        blocks.push(block.content.as_str());
+    }
+    Vue3ExternalTypeSource {
+        source: blocks.join("\n"),
+        source_type,
+    }
+}
+
+pub(crate) fn vue3_type_source_type(filename: &str) -> oxc_span::SourceType {
+    oxc_span::SourceType::from_path(filename).unwrap_or_else(|_| oxc_span::SourceType::ts())
+}

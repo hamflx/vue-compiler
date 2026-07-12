@@ -150,15 +150,26 @@ pub(crate) struct Vue27TypeContext {
     pub(crate) silent_unresolved_type_names: BTreeSet<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub(crate) struct Vue3TypeResolverContext {
     pub(crate) typescript_version: nodejs_semver::Version,
+    pub(crate) external_type_session: Vue3ExternalTypeLoadSession,
 }
+
+impl PartialEq for Vue3TypeResolverContext {
+    fn eq(&self, other: &Self) -> bool {
+        self.typescript_version == other.typescript_version
+            && self.external_type_session.limits() == other.external_type_session.limits()
+    }
+}
+
+impl Eq for Vue3TypeResolverContext {}
 
 impl Default for Vue3TypeResolverContext {
     fn default() -> Self {
         Self {
             typescript_version: vue3_package_typescript_baseline_version(),
+            external_type_session: Vue3ExternalTypeLoadSession::default(),
         }
     }
 }

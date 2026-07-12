@@ -176,16 +176,14 @@ pub(crate) fn vue3_global_type_context(
     type_resolver: &Vue3TypeResolverContext,
 ) -> Vue27TypeContext {
     let mut context = Vue27TypeContext::default();
-    for file in global_type_files {
-        let path = normalize_path_components(PathBuf::from(file));
-        let Some(global_context) =
-            vue3_global_type_context_from_path(&path, &context, type_resolver)
-        else {
+    let mut seen = BTreeSet::new();
+    let explicit_paths = global_type_files
+        .iter()
+        .map(|file| normalize_path_components(PathBuf::from(file)));
+    for path in explicit_paths.chain(vue3_tsconfig_global_type_files(filename, type_resolver)) {
+        if !seen.insert(vue3_external_type_context_cache_key(&path)) {
             continue;
-        };
-        merge_vue3_type_context_missing(&mut context, global_context);
-    }
-    for path in vue3_tsconfig_global_type_files(filename, type_resolver) {
+        }
         let Some(global_context) =
             vue3_global_type_context_from_path(&path, &context, type_resolver)
         else {
@@ -201,15 +199,34 @@ pub(crate) fn vue3_global_type_context_from_path(
     base_context: &Vue27TypeContext,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<Vue27TypeContext> {
-    let source = vue3_external_type_source_from_path(path)?;
+    if !type_resolver
+        .external_type_session
+        .has_context_build_capacity()
+    {
+        return None;
+    }
+    let source = vue3_external_global_type_source_from_path(path, type_resolver)?;
+    let initial_weight = source
+        .source
+        .len()
+        .saturating_add(vue3_external_type_context_cache_cost(base_context));
+    if !type_resolver
+        .external_type_session
+        .begin_uncached_context_load(initial_weight)
+    {
+        return None;
+    }
     let normalized = normalize_path_string(path);
-    Some(vue3_global_type_context_from_source(
+    let context = vue3_global_type_context_from_source(
         &source.source,
         &normalized,
         source.source_type,
         base_context,
         type_resolver,
-    ))
+    );
+    type_resolver
+        .external_type_session
+        .finish_uncached_context_load(context)
 }
 
 pub(crate) fn vue3_global_type_context_from_source(

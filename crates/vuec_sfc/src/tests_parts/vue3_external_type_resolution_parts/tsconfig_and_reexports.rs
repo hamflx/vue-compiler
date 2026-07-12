@@ -576,6 +576,15 @@ const model = defineModel<ModelValue>()
         root.join("type_0.ts")
     }
 
+    fn vue3_type_resolver_with_external_limits(
+        limits: Vue3ExternalTypeLoadLimits,
+    ) -> Vue3TypeResolverContext {
+        Vue3TypeResolverContext {
+            external_type_session: Vue3ExternalTypeLoadSession::with_limits(limits),
+            ..Vue3TypeResolverContext::default()
+        }
+    }
+
     #[test]
     fn vue3_external_type_loader_bounds_active_import_depth() {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -639,6 +648,46 @@ defineProps<Leaf>()
         assert_eq!(seen, BTreeSet::from([identity]));
     }
 
+    #[test]
+    fn vue3_external_type_loader_checks_active_paths_before_warm_cache() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source_path = dir.path().join("types.ts");
+        std::fs::write(&source_path, "export interface Props { value: string }")
+            .expect("write type file");
+        let resolver = Vue3TypeResolverContext::default();
+        assert!(vue3_external_type_context_from_path(
+            &source_path,
+            &mut BTreeSet::new(),
+            &resolver,
+        )
+        .is_some());
+
+        let identity = vue3_external_type_path_identity(&source_path);
+        let mut cyclic_seen = BTreeSet::from([identity.clone()]);
+        assert!(vue3_external_type_context_from_path(
+            &source_path,
+            &mut cyclic_seen,
+            &resolver,
+        )
+        .is_none());
+        assert_eq!(cyclic_seen, BTreeSet::from([identity]));
+
+        let mut depth_limited_seen = (0..VUE3_EXTERNAL_TYPE_MAX_ACTIVE_FILES)
+            .map(|index| format!("active-{index}"))
+            .collect::<BTreeSet<_>>();
+        assert!(vue3_external_type_context_from_path(
+            &source_path,
+            &mut depth_limited_seen,
+            &resolver,
+        )
+        .is_none());
+        assert_eq!(
+            depth_limited_seen.len(),
+            VUE3_EXTERNAL_TYPE_MAX_ACTIVE_FILES
+        );
+        assert_eq!(resolver.external_type_session.stats().context_cache_hits, 0);
+    }
+
     #[cfg(unix)]
     #[test]
     fn vue3_external_type_loader_resolves_symlink_identity() {
@@ -658,4 +707,374 @@ defineProps<Leaf>()
         )
         .is_none());
         assert_eq!(seen, BTreeSet::from([identity]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn vue3_external_type_context_cache_preserves_lexical_import_base() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let shared_dir = dir.path().join("shared");
+        let first_dir = dir.path().join("first");
+        let second_dir = dir.path().join("second");
+        for path in [&shared_dir, &first_dir, &second_dir] {
+            std::fs::create_dir_all(path).expect("create type directory");
+        }
+        let shared = shared_dir.join("shared.ts");
+        std::fs::write(&shared, "export { Marker } from './dep'")
+            .expect("write shared type file");
+        let first_alias = first_dir.join("shared.ts");
+        let second_alias = second_dir.join("shared.ts");
+        std::os::unix::fs::symlink(&shared, &first_alias).expect("create first type symlink");
+        std::os::unix::fs::symlink(&shared, &second_alias).expect("create second type symlink");
+        let first_dep = first_dir.join("dep.ts");
+        let second_dep = second_dir.join("dep.ts");
+        std::fs::write(&first_dep, "export interface Marker { first: string }")
+            .expect("write first dependency");
+        std::fs::write(&second_dep, "export interface Marker { second: string }")
+            .expect("write second dependency");
+        let resolver = Vue3TypeResolverContext::default();
+
+        let first = vue3_external_type_context_from_path(
+            &first_alias,
+            &mut BTreeSet::new(),
+            &resolver,
+        )
+        .expect("load first symlink context");
+        let second = vue3_external_type_context_from_path(
+            &second_alias,
+            &mut BTreeSet::new(),
+            &resolver,
+        )
+        .expect("load second symlink context");
+
+        assert_eq!(
+            first.type_sources.get("Marker"),
+            Some(&normalize_path_string(&first_dep))
+        );
+        assert_eq!(
+            second.type_sources.get("Marker"),
+            Some(&normalize_path_string(&second_dep))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn vue3_external_type_source_cache_preserves_declaration_mode() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let declaration = dir.path().join("types.d.ts");
+        let regular_alias = dir.path().join("types.ts");
+        std::fs::write(&declaration, "export interface Props { value: string }")
+            .expect("write declaration file");
+        std::os::unix::fs::symlink(&declaration, &regular_alias)
+            .expect("create regular TypeScript symlink");
+        let resolver = Vue3TypeResolverContext::default();
+
+        let regular = vue3_external_type_source_from_path(&regular_alias, &resolver)
+            .expect("load regular TypeScript alias");
+        let definition = vue3_external_type_source_from_path(&declaration, &resolver)
+            .expect("load TypeScript declaration");
+        assert!(!regular.source_type.is_typescript_definition());
+        assert!(definition.source_type.is_typescript_definition());
+        assert_eq!(resolver.external_type_session.stats().import_files_read, 2);
+
+        assert!(vue3_external_type_source_from_path(&regular_alias, &resolver).is_some());
+        assert!(vue3_external_type_source_from_path(&declaration, &resolver).is_some());
+        assert_eq!(resolver.external_type_session.stats().source_cache_hits, 2);
+    }
+
+    #[test]
+    fn vue3_external_type_loader_caches_diamond_import_contexts() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let leaf = dir.path().join("leaf.ts");
+        let root = dir.path().join("root.ts");
+        std::fs::write(&leaf, "export interface Leaf { value: string }")
+            .expect("write leaf type");
+        std::fs::write(
+            &root,
+            concat!(
+                "import { Leaf as Left } from './leaf'\n",
+                "import { Leaf as Right } from './leaf'\n",
+                "export interface Root { left: Left; right: Right }",
+            ),
+        )
+        .expect("write root type");
+        let resolver = Vue3TypeResolverContext::default();
+        let context =
+            vue3_external_type_context_from_path(&root, &mut BTreeSet::new(), &resolver)
+                .expect("load diamond import root");
+
+        assert!(context.declared_types.contains_key("Root"));
+        let stats = resolver.external_type_session.stats();
+        assert_eq!(stats.import_files_read, 2);
+        assert_eq!(
+            stats.import_bytes,
+            std::fs::metadata(&root).expect("root metadata").len() as usize
+                + std::fs::metadata(&leaf).expect("leaf metadata").len() as usize
+        );
+        assert_eq!(stats.source_cache_hits, 0);
+        assert_eq!(stats.context_lookups, 3);
+        assert_eq!(stats.context_builds, 2);
+        assert_eq!(stats.context_cache_hits, 1);
+        assert!(stats.context_build_weight > stats.import_bytes);
+        assert!(stats.cached_context_weight > 0);
+    }
+
+    #[test]
+    fn vue3_external_type_loader_enforces_shared_file_budgets() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cached = dir.path().join("cached.ts");
+        let invalid_utf8 = dir.path().join("invalid.ts");
+        let oversized = dir.path().join("oversized.ts");
+        let total_overflow = dir.path().join("total.ts");
+        let file_overflow = dir.path().join("file.ts");
+        std::fs::write(&cached, "export {}").expect("write cached type");
+        std::fs::write(&invalid_utf8, vec![0xff; 10]).expect("write invalid UTF-8 type");
+        std::fs::write(&oversized, "x".repeat(17)).expect("write oversized type");
+        std::fs::write(&total_overflow, "export const x=1").expect("write total overflow type");
+        std::fs::write(&file_overflow, "export {}").expect("write file overflow type");
+        let resolver = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+            max_import_files: 4,
+            max_file_bytes: 16,
+            max_import_bytes: 20,
+            max_context_builds: 8,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        let cloned = resolver.clone();
+
+        assert!(vue3_external_type_source_from_path(&cached, &resolver).is_some());
+        assert!(vue3_external_type_source_from_path(&cached, &cloned).is_some());
+        assert!(vue3_external_type_source_from_path(&invalid_utf8, &resolver).is_none());
+        assert!(vue3_external_type_source_from_path(&oversized, &resolver).is_none());
+        assert!(vue3_external_type_source_from_path(&total_overflow, &resolver).is_none());
+        assert!(vue3_external_type_source_from_path(&file_overflow, &resolver).is_none());
+        assert_eq!(
+            resolver.external_type_session.stats(),
+            Vue3ExternalTypeLoadStats {
+                import_files_read: 4,
+                global_files_read: 0,
+                import_bytes: "export {}".len() + 10,
+                global_bytes: 0,
+                source_cache_hits: 1,
+                context_lookups: 0,
+                context_builds: 0,
+                context_build_weight: 0,
+                context_cache_hits: 0,
+                cached_context_weight: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn vue3_external_type_loader_honors_exact_byte_boundaries() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let exact_file = dir.path().join("exact.ts");
+        let oversized_file = dir.path().join("oversized.ts");
+        let exact_total = dir.path().join("total.ts");
+        let total_overflow = dir.path().join("overflow.ts");
+        std::fs::write(&exact_file, "type").expect("write exact file");
+        std::fs::write(&oversized_file, "types").expect("write oversized file");
+        std::fs::write(&exact_total, "x").expect("write exact total file");
+        std::fs::write(&total_overflow, "x").expect("write total overflow file");
+        let resolver = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+            max_import_files: 8,
+            max_file_bytes: 4,
+            max_import_bytes: 5,
+            max_context_builds: 8,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+
+        assert!(vue3_external_type_source_from_path(&exact_file, &resolver).is_some());
+        assert!(vue3_external_type_source_from_path(&oversized_file, &resolver).is_none());
+        assert!(vue3_external_type_source_from_path(&exact_total, &resolver).is_some());
+        assert!(vue3_external_type_source_from_path(&total_overflow, &resolver).is_none());
+        let stats = resolver.external_type_session.stats();
+        assert_eq!(stats.import_files_read, 4);
+        assert_eq!(stats.import_bytes, 5);
+    }
+
+    #[test]
+    fn vue3_external_type_loader_bounds_context_builds() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = write_external_type_re_export_chain(dir.path(), 3);
+        let resolver = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+            max_import_files: 8,
+            max_file_bytes: 1024,
+            max_import_bytes: 4096,
+            max_context_builds: 2,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        let context =
+            vue3_external_type_context_from_path(&root, &mut BTreeSet::new(), &resolver)
+                .expect("load bounded context prefix");
+
+        assert!(!context.declared_types.contains_key("Leaf"));
+        assert_eq!(resolver.external_type_session.stats().context_builds, 2);
+    }
+
+    #[test]
+    fn vue3_external_type_loader_enforces_context_lookup_budget_on_cache_hits() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source_path = dir.path().join("types.ts");
+        std::fs::write(&source_path, "export interface Props { value: string }")
+            .expect("write type file");
+        let resolver = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+            max_context_lookups: 1,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+
+        assert!(vue3_external_type_context_from_path(
+            &source_path,
+            &mut BTreeSet::new(),
+            &resolver,
+        )
+        .is_some());
+        assert!(vue3_external_type_context_from_path(
+            &source_path,
+            &mut BTreeSet::new(),
+            &resolver,
+        )
+        .is_none());
+        let stats = resolver.external_type_session.stats();
+        assert_eq!(stats.context_lookups, 1);
+        assert_eq!(stats.context_builds, 1);
+        assert_eq!(stats.context_cache_hits, 0);
+    }
+
+    #[test]
+    fn vue3_external_type_loader_bounds_uncached_context_build_weight() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source_path = dir.path().join("types.ts");
+        let source = "export interface SecretContextMarker { value: string }";
+        std::fs::write(&source_path, source).expect("write type file");
+        let measuring_resolver = Vue3TypeResolverContext::default();
+        assert!(vue3_external_type_context_from_path(
+            &source_path,
+            &mut BTreeSet::new(),
+            &measuring_resolver,
+        )
+        .is_some());
+        let exact_build_weight = measuring_resolver
+            .external_type_session
+            .stats()
+            .context_build_weight;
+        let resolver = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+            max_context_build_weight: exact_build_weight,
+            max_context_cache_weight: 0,
+            max_context_cache_entry_weight: 0,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+
+        let context = vue3_external_type_context_from_path(
+            &source_path,
+            &mut BTreeSet::new(),
+            &resolver,
+        )
+        .expect("load context at exact build weight limit");
+        assert!(context
+            .declared_types
+            .contains_key("SecretContextMarker"));
+        assert!(vue3_external_type_context_from_path(
+            &source_path,
+            &mut BTreeSet::new(),
+            &resolver,
+        )
+        .is_none());
+        let stats = resolver.external_type_session.stats();
+        assert_eq!(stats.import_files_read, 1);
+        assert_eq!(stats.source_cache_hits, 0);
+        assert_eq!(stats.context_lookups, 2);
+        assert_eq!(stats.context_builds, 1);
+        assert_eq!(stats.context_build_weight, exact_build_weight);
+        assert_eq!(stats.context_cache_hits, 0);
+        assert_eq!(stats.cached_context_weight, 0);
+        assert!(!format!("{resolver:?}").contains("SecretContextMarker"));
+
+        let rejecting_resolver =
+            vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+                max_context_build_weight: exact_build_weight - 1,
+                ..Vue3ExternalTypeLoadLimits::default()
+            });
+        assert!(vue3_external_type_context_from_path(
+            &source_path,
+            &mut BTreeSet::new(),
+            &rejecting_resolver,
+        )
+        .is_none());
+        assert_eq!(
+            rejecting_resolver
+                .external_type_session
+                .stats()
+                .context_build_weight,
+            exact_build_weight - 1
+        );
+    }
+
+    #[test]
+    fn vue3_external_type_loader_deduplicates_global_paths_before_parsing() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let nested = dir.path().join("nested");
+        std::fs::create_dir_all(&nested).expect("create nested directory");
+        let global = dir.path().join("global.d.ts");
+        std::fs::write(&global, "declare interface GlobalProps { value: string }")
+            .expect("write global type file");
+        let alias = nested.join("..").join("global.d.ts");
+        let files = vec![
+            global.to_string_lossy().to_string(),
+            alias.to_string_lossy().to_string(),
+            global.to_string_lossy().to_string(),
+        ];
+        let resolver = Vue3TypeResolverContext::default();
+
+        let context = vue3_global_type_context(
+            &dir.path().join("Comp.vue").to_string_lossy(),
+            &files,
+            &resolver,
+        );
+        assert!(context.declared_types.contains_key("GlobalProps"));
+        let stats = resolver.external_type_session.stats();
+        assert_eq!(stats.global_files_read, 1);
+        assert_eq!(stats.source_cache_hits, 0);
+        assert_eq!(stats.context_lookups, 1);
+        assert_eq!(stats.context_builds, 1);
+    }
+
+    #[test]
+    fn vue3_external_type_loader_reserves_import_budget_from_globals() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let first_global = dir.path().join("global-one.d.ts");
+        let second_global = dir.path().join("global-two.d.ts");
+        let imported = dir.path().join("props.ts");
+        std::fs::write(&first_global, "declare interface GlobalOne {}")
+            .expect("write first global type");
+        std::fs::write(&second_global, "declare interface GlobalTwo {}")
+            .expect("write second global type");
+        std::fs::write(&imported, "export interface Props { value: string }")
+            .expect("write imported type");
+        let resolver = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+            max_import_files: 1,
+            max_global_files: 1,
+            max_import_bytes: 1024,
+            max_global_bytes: 1024,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+
+        assert!(vue3_global_type_context_from_path(
+            &first_global,
+            &Vue27TypeContext::default(),
+            &resolver,
+        )
+        .is_some());
+        assert!(vue3_global_type_context_from_path(
+            &second_global,
+            &Vue27TypeContext::default(),
+            &resolver,
+        )
+        .is_none());
+        let imported_context =
+            vue3_external_type_context_from_path(&imported, &mut BTreeSet::new(), &resolver)
+                .expect("load direct import after global budget exhaustion");
+        assert!(imported_context.declared_types.contains_key("Props"));
+        let stats = resolver.external_type_session.stats();
+        assert_eq!(stats.global_files_read, 1);
+        assert_eq!(stats.import_files_read, 1);
     }

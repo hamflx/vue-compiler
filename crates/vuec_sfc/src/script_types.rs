@@ -1,4 +1,5 @@
 include!("script_types_parts/types_and_vue27.rs");
+include!("script_types_parts/external_type_loading.rs");
 include!("script_types_parts/contexts_globals.rs");
 include!("script_types_parts/external_types.rs");
 include!("script_types_parts/alias_projection.rs");
