@@ -2,6 +2,55 @@ pub(crate) fn resolve_vue3_type_import_path(
     candidate: &Path,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
+    resolve_vue3_type_import_path_with_probe_mode(
+        candidate,
+        type_resolver,
+        Vue3TypeImportPathProbeMode::Source,
+    )
+}
+
+pub(crate) fn resolve_vue3_metadata_type_import_path(
+    candidate: &Path,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
+    resolve_vue3_type_import_path_with_probe_mode(
+        candidate,
+        type_resolver,
+        Vue3TypeImportPathProbeMode::Metadata,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum Vue3TypeImportPathProbeMode {
+    Source,
+    Metadata,
+}
+
+impl Vue3TypeImportPathProbeMode {
+    fn is_dir(self, path: &Path, type_resolver: &Vue3TypeResolverContext) -> Option<bool> {
+        match self {
+            Self::Source => Some(path.is_dir()),
+            Self::Metadata => type_resolver
+                .external_type_session
+                .metadata_path_is_dir(path),
+        }
+    }
+
+    fn exists(self, path: &Path, type_resolver: &Vue3TypeResolverContext) -> Option<bool> {
+        match self {
+            Self::Source => Some(path.exists()),
+            Self::Metadata => type_resolver
+                .external_type_session
+                .metadata_path_exists(path),
+        }
+    }
+}
+
+fn resolve_vue3_type_import_path_with_probe_mode(
+    candidate: &Path,
+    type_resolver: &Vue3TypeResolverContext,
+    probe_mode: Vue3TypeImportPathProbeMode,
+) -> Option<PathBuf> {
     let extension = candidate
         .extension()
         .and_then(|extension| extension.to_str())
@@ -20,7 +69,7 @@ pub(crate) fn resolve_vue3_type_import_path(
         }
         candidates.push(candidate.to_path_buf());
     } else {
-        if candidate.is_dir() {
+        if probe_mode.is_dir(candidate, type_resolver)? {
             match resolve_vue3_package_json_type_entry(candidate, None, type_resolver) {
                 Vue3PackageJsonTypeResolution::Resolved(path) => return Some(path),
                 Vue3PackageJsonTypeResolution::Blocked => return None,
@@ -36,7 +85,12 @@ pub(crate) fn resolve_vue3_type_import_path(
         candidates.push(candidate.join("index.tsx"));
         candidates.push(candidate.join("index.d.ts"));
     }
-    candidates.into_iter().find(|candidate| candidate.exists())
+    for candidate in candidates {
+        if probe_mode.exists(&candidate, type_resolver)? {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 pub(crate) fn arbitrary_extension_type_candidate(stem: &Path, extension: &str) -> PathBuf {

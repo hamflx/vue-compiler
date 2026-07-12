@@ -177,6 +177,53 @@ impl Vue3ExternalTypeLoadSession {
         true
     }
 
+    fn claim_metadata_fanout_entry(&self) -> bool {
+        let mut state = self.lock();
+        if state.metadata_blocked {
+            return false;
+        }
+        if state.stats.metadata_fanout_entries >= state.limits.max_metadata_fanout_entries {
+            let flights = vue3_block_metadata_state(&mut state);
+            drop(state);
+            vue3_abort_metadata_flights(flights);
+            return false;
+        }
+        state.stats.metadata_fanout_entries += 1;
+        true
+    }
+
+    fn claim_metadata_resolution_path_probe(&self) -> bool {
+        let mut state = self.lock();
+        if state.metadata_blocked {
+            return false;
+        }
+        if state.stats.metadata_resolution_path_probes
+            >= state.limits.max_metadata_resolution_path_probes
+        {
+            let flights = vue3_block_metadata_state(&mut state);
+            drop(state);
+            vue3_abort_metadata_flights(flights);
+            return false;
+        }
+        state.stats.metadata_resolution_path_probes += 1;
+        true
+    }
+
+    fn metadata_path_exists(&self, path: &Path) -> Option<bool> {
+        self.claim_metadata_resolution_path_probe()
+            .then(|| path.exists())
+    }
+
+    fn metadata_path_is_dir(&self, path: &Path) -> Option<bool> {
+        self.claim_metadata_resolution_path_probe()
+            .then(|| path.is_dir())
+    }
+
+    fn metadata_path_is_file(&self, path: &Path) -> Option<bool> {
+        self.claim_metadata_resolution_path_probe()
+            .then(|| path.is_file())
+    }
+
     pub(crate) fn metadata_is_blocked(&self) -> bool {
         let mut state = self.lock();
         if state.metadata_blocked {

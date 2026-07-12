@@ -1306,3 +1306,315 @@ fn vue3_tsconfig_graph_uses_canonical_symlink_identity() {
     assert_eq!(stats.tsconfig_nodes, 1);
     assert_eq!(stats.metadata_files_read, 1);
 }
+
+fn write_vue3_metadata_budget_project(root: &Path, targets: &[&str]) -> (String, PathBuf) {
+    let target = root.join("hit.ts");
+    std::fs::write(&target, "export interface BudgetProps { value: string }")
+        .expect("write metadata budget target");
+    std::fs::write(
+        root.join("tsconfig.json"),
+        serde_json::json!({
+            "compilerOptions": {
+                "paths": { "budget": targets }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write metadata budget tsconfig");
+    (
+        root.join("Comp.vue").to_string_lossy().to_string(),
+        target,
+    )
+}
+
+#[test]
+fn vue3_metadata_fanout_entries_are_bounded_and_cached() {
+    assert_eq!(
+        VUE3_EXTERNAL_TYPE_MAX_METADATA_FANOUT_ENTRIES,
+        65_536
+    );
+    let accepted_dir = tempfile::tempdir().expect("accepted temp dir");
+    let (accepted_filename, accepted_target) =
+        write_vue3_metadata_budget_project(accepted_dir.path(), &["missing.ts", "hit.ts"]);
+    let accepted = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_fanout_entries: 2,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+
+    assert_eq!(
+        resolve_vue3_type_import(&accepted_filename, "budget", &accepted),
+        Some(accepted_target.clone())
+    );
+    let first_stats = accepted.external_type_session.stats();
+    assert_eq!(first_stats.metadata_fanout_entries, 2);
+    assert_eq!(
+        resolve_vue3_type_import(&accepted_filename, "budget", &accepted),
+        Some(accepted_target)
+    );
+    let cached_stats = accepted.external_type_session.stats();
+    assert_eq!(
+        cached_stats.metadata_fanout_entries,
+        first_stats.metadata_fanout_entries
+    );
+    assert_eq!(
+        cached_stats.metadata_resolution_path_probes,
+        first_stats.metadata_resolution_path_probes
+    );
+    assert_eq!(cached_stats.resolution_cache_hits, 1);
+    assert!(!accepted.external_type_session.metadata_is_blocked());
+
+    let zero = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_fanout_entries: 0,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert!(resolve_vue3_type_import(&accepted_filename, "budget", &zero).is_none());
+    assert_eq!(
+        zero.external_type_session.stats().metadata_fanout_entries,
+        0
+    );
+    assert!(zero.external_type_session.metadata_is_blocked());
+
+    let rejected_dir = tempfile::tempdir().expect("rejected temp dir");
+    let (rejected_filename, _) = write_vue3_metadata_budget_project(
+        rejected_dir.path(),
+        &["missing.ts", "missing.ts", "hit.ts"],
+    );
+    let rejected = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_fanout_entries: 2,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+
+    assert!(resolve_vue3_type_import(&rejected_filename, "budget", &rejected).is_none());
+    let stats = rejected.external_type_session.stats();
+    assert_eq!(stats.metadata_fanout_entries, 2);
+    assert_eq!(stats.resolution_cache_hits, 0);
+    assert!(rejected.external_type_session.metadata_is_blocked());
+    assert!(resolve_vue3_type_import(&rejected_filename, "budget", &rejected).is_none());
+    assert_eq!(
+        rejected
+            .external_type_session
+            .stats()
+            .resolution_cache_hits,
+        0
+    );
+}
+
+#[test]
+fn vue3_metadata_resolution_path_probes_are_bounded_before_success() {
+    assert_eq!(
+        VUE3_EXTERNAL_TYPE_MAX_METADATA_RESOLUTION_PATH_PROBES,
+        131_072
+    );
+    let accepted_dir = tempfile::tempdir().expect("accepted temp dir");
+    let candidate = accepted_dir.path().join("base");
+    std::fs::create_dir_all(&candidate).expect("create accepted config directory");
+    let accepted_target = candidate.join("tsconfig.json");
+    std::fs::write(&accepted_target, "{}").expect("write accepted config");
+    let accepted = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_resolution_path_probes: 2,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+
+    assert_eq!(
+        resolve_vue3_tsconfig_candidate_path(&candidate, false, &accepted),
+        Some(accepted_target)
+    );
+    assert_eq!(
+        accepted
+            .external_type_session
+            .stats()
+            .metadata_resolution_path_probes,
+        2
+    );
+    assert!(!accepted.external_type_session.metadata_is_blocked());
+
+    let zero = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_resolution_path_probes: 0,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert!(resolve_vue3_tsconfig_candidate_path(&candidate, false, &zero).is_none());
+    assert_eq!(
+        zero.external_type_session
+            .stats()
+            .metadata_resolution_path_probes,
+        0
+    );
+    assert!(zero.external_type_session.metadata_is_blocked());
+
+    let rejected_dir = tempfile::tempdir().expect("rejected temp dir");
+    let rejected_candidate = rejected_dir.path().join("base");
+    std::fs::create_dir_all(&rejected_candidate).expect("create rejected config directory");
+    std::fs::write(rejected_candidate.join("tsconfig.json"), "{}")
+        .expect("write rejected config");
+    let safe_relative = rejected_dir.path().join("safe.ts");
+    std::fs::write(&safe_relative, "export interface SafeProps {}")
+        .expect("write safe relative target");
+    let rejected = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_resolution_path_probes: 1,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+
+    assert!(resolve_vue3_tsconfig_candidate_path(&rejected_candidate, false, &rejected).is_none());
+    assert_eq!(
+        rejected
+            .external_type_session
+            .stats()
+            .metadata_resolution_path_probes,
+        1
+    );
+    assert!(rejected.external_type_session.metadata_is_blocked());
+    let importer = rejected_dir
+        .path()
+        .join("Comp.vue")
+        .to_string_lossy()
+        .to_string();
+    assert_eq!(
+        resolve_vue3_type_import(&importer, "./safe.ts", &rejected),
+        Some(safe_relative)
+    );
+    assert_eq!(
+        rejected
+            .external_type_session
+            .stats()
+            .metadata_resolution_path_probes,
+        1
+    );
+}
+
+#[test]
+fn vue3_tsconfig_extends_and_references_share_fanout_budget() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let base = dir.path().join("base.json");
+    let referenced = dir.path().join("referenced.json");
+    std::fs::write(&base, "{}").expect("write base config");
+    std::fs::write(&referenced, "{}").expect("write referenced config");
+    let value = serde_json::json!({
+        "extends": ["./missing.json", "./base.json"],
+        "references": [
+            {"path": "./missing-reference.json"},
+            {"path": "./referenced.json"}
+        ]
+    });
+    let accepted = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_fanout_entries: 4,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+
+    assert_eq!(
+        vue3_tsconfig_extends_paths(&value, dir.path(), &accepted),
+        vec![base]
+    );
+    assert_eq!(
+        vue3_tsconfig_reference_paths(&value, dir.path(), &accepted),
+        vec![referenced]
+    );
+    assert_eq!(
+        accepted
+            .external_type_session
+            .stats()
+            .metadata_fanout_entries,
+        4
+    );
+    assert!(!accepted.external_type_session.metadata_is_blocked());
+
+    let rejected = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_fanout_entries: 3,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert_eq!(
+        vue3_tsconfig_extends_paths(&value, dir.path(), &rejected),
+        vec![dir.path().join("base.json")]
+    );
+    assert!(vue3_tsconfig_reference_paths(&value, dir.path(), &rejected).is_empty());
+    assert_eq!(
+        rejected
+            .external_type_session
+            .stats()
+            .metadata_fanout_entries,
+        3
+    );
+    assert!(rejected.external_type_session.metadata_is_blocked());
+}
+
+#[test]
+fn vue3_types_versions_repeated_targets_consume_fanout_budget() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let package_dir = dir.path().join("package");
+    write_vue3_test_type_package(
+        &package_dir,
+        r#"{
+            "types":"index.d.ts",
+            "typesVersions":{"*":{"index.d.ts":["missing.d.ts","hit.d.ts"]}}
+        }"#,
+    );
+    let hit = package_dir.join("hit.d.ts");
+    std::fs::write(&hit, "export interface VersionedProps {}")
+        .expect("write versioned target");
+    let accepted = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_fanout_entries: 2,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+
+    assert_eq!(
+        resolve_vue3_package_json_type_entry(&package_dir, None, &accepted),
+        Vue3PackageJsonTypeResolution::Resolved(hit)
+    );
+    assert_eq!(
+        accepted
+            .external_type_session
+            .stats()
+            .metadata_fanout_entries,
+        2
+    );
+
+    std::fs::write(
+        package_dir.join("package.json"),
+        r#"{
+            "types":"index.d.ts",
+            "typesVersions":{"*":{"index.d.ts":["missing.d.ts","missing.d.ts","hit.d.ts"]}}
+        }"#,
+    )
+    .expect("write repeated version targets");
+    let rejected = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_fanout_entries: 2,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert_eq!(
+        resolve_vue3_package_json_type_entry(&package_dir, None, &rejected),
+        Vue3PackageJsonTypeResolution::Blocked
+    );
+    assert_eq!(
+        rejected
+            .external_type_session
+            .stats()
+            .metadata_fanout_entries,
+        2
+    );
+    assert!(rejected.external_type_session.metadata_is_blocked());
+}
+
+#[test]
+fn vue3_metadata_fanout_semantic_miss_does_not_block() {
+    let resolver = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_fanout_entries: 1,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    let mappings = vue3_tsconfig_direct_path_mappings(
+        &serde_json::json!({
+            "compilerOptions": { "paths": { "missing": ["missing.ts"] } }
+        }),
+        Path::new("."),
+        Path::new("."),
+        &resolver,
+    );
+
+    assert!(resolve_vue3_tsconfig_path_mappings(&mappings, "missing", &resolver).is_none());
+    assert_eq!(
+        resolver
+            .external_type_session
+            .stats()
+            .metadata_fanout_entries,
+        1
+    );
+    assert!(!resolver.external_type_session.metadata_is_blocked());
+}

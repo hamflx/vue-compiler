@@ -86,6 +86,12 @@ pub(crate) fn resolve_vue3_tsconfig_path_mappings(
     });
     for matched in matches {
         for target in &matched.mapping.targets {
+            if !type_resolver
+                .external_type_session
+                .claim_metadata_fanout_entry()
+            {
+                return None;
+            }
             let candidate = vue3_tsconfig_target_path(
                 &matched.mapping.target_base_dir,
                 &matched.mapping.template_config_dir,
@@ -93,7 +99,7 @@ pub(crate) fn resolve_vue3_tsconfig_path_mappings(
                 &matched.capture,
                 type_resolver,
             )?;
-            let resolved = resolve_vue3_type_import_path(&candidate, type_resolver);
+            let resolved = resolve_vue3_metadata_type_import_path(&candidate, type_resolver);
             if type_resolver.external_type_session.metadata_is_blocked() {
                 return None;
             }
@@ -166,7 +172,10 @@ pub(crate) fn resolve_vue3_bare_type_import(
     let (package_name, subpath) = vue3_package_import_parts(source)?;
     for node_modules in vue3_node_modules_search_paths(filename, type_resolver) {
         let package_dir = node_modules.join(&package_name);
-        if package_dir.is_dir() {
+        let is_package_dir = type_resolver
+            .external_type_session
+            .metadata_path_is_dir(&package_dir)?;
+        if is_package_dir {
             let resolved =
                 resolve_vue3_package_type_entry(&package_dir, subpath.as_deref(), type_resolver);
             if type_resolver.external_type_session.metadata_is_blocked() {
@@ -177,7 +186,10 @@ pub(crate) fn resolve_vue3_bare_type_import(
             }
         }
         let types_package_dir = node_modules.join(vue3_at_types_package_name(&package_name));
-        if types_package_dir.is_dir() {
+        let is_types_package_dir = type_resolver
+            .external_type_session
+            .metadata_path_is_dir(&types_package_dir)?;
+        if is_types_package_dir {
             let resolved = resolve_vue3_package_type_entry(
                 &types_package_dir,
                 subpath.as_deref(),
@@ -353,5 +365,5 @@ pub(crate) fn resolve_vue3_package_type_entry(
     let candidate = subpath
         .map(|subpath| package_dir.join(subpath))
         .unwrap_or_else(|| package_dir.to_path_buf());
-    resolve_vue3_type_import_path(&candidate, type_resolver)
+    resolve_vue3_metadata_type_import_path(&candidate, type_resolver)
 }

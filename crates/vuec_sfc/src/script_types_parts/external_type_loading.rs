@@ -22,6 +22,8 @@ pub(crate) const VUE3_EXTERNAL_TYPE_MAX_RESOLUTION_CACHE_ENTRY_WEIGHT: usize = 6
 pub(crate) const VUE3_EXTERNAL_TYPE_MAX_METADATA_FILES: usize = 16_384;
 pub(crate) const VUE3_EXTERNAL_TYPE_MAX_METADATA_FILE_BYTES: usize = 1024 * 1024;
 pub(crate) const VUE3_EXTERNAL_TYPE_MAX_METADATA_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const VUE3_EXTERNAL_TYPE_MAX_METADATA_FANOUT_ENTRIES: usize = 65_536;
+pub(crate) const VUE3_EXTERNAL_TYPE_MAX_METADATA_RESOLUTION_PATH_PROBES: usize = 131_072;
 pub(crate) const VUE3_EXTERNAL_TYPE_MAX_GENERATED_PATH_BYTES: usize = 64 * 1024;
 pub(crate) const VUE3_EXTERNAL_TYPE_MAX_TSCONFIG_NODES: usize = 512;
 pub(crate) const VUE3_EXTERNAL_TYPE_MAX_TSCONFIG_DEPTH: usize = 64;
@@ -53,6 +55,8 @@ pub(crate) struct Vue3ExternalTypeLoadLimits {
     pub(crate) max_metadata_files: usize,
     pub(crate) max_metadata_file_bytes: usize,
     pub(crate) max_metadata_bytes: usize,
+    pub(crate) max_metadata_fanout_entries: usize,
+    pub(crate) max_metadata_resolution_path_probes: usize,
     pub(crate) max_generated_path_bytes: usize,
     pub(crate) max_tsconfig_nodes: usize,
     pub(crate) max_tsconfig_depth: usize,
@@ -87,6 +91,9 @@ impl Default for Vue3ExternalTypeLoadLimits {
             max_metadata_files: VUE3_EXTERNAL_TYPE_MAX_METADATA_FILES,
             max_metadata_file_bytes: VUE3_EXTERNAL_TYPE_MAX_METADATA_FILE_BYTES,
             max_metadata_bytes: VUE3_EXTERNAL_TYPE_MAX_METADATA_BYTES,
+            max_metadata_fanout_entries: VUE3_EXTERNAL_TYPE_MAX_METADATA_FANOUT_ENTRIES,
+            max_metadata_resolution_path_probes:
+                VUE3_EXTERNAL_TYPE_MAX_METADATA_RESOLUTION_PATH_PROBES,
             max_generated_path_bytes: VUE3_EXTERNAL_TYPE_MAX_GENERATED_PATH_BYTES,
             max_tsconfig_nodes: VUE3_EXTERNAL_TYPE_MAX_TSCONFIG_NODES,
             max_tsconfig_depth: VUE3_EXTERNAL_TYPE_MAX_TSCONFIG_DEPTH,
@@ -121,6 +128,8 @@ pub(crate) struct Vue3ExternalTypeLoadStats {
     pub(crate) metadata_bytes: usize,
     pub(crate) metadata_source_cache_hits: usize,
     pub(crate) metadata_parse_cache_hits: usize,
+    pub(crate) metadata_fanout_entries: usize,
+    pub(crate) metadata_resolution_path_probes: usize,
     pub(crate) tsconfig_nodes: usize,
     pub(crate) tsconfig_discovery_entries: usize,
     pub(crate) tsconfig_discovery_files: usize,

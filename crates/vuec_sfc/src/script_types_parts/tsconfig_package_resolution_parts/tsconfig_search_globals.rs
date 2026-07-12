@@ -103,7 +103,12 @@ pub(crate) fn vue3_tsconfig_search_paths<'a>(
         "tsconfig.json",
         &type_resolver.external_type_session,
     )
-    .filter(|candidate| candidate.is_file())
+    .filter(|candidate| {
+        type_resolver
+            .external_type_session
+            .metadata_path_is_file(candidate)
+            .unwrap_or(false)
+    })
 }
 
 fn vue3_tsconfig_path_mappings_from_config(
@@ -154,7 +159,7 @@ fn vue3_tsconfig_path_mappings_from_config(
             mappings.retain(|mapping| !direct_patterns.contains(mapping.pattern.as_str()));
             mappings.extend(direct);
         }
-        for reference in vue3_tsconfig_reference_paths(&value, config_dir) {
+        for reference in vue3_tsconfig_reference_paths(&value, config_dir, type_resolver) {
             let reference_dir = reference.parent().unwrap_or_else(|| Path::new(""));
             mappings.extend(vue3_tsconfig_path_mappings_from_config(
                 &reference,
@@ -252,7 +257,7 @@ fn vue3_tsconfig_global_type_files_from_config(
             files.push(file);
         }
     }
-    for reference in vue3_tsconfig_reference_paths(&value, config_dir) {
+    for reference in vue3_tsconfig_reference_paths(&value, config_dir, type_resolver) {
         let reference_dir = reference.parent().unwrap_or_else(|| Path::new(""));
         vue3_tsconfig_global_type_files_from_config(
             &reference,

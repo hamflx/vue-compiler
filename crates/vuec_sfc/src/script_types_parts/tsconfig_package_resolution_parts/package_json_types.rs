@@ -510,6 +510,12 @@ pub(crate) fn vue3_package_types_versions_type_path(
     matches.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
     for (_, _, capture, targets) in matches {
         for target in targets {
+            if !type_resolver
+                .external_type_session
+                .claim_metadata_fanout_entry()
+            {
+                return None;
+            }
             let target = type_resolver
                 .external_type_session
                 .replace_metadata_path_pattern(&target, "*", &capture)?;
@@ -613,22 +619,5 @@ pub(crate) fn vue3_package_type_target_path(
         return None;
     }
     let candidate = normalize_path_components(package_dir.join(target));
-    if candidate
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| matches!(extension, "js" | "jsx" | "mjs" | "cjs"))
-    {
-        let extension = candidate
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .unwrap_or_default();
-        let stem = candidate.with_extension("");
-        if let Some(resolved) = vue3_ts_resolution_candidates(&stem, extension)
-            .into_iter()
-            .find(|candidate| candidate.exists())
-        {
-            return Some(resolved);
-        }
-    }
-    resolve_vue3_type_import_path(&candidate, type_resolver)
+    resolve_vue3_metadata_type_import_path(&candidate, type_resolver)
 }
