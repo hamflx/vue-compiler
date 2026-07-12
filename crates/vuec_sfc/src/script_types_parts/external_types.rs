@@ -449,44 +449,34 @@ pub(crate) fn vue3_external_type_context_from_path(
     }
     let cache_key =
         vue3_external_type_context_cache_key(path, &type_resolver.typescript_version);
-    let failure_epoch = match type_resolver
+    let mut owner = match type_resolver
         .external_type_session
         .begin_context_load(&cache_key)
     {
         Vue3ExternalTypeContextLoad::Ready(context) => return Some(context),
+        Vue3ExternalTypeContextLoad::Wait(waiter) => return waiter.wait(),
         Vue3ExternalTypeContextLoad::Failed => return None,
-        Vue3ExternalTypeContextLoad::Start { failure_epoch } => failure_epoch,
+        Vue3ExternalTypeContextLoad::Start(owner) => owner,
     };
     seen.insert(identity.clone());
     let Some(source) = vue3_external_type_source_from_path(path, type_resolver) else {
         seen.remove(&identity);
-        return type_resolver.external_type_session.finish_context_load(
-            cache_key,
-            None,
-            failure_epoch,
-        );
+        return owner.complete(None);
     };
-    if !type_resolver
-        .external_type_session
-        .reserve_context_build_weight(&cache_key, source.source.len())
-    {
+    if !owner.reserve_build_weight(source.source.len()) {
         seen.remove(&identity);
         return None;
     }
     let normalized = normalize_path_string(path);
-    let context = std::sync::Arc::new(vue3_external_type_context_from_source_inner(
+    let context = vue3_external_type_context_from_source_inner(
         &source.source,
         &normalized,
         source.source_type,
         seen,
         type_resolver,
-    ));
+    );
     seen.remove(&identity);
-    type_resolver.external_type_session.finish_context_load(
-        cache_key,
-        Some(context),
-        failure_epoch,
-    )
+    owner.complete(Some(context))
 }
 
 pub(crate) struct Vue3ResolvedImportType {

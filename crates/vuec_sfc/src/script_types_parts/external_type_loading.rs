@@ -116,10 +116,11 @@ pub(crate) struct Vue3ExternalTypeLoadStats {
 
 include!("external_type_loading_parts/single_flight.rs");
 include!("external_type_loading_parts/source_single_flight.rs");
+include!("external_type_loading_parts/context_single_flight.rs");
 
 #[derive(Clone, Debug)]
 enum Vue3ExternalTypeContextCacheEntry {
-    Loading,
+    Loading(std::sync::Arc<Vue3ExternalTypeContextFlight>),
     Ready(std::sync::Arc<Vue27TypeContext>),
 }
 
@@ -155,7 +156,10 @@ struct Vue3ExternalTypeLoadState {
     tsconfig_node_states: BTreeSet<(PathBuf, PathBuf, PathBuf)>,
     active_package_resolutions:
         std::collections::HashMap<std::thread::ThreadId, Vec<PathBuf>>,
+    context_waits:
+        std::collections::HashMap<std::thread::ThreadId, Vue3ExternalTypeContextWaitEdge>,
     next_source_flight_id: u64,
+    next_context_flight_id: u64,
     reserved_import_bytes: usize,
     reserved_global_bytes: usize,
     next_metadata_flight_id: u64,
@@ -180,7 +184,9 @@ impl Vue3ExternalTypeLoadState {
             package_json_cache: BTreeMap::new(),
             tsconfig_node_states: BTreeSet::new(),
             active_package_resolutions: std::collections::HashMap::new(),
+            context_waits: std::collections::HashMap::new(),
             next_source_flight_id: 0,
+            next_context_flight_id: 0,
             reserved_import_bytes: 0,
             reserved_global_bytes: 0,
             next_metadata_flight_id: 0,
@@ -217,12 +223,6 @@ impl std::fmt::Debug for Vue3ExternalTypeLoadSession {
             .field("metadata_blocked", &state.metadata_blocked)
             .finish()
     }
-}
-
-enum Vue3ExternalTypeContextLoad {
-    Ready(std::sync::Arc<Vue27TypeContext>),
-    Failed,
-    Start { failure_epoch: usize },
 }
 
 impl Vue3ExternalTypeLoadSession {
@@ -266,51 +266,6 @@ impl Vue3ExternalTypeLoadSession {
         }
     }
 
-    fn begin_context_load(
-        &self,
-        cache_key: &Vue3ExternalTypeContextCacheKey,
-    ) -> Vue3ExternalTypeContextLoad {
-        let mut state = self.lock();
-        if state.stats.context_lookups >= state.limits.max_context_lookups {
-            state.failure_epoch += 1;
-            return Vue3ExternalTypeContextLoad::Failed;
-        }
-        state.stats.context_lookups += 1;
-        match state.context_cache.get(cache_key).cloned() {
-            Some(Vue3ExternalTypeContextCacheEntry::Ready(context)) => {
-                state.stats.context_cache_hits += 1;
-                return Vue3ExternalTypeContextLoad::Ready(context);
-            }
-            Some(Vue3ExternalTypeContextCacheEntry::Loading) => {
-                state.failure_epoch += 1;
-                return Vue3ExternalTypeContextLoad::Failed;
-            }
-            None => {}
-        }
-        if state.stats.context_builds >= state.limits.max_context_builds {
-            state.failure_epoch += 1;
-            return Vue3ExternalTypeContextLoad::Failed;
-        }
-        let key_weight = cache_key.payload_weight();
-        let remaining = state
-            .limits
-            .max_context_build_weight
-            .saturating_sub(state.stats.context_build_weight);
-        if key_weight > remaining {
-            state.stats.context_build_weight = state.limits.max_context_build_weight;
-            state.failure_epoch += 1;
-            return Vue3ExternalTypeContextLoad::Failed;
-        }
-        state.stats.context_builds += 1;
-        state.stats.context_build_weight += key_weight;
-        let failure_epoch = state.failure_epoch;
-        state.context_cache.insert(
-            cache_key.clone(),
-            Vue3ExternalTypeContextCacheEntry::Loading,
-        );
-        Vue3ExternalTypeContextLoad::Start { failure_epoch }
-    }
-
     fn record_context_failure(&self) {
         self.lock().failure_epoch += 1;
     }
@@ -320,26 +275,6 @@ impl Vue3ExternalTypeLoadSession {
         state.stats.context_lookups < state.limits.max_context_lookups
             && state.stats.context_builds < state.limits.max_context_builds
             && state.stats.context_build_weight < state.limits.max_context_build_weight
-    }
-
-    fn reserve_context_build_weight(
-        &self,
-        cache_key: &Vue3ExternalTypeContextCacheKey,
-        weight: usize,
-    ) -> bool {
-        let mut state = self.lock();
-        let remaining = state
-            .limits
-            .max_context_build_weight
-            .saturating_sub(state.stats.context_build_weight);
-        if weight > remaining {
-            state.stats.context_build_weight = state.limits.max_context_build_weight;
-            state.context_cache.remove(cache_key);
-            state.failure_epoch += 1;
-            return false;
-        }
-        state.stats.context_build_weight += weight;
-        true
     }
 
     fn begin_uncached_context_load(&self, source_weight: usize) -> bool {
@@ -386,56 +321,6 @@ impl Vue3ExternalTypeLoadSession {
         Some(context)
     }
 
-    fn finish_context_load(
-        &self,
-        cache_key: Vue3ExternalTypeContextCacheKey,
-        context: Option<std::sync::Arc<Vue27TypeContext>>,
-        failure_epoch: usize,
-    ) -> Option<std::sync::Arc<Vue27TypeContext>> {
-        let context_weight = context
-            .as_ref()
-            .map(|context| vue3_external_type_context_cache_cost(context.as_ref()));
-        let cache_entry_weight = context_weight
-            .map(|context_weight| cache_key.payload_weight().saturating_add(context_weight));
-        let mut state = self.lock();
-        let remaining = state
-            .limits
-            .max_context_build_weight
-            .saturating_sub(state.stats.context_build_weight);
-        if context_weight.is_some_and(|weight| weight > remaining) {
-            state.stats.context_build_weight = state.limits.max_context_build_weight;
-            state.context_cache.remove(&cache_key);
-            state.failure_epoch += 1;
-            return None;
-        }
-        state.stats.context_build_weight += context_weight.unwrap_or_default();
-        match context {
-            Some(context)
-                if state.failure_epoch == failure_epoch
-                    && cache_entry_weight.is_some_and(|weight| {
-                        weight <= state.limits.max_context_cache_entry_weight
-                            && state.stats.cached_context_weight.saturating_add(weight)
-                                <= state.limits.max_context_cache_weight
-                    }) =>
-            {
-                state.stats.cached_context_weight += cache_entry_weight.unwrap_or_default();
-                state.context_cache.insert(
-                    cache_key,
-                    Vue3ExternalTypeContextCacheEntry::Ready(context.clone()),
-                );
-                Some(context)
-            }
-            Some(context) => {
-                state.context_cache.remove(&cache_key);
-                Some(context)
-            }
-            None => {
-                state.context_cache.remove(&cache_key);
-                state.failure_epoch += 1;
-                None
-            }
-        }
-    }
 }
 
 impl Default for Vue3ExternalTypeLoadSession {
