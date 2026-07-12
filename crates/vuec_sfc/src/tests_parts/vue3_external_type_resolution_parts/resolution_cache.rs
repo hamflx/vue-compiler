@@ -159,6 +159,168 @@
     }
 
     #[test]
+    fn vue3_external_type_context_cache_keys_typescript_version() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let package_dir = dir
+            .path()
+            .join("node_modules")
+            .join("vuec-context-versioned");
+        std::fs::create_dir_all(&package_dir).expect("create versioned package");
+        std::fs::write(
+            package_dir.join("package.json"),
+            r#"{
+                "types": "index.d.ts",
+                "typesVersions": {
+                    "<5.0": { "index.d.ts": ["ts4.d.ts"] },
+                    ">=5.0": { "index.d.ts": ["ts5.d.ts"] }
+                }
+            }"#,
+        )
+        .expect("write versioned manifest");
+        let ts4 = package_dir.join("ts4.d.ts");
+        let ts5 = package_dir.join("ts5.d.ts");
+        std::fs::write(&ts4, "export interface Versioned { legacy: string }")
+            .expect("write TS 4 type");
+        std::fs::write(&ts5, "export interface Versioned { current: string }")
+            .expect("write TS 5 type");
+        let root = dir.path().join("root.ts");
+        std::fs::write(
+            &root,
+            "export { Versioned } from 'vuec-context-versioned'",
+        )
+        .expect("write versioned root");
+
+        let old_resolver = Vue3TypeResolverContext {
+            typescript_version: (4, 9, 0).into(),
+            ..Vue3TypeResolverContext::default()
+        };
+        let current_resolver = Vue3TypeResolverContext {
+            typescript_version: (5, 2, 0).into(),
+            ..old_resolver.clone()
+        };
+
+        let old_context = vue3_external_type_context_from_path(
+            &root,
+            &mut BTreeSet::new(),
+            &old_resolver,
+        )
+        .expect("load TS 4 context");
+        let current_context = vue3_external_type_context_from_path(
+            &root,
+            &mut BTreeSet::new(),
+            &current_resolver,
+        )
+        .expect("load TS 5 context");
+
+        assert_eq!(
+            old_context.type_sources.get("Versioned"),
+            Some(&normalize_path_string(&ts4))
+        );
+        assert_eq!(
+            current_context.type_sources.get("Versioned"),
+            Some(&normalize_path_string(&ts5))
+        );
+        assert!(!std::sync::Arc::ptr_eq(&old_context, &current_context));
+        let stats = current_resolver.external_type_session.stats();
+        assert_eq!(stats.import_files_read, 3);
+        assert_eq!(stats.source_cache_hits, 1);
+    }
+
+    #[test]
+    fn vue3_external_type_context_cache_charges_key_payload() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source_path = dir.path().join("empty.ts");
+        std::fs::write(&source_path, "export {}").expect("write empty type source");
+        let measuring = Vue3TypeResolverContext::default();
+        assert!(vue3_external_type_context_from_path(
+            &source_path,
+            &mut BTreeSet::new(),
+            &measuring,
+        )
+        .is_some());
+        let expected_key_weight = source_path.as_os_str().as_encoded_bytes().len()
+            + measuring.typescript_version.to_string().len();
+        assert_eq!(
+            measuring
+                .external_type_session
+                .stats()
+                .cached_context_weight,
+            expected_key_weight
+        );
+
+        let exact = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+            max_context_cache_weight: expected_key_weight,
+            max_context_cache_entry_weight: expected_key_weight,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert!(vue3_external_type_context_from_path(
+            &source_path,
+            &mut BTreeSet::new(),
+            &exact,
+        )
+        .is_some());
+        assert!(vue3_external_type_context_from_path(
+            &source_path,
+            &mut BTreeSet::new(),
+            &exact,
+        )
+        .is_some());
+        assert_eq!(exact.external_type_session.stats().context_cache_hits, 1);
+
+        let rejected = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+            max_context_cache_weight: expected_key_weight - 1,
+            max_context_cache_entry_weight: expected_key_weight - 1,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert!(vue3_external_type_context_from_path(
+            &source_path,
+            &mut BTreeSet::new(),
+            &rejected,
+        )
+        .is_some());
+        assert!(vue3_external_type_context_from_path(
+            &source_path,
+            &mut BTreeSet::new(),
+            &rejected,
+        )
+        .is_some());
+        let rejected_stats = rejected.external_type_session.stats();
+        assert_eq!(rejected_stats.context_builds, 2);
+        assert_eq!(rejected_stats.context_cache_hits, 0);
+        assert_eq!(rejected_stats.cached_context_weight, 0);
+
+        let version_source = dir.path().join("version-budget.ts");
+        std::fs::write(&version_source, "export interface VersionBudget {}")
+            .expect("write version budget source");
+        let version_prefix = "5.0.0+";
+        let version_text = format!(
+            "{version_prefix}{}",
+            "a".repeat(nodejs_semver::MAX_LENGTH - version_prefix.len())
+        );
+        let version_budget = version_text.len() - 1;
+        let version_limited = Vue3TypeResolverContext {
+            typescript_version: nodejs_semver::Version::parse(&version_text)
+                .expect("parse long TypeScript version"),
+            external_type_session: Vue3ExternalTypeLoadSession::with_limits(
+                Vue3ExternalTypeLoadLimits {
+                    max_context_build_weight: version_budget,
+                    ..Vue3ExternalTypeLoadLimits::default()
+                },
+            ),
+        };
+        assert!(vue3_external_type_context_from_path(
+            &version_source,
+            &mut BTreeSet::new(),
+            &version_limited,
+        )
+        .is_none());
+        let version_stats = version_limited.external_type_session.stats();
+        assert_eq!(version_stats.context_builds, 0);
+        assert_eq!(version_stats.import_files_read, 0);
+        assert_eq!(version_stats.context_build_weight, version_budget);
+    }
+
+    #[test]
     fn vue3_type_import_resolution_cache_honors_entry_and_weight_boundaries() {
         let dir = tempfile::tempdir().expect("temp dir");
         let filename = dir.path().join("Comp.vue").to_string_lossy().to_string();

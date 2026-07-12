@@ -322,6 +322,7 @@ mod source_single_flight_tests {
         let first = path_with_surrogate("type-.ts", 0xd800);
         let uppercase = path_with_surrogate("TYPE-.TS", 0xd800);
         let second = path_with_surrogate("type-.ts", 0xd801);
+        let typescript_version = vue3_package_typescript_baseline_version();
 
         assert_eq!(first.to_string_lossy(), second.to_string_lossy());
         assert_ne!(
@@ -329,8 +330,8 @@ mod source_single_flight_tests {
             vue3_external_type_path_identity(&second)
         );
         assert_ne!(
-            vue3_external_type_context_cache_key(&first),
-            vue3_external_type_context_cache_key(&second)
+            vue3_external_type_context_cache_key(&first, &typescript_version),
+            vue3_external_type_context_cache_key(&second, &typescript_version)
         );
         assert_ne!(
             vue3_external_type_source_cache_key(
@@ -343,8 +344,8 @@ mod source_single_flight_tests {
             )
         );
         assert_eq!(
-            vue3_external_type_context_cache_key(&first),
-            vue3_external_type_context_cache_key(&uppercase)
+            vue3_external_type_context_cache_key(&first, &typescript_version),
+            vue3_external_type_context_cache_key(&uppercase, &typescript_version)
         );
         assert_eq!(
             vue3_external_type_source_cache_key(

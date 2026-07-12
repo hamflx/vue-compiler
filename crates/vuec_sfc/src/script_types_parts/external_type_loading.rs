@@ -126,6 +126,17 @@ enum Vue3ExternalTypeContextCacheEntry {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct Vue3ExternalTypeContextCacheKey {
     path: PathBuf,
+    typescript_version: String,
+}
+
+impl Vue3ExternalTypeContextCacheKey {
+    fn payload_weight(&self) -> usize {
+        self.path
+            .as_os_str()
+            .as_encoded_bytes()
+            .len()
+            .saturating_add(self.typescript_version.len())
+    }
 }
 
 #[derive(Debug)]
@@ -276,13 +287,22 @@ impl Vue3ExternalTypeLoadSession {
             }
             None => {}
         }
-        if state.stats.context_builds >= state.limits.max_context_builds
-            || state.stats.context_build_weight >= state.limits.max_context_build_weight
-        {
+        if state.stats.context_builds >= state.limits.max_context_builds {
+            state.failure_epoch += 1;
+            return Vue3ExternalTypeContextLoad::Failed;
+        }
+        let key_weight = cache_key.payload_weight();
+        let remaining = state
+            .limits
+            .max_context_build_weight
+            .saturating_sub(state.stats.context_build_weight);
+        if key_weight > remaining {
+            state.stats.context_build_weight = state.limits.max_context_build_weight;
             state.failure_epoch += 1;
             return Vue3ExternalTypeContextLoad::Failed;
         }
         state.stats.context_builds += 1;
+        state.stats.context_build_weight += key_weight;
         let failure_epoch = state.failure_epoch;
         state.context_cache.insert(
             cache_key.clone(),
@@ -375,6 +395,8 @@ impl Vue3ExternalTypeLoadSession {
         let context_weight = context
             .as_ref()
             .map(|context| vue3_external_type_context_cache_cost(context.as_ref()));
+        let cache_entry_weight = context_weight
+            .map(|context_weight| cache_key.payload_weight().saturating_add(context_weight));
         let mut state = self.lock();
         let remaining = state
             .limits
@@ -390,13 +412,13 @@ impl Vue3ExternalTypeLoadSession {
         match context {
             Some(context)
                 if state.failure_epoch == failure_epoch
-                    && context_weight.is_some_and(|weight| {
+                    && cache_entry_weight.is_some_and(|weight| {
                         weight <= state.limits.max_context_cache_entry_weight
                             && state.stats.cached_context_weight.saturating_add(weight)
                                 <= state.limits.max_context_cache_weight
                     }) =>
             {
-                state.stats.cached_context_weight += context_weight.unwrap_or_default();
+                state.stats.cached_context_weight += cache_entry_weight.unwrap_or_default();
                 state.context_cache.insert(
                     cache_key,
                     Vue3ExternalTypeContextCacheEntry::Ready(context.clone()),
@@ -461,9 +483,13 @@ fn vue3_external_type_path_key(path: PathBuf) -> PathBuf {
     }
 }
 
-fn vue3_external_type_context_cache_key(path: &Path) -> Vue3ExternalTypeContextCacheKey {
+fn vue3_external_type_context_cache_key(
+    path: &Path,
+    typescript_version: &nodejs_semver::Version,
+) -> Vue3ExternalTypeContextCacheKey {
     Vue3ExternalTypeContextCacheKey {
         path: vue3_external_type_lexical_path(path),
+        typescript_version: typescript_version.to_string(),
     }
 }
 

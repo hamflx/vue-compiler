@@ -181,7 +181,10 @@ pub(crate) fn vue3_global_type_context(
         .iter()
         .map(|file| normalize_path_components(PathBuf::from(file)));
     for path in explicit_paths.chain(vue3_tsconfig_global_type_files(filename, type_resolver)) {
-        if !seen.insert(vue3_external_type_context_cache_key(&path)) {
+        if !seen.insert(vue3_external_type_context_cache_key(
+            &path,
+            &type_resolver.typescript_version,
+        )) {
             continue;
         }
         let Some(global_context) =

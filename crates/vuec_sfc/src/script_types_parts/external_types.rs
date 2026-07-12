@@ -447,7 +447,8 @@ pub(crate) fn vue3_external_type_context_from_path(
             .record_context_failure();
         return None;
     }
-    let cache_key = vue3_external_type_context_cache_key(path);
+    let cache_key =
+        vue3_external_type_context_cache_key(path, &type_resolver.typescript_version);
     let failure_epoch = match type_resolver
         .external_type_session
         .begin_context_load(&cache_key)
