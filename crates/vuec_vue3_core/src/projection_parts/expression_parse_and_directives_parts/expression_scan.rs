@@ -93,11 +93,39 @@ pub(crate) fn process_expression_assignment_operator(raw: &str, start: usize) ->
 }
 
 pub(crate) fn process_expression_assignment_rhs_end(raw: &str, rhs_start: usize) -> usize {
+    process_expression_assignment_rhs_end_ignoring_ranges(raw, rhs_start, &[])
+}
+
+pub(crate) fn process_expression_assignment_rhs_end_ignoring_ranges(
+    raw: &str,
+    rhs_start: usize,
+    ignored_ranges: &[(usize, usize)],
+) -> usize {
     let mut quote = None::<char>;
     let mut escaped = false;
     let mut depth = 0usize;
-    for (offset, ch) in raw[rhs_start..].char_indices() {
+    let mut ignored_range_index = ignored_ranges.partition_point(|(_, end)| *end <= rhs_start);
+    let mut chars = raw[rhs_start..].char_indices().peekable();
+    while let Some((offset, ch)) = chars.next() {
         let absolute = rhs_start + offset;
+        while ignored_ranges
+            .get(ignored_range_index)
+            .is_some_and(|(_, end)| *end <= absolute)
+        {
+            ignored_range_index += 1;
+        }
+        if let Some(&(start, end)) = ignored_ranges.get(ignored_range_index) {
+            if start <= absolute && absolute < end {
+                while chars
+                    .peek()
+                    .is_some_and(|(offset, _)| rhs_start + *offset < end)
+                {
+                    chars.next();
+                }
+                ignored_range_index += 1;
+                continue;
+            }
+        }
         if let Some(active_quote) = quote {
             if escaped {
                 escaped = false;

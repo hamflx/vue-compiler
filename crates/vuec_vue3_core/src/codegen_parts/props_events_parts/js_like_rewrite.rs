@@ -23,6 +23,24 @@ pub(crate) fn rewrite_js_like_expression_into(
     root_locals: Vec<String>,
     output: &mut String,
 ) {
+    let regular_expression_ranges = js_like_regular_expression_ranges(expression, options);
+    rewrite_js_like_expression_into_with_ranges(
+        expression,
+        options,
+        root_locals,
+        output,
+        &regular_expression_ranges,
+    );
+}
+
+fn rewrite_js_like_expression_into_with_ranges(
+    expression: &str,
+    options: &Vue3CompilerOptions,
+    root_locals: Vec<String>,
+    output: &mut String,
+    regular_expression_ranges: &[(usize, usize)],
+) {
+    let mut regular_expression_index = 0usize;
     let mut scopes = vec![Scope {
         locals: root_locals,
     }];
@@ -43,6 +61,12 @@ pub(crate) fn rewrite_js_like_expression_into(
     while index < chars.len() {
         let byte = chars[index].0;
         let ch = chars[index].1;
+        while regular_expression_ranges
+            .get(regular_expression_index)
+            .is_some_and(|(_, end)| *end <= byte)
+        {
+            regular_expression_index += 1;
+        }
         if ch == '/' {
             if let Some(tail) = expression.get(byte..) {
                 if tail.starts_with("//") {
@@ -75,10 +99,28 @@ pub(crate) fn rewrite_js_like_expression_into(
                     continue;
                 }
             }
+            if let Some(&(start, end)) = regular_expression_ranges.get(regular_expression_index) {
+                if start == byte {
+                    output.push_str(&expression[start..end]);
+                    regular_expression_index += 1;
+                    while index < chars.len() && chars[index].0 < end {
+                        index += 1;
+                    }
+                    previous = TokenKind::Other;
+                    continue;
+                }
+            }
         }
         if ch == '`' {
-            index =
-                rewrite_template_literal_into(expression, &chars, index, options, &scopes, output);
+            index = rewrite_template_literal_into(
+                expression,
+                &chars,
+                index,
+                options,
+                &scopes,
+                output,
+                regular_expression_ranges,
+            );
             previous = TokenKind::Other;
             continue;
         }
@@ -194,6 +236,7 @@ pub(crate) fn rewrite_js_like_expression_into(
                 options,
                 &scopes,
                 arrow_param,
+                regular_expression_ranges,
             ) {
                 output.push_str(&replacement);
                 index = chars
@@ -330,6 +373,82 @@ pub(crate) fn rewrite_js_like_expression_into(
     }
 }
 
+#[derive(Default)]
+struct JsLikeRegExpCollector {
+    ranges: Vec<(usize, usize)>,
+}
+
+impl<'a> oxc_ast_visit::Visit<'a> for JsLikeRegExpCollector {
+    fn visit_reg_exp_literal(&mut self, literal: &oxc_ast::ast::RegExpLiteral<'a>) {
+        self.ranges
+            .push((literal.span.start as usize, literal.span.end as usize));
+    }
+}
+
+pub(crate) fn js_like_regular_expression_ranges(
+    expression: &str,
+    options: &Vue3CompilerOptions,
+) -> Vec<(usize, usize)> {
+    if !expression.as_bytes().contains(&b'/') {
+        return Vec::new();
+    }
+
+    let store = JsAstStore::new();
+    let source_type = expression_source_type(options);
+    if let Ok(parsed) = store.parse_expression(expression, source_type) {
+        let mut collector = JsLikeRegExpCollector::default();
+        oxc_ast_visit::Visit::visit_expression(&mut collector, &parsed);
+        collector.ranges.sort_unstable();
+        return collector.ranges;
+    }
+
+    const FUNCTION_BODY_PREFIX: &str = "async function __vuec__($event) {\n";
+    let wrapped = format!("{FUNCTION_BODY_PREFIX}{expression}\n}}\n");
+    let parsed = store.parse_program(&wrapped, source_type);
+    if parsed.panicked || !parsed.errors.is_empty() {
+        return Vec::new();
+    }
+
+    let source_start = FUNCTION_BODY_PREFIX.len();
+    let source_end = source_start + expression.len();
+    let mut collector = JsLikeRegExpCollector::default();
+    oxc_ast_visit::Visit::visit_program(&mut collector, &parsed.program);
+    let mut ranges = collector
+        .ranges
+        .into_iter()
+        .filter_map(|(start, end)| {
+            (start >= source_start && end <= source_end)
+                .then_some((start - source_start, end - source_start))
+        })
+        .collect::<Vec<_>>();
+    ranges.sort_unstable();
+    ranges
+}
+
+fn js_like_regular_expression_ranges_in(
+    ranges: &[(usize, usize)],
+    source_start: usize,
+    source_end: usize,
+) -> Vec<(usize, usize)> {
+    ranges
+        .iter()
+        .filter_map(|&(start, end)| {
+            (start >= source_start && end <= source_end)
+                .then_some((start - source_start, end - source_start))
+        })
+        .collect()
+}
+
+fn js_like_regular_expression_end_at(
+    ranges: &[(usize, usize)],
+    start: usize,
+) -> Option<usize> {
+    ranges
+        .binary_search_by_key(&start, |&(range_start, _)| range_start)
+        .ok()
+        .map(|index| ranges[index].1)
+}
+
 pub(crate) fn rewrite_template_literal_into(
     expression: &str,
     chars: &[(usize, char)],
@@ -337,6 +456,7 @@ pub(crate) fn rewrite_template_literal_into(
     options: &Vue3CompilerOptions,
     scopes: &[Scope],
     output: &mut String,
+    regular_expression_ranges: &[(usize, usize)],
 ) -> usize {
     output.push('`');
     index += 1;
@@ -353,7 +473,12 @@ pub(crate) fn rewrite_template_literal_into(
             break;
         }
         if ch == '$' && index < chars.len() && chars[index].1 == '{' {
-            if let Some(close) = find_template_literal_expression_close(expression, chars, index) {
+            if let Some(close) = find_template_literal_expression_close(
+                expression,
+                chars,
+                index,
+                regular_expression_ranges,
+            ) {
                 output.push('{');
                 let inner_start = chars[index].0 + '{'.len_utf8();
                 let inner_end = chars[close].0;
@@ -362,7 +487,18 @@ pub(crate) fn rewrite_template_literal_into(
                         .iter()
                         .flat_map(|scope| scope.locals.iter().cloned())
                         .collect::<Vec<_>>();
-                    rewrite_js_like_expression_into(inner, options, locals, output);
+                    let inner_ranges = js_like_regular_expression_ranges_in(
+                        regular_expression_ranges,
+                        inner_start,
+                        inner_end,
+                    );
+                    rewrite_js_like_expression_into_with_ranges(
+                        inner,
+                        options,
+                        locals,
+                        output,
+                        &inner_ranges,
+                    );
                 }
                 output.push('}');
                 index = close + 1;
@@ -376,6 +512,7 @@ pub(crate) fn find_template_literal_expression_close(
     expression: &str,
     chars: &[(usize, char)],
     mut index: usize,
+    regular_expression_ranges: &[(usize, usize)],
 ) -> Option<usize> {
     let mut depth = 0usize;
     while index < chars.len() {
@@ -386,8 +523,23 @@ pub(crate) fn find_template_literal_expression_close(
             continue;
         }
         if ch == '`' {
-            index = skip_template_literal_chars(expression, chars, index);
+            index = skip_template_literal_chars(
+                expression,
+                chars,
+                index,
+                regular_expression_ranges,
+            );
             continue;
+        }
+        if ch == '/' {
+            if let Some(end) =
+                js_like_regular_expression_end_at(regular_expression_ranges, byte)
+            {
+                while index < chars.len() && chars[index].0 < end {
+                    index += 1;
+                }
+                continue;
+            }
         }
         if ch == '/'
             && expression
@@ -450,6 +602,7 @@ pub(crate) fn skip_template_literal_chars(
     expression: &str,
     chars: &[(usize, char)],
     mut index: usize,
+    regular_expression_ranges: &[(usize, usize)],
 ) -> usize {
     index += 1;
     while index < chars.len() {
@@ -463,7 +616,12 @@ pub(crate) fn skip_template_literal_chars(
             break;
         }
         if ch == '$' && index < chars.len() && chars[index].1 == '{' {
-            if let Some(close) = find_template_literal_expression_close(expression, chars, index) {
+            if let Some(close) = find_template_literal_expression_close(
+                expression,
+                chars,
+                index,
+                regular_expression_ranges,
+            ) {
                 index = close + 1;
             }
         }
@@ -479,6 +637,7 @@ pub(crate) fn rewrite_js_like_assignment(
     options: &Vue3CompilerOptions,
     scopes: &[Scope],
     arrow_local: bool,
+    regular_expression_ranges: &[(usize, usize)],
 ) -> Option<(String, usize)> {
     if !options.inline || is_local(scopes, ident) || arrow_local {
         return None;
@@ -487,13 +646,31 @@ pub(crate) fn rewrite_js_like_assignment(
     let assignment = process_expression_assignment_rhs(expression, start, end)?;
     let operator_start = skip_ws_forward(expression, end);
     let rhs_start = skip_ws_forward(expression, operator_start + assignment.operator.len());
-    let rhs_end = process_expression_assignment_rhs_end(expression, rhs_start);
-    let rhs = expression.get(rhs_start..rhs_end)?.trim();
+    let rhs_end = process_expression_assignment_rhs_end_ignoring_ranges(
+        expression,
+        rhs_start,
+        regular_expression_ranges,
+    );
+    let rhs_source = expression.get(rhs_start..rhs_end)?;
+    let rhs = rhs_source.trim();
+    let rhs_source_start = rhs_start + rhs_source.len().saturating_sub(rhs_source.trim_start().len());
+    let rhs_ranges = js_like_regular_expression_ranges_in(
+        regular_expression_ranges,
+        rhs_source_start,
+        rhs_source_start + rhs.len(),
+    );
     let locals = scopes
         .iter()
         .flat_map(|scope| scope.locals.iter().cloned())
         .collect::<Vec<_>>();
-    let rewritten_rhs = rewrite_js_like_expression_with_locals(rhs, options, &locals);
+    let mut rewritten_rhs = String::new();
+    rewrite_js_like_expression_into_with_ranges(
+        rhs,
+        options,
+        locals,
+        &mut rewritten_rhs,
+        &rhs_ranges,
+    );
     let replacement = match binding {
         "setup-ref" | "setup-maybe-ref" => {
             format!(

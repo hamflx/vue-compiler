@@ -960,6 +960,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxc_ast_visit"
+version = "0.132.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c56f75c8a3204594b0f2cf3334378de270b7cec98ed336c77f83ae39db5c088b"
+dependencies = [
+ "oxc_allocator",
+ "oxc_ast",
+ "oxc_span",
+ "oxc_syntax",
+]
+
+[[package]]
 name = "oxc_data_structures"
 version = "0.132.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1832,6 +1844,7 @@ name = "vuec_vue3_core"
 version = "0.1.0"
 dependencies = [
  "oxc_ast",
+ "oxc_ast_visit",
  "oxc_span",
  "serde",
  "serde_json",

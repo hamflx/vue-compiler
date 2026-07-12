@@ -321,6 +321,92 @@
     }
 
     #[test]
+    fn js_like_rewrite_preserves_regular_expression_literals() {
+        let options = Vue3CompilerOptions {
+            prefix_identifiers: true,
+            mode: "module".into(),
+            ..Vue3CompilerOptions::default()
+        };
+
+        assert_eq!(
+            rewrite_js_like_expression(
+                r#"/foo\/[a-z/\\]+(?<capture>bar)/giu.test(value)"#,
+                &options,
+            ),
+            r#"/foo\/[a-z/\\]+(?<capture>bar)/giu.test(_ctx.value)"#,
+        );
+        assert_eq!(
+            rewrite_js_like_expression(
+                r#"if (/foo/.test(value)) { const local = value; run(local) }"#,
+                &options,
+            ),
+            r#"if (/foo/.test(_ctx.value)) { const local = _ctx.value; _ctx.run(local) }"#,
+        );
+        assert_eq!(
+            rewrite_js_like_expression(r#"return /foo/.test(value)"#, &options),
+            r#"return /foo/.test(_ctx.value)"#,
+        );
+        assert_eq!(
+            rewrite_js_like_expression(r#"`match: ${/[}]/.test(value)}`"#, &options),
+            r#"`match: ${/[}]/.test(_ctx.value)}`"#,
+        );
+
+        let result = base_compile(
+            TemplateSource {
+                filename: "regexp.vue".into(),
+                source: r#"<div>{{ /foo/.test(value) }}</div>"#.into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            options,
+        );
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert!(result
+            .code
+            .contains("_toDisplayString(/foo/.test(_ctx.value))"));
+
+    }
+
+    #[test]
+    fn js_like_rewrite_uses_parser_to_distinguish_division_from_regex() {
+        let options = Vue3CompilerOptions {
+            prefix_identifiers: true,
+            mode: "module".into(),
+            ..Vue3CompilerOptions::default()
+        };
+
+        assert_eq!(
+            rewrite_js_like_expression(
+                "total / divisor + /foo/.test(value) / scale",
+                &options,
+            ),
+            "_ctx.total / _ctx.divisor + /foo/.test(_ctx.value) / _ctx.scale",
+        );
+    }
+
+    #[test]
+    fn js_like_rewrite_ignores_regex_punctuation_when_rewriting_assignments() {
+        let mut options = Vue3CompilerOptions {
+            prefix_identifiers: true,
+            mode: "module".into(),
+            inline: true,
+            ..Vue3CompilerOptions::default()
+        };
+        options
+            .binding_metadata
+            .insert("count".into(), "setup-ref".into());
+
+        assert_eq!(
+            rewrite_js_like_expression(r#"count = /foo[,;}]/.test(value)"#, &options),
+            r#"count.value = /foo[,;}]/.test(_ctx.value)"#,
+        );
+        assert_eq!(
+            rewrite_js_like_expression("count /= divisor", &options),
+            "count.value /= _ctx.divisor",
+        );
+    }
+
+    #[test]
     fn base_compile_accepts_v_for_of_expression_with_v_memo() {
         let result = base_compile(
             TemplateSource {

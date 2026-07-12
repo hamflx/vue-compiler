@@ -55,6 +55,7 @@ grass = { version = "0.13.4", default-features = false }
 tempfile = "3"
 oxc_allocator = "0.132.0"
 oxc_ast = "0.132.0"
+oxc_ast_visit = "0.132.0"
 oxc_diagnostics = "0.132.0"
 oxc_parser = "0.132.0"
 oxc_sourcemap = "6.1.1"
