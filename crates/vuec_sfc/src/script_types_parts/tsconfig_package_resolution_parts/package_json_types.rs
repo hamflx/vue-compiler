@@ -228,7 +228,7 @@ pub(crate) fn resolve_vue3_package_json_type_entry(
             Vue3PackageJsonTypeResolution::NoPackageJson
         };
     };
-    if let Some(exports) = &manifest.exports {
+    if let Some(exports) = manifest.exports.as_ref().filter(|exports| !exports.is_null()) {
         if let Some(target) =
             vue3_package_exports_type_target(exports, subpath, type_resolver)
         {
@@ -241,9 +241,7 @@ pub(crate) fn resolve_vue3_package_json_type_entry(
             }
             return Vue3PackageJsonTypeResolution::Blocked;
         }
-        if subpath.is_some() {
-            return Vue3PackageJsonTypeResolution::Blocked;
-        }
+        return Vue3PackageJsonTypeResolution::Blocked;
     }
     let root_type_target = if subpath.is_none() {
         manifest

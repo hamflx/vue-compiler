@@ -388,6 +388,48 @@ fn vue3_package_metadata_targets_cannot_escape_package_root() {
 }
 
 #[test]
+fn vue3_non_null_package_exports_block_legacy_root_fallback() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    for (name, manifest) in [
+        (
+            "excluded-root",
+            r#"{"types":"index.d.ts","exports":{".":null}}"#,
+        ),
+        ("empty-exports", r#"{"types":"index.d.ts","exports":{}}"#),
+        (
+            "subpath-only",
+            r#"{"types":"index.d.ts","exports":{"./feature":"./feature.d.ts"}}"#,
+        ),
+    ] {
+        let package_dir = dir.path().join(name);
+        write_vue3_test_type_package(&package_dir, manifest);
+        assert_eq!(
+            resolve_vue3_package_json_type_entry(
+                &package_dir,
+                None,
+                &Vue3TypeResolverContext::default(),
+            ),
+            Vue3PackageJsonTypeResolution::Blocked,
+            "{name}"
+        );
+    }
+
+    let null_exports = dir.path().join("null-exports");
+    write_vue3_test_type_package(
+        &null_exports,
+        r#"{"types":"index.d.ts","exports":null}"#,
+    );
+    assert_eq!(
+        resolve_vue3_package_json_type_entry(
+            &null_exports,
+            None,
+            &Vue3TypeResolverContext::default(),
+        ),
+        Vue3PackageJsonTypeResolution::Resolved(null_exports.join("index.d.ts"))
+    );
+}
+
+#[test]
 fn vue3_bare_package_subpaths_cannot_escape_package_root() {
     assert_eq!(
         vue3_package_import_parts("package/feature/item"),
