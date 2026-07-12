@@ -11,11 +11,11 @@ pub struct Node<K> {
     pub kind: K,
     /// Source, generated, or missing span metadata.
     pub span: NodeSpan,
-    /// Parent node id, absent only for the document root.
+    /// Parent node id, absent for the document root and detached nodes.
     pub parent: Option<NodeId>,
     /// Child node ids in source/tree order.
     pub children: Vec<NodeId>,
-    /// Position inside the parent's child list.
+    /// Position inside the parent's child list, or zero when detached.
     pub index_in_parent: u32,
 }
 
@@ -144,17 +144,17 @@ impl<K> AstDocument<K> {
 
     /// Attaches an existing node as the last child of `parent`.
     pub fn attach_child(&mut self, parent: NodeId, child: NodeId) {
-        if parent == child {
+        if parent == child || child == self.root {
             return;
         }
         if self.node(parent).is_none() || self.node(child).is_none() {
             return;
         }
+        if self.would_create_cycle(parent, child) {
+            return;
+        }
         if let Some(old_parent) = self.node(child).and_then(|node| node.parent) {
-            if let Some(old_parent_node) = self.node_mut(old_parent) {
-                old_parent_node.children.retain(|id| *id != child);
-            }
-            self.refresh_child_indexes(old_parent);
+            self.remove_child(old_parent, child);
         }
         let index_in_parent = self
             .node(parent)
@@ -168,30 +168,67 @@ impl<K> AstDocument<K> {
         }
     }
 
+    /// Removes every reference to `child` from `parent`.
+    ///
+    /// The removed child becomes detached when its parent metadata points to
+    /// `parent`, and the remaining sibling indexes are refreshed. Returns
+    /// whether the parent contained at least one matching child reference.
+    pub fn remove_child(&mut self, parent: NodeId, child: NodeId) -> bool {
+        let Some(parent_node) = self.node_mut(parent) else {
+            return false;
+        };
+        let original_len = parent_node.children.len();
+        parent_node.children.retain(|id| *id != child);
+        if parent_node.children.len() == original_len {
+            return false;
+        }
+
+        if let Some(child_node) = self.node_mut(child) {
+            if child_node.parent == Some(parent) {
+                child_node.parent = None;
+                child_node.index_in_parent = 0;
+            }
+        }
+        self.refresh_child_indexes(parent);
+        true
+    }
+
     /// Replaces the full child list of `parent`.
+    ///
+    /// Invalid, duplicate, root, or cycle-forming child ids leave the document
+    /// unchanged.
     pub fn replace_children(&mut self, parent: NodeId, children: Vec<NodeId>) {
         if self.node(parent).is_none() {
             return;
         }
+        let mut unique_children = BTreeSet::new();
+        if children.iter().copied().any(|child| {
+            child == self.root
+                || self.node(child).is_none()
+                || !unique_children.insert(child)
+                || self.would_create_cycle(parent, child)
+        }) {
+            return;
+        }
+
         let old_children = self
             .node(parent)
             .map(|node| node.children.clone())
             .unwrap_or_default();
         for old_child in old_children {
-            if !children.contains(&old_child) {
+            if !unique_children.contains(&old_child) {
                 if let Some(child_node) = self.node_mut(old_child) {
-                    child_node.parent = None;
-                    child_node.index_in_parent = 0;
+                    if child_node.parent == Some(parent) {
+                        child_node.parent = None;
+                        child_node.index_in_parent = 0;
+                    }
                 }
             }
         }
         for child in &children {
             if let Some(old_parent) = self.node(*child).and_then(|node| node.parent) {
                 if old_parent != parent {
-                    if let Some(old_parent_node) = self.node_mut(old_parent) {
-                        old_parent_node.children.retain(|id| id != child);
-                    }
-                    self.refresh_child_indexes(old_parent);
+                    self.remove_child(old_parent, *child);
                 }
             }
         }
@@ -208,6 +245,9 @@ impl<K> AstDocument<K> {
     pub fn set_root(&mut self, id: NodeId) -> bool {
         if self.node(id).is_none() {
             return false;
+        }
+        if let Some(parent) = self.node(id).and_then(|node| node.parent) {
+            self.remove_child(parent, id);
         }
         self.root = id;
         if let Some(root_node) = self.node_mut(id) {
@@ -257,7 +297,10 @@ impl<K> AstDocument<K> {
         self.node_mut(self.root)
     }
 
-    /// Validates parent, child, root, and node-id invariants.
+    /// Validates bidirectional parent/child, root, and node-id invariants.
+    ///
+    /// Detached nodes and detached subtrees are valid arena contents, but their
+    /// internal relationships must remain consistent.
     pub fn validate_tree(&self) -> Result<(), AstInvariantError> {
         let root_index = self.root.0 as usize;
         if root_index >= self.nodes.len() {
@@ -274,8 +317,21 @@ impl<K> AstDocument<K> {
                 if node.parent.is_some() || node.index_in_parent != 0 {
                     return Err(AstInvariantError::InvalidRootMetadata { root: self.root });
                 }
-            } else if node.parent.is_none() {
-                return Err(AstInvariantError::DetachedNode { node: node.id });
+            } else if node.parent.is_none() && node.index_in_parent != 0 {
+                return Err(AstInvariantError::InvalidDetachedMetadata {
+                    node: node.id,
+                    index_in_parent: node.index_in_parent,
+                });
+            }
+
+            let mut children = BTreeSet::new();
+            for child_id in node.children.iter().copied() {
+                if !children.insert(child_id) {
+                    return Err(AstInvariantError::DuplicateChild {
+                        parent: node.id,
+                        child: child_id,
+                    });
+                }
             }
             for (child_index, child_id) in node.children.iter().copied().enumerate() {
                 let child = self.node(child_id).ok_or(AstInvariantError::MissingChild {
@@ -291,7 +347,77 @@ impl<K> AstDocument<K> {
                 }
             }
         }
+
+        for node in &self.nodes {
+            let Some(parent_id) = node.parent else {
+                continue;
+            };
+            let parent = self
+                .node(parent_id)
+                .ok_or(AstInvariantError::MissingParent {
+                    node: node.id,
+                    parent: parent_id,
+                })?;
+            if parent.children.get(node.index_in_parent as usize) != Some(&node.id) {
+                return Err(AstInvariantError::InvalidParentMetadata {
+                    node: node.id,
+                    parent: parent_id,
+                    index_in_parent: node.index_in_parent,
+                });
+            }
+        }
+
+        self.validate_parent_cycles()
+    }
+
+    fn validate_parent_cycles(&self) -> Result<(), AstInvariantError> {
+        const UNVISITED: u8 = 0;
+        const VISITING: u8 = 1;
+        const COMPLETE: u8 = 2;
+
+        let mut states = vec![UNVISITED; self.nodes.len()];
+        for start in 0..self.nodes.len() {
+            let mut current = Some(start);
+            while let Some(index) = current {
+                match states[index] {
+                    UNVISITED => {
+                        states[index] = VISITING;
+                        current = self.nodes[index].parent.map(|parent| parent.0 as usize);
+                    }
+                    VISITING => {
+                        return Err(AstInvariantError::Cycle {
+                            node: self.nodes[index].id,
+                        });
+                    }
+                    COMPLETE => break,
+                    _ => unreachable!("parent visit state is internal"),
+                }
+            }
+
+            let mut current = Some(start);
+            while let Some(index) = current {
+                if states[index] != VISITING {
+                    break;
+                }
+                states[index] = COMPLETE;
+                current = self.nodes[index].parent.map(|parent| parent.0 as usize);
+            }
+        }
         Ok(())
+    }
+
+    fn would_create_cycle(&self, parent: NodeId, child: NodeId) -> bool {
+        let mut ancestor = Some(parent);
+        for _ in 0..self.nodes.len() {
+            let Some(id) = ancestor else {
+                return false;
+            };
+            if id == child {
+                return true;
+            }
+            ancestor = self.node(id).and_then(|node| node.parent);
+        }
+        ancestor.is_some()
     }
 
     fn refresh_child_indexes(&mut self, parent: NodeId) {

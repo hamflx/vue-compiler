@@ -106,6 +106,135 @@ mod tests {
     }
 
     #[test]
+    fn attach_child_rejects_root_reparenting_and_ancestor_cycles() {
+        let mut doc = Vue3Ast::new(Vue3NodeKind::root(), None);
+        let parent = doc.push_child(
+            doc.root,
+            Vue3NodeKind::element("section", Vec::new(), false),
+            None,
+        );
+        let child = doc.push_child(parent, Vue3NodeKind::text("child"), None);
+
+        doc.attach_child(child, parent);
+        doc.attach_child(child, doc.root);
+
+        assert_eq!(doc.node(parent).unwrap().parent, Some(doc.root));
+        assert_eq!(doc.node(child).unwrap().parent, Some(parent));
+        assert_eq!(doc.node(doc.root).unwrap().parent, None);
+        assert_eq!(doc.validate_tree(), Ok(()));
+    }
+
+    #[test]
+    fn replace_children_detaches_removed_nodes_and_keeps_tree_valid() {
+        let mut doc = Vue3Ast::new(Vue3NodeKind::root(), None);
+        let first = doc.push_child(doc.root, Vue3NodeKind::text("a"), None);
+        let retained = doc.push_child(doc.root, Vue3NodeKind::text("b"), None);
+
+        doc.replace_children(doc.root, vec![retained]);
+
+        assert_eq!(doc.node(first).unwrap().parent, None);
+        assert_eq!(doc.node(first).unwrap().index_in_parent, 0);
+        assert_eq!(doc.node(retained).unwrap().parent, Some(doc.root));
+        assert_eq!(doc.node(retained).unwrap().index_in_parent, 0);
+        assert_eq!(doc.validate_tree(), Ok(()));
+    }
+
+    #[test]
+    fn replace_children_rejects_invalid_input_atomically() {
+        let mut doc = Vue3Ast::new(Vue3NodeKind::root(), None);
+        let moved = doc.push_child(doc.root, Vue3NodeKind::text("moved"), None);
+        let new_parent = doc.push(Vue3NodeKind::element("section", Vec::new(), false), None);
+        let before = doc.clone();
+
+        doc.replace_children(new_parent, vec![moved, NodeId(u32::MAX)]);
+
+        assert_eq!(doc, before);
+        assert_eq!(doc.validate_tree(), Ok(()));
+    }
+
+    #[test]
+    fn validate_tree_rejects_parent_that_no_longer_lists_child() {
+        let mut doc = Vue3Ast::new(Vue3NodeKind::root(), None);
+        let child = doc.push_child(doc.root, Vue3NodeKind::text("orphaned"), None);
+        doc.node_mut(doc.root).unwrap().children.clear();
+
+        assert_eq!(doc.node(child).unwrap().parent, Some(doc.root));
+        assert_eq!(
+            doc.validate_tree(),
+            Err(AstInvariantError::InvalidParentMetadata {
+                node: child,
+                parent: doc.root,
+                index_in_parent: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn remove_child_detaches_node_and_refreshes_sibling_indexes() {
+        let mut doc = Vue3Ast::new(Vue3NodeKind::root(), None);
+        let removed = doc.push_child(doc.root, Vue3NodeKind::text("a"), None);
+        let retained = doc.push_child(doc.root, Vue3NodeKind::text("b"), None);
+
+        assert!(doc.remove_child(doc.root, removed));
+
+        assert_eq!(doc.node(removed).unwrap().parent, None);
+        assert_eq!(doc.node(retained).unwrap().index_in_parent, 0);
+        assert!(!doc.remove_child(doc.root, removed));
+        assert_eq!(doc.validate_tree(), Ok(()));
+    }
+
+    #[test]
+    fn validate_tree_rejects_duplicate_child_references() {
+        let mut doc = Vue3Ast::new(Vue3NodeKind::root(), None);
+        let child = doc.push_child(doc.root, Vue3NodeKind::text("duplicate"), None);
+        doc.node_mut(doc.root).unwrap().children.push(child);
+
+        assert_eq!(
+            doc.validate_tree(),
+            Err(AstInvariantError::DuplicateChild {
+                parent: doc.root,
+                child,
+            })
+        );
+    }
+
+    #[test]
+    fn validate_tree_rejects_detached_parent_cycles() {
+        let mut doc = Vue3Ast::new(Vue3NodeKind::root(), None);
+        let first = doc.push(Vue3NodeKind::text("first"), None);
+        let second = doc.push(Vue3NodeKind::text("second"), None);
+        {
+            let first_node = doc.node_mut(first).unwrap();
+            first_node.parent = Some(second);
+            first_node.children.push(second);
+        }
+        {
+            let second_node = doc.node_mut(second).unwrap();
+            second_node.parent = Some(first);
+            second_node.children.push(first);
+        }
+
+        assert_eq!(
+            doc.validate_tree(),
+            Err(AstInvariantError::Cycle { node: first })
+        );
+    }
+
+    #[test]
+    fn validate_tree_allows_detached_subtrees() {
+        let mut doc = Vue3Ast::new(Vue3NodeKind::root(), None);
+        let detached = doc.push(
+            Vue3NodeKind::element("template", Vec::new(), false),
+            None,
+        );
+        let child = doc.push_child(detached, Vue3NodeKind::text("fallback"), None);
+
+        assert_eq!(doc.node(detached).unwrap().parent, None);
+        assert_eq!(doc.node(child).unwrap().parent, Some(detached));
+        assert_eq!(doc.validate_tree(), Ok(()));
+    }
+
+    #[test]
     fn runtime_helpers_are_orderable() {
         let mut helpers = BTreeSet::new();
         helpers.insert(RuntimeHelper::Vue3OpenBlock);
@@ -137,6 +266,20 @@ mod tests {
         assert!(!doc.set_root(NodeId(99)));
 
         assert_eq!(doc.root, original_root);
+        assert_eq!(doc.validate_tree(), Ok(()));
+    }
+
+    #[test]
+    fn set_root_detaches_node_from_its_old_parent() {
+        let mut doc = Vue3Ast::new(Vue3NodeKind::root(), None);
+        let old_root = doc.root;
+        let new_root = doc.push_child(old_root, Vue3NodeKind::root(), None);
+
+        assert!(doc.set_root(new_root));
+
+        assert_eq!(doc.root, new_root);
+        assert!(doc.node(old_root).unwrap().children.is_empty());
+        assert_eq!(doc.node(new_root).unwrap().parent, None);
         assert_eq!(doc.validate_tree(), Ok(()));
     }
 

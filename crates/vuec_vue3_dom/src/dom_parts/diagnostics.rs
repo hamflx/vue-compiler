@@ -251,9 +251,7 @@ fn remove_side_effect_children(ast: &mut Vue3Ast, parent_id: NodeId, ctx: &mut T
             retained.push(child_id);
         }
     }
-    if let Some(parent) = ast.node_mut(parent_id) {
-        parent.children = retained;
-    }
+    ast.replace_children(parent_id, retained);
 }
 
 fn ast_node_is_side_effect_tag(node: &vuec_ast::Node<Vue3AstKind>) -> bool {

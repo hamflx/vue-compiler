@@ -35,6 +35,34 @@
     }
 
     #[test]
+    fn side_effect_transform_detaches_removed_arena_children() {
+        let mut ast = parse(
+            template_source(
+                "side-effect.vue",
+                "<div><script>run()</script><span /></div>",
+            ),
+            &DomCompilerOptions::default(),
+        );
+        let script_id = ast
+            .nodes
+            .iter()
+            .find(|node| {
+                matches!(
+                    &node.kind,
+                    Vue3AstKind::Element(element) if element.tag == "script"
+                )
+            })
+            .map(|node| node.id)
+            .expect("script node");
+
+        remove_side_effect_nodes(&mut ast, &mut TransformContext::default());
+
+        assert_eq!(ast.node(script_id).unwrap().parent, None);
+        assert_eq!(ast.node(script_id).unwrap().index_in_parent, 0);
+        assert_eq!(ast.validate_tree(), Ok(()));
+    }
+
+    #[test]
     fn decode_html_browser_projection_decodes_text_and_attribute_entities() {
         for (raw, decoded) in [
             (" abc  123 ", " abc  123 "),

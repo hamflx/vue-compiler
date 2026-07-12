@@ -12,6 +12,35 @@
     }
 
     #[test]
+    fn transition_transform_detaches_filtered_arena_children() {
+        let mut ast = parse(
+            template_source(
+                "transition.vue",
+                "<transition><!-- ignored --><div /></transition>",
+            ),
+            &DomCompilerOptions::default(),
+        );
+        let transition_id = ast.root_node().unwrap().children[0];
+        let comment_id = ast
+            .node(transition_id)
+            .unwrap()
+            .children
+            .iter()
+            .copied()
+            .find(|child_id| {
+                ast.node(*child_id)
+                    .is_some_and(|child| matches!(child.kind, Vue3AstKind::Comment(_)))
+            })
+            .expect("transition comment child");
+
+        transform_transition_children(&mut ast, &mut TransformContext::default());
+
+        assert_eq!(ast.node(comment_id).unwrap().parent, None);
+        assert_eq!(ast.node(comment_id).unwrap().index_in_parent, 0);
+        assert_eq!(ast.validate_tree(), Ok(()));
+    }
+
+    #[test]
     fn transform_transition_projection_reports_invalid_children() {
         let projection = transition_projection(vec![
             transition_element_child(vec![]),

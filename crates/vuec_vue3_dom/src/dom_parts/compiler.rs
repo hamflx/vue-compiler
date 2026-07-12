@@ -107,9 +107,7 @@ fn transform_transition_children(ast: &mut Vue3Ast, ctx: &mut TransformContext) 
             .node(node_id)
             .map(|node| transition_visible_child_ids(ast, &node.children))
             .unwrap_or_default();
-        if let Some(node) = ast.node_mut(node_id) {
-            node.children = visible_children.clone();
-        }
+        ast.replace_children(node_id, visible_children.clone());
         if had_ignored_comments {
             ctx.add_helper(RuntimeHelper::Vue3CreateCommentVNode);
         }

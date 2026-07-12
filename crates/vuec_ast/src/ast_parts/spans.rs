@@ -59,10 +59,28 @@ pub enum AstInvariantError {
         /// Root node with invalid metadata.
         root: NodeId,
     },
-    /// A non-root node has no parent.
-    DetachedNode {
+    /// A detached node retains a non-zero parent index.
+    InvalidDetachedMetadata {
         /// Detached node id.
         node: NodeId,
+        /// Invalid index retained without a parent.
+        index_in_parent: u32,
+    },
+    /// A node's parent reference does not point to an arena node.
+    MissingParent {
+        /// Node containing the parent reference.
+        node: NodeId,
+        /// Missing parent id.
+        parent: NodeId,
+    },
+    /// A parent does not list a node at its declared child index.
+    InvalidParentMetadata {
+        /// Node with inconsistent parent metadata.
+        node: NodeId,
+        /// Declared parent id.
+        parent: NodeId,
+        /// Declared index inside the parent.
+        index_in_parent: u32,
     },
     /// A child reference does not point to an arena node.
     MissingChild {
@@ -79,6 +97,18 @@ pub enum AstInvariantError {
         child: NodeId,
         /// Expected index inside the parent child list.
         expected_index: u32,
+    },
+    /// A parent contains the same child id more than once.
+    DuplicateChild {
+        /// Parent containing duplicate references.
+        parent: NodeId,
+        /// Repeated child id.
+        child: NodeId,
+    },
+    /// Parent relationships contain a cycle.
+    Cycle {
+        /// Node at which the parent walk re-entered the cycle.
+        node: NodeId,
     },
 }
 
