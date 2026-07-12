@@ -1,5 +1,12 @@
 use crate::*;
 
+/// Error code reported when a template exceeds the supported element nesting depth.
+pub const VUE3_TEMPLATE_NESTING_DEPTH_ERROR_CODE: u16 = 1000;
+
+/// Error message reported when a template exceeds the supported element nesting depth.
+pub const VUE3_TEMPLATE_NESTING_DEPTH_ERROR_MESSAGE: &str =
+    "Template nesting exceeds the maximum supported element depth.";
+
 /// Template source plus location metadata.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TemplateSource {

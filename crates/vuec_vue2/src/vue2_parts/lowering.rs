@@ -555,7 +555,7 @@ fn lower_vue2_element_to_mir_kind(
         })
         .unwrap_or_else(|| MirExpr::String(element.tag.clone()));
 
-    Vue2MirKind::CreateElement(Vue2CreateElement {
+    Vue2MirKind::CreateElement(Box::new(Vue2CreateElement {
         tag,
         data: lower_vue2_data_object(element, ast_node, state),
         is_component: explicit_component,
@@ -567,7 +567,7 @@ fn lower_vue2_element_to_mir_kind(
             }
         }),
         normalization_type: Vue2NormalizationType::None,
-    })
+    }))
 }
 
 fn lower_vue2_data_object(
@@ -575,61 +575,63 @@ fn lower_vue2_data_object(
     ast_node: &vuec_ast::Node<Vue2NodeKind>,
     state: &mut Vue2LoweringState,
 ) -> Option<Vue2DataObject> {
-    let mut data = Vue2DataObject::default();
-    data.directives = element
-        .directives
-        .iter()
-        .map(|directive| Vue2DirectiveRuntime {
-            name: directive.name.clone(),
-            raw_name: directive.raw_name.clone(),
-            value: directive.value.map(MirExpr::JsExpr),
-            arg: directive.arg.as_ref().map(|arg| {
-                if directive.is_dynamic_arg {
-                    MirExpr::JsExpr(state.js.register_expr(
-                        arg,
-                        ast_node_span(ast_node),
-                        SourceType::script(),
-                    ))
-                } else {
-                    MirExpr::String(arg.clone())
-                }
-            }),
-            is_dynamic_arg: directive.is_dynamic_arg,
-            modifiers: directive.modifiers.clone(),
-        })
-        .collect();
-    data.key = element.key.map(MirExpr::JsExpr);
-    data.ref_name = element.ref_name.as_ref().map(|name| {
-        MirExpr::JsExpr(
-            state
-                .js
-                .register_expr(name, ast_node_span(ast_node), SourceType::script()),
-        )
-    });
-    data.ref_in_for = element.ref_in_for;
-    data.pre = element.pre;
-    data.tag = element.component.as_ref().map(|_| element.tag.clone());
-    data.static_class = element.static_class.as_ref().map(|value| {
-        MirExpr::JsExpr(state.js.register_expr(
-            value,
-            ast_node_span(ast_node),
-            SourceType::script(),
-        ))
-    });
-    data.class_binding = element.class_binding.map(MirExpr::JsExpr);
-    data.static_style = element.static_style.as_ref().map(|value| {
-        MirExpr::JsExpr(state.js.register_expr(
-            value,
-            ast_node_span(ast_node),
-            SourceType::script(),
-        ))
-    });
-    data.style_binding = element.style_binding.map(MirExpr::JsExpr);
-    data.attrs = lower_vue2_data_props(&element.attrs, ast_node, state);
-    data.dom_props = lower_vue2_data_props(&element.props, ast_node, state);
-    data.dynamic_attrs = lower_vue2_data_props(&element.dynamic_attrs, ast_node, state);
-    data.events = element.events.clone();
-    data.native_events = element.native_events.clone();
+    let mut data = Vue2DataObject {
+        directives: element
+            .directives
+            .iter()
+            .map(|directive| Vue2DirectiveRuntime {
+                name: directive.name.clone(),
+                raw_name: directive.raw_name.clone(),
+                value: directive.value.map(MirExpr::JsExpr),
+                arg: directive.arg.as_ref().map(|arg| {
+                    if directive.is_dynamic_arg {
+                        MirExpr::JsExpr(state.js.register_expr(
+                            arg,
+                            ast_node_span(ast_node),
+                            SourceType::script(),
+                        ))
+                    } else {
+                        MirExpr::String(arg.clone())
+                    }
+                }),
+                is_dynamic_arg: directive.is_dynamic_arg,
+                modifiers: directive.modifiers.clone(),
+            })
+            .collect(),
+        key: element.key.map(MirExpr::JsExpr),
+        ref_name: element.ref_name.as_ref().map(|name| {
+            MirExpr::JsExpr(
+                state
+                    .js
+                    .register_expr(name, ast_node_span(ast_node), SourceType::script()),
+            )
+        }),
+        ref_in_for: element.ref_in_for,
+        pre: element.pre,
+        tag: element.component.as_ref().map(|_| element.tag.clone()),
+        static_class: element.static_class.as_ref().map(|value| {
+            MirExpr::JsExpr(state.js.register_expr(
+                value,
+                ast_node_span(ast_node),
+                SourceType::script(),
+            ))
+        }),
+        class_binding: element.class_binding.map(MirExpr::JsExpr),
+        static_style: element.static_style.as_ref().map(|value| {
+            MirExpr::JsExpr(state.js.register_expr(
+                value,
+                ast_node_span(ast_node),
+                SourceType::script(),
+            ))
+        }),
+        style_binding: element.style_binding.map(MirExpr::JsExpr),
+        attrs: lower_vue2_data_props(&element.attrs, ast_node, state),
+        dom_props: lower_vue2_data_props(&element.props, ast_node, state),
+        dynamic_attrs: lower_vue2_data_props(&element.dynamic_attrs, ast_node, state),
+        events: element.events.clone(),
+        native_events: element.native_events.clone(),
+        ..Default::default()
+    };
     if element.slot_scope.is_none() {
         data.slot = element.slot_target.as_ref().map(|slot| {
             MirExpr::JsExpr(state.js.register_expr(

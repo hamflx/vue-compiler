@@ -521,3 +521,75 @@
             )
         }));
     }
+
+    #[test]
+    fn base_compile_accepts_the_maximum_template_nesting_depth() {
+        let depth = vuec_html::DEFAULT_MAX_TEMPLATE_NESTING_DEPTH;
+        let source = nested_div_template(depth);
+        let result = Vue3Dialect::base_compile(
+            TemplateSource {
+                filename: "depth.vue".into(),
+                source,
+                file_id: FileId(90),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions::default(),
+        );
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert!(!result.code.is_empty());
+    }
+
+    #[test]
+    fn base_compile_rejects_excessive_template_nesting_once() {
+        let max_depth = vuec_html::DEFAULT_MAX_TEMPLATE_NESTING_DEPTH;
+        let source_text = nested_div_template(max_depth + 1024);
+        let source = TemplateSource {
+            filename: "depth.vue".into(),
+            source: source_text,
+            file_id: FileId(91),
+            base_offset: 17,
+        };
+        let options = Vue3CompilerOptions::default();
+        let ast = Vue3Dialect::base_parse(source.clone(), &options);
+
+        assert_eq!(ast.len(), max_depth + 1);
+        let parser_diagnostics = vue3_parser_diagnostics(&ast);
+        assert_eq!(parser_diagnostics.len(), 1);
+        assert_eq!(parser_diagnostics[0].code, "1000");
+        assert_eq!(
+            parser_diagnostics[0].message,
+            VUE3_TEMPLATE_NESTING_DEPTH_ERROR_MESSAGE
+        );
+        let overflow_offset = 17 + max_depth * "<div>".len();
+        assert_eq!(
+            parser_diagnostics[0].span,
+            Some(Span::new(FileId(91), overflow_offset, overflow_offset))
+        );
+
+        let dom = Vue3Dialect::lower_to_dom_mir(&ast, &options);
+        assert_eq!(dom.hir.validate_tree(), Ok(()));
+        assert_eq!(dom.mir.validate_tree(), Ok(()));
+        let ssr = Vue3Dialect::lower_to_ssr_mir(&ast, &options);
+        assert_eq!(ssr.hir.validate_tree(), Ok(()));
+        assert_eq!(ssr.mir.validate_tree(), Ok(()));
+
+        let result = Vue3Dialect::base_compile(source, options);
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(result.diagnostics[0].code, "1000");
+        assert_eq!(
+            result.diagnostics[0].message,
+            VUE3_TEMPLATE_NESTING_DEPTH_ERROR_MESSAGE
+        );
+    }
+
+    fn nested_div_template(depth: usize) -> String {
+        let mut source = String::with_capacity(depth * ("<div>".len() + "</div>".len()));
+        for _ in 0..depth {
+            source.push_str("<div>");
+        }
+        for _ in 0..depth {
+            source.push_str("</div>");
+        }
+        source
+    }

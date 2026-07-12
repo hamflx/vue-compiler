@@ -112,7 +112,7 @@ pub enum Vue2AstKind {
     /// Vue 2 root node.
     Root(Vue2Root),
     /// Vue 2 element node.
-    Element(Vue2Element),
+    Element(Box<Vue2Element>),
     /// Plain text node.
     Text(Vue2Text),
     /// Interpolated text node.
@@ -129,7 +129,7 @@ impl Vue2AstKind {
 
     /// Creates a Vue 2 element node kind.
     pub fn element(tag: impl Into<String>) -> Self {
-        Self::Element(Vue2Element::new(tag))
+        Self::Element(Box::new(Vue2Element::new(tag)))
     }
 
     /// Creates a Vue 2 text node kind.

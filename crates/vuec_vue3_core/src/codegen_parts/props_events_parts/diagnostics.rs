@@ -4,9 +4,25 @@ pub(crate) fn push_vue3_parser_diagnostic(
     file_id: FileId,
     offset: usize,
 ) {
+    push_vue3_custom_parser_diagnostic(
+        ast,
+        code.as_u16(),
+        vue3_parse_error_message(code),
+        file_id,
+        offset,
+    );
+}
+
+pub(crate) fn push_vue3_custom_parser_diagnostic(
+    ast: &mut Vue3Ast,
+    code: u16,
+    message: &str,
+    file_id: FileId,
+    offset: usize,
+) {
     let diagnostic = Vue3ParserDiagnostic {
-        code: code.as_u16(),
-        message: vue3_parse_error_message(code).into(),
+        code,
+        message: message.into(),
         span: Some(Span::new(file_id, offset, offset)),
     };
     if let Some(root_node) = ast.root_node_mut() {

@@ -1,3 +1,5 @@
+const TEMPLATE_DEPTH_LIMIT_ERROR_CODE: &str = "E_VUEC_TEMPLATE_DEPTH_LIMIT";
+
 fn parse_element_tree(
     diagnostics: &mut DiagnosticSink,
     template: &str,
@@ -7,6 +9,7 @@ fn parse_element_tree(
     let mut stack: Vec<Vue2Element> = Vec::new();
     let mut root: Option<Vue2Element> = None;
     let mut in_v_pre = false;
+    let mut depth_limit_exceeded = false;
 
     loop {
         let in_pre_tag = stack.iter().any(|element| element.tag == "pre");
@@ -49,6 +52,18 @@ fn parse_element_tree(
                 attributes,
                 self_closing,
             } => {
+                if stack.len() >= DEFAULT_MAX_TEMPLATE_NESTING_DEPTH {
+                    diagnostics.push(vue2_error(
+                        TEMPLATE_DEPTH_LIMIT_ERROR_CODE,
+                        format!(
+                            "Template nesting exceeds the maximum of {} nested elements.",
+                            DEFAULT_MAX_TEMPLATE_NESTING_DEPTH
+                        ),
+                        Some(Span::new(FileId(0), token.start, token.end)),
+                    ));
+                    depth_limit_exceeded = true;
+                    break;
+                }
                 let mut element = create_element(name, attributes, token.start, token.end, options);
                 if let Some(namespace) = namespace_for_tag(&element.tag, options) {
                     element.ns = Some(namespace);
@@ -149,11 +164,13 @@ fn parse_element_tree(
     }
 
     while let Some(element) = stack.pop() {
-        diagnostics.push(vue2_error(
-            "E_VUE2_UNCLOSED_TAG",
-            format!("tag <{}> has no matching end tag.", element.tag),
-            element.span,
-        ));
+        if !depth_limit_exceeded {
+            diagnostics.push(vue2_error(
+                "E_VUE2_UNCLOSED_TAG",
+                format!("tag <{}> has no matching end tag.", element.tag),
+                element.span,
+            ));
+        }
         close_element(
             element,
             &mut stack,

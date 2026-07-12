@@ -28,6 +28,9 @@ impl Vue3Dialect {
         let mut stack = vec![root];
         let mut v_pre_depth = 0usize;
         let mut malformed_start_depth = 0usize;
+        let mut suppressed_subtree_tag: Option<String> = None;
+        let mut suppressed_same_tag_depth = 0usize;
+        let mut nesting_depth_diagnostic_emitted = false;
         let mut namespace_stack = vec![options.root_namespace];
         let mut tokenizer = if let Some([open, close]) = &options.delimiters {
             HtmlTokenizer::new(&source.source).with_interpolation_delimiters(open, close)
@@ -51,6 +54,9 @@ impl Vue3Dialect {
                 .unwrap_or(vuec_ast::HtmlNamespace::Html);
             match token.kind {
                 HtmlTokenKind::Text(text) => {
+                    if suppressed_subtree_tag.is_some() {
+                        continue;
+                    }
                     if malformed_start_depth > 0 {
                         extend_open_element_spans_to(
                             &mut ast,
@@ -79,6 +85,9 @@ impl Vue3Dialect {
                     }
                 }
                 HtmlTokenKind::Comment(value) => {
+                    if suppressed_subtree_tag.is_some() {
+                        continue;
+                    }
                     extend_open_element_spans_to(&mut ast, &stack, source.base_offset + token.end);
                     if !options.comments {
                         continue;
@@ -109,6 +118,30 @@ impl Vue3Dialect {
                     attributes,
                     self_closing,
                 } => {
+                    let is_void = options.void_tags.iter().any(|candidate| candidate == &name);
+                    if let Some(suppressed_tag) = suppressed_subtree_tag.as_deref() {
+                        if !self_closing && !is_void && name.eq_ignore_ascii_case(suppressed_tag) {
+                            suppressed_same_tag_depth = suppressed_same_tag_depth.saturating_add(1);
+                        }
+                        continue;
+                    }
+                    if stack.len() > vuec_html::DEFAULT_MAX_TEMPLATE_NESTING_DEPTH {
+                        if !nesting_depth_diagnostic_emitted {
+                            push_vue3_custom_parser_diagnostic(
+                                &mut ast,
+                                VUE3_TEMPLATE_NESTING_DEPTH_ERROR_CODE,
+                                VUE3_TEMPLATE_NESTING_DEPTH_ERROR_MESSAGE,
+                                source.file_id,
+                                source.base_offset + token.start,
+                            );
+                            nesting_depth_diagnostic_emitted = true;
+                        }
+                        if !self_closing && !is_void {
+                            suppressed_subtree_tag = Some(name);
+                            suppressed_same_tag_depth = 1;
+                        }
+                        continue;
+                    }
                     let incomplete =
                         vue3_start_tag_is_incomplete(&source.source, token.start, token.end);
                     if incomplete && token.end == source.source.len() {
@@ -138,7 +171,6 @@ impl Vue3Dialect {
                         );
                         continue;
                     }
-                    let is_void = options.void_tags.iter().any(|candidate| candidate == &name);
                     let namespace = vue3_element_namespace(
                         &ast,
                         current_parent,
@@ -249,6 +281,15 @@ impl Vue3Dialect {
                     }
                 }
                 HtmlTokenKind::EndTag { name } => {
+                    if let Some(suppressed_tag) = suppressed_subtree_tag.as_deref() {
+                        if name.eq_ignore_ascii_case(suppressed_tag) {
+                            suppressed_same_tag_depth = suppressed_same_tag_depth.saturating_sub(1);
+                            if suppressed_same_tag_depth == 0 {
+                                suppressed_subtree_tag = None;
+                            }
+                        }
+                        continue;
+                    }
                     if name.is_empty() {
                         if vue3_empty_end_tag_should_be_text(&source.source, token.start, token.end)
                         {
@@ -321,9 +362,7 @@ impl Vue3Dialect {
                                             vuec_source::BytePos(source.base_offset + token.end);
                                     }
                                 }
-                                if v_pre_depth > 0 {
-                                    v_pre_depth -= 1;
-                                }
+                                v_pre_depth = v_pre_depth.saturating_sub(1);
                                 break;
                             } else {
                                 let missing_start = ast
@@ -342,14 +381,15 @@ impl Vue3Dialect {
                                             vuec_source::BytePos(source.base_offset + token.start);
                                     }
                                 }
-                                if v_pre_depth > 0 {
-                                    v_pre_depth -= 1;
-                                }
+                                v_pre_depth = v_pre_depth.saturating_sub(1);
                             }
                         }
                     }
                 }
                 HtmlTokenKind::Cdata(text) => {
+                    if suppressed_subtree_tag.is_some() {
+                        continue;
+                    }
                     extend_open_element_spans_to(&mut ast, &stack, source.base_offset + token.end);
                     if current_namespace != vuec_ast::HtmlNamespace::Html {
                         push_text(
@@ -362,27 +402,32 @@ impl Vue3Dialect {
                     }
                 }
                 HtmlTokenKind::BogusQuestionTag => {
+                    if suppressed_subtree_tag.is_some() {
+                        continue;
+                    }
                     extend_open_element_spans_to(&mut ast, &stack, source.base_offset + token.end);
                 }
                 HtmlTokenKind::Doctype(_) | HtmlTokenKind::Eof => {}
             }
             if eof {
-                let missing_starts = stack
-                    .iter()
-                    .copied()
-                    .skip(1)
-                    .filter_map(|node_id| {
-                        ast.node(node_id)
-                            .and_then(|node| node.span.source().map(|span| span.start.0))
-                    })
-                    .collect::<Vec<_>>();
-                for start in missing_starts {
-                    push_vue3_parser_diagnostic(
-                        &mut ast,
-                        Vue3ErrorCode::XMissingEndTag,
-                        source.file_id,
-                        start,
-                    );
+                if suppressed_subtree_tag.is_none() {
+                    let missing_starts = stack
+                        .iter()
+                        .copied()
+                        .skip(1)
+                        .filter_map(|node_id| {
+                            ast.node(node_id)
+                                .and_then(|node| node.span.source().map(|span| span.start.0))
+                        })
+                        .collect::<Vec<_>>();
+                    for start in missing_starts {
+                        push_vue3_parser_diagnostic(
+                            &mut ast,
+                            Vue3ErrorCode::XMissingEndTag,
+                            source.file_id,
+                            start,
+                        );
+                    }
                 }
                 extend_open_element_spans_to(
                     &mut ast,

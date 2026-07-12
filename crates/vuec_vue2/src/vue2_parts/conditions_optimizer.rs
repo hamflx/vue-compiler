@@ -267,7 +267,7 @@ fn mark_static_element(element: &mut Vue2Element, options: &Vue2CompileOptions) 
     static_node
 }
 
-fn mark_static_roots(element: &mut Vue2Element, in_for: bool, options: &Vue2CompileOptions) {
+fn mark_static_roots(element: &mut Vue2Element, in_for: bool) {
     if element.static_node || element.once {
         element.static_in_for = in_for;
     }
@@ -282,10 +282,10 @@ fn mark_static_roots(element: &mut Vue2Element, in_for: bool, options: &Vue2Comp
     element.static_root = false;
     for child in &mut element.children {
         if let Vue2Node::Element(child) = child {
-            mark_static_roots(child, in_for || element.for_exp.is_some(), options);
+            mark_static_roots(child, in_for || element.for_exp.is_some());
         }
     }
     for condition in &mut element.if_conditions {
-        mark_static_roots(&mut condition.block, in_for, options);
+        mark_static_roots(&mut condition.block, in_for);
     }
 }

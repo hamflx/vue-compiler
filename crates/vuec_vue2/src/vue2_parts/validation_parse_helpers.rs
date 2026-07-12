@@ -363,9 +363,7 @@ fn parse_text(text: &str, delimiters: Option<&[String; 2]>) -> Option<String> {
             tokens.push(js_string(&text[cursor..open_index]));
         }
         let expression_start = open_index + open.len();
-        let Some(close_offset) = text[expression_start..].find(close) else {
-            return None;
-        };
+        let close_offset = text[expression_start..].find(close)?;
         let close_index = expression_start + close_offset;
         let expression = parse_filters(text[expression_start..close_index].trim());
         tokens.push(format!("_s({expression})"));

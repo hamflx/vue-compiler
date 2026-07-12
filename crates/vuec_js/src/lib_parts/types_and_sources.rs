@@ -104,7 +104,7 @@ pub struct JsEntry {
 }
 
 /// Interned JavaScript source text.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialOrd)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct JsSource(Arc<str>);
 
 impl JsSource {
@@ -171,12 +171,6 @@ impl Deref for JsSource {
 impl fmt::Display for JsSource {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
-    }
-}
-
-impl PartialEq for JsSource {
-    fn eq(&self, other: &Self) -> bool {
-        self.as_str() == other.as_str()
     }
 }
 

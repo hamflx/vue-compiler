@@ -340,9 +340,9 @@ impl JsAstStore {
             JsParseMode::Statements
             | JsParseMode::ScriptModule
             | JsParseMode::ScriptClassic
-            | JsParseMode::TypeScript => Ok(JsParseResult::Program(
+            | JsParseMode::TypeScript => Ok(JsParseResult::Program(Box::new(
                 self.parse_program_checked(source_text, source_type)?,
-            )),
+            ))),
             JsParseMode::Params => self.parse_params(source_text).map(JsParseResult::Params),
             JsParseMode::ForExpression => self
                 .parse_for_expression(source_text, source_type)

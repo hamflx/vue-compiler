@@ -4,7 +4,7 @@ pub enum Vue2MirKind {
     /// Vue 2 MIR root node.
     Root(Vue2MirRoot),
     /// Create-element call.
-    CreateElement(Vue2CreateElement),
+    CreateElement(Box<Vue2CreateElement>),
     /// Text call.
     Text(Vue2TextCall),
     /// Comment node.

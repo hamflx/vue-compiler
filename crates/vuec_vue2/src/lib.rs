@@ -22,7 +22,10 @@ use vuec_ast::{
     Vue2ValidationData,
 };
 use vuec_diagnostics::{Diagnostic, DiagnosticSink, Severity};
-use vuec_html::{decode_html_text_entities, HtmlAttribute, HtmlTokenKind, HtmlTokenizer};
+use vuec_html::{
+    decode_html_text_entities, HtmlAttribute, HtmlTokenKind, HtmlTokenizer,
+    DEFAULT_MAX_TEMPLATE_NESTING_DEPTH,
+};
 use vuec_js::{parse_vue2_filter_expression, rewrite_vue2_filter_expression, JsAstStore};
 use vuec_source::{FileId, Span};
 

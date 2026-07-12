@@ -10,6 +10,12 @@ mod html_entities;
 
 use serde::{Deserialize, Serialize};
 
+/// Default maximum number of nested template elements parsers should construct.
+///
+/// The root element has depth one. Text and comment nodes do not increase the
+/// nesting depth.
+pub const DEFAULT_MAX_TEMPLATE_NESTING_DEPTH: usize = 128;
+
 /// HTML integration namespace for parsed elements.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HtmlNamespace {
@@ -361,16 +367,12 @@ impl<'a> HtmlTokenizer<'a> {
         }
 
         if self.remaining().starts_with("<!--") {
-            return self.consume_block("<!--", "-->", |body| HtmlTokenKind::Comment(body));
+            return self.consume_block("<!--", "-->", HtmlTokenKind::Comment);
         }
         if self.remaining().starts_with("<![CDATA[") {
-            return self.consume_block("<![CDATA[", "]]>", |body| HtmlTokenKind::Cdata(body));
+            return self.consume_block("<![CDATA[", "]]>", HtmlTokenKind::Cdata);
         }
-        if self
-            .remaining()
-            .to_ascii_uppercase()
-            .starts_with("<!DOCTYPE")
-        {
+        if starts_with_ignore_ascii_case(self.remaining(), "<!DOCTYPE") {
             return self.consume_block("<!DOCTYPE", ">", |body| {
                 HtmlTokenKind::Doctype(body.trim().to_string())
             });
@@ -688,7 +690,7 @@ impl<'a> HtmlTokenizer<'a> {
         let rest = &self.source[offset..];
         if rest.starts_with("<!--")
             || rest.starts_with("<![CDATA[")
-            || rest.to_ascii_uppercase().starts_with("<!DOCTYPE")
+            || starts_with_ignore_ascii_case(rest, "<!DOCTYPE")
         {
             return true;
         }
@@ -895,9 +897,7 @@ fn matching_raw_text_end_tag_end(source: &str, start: usize, tag: &str) -> Optio
     }
     let mut cursor = tag_end;
     loop {
-        let Some(ch) = source.get(cursor..).and_then(|rest| rest.chars().next()) else {
-            return None;
-        };
+        let ch = source.get(cursor..).and_then(|rest| rest.chars().next())?;
         if ch == '>' {
             return Some(cursor + ch.len_utf8());
         }
@@ -906,6 +906,13 @@ fn matching_raw_text_end_tag_end(source: &str, start: usize, tag: &str) -> Optio
         }
         cursor += ch.len_utf8();
     }
+}
+
+fn starts_with_ignore_ascii_case(value: &str, prefix: &str) -> bool {
+    value
+        .as_bytes()
+        .get(..prefix.len())
+        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(prefix.as_bytes()))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -938,6 +945,32 @@ mod tests {
         let tokens = HtmlTokenizer::new("<!DOCTYPE html><![CDATA[x]]>").tokenize();
         assert!(matches!(tokens[0].kind, HtmlTokenKind::Doctype(ref s) if s == "html"));
         assert!(matches!(tokens[1].kind, HtmlTokenKind::Cdata(ref s) if s == "x"));
+    }
+
+    #[test]
+    fn tokenizes_mixed_case_doctype_after_text() {
+        let tokens = HtmlTokenizer::new("before<!dOcTyPe html>after").tokenize();
+
+        assert!(matches!(tokens[0].kind, HtmlTokenKind::Text(ref s) if s == "before"));
+        assert!(matches!(tokens[1].kind, HtmlTokenKind::Doctype(ref s) if s == "html"));
+        assert!(matches!(tokens[2].kind, HtmlTokenKind::Text(ref s) if s == "after"));
+        assert!(matches!(tokens[3].kind, HtmlTokenKind::Eof));
+    }
+
+    #[test]
+    fn tokenizes_many_repeated_short_tags() {
+        const TAG_COUNT: usize = 20_000;
+        let source = "<i></i>".repeat(TAG_COUNT);
+        let tokens = HtmlTokenizer::new(&source).tokenize();
+
+        assert_eq!(tokens.len(), TAG_COUNT * 2 + 1);
+        assert!(tokens[..TAG_COUNT * 2].chunks_exact(2).all(|pair| {
+            matches!(&pair[0].kind, HtmlTokenKind::StartTag { name, .. } if name == "i")
+                && matches!(&pair[1].kind, HtmlTokenKind::EndTag { name } if name == "i")
+        }));
+        assert!(tokens
+            .last()
+            .is_some_and(|token| matches!(&token.kind, HtmlTokenKind::Eof)));
     }
 
     #[test]

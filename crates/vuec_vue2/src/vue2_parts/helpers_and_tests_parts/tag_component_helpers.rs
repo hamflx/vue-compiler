@@ -18,7 +18,7 @@ fn is_forbidden_tag(element: &Vue2Element) -> bool {
             && element
                 .attrs_map
                 .get("type")
-                .map_or(true, |value| value == "text/javascript"))
+                .is_none_or(|value| value == "text/javascript"))
 }
 
 fn is_unary_tag(tag: &str) -> bool {

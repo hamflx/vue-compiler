@@ -183,7 +183,7 @@ pub fn lower_vue2_ast_to_mir(ast: &Vue2Ast, js: JsAstStore) -> Vue2LoweringResul
 /// Marks static nodes and static roots in a Vue 2 element tree.
 pub fn optimize(root: &mut Vue2Element, options: &Vue2CompileOptions) {
     mark_static_element(root, options);
-    mark_static_roots(root, false, options);
+    mark_static_roots(root, false);
 }
 
 /// Generates a Vue 2 style source code frame for a byte range.

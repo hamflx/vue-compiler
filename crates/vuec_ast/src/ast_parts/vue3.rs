@@ -97,7 +97,7 @@ impl Vue3AstKind {
 }
 
 /// Vue 3 root node payload.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3Root {
     /// Source file id for this template, when known.
     pub source_id: Option<FileId>,
@@ -120,23 +120,6 @@ pub struct Vue3Root {
     pub cached: u32,
     /// Root codegen node reference.
     pub codegen_node: Option<Vue3CodegenRef>,
-}
-
-impl Default for Vue3Root {
-    fn default() -> Self {
-        Self {
-            source_id: None,
-            parser_diagnostics: Vec::new(),
-            helpers: BTreeSet::new(),
-            components: BTreeSet::new(),
-            directives: BTreeSet::new(),
-            imports: Vec::new(),
-            hoists: Vec::new(),
-            temps: 0,
-            cached: 0,
-            codegen_node: None,
-        }
-    }
 }
 
 /// Lightweight Vue 3 parser diagnostic stored on the AST root.
@@ -174,15 +157,15 @@ impl Vue3Element {
     pub fn template_attributes(&self) -> Vec<TemplateAttribute> {
         self.props
             .iter()
-            .filter_map(|prop| match prop {
-                Vue3Prop::Attribute(attr) => Some(TemplateAttribute {
+            .map(|prop| match prop {
+                Vue3Prop::Attribute(attr) => TemplateAttribute {
                     name: attr.name.clone(),
                     value: attr.value.clone(),
-                }),
-                Vue3Prop::Directive(directive) => Some(TemplateAttribute {
+                },
+                Vue3Prop::Directive(directive) => TemplateAttribute {
                     name: directive.raw_name.clone(),
                     value: directive.exp.as_ref().map(Vue3Expression::source_string),
-                }),
+                },
             })
             .collect()
     }

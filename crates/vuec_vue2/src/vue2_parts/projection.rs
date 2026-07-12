@@ -32,7 +32,9 @@ struct Vue2AstProjection {
 impl Vue2AstProjection {
     fn project_element(&mut self, parent: NodeId, element: &Vue2Element) -> NodeId {
         let payload = self.project_element_payload(element);
-        let id = self.ast.push(Vue2AstKind::Element(payload), element.span);
+        let id = self
+            .ast
+            .push(Vue2AstKind::Element(Box::new(payload)), element.span);
         self.ast.attach_child(parent, id);
 
         for child in &element.children {

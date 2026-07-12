@@ -140,7 +140,7 @@ fn mir_create_tag_literal(create: &Vue2CreateElement) -> Option<&str> {
         .data
         .as_ref()
         .and_then(|data| data.tag.as_deref())
-        .or_else(|| match &create.tag {
+        .or(match &create.tag {
             MirExpr::String(tag) => Some(tag.as_str()),
             _ => None,
         })
@@ -912,13 +912,12 @@ fn mir_node_tag(mir: &Vue2Mir, id: NodeId) -> Option<String> {
 }
 
 fn mir_node_pre(mir: &Vue2Mir, id: NodeId) -> bool {
-    matches!(
-        mir.node(id).map(|node| &node.kind),
-        Some(Vue2MirKind::CreateElement(Vue2CreateElement {
-            data: Some(Vue2DataObject { pre: true, .. }),
-            ..
-        }))
-    )
+    mir.node(id)
+        .and_then(|node| match &node.kind {
+            Vue2MirKind::CreateElement(create) => create.data.as_ref(),
+            _ => None,
+        })
+        .is_some_and(|data| data.pre)
 }
 
 fn mir_node_is_template(mir: &Vue2Mir, id: NodeId) -> bool {

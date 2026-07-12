@@ -59,6 +59,23 @@ mod tests {
     }
 
     #[test]
+    fn vue2_arena_node_kinds_keep_large_payloads_indirect() {
+        let ast_kind_size = std::mem::size_of::<Vue2AstKind>();
+        let mir_kind_size = std::mem::size_of::<Vue2MirKind>();
+
+        assert!(
+            ast_kind_size <= 128,
+            "Vue2AstKind grew to {ast_kind_size} bytes"
+        );
+        assert!(
+            mir_kind_size <= 192,
+            "Vue2MirKind grew to {mir_kind_size} bytes"
+        );
+        assert!(ast_kind_size < std::mem::size_of::<Vue2Element>());
+        assert!(mir_kind_size < std::mem::size_of::<Vue2CreateElement>());
+    }
+
+    #[test]
     fn attach_child_records_parent_and_index() {
         let mut doc = Vue3Ast::new(Vue3NodeKind::root(), None);
         let root = doc.root;
@@ -316,7 +333,7 @@ mod tests {
         );
         let element_id = doc.push_child(
             doc.root,
-            Vue2AstKind::Element(element),
+            Vue2AstKind::Element(Box::new(element)),
             Span::new(FileId(0), 0, 60),
         );
         let text_id = doc.push_child(

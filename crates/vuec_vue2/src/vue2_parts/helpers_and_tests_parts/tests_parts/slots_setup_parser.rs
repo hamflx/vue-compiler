@@ -495,3 +495,60 @@
             Vue2Node::Element(_) => panic!("expected non-breaking space text"),
         }
     }
+
+    #[test]
+    fn compiles_at_default_template_nesting_depth_limit() {
+        let template = nested_div_template(DEFAULT_MAX_TEMPLATE_NESTING_DEPTH);
+        let result = compile(&template, options());
+
+        assert!(result.errors.is_empty(), "{:#?}", result.diagnostics);
+        assert_eq!(
+            nested_element_depth(result.element_ast.as_ref().expect("root element")),
+            DEFAULT_MAX_TEMPLATE_NESTING_DEPTH
+        );
+        assert!(!result.render.is_empty());
+    }
+
+    #[test]
+    fn rejects_template_beyond_default_nesting_depth_without_panicking() {
+        let template = nested_div_template(DEFAULT_MAX_TEMPLATE_NESTING_DEPTH + 1_024);
+        let result = std::panic::catch_unwind(|| compile(&template, options()))
+            .expect("overly nested template must not panic");
+
+        assert_eq!(result.errors.len(), 1, "{:#?}", result.diagnostics);
+        assert_eq!(result.diagnostics.len(), 1, "{:#?}", result.diagnostics);
+        assert!(result.diagnostics[0].starts_with(&format!(
+            "[{TEMPLATE_DEPTH_LIMIT_ERROR_CODE}]"
+        )));
+        assert!(!result.diagnostics[0].contains("E_VUE2_UNCLOSED_TAG"));
+        assert_eq!(
+            nested_element_depth(result.element_ast.as_ref().expect("bounded partial tree")),
+            DEFAULT_MAX_TEMPLATE_NESTING_DEPTH
+        );
+        assert!(!result.render.is_empty());
+    }
+
+    fn nested_div_template(depth: usize) -> String {
+        let mut template = String::with_capacity(depth * ("<div>".len() + "</div>".len()) + 4);
+        for _ in 0..depth {
+            template.push_str("<div>");
+        }
+        template.push_str("leaf");
+        for _ in 0..depth {
+            template.push_str("</div>");
+        }
+        template
+    }
+
+    fn nested_element_depth(root: &Vue2Element) -> usize {
+        let mut depth = 1;
+        let mut element = root;
+        while let Some(child) = element.children.iter().find_map(|child| match child {
+            Vue2Node::Element(child) => Some(child.as_ref()),
+            Vue2Node::Text(_) => None,
+        }) {
+            depth += 1;
+            element = child;
+        }
+        depth
+    }

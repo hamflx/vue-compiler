@@ -104,7 +104,7 @@
         assert!(lowered.hir.nodes.iter().all(|node| {
             !matches!(
                 node.kind,
-                HirNodeKind::Fragment(_) if matches!(lowered.mir.node(node.id), Some(_))
+                HirNodeKind::Fragment(_) if lowered.mir.node(node.id).is_some()
             )
         }));
     }
@@ -119,11 +119,11 @@
         let lowered = lower_vue2_ast_to_mir(&projected.ast, projected.js);
 
         let button_data = lowered.mir.nodes.iter().find_map(|node| match &node.kind {
-            Vue2MirKind::CreateElement(Vue2CreateElement {
-                tag: MirExpr::String(tag),
-                data: Some(data),
-                ..
-            }) if tag == "button" => Some(data),
+            Vue2MirKind::CreateElement(create)
+                if matches!(&create.tag, MirExpr::String(tag) if tag == "button") =>
+            {
+                create.data.as_ref()
+            }
             _ => None,
         });
         let button_data = button_data.expect("button MIR data");
@@ -135,11 +135,14 @@
             .is_some_and(|handler| handler.modifiers.contains_key("stop")));
 
         let scoped = lowered.mir.nodes.iter().find_map(|node| match &node.kind {
-            Vue2MirKind::CreateElement(Vue2CreateElement {
-                tag: MirExpr::String(tag),
-                data: Some(data),
-                ..
-            }) if tag == "foo" => data.scoped_slots.first(),
+            Vue2MirKind::CreateElement(create)
+                if matches!(&create.tag, MirExpr::String(tag) if tag == "foo") =>
+            {
+                create
+                    .data
+                    .as_ref()
+                    .and_then(|data| data.scoped_slots.first())
+            }
             _ => None,
         });
         let scoped = scoped.expect("scoped slot payload");

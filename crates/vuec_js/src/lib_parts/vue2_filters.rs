@@ -12,7 +12,7 @@ pub fn parse_vue2_filter_expression(source_text: &str) -> Vue2FilterExpression<'
             continue;
         }
         if ch == '|'
-            && source_text[index + ch.len_utf8()..].chars().next() != Some('|')
+            && !source_text[index + ch.len_utf8()..].starts_with('|')
             && prev != '|'
             && state.depth_is_zero()
         {
@@ -60,7 +60,7 @@ pub fn rewrite_vue2_filter_expression(source_text: &str) -> String {
 /// Result of parsing source through a selected [`JsParseMode`].
 pub enum JsParseResult<'a> {
     /// Parsed program result.
-    Program(ParserReturn<'a>),
+    Program(Box<ParserReturn<'a>>),
     /// Parsed expression node.
     Expression(Expression<'a>),
     /// Parsed parameter list.
