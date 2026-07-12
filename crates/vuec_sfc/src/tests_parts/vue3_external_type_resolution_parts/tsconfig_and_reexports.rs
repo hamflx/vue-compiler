@@ -557,3 +557,105 @@ const model = defineModel<ModelValue>()
         assert_eq!(deps, expected);
         assert!(!script.deps.iter().any(|dep| dep.contains('\\')));
     }
+
+    fn write_external_type_re_export_chain(
+        root: &std::path::Path,
+        file_count: usize,
+    ) -> std::path::PathBuf {
+        assert!(file_count > 0);
+        std::fs::create_dir_all(root).expect("create type chain directory");
+        for index in 0..file_count {
+            let source = if index + 1 == file_count {
+                "export interface Leaf { value: string }".to_string()
+            } else {
+                format!("export {{ Leaf }} from './type_{}.ts'", index + 1)
+            };
+            std::fs::write(root.join(format!("type_{index}.ts")), source)
+                .expect("write type chain file");
+        }
+        root.join("type_0.ts")
+    }
+
+    #[test]
+    fn vue3_external_type_loader_bounds_active_import_depth() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let accepted = write_external_type_re_export_chain(
+            &dir.path().join("accepted"),
+            VUE3_EXTERNAL_TYPE_MAX_ACTIVE_FILES,
+        );
+        let rejected = write_external_type_re_export_chain(
+            &dir.path().join("rejected"),
+            VUE3_EXTERNAL_TYPE_MAX_ACTIVE_FILES + 1,
+        );
+        let resolver = Vue3TypeResolverContext::default();
+
+        let mut seen = BTreeSet::new();
+        let accepted_context =
+            vue3_external_type_context_from_path(&accepted, &mut seen, &resolver)
+                .expect("load chain at active file limit");
+        assert!(accepted_context.declared_types.contains_key("Leaf"));
+        assert!(seen.is_empty());
+
+        let rejected_context =
+            vue3_external_type_context_from_path(&rejected, &mut seen, &resolver)
+                .expect("load bounded type chain prefix");
+        assert!(!rejected_context.declared_types.contains_key("Leaf"));
+        assert!(seen.is_empty());
+
+        let filename = dir.path().join("Comp.vue");
+        let source = r#"<script setup lang="ts">
+import { Leaf } from './rejected/type_0'
+defineProps<Leaf>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+        assert!(
+            script.errors.iter().any(|error| error
+                .contains("Unresolvable type reference or unsupported built-in utility type")),
+            "{:?}",
+            script.errors
+        );
+    }
+
+    #[test]
+    fn vue3_external_type_loader_uses_canonical_path_identity() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let nested = dir.path().join("nested");
+        std::fs::create_dir_all(&nested).expect("create nested directory");
+        let source_path = dir.path().join("types.ts");
+        std::fs::write(&source_path, "export interface Props { value: string }")
+            .expect("write type file");
+        let alias_path = nested.join("..").join("types.ts");
+        let identity = vue3_external_type_path_identity(&source_path);
+        let mut seen = BTreeSet::from([identity.clone()]);
+
+        assert!(vue3_external_type_context_from_path(
+            &alias_path,
+            &mut seen,
+            &Vue3TypeResolverContext::default(),
+        )
+        .is_none());
+        assert_eq!(seen, BTreeSet::from([identity]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn vue3_external_type_loader_resolves_symlink_identity() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source_path = dir.path().join("types.ts");
+        let alias_path = dir.path().join("alias.ts");
+        std::fs::write(&source_path, "export interface Props { value: string }")
+            .expect("write type file");
+        std::os::unix::fs::symlink(&source_path, &alias_path).expect("create type file symlink");
+        let identity = vue3_external_type_path_identity(&source_path);
+        let mut seen = BTreeSet::from([identity.clone()]);
+
+        assert!(vue3_external_type_context_from_path(
+            &alias_path,
+            &mut seen,
+            &Vue3TypeResolverContext::default(),
+        )
+        .is_none());
+        assert_eq!(seen, BTreeSet::from([identity]));
+    }

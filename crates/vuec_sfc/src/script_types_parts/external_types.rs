@@ -80,28 +80,7 @@ pub(crate) fn extend_vue3_type_context_from_external_imports_with_seen(
     }
 }
 
-pub(crate) fn vue3_external_type_context_from_source_with_type(
-    source: &str,
-    filename: &str,
-    source_type: oxc_span::SourceType,
-    seen: &mut BTreeSet<String>,
-    type_resolver: &Vue3TypeResolverContext,
-) -> Vue27TypeContext {
-    if !seen.insert(filename.to_string()) {
-        return Vue27TypeContext::default();
-    }
-    let context = vue3_external_type_context_from_source_inner(
-        source,
-        filename,
-        source_type,
-        seen,
-        type_resolver,
-    );
-    seen.remove(filename);
-    context
-}
-
-pub(crate) fn vue3_external_type_context_from_source_inner(
+fn vue3_external_type_context_from_source_inner(
     source: &str,
     filename: &str,
     source_type: oxc_span::SourceType,
@@ -463,20 +442,49 @@ pub(crate) struct Vue3ExternalTypeSource {
     pub(crate) source_type: oxc_span::SourceType,
 }
 
+pub(crate) const VUE3_EXTERNAL_TYPE_MAX_ACTIVE_FILES: usize = 64;
+
+pub(crate) fn vue3_external_type_path_identity(path: &Path) -> String {
+    let identity = std::fs::canonicalize(path).unwrap_or_else(|_| {
+        let absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map(|current| current.join(path))
+                .unwrap_or_else(|_| path.to_path_buf())
+        };
+        normalize_path_components(absolute)
+    });
+    let normalized = normalize_path_string(&identity);
+    if cfg!(windows) {
+        normalized.to_lowercase()
+    } else {
+        normalized
+    }
+}
+
 pub(crate) fn vue3_external_type_context_from_path(
     path: &Path,
     seen: &mut BTreeSet<String>,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<Vue27TypeContext> {
-    let source = vue3_external_type_source_from_path(path)?;
-    let normalized = normalize_path_string(path);
-    Some(vue3_external_type_context_from_source_with_type(
-        &source.source,
-        &normalized,
-        source.source_type,
-        seen,
-        type_resolver,
-    ))
+    let identity = vue3_external_type_path_identity(path);
+    if seen.len() >= VUE3_EXTERNAL_TYPE_MAX_ACTIVE_FILES || !seen.insert(identity.clone()) {
+        return None;
+    }
+    let context = (|| {
+        let source = vue3_external_type_source_from_path(path)?;
+        let normalized = normalize_path_string(path);
+        Some(vue3_external_type_context_from_source_inner(
+            &source.source,
+            &normalized,
+            source.source_type,
+            seen,
+            type_resolver,
+        ))
+    })();
+    seen.remove(&identity);
+    context
 }
 
 pub(crate) fn vue3_external_type_source_from_path(path: &Path) -> Option<Vue3ExternalTypeSource> {
