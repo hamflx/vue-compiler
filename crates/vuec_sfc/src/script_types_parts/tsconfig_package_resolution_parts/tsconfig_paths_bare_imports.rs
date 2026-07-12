@@ -200,10 +200,18 @@ pub(crate) fn vue3_package_import_parts(source: &str) -> Option<(String, Option<
         || source.starts_with('/')
         || source.starts_with('#')
         || source.contains(':')
+        || source.contains('\\')
     {
         return None;
     }
     let parts = source.split('/').collect::<Vec<_>>();
+    // Bare package fallback must not normalize outside the selected package root.
+    if parts
+        .iter()
+        .any(|part| part.is_empty() || matches!(*part, "." | ".."))
+    {
+        return None;
+    }
     if parts.first().is_some_and(|part| part.starts_with('@')) {
         if parts.len() < 2 || parts[0].len() <= 1 || parts[1].is_empty() {
             return None;

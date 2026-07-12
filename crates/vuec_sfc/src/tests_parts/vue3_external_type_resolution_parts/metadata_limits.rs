@@ -387,6 +387,62 @@ fn vue3_package_metadata_targets_cannot_escape_package_root() {
     );
 }
 
+#[test]
+fn vue3_bare_package_subpaths_cannot_escape_package_root() {
+    assert_eq!(
+        vue3_package_import_parts("package/feature/item"),
+        Some(("package".into(), Some("feature/item".into())))
+    );
+    assert_eq!(
+        vue3_package_import_parts("@scope/package/feature/item"),
+        Some((
+            "@scope/package".into(),
+            Some("feature/item".into())
+        ))
+    );
+    for source in [
+        "package/",
+        "package//item",
+        "package/./item",
+        "package/../item",
+        "package/item/..",
+        "package\\..\\item",
+        "@scope/..",
+        "@scope/package/",
+        "@scope/package/../../item",
+    ] {
+        assert!(
+            vue3_package_import_parts(source).is_none(),
+            "unsafe package specifier was accepted: {source}"
+        );
+    }
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let node_modules = dir.path().join("node_modules");
+    std::fs::create_dir_all(node_modules.join("package")).expect("create package");
+    std::fs::create_dir_all(node_modules.join("@scope").join("package"))
+        .expect("create scoped package");
+    let outside = dir.path().join("outside.d.ts");
+    std::fs::write(&outside, "export interface Escaped { value: string }")
+        .expect("write escaped target");
+    let filename = dir.path().join("Comp.vue").to_string_lossy().to_string();
+
+    for source in [
+        "package/../../outside.d.ts",
+        "@scope/package/../../../outside.d.ts",
+    ] {
+        assert!(
+            resolve_vue3_bare_type_import(
+                &filename,
+                source,
+                &Vue3TypeResolverContext::default(),
+            )
+            .is_none(),
+            "package subpath escaped its package root: {source}"
+        );
+    }
+}
+
 fn write_vue3_package_resolution_chain(root: &Path, count: usize) {
     assert!(count > 0);
     let mut package = root.to_path_buf();
