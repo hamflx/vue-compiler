@@ -6,28 +6,66 @@ pub(crate) enum Vue3PackageJsonTypeResolution {
     Blocked,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct Vue3PackageJsonTypeManifest {
-    #[serde(default)]
+    pub(crate) version: Option<serde_json::Value>,
+    pub(crate) tsconfig: Option<serde_json::Value>,
     pub(crate) exports: Option<serde_json::Value>,
-    #[serde(default)]
     pub(crate) types: Option<serde_json::Value>,
-    #[serde(default)]
     pub(crate) typings: Option<serde_json::Value>,
-    #[serde(default, rename = "typesVersions")]
     pub(crate) types_versions: Vue3PackageTypesVersions,
 }
 
-#[derive(Debug, Default)]
+impl<'de> Deserialize<'de> for Vue3PackageJsonTypeManifest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct PackageJsonManifestVisitor;
+
+        impl<'de> Visitor<'de> for PackageJsonManifestVisitor {
+            type Value = Vue3PackageJsonTypeManifest;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a package.json object")
+            }
+
+            fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                let mut manifest = Vue3PackageJsonTypeManifest::default();
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "version" => manifest.version = Some(map.next_value()?),
+                        "tsconfig" => manifest.tsconfig = Some(map.next_value()?),
+                        "exports" => manifest.exports = Some(map.next_value()?),
+                        "types" => manifest.types = Some(map.next_value()?),
+                        "typings" => manifest.typings = Some(map.next_value()?),
+                        "typesVersions" => manifest.types_versions = map.next_value()?,
+                        _ => {
+                            map.next_value::<IgnoredAny>()?;
+                        }
+                    }
+                }
+                Ok(manifest)
+            }
+        }
+
+        deserializer.deserialize_map(PackageJsonManifestVisitor)
+    }
+}
+
+#[derive(Clone, Debug, Default)]
 pub(crate) struct Vue3PackageTypesVersions(Vec<Vue3PackageTypesVersionEntry>);
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Vue3PackageTypesVersionEntry {
     pub(crate) selector: String,
     pub(crate) mappings: Vue3PackageTypesVersionMappings,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct Vue3PackageTypesVersionMappings(Vec<(String, serde_json::Value)>);
 
 impl<'de> Deserialize<'de> for Vue3PackageTypesVersions {
@@ -170,18 +208,33 @@ pub(crate) fn resolve_vue3_package_json_type_entry(
     subpath: Option<&str>,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Vue3PackageJsonTypeResolution {
-    let package_json = package_dir.join("package.json");
-    let Ok(source) = std::fs::read_to_string(package_json) else {
-        return Vue3PackageJsonTypeResolution::NoPackageJson;
+    if type_resolver.external_type_session.metadata_is_blocked() {
+        return Vue3PackageJsonTypeResolution::Blocked;
+    }
+    let Some(_resolution_guard) = type_resolver
+        .external_type_session
+        .begin_package_resolution(package_dir)
+    else {
+        return Vue3PackageJsonTypeResolution::Blocked;
     };
-    let Ok(manifest) = serde_json::from_str::<Vue3PackageJsonTypeManifest>(&source) else {
-        return Vue3PackageJsonTypeResolution::NoPackageJson;
+    let package_json = package_dir.join("package.json");
+    let Some(manifest) = type_resolver
+        .external_type_session
+        .package_json_from_path(&package_json)
+    else {
+        return if type_resolver.external_type_session.metadata_is_blocked() {
+            Vue3PackageJsonTypeResolution::Blocked
+        } else {
+            Vue3PackageJsonTypeResolution::NoPackageJson
+        };
     };
     if let Some(exports) = &manifest.exports {
         if let Some(target) = vue3_package_exports_type_target(exports, subpath) {
-            if let Some(resolved) =
-                vue3_package_export_type_path(package_dir, &target, type_resolver)
-            {
+            let resolved = vue3_package_export_type_path(package_dir, &target, type_resolver);
+            if type_resolver.external_type_session.metadata_is_blocked() {
+                return Vue3PackageJsonTypeResolution::Blocked;
+            }
+            if let Some(resolved) = resolved {
                 return Vue3PackageJsonTypeResolution::Resolved(resolved);
             }
             return Vue3PackageJsonTypeResolution::Blocked;
@@ -204,24 +257,38 @@ pub(crate) fn resolve_vue3_package_json_type_entry(
     } else {
         None
     };
-    if let Some(resolved) = vue3_package_types_versions_type_path(
+    let types_versions_resolution = vue3_package_types_versions_type_path(
         package_dir,
         &manifest.types_versions,
         subpath,
         root_type_target,
         type_resolver,
-    ) {
+    );
+    if type_resolver.external_type_session.metadata_is_blocked() {
+        return Vue3PackageJsonTypeResolution::Blocked;
+    }
+    if let Some(resolved) = types_versions_resolution {
         return Vue3PackageJsonTypeResolution::Resolved(resolved);
     }
     if subpath.is_none() {
         if let Some(target) = root_type_target {
-            if let Some(resolved) = vue3_package_type_field_path(package_dir, target, type_resolver)
-            {
+            if !vue3_package_type_target_is_safe(target) {
+                return Vue3PackageJsonTypeResolution::Blocked;
+            }
+            let resolved = vue3_package_type_field_path(package_dir, target, type_resolver);
+            if type_resolver.external_type_session.metadata_is_blocked() {
+                return Vue3PackageJsonTypeResolution::Blocked;
+            }
+            if let Some(resolved) = resolved {
                 return Vue3PackageJsonTypeResolution::Resolved(resolved);
             }
         }
     }
-    Vue3PackageJsonTypeResolution::NoPackageTypeEntry
+    if type_resolver.external_type_session.metadata_is_blocked() {
+        Vue3PackageJsonTypeResolution::Blocked
+    } else {
+        Vue3PackageJsonTypeResolution::NoPackageTypeEntry
+    }
 }
 
 pub(crate) fn vue3_package_exports_type_target(
@@ -341,9 +408,15 @@ pub(crate) fn vue3_package_types_versions_type_path(
     for (_, _, capture, targets) in matches {
         for target in targets {
             let target = target.replace('*', &capture);
-            if let Some(resolved) =
-                vue3_package_type_field_path(package_dir, &target, type_resolver)
-            {
+            if !vue3_package_type_target_is_safe(&target) {
+                type_resolver.external_type_session.block_metadata();
+                return None;
+            }
+            let resolved = vue3_package_type_field_path(package_dir, &target, type_resolver);
+            if type_resolver.external_type_session.metadata_is_blocked() {
+                return None;
+            }
+            if let Some(resolved) = resolved {
                 return Some(resolved);
             }
         }
@@ -396,10 +469,25 @@ pub(crate) fn vue3_package_type_field_path(
     target: &str,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
-    if Path::new(target).is_absolute() || target.starts_with("../") {
+    if !vue3_package_type_target_is_safe(target) {
         return None;
     }
     vue3_package_type_target_path(package_dir, target.trim_start_matches("./"), type_resolver)
+}
+
+pub(crate) fn vue3_package_type_target_is_safe(target: &str) -> bool {
+    if target.is_empty() || target.contains(':') || Path::new(target).is_absolute() {
+        return false;
+    }
+    let mut has_normal = false;
+    for component in Path::new(target).components() {
+        match component {
+            std::path::Component::Normal(_) => has_normal = true,
+            std::path::Component::CurDir => {}
+            _ => return false,
+        }
+    }
+    has_normal
 }
 
 pub(crate) fn vue3_package_type_target_path(
@@ -407,6 +495,12 @@ pub(crate) fn vue3_package_type_target_path(
     target: &str,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
+    if type_resolver.external_type_session.metadata_is_blocked() {
+        return None;
+    }
+    if !vue3_package_type_target_is_safe(target) {
+        return None;
+    }
     let candidate = normalize_path_components(package_dir.join(target));
     if candidate
         .extension()

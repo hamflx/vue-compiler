@@ -27,6 +27,9 @@ pub(crate) fn resolve_vue3_type_import_path(
                 Vue3PackageJsonTypeResolution::NoPackageJson
                 | Vue3PackageJsonTypeResolution::NoPackageTypeEntry => {}
             }
+            if type_resolver.external_type_session.metadata_is_blocked() {
+                return None;
+            }
         }
         candidates.extend(vue3_ts_resolution_candidates(candidate, extension));
         candidates.push(candidate.join("index.ts"));

@@ -79,7 +79,11 @@ pub(crate) fn resolve_vue3_tsconfig_path_mappings(
                 target,
                 &matched.capture,
             );
-            if let Some(resolved) = resolve_vue3_type_import_path(&candidate, type_resolver) {
+            let resolved = resolve_vue3_type_import_path(&candidate, type_resolver);
+            if type_resolver.external_type_session.metadata_is_blocked() {
+                return None;
+            }
+            if let Some(resolved) = resolved {
                 return Some(resolved);
             }
         }
@@ -135,23 +139,33 @@ pub(crate) fn resolve_vue3_bare_type_import(
     source: &str,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
+    if type_resolver.external_type_session.metadata_is_blocked() {
+        return None;
+    }
     let (package_name, subpath) = vue3_package_import_parts(source)?;
     for node_modules in vue3_node_modules_search_paths(filename) {
         let package_dir = node_modules.join(&package_name);
         if package_dir.is_dir() {
-            if let Some(resolved) =
-                resolve_vue3_package_type_entry(&package_dir, subpath.as_deref(), type_resolver)
-            {
+            let resolved =
+                resolve_vue3_package_type_entry(&package_dir, subpath.as_deref(), type_resolver);
+            if type_resolver.external_type_session.metadata_is_blocked() {
+                return None;
+            }
+            if let Some(resolved) = resolved {
                 return Some(resolved);
             }
         }
         let types_package_dir = node_modules.join(vue3_at_types_package_name(&package_name));
         if types_package_dir.is_dir() {
-            if let Some(resolved) = resolve_vue3_package_type_entry(
+            let resolved = resolve_vue3_package_type_entry(
                 &types_package_dir,
                 subpath.as_deref(),
                 type_resolver,
-            ) {
+            );
+            if type_resolver.external_type_session.metadata_is_blocked() {
+                return None;
+            }
+            if let Some(resolved) = resolved {
                 return Some(resolved);
             }
         }
@@ -200,31 +214,39 @@ pub(crate) fn vue3_node_modules_search_paths_from_dir(start_dir: &Path) -> Vec<P
 }
 
 pub(crate) fn vue3_type_resolver_context_for_filename(filename: &str) -> Vue3TypeResolverContext {
-    Vue3TypeResolverContext {
-        typescript_version: vue3_typescript_version_for_filename(filename)
-            .unwrap_or_else(vue3_package_typescript_baseline_version),
-        external_type_session: Vue3ExternalTypeLoadSession::default(),
+    let mut type_resolver = Vue3TypeResolverContext::default();
+    if let Some(version) = vue3_typescript_version_for_filename(filename, &type_resolver) {
+        type_resolver.typescript_version = version;
     }
+    type_resolver
 }
 
 pub(crate) fn vue3_typescript_version_for_filename(
     filename: &str,
+    type_resolver: &Vue3TypeResolverContext,
 ) -> Option<nodejs_semver::Version> {
     vue3_node_modules_search_paths(filename)
         .into_iter()
         .find_map(|node_modules| {
             vue3_typescript_version_from_package_json(
                 &node_modules.join("typescript").join("package.json"),
+                type_resolver,
             )
         })
 }
 
 pub(crate) fn vue3_typescript_version_from_package_json(
     package_json: &Path,
+    type_resolver: &Vue3TypeResolverContext,
 ) -> Option<nodejs_semver::Version> {
-    let source = std::fs::read_to_string(package_json).ok()?;
-    let package = serde_json::from_str::<serde_json::Value>(&source).ok()?;
-    let version = package.get("version")?.as_str()?.trim();
+    let package = type_resolver
+        .external_type_session
+        .package_json_from_path(package_json)?;
+    let version = package
+        .version
+        .as_ref()
+        .and_then(serde_json::Value::as_str)?
+        .trim();
     nodejs_semver::Version::parse(version).ok()
 }
 

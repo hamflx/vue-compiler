@@ -860,6 +860,11 @@ defineProps<Leaf>()
                 context_build_weight: 0,
                 context_cache_hits: 0,
                 cached_context_weight: 0,
+                metadata_files_read: 0,
+                metadata_bytes: 0,
+                metadata_source_cache_hits: 0,
+                metadata_parse_cache_hits: 0,
+                tsconfig_nodes: 0,
             }
         );
     }

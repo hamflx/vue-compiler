@@ -15,6 +15,12 @@ pub(crate) const VUE3_EXTERNAL_TYPE_MAX_CONTEXT_BUILDS: usize = 2048;
 pub(crate) const VUE3_EXTERNAL_TYPE_MAX_CONTEXT_BUILD_WEIGHT: usize = 64 * 1024 * 1024;
 pub(crate) const VUE3_EXTERNAL_TYPE_MAX_CONTEXT_CACHE_WEIGHT: usize = 8 * 1024 * 1024;
 pub(crate) const VUE3_EXTERNAL_TYPE_MAX_CONTEXT_CACHE_ENTRY_WEIGHT: usize = 1024 * 1024;
+pub(crate) const VUE3_EXTERNAL_TYPE_MAX_METADATA_FILES: usize = 16_384;
+pub(crate) const VUE3_EXTERNAL_TYPE_MAX_METADATA_FILE_BYTES: usize = 1024 * 1024;
+pub(crate) const VUE3_EXTERNAL_TYPE_MAX_METADATA_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const VUE3_EXTERNAL_TYPE_MAX_TSCONFIG_NODES: usize = 512;
+pub(crate) const VUE3_EXTERNAL_TYPE_MAX_TSCONFIG_DEPTH: usize = 64;
+pub(crate) const VUE3_EXTERNAL_TYPE_MAX_PACKAGE_RESOLUTION_DEPTH: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Vue3ExternalTypeLoadLimits {
@@ -28,6 +34,12 @@ pub(crate) struct Vue3ExternalTypeLoadLimits {
     pub(crate) max_context_build_weight: usize,
     pub(crate) max_context_cache_weight: usize,
     pub(crate) max_context_cache_entry_weight: usize,
+    pub(crate) max_metadata_files: usize,
+    pub(crate) max_metadata_file_bytes: usize,
+    pub(crate) max_metadata_bytes: usize,
+    pub(crate) max_tsconfig_nodes: usize,
+    pub(crate) max_tsconfig_depth: usize,
+    pub(crate) max_package_resolution_depth: usize,
 }
 
 impl Default for Vue3ExternalTypeLoadLimits {
@@ -43,6 +55,12 @@ impl Default for Vue3ExternalTypeLoadLimits {
             max_context_build_weight: VUE3_EXTERNAL_TYPE_MAX_CONTEXT_BUILD_WEIGHT,
             max_context_cache_weight: VUE3_EXTERNAL_TYPE_MAX_CONTEXT_CACHE_WEIGHT,
             max_context_cache_entry_weight: VUE3_EXTERNAL_TYPE_MAX_CONTEXT_CACHE_ENTRY_WEIGHT,
+            max_metadata_files: VUE3_EXTERNAL_TYPE_MAX_METADATA_FILES,
+            max_metadata_file_bytes: VUE3_EXTERNAL_TYPE_MAX_METADATA_FILE_BYTES,
+            max_metadata_bytes: VUE3_EXTERNAL_TYPE_MAX_METADATA_BYTES,
+            max_tsconfig_nodes: VUE3_EXTERNAL_TYPE_MAX_TSCONFIG_NODES,
+            max_tsconfig_depth: VUE3_EXTERNAL_TYPE_MAX_TSCONFIG_DEPTH,
+            max_package_resolution_depth: VUE3_EXTERNAL_TYPE_MAX_PACKAGE_RESOLUTION_DEPTH,
         }
     }
 }
@@ -59,6 +77,11 @@ pub(crate) struct Vue3ExternalTypeLoadStats {
     pub(crate) context_build_weight: usize,
     pub(crate) context_cache_hits: usize,
     pub(crate) cached_context_weight: usize,
+    pub(crate) metadata_files_read: usize,
+    pub(crate) metadata_bytes: usize,
+    pub(crate) metadata_source_cache_hits: usize,
+    pub(crate) metadata_parse_cache_hits: usize,
+    pub(crate) tsconfig_nodes: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -85,6 +108,13 @@ struct Vue3ExternalTypeLoadState {
     limits: Vue3ExternalTypeLoadLimits,
     source_cache: BTreeMap<String, Vue3ExternalTypeSourceCacheEntry>,
     context_cache: BTreeMap<String, Vue3ExternalTypeContextCacheEntry>,
+    metadata_source_cache: BTreeMap<PathBuf, Vue3MetadataSourceCacheEntry>,
+    metadata_path_identities: BTreeMap<PathBuf, PathBuf>,
+    tsconfig_cache: BTreeMap<PathBuf, Vue3TsconfigCacheEntry>,
+    package_json_cache: BTreeMap<PathBuf, Vue3PackageJsonCacheEntry>,
+    tsconfig_node_states: BTreeSet<(PathBuf, PathBuf, PathBuf)>,
+    active_package_resolutions: BTreeSet<PathBuf>,
+    metadata_blocked: bool,
     stats: Vue3ExternalTypeLoadStats,
     // Parent contexts are cached only when every recursive load completed.
     failure_epoch: usize,
@@ -96,6 +126,13 @@ impl Vue3ExternalTypeLoadState {
             limits,
             source_cache: BTreeMap::new(),
             context_cache: BTreeMap::new(),
+            metadata_source_cache: BTreeMap::new(),
+            metadata_path_identities: BTreeMap::new(),
+            tsconfig_cache: BTreeMap::new(),
+            package_json_cache: BTreeMap::new(),
+            tsconfig_node_states: BTreeSet::new(),
+            active_package_resolutions: BTreeSet::new(),
+            metadata_blocked: false,
             stats: Vue3ExternalTypeLoadStats::default(),
             failure_epoch: 0,
         }
@@ -116,6 +153,13 @@ impl std::fmt::Debug for Vue3ExternalTypeLoadSession {
             .field("stats", &state.stats)
             .field("source_cache_entries", &state.source_cache.len())
             .field("context_cache_entries", &state.context_cache.len())
+            .field(
+                "metadata_source_cache_entries",
+                &state.metadata_source_cache.len(),
+            )
+            .field("tsconfig_cache_entries", &state.tsconfig_cache.len())
+            .field("package_json_cache_entries", &state.package_json_cache.len())
+            .field("metadata_blocked", &state.metadata_blocked)
             .finish()
     }
 }
@@ -393,8 +437,14 @@ impl Default for Vue3ExternalTypeLoadSession {
 }
 
 include!("external_type_loading_parts/context_cost.rs");
+include!("external_type_loading_parts/metadata.rs");
 
 pub(crate) fn vue3_external_type_path_identity(path: &Path) -> String {
+    let identity = vue3_external_type_path_identity_path(path);
+    normalize_path_string(&identity)
+}
+
+fn vue3_external_type_path_identity_path(path: &Path) -> PathBuf {
     let identity = std::fs::canonicalize(path).unwrap_or_else(|_| {
         let absolute = if path.is_absolute() {
             path.to_path_buf()
@@ -405,15 +455,10 @@ pub(crate) fn vue3_external_type_path_identity(path: &Path) -> String {
         };
         normalize_path_components(absolute)
     });
-    let normalized = normalize_path_string(&identity);
-    if cfg!(windows) {
-        normalized.to_lowercase()
-    } else {
-        normalized
-    }
+    vue3_external_type_path_key(identity)
 }
 
-fn vue3_external_type_context_cache_key(path: &Path) -> String {
+fn vue3_external_type_lexical_path(path: &Path) -> PathBuf {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -421,12 +466,19 @@ fn vue3_external_type_context_cache_key(path: &Path) -> String {
             .map(|current| current.join(path))
             .unwrap_or_else(|_| path.to_path_buf())
     };
-    let normalized = normalize_path_string(&normalize_path_components(absolute));
+    vue3_external_type_path_key(normalize_path_components(absolute))
+}
+
+fn vue3_external_type_path_key(path: PathBuf) -> PathBuf {
     if cfg!(windows) {
-        normalized.to_lowercase()
+        PathBuf::from(normalize_path_string(&path).to_lowercase())
     } else {
-        normalized
+        path
     }
+}
+
+fn vue3_external_type_context_cache_key(path: &Path) -> String {
+    normalize_path_string(&vue3_external_type_lexical_path(path))
 }
 
 fn vue3_external_type_source_cache_key(

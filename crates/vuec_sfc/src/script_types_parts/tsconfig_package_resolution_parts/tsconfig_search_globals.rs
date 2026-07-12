@@ -53,22 +53,80 @@ impl Default for Vue3TsconfigIncludeScanBudget {
     }
 }
 
+#[derive(Debug, Default)]
+struct Vue3TsconfigGraphTraversal {
+    seen_states: BTreeSet<(PathBuf, PathBuf, PathBuf)>,
+    active_identities: BTreeSet<PathBuf>,
+}
+
+fn vue3_tsconfig_graph_enter(
+    config_path: &Path,
+    template_config_dir: &Path,
+    depth: usize,
+    traversal: &mut Vue3TsconfigGraphTraversal,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
+    if type_resolver.external_type_session.metadata_is_blocked() {
+        return None;
+    }
+    let identity = vue3_external_type_path_identity_path(config_path);
+    if traversal.active_identities.contains(&identity) {
+        return None;
+    }
+    let state_key = (
+        identity.clone(),
+        vue3_external_type_lexical_path(
+            config_path.parent().unwrap_or_else(|| Path::new("")),
+        ),
+        vue3_external_type_lexical_path(template_config_dir),
+    );
+    if traversal.seen_states.contains(&state_key) {
+        return None;
+    }
+    if depth >= type_resolver.external_type_session.max_tsconfig_depth() {
+        type_resolver.external_type_session.block_metadata();
+        return None;
+    }
+    traversal.seen_states.insert(state_key.clone());
+    if !type_resolver
+        .external_type_session
+        .claim_tsconfig_node(&state_key)
+    {
+        return None;
+    }
+    traversal.active_identities.insert(identity.clone());
+    Some(identity)
+}
+
 pub(crate) fn resolve_vue3_tsconfig_type_import(
     filename: &str,
     source: &str,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
+    if type_resolver.external_type_session.metadata_is_blocked() {
+        return None;
+    }
+    let mut traversal = Vue3TsconfigGraphTraversal::default();
     for config_path in vue3_tsconfig_search_paths(filename) {
         let config_dir = config_path
             .parent()
             .unwrap_or_else(|| Path::new(""))
             .to_path_buf();
-        let mut seen = BTreeSet::new();
-        let mappings =
-            vue3_tsconfig_path_mappings_from_config(&config_path, &config_dir, &mut seen);
-        if let Some(resolved) =
-            resolve_vue3_tsconfig_path_mappings(&mappings, source, type_resolver)
-        {
+        let mappings = vue3_tsconfig_path_mappings_from_config(
+            &config_path,
+            &config_dir,
+            &mut traversal,
+            0,
+            type_resolver,
+        );
+        if type_resolver.external_type_session.metadata_is_blocked() {
+            return None;
+        }
+        let resolved = resolve_vue3_tsconfig_path_mappings(&mappings, source, type_resolver);
+        if type_resolver.external_type_session.metadata_is_blocked() {
+            return None;
+        }
+        if let Some(resolved) = resolved {
             return Some(resolved);
         }
     }
@@ -88,47 +146,63 @@ pub(crate) fn vue3_tsconfig_search_paths(filename: &str) -> Vec<PathBuf> {
     paths
 }
 
-pub(crate) fn vue3_tsconfig_path_mappings_from_config(
+fn vue3_tsconfig_path_mappings_from_config(
     config_path: &Path,
     template_config_dir: &Path,
-    seen: &mut BTreeSet<String>,
+    traversal: &mut Vue3TsconfigGraphTraversal,
+    depth: usize,
+    type_resolver: &Vue3TypeResolverContext,
 ) -> Vec<Vue3TsconfigPathMapping> {
-    let normalized = normalize_path_string(config_path);
-    if !seen.insert(normalized) {
-        return Vec::new();
-    }
-    let Ok(source) = std::fs::read_to_string(config_path) else {
+    let Some(identity) = vue3_tsconfig_graph_enter(
+        config_path,
+        template_config_dir,
+        depth,
+        traversal,
+        type_resolver,
+    ) else {
         return Vec::new();
     };
-    let Some(value) = vue3_parse_tsconfig_jsonc(&source) else {
-        return Vec::new();
-    };
-    let config_dir = config_path.parent().unwrap_or_else(|| Path::new(""));
-    let mut mappings = Vec::new();
-    for extended in vue3_tsconfig_extends_paths(&value, config_dir) {
-        mappings.extend(vue3_tsconfig_path_mappings_from_config(
-            &extended,
-            template_config_dir,
-            seen,
-        ));
-    }
-    let direct = vue3_tsconfig_direct_path_mappings(&value, config_dir, template_config_dir);
-    if !direct.is_empty() {
-        let direct_patterns = direct
-            .iter()
-            .map(|mapping| mapping.pattern.as_str())
-            .collect::<BTreeSet<_>>();
-        mappings.retain(|mapping| !direct_patterns.contains(mapping.pattern.as_str()));
-        mappings.extend(direct);
-    }
-    for reference in vue3_tsconfig_reference_paths(&value, config_dir) {
-        let reference_dir = reference.parent().unwrap_or_else(|| Path::new(""));
-        mappings.extend(vue3_tsconfig_path_mappings_from_config(
-            &reference,
-            reference_dir,
-            seen,
-        ));
-    }
+    let mappings = (|| {
+        let value = type_resolver
+            .external_type_session
+            .tsconfig_from_path(config_path)?;
+        let config_dir = config_path.parent().unwrap_or_else(|| Path::new(""));
+        let mut mappings = Vec::new();
+        for extended in vue3_tsconfig_extends_paths(&value, config_dir, type_resolver) {
+            mappings.extend(vue3_tsconfig_path_mappings_from_config(
+                &extended,
+                template_config_dir,
+                traversal,
+                depth + 1,
+                type_resolver,
+            ));
+        }
+        if type_resolver.external_type_session.metadata_is_blocked() {
+            return Some(Vec::new());
+        }
+        let direct = vue3_tsconfig_direct_path_mappings(&value, config_dir, template_config_dir);
+        if !direct.is_empty() {
+            let direct_patterns = direct
+                .iter()
+                .map(|mapping| mapping.pattern.as_str())
+                .collect::<BTreeSet<_>>();
+            mappings.retain(|mapping| !direct_patterns.contains(mapping.pattern.as_str()));
+            mappings.extend(direct);
+        }
+        for reference in vue3_tsconfig_reference_paths(&value, config_dir) {
+            let reference_dir = reference.parent().unwrap_or_else(|| Path::new(""));
+            mappings.extend(vue3_tsconfig_path_mappings_from_config(
+                &reference,
+                reference_dir,
+                traversal,
+                depth + 1,
+                type_resolver,
+            ));
+        }
+        Some(mappings)
+    })()
+    .unwrap_or_default();
+    traversal.active_identities.remove(&identity);
     mappings
 }
 
@@ -136,51 +210,71 @@ pub(crate) fn vue3_tsconfig_global_type_files(
     filename: &str,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Vec<PathBuf> {
+    if type_resolver.external_type_session.metadata_is_blocked() {
+        return Vec::new();
+    }
     let mut files = Vec::new();
-    let mut seen_configs = BTreeSet::new();
+    let mut traversal = Vue3TsconfigGraphTraversal::default();
     let mut seen_files = BTreeSet::new();
     for config_path in vue3_tsconfig_search_paths(filename) {
         let config_dir = config_path.parent().unwrap_or_else(|| Path::new(""));
         vue3_tsconfig_global_type_files_from_config(
             &config_path,
             config_dir,
-            &mut seen_configs,
+            &mut traversal,
             &mut seen_files,
             &mut files,
             type_resolver,
+            0,
         );
     }
-    files
+    if type_resolver.external_type_session.metadata_is_blocked() {
+        Vec::new()
+    } else {
+        files
+    }
 }
 
-pub(crate) fn vue3_tsconfig_global_type_files_from_config(
+fn vue3_tsconfig_global_type_files_from_config(
     config_path: &Path,
     template_config_dir: &Path,
-    seen_configs: &mut BTreeSet<String>,
+    traversal: &mut Vue3TsconfigGraphTraversal,
     seen_files: &mut BTreeSet<String>,
     files: &mut Vec<PathBuf>,
     type_resolver: &Vue3TypeResolverContext,
+    depth: usize,
 ) {
-    let normalized = normalize_path_string(config_path);
-    if !seen_configs.insert(normalized) {
-        return;
-    }
-    let Ok(source) = std::fs::read_to_string(config_path) else {
+    let Some(identity) = vue3_tsconfig_graph_enter(
+        config_path,
+        template_config_dir,
+        depth,
+        traversal,
+        type_resolver,
+    ) else {
         return;
     };
-    let Some(value) = vue3_parse_tsconfig_jsonc(&source) else {
+    let Some(value) = type_resolver
+        .external_type_session
+        .tsconfig_from_path(config_path)
+    else {
+        traversal.active_identities.remove(&identity);
         return;
     };
     let config_dir = config_path.parent().unwrap_or_else(|| Path::new(""));
-    for extended in vue3_tsconfig_extends_paths(&value, config_dir) {
+    for extended in vue3_tsconfig_extends_paths(&value, config_dir, type_resolver) {
         vue3_tsconfig_global_type_files_from_config(
             &extended,
             template_config_dir,
-            seen_configs,
+            traversal,
             seen_files,
             files,
             type_resolver,
+            depth + 1,
         );
+    }
+    if type_resolver.external_type_session.metadata_is_blocked() {
+        traversal.active_identities.remove(&identity);
+        return;
     }
     for file in vue3_tsconfig_direct_global_type_files(
         &value,
@@ -198,12 +292,14 @@ pub(crate) fn vue3_tsconfig_global_type_files_from_config(
         vue3_tsconfig_global_type_files_from_config(
             &reference,
             reference_dir,
-            seen_configs,
+            traversal,
             seen_files,
             files,
             type_resolver,
+            depth + 1,
         );
     }
+    traversal.active_identities.remove(&identity);
 }
 
 pub(crate) fn vue3_tsconfig_direct_global_type_files(

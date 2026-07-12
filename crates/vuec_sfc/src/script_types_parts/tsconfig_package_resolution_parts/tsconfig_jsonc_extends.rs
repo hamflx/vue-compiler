@@ -119,17 +119,20 @@ pub(crate) fn vue3_strip_jsonc_trailing_commas(source: &str) -> String {
 pub(crate) fn vue3_tsconfig_extends_paths(
     value: &serde_json::Value,
     config_dir: &Path,
+    type_resolver: &Vue3TypeResolverContext,
 ) -> Vec<PathBuf> {
     match value.get("extends") {
         Some(serde_json::Value::String(target)) => {
-            vue3_resolve_tsconfig_extends_path(config_dir, target)
+            vue3_resolve_tsconfig_extends_path(config_dir, target, type_resolver)
                 .into_iter()
                 .collect()
         }
         Some(serde_json::Value::Array(targets)) => targets
             .iter()
             .filter_map(serde_json::Value::as_str)
-            .filter_map(|target| vue3_resolve_tsconfig_extends_path(config_dir, target))
+            .filter_map(|target| {
+                vue3_resolve_tsconfig_extends_path(config_dir, target, type_resolver)
+            })
             .collect(),
         _ => Vec::new(),
     }
@@ -152,11 +155,12 @@ pub(crate) fn vue3_tsconfig_reference_paths(
 pub(crate) fn vue3_resolve_tsconfig_extends_path(
     config_dir: &Path,
     target: &str,
+    type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
     if vue3_tsconfig_path_is_relative(target) || Path::new(target).is_absolute() {
         return vue3_resolve_tsconfig_path(config_dir, target);
     }
-    resolve_vue3_package_tsconfig_extends(config_dir, target)
+    resolve_vue3_package_tsconfig_extends(config_dir, target, type_resolver)
 }
 
 pub(crate) fn vue3_resolve_tsconfig_path(config_dir: &Path, target: &str) -> Option<PathBuf> {
@@ -196,6 +200,7 @@ pub(crate) fn resolve_vue3_tsconfig_candidate_path(
 pub(crate) fn resolve_vue3_package_tsconfig_extends(
     config_dir: &Path,
     target: &str,
+    type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
     let (package_name, subpath) = vue3_package_import_parts(target)?;
     for node_modules in vue3_node_modules_search_paths_from_dir(config_dir) {
@@ -203,9 +208,12 @@ pub(crate) fn resolve_vue3_package_tsconfig_extends(
         if !package_dir.is_dir() {
             continue;
         }
-        if let Some(resolved) =
-            resolve_vue3_package_tsconfig_entry(&package_dir, subpath.as_deref())
-        {
+        let resolved =
+            resolve_vue3_package_tsconfig_entry(&package_dir, subpath.as_deref(), type_resolver);
+        if type_resolver.external_type_session.metadata_is_blocked() {
+            return None;
+        }
+        if let Some(resolved) = resolved {
             return Some(resolved);
         }
     }
@@ -215,11 +223,19 @@ pub(crate) fn resolve_vue3_package_tsconfig_extends(
 pub(crate) fn resolve_vue3_package_tsconfig_entry(
     package_dir: &Path,
     subpath: Option<&str>,
+    type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
+    if type_resolver.external_type_session.metadata_is_blocked() {
+        return None;
+    }
     if let Some(subpath) = subpath {
         return vue3_package_tsconfig_subpath(package_dir, subpath);
     }
-    vue3_package_json_tsconfig_entry(package_dir)
+    let manifest_entry = vue3_package_json_tsconfig_entry(package_dir, type_resolver);
+    if type_resolver.external_type_session.metadata_is_blocked() {
+        return None;
+    }
+    manifest_entry
         .or_else(|| resolve_vue3_tsconfig_candidate_path(&package_dir.join("tsconfig"), false))
         .or_else(|| {
             let index = package_dir.join("index.json");
@@ -235,11 +251,21 @@ pub(crate) fn vue3_package_tsconfig_subpath(package_dir: &Path, subpath: &str) -
     resolve_vue3_tsconfig_candidate_path(&candidate, true)
 }
 
-pub(crate) fn vue3_package_json_tsconfig_entry(package_dir: &Path) -> Option<PathBuf> {
+pub(crate) fn vue3_package_json_tsconfig_entry(
+    package_dir: &Path,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
+    if type_resolver.external_type_session.metadata_is_blocked() {
+        return None;
+    }
     let package_json = package_dir.join("package.json");
-    let source = std::fs::read_to_string(package_json).ok()?;
-    let value = serde_json::from_str::<serde_json::Value>(&source).ok()?;
-    let target = value.get("tsconfig").and_then(serde_json::Value::as_str)?;
+    let manifest = type_resolver
+        .external_type_session
+        .package_json_from_path(&package_json)?;
+    let target = manifest
+        .tsconfig
+        .as_ref()
+        .and_then(serde_json::Value::as_str)?;
     if !vue3_package_tsconfig_target_is_safe(target) {
         return None;
     }
