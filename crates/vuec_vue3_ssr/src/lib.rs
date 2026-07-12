@@ -14,7 +14,8 @@ use vuec_vue3_asset::transform_asset_url_props;
 pub use vuec_vue3_asset::AssetUrlOptions;
 use vuec_vue3_core::{
     generate_vue3_ssr_mir, lower_vue3_ast_to_ssr_mir, source_map_for_render,
-    vue3_parser_diagnostics, CodegenResult, TemplateSource, Vue3CompilerOptions, Vue3Dialect,
+    vue3_expression_diagnostics, vue3_parser_diagnostics, CodegenResult, TemplateSource,
+    Vue3CompilerOptions, Vue3Dialect,
 };
 
 /// Options for the Vue 3 SSR compiler facade.
@@ -98,6 +99,7 @@ pub fn compile(source: TemplateSource, options: SsrCompilerOptions) -> SsrCompil
         generated.map = source_map_for_render(&generated.code, &ast, &source, &options.core);
     }
     let mut diagnostics = vue3_parser_diagnostics(&ast);
+    diagnostics.extend(vue3_expression_diagnostics(&ast, &options.core));
     diagnostics.extend(generated.diagnostics);
     SsrCompileResult {
         ast_helpers: vue3_ssr_public_ast_helpers(&generated.code, &generated.preamble),
@@ -445,5 +447,61 @@ mod tests {
             .iter()
             .any(|diagnostic| diagnostic.code == "24"
                 && diagnostic.message == "Element is missing end tag."));
+    }
+
+    #[test]
+    fn compile_reports_invalid_interpolation_expression() {
+        let result = compile(
+            TemplateSource {
+                filename: "bad.vue".into(),
+                source: "<div>{{ value( }}</div>".into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            SsrCompilerOptions::default(),
+        );
+
+        assert!(result.code.contains("_ssrInterpolate"));
+        assert_eq!(result.diagnostics.len(), 1, "{:?}", result.diagnostics);
+        assert_eq!(result.diagnostics[0].code, "46");
+        assert!(result.diagnostics[0]
+            .message
+            .starts_with("Error parsing JavaScript expression:"));
+    }
+
+    #[test]
+    fn compile_reports_invalid_v_if_expression() {
+        let result = compile(
+            TemplateSource {
+                filename: "bad.vue".into(),
+                source: r#"<div v-if="visible(">content</div>"#.into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            SsrCompilerOptions::default(),
+        );
+
+        assert_eq!(result.diagnostics.len(), 1, "{:?}", result.diagnostics);
+        assert_eq!(result.diagnostics[0].code, "46");
+    }
+
+    #[test]
+    fn compile_reports_malformed_v_for_expression() {
+        let result = compile(
+            TemplateSource {
+                filename: "bad.vue".into(),
+                source: r#"<div v-for="item in">{{ item }}</div>"#.into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            SsrCompilerOptions::default(),
+        );
+
+        assert_eq!(result.diagnostics.len(), 1, "{:?}", result.diagnostics);
+        assert_eq!(result.diagnostics[0].code, "32");
+        assert_eq!(
+            result.diagnostics[0].message,
+            "v-for has invalid expression."
+        );
     }
 }

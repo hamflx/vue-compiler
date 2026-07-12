@@ -807,7 +807,7 @@ impl Vue3Dialect {
         result.diagnostics = vue3_parser_diagnostics(&ast);
         result
             .diagnostics
-            .extend(expression_diagnostics(&ast, &options));
+            .extend(vue3_expression_diagnostics(&ast, &options));
         result.diagnostics.extend(ctx.diagnostics.into_vec());
         result
     }

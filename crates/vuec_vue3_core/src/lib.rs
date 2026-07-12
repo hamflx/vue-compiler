@@ -78,7 +78,8 @@ pub(crate) use mir_codegen::*;
 mod codegen;
 pub(crate) use codegen::*;
 pub use codegen::{
-    source_map_for_render, vue3_element_codegen_patch_flag, vue3_parser_diagnostics,
+    source_map_for_render, vue3_element_codegen_patch_flag, vue3_expression_diagnostics,
+    vue3_parser_diagnostics,
 };
 
 mod public_codegen;

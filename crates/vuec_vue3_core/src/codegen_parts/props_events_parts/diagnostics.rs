@@ -66,7 +66,13 @@ pub(crate) fn vue3_parse_error_message(code: Vue3ErrorCode) -> &'static str {
     }
 }
 
-pub(crate) fn expression_diagnostics(
+/// Validates JavaScript expressions stored in a parsed Vue 3 template AST.
+///
+/// Diagnostics are returned in AST traversal order. This includes generic
+/// interpolation and directive parsing errors as well as Vue-specific
+/// `v-for` and `v-model` validation. Parser and emitter diagnostics are not
+/// included, so compile facades can merge the three phases deterministically.
+pub fn vue3_expression_diagnostics(
     ast: &Vue3Ast,
     options: &Vue3CompilerOptions,
 ) -> Vec<Diagnostic> {
