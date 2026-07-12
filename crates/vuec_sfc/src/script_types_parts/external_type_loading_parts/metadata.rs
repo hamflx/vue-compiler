@@ -1,23 +1,5 @@
-#[derive(Clone, Debug)]
-enum Vue3MetadataSourceCacheEntry {
-    Loading,
-    Ready(std::sync::Arc<String>),
-    Failed,
-}
-
-#[derive(Clone, Debug)]
-enum Vue3TsconfigCacheEntry {
-    Loading,
-    Ready(std::sync::Arc<serde_json::Value>),
-    Failed,
-}
-
-#[derive(Clone, Debug)]
-enum Vue3PackageJsonCacheEntry {
-    Loading,
-    Ready(std::sync::Arc<Vue3PackageJsonTypeManifest>),
-    Failed,
-}
+include!("metadata_source_single_flight.rs");
+include!("metadata_parse_single_flight.rs");
 
 struct Vue3PackageResolutionGuard<'a> {
     session: &'a Vue3ExternalTypeLoadSession,
@@ -44,212 +26,41 @@ impl Drop for Vue3PackageResolutionGuard<'_> {
 }
 
 impl Vue3ExternalTypeLoadSession {
+    #[cfg(test)]
     fn metadata_source_from_path(&self, path: &Path) -> Option<std::sync::Arc<String>> {
         let cache_key = self.metadata_cache_key(path)?;
-        let max_bytes = {
-            let mut state = self.lock();
-            if state.metadata_blocked {
-                state.failure_epoch += 1;
-                return None;
-            }
-            match state.metadata_source_cache.get(&cache_key).cloned() {
-                Some(Vue3MetadataSourceCacheEntry::Ready(source)) => {
-                    state.stats.metadata_source_cache_hits += 1;
-                    return Some(source);
-                }
-                Some(Vue3MetadataSourceCacheEntry::Failed) => {
-                    state.stats.metadata_source_cache_hits += 1;
-                    return None;
-                }
-                Some(Vue3MetadataSourceCacheEntry::Loading) => {
-                    state.failure_epoch += 1;
-                    return None;
-                }
-                None => {}
-            }
-            if state.stats.metadata_files_read >= state.limits.max_metadata_files {
-                state.metadata_blocked = true;
-                state.failure_epoch += 1;
-                return None;
-            }
-            let remaining = state
-                .limits
-                .max_metadata_bytes
-                .saturating_sub(state.stats.metadata_bytes);
-            state.stats.metadata_files_read += 1;
-            state
-                .metadata_source_cache
-                .insert(cache_key.clone(), Vue3MetadataSourceCacheEntry::Loading);
-            state.limits.max_metadata_file_bytes.min(remaining)
-        };
+        self.metadata_source_from_path_with_key(path, cache_key)
+    }
 
-        let (source, bytes_read, read_blocked) = read_vue3_metadata_source(path, max_bytes);
-        let mut state = self.lock();
-        state.stats.metadata_bytes = state.stats.metadata_bytes.saturating_add(bytes_read);
-        let total_exceeded = state.stats.metadata_bytes > state.limits.max_metadata_bytes;
-        match source {
-            Some(source) if !total_exceeded => {
-                let source = std::sync::Arc::new(source);
-                state.metadata_source_cache.insert(
-                    cache_key,
-                    Vue3MetadataSourceCacheEntry::Ready(source.clone()),
-                );
-                Some(source)
+    fn metadata_source_from_path_with_key(
+        &self,
+        path: &Path,
+        cache_key: PathBuf,
+    ) -> Option<std::sync::Arc<String>> {
+        match self.begin_metadata_source_load(cache_key) {
+            Vue3MetadataSourceLoad::Ready(source) => Some(source),
+            Vue3MetadataSourceLoad::Wait(waiter) => match waiter.wait() {
+                Vue3MetadataSourceWaitResult::Ready(source) => Some(source),
+                Vue3MetadataSourceWaitResult::Missing
+                | Vue3MetadataSourceWaitResult::Blocked => None,
+            },
+            Vue3MetadataSourceLoad::Start(mut owner) => {
+                let outcome = read_vue3_metadata_source(path, &mut owner);
+                owner.complete(outcome)
             }
-            _ => {
-                state
-                    .metadata_source_cache
-                    .insert(cache_key, Vue3MetadataSourceCacheEntry::Failed);
-                if read_blocked || total_exceeded {
-                    state.metadata_blocked = true;
-                    state.failure_epoch += 1;
-                }
-                None
-            }
+            Vue3MetadataSourceLoad::Missing | Vue3MetadataSourceLoad::Blocked => None,
         }
     }
 
     fn tsconfig_from_path(&self, path: &Path) -> Option<std::sync::Arc<serde_json::Value>> {
-        let cache_key = self.metadata_cache_key(path)?;
-        {
-            let mut state = self.lock();
-            if state.metadata_blocked {
-                state.failure_epoch += 1;
-                return None;
-            }
-            match state.tsconfig_cache.get(&cache_key).cloned() {
-                Some(Vue3TsconfigCacheEntry::Ready(value)) => {
-                    state.stats.metadata_parse_cache_hits += 1;
-                    return Some(value);
-                }
-                Some(Vue3TsconfigCacheEntry::Failed) => {
-                    state.stats.metadata_parse_cache_hits += 1;
-                    return None;
-                }
-                Some(Vue3TsconfigCacheEntry::Loading) => {
-                    state.failure_epoch += 1;
-                    return None;
-                }
-                None => {}
-            }
-        }
-        let source = self.metadata_source_from_path(path)?;
-        let cache_key = self.metadata_cache_key(path)?;
-        {
-            let mut state = self.lock();
-            match state.tsconfig_cache.get(&cache_key).cloned() {
-                Some(Vue3TsconfigCacheEntry::Ready(value)) => {
-                    state.stats.metadata_parse_cache_hits += 1;
-                    return Some(value);
-                }
-                Some(Vue3TsconfigCacheEntry::Failed) => {
-                    state.stats.metadata_parse_cache_hits += 1;
-                    return None;
-                }
-                Some(Vue3TsconfigCacheEntry::Loading) => {
-                    state.failure_epoch += 1;
-                    return None;
-                }
-                None => {
-                    state
-                        .tsconfig_cache
-                        .insert(cache_key.clone(), Vue3TsconfigCacheEntry::Loading);
-                }
-            }
-        }
-        let parsed = vue3_parse_tsconfig_jsonc(&source).map(std::sync::Arc::new);
-        let mut state = self.lock();
-        match parsed {
-            Some(value) => {
-                state.tsconfig_cache.insert(
-                    cache_key,
-                    Vue3TsconfigCacheEntry::Ready(value.clone()),
-                );
-                Some(value)
-            }
-            None => {
-                state
-                    .tsconfig_cache
-                    .insert(cache_key, Vue3TsconfigCacheEntry::Failed);
-                state.metadata_blocked = true;
-                state.failure_epoch += 1;
-                None
-            }
-        }
+        self.parsed_metadata_from_path::<Vue3TsconfigMetadataKind>(path)
     }
 
     fn package_json_from_path(
         &self,
         path: &Path,
     ) -> Option<std::sync::Arc<Vue3PackageJsonTypeManifest>> {
-        let cache_key = self.metadata_cache_key(path)?;
-        {
-            let mut state = self.lock();
-            if state.metadata_blocked {
-                state.failure_epoch += 1;
-                return None;
-            }
-            match state.package_json_cache.get(&cache_key).cloned() {
-                Some(Vue3PackageJsonCacheEntry::Ready(value)) => {
-                    state.stats.metadata_parse_cache_hits += 1;
-                    return Some(value);
-                }
-                Some(Vue3PackageJsonCacheEntry::Failed) => {
-                    state.stats.metadata_parse_cache_hits += 1;
-                    return None;
-                }
-                Some(Vue3PackageJsonCacheEntry::Loading) => {
-                    state.failure_epoch += 1;
-                    return None;
-                }
-                None => {}
-            }
-        }
-        let source = self.metadata_source_from_path(path)?;
-        let cache_key = self.metadata_cache_key(path)?;
-        {
-            let mut state = self.lock();
-            match state.package_json_cache.get(&cache_key).cloned() {
-                Some(Vue3PackageJsonCacheEntry::Ready(value)) => {
-                    state.stats.metadata_parse_cache_hits += 1;
-                    return Some(value);
-                }
-                Some(Vue3PackageJsonCacheEntry::Failed) => {
-                    state.stats.metadata_parse_cache_hits += 1;
-                    return None;
-                }
-                Some(Vue3PackageJsonCacheEntry::Loading) => {
-                    state.failure_epoch += 1;
-                    return None;
-                }
-                None => {
-                    state
-                        .package_json_cache
-                        .insert(cache_key.clone(), Vue3PackageJsonCacheEntry::Loading);
-                }
-            }
-        }
-        let parsed = serde_json::from_str::<Vue3PackageJsonTypeManifest>(&source)
-            .ok()
-            .map(std::sync::Arc::new);
-        let mut state = self.lock();
-        match parsed {
-            Some(value) => {
-                state.package_json_cache.insert(
-                    cache_key,
-                    Vue3PackageJsonCacheEntry::Ready(value.clone()),
-                );
-                Some(value)
-            }
-            None => {
-                state
-                    .package_json_cache
-                    .insert(cache_key, Vue3PackageJsonCacheEntry::Failed);
-                state.metadata_blocked = true;
-                state.failure_epoch += 1;
-                None
-            }
-        }
+        self.parsed_metadata_from_path::<Vue3PackageJsonMetadataKind>(path)
     }
 
     fn claim_tsconfig_node(&self, state_key: &(PathBuf, PathBuf, PathBuf)) -> bool {
@@ -261,8 +72,9 @@ impl Vue3ExternalTypeLoadSession {
             return true;
         }
         if state.tsconfig_node_states.len() >= state.limits.max_tsconfig_nodes {
-            state.metadata_blocked = true;
-            state.failure_epoch += 1;
+            let flights = vue3_block_metadata_state(&mut state);
+            drop(state);
+            vue3_abort_metadata_flights(flights);
             return false;
         }
         state.tsconfig_node_states.insert(state_key.clone());
@@ -286,8 +98,9 @@ impl Vue3ExternalTypeLoadSession {
         if state.stats.tsconfig_discovery_entries
             >= state.limits.max_tsconfig_discovery_entries
         {
-            state.metadata_blocked = true;
-            state.failure_epoch += 1;
+            let flights = vue3_block_metadata_state(&mut state);
+            drop(state);
+            vue3_abort_metadata_flights(flights);
             return false;
         }
         state.stats.tsconfig_discovery_entries += 1;
@@ -300,8 +113,9 @@ impl Vue3ExternalTypeLoadSession {
             return false;
         }
         if state.stats.tsconfig_discovery_files >= state.limits.max_tsconfig_discovery_files {
-            state.metadata_blocked = true;
-            state.failure_epoch += 1;
+            let flights = vue3_block_metadata_state(&mut state);
+            drop(state);
+            vue3_abort_metadata_flights(flights);
             return false;
         }
         state.stats.tsconfig_discovery_files += 1;
@@ -319,8 +133,9 @@ impl Vue3ExternalTypeLoadSession {
 
     fn block_metadata(&self) {
         let mut state = self.lock();
-        state.metadata_blocked = true;
-        state.failure_epoch += 1;
+        let flights = vue3_block_metadata_state(&mut state);
+        drop(state);
+        vue3_abort_metadata_flights(flights);
     }
 
     fn begin_package_resolution(&self, path: &Path) -> Option<Vue3PackageResolutionGuard<'_>> {
@@ -334,8 +149,9 @@ impl Vue3ExternalTypeLoadSession {
         let recursion_blocked = owner_stack.is_some_and(|stack| stack.contains(&identity))
             || owner_stack.map_or(0, Vec::len) >= state.limits.max_package_resolution_depth;
         if state.metadata_blocked || recursion_blocked {
-            state.metadata_blocked = true;
-            state.failure_epoch += 1;
+            let flights = vue3_block_metadata_state(&mut state);
+            drop(state);
+            vue3_abort_metadata_flights(flights);
             return None;
         }
         state
@@ -363,8 +179,9 @@ impl Vue3ExternalTypeLoadSession {
                 return Some(identity.clone());
             }
             if state.metadata_path_identities.len() >= state.limits.max_metadata_files {
-                state.metadata_blocked = true;
-                state.failure_epoch += 1;
+                let flights = vue3_block_metadata_state(&mut state);
+                drop(state);
+                vue3_abort_metadata_flights(flights);
                 return None;
             }
         }
@@ -378,8 +195,9 @@ impl Vue3ExternalTypeLoadSession {
             return Some(identity.clone());
         }
         if state.metadata_path_identities.len() >= state.limits.max_metadata_files {
-            state.metadata_blocked = true;
-            state.failure_epoch += 1;
+            let flights = vue3_block_metadata_state(&mut state);
+            drop(state);
+            vue3_abort_metadata_flights(flights);
             return None;
         }
         state
@@ -389,32 +207,48 @@ impl Vue3ExternalTypeLoadSession {
     }
 }
 
-fn read_vue3_metadata_source(path: &Path, max_bytes: usize) -> (Option<String>, usize, bool) {
-    let metadata = match std::fs::metadata(path) {
-        Ok(metadata) if metadata.is_file() => metadata,
-        Ok(_) => return (None, 0, true),
-        Err(error) => return (None, 0, error.kind() != std::io::ErrorKind::NotFound),
-    };
-    if metadata.len() > max_bytes as u64 {
-        return (None, 0, true);
-    }
-    let file = match std::fs::File::open(path) {
+fn read_vue3_metadata_source(
+    path: &Path,
+    owner: &mut Vue3MetadataSourceOwner,
+) -> Vue3MetadataSourceOutcome {
+    let mut file = match std::fs::File::open(path) {
         Ok(file) => file,
-        Err(error) => return (None, 0, error.kind() != std::io::ErrorKind::NotFound),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Vue3MetadataSourceOutcome::Missing;
+        }
+        Err(_) => return Vue3MetadataSourceOutcome::Blocked,
     };
-    let mut bytes = Vec::with_capacity(max_bytes.min(64 * 1024));
-    let mut limited = std::io::Read::take(file, max_bytes.saturating_add(1) as u64);
-    if std::io::Read::read_to_end(&mut limited, &mut bytes).is_err() {
-        let bytes_read = bytes.len();
-        return (None, bytes_read, true);
+    let metadata = match file.metadata() {
+        Ok(metadata) if metadata.is_file() => metadata,
+        Ok(_) | Err(_) => return Vue3MetadataSourceOutcome::Blocked,
+    };
+    let declared_len_u64 = metadata.len();
+    let Ok(declared_len) = usize::try_from(declared_len_u64) else {
+        return Vue3MetadataSourceOutcome::Blocked;
+    };
+    if !owner.reserve_bytes(declared_len) {
+        return Vue3MetadataSourceOutcome::Blocked;
+    }
+    let mut bytes = Vec::with_capacity(declared_len.min(64 * 1024));
+    let read_failed = {
+        let mut limited = std::io::Read::take(&mut file, declared_len as u64);
+        std::io::Read::read_to_end(&mut limited, &mut bytes).is_err()
+    };
+    if read_failed {
+        owner.record_bytes_read(bytes.len());
+        return Vue3MetadataSourceOutcome::Blocked;
     }
     let bytes_read = bytes.len();
-    if bytes_read > max_bytes {
-        return (None, bytes_read, true);
+    owner.record_bytes_read(bytes_read);
+    let length_changed = file
+        .metadata()
+        .map_or(true, |metadata| metadata.len() != declared_len_u64);
+    if bytes_read != declared_len || length_changed {
+        return Vue3MetadataSourceOutcome::Blocked;
     }
     match String::from_utf8(bytes) {
-        Ok(source) => (Some(source), bytes_read, false),
-        Err(_) => (None, bytes_read, true),
+        Ok(source) => Vue3MetadataSourceOutcome::Ready(source),
+        Err(_) => Vue3MetadataSourceOutcome::Blocked,
     }
 }
 

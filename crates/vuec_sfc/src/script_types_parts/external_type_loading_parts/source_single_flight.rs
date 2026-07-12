@@ -1,4 +1,5 @@
 type Vue3ExternalTypeSourceResult = Option<std::sync::Arc<Vue3ExternalTypeSource>>;
+type Vue3ExternalTypeSourceFlight = Vue3SingleFlight<Vue3ExternalTypeSource>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Vue3ExternalTypeSourceKind {
@@ -11,73 +12,6 @@ enum Vue3ExternalTypeSourceCacheEntry {
     Loading(std::sync::Arc<Vue3ExternalTypeSourceFlight>),
     Ready(std::sync::Arc<Vue3ExternalTypeSource>),
     Failed,
-}
-
-#[derive(Debug)]
-struct Vue3ExternalTypeSourceFlight {
-    id: u64,
-    owner: std::thread::ThreadId,
-    state: std::sync::Mutex<Vue3ExternalTypeSourceFlightState>,
-    ready: std::sync::Condvar,
-}
-
-#[derive(Clone, Debug)]
-enum Vue3ExternalTypeSourceFlightState {
-    Running,
-    Complete(Vue3ExternalTypeSourceResult),
-    Aborted,
-}
-
-impl Vue3ExternalTypeSourceFlight {
-    fn new(id: u64, owner: std::thread::ThreadId) -> Self {
-        Self {
-            id,
-            owner,
-            state: std::sync::Mutex::new(Vue3ExternalTypeSourceFlightState::Running),
-            ready: std::sync::Condvar::new(),
-        }
-    }
-
-    fn wait(&self) -> Vue3ExternalTypeSourceResult {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        loop {
-            match &*state {
-                Vue3ExternalTypeSourceFlightState::Running => {
-                    state = self
-                        .ready
-                        .wait(state)
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                }
-                Vue3ExternalTypeSourceFlightState::Complete(result) => return result.clone(),
-                Vue3ExternalTypeSourceFlightState::Aborted => return None,
-            }
-        }
-    }
-
-    fn complete(&self, result: Vue3ExternalTypeSourceResult) {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if matches!(*state, Vue3ExternalTypeSourceFlightState::Running) {
-            *state = Vue3ExternalTypeSourceFlightState::Complete(result);
-            self.ready.notify_all();
-        }
-    }
-
-    fn abort(&self) {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if matches!(*state, Vue3ExternalTypeSourceFlightState::Running) {
-            *state = Vue3ExternalTypeSourceFlightState::Aborted;
-            self.ready.notify_all();
-        }
-    }
 }
 
 enum Vue3ExternalTypeSourceLoad {
@@ -94,11 +28,15 @@ struct Vue3ExternalTypeSourceWaiter {
 
 impl Vue3ExternalTypeSourceWaiter {
     fn wait(self) -> Vue3ExternalTypeSourceResult {
-        let result = self.flight.wait();
-        if result.is_some() {
-            self.session.lock().stats.source_cache_hits += 1;
+        match self.flight.wait() {
+            Vue3SingleFlightOutcome::Complete(result) => {
+                if result.is_some() {
+                    self.session.lock().stats.source_cache_hits += 1;
+                }
+                result
+            }
+            Vue3SingleFlightOutcome::Aborted => None,
         }
-        result
     }
 }
 
@@ -310,7 +248,7 @@ impl Vue3ExternalTypeLoadSession {
             Vue3ExternalTypeSourceKind::Import => state.stats.import_files_read += 1,
             Vue3ExternalTypeSourceKind::Global => state.stats.global_files_read += 1,
         }
-        let flight = std::sync::Arc::new(Vue3ExternalTypeSourceFlight::new(flight_id, owner));
+        let flight = std::sync::Arc::new(Vue3ExternalTypeSourceFlight::new(flight_id, owner, 0));
         state.source_cache.insert(
             cache_key.clone(),
             Vue3ExternalTypeSourceCacheEntry::Loading(flight.clone()),

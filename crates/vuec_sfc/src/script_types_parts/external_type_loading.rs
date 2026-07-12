@@ -111,6 +111,7 @@ pub(crate) struct Vue3ExternalTypeLoadStats {
     pub(crate) tsconfig_discovery_files: usize,
 }
 
+include!("external_type_loading_parts/single_flight.rs");
 include!("external_type_loading_parts/source_single_flight.rs");
 
 #[derive(Clone, Debug)]
@@ -136,6 +137,9 @@ struct Vue3ExternalTypeLoadState {
     next_source_flight_id: u64,
     reserved_import_bytes: usize,
     reserved_global_bytes: usize,
+    next_metadata_flight_id: u64,
+    reserved_metadata_bytes: usize,
+    metadata_generation: u64,
     metadata_blocked: bool,
     stats: Vue3ExternalTypeLoadStats,
     // Parent contexts are cached only when every recursive load completed.
@@ -158,6 +162,9 @@ impl Vue3ExternalTypeLoadState {
             next_source_flight_id: 0,
             reserved_import_bytes: 0,
             reserved_global_bytes: 0,
+            next_metadata_flight_id: 0,
+            reserved_metadata_bytes: 0,
+            metadata_generation: 0,
             metadata_blocked: false,
             stats: Vue3ExternalTypeLoadStats::default(),
             failure_epoch: 0,
