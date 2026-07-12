@@ -21,15 +21,25 @@ enum Vue3PackageJsonCacheEntry {
 
 struct Vue3PackageResolutionGuard<'a> {
     session: &'a Vue3ExternalTypeLoadSession,
+    owner: std::thread::ThreadId,
     identity: PathBuf,
 }
 
 impl Drop for Vue3PackageResolutionGuard<'_> {
     fn drop(&mut self) {
-        self.session
-            .lock()
+        let mut state = self.session.lock();
+        let remove_owner = state
             .active_package_resolutions
-            .remove(&self.identity);
+            .get_mut(&self.owner)
+            .is_some_and(|stack| {
+                if let Some(index) = stack.iter().rposition(|path| path == &self.identity) {
+                    stack.remove(index);
+                }
+                stack.is_empty()
+            });
+        if remove_owner {
+            state.active_package_resolutions.remove(&self.owner);
+        }
     }
 }
 
@@ -318,19 +328,25 @@ impl Vue3ExternalTypeLoadSession {
             return None;
         }
         let identity = vue3_external_type_path_identity_path(path);
+        let owner = std::thread::current().id();
         let mut state = self.lock();
-        if state.metadata_blocked
-            || state.active_package_resolutions.contains(&identity)
-            || state.active_package_resolutions.len() >= state.limits.max_package_resolution_depth
-        {
+        let owner_stack = state.active_package_resolutions.get(&owner);
+        let recursion_blocked = owner_stack.is_some_and(|stack| stack.contains(&identity))
+            || owner_stack.map_or(0, Vec::len) >= state.limits.max_package_resolution_depth;
+        if state.metadata_blocked || recursion_blocked {
             state.metadata_blocked = true;
             state.failure_epoch += 1;
             return None;
         }
-        state.active_package_resolutions.insert(identity.clone());
+        state
+            .active_package_resolutions
+            .entry(owner)
+            .or_default()
+            .push(identity.clone());
         drop(state);
         Some(Vue3PackageResolutionGuard {
             session: self,
+            owner,
             identity,
         })
     }
@@ -399,5 +415,79 @@ fn read_vue3_metadata_source(path: &Path, max_bytes: usize) -> (Option<String>, 
     match String::from_utf8(bytes) {
         Ok(source) => (Some(source), bytes_read, false),
         Err(_) => (None, bytes_read, true),
+    }
+}
+
+#[cfg(test)]
+mod package_resolution_tests {
+    use super::*;
+
+    #[test]
+    fn package_resolution_recursion_is_scoped_to_the_current_thread() {
+        let session = Vue3ExternalTypeLoadSession::with_limits(Vue3ExternalTypeLoadLimits {
+            max_package_resolution_depth: 1,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        let path = PathBuf::from("same-package");
+        let _guard = session
+            .begin_package_resolution(&path)
+            .expect("first thread guard");
+        let other_session = session.clone();
+        let other_path = path.clone();
+
+        let allowed = std::thread::spawn(move || {
+            other_session
+                .begin_package_resolution(&other_path)
+                .is_some()
+        })
+        .join()
+        .expect("join package resolution thread");
+
+        assert!(allowed);
+        assert!(!session.metadata_is_blocked());
+    }
+
+    #[test]
+    fn package_resolution_rejects_same_thread_recursion() {
+        let session = Vue3ExternalTypeLoadSession::default();
+        let path = Path::new("recursive-package");
+        let _guard = session
+            .begin_package_resolution(path)
+            .expect("outer package resolution");
+
+        assert!(session.begin_package_resolution(path).is_none());
+        assert!(session.metadata_is_blocked());
+    }
+
+    #[test]
+    fn package_resolution_rejects_a_zero_depth_limit() {
+        let session = Vue3ExternalTypeLoadSession::with_limits(Vue3ExternalTypeLoadLimits {
+            max_package_resolution_depth: 0,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+
+        assert!(session
+            .begin_package_resolution(Path::new("blocked-package"))
+            .is_none());
+        assert!(session.metadata_is_blocked());
+    }
+
+    #[test]
+    fn package_resolution_guard_cleans_up_during_unwind() {
+        let session = Vue3ExternalTypeLoadSession::default();
+        let path = PathBuf::from("panicking-package");
+        let unwind_session = session.clone();
+        let unwind_path = path.clone();
+
+        let result = std::panic::catch_unwind(move || {
+            let _guard = unwind_session
+                .begin_package_resolution(&unwind_path)
+                .expect("package resolution before panic");
+            panic!("test package resolution unwind");
+        });
+
+        assert!(result.is_err());
+        assert!(session.begin_package_resolution(&path).is_some());
+        assert!(!session.metadata_is_blocked());
     }
 }

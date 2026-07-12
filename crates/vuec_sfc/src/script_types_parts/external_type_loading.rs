@@ -142,7 +142,8 @@ struct Vue3ExternalTypeLoadState {
     tsconfig_cache: BTreeMap<PathBuf, Vue3TsconfigCacheEntry>,
     package_json_cache: BTreeMap<PathBuf, Vue3PackageJsonCacheEntry>,
     tsconfig_node_states: BTreeSet<(PathBuf, PathBuf, PathBuf)>,
-    active_package_resolutions: BTreeSet<PathBuf>,
+    active_package_resolutions:
+        std::collections::HashMap<std::thread::ThreadId, Vec<PathBuf>>,
     metadata_blocked: bool,
     stats: Vue3ExternalTypeLoadStats,
     // Parent contexts are cached only when every recursive load completed.
@@ -161,7 +162,7 @@ impl Vue3ExternalTypeLoadState {
             tsconfig_cache: BTreeMap::new(),
             package_json_cache: BTreeMap::new(),
             tsconfig_node_states: BTreeSet::new(),
-            active_package_resolutions: BTreeSet::new(),
+            active_package_resolutions: std::collections::HashMap::new(),
             metadata_blocked: false,
             stats: Vue3ExternalTypeLoadStats::default(),
             failure_epoch: 0,
