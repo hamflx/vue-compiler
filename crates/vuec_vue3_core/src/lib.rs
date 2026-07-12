@@ -22,13 +22,13 @@ use vuec_ast::{
     HirStaticAttr, HirTag, JsExprId, JsPatternId, LoweringMap, MirChildren, MirExpr,
     MissingSpanReason, NodeId, NodeSpan, QuoteKind, RuntimeHelper, Vue3Ast, Vue3AstKind,
     Vue3Directive, Vue3DomBinding, Vue3DomClickEvent, Vue3DomContent, Vue3DomDirective,
-    Vue3DomEvent, Vue3DomEventCache, Vue3DomMir, Vue3DomMirKind, Vue3DomModel, Vue3DomModelKind,
-    Vue3DomObjectBinding, Vue3DomObjectListeners, Vue3DomPropSegment, Vue3DomProps,
-    Vue3DomPropsNormalize, Vue3DomRoot, Vue3DomSlotName, Vue3DomStaticAttr, Vue3DomTag,
-    Vue3Element, Vue3ElementType, Vue3Expression, Vue3ForMemo, Vue3ForMir, Vue3NodeKind,
-    Vue3ParserDiagnostic, Vue3PatchFlags, Vue3Prop, Vue3Root, Vue3SlotFlag, Vue3SsrAttrs,
-    Vue3SsrComponent, Vue3SsrContent, Vue3SsrFor, Vue3SsrMir, Vue3SsrMirKind, Vue3SsrModel,
-    Vue3SsrModelKind, Vue3SsrRoot, Vue3SsrSuspense, Vue3SsrTeleport, Vue3VNodeCall,
+    Vue3DomEvent, Vue3DomEventCache, Vue3DomKey, Vue3DomMir, Vue3DomMirKind, Vue3DomModel,
+    Vue3DomModelKind, Vue3DomObjectBinding, Vue3DomObjectListeners, Vue3DomPropSegment,
+    Vue3DomProps, Vue3DomPropsNormalize, Vue3DomRoot, Vue3DomSlotName, Vue3DomStaticAttr,
+    Vue3DomTag, Vue3Element, Vue3ElementType, Vue3Expression, Vue3ForMemo, Vue3ForMir,
+    Vue3NodeKind, Vue3ParserDiagnostic, Vue3PatchFlags, Vue3Prop, Vue3Root, Vue3SlotFlag,
+    Vue3SsrAttrs, Vue3SsrComponent, Vue3SsrContent, Vue3SsrFor, Vue3SsrMir, Vue3SsrMirKind,
+    Vue3SsrModel, Vue3SsrModelKind, Vue3SsrRoot, Vue3SsrSuspense, Vue3SsrTeleport, Vue3VNodeCall,
 };
 use vuec_codegen::{CodeWriter, SourceMapArtifact, SourceMapSegment};
 use vuec_diagnostics::{Diagnostic, Vue3ErrorCode};

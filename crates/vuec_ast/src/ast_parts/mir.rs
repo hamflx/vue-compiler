@@ -364,6 +364,12 @@ pub struct Vue3DomRoot {
 pub struct Vue3ForMir {
     /// Iterable source expression id.
     pub source: JsExprId,
+    /// Whether the iterable source is compile-time stable.
+    #[serde(default)]
+    pub is_stable: bool,
+    /// Whether the `v-for` node has a statically named `key` prop.
+    #[serde(default)]
+    pub has_key: bool,
     /// Value alias pattern id.
     pub value_alias: JsPatternId,
     /// Key alias pattern id.
@@ -433,6 +439,9 @@ pub enum Vue3DomTag {
 /// Vue 3 DOM prop collection.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vue3DomProps {
+    /// Key injected by structural control-flow lowering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub injected_key: Option<Vue3DomKey>,
     /// Ordered prop segments preserving codegen order.
     pub segments: Vec<Vue3DomPropSegment>,
     /// Static attributes.
@@ -447,6 +456,15 @@ pub struct Vue3DomProps {
     pub object_listeners: Vec<Vue3DomObjectListeners>,
     /// Prop normalization flags.
     pub normalize: Vue3DomPropsNormalize,
+}
+
+/// Vue 3 DOM key injected into a VNode or slot call by control-flow lowering.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Vue3DomKey {
+    /// Numeric key assigned to a `v-if` branch.
+    Branch(u32),
+    /// User-authored key moved from a structural `<template>`.
+    Value(MirExpr),
 }
 
 /// Ordered Vue 3 DOM prop segment.

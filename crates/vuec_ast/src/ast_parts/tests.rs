@@ -14,6 +14,30 @@ mod tests {
     }
 
     #[test]
+    fn vue3_for_mir_defaults_new_fragment_metadata_when_deserializing_legacy_data() {
+        let for_mir = Vue3ForMir {
+            source: JsExprId(1),
+            is_stable: true,
+            has_key: true,
+            value_alias: JsPatternId(2),
+            key_alias: None,
+            index_alias: None,
+            key: Some(MirExpr::String("item".into())),
+            branch_key: None,
+            memo: None,
+        };
+        let mut value = serde_json::to_value(for_mir).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.remove("is_stable");
+        object.remove("has_key");
+
+        let decoded: Vue3ForMir = serde_json::from_value(value).unwrap();
+        assert!(!decoded.is_stable);
+        assert!(!decoded.has_key);
+        assert_eq!(decoded.key, Some(MirExpr::String("item".into())));
+    }
+
+    #[test]
     fn document_capacity_can_be_reserved_without_changing_tree_shape() {
         let mut doc = Vue3Ast::with_capacity(Vue3NodeKind::root(), None, 16);
         assert_eq!(doc.root, NodeId(0));

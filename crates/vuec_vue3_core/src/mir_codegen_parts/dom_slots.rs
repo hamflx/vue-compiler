@@ -74,7 +74,12 @@ impl<'a> Vue3DomMirCodegen<'a> {
                         self.render_node(*child_id, Vue3DomMirRenderMode::Child, scope)
                     })
                     .collect::<Vec<_>>();
-                if rendered.is_empty() {
+                if matches!(
+                    call.tag,
+                    Vue3DomTag::RuntimeHelper(RuntimeHelper::Vue3Fragment)
+                ) {
+                    Some(render_array(&rendered))
+                } else if rendered.is_empty() {
                     None
                 } else if rendered.len() == 1 {
                     rendered.into_iter().next()

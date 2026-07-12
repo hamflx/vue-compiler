@@ -1370,3 +1370,440 @@
             vec!["[msg]", "msg", "list", "item.name", "[item.id]"]
         );
     }
+
+    #[test]
+    fn lower_vue3_ast_to_dom_mir_unwraps_structural_template_if_branches() {
+        let source = TemplateSource {
+            filename: "structural-if.vue".into(),
+            source: r#"<template v-if="ok"><div/><span/></template><template v-else><i/><b/></template>"#
+                .into(),
+            file_id: FileId(120),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+
+        assert_eq!(result.hir.validate_tree(), Ok(()));
+        assert_eq!(result.mir.validate_tree(), Ok(()));
+        assert!(!result.hir.nodes.iter().any(|node| matches!(
+            &node.kind,
+            HirNodeKind::Element(element)
+                if matches!(&element.tag, HirTag::Native(tag) if tag == "template")
+        )));
+        assert!(!result.mir.nodes.iter().any(|node| matches!(
+            &node.kind,
+            Vue3DomMirKind::VNodeCall(call)
+                if call.tag == Vue3DomTag::Native("template".into())
+        )));
+
+        let fragments = result
+            .mir
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.kind {
+                Vue3DomMirKind::VNodeCall(call)
+                    if call.tag
+                        == Vue3DomTag::RuntimeHelper(RuntimeHelper::Vue3Fragment) =>
+                {
+                    Some(call)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(fragments.len(), 2);
+        assert_eq!(
+            fragments
+                .iter()
+                .map(|call| call.props.injected_key.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                Some(Vue3DomKey::Branch(0)),
+                Some(Vue3DomKey::Branch(1))
+            ]
+        );
+        assert!(fragments.iter().all(|call| call.is_block));
+        assert!(fragments
+            .iter()
+            .all(|call| call.patch_flag.bits == 64));
+        assert!(fragments.iter().all(|call| matches!(
+            &call.children,
+            MirChildren::Nodes(children) if children.len() == 2
+        )));
+        assert_eq!(
+            result
+                .hir
+                .nodes
+                .iter()
+                .filter(|node| matches!(node.kind, HirNodeKind::Fragment(_)))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn lower_vue3_ast_to_dom_mir_unwraps_template_v_for_bodies_and_moves_keys() {
+        let source = TemplateSource {
+            filename: "structural-for.vue".into(),
+            source: r#"<template v-for="item in items" :key="item.id"><span>{{ item.name }}</span></template><template v-for="entry in entries">hello<i/></template>"#
+                .into(),
+            file_id: FileId(121),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+
+        assert_eq!(result.hir.validate_tree(), Ok(()));
+        assert_eq!(result.mir.validate_tree(), Ok(()));
+        assert!(!result.mir.nodes.iter().any(|node| matches!(
+            &node.kind,
+            Vue3DomMirKind::VNodeCall(call)
+                if call.tag == Vue3DomTag::Native("template".into())
+        )));
+        let loops = result
+            .mir
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.kind {
+                Vue3DomMirKind::For(for_mir) => Some((node, for_mir)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(loops.len(), 2);
+
+        let first_key = loops[0].1.key.clone().expect("keyed loop");
+        let first_body = result
+            .mir
+            .node(loops[0].0.children[0])
+            .expect("single-child loop body");
+        let Vue3DomMirKind::VNodeCall(first_call) = &first_body.kind else {
+            panic!("expected a direct VNode body");
+        };
+        assert_eq!(first_call.tag, Vue3DomTag::Native("span".into()));
+        assert_eq!(
+            first_call.props.injected_key,
+            Some(Vue3DomKey::Value(first_key))
+        );
+        assert!(first_call.is_block);
+
+        assert!(loops[1].1.key.is_none());
+        let second_body = result
+            .mir
+            .node(loops[1].0.children[0])
+            .expect("multi-child loop body");
+        let Vue3DomMirKind::VNodeCall(second_call) = &second_body.kind else {
+            panic!("expected a Fragment VNode body");
+        };
+        assert_eq!(
+            second_call.tag,
+            Vue3DomTag::RuntimeHelper(RuntimeHelper::Vue3Fragment)
+        );
+        assert_eq!(second_call.props.injected_key, None);
+        assert_eq!(second_call.patch_flag.bits, 64);
+        assert!(second_call.is_block);
+        assert!(matches!(
+            &second_call.children,
+            MirChildren::Nodes(children) if children.len() == 2
+        ));
+    }
+
+    #[test]
+    fn lower_vue3_ast_to_dom_mir_keeps_stable_template_v_for_child_as_vnode() {
+        let source = TemplateSource {
+            filename: "stable-structural-for.vue".into(),
+            source: r#"<template v-for="item in 10"><span/></template>"#.into(),
+            file_id: FileId(126),
+            base_offset: 0,
+        };
+        let options = Vue3CompilerOptions {
+            mode: "module".into(),
+            prefix_identifiers: true,
+            ..Vue3CompilerOptions::default()
+        };
+        let ast = Vue3Dialect::base_parse(source, &options);
+        let result = lower_vue3_ast_to_dom_mir(&ast, &options);
+
+        let (for_node, for_mir) = result
+            .mir
+            .nodes
+            .iter()
+            .find_map(|node| match &node.kind {
+                Vue3DomMirKind::For(for_mir) => Some((node, for_mir)),
+                _ => None,
+            })
+            .expect("stable loop");
+        assert!(for_mir.is_stable);
+        let body = result
+            .mir
+            .node(for_node.children[0])
+            .expect("stable loop body");
+        let Vue3DomMirKind::VNodeCall(call) = &body.kind else {
+            panic!("expected direct VNode body");
+        };
+        assert_eq!(call.tag, Vue3DomTag::Native("span".into()));
+        assert!(!call.is_block);
+        assert_eq!(result.hir.validate_tree(), Ok(()));
+        assert_eq!(result.mir.validate_tree(), Ok(()));
+    }
+
+    #[test]
+    fn lower_vue3_ast_to_dom_mir_preserves_literal_and_slot_templates() {
+        let source = TemplateSource {
+            filename: "template-boundaries.vue".into(),
+            source: r#"<template><span/></template><Comp><template #fallback v-if="ok"><i/></template></Comp>"#
+                .into(),
+            file_id: FileId(122),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+
+        assert_eq!(result.hir.validate_tree(), Ok(()));
+        assert_eq!(result.mir.validate_tree(), Ok(()));
+        assert_eq!(
+            result
+                .mir
+                .nodes
+                .iter()
+                .filter(|node| matches!(
+                    &node.kind,
+                    Vue3DomMirKind::VNodeCall(call)
+                        if call.tag == Vue3DomTag::Native("template".into())
+                ))
+                .count(),
+            1
+        );
+        let component = result
+            .mir
+            .nodes
+            .iter()
+            .find_map(|node| match &node.kind {
+                Vue3DomMirKind::VNodeCall(call)
+                    if call.tag == Vue3DomTag::ComponentAsset("Comp".into()) =>
+                {
+                    Some(call)
+                }
+                _ => None,
+            })
+            .expect("component VNode");
+        assert!(matches!(
+            &component.children,
+            MirChildren::Slots(slots) if slots.dynamic_slots.len() == 1
+        ));
+    }
+
+    #[test]
+    fn lower_vue3_ast_to_dom_mir_wraps_structural_once_control_flow_once() {
+        let source = TemplateSource {
+            filename: "structural-once.vue".into(),
+            source: r#"<div><template v-if="ok" v-for="item in items" v-once><span v-once/></template><template v-else><i/></template><template v-for="entry in entries" v-once><b/></template><em v-once/></div>"#
+                .into(),
+            file_id: FileId(133),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+
+        assert_eq!(result.hir.validate_tree(), Ok(()));
+        assert_eq!(result.mir.validate_tree(), Ok(()));
+        let caches = result
+            .mir
+            .nodes
+            .iter()
+            .filter_map(|node| match node.kind {
+                Vue3DomMirKind::Cache { index } => Some((index, node)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            caches.iter().map(|(index, _)| *index).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+
+        let combined_if = result
+            .mir
+            .node(caches[0].1.children[0])
+            .expect("combined v-if/v-for cache body");
+        assert!(matches!(combined_if.kind, Vue3DomMirKind::If { .. }));
+        assert!(combined_if.children.iter().any(|child| result
+            .mir
+            .node(*child)
+            .is_some_and(|node| matches!(node.kind, Vue3DomMirKind::For(_)))));
+        assert!(combined_if.children.iter().any(|child| result
+            .mir
+            .node(*child)
+            .is_some_and(|node| matches!(node.kind, Vue3DomMirKind::If { .. }))));
+
+        let standalone_for = result
+            .mir
+            .node(caches[1].1.children[0])
+            .expect("standalone v-for cache body");
+        assert!(matches!(standalone_for.kind, Vue3DomMirKind::For(_)));
+        let plain_once = result
+            .mir
+            .node(caches[2].1.children[0])
+            .expect("plain v-once cache body");
+        assert!(matches!(plain_once.kind, Vue3DomMirKind::VNodeCall(_)));
+    }
+
+    #[test]
+    fn lower_vue3_ast_to_dom_mir_allocates_parent_local_if_branch_keys() {
+        let source = TemplateSource {
+            filename: "branch-keys.vue".into(),
+            source: r#"<div v-if="a"/><template v-else><span/></template><template v-if="b"><i/></template><p v-else/><section><u v-if="c"/><u v-else/></section>"#
+                .into(),
+            file_id: FileId(134),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+
+        let keyed_tags = result
+            .mir
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.kind {
+                Vue3DomMirKind::VNodeCall(call) => match &call.props.injected_key {
+                    Some(Vue3DomKey::Branch(key)) => Some((call.tag.clone(), *key)),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            keyed_tags,
+            vec![
+                (Vue3DomTag::Native("div".into()), 0),
+                (Vue3DomTag::Native("span".into()), 1),
+                (Vue3DomTag::Native("i".into()), 2),
+                (Vue3DomTag::Native("p".into()), 3),
+                (Vue3DomTag::Native("u".into()), 0),
+                (Vue3DomTag::Native("u".into()), 1),
+            ]
+        );
+        assert_eq!(result.hir.validate_tree(), Ok(()));
+        assert_eq!(result.mir.validate_tree(), Ok(()));
+    }
+
+    #[test]
+    fn lower_vue3_ast_to_dom_mir_ignores_dynamic_v_for_key_arguments() {
+        let source = TemplateSource {
+            filename: "dynamic-for-key.vue".into(),
+            source: r#"<template v-for="item in items" :[key]="item.id"><span/></template><div v-for="entry in entries" :[key]="entry.id"/>"#
+                .into(),
+            file_id: FileId(135),
+            base_offset: 0,
+        };
+        let options = Vue3CompilerOptions {
+            mode: "module".into(),
+            prefix_identifiers: true,
+            ..Vue3CompilerOptions::default()
+        };
+        let ast = Vue3Dialect::base_parse(source, &options);
+        let result = lower_vue3_ast_to_dom_mir(&ast, &options);
+
+        let loops = result
+            .mir
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.kind {
+                Vue3DomMirKind::For(for_mir) => Some(for_mir),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(loops.len(), 2);
+        assert!(loops.iter().all(|for_mir| for_mir.key.is_none()));
+        assert!(loops.iter().all(|for_mir| !for_mir.has_key));
+
+        let span = result
+            .mir
+            .nodes
+            .iter()
+            .find_map(|node| match &node.kind {
+                Vue3DomMirKind::VNodeCall(call)
+                    if call.tag == Vue3DomTag::Native("span".into()) =>
+                {
+                    Some(call)
+                }
+                _ => None,
+            })
+            .expect("structural v-for body");
+        assert_eq!(span.props.injected_key, None);
+        let div = result
+            .mir
+            .nodes
+            .iter()
+            .find_map(|node| match &node.kind {
+                Vue3DomMirKind::VNodeCall(call)
+                    if call.tag == Vue3DomTag::Native("div".into()) =>
+                {
+                    Some(call)
+                }
+                _ => None,
+            })
+            .expect("plain v-for body");
+        assert_eq!(div.props.injected_key, None);
+        assert!(div
+            .props
+            .dynamic_bindings
+            .iter()
+            .any(|binding| binding.dynamic_arg));
+        let div_hir = result
+            .hir
+            .nodes
+            .iter()
+            .find_map(|node| match &node.kind {
+                HirNodeKind::Element(element)
+                    if element.tag == HirTag::Native("div".into()) =>
+                {
+                    Some(element)
+                }
+                _ => None,
+            })
+            .expect("plain v-for HIR body");
+        assert_eq!(div_hir.props.key, None);
+        assert_eq!(result.hir.validate_tree(), Ok(()));
+        assert_eq!(result.mir.validate_tree(), Ok(()));
+    }
+
+    #[test]
+    fn lower_vue3_ast_to_dom_mir_tracks_valueless_v_for_key_props() {
+        let source = TemplateSource {
+            filename: "valueless-for-key.vue".into(),
+            source: r#"<template v-for="item in items" key><span/></template><div v-for="entry in entries" key/>"#
+                .into(),
+            file_id: FileId(140),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+
+        let loops = result
+            .mir
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.kind {
+                Vue3DomMirKind::For(for_mir) => Some(for_mir),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(loops.len(), 2);
+        assert!(loops.iter().all(|for_mir| for_mir.has_key));
+        assert!(loops.iter().all(|for_mir| for_mir.key.is_none()));
+
+        let span = result
+            .mir
+            .nodes
+            .iter()
+            .find_map(|node| match &node.kind {
+                Vue3DomMirKind::VNodeCall(call)
+                    if call.tag == Vue3DomTag::Native("span".into()) =>
+                {
+                    Some(call)
+                }
+                _ => None,
+            })
+            .expect("structural v-for body");
+        assert_eq!(span.props.injected_key, None);
+        assert_eq!(result.hir.validate_tree(), Ok(()));
+        assert_eq!(result.mir.validate_tree(), Ok(()));
+    }

@@ -874,6 +874,7 @@ pub(crate) fn lower_hir_props_to_dom_mir_without_event_cache(props: &HirProps) -
     }
 
     Vue3DomProps {
+        injected_key: None,
         static_attrs: props
             .static_attrs
             .iter()

@@ -373,6 +373,522 @@
     }
 
     #[test]
+    fn generate_vue3_dom_mir_emits_structural_template_if_fragments() {
+        let source = TemplateSource {
+            filename: "structural-if.vue".into(),
+            source: r#"<div v-if="first"/><template v-else-if="second"><span/></template><template v-else><i/><b/></template>"#
+                .into(),
+            file_id: FileId(123),
+            base_offset: 0,
+        };
+        let options = Vue3CompilerOptions {
+            mode: "module".into(),
+            prefix_identifiers: true,
+            ..Vue3CompilerOptions::default()
+        };
+        let ast = Vue3Dialect::base_parse(source, &options);
+        let result = lower_vue3_ast_to_dom_mir(&ast, &options);
+        let generated = generate_vue3_dom_mir(&result.mir, &result.js, &options);
+
+        assert!(
+            generated
+                .code
+                .contains(r#"_createElementBlock("div", { key: 0 })"#),
+            "{}",
+            generated.code
+        );
+        assert!(
+            generated
+                .code
+                .contains(r#"_createElementBlock("span", { key: 1 })"#),
+            "{}",
+            generated.code
+        );
+        assert!(
+            generated
+                .code
+                .contains("_createElementBlock(_Fragment, { key: 2 }, ["),
+            "{}",
+            generated.code
+        );
+        assert!(generated.code.contains("64 /* STABLE_FRAGMENT */"));
+        assert!(!generated.code.contains(r#"ElementBlock("template""#));
+        assert!(!generated.code.contains(r#"ElementVNode("template""#));
+    }
+
+    #[test]
+    fn generate_vue3_dom_mir_wraps_single_text_template_if_in_fragment_array() {
+        let source = TemplateSource {
+            filename: "structural-if-text.vue".into(),
+            source: r#"<template v-if="ok">only</template>"#.into(),
+            file_id: FileId(128),
+            base_offset: 0,
+        };
+        let options = Vue3CompilerOptions {
+            mode: "module".into(),
+            prefix_identifiers: true,
+            ..Vue3CompilerOptions::default()
+        };
+        let ast = Vue3Dialect::base_parse(source, &options);
+        let result = lower_vue3_ast_to_dom_mir(&ast, &options);
+        let generated = generate_vue3_dom_mir(&result.mir, &result.js, &options);
+
+        assert!(
+            generated
+                .code
+                .contains("_createElementBlock(_Fragment, { key: 0 }, ["),
+            "{}",
+            generated.code
+        );
+        assert!(generated.code.contains("_createTextVNode(\"only\")"));
+        assert!(generated.code.contains("64 /* STABLE_FRAGMENT */"));
+        assert!(!generated.code.contains(r#"ElementBlock("template""#));
+    }
+
+    #[test]
+    fn generate_vue3_dom_mir_injects_key_into_structural_template_slot() {
+        let source = TemplateSource {
+            filename: "structural-if-slot.vue".into(),
+            source: r#"<template v-if="ok"><slot/></template>"#.into(),
+            file_id: FileId(129),
+            base_offset: 0,
+        };
+        let options = Vue3CompilerOptions {
+            mode: "module".into(),
+            prefix_identifiers: true,
+            ..Vue3CompilerOptions::default()
+        };
+        let ast = Vue3Dialect::base_parse(source, &options);
+        let result = lower_vue3_ast_to_dom_mir(&ast, &options);
+        let generated = generate_vue3_dom_mir(&result.mir, &result.js, &options);
+
+        assert!(
+            generated
+                .code
+                .contains(r#"_renderSlot(_ctx.$slots, "default", { key: 0 })"#),
+            "{}",
+            generated.code
+        );
+        assert!(!generated.code.contains("_Fragment"));
+        assert!(!generated.code.contains(r#"ElementBlock("template""#));
+    }
+
+    #[test]
+    fn generate_vue3_dom_mir_keeps_structural_if_root_inside_render_with_hoists() {
+        let source = TemplateSource {
+            filename: "structural-if-hoist.vue".into(),
+            source: r#"<template v-if="ok"><div/></template>"#.into(),
+            file_id: FileId(130),
+            base_offset: 0,
+        };
+        let options = Vue3CompilerOptions {
+            mode: "module".into(),
+            prefix_identifiers: true,
+            hoist_static: true,
+            ..Vue3CompilerOptions::default()
+        };
+        let ast = Vue3Dialect::base_parse(source, &options);
+        let result = lower_vue3_ast_to_dom_mir(&ast, &options);
+        let generated = generate_vue3_dom_mir(&result.mir, &result.js, &options);
+
+        assert!(
+            generated
+                .code
+                .contains(r#"_createElementBlock("div", { key: 0 })"#),
+            "{}",
+            generated.code
+        );
+        assert!(!result
+            .mir
+            .nodes
+            .iter()
+            .any(|node| matches!(node.kind, Vue3DomMirKind::Hoisted { .. })));
+        assert!(!generated.code.contains("const _hoisted_1"));
+    }
+
+    #[test]
+    fn generate_vue3_dom_mir_unwraps_keyed_single_child_template_v_for() {
+        let source = TemplateSource {
+            filename: "structural-for-single.vue".into(),
+            source: r#"<template v-for="item in items" :key="item.id"><span/></template>"#
+                .into(),
+            file_id: FileId(124),
+            base_offset: 0,
+        };
+        let options = Vue3CompilerOptions {
+            mode: "module".into(),
+            prefix_identifiers: true,
+            ..Vue3CompilerOptions::default()
+        };
+        let ast = Vue3Dialect::base_parse(source, &options);
+        let result = lower_vue3_ast_to_dom_mir(&ast, &options);
+        let generated = generate_vue3_dom_mir(&result.mir, &result.js, &options);
+
+        assert!(generated
+            .code
+            .contains("_renderList(_ctx.items, (item) => {"));
+        assert!(
+            generated
+                .code
+                .contains(r#"return (_openBlock(), _createElementBlock("span", { key: item.id }))"#),
+            "{}",
+            generated.code
+        );
+        assert!(generated.code.contains("128 /* KEYED_FRAGMENT */"));
+        assert!(!generated.code.contains(r#"ElementBlock("template""#));
+        assert!(!generated.code.contains(r#"ElementVNode("template""#));
+    }
+
+    #[test]
+    fn generate_vue3_dom_mir_uses_vnode_for_stable_template_v_for_child() {
+        let source = TemplateSource {
+            filename: "stable-structural-for.vue".into(),
+            source: r#"<template v-for="item in 10"><span/></template>"#.into(),
+            file_id: FileId(127),
+            base_offset: 0,
+        };
+        let options = Vue3CompilerOptions {
+            mode: "module".into(),
+            prefix_identifiers: true,
+            ..Vue3CompilerOptions::default()
+        };
+        let ast = Vue3Dialect::base_parse(source, &options);
+        let result = lower_vue3_ast_to_dom_mir(&ast, &options);
+        let generated = generate_vue3_dom_mir(&result.mir, &result.js, &options);
+
+        assert!(generated.code.contains(
+            "(_openBlock(), _createElementBlock(_Fragment, null, _renderList(10, (item) => {"
+        ));
+        assert!(
+            generated
+                .code
+                .contains(r#"return _createElementVNode("span")"#),
+            "{}",
+            generated.code
+        );
+        assert!(generated.code.contains("64 /* STABLE_FRAGMENT */"));
+        assert!(!generated
+            .code
+            .contains(r#"_createElementBlock("span""#));
+        assert!(!generated.code.contains(r#"ElementVNode("template""#));
+    }
+
+    #[test]
+    fn generate_vue3_dom_mir_detects_literal_template_v_for_in_function_mode() {
+        let source = TemplateSource {
+            filename: "stable-structural-for-function.vue".into(),
+            source: r#"<template v-for="item in 10"><span/></template>"#.into(),
+            file_id: FileId(131),
+            base_offset: 0,
+        };
+        let options = Vue3CompilerOptions::default();
+        let ast = Vue3Dialect::base_parse(source, &options);
+        let result = lower_vue3_ast_to_dom_mir(&ast, &options);
+        let generated = generate_vue3_dom_mir(&result.mir, &result.js, &options);
+
+        assert!(generated.code.contains(
+            "(_openBlock(), _createElementBlock(_Fragment, null, _renderList(10, (item) => {"
+        ));
+        assert!(
+            generated
+                .code
+                .contains(r#"return _createElementVNode("span")"#),
+            "{}",
+            generated.code
+        );
+        assert!(generated.code.contains("64 /* STABLE_FRAGMENT */"));
+        assert!(!generated.code.contains("_openBlock(true)"));
+    }
+
+    #[test]
+    fn generate_vue3_dom_mir_keeps_stable_memoized_template_v_for_as_vnodes() {
+        let source = TemplateSource {
+            filename: "stable-memo-structural-for.vue".into(),
+            source: r#"<template v-for="item in 10" :key="item" v-memo="[item]"><span/></template>"#
+                .into(),
+            file_id: FileId(132),
+            base_offset: 0,
+        };
+        let options = Vue3CompilerOptions {
+            mode: "module".into(),
+            prefix_identifiers: true,
+            ..Vue3CompilerOptions::default()
+        };
+        let ast = Vue3Dialect::base_parse(source, &options);
+        let result = lower_vue3_ast_to_dom_mir(&ast, &options);
+        let generated = generate_vue3_dom_mir(&result.mir, &result.js, &options);
+
+        assert!(generated.code.contains(
+            "(_openBlock(), _createElementBlock(_Fragment, null, _renderList(10, (item, __, ___, _cached) => {"
+        ));
+        assert!(generated.code.contains(
+            r#"const _item = _createElementVNode("span", { key: item })"#
+        ));
+        assert!(generated.code.contains("64 /* STABLE_FRAGMENT */"));
+        assert!(!generated.code.contains("_openBlock(true)"));
+    }
+
+    #[test]
+    fn generate_vue3_dom_mir_keeps_stable_memoized_plain_v_for_as_blocks() {
+        let source = TemplateSource {
+            filename: "stable-memo-plain-for.vue".into(),
+            source: r#"<div v-for="item in 10" v-memo="[item]"/>"#.into(),
+            file_id: FileId(136),
+            base_offset: 0,
+        };
+        let options = Vue3CompilerOptions {
+            mode: "module".into(),
+            prefix_identifiers: true,
+            ..Vue3CompilerOptions::default()
+        };
+        let ast = Vue3Dialect::base_parse(source, &options);
+        let result = lower_vue3_ast_to_dom_mir(&ast, &options);
+        let generated = generate_vue3_dom_mir(&result.mir, &result.js, &options);
+
+        assert!(generated.code.contains(
+            "(_openBlock(), _createElementBlock(_Fragment, null, _renderList(10, (item, __, ___, _cached) => {"
+        ));
+        assert!(generated
+            .code
+            .contains(r#"const _item = (_openBlock(), _createElementBlock("div"))"#));
+        assert!(generated.code.contains("64 /* STABLE_FRAGMENT */"));
+        assert!(!generated
+            .code
+            .contains(r#"const _item = _createElementVNode("div")"#));
+    }
+
+    #[test]
+    fn generate_vue3_dom_mir_caches_combined_structural_control_flow_once() {
+        let source = TemplateSource {
+            filename: "structural-once.vue".into(),
+            source: r#"<template v-if="ok" v-for="item in items" v-once><span>{{ item }}</span></template><template v-else><i/></template>"#
+                .into(),
+            file_id: FileId(137),
+            base_offset: 0,
+        };
+        let options = Vue3CompilerOptions {
+            mode: "module".into(),
+            prefix_identifiers: true,
+            ..Vue3CompilerOptions::default()
+        };
+        let ast = Vue3Dialect::base_parse(source, &options);
+        let result = lower_vue3_ast_to_dom_mir(&ast, &options);
+        let generated = generate_vue3_dom_mir(&result.mir, &result.js, &options);
+
+        assert_eq!(
+            generated
+                .code
+                .matches("_cache[0] || (_cache[0] =")
+                .count(),
+            1
+        );
+        assert!(!generated.code.contains("_cache[1]"));
+        let cache = generated
+            .code
+            .find("_cache[0] || (_cache[0] =")
+            .expect("control-flow cache");
+        let condition = generated.code.find("_ctx.ok").expect("if condition");
+        let loop_body = generated
+            .code
+            .find("_renderList(_ctx.items, (item) =>")
+            .expect("v-for body");
+        let alternate = generated
+            .code
+            .find(r#"_createElementBlock("i", { key: 1 })"#)
+            .expect("else branch");
+        assert!(cache < condition);
+        assert!(condition < loop_body);
+        assert!(loop_body < alternate);
+        assert!(generated
+            .code
+            .contains("_Fragment, { key: 0 }, _renderList"));
+    }
+
+    #[test]
+    fn generate_vue3_dom_mir_increments_keys_across_sibling_if_chains() {
+        let source = TemplateSource {
+            filename: "branch-keys.vue".into(),
+            source: r#"<div v-if="a"/><template v-else><span/></template><template v-if="b"><i/></template><p v-else/>"#
+                .into(),
+            file_id: FileId(138),
+            base_offset: 0,
+        };
+        let options = Vue3CompilerOptions {
+            mode: "module".into(),
+            prefix_identifiers: true,
+            ..Vue3CompilerOptions::default()
+        };
+        let ast = Vue3Dialect::base_parse(source, &options);
+        let result = lower_vue3_ast_to_dom_mir(&ast, &options);
+        let generated = generate_vue3_dom_mir(&result.mir, &result.js, &options);
+
+        for (tag, key) in [("div", 0), ("span", 1), ("i", 2), ("p", 3)] {
+            assert!(
+                generated.code.contains(&format!(
+                    r#"_createElementBlock("{tag}", {{ key: {key} }})"#
+                )),
+                "{}",
+                generated.code
+            );
+        }
+    }
+
+    #[test]
+    fn generate_vue3_dom_mir_keeps_dynamic_v_for_key_arguments_unkeyed() {
+        let source = TemplateSource {
+            filename: "dynamic-for-key.vue".into(),
+            source: r#"<template v-for="item in items" :[key]="item.id"><span/></template><div v-for="entry in entries" :[key]="entry.id"/>"#
+                .into(),
+            file_id: FileId(139),
+            base_offset: 0,
+        };
+        let options = Vue3CompilerOptions {
+            mode: "module".into(),
+            prefix_identifiers: true,
+            ..Vue3CompilerOptions::default()
+        };
+        let ast = Vue3Dialect::base_parse(source, &options);
+        let result = lower_vue3_ast_to_dom_mir(&ast, &options);
+        let generated = generate_vue3_dom_mir(&result.mir, &result.js, &options);
+
+        assert_eq!(generated.code.matches("256 /* UNKEYED_FRAGMENT */").count(), 2);
+        assert!(!generated.code.contains("128 /* KEYED_FRAGMENT */"));
+        assert!(!generated.code.contains("key: item.id"));
+        assert!(!generated.code.contains("key: entry.id"));
+        assert!(!generated.code.contains("item.id"));
+        assert!(generated.code.contains("entry.id"));
+        assert!(generated.code.contains("[_ctx.key || \"\"]"));
+    }
+
+    #[test]
+    fn generate_vue3_dom_mir_keys_valueless_v_for_fragments() {
+        let source = TemplateSource {
+            filename: "valueless-for-key.vue".into(),
+            source: r#"<template v-for="item in items" key><span/></template><div v-for="entry in entries" key/>"#
+                .into(),
+            file_id: FileId(141),
+            base_offset: 0,
+        };
+        let options = Vue3CompilerOptions {
+            mode: "module".into(),
+            prefix_identifiers: true,
+            ..Vue3CompilerOptions::default()
+        };
+        let ast = Vue3Dialect::base_parse(source, &options);
+        let result = lower_vue3_ast_to_dom_mir(&ast, &options);
+        let generated = generate_vue3_dom_mir(&result.mir, &result.js, &options);
+
+        assert_eq!(generated.code.matches("128 /* KEYED_FRAGMENT */").count(), 2);
+        assert!(!generated.code.contains("256 /* UNKEYED_FRAGMENT */"));
+        assert!(generated.code.contains(r#"_createElementBlock("span")"#));
+        assert!(generated
+            .code
+            .contains(r#"_createElementBlock("div", { key: "" })"#));
+        assert!(!generated.code.contains(r#"_createElementBlock("span", { key:"#));
+    }
+
+    #[test]
+    fn generate_vue3_dom_mir_preserves_legacy_keyed_for_metadata() {
+        let source = TemplateSource {
+            filename: "legacy-keyed-for.vue".into(),
+            source: r#"<div v-for="item in items" :key="item.id"/>"#.into(),
+            file_id: FileId(142),
+            base_offset: 0,
+        };
+        let options = Vue3CompilerOptions {
+            mode: "module".into(),
+            prefix_identifiers: true,
+            ..Vue3CompilerOptions::default()
+        };
+        let ast = Vue3Dialect::base_parse(source, &options);
+        let mut result = lower_vue3_ast_to_dom_mir(&ast, &options);
+        let for_mir = result
+            .mir
+            .nodes
+            .iter_mut()
+            .find_map(|node| match &mut node.kind {
+                Vue3DomMirKind::For(for_mir) => Some(for_mir),
+                _ => None,
+            })
+            .expect("keyed loop");
+        assert!(for_mir.key.is_some());
+        for_mir.has_key = false;
+
+        let generated = generate_vue3_dom_mir(&result.mir, &result.js, &options);
+        assert!(generated.code.contains("128 /* KEYED_FRAGMENT */"));
+        assert!(!generated.code.contains("256 /* UNKEYED_FRAGMENT */"));
+    }
+
+    #[test]
+    fn generate_vue3_dom_mir_ignores_once_on_non_initial_if_branches() {
+        let source = TemplateSource {
+            filename: "non-initial-branch-once.vue".into(),
+            source: r#"<div v-if="a"/><span v-else v-once><i v-once/></span><template v-if="b"><b/></template><template v-else v-once><em v-once/></template>"#
+                .into(),
+            file_id: FileId(143),
+            base_offset: 0,
+        };
+        let options = Vue3CompilerOptions {
+            mode: "module".into(),
+            prefix_identifiers: true,
+            ..Vue3CompilerOptions::default()
+        };
+        let ast = Vue3Dialect::base_parse(source, &options);
+        let result = lower_vue3_ast_to_dom_mir(&ast, &options);
+        let generated = generate_vue3_dom_mir(&result.mir, &result.js, &options);
+
+        assert!(!result
+            .mir
+            .nodes
+            .iter()
+            .any(|node| matches!(node.kind, Vue3DomMirKind::Cache { .. })));
+        assert!(!generated.code.contains("_cache["));
+        assert!(generated
+            .code
+            .contains(r#"_createElementBlock("span", { key: 1 }"#));
+        assert!(generated
+            .code
+            .contains(r#"_createElementBlock("em", { key: 3 })"#));
+    }
+
+    #[test]
+    fn generate_vue3_dom_mir_emits_template_v_for_fragments_and_if_precedence() {
+        let source = TemplateSource {
+            filename: "structural-for-fragment.vue".into(),
+            source: r#"<template v-if="show" v-for="item in items">hello<i>{{ item }}</i></template>"#
+                .into(),
+            file_id: FileId(125),
+            base_offset: 0,
+        };
+        let options = Vue3CompilerOptions {
+            mode: "module".into(),
+            prefix_identifiers: true,
+            ..Vue3CompilerOptions::default()
+        };
+        let ast = Vue3Dialect::base_parse(source, &options);
+        let result = lower_vue3_ast_to_dom_mir(&ast, &options);
+        let generated = generate_vue3_dom_mir(&result.mir, &result.js, &options);
+
+        assert!(generated.code.contains("_ctx.show"));
+        assert!(generated.code.contains(
+            "_createElementBlock(_Fragment, { key: 0 }, _renderList(_ctx.items, (item) => {"
+        ));
+        assert!(
+            generated
+                .code
+                .contains("return (_openBlock(), _createElementBlock(_Fragment, null, ["),
+            "{}",
+            generated.code
+        );
+        assert!(generated.code.contains("64 /* STABLE_FRAGMENT */"));
+        assert!(generated.code.contains("256 /* UNKEYED_FRAGMENT */"));
+        assert!(generated.code.contains("_toDisplayString(item)"));
+        assert!(!generated.code.contains("_toDisplayString(_ctx.item)"));
+        assert!(!generated.code.contains(r#"ElementBlock("template""#));
+        assert!(!generated.code.contains(r#"ElementVNode("template""#));
+    }
+
+    #[test]
     fn generate_vue3_dom_mir_emits_cache_and_hoist_wrappers() {
         let source = TemplateSource {
             filename: "foo.vue".into(),

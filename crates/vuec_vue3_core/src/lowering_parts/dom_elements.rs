@@ -501,6 +501,7 @@ pub(crate) fn lower_hir_props_to_dom_mir(
     }
 
     Vue3DomProps {
+        injected_key: None,
         static_attrs: props
             .static_attrs
             .iter()
@@ -593,6 +594,7 @@ pub(crate) fn lower_ordered_hir_props_to_dom_mir(
     }
 
     Vue3DomProps {
+        injected_key: None,
         segments,
         static_attrs,
         dynamic_bindings,
@@ -991,22 +993,76 @@ pub(crate) fn lower_vue3_element_control_flow_to_dom_mir(
         .or_else(|| directive_by_name(element, "else-if"))
         .filter(|dir| dir.exp.is_some());
     if let Some(if_dir) = if_dir {
-        let lowered = lower_vue3_if_directive_to_dom_mir(
-            ast_id, element, ast, ast_node, if_dir, hir_parent, mir_parent, state,
+        let lowered = lower_vue3_with_once_cache(
+            element,
+            ast_node,
+            mir_parent,
+            state,
+            |wrapper_id, state| {
+                lower_vue3_if_directive_to_dom_mir(
+                    ast_id, element, ast, ast_node, if_dir, hir_parent, wrapper_id, state,
+                )
+            },
         );
         return Some(lowered);
     }
     if let Some(for_dir) = directive_by_name(element, "for") {
-        let lowered = lower_vue3_for_directive_to_dom_mir(
-            ast_id, element, ast, ast_node, for_dir, None, hir_parent, mir_parent, state,
+        let lowered = lower_vue3_with_once_cache(
+            element,
+            ast_node,
+            mir_parent,
+            state,
+            |wrapper_id, state| {
+                lower_vue3_for_directive_to_dom_mir(
+                    ast_id, element, ast, ast_node, for_dir, None, hir_parent, wrapper_id, state,
+                )
+            },
         );
         return Some(lowered);
     }
     None
 }
 
+fn vue3_dom_is_structural_template(element: &Vue3Element) -> bool {
+    element.tag_type == Vue3ElementType::Template
+        && directive_by_name(element, "slot").is_none()
+}
+
 pub(crate) fn lower_vue3_if_branch_chain_to_dom_mir(
     branch_ids: &[NodeId],
+    branch_key_base: usize,
+    ast: &Vue3Ast,
+    hir_parent: NodeId,
+    mir_parent: NodeId,
+    state: &mut Vue3DomLoweringState,
+) -> Option<(NodeId, NodeId)> {
+    let first_id = *branch_ids.first()?;
+    let first_node = ast.node(first_id)?;
+    let first_element = match &first_node.kind {
+        Vue3AstKind::Element(element) => element,
+        _ => return None,
+    };
+    lower_vue3_with_once_cache(
+        first_element,
+        first_node,
+        mir_parent,
+        state,
+        |wrapper_id, state| {
+            lower_vue3_if_branch_chain_inner_to_dom_mir(
+                branch_ids,
+                branch_key_base,
+                ast,
+                hir_parent,
+                wrapper_id,
+                state,
+            )
+        },
+    )
+}
+
+fn lower_vue3_if_branch_chain_inner_to_dom_mir(
+    branch_ids: &[NodeId],
+    branch_key_base: usize,
     ast: &Vue3Ast,
     hir_parent: NodeId,
     mir_parent: NodeId,
@@ -1038,7 +1094,10 @@ pub(crate) fn lower_vue3_if_branch_chain_to_dom_mir(
     state.map.record_hir_to_mir(hir_id, mir_id);
 
     let mut previous_branch_mir = mir_id;
-    for (branch_key, branch_id) in branch_ids.iter().enumerate() {
+    for (branch_offset, branch_id) in branch_ids.iter().enumerate() {
+        let branch_key = branch_key_base
+            .checked_add(branch_offset)
+            .and_then(|key| u32::try_from(key).ok());
         let Some(branch_node) = ast.node(*branch_id) else {
             continue;
         };
@@ -1067,6 +1126,9 @@ pub(crate) fn lower_vue3_if_branch_chain_to_dom_mir(
         } else {
             mir_id
         };
+        let suppress_branch_once = *branch_id != first_id
+            && directive_by_name(branch_element, "once").is_some();
+        state.in_v_once += u32::from(suppress_branch_once);
         let body = if let Some(for_dir) = directive_by_name(branch_element, "for") {
             lower_vue3_for_directive_to_dom_mir(
                 *branch_id,
@@ -1074,9 +1136,19 @@ pub(crate) fn lower_vue3_if_branch_chain_to_dom_mir(
                 ast,
                 branch_node,
                 for_dir,
-                u32::try_from(branch_key).ok(),
+                branch_key,
                 hir_id,
                 branch_mir,
+                state,
+            )
+        } else if vue3_dom_is_structural_template(branch_element) {
+            lower_vue3_structural_template_body_to_dom_mir(
+                branch_node,
+                ast,
+                hir_id,
+                branch_mir,
+                branch_key.map(Vue3DomKey::Branch),
+                Vue3StructuralTemplateBodyKind::If,
                 state,
             )
         } else {
@@ -1090,7 +1162,11 @@ pub(crate) fn lower_vue3_if_branch_chain_to_dom_mir(
                 state,
             )
         };
-        if let Some((body_hir, _)) = body {
+        state.in_v_once -= u32::from(suppress_branch_once);
+        if let Some((body_hir, body_mir)) = body {
+            if let Some(branch_key) = branch_key {
+                inject_vue3_dom_key(body_mir, Vue3DomKey::Branch(branch_key), state);
+            }
             if let Some(node) = state.hir.node_mut(hir_id) {
                 if let HirNodeKind::If(hir_if) = &mut node.kind {
                     hir_if.branches.push(HirIfBranch {
@@ -1118,6 +1194,8 @@ pub(crate) fn lower_vue3_for_directive_to_dom_mir(
     state: &mut Vue3DomLoweringState,
 ) -> Option<(NodeId, NodeId)> {
     let parsed = lower_vue3_for_directive(directive, ast_node, &mut state.js, state.source_type)?;
+    let is_stable = vue3_dom_for_source_is_stable(parsed.source, state);
+    let has_key = vue3_for_has_key_prop(element);
     let hir_id = state.hir.push_child(
         hir_parent,
         HirNodeKind::For(HirFor {
@@ -1133,6 +1211,8 @@ pub(crate) fn lower_vue3_for_directive_to_dom_mir(
         mir_parent,
         Vue3DomMirKind::For(Vue3ForMir {
             source: parsed.source,
+            is_stable,
+            has_key,
             value_alias: parsed.value_alias,
             key_alias: parsed.key_alias,
             index_alias: parsed.index_alias,
@@ -1145,17 +1225,38 @@ pub(crate) fn lower_vue3_for_directive_to_dom_mir(
     state.map.record_ast_to_hir(ast_id, hir_id);
     state.map.record_hir_to_mir(hir_id, mir_id);
 
-    let body = lower_vue3_non_control_element_to_dom_mir(
-        ast_id, element, ast, ast_node, hir_id, mir_id, state,
-    );
-    if let Some((body_hir, _)) = body {
+    let is_structural_template = vue3_dom_is_structural_template(element);
+    let mut key = is_structural_template
+        .then(|| vue3_for_key_mir_expr(element, ast_node, &mut state.js, state.source_type))
+        .flatten();
+    let body = if is_structural_template {
+        lower_vue3_structural_template_body_to_dom_mir(
+            ast_node,
+            ast,
+            hir_id,
+            mir_id,
+            key.clone().map(Vue3DomKey::Value),
+            Vue3StructuralTemplateBodyKind::For,
+            state,
+        )
+    } else {
+        lower_vue3_non_control_element_to_dom_mir(
+            ast_id, element, ast, ast_node, hir_id, mir_id, state,
+        )
+    };
+    if !is_structural_template {
+        key = vue3_for_key_mir_expr(element, ast_node, &mut state.js, state.source_type);
+    }
+    if let Some((body_hir, body_mir)) = body {
+        let can_use_vnode = is_stable
+            && (is_structural_template || directive_by_name(element, "memo").is_none());
+        set_vue3_dom_for_body_block(body_mir, can_use_vnode, state);
         if let Some(node) = state.hir.node_mut(hir_id) {
             if let HirNodeKind::For(hir_for) = &mut node.kind {
                 hir_for.body = body_hir;
             }
         }
     }
-    let key = vue3_for_key_mir_expr(element, ast_node, &mut state.js, state.source_type);
     let memo = vue3_for_memo_mir(element, ast_node, state);
     if let Some(node) = state.mir.node_mut(mir_id) {
         if let Vue3DomMirKind::For(for_mir) = &mut node.kind {
@@ -1164,6 +1265,30 @@ pub(crate) fn lower_vue3_for_directive_to_dom_mir(
         }
     }
     Some((hir_id, mir_id))
+}
+
+fn vue3_for_has_key_prop(element: &Vue3Element) -> bool {
+    element.props.iter().any(|prop| match prop {
+        Vue3Prop::Directive(dir) => {
+            dir.name == "bind"
+                && !dir.is_dynamic_arg
+                && dir
+                    .arg
+                    .as_ref()
+                    .is_some_and(|arg| arg.source_string() == "key")
+        }
+        Vue3Prop::Attribute(attr) => attr.name == "key",
+    })
+}
+
+fn vue3_dom_for_source_is_stable(source: JsExprId, state: &Vue3DomLoweringState) -> bool {
+    let Some(source) = state.js.expressions().get(source.0 as usize) else {
+        return false;
+    };
+    let source = source.source.trim();
+    static_const_eval_source(source).is_some()
+        || (uses_prefixed_identifiers(&state.options)
+            && process_expression_is_const_binding(source, &state.options))
 }
 
 pub(crate) fn vue3_for_key_mir_expr(
@@ -1175,6 +1300,7 @@ pub(crate) fn vue3_for_key_mir_expr(
     element.props.iter().find_map(|prop| match prop {
         Vue3Prop::Directive(dir)
             if dir.name == "bind"
+                && !dir.is_dynamic_arg
                 && dir
                     .arg
                     .as_ref()
@@ -1255,12 +1381,23 @@ pub(crate) fn lower_vue3_if_directive_to_dom_mir(
             mir_id,
             state,
         )
+    } else if vue3_dom_is_structural_template(element) {
+        lower_vue3_structural_template_body_to_dom_mir(
+            ast_node,
+            ast,
+            hir_id,
+            mir_id,
+            Some(Vue3DomKey::Branch(0)),
+            Vue3StructuralTemplateBodyKind::If,
+            state,
+        )
     } else {
         lower_vue3_non_control_element_to_dom_mir(
             ast_id, element, ast, ast_node, hir_id, mir_id, state,
         )
     };
-    if let Some((body_hir, _)) = body {
+    if let Some((body_hir, body_mir)) = body {
+        inject_vue3_dom_key(body_mir, Vue3DomKey::Branch(0), state);
         if let Some(node) = state.hir.node_mut(hir_id) {
             if let HirNodeKind::If(hir_if) = &mut node.kind {
                 hir_if.branches.push(HirIfBranch {

@@ -46,7 +46,7 @@ pub(crate) fn lower_vue3_props_to_hir(
                         dir.exp_span.or_else(|| ast_node.span.source()),
                         source_type,
                     );
-                    if name == "key" {
+                    if !dir.is_dynamic_arg && name == "key" {
                         hir.key = Some(value);
                     } else if name == "ref" {
                         hir.ref_name = Some(vuec_ast::HirRef {

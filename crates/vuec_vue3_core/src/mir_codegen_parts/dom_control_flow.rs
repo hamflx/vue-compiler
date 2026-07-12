@@ -53,35 +53,43 @@ impl<'a> Vue3DomMirCodegen<'a> {
     fn render_for(&self, node_id: NodeId, for_mir: &Vue3ForMir, scope: &RenderScope) -> String {
         let source = self.render_js_expr(for_mir.source, scope);
         let child_scope = self.scope_with_for_mir(scope, for_mir);
-        let children = self.render_children(node_id, Vue3DomMirRenderMode::Root, &child_scope);
+        let child_mode = if for_mir.is_stable {
+            Vue3DomMirRenderMode::Child
+        } else {
+            Vue3DomMirRenderMode::Root
+        };
+        let children = self.render_children(node_id, child_mode, &child_scope);
         let body = match children.as_slice() {
             [] => "null".into(),
             [single] => single.clone(),
             _ => render_array(&children),
         };
         let params = self.render_for_params(for_mir);
+        let (disable_tracking, fragment_flag) = if for_mir.is_stable {
+            ("", "64 /* STABLE_FRAGMENT */")
+        } else if for_mir.has_key || for_mir.key.is_some() {
+            ("true", "128 /* KEYED_FRAGMENT */")
+        } else {
+            ("true", "256 /* UNKEYED_FRAGMENT */")
+        };
         if let Some(memo) = &for_mir.memo {
             return self.render_memo_for(
                 &source,
                 &params,
                 for_mir.key.as_ref(),
                 for_mir.branch_key,
+                (disable_tracking, fragment_flag),
                 memo,
                 &body,
                 &child_scope,
             );
         }
-        let fragment_flag = if for_mir.key.is_some() {
-            "128 /* KEYED_FRAGMENT */"
-        } else {
-            "256 /* UNKEYED_FRAGMENT */"
-        };
         let fragment_props = for_mir
             .branch_key
             .map(|key| format!("{{ key: {key} }}"))
             .unwrap_or_else(|| "null".into());
         format!(
-            "(_openBlock(true), _createElementBlock(_Fragment, {fragment_props}, _renderList({source}, ({params}) => {{\n  return {}\n}}), {fragment_flag}))",
+            "(_openBlock({disable_tracking}), _createElementBlock(_Fragment, {fragment_props}, _renderList({source}, ({params}) => {{\n  return {}\n}}), {fragment_flag}))",
             indent_after_first_line(&body, 2)
         )
     }
@@ -103,10 +111,12 @@ impl<'a> Vue3DomMirCodegen<'a> {
         params: &str,
         key: Option<&MirExpr>,
         branch_key: Option<u32>,
+        fragment_mode: (&str, &str),
         memo: &Vue3ForMemo,
         body: &str,
         scope: &RenderScope,
     ) -> String {
+        let (disable_tracking, fragment_flag) = fragment_mode;
         let params = format!("{params}, __, ___, _cached");
         let memo_expression = self.render_js_expr(memo.expression, scope);
         let guard = key.map_or_else(
@@ -122,7 +132,7 @@ impl<'a> Vue3DomMirCodegen<'a> {
             .map(|key| format!("{{ key: {key} }}"))
             .unwrap_or_else(|| "null".into());
         format!(
-            "(_openBlock(true), _createElementBlock(_Fragment, {fragment_props}, _renderList({source}, ({params}) => {{\n  const _memo = ({memo_expression})\n  if ({guard}) return _cached\n  const _item = {}\n  _item.memo = _memo\n  return _item\n}}, _cache, {}), 128 /* KEYED_FRAGMENT */))",
+            "(_openBlock({disable_tracking}), _createElementBlock(_Fragment, {fragment_props}, _renderList({source}, ({params}) => {{\n  const _memo = ({memo_expression})\n  if ({guard}) return _cached\n  const _item = {}\n  _item.memo = _memo\n  return _item\n}}, _cache, {}), {fragment_flag}))",
             indent_after_first_line(body, 2),
             memo.index
         )

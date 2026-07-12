@@ -247,6 +247,9 @@ impl<'a> Vue3DomMirCodegen<'a> {
     ) -> Option<String> {
         if props.segments.is_empty() {
             let mut entries = Vec::new();
+            if let Some(key) = self.render_injected_key(props, scope) {
+                entries.push(key);
+            }
             for attr in &props.static_attrs {
                 entries.push(self.render_static_attr(attr));
             }
@@ -264,6 +267,9 @@ impl<'a> Vue3DomMirCodegen<'a> {
 
         let mut merge_args = Vec::new();
         let mut object_entries = Vec::new();
+        if let Some(key) = self.render_injected_key(props, scope) {
+            object_entries.push(key);
+        }
         for segment in &props.segments {
             match segment {
                 Vue3DomPropSegment::StaticAttr(attr) => {
@@ -302,6 +308,21 @@ impl<'a> Vue3DomMirCodegen<'a> {
         } else {
             Some(format!("_mergeProps({})", merge_args.join(", ")))
         }
+    }
+
+    fn render_injected_key(
+        &self,
+        props: &Vue3DomProps,
+        scope: &RenderScope,
+    ) -> Option<String> {
+        if vue3_dom_props_has_explicit_key(props) {
+            return None;
+        }
+        let value = match props.injected_key.as_ref()? {
+            Vue3DomKey::Branch(key) => key.to_string(),
+            Vue3DomKey::Value(value) => self.render_mir_expr(value, scope),
+        };
+        Some(format!("key: {value}"))
     }
 
     fn render_static_attr(&self, attr: &Vue3DomStaticAttr) -> String {

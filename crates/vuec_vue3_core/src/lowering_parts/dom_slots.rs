@@ -6,6 +6,7 @@ pub(crate) fn lower_vue3_dom_child_sequence(
     state: &mut Vue3DomLoweringState,
 ) {
     let mut index = 0usize;
+    let mut branch_key_base = 0usize;
     while index < children.len() {
         let child_id = children[index];
         let Some(child) = ast.node(child_id) else {
@@ -17,11 +18,13 @@ pub(crate) fn lower_vue3_dom_child_sequence(
                 let (branch_ids, next_index) = collect_vue3_if_branch_chain(children, index, ast);
                 lower_vue3_if_branch_chain_to_dom_mir(
                     &branch_ids,
+                    branch_key_base,
                     ast,
                     hir_parent,
                     mir_parent,
                     state,
                 );
+                branch_key_base = branch_key_base.saturating_add(branch_ids.len());
                 index = next_index;
                 continue;
             }
@@ -231,24 +234,18 @@ pub(crate) fn lower_vue3_non_control_element_to_dom_mir(
         return None;
     }
 
-    if directive_by_name(element, "once").is_some() && state.in_v_once == 0 {
-        let cache_id = state.next_cache_index;
-        state.next_cache_index += 1;
-        let wrapper_id = state.mir.push_child(
+    if directive_by_name(element, "once").is_some() {
+        return lower_vue3_with_once_cache(
+            element,
+            ast_node,
             mir_parent,
-            Vue3DomMirKind::Cache { index: cache_id },
-            NodeSpan::generated(ast_node.span.source(), vuec_ast::GeneratedReason::Lowering),
+            state,
+            |wrapper_id, state| {
+                lower_vue3_plain_element_to_dom_mir(
+                    ast_id, element, ast, ast_node, hir_parent, wrapper_id, state,
+                )
+            },
         );
-        state.in_v_once += 1;
-        let lowered = lower_vue3_plain_element_to_dom_mir(
-            ast_id, element, ast, ast_node, hir_parent, wrapper_id, state,
-        );
-        state.in_v_once -= 1;
-        if let Some((hir_id, _)) = lowered {
-            state.map.record_hir_to_mir(hir_id, wrapper_id);
-            return Some((hir_id, wrapper_id));
-        }
-        return None;
     }
 
     if state.options.hoist_static
@@ -279,6 +276,205 @@ pub(crate) fn lower_vue3_non_control_element_to_dom_mir(
     lower_vue3_plain_element_to_dom_mir(
         ast_id, element, ast, ast_node, hir_parent, mir_parent, state,
     )
+}
+
+pub(crate) fn lower_vue3_with_once_cache(
+    element: &Vue3Element,
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    mir_parent: NodeId,
+    state: &mut Vue3DomLoweringState,
+    lower: impl FnOnce(NodeId, &mut Vue3DomLoweringState) -> Option<(NodeId, NodeId)>,
+) -> Option<(NodeId, NodeId)> {
+    if directive_by_name(element, "once").is_none() || state.in_v_once > 0 {
+        return lower(mir_parent, state);
+    }
+
+    let cache_id = state.next_cache_index;
+    state.next_cache_index += 1;
+    let wrapper_id = state.mir.push_child(
+        mir_parent,
+        Vue3DomMirKind::Cache { index: cache_id },
+        NodeSpan::generated(ast_node.span.source(), vuec_ast::GeneratedReason::Lowering),
+    );
+    state.in_v_once += 1;
+    let lowered = lower(wrapper_id, state);
+    state.in_v_once -= 1;
+    let (hir_id, _) = lowered?;
+    state.map.record_hir_to_mir(hir_id, wrapper_id);
+    Some((hir_id, wrapper_id))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Vue3StructuralTemplateBodyKind {
+    If,
+    For,
+}
+
+pub(crate) fn lower_vue3_structural_template_body_to_dom_mir(
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    ast: &Vue3Ast,
+    hir_parent: NodeId,
+    mir_parent: NodeId,
+    injected_key: Option<Vue3DomKey>,
+    body_kind: Vue3StructuralTemplateBodyKind,
+    state: &mut Vue3DomLoweringState,
+) -> Option<(NodeId, NodeId)> {
+    if let Some(child_id) = vue3_structural_template_direct_child(ast_node, ast, body_kind) {
+        let previous_do_not_hoist_root = state.do_not_hoist_root.replace(child_id);
+        let lowered = lower_vue3_ast_node_to_dom_mir(
+            child_id, ast, hir_parent, mir_parent, state,
+        );
+        state.do_not_hoist_root = previous_do_not_hoist_root;
+        let lowered = lowered?;
+        if let Some(key) = injected_key {
+            inject_vue3_dom_key(lowered.1, key, state);
+        }
+        return Some(lowered);
+    }
+
+    let span = NodeSpan::generated(
+        ast_node.span.source(),
+        vuec_ast::GeneratedReason::Lowering,
+    );
+    let hir_id = state
+        .hir
+        .push_child(hir_parent, HirNodeKind::Fragment(HirFragment), span.clone());
+    let mir_id = state.mir.push_child(
+        mir_parent,
+        Vue3DomMirKind::VNodeCall(Vue3VNodeCall {
+            tag: Vue3DomTag::RuntimeHelper(RuntimeHelper::Vue3Fragment),
+            props: Vue3DomProps {
+                injected_key,
+                ..Vue3DomProps::default()
+            },
+            v_show: None,
+            directives: Vec::new(),
+            models: Vec::new(),
+            content: None,
+            children: MirChildren::Nodes(Vec::new()),
+            patch_flag: Vue3PatchFlags { bits: 64 },
+            dynamic_props: Vec::new(),
+            is_block: true,
+            disable_tracking: false,
+            is_component: false,
+        }),
+        span,
+    );
+    state.map.record_hir_to_mir(hir_id, mir_id);
+    lower_vue3_dom_child_sequence(&ast_node.children, ast, hir_id, mir_id, state);
+    let children = state
+        .mir
+        .node(mir_id)
+        .map(|node| node.children.clone())
+        .unwrap_or_default();
+    if let Some(node) = state.mir.node_mut(mir_id) {
+        if let Vue3DomMirKind::VNodeCall(call) = &mut node.kind {
+            call.children = MirChildren::Nodes(children);
+        }
+    }
+    Some((hir_id, mir_id))
+}
+
+fn vue3_structural_template_direct_child(
+    ast_node: &vuec_ast::Node<Vue3NodeKind>,
+    ast: &Vue3Ast,
+    body_kind: Vue3StructuralTemplateBodyKind,
+) -> Option<NodeId> {
+    let [child_id] = ast_node.children.as_slice() else {
+        return None;
+    };
+    let child = ast.node(*child_id)?;
+    let Vue3AstKind::Element(element) = &child.kind else {
+        return None;
+    };
+    if directive_by_name(element, "if").is_some() || is_else_branch(element) {
+        return None;
+    }
+    if body_kind == Vue3StructuralTemplateBodyKind::For
+        && directive_by_name(element, "for").is_some()
+    {
+        return None;
+    }
+    Some(*child_id)
+}
+
+pub(crate) fn inject_vue3_dom_key(
+    mir_id: NodeId,
+    key: Vue3DomKey,
+    state: &mut Vue3DomLoweringState,
+) {
+    let wrapper_child = {
+        let Some(node) = state.mir.node_mut(mir_id) else {
+            return;
+        };
+        match &mut node.kind {
+            Vue3DomMirKind::VNodeCall(call) => {
+                call.is_block = true;
+                inject_vue3_dom_key_into_props(&mut call.props, key);
+                return;
+            }
+            Vue3DomMirKind::RenderSlot(slot) => {
+                inject_vue3_dom_key_into_props(&mut slot.props, key);
+                return;
+            }
+            Vue3DomMirKind::For(for_mir) => {
+                if let Vue3DomKey::Branch(branch_key) = key {
+                    for_mir.branch_key = Some(branch_key);
+                }
+                return;
+            }
+            Vue3DomMirKind::WithDirectives
+            | Vue3DomMirKind::Cache { .. }
+            | Vue3DomMirKind::Memo { .. }
+            | Vue3DomMirKind::Hoisted { .. } => node.children.first().copied(),
+            _ => None,
+        }
+    };
+    if let Some(child) = wrapper_child {
+        inject_vue3_dom_key(child, key, state);
+    }
+}
+
+pub(crate) fn set_vue3_dom_for_body_block(
+    mir_id: NodeId,
+    is_stable: bool,
+    state: &mut Vue3DomLoweringState,
+) {
+    let wrapper_child = {
+        let Some(node) = state.mir.node_mut(mir_id) else {
+            return;
+        };
+        match &mut node.kind {
+            Vue3DomMirKind::VNodeCall(call) => {
+                if call.tag != Vue3DomTag::RuntimeHelper(RuntimeHelper::Vue3Fragment) {
+                    call.is_block = !is_stable;
+                }
+                return;
+            }
+            Vue3DomMirKind::WithDirectives
+            | Vue3DomMirKind::Cache { .. }
+            | Vue3DomMirKind::Memo { .. }
+            | Vue3DomMirKind::Hoisted { .. } => node.children.first().copied(),
+            _ => None,
+        }
+    };
+    if let Some(child) = wrapper_child {
+        set_vue3_dom_for_body_block(child, is_stable, state);
+    }
+}
+
+fn inject_vue3_dom_key_into_props(props: &mut Vue3DomProps, key: Vue3DomKey) {
+    if props.injected_key.is_none() && !vue3_dom_props_has_explicit_key(props) {
+        props.injected_key = Some(key);
+    }
+}
+
+pub(crate) fn vue3_dom_props_has_explicit_key(props: &Vue3DomProps) -> bool {
+    props.static_attrs.iter().any(|attr| attr.name == "key")
+        || props
+            .dynamic_bindings
+            .iter()
+            .any(|binding| !binding.dynamic_arg && binding.name == "key")
 }
 
 pub(crate) fn lower_vue3_dom_children(
