@@ -1184,9 +1184,23 @@
         .expect("sfc compileTemplate");
 
         let code = compiled["code"].as_str().unwrap_or("");
+        assert_eq!(compiled["map"]["version"], json!(3));
         assert!(code.contains("import _imports_0 from './bar.png'"));
         assert!(code.contains("src: _imports_0"));
         assert!(!code.contains("_cache[0]"));
+
+        let without_map = dispatch(
+            "sfc.compileTemplate",
+            json!({
+                "source": "<div>{{ msg }}</div>",
+                "filename": "template.vue",
+                "bridgeOptions": {
+                    "sourceMap": false
+                }
+            }),
+        )
+        .expect("sfc compileTemplate without source map");
+        assert!(without_map["map"].is_null());
     }
 
     #[test]

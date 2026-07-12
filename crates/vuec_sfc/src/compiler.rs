@@ -179,7 +179,7 @@ impl SfcCompiler {
             cache_handlers: true,
             scope_id: options.scope_id.clone(),
             slotted: options.slotted,
-            source_map: true,
+            source_map: options.source_map,
             ..Vue3CompilerOptions::default()
         };
         apply_dom_parser_defaults(&mut core);
@@ -276,7 +276,7 @@ impl SfcCompiler {
             cache_handlers: true,
             scope_id: options.scope_id.clone(),
             slotted: options.slotted,
-            source_map: true,
+            source_map: options.source_map,
             ..Vue3CompilerOptions::default()
         };
         apply_dom_parser_defaults(&mut core);

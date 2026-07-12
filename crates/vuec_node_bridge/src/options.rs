@@ -542,6 +542,11 @@ pub(crate) fn sfc_template_options(value: Option<&Value>) -> SfcTemplateCompileO
             bool_option(value, "stringify_static", options.stringify_static),
         ),
     );
+    options.source_map = bool_option(
+        value,
+        "sourceMap",
+        bool_option(value, "source_map", options.source_map),
+    );
     options.transform_asset_urls =
         transform_asset_urls_enabled(value, options.transform_asset_urls);
     options.asset_url_options = asset_url_options(value, options.asset_url_options);

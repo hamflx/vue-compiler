@@ -494,6 +494,40 @@
     }
 
     #[test]
+    fn compile_template_source_maps_can_be_disabled_for_all_template_paths() {
+        let mut compiler = SfcCompiler::new();
+        let descriptor =
+            compiler.parse("map.vue", "<template><div>{{ msg }}</div></template>");
+
+        assert!(compiler
+            .compile_template(&descriptor, SfcTemplateCompileOptions::default())
+            .map
+            .is_some());
+        for ssr in [false, true] {
+            let full_sfc = compiler.compile_template(
+                &descriptor,
+                SfcTemplateCompileOptions {
+                    ssr,
+                    source_map: false,
+                    ..SfcTemplateCompileOptions::default()
+                },
+            );
+            let standalone = compiler.compile_template_source(
+                "map.vue",
+                "<div>{{ msg }}</div>",
+                SfcTemplateCompileOptions {
+                    ssr,
+                    source_map: false,
+                    ..SfcTemplateCompileOptions::default()
+                },
+            );
+
+            assert!(full_sfc.map.is_none(), "ssr={ssr}");
+            assert!(standalone.map.is_none(), "ssr={ssr}");
+        }
+    }
+
+    #[test]
     fn compile_template_passes_asset_url_base_to_dom_backend() {
         let mut compiler = SfcCompiler::new();
         let descriptor = compiler.parse(

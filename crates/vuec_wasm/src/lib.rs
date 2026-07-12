@@ -413,6 +413,11 @@ fn sfc_template_options(value: &Value) -> SfcTemplateCompileOptions {
             bool_option(value, "stringify_static", options.stringify_static),
         ),
     );
+    options.source_map = bool_option(
+        value,
+        "sourceMap",
+        bool_option(value, "source_map", options.source_map),
+    );
     options.scope_id = string_option(value, "scopeId").or_else(|| string_option(value, "scope_id"));
     options.transform_asset_urls = bool_option(
         value,
@@ -695,6 +700,20 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .contains("export function render"));
+        assert_eq!(value["map"]["version"], 3);
+
+        let without_map = compile_sfc_template_json(
+            "<template><div>{{ msg }}</div></template>",
+            json!({ "filename": "App.vue", "sourceMap": false }),
+        );
+        assert!(without_map["map"].is_null());
+
+        let standalone: Value = serde_json::from_str(&compile_sfc_template_source(
+            "<div>{{ msg }}</div>",
+            Some(json!({ "sourceMap": false }).to_string()),
+        ))
+        .expect("standalone template JSON");
+        assert!(standalone["map"].is_null());
     }
 
     #[test]

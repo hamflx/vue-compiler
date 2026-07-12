@@ -274,6 +274,9 @@ pub struct SfcTemplateCompileOptions {
     /// Whether hoisted static subtrees should be stringified.
     #[serde(default)]
     pub stringify_static: bool,
+    /// Whether template compilation should return a source map.
+    #[serde(default = "default_template_source_map")]
+    pub source_map: bool,
     /// Whether asset URLs should be transformed.
     pub transform_asset_urls: bool,
     /// Asset URL transform options.
@@ -290,6 +293,7 @@ impl Default for SfcTemplateCompileOptions {
             is_prod: false,
             hoist_static: true,
             stringify_static: false,
+            source_map: true,
             transform_asset_urls: true,
             asset_url_options: AssetUrlOptions::default(),
         }
@@ -297,6 +301,10 @@ impl Default for SfcTemplateCompileOptions {
 }
 
 pub(crate) fn default_template_hoist_static() -> bool {
+    true
+}
+
+pub(crate) fn default_template_source_map() -> bool {
     true
 }
 

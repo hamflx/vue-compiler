@@ -97,6 +97,8 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("setup"));
+        assert!(value["template"]["map"].is_null());
+        assert!(value["script"]["map"].is_null());
     }
 
     #[test]
@@ -202,7 +204,7 @@ mod tests {
 
     #[test]
     fn compiles_vue3_sfc_script_source_map_json() {
-        let source = "<script setup>\nconst msg = 'hi'\n</script>";
+        let source = "<template><div>{{ msg }}</div></template>\n<script setup>\nconst msg = 'hi'\n</script>";
         let path = write_temp("vuec-cli-sfc-script-map.vue", source);
         let output = run_with_args([
             "vuec",
@@ -215,6 +217,7 @@ mod tests {
         let value: Value = serde_json::from_str(&output.stdout).expect("json");
 
         assert_eq!(value["kind"], json!("vue3-sfc"));
+        assert_eq!(value["template"]["map"]["version"], json!(3));
         assert_eq!(value["script"]["map"]["version"], json!(3));
         assert_eq!(value["script"]["map"]["sourcesContent"][0], json!(source));
         assert!(value["script"]["map"]["mappings"]
@@ -314,6 +317,7 @@ mod tests {
         let value: Value = serde_json::from_str(&output.stdout).expect("json");
 
         assert_eq!(output.code, 1);
+        assert!(value["map"].is_null());
         assert_eq!(value["diagnostics"].as_array().unwrap().len(), 1);
         assert_eq!(value["diagnostics"][0]["code"], json!("VUEC_SFC_PARSE"));
     }

@@ -62,6 +62,7 @@ fn compile_sfc_command(args: CompileSfcArgs) -> Result<RunOutput> {
                 ssr: args.ssr,
                 id: args.id.clone(),
                 scope_id: args.id.as_ref().map(|id| format!("data-v-{id}")),
+                source_map: args.source_map,
                 ..SfcTemplateCompileOptions::default()
             },
         )
@@ -132,6 +133,7 @@ fn compile_ssr_command(args: CompileSsrArgs) -> Result<RunOutput> {
             &parsed.descriptor,
             SfcTemplateCompileOptions {
                 ssr: true,
+                source_map: args.source_map,
                 ..SfcTemplateCompileOptions::default()
             },
         );

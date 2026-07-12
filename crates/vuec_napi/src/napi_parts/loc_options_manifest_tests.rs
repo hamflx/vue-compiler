@@ -203,6 +203,11 @@ fn sfc_template_options(value: Option<&Value>) -> SfcTemplateCompileOptions {
             bool_option(value, "stringify_static", options.stringify_static),
         ),
     );
+    options.source_map = bool_option(
+        value,
+        "sourceMap",
+        bool_option(value, "source_map", options.source_map),
+    );
     options.transform_asset_urls =
         transform_asset_urls_enabled_with_compiler_fallback(value, options.transform_asset_urls);
     options.asset_url_options =
@@ -570,11 +575,13 @@ mod tests {
     #[test]
     fn vue3_sfc_template_options_accept_asset_url_projection_keys() {
         let options = sfc_template_options(Some(&json!({
+            "sourceMap": false,
             "transformAssetUrls": {
                 "foo": ["bar"]
             }
         })));
 
+        assert!(!options.source_map);
         assert!(options.transform_asset_urls);
         assert_eq!(
             options.asset_url_options.tags.get("foo"),
@@ -664,7 +671,10 @@ mod tests {
         let template = serde_json::to_value(compile_sfc_template_result(
             source,
             "Duplicate.vue".into(),
-            SfcTemplateCompileOptions::default(),
+            SfcTemplateCompileOptions {
+                source_map: false,
+                ..SfcTemplateCompileOptions::default()
+            },
         ))
         .unwrap();
         assert_eq!(
@@ -672,6 +682,7 @@ mod tests {
             json!("Single file component can contain only one <template> element")
         );
         assert_eq!(template["errors"][0]["code"], json!(0));
+        assert!(template["map"].is_null());
 
         let script = serde_json::to_value(compile_sfc_script_result(
             source,
