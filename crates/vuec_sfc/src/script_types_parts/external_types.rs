@@ -366,18 +366,12 @@ pub(crate) fn project_vue3_type_re_exports(
                     continue;
                 };
                 let import_source = source.value.as_str();
-                let Some(imported_context) = vue3_external_type_context_from_source(
+                let Some(resolved_external) = vue3_external_type_context_from_source(
                     filename,
                     import_source,
                     seen,
                     type_resolver,
                 ) else {
-                    continue;
-                };
-                let Some(dependency) =
-                    resolve_vue3_type_import(filename, import_source, type_resolver)
-                        .map(|path| normalize_path_string(&path))
-                else {
                     continue;
                 };
                 for specifier in &declaration.specifiers {
@@ -389,19 +383,19 @@ pub(crate) fn project_vue3_type_re_exports(
                     };
                     insert_vue3_re_exported_type_alias(
                         analysis,
-                        &imported_context,
+                        &resolved_external.context,
                         imported,
                         exported,
-                        &dependency,
+                        &resolved_external.dependency,
                     );
-                    if vue3_type_context_has_name(&imported_context, imported) {
+                    if vue3_type_context_has_name(&resolved_external.context, imported) {
                         exported_names.insert(exported.to_string());
                     }
                 }
             }
             Statement::ExportAllDeclaration(declaration) => {
                 let import_source = declaration.source.value.as_str();
-                let Some(imported_context) = vue3_external_type_context_from_source(
+                let Some(resolved_external) = vue3_external_type_context_from_source(
                     filename,
                     import_source,
                     seen,
@@ -409,16 +403,10 @@ pub(crate) fn project_vue3_type_re_exports(
                 ) else {
                     continue;
                 };
-                let Some(dependency) =
-                    resolve_vue3_type_import(filename, import_source, type_resolver)
-                        .map(|path| normalize_path_string(&path))
-                else {
-                    continue;
-                };
                 exported_names.extend(project_vue3_export_all_type_context(
                     analysis,
-                    &imported_context,
-                    &dependency,
+                    &resolved_external.context,
+                    &resolved_external.dependency,
                 ));
             }
             _ => {}
@@ -427,14 +415,24 @@ pub(crate) fn project_vue3_type_re_exports(
     exported_names
 }
 
+pub(crate) struct Vue3ResolvedExternalTypeContext {
+    pub(crate) dependency: String,
+    pub(crate) context: std::sync::Arc<Vue27TypeContext>,
+}
+
 pub(crate) fn vue3_external_type_context_from_source(
     filename: &str,
     source: &str,
     seen: &mut BTreeSet<String>,
     type_resolver: &Vue3TypeResolverContext,
-) -> Option<std::sync::Arc<Vue27TypeContext>> {
+) -> Option<Vue3ResolvedExternalTypeContext> {
     let resolved = resolve_vue3_type_import(filename, source, type_resolver)?;
-    vue3_external_type_context_from_path(&resolved, seen, type_resolver)
+    let dependency = normalize_path_string(&resolved);
+    let context = vue3_external_type_context_from_path(&resolved, seen, type_resolver)?;
+    Some(Vue3ResolvedExternalTypeContext {
+        dependency,
+        context,
+    })
 }
 
 pub(crate) fn vue3_external_type_context_from_path(

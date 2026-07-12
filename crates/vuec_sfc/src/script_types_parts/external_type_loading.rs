@@ -15,6 +15,10 @@ pub(crate) const VUE3_EXTERNAL_TYPE_MAX_CONTEXT_BUILDS: usize = 2048;
 pub(crate) const VUE3_EXTERNAL_TYPE_MAX_CONTEXT_BUILD_WEIGHT: usize = 64 * 1024 * 1024;
 pub(crate) const VUE3_EXTERNAL_TYPE_MAX_CONTEXT_CACHE_WEIGHT: usize = 8 * 1024 * 1024;
 pub(crate) const VUE3_EXTERNAL_TYPE_MAX_CONTEXT_CACHE_ENTRY_WEIGHT: usize = 1024 * 1024;
+pub(crate) const VUE3_EXTERNAL_TYPE_MAX_RESOLUTION_LOOKUPS: usize = 65_536;
+pub(crate) const VUE3_EXTERNAL_TYPE_MAX_RESOLUTION_CACHE_ENTRIES: usize = 16_384;
+pub(crate) const VUE3_EXTERNAL_TYPE_MAX_RESOLUTION_CACHE_WEIGHT: usize = 4 * 1024 * 1024;
+pub(crate) const VUE3_EXTERNAL_TYPE_MAX_RESOLUTION_CACHE_ENTRY_WEIGHT: usize = 64 * 1024;
 pub(crate) const VUE3_EXTERNAL_TYPE_MAX_METADATA_FILES: usize = 16_384;
 pub(crate) const VUE3_EXTERNAL_TYPE_MAX_METADATA_FILE_BYTES: usize = 1024 * 1024;
 pub(crate) const VUE3_EXTERNAL_TYPE_MAX_METADATA_BYTES: usize = 16 * 1024 * 1024;
@@ -37,6 +41,10 @@ pub(crate) struct Vue3ExternalTypeLoadLimits {
     pub(crate) max_context_build_weight: usize,
     pub(crate) max_context_cache_weight: usize,
     pub(crate) max_context_cache_entry_weight: usize,
+    pub(crate) max_resolution_lookups: usize,
+    pub(crate) max_resolution_cache_entries: usize,
+    pub(crate) max_resolution_cache_weight: usize,
+    pub(crate) max_resolution_cache_entry_weight: usize,
     pub(crate) max_metadata_files: usize,
     pub(crate) max_metadata_file_bytes: usize,
     pub(crate) max_metadata_bytes: usize,
@@ -61,6 +69,11 @@ impl Default for Vue3ExternalTypeLoadLimits {
             max_context_build_weight: VUE3_EXTERNAL_TYPE_MAX_CONTEXT_BUILD_WEIGHT,
             max_context_cache_weight: VUE3_EXTERNAL_TYPE_MAX_CONTEXT_CACHE_WEIGHT,
             max_context_cache_entry_weight: VUE3_EXTERNAL_TYPE_MAX_CONTEXT_CACHE_ENTRY_WEIGHT,
+            max_resolution_lookups: VUE3_EXTERNAL_TYPE_MAX_RESOLUTION_LOOKUPS,
+            max_resolution_cache_entries: VUE3_EXTERNAL_TYPE_MAX_RESOLUTION_CACHE_ENTRIES,
+            max_resolution_cache_weight: VUE3_EXTERNAL_TYPE_MAX_RESOLUTION_CACHE_WEIGHT,
+            max_resolution_cache_entry_weight:
+                VUE3_EXTERNAL_TYPE_MAX_RESOLUTION_CACHE_ENTRY_WEIGHT,
             max_metadata_files: VUE3_EXTERNAL_TYPE_MAX_METADATA_FILES,
             max_metadata_file_bytes: VUE3_EXTERNAL_TYPE_MAX_METADATA_FILE_BYTES,
             max_metadata_bytes: VUE3_EXTERNAL_TYPE_MAX_METADATA_BYTES,
@@ -86,6 +99,9 @@ pub(crate) struct Vue3ExternalTypeLoadStats {
     pub(crate) context_build_weight: usize,
     pub(crate) context_cache_hits: usize,
     pub(crate) cached_context_weight: usize,
+    pub(crate) resolution_lookups: usize,
+    pub(crate) resolution_cache_hits: usize,
+    pub(crate) cached_resolution_weight: usize,
     pub(crate) metadata_files_read: usize,
     pub(crate) metadata_bytes: usize,
     pub(crate) metadata_source_cache_hits: usize,
@@ -119,6 +135,8 @@ struct Vue3ExternalTypeLoadState {
     limits: Vue3ExternalTypeLoadLimits,
     source_cache: BTreeMap<String, Vue3ExternalTypeSourceCacheEntry>,
     context_cache: BTreeMap<String, Vue3ExternalTypeContextCacheEntry>,
+    resolution_cache:
+        BTreeMap<Vue3TypeImportResolutionCacheKey, Vue3TypeImportResolutionCacheEntry>,
     metadata_source_cache: BTreeMap<PathBuf, Vue3MetadataSourceCacheEntry>,
     metadata_path_identities: BTreeMap<PathBuf, PathBuf>,
     tsconfig_cache: BTreeMap<PathBuf, Vue3TsconfigCacheEntry>,
@@ -137,6 +155,7 @@ impl Vue3ExternalTypeLoadState {
             limits,
             source_cache: BTreeMap::new(),
             context_cache: BTreeMap::new(),
+            resolution_cache: BTreeMap::new(),
             metadata_source_cache: BTreeMap::new(),
             metadata_path_identities: BTreeMap::new(),
             tsconfig_cache: BTreeMap::new(),
@@ -164,6 +183,7 @@ impl std::fmt::Debug for Vue3ExternalTypeLoadSession {
             .field("stats", &state.stats)
             .field("source_cache_entries", &state.source_cache.len())
             .field("context_cache_entries", &state.context_cache.len())
+            .field("resolution_cache_entries", &state.resolution_cache.len())
             .field(
                 "metadata_source_cache_entries",
                 &state.metadata_source_cache.len(),
@@ -448,6 +468,7 @@ impl Default for Vue3ExternalTypeLoadSession {
 }
 
 include!("external_type_loading_parts/context_cost.rs");
+include!("external_type_loading_parts/resolution.rs");
 include!("external_type_loading_parts/metadata.rs");
 
 pub(crate) fn vue3_external_type_path_identity(path: &Path) -> String {

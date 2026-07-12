@@ -51,7 +51,10 @@ impl Vue3ExternalTypeLoadSession {
                     state.stats.metadata_source_cache_hits += 1;
                     return None;
                 }
-                Some(Vue3MetadataSourceCacheEntry::Loading) => return None,
+                Some(Vue3MetadataSourceCacheEntry::Loading) => {
+                    state.failure_epoch += 1;
+                    return None;
+                }
                 None => {}
             }
             if state.stats.metadata_files_read >= state.limits.max_metadata_files {
@@ -113,7 +116,10 @@ impl Vue3ExternalTypeLoadSession {
                     state.stats.metadata_parse_cache_hits += 1;
                     return None;
                 }
-                Some(Vue3TsconfigCacheEntry::Loading) => return None,
+                Some(Vue3TsconfigCacheEntry::Loading) => {
+                    state.failure_epoch += 1;
+                    return None;
+                }
                 None => {}
             }
         }
@@ -130,7 +136,10 @@ impl Vue3ExternalTypeLoadSession {
                     state.stats.metadata_parse_cache_hits += 1;
                     return None;
                 }
-                Some(Vue3TsconfigCacheEntry::Loading) => return None,
+                Some(Vue3TsconfigCacheEntry::Loading) => {
+                    state.failure_epoch += 1;
+                    return None;
+                }
                 None => {
                     state
                         .tsconfig_cache
@@ -179,7 +188,10 @@ impl Vue3ExternalTypeLoadSession {
                     state.stats.metadata_parse_cache_hits += 1;
                     return None;
                 }
-                Some(Vue3PackageJsonCacheEntry::Loading) => return None,
+                Some(Vue3PackageJsonCacheEntry::Loading) => {
+                    state.failure_epoch += 1;
+                    return None;
+                }
                 None => {}
             }
         }
@@ -196,7 +208,10 @@ impl Vue3ExternalTypeLoadSession {
                     state.stats.metadata_parse_cache_hits += 1;
                     return None;
                 }
-                Some(Vue3PackageJsonCacheEntry::Loading) => return None,
+                Some(Vue3PackageJsonCacheEntry::Loading) => {
+                    state.failure_epoch += 1;
+                    return None;
+                }
                 None => {
                     state
                         .package_json_cache

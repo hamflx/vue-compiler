@@ -3,7 +3,43 @@ pub(crate) fn resolve_vue3_type_import(
     source: &str,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
-    if vue3_type_import_source_is_relative(source) {
+    let is_relative = vue3_type_import_source_is_relative(source);
+    match type_resolver
+        .external_type_session
+        .begin_type_import_resolution(
+            filename,
+            source,
+            &type_resolver.typescript_version,
+            is_relative,
+        )
+    {
+        Vue3TypeImportResolutionLoad::Ready(resolution) => resolution,
+        Vue3TypeImportResolutionLoad::Failed => None,
+        Vue3TypeImportResolutionLoad::Start {
+            cache_key,
+            failure_epoch,
+        } => {
+            let resolution =
+                resolve_vue3_type_import_uncached(filename, source, type_resolver, is_relative);
+            type_resolver
+                .external_type_session
+                .finish_type_import_resolution(
+                    cache_key,
+                    resolution,
+                    failure_epoch,
+                    is_relative,
+                )
+        }
+    }
+}
+
+fn resolve_vue3_type_import_uncached(
+    filename: &str,
+    source: &str,
+    type_resolver: &Vue3TypeResolverContext,
+    is_relative: bool,
+) -> Option<PathBuf> {
+    if is_relative {
         return resolve_vue3_relative_type_import(filename, source, type_resolver);
     }
     if let Some(resolved) = resolve_vue3_tsconfig_type_import(filename, source, type_resolver) {
