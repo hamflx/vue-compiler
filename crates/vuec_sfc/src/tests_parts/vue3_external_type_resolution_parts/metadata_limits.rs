@@ -388,6 +388,169 @@ fn vue3_package_metadata_targets_cannot_escape_package_root() {
 }
 
 #[test]
+fn vue3_package_exports_reject_forbidden_path_segments() {
+    for target in [
+        "./node_modules/x.d.ts",
+        "./Node_Modules/x.d.ts",
+        "./no%64e_modules/x.d.ts",
+        "./types/./x.d.ts",
+        "./types/../x.d.ts",
+        "./%2e%2E/x.d.ts",
+        "./types%2Fx.d.ts",
+        "./types%5cx.d.ts",
+        r"./types\..\x.d.ts",
+    ] {
+        assert!(
+            !vue3_package_export_target_is_safe(target),
+            "unsafe export target was accepted: {target}"
+        );
+    }
+    for target in [
+        "./types/x.d.ts",
+        "./node_modules-x/x.d.ts",
+        "./prefix-node_modules/x.d.ts",
+        "./%252e%252e/x.d.ts",
+        "./types//x.d.ts",
+        "./node_*/x.d.ts",
+    ] {
+        assert!(
+            vue3_package_export_target_is_safe(target),
+            "safe export target was rejected: {target}"
+        );
+    }
+    for capture in [
+        "node_modules/x",
+        "Node_Modules/x",
+        "no%64e_modules/x",
+        "%2e%2e/x",
+        r"types\..\x",
+    ] {
+        assert!(
+            !vue3_package_export_pattern_capture_is_safe(capture),
+            "unsafe export capture was accepted: {capture}"
+        );
+    }
+    assert!(vue3_package_export_pattern_capture_is_safe("modules/x"));
+    assert!(vue3_package_export_pattern_capture_is_safe("types%2fx"));
+
+    let fixed_resolver = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_generated_path_bytes: 16,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    let fixed = serde_json::json!({ "./*": "./fixed.d.ts" });
+    let unused_long_capture = format!("types%2f{}", "x".repeat(128));
+    assert_eq!(
+        vue3_package_exports_type_target(
+            &fixed,
+            Some(&unused_long_capture),
+            &fixed_resolver,
+        )
+        .as_deref(),
+        Some("./fixed.d.ts")
+    );
+    assert!(!fixed_resolver
+        .external_type_session
+        .metadata_is_blocked());
+
+    let expanded = serde_json::json!({ "./*": "./types/*.d.ts" });
+    let expanded_resolver = Vue3TypeResolverContext::default();
+    assert!(vue3_package_exports_type_target(
+        &expanded,
+        Some("types%2fx"),
+        &expanded_resolver,
+    )
+    .is_none());
+    assert!(!expanded_resolver
+        .external_type_session
+        .metadata_is_blocked());
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let fixed_package = dir.path().join("fixed-package");
+    write_vue3_test_type_package(
+        &fixed_package,
+        r#"{"exports":{"./fixed/*":"./index.d.ts"}}"#,
+    );
+    let fixed_package_resolver = Vue3TypeResolverContext::default();
+    assert_eq!(
+        resolve_vue3_package_json_type_entry(
+            &fixed_package,
+            Some("fixed/types%2fx"),
+            &fixed_package_resolver,
+        ),
+        Vue3PackageJsonTypeResolution::Resolved(fixed_package.join("index.d.ts"))
+    );
+    assert!(!fixed_package_resolver
+        .external_type_session
+        .metadata_is_blocked());
+
+    let expanded_package = dir.path().join("expanded-package");
+    write_vue3_test_type_package(
+        &expanded_package,
+        r#"{"exports":{"./expanded/*":"./types/*.d.ts"}}"#,
+    );
+    assert_eq!(
+        resolve_vue3_package_json_type_entry(
+            &expanded_package,
+            Some("expanded/types%2fx"),
+            &Vue3TypeResolverContext::default(),
+        ),
+        Vue3PackageJsonTypeResolution::Blocked
+    );
+
+    let specific = dir.path().join("specific");
+    write_vue3_test_type_package(
+        &specific,
+        r#"{"exports":{"./*":"./types/broad.d.ts","./pre-*/x":"./types/specific.d.ts"}}"#,
+    );
+    std::fs::create_dir_all(specific.join("types")).expect("create export types");
+    std::fs::write(specific.join("types").join("broad.d.ts"), "export type T = string")
+        .expect("write broad export target");
+    let resolver = Vue3TypeResolverContext::default();
+    assert_eq!(
+        resolve_vue3_package_json_type_entry(
+            &specific,
+            Some("pre-node_modules/x"),
+            &resolver,
+        ),
+        Vue3PackageJsonTypeResolution::Blocked
+    );
+    assert!(!resolver.external_type_session.metadata_is_blocked());
+
+    let explicit = dir.path().join("explicit");
+    write_vue3_test_type_package(
+        &explicit,
+        r#"{"exports":{"./node_modules/exact":"./index.d.ts","./node_modules/*":"./index.d.ts"}}"#,
+    );
+    for subpath in ["node_modules/exact", "node_modules/feature"] {
+        assert_eq!(
+            resolve_vue3_package_json_type_entry(&explicit, Some(subpath), &resolver),
+            Vue3PackageJsonTypeResolution::Resolved(explicit.join("index.d.ts")),
+            "{subpath}"
+        );
+    }
+
+    let legacy = dir.path().join("legacy");
+    write_vue3_test_type_package(&legacy, r#"{"types":"node_modules/x.d.ts"}"#);
+    std::fs::create_dir_all(legacy.join("node_modules")).expect("create legacy nested package");
+    std::fs::write(
+        legacy.join("node_modules").join("x.d.ts"),
+        "export type Legacy = string",
+    )
+    .expect("write legacy nested type");
+    assert_eq!(
+        resolve_vue3_package_json_type_entry(&legacy, None, &resolver),
+        Vue3PackageJsonTypeResolution::Resolved(legacy.join("node_modules").join("x.d.ts"))
+    );
+
+    let safe = dir.path().join("safe");
+    write_vue3_test_type_package(&safe, r#"{"exports":{".":"./index.d.ts"}}"#);
+    assert_eq!(
+        resolve_vue3_package_json_type_entry(&safe, None, &resolver),
+        Vue3PackageJsonTypeResolution::Resolved(safe.join("index.d.ts"))
+    );
+}
+
+#[test]
 fn vue3_non_null_package_exports_block_legacy_root_fallback() {
     let dir = tempfile::tempdir().expect("temp dir");
     for (name, manifest) in [

@@ -304,8 +304,10 @@ pub(crate) fn vue3_package_exports_type_target(
             .get(".")
             .or_else(|| vue3_package_exports_is_condition_map(exports).then_some(exports))
             .and_then(vue3_package_export_target_value)
+            .filter(|target| vue3_package_export_target_is_safe(target))
     } else if let Some(target) = exports.get(&key) {
         vue3_package_export_target_value(target)
+            .filter(|target| vue3_package_export_target_is_safe(target))
     } else {
         vue3_package_exports_pattern_target(exports, &key, type_resolver)
     }?;
@@ -336,9 +338,21 @@ pub(crate) fn vue3_package_exports_pattern_target(
         })
         .max_by_key(|(specificity, _, _)| *specificity)?;
     let target = vue3_package_export_target_value(target)?;
-    type_resolver
+    if (target.contains('*')
+        && !type_resolver
+            .external_type_session
+            .metadata_path_is_within_limit(capture))
+        || !vue3_package_export_target_is_safe(&target)
+        || !vue3_package_export_pattern_capture_is_safe(capture)
+    {
+        return None;
+    }
+    let expanded = type_resolver
         .external_type_session
-        .replace_metadata_path_pattern(&target, "*", &capture)
+        .replace_metadata_path_pattern(&target, "*", capture)?;
+    (!vue3_package_export_contains_encoded_separator(&expanded)
+        && vue3_package_type_target_is_safe(&expanded))
+    .then_some(expanded)
 }
 
 pub(crate) fn vue3_package_export_target_value(value: &serde_json::Value) -> Option<String> {
@@ -365,7 +379,10 @@ pub(crate) fn vue3_package_export_target_value(value: &serde_json::Value) -> Opt
     None
 }
 
-pub(crate) fn vue3_package_export_pattern_capture(pattern: &str, key: &str) -> Option<String> {
+pub(crate) fn vue3_package_export_pattern_capture<'a>(
+    pattern: &str,
+    key: &'a str,
+) -> Option<&'a str> {
     let star = pattern.find('*')?;
     if pattern[star + 1..].contains('*') {
         return None;
@@ -376,7 +393,82 @@ pub(crate) fn vue3_package_export_pattern_capture(pattern: &str, key: &str) -> O
     {
         return None;
     }
-    Some(key[prefix.len()..key.len() - suffix.len()].to_string())
+    Some(&key[prefix.len()..key.len() - suffix.len()])
+}
+
+pub(crate) fn vue3_package_export_target_is_safe(target: &str) -> bool {
+    let Some(relative) = target.strip_prefix("./") else {
+        return false;
+    };
+    vue3_package_type_target_is_safe(target)
+        && !vue3_package_export_contains_encoded_separator(target)
+        && vue3_package_export_segments_are_safe(relative)
+}
+
+pub(crate) fn vue3_package_export_pattern_capture_is_safe(capture: &str) -> bool {
+    vue3_package_export_segments_are_safe(capture)
+}
+
+fn vue3_package_export_segments_are_safe(value: &str) -> bool {
+    value
+        .split(['/', '\\'])
+        .all(|segment| !vue3_package_export_segment_is_forbidden(segment))
+}
+
+fn vue3_package_export_segment_is_forbidden(segment: &str) -> bool {
+    [b".".as_slice(), b"..".as_slice(), b"node_modules".as_slice()]
+        .into_iter()
+        .any(|forbidden| vue3_package_export_percent_decoded_eq(segment, forbidden))
+}
+
+fn vue3_package_export_percent_decoded_eq(value: &str, expected: &[u8]) -> bool {
+    let bytes = value.as_bytes();
+    let mut value_index = 0;
+    let mut expected_index = 0;
+    while value_index < bytes.len() && expected_index < expected.len() {
+        let percent_decoded = if bytes[value_index] == b'%' && value_index + 2 < bytes.len() {
+            vue3_package_export_hex_value(bytes[value_index + 1])
+                .zip(vue3_package_export_hex_value(bytes[value_index + 2]))
+                .map(|(high, low)| (high << 4) | low)
+        } else {
+            None
+        };
+        let decoded = if let Some(decoded) = percent_decoded {
+            value_index += 3;
+            decoded
+        } else {
+            let byte = bytes[value_index];
+            value_index += 1;
+            byte
+        };
+        if decoded.to_ascii_lowercase() != expected[expected_index] {
+            return false;
+        }
+        expected_index += 1;
+    }
+    value_index == bytes.len() && expected_index == expected.len()
+}
+
+fn vue3_package_export_contains_encoded_separator(value: &str) -> bool {
+    value.as_bytes().windows(3).any(|window| {
+        window[0] == b'%'
+            && matches!(
+                (
+                    vue3_package_export_hex_value(window[1]),
+                    vue3_package_export_hex_value(window[2]),
+                ),
+                (Some(2), Some(15)) | (Some(5), Some(12))
+            )
+    })
+}
+
+fn vue3_package_export_hex_value(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
 }
 
 pub(crate) fn vue3_package_export_type_path(
