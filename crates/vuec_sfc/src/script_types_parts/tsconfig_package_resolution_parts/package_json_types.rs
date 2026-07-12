@@ -306,13 +306,10 @@ pub(crate) fn vue3_package_exports_type_target(
             .get(".")
             .or_else(|| vue3_package_exports_is_condition_map(exports).then_some(exports))
             .and_then(vue3_package_export_target_value)
+    } else if let Some(target) = exports.get(&key) {
+        vue3_package_export_target_value(target)
     } else {
-        exports
-            .get(&key)
-            .and_then(vue3_package_export_target_value)
-            .or_else(|| {
-                vue3_package_exports_pattern_target(exports, &key, type_resolver)
-            })
+        vue3_package_exports_pattern_target(exports, &key, type_resolver)
     }?;
     type_resolver
         .external_type_session
@@ -332,16 +329,18 @@ pub(crate) fn vue3_package_exports_pattern_target(
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<String> {
     let object = exports.as_object()?;
-    for (pattern, target) in object {
-        let Some(capture) = vue3_package_export_pattern_capture(pattern, key) else {
-            continue;
-        };
-        let target = vue3_package_export_target_value(target)?;
-        return type_resolver
-            .external_type_session
-            .replace_metadata_path_pattern(&target, "*", &capture);
-    }
-    None
+    let (_, target, capture) = object
+        .iter()
+        .filter_map(|(pattern, target)| {
+            let star = pattern.find('*')?;
+            let capture = vue3_package_export_pattern_capture(pattern, key)?;
+            Some(((star + 1, pattern.len()), target, capture))
+        })
+        .max_by_key(|(specificity, _, _)| *specificity)?;
+    let target = vue3_package_export_target_value(target)?;
+    type_resolver
+        .external_type_session
+        .replace_metadata_path_pattern(&target, "*", &capture)
 }
 
 pub(crate) fn vue3_package_export_target_value(value: &serde_json::Value) -> Option<String> {
@@ -370,6 +369,9 @@ pub(crate) fn vue3_package_export_target_value(value: &serde_json::Value) -> Opt
 
 pub(crate) fn vue3_package_export_pattern_capture(pattern: &str, key: &str) -> Option<String> {
     let star = pattern.find('*')?;
+    if pattern[star + 1..].contains('*') {
+        return None;
+    }
     let prefix = &pattern[..star];
     let suffix = &pattern[star + 1..];
     if !key.starts_with(prefix) || !key.ends_with(suffix) || key.len() < prefix.len() + suffix.len()

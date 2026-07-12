@@ -114,9 +114,11 @@ const model = defineModel<ModelValue>()
         let exports_pkg = node_modules.join("vuec-exports-pkg");
         std::fs::create_dir_all(exports_pkg.join("types").join("feature"))
             .expect("create exports package");
+        std::fs::create_dir_all(exports_pkg.join("types").join("internal"))
+            .expect("create specific exports package path");
         std::fs::write(
             exports_pkg.join("package.json"),
-            r#"{"exports":{".":{"types":"./types/index.d.ts","default":"./dist/index.js"},"./feature/*":{"types":"./types/feature/*.d.ts","default":"./dist/feature/*.js"}}}"#,
+            r#"{"exports":{".":{"types":"./types/index.d.ts","default":"./dist/index.js"},"./feature/*":{"types":"./types/feature/*.d.ts","default":"./dist/feature/*.js"},"./feature/internal/*":{"types":"./types/internal/*.d.ts","default":"./dist/internal/*.js"}}}"#,
         )
         .expect("write exports manifest");
         std::fs::write(
@@ -129,6 +131,11 @@ const model = defineModel<ModelValue>()
             "export type FeatureProps = { feature: boolean }",
         )
         .expect("write exports feature types");
+        std::fs::write(
+            exports_pkg.join("types").join("internal").join("item.d.ts"),
+            "export type InternalProps = { internal: boolean }",
+        )
+        .expect("write specific exports feature types");
 
         let ambient_pkg = node_modules.join("@types").join("vuec-ambient");
         std::fs::create_dir_all(&ambient_pkg).expect("create @types package");
@@ -143,9 +150,10 @@ const model = defineModel<ModelValue>()
 import type { ExtraProps, Events } from 'vuec-types-pkg'
 import type { FacadeProps } from 'vuec-facade-pkg'
 import type { FeatureProps } from 'vuec-exports-pkg/feature/item'
+import type { InternalProps } from 'vuec-exports-pkg/feature/internal/item'
 import type { AmbientProps } from 'vuec-ambient'
 import * as Exported from 'vuec-exports-pkg'
-const props = defineProps<FacadeProps & ExtraProps & FeatureProps & AmbientProps & Exported.Nested.Props>()
+const props = defineProps<FacadeProps & ExtraProps & FeatureProps & InternalProps & AmbientProps & Exported.Nested.Props>()
 const emit = defineEmits<Events>()
 const model = defineModel<import('vuec-types-pkg').ModelValue>()
 </script>"#;
@@ -170,6 +178,9 @@ const model = defineModel<import('vuec-types-pkg').ModelValue>()
             .contains("feature: { type: Boolean, required: true }"));
         assert!(script
             .content
+            .contains("internal: { type: Boolean, required: true }"));
+        assert!(script
+            .content
             .contains("ambient: { type: String, required: true }"));
         assert!(script
             .content
@@ -189,6 +200,7 @@ const model = defineModel<import('vuec-types-pkg').ModelValue>()
             facade_pkg.join("index.d.ts"),
             exports_pkg.join("types").join("index.d.ts"),
             exports_pkg.join("types").join("feature").join("item.d.ts"),
+            exports_pkg.join("types").join("internal").join("item.d.ts"),
             ambient_pkg.join("index.d.ts"),
         ]
         .into_iter()
@@ -196,6 +208,70 @@ const model = defineModel<import('vuec-types-pkg').ModelValue>()
         .collect::<BTreeSet<_>>();
         assert_eq!(deps, expected);
         assert!(!script.deps.iter().any(|dep| dep.contains('\\')));
+    }
+
+    #[test]
+    fn vue3_package_exports_selects_the_most_specific_pattern() {
+        let resolver = Vue3TypeResolverContext::default();
+        let exports = serde_json::json!({
+            "./feature/*": { "types": "./generic/*.d.ts" },
+            "./feature/internal/*": { "types": "./internal/*.d.ts" },
+            "./feature/*.js": { "types": "./javascript/*.d.ts" },
+            "./feature/exact.js": { "types": "./exact.d.ts" }
+        });
+        assert_eq!(
+            vue3_package_exports_type_target(
+                &exports,
+                Some("feature/internal/item"),
+                &resolver,
+            )
+            .as_deref(),
+            Some("./internal/item.d.ts")
+        );
+        assert_eq!(
+            vue3_package_exports_type_target(&exports, Some("feature/item.js"), &resolver)
+                .as_deref(),
+            Some("./javascript/item.d.ts")
+        );
+        assert_eq!(
+            vue3_package_exports_type_target(&exports, Some("feature/exact.js"), &resolver)
+                .as_deref(),
+            Some("./exact.d.ts")
+        );
+
+        let exclusions = serde_json::json!({
+            "./*": { "types": "./broad/*.d.ts" },
+            "./private/*": null,
+            "./private/exact": null
+        });
+        assert!(vue3_package_exports_type_target(
+            &exclusions,
+            Some("private/item"),
+            &resolver,
+        )
+        .is_none());
+        assert!(vue3_package_exports_type_target(
+            &exclusions,
+            Some("private/exact"),
+            &resolver,
+        )
+        .is_none());
+
+        let invalid_pattern = serde_json::json!({
+            "./feature/*": { "types": "./broad/*.d.ts" },
+            "./feature/*/*": { "types": "./invalid/*.d.ts" }
+        });
+        assert_eq!(
+            vue3_package_exports_type_target(
+                &invalid_pattern,
+                Some("feature/one/two"),
+                &resolver,
+            )
+            .as_deref(),
+            Some("./broad/one/two.d.ts")
+        );
+        assert!(vue3_package_export_pattern_capture("./feature/*/*", "./feature/one/two")
+            .is_none());
     }
 
     #[test]
