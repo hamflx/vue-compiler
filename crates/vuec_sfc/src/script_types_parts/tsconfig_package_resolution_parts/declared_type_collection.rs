@@ -7,9 +7,35 @@ pub(crate) fn collect_vue3_declared_types_from_statements(
         collect_vue3_predeclared_runtime_type_from_statement(statement, analysis);
     }
     for statement in statements {
-        collect_vue3_declared_type_from_statement(source, statement, analysis);
+        if !vue3_statement_has_deferred_type_scope(statement) {
+            collect_vue3_declared_type_from_statement(source, statement, analysis);
+        }
     }
     refresh_vue3_declared_type_declarations_from_statements(source, statements, analysis);
+    if !statements
+        .iter()
+        .any(vue3_statement_has_deferred_type_scope)
+    {
+        return;
+    }
+    collect_vue3_declared_type_deps_from_statements(statements, analysis);
+    for statement in statements {
+        if vue3_statement_has_deferred_type_scope(statement) {
+            collect_vue3_declared_type_from_statement(source, statement, analysis);
+        }
+    }
+    refresh_vue3_declared_type_declarations_from_statements(source, statements, analysis);
+}
+
+pub(crate) fn vue3_statement_has_deferred_type_scope(statement: &Statement<'_>) -> bool {
+    match statement {
+        Statement::TSGlobalDeclaration(_) | Statement::TSModuleDeclaration(_) => true,
+        Statement::ExportNamedDeclaration(declaration) => matches!(
+            declaration.declaration.as_ref(),
+            Some(Declaration::TSModuleDeclaration(_))
+        ),
+        _ => false,
+    }
 }
 
 pub(crate) fn collect_vue3_predeclared_runtime_type_from_statement(

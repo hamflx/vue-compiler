@@ -390,30 +390,34 @@ pub(crate) fn collect_vue3_global_types_from_statements(
             collect_vue3_predeclared_runtime_type_from_statement(statement, analysis);
         }
         for statement in statements {
-            match statement {
-                Statement::TSGlobalDeclaration(global) => {
-                    names.extend(vue3_declared_type_names_from_statements(&global.body.body));
-                    collect_vue3_declared_types_from_statements(
-                        source,
-                        &global.body.body,
-                        analysis,
-                    );
-                }
-                Statement::TSModuleDeclaration(declaration)
-                    if vue3_ts_module_declaration_is_global(declaration) =>
-                {
-                    if let Some(body) = vue3_ts_module_declaration_block_body(declaration) {
-                        names.extend(vue3_declared_type_names_from_statements(body));
-                        collect_vue3_declared_types_from_statements(source, body, analysis);
-                    }
-                }
-                _ if vue3_statement_is_declare_type(statement) => {
-                    names.extend(vue3_declared_type_names_from_statement(statement));
-                    collect_vue3_global_declared_type_from_statement(source, statement, analysis);
-                }
-                _ => {}
+            if !vue3_statement_has_deferred_type_scope(statement) {
+                collect_vue3_ambient_global_type_from_statement(
+                    source,
+                    statement,
+                    &mut names,
+                    analysis,
+                );
             }
         }
+        refresh_vue3_declared_type_declarations_from_statements(source, statements, analysis);
+        if !statements
+            .iter()
+            .any(vue3_statement_has_deferred_type_scope)
+        {
+            return names;
+        }
+        collect_vue3_declared_type_deps_from_statements(statements, analysis);
+        for statement in statements {
+            if vue3_statement_has_deferred_type_scope(statement) {
+                collect_vue3_ambient_global_type_from_statement(
+                    source,
+                    statement,
+                    &mut names,
+                    analysis,
+                );
+            }
+        }
+        refresh_vue3_declared_type_declarations_from_statements(source, statements, analysis);
         return names;
     }
     for statement in statements {
@@ -424,6 +428,33 @@ pub(crate) fn collect_vue3_global_types_from_statements(
         collect_vue3_declared_types_from_statements(source, &global.body.body, analysis);
     }
     names
+}
+
+fn collect_vue3_ambient_global_type_from_statement(
+    source: &str,
+    statement: &Statement<'_>,
+    names: &mut BTreeSet<String>,
+    analysis: &mut Vue3ScriptSetupAnalysis,
+) {
+    match statement {
+        Statement::TSGlobalDeclaration(global) => {
+            names.extend(vue3_declared_type_names_from_statements(&global.body.body));
+            collect_vue3_declared_types_from_statements(source, &global.body.body, analysis);
+        }
+        Statement::TSModuleDeclaration(declaration)
+            if vue3_ts_module_declaration_is_global(declaration) =>
+        {
+            if let Some(body) = vue3_ts_module_declaration_block_body(declaration) {
+                names.extend(vue3_declared_type_names_from_statements(body));
+                collect_vue3_declared_types_from_statements(source, body, analysis);
+            }
+        }
+        _ if vue3_statement_is_declare_type(statement) => {
+            names.extend(vue3_declared_type_names_from_statement(statement));
+            collect_vue3_global_declared_type_from_statement(source, statement, analysis);
+        }
+        _ => {}
+    }
 }
 
 pub(crate) fn project_vue3_global_type_re_exports(

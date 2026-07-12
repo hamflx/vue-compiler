@@ -162,12 +162,12 @@ fn vue3_parent_generic_aliases_keep_their_scope_inside_namespaces() {
     std::fs::write(
         &types,
         r#"
-interface Base { outerValue: string }
-type Box<T> = Base & { value: T }
 export namespace Nested {
   interface Base { innerValue: number }
   export type Props = Box<boolean>
 }
+type Box<T> = Base & { value: T }
+interface Base { outerValue: string }
 "#,
     )
     .expect("write namespace generic types");
@@ -189,4 +189,120 @@ defineProps<Types.Nested.Props>()
     assert!(script
         .content
         .contains("value: { type: Boolean, required: true }"));
+}
+
+#[test]
+fn vue3_deferred_namespaces_preserve_outer_forward_references() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let types = dir.path().join("types.ts");
+    std::fs::write(
+        &types,
+        r#"
+export type Props = Nested.Inner
+export namespace Nested {
+  export interface Inner { nestedValue: string }
+}
+"#,
+    )
+    .expect("write forward namespace types");
+
+    let filename = dir.path().join("Comp.vue");
+    let source = r#"<script setup lang="ts">
+import type { Props } from './types'
+defineProps<Props>()
+</script>"#;
+    let mut compiler = SfcCompiler::new();
+    let descriptor = compiler.parse(filename.to_string_lossy(), source);
+    let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+    assert!(script.errors.is_empty(), "{:?}", script.errors);
+    assert!(script
+        .content
+        .contains("nestedValue: { type: String, required: true }"));
+}
+
+#[test]
+fn vue3_deferred_namespaces_capture_refreshed_parent_aliases() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let types = dir.path().join("types.ts");
+    let base = dir.path().join("base.ts");
+    std::fs::write(
+        &base,
+        "export interface ExternalBase { baseValue: string }",
+    )
+    .expect("write deferred namespace base");
+    std::fs::write(
+        &types,
+        r#"
+import type { ExternalBase } from './base'
+export namespace Nested {
+  export type Props = Alias
+}
+type Alias = ExternalBase & LocalBase & { aliasValue: boolean }
+interface LocalBase { localValue: number }
+"#,
+    )
+    .expect("write deferred namespace aliases");
+
+    let filename = dir.path().join("Comp.vue");
+    let source = r#"<script setup lang="ts">
+import type * as Types from './types'
+defineProps<Types.Nested.Props>()
+</script>"#;
+    let mut compiler = SfcCompiler::new();
+    let descriptor = compiler.parse(filename.to_string_lossy(), source);
+    let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+    assert!(script.errors.is_empty(), "{:?}", script.errors);
+    assert!(script
+        .content
+        .contains("baseValue: { type: String, required: true }"));
+    assert!(script
+        .content
+        .contains("localValue: { type: Number, required: true }"));
+    assert!(script
+        .content
+        .contains("aliasValue: { type: Boolean, required: true }"));
+    let deps = script.deps.iter().cloned().collect::<BTreeSet<_>>();
+    assert!(deps.contains(&normalize_path_string(&types)));
+    assert!(deps.contains(&normalize_path_string(&base)));
+}
+
+#[test]
+fn vue3_ambient_namespaces_capture_forward_parent_aliases() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let global = dir.path().join("global.d.ts");
+    std::fs::write(
+        &global,
+        r#"
+declare namespace Ambient {
+  type Props = Alias
+}
+declare type Alias = Base & { aliasValue: boolean }
+declare interface Base { baseValue: string }
+"#,
+    )
+    .expect("write ambient namespace aliases");
+
+    let filename = dir.path().join("Comp.vue");
+    let source = r#"<script setup lang="ts">
+defineProps<Ambient.Props>()
+</script>"#;
+    let mut compiler = SfcCompiler::new();
+    let descriptor = compiler.parse(filename.to_string_lossy(), source);
+    let script = compiler.compile_script(
+        &descriptor,
+        SfcScriptCompileOptions {
+            global_type_files: vec![global.to_string_lossy().to_string()],
+            ..SfcScriptCompileOptions::default()
+        },
+    );
+
+    assert!(script.errors.is_empty(), "{:?}", script.errors);
+    assert!(script
+        .content
+        .contains("baseValue: { type: String, required: true }"));
+    assert!(script
+        .content
+        .contains("aliasValue: { type: Boolean, required: true }"));
 }
