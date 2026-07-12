@@ -14,6 +14,45 @@ pub(crate) struct Vue3TsconfigPathMatch<'a> {
     pub(crate) order: usize,
 }
 
+const VUE3_TSCONFIG_INCLUDE_MAX_DEPTH: usize = 64;
+const VUE3_TSCONFIG_INCLUDE_MAX_ENTRIES: usize = 65_536;
+const VUE3_TSCONFIG_INCLUDE_MAX_FILES: usize = 16_384;
+
+#[derive(Debug)]
+pub(crate) struct Vue3TsconfigIncludeScanBudget {
+    max_depth: usize,
+    remaining_entries: usize,
+    remaining_files: usize,
+}
+
+impl Vue3TsconfigIncludeScanBudget {
+    pub(crate) fn new(max_depth: usize, max_entries: usize, max_files: usize) -> Self {
+        Self {
+            max_depth,
+            remaining_entries: max_entries,
+            remaining_files: max_files,
+        }
+    }
+
+    fn claim_file(&mut self) -> bool {
+        if self.remaining_files == 0 {
+            return false;
+        }
+        self.remaining_files -= 1;
+        true
+    }
+}
+
+impl Default for Vue3TsconfigIncludeScanBudget {
+    fn default() -> Self {
+        Self::new(
+            VUE3_TSCONFIG_INCLUDE_MAX_DEPTH,
+            VUE3_TSCONFIG_INCLUDE_MAX_ENTRIES,
+            VUE3_TSCONFIG_INCLUDE_MAX_FILES,
+        )
+    }
+}
+
 pub(crate) fn resolve_vue3_tsconfig_type_import(
     filename: &str,
     source: &str,
@@ -174,6 +213,7 @@ pub(crate) fn vue3_tsconfig_direct_global_type_files(
     type_resolver: &Vue3TypeResolverContext,
 ) -> Vec<PathBuf> {
     let mut files = Vec::new();
+    let mut include_scan_budget = Vue3TsconfigIncludeScanBudget::default();
     for target in vue3_tsconfig_string_array(value.get("files")) {
         let path = vue3_tsconfig_target_path(config_dir, template_config_dir, &target, "");
         if vue3_tsconfig_global_type_file_is_supported(&path) {
@@ -185,6 +225,7 @@ pub(crate) fn vue3_tsconfig_direct_global_type_files(
             config_dir,
             template_config_dir,
             &target,
+            &mut include_scan_budget,
         ));
     }
     files.extend(vue3_tsconfig_compiler_option_global_type_files(
@@ -380,18 +421,19 @@ pub(crate) fn vue3_tsconfig_include_global_type_files(
     config_dir: &Path,
     template_config_dir: &Path,
     target: &str,
+    scan_budget: &mut Vue3TsconfigIncludeScanBudget,
 ) -> Vec<PathBuf> {
     if !vue3_tsconfig_include_can_match_global_type_files(target) {
         return Vec::new();
     }
     if !target.contains('*') && !target.contains('?') {
         let path = vue3_tsconfig_target_path(config_dir, template_config_dir, target, "");
-        if vue3_tsconfig_global_type_file_is_supported(&path) {
+        if vue3_tsconfig_global_type_file_is_supported(&path) && scan_budget.claim_file() {
             return vec![path];
         }
         if path.is_dir() {
             let mut files = Vec::new();
-            vue3_collect_global_type_files_from_dir(&path, &mut files);
+            vue3_collect_global_type_files_from_dir(&path, &mut files, scan_budget);
             return files;
         }
         return Vec::new();
@@ -402,7 +444,7 @@ pub(crate) fn vue3_tsconfig_include_global_type_files(
     };
     let pattern = vue3_tsconfig_include_pattern(config_dir, template_config_dir, target);
     let mut files = Vec::new();
-    vue3_collect_global_type_files_from_dir(&root, &mut files);
+    vue3_collect_global_type_files_from_dir(&root, &mut files, scan_budget);
     files
         .into_iter()
         .filter(|file| vue3_tsconfig_glob_matches(&pattern, &normalize_path_string(file)))
@@ -459,27 +501,77 @@ pub(crate) fn vue3_tsconfig_include_root_path(
     path.is_dir().then_some(path)
 }
 
-pub(crate) fn vue3_collect_global_type_files_from_dir(dir: &Path, files: &mut Vec<PathBuf>) {
+pub(crate) fn vue3_collect_global_type_files_from_dir(
+    dir: &Path,
+    files: &mut Vec<PathBuf>,
+    scan_budget: &mut Vue3TsconfigIncludeScanBudget,
+) {
+    let mut seen_dirs = BTreeSet::new();
+    vue3_collect_global_type_files_from_dir_inner(
+        dir,
+        files,
+        scan_budget,
+        &mut seen_dirs,
+        0,
+    );
+}
+
+fn vue3_collect_global_type_files_from_dir_inner(
+    dir: &Path,
+    files: &mut Vec<PathBuf>,
+    scan_budget: &mut Vue3TsconfigIncludeScanBudget,
+    seen_dirs: &mut BTreeSet<String>,
+    depth: usize,
+) {
+    if scan_budget.remaining_entries == 0 || scan_budget.remaining_files == 0 {
+        return;
+    }
+    let canonical_dir = std::fs::canonicalize(dir)
+        .unwrap_or_else(|_| normalize_path_components(dir.to_path_buf()));
+    if !seen_dirs.insert(normalize_path_string(&canonical_dir)) {
+        return;
+    }
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
-    let mut entries = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
+    let entries = entries
+        .take(scan_budget.remaining_entries)
         .collect::<Vec<_>>();
-    entries.sort();
-    for entry in entries {
-        let name = entry
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("");
+    scan_budget.remaining_entries = scan_budget.remaining_entries.saturating_sub(entries.len());
+    let mut entries = entries
+        .into_iter()
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            Some((entry.path(), entry.file_type().ok()?))
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+    for (path, file_type) in entries {
+        if scan_budget.remaining_files == 0 {
+            break;
+        }
+        if file_type.is_symlink() {
+            continue;
+        }
+        let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
         if name == "node_modules" || name.starts_with('.') {
             continue;
         }
-        if entry.is_dir() {
-            vue3_collect_global_type_files_from_dir(&entry, files);
-        } else if vue3_tsconfig_global_type_file_is_supported(&entry) {
-            files.push(normalize_path_components(entry));
+        if file_type.is_dir() {
+            if depth < scan_budget.max_depth {
+                vue3_collect_global_type_files_from_dir_inner(
+                    &path,
+                    files,
+                    scan_budget,
+                    seen_dirs,
+                    depth + 1,
+                );
+            }
+        } else if file_type.is_file()
+            && vue3_tsconfig_global_type_file_is_supported(&path)
+            && scan_budget.claim_file()
+        {
+            files.push(normalize_path_components(path));
         }
     }
 }
@@ -493,17 +585,28 @@ pub(crate) fn vue3_tsconfig_glob_matches(pattern: &str, path: &str) -> bool {
 }
 
 pub(crate) fn vue3_tsconfig_glob_parts_match(pattern: &[&str], path: &[&str]) -> bool {
-    if pattern.is_empty() {
-        return path.is_empty();
+    let mut previous = vec![false; path.len() + 1];
+    let mut current = vec![false; path.len() + 1];
+    previous[0] = true;
+    for pattern_part in pattern {
+        current.fill(false);
+        if *pattern_part == "**" {
+            current[0] = previous[0];
+            for path_index in 1..=path.len() {
+                current[path_index] = previous[path_index] || current[path_index - 1];
+            }
+        } else {
+            for path_index in 1..=path.len() {
+                current[path_index] = previous[path_index - 1]
+                    && vue3_tsconfig_glob_segment_match(
+                        pattern_part,
+                        path[path_index - 1],
+                    );
+            }
+        }
+        std::mem::swap(&mut previous, &mut current);
     }
-    if pattern[0] == "**" {
-        return vue3_tsconfig_glob_parts_match(&pattern[1..], path)
-            || (!path.is_empty() && vue3_tsconfig_glob_parts_match(pattern, &path[1..]));
-    }
-    if path.is_empty() || !vue3_tsconfig_glob_segment_match(pattern[0], path[0]) {
-        return false;
-    }
-    vue3_tsconfig_glob_parts_match(&pattern[1..], &path[1..])
+    previous[path.len()]
 }
 
 pub(crate) fn vue3_tsconfig_glob_segment_match(pattern: &str, text: &str) -> bool {

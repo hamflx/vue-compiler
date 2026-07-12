@@ -341,6 +341,106 @@ defineModel<RefGlobalModel>()
     }
 
     #[test]
+    fn vue3_tsconfig_include_scan_enforces_entry_file_and_depth_budgets() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let types = dir.path().join("types");
+        let nested = types.join("nested");
+        let too_deep = nested.join("too-deep");
+        std::fs::create_dir_all(&too_deep).expect("create nested type dirs");
+        std::fs::write(types.join("root.d.ts"), "declare interface Root {}")
+            .expect("write root type");
+        std::fs::write(nested.join("nested.d.ts"), "declare interface Nested {}")
+            .expect("write nested type");
+        std::fs::write(
+            too_deep.join("hidden.d.ts"),
+            "declare interface Hidden {}",
+        )
+        .expect("write deep type");
+
+        let mut depth_budget = Vue3TsconfigIncludeScanBudget::new(1, 32, 32);
+        let mut depth_limited = Vec::new();
+        vue3_collect_global_type_files_from_dir(
+            &types,
+            &mut depth_limited,
+            &mut depth_budget,
+        );
+        let depth_limited = depth_limited
+            .into_iter()
+            .map(|path| path.file_name().expect("file name").to_owned())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            depth_limited,
+            ["nested.d.ts", "root.d.ts"]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect()
+        );
+
+        let mut entry_budget = Vue3TsconfigIncludeScanBudget::new(64, 1, 32);
+        let mut entry_limited = Vec::new();
+        vue3_collect_global_type_files_from_dir(
+            &types,
+            &mut entry_limited,
+            &mut entry_budget,
+        );
+        assert!(entry_limited.len() <= 1, "{entry_limited:?}");
+
+        let mut file_budget = Vue3TsconfigIncludeScanBudget::new(64, 32, 1);
+        let mut file_limited = Vec::new();
+        vue3_collect_global_type_files_from_dir(&types, &mut file_limited, &mut file_budget);
+        assert_eq!(file_limited.len(), 1, "{file_limited:?}");
+    }
+
+    #[test]
+    fn vue3_tsconfig_glob_matching_handles_deep_double_star_patterns_iteratively() {
+        assert!(vue3_tsconfig_glob_parts_match(
+            &["src", "**", "*.d.ts"],
+            &["src", "nested", "types", "global.d.ts"],
+        ));
+        assert!(vue3_tsconfig_glob_parts_match(
+            &["src", "**", "*.d.ts"],
+            &["src", "global.d.ts"],
+        ));
+        assert!(!vue3_tsconfig_glob_parts_match(
+            &["src", "**", "*.d.ts"],
+            &["src", "nested", "global.ts"],
+        ));
+
+        let mut pattern = vec!["**"; 1_024];
+        pattern.push("target.d.ts");
+        let path = vec!["directory"; 1_024];
+        assert!(!vue3_tsconfig_glob_parts_match(&pattern, &path));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn vue3_tsconfig_include_scan_does_not_follow_directory_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let types = dir.path().join("types");
+        let real = types.join("real");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&real).expect("create real type dir");
+        std::fs::create_dir_all(&outside).expect("create outside dir");
+        std::fs::write(real.join("inside.d.ts"), "declare interface Inside {}")
+            .expect("write inside type");
+        std::fs::write(
+            outside.join("outside.d.ts"),
+            "declare interface Outside {}",
+        )
+        .expect("write outside type");
+        symlink(&types, types.join("cycle")).expect("create cycle symlink");
+        symlink(&outside, types.join("outside-link")).expect("create outside symlink");
+
+        let mut budget = Vue3TsconfigIncludeScanBudget::default();
+        let mut files = Vec::new();
+        vue3_collect_global_type_files_from_dir(&types, &mut files, &mut budget);
+
+        assert_eq!(files, vec![real.join("inside.d.ts")]);
+    }
+
+    #[test]
     fn vue3_compile_script_discovers_tsconfig_types_and_type_roots_global_deps() {
         let dir = tempfile::tempdir().expect("temp dir");
         std::fs::create_dir_all(dir.path().join("src").join("components"))
