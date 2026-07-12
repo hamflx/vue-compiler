@@ -249,6 +249,40 @@ impl Vue3ExternalTypeLoadSession {
         self.lock().limits.max_tsconfig_depth
     }
 
+    fn max_tsconfig_discovery_depth(&self) -> usize {
+        self.lock().limits.max_tsconfig_discovery_depth
+    }
+
+    fn claim_tsconfig_discovery_entry(&self) -> bool {
+        let mut state = self.lock();
+        if state.metadata_blocked {
+            return false;
+        }
+        if state.stats.tsconfig_discovery_entries
+            >= state.limits.max_tsconfig_discovery_entries
+        {
+            state.metadata_blocked = true;
+            state.failure_epoch += 1;
+            return false;
+        }
+        state.stats.tsconfig_discovery_entries += 1;
+        true
+    }
+
+    fn claim_tsconfig_discovery_file(&self) -> bool {
+        let mut state = self.lock();
+        if state.metadata_blocked {
+            return false;
+        }
+        if state.stats.tsconfig_discovery_files >= state.limits.max_tsconfig_discovery_files {
+            state.metadata_blocked = true;
+            state.failure_epoch += 1;
+            return false;
+        }
+        state.stats.tsconfig_discovery_files += 1;
+        true
+    }
+
     fn metadata_is_blocked(&self) -> bool {
         let mut state = self.lock();
         if state.metadata_blocked {

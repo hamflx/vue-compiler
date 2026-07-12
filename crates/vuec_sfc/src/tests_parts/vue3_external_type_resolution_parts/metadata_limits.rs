@@ -574,6 +574,179 @@ fn vue3_tsconfig_graph_bounds_unique_nodes() {
     assert_eq!(stats.metadata_files_read, 2);
 }
 
+#[test]
+fn vue3_tsconfig_discovery_budget_is_shared_across_extends_and_references() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let source_dir = dir.path().join("src");
+    let reference_dir = dir.path().join("reference");
+    let type_package = reference_dir.join("types").join("package");
+    std::fs::create_dir_all(&source_dir).expect("create source directory");
+    std::fs::create_dir_all(&reference_dir).expect("create reference directory");
+    write_vue3_test_type_package(&type_package, r#"{"types":"index.d.ts"}"#);
+    let base_file = dir.path().join("base.d.ts");
+    let root_file = dir.path().join("root.d.ts");
+    std::fs::write(&base_file, "declare interface BaseGlobalProps {}")
+        .expect("write base global type");
+    std::fs::write(&root_file, "declare interface RootGlobalProps {}")
+        .expect("write root global type");
+    std::fs::write(
+        dir.path().join("base.json"),
+        r#"{"include":["./base.d.ts"],"compilerOptions":{"types":[]}}"#,
+    )
+    .expect("write base tsconfig");
+    std::fs::write(
+        dir.path().join("tsconfig.json"),
+        r#"{
+            "extends":"./base.json",
+            "files":["./root.d.ts"],
+            "compilerOptions":{"types":[]},
+            "references":[{"path":"./reference"}]
+        }"#,
+    )
+    .expect("write root tsconfig");
+    std::fs::write(
+        reference_dir.join("tsconfig.json"),
+        r#"{"compilerOptions":{"typeRoots":["./types"]}}"#,
+    )
+    .expect("write referenced tsconfig");
+    let filename = source_dir.join("Comp.vue").to_string_lossy().to_string();
+    let package_file = type_package.join("index.d.ts");
+
+    let accepted = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_tsconfig_discovery_entries: 4,
+        max_tsconfig_discovery_files: 3,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert_eq!(
+        vue3_tsconfig_global_type_files(&filename, &accepted),
+        vec![base_file, root_file, package_file]
+    );
+    let stats = accepted.external_type_session.stats();
+    assert_eq!(stats.tsconfig_discovery_entries, 4);
+    assert_eq!(stats.tsconfig_discovery_files, 3);
+
+    let entry_limited = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_tsconfig_discovery_entries: 3,
+        max_tsconfig_discovery_files: 3,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert!(vue3_tsconfig_global_type_files(&filename, &entry_limited).is_empty());
+    let stats = entry_limited.external_type_session.stats();
+    assert_eq!(stats.tsconfig_discovery_entries, 3);
+    assert_eq!(stats.tsconfig_discovery_files, 2);
+    assert_eq!(stats.metadata_files_read, 3);
+
+    let file_limited = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_tsconfig_discovery_entries: 4,
+        max_tsconfig_discovery_files: 2,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert!(vue3_tsconfig_global_type_files(&filename, &file_limited).is_empty());
+    let stats = file_limited.external_type_session.stats();
+    assert_eq!(stats.tsconfig_discovery_entries, 4);
+    assert_eq!(stats.tsconfig_discovery_files, 2);
+}
+
+#[test]
+fn vue3_tsconfig_type_root_enumeration_is_bounded_before_sorting() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let source_dir = dir.path().join("src");
+    let type_root = dir.path().join("types");
+    let alpha = type_root.join("alpha");
+    let zeta = type_root.join("zeta");
+    std::fs::create_dir_all(&source_dir).expect("create source directory");
+    write_vue3_test_type_package(&alpha, r#"{"types":"index.d.ts"}"#);
+    write_vue3_test_type_package(&zeta, r#"{"types":"index.d.ts"}"#);
+    std::fs::write(
+        dir.path().join("tsconfig.json"),
+        r#"{"compilerOptions":{"typeRoots":["./types"]}}"#,
+    )
+    .expect("write tsconfig");
+    let filename = source_dir.join("Comp.vue").to_string_lossy().to_string();
+
+    let accepted = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_tsconfig_discovery_entries: 3,
+        max_tsconfig_discovery_files: 2,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert_eq!(
+        vue3_tsconfig_global_type_files(&filename, &accepted),
+        vec![alpha.join("index.d.ts"), zeta.join("index.d.ts")]
+    );
+    let stats = accepted.external_type_session.stats();
+    assert_eq!(stats.tsconfig_discovery_entries, 3);
+    assert_eq!(stats.tsconfig_discovery_files, 2);
+
+    let rejected = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_tsconfig_discovery_entries: 2,
+        max_tsconfig_discovery_files: 2,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert!(vue3_tsconfig_global_type_files(&filename, &rejected).is_empty());
+    let stats = rejected.external_type_session.stats();
+    assert_eq!(stats.tsconfig_discovery_entries, 2);
+    assert_eq!(stats.tsconfig_discovery_files, 0);
+    assert_eq!(stats.metadata_files_read, 1);
+}
+
+#[test]
+fn vue3_tsconfig_empty_types_skips_type_root_discovery() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::create_dir_all(dir.path().join("src")).expect("create source directory");
+    let alias = dir.path().join("alias.ts");
+    std::fs::write(&alias, "export interface AliasProps {}").expect("write alias type");
+    std::fs::write(
+        dir.path().join("tsconfig.json"),
+        r#"{"compilerOptions":{"types":[],"paths":{"alias":["./alias.ts"]}}}"#,
+    )
+    .expect("write tsconfig");
+    let filename = dir
+        .path()
+        .join("src")
+        .join("Comp.vue")
+        .to_string_lossy()
+        .to_string();
+    let resolver = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_tsconfig_discovery_entries: 0,
+        max_tsconfig_discovery_files: 0,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+
+    assert!(vue3_tsconfig_global_type_files(&filename, &resolver).is_empty());
+    let stats = resolver.external_type_session.stats();
+    assert_eq!(stats.tsconfig_discovery_entries, 0);
+    assert_eq!(stats.tsconfig_discovery_files, 0);
+    assert_eq!(
+        resolve_vue3_tsconfig_type_import(&filename, "alias", &resolver),
+        Some(alias)
+    );
+}
+
+#[test]
+fn vue3_tsconfig_named_type_candidates_are_charged_before_package_resolution() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let first_root = dir.path().join("first");
+    let second_root = dir.path().join("second");
+    std::fs::create_dir_all(first_root.join("missing")).expect("create first candidate");
+    std::fs::create_dir_all(second_root.join("missing")).expect("create second candidate");
+    std::fs::write(second_root.join("missing").join("package.json"), "{")
+        .expect("write malformed second manifest");
+    let resolver = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_tsconfig_discovery_entries: 1,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+
+    assert!(vue3_tsconfig_named_type_global_type_files(
+        &[first_root, second_root],
+        "missing",
+        &resolver,
+    )
+    .is_empty());
+    let stats = resolver.external_type_session.stats();
+    assert_eq!(stats.tsconfig_discovery_entries, 1);
+    assert_eq!(stats.metadata_files_read, 1);
+}
+
 #[cfg(unix)]
 #[test]
 fn vue3_tsconfig_graph_uses_canonical_symlink_identity() {

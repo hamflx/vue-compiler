@@ -357,13 +357,14 @@ defineModel<RefGlobalModel>()
         )
         .expect("write deep type");
 
-        let mut depth_budget = Vue3TsconfigIncludeScanBudget::new(1, 32, 32);
+        let depth_resolver = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+            max_tsconfig_discovery_depth: 1,
+            max_tsconfig_discovery_entries: 32,
+            max_tsconfig_discovery_files: 32,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
         let mut depth_limited = Vec::new();
-        vue3_collect_global_type_files_from_dir(
-            &types,
-            &mut depth_limited,
-            &mut depth_budget,
-        );
+        vue3_collect_global_type_files_from_dir(&types, &mut depth_limited, &depth_resolver);
         let depth_limited = depth_limited
             .into_iter()
             .map(|path| path.file_name().expect("file name").to_owned())
@@ -376,19 +377,37 @@ defineModel<RefGlobalModel>()
                 .collect()
         );
 
-        let mut entry_budget = Vue3TsconfigIncludeScanBudget::new(64, 1, 32);
+        let entry_resolver = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+            max_tsconfig_discovery_entries: 1,
+            max_tsconfig_discovery_files: 32,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
         let mut entry_limited = Vec::new();
-        vue3_collect_global_type_files_from_dir(
-            &types,
-            &mut entry_limited,
-            &mut entry_budget,
+        vue3_collect_global_type_files_from_dir(&types, &mut entry_limited, &entry_resolver);
+        assert!(entry_limited.is_empty(), "{entry_limited:?}");
+        assert_eq!(
+            entry_resolver
+                .external_type_session
+                .stats()
+                .tsconfig_discovery_entries,
+            1
         );
-        assert!(entry_limited.len() <= 1, "{entry_limited:?}");
 
-        let mut file_budget = Vue3TsconfigIncludeScanBudget::new(64, 32, 1);
+        let file_resolver = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+            max_tsconfig_discovery_entries: 32,
+            max_tsconfig_discovery_files: 1,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
         let mut file_limited = Vec::new();
-        vue3_collect_global_type_files_from_dir(&types, &mut file_limited, &mut file_budget);
-        assert_eq!(file_limited.len(), 1, "{file_limited:?}");
+        vue3_collect_global_type_files_from_dir(&types, &mut file_limited, &file_resolver);
+        assert!(file_limited.is_empty(), "{file_limited:?}");
+        assert_eq!(
+            file_resolver
+                .external_type_session
+                .stats()
+                .tsconfig_discovery_files,
+            1
+        );
     }
 
     #[test]
@@ -433,11 +452,37 @@ defineModel<RefGlobalModel>()
         symlink(&types, types.join("cycle")).expect("create cycle symlink");
         symlink(&outside, types.join("outside-link")).expect("create outside symlink");
 
-        let mut budget = Vue3TsconfigIncludeScanBudget::default();
+        let resolver = Vue3TypeResolverContext::default();
         let mut files = Vec::new();
-        vue3_collect_global_type_files_from_dir(&types, &mut files, &mut budget);
+        vue3_collect_global_type_files_from_dir(&types, &mut files, &resolver);
 
         assert_eq!(files, vec![real.join("inside.d.ts")]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn vue3_tsconfig_include_scan_preserves_non_utf8_directory_identities() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let types = dir.path().join("types");
+        let first = types.join(std::ffi::OsString::from_vec(vec![b'd', 0x80]));
+        let second = types.join(std::ffi::OsString::from_vec(vec![b'd', 0x81]));
+        std::fs::create_dir_all(&first).expect("create first non-UTF-8 directory");
+        std::fs::create_dir_all(&second).expect("create second non-UTF-8 directory");
+        let first_file = first.join("first.d.ts");
+        let second_file = second.join("second.d.ts");
+        std::fs::write(&first_file, "declare interface First {}").expect("write first type");
+        std::fs::write(&second_file, "declare interface Second {}").expect("write second type");
+        let resolver = Vue3TypeResolverContext::default();
+        let mut files = Vec::new();
+
+        vue3_collect_global_type_files_from_dir(&types, &mut files, &resolver);
+
+        assert_eq!(
+            files.into_iter().collect::<BTreeSet<_>>(),
+            [first_file, second_file].into_iter().collect()
+        );
     }
 
     #[test]

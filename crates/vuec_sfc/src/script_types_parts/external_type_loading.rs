@@ -20,6 +20,9 @@ pub(crate) const VUE3_EXTERNAL_TYPE_MAX_METADATA_FILE_BYTES: usize = 1024 * 1024
 pub(crate) const VUE3_EXTERNAL_TYPE_MAX_METADATA_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) const VUE3_EXTERNAL_TYPE_MAX_TSCONFIG_NODES: usize = 512;
 pub(crate) const VUE3_EXTERNAL_TYPE_MAX_TSCONFIG_DEPTH: usize = 64;
+pub(crate) const VUE3_EXTERNAL_TYPE_MAX_TSCONFIG_DISCOVERY_DEPTH: usize = 64;
+pub(crate) const VUE3_EXTERNAL_TYPE_MAX_TSCONFIG_DISCOVERY_ENTRIES: usize = 65_536;
+pub(crate) const VUE3_EXTERNAL_TYPE_MAX_TSCONFIG_DISCOVERY_FILES: usize = 16_384;
 pub(crate) const VUE3_EXTERNAL_TYPE_MAX_PACKAGE_RESOLUTION_DEPTH: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,6 +42,9 @@ pub(crate) struct Vue3ExternalTypeLoadLimits {
     pub(crate) max_metadata_bytes: usize,
     pub(crate) max_tsconfig_nodes: usize,
     pub(crate) max_tsconfig_depth: usize,
+    pub(crate) max_tsconfig_discovery_depth: usize,
+    pub(crate) max_tsconfig_discovery_entries: usize,
+    pub(crate) max_tsconfig_discovery_files: usize,
     pub(crate) max_package_resolution_depth: usize,
 }
 
@@ -60,6 +66,9 @@ impl Default for Vue3ExternalTypeLoadLimits {
             max_metadata_bytes: VUE3_EXTERNAL_TYPE_MAX_METADATA_BYTES,
             max_tsconfig_nodes: VUE3_EXTERNAL_TYPE_MAX_TSCONFIG_NODES,
             max_tsconfig_depth: VUE3_EXTERNAL_TYPE_MAX_TSCONFIG_DEPTH,
+            max_tsconfig_discovery_depth: VUE3_EXTERNAL_TYPE_MAX_TSCONFIG_DISCOVERY_DEPTH,
+            max_tsconfig_discovery_entries: VUE3_EXTERNAL_TYPE_MAX_TSCONFIG_DISCOVERY_ENTRIES,
+            max_tsconfig_discovery_files: VUE3_EXTERNAL_TYPE_MAX_TSCONFIG_DISCOVERY_FILES,
             max_package_resolution_depth: VUE3_EXTERNAL_TYPE_MAX_PACKAGE_RESOLUTION_DEPTH,
         }
     }
@@ -82,6 +91,8 @@ pub(crate) struct Vue3ExternalTypeLoadStats {
     pub(crate) metadata_source_cache_hits: usize,
     pub(crate) metadata_parse_cache_hits: usize,
     pub(crate) tsconfig_nodes: usize,
+    pub(crate) tsconfig_discovery_entries: usize,
+    pub(crate) tsconfig_discovery_files: usize,
 }
 
 #[derive(Clone, Debug)]
