@@ -29,6 +29,10 @@ pub(crate) const VUE3_EXTERNAL_TYPE_MAX_TSCONFIG_DISCOVERY_DEPTH: usize = 64;
 pub(crate) const VUE3_EXTERNAL_TYPE_MAX_TSCONFIG_DISCOVERY_ENTRIES: usize = 65_536;
 pub(crate) const VUE3_EXTERNAL_TYPE_MAX_TSCONFIG_DISCOVERY_FILES: usize = 16_384;
 pub(crate) const VUE3_EXTERNAL_TYPE_MAX_PACKAGE_RESOLUTION_DEPTH: usize = 64;
+pub(crate) const VUE3_EXTERNAL_TYPE_MAX_ANCESTOR_SEARCH_DEPTH: usize = 128;
+pub(crate) const VUE3_EXTERNAL_TYPE_MAX_ANCESTOR_SEARCH_ENTRIES: usize = 65_536;
+pub(crate) const VUE3_EXTERNAL_TYPE_MAX_ANCESTOR_SEARCH_WEIGHT: usize = 64 * 1024 * 1024;
+pub(crate) const VUE3_EXTERNAL_TYPE_MAX_ANCESTOR_SEARCH_PATH_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Vue3ExternalTypeLoadLimits {
@@ -56,6 +60,10 @@ pub(crate) struct Vue3ExternalTypeLoadLimits {
     pub(crate) max_tsconfig_discovery_entries: usize,
     pub(crate) max_tsconfig_discovery_files: usize,
     pub(crate) max_package_resolution_depth: usize,
+    pub(crate) max_ancestor_search_depth: usize,
+    pub(crate) max_ancestor_search_entries: usize,
+    pub(crate) max_ancestor_search_weight: usize,
+    pub(crate) max_ancestor_search_path_bytes: usize,
 }
 
 impl Default for Vue3ExternalTypeLoadLimits {
@@ -86,6 +94,10 @@ impl Default for Vue3ExternalTypeLoadLimits {
             max_tsconfig_discovery_entries: VUE3_EXTERNAL_TYPE_MAX_TSCONFIG_DISCOVERY_ENTRIES,
             max_tsconfig_discovery_files: VUE3_EXTERNAL_TYPE_MAX_TSCONFIG_DISCOVERY_FILES,
             max_package_resolution_depth: VUE3_EXTERNAL_TYPE_MAX_PACKAGE_RESOLUTION_DEPTH,
+            max_ancestor_search_depth: VUE3_EXTERNAL_TYPE_MAX_ANCESTOR_SEARCH_DEPTH,
+            max_ancestor_search_entries: VUE3_EXTERNAL_TYPE_MAX_ANCESTOR_SEARCH_ENTRIES,
+            max_ancestor_search_weight: VUE3_EXTERNAL_TYPE_MAX_ANCESTOR_SEARCH_WEIGHT,
+            max_ancestor_search_path_bytes: VUE3_EXTERNAL_TYPE_MAX_ANCESTOR_SEARCH_PATH_BYTES,
         }
     }
 }
@@ -112,6 +124,8 @@ pub(crate) struct Vue3ExternalTypeLoadStats {
     pub(crate) tsconfig_nodes: usize,
     pub(crate) tsconfig_discovery_entries: usize,
     pub(crate) tsconfig_discovery_files: usize,
+    pub(crate) ancestor_search_entries: usize,
+    pub(crate) ancestor_search_weight: usize,
 }
 
 include!("external_type_loading_parts/single_flight.rs");
@@ -154,6 +168,7 @@ struct Vue3ExternalTypeLoadState {
     tsconfig_cache: BTreeMap<PathBuf, Vue3TsconfigCacheEntry>,
     package_json_cache: BTreeMap<PathBuf, Vue3PackageJsonCacheEntry>,
     tsconfig_node_states: BTreeSet<(PathBuf, PathBuf, PathBuf)>,
+    ancestor_search_dirs: BTreeSet<PathBuf>,
     active_package_resolutions:
         std::collections::HashMap<std::thread::ThreadId, Vec<PathBuf>>,
     context_waits:
@@ -183,6 +198,7 @@ impl Vue3ExternalTypeLoadState {
             tsconfig_cache: BTreeMap::new(),
             package_json_cache: BTreeMap::new(),
             tsconfig_node_states: BTreeSet::new(),
+            ancestor_search_dirs: BTreeSet::new(),
             active_package_resolutions: std::collections::HashMap::new(),
             context_waits: std::collections::HashMap::new(),
             next_source_flight_id: 0,

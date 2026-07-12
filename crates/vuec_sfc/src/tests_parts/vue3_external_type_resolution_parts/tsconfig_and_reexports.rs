@@ -937,6 +937,8 @@ defineProps<Leaf>()
                 tsconfig_nodes: 0,
                 tsconfig_discovery_entries: 0,
                 tsconfig_discovery_files: 0,
+                ancestor_search_entries: 0,
+                ancestor_search_weight: 0,
             }
         );
     }

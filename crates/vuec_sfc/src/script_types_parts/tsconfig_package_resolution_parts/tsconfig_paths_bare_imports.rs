@@ -164,7 +164,7 @@ pub(crate) fn resolve_vue3_bare_type_import(
         return None;
     }
     let (package_name, subpath) = vue3_package_import_parts(source)?;
-    for node_modules in vue3_node_modules_search_paths(filename) {
+    for node_modules in vue3_node_modules_search_paths(filename, type_resolver) {
         let package_dir = node_modules.join(&package_name);
         if package_dir.is_dir() {
             let resolved =
@@ -225,21 +225,76 @@ pub(crate) fn vue3_package_import_parts(source: &str) -> Option<(String, Option<
     Some((package_name, subpath))
 }
 
-pub(crate) fn vue3_node_modules_search_paths(filename: &str) -> Vec<PathBuf> {
-    let Some(current) = Path::new(filename).parent() else {
-        return Vec::new();
-    };
-    vue3_node_modules_search_paths_from_dir(current)
+pub(crate) fn vue3_ancestor_search_candidate_weight(dir: &Path, suffix: &str) -> usize {
+    dir.as_os_str()
+        .as_encoded_bytes()
+        .len()
+        .saturating_add(usize::from(!dir.as_os_str().is_empty()))
+        .saturating_add(suffix.len())
 }
 
-pub(crate) fn vue3_node_modules_search_paths_from_dir(start_dir: &Path) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    let mut current = Some(start_dir);
-    while let Some(dir) = current {
-        paths.push(normalize_path_components(dir.join("node_modules")));
-        current = dir.parent();
+struct Vue3AncestorSearchPaths<'a> {
+    current: Option<&'a Path>,
+    suffix: &'static str,
+    remaining_depth: usize,
+    session: &'a Vue3ExternalTypeLoadSession,
+}
+
+impl<'a> Vue3AncestorSearchPaths<'a> {
+    fn new(
+        current: Option<&'a Path>,
+        suffix: &'static str,
+        session: &'a Vue3ExternalTypeLoadSession,
+    ) -> Self {
+        Self {
+            current,
+            suffix,
+            remaining_depth: session.max_ancestor_search_depth(),
+            session,
+        }
     }
-    paths
+}
+
+impl Iterator for Vue3AncestorSearchPaths<'_> {
+    type Item = PathBuf;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let dir = self.current.take()?;
+        self.current = dir.parent();
+        if self.remaining_depth == 0 {
+            self.current = None;
+            self.session.block_metadata();
+            return None;
+        }
+        self.remaining_depth -= 1;
+        if !self.session.claim_ancestor_search_dir(dir, self.suffix) {
+            self.current = None;
+            return None;
+        }
+        Some(normalize_path_components(dir.join(self.suffix)))
+    }
+}
+
+pub(crate) fn vue3_node_modules_search_paths<'a>(
+    filename: &'a str,
+    type_resolver: &'a Vue3TypeResolverContext,
+) -> impl Iterator<Item = PathBuf> + 'a {
+    Vue3AncestorSearchPaths::new(
+        Path::new(filename).parent(),
+        "node_modules",
+        &type_resolver.external_type_session,
+    )
+}
+
+pub(crate) fn vue3_node_modules_search_paths_from_dir<'a>(
+    start_dir: &'a Path,
+    type_resolver: &'a Vue3TypeResolverContext,
+) -> impl Iterator<Item = PathBuf> + 'a {
+    Vue3AncestorSearchPaths::new(
+        Some(start_dir),
+        "node_modules",
+        &type_resolver.external_type_session,
+    )
 }
 
 pub(crate) fn vue3_type_resolver_context_for_filename(filename: &str) -> Vue3TypeResolverContext {
@@ -254,14 +309,12 @@ pub(crate) fn vue3_typescript_version_for_filename(
     filename: &str,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<nodejs_semver::Version> {
-    vue3_node_modules_search_paths(filename)
-        .into_iter()
-        .find_map(|node_modules| {
-            vue3_typescript_version_from_package_json(
-                &node_modules.join("typescript").join("package.json"),
-                type_resolver,
-            )
-        })
+    vue3_node_modules_search_paths(filename, type_resolver).find_map(|node_modules| {
+        vue3_typescript_version_from_package_json(
+            &node_modules.join("typescript").join("package.json"),
+            type_resolver,
+        )
+    })
 }
 
 pub(crate) fn vue3_typescript_version_from_package_json(

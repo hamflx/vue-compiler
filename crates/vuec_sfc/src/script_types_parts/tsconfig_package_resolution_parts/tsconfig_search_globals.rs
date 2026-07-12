@@ -68,7 +68,7 @@ pub(crate) fn resolve_vue3_tsconfig_type_import(
         return None;
     }
     let mut traversal = Vue3TsconfigGraphTraversal::default();
-    for config_path in vue3_tsconfig_search_paths(filename) {
+    for config_path in vue3_tsconfig_search_paths(filename, type_resolver) {
         let config_dir = config_path
             .parent()
             .unwrap_or_else(|| Path::new(""))
@@ -94,17 +94,16 @@ pub(crate) fn resolve_vue3_tsconfig_type_import(
     None
 }
 
-pub(crate) fn vue3_tsconfig_search_paths(filename: &str) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    let mut current = Path::new(filename).parent();
-    while let Some(dir) = current {
-        let candidate = normalize_path_components(dir.join("tsconfig.json"));
-        if candidate.is_file() {
-            paths.push(candidate);
-        }
-        current = dir.parent();
-    }
-    paths
+pub(crate) fn vue3_tsconfig_search_paths<'a>(
+    filename: &'a str,
+    type_resolver: &'a Vue3TypeResolverContext,
+) -> impl Iterator<Item = PathBuf> + 'a {
+    Vue3AncestorSearchPaths::new(
+        Path::new(filename).parent(),
+        "tsconfig.json",
+        &type_resolver.external_type_session,
+    )
+    .filter(|candidate| candidate.is_file())
 }
 
 fn vue3_tsconfig_path_mappings_from_config(
@@ -182,7 +181,7 @@ pub(crate) fn vue3_tsconfig_global_type_files(
     let mut files = Vec::new();
     let mut traversal = Vue3TsconfigGraphTraversal::default();
     let mut seen_files = BTreeSet::new();
-    for config_path in vue3_tsconfig_search_paths(filename) {
+    for config_path in vue3_tsconfig_search_paths(filename, type_resolver) {
         let config_dir = config_path.parent().unwrap_or_else(|| Path::new(""));
         vue3_tsconfig_global_type_files_from_config(
             &config_path,
@@ -415,7 +414,7 @@ pub(crate) fn vue3_tsconfig_default_type_roots(
     type_resolver: &Vue3TypeResolverContext,
 ) -> Vec<PathBuf> {
     let mut type_roots = Vec::new();
-    for node_modules in vue3_node_modules_search_paths_from_dir(config_dir) {
+    for node_modules in vue3_node_modules_search_paths_from_dir(config_dir, type_resolver) {
         if !type_resolver
             .external_type_session
             .claim_tsconfig_discovery_entry()

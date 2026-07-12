@@ -524,8 +524,115 @@ fn vue3_path_normalization_preserves_unresolved_parent_components() {
         Some(PathBuf::from("../shared/x"))
     );
     assert_eq!(
-        vue3_node_modules_search_paths_from_dir(Path::new("../workspace/src"))[0],
-        PathBuf::from("../workspace/src/node_modules")
+        vue3_node_modules_search_paths_from_dir(Path::new("../workspace/src"), &resolver).next(),
+        Some(PathBuf::from("../workspace/src/node_modules"))
+    );
+}
+
+#[test]
+fn vue3_ancestor_search_is_lazy_and_depth_bounded() {
+    assert_eq!(VUE3_EXTERNAL_TYPE_MAX_ANCESTOR_SEARCH_DEPTH, 128);
+    assert_eq!(VUE3_EXTERNAL_TYPE_MAX_ANCESTOR_SEARCH_PATH_BYTES, 64 * 1024);
+    let resolver = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_ancestor_search_depth: 2,
+        max_ancestor_search_entries: 8,
+        max_ancestor_search_weight: 1024,
+        max_ancestor_search_path_bytes: 1024,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    let mut paths =
+        vue3_node_modules_search_paths_from_dir(Path::new("a/b/c"), &resolver);
+
+    assert_eq!(paths.next(), Some(PathBuf::from("a/b/c/node_modules")));
+    assert_eq!(resolver.external_type_session.stats().ancestor_search_entries, 1);
+    assert!(!resolver.external_type_session.metadata_is_blocked());
+    assert_eq!(paths.next(), Some(PathBuf::from("a/b/node_modules")));
+    assert_eq!(paths.next(), None);
+    assert!(resolver.external_type_session.metadata_is_blocked());
+    assert_eq!(resolver.external_type_session.stats().ancestor_search_entries, 2);
+}
+
+#[test]
+fn vue3_ancestor_search_budgets_unique_native_directories() {
+    let start = Path::new("a/b");
+    let baseline = Vue3TypeResolverContext::default();
+    let ancestor_count =
+        vue3_node_modules_search_paths_from_dir(start, &baseline).count();
+    let baseline_stats = baseline.external_type_session.stats();
+    let exact_weight = baseline_stats.ancestor_search_weight;
+    assert_eq!(baseline_stats.ancestor_search_entries, ancestor_count);
+    let exact = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_ancestor_search_depth: ancestor_count,
+        max_ancestor_search_entries: ancestor_count,
+        max_ancestor_search_weight: exact_weight,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+
+    assert_eq!(
+        vue3_node_modules_search_paths_from_dir(start, &exact).count(),
+        ancestor_count
+    );
+    assert_eq!(
+        vue3_node_modules_search_paths("a/b/Comp.vue", &exact).count(),
+        ancestor_count
+    );
+    let _ = vue3_tsconfig_search_paths("a/b/Comp.vue", &exact).collect::<Vec<_>>();
+    let stats = exact.external_type_session.stats();
+    assert_eq!(stats.ancestor_search_entries, ancestor_count);
+    assert_eq!(stats.ancestor_search_weight, exact_weight);
+    assert!(!exact.external_type_session.metadata_is_blocked());
+
+    assert_eq!(
+        vue3_node_modules_search_paths_from_dir(Path::new("a/c"), &exact).next(),
+        None
+    );
+    assert!(exact.external_type_session.metadata_is_blocked());
+    let stats = exact.external_type_session.stats();
+    assert_eq!(stats.ancestor_search_entries, ancestor_count);
+    assert_eq!(stats.ancestor_search_weight, exact_weight);
+
+    let weight_limited =
+        vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+            max_ancestor_search_depth: ancestor_count,
+            max_ancestor_search_entries: ancestor_count,
+            max_ancestor_search_weight: exact_weight - 1,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+    assert_eq!(
+        vue3_node_modules_search_paths_from_dir(start, &weight_limited).count(),
+        ancestor_count - 1
+    );
+    assert!(weight_limited
+        .external_type_session
+        .metadata_is_blocked());
+    assert_eq!(
+        weight_limited
+            .external_type_session
+            .stats()
+            .ancestor_search_entries,
+        ancestor_count - 1
+    );
+
+    let path_limited =
+        vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+            max_ancestor_search_path_bytes: 16,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+    assert_eq!(
+        vue3_node_modules_search_paths_from_dir(
+            Path::new("this-directory-is-too-long"),
+            &path_limited,
+        )
+        .next(),
+        None
+    );
+    assert!(path_limited.external_type_session.metadata_is_blocked());
+    assert_eq!(
+        path_limited
+            .external_type_session
+            .stats()
+            .ancestor_search_entries,
+        0
     );
 }
 

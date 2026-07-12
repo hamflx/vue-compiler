@@ -90,6 +90,61 @@ impl Vue3ExternalTypeLoadSession {
         self.lock().limits.max_tsconfig_discovery_depth
     }
 
+    fn max_ancestor_search_depth(&self) -> usize {
+        self.lock().limits.max_ancestor_search_depth
+    }
+
+    fn claim_ancestor_search_dir(&self, dir: &Path, suffix: &str) -> bool {
+        let raw_candidate_weight = vue3_ancestor_search_candidate_weight(dir, suffix);
+        let path_limit = {
+            let state = self.lock();
+            if state.metadata_blocked {
+                return false;
+            }
+            state.limits.max_ancestor_search_path_bytes
+        };
+        if raw_candidate_weight > path_limit {
+            self.block_metadata();
+            return false;
+        }
+
+        let identity = vue3_external_type_lexical_path(dir);
+        let identity_weight = identity.as_os_str().as_encoded_bytes().len();
+        let normalized_candidate_weight = vue3_ancestor_search_candidate_weight(&identity, suffix);
+        let mut state = self.lock();
+        if state.metadata_blocked {
+            return false;
+        }
+        if normalized_candidate_weight > state.limits.max_ancestor_search_path_bytes {
+            let flights = vue3_block_metadata_state(&mut state);
+            drop(state);
+            vue3_abort_metadata_flights(flights);
+            return false;
+        }
+        if state.ancestor_search_dirs.contains(&identity) {
+            return true;
+        }
+        let Some(next_weight) = state.stats.ancestor_search_weight.checked_add(identity_weight)
+        else {
+            let flights = vue3_block_metadata_state(&mut state);
+            drop(state);
+            vue3_abort_metadata_flights(flights);
+            return false;
+        };
+        if state.ancestor_search_dirs.len() >= state.limits.max_ancestor_search_entries
+            || next_weight > state.limits.max_ancestor_search_weight
+        {
+            let flights = vue3_block_metadata_state(&mut state);
+            drop(state);
+            vue3_abort_metadata_flights(flights);
+            return false;
+        }
+        state.ancestor_search_dirs.insert(identity);
+        state.stats.ancestor_search_entries = state.ancestor_search_dirs.len();
+        state.stats.ancestor_search_weight = next_weight;
+        true
+    }
+
     fn claim_tsconfig_discovery_entry(&self) -> bool {
         let mut state = self.lock();
         if state.metadata_blocked {

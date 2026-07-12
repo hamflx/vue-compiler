@@ -203,7 +203,7 @@ pub(crate) fn resolve_vue3_package_tsconfig_extends(
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
     let (package_name, subpath) = vue3_package_import_parts(target)?;
-    for node_modules in vue3_node_modules_search_paths_from_dir(config_dir) {
+    for node_modules in vue3_node_modules_search_paths_from_dir(config_dir, type_resolver) {
         let package_dir = normalize_path_components(node_modules.join(&package_name));
         if !package_dir.is_dir() {
             continue;
