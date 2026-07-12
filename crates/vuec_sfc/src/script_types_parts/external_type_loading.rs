@@ -123,11 +123,18 @@ enum Vue3ExternalTypeContextCacheEntry {
     Ready(std::sync::Arc<Vue27TypeContext>),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Vue3ExternalTypeContextCacheKey {
+    path: PathBuf,
+}
+
 #[derive(Debug)]
 struct Vue3ExternalTypeLoadState {
     limits: Vue3ExternalTypeLoadLimits,
-    source_cache: BTreeMap<String, Vue3ExternalTypeSourceCacheEntry>,
-    context_cache: BTreeMap<String, Vue3ExternalTypeContextCacheEntry>,
+    source_cache:
+        BTreeMap<Vue3ExternalTypeSourceCacheKey, Vue3ExternalTypeSourceCacheEntry>,
+    context_cache:
+        BTreeMap<Vue3ExternalTypeContextCacheKey, Vue3ExternalTypeContextCacheEntry>,
     resolution_cache:
         BTreeMap<Vue3TypeImportResolutionCacheKey, Vue3TypeImportResolutionCacheEntry>,
     metadata_source_cache: BTreeMap<PathBuf, Vue3MetadataSourceCacheEntry>,
@@ -237,7 +244,7 @@ impl Vue3ExternalTypeLoadSession {
         kind: Vue3ExternalTypeSourceKind,
     ) -> Option<std::sync::Arc<Vue3ExternalTypeSource>> {
         let cache_key = vue3_external_type_source_cache_key(path, kind);
-        match self.begin_source_load(cache_key, kind) {
+        match self.begin_source_load(cache_key) {
             Vue3ExternalTypeSourceLoad::Ready(source) => Some(source),
             Vue3ExternalTypeSourceLoad::Wait(waiter) => waiter.wait(),
             Vue3ExternalTypeSourceLoad::Start(mut owner) => {
@@ -248,7 +255,10 @@ impl Vue3ExternalTypeLoadSession {
         }
     }
 
-    fn begin_context_load(&self, cache_key: &str) -> Vue3ExternalTypeContextLoad {
+    fn begin_context_load(
+        &self,
+        cache_key: &Vue3ExternalTypeContextCacheKey,
+    ) -> Vue3ExternalTypeContextLoad {
         let mut state = self.lock();
         if state.stats.context_lookups >= state.limits.max_context_lookups {
             state.failure_epoch += 1;
@@ -275,7 +285,7 @@ impl Vue3ExternalTypeLoadSession {
         state.stats.context_builds += 1;
         let failure_epoch = state.failure_epoch;
         state.context_cache.insert(
-            cache_key.to_string(),
+            cache_key.clone(),
             Vue3ExternalTypeContextCacheEntry::Loading,
         );
         Vue3ExternalTypeContextLoad::Start { failure_epoch }
@@ -292,7 +302,11 @@ impl Vue3ExternalTypeLoadSession {
             && state.stats.context_build_weight < state.limits.max_context_build_weight
     }
 
-    fn reserve_context_build_weight(&self, cache_key: &str, weight: usize) -> bool {
+    fn reserve_context_build_weight(
+        &self,
+        cache_key: &Vue3ExternalTypeContextCacheKey,
+        weight: usize,
+    ) -> bool {
         let mut state = self.lock();
         let remaining = state
             .limits
@@ -354,7 +368,7 @@ impl Vue3ExternalTypeLoadSession {
 
     fn finish_context_load(
         &self,
-        cache_key: String,
+        cache_key: Vue3ExternalTypeContextCacheKey,
         context: Option<std::sync::Arc<Vue27TypeContext>>,
         failure_epoch: usize,
     ) -> Option<std::sync::Arc<Vue27TypeContext>> {
@@ -412,12 +426,7 @@ include!("external_type_loading_parts/context_cost.rs");
 include!("external_type_loading_parts/resolution.rs");
 include!("external_type_loading_parts/metadata.rs");
 
-pub(crate) fn vue3_external_type_path_identity(path: &Path) -> String {
-    let identity = vue3_external_type_path_identity_path(path);
-    normalize_path_string(&identity)
-}
-
-fn vue3_external_type_path_identity_path(path: &Path) -> PathBuf {
+pub(crate) fn vue3_external_type_path_identity(path: &Path) -> PathBuf {
     let identity = std::fs::canonicalize(path).unwrap_or_else(|_| {
         let absolute = if path.is_absolute() {
             path.to_path_buf()
@@ -444,29 +453,29 @@ fn vue3_external_type_lexical_path(path: &Path) -> PathBuf {
 
 fn vue3_external_type_path_key(path: PathBuf) -> PathBuf {
     if cfg!(windows) {
-        PathBuf::from(normalize_path_string(&path).to_lowercase())
+        let mut path = path.into_os_string();
+        path.make_ascii_lowercase();
+        PathBuf::from(path)
     } else {
         path
     }
 }
 
-fn vue3_external_type_context_cache_key(path: &Path) -> String {
-    normalize_path_string(&vue3_external_type_lexical_path(path))
+fn vue3_external_type_context_cache_key(path: &Path) -> Vue3ExternalTypeContextCacheKey {
+    Vue3ExternalTypeContextCacheKey {
+        path: vue3_external_type_lexical_path(path),
+    }
 }
 
 fn vue3_external_type_source_cache_key(
     path: &Path,
     kind: Vue3ExternalTypeSourceKind,
-) -> String {
-    let kind = match kind {
-        Vue3ExternalTypeSourceKind::Import => "import",
-        Vue3ExternalTypeSourceKind::Global => "global",
-    };
-    format!(
-        "{kind}\0{}\0{}",
-        vue3_external_type_path_identity(path),
-        vue3_external_type_source_mode(path),
-    )
+) -> Vue3ExternalTypeSourceCacheKey {
+    Vue3ExternalTypeSourceCacheKey {
+        path: vue3_external_type_path_identity(path),
+        kind,
+        mode: vue3_external_type_source_mode(path),
+    }
 }
 
 fn vue3_external_type_source_mode(path: &Path) -> String {

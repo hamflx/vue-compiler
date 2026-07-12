@@ -1,10 +1,17 @@
 type Vue3ExternalTypeSourceResult = Option<std::sync::Arc<Vue3ExternalTypeSource>>;
 type Vue3ExternalTypeSourceFlight = Vue3SingleFlight<Vue3ExternalTypeSource>;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Vue3ExternalTypeSourceKind {
     Import,
     Global,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Vue3ExternalTypeSourceCacheKey {
+    path: PathBuf,
+    kind: Vue3ExternalTypeSourceKind,
+    mode: String,
 }
 
 #[derive(Clone, Debug)]
@@ -42,7 +49,7 @@ impl Vue3ExternalTypeSourceWaiter {
 
 struct Vue3ExternalTypeSourceOwner {
     session: Vue3ExternalTypeLoadSession,
-    cache_key: String,
+    cache_key: Vue3ExternalTypeSourceCacheKey,
     kind: Vue3ExternalTypeSourceKind,
     flight: std::sync::Arc<Vue3ExternalTypeSourceFlight>,
     reserved_bytes: usize,
@@ -200,9 +207,9 @@ impl Drop for Vue3ExternalTypeSourceOwner {
 impl Vue3ExternalTypeLoadSession {
     fn begin_source_load(
         &self,
-        cache_key: String,
-        kind: Vue3ExternalTypeSourceKind,
+        cache_key: Vue3ExternalTypeSourceCacheKey,
     ) -> Vue3ExternalTypeSourceLoad {
+        let kind = cache_key.kind;
         let owner = std::thread::current().id();
         let mut state = self.lock();
         match state.source_cache.get(&cache_key).cloned() {
@@ -290,12 +297,73 @@ mod source_single_flight_tests {
         }
     }
 
+    fn cache_key(
+        value: &str,
+        kind: Vue3ExternalTypeSourceKind,
+    ) -> Vue3ExternalTypeSourceCacheKey {
+        Vue3ExternalTypeSourceCacheKey {
+            path: PathBuf::from(value),
+            kind,
+            mode: "test".into(),
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn external_type_cache_keys_preserve_native_windows_paths() {
+        use std::os::windows::ffi::OsStringExt;
+
+        fn path_with_surrogate(name: &str, surrogate: u16) -> PathBuf {
+            let mut units = name.encode_utf16().collect::<Vec<_>>();
+            units.insert(5, surrogate);
+            PathBuf::from(std::ffi::OsString::from_wide(&units))
+        }
+
+        let first = path_with_surrogate("type-.ts", 0xd800);
+        let uppercase = path_with_surrogate("TYPE-.TS", 0xd800);
+        let second = path_with_surrogate("type-.ts", 0xd801);
+
+        assert_eq!(first.to_string_lossy(), second.to_string_lossy());
+        assert_ne!(
+            vue3_external_type_path_identity(&first),
+            vue3_external_type_path_identity(&second)
+        );
+        assert_ne!(
+            vue3_external_type_context_cache_key(&first),
+            vue3_external_type_context_cache_key(&second)
+        );
+        assert_ne!(
+            vue3_external_type_source_cache_key(
+                &first,
+                Vue3ExternalTypeSourceKind::Import,
+            ),
+            vue3_external_type_source_cache_key(
+                &second,
+                Vue3ExternalTypeSourceKind::Import,
+            )
+        );
+        assert_eq!(
+            vue3_external_type_context_cache_key(&first),
+            vue3_external_type_context_cache_key(&uppercase)
+        );
+        assert_eq!(
+            vue3_external_type_source_cache_key(
+                &first,
+                Vue3ExternalTypeSourceKind::Import,
+            ),
+            vue3_external_type_source_cache_key(
+                &uppercase,
+                Vue3ExternalTypeSourceKind::Import,
+            )
+        );
+    }
+
     fn start(
         session: &Vue3ExternalTypeLoadSession,
         key: &str,
         kind: Vue3ExternalTypeSourceKind,
     ) -> Vue3ExternalTypeSourceOwner {
-        match session.begin_source_load(key.into(), kind) {
+        match session.begin_source_load(cache_key(key, kind)) {
             Vue3ExternalTypeSourceLoad::Start(owner) => owner,
             _ => panic!("expected source flight owner"),
         }
@@ -327,8 +395,7 @@ mod source_single_flight_tests {
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let waiter = std::thread::spawn(move || {
             let Vue3ExternalTypeSourceLoad::Wait(waiter) = waiter_session.begin_source_load(
-                key.into(),
-                Vue3ExternalTypeSourceKind::Import,
+                cache_key(key, Vue3ExternalTypeSourceKind::Import),
             ) else {
                 panic!("expected source flight waiter");
             };
@@ -352,8 +419,7 @@ mod source_single_flight_tests {
         assert_eq!(session.stats().source_cache_hits, 1);
 
         let Vue3ExternalTypeSourceLoad::Ready(cached) = session.begin_source_load(
-            key.into(),
-            Vue3ExternalTypeSourceKind::Import,
+            cache_key(key, Vue3ExternalTypeSourceKind::Import),
         ) else {
             panic!("expected cached source");
         };
@@ -376,16 +442,20 @@ mod source_single_flight_tests {
 
         assert!(matches!(
             session.begin_source_load(
-                "recursive-source".into(),
-                Vue3ExternalTypeSourceKind::Import,
+                cache_key(
+                    "recursive-source",
+                    Vue3ExternalTypeSourceKind::Import,
+                ),
             ),
             Vue3ExternalTypeSourceLoad::Failed
         ));
         drop(owner);
         assert!(matches!(
             session.begin_source_load(
-                "recursive-source".into(),
-                Vue3ExternalTypeSourceKind::Import,
+                cache_key(
+                    "recursive-source",
+                    Vue3ExternalTypeSourceKind::Import,
+                ),
             ),
             Vue3ExternalTypeSourceLoad::Start(_)
         ));
@@ -402,8 +472,7 @@ mod source_single_flight_tests {
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let waiter = std::thread::spawn(move || {
             let Vue3ExternalTypeSourceLoad::Wait(waiter) = waiter_session.begin_source_load(
-                key.into(),
-                Vue3ExternalTypeSourceKind::Import,
+                cache_key(key, Vue3ExternalTypeSourceKind::Import),
             ) else {
                 panic!("expected source flight waiter");
             };
@@ -424,7 +493,9 @@ mod source_single_flight_tests {
             .is_none());
         waiter.join().expect("join source waiter");
         assert!(matches!(
-            session.begin_source_load(key.into(), Vue3ExternalTypeSourceKind::Import),
+            session.begin_source_load(
+                cache_key(key, Vue3ExternalTypeSourceKind::Import),
+            ),
             Vue3ExternalTypeSourceLoad::Failed
         ));
         let stats = session.stats();
@@ -447,8 +518,7 @@ mod source_single_flight_tests {
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let waiter = std::thread::spawn(move || {
             let Vue3ExternalTypeSourceLoad::Wait(waiter) = waiter_session.begin_source_load(
-                key.into(),
-                Vue3ExternalTypeSourceKind::Import,
+                cache_key(key, Vue3ExternalTypeSourceKind::Import),
             ) else {
                 panic!("expected source flight waiter");
             };
@@ -515,7 +585,7 @@ mod source_single_flight_tests {
             assert!(exact.complete(Some(source("exact"))).is_some());
             assert_eq!(budget(&session, kind), (12, 0));
             let Vue3ExternalTypeSourceLoad::Ready(cached) =
-                session.begin_source_load("first".into(), kind)
+                session.begin_source_load(cache_key("first", kind))
             else {
                 panic!("unrelated failure must not discard ready source");
             };
@@ -534,8 +604,7 @@ mod source_single_flight_tests {
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let waiter = std::thread::spawn(move || {
             let Vue3ExternalTypeSourceLoad::Wait(waiter) = waiter_session.begin_source_load(
-                key.into(),
-                Vue3ExternalTypeSourceKind::Import,
+                cache_key(key, Vue3ExternalTypeSourceKind::Import),
             ) else {
                 panic!("expected source flight waiter");
             };

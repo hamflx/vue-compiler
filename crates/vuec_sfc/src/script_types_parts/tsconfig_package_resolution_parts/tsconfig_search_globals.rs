@@ -30,7 +30,7 @@ fn vue3_tsconfig_graph_enter(
     if type_resolver.external_type_session.metadata_is_blocked() {
         return None;
     }
-    let identity = vue3_external_type_path_identity_path(config_path);
+    let identity = vue3_external_type_path_identity(config_path);
     if traversal.active_identities.contains(&identity) {
         return None;
     }

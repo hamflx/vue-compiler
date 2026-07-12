@@ -648,6 +648,73 @@ defineProps<Leaf>()
         assert_eq!(seen, BTreeSet::from([identity]));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn vue3_external_type_caches_preserve_native_unix_paths() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let first_path = dir
+            .path()
+            .join(std::ffi::OsString::from_vec(b"type-\x80.ts".to_vec()));
+        let second_path = dir
+            .path()
+            .join(std::ffi::OsString::from_vec(b"type-\x81.ts".to_vec()));
+        std::fs::write(
+            &first_path,
+            "export interface FirstNativePath { value: string }",
+        )
+        .expect("write first native path");
+        std::fs::write(
+            &second_path,
+            "export interface SecondNativePath { value: string }",
+        )
+        .expect("write second native path");
+        assert_eq!(
+            first_path.to_string_lossy(),
+            second_path.to_string_lossy()
+        );
+        assert_ne!(
+            vue3_external_type_path_identity(&first_path),
+            vue3_external_type_path_identity(&second_path)
+        );
+
+        let resolver = Vue3TypeResolverContext::default();
+        let first_source = vue3_external_type_source_from_path(&first_path, &resolver)
+            .expect("load first native source");
+        let second_source = vue3_external_type_source_from_path(&second_path, &resolver)
+            .expect("load second native source");
+        assert!(first_source.source.contains("FirstNativePath"));
+        assert!(second_source.source.contains("SecondNativePath"));
+        assert!(!std::sync::Arc::ptr_eq(&first_source, &second_source));
+
+        let first_context = vue3_external_type_context_from_path(
+            &first_path,
+            &mut BTreeSet::new(),
+            &resolver,
+        )
+        .expect("load first native context");
+        let second_context = vue3_external_type_context_from_path(
+            &second_path,
+            &mut BTreeSet::new(),
+            &resolver,
+        )
+        .expect("load second native context");
+        assert!(first_context
+            .declared_types
+            .contains_key("FirstNativePath"));
+        assert!(second_context
+            .declared_types
+            .contains_key("SecondNativePath"));
+        assert!(!std::sync::Arc::ptr_eq(&first_context, &second_context));
+
+        let stats = resolver.external_type_session.stats();
+        assert_eq!(stats.import_files_read, 2);
+        assert_eq!(stats.source_cache_hits, 2);
+        assert_eq!(stats.context_builds, 2);
+        assert_eq!(stats.context_cache_hits, 0);
+    }
+
     #[test]
     fn vue3_external_type_loader_checks_active_paths_before_warm_cache() {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -673,7 +740,7 @@ defineProps<Leaf>()
         assert_eq!(cyclic_seen, BTreeSet::from([identity]));
 
         let mut depth_limited_seen = (0..VUE3_EXTERNAL_TYPE_MAX_ACTIVE_FILES)
-            .map(|index| format!("active-{index}"))
+            .map(|index| PathBuf::from(format!("active-{index}")))
             .collect::<BTreeSet<_>>();
         assert!(vue3_external_type_context_from_path(
             &source_path,

@@ -180,7 +180,7 @@ impl Vue3ExternalTypeLoadSession {
         if self.metadata_is_blocked() {
             return None;
         }
-        let identity = vue3_external_type_path_identity_path(path);
+        let identity = vue3_external_type_path_identity(path);
         let owner = std::thread::current().id();
         let mut state = self.lock();
         let owner_stack = state.active_package_resolutions.get(&owner);
@@ -223,7 +223,7 @@ impl Vue3ExternalTypeLoadSession {
                 return None;
             }
         }
-        let probed_identity = vue3_external_type_path_identity_path(path);
+        let probed_identity = vue3_external_type_path_identity(path);
         let mut state = self.lock();
         if state.metadata_blocked {
             state.failure_epoch += 1;

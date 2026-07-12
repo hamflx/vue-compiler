@@ -21,7 +21,7 @@ pub(crate) fn extend_vue3_type_context_from_external_imports_with_seen(
     source: &str,
     source_type: oxc_span::SourceType,
     context: &mut Vue27TypeContext,
-    seen: &mut BTreeSet<String>,
+    seen: &mut BTreeSet<PathBuf>,
     type_resolver: &Vue3TypeResolverContext,
 ) {
     let allocator = oxc_allocator::Allocator::default();
@@ -84,7 +84,7 @@ fn vue3_external_type_context_from_source_inner(
     source: &str,
     filename: &str,
     source_type: oxc_span::SourceType,
-    seen: &mut BTreeSet<String>,
+    seen: &mut BTreeSet<PathBuf>,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Vue27TypeContext {
     let allocator = oxc_allocator::Allocator::default();
@@ -355,7 +355,7 @@ pub(crate) fn project_vue3_type_re_exports(
     filename: &str,
     statements: &[Statement<'_>],
     analysis: &mut Vue3ScriptSetupAnalysis,
-    seen: &mut BTreeSet<String>,
+    seen: &mut BTreeSet<PathBuf>,
     type_resolver: &Vue3TypeResolverContext,
 ) -> BTreeSet<String> {
     let mut exported_names = BTreeSet::new();
@@ -423,7 +423,7 @@ pub(crate) struct Vue3ResolvedExternalTypeContext {
 pub(crate) fn vue3_external_type_context_from_source(
     filename: &str,
     source: &str,
-    seen: &mut BTreeSet<String>,
+    seen: &mut BTreeSet<PathBuf>,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<Vue3ResolvedExternalTypeContext> {
     let resolved = resolve_vue3_type_import(filename, source, type_resolver)?;
@@ -437,7 +437,7 @@ pub(crate) fn vue3_external_type_context_from_source(
 
 pub(crate) fn vue3_external_type_context_from_path(
     path: &Path,
-    seen: &mut BTreeSet<String>,
+    seen: &mut BTreeSet<PathBuf>,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<std::sync::Arc<Vue27TypeContext>> {
     let identity = vue3_external_type_path_identity(path);
