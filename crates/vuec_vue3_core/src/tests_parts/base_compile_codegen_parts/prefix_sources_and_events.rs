@@ -274,6 +274,82 @@
     }
 
     #[test]
+    fn base_compile_source_map_excludes_non_identifier_text_from_names() {
+        let source =
+            r#"<div>{{ 'foo' + /hidden(?<capture>name)/.test(value) + `raw ${other}` /* ignored */ }}</div>"#;
+        let result = base_compile(
+            TemplateSource {
+                filename: "Literals.vue".into(),
+                source: source.into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                mode: "module".into(),
+                source_map: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert!(result.code.contains(
+            r#"'foo' + /hidden(?<capture>name)/.test(_ctx.value) + `raw ${_ctx.other}` /* ignored */"#
+        ));
+        assert_eq!(
+            result.map.expect("source map").names,
+            vec!["test", "value", "other"]
+        );
+    }
+
+    #[test]
+    fn base_compile_source_map_keeps_object_and_member_identifiers() {
+        let source =
+            r#"<div>{{ ({ plain: value, [dynamic]: object.member }).plain }}</div>"#;
+        let result = base_compile(
+            TemplateSource {
+                filename: "Members.vue".into(),
+                source: source.into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                mode: "module".into(),
+                source_map: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert_eq!(
+            result.map.expect("source map").names,
+            vec!["plain", "value", "dynamic", "object", "member"]
+        );
+    }
+
+    #[test]
+    fn base_compile_source_map_leaves_literal_only_names_empty() {
+        let result = base_compile(
+            TemplateSource {
+                filename: "LiteralOnly.vue".into(),
+                source: r#"<div>{{ "only text" }}</div>"#.into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                mode: "module".into(),
+                source_map: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert!(result.map.expect("source map").names.is_empty());
+    }
+
+    #[test]
     fn base_compile_prefixes_template_literal_placeholders() {
         let options = Vue3CompilerOptions {
             prefix_identifiers: true,
@@ -744,6 +820,34 @@
         assert!(result.code.contains("throw new Error(`msg`);"));
         let map = result.map.expect("source map");
         assert!(map.names.contains(&"Error".into()));
+        assert!(!map.names.contains(&"__vuec__".into()));
+        assert!(!map.names.contains(&"$event".into()));
+        assert!(!map.names.contains(&"msg".into()));
+    }
+
+    #[test]
+    fn base_compile_source_map_excludes_event_handler_literal_text() {
+        let result = base_compile(
+            TemplateSource {
+                filename: "Event.vue".into(),
+                source: r#"<button @click="throw /hidden/.test(value) && run('fake');"></button>"#
+                    .into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                mode: "module".into(),
+                source_map: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert_eq!(
+            result.map.expect("source map").names,
+            vec!["test", "value", "run"]
+        );
     }
 
     #[test]

@@ -223,6 +223,7 @@ pub(crate) fn add_interpolation_mapping(
         original_start,
         *cursor,
         uses_prefixed_identifiers(options),
+        expression_source_type(options),
         names,
         segments,
     );
@@ -366,6 +367,7 @@ pub(crate) fn add_element_prop_mappings(
                             original_start,
                             0,
                             uses_prefixed_identifiers(options),
+                            expression_source_type(options),
                             names,
                             segments,
                         );
@@ -385,6 +387,7 @@ pub(crate) fn add_element_prop_mappings(
                             original_start,
                             0,
                             uses_prefixed_identifiers(options),
+                            expression_source_type(options),
                             names,
                             segments,
                         );
@@ -419,6 +422,7 @@ pub(crate) fn add_directive_expression_token_mappings(
         original_start,
         0,
         uses_prefixed_identifiers(options),
+        expression_source_type(options),
         names,
         segments,
     );
@@ -459,6 +463,7 @@ pub(crate) fn add_expression_token_mappings(
     original_expression_start: usize,
     generated_from: usize,
     precise_members: bool,
+    source_type: oxc_span::SourceType,
     names: &mut Vec<String>,
     segments: &mut Vec<SourceMapSegment>,
 ) -> usize {
@@ -468,8 +473,11 @@ pub(crate) fn add_expression_token_mappings(
         expression,
         original_expression_start,
         generated_from,
-        precise_members,
-        false,
+        ExpressionTokenMappingOptions {
+            precise_members,
+            include_globals: false,
+            source_type,
+        },
         names,
         segments,
     )
@@ -482,6 +490,7 @@ pub(crate) fn add_event_handler_token_mappings(
     original_expression_start: usize,
     generated_from: usize,
     precise_members: bool,
+    source_type: oxc_span::SourceType,
     names: &mut Vec<String>,
     segments: &mut Vec<SourceMapSegment>,
 ) -> usize {
@@ -491,29 +500,44 @@ pub(crate) fn add_event_handler_token_mappings(
         expression,
         original_expression_start,
         generated_from,
-        precise_members,
-        true,
+        ExpressionTokenMappingOptions {
+            precise_members,
+            include_globals: true,
+            source_type,
+        },
         names,
         segments,
     )
 }
 
-pub(crate) fn add_expression_token_mappings_with_options(
+#[derive(Clone, Copy)]
+struct ExpressionTokenMappingOptions {
+    precise_members: bool,
+    include_globals: bool,
+    source_type: oxc_span::SourceType,
+}
+
+fn add_expression_token_mappings_with_options(
     code: &str,
     source: &str,
     expression: &str,
     original_expression_start: usize,
     generated_from: usize,
-    precise_members: bool,
-    include_globals: bool,
+    options: ExpressionTokenMappingOptions,
     names: &mut Vec<String>,
     segments: &mut Vec<SourceMapSegment>,
 ) -> usize {
-    let tokens = expression_source_map_tokens(expression, include_globals);
+    let tokens = expression_source_map_tokens(
+        expression,
+        options.include_globals,
+        options.source_type,
+    );
     let mut token_cursors = BTreeMap::new();
     let mut generated_end = generated_from;
     let mut single_token_end = None;
-    for (original_relative, token) in tokens.iter().copied() {
+    for (original_relative, token) in &tokens {
+        let original_relative = *original_relative;
+        let token = token.as_str();
         let token_cursor = token_cursors.get(token).copied().unwrap_or(generated_from);
         let generated_needles = if uses_ctx_prefix_for_generated(code, token) {
             vec![format!("_ctx.{token}"), token.to_string()]
@@ -531,7 +555,7 @@ pub(crate) fn add_expression_token_mappings_with_options(
         token_cursors.insert(token, token_end);
         generated_end = generated_end.max(token_end);
         single_token_end = Some(token_end);
-        let original_offset = if precise_members
+        let original_offset = if options.precise_members
             || !is_member_tail_token(expression, original_relative)
         {
             original_expression_start + original_relative
@@ -601,7 +625,103 @@ pub(crate) fn is_member_tail_token(expression: &str, token_start: usize) -> bool
 pub(crate) fn expression_source_map_tokens(
     expression: &str,
     include_globals: bool,
-) -> Vec<(usize, &str)> {
+    source_type: oxc_span::SourceType,
+) -> Vec<(usize, String)> {
+    parsed_expression_source_map_tokens(expression, include_globals, source_type)
+        .unwrap_or_else(|| lexical_expression_source_map_tokens(expression, include_globals))
+}
+
+#[derive(Default)]
+struct SourceMapIdentifierCollector {
+    tokens: Vec<(usize, usize, String)>,
+}
+
+impl SourceMapIdentifierCollector {
+    fn push(&mut self, span: oxc_span::Span, name: &str) {
+        self.tokens.push((
+            span.start as usize,
+            span.end as usize,
+            name.to_string(),
+        ));
+    }
+}
+
+impl<'a> oxc_ast_visit::Visit<'a> for SourceMapIdentifierCollector {
+    fn visit_identifier_name(&mut self, identifier: &oxc_ast::ast::IdentifierName<'a>) {
+        self.push(identifier.span, identifier.name.as_str());
+    }
+
+    fn visit_identifier_reference(&mut self, identifier: &oxc_ast::ast::IdentifierReference<'a>) {
+        self.push(identifier.span, identifier.name.as_str());
+    }
+
+    fn visit_binding_identifier(&mut self, identifier: &oxc_ast::ast::BindingIdentifier<'a>) {
+        self.push(identifier.span, identifier.name.as_str());
+    }
+
+    fn visit_label_identifier(&mut self, identifier: &oxc_ast::ast::LabelIdentifier<'a>) {
+        self.push(identifier.span, identifier.name.as_str());
+    }
+
+    fn visit_private_identifier(&mut self, identifier: &oxc_ast::ast::PrivateIdentifier<'a>) {
+        self.push(identifier.span, identifier.name.as_str());
+    }
+}
+
+fn parsed_expression_source_map_tokens(
+    expression: &str,
+    include_globals: bool,
+    source_type: oxc_span::SourceType,
+) -> Option<Vec<(usize, String)>> {
+    let store = JsAstStore::new();
+    let (mut collector, source_start, source_end) =
+        if let Ok(parsed) = store.parse_expression(expression, source_type) {
+            let mut collector = SourceMapIdentifierCollector::default();
+            oxc_ast_visit::Visit::visit_expression(&mut collector, &parsed);
+            (collector, 0, expression.len())
+        } else {
+            const FUNCTION_BODY_PREFIX: &str = "async function __vuec__($event) {\n";
+            let wrapped = format!("{FUNCTION_BODY_PREFIX}{expression}\n}}\n");
+            let parsed = store.parse_program(&wrapped, source_type);
+            if parsed.panicked || !parsed.errors.is_empty() {
+                return None;
+            }
+            let mut collector = SourceMapIdentifierCollector::default();
+            oxc_ast_visit::Visit::visit_program(&mut collector, &parsed.program);
+            (
+                collector,
+                FUNCTION_BODY_PREFIX.len(),
+                FUNCTION_BODY_PREFIX.len() + expression.len(),
+            )
+        };
+
+    collector.tokens.sort_by(|left, right| {
+        (left.0, left.1, left.2.as_str()).cmp(&(right.0, right.1, right.2.as_str()))
+    });
+    collector.tokens.dedup();
+    Some(
+        collector
+            .tokens
+            .into_iter()
+            .filter_map(|(start, end, name)| {
+                if start >= source_start
+                    && end <= source_end
+                    && !is_keyword(&name)
+                    && (include_globals || !is_global_or_literal(&name))
+                {
+                    Some((start - source_start, name))
+                } else {
+                    None
+                }
+            })
+            .collect(),
+    )
+}
+
+fn lexical_expression_source_map_tokens(
+    expression: &str,
+    include_globals: bool,
+) -> Vec<(usize, String)> {
     let mut tokens = Vec::new();
     for (index, ch) in expression.char_indices() {
         if !is_identifier_start(ch) {
@@ -623,11 +743,11 @@ pub(crate) fn expression_source_map_tokens(
             .unwrap_or(expression.len());
         let token = &expression[index..end];
         if !is_keyword(token) && (include_globals || !is_global_or_literal(token)) {
-            tokens.push((index, token));
+            tokens.push((index, token.to_string()));
         }
     }
     if tokens.is_empty() && !expression.is_empty() {
-        tokens.push((0, expression));
+        tokens.push((0, expression.to_string()));
     }
     tokens
 }
