@@ -31,6 +31,40 @@
     }
 
     #[test]
+    fn generate_vue3_ssr_mir_gives_v_if_precedence_over_v_for() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<div><span v-if="item.ok" v-for="item in items">{{ item }}</span></div>"#
+                .into(),
+            file_id: FileId(89),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_ssr_mir(&ast, &Vue3CompilerOptions::default());
+        let generated = generate_vue3_ssr_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        let condition = generated
+            .code
+            .find("if (_ctx.item.ok)")
+            .expect("v-if condition");
+        let loop_start = generated
+            .code
+            .find("_ssrRenderList(_ctx.items, (item) =>")
+            .expect("v-for loop");
+        assert!(condition < loop_start);
+        assert!(generated.code.contains("_ssrInterpolate(item)"));
+        assert!(!generated.code.contains("_ssrInterpolate(_ctx.item)"));
+    }
+
+    #[test]
     fn generate_vue3_ssr_mir_wraps_v_for_fragments_from_mir() {
         let source = TemplateSource {
             filename: "foo.vue".into(),

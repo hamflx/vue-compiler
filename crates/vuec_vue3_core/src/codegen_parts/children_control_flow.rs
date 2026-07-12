@@ -705,18 +705,7 @@ pub(crate) fn render_maybe_once_if_chain(
             memo_index,
         );
     }
-    let (once_index, scoped) = if directive_by_name(first_element, "memo").is_some() {
-        let memo_slot = memo_index.alloc();
-        let once_slot = memo_index.alloc();
-        (
-            once_slot,
-            scope
-                .with_v_once()
-                .with_memo_index_override(branch_ids[0], memo_slot),
-        )
-    } else {
-        (memo_index.alloc(), scope.with_v_once())
-    };
+    let scoped = scope.with_v_once();
     let rendered = render_if_chain(
         ast,
         branch_ids,
@@ -726,6 +715,7 @@ pub(crate) fn render_maybe_once_if_chain(
         &scoped,
         memo_index,
     );
+    let once_index = memo_index.alloc();
     render_with_v_once(rendered, once_index)
 }
 
@@ -740,6 +730,49 @@ pub(crate) fn render_if_branch_expr(
     branch_key: usize,
     memo_index: &mut MemoIndex,
 ) -> String {
+    if let Some(for_dir) = directive_by_name(element, "for") {
+        if !leading_comment_ids.is_empty() {
+            let mut rendered = leading_comment_ids
+                .iter()
+                .map(|comment_id| {
+                    render_node_expr_scoped(
+                        ast,
+                        *comment_id,
+                        options,
+                        NodeRenderMode::Child,
+                        scope,
+                        memo_index,
+                    )
+                })
+                .collect::<Vec<_>>();
+            rendered.push(render_for_node(
+                ast,
+                node_id,
+                element,
+                for_dir,
+                options,
+                NodeRenderMode::Child,
+                scope,
+                None,
+                memo_index,
+            ));
+            let children = render_array(&rendered);
+            return format!(
+                "(_openBlock(), _createElementBlock(_Fragment, {{ key: {branch_key} }}, {children}, 2112 /* STABLE_FRAGMENT, DEV_ROOT_FRAGMENT */))"
+            );
+        }
+        return render_for_node(
+            ast,
+            node_id,
+            element,
+            for_dir,
+            options,
+            NodeRenderMode::Root,
+            scope,
+            Some(branch_key),
+            memo_index,
+        );
+    }
     if element.tag == "template" {
         let children = ast
             .node(node_id)
@@ -843,14 +876,31 @@ pub(crate) fn render_for_node(
     options: &Vue3CompilerOptions,
     _mode: NodeRenderMode,
     scope: &RenderScope,
+    branch_key: Option<usize>,
     _memo_index: &mut MemoIndex,
 ) -> String {
     let Some(expression) = directive.exp.as_ref().map(Vue3Expression::source_string) else {
-        return render_once_plain_fallback(ast, node_id, element, options, scope, _memo_index);
+        return render_once_plain_fallback(
+            ast,
+            node_id,
+            element,
+            options,
+            scope,
+            branch_key,
+            _memo_index,
+        );
     };
     let parsed = parse_v_for_expression(&expression);
     let Some((source, aliases)) = parsed else {
-        return render_once_plain_fallback(ast, node_id, element, options, scope, _memo_index);
+        return render_once_plain_fallback(
+            ast,
+            node_id,
+            element,
+            options,
+            scope,
+            branch_key,
+            _memo_index,
+        );
     };
     let source = rewrite_expression_with_scope(&source, options, scope);
     let scoped = scope.with_locals(normalize_v_for_aliases(&aliases));
@@ -863,12 +913,15 @@ pub(crate) fn render_for_node(
         scoped
     };
     let params = aliases.join(", ");
+    let fragment_props = branch_key
+        .map(|key| format!("{{ key: {key} }}"))
+        .unwrap_or_else(|| "null".into());
     let Some(memo) = directive_by_name(element, "memo") else {
         let body = render_v_for_body(ast, node_id, element, options, &scoped, _memo_index);
         let fragment_flag = v_for_fragment_patch_flag(element);
         let body = indent_after_first_line(&body, 2);
         let rendered = format!(
-            "(_openBlock(true), _createElementBlock(_Fragment, null, _renderList({source}, ({params}) => {{\n  return {body}\n}}), {fragment_flag}))"
+            "(_openBlock(true), _createElementBlock(_Fragment, {fragment_props}, _renderList({source}, ({params}) => {{\n  return {body}\n}}), {fragment_flag}))"
         );
         return once_index.map_or(rendered.clone(), |index| {
             render_with_v_once(rendered, index)
@@ -896,7 +949,7 @@ pub(crate) fn render_for_node(
     );
     let body = indent_after_first_line(&body, 2);
     let rendered = format!(
-        "(_openBlock(true), _createElementBlock(_Fragment, null, _renderList({source}, ({params}) => {{\n  const _memo = ({memo_expression})\n  if ({guard}) return _cached\n  const _item = {body}\n  _item.memo = _memo\n  return _item\n}}, _cache, {cache_index}), 128 /* KEYED_FRAGMENT */))"
+        "(_openBlock(true), _createElementBlock(_Fragment, {fragment_props}, _renderList({source}, ({params}) => {{\n  const _memo = ({memo_expression})\n  if ({guard}) return _cached\n  const _item = {body}\n  _item.memo = _memo\n  return _item\n}}, _cache, {cache_index}), 128 /* KEYED_FRAGMENT */))"
     );
     once_index.map_or(rendered.clone(), |index| {
         render_with_v_once(rendered, index)
@@ -909,6 +962,7 @@ pub(crate) fn render_once_plain_fallback(
     element: &Vue3Element,
     options: &Vue3CompilerOptions,
     scope: &RenderScope,
+    branch_key: Option<usize>,
     memo_index: &mut MemoIndex,
 ) -> String {
     if directive_by_name(element, "once").is_some() && !scope.in_v_once {
@@ -921,7 +975,7 @@ pub(crate) fn render_once_plain_fallback(
             options,
             NodeRenderMode::OnceRoot,
             &scope,
-            None,
+            branch_key,
             memo_index,
         );
         render_with_v_once(rendered, once_index)
@@ -933,7 +987,7 @@ pub(crate) fn render_once_plain_fallback(
             options,
             NodeRenderMode::Root,
             scope,
-            None,
+            branch_key,
             memo_index,
         )
     }

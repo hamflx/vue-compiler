@@ -188,7 +188,7 @@
                 .iter()
                 .map(|entry| entry.source.as_str())
                 .collect::<Vec<_>>(),
-            vec!["list", "item.ok", "item.name"]
+            vec!["item.ok", "list", "item.name"]
         );
         assert_eq!(
             result
@@ -200,36 +200,55 @@
             vec!["item"]
         );
 
-        assert!(result
+        let if_hir = result
             .hir
-            .nodes
-            .iter()
-            .any(|node| matches!(node.kind, HirNodeKind::For(_))));
-        assert!(result
-            .hir
-            .nodes
-            .iter()
-            .any(|node| matches!(node.kind, HirNodeKind::If(_))));
-        let for_mir = result
-            .mir
             .nodes
             .iter()
             .find_map(|node| match &node.kind {
+                HirNodeKind::If(hir_if) => Some(hir_if),
+                _ => None,
+            })
+            .expect("HIR if");
+        assert_eq!(if_hir.branches.len(), 1);
+        let for_hir = result
+            .hir
+            .node(if_hir.branches[0].body)
+            .and_then(|node| match &node.kind {
+                HirNodeKind::For(hir_for) => Some(hir_for),
+                _ => None,
+            })
+            .expect("HIR for");
+        assert!(result
+            .hir
+            .node(for_hir.body)
+            .is_some_and(|node| matches!(node.kind, HirNodeKind::Element(_))));
+
+        let if_mir = result
+            .mir
+            .nodes
+            .iter()
+            .find(|node| {
+                matches!(
+                    node.kind,
+                    Vue3SsrMirKind::If {
+                        condition: Some(JsExprId(0)),
+                        ..
+                    }
+                )
+            })
+            .expect("SSR MIR if");
+        let for_mir = if_mir
+            .children
+            .iter()
+            .find_map(|child_id| match &result.mir.node(*child_id)?.kind {
                 Vue3SsrMirKind::For(for_mir) => Some(for_mir),
                 _ => None,
             })
             .expect("SSR MIR for");
-        assert_eq!(for_mir.source, JsExprId(0));
+        assert_eq!(for_mir.source, JsExprId(1));
         assert_eq!(for_mir.value_alias, JsPatternId(0));
         assert!(for_mir.key_alias.is_none());
         assert!(for_mir.index_alias.is_none());
-        assert!(result.mir.nodes.iter().any(|node| matches!(
-            node.kind,
-            Vue3SsrMirKind::If {
-                condition: Some(_),
-                ..
-            }
-        )));
         assert!(result
             .mir
             .nodes

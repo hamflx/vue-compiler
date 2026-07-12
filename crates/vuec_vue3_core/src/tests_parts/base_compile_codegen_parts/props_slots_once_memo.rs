@@ -359,6 +359,130 @@
     }
 
     #[test]
+    fn base_compile_gives_v_if_precedence_over_v_for_on_the_same_element() {
+        let result = base_compile(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: r#"<div><span v-if="ok" v-for="x in xs">{{ x }}</span><span v-else v-for="y in ys">{{ y }}</span></div>"#.into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                mode: "module".into(),
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let condition = result.code.find("_ctx.ok").expect("v-if condition");
+        let first_loop = result
+            .code
+            .find("_renderList(_ctx.xs")
+            .expect("v-for loop");
+        assert!(condition < first_loop);
+        assert!(result
+            .code
+            .contains("_Fragment, { key: 0 }, _renderList(_ctx.xs, (x) =>"));
+        assert!(result
+            .code
+            .contains("_Fragment, { key: 1 }, _renderList(_ctx.ys, (y) =>"));
+        assert!(result.code.contains("_toDisplayString(x)"));
+        assert!(result.code.contains("_toDisplayString(y)"));
+        assert!(!result.code.contains("_toDisplayString(_ctx.x)"));
+        assert!(!result.code.contains("_toDisplayString(_ctx.y)"));
+
+        let scoped_condition = base_compile(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: r#"<li v-if="item.ok" v-for="item in items">{{ item.name }}</li>"#
+                    .into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                mode: "module".into(),
+                ..Vue3CompilerOptions::default()
+            },
+        );
+        let condition = scoped_condition
+            .code
+            .find("_ctx.item.ok")
+            .expect("outer v-if condition");
+        let loop_start = scoped_condition
+            .code
+            .find("_renderList(_ctx.items, (item) =>")
+            .expect("inner v-for loop");
+        assert!(condition < loop_start);
+        assert!(scoped_condition
+            .code
+            .contains("_toDisplayString(item.name)"));
+        assert!(!scoped_condition
+            .code
+            .contains("_toDisplayString(_ctx.item.name)"));
+
+        let template = base_compile(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: r#"<template v-if="show" v-for="item in items"><i>{{ item }}</i></template>"#
+                    .into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                mode: "module".into(),
+                ..Vue3CompilerOptions::default()
+            },
+        );
+        assert!(template.diagnostics.is_empty(), "{:?}", template.diagnostics);
+        assert!(template
+            .code
+            .contains("_Fragment, { key: 0 }, _renderList(_ctx.items, (item) =>"));
+        assert!(template.code.contains("_toDisplayString(item)"));
+        assert!(!template.code.contains("_toDisplayString(_ctx.item)"));
+
+        let memo = base_compile(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: r#"<li v-if="ok" v-for="item in items" :key="item.id" v-memo="[item.id]">{{ item.name }}</li>"#.into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                mode: "module".into(),
+                ..Vue3CompilerOptions::default()
+            },
+        );
+        assert!(memo
+            .code
+            .contains("_Fragment, { key: 0 }, _renderList(_ctx.items"));
+        assert!(memo.code.contains("_cached.key === item.id"));
+        assert!(memo.code.contains("const _memo = ([item.id])"));
+
+        let once_memo = base_compile(
+            TemplateSource {
+                filename: "foo.vue".into(),
+                source: r#"<li v-if="ok" v-for="item in items" :key="item.id" v-memo="[item.id]" v-once>{{ item.name }}</li>"#.into(),
+                file_id: FileId(0),
+                base_offset: 0,
+            },
+            Vue3CompilerOptions {
+                prefix_identifiers: true,
+                mode: "module".into(),
+                ..Vue3CompilerOptions::default()
+            },
+        );
+        assert!(once_memo.code.contains("_cache[2] || ("));
+        assert!(once_memo.code.contains("_renderList(_ctx.items"));
+        assert!(once_memo.code.contains("}, _cache, 0)"));
+        assert!(once_memo.code.contains(")).cacheIndex = 2"));
+        assert!(!once_memo.code.contains("_cache[1] || ("));
+    }
+
+    #[test]
     fn base_compile_wraps_v_if_v_once_around_chain() {
         let result = base_compile(
             TemplateSource {

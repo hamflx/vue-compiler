@@ -1013,7 +1013,7 @@
                 .iter()
                 .map(|entry| entry.source.as_str())
                 .collect::<Vec<_>>(),
-            vec!["list", "item.ok", "item.id", "item.name"]
+            vec!["item.ok", "list", "item.id", "item.name"]
         );
         assert_eq!(
             result
@@ -1025,11 +1025,20 @@
             vec!["item", "key", "index"]
         );
 
-        let for_node = result
+        let if_node = result
             .hir
             .nodes
             .iter()
             .find_map(|node| match &node.kind {
+                HirNodeKind::If(hir_if) => Some((node.id, hir_if)),
+                _ => None,
+            })
+            .expect("HIR if");
+        assert_eq!(if_node.1.branches.len(), 1);
+        let for_node = result
+            .hir
+            .node(if_node.1.branches[0].body)
+            .and_then(|node| match &node.kind {
                 HirNodeKind::For(hir_for) => Some((node.id, hir_for)),
                 _ => None,
             })
@@ -1037,37 +1046,41 @@
         assert!(result
             .hir
             .node(for_node.1.body)
-            .is_some_and(|node| matches!(node.kind, HirNodeKind::If(_))));
-
-        let if_hir = result
-            .hir
-            .node(for_node.1.body)
-            .and_then(|node| match &node.kind {
-                HirNodeKind::If(hir_if) => Some(hir_if),
-                _ => None,
-            })
-            .expect("HIR if");
-        assert_eq!(if_hir.branches.len(), 1);
-        assert!(result
-            .hir
-            .node(if_hir.branches[0].body)
             .is_some_and(|node| matches!(node.kind, HirNodeKind::Element(_))));
 
+        let if_mir = result
+            .mir
+            .nodes
+            .iter()
+            .find(|node| {
+                matches!(
+                    node.kind,
+                    Vue3DomMirKind::If {
+                        condition: Some(JsExprId(0))
+                    }
+                )
+            })
+            .expect("DOM MIR if");
+        let for_mir = if_mir
+            .children
+            .iter()
+            .find_map(|child_id| match &result.mir.node(*child_id)?.kind {
+                Vue3DomMirKind::For(for_mir) => Some(for_mir),
+                _ => None,
+            })
+            .expect("DOM MIR for");
+        assert_eq!(for_mir.source, JsExprId(1));
+        assert_eq!(for_mir.branch_key, Some(0));
         assert!(result
             .mir
             .nodes
             .iter()
             .any(|node| matches!(node.kind, Vue3DomMirKind::For(_))));
         assert!(result
-            .mir
-            .nodes
-            .iter()
-            .any(|node| matches!(node.kind, Vue3DomMirKind::If { condition: Some(_) })));
-        assert!(result
             .map
             .hir_to_mir
             .iter()
-            .any(|(hir, _)| *hir == for_node.0));
+            .any(|(hir, _)| *hir == if_node.0));
 
         let li_mir = result
             .mir

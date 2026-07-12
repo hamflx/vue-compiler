@@ -372,6 +372,9 @@ pub struct Vue3ForMir {
     pub index_alias: Option<JsPatternId>,
     /// Optional key expression.
     pub key: Option<MirExpr>,
+    /// Numeric branch key when the loop is the root of a `v-if` branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_key: Option<u32>,
     /// Optional memo metadata.
     pub memo: Option<Vue3ForMemo>,
 }

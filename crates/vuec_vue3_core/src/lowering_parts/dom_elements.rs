@@ -987,18 +987,18 @@ pub(crate) fn lower_vue3_element_control_flow_to_dom_mir(
     mir_parent: NodeId,
     state: &mut Vue3DomLoweringState,
 ) -> Option<Option<(NodeId, NodeId)>> {
-    if let Some(for_dir) = directive_by_name(element, "for") {
-        let lowered = lower_vue3_for_directive_to_dom_mir(
-            ast_id, element, ast, ast_node, for_dir, hir_parent, mir_parent, state,
-        );
-        return Some(lowered);
-    }
     let if_dir = directive_by_name(element, "if")
         .or_else(|| directive_by_name(element, "else-if"))
         .filter(|dir| dir.exp.is_some());
     if let Some(if_dir) = if_dir {
         let lowered = lower_vue3_if_directive_to_dom_mir(
             ast_id, element, ast, ast_node, if_dir, hir_parent, mir_parent, state,
+        );
+        return Some(lowered);
+    }
+    if let Some(for_dir) = directive_by_name(element, "for") {
+        let lowered = lower_vue3_for_directive_to_dom_mir(
+            ast_id, element, ast, ast_node, for_dir, None, hir_parent, mir_parent, state,
         );
         return Some(lowered);
     }
@@ -1037,7 +1037,8 @@ pub(crate) fn lower_vue3_if_branch_chain_to_dom_mir(
     state.map.record_ast_to_hir(first_id, hir_id);
     state.map.record_hir_to_mir(hir_id, mir_id);
 
-    for branch_id in branch_ids {
+    let mut previous_branch_mir = mir_id;
+    for (branch_key, branch_id) in branch_ids.iter().enumerate() {
         let Some(branch_node) = ast.node(*branch_id) else {
             continue;
         };
@@ -1054,24 +1055,42 @@ pub(crate) fn lower_vue3_if_branch_chain_to_dom_mir(
                 state.source_type,
             )
         };
-        if *branch_id != first_id {
+        let branch_mir = if *branch_id != first_id {
             let branch_mir = state.mir.push_child(
-                mir_id,
+                previous_branch_mir,
                 Vue3DomMirKind::If { condition },
                 branch_node.span.clone(),
             );
             state.map.record_ast_to_hir(*branch_id, hir_id);
             state.map.record_hir_to_mir(hir_id, branch_mir);
-        }
-        if let Some((body_hir, _)) = lower_vue3_non_control_element_to_dom_mir(
-            *branch_id,
-            branch_element,
-            ast,
-            branch_node,
-            hir_id,
-            mir_id,
-            state,
-        ) {
+            branch_mir
+        } else {
+            mir_id
+        };
+        let body = if let Some(for_dir) = directive_by_name(branch_element, "for") {
+            lower_vue3_for_directive_to_dom_mir(
+                *branch_id,
+                branch_element,
+                ast,
+                branch_node,
+                for_dir,
+                u32::try_from(branch_key).ok(),
+                hir_id,
+                branch_mir,
+                state,
+            )
+        } else {
+            lower_vue3_non_control_element_to_dom_mir(
+                *branch_id,
+                branch_element,
+                ast,
+                branch_node,
+                hir_id,
+                branch_mir,
+                state,
+            )
+        };
+        if let Some((body_hir, _)) = body {
             if let Some(node) = state.hir.node_mut(hir_id) {
                 if let HirNodeKind::If(hir_if) = &mut node.kind {
                     hir_if.branches.push(HirIfBranch {
@@ -1081,6 +1100,7 @@ pub(crate) fn lower_vue3_if_branch_chain_to_dom_mir(
                 }
             }
         }
+        previous_branch_mir = branch_mir;
     }
 
     Some((hir_id, mir_id))
@@ -1092,6 +1112,7 @@ pub(crate) fn lower_vue3_for_directive_to_dom_mir(
     ast: &Vue3Ast,
     ast_node: &vuec_ast::Node<Vue3NodeKind>,
     directive: &Vue3Directive,
+    branch_key: Option<u32>,
     hir_parent: NodeId,
     mir_parent: NodeId,
     state: &mut Vue3DomLoweringState,
@@ -1116,6 +1137,7 @@ pub(crate) fn lower_vue3_for_directive_to_dom_mir(
             key_alias: parsed.key_alias,
             index_alias: parsed.index_alias,
             key: None,
+            branch_key,
             memo: None,
         }),
         ast_node.span.clone(),
@@ -1123,16 +1145,9 @@ pub(crate) fn lower_vue3_for_directive_to_dom_mir(
     state.map.record_ast_to_hir(ast_id, hir_id);
     state.map.record_hir_to_mir(hir_id, mir_id);
 
-    let body =
-        if let Some(if_dir) = directive_by_name(element, "if").filter(|dir| dir.exp.is_some()) {
-            lower_vue3_if_directive_to_dom_mir(
-                ast_id, element, ast, ast_node, if_dir, hir_id, mir_id, state,
-            )
-        } else {
-            lower_vue3_non_control_element_to_dom_mir(
-                ast_id, element, ast, ast_node, hir_id, mir_id, state,
-            )
-        };
+    let body = lower_vue3_non_control_element_to_dom_mir(
+        ast_id, element, ast, ast_node, hir_id, mir_id, state,
+    );
     if let Some((body_hir, _)) = body {
         if let Some(node) = state.hir.node_mut(hir_id) {
             if let HirNodeKind::For(hir_for) = &mut node.kind {
@@ -1228,9 +1243,24 @@ pub(crate) fn lower_vue3_if_directive_to_dom_mir(
     state.map.record_ast_to_hir(ast_id, hir_id);
     state.map.record_hir_to_mir(hir_id, mir_id);
 
-    if let Some((body_hir, _)) = lower_vue3_non_control_element_to_dom_mir(
-        ast_id, element, ast, ast_node, hir_id, mir_id, state,
-    ) {
+    let body = if let Some(for_dir) = directive_by_name(element, "for") {
+        lower_vue3_for_directive_to_dom_mir(
+            ast_id,
+            element,
+            ast,
+            ast_node,
+            for_dir,
+            Some(0),
+            hir_id,
+            mir_id,
+            state,
+        )
+    } else {
+        lower_vue3_non_control_element_to_dom_mir(
+            ast_id, element, ast, ast_node, hir_id, mir_id, state,
+        )
+    };
+    if let Some((body_hir, _)) = body {
         if let Some(node) = state.hir.node_mut(hir_id) {
             if let HirNodeKind::If(hir_if) = &mut node.kind {
                 hir_if.branches.push(HirIfBranch {

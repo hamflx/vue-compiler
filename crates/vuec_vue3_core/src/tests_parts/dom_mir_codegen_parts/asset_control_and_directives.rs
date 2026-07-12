@@ -308,14 +308,68 @@
         assert!(generated
             .code
             .contains("_renderList(_ctx.list, (item) => {"));
-        assert!(generated.code.contains("item.ok"));
-        assert!(generated.code.contains("? (_openBlock()"));
+        let condition = generated
+            .code
+            .find("_ctx.item.ok")
+            .expect("v-if condition");
+        let loop_start = generated
+            .code
+            .find("_renderList(_ctx.list")
+            .expect("v-for loop");
+        assert!(condition < loop_start);
+        assert!(generated
+            .code
+            .contains("_Fragment, { key: 0 }, _renderList"));
         assert!(generated.code.contains("_toDisplayString(item.name)"));
-        assert!(!generated.code.contains("_ctx.item"));
+        assert!(!generated
+            .code
+            .contains("_toDisplayString(_ctx.item.name)"));
         assert!(generated
             .code
             .contains("_createCommentVNode(\"v-if\", true)"));
         assert!(!generated.code.contains("v-for"));
+    }
+
+    #[test]
+    fn generate_vue3_dom_mir_emits_nested_if_else_alternates() {
+        let source = TemplateSource {
+            filename: "foo.vue".into(),
+            source: r#"<p v-if="one">one</p><p v-else-if="two">two</p><p v-else>three</p>"#
+                .into(),
+            file_id: FileId(88),
+            base_offset: 0,
+        };
+        let ast = Vue3Dialect::base_parse(source, &Vue3CompilerOptions::default());
+        let result = lower_vue3_ast_to_dom_mir(&ast, &Vue3CompilerOptions::default());
+        let generated = generate_vue3_dom_mir(
+            &result.mir,
+            &result.js,
+            &Vue3CompilerOptions {
+                mode: "module".into(),
+                prefix_identifiers: true,
+                ..Vue3CompilerOptions::default()
+            },
+        );
+
+        let first_condition = generated.code.find("_ctx.one").expect("first condition");
+        let first_branch = generated
+            .code
+            .find("\"one\"")
+            .expect("first branch");
+        let second_condition = generated.code.find("_ctx.two").expect("second condition");
+        let second_branch = generated
+            .code
+            .find("\"two\"")
+            .expect("second branch");
+        let alternate = generated
+            .code
+            .find("\"three\"")
+            .expect("else branch");
+        assert!(first_condition < first_branch);
+        assert!(first_branch < second_condition);
+        assert!(second_condition < second_branch);
+        assert!(second_branch < alternate);
+        assert!(!generated.code.contains("_createCommentVNode(\"v-if\""));
     }
 
     #[test]

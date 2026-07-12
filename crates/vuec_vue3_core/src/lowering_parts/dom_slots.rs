@@ -13,11 +13,6 @@ pub(crate) fn lower_vue3_dom_child_sequence(
             continue;
         };
         if let Vue3AstKind::Element(element) = &child.kind {
-            if directive_by_name(element, "for").is_some() {
-                lower_vue3_ast_node_to_dom_mir(child_id, ast, hir_parent, mir_parent, state);
-                index += 1;
-                continue;
-            }
             if directive_by_name(element, "if").is_some() {
                 let (branch_ids, next_index) = collect_vue3_if_branch_chain(children, index, ast);
                 lower_vue3_if_branch_chain_to_dom_mir(
@@ -28,6 +23,11 @@ pub(crate) fn lower_vue3_dom_child_sequence(
                     state,
                 );
                 index = next_index;
+                continue;
+            }
+            if directive_by_name(element, "for").is_some() {
+                lower_vue3_ast_node_to_dom_mir(child_id, ast, hir_parent, mir_parent, state);
+                index += 1;
                 continue;
             }
             if is_else_branch(element) {

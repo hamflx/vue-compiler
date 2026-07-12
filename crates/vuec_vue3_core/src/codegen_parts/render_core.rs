@@ -142,7 +142,6 @@ pub(crate) fn once_children_mode(mode: NodeRenderMode) -> bool {
 pub(crate) struct RenderScope {
     pub(crate) locals: Vec<String>,
     pub(crate) in_v_once: bool,
-    pub(crate) memo_index_overrides: BTreeMap<vuec_ast::NodeId, usize>,
     pub(crate) static_hoists: StaticHoists,
     pub(crate) disable_stringify_static_chunks: bool,
 }
@@ -161,12 +160,6 @@ impl RenderScope {
     pub(crate) fn with_v_once(&self) -> Self {
         let mut next = self.clone();
         next.in_v_once = true;
-        next
-    }
-
-    pub(crate) fn with_memo_index_override(&self, node_id: vuec_ast::NodeId, index: usize) -> Self {
-        let mut next = self.clone();
-        next.memo_index_overrides.insert(node_id, index);
         next
     }
 
@@ -304,11 +297,6 @@ pub(crate) fn render_node_expr_scoped(
             format!("_createCommentVNode({})", quote_string(&comment.value))
         }
         Vue3AstKind::Element(element) => {
-            if let Some(for_dir) = directive_by_name(element, "for") {
-                return render_for_node(
-                    ast, node_id, element, for_dir, options, mode, scope, memo_index,
-                );
-            }
             if directive_by_name(element, "if").is_some() {
                 return render_maybe_once_if_chain(
                     ast,
@@ -318,6 +306,11 @@ pub(crate) fn render_node_expr_scoped(
                     mode,
                     scope,
                     memo_index,
+                );
+            }
+            if let Some(for_dir) = directive_by_name(element, "for") {
+                return render_for_node(
+                    ast, node_id, element, for_dir, options, mode, scope, None, memo_index,
                 );
             }
             if is_else_branch(element) {
@@ -479,11 +472,7 @@ pub(crate) fn render_maybe_memo_element(
             ast, node_id, element, options, mode, &scope, branch_key, memo_index,
         );
     };
-    let cache_index = scope
-        .memo_index_overrides
-        .get(&node_id)
-        .copied()
-        .unwrap_or_else(|| memo_index.alloc());
+    let cache_index = memo_index.alloc();
     let once_index = (directive_by_name(element, "once").is_some() && !scope.in_v_once)
         .then(|| memo_index.alloc());
     let memo_mode = if element.tag_type == Vue3ElementType::Component {
