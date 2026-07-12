@@ -412,6 +412,68 @@
     }
 
     #[test]
+    fn parsed_vue3_compile_results_preserve_descriptor_errors() {
+        let mut compiler = SfcCompiler::new();
+        let parsed = compiler.parse_vue3(
+            "Duplicate.vue",
+            "<template><div/></template><template><span/></template><script>const one = 1</script><script>const two = 2</script><style>.a{}</style>",
+        );
+        let expected = [
+            "Single file component can contain only one <template> element",
+            "Single file component can contain only one <script> element",
+        ];
+
+        let template = compiler.compile_parsed_vue3_template(
+            &parsed,
+            SfcTemplateCompileOptions::default(),
+        );
+        assert_eq!(
+            template
+                .errors
+                .iter()
+                .take(2)
+                .map(|error| error.message.as_str())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(
+            template.errors[0].loc.source,
+            "<template><span/></template>"
+        );
+
+        let script = compiler
+            .compile_parsed_vue3_script(&parsed, SfcScriptCompileOptions::default());
+        assert_eq!(
+            script
+                .errors
+                .iter()
+                .take(2)
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            expected
+        );
+
+        let style =
+            compiler.compile_parsed_vue3_style(&parsed, SfcStyleCompileOptions::default());
+        assert_eq!(
+            style
+                .errors
+                .iter()
+                .take(2)
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(style.diagnostics[0].code, "VUEC_SFC_PARSE");
+        assert_eq!(style.diagnostics[1].code, "VUEC_SFC_PARSE");
+
+        let unclosed = compiler.parse_vue3("Unclosed.vue", "<script>const value = 1");
+        let script = compiler
+            .compile_parsed_vue3_script(&unclosed, SfcScriptCompileOptions::default());
+        assert_eq!(script.errors[0], "Element is missing end tag.");
+    }
+
+    #[test]
     fn vue3_parse_applies_script_src_and_empty_script_rules() {
         let mut compiler = SfcCompiler::new();
         let empty_script =

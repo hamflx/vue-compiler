@@ -640,6 +640,46 @@ mod tests {
     }
 
     #[test]
+    fn full_sfc_compile_bindings_preserve_descriptor_parse_errors() {
+        let source = "<template><div/></template><template><span/></template><script>const one = 1</script><script>const two = 2</script><style>.a{}</style>";
+
+        let template = serde_json::to_value(compile_sfc_template_result(
+            source,
+            "Duplicate.vue".into(),
+            SfcTemplateCompileOptions::default(),
+        ))
+        .unwrap();
+        assert_eq!(
+            template["errors"][0]["message"],
+            json!("Single file component can contain only one <template> element")
+        );
+        assert_eq!(template["errors"][0]["code"], json!(0));
+
+        let script = serde_json::to_value(compile_sfc_script_result(
+            source,
+            "Duplicate.vue".into(),
+            SfcScriptCompileOptions::default(),
+        ))
+        .unwrap();
+        assert_eq!(
+            script["errors"][1],
+            json!("Single file component can contain only one <script> element")
+        );
+
+        let style = serde_json::to_value(compile_sfc_style_result(
+            source,
+            "Duplicate.vue".into(),
+            SfcStyleCompileOptions::default(),
+        ))
+        .unwrap();
+        assert_eq!(
+            style["errors"][0],
+            json!("Single file component can contain only one <template> element")
+        );
+        assert_eq!(style["diagnostics"][0]["code"], json!("VUEC_SFC_PARSE"));
+    }
+
+    #[test]
     fn vue3_sfc_parse_result_attaches_template_ast_to_descriptor() {
         let mut compiler = SfcCompiler::new();
         let result = compiler.parse_vue3(

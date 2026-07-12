@@ -90,21 +90,27 @@ fn compile_batch_input(
         }
         CompileBatchTarget::Vue3Sfc => {
             let mut compiler = SfcCompiler::new();
-            let descriptor = compiler.parse(input.path.clone(), &input.source);
+            let parsed = compiler.parse_vue3(input.path.clone(), &input.source);
+            let descriptor = &parsed.descriptor;
             let template = descriptor.template.as_ref().map(|_| {
-                compiler.compile_template(&descriptor, SfcTemplateCompileOptions::default())
+                compiler.compile_template(descriptor, SfcTemplateCompileOptions::default())
             });
             let script = if descriptor.script.is_some() || descriptor.script_setup.is_some() {
-                Some(compiler.compile_script(&descriptor, SfcScriptCompileOptions::default()))
+                Some(compiler.compile_script(descriptor, SfcScriptCompileOptions::default()))
             } else {
                 None
             };
             let styles = if descriptor.styles.is_empty() {
                 Vec::new()
             } else {
-                vec![compiler.compile_style(&descriptor, SfcStyleCompileOptions::default())]
+                vec![compiler.compile_style(descriptor, SfcStyleCompileOptions::default())]
             };
-            let diagnostics = sfc_diagnostics(template.as_ref(), script.as_ref(), &styles);
+            let mut diagnostics = diagnostics_from_core(&vue3_sfc_parse_diagnostics(&parsed));
+            diagnostics.extend(sfc_diagnostics(
+                template.as_ref(),
+                script.as_ref(),
+                &styles,
+            ));
             let text = render_sfc_text(template.as_ref(), script.as_ref(), &styles);
             let payload = json!({
                 "kind": "vue3-sfc",

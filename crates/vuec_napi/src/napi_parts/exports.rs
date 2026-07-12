@@ -393,10 +393,22 @@ pub fn parse_vue27_sfc_component(
 pub fn compile_sfc_template(env: Env, source: String, options: Option<Unknown>) -> Result<String> {
     let raw_options = from_js_options(&env, options)?;
     let filename = string_option(&raw_options, "filename", "anonymous.vue");
-    let mut compiler = SfcCompiler::new();
-    let descriptor = compiler.parse(filename, &source);
-    let result = compiler.compile_template(&descriptor, sfc_template_options(Some(&raw_options)));
+    let result = compile_sfc_template_result(
+        &source,
+        filename,
+        sfc_template_options(Some(&raw_options)),
+    );
     to_json_string(result)
+}
+
+fn compile_sfc_template_result(
+    source: &str,
+    filename: String,
+    options: SfcTemplateCompileOptions,
+) -> vuec_sfc::SfcTemplateCompileResult {
+    let mut compiler = SfcCompiler::new();
+    let parsed = compiler.parse_vue3(filename, source);
+    compiler.compile_parsed_vue3_template(&parsed, options)
 }
 
 #[napi(js_name = "compileSfcTemplateSource")]
@@ -422,10 +434,22 @@ pub fn compile_sfc_template_source(
 pub fn compile_sfc_script(env: Env, source: String, options: Option<Unknown>) -> Result<String> {
     let raw_options = from_js_options(&env, options)?;
     let filename = string_option(&raw_options, "filename", "anonymous.vue");
-    let mut compiler = SfcCompiler::new();
-    let descriptor = compiler.parse(filename, &source);
-    let result = compiler.compile_script(&descriptor, sfc_script_options(Some(&raw_options)));
+    let result = compile_sfc_script_result(
+        &source,
+        filename,
+        sfc_script_options(Some(&raw_options)),
+    );
     to_json_string(result)
+}
+
+fn compile_sfc_script_result(
+    source: &str,
+    filename: String,
+    options: SfcScriptCompileOptions,
+) -> vuec_sfc::SfcScriptBlock {
+    let mut compiler = SfcCompiler::new();
+    let parsed = compiler.parse_vue3(filename, source);
+    compiler.compile_parsed_vue3_script(&parsed, options)
 }
 
 #[napi(js_name = "compileVue27SfcTemplate")]
@@ -488,8 +512,20 @@ pub fn compile_vue27_sfc_script(
 pub fn compile_sfc_style(env: Env, source: String, options: Option<Unknown>) -> Result<String> {
     let raw_options = from_js_options(&env, options)?;
     let filename = string_option(&raw_options, "filename", "anonymous.vue");
-    let mut compiler = SfcCompiler::new();
-    let descriptor = compiler.parse(filename, &source);
-    let result = compiler.compile_style(&descriptor, sfc_style_options(Some(&raw_options)));
+    let result = compile_sfc_style_result(
+        &source,
+        filename,
+        sfc_style_options(Some(&raw_options)),
+    );
     to_json_string(result)
+}
+
+fn compile_sfc_style_result(
+    source: &str,
+    filename: String,
+    options: SfcStyleCompileOptions,
+) -> vuec_sfc::SfcStyleCompileResult {
+    let mut compiler = SfcCompiler::new();
+    let parsed = compiler.parse_vue3(filename, source);
+    compiler.compile_parsed_vue3_style(&parsed, options)
 }

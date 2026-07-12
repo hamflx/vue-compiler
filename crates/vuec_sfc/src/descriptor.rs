@@ -197,6 +197,64 @@ pub(crate) fn vue3_sfc_parse_block_error(
     }
 }
 
+/// Converts Vue 3 SFC descriptor parse errors into shared compiler diagnostics.
+pub fn vue3_sfc_parse_diagnostics(result: &Vue3SfcParseResult) -> Vec<Diagnostic> {
+    result
+        .errors
+        .iter()
+        .map(|error| {
+            Diagnostic::error("VUEC_SFC_PARSE", error.message.clone()).with_span(
+                error.loc.as_ref().map(|loc| {
+                    let start = loc.start.min(result.descriptor.source.len());
+                    Span::new(
+                        loc.source_file,
+                        start,
+                        loc.end.min(result.descriptor.source.len()).max(start),
+                    )
+                }),
+            )
+        })
+        .collect()
+}
+
+pub(crate) fn vue3_sfc_parse_template_errors(result: &Vue3SfcParseResult) -> Vec<SfcTemplateError> {
+    result
+        .errors
+        .iter()
+        .map(|error| {
+            let (start, end) = error
+                .loc
+                .as_ref()
+                .map(|loc| (loc.start, loc.end))
+                .unwrap_or((0, 0));
+            let start = start.min(result.descriptor.source.len());
+            let end = end.min(result.descriptor.source.len()).max(start);
+            let start_position =
+                position_at(&result.descriptor.source, start).unwrap_or(SfcPosition {
+                    column: 1,
+                    line: 1,
+                    offset: 0,
+                });
+            let end_position = position_at(&result.descriptor.source, end)
+                .unwrap_or_else(|| start_position.clone());
+            SfcTemplateError {
+                code: 0,
+                message: error.message.clone(),
+                loc: SfcSourceLocation {
+                    start: start_position,
+                    end: end_position,
+                    source: result
+                        .descriptor
+                        .source
+                        .get(start..end)
+                        .unwrap_or_default()
+                        .to_string(),
+                },
+            }
+        })
+        .collect()
+}
+
 pub(crate) fn vue3_sfc_functional_template_error(block: &SfcBlock) -> Option<Vue3SfcParseError> {
     if !block.attrs.raw.contains_key("functional") {
         return None;

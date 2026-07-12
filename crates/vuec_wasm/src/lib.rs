@@ -111,8 +111,8 @@ pub fn compile_sfc_template(source: &str, options_json: Option<String>) -> Strin
         let filename =
             string_option(&options, "filename").unwrap_or_else(|| "anonymous.vue".into());
         let mut compiler = SfcCompiler::new();
-        let descriptor = compiler.parse(filename, source);
-        Ok(compiler.compile_template(&descriptor, sfc_template_options(&options)))
+        let parsed = compiler.parse_vue3(filename, source);
+        Ok(compiler.compile_parsed_vue3_template(&parsed, sfc_template_options(&options)))
     })
 }
 
@@ -136,8 +136,8 @@ pub fn compile_sfc_script(source: &str, options_json: Option<String>) -> String 
         let filename =
             string_option(&options, "filename").unwrap_or_else(|| "anonymous.vue".into());
         let mut compiler = SfcCompiler::new();
-        let descriptor = compiler.parse(filename, source);
-        Ok(compiler.compile_script(&descriptor, sfc_script_options(&options)))
+        let parsed = compiler.parse_vue3(filename, source);
+        Ok(compiler.compile_parsed_vue3_script(&parsed, sfc_script_options(&options)))
     })
 }
 
@@ -149,8 +149,8 @@ pub fn compile_sfc_style(source: &str, options_json: Option<String>) -> String {
         let filename =
             string_option(&options, "filename").unwrap_or_else(|| "anonymous.vue".into());
         let mut compiler = SfcCompiler::new();
-        let descriptor = compiler.parse(filename, source);
-        Ok(compiler.compile_style(&descriptor, sfc_style_options(&options)))
+        let parsed = compiler.parse_vue3(filename, source);
+        Ok(compiler.compile_parsed_vue3_style(&parsed, sfc_style_options(&options)))
     })
 }
 
@@ -179,9 +179,11 @@ pub fn compile_vue3_dom_json(source: &str, options: Value) -> Value {
 pub fn compile_sfc_template_json(source: &str, options: Value) -> Value {
     let filename = string_option(&options, "filename").unwrap_or_else(|| "anonymous.vue".into());
     let mut compiler = SfcCompiler::new();
-    let descriptor = compiler.parse(filename, source);
-    serde_json::to_value(compiler.compile_template(&descriptor, sfc_template_options(&options)))
-        .unwrap_or_else(serialization_error_value)
+    let parsed = compiler.parse_vue3(filename, source);
+    serde_json::to_value(
+        compiler.compile_parsed_vue3_template(&parsed, sfc_template_options(&options)),
+    )
+    .unwrap_or_else(serialization_error_value)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -630,6 +632,39 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .contains("export function render"));
+    }
+
+    #[test]
+    fn full_sfc_exports_preserve_descriptor_parse_errors() {
+        let source = "<template><div/></template><template><span/></template><script>const one = 1</script><script>const two = 2</script><style>.a{}</style>";
+        let options = Some(json!({ "filename": "Duplicate.vue" }).to_string());
+
+        let template: Value =
+            serde_json::from_str(&compile_sfc_template(source, options.clone())).unwrap();
+        assert_eq!(
+            template["errors"][0]["message"],
+            "Single file component can contain only one <template> element"
+        );
+
+        let script: Value =
+            serde_json::from_str(&compile_sfc_script(source, options.clone())).unwrap();
+        assert_eq!(
+            script["errors"][1],
+            "Single file component can contain only one <script> element"
+        );
+
+        let style: Value = serde_json::from_str(&compile_sfc_style(source, options)).unwrap();
+        assert_eq!(style["diagnostics"][0]["code"], "VUEC_SFC_PARSE");
+
+        let rust_json = compile_sfc_template_json(source, json!({ "filename": "Duplicate.vue" }));
+        assert_eq!(
+            rust_json["errors"][0]["message"],
+            "Single file component can contain only one <template> element"
+        );
+
+        let unclosed: Value =
+            serde_json::from_str(&compile_sfc_script("<script>const value = 1", None)).unwrap();
+        assert_eq!(unclosed["errors"][0], "Element is missing end tag.");
     }
 
     #[test]

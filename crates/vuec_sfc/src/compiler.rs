@@ -12,6 +12,10 @@ impl SfcCompiler {
     }
 
     /// Parses an SFC descriptor using Vue 3-style descriptor rules.
+    ///
+    /// This compatibility helper discards descriptor diagnostics. New compile
+    /// facades should retain [`Vue3SfcParseResult`] from [`Self::parse_vue3`]
+    /// and use the corresponding `compile_parsed_vue3_*` method.
     pub fn parse(&mut self, filename: impl Into<String>, source: &str) -> SfcDescriptor {
         self.parse_vue3(filename, source).descriptor
     }
@@ -241,6 +245,19 @@ impl SfcCompiler {
         }
     }
 
+    /// Compiles a parsed Vue 3 SFC template and preserves descriptor parse errors.
+    pub fn compile_parsed_vue3_template(
+        &self,
+        parsed: &Vue3SfcParseResult,
+        options: SfcTemplateCompileOptions,
+    ) -> SfcTemplateCompileResult {
+        let mut result = self.compile_template(&parsed.descriptor, options);
+        result
+            .errors
+            .splice(0..0, vue3_sfc_parse_template_errors(parsed));
+        result
+    }
+
     /// Compiles standalone template source through the SFC template path.
     pub fn compile_template_source(
         &self,
@@ -386,6 +403,20 @@ impl SfcCompiler {
             script_setup_ast,
             deps: generated_content.deps,
         }
+    }
+
+    /// Compiles parsed Vue 3 SFC scripts and preserves descriptor parse errors.
+    pub fn compile_parsed_vue3_script(
+        &mut self,
+        parsed: &Vue3SfcParseResult,
+        options: SfcScriptCompileOptions,
+    ) -> SfcScriptBlock {
+        let mut result = self.compile_script(&parsed.descriptor, options);
+        result.errors.splice(
+            0..0,
+            parsed.errors.iter().map(|error| error.message.clone()),
+        );
+        result
     }
 
     /// Resolves the first top-level `defineProps<T>()` type argument in Vue 3 script setup code.
@@ -566,6 +597,23 @@ impl SfcCompiler {
             modules,
             raw_result,
         }
+    }
+
+    /// Compiles parsed Vue 3 SFC styles and preserves descriptor parse errors.
+    pub fn compile_parsed_vue3_style(
+        &self,
+        parsed: &Vue3SfcParseResult,
+        options: SfcStyleCompileOptions,
+    ) -> SfcStyleCompileResult {
+        let mut result = self.compile_style(&parsed.descriptor, options);
+        result.errors.splice(
+            0..0,
+            parsed.errors.iter().map(|error| error.message.clone()),
+        );
+        result
+            .diagnostics
+            .splice(0..0, vue3_sfc_parse_diagnostics(parsed));
+        result
     }
 
     /// Rewrites Vue 2.7 default exports to an assigned variable.

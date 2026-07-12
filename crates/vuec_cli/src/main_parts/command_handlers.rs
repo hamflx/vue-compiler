@@ -53,10 +53,11 @@ fn compile_template_command(args: CompileTemplateArgs) -> Result<RunOutput> {
 fn compile_sfc_command(args: CompileSfcArgs) -> Result<RunOutput> {
     let input = read_input(&args.input)?;
     let mut compiler = SfcCompiler::new();
-    let descriptor = compiler.parse(input.path.clone(), &input.source);
+    let parsed = compiler.parse_vue3(input.path.clone(), &input.source);
+    let descriptor = &parsed.descriptor;
     let template = descriptor.template.as_ref().map(|_| {
         compiler.compile_template(
-            &descriptor,
+            descriptor,
             SfcTemplateCompileOptions {
                 ssr: args.ssr,
                 id: args.id.clone(),
@@ -68,7 +69,7 @@ fn compile_sfc_command(args: CompileSfcArgs) -> Result<RunOutput> {
     let script = if descriptor.script.is_some() || descriptor.script_setup.is_some() {
         Some(
             compiler.compile_script(
-                &descriptor,
+                descriptor,
                 SfcScriptCompileOptions {
                     id: args.id.clone(),
                     inline_template: args.inline_template,
@@ -91,7 +92,7 @@ fn compile_sfc_command(args: CompileSfcArgs) -> Result<RunOutput> {
         Vec::new()
     } else {
         vec![compiler.compile_style(
-            &descriptor,
+            descriptor,
             SfcStyleCompileOptions {
                 id: args.id.clone(),
                 source_map: args.source_map,
@@ -103,7 +104,12 @@ fn compile_sfc_command(args: CompileSfcArgs) -> Result<RunOutput> {
         let map = template.as_ref().and_then(|template| template.map.as_ref());
         write_optional_map(Some(map_out), map)?;
     }
-    let diagnostics = sfc_diagnostics(template.as_ref(), script.as_ref(), &styles);
+    let mut diagnostics = diagnostics_from_core(&vue3_sfc_parse_diagnostics(&parsed));
+    diagnostics.extend(sfc_diagnostics(
+        template.as_ref(),
+        script.as_ref(),
+        &styles,
+    ));
     let text = render_sfc_text(template.as_ref(), script.as_ref(), &styles);
     let payload = json!({
         "kind": if args.ssr { "vue3-sfc-ssr" } else { "vue3-sfc" },
@@ -121,16 +127,17 @@ fn compile_ssr_command(args: CompileSsrArgs) -> Result<RunOutput> {
     let input = read_input(&args.input)?;
     if args.sfc {
         let mut compiler = SfcCompiler::new();
-        let descriptor = compiler.parse(input.path.clone(), &input.source);
+        let parsed = compiler.parse_vue3(input.path.clone(), &input.source);
         let result = compiler.compile_template(
-            &descriptor,
+            &parsed.descriptor,
             SfcTemplateCompileOptions {
                 ssr: true,
                 ..SfcTemplateCompileOptions::default()
             },
         );
         write_optional_map(args.map_out.as_deref(), result.map.as_ref())?;
-        let diagnostics = sfc_template_diagnostics(&result);
+        let mut diagnostics = diagnostics_from_core(&vue3_sfc_parse_diagnostics(&parsed));
+        diagnostics.extend(sfc_template_diagnostics(&result));
         let payload = json!({
             "kind": "vue3-sfc-ssr-template",
             "input": input.path,
@@ -196,26 +203,22 @@ fn compile_batch_command(args: CompileBatchArgs) -> Result<RunOutput> {
 fn parse_sfc_command(args: ParseSfcArgs) -> Result<RunOutput> {
     let input = read_input(&args.input)?;
     let mut compiler = SfcCompiler::new();
-    let descriptor = compiler.parse(input.path.clone(), &input.source);
+    let parsed = compiler.parse_vue3(input.path.clone(), &input.source);
+    let diagnostics = diagnostics_from_core(&vue3_sfc_parse_diagnostics(&parsed));
     let payload = json!({
         "kind": "sfc-descriptor",
         "input": input.path,
-        "descriptor": descriptor,
-        "diagnostics": [],
+        "descriptor": parsed.descriptor,
+        "diagnostics": diagnostics,
     });
-    let stdout = if args.json {
-        format!("{}\n", serde_json::to_string_pretty(&payload)?)
-    } else {
-        format!(
-            "{}\n",
-            serde_json::to_string_pretty(&payload["descriptor"])?
-        )
-    };
-    Ok(RunOutput {
-        stdout,
-        stderr: String::new(),
-        code: 0,
-    })
+    let text = serde_json::to_string_pretty(&payload["descriptor"])?;
+    emit_result(
+        args.json,
+        true,
+        payload,
+        text,
+        diagnostics,
+    )
 }
 
 fn conformance_command(args: ConformanceArgs) -> Result<RunOutput> {

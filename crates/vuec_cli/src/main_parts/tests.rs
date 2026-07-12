@@ -230,6 +230,60 @@ mod tests {
     }
 
     #[test]
+    fn parse_sfc_reports_descriptor_diagnostics_and_exits_non_zero() {
+        let source = "<template><div/></template><template><span/></template><script>const one = 1</script><script>const two = 2</script>";
+        let path = write_temp("vuec-cli-parse-errors.vue", source);
+        let output =
+            run_with_args(["vuec", "parse-sfc", "--json", path.to_str().unwrap()]).expect("run");
+        let value: Value = serde_json::from_str(&output.stdout).expect("json");
+
+        assert_eq!(output.code, 1);
+        assert_eq!(value["diagnostics"][0]["code"], json!("VUEC_SFC_PARSE"));
+        assert_eq!(
+            value["diagnostics"][0]["message"],
+            json!("Single file component can contain only one <template> element")
+        );
+        assert_eq!(
+            value["diagnostics"][1]["message"],
+            json!("Single file component can contain only one <script> element")
+        );
+        assert!(output.stderr.contains("VUEC_SFC_PARSE"));
+    }
+
+    #[test]
+    fn compile_sfc_reports_descriptor_diagnostics_once() {
+        let source = "<template><div/></template><template><span/></template><script>const one = 1</script><script>const two = 2</script>";
+        let path = write_temp("vuec-cli-compile-errors.vue", source);
+        let output =
+            run_with_args(["vuec", "compile-sfc", "--json", path.to_str().unwrap()]).expect("run");
+        let value: Value = serde_json::from_str(&output.stdout).expect("json");
+
+        assert_eq!(output.code, 1);
+        assert_eq!(value["diagnostics"].as_array().unwrap().len(), 2);
+        assert_eq!(value["diagnostics"][0]["code"], json!("VUEC_SFC_PARSE"));
+        assert_eq!(value["diagnostics"][1]["code"], json!("VUEC_SFC_PARSE"));
+    }
+
+    #[test]
+    fn compile_ssr_sfc_reports_descriptor_diagnostics_once() {
+        let source = "<template><div/></template><template><span/></template>";
+        let path = write_temp("vuec-cli-ssr-sfc-errors.vue", source);
+        let output = run_with_args([
+            "vuec",
+            "compile-ssr",
+            "--sfc",
+            "--json",
+            path.to_str().unwrap(),
+        ])
+        .expect("run");
+        let value: Value = serde_json::from_str(&output.stdout).expect("json");
+
+        assert_eq!(output.code, 1);
+        assert_eq!(value["diagnostics"].as_array().unwrap().len(), 1);
+        assert_eq!(value["diagnostics"][0]["code"], json!("VUEC_SFC_PARSE"));
+    }
+
+    #[test]
     fn benchmarks_vue3_template_json() {
         let path = write_temp("vuec-cli-bench.html", "<div/>");
         let output = run_with_args([
@@ -292,6 +346,29 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("second"));
+    }
+
+    #[test]
+    fn compile_batch_sfc_reports_descriptor_diagnostics() {
+        let source = "<template><div/></template><template><span/></template>";
+        let path = write_temp("vuec-cli-batch-sfc-errors.vue", source);
+        let output = run_with_args([
+            "vuec",
+            "compile-batch",
+            "--target",
+            "vue3-sfc",
+            "--json",
+            path.to_str().unwrap(),
+        ])
+        .expect("run");
+        let value: Value = serde_json::from_str(&output.stdout).expect("json");
+
+        assert_eq!(output.code, 1);
+        assert_eq!(value["results"][0]["status"], json!("ok"));
+        assert_eq!(
+            value["results"][0]["result"]["diagnostics"][0]["code"],
+            json!("VUEC_SFC_PARSE")
+        );
     }
 
     #[test]

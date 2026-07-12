@@ -61,7 +61,9 @@ mod compiler;
 
 mod descriptor;
 pub(crate) use descriptor::*;
-pub use descriptor::{vue3_sfc_descriptor_value, vue3_sfc_parse_result_value};
+pub use descriptor::{
+    vue3_sfc_descriptor_value, vue3_sfc_parse_diagnostics, vue3_sfc_parse_result_value,
+};
 
 mod rewrite;
 pub(crate) use rewrite::*;

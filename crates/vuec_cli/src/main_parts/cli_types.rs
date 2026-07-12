@@ -14,9 +14,9 @@ use serde_json::{json, Value};
 use vuec_codegen::SourceMapArtifact;
 use vuec_diagnostics::Diagnostic;
 use vuec_sfc::{
-    SfcCompiler, SfcPropsDestructureMode, SfcScriptBlock, SfcScriptCompileOptions,
-    SfcStyleCompileOptions, SfcStyleCompileResult, SfcTemplateCompileOptions,
-    SfcTemplateCompileResult,
+    vue3_sfc_parse_diagnostics, SfcCompiler, SfcPropsDestructureMode, SfcScriptBlock,
+    SfcScriptCompileOptions, SfcStyleCompileOptions, SfcStyleCompileResult,
+    SfcTemplateCompileOptions, SfcTemplateCompileResult,
 };
 use vuec_source::FileId;
 use vuec_vue2::{Vue2CompileOptions, Vue2CompiledResult};
