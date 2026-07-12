@@ -2,33 +2,34 @@ fn vue3_sfc_attach_template_ast(
     descriptor_value: &mut Value,
     descriptor: &vuec_sfc::SfcDescriptor,
     parse_options: &Value,
-) {
+) -> Result<()> {
     let Some(template) = descriptor.template.as_ref() else {
-        return;
+        return Ok(());
     };
     if template.attrs.has_src_attr() {
-        return;
+        return Ok(());
     }
-    let ast = vue3_sfc_template_ast_value(descriptor, template, parse_options);
+    let ast = vue3_sfc_template_ast_value(descriptor, template, parse_options)?;
     if let Some(template_value) = descriptor_value
         .get_mut("template")
         .and_then(Value::as_object_mut)
     {
         template_value.insert("ast".into(), ast);
     }
+    Ok(())
 }
 
 fn vue3_sfc_template_ast_value(
     descriptor: &vuec_sfc::SfcDescriptor,
     template: &vuec_sfc::SfcBlock,
     parse_options: &Value,
-) -> Value {
+) -> Result<Value> {
     if sfc_template_is_plain_text(template) {
-        return vue3_sfc_plain_template_ast_value(descriptor, template);
+        return Ok(vue3_sfc_plain_template_ast_value(descriptor, template));
     }
     let null = Value::Null;
     let template_options = parse_options.get("templateParseOptions").unwrap_or(&null);
-    let mut core = vue3_options(Some(template_options));
+    let mut core = vue3_options(Some(template_options))?;
     core.prefix_identifiers = true;
     apply_napi_dom_parser_defaults(&mut core, Some(template_options));
     let default_options = DomCompilerOptions::default();
@@ -56,7 +57,7 @@ fn vue3_sfc_template_ast_value(
         object.insert("loc".into(), vue3_loc_stub_value());
         object.remove("__vuecDiagnostics");
     }
-    value
+    Ok(value)
 }
 
 fn sfc_template_is_plain_text(template: &vuec_sfc::SfcBlock) -> bool {

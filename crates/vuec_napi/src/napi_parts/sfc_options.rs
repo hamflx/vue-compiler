@@ -320,10 +320,10 @@ fn deprecated_import_assert_syntax_plugin(value: &Value) -> bool {
     })
 }
 
-fn vue3_options(value: Option<&Value>) -> Vue3CompilerOptions {
+fn vue3_options(value: Option<&Value>) -> Result<Vue3CompilerOptions> {
     let mut options = Vue3CompilerOptions::default();
     let Some(value) = value else {
-        return options;
+        return Ok(options);
     };
     options.prefix_identifiers = bool_option(
         value,
@@ -382,7 +382,7 @@ fn vue3_options(value: Option<&Value>) -> Vue3CompilerOptions {
         .or_else(|| value.get("scope_id"))
         .and_then(Value::as_str)
         .map(ToOwned::to_owned);
-    if let Some(mode) = value.get("mode").and_then(Value::as_str) {
+    if let Some(mode) = vue3_mode_option(value)? {
         options.mode = mode.into();
     } else if options.prefix_identifiers {
         options.mode = "function".into();
@@ -458,7 +458,22 @@ fn vue3_options(value: Option<&Value>) -> Vue3CompilerOptions {
             }
         }
     }
-    options
+    Ok(options)
+}
+
+fn vue3_mode_option(value: &Value) -> Result<Option<&str>> {
+    let Some(mode) = value.get("mode") else {
+        return Ok(None);
+    };
+    match mode.as_str() {
+        Some(mode @ ("function" | "module")) => Ok(Some(mode)),
+        _ => Err(napi::Error::new(
+            Status::InvalidArg,
+            format!(
+                "invalid Vue 3 compiler mode {mode}; expected \"function\" or \"module\""
+            ),
+        )),
+    }
 }
 
 fn vue3_namespace_option_value(value: &Value) -> Option<vuec_ast::HtmlNamespace> {

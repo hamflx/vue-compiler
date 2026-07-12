@@ -140,7 +140,7 @@ pub fn rewrite_default_vue3(
 pub fn compile_vue3_dom(env: Env, source: String, options: Option<Unknown>) -> Result<String> {
     let raw_options = from_js_options(&env, options)?;
     let template = template_source(&source, &raw_options);
-    let mut core = vue3_options(Some(&raw_options));
+    let mut core = vue3_options(Some(&raw_options))?;
     apply_napi_dom_parser_defaults(&mut core, Some(&raw_options));
     let default_options = DomCompilerOptions::default();
     let dom_options = DomCompilerOptions {
@@ -163,7 +163,7 @@ pub fn compile_vue3_dom(env: Env, source: String, options: Option<Unknown>) -> R
 pub fn parse_vue3_dom(env: Env, source: String, options: Option<Unknown>) -> Result<String> {
     let raw_options = from_js_options(&env, options)?;
     let template = template_source(&source, &raw_options);
-    let mut core = vue3_options(Some(&raw_options));
+    let mut core = vue3_options(Some(&raw_options))?;
     apply_napi_dom_parser_defaults(&mut core, Some(&raw_options));
     let default_options = DomCompilerOptions::default();
     let dom_options = DomCompilerOptions {
@@ -198,7 +198,7 @@ pub fn base_compile_vue3(env: Env, source: String, options: Option<Unknown>) -> 
 pub fn base_parse_vue3(env: Env, source: String, options: Option<Unknown>) -> Result<String> {
     let raw_options = from_js_options(&env, options)?;
     let template = template_source(&source, &raw_options);
-    let options = vue3_options(Some(&raw_options));
+    let options = vue3_options(Some(&raw_options))?;
     let ast = Vue3Dialect::base_parse(template.clone(), &options);
     to_json_string(vue3_public_parse_ast(
         &ast,
@@ -212,7 +212,8 @@ pub fn base_parse_vue3(env: Env, source: String, options: Option<Unknown>) -> Re
 /// Generates Vue 3 render code from a hydrated public AST value.
 pub fn generate_vue3_core(env: Env, ast: Unknown, options: Option<Unknown>) -> Result<String> {
     let ast = from_js_options(&env, Some(ast))?;
-    let options = vue3_options(Some(&from_js_options(&env, options)?));
+    let raw_options = from_js_options(&env, options)?;
+    let options = vue3_options(Some(&raw_options))?;
     to_json_string(vuec_vue3_core::generate_public_ast(&ast, &options))
 }
 
@@ -315,7 +316,7 @@ pub fn call_vue3_dom_projection(env: Env, command: String, payload: Unknown) -> 
 pub fn compile_vue3_ssr(env: Env, source: String, options: Option<Unknown>) -> Result<String> {
     let raw_options = from_js_options(&env, options)?;
     let template = template_source(&source, &raw_options);
-    let mut core = vue3_options(Some(&raw_options));
+    let mut core = vue3_options(Some(&raw_options))?;
     apply_napi_dom_parser_defaults(&mut core, Some(&raw_options));
     let default_options = SsrCompilerOptions::default();
     let ssr_options = SsrCompilerOptions {
@@ -350,7 +351,7 @@ pub fn parse_sfc(env: Env, source: String, options: Option<Unknown>) -> Result<S
     let result = compiler.parse_vue3_with_options(filename, &source, parse_options.clone());
     let projection_options = vue3_sfc_parse_projection_options(&raw_options, &parse_options);
     let mut value = vuec_sfc::vue3_sfc_descriptor_value(&result.descriptor, &projection_options);
-    vue3_sfc_attach_template_ast(&mut value, &result.descriptor, &raw_options);
+    vue3_sfc_attach_template_ast(&mut value, &result.descriptor, &raw_options)?;
     to_json_string(value)
 }
 
@@ -365,7 +366,7 @@ pub fn parse_sfc_result(env: Env, source: String, options: Option<Unknown>) -> R
     let projection_options = vue3_sfc_parse_projection_options(&raw_options, &parse_options);
     let mut value = vuec_sfc::vue3_sfc_parse_result_value(&result, &projection_options);
     if let Some(descriptor_value) = value.get_mut("descriptor") {
-        vue3_sfc_attach_template_ast(descriptor_value, &result.descriptor, &raw_options);
+        vue3_sfc_attach_template_ast(descriptor_value, &result.descriptor, &raw_options)?;
     }
     to_json_string(value)
 }

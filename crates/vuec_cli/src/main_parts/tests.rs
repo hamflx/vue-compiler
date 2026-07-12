@@ -45,6 +45,41 @@ mod tests {
     }
 
     #[test]
+    fn validates_vue3_template_mode() {
+        let path = write_temp("vuec-cli-vue3-mode.html", "<div>{{ msg }}</div>");
+
+        for mode in ["function", "module"] {
+            let output = run_with_args([
+                "vuec",
+                "compile-template",
+                "--target",
+                "vue3",
+                "--mode",
+                mode,
+                path.to_str().unwrap(),
+            ])
+            .expect("run");
+            assert_eq!(output.code, 0, "mode {mode}");
+            assert!(output.stdout.contains("function render"), "mode {mode}");
+        }
+
+        let output = run_with_args([
+            "vuec",
+            "compile-template",
+            "--target",
+            "vue3",
+            "--mode",
+            "invalid",
+            path.to_str().unwrap(),
+        ])
+        .expect("run");
+        assert_eq!(output.code, 2);
+        assert!(output.stderr.contains("invalid value 'invalid'"));
+        assert!(output.stderr.contains("function"));
+        assert!(output.stderr.contains("module"));
+    }
+
+    #[test]
     fn compiles_vue3_sfc_json() {
         let path = write_temp(
             "vuec-cli-sfc.vue",

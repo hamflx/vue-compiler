@@ -496,12 +496,29 @@ mod tests {
             "sourceMap": true,
             "ssrCssVars": "{ \"--x\": (foo) }",
             "scopeId": "data-v-test"
-        })));
+        })))
+        .expect("valid Vue 3 options");
         assert_eq!(options.mode, "module");
         assert!(options.prefix_identifiers);
         assert!(options.source_map);
         assert_eq!(options.ssr_css_vars.as_deref(), Some("{ \"--x\": (foo) }"));
         assert_eq!(options.scope_id.as_deref(), Some("data-v-test"));
+    }
+
+    #[test]
+    fn vue3_options_validate_compiler_mode() {
+        for mode in ["function", "module"] {
+            let options = vue3_options(Some(&json!({ "mode": mode })))
+                .expect("supported Vue 3 compiler mode");
+            assert_eq!(options.mode, mode);
+        }
+
+        for mode in [json!("invalid"), json!(42)] {
+            let error = vue3_options(Some(&json!({ "mode": mode })))
+                .expect_err("unsupported Vue 3 compiler mode");
+            assert_eq!(error.status, Status::InvalidArg);
+            assert!(error.reason.contains("expected \"function\" or \"module\""));
+        }
     }
 
     #[test]
@@ -512,7 +529,8 @@ mod tests {
             "__vuecCustomElements": ["x-thing"],
             "__vuecBuiltInComponents": ["Transition"],
             "parseMode": "sfc"
-        })));
+        })))
+        .expect("valid Vue 3 options");
         assert_eq!(options.void_tags, vec!["img"]);
         assert_eq!(options.native_tags, Some(vec!["div".into()]));
         assert_eq!(options.custom_elements, vec!["x-thing"]);
@@ -691,7 +709,8 @@ mod tests {
             &Vue3SfcParseProjectionOptions::default(),
         );
         if let Some(descriptor_value) = value.get_mut("descriptor") {
-            vue3_sfc_attach_template_ast(descriptor_value, &result.descriptor, &Value::Null);
+            vue3_sfc_attach_template_ast(descriptor_value, &result.descriptor, &Value::Null)
+                .expect("valid template options");
         }
 
         assert_eq!(
@@ -709,7 +728,8 @@ mod tests {
             &Vue3SfcParseProjectionOptions::default(),
         );
         if let Some(descriptor_value) = src_value.get_mut("descriptor") {
-            vue3_sfc_attach_template_ast(descriptor_value, &src_result.descriptor, &Value::Null);
+            vue3_sfc_attach_template_ast(descriptor_value, &src_result.descriptor, &Value::Null)
+                .expect("valid template options");
         }
         assert!(src_value["descriptor"]["template"].get("ast").is_none());
     }

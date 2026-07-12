@@ -42,6 +42,15 @@ const rawDomWithSharedOptions = JSON.parse(rawBinding.compileVue3Dom('<div/>', {
 }));
 assert.match(rawDomWithSharedOptions.code, /export function render/);
 
+assert.throws(
+  () => rawBinding.compileVue3Dom('<div/>', { mode: 'invalid' }),
+  (error) => {
+    assert.strictEqual(error.code, 'InvalidArg');
+    assert.match(error.message, /expected "function" or "module"/);
+    return true;
+  },
+);
+
 const cyclicOptions = {};
 cyclicOptions.self = cyclicOptions;
 assert.throws(

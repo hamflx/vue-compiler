@@ -56,7 +56,7 @@ pub fn compile_vue3_dom(source: &str, options_json: Option<String>) -> String {
     wasm_json_boundary(|| {
         let options = parse_options(options_json)?;
         let template = template_source(source, &options);
-        let mut core = vue3_options(&options);
+        let mut core = vue3_options(&options)?;
         apply_dom_parser_defaults(&mut core);
         Ok(compile_dom(
             template,
@@ -74,7 +74,7 @@ pub fn compile_vue3_ssr(source: &str, options_json: Option<String>) -> String {
     wasm_json_boundary(|| {
         let options = parse_options(options_json)?;
         let template = template_source(source, &options);
-        let mut core = vue3_options(&options);
+        let mut core = vue3_options(&options)?;
         apply_dom_parser_defaults(&mut core);
         Ok(compile_ssr(
             template,
@@ -163,7 +163,10 @@ pub fn compile_vue2_json(template: &str, options: Value) -> Value {
 /// Compiles a Vue 3 DOM template and returns a JSON value for Rust-side callers.
 pub fn compile_vue3_dom_json(source: &str, options: Value) -> Value {
     let template = template_source(source, &options);
-    let mut core = vue3_options(&options);
+    let mut core = match vue3_options(&options) {
+        Ok(core) => core,
+        Err(error) => return boundary_error_value(error.code, error.message),
+    };
     apply_dom_parser_defaults(&mut core);
     serde_json::to_value(compile_dom(
         template,
@@ -317,7 +320,7 @@ fn vue2_options(value: &Value) -> Vue2CompileOptions {
     options
 }
 
-fn vue3_options(value: &Value) -> Vue3CompilerOptions {
+fn vue3_options(value: &Value) -> Result<Vue3CompilerOptions, WasmBoundaryError> {
     let mut options = Vue3CompilerOptions::default();
     options.prefix_identifiers = bool_option(
         value,
@@ -355,8 +358,8 @@ fn vue3_options(value: &Value) -> Vue3CompilerOptions {
     );
     options.comments = bool_option(value, "comments", options.comments);
     options.scope_id = string_option(value, "scopeId").or_else(|| string_option(value, "scope_id"));
-    if let Some(mode) = string_option(value, "mode") {
-        options.mode = mode;
+    if let Some(mode) = vue3_mode_option(value)? {
+        options.mode = mode.into();
     } else if options.prefix_identifiers {
         options.mode = "function".into();
     }
@@ -370,7 +373,20 @@ fn vue3_options(value: &Value) -> Vue3CompilerOptions {
             }
         }
     }
-    options
+    Ok(options)
+}
+
+fn vue3_mode_option(value: &Value) -> Result<Option<&str>, WasmBoundaryError> {
+    let Some(mode) = value.get("mode") else {
+        return Ok(None);
+    };
+    match mode.as_str() {
+        Some(mode @ ("function" | "module")) => Ok(Some(mode)),
+        _ => Err(WasmBoundaryError::new(
+            "VUEC_WASM_INVALID_COMPILER_MODE",
+            format!("invalid Vue 3 compiler mode {mode}; expected \"function\" or \"module\""),
+        )),
+    }
 }
 
 fn sfc_template_options(value: &Value) -> SfcTemplateCompileOptions {
@@ -620,6 +636,53 @@ mod tests {
             .unwrap_or_default()
             .contains("_toDisplayString(_ctx.msg)"));
         assert_eq!(value["map"]["version"], 3);
+    }
+
+    #[test]
+    fn accepts_supported_vue3_compiler_modes() {
+        for mode in ["function", "module"] {
+            let options = json!({ "mode": mode });
+            assert_eq!(
+                vue3_options(&options)
+                    .expect("supported compiler mode")
+                    .mode,
+                mode
+            );
+
+            let value: Value = serde_json::from_str(&compile_vue3_dom(
+                "<div>{{ msg }}</div>",
+                Some(options.to_string()),
+            ))
+            .expect("compiler JSON");
+            assert!(value["code"].is_string());
+            assert!(value.get("errors").is_none());
+        }
+    }
+
+    #[test]
+    fn wasm_exports_report_invalid_vue3_compiler_mode() {
+        let options = Some(json!({ "mode": "invalid" }).to_string());
+        for result in [
+            compile_vue3_dom("<div/>", options.clone()),
+            compile_vue3_ssr("<div/>", options.clone()),
+        ] {
+            let value: Value = serde_json::from_str(&result).expect("error JSON");
+            assert_eq!(
+                value["errors"][0]["code"],
+                "VUEC_WASM_INVALID_COMPILER_MODE"
+            );
+            assert_eq!(value["diagnostics"][0]["severity"], "error");
+            assert!(value["errors"][0]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("expected \"function\" or \"module\""));
+        }
+
+        let value = compile_vue3_dom_json("<div/>", json!({ "mode": "invalid" }));
+        assert_eq!(
+            value["errors"][0]["code"],
+            "VUEC_WASM_INVALID_COMPILER_MODE"
+        );
     }
 
     #[test]
