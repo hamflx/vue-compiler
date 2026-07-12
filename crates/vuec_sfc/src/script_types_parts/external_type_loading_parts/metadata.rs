@@ -122,13 +122,51 @@ impl Vue3ExternalTypeLoadSession {
         true
     }
 
-    fn metadata_is_blocked(&self) -> bool {
+    pub(crate) fn metadata_is_blocked(&self) -> bool {
         let mut state = self.lock();
         if state.metadata_blocked {
             state.failure_epoch += 1;
             return true;
         }
         false
+    }
+
+    fn replace_metadata_path_pattern(
+        &self,
+        source: &str,
+        pattern: &str,
+        replacement: &str,
+    ) -> Option<String> {
+        let max_bytes = {
+            let mut state = self.lock();
+            if state.metadata_blocked {
+                state.failure_epoch += 1;
+                return None;
+            }
+            state.limits.max_generated_path_bytes
+        };
+        match vue3_bounded_replace(source, pattern, replacement, max_bytes) {
+            Some(value) => Some(value),
+            None => {
+                self.block_metadata();
+                None
+            }
+        }
+    }
+
+    fn metadata_path_is_within_limit(&self, path: &str) -> bool {
+        let within_limit = {
+            let mut state = self.lock();
+            if state.metadata_blocked {
+                state.failure_epoch += 1;
+                return false;
+            }
+            path.len() <= state.limits.max_generated_path_bytes
+        };
+        if !within_limit {
+            self.block_metadata();
+        }
+        within_limit
     }
 
     fn block_metadata(&self) {

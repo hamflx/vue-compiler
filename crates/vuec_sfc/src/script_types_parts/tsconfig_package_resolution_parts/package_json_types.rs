@@ -229,7 +229,9 @@ pub(crate) fn resolve_vue3_package_json_type_entry(
         };
     };
     if let Some(exports) = &manifest.exports {
-        if let Some(target) = vue3_package_exports_type_target(exports, subpath) {
+        if let Some(target) =
+            vue3_package_exports_type_target(exports, subpath, type_resolver)
+        {
             let resolved = vue3_package_export_type_path(package_dir, &target, type_resolver);
             if type_resolver.external_type_session.metadata_is_blocked() {
                 return Vue3PackageJsonTypeResolution::Blocked;
@@ -294,6 +296,7 @@ pub(crate) fn resolve_vue3_package_json_type_entry(
 pub(crate) fn vue3_package_exports_type_target(
     exports: &serde_json::Value,
     subpath: Option<&str>,
+    type_resolver: &Vue3TypeResolverContext,
 ) -> Option<String> {
     let key = subpath
         .map(|subpath| format!("./{}", subpath.trim_start_matches("./")))
@@ -307,9 +310,14 @@ pub(crate) fn vue3_package_exports_type_target(
         exports
             .get(&key)
             .and_then(vue3_package_export_target_value)
-            .or_else(|| vue3_package_exports_pattern_target(exports, &key))
+            .or_else(|| {
+                vue3_package_exports_pattern_target(exports, &key, type_resolver)
+            })
     }?;
-    Some(target)
+    type_resolver
+        .external_type_session
+        .metadata_path_is_within_limit(&target)
+        .then_some(target)
 }
 
 pub(crate) fn vue3_package_exports_is_condition_map(exports: &serde_json::Value) -> bool {
@@ -321,6 +329,7 @@ pub(crate) fn vue3_package_exports_is_condition_map(exports: &serde_json::Value)
 pub(crate) fn vue3_package_exports_pattern_target(
     exports: &serde_json::Value,
     key: &str,
+    type_resolver: &Vue3TypeResolverContext,
 ) -> Option<String> {
     let object = exports.as_object()?;
     for (pattern, target) in object {
@@ -328,7 +337,9 @@ pub(crate) fn vue3_package_exports_pattern_target(
             continue;
         };
         let target = vue3_package_export_target_value(target)?;
-        return Some(target.replace('*', &capture));
+        return type_resolver
+            .external_type_session
+            .replace_metadata_path_pattern(&target, "*", &capture);
     }
     None
 }
@@ -407,7 +418,9 @@ pub(crate) fn vue3_package_types_versions_type_path(
     matches.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
     for (_, _, capture, targets) in matches {
         for target in targets {
-            let target = target.replace('*', &capture);
+            let target = type_resolver
+                .external_type_session
+                .replace_metadata_path_pattern(&target, "*", &capture)?;
             if !vue3_package_type_target_is_safe(&target) {
                 type_resolver.external_type_session.block_metadata();
                 return None;
@@ -496,6 +509,12 @@ pub(crate) fn vue3_package_type_target_path(
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
     if type_resolver.external_type_session.metadata_is_blocked() {
+        return None;
+    }
+    if !type_resolver
+        .external_type_session
+        .metadata_path_is_within_limit(target)
+    {
         return None;
     }
     if !vue3_package_type_target_is_safe(target) {

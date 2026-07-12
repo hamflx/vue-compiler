@@ -2,6 +2,7 @@ pub(crate) fn vue3_tsconfig_direct_path_mappings(
     value: &serde_json::Value,
     config_dir: &Path,
     template_config_dir: &Path,
+    type_resolver: &Vue3TypeResolverContext,
 ) -> Vec<Vue3TsconfigPathMapping> {
     let Some(compiler_options) = value
         .get("compilerOptions")
@@ -9,11 +10,23 @@ pub(crate) fn vue3_tsconfig_direct_path_mappings(
     else {
         return Vec::new();
     };
-    let target_base_dir = compiler_options
+    let target_base_dir = if let Some(base_url) = compiler_options
         .get("baseUrl")
         .and_then(serde_json::Value::as_str)
-        .map(|base_url| vue3_tsconfig_target_path(config_dir, template_config_dir, base_url, ""))
-        .unwrap_or_else(|| config_dir.to_path_buf());
+    {
+        let Some(path) = vue3_tsconfig_target_path(
+            config_dir,
+            template_config_dir,
+            base_url,
+            "",
+            type_resolver,
+        ) else {
+            return Vec::new();
+        };
+        path
+    } else {
+        config_dir.to_path_buf()
+    };
     let Some(paths) = compiler_options
         .get("paths")
         .and_then(serde_json::Value::as_object)
@@ -78,7 +91,8 @@ pub(crate) fn resolve_vue3_tsconfig_path_mappings(
                 &matched.mapping.template_config_dir,
                 target,
                 &matched.capture,
-            );
+                type_resolver,
+            )?;
             let resolved = resolve_vue3_type_import_path(&candidate, type_resolver);
             if type_resolver.external_type_session.metadata_is_blocked() {
                 return None;
@@ -120,17 +134,24 @@ pub(crate) fn vue3_tsconfig_target_path(
     template_config_dir: &Path,
     target: &str,
     capture: &str,
-) -> PathBuf {
-    let target = target.replace('*', capture);
-    let target = target.replace(
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
+    let target = type_resolver.external_type_session.replace_metadata_path_pattern(
+        target,
+        "*",
+        capture,
+    )?;
+    let template_config_dir = normalize_path_string(template_config_dir);
+    let target = type_resolver.external_type_session.replace_metadata_path_pattern(
+        &target,
         "${configDir}",
-        normalize_path_string(template_config_dir).as_str(),
-    );
+        &template_config_dir,
+    )?;
     let path = Path::new(&target);
     if path.is_absolute() {
-        normalize_path_components(PathBuf::from(target))
+        Some(normalize_path_components(PathBuf::from(target)))
     } else {
-        normalize_path_components(target_base_dir.join(target))
+        Some(normalize_path_components(target_base_dir.join(target)))
     }
 }
 

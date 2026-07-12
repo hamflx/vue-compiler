@@ -141,7 +141,12 @@ fn vue3_tsconfig_path_mappings_from_config(
         if type_resolver.external_type_session.metadata_is_blocked() {
             return Some(Vec::new());
         }
-        let direct = vue3_tsconfig_direct_path_mappings(&value, config_dir, template_config_dir);
+        let direct = vue3_tsconfig_direct_path_mappings(
+            &value,
+            config_dir,
+            template_config_dir,
+            type_resolver,
+        );
         if !direct.is_empty() {
             let direct_patterns = direct
                 .iter()
@@ -277,7 +282,15 @@ pub(crate) fn vue3_tsconfig_direct_global_type_files(
         {
             return Vec::new();
         }
-        let path = vue3_tsconfig_target_path(config_dir, template_config_dir, &target, "");
+        let Some(path) = vue3_tsconfig_target_path(
+            config_dir,
+            template_config_dir,
+            &target,
+            "",
+            type_resolver,
+        ) else {
+            return Vec::new();
+        };
         if vue3_tsconfig_global_type_file_is_supported(&path) {
             if !type_resolver
                 .external_type_session
@@ -349,7 +362,15 @@ pub(crate) fn vue3_tsconfig_compiler_option_global_type_files(
         {
             return Vec::new();
         }
-        let path = vue3_tsconfig_target_path(config_dir, template_config_dir, &target, "");
+        let Some(path) = vue3_tsconfig_target_path(
+            config_dir,
+            template_config_dir,
+            &target,
+            "",
+            type_resolver,
+        ) else {
+            return Vec::new();
+        };
         if path.is_dir() {
             configured_type_roots.push(path);
         }
@@ -587,7 +608,15 @@ pub(crate) fn vue3_tsconfig_include_global_type_files(
         return Vec::new();
     }
     if !target.contains('*') && !target.contains('?') {
-        let path = vue3_tsconfig_target_path(config_dir, template_config_dir, target, "");
+        let Some(path) = vue3_tsconfig_target_path(
+            config_dir,
+            template_config_dir,
+            target,
+            "",
+            type_resolver,
+        ) else {
+            return Vec::new();
+        };
         if vue3_tsconfig_global_type_file_is_supported(&path) {
             if !type_resolver
                 .external_type_session
@@ -604,11 +633,19 @@ pub(crate) fn vue3_tsconfig_include_global_type_files(
         }
         return Vec::new();
     }
-    let Some(root) = vue3_tsconfig_include_root_path(config_dir, template_config_dir, target)
+    let Some(root) = vue3_tsconfig_include_root_path(
+        config_dir,
+        template_config_dir,
+        target,
+        type_resolver,
+    ) else {
+        return Vec::new();
+    };
+    let Some(pattern) =
+        vue3_tsconfig_include_pattern(config_dir, template_config_dir, target, type_resolver)
     else {
         return Vec::new();
     };
-    let pattern = vue3_tsconfig_include_pattern(config_dir, template_config_dir, target);
     let mut files = Vec::new();
     vue3_collect_global_type_files_from_dir(&root, &mut files, type_resolver);
     if type_resolver.external_type_session.metadata_is_blocked() {
@@ -632,16 +669,23 @@ pub(crate) fn vue3_tsconfig_include_pattern(
     config_dir: &Path,
     template_config_dir: &Path,
     target: &str,
-) -> String {
-    let target = target.replace(
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<String> {
+    let template_config_dir = normalize_path_string(template_config_dir);
+    let target = type_resolver.external_type_session.replace_metadata_path_pattern(
+        target,
         "${configDir}",
-        normalize_path_string(template_config_dir).as_str(),
-    );
+        &template_config_dir,
+    )?;
     let path = Path::new(&target);
     if path.is_absolute() {
-        normalize_path_string(&normalize_path_components(PathBuf::from(target)))
+        Some(normalize_path_string(&normalize_path_components(
+            PathBuf::from(target),
+        )))
     } else {
-        normalize_path_string(&normalize_path_components(config_dir.join(target)))
+        Some(normalize_path_string(&normalize_path_components(
+            config_dir.join(target),
+        )))
     }
 }
 
@@ -649,6 +693,7 @@ pub(crate) fn vue3_tsconfig_include_root_path(
     config_dir: &Path,
     template_config_dir: &Path,
     target: &str,
+    type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
     if target.is_empty() || target.contains('\\') || target.contains(':') {
         return None;
@@ -666,7 +711,13 @@ pub(crate) fn vue3_tsconfig_include_root_path(
     } else {
         root.join("/")
     };
-    let path = vue3_tsconfig_target_path(config_dir, template_config_dir, &root, "");
+    let path = vue3_tsconfig_target_path(
+        config_dir,
+        template_config_dir,
+        &root,
+        "",
+        type_resolver,
+    )?;
     path.is_dir().then_some(path)
 }
 

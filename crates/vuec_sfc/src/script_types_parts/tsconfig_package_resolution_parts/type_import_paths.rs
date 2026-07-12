@@ -75,6 +75,34 @@ pub(crate) fn path_with_extension(path: &Path, extension: &str) -> PathBuf {
     path
 }
 
+pub(crate) fn vue3_bounded_replace(
+    source: &str,
+    pattern: &str,
+    replacement: &str,
+    max_bytes: usize,
+) -> Option<String> {
+    if pattern.is_empty() {
+        return None;
+    }
+    let matches = source.match_indices(pattern).count();
+    let removed = matches.checked_mul(pattern.len())?;
+    let added = matches.checked_mul(replacement.len())?;
+    let output_len = source.len().checked_sub(removed)?.checked_add(added)?;
+    if output_len > max_bytes {
+        return None;
+    }
+    let mut output = String::with_capacity(output_len);
+    let mut remainder = source;
+    while let Some(index) = remainder.find(pattern) {
+        output.push_str(&remainder[..index]);
+        output.push_str(replacement);
+        remainder = &remainder[index + pattern.len()..];
+    }
+    output.push_str(remainder);
+    debug_assert_eq!(output.len(), output_len);
+    Some(output)
+}
+
 pub(crate) fn normalize_path_components(path: PathBuf) -> PathBuf {
     let mut normalized = PathBuf::new();
     for component in path.components() {

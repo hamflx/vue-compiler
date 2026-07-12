@@ -18,6 +18,101 @@ fn write_vue3_test_type_package(package_dir: &Path, manifest: &str) {
 }
 
 #[test]
+fn vue3_generated_metadata_paths_are_bounded_before_expansion() {
+    assert_eq!(VUE3_EXTERNAL_TYPE_MAX_GENERATED_PATH_BYTES, 64 * 1024);
+    assert_eq!(
+        vue3_bounded_replace("*/*", "*", "123456789", 19).as_deref(),
+        Some("123456789/123456789")
+    );
+    assert!(vue3_bounded_replace("*/*", "*", "123456789", 18).is_none());
+
+    let paths_resolver = vue3_type_resolver_with_external_limits(
+        Vue3ExternalTypeLoadLimits {
+            max_generated_path_bytes: 18,
+            ..Vue3ExternalTypeLoadLimits::default()
+        },
+    );
+    let mappings = vue3_tsconfig_direct_path_mappings(
+        &serde_json::json!({
+            "compilerOptions": {
+                "paths": { "alias/*": ["*/*"] }
+            }
+        }),
+        Path::new("."),
+        Path::new("."),
+        &paths_resolver,
+    );
+    assert!(resolve_vue3_tsconfig_path_mappings(
+        &mappings,
+        "alias/123456789",
+        &paths_resolver,
+    )
+    .is_none());
+    assert!(paths_resolver.external_type_session.metadata_is_blocked());
+
+    let config_dir_resolver = vue3_type_resolver_with_external_limits(
+        Vue3ExternalTypeLoadLimits {
+            max_generated_path_bytes: 18,
+            ..Vue3ExternalTypeLoadLimits::default()
+        },
+    );
+    assert!(vue3_tsconfig_include_pattern(
+        Path::new("."),
+        Path::new("123456789"),
+        "${configDir}/${configDir}",
+        &config_dir_resolver,
+    )
+    .is_none());
+    assert!(config_dir_resolver
+        .external_type_session
+        .metadata_is_blocked());
+}
+
+#[test]
+fn vue3_generated_package_paths_are_bounded_before_expansion() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let exports_package = dir.path().join("exports-package");
+    write_vue3_test_type_package(
+        &exports_package,
+        r#"{"exports":{"./feature/*":{"types":"./*/*.d.ts"}}}"#,
+    );
+    let exports_resolver = vue3_type_resolver_with_external_limits(
+        Vue3ExternalTypeLoadLimits {
+            max_generated_path_bytes: 18,
+            ..Vue3ExternalTypeLoadLimits::default()
+        },
+    );
+    assert_eq!(
+        resolve_vue3_package_json_type_entry(
+            &exports_package,
+            Some("feature/123456789"),
+            &exports_resolver,
+        ),
+        Vue3PackageJsonTypeResolution::Blocked
+    );
+
+    let versions_package = dir.path().join("versions-package");
+    write_vue3_test_type_package(
+        &versions_package,
+        r#"{"typesVersions":{"*":{"*":["*/*.d.ts"]}}}"#,
+    );
+    let versions_resolver = vue3_type_resolver_with_external_limits(
+        Vue3ExternalTypeLoadLimits {
+            max_generated_path_bytes: 18,
+            ..Vue3ExternalTypeLoadLimits::default()
+        },
+    );
+    assert_eq!(
+        resolve_vue3_package_json_type_entry(
+            &versions_package,
+            Some("123456789"),
+            &versions_resolver,
+        ),
+        Vue3PackageJsonTypeResolution::Blocked
+    );
+}
+
+#[test]
 fn vue3_metadata_loader_honors_byte_boundaries_and_fails_closed() {
     assert_eq!(VUE3_EXTERNAL_TYPE_MAX_METADATA_FILE_BYTES, 1024 * 1024);
     assert_eq!(VUE3_EXTERNAL_TYPE_MAX_METADATA_BYTES, 16 * 1024 * 1024);
