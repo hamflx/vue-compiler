@@ -109,7 +109,15 @@ pub(crate) fn normalize_path_components(path: PathBuf) -> PathBuf {
         match component {
             std::path::Component::CurDir => {}
             std::path::Component::ParentDir => {
-                normalized.pop();
+                let can_pop = matches!(
+                    normalized.components().next_back(),
+                    Some(std::path::Component::Normal(_))
+                );
+                if can_pop {
+                    normalized.pop();
+                } else if !normalized.has_root() {
+                    normalized.push(component.as_os_str());
+                }
             }
             _ => normalized.push(component.as_os_str()),
         }

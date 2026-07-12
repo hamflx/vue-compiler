@@ -443,6 +443,73 @@ fn vue3_bare_package_subpaths_cannot_escape_package_root() {
     }
 }
 
+#[test]
+fn vue3_path_normalization_preserves_unresolved_parent_components() {
+    for (input, expected) in [
+        ("../x", "../x"),
+        ("a/../../x", "../x"),
+        ("../../a/../x", "../../x"),
+        ("a/./b/../x", "a/x"),
+    ] {
+        let normalized = normalize_path_components(PathBuf::from(input));
+        assert_eq!(normalized, PathBuf::from(expected), "{input}");
+        assert_eq!(
+            normalize_path_components(normalized.clone()),
+            normalized,
+            "normalization was not idempotent for {input}"
+        );
+    }
+
+    let root = PathBuf::from(std::path::MAIN_SEPARATOR.to_string());
+    assert_eq!(
+        normalize_path_components(root.join("a").join("..").join("..").join("x")),
+        root.join("x")
+    );
+    assert_ne!(
+        normalize_path_components(PathBuf::from("../x")),
+        normalize_path_components(PathBuf::from("x"))
+    );
+
+    let resolver = Vue3TypeResolverContext::default();
+    assert_eq!(
+        vue3_tsconfig_target_path(
+            Path::new("config"),
+            Path::new("config"),
+            "../../shared/x",
+            "",
+            &resolver,
+        ),
+        Some(PathBuf::from("../shared/x"))
+    );
+    assert_eq!(
+        vue3_node_modules_search_paths_from_dir(Path::new("../workspace/src"))[0],
+        PathBuf::from("../workspace/src/node_modules")
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn vue3_path_normalization_preserves_windows_root_semantics() {
+    for (input, expected) in [
+        (r"C:..\x", r"C:..\x"),
+        (r"C:a\..\..\x", r"C:..\x"),
+        (r"C:\a\..\..\x", r"C:\x"),
+        (r"\a\..\..\x", r"\x"),
+        (r"\\server\share\a\..\..\x", r"\\server\share\x"),
+        (r"\\?\C:\a\..\..\x", r"\\?\C:\x"),
+        (
+            r"\\?\UNC\server\share\a\..\..\x",
+            r"\\?\UNC\server\share\x",
+        ),
+    ] {
+        assert_eq!(
+            normalize_path_components(PathBuf::from(input)),
+            PathBuf::from(expected),
+            "{input}"
+        );
+    }
+}
+
 fn write_vue3_package_resolution_chain(root: &Path, count: usize) {
     assert!(count > 0);
     let mut package = root.to_path_buf();
