@@ -350,6 +350,13 @@
             rewrite_js_like_expression(r#"`match: ${/[}]/.test(value)}`"#, &options),
             r#"`match: ${/[}]/.test(_ctx.value)}`"#,
         );
+        assert_eq!(
+            rewrite_js_like_expression(
+                r#"/hidden/.test(value) + `raw ${other}`"#,
+                &options,
+            ),
+            r#"/hidden/.test(_ctx.value) + `raw ${_ctx.other}`"#,
+        );
 
         let result = base_compile(
             TemplateSource {
@@ -403,6 +410,10 @@
         assert_eq!(
             rewrite_js_like_expression("count /= divisor", &options),
             "count.value /= _ctx.divisor",
+        );
+        assert_eq!(
+            rewrite_js_like_expression(r#"/lead/.test(value); count = next"#, &options),
+            r#"/lead/.test(_ctx.value); count.value = _ctx.next"#,
         );
     }
 

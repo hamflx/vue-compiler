@@ -417,8 +417,11 @@ pub(crate) fn js_like_regular_expression_ranges(
         .ranges
         .into_iter()
         .filter_map(|(start, end)| {
-            (start >= source_start && end <= source_end)
-                .then_some((start - source_start, end - source_start))
+            if start >= source_start && end <= source_end {
+                Some((start - source_start, end - source_start))
+            } else {
+                None
+            }
         })
         .collect::<Vec<_>>();
     ranges.sort_unstable();
@@ -433,8 +436,11 @@ fn js_like_regular_expression_ranges_in(
     ranges
         .iter()
         .filter_map(|&(start, end)| {
-            (start >= source_start && end <= source_end)
-                .then_some((start - source_start, end - source_start))
+            if start >= source_start && end <= source_end {
+                Some((start - source_start, end - source_start))
+            } else {
+                None
+            }
         })
         .collect()
 }
