@@ -319,7 +319,7 @@ fn run_cli_smoke_suite() -> Result<String> {
 
     let parse_out = run_cli_command(&exe, &["parse-sfc", "--json", &sfc.display().to_string()])?;
     let parse_json = parse_cli_json("parse-sfc", &parse_out)?;
-    if !parse_json.pointer("/descriptor/template").is_some() {
+    if parse_json.pointer("/descriptor/template").is_none() {
         anyhow::bail!("parse-sfc CLI output missing descriptor template: {parse_json}");
     }
     checks.push("parse-sfc");
@@ -1075,9 +1075,11 @@ fn run_string_interning_smoke_suite() -> Result<String> {
         anyhow::bail!("interned JS source did not serialize as a plain string: {serialized}");
     }
 
-    let mut lowering_options = vuec_vue3_core::Vue3CompilerOptions::default();
-    lowering_options.prefix_identifiers = true;
-    lowering_options.mode = "module".into();
+    let lowering_options = vuec_vue3_core::Vue3CompilerOptions {
+        prefix_identifiers: true,
+        mode: "module".into(),
+        ..vuec_vue3_core::Vue3CompilerOptions::default()
+    };
     let source = vuec_vue3_core::TemplateSource {
         filename: "Interned.vue".into(),
         source: "<div>{{ item.count }}</div>".into(),

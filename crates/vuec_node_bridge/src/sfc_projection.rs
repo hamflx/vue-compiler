@@ -148,18 +148,21 @@ pub(crate) fn vue3_sfc_parse_projection_options(
     value: Option<&Value>,
     parse_options: &Vue3SfcParseOptions,
 ) -> Vue3SfcParseProjectionOptions {
-    let mut options = Vue3SfcParseProjectionOptions::default();
-    options.pad = parse_options.pad.clone();
-    let Some(value) = value else {
-        return options;
-    };
-    options.source_map = bool_option(value, "sourceMap", true);
-    options.source_root = value
-        .get("sourceRoot")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    options
+    match value {
+        Some(value) => Vue3SfcParseProjectionOptions {
+            pad: parse_options.pad.clone(),
+            source_map: bool_option(value, "sourceMap", true),
+            source_root: value
+                .get("sourceRoot")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        },
+        None => Vue3SfcParseProjectionOptions {
+            pad: parse_options.pad.clone(),
+            ..Vue3SfcParseProjectionOptions::default()
+        },
+    }
 }
 
 pub(crate) fn vue3_sfc_pad_option(value: Option<&Value>) -> Vue3SfcPad {

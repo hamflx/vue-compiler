@@ -91,7 +91,7 @@ const typed: FooType | null = null
         assert_script_import_binding(&script, "FooBaz", "FooBaz", "./x", false, true, true);
         assert_script_import_binding(&script, "FooType", "FooType", "./x", true, true, false);
         assert_script_import_binding(&script, "ref", "ref", "vue", false, true, false);
-        assert!(script.imports.get("defineProps").is_none());
+        assert!(!script.imports.contains_key("defineProps"));
     }
 
     #[test]
@@ -420,7 +420,7 @@ console.log(message, payload, fooBar)
             script.props_aliases.get("fooBar").map(String::as_str),
             Some("foo.bar")
         );
-        assert!(script.props_aliases.get("foo").is_none());
+        assert!(!script.props_aliases.contains_key("foo"));
     }
 
     #[test]
@@ -790,7 +790,7 @@ const other = ref(1)
             script.bindings.get("title").map(String::as_str),
             Some("setup-ref")
         );
-        assert!(script.bindings.get("defineModel").is_none());
+        assert!(!script.bindings.contains_key("defineModel"));
     }
 
     #[test]

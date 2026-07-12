@@ -561,10 +561,10 @@ pub(crate) fn vue3_exported_type_names(statements: &[Statement<'_>]) -> BTreeSet
     let mut names = BTreeSet::new();
     for statement in statements {
         match statement {
-            Statement::ExportDefaultDeclaration(declaration) => {
-                if vue3_default_export_may_be_type(declaration) {
-                    names.insert("default".into());
-                }
+            Statement::ExportDefaultDeclaration(declaration)
+                if vue3_default_export_may_be_type(declaration) =>
+            {
+                names.insert("default".into());
             }
             Statement::ExportNamedDeclaration(declaration) => {
                 if let Some(declaration) = &declaration.declaration {

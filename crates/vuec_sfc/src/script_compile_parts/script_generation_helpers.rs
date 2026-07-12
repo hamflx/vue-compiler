@@ -305,16 +305,11 @@ pub(crate) fn vue3_ts_enum_binding_type(declaration: &TSEnumDeclaration<'_>) -> 
 }
 
 pub(crate) fn vue3_ts_enum_is_static_literal(declaration: &TSEnumDeclaration<'_>) -> bool {
-    if declaration
+    declaration
         .body
         .members
         .iter()
         .all(|member| member.initializer.as_ref().is_none_or(vue3_is_static_node))
-    {
-        true
-    } else {
-        false
-    }
 }
 
 pub(crate) fn vue3_is_static_node(expression: &Expression<'_>) -> bool {
@@ -408,15 +403,15 @@ pub(crate) fn analyze_vue3_normal_script_for_setup(
                 analysis.has_default_export_name = default_export_has_name(declaration);
                 rewrite_vue3_export_default("__default__", declaration, &mut edits);
             }
-            Statement::ExportNamedDeclaration(declaration) => {
+            Statement::ExportNamedDeclaration(declaration)
                 if rewrite_vue3_compile_script_named_default_export(
                     source,
                     "__default__",
                     declaration,
                     &mut edits,
-                ) {
-                    analysis.has_default_export = true;
-                }
+                ) =>
+            {
+                analysis.has_default_export = true;
             }
             _ => {}
         }
@@ -468,19 +463,32 @@ pub(crate) fn rewrite_vue3_compile_script_named_default_export(
     true
 }
 
+pub(crate) struct Vue3ScriptSetupExportOptions<'a> {
+    pub(crate) filename: &'a str,
+    pub(crate) is_ts: bool,
+    pub(crate) is_prod: bool,
+    pub(crate) inline_render: Option<&'a Vue3InlineTemplateRender>,
+    pub(crate) css_vars_code: Option<&'a str>,
+    pub(crate) emit_script_setup_marker: bool,
+    pub(crate) gen_default_as: Option<&'a str>,
+}
+
 pub(crate) fn vue3_script_setup_export(
     setup_analysis: &Vue3ScriptSetupAnalysis,
     bindings: &[Vue3ScriptSetupReturnBinding],
     script_bindings: &BTreeMap<String, String>,
-    filename: &str,
     normal_script: &Vue3NormalScriptAnalysis,
-    is_ts: bool,
-    is_prod: bool,
-    inline_render: Option<&Vue3InlineTemplateRender>,
-    css_vars_code: Option<&str>,
-    emit_script_setup_marker: bool,
-    gen_default_as: Option<&str>,
+    options: Vue3ScriptSetupExportOptions<'_>,
 ) -> String {
+    let Vue3ScriptSetupExportOptions {
+        filename,
+        is_ts,
+        is_prod,
+        inline_render,
+        css_vars_code,
+        emit_script_setup_marker,
+        gen_default_as,
+    } = options;
     let export_prefix = vue3_script_setup_default_export_prefix(gen_default_as);
     let runtime_options = vue3_script_setup_runtime_options(
         filename,

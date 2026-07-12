@@ -221,19 +221,18 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                 .mir
                 .node(children[cursor])
                 .is_some_and(|node| matches!(node.kind, Vue3SsrMirKind::PushString(_)))
+                && parse_ssr_open_tag_start(self.ssr_push_string(children[cursor])?).is_some()
             {
-                if parse_ssr_open_tag_start(self.ssr_push_string(children[cursor])?).is_some() {
-                    cursor = self.collect_ssr_template_node(
-                        children,
-                        cursor,
-                        scope,
-                        scope_id_expr,
-                        parts,
-                        dynamic,
-                        None,
-                    )?;
-                    continue;
-                }
+                cursor = self.collect_ssr_template_node(
+                    children,
+                    cursor,
+                    scope,
+                    scope_id_expr,
+                    parts,
+                    dynamic,
+                    None,
+                )?;
+                continue;
             }
             match self.mir.node(children[cursor]).map(|node| &node.kind) {
                 Some(Vue3SsrMirKind::PushString(value)) => {
@@ -336,10 +335,9 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         if attrs.v_model.is_some() {
             return self.collect_ssr_template_attrs_with_v_model(attrs, scope, parts);
         }
-        if attrs.v_show.is_some() {
+        if let Some(v_show) = attrs.v_show {
             if ssr_attrs_has_object_binding(&attrs.props) {
-                let style =
-                    self.render_v_show_style(&attrs.props, attrs.v_show.expect("v-show"), scope);
+                let style = self.render_v_show_style(&attrs.props, v_show, scope);
                 let attrs_expr = self.render_v_show_merged_attrs(&attrs.props, &style, scope, None);
                 parts.push(SsrTemplatePart::Expr(format!(
                     "_ssrRenderAttrs({attrs_expr})"
@@ -347,8 +345,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                 return Some(());
             }
             self.collect_ssr_template_attrs_without_v_show_style(attrs, scope, parts);
-            let style =
-                self.render_v_show_style(&attrs.props, attrs.v_show.expect("v-show"), scope);
+            let style = self.render_v_show_style(&attrs.props, v_show, scope);
             parts.push(SsrTemplatePart::Static(" style=\"".into()));
             parts.push(SsrTemplatePart::Expr(format!("_ssrRenderStyle({style})")));
             parts.push(SsrTemplatePart::Static("\"".into()));

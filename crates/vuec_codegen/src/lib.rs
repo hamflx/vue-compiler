@@ -1049,9 +1049,7 @@ fn find_source_file_id(sources: &SourceMap, source_name: &str) -> Option<vuec_so
     let mut index = 0u32;
     loop {
         let id = vuec_source::FileId(index);
-        let Some(file) = sources.file(id) else {
-            return None;
-        };
+        let file = sources.file(id)?;
         if file
             .path
             .as_ref()

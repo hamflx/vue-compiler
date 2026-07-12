@@ -336,7 +336,6 @@ pub fn compile_vue3_ssr(env: Env, source: String, options: Option<Unknown>) -> R
             &raw_options,
             default_options.asset_url_options.clone(),
         ),
-        ..default_options
     };
     to_json_string(compile_ssr(template, ssr_options))
 }

@@ -974,7 +974,7 @@ pub(crate) fn has_hydration_event_binding(element: &Vue3Element) -> bool {
             return false;
         };
         let prop = event_handler_prop_name(element, &event);
-        prop.to_ascii_lowercase() != "onclick" && prop != "onUpdate:modelValue"
+        !prop.eq_ignore_ascii_case("onclick") && prop != "onUpdate:modelValue"
     })
 }
 

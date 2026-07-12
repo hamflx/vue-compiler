@@ -173,10 +173,10 @@ pub(crate) fn transform_if_branch_codegen_projection(payload: &Value) -> Value {
     let first = children.first();
     let need_fragment_wrapper = children.len() != 1
         || first
-            .and_then(|child| json_node_type(child))
+            .and_then(json_node_type)
             .is_some_and(|node_type| node_type != 1);
     if need_fragment_wrapper {
-        if children.len() == 1 && first.and_then(|child| json_node_type(child)) == Some(11) {
+        if children.len() == 1 && first.and_then(json_node_type) == Some(11) {
             return json!({ "kind": "for" });
         }
         let mut patch_flag = 64u16;

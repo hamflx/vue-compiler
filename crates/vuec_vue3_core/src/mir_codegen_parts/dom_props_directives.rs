@@ -132,9 +132,7 @@ impl<'a> Vue3DomMirCodegen<'a> {
         let node = self.mir.node(node_id)?;
         match &node.kind {
             Vue3DomMirKind::Root(_) => Some(self.render_root_children(node_id, scope)),
-            Vue3DomMirKind::VNodeCall(call) => {
-                Some(self.render_vnode_call(node_id, call, mode, scope))
-            }
+            Vue3DomMirKind::VNodeCall(call) => Some(self.render_vnode_call(call, mode, scope)),
             Vue3DomMirKind::TextCall { value } => Some(format!(
                 "_createTextVNode({})",
                 self.render_mir_expr(value, scope)
@@ -172,7 +170,6 @@ impl<'a> Vue3DomMirCodegen<'a> {
 
     fn render_vnode_call(
         &self,
-        node_id: NodeId,
         call: &Vue3VNodeCall,
         mode: Vue3DomMirRenderMode,
         scope: &RenderScope,
@@ -217,12 +214,6 @@ impl<'a> Vue3DomMirCodegen<'a> {
                 helper,
                 args
             )
-        } else if self
-            .mir
-            .node(node_id)
-            .is_some_and(|node| node.parent == Some(self.mir.root))
-        {
-            format!("{}({})", helper, args)
         } else {
             format!("{}({})", helper, args)
         };

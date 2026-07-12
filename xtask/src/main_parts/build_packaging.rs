@@ -295,7 +295,7 @@ fn copy_napi_binding_from(source_path: &Path, target_path: &Path) -> Result<Path
         .context("NAPI target path has no parent directory")?;
     std::fs::create_dir_all(parent)
         .with_context(|| format!("failed to create {}", parent.display()))?;
-    std::fs::copy(&source_path, target_path).with_context(|| {
+    std::fs::copy(source_path, target_path).with_context(|| {
         format!(
             "failed to copy {} to {}",
             source_path.display(),

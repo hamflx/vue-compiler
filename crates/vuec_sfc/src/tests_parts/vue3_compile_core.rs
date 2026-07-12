@@ -61,7 +61,7 @@ export default {
             script.bindings.get("__isScriptSetup").map(String::as_str),
             Some("false")
         );
-        assert!(script.bindings.get("ignored").is_none());
+        assert!(!script.bindings.contains_key("ignored"));
 
         let async_descriptor = compiler.parse(
             "Comp.vue",
@@ -160,7 +160,7 @@ const local = 1
             script.bindings.get("r").map(String::as_str),
             Some("setup-const")
         );
-        assert!(script.bindings.get("__isScriptSetup").is_none());
+        assert!(!script.bindings.contains_key("__isScriptSetup"));
         assert!(script
             .content
             .contains("get count() { return count }, set count(v) { count = v }"));
@@ -874,7 +874,7 @@ const slots = defineSlots<{
             script.bindings.get("slots").map(String::as_str),
             Some("setup-const")
         );
-        assert!(script.bindings.get("defineSlots").is_none());
+        assert!(!script.bindings.contains_key("defineSlots"));
 
         let unbound = compiler.parse(
             "FooBar.vue",

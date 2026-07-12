@@ -336,9 +336,7 @@ pub(crate) fn component_patch_flag_kind(
     options: &Vue3CompilerOptions,
     scope: &RenderScope,
 ) -> Option<i32> {
-    let Some(node) = ast.node(node_id) else {
-        return None;
-    };
+    let node = ast.node(node_id)?;
     let visible = visible_children(ast, &node.children);
     let mut flag = if has_dynamic_arg_binding(element) {
         16

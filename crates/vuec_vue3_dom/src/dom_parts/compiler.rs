@@ -150,19 +150,18 @@ pub fn normalize_dom_ast(ast: &mut Vue3Ast, options: &DomCompilerOptions) {
             Vue3AstKind::Text(text) if options.decode_entities => {
                 text.value = decode_basic_entities(&text.value);
             }
-            Vue3AstKind::Element(element) => {
+            Vue3AstKind::Element(element)
                 if options
                     .is_custom_element
                     .iter()
-                    .any(|custom| custom == &element.tag)
-                {
-                    let mut attributes = element.template_attributes();
-                    attributes.push(TemplateAttribute {
-                        name: "data-vuec-custom-element".into(),
-                        value: None,
-                    });
-                    element.props = attributes.into_iter().map(Vue3Prop::from).collect();
-                }
+                    .any(|custom| custom == &element.tag) =>
+            {
+                let mut attributes = element.template_attributes();
+                attributes.push(TemplateAttribute {
+                    name: "data-vuec-custom-element".into(),
+                    value: None,
+                });
+                element.props = attributes.into_iter().map(Vue3Prop::from).collect();
             }
             _ => {}
         }

@@ -238,6 +238,9 @@ fn option_matrix_cases(target: TargetSpec) -> Vec<OptionMatrixCase> {
     }
 }
 
+// This is a row constructor for a declarative table. Its positional arguments
+// intentionally mirror the checked-in matrix schema so adjacent rows stay column-aligned.
+#[allow(clippy::too_many_arguments)]
 fn option_case(
     option_name: &'static str,
     option_path: &'static str,

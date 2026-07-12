@@ -120,11 +120,6 @@ impl<'a> Vue3DomMirCodegen<'a> {
                 "export function render({}) {{",
                 render_args(self.options)
             ));
-        } else if self.options.prefix_identifiers {
-            writer.push_line(&format!(
-                "return function render({}) {{",
-                render_args(self.options)
-            ));
         } else {
             writer.push_line(&format!(
                 "return function render({}) {{",

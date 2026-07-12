@@ -93,15 +93,10 @@ pub(crate) fn vue3_template_static_bind_argument(name: &str) -> Option<&str> {
     if vue3_template_dynamic_argument(name).is_some() {
         return None;
     }
-    let raw = if let Some(arg) = name.strip_prefix(':') {
-        arg
-    } else if let Some(arg) = name.strip_prefix('.') {
-        arg
-    } else if let Some(arg) = name.strip_prefix("v-bind:") {
-        arg
-    } else {
-        return None;
-    };
+    let raw = name
+        .strip_prefix(':')
+        .or_else(|| name.strip_prefix('.'))
+        .or_else(|| name.strip_prefix("v-bind:"))?;
     raw.split('.').next().filter(|arg| !arg.is_empty())
 }
 

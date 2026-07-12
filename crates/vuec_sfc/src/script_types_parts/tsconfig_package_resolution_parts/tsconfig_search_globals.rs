@@ -447,7 +447,7 @@ pub(crate) fn vue3_tsconfig_include_root_path(
         .take_while(|segment| !segment.contains('*') && !segment.contains('?'))
         .filter(|segment| !segment.is_empty() && *segment != ".")
         .collect::<Vec<_>>();
-    if root.iter().any(|segment| *segment == "..") {
+    if root.contains(&"..") {
         return None;
     }
     let root = if root.is_empty() {

@@ -350,7 +350,7 @@ pub(crate) fn render_child_sequence(
             while index < children.len()
                 && ast
                     .node(children[index])
-                    .is_some_and(|candidate| is_text_like(candidate))
+                    .is_some_and(is_text_like)
             {
                 index += 1;
             }
@@ -458,7 +458,7 @@ pub(crate) fn select_children_include_unstringifiable_option_value(
         && ast.node(node_id).is_some_and(|node| {
             node.children.iter().any(|child_id| {
                 ast.node(*child_id)
-                    .is_some_and(|child| option_has_unstringifiable_value_binding(child))
+                    .is_some_and(option_has_unstringifiable_value_binding)
             })
         })
 }
@@ -889,7 +889,7 @@ pub(crate) fn render_for_node(
     let memo_expression = rewrite_expression_with_scope(&memo_expression, options, &scoped);
     let key = v_for_key_expression(element, options, &scoped);
     let guard = key.map_or_else(
-        || format!("_cached && _cached.el && _isMemoSame(_cached, _memo)"),
+        || "_cached && _cached.el && _isMemoSame(_cached, _memo)".to_string(),
         |key| {
             format!("_cached && _cached.el && _cached.key === {key} && _isMemoSame(_cached, _memo)")
         },

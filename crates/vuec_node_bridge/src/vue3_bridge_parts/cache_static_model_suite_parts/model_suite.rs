@@ -573,14 +573,13 @@ pub(crate) fn vue3_model_suite_collect_helpers(node: &Value, used: &mut Vec<&'st
             Some("RENDER_LIST") => vue3_text_suite_add_helper(used, "RENDER_LIST"),
             _ => {}
         },
-        Some(20) => {
+        Some(20)
             if node
                 .get("needPauseTracking")
                 .and_then(Value::as_bool)
-                .unwrap_or(false)
-            {
-                vue3_text_suite_add_helper(used, "SET_BLOCK_TRACKING");
-            }
+                .unwrap_or(false) =>
+        {
+            vue3_text_suite_add_helper(used, "SET_BLOCK_TRACKING");
         }
         _ => {}
     }

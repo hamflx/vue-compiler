@@ -966,7 +966,7 @@ pub(crate) fn vue3_for_suite_helpers(root: &Value) -> Vec<String> {
         "WITH_DIRECTIVES",
     ]
     .into_iter()
-    .filter(|helper| used.iter().any(|used| *used == *helper))
+    .filter(|helper| used.contains(helper))
     .map(str::to_string)
     .collect()
 }

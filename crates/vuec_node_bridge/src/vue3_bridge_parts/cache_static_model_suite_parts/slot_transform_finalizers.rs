@@ -191,19 +191,16 @@ pub(crate) fn vue3_slot_suite_collect_helpers(node: &Value, used: &mut Vec<&'sta
             Some("TO_HANDLER_KEY") => vue3_text_suite_add_helper(used, "TO_HANDLER_KEY"),
             _ => {}
         },
-        Some(20) => {
+        Some(20)
             if node
                 .get("needPauseTracking")
                 .and_then(Value::as_bool)
-                .unwrap_or(false)
-            {
-                vue3_text_suite_add_helper(used, "SET_BLOCK_TRACKING");
-            }
+                .unwrap_or(false) =>
+        {
+            vue3_text_suite_add_helper(used, "SET_BLOCK_TRACKING");
         }
-        Some(18) => {
-            if node.get("isSlot").and_then(Value::as_bool).unwrap_or(false) {
-                vue3_text_suite_add_helper(used, "WITH_CTX");
-            }
+        Some(18) if node.get("isSlot").and_then(Value::as_bool).unwrap_or(false) => {
+            vue3_text_suite_add_helper(used, "WITH_CTX");
         }
         _ => {}
     }

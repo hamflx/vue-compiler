@@ -300,7 +300,7 @@ pub(crate) fn model_chain_element_is_member(element: &ChainElement<'_>) -> bool 
     )
 }
 
-pub(crate) fn context_identifier_count<'a>(context: &'a Value, name: &str) -> i64 {
+pub(crate) fn context_identifier_count(context: &Value, name: &str) -> i64 {
     context
         .get("identifiers")
         .and_then(|identifiers| identifiers.get(name))

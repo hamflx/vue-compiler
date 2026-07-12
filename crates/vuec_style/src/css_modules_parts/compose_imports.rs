@@ -678,9 +678,7 @@ pub(crate) fn find_next_css_module_selector_token(
                 '\'' => state = SelectorScannerState::SingleQuote,
                 '"' => state = SelectorScannerState::DoubleQuote,
                 '[' => {
-                    let Some(end) = find_matching_selector_bracket(source, index) else {
-                        return None;
-                    };
+                    let end = find_matching_selector_bracket(source, index)?;
                     index = end + 1;
                     continue;
                 }

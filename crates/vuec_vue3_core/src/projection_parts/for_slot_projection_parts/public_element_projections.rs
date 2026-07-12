@@ -137,10 +137,8 @@ pub fn transform_element_props_projection(payload: &Value) -> Value {
 
     for prop in props {
         match json_str(prop, "kind") {
-            Some("attribute") => {
-                if json_str(prop, "name") == Some("ref") {
-                    has_ref = true;
-                }
+            Some("attribute") if json_str(prop, "name") == Some("ref") => {
+                has_ref = true;
             }
             Some("objectBind") => {
                 has_dynamic_keys = true;
@@ -170,7 +168,7 @@ pub fn transform_element_props_projection(payload: &Value) -> Value {
                     let is_event = prop_name_is_event_handler(name);
                     if is_event
                         && (!is_component || is_dynamic_component)
-                        && name.to_ascii_lowercase() != "onclick"
+                        && !name.eq_ignore_ascii_case("onclick")
                         && name != "onUpdate:modelValue"
                         && !prop_name_is_reserved(name)
                     {

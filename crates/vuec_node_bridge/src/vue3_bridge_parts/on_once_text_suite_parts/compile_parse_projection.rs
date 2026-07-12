@@ -326,12 +326,7 @@ pub(crate) fn collect_html_parse_error_diagnostics(
     options: &Vue3CompilerOptions,
     diagnostics: &mut Vec<Value>,
 ) {
-    if source.ends_with('<') {
-        diagnostics.push(vue3_error_value(
-            5,
-            vue3_source_loc_value(source, source.len(), source.len()),
-        ));
-    } else if source.ends_with("</") && source.len() <= 2 {
+    if source.ends_with('<') || (source.ends_with("</") && source.len() <= 2) {
         diagnostics.push(vue3_error_value(
             5,
             vue3_source_loc_value(source, source.len(), source.len()),
@@ -411,8 +406,7 @@ pub(crate) fn collect_html_parse_error_diagnostics(
                     if token.end == source.len()
                         && tag_token_is_incomplete(source, token.start, token.end)
                     {
-                        let code = if source[token.start..token.end]
-                            .as_bytes()
+                        let code = if source.as_bytes()[token.start..token.end]
                             .get(2)
                             .is_some_and(u8::is_ascii_whitespace)
                         {

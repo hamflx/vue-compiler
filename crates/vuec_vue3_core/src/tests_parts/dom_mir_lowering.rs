@@ -584,8 +584,10 @@
             file_id: FileId(71),
             base_offset: 0,
         };
-        let mut options = Vue3CompilerOptions::default();
-        options.built_in_components = vec!["transition".into()];
+        let options = Vue3CompilerOptions {
+            built_in_components: vec!["transition".into()],
+            ..Vue3CompilerOptions::default()
+        };
         let ast = Vue3Dialect::base_parse(source, &options);
         let result = lower_vue3_ast_to_dom_mir(&ast, &options);
 

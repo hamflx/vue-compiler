@@ -61,7 +61,7 @@ pub(crate) fn vue3_transform_element_suite_directive_runtime(
             .or_else(|| runtime.get("helperName").and_then(Value::as_str))
             .map(|helper| Value::String(format!("_{}", vue3_bind_suite_helper_name(helper))))
             .unwrap_or(Value::Null),
-        Some("asset") | _ => runtime
+        _ => runtime
             .get("name")
             .and_then(Value::as_str)
             .or_else(|| dir.get("name").and_then(Value::as_str))

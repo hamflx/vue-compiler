@@ -523,10 +523,8 @@ fn write_alias_index(
         source.push_str("Object.defineProperty(exports, '__vuecRuntime', { value: Object.assign({}, vue3CoreRuntime, { decodeHtmlBrowser: vue3CoreRuntime.decodeHtmlBrowser, ignoreSideEffectTags: vue3CoreRuntime.ignoreSideEffectTags, transformOn: vue3CoreRuntime.transformDomOn, transformModel: vue3CoreRuntime.transformDomModel, transformTransition: vue3CoreRuntime.transformDomTransition, validateHtmlNesting: vue3CoreRuntime.validateHtmlNesting, isValidHTMLNesting: vue3CoreRuntime.isValidHTMLNesting }), enumerable: false });\n");
     } else if matches!(
         target.kind,
-        TargetKind::Vue26Template | TargetKind::Vue27Template
+        TargetKind::Vue26Template | TargetKind::Vue27Template | TargetKind::Vue3Sfc
     ) {
-        source.push_str("Object.defineProperty(exports, '__vuecRuntime', { value: vuecBridgeRuntime, enumerable: false });\n");
-    } else if target.kind == TargetKind::Vue3Sfc {
         source.push_str("Object.defineProperty(exports, '__vuecRuntime', { value: vuecBridgeRuntime, enumerable: false });\n");
     }
     for export_name in &manifest.exports {
@@ -599,13 +597,13 @@ fn alias_export_expression(
     let Some(detail) = detail else {
         return "undefined".into();
     };
-    if target.kind == TargetKind::Vue3Core {
-        if vue3_core_runtime_export(export_name, detail).is_some() {
-            if detail.kind == "function" {
-                return alias_runtime_function_expression("vue3CoreRuntime", export_name, detail);
-            }
-            return format!("vue3CoreRuntime[{}]", js_string_literal(export_name));
+    if target.kind == TargetKind::Vue3Core
+        && vue3_core_runtime_export(export_name, detail).is_some()
+    {
+        if detail.kind == "function" {
+            return alias_runtime_function_expression("vue3CoreRuntime", export_name, detail);
         }
+        return format!("vue3CoreRuntime[{}]", js_string_literal(export_name));
     }
     if target.kind == TargetKind::Vue3Dom && export_name == "parserOptions" {
         return "vue3DomParserOptions".into();
@@ -1340,10 +1338,7 @@ fn compare_api_manifests(official: &ManifestFile, rust: &ManifestFile) -> Vec<St
 }
 
 fn load_allowed_api_diffs(path: &Path) -> AllowedApiDiffFile {
-    match read_json::<AllowedApiDiffFile>(path) {
-        Ok(file) => file,
-        Err(_) => AllowedApiDiffFile::default(),
-    }
+    read_json::<AllowedApiDiffFile>(path).unwrap_or_default()
 }
 
 fn is_allowed_api_diff(allowed: &AllowedApiDiffFile, target: TargetSpec, diff: &str) -> bool {

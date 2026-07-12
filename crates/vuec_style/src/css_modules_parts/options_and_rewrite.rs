@@ -241,11 +241,13 @@ pub(crate) fn rewrite_css_module_rule_body(
             &mut output,
             &mut declarations,
             context,
-            prelude,
-            compose_local_names,
-            declarations_offset.take().unwrap_or(body_offset),
-            native_nested_rule,
-            true,
+            NestedDeclarationsFlush {
+                prelude,
+                compose_local_names,
+                body_offset: declarations_offset.take().unwrap_or(body_offset),
+                native_nested_rule,
+                separate_before_next_block: true,
+            },
         );
 
         let nested_body = &body[delimiter + 1..close];
@@ -304,11 +306,13 @@ pub(crate) fn rewrite_css_module_rule_body(
         &mut output,
         &mut declarations,
         context,
-        prelude,
-        compose_local_names,
-        declarations_offset.take().unwrap_or(body_offset),
-        native_nested_rule,
-        false,
+        NestedDeclarationsFlush {
+            prelude,
+            compose_local_names,
+            body_offset: declarations_offset.take().unwrap_or(body_offset),
+            native_nested_rule,
+            separate_before_next_block: false,
+        },
     );
     if !output.is_empty() {
         output.push('\n');
@@ -316,30 +320,34 @@ pub(crate) fn rewrite_css_module_rule_body(
     output
 }
 
-pub(crate) fn flush_css_module_nested_declarations(
-    output: &mut String,
-    declarations: &mut String,
-    context: &mut CssModulesContext<'_>,
-    prelude: &str,
-    compose_local_names: &[String],
+struct NestedDeclarationsFlush<'a> {
+    prelude: &'a str,
+    compose_local_names: &'a [String],
     body_offset: usize,
     native_nested_rule: bool,
     separate_before_next_block: bool,
+}
+
+fn flush_css_module_nested_declarations(
+    output: &mut String,
+    declarations: &mut String,
+    context: &mut CssModulesContext<'_>,
+    flush: NestedDeclarationsFlush<'_>,
 ) {
     if declarations.is_empty() {
         return;
     }
     let rewritten = rewrite_css_module_declarations(
-        prelude,
+        flush.prelude,
         declarations,
         context,
         CssBlockContext::Container,
-        compose_local_names,
-        body_offset,
-        native_nested_rule,
+        flush.compose_local_names,
+        flush.body_offset,
+        flush.native_nested_rule,
     );
     output.push_str(rewritten.trim_end());
-    if separate_before_next_block && !output.ends_with('\n') {
+    if flush.separate_before_next_block && !output.ends_with('\n') {
         output.push('\n');
     }
     declarations.clear();
@@ -620,43 +628,59 @@ pub(crate) fn rewrite_css_module_declarations(
     let mut segment_start = 0usize;
     for semicolon in top_level_semicolons(body) {
         rewrite_css_module_declaration_segment(
-            &body[segment_start..semicolon],
             context,
-            prelude,
-            compose_local_names,
-            body_offset + segment_start,
-            true,
-            nested_compose_message.as_deref(),
             &mut nested_compose_reported,
             &mut output,
+            DeclarationSegment {
+                source: &body[segment_start..semicolon],
+                prelude,
+                compose_local_names,
+                source_offset: body_offset + segment_start,
+                has_semicolon: true,
+                nested_compose_message: nested_compose_message.as_deref(),
+            },
         );
         segment_start = semicolon + 1;
     }
     rewrite_css_module_declaration_segment(
-        &body[segment_start..],
         context,
-        prelude,
-        compose_local_names,
-        body_offset + segment_start,
-        false,
-        nested_compose_message.as_deref(),
         &mut nested_compose_reported,
         &mut output,
+        DeclarationSegment {
+            source: &body[segment_start..],
+            prelude,
+            compose_local_names,
+            source_offset: body_offset + segment_start,
+            has_semicolon: false,
+            nested_compose_message: nested_compose_message.as_deref(),
+        },
     );
     output
 }
 
-pub(crate) fn rewrite_css_module_declaration_segment(
-    segment: &str,
-    context: &mut CssModulesContext<'_>,
-    prelude: &str,
-    compose_local_names: &[String],
-    segment_offset: usize,
+struct DeclarationSegment<'a> {
+    source: &'a str,
+    prelude: &'a str,
+    compose_local_names: &'a [String],
+    source_offset: usize,
     has_semicolon: bool,
-    nested_compose_message: Option<&str>,
+    nested_compose_message: Option<&'a str>,
+}
+
+fn rewrite_css_module_declaration_segment(
+    context: &mut CssModulesContext<'_>,
     nested_compose_reported: &mut bool,
     output: &mut String,
+    segment: DeclarationSegment<'_>,
 ) {
+    let DeclarationSegment {
+        source: segment,
+        prelude,
+        compose_local_names,
+        source_offset: segment_offset,
+        has_semicolon,
+        nested_compose_message,
+    } = segment;
     let Some(colon) = find_top_level_colon(segment) else {
         output.push_str(segment);
         if has_semicolon {

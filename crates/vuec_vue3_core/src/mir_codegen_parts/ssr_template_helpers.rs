@@ -26,6 +26,8 @@ pub(crate) enum SsrTemplatePart {
     Expr(String),
 }
 
+pub(crate) type ParsedSsrOpenTag = (String, Vec<(String, Option<String>)>);
+
 pub(crate) fn render_ssr_template_literal(parts: &[SsrTemplatePart]) -> String {
     let parts = merge_adjacent_ssr_template_static_parts(parts);
     let mut output = String::from("`");
@@ -89,9 +91,7 @@ pub(crate) fn escape_template_literal_static(value: &str) -> String {
         .replace('$', "\\$")
 }
 
-pub(crate) fn parse_ssr_open_tag_start(
-    value: &str,
-) -> Option<(String, Vec<(String, Option<String>)>)> {
+pub(crate) fn parse_ssr_open_tag_start(value: &str) -> Option<ParsedSsrOpenTag> {
     let rest = value.strip_prefix('<')?;
     let tag_end = rest
         .char_indices()

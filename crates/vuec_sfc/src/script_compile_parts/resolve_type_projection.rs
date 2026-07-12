@@ -132,7 +132,7 @@ pub(crate) fn vue3_resolve_type_projection(
     Vue3ResolveTypeResult {
         props,
         calls,
-        deps: analysis.deps.iter().cloned().collect(),
+        deps: analysis.deps.to_vec(),
         raw,
         errors,
     }

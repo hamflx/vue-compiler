@@ -61,9 +61,9 @@ pub(crate) struct Vue3ForMatch {
 
 pub(crate) fn find_vue3_for_match(source: &str) -> Option<Vue3ForMatch> {
     for (operator_start, _) in source.char_indices() {
-        let operator_len = if source[operator_start..].starts_with("in") {
-            2
-        } else if source[operator_start..].starts_with("of") {
+        let operator_len = if source[operator_start..].starts_with("in")
+            || source[operator_start..].starts_with("of")
+        {
             2
         } else {
             continue;

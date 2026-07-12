@@ -13,6 +13,26 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  rust-quality:
+    name: Rust Quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: clippy, rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
   compatibility:
     name: Compatibility (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -33,9 +53,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 24
-
-      - name: Check formatting
-        run: cargo fmt --all --check
 
       - name: Verify official lock
         run: cargo xtask verify-official-lock

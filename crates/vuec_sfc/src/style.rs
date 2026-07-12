@@ -107,7 +107,7 @@ pub(crate) fn vue27_normal_script_content(
     format!(
         "{}{}\nexport default __default__",
         content,
-        gen_vue27_normal_script_css_vars_code(css_vars, &bindings, &scope_id, options.is_prod)
+        gen_vue27_normal_script_css_vars_code(css_vars, bindings, &scope_id, options.is_prod)
     )
 }
 
@@ -129,7 +129,7 @@ pub(crate) fn vue27_script_setup_content(
     } else {
         format!(
             "\n{}\n",
-            gen_vue27_css_vars_code(css_vars, &bindings, &scope_id, options.is_prod)
+            gen_vue27_css_vars_code(css_vars, bindings, &scope_id, options.is_prod)
         )
     };
     let return_bindings = vue27_script_setup_return_bindings(
@@ -160,8 +160,8 @@ pub(crate) fn vue27_script_setup_content(
     } else {
         helper_import.to_string()
     };
-    let runtime_options = vue27_script_setup_runtime_options(descriptor, &analysis, &normal_script);
-    let setup_params = vue27_script_setup_params(&analysis, is_ts);
+    let runtime_options = vue27_script_setup_runtime_options(descriptor, analysis, normal_script);
+    let setup_params = vue27_script_setup_params(analysis, is_ts);
     let setup_prefix = format!(
         "{}{}{}",
         css_vars_code, analysis.setup_prelude, analysis.setup_content
@@ -169,7 +169,7 @@ pub(crate) fn vue27_script_setup_content(
     let return_separator = vue27_return_separator(&setup_prefix);
     let setup_body = format!("{setup_prefix}{return_separator}return {returned}");
     let export_prefix = vue27_script_setup_export_prefix(
-        &normal_script,
+        normal_script,
         &runtime_options,
         is_ts,
         &setup_params,
@@ -241,9 +241,9 @@ pub(crate) fn append_vue27_module_chunk(
     } else {
         let mut chunk = chunk;
         let pending_blank = output_has_pending_blank_line(output);
-        if first_module_chunk && output.ends_with('\n') && chunk.starts_with('\n') {
-            chunk = &chunk[1..];
-        } else if pending_blank && chunk.starts_with('\n') {
+        if chunk.starts_with('\n')
+            && ((first_module_chunk && output.ends_with('\n')) || pending_blank)
+        {
             chunk = &chunk[1..];
         }
         if !output.ends_with('\n') && !chunk.starts_with('\n') {
@@ -263,10 +263,9 @@ pub(crate) fn append_vue27_module_chunk(
             && !first_module_chunk
             && blank_between_plain_chunks
             && !pending_blank
+            && !chunk.starts_with("\n\n")
         {
-            if !chunk.starts_with("\n\n") {
-                output.push_str("\n\n");
-            }
+            output.push_str("\n\n");
         }
         chunk
     };
@@ -281,8 +280,7 @@ pub(crate) fn output_has_pending_blank_line(output: &str) -> bool {
     if output.is_empty() {
         return false;
     }
-    let current = if output.ends_with('\n') {
-        let without_final_newline = &output[..output.len() - 1];
+    let current = if let Some(without_final_newline) = output.strip_suffix('\n') {
         let line_start = without_final_newline
             .rfind('\n')
             .map_or(0, |index| index + 1);
@@ -508,15 +506,20 @@ pub(crate) fn analyze_vue27_normal_script_for_setup(
                     "const __default__ = ",
                 );
             }
-            Statement::ExportNamedDeclaration(declaration) => {
-                if rewrite_named_default_exports(source, "__default__", declaration, &mut edits) {
-                    analysis.has_default_export = true;
-                    if export_named_declaration_only_exports_default(declaration) {
-                        named_default_exports.push((
-                            declaration.span.start as usize,
-                            declaration.span.end as usize,
-                        ));
-                    }
+            Statement::ExportNamedDeclaration(declaration)
+                if rewrite_named_default_exports(
+                    source,
+                    "__default__",
+                    declaration,
+                    &mut edits,
+                ) =>
+            {
+                analysis.has_default_export = true;
+                if export_named_declaration_only_exports_default(declaration) {
+                    named_default_exports.push((
+                        declaration.span.start as usize,
+                        declaration.span.end as usize,
+                    ));
                 }
             }
             _ => {}

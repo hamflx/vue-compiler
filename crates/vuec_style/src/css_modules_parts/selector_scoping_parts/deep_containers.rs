@@ -111,16 +111,11 @@ pub(crate) fn rewrite_deep_container_selector_for_rule(
             };
             if index > 0 {
                 selector.push(',');
-                if matches!(name, ":is" | ":where") {
-                    selector.push(' ');
-                } else if name == ":has" && !selector_suffix_is_pseudo_only(suffix) {
-                    selector.push(' ');
-                } else if name == ":has"
-                    && selector_suffix_is_pseudo_only(suffix)
-                    && branch_has_deep
-                {
-                    selector.push(' ');
-                } else if branch_is_first_deep {
+                let needs_separator = matches!(name, ":is" | ":where")
+                    || (name == ":has"
+                        && (!selector_suffix_is_pseudo_only(suffix) || branch_has_deep))
+                    || branch_is_first_deep;
+                if needs_separator {
                     selector.push(' ');
                 } else {
                     let preserve_leading = if matches!(name, ":is" | ":where")

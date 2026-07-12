@@ -160,12 +160,11 @@ pub(crate) fn scoped_container_injection_target(selector: &str) -> Option<Select
                     index = skip_selector_comment(selector, index);
                     continue;
                 }
-                '&' => {
-                    if !has_target {
-                        has_target = true;
-                        target = None;
-                    }
+                '&' if !has_target => {
+                    has_target = true;
+                    target = None;
                 }
+                '&' => {}
                 '[' => {
                     let end = find_matching_selector_bracket(selector, index)
                         .unwrap_or(selector.len().saturating_sub(1));
@@ -189,12 +188,11 @@ pub(crate) fn scoped_container_injection_target(selector: &str) -> Option<Select
                     continue;
                 }
                 '>' | '+' | '~' | ',' => {}
-                '*' => {
-                    if !has_target {
-                        has_target = true;
-                        target = None;
-                    }
+                '*' if !has_target => {
+                    has_target = true;
+                    target = None;
                 }
+                '*' => {}
                 _ if ch.is_whitespace() => {}
                 _ if is_selector_ident_start(ch) || ch == '.' || ch == '#' => {
                     let end = consume_selector_token(selector, index);

@@ -123,7 +123,7 @@ pub(crate) fn extract_v_for_alias_locals(alias: &str) -> Vec<String> {
     if alias
         .chars()
         .next()
-        .is_some_and(|ch| is_identifier_start(ch))
+        .is_some_and(is_identifier_start)
     {
         vec![alias.to_string()]
     } else {
@@ -140,7 +140,7 @@ pub(crate) fn extract_destructure_alias_locals(alias: &str) -> Vec<String> {
         .trim_end_matches(']');
     split_top_level_like(trimmed, ',')
         .into_iter()
-        .flat_map(|part| extract_slot_params(part))
+        .flat_map(extract_slot_params)
         .collect()
 }
 

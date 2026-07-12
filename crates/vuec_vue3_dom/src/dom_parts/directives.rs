@@ -2,7 +2,7 @@
 pub fn extract_directives(attributes: &[TemplateAttribute]) -> Vec<DomDirective> {
     attributes
         .iter()
-        .filter_map(|attr| parse_directive(attr))
+        .filter_map(parse_directive)
         .collect()
 }
 

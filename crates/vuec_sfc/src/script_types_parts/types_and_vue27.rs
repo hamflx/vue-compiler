@@ -222,8 +222,10 @@ pub(crate) fn analyze_vue27_script_setup(
     }
 
     let mut edits = SourceEdits::new(source);
-    let mut analysis = Vue27ScriptSetupAnalysis::default();
-    analysis.normal_imports = setup_context.normal_imports.clone();
+    let mut analysis = Vue27ScriptSetupAnalysis {
+        normal_imports: setup_context.normal_imports.clone(),
+        ..Vue27ScriptSetupAnalysis::default()
+    };
     analysis
         .declared_types
         .extend(setup_context.normal_types.declared_types.clone());

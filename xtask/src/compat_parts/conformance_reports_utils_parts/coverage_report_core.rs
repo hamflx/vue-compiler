@@ -60,7 +60,7 @@ fn conformance_counts_by_source(
             ConformanceExecutionCounts::default(),
         );
     }
-    if manifest.is_some_and(|manifest| manifest_contains_mixed_official_source_boundary(manifest))
+    if manifest.is_some_and(manifest_contains_mixed_official_source_boundary)
         || files.is_empty()
     {
         if let Some(bucket) = counts_by_source.get_mut(report_source.as_str()) {
@@ -140,7 +140,7 @@ fn conformance_coverage_report_kind(
     files: &[ConformanceCoverageFile],
     manifest: Option<&PreparedTestManifest>,
 ) -> ConformanceCoverageKind {
-    if manifest.is_some_and(|manifest| manifest_contains_mixed_official_source_boundary(manifest)) {
+    if manifest.is_some_and(manifest_contains_mixed_official_source_boundary) {
         return ConformanceCoverageKind::Mixed;
     }
     let Some(first) = files.first() else {

@@ -498,19 +498,34 @@ fn run_output_contract_probe(
         .with_context(|| format!("failed to parse output contract probe for {request}"))
 }
 
-fn run_option_probe(
-    side: &str,
+struct OptionProbeRequest<'a> {
+    side: &'a str,
     target: TargetSpec,
-    root: &Path,
-    request: &str,
-    method: &str,
-    fixture_source: &str,
-    fixture_id: &str,
-    option_name: &str,
-    option_path: &str,
-    input_kind: &str,
-    option_value: Option<&serde_json::Value>,
-) -> Result<OptionProbeOutput> {
+    root: &'a Path,
+    request: &'a str,
+    method: &'a str,
+    fixture_source: &'a str,
+    fixture_id: &'a str,
+    option_name: &'a str,
+    option_path: &'a str,
+    input_kind: &'a str,
+    option_value: Option<&'a serde_json::Value>,
+}
+
+fn run_option_probe(probe: OptionProbeRequest<'_>) -> Result<OptionProbeOutput> {
+    let OptionProbeRequest {
+        side,
+        target,
+        root,
+        request,
+        method,
+        fixture_source,
+        fixture_id,
+        option_name,
+        option_path,
+        input_kind,
+        option_value,
+    } = probe;
     let root = absolute_path(root);
     let node = resolve_program("node");
     let payload = serde_json::json!({

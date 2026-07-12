@@ -134,13 +134,14 @@ pub(crate) fn script_content(
         }
     }
     append_vue3_module_chunk(&mut content, &setup_analysis.module_content);
-    if content.is_empty() && !normal_script.module_content.is_empty() {
-        if setup_analysis.removed_leading_import_padding.is_some() {
-            if let Some(padding) = vue3_trailing_blank_line_padding(&normal_script.module_content)
-                .or(setup_analysis.removed_leading_import_padding.as_deref())
-            {
-                content.push_str(padding);
-            }
+    if content.is_empty()
+        && !normal_script.module_content.is_empty()
+        && setup_analysis.removed_leading_import_padding.is_some()
+    {
+        if let Some(padding) = vue3_trailing_blank_line_padding(&normal_script.module_content)
+            .or(setup_analysis.removed_leading_import_padding.as_deref())
+        {
+            content.push_str(padding);
         }
     }
     append_vue3_module_chunk(&mut content, &normal_script.module_content);
@@ -155,8 +156,6 @@ pub(crate) fn script_content(
             .is_some_and(|render| !render.preamble.is_empty())
         {
             content.push_str("\n\n\n");
-        } else if inline_render.is_some() {
-            content.push_str("\n\n");
         } else {
             content.push_str("\n\n");
         }
@@ -192,14 +191,16 @@ pub(crate) fn script_content(
         &setup_analysis,
         &return_bindings,
         &script_binding_metadata,
-        filename,
         &normal_script,
-        is_ts,
-        options.is_prod,
-        inline_render.as_ref(),
-        css_vars_code.as_deref(),
-        options.emit_script_setup_marker,
-        options.gen_default_as.as_deref(),
+        Vue3ScriptSetupExportOptions {
+            filename,
+            is_ts,
+            is_prod: options.is_prod,
+            inline_render: inline_render.as_ref(),
+            css_vars_code: css_vars_code.as_deref(),
+            emit_script_setup_marker: options.emit_script_setup_marker,
+            gen_default_as: options.gen_default_as.as_deref(),
+        },
     );
     append_vue3_export_chunk(&mut content, &export);
     let mut bindings = BTreeMap::new();
@@ -239,7 +240,7 @@ pub(crate) fn script_content(
         props_aliases: public_props_aliases,
         imports,
         removed_bindings: setup_analysis.removed_bindings,
-        deps: setup_analysis.deps.iter().cloned().collect(),
+        deps: setup_analysis.deps.to_vec(),
         map,
     }
 }
@@ -649,15 +650,15 @@ pub(crate) fn vue3_normal_script_content(
                 has_default_export = true;
                 rewrite_vue3_export_default(default_export_name, declaration, &mut edits);
             }
-            Statement::ExportNamedDeclaration(declaration) => {
+            Statement::ExportNamedDeclaration(declaration)
                 if rewrite_vue3_compile_script_named_default_export(
                     source,
                     default_export_name,
                     declaration,
                     &mut edits,
-                ) {
-                    has_default_export = true;
-                }
+                ) =>
+            {
+                has_default_export = true;
             }
             _ => {}
         }

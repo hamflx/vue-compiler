@@ -101,9 +101,7 @@ pub fn vue3_element_codegen_patch_flag(
     options: &Vue3CompilerOptions,
     is_root: bool,
 ) -> Option<i32> {
-    let Some(node) = ast.node(node_id) else {
-        return None;
-    };
+    let node = ast.node(node_id)?;
     let Vue3AstKind::Element(element) = &node.kind else {
         return None;
     };

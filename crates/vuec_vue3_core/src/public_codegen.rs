@@ -604,21 +604,17 @@ impl<'a> PublicAstCodegen<'a> {
         let test = node.get("test").unwrap_or(&Value::Null);
         let alternate = node.get("alternate").unwrap_or(&Value::Null);
         let nested = json_u64(alternate, "type") == Some(19);
-        if json_u64(test, "type") == Some(4)
-            && !json_bool(test, "isStatic")
-            && !is_simple_identifier(json_str(test, "content").unwrap_or(""))
+        if json_u64(test, "type") != Some(4)
+            || (!json_bool(test, "isStatic")
+                && !is_simple_identifier(json_str(test, "content").unwrap_or("")))
         {
-            self.push("(");
-            self.gen_node(test);
-            self.push(")");
-        } else if json_u64(test, "type") != Some(4) {
             self.push("(");
             self.gen_node(test);
             self.push(")");
         } else {
             self.gen_node(test);
         }
-        if json_bool(node, "newline") == false && node.get("newline").is_some() {
+        if !json_bool(node, "newline") && node.get("newline").is_some() {
             self.push(" ? ");
             self.gen_node(node.get("consequent").unwrap_or(&Value::Null));
             self.push(" : ");

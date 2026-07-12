@@ -212,6 +212,7 @@ fn run_option_matrix_with_backend(scope: &SelectionArgs, backend: AliasBackend) 
             }
         };
         let rust_root = backend.root(target.version_line);
+        let request = api_require_request(target);
         let mut row_reports = Vec::new();
         for row in &matrix.rows {
             if row.status == "pending" {
@@ -225,32 +226,32 @@ fn run_option_matrix_with_backend(scope: &SelectionArgs, backend: AliasBackend) 
                 }));
                 continue;
             }
-            let official_probe = run_option_probe(
-                "official",
+            let official_probe = run_option_probe(OptionProbeRequest {
+                side: "official",
                 target,
-                &official_root,
-                &api_require_request(target),
-                &row.method,
-                &row.fixture_source,
-                &row.fixture_id,
-                &row.option_name,
-                &row.option_path,
-                &row.input_kind,
-                row.option_value.as_ref(),
-            );
-            let rust_probe = run_option_probe(
-                backend.option_side(),
+                root: &official_root,
+                request: &request,
+                method: &row.method,
+                fixture_source: &row.fixture_source,
+                fixture_id: &row.fixture_id,
+                option_name: &row.option_name,
+                option_path: &row.option_path,
+                input_kind: &row.input_kind,
+                option_value: row.option_value.as_ref(),
+            });
+            let rust_probe = run_option_probe(OptionProbeRequest {
+                side: backend.option_side(),
                 target,
-                &rust_root,
-                &api_require_request(target),
-                &row.method,
-                &row.fixture_source,
-                &row.fixture_id,
-                &row.option_name,
-                &row.option_path,
-                &row.input_kind,
-                row.option_value.as_ref(),
-            );
+                root: &rust_root,
+                request: &request,
+                method: &row.method,
+                fixture_source: &row.fixture_source,
+                fixture_id: &row.fixture_id,
+                option_name: &row.option_name,
+                option_path: &row.option_path,
+                input_kind: &row.input_kind,
+                option_value: row.option_value.as_ref(),
+            });
             match (official_probe, rust_probe) {
                 (Ok(official), Ok(rust)) => {
                     let equal = compare_option_probe(row, &official, &rust);

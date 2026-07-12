@@ -1105,7 +1105,8 @@ pub(crate) fn static_const_normalize_class(value: &StaticConstValue) -> Option<S
         StaticConstValue::Object(properties) => Some(
             properties
                 .iter()
-                .filter_map(|(key, value)| value.truthy().then(|| key.clone()))
+                .filter(|(_, value)| value.truthy())
+                .map(|(key, _)| key.clone())
                 .collect::<Vec<_>>()
                 .join(" "),
         ),

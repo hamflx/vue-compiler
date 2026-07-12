@@ -358,13 +358,16 @@ impl<'a> Vue3ScriptCompileContext<'a> {
                         &self.descriptor().filename,
                         self.descriptor(),
                         script_setup,
-                        self.options.hoist_static && self.script.is_none(),
                         &normal_type_context,
                         &normal_user_imports,
                         &type_resolver,
-                        self.options.props_destructure,
-                        self.options.is_prod,
-                        self.options.custom_element,
+                        Vue3ScriptSetupAnalysisOptions {
+                            hoist_static_literals: self.options.hoist_static
+                                && self.script.is_none(),
+                            props_destructure: self.options.props_destructure,
+                            is_prod: self.options.is_prod,
+                            custom_element: self.options.custom_element,
+                        },
                     )
                 })
                 .unwrap_or_default();

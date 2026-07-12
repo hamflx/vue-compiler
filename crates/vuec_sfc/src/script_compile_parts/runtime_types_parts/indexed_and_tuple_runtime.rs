@@ -107,9 +107,7 @@ pub(crate) fn vue3_indexed_access_runtime_index(
             vue3_indexed_access_runtime_index(&parenthesized.type_annotation, analysis)
         }
         TSType::TSTypeReference(reference) => {
-            let Some(name) = vue3_ts_type_name_key(&reference.type_name) else {
-                return None;
-            };
+            let name = vue3_ts_type_name_key(&reference.type_name)?;
             if analysis
                 .declared_types
                 .get(&name)

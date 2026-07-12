@@ -22,7 +22,7 @@ pub(crate) fn vue27_strip_template_expression_strings(exp: &str) -> String {
                     } else if inner == '$' && chars.peek().is_some_and(|(_, next)| *next == '{') {
                         let _ = chars.next();
                         let mut depth = 1usize;
-                        while let Some((_, expr_ch)) = chars.next() {
+                        for (_, expr_ch) in chars.by_ref() {
                             if expr_ch == '{' {
                                 depth += 1;
                                 template_expr.push(expr_ch);
@@ -1078,7 +1078,7 @@ pub(crate) fn push_unique(values: &mut Vec<String>, value: &str) {
 }
 
 pub(crate) fn trim_trailing_blank_lines(value: &str) -> &str {
-    value.trim_end_matches(|ch| matches!(ch, '\n' | '\r'))
+    value.trim_end_matches(['\n', '\r'])
 }
 
 pub(crate) fn script_is_typescript(attrs: &SfcBlockAttrs) -> bool {

@@ -475,11 +475,11 @@ pub(crate) fn project_vue3_export_all_type_context(
         .chain(imported.string_literal_type_declarations.keys())
         .chain(imported.ordered_string_literal_type_declarations.keys())
         .chain(imported.emits_type_declarations.keys())
+        .filter(|&name| name != "default")
         .cloned()
-        .filter(|name| name != "default")
         .collect::<BTreeSet<_>>();
     for name in &names {
-        insert_vue3_re_exported_type_alias(analysis, imported, &name, &name, dependency);
+        insert_vue3_re_exported_type_alias(analysis, imported, name, name, dependency);
     }
     names
 }

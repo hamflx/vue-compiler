@@ -237,7 +237,7 @@ fn remove_side_effect_children(ast: &mut Vue3Ast, parent_id: NodeId, ctx: &mut T
     for child_id in child_ids {
         let remove = ast
             .node(child_id)
-            .is_some_and(|child| ast_node_is_side_effect_tag(child));
+            .is_some_and(ast_node_is_side_effect_tag);
         if remove {
             if let Some(span) = ast.node(child_id).and_then(|node| node.span.source()) {
                 ctx.report(Diagnostic::vue3_error(

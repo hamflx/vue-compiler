@@ -125,7 +125,7 @@ pub(crate) fn diagnostic_attrs_have_value(
             && attr
                 .value
                 .as_deref()
-                .is_some_and(|value| values.iter().any(|candidate| *candidate == value))
+                .is_some_and(|value| values.contains(&value))
     })
 }
 
@@ -585,8 +585,7 @@ pub(crate) fn collect_invalid_end_tag_diagnostics(
                     if tag_token_is_incomplete(source, token.start, token.end) {
                         continue;
                     }
-                    if source[token.start..token.end]
-                        .as_bytes()
+                    if source.as_bytes()[token.start..token.end]
                         .get(2)
                         .is_some_and(u8::is_ascii_whitespace)
                     {

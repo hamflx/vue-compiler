@@ -34,8 +34,7 @@ pub(crate) fn vue3_text_has_untransformed_custom_directive(node: &Value, context
         .is_some_and(|props| {
             props.iter().any(|prop| {
                 json_node_type(prop) == Some(7)
-                    && json_str(prop, "name")
-                        .is_some_and(|name| !transformed.iter().any(|known| *known == name))
+                    && json_str(prop, "name").is_some_and(|name| !transformed.contains(&name))
             })
         })
 }

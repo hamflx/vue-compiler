@@ -169,7 +169,7 @@ defineProps<Props>()
             ignored_script.bindings.get("foo").map(String::as_str),
             Some("props")
         );
-        assert!(ignored_script.bindings.get("skipped").is_none());
+        assert!(!ignored_script.bindings.contains_key("skipped"));
         assert!(ignored_script.deps.is_empty(), "{:?}", ignored_script.deps);
     }
 

@@ -110,7 +110,7 @@ pub(crate) fn vue3_cache_static_suite_collect_transform_helpers(
                 vue3_cache_static_suite_collect_transform_helpers(content, context, tracker);
             }
             if let Some(codegen) = node.get("codegenNode") {
-                vue3_cache_static_suite_collect_expression_helpers(codegen, context, tracker);
+                vue3_cache_static_suite_collect_expression_helpers(codegen, tracker);
             }
         }
         Some(20) => {
@@ -159,7 +159,7 @@ pub(crate) fn vue3_cache_static_suite_collect_element_exit_helpers(
         return;
     };
     if vue3_public_node_type(codegen) != Some(13) {
-        vue3_cache_static_suite_collect_expression_helpers(codegen, context, tracker);
+        vue3_cache_static_suite_collect_expression_helpers(codegen, tracker);
         return;
     }
     if codegen
@@ -274,10 +274,8 @@ pub(crate) fn vue3_cache_static_suite_collect_if_codegen_helpers(
                 vue3_cache_static_suite_collect_if_codegen_helpers(alternate, tracker);
             }
         }
-        Some(13) => {
-            if node.get("tag").and_then(Value::as_str) == Some("FRAGMENT") {
-                vue3_cache_static_suite_collect_vnode_self_helpers(node, tracker);
-            }
+        Some(13) if node.get("tag").and_then(Value::as_str) == Some("FRAGMENT") => {
+            vue3_cache_static_suite_collect_vnode_self_helpers(node, tracker);
         }
         Some(14) if node.get("callee").and_then(Value::as_str) == Some("CREATE_COMMENT") => {
             tracker.add("CREATE_COMMENT");
@@ -415,17 +413,16 @@ pub(crate) fn vue3_cache_static_suite_collect_hoisted_expression_helpers(
             .and_then(|value| value.parse::<usize>().ok())
         {
             if let Some(hoist) = context.hoists.get(index.saturating_sub(1)) {
-                vue3_cache_static_suite_collect_expression_helpers(hoist, context, tracker);
+                vue3_cache_static_suite_collect_expression_helpers(hoist, tracker);
                 return;
             }
         }
     }
-    vue3_cache_static_suite_collect_expression_helpers(node, context, tracker);
+    vue3_cache_static_suite_collect_expression_helpers(node, tracker);
 }
 
 pub(crate) fn vue3_cache_static_suite_collect_expression_helpers(
     node: &Value,
-    context: &Vue3CacheStaticHelperContext,
     tracker: &mut Vue3CacheStaticHelperTracker,
 ) {
     match vue3_public_node_type(node) {
@@ -433,16 +430,16 @@ pub(crate) fn vue3_cache_static_suite_collect_expression_helpers(
         Some(8) => {
             if let Some(children) = node.get("children").and_then(Value::as_array) {
                 for child in children {
-                    vue3_cache_static_suite_collect_expression_helpers(child, context, tracker);
+                    vue3_cache_static_suite_collect_expression_helpers(child, tracker);
                 }
             }
         }
         Some(12) => {
             if let Some(content) = node.get("content") {
-                vue3_cache_static_suite_collect_expression_helpers(content, context, tracker);
+                vue3_cache_static_suite_collect_expression_helpers(content, tracker);
             }
             if let Some(codegen) = node.get("codegenNode") {
-                vue3_cache_static_suite_collect_expression_helpers(codegen, context, tracker);
+                vue3_cache_static_suite_collect_expression_helpers(codegen, tracker);
             }
         }
         Some(14) => {
@@ -455,7 +452,7 @@ pub(crate) fn vue3_cache_static_suite_collect_expression_helpers(
             }
             if let Some(arguments) = node.get("arguments").and_then(Value::as_array) {
                 for argument in arguments {
-                    vue3_cache_static_suite_collect_expression_helpers(argument, context, tracker);
+                    vue3_cache_static_suite_collect_expression_helpers(argument, tracker);
                 }
             }
         }
@@ -463,10 +460,10 @@ pub(crate) fn vue3_cache_static_suite_collect_expression_helpers(
             if let Some(properties) = node.get("properties").and_then(Value::as_array) {
                 for property in properties {
                     if let Some(key) = property.get("key") {
-                        vue3_cache_static_suite_collect_expression_helpers(key, context, tracker);
+                        vue3_cache_static_suite_collect_expression_helpers(key, tracker);
                     }
                     if let Some(value) = property.get("value") {
-                        vue3_cache_static_suite_collect_expression_helpers(value, context, tracker);
+                        vue3_cache_static_suite_collect_expression_helpers(value, tracker);
                     }
                 }
             }
@@ -474,7 +471,7 @@ pub(crate) fn vue3_cache_static_suite_collect_expression_helpers(
         Some(17) => {
             if let Some(elements) = node.get("elements").and_then(Value::as_array) {
                 for element in elements {
-                    vue3_cache_static_suite_collect_expression_helpers(element, context, tracker);
+                    vue3_cache_static_suite_collect_expression_helpers(element, tracker);
                 }
             }
         }
@@ -483,7 +480,7 @@ pub(crate) fn vue3_cache_static_suite_collect_expression_helpers(
                 tracker.add("WITH_CTX");
             }
             if let Some(returns) = node.get("returns") {
-                vue3_cache_static_suite_collect_expression_helpers(returns, context, tracker);
+                vue3_cache_static_suite_collect_expression_helpers(returns, tracker);
             }
         }
         Some(20) => {
@@ -495,7 +492,7 @@ pub(crate) fn vue3_cache_static_suite_collect_expression_helpers(
                 tracker.add("SET_BLOCK_TRACKING");
             }
             if let Some(value) = node.get("value") {
-                vue3_cache_static_suite_collect_expression_helpers(value, context, tracker);
+                vue3_cache_static_suite_collect_expression_helpers(value, tracker);
             }
         }
         _ => {}

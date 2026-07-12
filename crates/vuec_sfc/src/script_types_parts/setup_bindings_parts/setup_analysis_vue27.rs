@@ -63,8 +63,7 @@ pub(crate) fn analyze_vue27_setup_variable_declaration(
 ) {
     let mut macro_declarators = Vec::new();
     for (index, declarator) in declaration.declarations.iter().enumerate() {
-        if let Some(init) = &declarator.init {
-            if let Expression::CallExpression(call) = init {
+        if let Some(Expression::CallExpression(call)) = &declarator.init {
                 if is_call_named(call, "defineProps") {
                     collect_define_props_call(source, call, None, analysis, is_prod);
                     collect_pattern_bindings(&declarator.id, &mut analysis.return_bindings);
@@ -106,7 +105,6 @@ pub(crate) fn analyze_vue27_setup_variable_declaration(
                     macro_declarators.push(index);
                     continue;
                 }
-            }
         }
         let binding_type =
             vue27_setup_binding_type(declaration.kind, declarator.init.as_ref(), analysis);

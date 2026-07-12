@@ -92,10 +92,10 @@ pub(crate) fn rewrite_vue27_default_from_program(
                 found_default = true;
                 rewrite_export_default(input, variable, declaration, &mut edits);
             }
-            Statement::ExportNamedDeclaration(declaration) => {
-                if rewrite_named_default_exports(input, variable, declaration, &mut edits) {
-                    found_default = true;
-                }
+            Statement::ExportNamedDeclaration(declaration)
+                if rewrite_named_default_exports(input, variable, declaration, &mut edits) =>
+            {
+                found_default = true;
             }
             _ => {}
         }
@@ -119,10 +119,10 @@ pub(crate) fn rewrite_vue3_default_from_program(
                 found_default = true;
                 rewrite_vue3_export_default(variable, declaration, &mut edits);
             }
-            Statement::ExportNamedDeclaration(declaration) => {
-                if rewrite_vue3_named_default_exports(input, variable, declaration, &mut edits) {
-                    found_default = true;
-                }
+            Statement::ExportNamedDeclaration(declaration)
+                if rewrite_vue3_named_default_exports(input, variable, declaration, &mut edits) =>
+            {
+                found_default = true;
             }
             _ => {}
         }
@@ -404,8 +404,6 @@ pub(crate) fn specifier_end(input: &str, mut end: usize, node_end: usize) -> usi
         } else if ch == ',' {
             end += ch.len_utf8();
             has_comma = true;
-            break;
-        } else if ch == '}' {
             break;
         } else {
             break;

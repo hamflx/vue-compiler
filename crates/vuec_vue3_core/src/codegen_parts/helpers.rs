@@ -654,7 +654,7 @@ pub(crate) fn apply_vue3_dynamic_event_helper_order(
     reorder_helpers_by_preference(helpers, &preferred);
 }
 
-pub(crate) fn sort_helpers_by_order(helpers: &mut Vec<RuntimeHelper>, order: &[RuntimeHelper]) {
+pub(crate) fn sort_helpers_by_order(helpers: &mut [RuntimeHelper], order: &[RuntimeHelper]) {
     helpers.sort_by_key(|helper| {
         order
             .iter()

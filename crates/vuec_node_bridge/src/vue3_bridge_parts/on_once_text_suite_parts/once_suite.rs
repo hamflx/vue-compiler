@@ -481,14 +481,13 @@ pub(crate) fn vue3_once_suite_set_root_codegen(root: &mut Value) {
                 .and_then(Value::as_array_mut)
                 .and_then(|items| items.get_mut(*index))
             {
-                if vue3_public_node_type(root_child) == Some(1) {
-                    if root_child
+                if vue3_public_node_type(root_child) == Some(1)
+                    && root_child
                         .get("codegenNode")
                         .and_then(vue3_public_node_type)
                         == Some(13)
-                    {
-                        root_child["codegenNode"]["isBlock"] = json!(true);
-                    }
+                {
+                    root_child["codegenNode"]["isBlock"] = json!(true);
                 }
             }
             root.get("children")

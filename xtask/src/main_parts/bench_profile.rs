@@ -639,7 +639,7 @@ fn p95_micros(samples: &[u128]) -> u128 {
     if sorted.is_empty() {
         return 0;
     }
-    let index = ((sorted.len() * 95 + 99) / 100).saturating_sub(1);
+    let index = (sorted.len() * 95).div_ceil(100).saturating_sub(1);
     sorted[index]
 }
 

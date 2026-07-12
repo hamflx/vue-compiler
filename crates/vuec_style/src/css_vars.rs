@@ -271,9 +271,7 @@ pub(crate) fn find_next_v_bind(
                     continue;
                 }
                 if source[open..].starts_with("/*") {
-                    let Some(end_offset) = source[open + 2..].find("*/") else {
-                        return None;
-                    };
+                    let end_offset = source[open + 2..].find("*/")?;
                     saw_comment = true;
                     open += 2 + end_offset + 2;
                     continue;
@@ -306,28 +304,28 @@ pub(crate) fn skip_css_line_comment(source: &str, start: usize) -> usize {
 }
 
 pub(crate) fn lex_css_var_binding(source: &str, start: usize) -> Option<usize> {
-    let mut state = CssVarLexerState::InParens;
+    let mut state = CssVarLexerState::Parens;
     let mut depth = 0usize;
     let mut index = start;
     while index < source.len() {
         let ch = source[index..].chars().next()?;
         match state {
-            CssVarLexerState::InParens => match ch {
-                '\'' => state = CssVarLexerState::InSingleQuote,
-                '"' => state = CssVarLexerState::InDoubleQuote,
+            CssVarLexerState::Parens => match ch {
+                '\'' => state = CssVarLexerState::SingleQuote,
+                '"' => state = CssVarLexerState::DoubleQuote,
                 '(' => depth += 1,
                 ')' if depth > 0 => depth -= 1,
                 ')' => return Some(index),
                 _ => {}
             },
-            CssVarLexerState::InSingleQuote => {
+            CssVarLexerState::SingleQuote => {
                 if ch == '\'' {
-                    state = CssVarLexerState::InParens;
+                    state = CssVarLexerState::Parens;
                 }
             }
-            CssVarLexerState::InDoubleQuote => {
+            CssVarLexerState::DoubleQuote => {
                 if ch == '"' {
-                    state = CssVarLexerState::InParens;
+                    state = CssVarLexerState::Parens;
                 }
             }
         }
@@ -338,9 +336,9 @@ pub(crate) fn lex_css_var_binding(source: &str, start: usize) -> Option<usize> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CssVarLexerState {
-    InParens,
-    InSingleQuote,
-    InDoubleQuote,
+    Parens,
+    SingleQuote,
+    DoubleQuote,
 }
 
 pub(crate) fn normalize_expression(value: &str) -> String {

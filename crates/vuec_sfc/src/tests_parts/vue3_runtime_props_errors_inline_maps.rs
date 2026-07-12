@@ -307,8 +307,8 @@ const count = ref(1)
         assert!(script.content.contains("const props = __props"));
         assert!(!script.content.contains("withDefaults"));
         assert!(!script.content.contains("defineProps"));
-        assert!(script.bindings.get("withDefaults").is_none());
-        assert!(script.bindings.get("defineProps").is_none());
+        assert!(!script.bindings.contains_key("withDefaults"));
+        assert!(!script.bindings.contains_key("defineProps"));
     }
 
     #[test]

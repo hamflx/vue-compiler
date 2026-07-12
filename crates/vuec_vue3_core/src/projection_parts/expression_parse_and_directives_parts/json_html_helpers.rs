@@ -24,10 +24,12 @@ pub(crate) fn setup_reference_name_for_tag(
 pub(crate) fn setup_reference_name(name: &str, options: &Vue3CompilerOptions) -> Option<String> {
     let camel_name = camelize(name);
     let pascal_name = capitalize(&camel_name);
-    for candidate in [name.to_string(), camel_name, pascal_name] {
-        if options
+    [name.to_string(), camel_name, pascal_name]
+        .into_iter()
+        .find(|candidate| {
+            options
             .binding_metadata
-            .get(&candidate)
+            .get(candidate)
             .is_some_and(|kind| {
                 matches!(
                     kind.as_str(),
@@ -40,11 +42,7 @@ pub(crate) fn setup_reference_name(name: &str, options: &Vue3CompilerOptions) ->
                         | "props"
                 )
             })
-        {
-            return Some(candidate);
-        }
-    }
-    None
+        })
 }
 
 pub(crate) fn to_handler_key(value: &str) -> String {
@@ -152,7 +150,7 @@ pub(crate) fn vue3_element_has_attr_value(
                     && attr
                         .value
                         .as_deref()
-                        .is_some_and(|value| values.iter().any(|candidate| *candidate == value))
+                        .is_some_and(|value| values.contains(&value))
         )
     })
 }

@@ -297,12 +297,9 @@ fn report_value_status(value: &serde_json::Value) -> ReportStatus {
 }
 
 fn combine_report_statuses<const N: usize>(statuses: [ReportStatus; N]) -> ReportStatus {
-    if statuses.iter().any(|status| *status == ReportStatus::Fail) {
+    if statuses.contains(&ReportStatus::Fail) {
         ReportStatus::Fail
-    } else if statuses
-        .iter()
-        .any(|status| *status == ReportStatus::Pending)
-    {
+    } else if statuses.contains(&ReportStatus::Pending) {
         ReportStatus::Pending
     } else {
         ReportStatus::Pass

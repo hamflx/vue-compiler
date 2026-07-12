@@ -56,7 +56,7 @@ pub(crate) fn selector_list_branch_preserves_leading_whitespace(
     if original.starts_with(">>>") || original.starts_with("/deep/") {
         return false;
     }
-    !match_selector_pseudo_function(
+    match_selector_pseudo_function(
         original,
         0,
         &[
@@ -68,7 +68,7 @@ pub(crate) fn selector_list_branch_preserves_leading_whitespace(
             "::v-deep",
         ],
     )
-    .is_some()
+    .is_none()
 }
 
 pub(crate) fn selector_leading_whitespace(selector: &str) -> &str {

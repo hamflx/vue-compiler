@@ -43,7 +43,7 @@ pub(crate) fn vue3_strip_jsonc_comments(source: &str) -> String {
                 chars.next();
                 output.push(' ');
                 output.push(' ');
-                while let Some(comment) = chars.next() {
+                for comment in chars.by_ref() {
                     if comment == '\n' || comment == '\r' {
                         output.push(comment);
                         break;
@@ -56,7 +56,7 @@ pub(crate) fn vue3_strip_jsonc_comments(source: &str) -> String {
                 output.push(' ');
                 output.push(' ');
                 let mut prev_star = false;
-                while let Some(comment) = chars.next() {
+                for comment in chars.by_ref() {
                     let ends_comment = prev_star && comment == '/';
                     if comment == '\n' || comment == '\r' {
                         output.push(comment);

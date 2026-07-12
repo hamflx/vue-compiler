@@ -1,15 +1,25 @@
+pub(crate) struct Vue3ScriptSetupAnalysisOptions {
+    pub(crate) hoist_static_literals: bool,
+    pub(crate) props_destructure: SfcPropsDestructureMode,
+    pub(crate) is_prod: bool,
+    pub(crate) custom_element: bool,
+}
+
 pub(crate) fn analyze_vue3_script_setup(
     filename: &str,
     descriptor: &SfcDescriptor,
     script_setup: &SfcBlock,
-    hoist_static_literals: bool,
     normal_type_context: &Vue27TypeContext,
     normal_user_imports: &Vue3UserImports,
     type_resolver: &Vue3TypeResolverContext,
-    props_destructure: SfcPropsDestructureMode,
-    is_prod: bool,
-    custom_element: bool,
+    options: Vue3ScriptSetupAnalysisOptions,
 ) -> Vue3ScriptSetupAnalysis {
+    let Vue3ScriptSetupAnalysisOptions {
+        hoist_static_literals,
+        props_destructure,
+        is_prod,
+        custom_element,
+    } = options;
     let source = script_setup.content.as_str();
     let is_ts = script_is_typescript(&script_setup.attrs);
     let allocator = oxc_allocator::Allocator::default();

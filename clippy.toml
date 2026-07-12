@@ -1,0 +1,4 @@
+# Compiler lowering and code-generation helpers often carry an AST node, target
+# context, scope, options, and output state together. Keep the gate strict for
+# larger interfaces without forcing churn solely to satisfy Clippy's default 7.
+too-many-arguments-threshold = 9

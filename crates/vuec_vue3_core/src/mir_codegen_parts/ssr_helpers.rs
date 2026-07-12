@@ -7,7 +7,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
             .as_ref()
             .and_then(|root_attrs| self.root_attr_node_for_children(root_children, root_attrs));
         if let Some(root_attrs) = &root_attrs {
-            if self.root_attrs_need_merge_props(self.root_children(), &root_attrs) {
+            if self.root_attrs_need_merge_props(self.root_children(), root_attrs) {
                 push_unique_helper(&mut helpers, RuntimeHelper::Vue3MergeProps);
             }
         }
@@ -346,10 +346,10 @@ impl<'a> Vue3SsrMirCodegen<'a> {
                     self.push_prop_helpers(&component.props, helpers);
                     self.push_vnode_fallback_helpers(*child_id, helpers);
                 }
-                Vue3SsrMirKind::RenderSlot(slot) => {
-                    if self.render_slot_as_vnode_fallback(slot) {
-                        push_unique_helper(helpers, RuntimeHelper::Vue3RenderSlot);
-                    }
+                Vue3SsrMirKind::RenderSlot(slot)
+                    if self.render_slot_as_vnode_fallback(slot) =>
+                {
+                    push_unique_helper(helpers, RuntimeHelper::Vue3RenderSlot);
                 }
                 Vue3SsrMirKind::If { .. } | Vue3SsrMirKind::For(_) => {
                     self.push_vnode_fallback_helpers(*child_id, helpers);

@@ -388,7 +388,7 @@ pub(crate) fn js_ast_walk_identifiers<'a>(
                 .iter()
                 .map(|ancestor| ancestor.node.clone())
                 .collect::<Vec<_>>();
-            let is_refed = parent.map_or(true, |parent| {
+            let is_refed = parent.is_none_or(|parent| {
                 js_ast_is_referenced_identifier(node, parent, &stack_nodes, relation)
             });
             if include_all || (is_refed && !is_local) {
@@ -442,7 +442,7 @@ pub(crate) fn js_ast_walk_identifiers<'a>(
     }
 }
 
-pub(crate) fn js_ast_child_entries<'a>(node: &'a Value) -> Vec<(String, Vec<Value>, &'a Value)> {
+pub(crate) fn js_ast_child_entries(node: &Value) -> Vec<(String, Vec<Value>, &Value)> {
     const KEYS: &[&str] = &[
         "body",
         "declarations",
@@ -540,12 +540,12 @@ pub(crate) fn js_ast_walk_block_declaration_names(block: &Value) -> Vec<String> 
                     }
                 }
             }
-            Some("FunctionDeclaration" | "ClassDeclaration") => {
-                if !json_bool(stmt, "declare") {
-                    if let Some(id) = stmt.get("id") {
-                        if let Some(name) = json_str(id, "name") {
-                            names.push(name.to_string());
-                        }
+            Some("FunctionDeclaration" | "ClassDeclaration")
+                if !json_bool(stmt, "declare") =>
+            {
+                if let Some(id) = stmt.get("id") {
+                    if let Some(name) = json_str(id, "name") {
+                        names.push(name.to_string());
                     }
                 }
             }

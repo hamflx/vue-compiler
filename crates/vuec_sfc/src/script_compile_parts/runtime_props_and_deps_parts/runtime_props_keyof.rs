@@ -188,14 +188,10 @@ pub(crate) fn vue3_keyof_runtime_type_from_signatures(
                 push_unique(&mut types, runtime_type);
             }
             TSSignature::TSIndexSignature(signature) => {
-                let Some(parameter) = signature.parameters.first() else {
-                    return None;
-                };
+                let parameter = signature.parameters.first()?;
                 let runtime_types =
                     infer_vue3_runtime_type(&parameter.type_annotation.type_annotation, analysis);
-                let Some(runtime_type) = runtime_types.first() else {
-                    return None;
-                };
+                let runtime_type = runtime_types.first()?;
                 if runtime_type == "null" || runtime_type == "Unknown" {
                     return None;
                 }

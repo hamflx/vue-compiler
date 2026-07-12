@@ -39,9 +39,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         root_attrs: Option<&SsrRootAttrs>,
         writer: &mut CodeWriter,
     ) -> Option<NodeId> {
-        let Some(node) = self.mir.node(node_id) else {
-            return None;
-        };
+        let node = self.mir.node(node_id)?;
         let (primary_children, alternate) = self.split_if_children(&node.children);
         let branch_root_attrs = self.root_attrs_for_branch_children(&primary_children, root_attrs);
         let scope_id = scope

@@ -658,7 +658,7 @@ pub(crate) fn vue3_text_suite_helpers(root: &Value) -> Vec<String> {
     order
         .iter()
         .copied()
-        .filter(|helper| used.iter().any(|used| *used == *helper))
+        .filter(|helper| used.contains(helper))
         .map(str::to_string)
         .collect()
 }
@@ -726,7 +726,7 @@ pub(crate) fn vue3_text_suite_collect_helpers(node: &Value, used: &mut Vec<&'sta
 }
 
 pub(crate) fn vue3_text_suite_add_helper(used: &mut Vec<&'static str>, helper: &'static str) {
-    if !used.iter().any(|existing| *existing == helper) {
+    if !used.contains(&helper) {
         used.push(helper);
     }
 }

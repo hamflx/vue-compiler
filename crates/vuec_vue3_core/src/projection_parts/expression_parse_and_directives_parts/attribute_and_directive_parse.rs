@@ -1,3 +1,12 @@
+type ParsedVue3Directive = (
+    String,
+    Option<String>,
+    Vec<String>,
+    bool,
+    Option<Span>,
+    Vec<NodeSpan>,
+);
+
 pub(crate) fn is_template_directive(name: &str) -> bool {
     matches!(name, "if" | "else" | "else-if" | "for" | "slot")
 }
@@ -87,14 +96,7 @@ pub(crate) fn vue3_attr_from_html(
 pub(crate) fn parse_vue3_directive(
     raw: &str,
     name_span: Option<Span>,
-) -> Option<(
-    String,
-    Option<String>,
-    Vec<String>,
-    bool,
-    Option<Span>,
-    Vec<NodeSpan>,
-)> {
+) -> Option<ParsedVue3Directive> {
     let mut body = raw;
     let mut name = None;
     let mut arg_offset = 0usize;

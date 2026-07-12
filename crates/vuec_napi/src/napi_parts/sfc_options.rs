@@ -199,18 +199,16 @@ fn asset_url_tags(object: &Map<String, Value>) -> BTreeMap<String, Vec<String>> 
 }
 
 fn vue27_parse_component_options(value: &Value) -> Vue27ParseComponentOptions {
-    let mut options = Vue27ParseComponentOptions::default();
-    options.output_source_range = bool_option(value, "outputSourceRange", false);
-    if let Some(deindent) = value.get("deindent").and_then(Value::as_bool) {
-        options.deindent = Some(deindent);
+    Vue27ParseComponentOptions {
+        output_source_range: bool_option(value, "outputSourceRange", false),
+        deindent: value.get("deindent").and_then(Value::as_bool),
+        pad: match value.get("pad") {
+            Some(Value::Bool(true)) => Vue27SfcPad::True,
+            Some(Value::String(value)) if value == "line" => Vue27SfcPad::Line,
+            Some(Value::String(value)) if value == "space" => Vue27SfcPad::Space,
+            _ => Vue27SfcPad::False,
+        },
     }
-    options.pad = match value.get("pad") {
-        Some(Value::Bool(true)) => Vue27SfcPad::True,
-        Some(Value::String(value)) if value == "line" => Vue27SfcPad::Line,
-        Some(Value::String(value)) if value == "space" => Vue27SfcPad::Space,
-        _ => Vue27SfcPad::False,
-    };
-    options
 }
 
 fn vue27_template_preprocess_options(
@@ -504,15 +502,15 @@ fn vue3_sfc_parse_projection_options(
     value: &Value,
     parse_options: &Vue3SfcParseOptions,
 ) -> Vue3SfcParseProjectionOptions {
-    let mut options = Vue3SfcParseProjectionOptions::default();
-    options.pad = parse_options.pad.clone();
-    options.source_map = bool_option(value, "sourceMap", true);
-    options.source_root = value
-        .get("sourceRoot")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    options
+    Vue3SfcParseProjectionOptions {
+        pad: parse_options.pad.clone(),
+        source_map: bool_option(value, "sourceMap", true),
+        source_root: value
+            .get("sourceRoot")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+    }
 }
 
 fn vue3_sfc_pad_option(value: Option<&Value>) -> Vue3SfcPad {

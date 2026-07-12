@@ -478,7 +478,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         let mut index = 0usize;
         while index < children.len() {
             if let Some((element, next_index)) =
-                self.render_vnode_fallback_element(&children, index, scope)
+                self.render_vnode_fallback_element(children, index, scope)
             {
                 rendered.push(element);
                 index = next_index;
@@ -931,9 +931,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         props: Option<String>,
         children: Vec<String>,
     ) -> String {
-        let tag = if tag.starts_with("_component_") {
-            tag.to_string()
-        } else if tag.starts_with('_') {
+        let tag = if tag.starts_with("_component_") || tag.starts_with('_') {
             tag.to_string()
         } else {
             quote_string(tag)
@@ -970,11 +968,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         } else {
             quote_string(tag)
         };
-        let open = if tag.starts_with("_component_") || tag.starts_with('_') {
-            "_openBlock()"
-        } else {
-            "_openBlock()"
-        };
+        let open = "_openBlock()";
         match (props, children.is_empty()) {
             (None, true) => format!("({open}, _createBlock({tag}))"),
             (Some(props), true) => format!("({open}, _createBlock({tag}, {props}))"),

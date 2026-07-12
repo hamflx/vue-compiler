@@ -248,10 +248,7 @@ impl<'a> Vue3SsrMirCodegen<'a> {
         root_attrs.and_then(|attrs| {
             let mut attrs = attrs.clone();
             if let Some(target_start) = attrs.target_start {
-                attrs.target_start = target_start.checked_sub(offset);
-                if attrs.target_start.is_none() {
-                    return None;
-                }
+                attrs.target_start = Some(target_start.checked_sub(offset)?);
             }
             Some(attrs)
         })

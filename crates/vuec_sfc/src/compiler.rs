@@ -199,7 +199,7 @@ impl SfcCompiler {
                 },
             );
             let ast_summary = result.ast_summary;
-            return SfcTemplateCompileResult {
+            SfcTemplateCompileResult {
                 code: result.code,
                 map: result.map,
                 errors: sfc_template_errors_from_diagnostics(
@@ -212,7 +212,7 @@ impl SfcCompiler {
                 preamble: result.preamble,
                 source: template.content.clone(),
                 tips: Vec::new(),
-            };
+            }
         } else {
             let result = compile_dom(
                 source,
@@ -224,7 +224,7 @@ impl SfcCompiler {
                 },
             );
             let ast_summary = result.ast_summary;
-            return SfcTemplateCompileResult {
+            SfcTemplateCompileResult {
                 code: result.code,
                 map: result.map,
                 errors: sfc_template_errors_from_diagnostics(
@@ -237,7 +237,7 @@ impl SfcCompiler {
                 preamble: result.preamble,
                 source: template.content.clone(),
                 tips: Vec::new(),
-            };
+            }
         }
     }
 
