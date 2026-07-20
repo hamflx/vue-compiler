@@ -90,9 +90,72 @@ pub(crate) fn refresh_vue3_interface_declaration_group(
     let Some(declarations) = interface_declarations.get(&name) else {
         return refresh_vue3_non_generic_interface_declaration(source, declaration, analysis);
     };
-    let mut changed = refresh_vue3_generic_interface_declaration(source, declaration, analysis);
+    let mut changed =
+        refresh_vue3_generic_interface_declaration_group(source, declarations, analysis);
     changed |= refresh_vue3_merged_interface_declarations(source, declarations, analysis);
     changed
+}
+
+fn refresh_vue3_generic_interface_declaration_group(
+    source: &str,
+    declarations: &[&TSInterfaceDeclaration<'_>],
+    analysis: &mut Vue3ScriptSetupAnalysis,
+) -> bool {
+    let Some(first) = declarations.first() else {
+        return false;
+    };
+    if declarations.len() == 1 {
+        return refresh_vue3_generic_interface_declaration(source, first, analysis);
+    }
+    let Some(type_parameters) = first.type_parameters.as_ref() else {
+        return refresh_vue3_generic_interface_declaration(source, first, analysis);
+    };
+    let params = type_parameters
+        .params
+        .iter()
+        .map(|param| param.name.name.to_string())
+        .collect::<Vec<_>>();
+    if params.is_empty()
+        || !declarations.iter().all(|declaration| {
+            declaration.type_parameters.as_ref().is_some_and(|parameters| {
+                parameters
+                    .params
+                    .iter()
+                    .map(|param| param.name.name.as_str())
+                    .eq(params.iter().map(String::as_str))
+            })
+        })
+    {
+        return refresh_vue3_generic_interface_declaration(source, first, analysis);
+    }
+    let fragments = declarations
+        .iter()
+        .filter_map(|declaration| {
+            source
+                .get(declaration.span.start as usize..declaration.span.end as usize)
+                .filter(|source| !source.is_empty())
+                .map(|source| Vue3GenericInterfaceFragment {
+                    source: source.to_string(),
+                    scope: Vue3GenericTypeScope::Local,
+                })
+        })
+        .collect::<Vec<_>>();
+    if fragments.len() != declarations.len() {
+        return refresh_vue3_generic_interface_declaration(source, first, analysis);
+    }
+    let name = first.id.name.as_str();
+    let mut alias = vue3_generic_type_alias(
+        String::new(),
+        Vue3GenericTypeAliasKind::Interface,
+        params,
+    );
+    alias.interface_fragments = fragments;
+    if analysis.generic_type_aliases.get(name) == Some(&alias) {
+        false
+    } else {
+        analysis.generic_type_aliases.insert(name.to_string(), alias);
+        true
+    }
 }
 
 pub(crate) fn refresh_vue3_merged_interface_declarations(

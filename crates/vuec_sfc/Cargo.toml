@@ -18,6 +18,7 @@ serde_json.workspace = true
 nodejs-semver.workspace = true
 oxc_allocator.workspace = true
 oxc_ast.workspace = true
+oxc_ast_visit.workspace = true
 oxc_parser.workspace = true
 oxc_span.workspace = true
 vuec_codegen = { path = "../vuec_codegen", version = "0.1.0" }

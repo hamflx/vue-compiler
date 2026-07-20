@@ -1,211 +1,199 @@
-pub(crate) fn insert_vue3_type_alias_from_analysis(
+pub(crate) fn sync_vue3_type_alias_from_analysis(
     target: &mut Vue3ScriptSetupAnalysis,
     source: &Vue3ScriptSetupAnalysis,
     source_name: &str,
     target_name: &str,
-) {
-    if let Some(value) = source.declared_types.get(source_name).cloned() {
-        target.declared_types.insert(target_name.to_string(), value);
+) -> bool {
+    macro_rules! sync_entry {
+        ($field:ident) => {
+            sync_vue3_projection_entry(
+                &mut target.$field,
+                &source.$field,
+                source_name,
+                target_name,
+            )
+        };
     }
-    if let Some(value) = source.define_model_declared_types.get(source_name).cloned() {
-        target
-            .define_model_declared_types
-            .insert(target_name.to_string(), value);
+
+    let mut changed = false;
+    changed |= sync_entry!(declared_types);
+    changed |= sync_entry!(define_model_declared_types);
+    changed |= sync_entry!(type_query_declared_types);
+    changed |= sync_entry!(define_model_type_query_declared_types);
+    changed |= sync_entry!(keyof_type_query_declared_types);
+    changed |= sync_entry!(props_type_declarations);
+    changed |= sync_entry!(keyof_runtime_type_declarations);
+    changed |= sync_entry!(tuple_runtime_type_declarations);
+    changed |= sync_entry!(define_model_tuple_runtime_type_declarations);
+    changed |= sync_entry!(array_element_runtime_type_declarations);
+    changed |= sync_entry!(define_model_array_element_runtime_type_declarations);
+    changed |= sync_entry!(parameter_tuple_runtime_type_declarations);
+    changed |= sync_entry!(define_model_parameter_tuple_runtime_type_declarations);
+    changed |= sync_entry!(constructor_parameter_tuple_runtime_type_declarations);
+    changed |= sync_entry!(define_model_constructor_parameter_tuple_runtime_type_declarations);
+    changed |= sync_entry!(return_type_runtime_type_declarations);
+    changed |= sync_entry!(define_model_return_type_runtime_type_declarations);
+    changed |= sync_entry!(props_options_type_declarations);
+    changed |= sync_entry!(return_type_props_options_declarations);
+    changed |= sync_vue3_generic_projection_entry(
+        &mut target.generic_type_aliases,
+        &source.generic_type_aliases,
+        source_name,
+        target_name,
+    );
+    changed |= sync_entry!(string_literal_type_declarations);
+    changed |= sync_entry!(ordered_string_literal_type_declarations);
+    changed |= sync_entry!(emits_type_declarations);
+    changed |= sync_entry!(type_sources);
+    changed |= sync_entry!(type_direct_deps);
+    changed |= sync_entry!(type_deps);
+    changed |= sync_entry!(unresolved_import_sources);
+
+    let source_is_silent = source.silent_unresolved_type_names.contains(source_name);
+    let target_is_silent = target.silent_unresolved_type_names.contains(target_name);
+    if source_is_silent != target_is_silent {
+        if source_is_silent {
+            target
+                .silent_unresolved_type_names
+                .insert(target_name.to_string());
+        } else {
+            target.silent_unresolved_type_names.remove(target_name);
+        }
+        changed = true;
     }
-    if let Some(value) = source.type_query_declared_types.get(source_name).cloned() {
-        target
-            .type_query_declared_types
-            .insert(target_name.to_string(), value);
-    }
-    if let Some(value) = source
-        .define_model_type_query_declared_types
-        .get(source_name)
-        .cloned()
-    {
-        target
+    changed
+}
+
+pub(crate) fn has_vue3_type_alias_projection(
+    analysis: &Vue3ScriptSetupAnalysis,
+    name: &str,
+) -> bool {
+    analysis.declared_types.contains_key(name)
+        || analysis.define_model_declared_types.contains_key(name)
+        || analysis.type_query_declared_types.contains_key(name)
+        || analysis
             .define_model_type_query_declared_types
-            .insert(target_name.to_string(), value);
-    }
-    if let Some(value) = source
-        .keyof_type_query_declared_types
-        .get(source_name)
-        .cloned()
-    {
-        target
-            .keyof_type_query_declared_types
-            .insert(target_name.to_string(), value);
-    }
-    if let Some(value) = source.props_type_declarations.get(source_name).cloned() {
-        target
-            .props_type_declarations
-            .insert(target_name.to_string(), value);
-    }
-    if let Some(value) = source
-        .keyof_runtime_type_declarations
-        .get(source_name)
-        .cloned()
-    {
-        target
-            .keyof_runtime_type_declarations
-            .insert(target_name.to_string(), value);
-    }
-    if let Some(value) = source
-        .tuple_runtime_type_declarations
-        .get(source_name)
-        .cloned()
-    {
-        target
-            .tuple_runtime_type_declarations
-            .insert(target_name.to_string(), value);
-    }
-    if let Some(value) = source
-        .define_model_tuple_runtime_type_declarations
-        .get(source_name)
-        .cloned()
-    {
-        target
+            .contains_key(name)
+        || analysis.keyof_type_query_declared_types.contains_key(name)
+        || analysis.props_type_declarations.contains_key(name)
+        || analysis.keyof_runtime_type_declarations.contains_key(name)
+        || analysis.tuple_runtime_type_declarations.contains_key(name)
+        || analysis
             .define_model_tuple_runtime_type_declarations
-            .insert(target_name.to_string(), value);
-    }
-    if let Some(value) = source
-        .array_element_runtime_type_declarations
-        .get(source_name)
-        .cloned()
-    {
-        target
+            .contains_key(name)
+        || analysis
             .array_element_runtime_type_declarations
-            .insert(target_name.to_string(), value);
-    }
-    if let Some(value) = source
-        .define_model_array_element_runtime_type_declarations
-        .get(source_name)
-        .cloned()
-    {
-        target
+            .contains_key(name)
+        || analysis
             .define_model_array_element_runtime_type_declarations
-            .insert(target_name.to_string(), value);
-    }
-    if let Some(value) = source
-        .parameter_tuple_runtime_type_declarations
-        .get(source_name)
-        .cloned()
-    {
-        target
+            .contains_key(name)
+        || analysis
             .parameter_tuple_runtime_type_declarations
-            .insert(target_name.to_string(), value);
-    }
-    if let Some(value) = source
-        .define_model_parameter_tuple_runtime_type_declarations
-        .get(source_name)
-        .cloned()
-    {
-        target
+            .contains_key(name)
+        || analysis
             .define_model_parameter_tuple_runtime_type_declarations
-            .insert(target_name.to_string(), value);
-    }
-    if let Some(value) = source
-        .constructor_parameter_tuple_runtime_type_declarations
-        .get(source_name)
-        .cloned()
-    {
-        target
+            .contains_key(name)
+        || analysis
             .constructor_parameter_tuple_runtime_type_declarations
-            .insert(target_name.to_string(), value);
-    }
-    if let Some(value) = source
-        .define_model_constructor_parameter_tuple_runtime_type_declarations
-        .get(source_name)
-        .cloned()
-    {
-        target
+            .contains_key(name)
+        || analysis
             .define_model_constructor_parameter_tuple_runtime_type_declarations
-            .insert(target_name.to_string(), value);
-    }
-    if let Some(value) = source
-        .return_type_runtime_type_declarations
-        .get(source_name)
-        .cloned()
-    {
-        target
+            .contains_key(name)
+        || analysis
             .return_type_runtime_type_declarations
-            .insert(target_name.to_string(), value);
-    }
-    if let Some(value) = source
-        .define_model_return_type_runtime_type_declarations
-        .get(source_name)
-        .cloned()
-    {
-        target
+            .contains_key(name)
+        || analysis
             .define_model_return_type_runtime_type_declarations
-            .insert(target_name.to_string(), value);
-    }
-    if let Some(value) = source
-        .props_options_type_declarations
-        .get(source_name)
-        .cloned()
-    {
-        target
-            .props_options_type_declarations
-            .insert(target_name.to_string(), value);
-    }
-    if let Some(value) = source
-        .return_type_props_options_declarations
-        .get(source_name)
-        .cloned()
-    {
-        target
+            .contains_key(name)
+        || analysis.props_options_type_declarations.contains_key(name)
+        || analysis
             .return_type_props_options_declarations
-            .insert(target_name.to_string(), value);
-    }
-    if let Some(value) = source.generic_type_aliases.get(source_name).cloned() {
-        target
-            .generic_type_aliases
-            .insert(target_name.to_string(), value);
-    }
-    if let Some(value) = source
-        .string_literal_type_declarations
-        .get(source_name)
-        .cloned()
-    {
-        target
-            .string_literal_type_declarations
-            .insert(target_name.to_string(), value);
-    }
-    if let Some(value) = source
-        .ordered_string_literal_type_declarations
-        .get(source_name)
-        .cloned()
-    {
-        target
+            .contains_key(name)
+        || analysis.generic_type_aliases.contains_key(name)
+        || analysis.string_literal_type_declarations.contains_key(name)
+        || analysis
             .ordered_string_literal_type_declarations
-            .insert(target_name.to_string(), value);
+            .contains_key(name)
+        || analysis.emits_type_declarations.contains_key(name)
+        || analysis.type_sources.contains_key(name)
+        || analysis.type_direct_deps.contains_key(name)
+        || analysis.type_deps.contains_key(name)
+        || analysis.unresolved_import_sources.contains_key(name)
+        || analysis.silent_unresolved_type_names.contains(name)
+}
+
+fn sync_vue3_projection_entry<T: Clone + PartialEq>(
+    target: &mut BTreeMap<String, T>,
+    source: &BTreeMap<String, T>,
+    source_name: &str,
+    target_name: &str,
+) -> bool {
+    match source.get(source_name) {
+        Some(value) if target.get(target_name) == Some(value) => false,
+        Some(value) => {
+            target.insert(target_name.to_string(), value.clone());
+            true
+        }
+        None => target.remove(target_name).is_some(),
     }
-    if let Some(value) = source.emits_type_declarations.get(source_name).cloned() {
-        target
-            .emits_type_declarations
-            .insert(target_name.to_string(), value);
+}
+
+fn sync_vue3_generic_projection_entry(
+    target: &mut BTreeMap<String, Vue3GenericTypeAlias>,
+    source: &BTreeMap<String, Vue3GenericTypeAlias>,
+    source_name: &str,
+    target_name: &str,
+) -> bool {
+    match source.get(source_name) {
+        Some(value)
+            if target
+                .get(target_name)
+                .is_some_and(|existing| vue3_generic_type_alias_semantically_eq(existing, value)) =>
+        {
+            if target.get(target_name) != Some(value) {
+                target.insert(target_name.to_string(), value.clone());
+            }
+            false
+        }
+        Some(value) => {
+            target.insert(target_name.to_string(), value.clone());
+            true
+        }
+        None => target.remove(target_name).is_some(),
     }
-    if let Some(value) = source.type_sources.get(source_name).cloned() {
-        target.type_sources.insert(target_name.to_string(), value);
-    }
-    if let Some(value) = source.type_direct_deps.get(source_name).cloned() {
-        target
-            .type_direct_deps
-            .insert(target_name.to_string(), value);
-    }
-    if let Some(value) = source.type_deps.get(source_name).cloned() {
-        target.type_deps.insert(target_name.to_string(), value);
-    }
-    if let Some(value) = source.unresolved_import_sources.get(source_name).cloned() {
-        target
-            .unresolved_import_sources
-            .insert(target_name.to_string(), value);
-    }
-    if source.silent_unresolved_type_names.contains(source_name) {
-        target
-            .silent_unresolved_type_names
-            .insert(target_name.to_string());
-    }
+}
+
+fn vue3_generic_type_alias_semantically_eq(
+    left: &Vue3GenericTypeAlias,
+    right: &Vue3GenericTypeAlias,
+) -> bool {
+    left.source == right.source
+        && left.kind == right.kind
+        && left.params == right.params
+        && vue3_generic_type_scope_kinds_match(&left.scope, &right.scope)
+        && left.interface_fragments.len() == right.interface_fragments.len()
+        && left
+            .interface_fragments
+            .iter()
+            .zip(&right.interface_fragments)
+            .all(|(left, right)| {
+                left.source == right.source
+                    && vue3_generic_type_scope_kinds_match(&left.scope, &right.scope)
+            })
+}
+
+fn vue3_generic_type_scope_kinds_match(
+    left: &Vue3GenericTypeScope,
+    right: &Vue3GenericTypeScope,
+) -> bool {
+    matches!(
+        (left, right),
+        (Vue3GenericTypeScope::Local, Vue3GenericTypeScope::Local)
+            | (
+                Vue3GenericTypeScope::Captured(_),
+                Vue3GenericTypeScope::Captured(_)
+            )
+    )
 }
 
 pub(crate) fn insert_vue3_local_type_alias(
@@ -429,59 +417,31 @@ pub(crate) fn project_vue3_export_all_type_context(
     analysis: &mut Vue3ScriptSetupAnalysis,
     imported: &Vue27TypeContext,
     dependency: &str,
-) -> BTreeSet<String> {
-    let names = imported
-        .declared_types
-        .keys()
-        .chain(imported.define_model_declared_types.keys())
-        .chain(imported.type_query_declared_types.keys())
-        .chain(imported.define_model_type_query_declared_types.keys())
-        .chain(imported.keyof_type_query_declared_types.keys())
-        .chain(imported.props_type_declarations.keys())
-        .chain(imported.keyof_runtime_type_declarations.keys())
-        .chain(imported.tuple_runtime_type_declarations.keys())
-        .chain(imported.define_model_tuple_runtime_type_declarations.keys())
-        .chain(imported.array_element_runtime_type_declarations.keys())
-        .chain(
-            imported
-                .define_model_array_element_runtime_type_declarations
-                .keys(),
-        )
-        .chain(imported.parameter_tuple_runtime_type_declarations.keys())
-        .chain(
-            imported
-                .define_model_parameter_tuple_runtime_type_declarations
-                .keys(),
-        )
-        .chain(
-            imported
-                .constructor_parameter_tuple_runtime_type_declarations
-                .keys(),
-        )
-        .chain(
-            imported
-                .define_model_constructor_parameter_tuple_runtime_type_declarations
-                .keys(),
-        )
-        .chain(imported.return_type_runtime_type_declarations.keys())
-        .chain(
-            imported
-                .define_model_return_type_runtime_type_declarations
-                .keys(),
-        )
-        .chain(imported.props_options_type_declarations.keys())
-        .chain(imported.return_type_props_options_declarations.keys())
-        .chain(imported.generic_type_aliases.keys())
-        .chain(imported.string_literal_type_declarations.keys())
-        .chain(imported.ordered_string_literal_type_declarations.keys())
-        .chain(imported.emits_type_declarations.keys())
-        .filter(|&name| name != "default")
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    for name in &names {
-        insert_vue3_re_exported_type_alias(analysis, imported, name, name, dependency);
+    namespace_budget: &mut Vue3NamespaceProjectionBudget,
+) -> Option<BTreeSet<String>> {
+    for name in imported.type_sources.keys() {
+        if name == "default" {
+            continue;
+        }
+        if !reserve_vue3_external_type_alias_projection(
+            imported,
+            name,
+            name.len(),
+            dependency,
+            namespace_budget,
+        ) {
+            return None;
+        }
     }
-    names
+    let mut names = BTreeSet::new();
+    for name in imported.type_sources.keys() {
+        if name == "default" {
+            continue;
+        }
+        insert_vue3_re_exported_type_alias(analysis, imported, name, name, dependency);
+        names.insert(name.clone());
+    }
+    Some(names)
 }
 
 pub(crate) fn insert_vue3_re_exported_type_alias(
@@ -673,6 +633,73 @@ pub(crate) fn insert_vue3_re_exported_type_alias(
     }
 }
 
+pub(crate) fn insert_vue3_re_exported_type_alias_and_namespace_members(
+    analysis: &mut Vue3ScriptSetupAnalysis,
+    imported: &Vue27TypeContext,
+    imported_name: &str,
+    exported_name: &str,
+    dependency: &str,
+    namespace_budget: &mut Vue3NamespaceProjectionBudget,
+) -> Option<BTreeSet<String>> {
+    if vue3_type_context_has_name(imported, imported_name)
+        && !reserve_vue3_external_type_alias_projection(
+            imported,
+            imported_name,
+            exported_name.len(),
+            dependency,
+            namespace_budget,
+        )
+    {
+        return None;
+    }
+    let imported_prefix = format!("{imported_name}.");
+    for imported_member in imported.type_sources.range(imported_prefix.clone()..) {
+        let imported_member = imported_member.0;
+        let Some(member) = imported_member.strip_prefix(&imported_prefix) else {
+            break;
+        };
+        if !reserve_vue3_external_type_alias_projection(
+            imported,
+            imported_member,
+            exported_name
+                .len()
+                .saturating_add(member.len())
+                .saturating_add(1),
+            dependency,
+            namespace_budget,
+        ) {
+            return None;
+        }
+    }
+    let mut exported_names = BTreeSet::new();
+    if vue3_type_context_has_name(imported, imported_name) {
+        insert_vue3_re_exported_type_alias(
+            analysis,
+            imported,
+            imported_name,
+            exported_name,
+            dependency,
+        );
+        exported_names.insert(exported_name.to_string());
+    }
+    for imported_member in imported.type_sources.range(imported_prefix.clone()..) {
+        let imported_member = imported_member.0;
+        let Some(member) = imported_member.strip_prefix(&imported_prefix) else {
+            break;
+        };
+        let exported_member = format!("{exported_name}.{member}");
+        insert_vue3_re_exported_type_alias(
+            analysis,
+            imported,
+            imported_member,
+            &exported_member,
+            dependency,
+        );
+        exported_names.insert(exported_member);
+    }
+    Some(exported_names)
+}
+
 pub(crate) fn insert_vue3_external_type_alias(
     context: &mut Vue27TypeContext,
     imported: &Vue27TypeContext,
@@ -812,7 +839,6 @@ pub(crate) fn insert_vue3_external_type_alias(
         context
             .generic_type_aliases
             .insert(local_name.to_string(), alias.clone());
-        insert_vue3_external_generic_alias_string_key_helpers(context, imported, dependency);
     }
     if let Some(keys) = imported.string_literal_type_declarations.get(imported_name) {
         context
@@ -922,6 +948,93 @@ pub(crate) fn insert_vue3_external_type_alias(
             .silent_unresolved_type_names
             .insert(local_name.to_string());
     }
+}
+
+pub(crate) fn insert_vue3_external_type_alias_and_namespace_members(
+    context: &mut Vue27TypeContext,
+    imported: &Vue27TypeContext,
+    imported_name: &str,
+    local_name: &str,
+    dependency: &str,
+    namespace_budget: &mut Vue3NamespaceProjectionBudget,
+) -> bool {
+    if !reserve_vue3_external_type_alias_projection(
+        imported,
+        imported_name,
+        local_name.len(),
+        dependency,
+        namespace_budget,
+    ) {
+        return false;
+    }
+    let mut has_generic_alias = imported.generic_type_aliases.contains_key(imported_name);
+    let imported_prefix = format!("{imported_name}.");
+    for imported_member in imported.type_sources.range(imported_prefix.clone()..) {
+        let imported_member = imported_member.0;
+        let Some(member) = imported_member.strip_prefix(&imported_prefix) else {
+            break;
+        };
+        has_generic_alias |= imported.generic_type_aliases.contains_key(imported_member);
+        if !reserve_vue3_external_type_alias_projection(
+            imported,
+            imported_member,
+            local_name
+                .len()
+                .saturating_add(member.len())
+                .saturating_add(1),
+            dependency,
+            namespace_budget,
+        ) {
+            return false;
+        }
+    }
+    if has_generic_alias
+        && !namespace_budget.reserve(vue3_external_generic_alias_helpers_projection_work(
+            imported, dependency,
+        ))
+    {
+        return false;
+    }
+    insert_vue3_external_type_alias(
+        context,
+        imported,
+        imported_name,
+        local_name,
+        dependency,
+    );
+    for imported_member in imported.type_sources.range(imported_prefix.clone()..) {
+        let imported_member = imported_member.0;
+        let Some(member) = imported_member.strip_prefix(&imported_prefix) else {
+            break;
+        };
+        let local_member = format!("{local_name}.{member}");
+        insert_vue3_external_type_alias(
+            context,
+            imported,
+            imported_member,
+            &local_member,
+            dependency,
+        );
+    }
+    if has_generic_alias {
+        insert_vue3_external_generic_alias_string_key_helpers(context, imported, dependency);
+    }
+    true
+}
+
+fn reserve_vue3_external_type_alias_projection(
+    context: &Vue27TypeContext,
+    source_name: &str,
+    target_name_len: usize,
+    dependency: &str,
+    namespace_budget: &mut Vue3NamespaceProjectionBudget,
+) -> bool {
+    namespace_budget.reserve(vue3_external_type_alias_projection_work(
+        context,
+        source_name,
+        target_name_len,
+        dependency,
+    ))
 }
 
 pub(crate) fn insert_vue3_external_generic_alias_string_key_helpers(
@@ -1063,11 +1176,39 @@ pub(crate) fn insert_vue3_external_namespace_types(
     imported: &Vue27TypeContext,
     namespace: &str,
     dependency: &str,
-) {
-    for imported_name in vue3_type_context_names(imported) {
-        let local_name = format!("{namespace}.{imported_name}");
-        insert_vue3_external_type_alias(context, imported, &imported_name, &local_name, dependency);
+    namespace_budget: &mut Vue3NamespaceProjectionBudget,
+) -> bool {
+    let mut has_generic_alias = false;
+    for imported_name in imported.type_sources.keys() {
+        has_generic_alias |= imported.generic_type_aliases.contains_key(imported_name);
+        if !reserve_vue3_external_type_alias_projection(
+            imported,
+            imported_name,
+            namespace
+                .len()
+                .saturating_add(imported_name.len())
+                .saturating_add(1),
+            dependency,
+            namespace_budget,
+        ) {
+            return false;
+        }
     }
+    if has_generic_alias
+        && !namespace_budget.reserve(vue3_external_generic_alias_helpers_projection_work(
+            imported, dependency,
+        ))
+    {
+        return false;
+    }
+    for imported_name in imported.type_sources.keys() {
+        let local_name = format!("{namespace}.{imported_name}");
+        insert_vue3_external_type_alias(context, imported, imported_name, &local_name, dependency);
+    }
+    if has_generic_alias {
+        insert_vue3_external_generic_alias_string_key_helpers(context, imported, dependency);
+    }
+    true
 }
 
 pub(crate) fn vue3_type_context_names(context: &Vue27TypeContext) -> BTreeSet<String> {

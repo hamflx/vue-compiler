@@ -145,6 +145,7 @@ pub(crate) fn analyze_vue3_script_setup(
         type_sources: type_analysis.type_sources,
         type_direct_deps: type_analysis.type_direct_deps,
         type_deps: type_analysis.type_deps,
+        deps: type_analysis.deps,
         unresolved_import_sources: type_analysis.unresolved_import_sources,
         silent_unresolved_type_names: type_analysis.silent_unresolved_type_names,
         type_filename: Some(filename.to_string()),

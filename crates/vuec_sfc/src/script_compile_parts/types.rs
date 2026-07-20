@@ -100,6 +100,7 @@ pub(crate) struct Vue3ScriptSetupAnalysis {
     pub(crate) type_sources: BTreeMap<String, String>,
     pub(crate) type_direct_deps: BTreeMap<String, Vec<String>>,
     pub(crate) type_deps: BTreeMap<String, BTreeSet<String>>,
+    pub(crate) type_dependency_work_exhausted: bool,
     pub(crate) unresolved_import_sources: BTreeMap<String, String>,
     pub(crate) silent_unresolved_type_names: BTreeSet<String>,
     pub(crate) type_filename: Option<String>,

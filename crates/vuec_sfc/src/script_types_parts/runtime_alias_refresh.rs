@@ -237,6 +237,26 @@ pub(crate) fn refresh_vue3_type_alias_declaration(
         }
     }
 
+    match vue3_props_options_type_members(source, &declaration.type_annotation, analysis) {
+        Some(props_options) => {
+            if analysis.props_options_type_declarations.get(&name) != Some(&props_options) {
+                analysis
+                    .props_options_type_declarations
+                    .insert(name.clone(), props_options);
+                changed = true;
+            }
+        }
+        None => {
+            if analysis
+                .props_options_type_declarations
+                .remove(&name)
+                .is_some()
+            {
+                changed = true;
+            }
+        }
+    }
+
     let emits = vue3_resolve_emits_type(source, &declaration.type_annotation, analysis);
     match emits {
         Some(emits) if !emits.events.is_empty() => {
@@ -320,6 +340,7 @@ pub(crate) fn vue3_generic_type_alias(
         kind,
         params,
         scope: Vue3GenericTypeScope::Local,
+        interface_fragments: Vec::new(),
     }
 }
 
@@ -327,6 +348,7 @@ impl Vue3GenericTypeEnvironment {
     pub(crate) fn from_analysis(analysis: &Vue3ScriptSetupAnalysis) -> Self {
         Self {
             definition_filename: analysis.type_filename.clone(),
+            generic_type_aliases: analysis.generic_type_aliases.clone(),
             declared_types: analysis.declared_types.clone(),
             define_model_declared_types: analysis.define_model_declared_types.clone(),
             type_query_declared_types: analysis.type_query_declared_types.clone(),
@@ -380,6 +402,9 @@ impl Vue3GenericTypeEnvironment {
     }
 
     pub(crate) fn overlay_analysis(&self, analysis: &mut Vue3ScriptSetupAnalysis) {
+        analysis
+            .generic_type_aliases
+            .extend(self.generic_type_aliases.clone());
         analysis.declared_types.extend(self.declared_types.clone());
         analysis
             .define_model_declared_types
@@ -458,7 +483,7 @@ pub(crate) fn finalize_vue3_local_generic_alias_scopes(analysis: &mut Vue3Script
     if !analysis
         .generic_type_aliases
         .values()
-        .any(|alias| matches!(&alias.scope, Vue3GenericTypeScope::Local))
+        .any(vue3_generic_alias_has_local_scope)
     {
         return;
     }
@@ -467,16 +492,31 @@ pub(crate) fn finalize_vue3_local_generic_alias_scopes(analysis: &mut Vue3Script
         if matches!(&alias.scope, Vue3GenericTypeScope::Local) {
             alias.scope = Vue3GenericTypeScope::Captured(environment.clone());
         }
+        for fragment in &mut alias.interface_fragments {
+            if matches!(&fragment.scope, Vue3GenericTypeScope::Local) {
+                fragment.scope = Vue3GenericTypeScope::Captured(environment.clone());
+            }
+        }
     }
 }
 
 pub(crate) fn captured_vue3_generic_aliases_for_child_scope(
     analysis: &Vue3ScriptSetupAnalysis,
+    names: &BTreeSet<String>,
 ) -> BTreeMap<String, Vue3GenericTypeAlias> {
-    let mut aliases = analysis.generic_type_aliases.clone();
+    let mut aliases = names
+        .iter()
+        .filter_map(|name| {
+            analysis
+                .generic_type_aliases
+                .get(name)
+                .cloned()
+                .map(|alias| (name.clone(), alias))
+        })
+        .collect::<BTreeMap<_, _>>();
     if !aliases
         .values()
-        .any(|alias| matches!(&alias.scope, Vue3GenericTypeScope::Local))
+        .any(vue3_generic_alias_has_local_scope)
     {
         return aliases;
     }
@@ -485,8 +525,21 @@ pub(crate) fn captured_vue3_generic_aliases_for_child_scope(
         if matches!(&alias.scope, Vue3GenericTypeScope::Local) {
             alias.scope = Vue3GenericTypeScope::Captured(environment.clone());
         }
+        for fragment in &mut alias.interface_fragments {
+            if matches!(&fragment.scope, Vue3GenericTypeScope::Local) {
+                fragment.scope = Vue3GenericTypeScope::Captured(environment.clone());
+            }
+        }
     }
     aliases
+}
+
+fn vue3_generic_alias_has_local_scope(alias: &Vue3GenericTypeAlias) -> bool {
+    matches!(&alias.scope, Vue3GenericTypeScope::Local)
+        || alias
+            .interface_fragments
+            .iter()
+            .any(|fragment| matches!(&fragment.scope, Vue3GenericTypeScope::Local))
 }
 
 pub(crate) fn register_vue3_ts_enum_declaration(
@@ -971,41 +1024,6 @@ pub(crate) fn register_vue3_default_static_runtime_props_options(
         .props_options_type_declarations
         .insert("default".into(), props_options);
     insert_vue3_declared_type_deps(analysis, "default", deps);
-}
-
-pub(crate) fn collect_vue3_function_value_return_type_deps_from_variable(
-    declaration: &VariableDeclaration<'_>,
-    analysis: &mut Vue3ScriptSetupAnalysis,
-) {
-    for declarator in &declaration.declarations {
-        let Some(name) = first_pattern_binding(&declarator.id) else {
-            continue;
-        };
-        let Some(return_type) = vue3_variable_declarator_function_return_type(declarator) else {
-            continue;
-        };
-        let deps = collect_vue3_type_argument_deps(return_type, analysis);
-        insert_vue3_declared_type_deps(analysis, &name, deps);
-    }
-}
-
-pub(crate) fn collect_vue3_static_runtime_props_options_deps_from_variable(
-    declaration: &VariableDeclaration<'_>,
-    analysis: &mut Vue3ScriptSetupAnalysis,
-) {
-    for declarator in &declaration.declarations {
-        let Some(name) = first_pattern_binding(&declarator.id) else {
-            continue;
-        };
-        let Some(init) = declarator.init.as_ref() else {
-            continue;
-        };
-        if !analysis.props_options_type_declarations.contains_key(&name) {
-            continue;
-        }
-        let deps = collect_vue3_static_runtime_props_options_deps(init, analysis);
-        insert_vue3_declared_type_deps(analysis, &name, deps);
-    }
 }
 
 pub(crate) fn collect_vue3_static_runtime_props_options_deps(
