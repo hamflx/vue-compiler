@@ -257,9 +257,12 @@ pub(crate) fn vue3_global_type_context_from_source(
     }
 
     let dependency = normalize_path_string(Path::new(filename));
+    let mut namespace_budget = Vue3NamespaceProjectionBudget::default();
+    if !namespace_budget.reserve(vue3_external_type_context_cache_cost(base_context)) {
+        return base_context.clone();
+    }
     let mut seed_context = base_context.clone();
     let mut seen = BTreeSet::new();
-    let mut namespace_budget = Vue3NamespaceProjectionBudget::default();
     if !extend_vue3_type_context_from_external_imports_with_seen(
         filename,
         source,
@@ -313,15 +316,21 @@ pub(crate) fn vue3_global_type_context_from_source(
         type_resolver: type_resolver.clone(),
         ..Vue3ScriptSetupAnalysis::default()
     };
-    let Some(mut global_names) = collect_vue3_global_types_from_statements_with_budget(
-        source,
-        &parsed.program.body,
-        source_type.is_typescript_definition(),
-        &mut analysis,
-        &mut namespace_budget,
-    ) else {
+    let Some((mut global_names, global_import_names)) =
+        collect_vue3_global_types_from_statements_with_budget(
+            source,
+            &parsed.program.body,
+            source_type.is_typescript_definition(),
+            base_context,
+            &mut analysis,
+            &mut namespace_budget,
+        )
+    else {
         return base_context.clone();
     };
+    if !namespace_budget.reserve(vue3_local_generic_scope_capture_work(&analysis)) {
+        return base_context.clone();
+    }
     finalize_vue3_local_generic_alias_scopes(&mut analysis);
     let Some(re_exported) = project_vue3_global_type_re_exports(
         filename,
@@ -333,7 +342,6 @@ pub(crate) fn vue3_global_type_context_from_source(
         return base_context.clone();
     };
     global_names.extend(re_exported);
-    let global_import_names = vue3_global_type_file_import_names(&parsed.program.body);
     collect_vue3_global_type_deps_from_statements(&parsed.program.body, &mut analysis);
     if analysis.type_dependency_work_exhausted {
         return base_context.clone();
@@ -398,14 +406,19 @@ fn collect_vue3_global_types_from_statements_with_budget(
     source: &str,
     statements: &[Statement<'_>],
     implicitly_ambient: bool,
+    base_context: &Vue27TypeContext,
     analysis: &mut Vue3ScriptSetupAnalysis,
     namespace_budget: &mut Vue3NamespaceProjectionBudget,
-) -> Option<BTreeSet<String>> {
+) -> Option<(BTreeSet<String>, BTreeSet<String>)> {
+    if !namespace_budget.reserve(vue3_type_analysis_clone_work(analysis)) {
+        return None;
+    }
     let mut working_analysis = analysis.clone();
     let names = collect_vue3_global_types_from_statements_inner(
         source,
         statements,
         implicitly_ambient,
+        base_context,
         &mut working_analysis,
         namespace_budget,
     )?;
@@ -417,10 +430,13 @@ fn collect_vue3_global_types_from_statements_inner(
     source: &str,
     statements: &[Statement<'_>],
     implicitly_ambient: bool,
+    base_context: &Vue27TypeContext,
     analysis: &mut Vue3ScriptSetupAnalysis,
     namespace_budget: &mut Vue3NamespaceProjectionBudget,
-) -> Option<BTreeSet<String>> {
+) -> Option<(BTreeSet<String>, BTreeSet<String>)> {
     let mut names = BTreeSet::new();
+    let module_import_names =
+        vue3_global_type_file_import_names_with_budget(statements, namespace_budget)?;
     let is_ambient = vue3_statements_are_ambient_global_scope(statements);
     if is_ambient {
         for statement in statements {
@@ -443,7 +459,7 @@ fn collect_vue3_global_types_from_statements_inner(
             .iter()
             .any(vue3_statement_has_deferred_type_scope)
         {
-            return Some(names);
+            return Some((names, module_import_names));
         }
         collect_vue3_declared_type_deps_from_statements(statements, analysis);
         if analysis.type_dependency_work_exhausted {
@@ -461,8 +477,11 @@ fn collect_vue3_global_types_from_statements_inner(
                 )?;
             }
         }
-        let mut statement_groups = vec![statements];
-        statement_groups.extend(vue3_global_declaration_statement_groups(statements));
+        let statement_groups = vue3_global_declaration_statement_groups_with_budget(
+            statements,
+            true,
+            namespace_budget,
+        )?;
         project_vue3_namespace_groups_from_statement_groups_with_budget(
             source,
             &statement_groups,
@@ -475,19 +494,78 @@ fn collect_vue3_global_types_from_statements_inner(
             return None;
         }
         refresh_vue3_declared_type_declarations_from_statements(source, statements, analysis);
-        return Some(names);
+        return Some((names, module_import_names));
     }
-    for statement in statements {
-        let Statement::TSGlobalDeclaration(global) = statement else {
-            continue;
-        };
-        names.extend(vue3_declared_type_names_from_statements_with_budget(
-            &global.body.body,
-            namespace_budget,
-        )?);
+    let statement_groups = vue3_global_declaration_statement_groups_with_budget(
+        statements,
+        false,
+        namespace_budget,
+    )?;
+    let mut global_root_names = BTreeSet::new();
+    for group in &statement_groups {
+        let (group_names, group_roots) =
+            vue3_module_lexical_type_names_with_budget(group, namespace_budget)?;
+        names.extend(group_names);
+        global_root_names.extend(group_roots);
+    }
+    let (module_names, module_root_names) =
+        vue3_module_lexical_type_names_with_budget(statements, namespace_budget)?;
+    let mut shadowed_roots = BTreeSet::new();
+    for root in global_root_names {
+        if module_root_names.contains(&root) || module_import_names.contains(&root) {
+            if !namespace_budget.reserve(root.len().saturating_add(1)) {
+                return None;
+            }
+            shadowed_roots.insert(root);
+        }
+    }
+
+    remove_vue3_shadowed_base_type_projections(
+        analysis,
+        base_context,
+        &module_root_names,
+        &module_import_names,
+        namespace_budget,
+    )?;
+
+    collect_vue3_declared_types_from_statements_with_namespace_budget(
+        source,
+        statements,
+        implicitly_ambient,
+        0,
+        analysis,
+        namespace_budget,
+    );
+    if namespace_budget.is_exhausted() || analysis.type_dependency_work_exhausted {
+        return None;
+    }
+
+    let shadowed_scope_names = vue3_shadowed_scope_projection_names_with_budget(
+        analysis,
+        base_context,
+        &names,
+        &module_names,
+        &shadowed_roots,
+        namespace_budget,
+    )?;
+    let mut module_shadow_projection = Vue3ScriptSetupAnalysis::default();
+    sync_vue3_scope_type_projections(
+        &mut module_shadow_projection,
+        analysis,
+        &shadowed_scope_names,
+        namespace_budget,
+    )?;
+    restore_vue3_global_base_type_projections(
+        analysis,
+        base_context,
+        &shadowed_scope_names,
+        namespace_budget,
+    )?;
+
+    for group in &statement_groups {
         collect_vue3_declared_types_from_statements_with_namespace_budget(
             source,
-            &global.body.body,
+            group,
             true,
             0,
             analysis,
@@ -497,19 +575,282 @@ fn collect_vue3_global_types_from_statements_inner(
             return None;
         }
     }
-    let statement_groups = vue3_global_declaration_statement_groups(statements);
-    project_vue3_namespace_groups_from_statement_groups_with_budget(
+    converge_vue3_namespace_groups_from_statement_groups_in_place_with_budget(
         source,
         &statement_groups,
         true,
         0,
         analysis,
         namespace_budget,
-    );
+    )?;
     if namespace_budget.is_exhausted() {
         return None;
     }
+
+    let mut global_shadow_projection = Vue3ScriptSetupAnalysis::default();
+    sync_vue3_scope_type_projections(
+        &mut global_shadow_projection,
+        analysis,
+        &shadowed_scope_names,
+        namespace_budget,
+    )?;
+    let convergence_limit = module_names
+        .len()
+        .saturating_add(names.len())
+        .saturating_add(1);
+    let statement_count = statement_groups
+        .iter()
+        .fold(statements.len().saturating_add(1), |count, group| {
+            count.saturating_add(group.len())
+        });
+    let iteration_work = statement_count.saturating_mul(statement_count);
+    let mut converged = false;
+    for _ in 0..convergence_limit {
+        if !namespace_budget.reserve(iteration_work) {
+            return None;
+        }
+        sync_vue3_scope_type_projections(
+            analysis,
+            &module_shadow_projection,
+            &shadowed_scope_names,
+            namespace_budget,
+        )?;
+        let mut changed =
+            converge_vue3_namespace_groups_from_statement_groups_in_place_with_budget(
+            source,
+            &[statements],
+            implicitly_ambient,
+            0,
+            analysis,
+            namespace_budget,
+        )?;
+        if namespace_budget.is_exhausted() || analysis.type_dependency_work_exhausted {
+            return None;
+        }
+        sync_vue3_scope_type_projections(
+            &mut module_shadow_projection,
+            analysis,
+            &shadowed_scope_names,
+            namespace_budget,
+        )?;
+
+        sync_vue3_scope_type_projections(
+            analysis,
+            &global_shadow_projection,
+            &shadowed_scope_names,
+            namespace_budget,
+        )?;
+        changed |= converge_vue3_namespace_groups_from_statement_groups_in_place_with_budget(
+            source,
+            &statement_groups,
+            true,
+            0,
+            analysis,
+            namespace_budget,
+        )?;
+        if namespace_budget.is_exhausted() || analysis.type_dependency_work_exhausted {
+            return None;
+        }
+        sync_vue3_scope_type_projections(
+            &mut global_shadow_projection,
+            analysis,
+            &shadowed_scope_names,
+            namespace_budget,
+        )?;
+        if !changed {
+            converged = true;
+            break;
+        }
+    }
+    if !converged {
+        return None;
+    }
+    Some((names, module_import_names))
+}
+
+fn vue3_shadowed_scope_projection_names_with_budget(
+    analysis: &Vue3ScriptSetupAnalysis,
+    base_context: &Vue27TypeContext,
+    global_names: &BTreeSet<String>,
+    module_names: &BTreeSet<String>,
+    shadowed_roots: &BTreeSet<String>,
+    namespace_budget: &mut Vue3NamespaceProjectionBudget,
+) -> Option<BTreeSet<String>> {
+    let mut names = BTreeSet::new();
+    for name in global_names
+        .iter()
+        .chain(module_names)
+        .chain(analysis.type_sources.keys())
+        .chain(analysis.unresolved_import_sources.keys())
+        .chain(&analysis.silent_unresolved_type_names)
+        .chain(&analysis.local_ts_enum_type_names)
+        .chain(base_context.type_sources.keys())
+        .chain(base_context.unresolved_import_sources.keys())
+        .chain(&base_context.silent_unresolved_type_names)
+    {
+        let root = name.split('.').next().unwrap_or(name);
+        if !shadowed_roots.contains(root) || names.contains(name) {
+            continue;
+        }
+        if !namespace_budget.reserve(name.len().saturating_add(1)) {
+            return None;
+        }
+        names.insert(name.clone());
+    }
     Some(names)
+}
+
+fn remove_vue3_shadowed_base_type_projections(
+    analysis: &mut Vue3ScriptSetupAnalysis,
+    base_context: &Vue27TypeContext,
+    module_root_names: &BTreeSet<String>,
+    module_import_names: &BTreeSet<String>,
+    namespace_budget: &mut Vue3NamespaceProjectionBudget,
+) -> Option<()> {
+    let empty = Vue3ScriptSetupAnalysis::default();
+    for name in base_context
+        .type_sources
+        .keys()
+        .chain(
+            base_context
+                .unresolved_import_sources
+                .keys()
+                .filter(|name| !base_context.type_sources.contains_key(*name)),
+        )
+        .chain(base_context.silent_unresolved_type_names.iter().filter(|name| {
+            !base_context.type_sources.contains_key(*name)
+                && !base_context.unresolved_import_sources.contains_key(*name)
+        }))
+    {
+        let root = name.split('.').next().unwrap_or(name);
+        if !module_root_names.contains(root) && !module_import_names.contains(root) {
+            continue;
+        }
+        let work = vue3_type_alias_projection_work(analysis, name, name)
+            .saturating_add(vue3_external_type_alias_projection_work(
+                base_context,
+                name,
+                name.len(),
+                "",
+            ));
+        if !namespace_budget.reserve(work) {
+            return None;
+        }
+        let mut base_projection = Vue3ScriptSetupAnalysis::default();
+        sync_vue3_type_alias_from_context(&mut base_projection, base_context, name, name);
+        if !sync_vue3_type_alias_from_analysis(&mut base_projection, analysis, name, name) {
+            sync_vue3_type_alias_from_analysis(analysis, &empty, name, name);
+            analysis.local_ts_enum_type_names.remove(name);
+        }
+    }
+    Some(())
+}
+
+fn sync_vue3_scope_type_projections(
+    target: &mut Vue3ScriptSetupAnalysis,
+    source: &Vue3ScriptSetupAnalysis,
+    names: &BTreeSet<String>,
+    namespace_budget: &mut Vue3NamespaceProjectionBudget,
+) -> Option<()> {
+    for name in names {
+        let work = vue3_type_alias_projection_work(source, name, name)
+            .saturating_add(vue3_type_alias_projection_work(target, name, name))
+            .max(name.len().saturating_mul(2).saturating_add(64));
+        if !namespace_budget.reserve(work) {
+            return None;
+        }
+        sync_vue3_type_alias_from_analysis(target, source, name, name);
+        if source.local_ts_enum_type_names.contains(name) {
+            target.local_ts_enum_type_names.insert(name.clone());
+        } else {
+            target.local_ts_enum_type_names.remove(name);
+        }
+    }
+    Some(())
+}
+
+fn restore_vue3_global_base_type_projections(
+    analysis: &mut Vue3ScriptSetupAnalysis,
+    base_context: &Vue27TypeContext,
+    names: &BTreeSet<String>,
+    namespace_budget: &mut Vue3NamespaceProjectionBudget,
+) -> Option<()> {
+    for name in names {
+        let work = vue3_type_alias_projection_work(analysis, name, name).saturating_add(
+            vue3_external_type_alias_projection_work(base_context, name, name.len(), ""),
+        );
+        if !namespace_budget.reserve(work) {
+            return None;
+        }
+        sync_vue3_type_alias_from_context(analysis, base_context, name, name);
+        analysis.local_ts_enum_type_names.remove(name);
+    }
+    Some(())
+}
+
+fn vue3_module_lexical_type_names_with_budget(
+    statements: &[Statement<'_>],
+    namespace_budget: &mut Vue3NamespaceProjectionBudget,
+) -> Option<(BTreeSet<String>, BTreeSet<String>)> {
+    let mut names = BTreeSet::new();
+    let mut roots = BTreeSet::new();
+    for statement in statements {
+        let is_global = match statement {
+            Statement::TSGlobalDeclaration(_) => true,
+            Statement::TSModuleDeclaration(declaration) => {
+                vue3_ts_module_declaration_is_global(declaration)
+            }
+            Statement::ExportNamedDeclaration(export) => export
+                .declaration
+                .as_ref()
+                .is_some_and(|declaration| match declaration {
+                    Declaration::TSModuleDeclaration(declaration) => {
+                        vue3_ts_module_declaration_is_global(declaration)
+                    }
+                    _ => false,
+                }),
+            _ => false,
+        };
+        if is_global {
+            continue;
+        }
+        let statement_names =
+            vue3_declared_type_names_from_statement_with_budget(statement, namespace_budget)?;
+        for name in statement_names {
+            let root = name.split('.').next().unwrap_or(&name);
+            if !roots.contains(root) {
+                if !namespace_budget.reserve(root.len().saturating_add(1)) {
+                    return None;
+                }
+                roots.insert(root.to_string());
+            }
+            names.insert(name);
+        }
+        let namespace_root = match statement {
+            Statement::TSModuleDeclaration(declaration) => {
+                vue3_ts_module_declaration_name_ref(declaration)
+            }
+            Statement::ExportNamedDeclaration(export) => {
+                export.declaration.as_ref().and_then(|declaration| {
+                    if let Declaration::TSModuleDeclaration(declaration) = declaration {
+                        vue3_ts_module_declaration_name_ref(declaration)
+                    } else {
+                        None
+                    }
+                })
+            }
+            _ => None,
+        };
+        if let Some(root) = namespace_root {
+            if !roots.contains(root) {
+                if !namespace_budget.reserve(root.len().saturating_add(1)) {
+                    return None;
+                }
+                roots.insert(root.to_string());
+            }
+        }
+    }
+    Some((names, roots))
 }
 
 fn vue3_global_declaration_statement_groups<'a>(
@@ -530,6 +871,49 @@ fn vue3_global_declaration_statement_groups<'a>(
         }
     }
     groups
+}
+
+fn vue3_global_declaration_statement_groups_with_budget<'a>(
+    statements: &'a [Statement<'a>],
+    include_root: bool,
+    namespace_budget: &mut Vue3NamespaceProjectionBudget,
+) -> Option<Vec<&'a [Statement<'a>]>> {
+    let group_count = statements.iter().fold(usize::from(include_root), |count, statement| {
+        let has_group = match statement {
+            Statement::TSGlobalDeclaration(_) => true,
+            Statement::TSModuleDeclaration(declaration)
+                if vue3_ts_module_declaration_is_global(declaration) =>
+            {
+                vue3_ts_module_declaration_block_body(declaration).is_some()
+            }
+            _ => false,
+        };
+        count.saturating_add(usize::from(has_group))
+    });
+    let work = statements.len().saturating_add(
+        group_count.saturating_mul(std::mem::size_of::<&[()]>()),
+    );
+    if !namespace_budget.reserve(work) {
+        return None;
+    }
+    let mut groups = Vec::with_capacity(group_count);
+    if include_root {
+        groups.push(statements);
+    }
+    for statement in statements {
+        match statement {
+            Statement::TSGlobalDeclaration(global) => groups.push(global.body.body.as_slice()),
+            Statement::TSModuleDeclaration(declaration)
+                if vue3_ts_module_declaration_is_global(declaration) =>
+            {
+                if let Some(body) = vue3_ts_module_declaration_block_body(declaration) {
+                    groups.push(body);
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(groups)
 }
 
 fn vue3_statements_are_ambient_global_scope(statements: &[Statement<'_>]) -> bool {
@@ -644,7 +1028,10 @@ pub(crate) fn project_vue3_global_type_re_exports(
     Some(names)
 }
 
-pub(crate) fn vue3_global_type_file_import_names(statements: &[Statement<'_>]) -> BTreeSet<String> {
+fn vue3_global_type_file_import_names_with_budget(
+    statements: &[Statement<'_>],
+    namespace_budget: &mut Vue3NamespaceProjectionBudget,
+) -> Option<BTreeSet<String>> {
     if !statements.iter().any(|statement| {
         matches!(
             statement,
@@ -654,7 +1041,7 @@ pub(crate) fn vue3_global_type_file_import_names(statements: &[Statement<'_>]) -
                 | Statement::ExportNamedDeclaration(_)
         )
     }) {
-        return BTreeSet::new();
+        return Some(BTreeSet::new());
     }
     let mut names = BTreeSet::new();
     for statement in statements {
@@ -665,10 +1052,27 @@ pub(crate) fn vue3_global_type_file_import_names(statements: &[Statement<'_>]) -
             continue;
         };
         for specifier in specifiers {
-            names.insert(import_specifier_local(specifier));
+            let local = match specifier {
+                ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
+                    specifier.local.name.as_str()
+                }
+                ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
+                    specifier.local.name.as_str()
+                }
+                ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
+                    specifier.local.name.as_str()
+                }
+            };
+            if names.contains(local) {
+                continue;
+            }
+            if !namespace_budget.reserve(local.len().saturating_add(1)) {
+                return None;
+            }
+            names.insert(local.to_string());
         }
     }
-    names
+    Some(names)
 }
 
 pub(crate) fn collect_vue3_global_declared_type_from_statement(
@@ -749,40 +1153,68 @@ fn vue3_declared_type_names_from_statement_with_budget(
     let mut names = BTreeSet::new();
     match statement {
         Statement::TSInterfaceDeclaration(declaration) => {
-            names.insert(declaration.id.name.to_string());
+            insert_vue3_declared_type_name_with_budget(
+                &mut names,
+                declaration.id.name.as_str(),
+                namespace_budget,
+            )?;
         }
         Statement::TSTypeAliasDeclaration(declaration) => {
-            names.insert(declaration.id.name.to_string());
+            insert_vue3_declared_type_name_with_budget(
+                &mut names,
+                declaration.id.name.as_str(),
+                namespace_budget,
+            )?;
         }
         Statement::TSEnumDeclaration(declaration) => {
-            names.insert(declaration.id.name.to_string());
+            insert_vue3_declared_type_name_with_budget(
+                &mut names,
+                declaration.id.name.as_str(),
+                namespace_budget,
+            )?;
         }
         Statement::FunctionDeclaration(function)
             if vue3_function_has_return_projection(function) =>
         {
             if let Some(id) = &function.id {
-                names.insert(id.name.to_string());
+                insert_vue3_declared_type_name_with_budget(
+                    &mut names,
+                    id.name.as_str(),
+                    namespace_budget,
+                )?;
             }
         }
         Statement::VariableDeclaration(declaration) if declaration.declare => {
             for declarator in &declaration.declarations {
-                if let Some(name) = first_pattern_binding(&declarator.id) {
-                    names.insert(name);
+                if let Some(name) = first_pattern_binding_name(&declarator.id) {
+                    insert_vue3_declared_type_name_with_budget(
+                        &mut names,
+                        name,
+                        namespace_budget,
+                    )?;
                 }
             }
         }
         Statement::VariableDeclaration(declaration) => {
             for declarator in &declaration.declarations {
                 if vue3_variable_declarator_has_type_projection(declarator) {
-                    if let Some(name) = first_pattern_binding(&declarator.id) {
-                        names.insert(name);
+                    if let Some(name) = first_pattern_binding_name(&declarator.id) {
+                        insert_vue3_declared_type_name_with_budget(
+                            &mut names,
+                            name,
+                            namespace_budget,
+                        )?;
                     }
                 }
             }
         }
         Statement::ClassDeclaration(declaration) => {
             if let Some(id) = &declaration.id {
-                names.insert(id.name.to_string());
+                insert_vue3_declared_type_name_with_budget(
+                    &mut names,
+                    id.name.as_str(),
+                    namespace_budget,
+                )?;
             }
         }
         Statement::TSModuleDeclaration(declaration) => {
@@ -804,6 +1236,21 @@ fn vue3_declared_type_names_from_statement_with_budget(
     Some(names)
 }
 
+fn insert_vue3_declared_type_name_with_budget(
+    names: &mut BTreeSet<String>,
+    name: &str,
+    namespace_budget: &mut Vue3NamespaceProjectionBudget,
+) -> Option<()> {
+    if names.contains(name) {
+        return Some(());
+    }
+    if !namespace_budget.reserve(name.len().saturating_add(1)) {
+        return None;
+    }
+    names.insert(name.to_string());
+    Some(())
+}
+
 pub(crate) fn vue3_declared_type_names_from_declaration(
     declaration: &Declaration<'_>,
 ) -> BTreeSet<String> {
@@ -819,40 +1266,68 @@ fn vue3_declared_type_names_from_declaration_with_budget(
     let mut names = BTreeSet::new();
     match declaration {
         Declaration::TSInterfaceDeclaration(declaration) => {
-            names.insert(declaration.id.name.to_string());
+            insert_vue3_declared_type_name_with_budget(
+                &mut names,
+                declaration.id.name.as_str(),
+                namespace_budget,
+            )?;
         }
         Declaration::TSTypeAliasDeclaration(declaration) => {
-            names.insert(declaration.id.name.to_string());
+            insert_vue3_declared_type_name_with_budget(
+                &mut names,
+                declaration.id.name.as_str(),
+                namespace_budget,
+            )?;
         }
         Declaration::TSEnumDeclaration(declaration) => {
-            names.insert(declaration.id.name.to_string());
+            insert_vue3_declared_type_name_with_budget(
+                &mut names,
+                declaration.id.name.as_str(),
+                namespace_budget,
+            )?;
         }
         Declaration::FunctionDeclaration(function)
             if vue3_function_has_return_projection(function) =>
         {
             if let Some(id) = &function.id {
-                names.insert(id.name.to_string());
+                insert_vue3_declared_type_name_with_budget(
+                    &mut names,
+                    id.name.as_str(),
+                    namespace_budget,
+                )?;
             }
         }
         Declaration::VariableDeclaration(declaration) if declaration.declare => {
             for declarator in &declaration.declarations {
-                if let Some(name) = first_pattern_binding(&declarator.id) {
-                    names.insert(name);
+                if let Some(name) = first_pattern_binding_name(&declarator.id) {
+                    insert_vue3_declared_type_name_with_budget(
+                        &mut names,
+                        name,
+                        namespace_budget,
+                    )?;
                 }
             }
         }
         Declaration::VariableDeclaration(declaration) => {
             for declarator in &declaration.declarations {
                 if vue3_variable_declarator_has_type_projection(declarator) {
-                    if let Some(name) = first_pattern_binding(&declarator.id) {
-                        names.insert(name);
+                    if let Some(name) = first_pattern_binding_name(&declarator.id) {
+                        insert_vue3_declared_type_name_with_budget(
+                            &mut names,
+                            name,
+                            namespace_budget,
+                        )?;
                     }
                 }
             }
         }
         Declaration::ClassDeclaration(declaration) => {
             if let Some(id) = &declaration.id {
-                names.insert(id.name.to_string());
+                insert_vue3_declared_type_name_with_budget(
+                    &mut names,
+                    id.name.as_str(),
+                    namespace_budget,
+                )?;
             }
         }
         Declaration::TSModuleDeclaration(declaration) => {

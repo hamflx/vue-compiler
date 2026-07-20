@@ -591,6 +591,30 @@ fn vue3_analysis_generic_environment_cache_cost(analysis: &Vue3ScriptSetupAnalys
     .fold(0usize, usize::saturating_add)
 }
 
+pub(crate) fn vue3_type_analysis_clone_work(analysis: &Vue3ScriptSetupAnalysis) -> usize {
+    [
+        vue3_analysis_generic_environment_cache_cost(analysis),
+        vue3_external_string_map_cost(
+            &analysis.emits_type_declarations,
+            vue3_external_emits_cache_cost,
+        ),
+        vue3_external_string_map_cost(&analysis.type_sources, String::len),
+        vue3_external_string_map_cost(&analysis.type_direct_deps, |dependencies| {
+            vue3_external_string_vec_cost(dependencies)
+        }),
+        vue3_external_string_map_cost(&analysis.type_deps, |dependencies| {
+            vue3_external_string_set_cost(dependencies)
+        }),
+        vue3_external_string_set_cost(&analysis.local_ts_enum_type_names),
+        vue3_external_string_set_cost(&analysis.generic_type_parameter_names),
+        vue3_external_string_vec_cost(&analysis.deps),
+        vue3_external_string_vec_cost(&analysis.errors),
+        vue3_external_string_vec_cost(&analysis.warnings),
+    ]
+    .into_iter()
+    .fold(64usize, usize::saturating_add)
+}
+
 pub(crate) fn vue3_generic_alias_capture_work(
     analysis: &Vue3ScriptSetupAnalysis,
     names: &BTreeSet<String>,

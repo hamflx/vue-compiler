@@ -64,6 +64,72 @@ pub(crate) fn sync_vue3_type_alias_from_analysis(
     changed
 }
 
+pub(crate) fn sync_vue3_type_alias_from_context(
+    target: &mut Vue3ScriptSetupAnalysis,
+    source: &Vue27TypeContext,
+    source_name: &str,
+    target_name: &str,
+) -> bool {
+    macro_rules! sync_entry {
+        ($field:ident) => {
+            sync_vue3_projection_entry(
+                &mut target.$field,
+                &source.$field,
+                source_name,
+                target_name,
+            )
+        };
+    }
+
+    let mut changed = false;
+    changed |= sync_entry!(declared_types);
+    changed |= sync_entry!(define_model_declared_types);
+    changed |= sync_entry!(type_query_declared_types);
+    changed |= sync_entry!(define_model_type_query_declared_types);
+    changed |= sync_entry!(keyof_type_query_declared_types);
+    changed |= sync_entry!(props_type_declarations);
+    changed |= sync_entry!(keyof_runtime_type_declarations);
+    changed |= sync_entry!(tuple_runtime_type_declarations);
+    changed |= sync_entry!(define_model_tuple_runtime_type_declarations);
+    changed |= sync_entry!(array_element_runtime_type_declarations);
+    changed |= sync_entry!(define_model_array_element_runtime_type_declarations);
+    changed |= sync_entry!(parameter_tuple_runtime_type_declarations);
+    changed |= sync_entry!(define_model_parameter_tuple_runtime_type_declarations);
+    changed |= sync_entry!(constructor_parameter_tuple_runtime_type_declarations);
+    changed |= sync_entry!(define_model_constructor_parameter_tuple_runtime_type_declarations);
+    changed |= sync_entry!(return_type_runtime_type_declarations);
+    changed |= sync_entry!(define_model_return_type_runtime_type_declarations);
+    changed |= sync_entry!(props_options_type_declarations);
+    changed |= sync_entry!(return_type_props_options_declarations);
+    changed |= sync_vue3_generic_projection_entry(
+        &mut target.generic_type_aliases,
+        &source.generic_type_aliases,
+        source_name,
+        target_name,
+    );
+    changed |= sync_entry!(string_literal_type_declarations);
+    changed |= sync_entry!(ordered_string_literal_type_declarations);
+    changed |= sync_entry!(emits_type_declarations);
+    changed |= sync_entry!(type_sources);
+    changed |= sync_entry!(type_direct_deps);
+    changed |= sync_entry!(type_deps);
+    changed |= sync_entry!(unresolved_import_sources);
+
+    let source_is_silent = source.silent_unresolved_type_names.contains(source_name);
+    let target_is_silent = target.silent_unresolved_type_names.contains(target_name);
+    if source_is_silent != target_is_silent {
+        if source_is_silent {
+            target
+                .silent_unresolved_type_names
+                .insert(target_name.to_string());
+        } else {
+            target.silent_unresolved_type_names.remove(target_name);
+        }
+        changed = true;
+    }
+    changed
+}
+
 pub(crate) fn has_vue3_type_alias_projection(
     analysis: &Vue3ScriptSetupAnalysis,
     name: &str,
@@ -958,6 +1024,9 @@ pub(crate) fn insert_vue3_external_type_alias_and_namespace_members(
     dependency: &str,
     namespace_budget: &mut Vue3NamespaceProjectionBudget,
 ) -> bool {
+    if !reserve_vue3_external_import_binding_clear(context, local_name, namespace_budget) {
+        return false;
+    }
     if !reserve_vue3_external_type_alias_projection(
         imported,
         imported_name,
@@ -995,6 +1064,7 @@ pub(crate) fn insert_vue3_external_type_alias_and_namespace_members(
     {
         return false;
     }
+    clear_vue3_external_import_binding(context, local_name);
     insert_vue3_external_type_alias(
         context,
         imported,
@@ -1178,6 +1248,9 @@ pub(crate) fn insert_vue3_external_namespace_types(
     dependency: &str,
     namespace_budget: &mut Vue3NamespaceProjectionBudget,
 ) -> bool {
+    if !reserve_vue3_external_import_binding_clear(context, namespace, namespace_budget) {
+        return false;
+    }
     let mut has_generic_alias = false;
     for imported_name in imported.type_sources.keys() {
         has_generic_alias |= imported.generic_type_aliases.contains_key(imported_name);
@@ -1201,6 +1274,7 @@ pub(crate) fn insert_vue3_external_namespace_types(
     {
         return false;
     }
+    clear_vue3_external_import_binding(context, namespace);
     for imported_name in imported.type_sources.keys() {
         let local_name = format!("{namespace}.{imported_name}");
         insert_vue3_external_type_alias(context, imported, imported_name, &local_name, dependency);
@@ -1209,6 +1283,88 @@ pub(crate) fn insert_vue3_external_namespace_types(
         insert_vue3_external_generic_alias_string_key_helpers(context, imported, dependency);
     }
     true
+}
+
+fn reserve_vue3_external_import_binding_clear(
+    context: &Vue27TypeContext,
+    local_name: &str,
+    namespace_budget: &mut Vue3NamespaceProjectionBudget,
+) -> bool {
+    const TYPE_CONTEXT_ALIAS_COLLECTIONS: usize = 28;
+
+    let scan_work = context
+        .type_sources
+        .keys()
+        .chain(context.unresolved_import_sources.keys())
+        .chain(&context.silent_unresolved_type_names)
+        .fold(local_name.len().saturating_add(2), |work, name| {
+            work.saturating_add(name.len()).saturating_add(1)
+        });
+    let clear_work = context.type_sources.keys().fold(0usize, |work, name| {
+        if vue3_type_name_is_in_import_binding(name, local_name) {
+            work.saturating_add(vue3_external_type_alias_projection_work(
+                context,
+                name,
+                name.len(),
+                "",
+            ))
+        } else {
+            work
+        }
+    });
+    namespace_budget.reserve(
+        scan_work
+            .saturating_mul(TYPE_CONTEXT_ALIAS_COLLECTIONS)
+            .saturating_add(clear_work),
+    )
+}
+
+fn clear_vue3_external_import_binding(context: &mut Vue27TypeContext, local_name: &str) {
+    macro_rules! clear_field {
+        ($field:ident) => {
+            context
+                .$field
+                .retain(|name, _| !vue3_type_name_is_in_import_binding(name, local_name));
+        };
+    }
+
+    clear_field!(declared_types);
+    clear_field!(define_model_declared_types);
+    clear_field!(type_query_declared_types);
+    clear_field!(define_model_type_query_declared_types);
+    clear_field!(keyof_type_query_declared_types);
+    clear_field!(props_type_declarations);
+    clear_field!(keyof_runtime_type_declarations);
+    clear_field!(tuple_runtime_type_declarations);
+    clear_field!(define_model_tuple_runtime_type_declarations);
+    clear_field!(array_element_runtime_type_declarations);
+    clear_field!(define_model_array_element_runtime_type_declarations);
+    clear_field!(parameter_tuple_runtime_type_declarations);
+    clear_field!(define_model_parameter_tuple_runtime_type_declarations);
+    clear_field!(constructor_parameter_tuple_runtime_type_declarations);
+    clear_field!(define_model_constructor_parameter_tuple_runtime_type_declarations);
+    clear_field!(return_type_runtime_type_declarations);
+    clear_field!(define_model_return_type_runtime_type_declarations);
+    clear_field!(props_options_type_declarations);
+    clear_field!(return_type_props_options_declarations);
+    clear_field!(generic_type_aliases);
+    clear_field!(string_literal_type_declarations);
+    clear_field!(ordered_string_literal_type_declarations);
+    clear_field!(emits_type_declarations);
+    clear_field!(type_sources);
+    clear_field!(type_direct_deps);
+    clear_field!(type_deps);
+    clear_field!(unresolved_import_sources);
+    context
+        .silent_unresolved_type_names
+        .retain(|name| !vue3_type_name_is_in_import_binding(name, local_name));
+}
+
+fn vue3_type_name_is_in_import_binding(name: &str, local_name: &str) -> bool {
+    name == local_name
+        || name
+            .strip_prefix(local_name)
+            .is_some_and(|suffix| suffix.starts_with('.'))
 }
 
 pub(crate) fn vue3_type_context_names(context: &Vue27TypeContext) -> BTreeSet<String> {

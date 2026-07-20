@@ -823,6 +823,352 @@ defineProps<Shared.Props & RootProps>()
 }
 
 #[test]
+fn vue3_global_augmentation_uses_module_lexical_types_and_preserves_deps() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let leaf = dir.path().join("leaf.ts");
+    std::fs::write(
+        &leaf,
+        "export interface Leaf { leafValue: string }",
+    )
+    .expect("write global augmentation dependency");
+    let global = dir.path().join("global.d.ts");
+    std::fs::write(
+        &global,
+        r#"
+import type { Leaf } from './leaf'
+export {}
+declare global {
+  interface GlobalBase extends Leaf { globalValue: boolean }
+  interface GlobalProps extends LocalAlias {}
+}
+type LocalAlias = GlobalBase & { localValue: number }
+"#,
+    )
+    .expect("write lexical global augmentation");
+
+    let filename = dir.path().join("Comp.vue");
+    let source = r#"<script setup lang="ts">
+defineProps<GlobalProps>()
+</script>"#;
+    let mut compiler = SfcCompiler::new();
+    let descriptor = compiler.parse(filename.to_string_lossy(), source);
+    let script = compiler.compile_script(
+        &descriptor,
+        SfcScriptCompileOptions {
+            global_type_files: vec![global.to_string_lossy().to_string()],
+            ..SfcScriptCompileOptions::default()
+        },
+    );
+
+    assert!(script.errors.is_empty(), "{:?}", script.errors);
+    assert!(script
+        .content
+        .contains("leafValue: { type: String, required: true }"));
+    assert!(script
+        .content
+        .contains("globalValue: { type: Boolean, required: true }"));
+    assert!(script
+        .content
+        .contains("localValue: { type: Number, required: true }"));
+    assert_eq!(
+        script.deps.iter().cloned().collect::<BTreeSet<_>>(),
+        [normalize_path_string(&global), normalize_path_string(&leaf)]
+            .into_iter()
+            .collect()
+    );
+}
+
+#[test]
+fn vue3_global_augmentation_keeps_module_lexical_types_private() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let global = dir.path().join("global.d.ts");
+    std::fs::write(
+        &global,
+        r#"
+export {}
+interface ModuleOnly { hiddenValue: string }
+namespace ModuleNamespace {
+  interface AmbientBase { ambientValue: boolean }
+}
+interface Shared { moduleSharedValue: Date }
+enum SharedEnum { Module = 'module' }
+declare global {
+  interface Shared { globalSharedValue: string }
+  enum SharedEnum { Global = 1 }
+  interface GlobalOnly extends ModuleOnly, ModuleNamespace.AmbientBase, Shared {
+    visibleValue: number
+    enumValue: SharedEnum
+  }
+}
+"#,
+    )
+    .expect("write isolated global augmentation");
+    let resolver = Vue3TypeResolverContext::default();
+    let context = vue3_global_type_context(
+        &dir.path().join("Comp.vue").to_string_lossy(),
+        &[global.to_string_lossy().to_string()],
+        &resolver,
+    );
+
+    let names = vue3_type_context_names(&context);
+    assert!(names.contains("GlobalOnly"));
+    assert!(!names.contains("ModuleOnly"));
+    assert!(!names.iter().any(|name| name.starts_with("ModuleNamespace")));
+    let props = context
+        .props_type_declarations
+        .get("GlobalOnly")
+        .expect("global augmentation props");
+    let keys = props
+        .members
+        .iter()
+        .map(|prop| prop.key.as_str())
+        .collect::<BTreeSet<_>>();
+    assert!(keys.contains("hiddenValue"));
+    assert!(keys.contains("ambientValue"));
+    assert!(keys.contains("globalSharedValue"));
+    assert!(keys.contains("visibleValue"));
+    assert!(!keys.contains("moduleSharedValue"));
+    let enum_prop = props
+        .members
+        .iter()
+        .find(|prop| prop.key == "enumValue")
+        .expect("global enum prop");
+    assert_eq!(enum_prop.types, ["Number"]);
+}
+
+#[test]
+fn vue3_global_namespace_and_module_namespace_import_keep_separate_scopes() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let base = dir.path().join("base-global.d.ts");
+    std::fs::write(
+        &base,
+        "declare namespace Types { interface BaseOnly { baseValue: Date } }",
+    )
+    .expect("write base global namespace");
+    let types = dir.path().join("types.ts");
+    std::fs::write(
+        &types,
+        "export interface ModuleOnly { moduleValue: string }",
+    )
+    .expect("write module namespace import");
+    let global = dir.path().join("global.d.ts");
+    std::fs::write(
+        &global,
+        r#"
+import type * as Types from './types'
+export {}
+type ModuleAlias = Types.ModuleOnly
+type BaseLeakAlias = Types.BaseOnly
+declare global {
+  namespace Types {
+    interface GlobalOnly { globalValue: number }
+  }
+  interface GlobalProps extends Types.GlobalOnly {}
+  interface ModuleProps extends ModuleAlias {}
+  interface LeakedProps extends Types.ModuleOnly {}
+  interface BaseLeakedProps extends BaseLeakAlias {}
+}
+"#,
+    )
+    .expect("write colliding namespace scopes");
+
+    let filename = dir.path().join("Comp.vue");
+    let source = r#"<script setup lang="ts">
+defineProps<GlobalProps & ModuleProps>()
+</script>"#;
+    let mut compiler = SfcCompiler::new();
+    let descriptor = compiler.parse(filename.to_string_lossy(), source);
+    let script = compiler.compile_script(
+        &descriptor,
+        SfcScriptCompileOptions {
+            global_type_files: vec![
+                base.to_string_lossy().to_string(),
+                global.to_string_lossy().to_string(),
+            ],
+            ..SfcScriptCompileOptions::default()
+        },
+    );
+
+    assert!(script.errors.is_empty(), "{:?}", script.errors);
+    assert!(script
+        .content
+        .contains("globalValue: { type: Number, required: true }"));
+    assert!(script
+        .content
+        .contains("moduleValue: { type: String, required: true }"));
+    assert_eq!(
+        script.deps.iter().cloned().collect::<BTreeSet<_>>(),
+        [normalize_path_string(&global), normalize_path_string(&types)]
+            .into_iter()
+            .collect()
+    );
+    let context = vue3_global_type_context(
+        &filename.to_string_lossy(),
+        &[
+            base.to_string_lossy().to_string(),
+            global.to_string_lossy().to_string(),
+        ],
+        &Vue3TypeResolverContext::default(),
+    );
+    let leaked = context
+        .props_type_declarations
+        .get("LeakedProps")
+        .expect("unresolved shadowed namespace member");
+    assert!(!leaked.errors.is_empty());
+    assert!(!leaked.members.iter().any(|prop| prop.key == "moduleValue"));
+    let base_leaked = context
+        .props_type_declarations
+        .get("BaseLeakedProps")
+        .expect("shadowed base namespace member");
+    assert!(!base_leaked.errors.is_empty());
+    assert!(!base_leaked
+        .members
+        .iter()
+        .any(|prop| prop.key == "baseValue"));
+}
+
+#[test]
+fn vue3_global_module_imports_exactly_shadow_base_type_projections() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let base = dir.path().join("base-global.d.ts");
+    std::fs::write(
+        &base,
+        r#"
+interface Foo { leakedValue: string }
+interface MissingFoo { missingLeakValue: number }
+"#,
+    )
+    .expect("write base global aliases");
+    let types = dir.path().join("types.ts");
+    std::fs::write(&types, "export type Foo = string").expect("write primitive import");
+    let global = dir.path().join("global.d.ts");
+    std::fs::write(
+        &global,
+        r#"
+import type { Foo } from './types'
+import type { MissingFoo } from './missing'
+export {}
+type ImportedAlias = Foo
+type MissingAlias = MissingFoo
+declare global {
+  interface ImportedProps { value: ImportedAlias }
+  interface ImportedLeak extends Foo {}
+  interface MissingLeak extends MissingAlias {}
+}
+"#,
+    )
+    .expect("write exact import shadows");
+
+    let filename = dir.path().join("Comp.vue");
+    let source = r#"<script setup lang="ts">
+defineProps<ImportedProps>()
+</script>"#;
+    let files = vec![
+        base.to_string_lossy().to_string(),
+        global.to_string_lossy().to_string(),
+    ];
+    let mut compiler = SfcCompiler::new();
+    let descriptor = compiler.parse(filename.to_string_lossy(), source);
+    let script = compiler.compile_script(
+        &descriptor,
+        SfcScriptCompileOptions {
+            global_type_files: files.clone(),
+            ..SfcScriptCompileOptions::default()
+        },
+    );
+
+    assert!(script.errors.is_empty(), "{:?}", script.errors);
+    assert!(script
+        .content
+        .contains("value: { type: String, required: true }"));
+    assert_eq!(
+        script.deps.iter().cloned().collect::<BTreeSet<_>>(),
+        [normalize_path_string(&global), normalize_path_string(&types)]
+            .into_iter()
+            .collect()
+    );
+
+    let context = vue3_global_type_context(
+        &filename.to_string_lossy(),
+        &files,
+        &Vue3TypeResolverContext::default(),
+    );
+    let imported_leak = context
+        .props_type_declarations
+        .get("ImportedLeak")
+        .expect("incompatible imported base");
+    assert!(!imported_leak.errors.is_empty());
+    assert!(!imported_leak
+        .members
+        .iter()
+        .any(|prop| prop.key == "leakedValue"));
+    let missing_leak = context
+        .props_type_declarations
+        .get("MissingLeak")
+        .expect("missing imported base");
+    assert!(!missing_leak.errors.is_empty());
+    assert!(!missing_leak
+        .members
+        .iter()
+        .any(|prop| prop.key == "missingLeakValue"));
+}
+
+#[test]
+fn vue3_global_generic_alias_captures_module_lexical_environment() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let leaf = dir.path().join("leaf.ts");
+    std::fs::write(
+        &leaf,
+        "export interface Leaf { leafValue: string }",
+    )
+    .expect("write generic global dependency");
+    let global = dir.path().join("global.d.ts");
+    std::fs::write(
+        &global,
+        r#"
+import type { Leaf } from './leaf'
+export {}
+type LocalBox<T> = T & { localValue: number }
+declare global {
+  type GenericGlobalProps<T> = LocalBox<T> & Leaf
+}
+"#,
+    )
+    .expect("write generic global augmentation");
+
+    let filename = dir.path().join("Comp.vue");
+    let source = r#"<script setup lang="ts">
+defineProps<GenericGlobalProps<{ componentValue: boolean }>>()
+</script>"#;
+    let mut compiler = SfcCompiler::new();
+    let descriptor = compiler.parse(filename.to_string_lossy(), source);
+    let script = compiler.compile_script(
+        &descriptor,
+        SfcScriptCompileOptions {
+            global_type_files: vec![global.to_string_lossy().to_string()],
+            ..SfcScriptCompileOptions::default()
+        },
+    );
+
+    assert!(script.errors.is_empty(), "{:?}", script.errors);
+    assert!(script
+        .content
+        .contains("componentValue: { type: Boolean, required: true }"));
+    assert!(script
+        .content
+        .contains("localValue: { type: Number, required: true }"));
+    assert!(script
+        .content
+        .contains("leafValue: { type: String, required: true }"));
+    assert_eq!(
+        script.deps.iter().cloned().collect::<BTreeSet<_>>(),
+        [normalize_path_string(&global), normalize_path_string(&leaf)]
+            .into_iter()
+            .collect()
+    );
+}
+
+#[test]
 fn vue3_global_augmentation_groups_union_interface_dependencies() {
     let dir = tempfile::tempdir().expect("temp dir");
     let first = dir.path().join("first.ts");

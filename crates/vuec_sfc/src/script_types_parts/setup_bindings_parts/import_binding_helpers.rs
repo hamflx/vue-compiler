@@ -1,28 +1,34 @@
 pub(crate) fn first_pattern_binding(pattern: &BindingPattern<'_>) -> Option<String> {
+    first_pattern_binding_name(pattern).map(str::to_string)
+}
+
+pub(crate) fn first_pattern_binding_name<'a>(
+    pattern: &'a BindingPattern<'_>,
+) -> Option<&'a str> {
     match pattern {
-        BindingPattern::BindingIdentifier(identifier) => Some(identifier.name.to_string()),
+        BindingPattern::BindingIdentifier(identifier) => Some(identifier.name.as_str()),
         BindingPattern::ObjectPattern(pattern) => pattern
             .properties
             .iter()
-            .find_map(|property| first_pattern_binding(&property.value))
+            .find_map(|property| first_pattern_binding_name(&property.value))
             .or_else(|| {
                 pattern
                     .rest
                     .as_ref()
-                    .and_then(|rest| first_pattern_binding(&rest.argument))
+                    .and_then(|rest| first_pattern_binding_name(&rest.argument))
             }),
         BindingPattern::ArrayPattern(pattern) => pattern
             .elements
             .iter()
             .flatten()
-            .find_map(first_pattern_binding)
+            .find_map(first_pattern_binding_name)
             .or_else(|| {
                 pattern
                     .rest
                     .as_ref()
-                    .and_then(|rest| first_pattern_binding(&rest.argument))
+                    .and_then(|rest| first_pattern_binding_name(&rest.argument))
             }),
-        BindingPattern::AssignmentPattern(pattern) => first_pattern_binding(&pattern.left),
+        BindingPattern::AssignmentPattern(pattern) => first_pattern_binding_name(&pattern.left),
     }
 }
 
@@ -96,13 +102,19 @@ pub(crate) fn object_expression_keys(object: &ObjectExpression<'_>) -> Vec<Strin
 }
 
 pub(crate) fn import_specifier_local(specifier: &ImportDeclarationSpecifier<'_>) -> String {
+    import_specifier_local_name(specifier).to_string()
+}
+
+pub(crate) fn import_specifier_local_name<'a>(
+    specifier: &'a ImportDeclarationSpecifier<'_>,
+) -> &'a str {
     match specifier {
-        ImportDeclarationSpecifier::ImportSpecifier(specifier) => specifier.local.name.to_string(),
+        ImportDeclarationSpecifier::ImportSpecifier(specifier) => specifier.local.name.as_str(),
         ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
-            specifier.local.name.to_string()
+            specifier.local.name.as_str()
         }
         ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
-            specifier.local.name.to_string()
+            specifier.local.name.as_str()
         }
     }
 }
@@ -110,12 +122,18 @@ pub(crate) fn import_specifier_local(specifier: &ImportDeclarationSpecifier<'_>)
 pub(crate) fn import_specifier_imported(
     specifier: &ImportDeclarationSpecifier<'_>,
 ) -> Option<String> {
+    import_specifier_imported_name(specifier).map(str::to_string)
+}
+
+pub(crate) fn import_specifier_imported_name<'a>(
+    specifier: &'a ImportDeclarationSpecifier<'a>,
+) -> Option<&'a str> {
     match specifier {
         ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
-            Some(specifier.imported.name().to_string())
+            module_export_name(&specifier.imported)
         }
-        ImportDeclarationSpecifier::ImportDefaultSpecifier(_) => Some("default".into()),
-        ImportDeclarationSpecifier::ImportNamespaceSpecifier(_) => Some("*".into()),
+        ImportDeclarationSpecifier::ImportDefaultSpecifier(_) => Some("default"),
+        ImportDeclarationSpecifier::ImportNamespaceSpecifier(_) => Some("*"),
     }
 }
 
