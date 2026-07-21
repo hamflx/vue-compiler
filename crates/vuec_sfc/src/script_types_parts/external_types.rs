@@ -1635,8 +1635,9 @@ fn project_vue3_namespace_declaration_with_prefix(
                 &excluded_interfaces,
                 &mut namespace_analysis,
             );
-            collect_vue3_declared_type_deps_from_statements(
-                &block.body,
+            collect_vue3_declared_type_deps_from_statement_groups_excluding_names(
+                &[&block.body],
+                &local_mergeable_names,
                 &mut namespace_analysis,
             );
             if namespace_analysis.type_dependency_work_exhausted {
@@ -1882,11 +1883,12 @@ fn merge_vue3_namespace_declaration_projections(
         ($field:ident) => {{
             let mut found = false;
             let mut values = Vec::new();
+            let mut seen = BTreeSet::new();
             for projection in projections {
                 if let Some(source_values) = projection.analysis.$field.get(name) {
                     found = true;
                     for value in source_values {
-                        if !values.contains(value) {
+                        if seen.insert(value) {
                             values.push(value.clone());
                         }
                     }
@@ -1928,8 +1930,9 @@ fn merge_vue3_namespace_declaration_projections(
                 merged.$field.remove(name);
             } else {
                 let mut source_parts = Vec::new();
+                let mut seen_sources = BTreeSet::new();
                 for value in &values {
-                    if !source_parts.contains(&value.source) {
+                    if seen_sources.insert(value.source.as_str()) {
                         source_parts.push(value.source.clone());
                     }
                 }
@@ -2010,15 +2013,19 @@ fn merge_vue3_namespace_declaration_projections(
         merged.emits_type_declarations.remove(name);
     } else {
         let mut source_parts = Vec::new();
+        let mut seen_sources = BTreeSet::new();
         let mut events = Vec::new();
+        let mut seen_events = BTreeSet::new();
         let mut syntax = Vue3EmitsTypeSyntax::default();
         let mut call_count = 0usize;
         for emit in emits {
-            if !source_parts.contains(&emit.source) {
+            if seen_sources.insert(emit.source.as_str()) {
                 source_parts.push(emit.source.clone());
             }
             for event in &emit.events {
-                push_unique(&mut events, event);
+                if seen_events.insert(event.as_str()) {
+                    events.push(event.clone());
+                }
             }
             syntax.has_call_signature |= emit.syntax.has_call_signature;
             syntax.has_property |= emit.syntax.has_property;

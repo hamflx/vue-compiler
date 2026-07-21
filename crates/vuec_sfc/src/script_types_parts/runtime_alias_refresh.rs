@@ -590,6 +590,7 @@ pub(crate) fn register_vue3_declared_function_return_props_options(
         return;
     };
     register_vue3_function_return_projection(source, id.name.as_str(), function, analysis);
+    capture_vue3_value_type_projection(analysis, id.name.as_str());
 }
 
 pub(crate) fn vue3_function_has_return_projection(function: &Function<'_>) -> bool {
@@ -1003,6 +1004,14 @@ pub(crate) fn register_vue3_static_runtime_props_options(
             .props_options_type_declarations
             .insert(name.to_string(), props_options);
     }
+    for declarator in &declaration.declarations {
+        if !vue3_variable_declarator_has_type_projection(declarator) {
+            continue;
+        }
+        if let Some(name) = first_pattern_binding_name(&declarator.id) {
+            capture_vue3_value_type_projection(analysis, name);
+        }
+    }
 }
 
 pub(crate) fn register_vue3_default_static_runtime_props_options(
@@ -1125,61 +1134,39 @@ pub(crate) fn register_vue3_declared_variable_props_options(
         let Some(type_annotation) = declarator.type_annotation.as_ref() else {
             continue;
         };
-        register_vue3_local_type_name(analysis, &name);
-        register_vue3_declared_type_query_runtime_types(
-            &name,
-            &type_annotation.type_annotation,
-            analysis,
-        );
-        register_vue3_declared_callable_return_runtime_types(
-            &name,
-            &type_annotation.type_annotation,
-            analysis,
-        );
-        match &type_annotation.type_annotation {
-            TSType::TSTypeLiteral(_) => {
-                if let Some(props_options) = vue3_props_options_type_members(
-                    source,
-                    &type_annotation.type_annotation,
-                    analysis,
-                ) {
-                    analysis
-                        .props_options_type_declarations
-                        .insert(name.to_string(), props_options);
-                }
-            }
-            TSType::TSFunctionType(function) => {
-                if let Some(props_options) = vue3_props_options_type_members(
+        let ty = &type_annotation.type_annotation;
+        let projection = Vue3ValueTypeProjection {
+            type_query_declared_types: Some(infer_vue3_runtime_type(ty, analysis)),
+            define_model_type_query_declared_types: Some(
+                infer_vue3_define_model_runtime_type(ty, analysis),
+            ),
+            keyof_type_query_declared_types: infer_vue3_keyof_runtime_type(ty, analysis),
+            return_type_runtime_type_declarations: infer_vue3_return_runtime_type(
+                ty,
+                analysis,
+                Vue3ArrayElementRuntimeMode::Props,
+            ),
+            define_model_return_type_runtime_type_declarations: infer_vue3_return_runtime_type(
+                ty,
+                analysis,
+                Vue3ArrayElementRuntimeMode::DefineModel,
+            ),
+            props_options_type_declarations: matches!(ty, TSType::TSTypeLiteral(_))
+                .then(|| vue3_props_options_type_members(source, ty, analysis))
+                .flatten(),
+            return_type_props_options_declarations: match ty {
+                TSType::TSFunctionType(function) => vue3_props_options_type_members(
                     source,
                     &function.return_type.type_annotation,
                     analysis,
-                ) {
-                    analysis
-                        .return_type_props_options_declarations
-                        .insert(name.to_string(), props_options);
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-pub(crate) fn register_vue3_declared_type_query_runtime_types(
-    name: &str,
-    ty: &TSType<'_>,
-    analysis: &mut Vue3ScriptSetupAnalysis,
-) {
-    analysis
-        .type_query_declared_types
-        .insert(name.to_string(), infer_vue3_runtime_type(ty, analysis));
-    analysis.define_model_type_query_declared_types.insert(
-        name.to_string(),
-        infer_vue3_define_model_runtime_type(ty, analysis),
-    );
-    if let Some(types) = infer_vue3_keyof_runtime_type(ty, analysis) {
-        analysis
-            .keyof_type_query_declared_types
-            .insert(name.to_string(), types);
+                ),
+                _ => None,
+            },
+            unresolved_import_sources: None,
+        };
+        register_vue3_local_type_name(analysis, &name);
+        projection.apply_to_analysis(analysis, &name);
+        analysis.value_type_projections.insert(name, projection);
     }
 }
 
@@ -1189,32 +1176,23 @@ pub(crate) fn register_vue3_declared_return_props_options(
     ty: &TSType<'_>,
     analysis: &mut Vue3ScriptSetupAnalysis,
 ) {
+    let projection = Vue3ValueTypeProjection {
+        return_type_runtime_type_declarations: vue3_non_empty_runtime_types(
+            infer_vue3_runtime_type(ty, analysis),
+        ),
+        define_model_return_type_runtime_type_declarations: vue3_non_empty_runtime_types(
+            infer_vue3_define_model_runtime_type(ty, analysis),
+        ),
+        return_type_props_options_declarations: vue3_props_options_type_members(
+            source, ty, analysis,
+        ),
+        ..Vue3ValueTypeProjection::default()
+    };
     register_vue3_local_type_name(analysis, name);
-    register_vue3_declared_return_annotation_runtime_types(name, ty, analysis);
-    if let Some(props_options) = vue3_props_options_type_members(source, ty, analysis) {
-        analysis
-            .return_type_props_options_declarations
-            .insert(name.to_string(), props_options);
-    }
-}
-
-pub(crate) fn register_vue3_declared_return_annotation_runtime_types(
-    name: &str,
-    ty: &TSType<'_>,
-    analysis: &mut Vue3ScriptSetupAnalysis,
-) {
-    if let Some(types) = vue3_non_empty_runtime_types(infer_vue3_runtime_type(ty, analysis)) {
-        analysis
-            .return_type_runtime_type_declarations
-            .insert(name.to_string(), types);
-    }
-    if let Some(types) =
-        vue3_non_empty_runtime_types(infer_vue3_define_model_runtime_type(ty, analysis))
-    {
-        analysis
-            .define_model_return_type_runtime_type_declarations
-            .insert(name.to_string(), types);
-    }
+    projection.apply_to_analysis(analysis, name);
+    analysis
+        .value_type_projections
+        .insert(name.to_string(), projection);
 }
 
 pub(crate) fn register_vue3_declared_return_runtime_types(
@@ -1232,27 +1210,6 @@ pub(crate) fn register_vue3_declared_return_runtime_types(
     analysis
         .define_model_return_type_runtime_type_declarations
         .insert(name.to_string(), types);
-}
-
-pub(crate) fn register_vue3_declared_callable_return_runtime_types(
-    name: &str,
-    ty: &TSType<'_>,
-    analysis: &mut Vue3ScriptSetupAnalysis,
-) {
-    if let Some(types) =
-        infer_vue3_return_runtime_type(ty, analysis, Vue3ArrayElementRuntimeMode::Props)
-    {
-        analysis
-            .return_type_runtime_type_declarations
-            .insert(name.to_string(), types);
-    }
-    if let Some(types) =
-        infer_vue3_return_runtime_type(ty, analysis, Vue3ArrayElementRuntimeMode::DefineModel)
-    {
-        analysis
-            .define_model_return_type_runtime_type_declarations
-            .insert(name.to_string(), types);
-    }
 }
 
 pub(crate) fn infer_vue3_enum_runtime_type(declaration: &TSEnumDeclaration<'_>) -> Vec<String> {

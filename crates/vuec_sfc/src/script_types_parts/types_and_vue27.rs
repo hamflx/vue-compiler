@@ -54,6 +54,18 @@ pub(crate) struct Vue27TypeMembers {
     pub(crate) errors: Vec<String>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Vue3ValueTypeProjection {
+    pub(crate) type_query_declared_types: Option<Vec<String>>,
+    pub(crate) define_model_type_query_declared_types: Option<Vec<String>>,
+    pub(crate) keyof_type_query_declared_types: Option<Vec<String>>,
+    pub(crate) return_type_runtime_type_declarations: Option<Vec<String>>,
+    pub(crate) define_model_return_type_runtime_type_declarations: Option<Vec<String>>,
+    pub(crate) props_options_type_declarations: Option<Vue27TypeMembers>,
+    pub(crate) return_type_props_options_declarations: Option<Vue27TypeMembers>,
+    pub(crate) unresolved_import_sources: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Vue3PropsTypeResolveMode {
     Silent,

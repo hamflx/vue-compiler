@@ -90,6 +90,18 @@ pub(crate) fn refresh_vue3_interface_declaration_group(
     let Some(declarations) = interface_declarations.get(&name) else {
         return refresh_vue3_non_generic_interface_declaration(source, declaration, analysis);
     };
+    let Some(first) = declarations.first() else {
+        return refresh_vue3_non_generic_interface_declaration(source, declaration, analysis);
+    };
+    if !declarations
+        .iter()
+        .skip(1)
+        .all(|declaration| vue3_interface_type_parameters_are_compatible(first, declaration))
+    {
+        let mut changed = refresh_vue3_generic_interface_declaration(source, first, analysis);
+        changed |= refresh_vue3_merged_interface_declarations(source, &[*first], analysis);
+        return changed;
+    }
     let mut changed =
         refresh_vue3_generic_interface_declaration_group(source, declarations, analysis);
     changed |= refresh_vue3_merged_interface_declarations(source, declarations, analysis);
@@ -115,17 +127,7 @@ fn refresh_vue3_generic_interface_declaration_group(
         .iter()
         .map(|param| param.name.name.to_string())
         .collect::<Vec<_>>();
-    if params.is_empty()
-        || !declarations.iter().all(|declaration| {
-            declaration.type_parameters.as_ref().is_some_and(|parameters| {
-                parameters
-                    .params
-                    .iter()
-                    .map(|param| param.name.name.as_str())
-                    .eq(params.iter().map(String::as_str))
-            })
-        })
-    {
+    if params.is_empty() {
         return refresh_vue3_generic_interface_declaration(source, first, analysis);
     }
     let fragments = declarations
@@ -156,6 +158,13 @@ fn refresh_vue3_generic_interface_declaration_group(
         analysis.generic_type_aliases.insert(name.to_string(), alias);
         true
     }
+}
+
+fn vue3_interface_type_parameters_are_compatible(
+    left: &TSInterfaceDeclaration<'_>,
+    right: &TSInterfaceDeclaration<'_>,
+) -> bool {
+    oxc_span::ContentEq::content_eq(&left.type_parameters, &right.type_parameters)
 }
 
 pub(crate) fn refresh_vue3_merged_interface_declarations(

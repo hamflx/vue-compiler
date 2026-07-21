@@ -14,7 +14,11 @@ pub(crate) fn vue3_props_options_type_members(
         }),
         TSType::TSTypeReference(reference) => {
             let name = vue3_ts_type_name_key(&reference.type_name)?;
-            analysis.props_options_type_declarations.get(&name).cloned()
+            analysis
+                .props_options_type_declarations
+                .get(&name)
+                .or_else(|| analysis.props_type_declarations.get(&name))
+                .cloned()
         }
         TSType::TSImportType(import_type) => {
             let resolved = vue3_resolve_import_type(import_type, analysis)?;

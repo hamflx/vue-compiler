@@ -91,6 +91,7 @@ pub(crate) struct Vue3ScriptSetupAnalysis {
     pub(crate) define_model_return_type_runtime_type_declarations: BTreeMap<String, Vec<String>>,
     pub(crate) props_options_type_declarations: BTreeMap<String, Vue27TypeMembers>,
     pub(crate) return_type_props_options_declarations: BTreeMap<String, Vue27TypeMembers>,
+    pub(crate) value_type_projections: BTreeMap<String, Vue3ValueTypeProjection>,
     pub(crate) generic_type_aliases: BTreeMap<String, Vue3GenericTypeAlias>,
     pub(crate) string_literal_type_declarations: BTreeMap<String, BTreeSet<String>>,
     pub(crate) ordered_string_literal_type_declarations: BTreeMap<String, Vec<String>>,

@@ -35,6 +35,7 @@ pub(crate) fn sync_vue3_type_alias_from_analysis(
     changed |= sync_entry!(define_model_return_type_runtime_type_declarations);
     changed |= sync_entry!(props_options_type_declarations);
     changed |= sync_entry!(return_type_props_options_declarations);
+    changed |= sync_entry!(value_type_projections);
     changed |= sync_vue3_generic_projection_entry(
         &mut target.generic_type_aliases,
         &source.generic_type_aliases,
@@ -67,6 +68,72 @@ pub(crate) fn sync_vue3_type_alias_from_analysis(
 pub(crate) fn sync_vue3_type_alias_from_context(
     target: &mut Vue3ScriptSetupAnalysis,
     source: &Vue27TypeContext,
+    source_name: &str,
+    target_name: &str,
+) -> bool {
+    macro_rules! sync_entry {
+        ($field:ident) => {
+            sync_vue3_projection_entry(
+                &mut target.$field,
+                &source.$field,
+                source_name,
+                target_name,
+            )
+        };
+    }
+
+    let mut changed = false;
+    changed |= sync_entry!(declared_types);
+    changed |= sync_entry!(define_model_declared_types);
+    changed |= sync_entry!(type_query_declared_types);
+    changed |= sync_entry!(define_model_type_query_declared_types);
+    changed |= sync_entry!(keyof_type_query_declared_types);
+    changed |= sync_entry!(props_type_declarations);
+    changed |= sync_entry!(keyof_runtime_type_declarations);
+    changed |= sync_entry!(tuple_runtime_type_declarations);
+    changed |= sync_entry!(define_model_tuple_runtime_type_declarations);
+    changed |= sync_entry!(array_element_runtime_type_declarations);
+    changed |= sync_entry!(define_model_array_element_runtime_type_declarations);
+    changed |= sync_entry!(parameter_tuple_runtime_type_declarations);
+    changed |= sync_entry!(define_model_parameter_tuple_runtime_type_declarations);
+    changed |= sync_entry!(constructor_parameter_tuple_runtime_type_declarations);
+    changed |= sync_entry!(define_model_constructor_parameter_tuple_runtime_type_declarations);
+    changed |= sync_entry!(return_type_runtime_type_declarations);
+    changed |= sync_entry!(define_model_return_type_runtime_type_declarations);
+    changed |= sync_entry!(props_options_type_declarations);
+    changed |= sync_entry!(return_type_props_options_declarations);
+    changed |= sync_vue3_generic_projection_entry(
+        &mut target.generic_type_aliases,
+        &source.generic_type_aliases,
+        source_name,
+        target_name,
+    );
+    changed |= sync_entry!(string_literal_type_declarations);
+    changed |= sync_entry!(ordered_string_literal_type_declarations);
+    changed |= sync_entry!(emits_type_declarations);
+    changed |= sync_entry!(type_sources);
+    changed |= sync_entry!(type_direct_deps);
+    changed |= sync_entry!(type_deps);
+    changed |= sync_entry!(unresolved_import_sources);
+
+    let source_is_silent = source.silent_unresolved_type_names.contains(source_name);
+    let target_is_silent = target.silent_unresolved_type_names.contains(target_name);
+    if source_is_silent != target_is_silent {
+        if source_is_silent {
+            target
+                .silent_unresolved_type_names
+                .insert(target_name.to_string());
+        } else {
+            target.silent_unresolved_type_names.remove(target_name);
+        }
+        changed = true;
+    }
+    changed
+}
+
+pub(crate) fn sync_vue3_type_alias_to_context(
+    target: &mut Vue27TypeContext,
+    source: &Vue3ScriptSetupAnalysis,
     source_name: &str,
     target_name: &str,
 ) -> bool {
@@ -175,6 +242,7 @@ pub(crate) fn has_vue3_type_alias_projection(
         || analysis
             .return_type_props_options_declarations
             .contains_key(name)
+        || analysis.value_type_projections.contains_key(name)
         || analysis.generic_type_aliases.contains_key(name)
         || analysis.string_literal_type_declarations.contains_key(name)
         || analysis
@@ -424,6 +492,11 @@ pub(crate) fn insert_vue3_local_type_alias(
     {
         analysis
             .return_type_props_options_declarations
+            .insert(exported_name.to_string(), value);
+    }
+    if let Some(value) = analysis.value_type_projections.get(local_name).cloned() {
+        analysis
+            .value_type_projections
             .insert(exported_name.to_string(), value);
     }
     if let Some(value) = analysis.generic_type_aliases.get(local_name).cloned() {

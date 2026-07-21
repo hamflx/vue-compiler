@@ -200,6 +200,11 @@ pub(crate) fn vue3_type_alias_projection_work(
         ),
         vue3_external_named_projection_value_cost(
             name,
+            analysis.value_type_projections.get(name),
+            Vue3ValueTypeProjection::work,
+        ),
+        vue3_external_named_projection_value_cost(
+            name,
             analysis.generic_type_aliases.get(name),
             vue3_external_generic_alias_payload_cost,
         ),
@@ -575,6 +580,10 @@ fn vue3_analysis_generic_environment_cache_cost(analysis: &Vue3ScriptSetupAnalys
         vue3_external_string_map_cost(
             &analysis.return_type_props_options_declarations,
             vue3_external_type_members_cache_cost,
+        ),
+        vue3_external_string_map_cost(
+            &analysis.value_type_projections,
+            Vue3ValueTypeProjection::work,
         ),
         vue3_external_string_map_cost(
             &analysis.string_literal_type_declarations,

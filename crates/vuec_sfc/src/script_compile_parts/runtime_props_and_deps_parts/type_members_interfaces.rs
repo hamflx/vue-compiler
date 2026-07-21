@@ -405,6 +405,11 @@ pub(crate) fn vue3_expression_type_name_key(expression: &Expression<'_>) -> Opti
             let left = vue3_expression_type_name_key(&member.object)?;
             Some(format!("{left}.{}", member.property.name))
         }
+        Expression::ComputedMemberExpression(member) => {
+            let left = vue3_expression_type_name_key(&member.object)?;
+            let property = member.static_property_name()?;
+            Some(format!("{left}.{property}"))
+        }
         _ => None,
     }
 }

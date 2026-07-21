@@ -1767,3 +1767,2155 @@ defineProps<Types.Scoped.Box<string>>()
         .content
         .contains("secondValue: { type: String, required: true }"));
 }
+
+#[test]
+fn vue3_global_files_merge_interfaces_and_refresh_earlier_dependents() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let first_leaf = dir.path().join("first.ts");
+    let second_leaf = dir.path().join("second.ts");
+    std::fs::write(
+        &first_leaf,
+        "export interface First { firstValue: string }",
+    )
+    .expect("write first global interface dependency");
+    std::fs::write(
+        &second_leaf,
+        "export interface Second { secondValue: number }",
+    )
+    .expect("write second global interface dependency");
+    let first = dir.path().join("first-global.d.ts");
+    let second = dir.path().join("second-global.d.ts");
+    std::fs::write(
+        &first,
+        r#"
+import type { First } from './first'
+export {}
+declare global {
+  interface Shared extends First {}
+  interface Consumer extends Shared {}
+}
+"#,
+    )
+    .expect("write first global interface fragment");
+    std::fs::write(
+        &second,
+        r#"
+import type { Second } from './second'
+export {}
+declare global {
+  interface Shared extends Second {}
+}
+"#,
+    )
+    .expect("write second global interface fragment");
+
+    let filename = dir.path().join("Comp.vue");
+    let source = r#"<script setup lang="ts">
+defineProps<Consumer>()
+</script>"#;
+    for files in [
+        vec![first.clone(), second.clone()],
+        vec![second.clone(), first.clone()],
+    ] {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(
+            &descriptor,
+            SfcScriptCompileOptions {
+                global_type_files: files
+                    .iter()
+                    .map(|path| path.to_string_lossy().to_string())
+                    .collect(),
+                ..SfcScriptCompileOptions::default()
+            },
+        );
+
+        assert!(
+            script.errors.is_empty(),
+            "{:?} for {files:?}",
+            script.errors
+        );
+        assert!(script
+            .content
+            .contains("firstValue: { type: String, required: true }"), "{}", script.content);
+        assert!(script
+            .content
+            .contains("secondValue: { type: Number, required: true }"), "{}", script.content);
+        assert_eq!(
+            script.deps.iter().cloned().collect::<BTreeSet<_>>(),
+            [
+                normalize_path_string(&first),
+                normalize_path_string(&second),
+                normalize_path_string(&first_leaf),
+                normalize_path_string(&second_leaf),
+            ]
+            .into_iter()
+            .collect()
+        );
+    }
+}
+
+#[test]
+fn vue3_global_files_merge_qualified_namespace_interfaces_in_any_order() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let first = dir.path().join("first-global.d.ts");
+    let second = dir.path().join("second-global.d.ts");
+    std::fs::write(
+        &first,
+        "declare namespace Shared { interface Props { firstValue: string } }",
+    )
+    .expect("write first global namespace fragment");
+    std::fs::write(
+        &second,
+        "declare namespace Shared { interface Props { secondValue: number } }",
+    )
+    .expect("write second global namespace fragment");
+
+    let filename = dir.path().join("Comp.vue");
+    let source = r#"<script setup lang="ts">
+defineProps<Shared.Props>()
+</script>"#;
+    for files in [
+        vec![first.clone(), second.clone()],
+        vec![second.clone(), first.clone()],
+    ] {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(
+            &descriptor,
+            SfcScriptCompileOptions {
+                global_type_files: files
+                    .iter()
+                    .map(|path| path.to_string_lossy().to_string())
+                    .collect(),
+                ..SfcScriptCompileOptions::default()
+            },
+        );
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("firstValue: { type: String, required: true }"));
+        assert!(script
+            .content
+            .contains("secondValue: { type: Number, required: true }"));
+    }
+}
+
+#[test]
+fn vue3_global_files_merge_classes_and_interfaces_in_any_order() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let class = dir.path().join("class-global.d.ts");
+    let interface = dir.path().join("interface-global.d.ts");
+    std::fs::write(
+        &class,
+        r#"
+declare class SharedClass {
+  sharedValue: string
+  method(value: string): string
+  method(value: number): number
+}
+interface Consumer extends SharedClass { consumerValue: boolean }
+"#,
+    )
+    .expect("write global class declaration and consumer");
+    std::fs::write(
+        &interface,
+        r#"
+interface SharedClass {
+  sharedValue: string
+  method(value: boolean): boolean
+  mergedValue: string
+}
+"#,
+    )
+    .expect("write global interface declaration");
+
+    let filename = dir.path().join("Comp.vue");
+    let source = r#"<script setup lang="ts">
+defineProps<Consumer>()
+</script>"#;
+    for files in [
+        vec![class.clone(), interface.clone()],
+        vec![interface.clone(), class.clone()],
+    ] {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(
+            &descriptor,
+            SfcScriptCompileOptions {
+                global_type_files: files
+                    .iter()
+                    .map(|path| path.to_string_lossy().to_string())
+                    .collect(),
+                ..SfcScriptCompileOptions::default()
+            },
+        );
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(
+            script
+                .content
+                .contains("mergedValue: { type: String, required: true }"),
+            "{}",
+            script.content
+        );
+        assert!(
+            script
+                .content
+                .contains("sharedValue: { type: String, required: true }"),
+            "{}",
+            script.content
+        );
+        assert!(
+            script
+                .content
+                .contains("consumerValue: { type: Boolean, required: true }"),
+            "{}",
+            script.content
+        );
+        assert_eq!(
+            script.deps.iter().cloned().collect::<BTreeSet<_>>(),
+            [normalize_path_string(&class), normalize_path_string(&interface)]
+                .into_iter()
+                .collect()
+        );
+    }
+}
+
+#[test]
+fn vue3_global_files_merge_enums_and_refresh_runtime_types_in_any_order() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let text = dir.path().join("text-enum-global.d.ts");
+    let numeric = dir.path().join("numeric-enum-global.d.ts");
+    std::fs::write(&text, "declare enum SharedKind { Text = 'text' }")
+        .expect("write string enum fragment");
+    std::fs::write(
+        &numeric,
+        r#"
+declare enum SharedKind { Numeric = 1 }
+interface EnumProps { kind: SharedKind }
+"#,
+    )
+    .expect("write numeric enum fragment and consumer");
+
+    let filename = dir.path().join("Comp.vue");
+    let source = r#"<script setup lang="ts">
+defineProps<EnumProps>()
+</script>"#;
+    for files in [
+        vec![text.clone(), numeric.clone()],
+        vec![numeric.clone(), text.clone()],
+    ] {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(
+            &descriptor,
+            SfcScriptCompileOptions {
+                global_type_files: files
+                    .iter()
+                    .map(|path| path.to_string_lossy().to_string())
+                    .collect(),
+                ..SfcScriptCompileOptions::default()
+            },
+        );
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(
+            script
+                .content
+                .contains("kind: { type: [String, Number], required: true }")
+                || script
+                    .content
+                    .contains("kind: { type: [Number, String], required: true }"),
+            "{}",
+            script.content
+        );
+        assert_eq!(
+            script.deps.iter().cloned().collect::<BTreeSet<_>>(),
+            [normalize_path_string(&text), normalize_path_string(&numeric)]
+                .into_iter()
+                .collect()
+        );
+    }
+}
+
+#[test]
+fn vue3_later_unique_global_declarations_refresh_earlier_consumers_in_any_order() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let consumer = dir.path().join("consumer-global.d.ts");
+    let later = dir.path().join("later-global.d.ts");
+    std::fs::write(
+        &consumer,
+        "interface Consumer extends Later { consumerValue: boolean }",
+    )
+    .expect("write forward global consumer");
+    std::fs::write(&later, "interface Later { laterValue: string }")
+        .expect("write later unique global declaration");
+
+    let filename = dir.path().join("Comp.vue");
+    let source = r#"<script setup lang="ts">
+defineProps<Consumer>()
+</script>"#;
+    for files in [
+        vec![consumer.clone(), later.clone()],
+        vec![later.clone(), consumer.clone()],
+    ] {
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(
+            &descriptor,
+            SfcScriptCompileOptions {
+                global_type_files: files
+                    .iter()
+                    .map(|path| path.to_string_lossy().to_string())
+                    .collect(),
+                ..SfcScriptCompileOptions::default()
+            },
+        );
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(script
+            .content
+            .contains("consumerValue: { type: Boolean, required: true }"));
+        assert!(
+            script
+                .content
+                .contains("laterValue: { type: String, required: true }"),
+            "{}",
+            script.content
+        );
+        assert_eq!(
+            script.deps.iter().cloned().collect::<BTreeSet<_>>(),
+            [normalize_path_string(&consumer), normalize_path_string(&later)]
+                .into_iter()
+                .collect()
+        );
+    }
+}
+
+#[test]
+fn vue3_global_type_and_value_declarations_coexist_with_complete_dependencies() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let interface = dir.path().join("interface-global.d.ts");
+    let function = dir.path().join("function-global.d.ts");
+    std::fs::write(
+        &interface,
+        "interface Shared { interfaceValue: string }",
+    )
+    .expect("write interface declaration");
+    std::fs::write(
+        &function,
+        "declare function Shared(): { functionValue: number }",
+    )
+    .expect("write value declaration");
+
+    let filename = dir.path().join("Comp.vue");
+    let source = r#"<script setup lang="ts">
+defineProps<Shared & { result: ReturnType<typeof Shared> }>()
+</script>"#;
+    for files in [
+        vec![interface.clone(), function.clone()],
+        vec![function.clone(), interface.clone()],
+    ] {
+        let context = vue3_global_type_context(
+            &filename.to_string_lossy(),
+            &files
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+            &Vue3TypeResolverContext::default(),
+        );
+        assert!(context
+            .return_type_runtime_type_declarations
+            .contains_key("Shared"));
+        assert_eq!(
+            context.type_deps.get("Shared"),
+            Some(
+                &[normalize_path_string(&interface), normalize_path_string(&function)]
+                    .into_iter()
+                    .collect()
+            )
+        );
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(
+            &descriptor,
+            SfcScriptCompileOptions {
+                global_type_files: files
+                    .iter()
+                    .map(|path| path.to_string_lossy().to_string())
+                    .collect(),
+                ..SfcScriptCompileOptions::default()
+            },
+        );
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(
+            script
+                .content
+                .contains("interfaceValue: { type: String, required: true }"),
+            "{}",
+            script.content
+        );
+        assert!(
+            script
+                .content
+                .contains("result: { type: Object, required: true }"),
+            "{}",
+            script.content
+        );
+        assert_eq!(
+            script.deps.iter().cloned().collect::<BTreeSet<_>>(),
+            [
+                normalize_path_string(&interface),
+                normalize_path_string(&function),
+            ]
+            .into_iter()
+            .collect()
+        );
+    }
+}
+
+#[test]
+fn vue3_incompatible_global_type_declarations_fail_closed_in_any_order() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let alias = dir.path().join("alias-global.d.ts");
+    let interface = dir.path().join("interface-global.d.ts");
+    std::fs::write(&alias, "type Shared = { aliasValue: string }")
+        .expect("write type alias");
+    std::fs::write(&interface, "interface Shared { interfaceValue: number }")
+        .expect("write incompatible interface");
+
+    let filename = dir.path().join("Comp.vue");
+    let expected_deps = [normalize_path_string(&alias), normalize_path_string(&interface)]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    for files in [
+        vec![alias.clone(), interface.clone()],
+        vec![interface.clone(), alias.clone()],
+    ] {
+        let context = vue3_global_type_context(
+            &filename.to_string_lossy(),
+            &files
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+            &Vue3TypeResolverContext::default(),
+        );
+
+        assert!(!vue3_type_context_has_name(&context, "Shared"));
+        assert!(context.silent_unresolved_type_names.contains("Shared"));
+        assert_eq!(context.type_deps.get("Shared"), Some(&expected_deps));
+    }
+}
+
+#[test]
+fn vue3_global_type_conflicts_preserve_the_independent_value_space() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let alias = dir.path().join("alias-global.d.ts");
+    let interface = dir.path().join("interface-global.d.ts");
+    let function = dir.path().join("function-global.d.ts");
+    std::fs::write(&alias, "type Shared = { aliasValue: string }")
+        .expect("write conflicting type alias");
+    std::fs::write(&interface, "interface Shared { interfaceValue: number }")
+        .expect("write conflicting interface");
+    std::fs::write(&function, "declare function Shared(): string")
+        .expect("write independent value declaration");
+
+    let filename = dir.path().join("Comp.vue");
+    let source = r#"<script setup lang="ts">
+defineProps<{ result: ReturnType<typeof Shared> }>()
+</script>"#;
+    let expected_deps = [
+        normalize_path_string(&alias),
+        normalize_path_string(&interface),
+        normalize_path_string(&function),
+    ]
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+    for files in [
+        vec![function.clone(), alias.clone(), interface.clone()],
+        vec![alias.clone(), interface.clone(), function.clone()],
+    ] {
+        let global_files = files
+            .iter()
+            .map(|path| path.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        let context = vue3_global_type_context(
+            &filename.to_string_lossy(),
+            &global_files,
+            &Vue3TypeResolverContext::default(),
+        );
+        assert!(context.silent_unresolved_type_names.contains("Shared"));
+        assert!(!context.props_type_declarations.contains_key("Shared"));
+        assert!(!context
+            .props_options_type_declarations
+            .contains_key("Shared"));
+        assert_eq!(
+            context.return_type_runtime_type_declarations.get("Shared"),
+            Some(&vec!["String".to_string()])
+        );
+        assert_eq!(context.type_deps.get("Shared"), Some(&expected_deps));
+
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(
+            &descriptor,
+            SfcScriptCompileOptions {
+                global_type_files: global_files,
+                ..SfcScriptCompileOptions::default()
+            },
+        );
+        assert!(
+            script.errors.is_empty(),
+            "{:?} for {files:?}",
+            script.errors
+        );
+        assert!(
+            script
+                .content
+                .contains("result: { type: String, required: true }"),
+            "{}",
+            script.content
+        );
+        assert_eq!(
+            script.deps.iter().cloned().collect::<BTreeSet<_>>(),
+            expected_deps
+        );
+    }
+}
+
+#[test]
+fn vue3_global_value_projection_provenance_is_order_independent() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let function = dir.path().join("function-global.d.ts");
+    std::fs::write(&function, "declare function Shared(): string")
+        .expect("write value declaration");
+    let filename = dir.path().join("Comp.vue");
+    let source = r#"<script setup lang="ts">
+defineProps<{ result: ReturnType<typeof Shared> }>()
+</script>"#;
+
+    for (case, alias_source) in [
+        ("object", "type Shared = { leaked: string }"),
+        ("callable", "type Shared = () => number"),
+    ] {
+        let alias = dir.path().join(format!("{case}-alias-global.d.ts"));
+        std::fs::write(&alias, alias_source).expect("write type declaration");
+        let expected_deps = [normalize_path_string(&alias), normalize_path_string(&function)]
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        for files in [
+            vec![function.clone(), alias.clone()],
+            vec![alias.clone(), function.clone()],
+        ] {
+            let global_files = files
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>();
+            let context = vue3_global_type_context(
+                &filename.to_string_lossy(),
+                &global_files,
+                &Vue3TypeResolverContext::default(),
+            );
+            assert!(context.silent_unresolved_type_names.contains("Shared"));
+            assert_eq!(
+                context.return_type_runtime_type_declarations.get("Shared"),
+                Some(&vec!["String".to_string()]),
+                "case {case}, files {files:?}"
+            );
+            assert!(!context
+                .props_options_type_declarations
+                .contains_key("Shared"));
+            assert_eq!(context.type_deps.get("Shared"), Some(&expected_deps));
+
+            let mut compiler = SfcCompiler::new();
+            let descriptor = compiler.parse(filename.to_string_lossy(), source);
+            let script = compiler.compile_script(
+                &descriptor,
+                SfcScriptCompileOptions {
+                    global_type_files: global_files,
+                    ..SfcScriptCompileOptions::default()
+                },
+            );
+            assert!(script.errors.is_empty(), "{:?}", script.errors);
+            assert!(
+                script
+                    .content
+                    .contains("result: { type: String, required: true }"),
+                "{}",
+                script.content
+            );
+        }
+    }
+}
+
+#[test]
+fn vue3_same_file_callable_type_and_value_conflicts_keep_the_value_projection() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let filename = dir.path().join("Comp.vue");
+    for (index, declarations) in [
+        "declare function Shared(): string\ntype Shared = () => number",
+        "type Shared = () => number\ndeclare function Shared(): string",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let types = dir.path().join(format!("same-file-{index}.d.ts"));
+        std::fs::write(&types, declarations).expect("write conflicting declarations");
+        let context = vue3_global_type_context(
+            &filename.to_string_lossy(),
+            &[types.to_string_lossy().to_string()],
+            &Vue3TypeResolverContext::default(),
+        );
+        assert!(context.silent_unresolved_type_names.contains("Shared"));
+        assert_eq!(
+            context.return_type_runtime_type_declarations.get("Shared"),
+            Some(&vec!["String".to_string()])
+        );
+        assert!(!context
+            .props_options_type_declarations
+            .contains_key("Shared"));
+        assert_eq!(
+            context.type_deps.get("Shared"),
+            Some(&BTreeSet::from([normalize_path_string(&types)]))
+        );
+    }
+}
+
+#[test]
+fn vue3_global_type_conflicts_preserve_declared_const_keyof_projection() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let alias = dir.path().join("alias-global.d.ts");
+    let interface = dir.path().join("interface-global.d.ts");
+    let value = dir.path().join("value-global.d.ts");
+    std::fs::write(&alias, "type Shared = { aliasValue: string }")
+        .expect("write conflicting alias");
+    std::fs::write(&interface, "interface Shared { interfaceValue: number }")
+        .expect("write conflicting interface");
+    std::fs::write(&value, "declare const Shared: { key: string }")
+        .expect("write independent value");
+    let filename = dir.path().join("Comp.vue");
+    let source = r#"<script setup lang="ts">
+defineProps<{ key: keyof typeof Shared }>()
+</script>"#;
+    let expected_deps = [
+        normalize_path_string(&alias),
+        normalize_path_string(&interface),
+        normalize_path_string(&value),
+    ]
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+
+    for files in [
+        vec![value.clone(), alias.clone(), interface.clone()],
+        vec![alias.clone(), interface.clone(), value.clone()],
+    ] {
+        let global_files = files
+            .iter()
+            .map(|path| path.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        let context = vue3_global_type_context(
+            &filename.to_string_lossy(),
+            &global_files,
+            &Vue3TypeResolverContext::default(),
+        );
+        assert!(context.silent_unresolved_type_names.contains("Shared"));
+        assert!(!context.props_type_declarations.contains_key("Shared"));
+        assert_eq!(
+            context.keyof_type_query_declared_types.get("Shared"),
+            Some(&vec!["String".to_string()])
+        );
+        assert_eq!(context.type_deps.get("Shared"), Some(&expected_deps));
+
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(
+            &descriptor,
+            SfcScriptCompileOptions {
+                global_type_files: global_files,
+                ..SfcScriptCompileOptions::default()
+            },
+        );
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(
+            script
+                .content
+                .contains("key: { type: String, required: true }"),
+            "{}",
+            script.content
+        );
+        assert_eq!(
+            script.deps.iter().cloned().collect::<BTreeSet<_>>(),
+            expected_deps
+        );
+    }
+}
+
+#[test]
+fn vue3_kind_only_global_values_still_participate_in_conflicts_and_deps() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let alias = dir.path().join("alias-global.d.ts");
+    let function = dir.path().join("function-global.d.ts");
+    std::fs::write(&alias, "type Shared = () => number").expect("write callable alias");
+    std::fs::write(&function, "declare function Shared();")
+    .expect("write value without a runtime return projection");
+    let filename = dir.path().join("Comp.vue");
+    let expected_deps = [normalize_path_string(&alias), normalize_path_string(&function)]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+
+    for files in [
+        vec![alias.clone(), function.clone()],
+        vec![function.clone(), alias.clone()],
+    ] {
+        let context = vue3_global_type_context(
+            &filename.to_string_lossy(),
+            &files
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+            &Vue3TypeResolverContext::default(),
+        );
+        assert!(context.silent_unresolved_type_names.contains("Shared"));
+        assert!(!context
+            .return_type_runtime_type_declarations
+            .contains_key("Shared"));
+        assert_eq!(context.type_deps.get("Shared"), Some(&expected_deps));
+    }
+
+    let interface = dir.path().join("interface-global.d.ts");
+    std::fs::write(&interface, "interface Shared { key: string }")
+        .expect("write compatible type declaration");
+    let expected_deps = [
+        normalize_path_string(&interface),
+        normalize_path_string(&function),
+    ]
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+    for files in [
+        vec![interface.clone(), function.clone()],
+        vec![function.clone(), interface.clone()],
+    ] {
+        let context = vue3_global_type_context(
+            &filename.to_string_lossy(),
+            &files
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+            &Vue3TypeResolverContext::default(),
+        );
+        assert!(!context.silent_unresolved_type_names.contains("Shared"));
+        assert!(context.props_type_declarations.contains_key("Shared"));
+        assert_eq!(context.type_deps.get("Shared"), Some(&expected_deps));
+    }
+}
+
+#[test]
+fn vue3_global_conflict_propagation_distinguishes_referenced_spaces() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let alias = dir.path().join("alias.d.ts");
+    let interface = dir.path().join("interface.d.ts");
+    let function = dir.path().join("function.d.ts");
+    let consumer = dir.path().join("consumer.d.ts");
+    std::fs::write(&alias, "type Shared = { aliasValue: number }").expect("write alias");
+    std::fs::write(&interface, "interface Shared { interfaceValue: boolean }")
+        .expect("write interface");
+    std::fs::write(&function, "declare function Shared(): string")
+        .expect("write function");
+    std::fs::write(
+        &consumer,
+        r#"
+type TypeDependent = Shared
+type ValueDependent = ReturnType<typeof Shared>
+"#,
+    )
+    .expect("write consumers");
+    let filename = dir.path().join("Comp.vue");
+
+    for files in [
+        vec![alias.clone(), interface.clone(), function.clone(), consumer.clone()],
+        vec![consumer.clone(), function.clone(), interface.clone(), alias.clone()],
+    ] {
+        let global_files = files
+            .iter()
+            .map(|path| path.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        let context = vue3_global_type_context(
+            &filename.to_string_lossy(),
+            &global_files,
+            &Vue3TypeResolverContext::default(),
+        );
+        assert!(context.silent_unresolved_type_names.contains("Shared"));
+        assert!(context
+            .silent_unresolved_type_names
+            .contains("TypeDependent"));
+        assert!(!context
+            .silent_unresolved_type_names
+            .contains("ValueDependent"));
+        assert!(vue3_type_context_has_name(&context, "ValueDependent"));
+
+        let source = r#"<script setup lang="ts">
+defineProps<{ result: ValueDependent }>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(
+            &descriptor,
+            SfcScriptCompileOptions {
+                global_type_files: global_files,
+                ..SfcScriptCompileOptions::default()
+            },
+        );
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(
+            script
+                .content
+                .contains("result: { type: String, required: true }"),
+            "{}",
+            script.content
+        );
+    }
+}
+
+#[test]
+fn vue3_global_value_conflicts_preserve_independent_type_dependents() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let interface = dir.path().join("interface.d.ts");
+    let string_value = dir.path().join("string-value.d.ts");
+    let number_value = dir.path().join("number-value.d.ts");
+    let consumer = dir.path().join("consumer.d.ts");
+    std::fs::write(&interface, "interface Shared { kept: string }")
+        .expect("write interface");
+    std::fs::write(&string_value, "declare const Shared: string")
+        .expect("write string value");
+    std::fs::write(&number_value, "declare const Shared: number")
+        .expect("write number value");
+    std::fs::write(
+        &consumer,
+        "type TypeDependent = Shared\ntype ValueDependent = typeof Shared",
+    )
+    .expect("write consumers");
+    let filename = dir.path().join("Comp.vue");
+
+    for files in [
+        vec![
+            interface.clone(),
+            string_value.clone(),
+            number_value.clone(),
+            consumer.clone(),
+        ],
+        vec![
+            consumer.clone(),
+            number_value.clone(),
+            string_value.clone(),
+            interface.clone(),
+        ],
+    ] {
+        let context = vue3_global_type_context(
+            &filename.to_string_lossy(),
+            &files
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+            &Vue3TypeResolverContext::default(),
+        );
+        assert!(context.props_type_declarations.contains_key("Shared"));
+        assert!(vue3_type_context_has_name(&context, "TypeDependent"));
+        assert!(!context
+            .silent_unresolved_type_names
+            .contains("TypeDependent"));
+        assert!(context
+            .silent_unresolved_type_names
+            .contains("ValueDependent"));
+        assert!(!context.type_query_declared_types.contains_key("Shared"));
+    }
+}
+
+#[test]
+fn vue3_incompatible_global_interface_and_enum_members_block_dependents() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let string_interface = dir.path().join("string-interface.d.ts");
+    let number_interface = dir.path().join("number-interface.d.ts");
+    let consumer = dir.path().join("consumer.d.ts");
+    std::fs::write(&string_interface, "interface Shared { value: string }")
+        .expect("write string interface");
+    std::fs::write(&number_interface, "interface Shared { value: number }")
+        .expect("write number interface");
+    std::fs::write(
+        &consumer,
+        r#"
+type Uses = Shared
+interface NestedConsumer {
+  actual: Shared
+  method<Shared>(value: Shared): Shared
+}
+"#,
+    )
+    .expect("write consumers");
+    let filename = dir.path().join("Comp.vue");
+
+    for files in [
+        vec![string_interface.clone(), number_interface.clone(), consumer.clone()],
+        vec![consumer.clone(), number_interface.clone(), string_interface.clone()],
+    ] {
+        let context = vue3_global_type_context(
+            &filename.to_string_lossy(),
+            &files
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+            &Vue3TypeResolverContext::default(),
+        );
+        for name in ["Shared", "Uses", "NestedConsumer"] {
+            assert!(
+                context.silent_unresolved_type_names.contains(name),
+                "missing blocked name {name} for {files:?}"
+            );
+            assert!(!vue3_type_context_has_name(&context, name));
+        }
+    }
+
+    let string_index = dir.path().join("string-index.d.ts");
+    let number_index = dir.path().join("number-index.d.ts");
+    let index_consumer = dir.path().join("index-consumer.d.ts");
+    std::fs::write(
+        &string_index,
+        "interface Indexed { [key: string]: string }",
+    )
+    .expect("write string index signature");
+    std::fs::write(
+        &number_index,
+        "interface Indexed { [key: string]: number }",
+    )
+    .expect("write number index signature");
+    std::fs::write(&index_consumer, "type IndexedConsumer = Indexed")
+        .expect("write index consumer");
+    for files in [
+        vec![
+            string_index.clone(),
+            number_index.clone(),
+            index_consumer.clone(),
+        ],
+        vec![index_consumer.clone(), number_index.clone(), string_index.clone()],
+    ] {
+        let context = vue3_global_type_context(
+            &filename.to_string_lossy(),
+            &files
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+            &Vue3TypeResolverContext::default(),
+        );
+        for name in ["Indexed", "IndexedConsumer"] {
+            assert!(context.silent_unresolved_type_names.contains(name));
+            assert!(!vue3_type_context_has_name(&context, name));
+        }
+    }
+
+    let enum_first = dir.path().join("enum-first.d.ts");
+    let enum_second = dir.path().join("enum-second.d.ts");
+    let enum_consumer = dir.path().join("enum-consumer.d.ts");
+    std::fs::write(&enum_first, "declare enum Duplicate { Value = 1 }")
+        .expect("write first duplicate enum member");
+    std::fs::write(&enum_second, "declare enum Duplicate { Value = 2 }")
+        .expect("write second duplicate enum member");
+    std::fs::write(
+        &enum_consumer,
+        "type DuplicateConsumer = typeof Duplicate.Value",
+    )
+    .expect("write duplicate enum consumer");
+    for files in [
+        vec![
+            enum_first.clone(),
+            enum_second.clone(),
+            enum_consumer.clone(),
+        ],
+        vec![enum_consumer.clone(), enum_second.clone(), enum_first.clone()],
+    ] {
+        let context = vue3_global_type_context(
+            &filename.to_string_lossy(),
+            &files
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+            &Vue3TypeResolverContext::default(),
+        );
+        for name in ["Duplicate", "DuplicateConsumer"] {
+            assert!(context.silent_unresolved_type_names.contains(name));
+            assert!(!vue3_type_context_has_name(&context, name));
+        }
+    }
+
+    let const_enum = dir.path().join("const-enum.d.ts");
+    let regular_enum = dir.path().join("regular-enum.d.ts");
+    let constness_consumer = dir.path().join("constness-consumer.d.ts");
+    std::fs::write(&const_enum, "declare const enum Constness { Text = 'text' }")
+        .expect("write const enum fragment");
+    std::fs::write(&regular_enum, "declare enum Constness { Numeric = 1 }")
+        .expect("write regular enum fragment");
+    std::fs::write(&constness_consumer, "type ConstnessConsumer = Constness")
+        .expect("write enum constness consumer");
+    for files in [
+        vec![
+            const_enum.clone(),
+            regular_enum.clone(),
+            constness_consumer.clone(),
+        ],
+        vec![constness_consumer.clone(), regular_enum.clone(), const_enum.clone()],
+    ] {
+        let context = vue3_global_type_context(
+            &filename.to_string_lossy(),
+            &files
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+            &Vue3TypeResolverContext::default(),
+        );
+        for name in ["Constness", "ConstnessConsumer"] {
+            assert!(context.silent_unresolved_type_names.contains(name));
+            assert!(!vue3_type_context_has_name(&context, name));
+        }
+    }
+
+    let first_implicit = dir.path().join("first-implicit-enum.d.ts");
+    let second_implicit = dir.path().join("second-implicit-enum.d.ts");
+    let implicit_consumer = dir.path().join("implicit-enum-consumer.d.ts");
+    std::fs::write(&first_implicit, "declare enum Implicit { First }")
+        .expect("write first implicit enum fragment");
+    std::fs::write(&second_implicit, "declare enum Implicit { Second }")
+        .expect("write second implicit enum fragment");
+    std::fs::write(&implicit_consumer, "type ImplicitConsumer = Implicit")
+        .expect("write implicit enum consumer");
+    for files in [
+        vec![
+            first_implicit.clone(),
+            second_implicit.clone(),
+            implicit_consumer.clone(),
+        ],
+        vec![
+            implicit_consumer.clone(),
+            second_implicit.clone(),
+            first_implicit.clone(),
+        ],
+    ] {
+        let context = vue3_global_type_context(
+            &filename.to_string_lossy(),
+            &files
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+            &Vue3TypeResolverContext::default(),
+        );
+        for name in ["Implicit", "ImplicitConsumer"] {
+            assert!(context.silent_unresolved_type_names.contains(name));
+            assert!(!vue3_type_context_has_name(&context, name));
+        }
+    }
+
+    let initialized = dir.path().join("initialized-enum.d.ts");
+    std::fs::write(&initialized, "declare enum Continuation { Second = 2 }")
+        .expect("write initialized enum continuation");
+    std::fs::write(&first_implicit, "declare enum Continuation { First }")
+        .expect("write one implicit enum fragment");
+    std::fs::write(
+        &implicit_consumer,
+        "type ContinuationConsumer = Continuation",
+    )
+    .expect("write valid enum continuation consumer");
+    for files in [
+        vec![
+            first_implicit.clone(),
+            initialized.clone(),
+            implicit_consumer.clone(),
+        ],
+        vec![implicit_consumer.clone(), initialized.clone(), first_implicit.clone()],
+    ] {
+        let context = vue3_global_type_context(
+            &filename.to_string_lossy(),
+            &files
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+            &Vue3TypeResolverContext::default(),
+        );
+        for name in ["Continuation", "ContinuationConsumer"] {
+            assert!(!context.silent_unresolved_type_names.contains(name));
+            assert!(vue3_type_context_has_name(&context, name));
+        }
+    }
+}
+
+#[test]
+fn vue3_computed_global_members_merge_by_symbol_identity() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let filename = dir.path().join("Comp.vue");
+    let key = dir.path().join("shared-key.d.ts");
+    let string_member = dir.path().join("computed-string.d.ts");
+    let number_member = dir.path().join("computed-number.d.ts");
+    let consumer = dir.path().join("computed-consumer.d.ts");
+    std::fs::write(&key, "declare const sharedKey: unique symbol")
+        .expect("write shared unique symbol");
+    std::fs::write(
+        &string_member,
+        "interface SharedComputed { [sharedKey]: string }",
+    )
+    .expect("write string computed member");
+    std::fs::write(
+        &number_member,
+        "interface SharedComputed { [sharedKey]: number }",
+    )
+    .expect("write number computed member");
+    std::fs::write(&consumer, "type ComputedConsumer = SharedComputed")
+        .expect("write computed member consumer");
+    for files in [
+        vec![
+            key.clone(),
+            string_member.clone(),
+            number_member.clone(),
+            consumer.clone(),
+        ],
+        vec![
+            consumer.clone(),
+            number_member.clone(),
+            string_member.clone(),
+            key.clone(),
+        ],
+    ] {
+        let context = vue3_global_type_context(
+            &filename.to_string_lossy(),
+            &files
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+            &Vue3TypeResolverContext::default(),
+        );
+        for name in ["SharedComputed", "ComputedConsumer"] {
+            assert!(context.silent_unresolved_type_names.contains(name));
+            assert!(!vue3_type_context_has_name(&context, name));
+        }
+    }
+
+    let local_string = dir.path().join("local-computed-string.ts");
+    let local_number = dir.path().join("local-computed-number.ts");
+    let local_consumer = dir.path().join("local-computed-consumer.d.ts");
+    std::fs::write(
+        &local_string,
+        r#"
+export {}
+declare const key: unique symbol
+declare global { interface DistinctComputed { [key]: string } }
+"#,
+    )
+    .expect("write module-local string symbol");
+    std::fs::write(
+        &local_number,
+        r#"
+export {}
+declare const key: unique symbol
+declare global { interface DistinctComputed { [key]: number } }
+"#,
+    )
+    .expect("write module-local number symbol");
+    std::fs::write(
+        &local_consumer,
+        "type DistinctComputedConsumer = DistinctComputed",
+    )
+    .expect("write distinct computed consumer");
+    for files in [
+        vec![
+            local_string.clone(),
+            local_number.clone(),
+            local_consumer.clone(),
+        ],
+        vec![
+            local_consumer.clone(),
+            local_number.clone(),
+            local_string.clone(),
+        ],
+    ] {
+        let context = vue3_global_type_context(
+            &filename.to_string_lossy(),
+            &files
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+            &Vue3TypeResolverContext::default(),
+        );
+        for name in ["DistinctComputed", "DistinctComputedConsumer"] {
+            assert!(!context.silent_unresolved_type_names.contains(name));
+            assert!(vue3_type_context_has_name(&context, name));
+        }
+    }
+
+    let symbols = dir.path().join("symbols.d.ts");
+    let imported_string = dir.path().join("imported-computed-string.ts");
+    let imported_number = dir.path().join("imported-computed-number.ts");
+    let imported_consumer = dir.path().join("imported-computed-consumer.d.ts");
+    std::fs::write(&symbols, "export declare const key: unique symbol")
+        .expect("write exported unique symbol");
+    std::fs::write(
+        &imported_string,
+        r#"
+import { key as stringKey } from './symbols'
+declare global { interface ImportedComputed { [stringKey]: string } }
+"#,
+    )
+    .expect("write imported string symbol");
+    std::fs::write(
+        &imported_number,
+        r#"
+import * as Symbols from './symbols'
+declare global { interface ImportedComputed { [Symbols.key]: number } }
+"#,
+    )
+    .expect("write namespace-imported number symbol");
+    std::fs::write(
+        &imported_consumer,
+        "type ImportedComputedConsumer = ImportedComputed",
+    )
+    .expect("write imported computed consumer");
+    for files in [
+        vec![
+            imported_string.clone(),
+            imported_number.clone(),
+            imported_consumer.clone(),
+        ],
+        vec![
+            imported_consumer.clone(),
+            imported_number.clone(),
+            imported_string.clone(),
+        ],
+    ] {
+        let context = vue3_global_type_context(
+            &filename.to_string_lossy(),
+            &files
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+            &Vue3TypeResolverContext::default(),
+        );
+        for name in ["ImportedComputed", "ImportedComputedConsumer"] {
+            assert!(context.silent_unresolved_type_names.contains(name));
+            assert!(!vue3_type_context_has_name(&context, name));
+        }
+    }
+
+    let literal = dir.path().join("literal-computed.d.ts");
+    let named = dir.path().join("named-computed.d.ts");
+    std::fs::write(&literal, "interface LiteralComputed { ['value']: string }")
+        .expect("write literal computed member");
+    std::fs::write(&named, "interface LiteralComputed { value: number }")
+        .expect("write named member");
+    for files in [vec![literal.clone(), named.clone()], vec![named, literal]] {
+        let context = vue3_global_type_context(
+            &filename.to_string_lossy(),
+            &files
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+            &Vue3TypeResolverContext::default(),
+        );
+        assert!(context
+            .silent_unresolved_type_names
+            .contains("LiteralComputed"));
+        assert!(!vue3_type_context_has_name(&context, "LiteralComputed"));
+    }
+
+    let computed_class = dir.path().join("computed-class.d.ts");
+    let computed_interface = dir.path().join("computed-interface.d.ts");
+    std::fs::write(
+        &computed_class,
+        "declare class ComputedClass { [sharedKey]: string }",
+    )
+    .expect("write computed class member");
+    std::fs::write(
+        &computed_interface,
+        "interface ComputedClass { [sharedKey]: string; visible: boolean }\ninterface ComputedClassConsumer extends ComputedClass { consumer: boolean }",
+    )
+    .expect("write compatible computed interface member");
+    for files in [
+        vec![key.clone(), computed_class.clone(), computed_interface.clone()],
+        vec![
+            computed_interface.clone(),
+            computed_class.clone(),
+            key.clone(),
+        ],
+    ] {
+        let context = vue3_global_type_context(
+            &filename.to_string_lossy(),
+            &files
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+            &Vue3TypeResolverContext::default(),
+        );
+        for name in ["ComputedClass", "ComputedClassConsumer"] {
+            assert!(!context.silent_unresolved_type_names.contains(name));
+        }
+    }
+    std::fs::write(
+        &computed_interface,
+        "interface ComputedClass { [sharedKey]: number; visible: boolean }\ninterface ComputedClassConsumer extends ComputedClass { consumer: boolean }",
+    )
+    .expect("write computed interface member");
+    for files in [
+        vec![key.clone(), computed_class.clone(), computed_interface.clone()],
+        vec![computed_interface, computed_class, key],
+    ] {
+        let context = vue3_global_type_context(
+            &filename.to_string_lossy(),
+            &files
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+            &Vue3TypeResolverContext::default(),
+        );
+        for name in ["ComputedClass", "ComputedClassConsumer"] {
+            assert!(context.silent_unresolved_type_names.contains(name));
+            assert!(!vue3_type_context_has_name(&context, name));
+        }
+    }
+}
+
+#[test]
+fn vue3_namespace_conflicts_block_qualified_dependents() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let alias = dir.path().join("alias.d.ts");
+    let interface = dir.path().join("interface.d.ts");
+    let consumer = dir.path().join("consumer.d.ts");
+    std::fs::write(&alias, "declare namespace Box { type Bad = { alias: string } }")
+        .expect("write namespace alias");
+    std::fs::write(
+        &interface,
+        "declare namespace Box { interface Bad { interfaceValue: number } }",
+    )
+    .expect("write namespace interface");
+    std::fs::write(&consumer, "declare namespace Box { type Dep = Bad }")
+        .expect("write namespace consumer");
+    let filename = dir.path().join("Comp.vue");
+
+    for files in [
+        vec![alias.clone(), interface.clone(), consumer.clone()],
+        vec![consumer.clone(), interface.clone(), alias.clone()],
+    ] {
+        let context = vue3_global_type_context(
+            &filename.to_string_lossy(),
+            &files
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+            &Vue3TypeResolverContext::default(),
+        );
+        assert!(context.silent_unresolved_type_names.contains("Box.Bad"));
+        assert!(context.silent_unresolved_type_names.contains("Box.Dep"));
+        assert!(!vue3_type_context_has_name(&context, "Box.Dep"));
+    }
+
+    let enum_file = dir.path().join("namespace-enum.d.ts");
+    let member_alias = dir.path().join("namespace-member-alias.d.ts");
+    let member_consumer = dir.path().join("namespace-member-consumer.d.ts");
+    std::fs::write(
+        &enum_file,
+        "declare namespace Box { enum Member { Value = 1 } }",
+    )
+    .expect("write namespace enum");
+    std::fs::write(
+        &member_alias,
+        "declare namespace Box { type Member = { alias: string } }",
+    )
+    .expect("write conflicting namespace member alias");
+    std::fs::write(
+        &member_consumer,
+        "declare namespace Box { type MemberConsumer = typeof Member.Value }",
+    )
+    .expect("write namespace enum member consumer");
+    for files in [
+        vec![
+            enum_file.clone(),
+            member_alias.clone(),
+            member_consumer.clone(),
+        ],
+        vec![member_consumer.clone(), member_alias.clone(), enum_file.clone()],
+    ] {
+        let context = vue3_global_type_context(
+            &filename.to_string_lossy(),
+            &files
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+            &Vue3TypeResolverContext::default(),
+        );
+        for name in ["Box.Member", "Box.MemberConsumer"] {
+            assert!(context.silent_unresolved_type_names.contains(name));
+            assert!(!vue3_type_context_has_name(&context, name));
+        }
+    }
+}
+
+#[test]
+fn vue3_callable_interface_value_ambiguity_blocks_only_the_type_space() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let interface = dir.path().join("interface.d.ts");
+    let function = dir.path().join("function.d.ts");
+    let consumer = dir.path().join("consumer.d.ts");
+    std::fs::write(&interface, "interface Shared { (): number }")
+        .expect("write callable interface");
+    std::fs::write(&function, "declare function Shared(): string")
+        .expect("write function");
+    std::fs::write(
+        &consumer,
+        r#"
+type TypeDependent = ReturnType<Shared>
+type ValueDependent = ReturnType<typeof Shared>
+"#,
+    )
+    .expect("write consumers");
+    let filename = dir.path().join("Comp.vue");
+
+    for files in [
+        vec![interface.clone(), function.clone(), consumer.clone()],
+        vec![consumer.clone(), function.clone(), interface.clone()],
+    ] {
+        let context = vue3_global_type_context(
+            &filename.to_string_lossy(),
+            &files
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+            &Vue3TypeResolverContext::default(),
+        );
+        assert!(context.silent_unresolved_type_names.contains("Shared"));
+        assert!(context
+            .silent_unresolved_type_names
+            .contains("TypeDependent"));
+        assert!(!context
+            .silent_unresolved_type_names
+            .contains("ValueDependent"));
+        assert_eq!(
+            context.declared_types.get("ValueDependent"),
+            Some(&vec!["String".to_string()])
+        );
+    }
+}
+
+#[test]
+fn vue3_global_interface_and_self_returning_function_coexist_in_any_order() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let interface = dir.path().join("interface.d.ts");
+    let function = dir.path().join("function.d.ts");
+    std::fs::write(&interface, "interface Shared { value: string }")
+        .expect("write interface");
+    std::fs::write(&function, "declare function Shared(): Shared")
+        .expect("write self-returning function");
+    let filename = dir.path().join("Comp.vue");
+    let source = r#"<script setup lang="ts">
+defineProps<Shared & { result: ReturnType<typeof Shared> }>()
+</script>"#;
+
+    for files in [
+        vec![interface.clone(), function.clone()],
+        vec![function.clone(), interface.clone()],
+    ] {
+        let global_files = files
+            .iter()
+            .map(|path| path.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        let context = vue3_global_type_context(
+            &filename.to_string_lossy(),
+            &global_files,
+            &Vue3TypeResolverContext::default(),
+        );
+        assert!(!context.silent_unresolved_type_names.contains("Shared"));
+        assert!(context.props_type_declarations.contains_key("Shared"));
+        assert!(context
+            .return_type_props_options_declarations
+            .contains_key("Shared"));
+
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(
+            &descriptor,
+            SfcScriptCompileOptions {
+                global_type_files: global_files,
+                ..SfcScriptCompileOptions::default()
+            },
+        );
+        assert!(
+            script.errors.is_empty(),
+            "{:?} for {files:?}",
+            script.errors
+        );
+        assert!(
+            script
+                .content
+                .contains("value: { type: String, required: true }"),
+            "{}",
+            script.content
+        );
+        assert!(
+            script
+                .content
+                .contains("result: { type: Object, required: true }"),
+            "{}",
+            script.content
+        );
+    }
+}
+
+#[test]
+fn vue3_conflicting_return_types_block_dependent_function_values() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let alias = dir.path().join("alias.d.ts");
+    let interface = dir.path().join("interface.d.ts");
+    let function = dir.path().join("function.d.ts");
+    let consumer = dir.path().join("consumer.d.ts");
+    std::fs::write(&alias, "type Shared = { aliasValue: string }").expect("write alias");
+    std::fs::write(&interface, "interface Shared { interfaceValue: number }")
+        .expect("write interface");
+    std::fs::write(&function, "declare function Shared(): Shared")
+        .expect("write dependent function");
+    std::fs::write(&consumer, "type UsesValue = ReturnType<typeof Shared>")
+        .expect("write value consumer");
+    let filename = dir.path().join("Comp.vue");
+
+    for files in [
+        vec![alias.clone(), interface.clone(), function.clone(), consumer.clone()],
+        vec![consumer.clone(), function.clone(), interface.clone(), alias.clone()],
+    ] {
+        let context = vue3_global_type_context(
+            &filename.to_string_lossy(),
+            &files
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+            &Vue3TypeResolverContext::default(),
+        );
+        for name in ["Shared", "UsesValue"] {
+            assert!(
+                context.silent_unresolved_type_names.contains(name),
+                "missing blocked name {name} for {files:?}"
+            );
+        }
+        assert!(!context
+            .return_type_runtime_type_declarations
+            .contains_key("Shared"));
+    }
+}
+
+#[test]
+fn vue3_generic_bindings_do_not_inherit_unrelated_global_conflicts() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let alias = dir.path().join("alias.d.ts");
+    let interface = dir.path().join("interface.d.ts");
+    let consumer = dir.path().join("consumer.d.ts");
+    std::fs::write(&alias, "type T = string").expect("write alias");
+    std::fs::write(&interface, "interface T { value: number }").expect("write interface");
+    std::fs::write(&consumer, "interface Box<T> { value: T }").expect("write consumer");
+    let filename = dir.path().join("Comp.vue");
+
+    for files in [
+        vec![alias.clone(), interface.clone(), consumer.clone()],
+        vec![consumer.clone(), interface.clone(), alias.clone()],
+    ] {
+        let context = vue3_global_type_context(
+            &filename.to_string_lossy(),
+            &files
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+            &Vue3TypeResolverContext::default(),
+        );
+        assert!(context.silent_unresolved_type_names.contains("T"));
+        assert!(!context.silent_unresolved_type_names.contains("Box"));
+        assert!(vue3_type_context_has_name(&context, "Box"));
+    }
+}
+
+#[test]
+fn vue3_global_function_overloads_are_order_independent_or_fail_closed() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let string_function = dir.path().join("string-function.d.ts");
+    let number_function = dir.path().join("number-function.d.ts");
+    let duplicate_function = dir.path().join("duplicate-function.d.ts");
+    let consumer = dir.path().join("consumer.d.ts");
+    std::fs::write(&string_function, "declare function Shared(): string")
+        .expect("write string overload");
+    std::fs::write(&number_function, "declare function Shared(): number")
+        .expect("write number overload");
+    std::fs::write(&duplicate_function, "declare function Shared(): string")
+        .expect("write compatible overload");
+    std::fs::write(&consumer, "type Uses = ReturnType<typeof Shared>")
+        .expect("write overload consumer");
+    let filename = dir.path().join("Comp.vue");
+
+    for files in [
+        vec![string_function.clone(), number_function.clone(), consumer.clone()],
+        vec![consumer.clone(), number_function.clone(), string_function.clone()],
+    ] {
+        let context = vue3_global_type_context(
+            &filename.to_string_lossy(),
+            &files
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+            &Vue3TypeResolverContext::default(),
+        );
+        assert!(!context
+            .return_type_runtime_type_declarations
+            .contains_key("Shared"));
+        assert!(context.silent_unresolved_type_names.contains("Uses"));
+    }
+
+    for files in [
+        vec![string_function.clone(), duplicate_function.clone()],
+        vec![duplicate_function.clone(), string_function.clone()],
+    ] {
+        let context = vue3_global_type_context(
+            &filename.to_string_lossy(),
+            &files
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+            &Vue3TypeResolverContext::default(),
+        );
+        assert_eq!(
+            context.return_type_runtime_type_declarations.get("Shared"),
+            Some(&vec!["String".to_string()])
+        );
+    }
+}
+
+#[test]
+fn vue3_global_variable_conflicts_do_not_block_sibling_declarators() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let string_value = dir.path().join("string-value.d.ts");
+    let number_value = dir.path().join("number-value.d.ts");
+    let consumers = dir.path().join("consumers.d.ts");
+    std::fs::write(&string_value, "declare const Bad: string")
+        .expect("write string value");
+    std::fs::write(&number_value, "declare const Bad: number")
+        .expect("write number value");
+    std::fs::write(
+        &consumers,
+        "declare const Dependent: typeof Bad, Independent: string",
+    )
+    .expect("write sibling declarators");
+    let filename = dir.path().join("Comp.vue");
+
+    for files in [
+        vec![string_value.clone(), number_value.clone(), consumers.clone()],
+        vec![consumers.clone(), number_value.clone(), string_value.clone()],
+    ] {
+        let context = vue3_global_type_context(
+            &filename.to_string_lossy(),
+            &files
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+            &Vue3TypeResolverContext::default(),
+        );
+        assert!(!context.type_query_declared_types.contains_key("Bad"));
+        assert!(!context
+            .type_query_declared_types
+            .contains_key("Dependent"));
+        assert_eq!(
+            context.type_query_declared_types.get("Independent"),
+            Some(&vec!["String".to_string()])
+        );
+    }
+
+    let same_file = dir.path().join("same-file.d.ts");
+    std::fs::write(
+        &same_file,
+        "declare const Shared: string\ndeclare const Shared: number",
+    )
+    .expect("write same-file conflict");
+    let context = vue3_global_type_context(
+        &filename.to_string_lossy(),
+        &[same_file.to_string_lossy().to_string()],
+        &Vue3TypeResolverContext::default(),
+    );
+    assert!(!context.type_query_declared_types.contains_key("Shared"));
+}
+
+#[test]
+fn vue3_namespace_references_bind_to_the_nearest_declared_member() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let alias = dir.path().join("root-alias.d.ts");
+    let interface = dir.path().join("root-interface.d.ts");
+    std::fs::write(&alias, "type Bad = { aliasValue: string }").expect("write root alias");
+    std::fs::write(&interface, "interface Bad { interfaceValue: number }")
+        .expect("write root interface");
+    let filename = dir.path().join("Comp.vue");
+
+    for (index, declarations) in [
+        r#"
+declare namespace Box {
+  interface Bad { localValue: boolean }
+  type Dep = Bad
+}
+"#,
+        r#"
+declare namespace Box {
+  type Dep = Bad
+  interface Bad { localValue: boolean }
+}
+"#,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let consumer = dir.path().join(format!("consumer-{index}.d.ts"));
+        std::fs::write(&consumer, declarations).expect("write namespace consumer");
+        for files in [
+            vec![alias.clone(), interface.clone(), consumer.clone()],
+            vec![consumer.clone(), interface.clone(), alias.clone()],
+        ] {
+            let context = vue3_global_type_context(
+                &filename.to_string_lossy(),
+                &files
+                    .iter()
+                    .map(|path| path.to_string_lossy().to_string())
+                    .collect::<Vec<_>>(),
+                &Vue3TypeResolverContext::default(),
+            );
+            assert!(context.silent_unresolved_type_names.contains("Bad"));
+            assert!(!context.silent_unresolved_type_names.contains("Box.Bad"));
+            assert!(!context.silent_unresolved_type_names.contains("Box.Dep"));
+            assert!(vue3_type_context_has_name(&context, "Box.Dep"));
+        }
+    }
+}
+
+#[test]
+fn vue3_class_and_enum_conflicts_invalidate_value_dependents() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let alias = dir.path().join("alias.d.ts");
+    let enum_file = dir.path().join("enum.d.ts");
+    let consumer = dir.path().join("consumer.d.ts");
+    std::fs::write(&alias, "type Shared = { aliasValue: string }").expect("write alias");
+    std::fs::write(&enum_file, "declare enum Shared { Value = 1 }").expect("write enum");
+    std::fs::write(
+        &consumer,
+        "type UsesValue = typeof Shared\ntype UsesKeys = keyof typeof Shared\ntype UsesMember = typeof Shared.Value",
+    )
+    .expect("write value consumers");
+    let filename = dir.path().join("Comp.vue");
+
+    for files in [
+        vec![alias.clone(), enum_file.clone(), consumer.clone()],
+        vec![consumer.clone(), enum_file.clone(), alias.clone()],
+    ] {
+        let context = vue3_global_type_context(
+            &filename.to_string_lossy(),
+            &files
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+            &Vue3TypeResolverContext::default(),
+        );
+        for name in ["Shared", "UsesValue", "UsesKeys", "UsesMember"] {
+            assert!(context.silent_unresolved_type_names.contains(name));
+            assert!(!vue3_type_context_has_name(&context, name));
+        }
+    }
+
+    let class = dir.path().join("class.d.ts");
+    let function = dir.path().join("function.d.ts");
+    std::fs::write(&class, "declare class Collision {}")
+        .expect("write class collision");
+    std::fs::write(&function, "declare function Collision(): string")
+        .expect("write function collision");
+    for files in [
+        vec![class.clone(), function.clone()],
+        vec![function.clone(), class.clone()],
+    ] {
+        let context = vue3_global_type_context(
+            &filename.to_string_lossy(),
+            &files
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+            &Vue3TypeResolverContext::default(),
+        );
+        assert!(context.silent_unresolved_type_names.contains("Collision"));
+        assert!(!context
+            .return_type_runtime_type_declarations
+            .contains_key("Collision"));
+    }
+
+    let bad_alias = dir.path().join("bad-alias.d.ts");
+    let bad_interface = dir.path().join("bad-interface.d.ts");
+    let dependent_class = dir.path().join("dependent-class.d.ts");
+    std::fs::write(&bad_alias, "type Bad = { aliasValue: string }")
+        .expect("write bad alias");
+    std::fs::write(&bad_interface, "interface Bad { interfaceValue: number }")
+        .expect("write bad interface");
+    std::fs::write(
+        &dependent_class,
+        "declare class DependentClass { value: Bad }\ntype ClassValueConsumer = typeof DependentClass",
+    )
+    .expect("write dependent class");
+    for files in [
+        vec![
+            bad_alias.clone(),
+            bad_interface.clone(),
+            dependent_class.clone(),
+        ],
+        vec![dependent_class.clone(), bad_interface.clone(), bad_alias.clone()],
+    ] {
+        let context = vue3_global_type_context(
+            &filename.to_string_lossy(),
+            &files
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+            &Vue3TypeResolverContext::default(),
+        );
+        for name in ["Bad", "DependentClass", "ClassValueConsumer"] {
+            assert!(context.silent_unresolved_type_names.contains(name));
+            assert!(!vue3_type_context_has_name(&context, name));
+        }
+    }
+}
+
+#[test]
+fn vue3_module_local_aliases_preserve_their_actual_global_dependencies() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let alias = dir.path().join("alias.d.ts");
+    let interface = dir.path().join("interface.d.ts");
+    let local = dir.path().join("local-global.ts");
+    let leaf = dir.path().join("leaf.d.ts");
+    let imported = dir.path().join("imported-global.d.ts");
+    std::fs::write(&alias, "type Bad = { aliasValue: string }").expect("write alias");
+    std::fs::write(&interface, "interface Bad { interfaceValue: number }")
+        .expect("write interface");
+    std::fs::write(
+        &local,
+        r#"
+export {}
+type Local = Bad
+class LocalClass { static value: Bad }
+namespace LocalTypes {
+  type Private = Bad
+  export namespace Nested {
+    export type Exported = Private
+  }
+}
+namespace Split {
+  type Bad = { cleanValue: string }
+  export type Clean = Bad
+}
+namespace Split {
+  export type Tainted = Bad
+}
+namespace Shadow {
+  export type Bad = { shadowValue: string }
+  export type Relay = Bad
+}
+declare global {
+  type LocalConsumer = Local
+  type LocalClassConsumer = typeof LocalClass
+  type LocalClassMemberConsumer = typeof LocalClass.value
+  type NamespaceConsumer = LocalTypes.Nested.Exported
+  type CleanConsumer = Split.Clean
+  type TaintedConsumer = Split.Tainted
+  type ShadowConsumer = Shadow.Relay
+}
+"#,
+    )
+    .expect("write local consumer");
+    std::fs::write(&leaf, "export interface Bad { importedValue: boolean }")
+        .expect("write imported leaf");
+    std::fs::write(
+        &imported,
+        "import type { Bad } from './leaf'\ndeclare global { type ImportedConsumer = Bad }\nexport {}",
+    )
+    .expect("write imported consumer");
+    let filename = dir.path().join("Comp.vue");
+
+    for files in [
+        vec![
+            alias.clone(),
+            interface.clone(),
+            local.clone(),
+            imported.clone(),
+        ],
+        vec![
+            imported.clone(),
+            local.clone(),
+            interface.clone(),
+            alias.clone(),
+        ],
+    ] {
+        let context = vue3_global_type_context(
+            &filename.to_string_lossy(),
+            &files
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+            &Vue3TypeResolverContext::default(),
+        );
+        assert!(context.silent_unresolved_type_names.contains("Bad"));
+        assert!(context
+            .silent_unresolved_type_names
+            .contains("LocalConsumer"));
+        assert!(!vue3_type_context_has_name(&context, "LocalConsumer"));
+        for name in ["LocalClassConsumer", "LocalClassMemberConsumer"] {
+            assert!(context.silent_unresolved_type_names.contains(name));
+            assert!(!vue3_type_context_has_name(&context, name));
+        }
+        assert!(context
+            .silent_unresolved_type_names
+            .contains("NamespaceConsumer"));
+        assert!(!vue3_type_context_has_name(&context, "NamespaceConsumer"));
+        assert!(!context
+            .silent_unresolved_type_names
+            .contains("CleanConsumer"));
+        assert!(vue3_type_context_has_name(&context, "CleanConsumer"));
+        assert!(context
+            .silent_unresolved_type_names
+            .contains("TaintedConsumer"));
+        assert!(!vue3_type_context_has_name(&context, "TaintedConsumer"));
+        assert!(!context
+            .silent_unresolved_type_names
+            .contains("ShadowConsumer"));
+        assert!(vue3_type_context_has_name(&context, "ShadowConsumer"));
+        assert!(!context
+            .silent_unresolved_type_names
+            .contains("ImportedConsumer"));
+        assert!(vue3_type_context_has_name(&context, "ImportedConsumer"));
+        assert!(context
+            .type_deps
+            .get("ImportedConsumer")
+            .is_some_and(|deps| deps.contains(&normalize_path_string(&leaf))));
+        assert!(vue3_type_context_names(&context)
+            .iter()
+            .chain(&context.silent_unresolved_type_names)
+            .chain(context.type_deps.keys())
+            .all(|name| !name.starts_with("local:")));
+    }
+}
+
+#[test]
+fn vue3_current_global_namespaces_shadow_module_imports_in_dependency_graphs() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let alias = dir.path().join("namespace-alias.d.ts");
+    let interface = dir.path().join("namespace-interface.d.ts");
+    let leaf = dir.path().join("leaf.ts");
+    let consumer = dir.path().join("consumer.ts");
+    std::fs::write(
+        &alias,
+        "declare namespace Types { type Bad = { aliasValue: string } }",
+    )
+    .expect("write namespace alias");
+    std::fs::write(
+        &interface,
+        "declare namespace Types { interface Bad { interfaceValue: number } }",
+    )
+    .expect("write namespace interface");
+    std::fs::write(&leaf, "export interface Bad { importedValue: boolean }")
+        .expect("write imported namespace leaf");
+    std::fs::write(
+        &consumer,
+        r#"
+import type * as Types from './leaf'
+import type * as Imported from './leaf'
+export {}
+declare global {
+  namespace Types { interface Marker {} }
+  type NamespaceConsumer = Types.Bad
+  type ImportedConsumer = Imported.Bad
+}
+"#,
+    )
+    .expect("write namespace import shadow consumer");
+    let filename = dir.path().join("Comp.vue");
+
+    for files in [
+        vec![
+            alias.clone(),
+            interface.clone(),
+            consumer.clone(),
+        ],
+        vec![consumer.clone(), interface.clone(), alias.clone()],
+    ] {
+        let context = vue3_global_type_context(
+            &filename.to_string_lossy(),
+            &files
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+            &Vue3TypeResolverContext::default(),
+        );
+        assert!(context.silent_unresolved_type_names.contains("Types.Bad"));
+        assert!(context
+            .silent_unresolved_type_names
+            .contains("NamespaceConsumer"));
+        assert!(!vue3_type_context_has_name(&context, "NamespaceConsumer"));
+        assert!(!context
+            .silent_unresolved_type_names
+            .contains("ImportedConsumer"));
+        assert!(vue3_type_context_has_name(&context, "ImportedConsumer"));
+        assert!(context
+            .type_deps
+            .get("ImportedConsumer")
+            .is_some_and(|deps| deps.contains(&normalize_path_string(&leaf))));
+    }
+}
+
+#[test]
+fn vue3_global_member_signatures_ignore_shadowed_module_local_identities() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let first = dir.path().join("first.ts");
+    let second = dir.path().join("second.ts");
+    std::fs::write(
+        &first,
+        r#"
+export {}
+interface Base { localFirst: Date }
+declare global {
+  interface Base { globalFirst: string }
+  interface Shared { value: Base }
+  interface Consumer extends Shared { first: boolean }
+}
+"#,
+    )
+    .expect("write first shadowed signature");
+    std::fs::write(
+        &second,
+        r#"
+export {}
+interface Base { localSecond: RegExp }
+declare global {
+  interface Base { globalSecond: number }
+  interface Shared { value: Base }
+  interface Consumer extends Shared { second: bigint }
+}
+"#,
+    )
+    .expect("write second shadowed signature");
+    let filename = dir.path().join("Comp.vue");
+
+    for files in [
+        vec![first.clone(), second.clone()],
+        vec![second.clone(), first.clone()],
+    ] {
+        let context = vue3_global_type_context(
+            &filename.to_string_lossy(),
+            &files
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+            &Vue3TypeResolverContext::default(),
+        );
+        for name in ["Base", "Shared", "Consumer"] {
+            assert!(!context.silent_unresolved_type_names.contains(name));
+            assert!(vue3_type_context_has_name(&context, name));
+        }
+    }
+}
+
+#[test]
+fn vue3_illegal_same_file_alias_and_class_redeclarations_fail_closed() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let filename = dir.path().join("Comp.vue");
+
+    for (index, declarations) in [
+        "type Shared = { first: string }\ntype Shared = { second: number }",
+        "type Shared = { second: number }\ntype Shared = { first: string }",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let file = dir.path().join(format!("alias-{index}.d.ts"));
+        std::fs::write(
+            &file,
+            format!("{declarations}\ntype AliasConsumer = Shared"),
+        )
+        .expect("write duplicate aliases");
+        let context = vue3_global_type_context(
+            &filename.to_string_lossy(),
+            &[file.to_string_lossy().to_string()],
+            &Vue3TypeResolverContext::default(),
+        );
+        for name in ["Shared", "AliasConsumer"] {
+            assert!(context.silent_unresolved_type_names.contains(name));
+            assert!(!vue3_type_context_has_name(&context, name));
+        }
+    }
+
+    for (index, declarations) in [
+        "declare class Repeated { first: string }\ndeclare class Repeated { second: number }",
+        "declare class Repeated { second: number }\ndeclare class Repeated { first: string }",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let file = dir.path().join(format!("class-{index}.d.ts"));
+        std::fs::write(
+            &file,
+            format!("{declarations}\ntype ClassConsumer = Repeated"),
+        )
+        .expect("write duplicate classes");
+        let context = vue3_global_type_context(
+            &filename.to_string_lossy(),
+            &[file.to_string_lossy().to_string()],
+            &Vue3TypeResolverContext::default(),
+        );
+        for name in ["Repeated", "ClassConsumer"] {
+            assert!(context.silent_unresolved_type_names.contains(name));
+            assert!(!vue3_type_context_has_name(&context, name));
+        }
+    }
+}
+
+#[test]
+fn vue3_missing_nearest_namespace_members_do_not_fall_back_to_outer_namespaces() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let alias = dir.path().join("outer-alias.d.ts");
+    let interface = dir.path().join("outer-interface.d.ts");
+    let consumer = dir.path().join("inner-consumer.d.ts");
+    std::fs::write(
+        &alias,
+        "declare namespace A.Types { type Bad = { aliasValue: string } }",
+    )
+    .expect("write outer namespace alias");
+    std::fs::write(
+        &interface,
+        "declare namespace A.Types { interface Bad { interfaceValue: number } }",
+    )
+    .expect("write outer namespace interface");
+    std::fs::write(
+        &consumer,
+        r#"
+declare namespace A.B {
+  namespace Types {}
+  type Consumer = Types.Bad
+}
+type ClosestConsumer = A.B.Consumer
+"#,
+    )
+    .expect("write nearest namespace consumer");
+    let filename = dir.path().join("Comp.vue");
+
+    for files in [
+        vec![alias.clone(), interface.clone(), consumer.clone()],
+        vec![consumer.clone(), interface.clone(), alias.clone()],
+    ] {
+        let context = vue3_global_type_context(
+            &filename.to_string_lossy(),
+            &files
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+            &Vue3TypeResolverContext::default(),
+        );
+        assert!(context.silent_unresolved_type_names.contains("A.Types.Bad"));
+        for name in ["A.B.Consumer", "ClosestConsumer"] {
+            assert!(!context.silent_unresolved_type_names.contains(name));
+        }
+    }
+}

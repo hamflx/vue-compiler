@@ -120,6 +120,20 @@ pub(crate) fn collect_vue3_declared_type_deps_from_statement_groups(
         statement_groups,
         analysis,
         VUE3_MAX_DECLARED_TYPE_DEPENDENCY_WORK,
+        &BTreeSet::new(),
+    )
+}
+
+pub(crate) fn collect_vue3_declared_type_deps_from_statement_groups_excluding_names(
+    statement_groups: &[&[Statement<'_>]],
+    excluded_names: &BTreeSet<String>,
+    analysis: &mut Vue3ScriptSetupAnalysis,
+) -> bool {
+    collect_vue3_declared_type_deps_from_statement_groups_with_limit(
+        statement_groups,
+        analysis,
+        VUE3_MAX_DECLARED_TYPE_DEPENDENCY_WORK,
+        excluded_names,
     )
 }
 
@@ -127,6 +141,7 @@ fn collect_vue3_declared_type_deps_from_statement_groups_with_limit(
     statement_groups: &[&[Statement<'_>]],
     analysis: &mut Vue3ScriptSetupAnalysis,
     mut remaining_work: usize,
+    excluded_names: &BTreeSet<String>,
 ) -> bool {
     if analysis.type_dependency_work_exhausted {
         return false;
@@ -146,6 +161,7 @@ fn collect_vue3_declared_type_deps_from_statement_groups_with_limit(
                 }),
         );
     }
+    names.retain(|name| !excluded_names.contains(name));
     syntax_work = syntax_work.saturating_add(names.len());
     let mut changed = false;
     for _ in 0..names.len().saturating_add(1) {
@@ -512,27 +528,58 @@ pub(crate) fn refresh_vue3_declared_type_declarations_excluding_interfaces(
     excluded_interfaces: &BTreeSet<String>,
     analysis: &mut Vue3ScriptSetupAnalysis,
 ) {
-    let limit = count_vue3_refreshable_type_declarations_in_statements(statements);
+    refresh_vue3_declared_type_declarations_from_statement_groups_excluding_interfaces(
+        source,
+        &[statements],
+        excluded_interfaces,
+        analysis,
+    );
+}
+
+pub(crate) fn refresh_vue3_declared_type_declarations_from_statement_groups_excluding_interfaces(
+    source: &str,
+    statement_groups: &[&[Statement<'_>]],
+    excluded_interfaces: &BTreeSet<String>,
+    analysis: &mut Vue3ScriptSetupAnalysis,
+) -> bool {
+    let limit = statement_groups.iter().fold(0usize, |count, statements| {
+        count.saturating_add(count_vue3_refreshable_type_declarations_in_statements(
+            statements,
+        ))
+    });
+    let mut interface_declarations = BTreeMap::new();
+    for statements in statement_groups {
+        for statement in *statements {
+            collect_vue3_interface_declarations_from_statement(
+                statement,
+                &mut interface_declarations,
+            );
+        }
+    }
+    let mut any_changed = false;
     for _ in 0..limit {
-        let interface_declarations = vue3_interface_declarations_by_name(statements);
         let mut refreshed_interfaces = BTreeSet::new();
         let mut changed = false;
-        for statement in statements {
-            if vue3_statement_declares_interface_named(statement, excluded_interfaces) {
-                continue;
+        for statements in statement_groups {
+            for statement in *statements {
+                if vue3_statement_declares_interface_named(statement, excluded_interfaces) {
+                    continue;
+                }
+                changed |= refresh_vue3_declared_type_declaration_from_statement(
+                    source,
+                    statement,
+                    &interface_declarations,
+                    &mut refreshed_interfaces,
+                    analysis,
+                );
             }
-            changed |= refresh_vue3_declared_type_declaration_from_statement(
-                source,
-                statement,
-                &interface_declarations,
-                &mut refreshed_interfaces,
-                analysis,
-            );
         }
         if !changed {
             break;
         }
+        any_changed = true;
     }
+    any_changed
 }
 
 fn vue3_statement_declares_interface_named(
@@ -854,6 +901,7 @@ mod declared_type_dependency_work_tests {
                 &[&parsed.program.body],
                 &mut analysis,
                 0,
+                &BTreeSet::new(),
             )
         );
 
