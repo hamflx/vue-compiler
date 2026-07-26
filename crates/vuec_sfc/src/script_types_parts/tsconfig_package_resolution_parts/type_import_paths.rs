@@ -394,10 +394,6 @@ pub(crate) fn vue3_ts_resolution_candidates(
             candidates.push(vue3_path_with_typescript_extension(candidate, "ts"));
             candidates.push(vue3_path_with_typescript_extension(candidate, "tsx"));
             candidates.push(vue3_path_with_typescript_extension(candidate, "d.ts"));
-            candidates.push(vue3_path_with_typescript_extension(candidate, "mts"));
-            candidates.push(vue3_path_with_typescript_extension(candidate, "d.mts"));
-            candidates.push(vue3_path_with_typescript_extension(candidate, "cts"));
-            candidates.push(vue3_path_with_typescript_extension(candidate, "d.cts"));
         }
         Some(_) => {}
     }
@@ -560,6 +556,31 @@ mod vue3_type_import_candidate_tests {
                 "entry.cjs.d.ts",
             ]
         );
+    }
+
+    #[test]
+    fn extensionless_candidates_do_not_probe_module_specific_extensions() {
+        assert_eq!(
+            file_names(vue3_ts_resolution_candidates(
+                Path::new("entry"),
+                None
+            )),
+            ["entry.ts", "entry.tsx", "entry.d.ts"]
+        );
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let resolver = Vue3TypeResolverContext::default();
+        for (index, extension) in ["mts", "d.mts", "cts", "d.cts"].into_iter().enumerate() {
+            let candidate = dir.path().join(format!("entry-{index}"));
+            std::fs::write(candidate.with_extension(extension), "export interface Props {}")
+                .expect("write module-specific target");
+            assert!(resolve_vue3_type_import_path_with_mode(
+                &candidate,
+                Vue3TypeResolutionMode::Import,
+                &resolver,
+            )
+            .is_none());
+        }
     }
 
     #[test]
