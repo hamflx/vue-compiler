@@ -133,6 +133,72 @@ const props = defineProps<PackageProps & PathProps & UserProps & BaseProps & Vue
     }
 
     #[test]
+    fn vue3_compile_script_resolves_rooted_and_parent_include_globs() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let config_dir = dir.path().join("project").join("config");
+        let absolute_types = dir.path().join("absolute-types");
+        let shared_types = dir.path().join("shared");
+        for directory in [&config_dir, &absolute_types, &shared_types] {
+            std::fs::create_dir_all(directory).expect("create include fixture directory");
+        }
+
+        let absolute_global = absolute_types.join("absolute.d.ts");
+        let parent_global = shared_types.join("parent.d.ts");
+        std::fs::write(
+            &absolute_global,
+            "declare interface AbsoluteGlobalProps { absoluteValue: string }",
+        )
+        .expect("write rooted include declaration");
+        std::fs::write(
+            &parent_global,
+            "declare interface ParentGlobalProps { parentValue?: number }",
+        )
+        .expect("write parent include declaration");
+
+        let absolute_pattern = format!(r"{}\**\*.d.ts", absolute_types.to_string_lossy());
+        let tsconfig = serde_json::json!({
+            "include": [absolute_pattern, r"..\..\shared\**\*.d.ts"],
+            "compilerOptions": { "types": [] }
+        });
+        std::fs::write(
+            config_dir.join("tsconfig.json"),
+            serde_json::to_vec(&tsconfig).expect("serialize include config"),
+        )
+        .expect("write include config");
+
+        let filename = config_dir.join("Comp.vue");
+        let source = r#"<script setup lang="ts">
+defineProps<AbsoluteGlobalProps & ParentGlobalProps>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        assert!(
+            script
+                .content
+                .contains("absoluteValue: { type: String, required: true }"),
+            "{}",
+            script.content
+        );
+        assert!(
+            script
+                .content
+                .contains("parentValue: { type: Number, required: false }"),
+            "{}",
+            script.content
+        );
+        assert_eq!(
+            script.deps.iter().cloned().collect::<BTreeSet<_>>(),
+            [absolute_global, parent_global]
+                .into_iter()
+                .map(|path| normalize_path_string(&path))
+                .collect::<BTreeSet<_>>()
+        );
+    }
+
+    #[test]
     fn vue3_compile_script_resolves_base_url_after_paths_and_before_packages() {
         let dir = tempfile::tempdir().expect("temp dir");
         let source_dir = dir.path().join("src");

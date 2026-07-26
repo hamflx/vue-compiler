@@ -74,6 +74,49 @@ fn vue3_generated_metadata_paths_are_bounded_before_expansion() {
 }
 
 #[test]
+fn vue3_include_glob_root_honors_exact_generated_path_limit() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let target = format!(r"{}\**\*.d.ts", dir.path().to_string_lossy());
+    let normalized_pattern = format!("{}/**/*.d.ts", normalize_path_string(dir.path()));
+    let required = normalized_pattern.len();
+    let exact = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_generated_path_bytes: required,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+
+    assert_eq!(
+        vue3_tsconfig_include_pattern(Path::new("ignored"), Path::new("ignored"), &target, &exact)
+            .as_deref(),
+        Some(normalized_pattern.as_str())
+    );
+    assert_eq!(
+        vue3_tsconfig_include_root_path(
+            Path::new("ignored"),
+            Path::new("ignored"),
+            &target,
+            &exact,
+        ),
+        Some(dir.path().to_path_buf())
+    );
+    assert!(!exact.external_type_session.metadata_is_blocked());
+    assert_eq!(exact.external_type_session.stats().tsconfig_discovery_entries, 0);
+
+    let short = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_generated_path_bytes: required - 1,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert!(vue3_tsconfig_include_root_path(
+        Path::new("ignored"),
+        Path::new("ignored"),
+        &target,
+        &short,
+    )
+    .is_none());
+    assert!(short.external_type_session.metadata_is_blocked());
+    assert_eq!(short.external_type_session.stats().tsconfig_discovery_entries, 0);
+}
+
+#[test]
 fn vue3_config_dir_template_expansion_is_prefix_only_and_bounded() {
     let template_config_dir = Path::new("expanded-config-directory");
     let resolver = Vue3TypeResolverContext::default();

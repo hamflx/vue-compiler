@@ -1116,24 +1116,19 @@ pub(crate) fn vue3_tsconfig_include_global_type_files(
         }
         return Vec::new();
     }
-    let Some(root) =
-        vue3_tsconfig_include_root_path(config_dir, template_config_dir, target, type_resolver)
-    else {
-        return Vec::new();
-    };
-    let Some(pattern) =
-        vue3_tsconfig_include_pattern(config_dir, template_config_dir, target, type_resolver)
+    let Some(glob) =
+        vue3_tsconfig_include_glob(config_dir, template_config_dir, target, type_resolver)
     else {
         return Vec::new();
     };
     let mut files = Vec::new();
-    vue3_collect_global_type_files_from_dir(&root, &mut files, type_resolver);
+    vue3_collect_global_type_files_from_dir(&glob.root, &mut files, type_resolver);
     if type_resolver.external_type_session.metadata_is_blocked() {
         return Vec::new();
     }
     files
         .into_iter()
-        .filter(|file| vue3_tsconfig_glob_matches(&pattern, &normalize_path_string(file)))
+        .filter(|file| vue3_tsconfig_glob_matches(&glob.pattern, &normalize_path_string(file)))
         .collect()
 }
 
@@ -1150,48 +1145,90 @@ pub(crate) fn vue3_tsconfig_include_can_match_global_type_files(target: &str) ->
         .any(|extension| file_pattern.ends_with(extension))
 }
 
+#[cfg(test)]
 pub(crate) fn vue3_tsconfig_include_pattern(
     config_dir: &Path,
     template_config_dir: &Path,
     target: &str,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<String> {
-    let target =
-        vue3_tsconfig_expand_config_dir_template(target, template_config_dir, type_resolver)?;
-    let path = vue3_tsconfig_path_from_expanded_target(config_dir, &target, type_resolver)?;
+    let path = vue3_tsconfig_include_path(
+        config_dir,
+        template_config_dir,
+        target,
+        type_resolver,
+    )?;
     Some(normalize_path_string(&path))
 }
 
+fn vue3_tsconfig_include_path(
+    config_dir: &Path,
+    template_config_dir: &Path,
+    target: &str,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
+    let target =
+        vue3_tsconfig_expand_config_dir_template(target, template_config_dir, type_resolver)?;
+    vue3_tsconfig_path_from_expanded_target(config_dir, &target, type_resolver)
+}
+
+struct Vue3TsconfigIncludeGlob {
+    pattern: String,
+    root: PathBuf,
+}
+
+fn vue3_tsconfig_include_glob(
+    config_dir: &Path,
+    template_config_dir: &Path,
+    target: &str,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<Vue3TsconfigIncludeGlob> {
+    let path = vue3_tsconfig_include_path(
+        config_dir,
+        template_config_dir,
+        target,
+        type_resolver,
+    )?;
+    let root = vue3_tsconfig_include_root_from_pattern(&path)?;
+    Some(Vue3TsconfigIncludeGlob {
+        pattern: normalize_path_string(&path),
+        root,
+    })
+}
+
+#[cfg(test)]
 pub(crate) fn vue3_tsconfig_include_root_path(
     config_dir: &Path,
     template_config_dir: &Path,
     target: &str,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
-    let target = vue3_normalize_typescript_path_separators(target, type_resolver)?;
-    if target.is_empty() || target.contains(':') {
-        return None;
-    }
-    let root = target
-        .split('/')
-        .take_while(|segment| !segment.contains('*') && !segment.contains('?'))
-        .filter(|segment| !segment.is_empty() && *segment != ".")
-        .collect::<Vec<_>>();
-    if root.contains(&"..") {
-        return None;
-    }
-    let root = if root.is_empty() {
-        ".".to_string()
-    } else {
-        root.join("/")
-    };
-    let path = vue3_tsconfig_target_path(
+    let pattern = vue3_tsconfig_include_path(
         config_dir,
         template_config_dir,
-        &root,
+        target,
         type_resolver,
     )?;
-    path.is_dir().then_some(path)
+    vue3_tsconfig_include_root_from_pattern(&pattern)
+}
+
+fn vue3_tsconfig_include_root_from_pattern(pattern: &Path) -> Option<PathBuf> {
+    let mut root = PathBuf::new();
+    for component in pattern.components() {
+        let contains_wildcard = matches!(
+            component,
+            std::path::Component::Normal(segment)
+                if segment.to_string_lossy().contains(['*', '?'])
+        );
+        if contains_wildcard {
+            break;
+        }
+        root.push(component.as_os_str());
+    }
+    if root.as_os_str().is_empty() {
+        root.push(".");
+    }
+    root.is_dir().then_some(root)
 }
 
 pub(crate) fn vue3_collect_global_type_files_from_dir(
