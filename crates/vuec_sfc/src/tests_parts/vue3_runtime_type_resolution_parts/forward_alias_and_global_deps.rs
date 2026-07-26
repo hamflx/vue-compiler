@@ -741,6 +741,91 @@ defineProps<DefaultIncludedProps & NestedDefaultProps>()
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn vue3_tsconfig_discovery_matches_paths_case_insensitively_on_windows() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let project = dir.path().join("project");
+        for directory in [
+            project.join("src"),
+            project.join("dist"),
+            project.join("NODE_MODULES").join("package"),
+            project.join("BOWER_COMPONENTS").join("package"),
+            project.join("JSPM_PACKAGES").join("package"),
+        ] {
+            std::fs::create_dir_all(directory).expect("create case-insensitive fixture");
+        }
+        let config_path = project.join("tsconfig.json");
+        std::fs::write(
+            &config_path,
+            r#"{"compilerOptions":{"types":[],"outDir":"./DIST"}}"#,
+        )
+        .expect("write case-insensitive output config");
+        let ambient = project.join("ambient.d.ts");
+        std::fs::write(&ambient, "declare interface CaseInsensitiveProps {}")
+            .expect("write included declaration");
+        for path in [
+            project.join("dist").join("generated.d.ts"),
+            project
+                .join("NODE_MODULES")
+                .join("package")
+                .join("ignored.d.ts"),
+            project
+                .join("BOWER_COMPONENTS")
+                .join("package")
+                .join("ignored.d.ts"),
+            project
+                .join("JSPM_PACKAGES")
+                .join("package")
+                .join("ignored.d.ts"),
+        ] {
+            std::fs::write(path, "declare interface IgnoredProps {}")
+                .expect("write excluded declaration");
+        }
+        let filename = project.join("src").join("Comp.vue");
+        let filename_text = filename.to_string_lossy();
+        let bounded = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+            max_tsconfig_discovery_files: 1,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert_eq!(
+            vue3_tsconfig_global_type_files(&filename_text, &bounded),
+            vec![ambient.clone()]
+        );
+        assert_eq!(
+            bounded
+                .external_type_session
+                .stats()
+                .tsconfig_discovery_files,
+            1
+        );
+        assert!(!bounded.external_type_session.metadata_is_blocked());
+
+        let ignored = project.join("ignored").join("deep");
+        std::fs::create_dir_all(&ignored).expect("create wildcard exclude fixture");
+        std::fs::write(
+            ignored.join("value.d.ts"),
+            "declare interface WildcardIgnoredProps {}",
+        )
+        .expect("write wildcard excluded declaration");
+        std::fs::write(
+            &config_path,
+            r#"{
+                "include":["./ambient.d.ts","./ignored/**/*.d.ts"],
+                "exclude":["./IGNORED/**/*.D.TS"],
+                "compilerOptions":{"types":[]}
+            }"#,
+        )
+        .expect("write case-insensitive wildcard config");
+        assert_eq!(
+            vue3_tsconfig_global_type_files(
+                &filename_text,
+                &vue3_type_resolver_context_for_filename(&filename_text),
+            ),
+            vec![ambient]
+        );
+    }
+
     #[test]
     fn vue3_tsconfig_filesystem_fields_accept_windows_separators_cross_platform() {
         let dir = tempfile::tempdir().expect("temp dir");
