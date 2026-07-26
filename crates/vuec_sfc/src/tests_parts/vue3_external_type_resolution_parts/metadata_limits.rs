@@ -630,6 +630,21 @@ fn vue3_package_metadata_targets_cannot_escape_package_root() {
 
     std::fs::write(
         package_dir.join("package.json"),
+        r#"{"types":"nested\\..\\..\\outside.d.ts"}"#,
+    )
+    .expect("replace package manifest with Windows traversal target");
+    let windows_traversal_resolver = Vue3TypeResolverContext::default();
+    assert_eq!(
+        resolve_vue3_package_json_type_entry(
+            &package_dir,
+            None,
+            &windows_traversal_resolver,
+        ),
+        Vue3PackageJsonTypeResolution::Blocked
+    );
+
+    std::fs::write(
+        package_dir.join("package.json"),
         r#"{"exports":{".":{"types":"./nested/../../outside.d.ts"}}}"#,
     )
     .expect("replace package manifest");

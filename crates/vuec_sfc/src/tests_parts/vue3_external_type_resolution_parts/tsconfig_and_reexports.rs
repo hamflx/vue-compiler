@@ -897,14 +897,15 @@ defineProps<RootProps & AppProps & BaseProps>()
             .join("node_modules")
             .join("@vuec")
             .join("tsconfig");
-        std::fs::create_dir_all(&scoped_config_pkg).expect("create scoped config package");
+        let scoped_config_dir = scoped_config_pkg.join("configs");
+        std::fs::create_dir_all(&scoped_config_dir).expect("create scoped config package");
         std::fs::write(
             scoped_config_pkg.join("package.json"),
-            r#"{"tsconfig":"base.json"}"#,
+            r#"{"tsconfig":".\\configs\\base.json"}"#,
         )
         .expect("write scoped config package manifest");
         std::fs::write(
-            scoped_config_pkg.join("base.json"),
+            scoped_config_dir.join("base.json"),
             r#"{
                 // Package config entries may be JSONC.
                 "compilerOptions": {

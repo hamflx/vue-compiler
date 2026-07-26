@@ -362,7 +362,8 @@ pub(crate) fn vue3_package_json_tsconfig_entry(
         .tsconfig
         .as_ref()
         .and_then(serde_json::Value::as_str)?;
-    if !vue3_package_tsconfig_target_is_safe(target) {
+    let target = vue3_normalize_typescript_path_separators(target, type_resolver)?;
+    if !vue3_package_tsconfig_target_is_safe(&target) {
         return None;
     }
     let target = target.trim_start_matches("./");

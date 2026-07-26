@@ -1942,6 +1942,101 @@ defineProps<VersionedProps>()
     }
 
     #[test]
+    fn vue3_package_root_fields_normalize_windows_separators_before_version_matching() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let node_modules = dir.path().join("node_modules");
+        let mut expected_deps = Vec::new();
+        for (package_name, manifest, relative_target, declaration) in [
+            (
+                "vuec-windows-types-field",
+                r#"{"types":".\\declarations\\index.d.ts"}"#,
+                "declarations/index.d.ts",
+                "export interface TypesFieldProps { typesField: string }",
+            ),
+            (
+                "vuec-windows-typings-field",
+                r#"{"typings":".\\declarations\\index.d.ts"}"#,
+                "declarations/index.d.ts",
+                "export interface TypingsFieldProps { typingsField: number }",
+            ),
+            (
+                "vuec-windows-main-field",
+                r#"{"main":".\\dist\\index.js"}"#,
+                "dist/index.d.ts",
+                "export interface MainFieldProps { mainField: boolean }",
+            ),
+        ] {
+            let package = node_modules.join(package_name);
+            let target = package.join(relative_target);
+            std::fs::create_dir_all(target.parent().expect("package target parent"))
+                .expect("create package root field fixture");
+            std::fs::write(package.join("package.json"), manifest)
+                .expect("write package root field manifest");
+            std::fs::write(&target, declaration).expect("write package root field declaration");
+            expected_deps.push(target);
+        }
+
+        let versioned_package = node_modules.join("vuec-windows-versioned-root");
+        let fallback = versioned_package.join("types").join("index.d.ts");
+        let versioned = versioned_package.join("versioned").join("index.d.ts");
+        for target in [&fallback, &versioned] {
+            std::fs::create_dir_all(target.parent().expect("versioned target parent"))
+                .expect("create versioned root fixture");
+        }
+        std::fs::write(
+            versioned_package.join("package.json"),
+            r#"{
+                "types": ".\\types\\index.d.ts",
+                "typesVersions": {
+                    "*": { "types/*": ["versioned\\*"] }
+                }
+            }"#,
+        )
+        .expect("write versioned root manifest");
+        std::fs::write(
+            &fallback,
+            "export interface VersionedRootProps { wrongFallback: never }",
+        )
+        .expect("write versioned root fallback");
+        std::fs::write(
+            &versioned,
+            "export interface VersionedRootProps { versionedRoot?: string }",
+        )
+        .expect("write versioned root target");
+        expected_deps.push(versioned);
+
+        let filename = dir.path().join("Comp.vue");
+        let source = r#"<script setup lang="ts">
+import type { TypesFieldProps } from 'vuec-windows-types-field'
+import type { TypingsFieldProps } from 'vuec-windows-typings-field'
+import type { MainFieldProps } from 'vuec-windows-main-field'
+import type { VersionedRootProps } from 'vuec-windows-versioned-root'
+defineProps<TypesFieldProps & TypingsFieldProps & MainFieldProps & VersionedRootProps>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        for expected in [
+            "typesField: { type: String, required: true }",
+            "typingsField: { type: Number, required: true }",
+            "mainField: { type: Boolean, required: true }",
+            "versionedRoot: { type: String, required: false }",
+        ] {
+            assert!(script.content.contains(expected), "{}", script.content);
+        }
+        assert!(!script.content.contains("wrongFallback"));
+        assert_eq!(
+            script.deps.iter().cloned().collect::<BTreeSet<_>>(),
+            expected_deps
+                .iter()
+                .map(|path| normalize_path_string(path))
+                .collect::<BTreeSet<_>>()
+        );
+    }
+
+    #[test]
     fn vue3_compile_script_resolves_package_types_versions_type_deps() {
         let dir = tempfile::tempdir().expect("temp dir");
         let node_modules = dir.path().join("node_modules");
