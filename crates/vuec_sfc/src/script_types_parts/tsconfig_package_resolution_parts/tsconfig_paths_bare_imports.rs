@@ -47,6 +47,25 @@ pub(crate) fn vue3_tsconfig_direct_path_mappings(
         .collect()
 }
 
+fn vue3_tsconfig_direct_base_url(
+    value: &serde_json::Value,
+    config_dir: &Path,
+    template_config_dir: &Path,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
+    let base_url = value
+        .get("compilerOptions")?
+        .get("baseUrl")?
+        .as_str()?;
+    vue3_tsconfig_target_path(
+        config_dir,
+        template_config_dir,
+        base_url,
+        "",
+        type_resolver,
+    )
+}
+
 pub(crate) fn vue3_tsconfig_path_target_values(value: &serde_json::Value) -> Vec<String> {
     match value {
         serde_json::Value::Array(targets) => targets
@@ -128,6 +147,35 @@ pub(crate) fn resolve_vue3_tsconfig_path_mappings_with_mode(
         }
     }
     None
+}
+
+pub(crate) fn resolve_vue3_tsconfig_base_url_with_mode(
+    base_url: &Path,
+    source: &str,
+    resolution_mode: Vue3TypeResolutionMode,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Option<PathBuf> {
+    if source.is_empty() || vue3_type_import_source_is_relative(source) {
+        return None;
+    }
+    if !type_resolver
+        .external_type_session
+        .metadata_path_is_within_limit(source)
+    {
+        return None;
+    }
+    let candidate = normalize_path_components(base_url.join(source));
+    if !type_resolver
+        .external_type_session
+        .metadata_path_is_within_limit(&normalize_path_string(&candidate))
+    {
+        return None;
+    }
+    resolve_vue3_metadata_type_import_path_with_mode(
+        &candidate,
+        resolution_mode,
+        type_resolver,
+    )
 }
 
 pub(crate) fn vue3_tsconfig_path_pattern_capture(

@@ -139,6 +139,291 @@ const props = defineProps<PackageProps & PathProps & UserProps & BaseProps & Vue
     }
 
     #[test]
+    fn vue3_compile_script_resolves_base_url_after_paths_and_before_packages() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source_dir = dir.path().join("src");
+        std::fs::create_dir_all(source_dir.join("components"))
+            .expect("create project source directory");
+        std::fs::write(
+            dir.path().join("tsconfig.json"),
+            r#"{
+                "compilerOptions": {
+                    "baseUrl": "./src",
+                    "paths": {
+                        "base-choice": ["./missing.ts"],
+                        "mapped-choice": ["./mapped.ts"]
+                    }
+                }
+            }"#,
+        )
+        .expect("write baseUrl config");
+        let base_choice = source_dir.join("base-choice.ts");
+        let mapped_choice = source_dir.join("mapped.ts");
+        std::fs::write(
+            &base_choice,
+            "export interface BaseChoiceProps { baseValue: string }",
+        )
+        .expect("write baseUrl target");
+        std::fs::write(
+            &mapped_choice,
+            "export interface MappedChoiceProps { mappedValue: boolean }",
+        )
+        .expect("write paths target");
+
+        let base_decoy = dir.path().join("node_modules").join("base-choice");
+        let package_fallback = dir.path().join("node_modules").join("package-fallback");
+        for package in [&base_decoy, &package_fallback] {
+            std::fs::create_dir_all(package).expect("create dependency package");
+            std::fs::write(package.join("package.json"), r#"{"types":"index.d.ts"}"#)
+                .expect("write dependency manifest");
+        }
+        std::fs::write(
+            base_decoy.join("index.d.ts"),
+            "export interface BaseChoiceProps { wrongPackagePriority: never }",
+        )
+        .expect("write baseUrl package decoy");
+        let package_entry = package_fallback.join("index.d.ts");
+        std::fs::write(
+            &package_entry,
+            "export interface PackageProps { packageValue: number }",
+        )
+        .expect("write package fallback target");
+
+        let filename = source_dir.join("components").join("Comp.vue");
+        let source = r#"<script setup lang="ts">
+import type { BaseChoiceProps } from 'base-choice'
+import type { MappedChoiceProps } from 'mapped-choice'
+import type { PackageProps } from 'package-fallback'
+defineProps<BaseChoiceProps & MappedChoiceProps & PackageProps>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        for expected in [
+            "baseValue: { type: String, required: true }",
+            "mappedValue: { type: Boolean, required: true }",
+            "packageValue: { type: Number, required: true }",
+        ] {
+            assert!(script.content.contains(expected), "{}", script.content);
+        }
+        assert!(!script.content.contains("wrongPackagePriority"));
+        assert_eq!(
+            script.deps.iter().cloned().collect::<BTreeSet<_>>(),
+            [base_choice, mapped_choice, package_entry]
+                .iter()
+                .map(|path| normalize_path_string(path))
+                .collect::<BTreeSet<_>>()
+        );
+    }
+
+    #[test]
+    fn vue3_compile_script_inherits_and_overrides_base_url_without_reference_leaks() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let config_dir = dir.path().join("configs");
+        let inherited_source_dir = dir.path().join("sources");
+        let inherited_project = dir.path().join("inherited-project");
+        let override_project = dir.path().join("override-project");
+        let referenced_project = dir.path().join("referenced-project");
+        let reference_consumer = dir.path().join("reference-consumer");
+        for directory in [
+            &config_dir,
+            &inherited_source_dir,
+            &inherited_project,
+            &override_project.join("local"),
+            &referenced_project.join("types"),
+            &reference_consumer,
+        ] {
+            std::fs::create_dir_all(directory).expect("create baseUrl inheritance fixture");
+        }
+        std::fs::write(
+            config_dir.join("base.json"),
+            r#"{"compilerOptions":{"baseUrl":"../sources"}}"#,
+        )
+        .expect("write inherited baseUrl config");
+        std::fs::write(
+            inherited_project.join("tsconfig.json"),
+            r#"{"extends":"../configs/base.json"}"#,
+        )
+        .expect("write inherited project config");
+        std::fs::write(
+            override_project.join("tsconfig.json"),
+            r#"{
+                "extends":"../configs/base.json",
+                "compilerOptions":{"baseUrl":"./local"}
+            }"#,
+        )
+        .expect("write overriding project config");
+        std::fs::write(
+            referenced_project.join("tsconfig.json"),
+            r#"{"compilerOptions":{"baseUrl":"./types"}}"#,
+        )
+        .expect("write referenced project config");
+        std::fs::write(
+            reference_consumer.join("tsconfig.json"),
+            r#"{"references":[{"path":"../referenced-project"}]}"#,
+        )
+        .expect("write reference consumer config");
+        let inherited_target = inherited_source_dir.join("choice.ts");
+        let override_target = override_project.join("local").join("choice.ts");
+        let referenced_target = referenced_project.join("types").join("choice.ts");
+        std::fs::write(
+            &inherited_target,
+            "export interface ChoiceProps { inheritedValue: string }",
+        )
+        .expect("write inherited baseUrl target");
+        std::fs::write(
+            &override_target,
+            "export interface ChoiceProps { overrideValue: number }",
+        )
+        .expect("write overriding baseUrl target");
+        std::fs::write(
+            &referenced_target,
+            "export interface ChoiceProps { referencedValue: boolean }",
+        )
+        .expect("write referenced baseUrl target");
+        let package = dir.path().join("node_modules").join("choice");
+        std::fs::create_dir_all(&package).expect("create reference fallback package");
+        std::fs::write(package.join("package.json"), r#"{"types":"index.d.ts"}"#)
+            .expect("write reference fallback manifest");
+        let package_target = package.join("index.d.ts");
+        std::fs::write(
+            &package_target,
+            "export interface ChoiceProps { packageValue: boolean }",
+        )
+        .expect("write reference fallback types");
+
+        let compile = |filename: &Path| {
+            let source = r#"<script setup lang="ts">
+import type { ChoiceProps } from 'choice'
+defineProps<ChoiceProps>()
+</script>"#;
+            let mut compiler = SfcCompiler::new();
+            let descriptor = compiler.parse(filename.to_string_lossy(), source);
+            compiler.compile_script(&descriptor, SfcScriptCompileOptions::default())
+        };
+        let inherited = compile(&inherited_project.join("Comp.vue"));
+        let overridden = compile(&override_project.join("Comp.vue"));
+        let referenced = compile(&reference_consumer.join("Comp.vue"));
+
+        assert!(inherited.errors.is_empty(), "{:?}", inherited.errors);
+        assert!(overridden.errors.is_empty(), "{:?}", overridden.errors);
+        assert!(referenced.errors.is_empty(), "{:?}", referenced.errors);
+        assert!(
+            inherited
+                .content
+                .contains("inheritedValue: { type: String, required: true }"),
+            "{}",
+            inherited.content
+        );
+        assert!(
+            overridden
+                .content
+                .contains("overrideValue: { type: Number, required: true }"),
+            "{}",
+            overridden.content
+        );
+        assert!(
+            referenced
+                .content
+                .contains("packageValue: { type: Boolean, required: true }"),
+            "{}",
+            referenced.content
+        );
+        assert!(!referenced.content.contains("referencedValue"));
+        assert_eq!(
+            inherited.deps,
+            vec![normalize_path_string(&inherited_target)]
+        );
+        assert_eq!(
+            overridden.deps,
+            vec![normalize_path_string(&override_target)]
+        );
+        assert_eq!(referenced.deps, vec![normalize_path_string(&package_target)]);
+    }
+
+    #[test]
+    fn vue3_base_url_lookup_uses_the_nearest_config_and_stops_at_typescript_6() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source_dir = dir.path().join("src");
+        let package = dir.path().join("node_modules").join("choice");
+        std::fs::create_dir_all(&source_dir).expect("create baseUrl source directory");
+        std::fs::create_dir_all(&package).expect("create fallback package");
+        std::fs::write(
+            dir.path().join("tsconfig.json"),
+            r#"{"compilerOptions":{"baseUrl":"./src"}}"#,
+        )
+        .expect("write baseUrl config");
+        let base_url_target = source_dir.join("choice.ts");
+        std::fs::write(
+            &base_url_target,
+            "export interface ChoiceProps { baseUrlValue: string }",
+        )
+        .expect("write baseUrl target");
+        let relative_target = dir.path().join("relative.ts");
+        std::fs::write(
+            &relative_target,
+            "export interface RelativeProps { relativeValue: boolean }",
+        )
+        .expect("write relative target");
+        std::fs::write(
+            source_dir.join("relative.ts"),
+            "export interface RelativeProps { wrongBaseUrlValue: never }",
+        )
+        .expect("write baseUrl relative decoy");
+        std::fs::write(package.join("package.json"), r#"{"types":"index.d.ts"}"#)
+            .expect("write fallback package manifest");
+        let package_target = package.join("index.d.ts");
+        std::fs::write(
+            &package_target,
+            "export interface ChoiceProps { packageValue: number }",
+        )
+        .expect("write fallback package types");
+        let importer = dir.path().join("Comp.vue").to_string_lossy().to_string();
+
+        let typescript_5 = Vue3TypeResolverContext {
+            typescript_version: (5, 9, 0).into(),
+            ..Vue3TypeResolverContext::default()
+        };
+        let typescript_6 = Vue3TypeResolverContext {
+            typescript_version: (6, 0, 0).into(),
+            ..Vue3TypeResolverContext::default()
+        };
+        assert_eq!(
+            resolve_vue3_type_import(&importer, "choice", &typescript_5),
+            Some(base_url_target)
+        );
+        assert_eq!(
+            resolve_vue3_type_import(&importer, r".\relative", &typescript_5),
+            Some(relative_target)
+        );
+        assert_eq!(
+            resolve_vue3_type_import(&importer, "choice", &typescript_6),
+            Some(package_target.clone())
+        );
+
+        let nested_dir = dir.path().join("nested");
+        std::fs::create_dir_all(&nested_dir).expect("create nested project");
+        std::fs::write(nested_dir.join("tsconfig.json"), "{}")
+            .expect("write nearest config without baseUrl");
+        let nested_importer = nested_dir.join("Comp.vue").to_string_lossy().to_string();
+        let nested_typescript_5 = Vue3TypeResolverContext {
+            typescript_version: (5, 9, 0).into(),
+            ..Vue3TypeResolverContext::default()
+        };
+        assert_eq!(
+            resolve_vue3_type_import(&nested_importer, "choice", &nested_typescript_5),
+            Some(package_target)
+        );
+        assert!(!typescript_5.external_type_session.metadata_is_blocked());
+        assert!(!typescript_6.external_type_session.metadata_is_blocked());
+        assert!(!nested_typescript_5
+            .external_type_session
+            .metadata_is_blocked());
+    }
+
+    #[test]
     fn vue3_compile_script_resolves_tsconfig_jsonc_paths_and_deps() {
         let dir = tempfile::tempdir().expect("temp dir");
         std::fs::create_dir_all(dir.path().join("src").join("components"))

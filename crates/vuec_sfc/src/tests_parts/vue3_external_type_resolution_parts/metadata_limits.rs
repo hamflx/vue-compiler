@@ -1515,6 +1515,95 @@ fn vue3_metadata_resolution_path_probes_are_bounded_before_success() {
 }
 
 #[test]
+fn vue3_base_url_resolution_probes_are_exact_and_cached() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let base_url = dir.path().join("src");
+    std::fs::create_dir_all(&base_url).expect("create baseUrl directory");
+    let target = base_url.join("choice.ts");
+    std::fs::write(&target, "export interface ChoiceProps { value: string }")
+        .expect("write baseUrl target");
+
+    let accepted = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_metadata_resolution_path_probes: 2,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert_eq!(
+        resolve_vue3_tsconfig_base_url_with_mode(
+            &base_url,
+            "choice",
+            Vue3TypeResolutionMode::Import,
+            &accepted,
+        ),
+        Some(target.clone())
+    );
+    assert_eq!(
+        accepted
+            .external_type_session
+            .stats()
+            .metadata_resolution_path_probes,
+        2
+    );
+    assert!(!accepted.external_type_session.metadata_is_blocked());
+    assert!(resolve_vue3_tsconfig_base_url_with_mode(
+        &base_url,
+        &normalize_path_string(&target),
+        Vue3TypeResolutionMode::Import,
+        &accepted,
+    )
+    .is_none());
+
+    for limit in [0, 1] {
+        let rejected = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+            max_metadata_resolution_path_probes: limit,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+        assert!(resolve_vue3_tsconfig_base_url_with_mode(
+            &base_url,
+            "choice",
+            Vue3TypeResolutionMode::Import,
+            &rejected,
+        )
+        .is_none());
+        assert_eq!(
+            rejected
+                .external_type_session
+                .stats()
+                .metadata_resolution_path_probes,
+            limit
+        );
+        assert!(rejected.external_type_session.metadata_is_blocked());
+    }
+
+    std::fs::write(
+        dir.path().join("tsconfig.json"),
+        r#"{"compilerOptions":{"baseUrl":"./src"}}"#,
+    )
+    .expect("write cached baseUrl config");
+    let importer = dir.path().join("Comp.vue").to_string_lossy().to_string();
+    let cached = Vue3TypeResolverContext::default();
+    assert_eq!(
+        resolve_vue3_type_import(&importer, "choice", &cached),
+        Some(target.clone())
+    );
+    let first_stats = cached.external_type_session.stats();
+    assert_eq!(
+        resolve_vue3_type_import(&importer, "choice", &cached),
+        Some(target)
+    );
+    let cached_stats = cached.external_type_session.stats();
+    assert_eq!(
+        cached_stats.metadata_files_read,
+        first_stats.metadata_files_read
+    );
+    assert_eq!(
+        cached_stats.metadata_resolution_path_probes,
+        first_stats.metadata_resolution_path_probes
+    );
+    assert_eq!(cached_stats.resolution_cache_hits, 1);
+    assert!(!cached.external_type_session.metadata_is_blocked());
+}
+
+#[test]
 fn vue3_tsconfig_extends_and_references_share_fanout_budget() {
     let dir = tempfile::tempdir().expect("temp dir");
     let base = dir.path().join("base.json");

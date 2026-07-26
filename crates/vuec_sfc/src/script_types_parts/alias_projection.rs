@@ -1541,5 +1541,9 @@ pub(crate) fn vue3_type_context_has_name(context: &Vue27TypeContext, name: &str)
 }
 
 pub(crate) fn vue3_type_import_source_is_relative(source: &str) -> bool {
-    source.starts_with("./") || source.starts_with("../")
+    source.starts_with("./")
+        || source.starts_with("../")
+        || source.starts_with(".\\")
+        || source.starts_with("..\\")
+        || Path::new(source).has_root()
 }

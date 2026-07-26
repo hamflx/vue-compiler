@@ -331,6 +331,6 @@ fn resolve_vue3_relative_type_import_with_mode(
     let base = Path::new(filename)
         .parent()
         .unwrap_or_else(|| Path::new(""));
-    let candidate = normalize_path_components(base.join(source));
+    let candidate = normalize_path_components(base.join(source.replace('\\', "/")));
     resolve_vue3_type_import_path_with_mode(&candidate, resolution_mode, type_resolver)
 }

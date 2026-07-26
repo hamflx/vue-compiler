@@ -14,6 +14,25 @@ pub(crate) struct Vue3TsconfigPathMatch<'a> {
     pub(crate) order: usize,
 }
 
+#[derive(Debug, Default)]
+struct Vue3TsconfigModuleResolutionSettings {
+    path_mappings: Vec<Vue3TsconfigPathMapping>,
+    base_url: Option<PathBuf>,
+}
+
+impl Vue3TsconfigModuleResolutionSettings {
+    fn inherit(&mut self, inherited: Self) {
+        self.path_mappings.extend(inherited.path_mappings);
+        if let Some(base_url) = inherited.base_url {
+            self.base_url = Some(base_url);
+        }
+    }
+
+    fn add_reference(&mut self, referenced: Self) {
+        self.path_mappings.extend(referenced.path_mappings);
+    }
+}
+
 type Vue3TsconfigGraphStateKey = (PathBuf, PathBuf, PathBuf);
 type Vue3TsconfigTypeRootsOverride = Option<std::sync::Arc<[PathBuf]>>;
 
@@ -97,12 +116,14 @@ pub(crate) fn resolve_vue3_tsconfig_type_import_with_mode(
         return None;
     }
     let mut traversal = Vue3TsconfigGraphTraversal::default();
-    for config_path in vue3_tsconfig_search_paths(filename, type_resolver) {
+    for (config_index, config_path) in
+        vue3_tsconfig_search_paths(filename, type_resolver).enumerate()
+    {
         let config_dir = config_path
             .parent()
             .unwrap_or_else(|| Path::new(""))
             .to_path_buf();
-        let mappings = vue3_tsconfig_path_mappings_from_config(
+        let settings = vue3_tsconfig_module_resolution_from_config(
             &config_path,
             &config_dir,
             &mut traversal,
@@ -113,7 +134,7 @@ pub(crate) fn resolve_vue3_tsconfig_type_import_with_mode(
             return None;
         }
         let resolved = resolve_vue3_tsconfig_path_mappings_with_mode(
-            &mappings,
+            &settings.path_mappings,
             source,
             resolution_mode,
             type_resolver,
@@ -123,6 +144,22 @@ pub(crate) fn resolve_vue3_tsconfig_type_import_with_mode(
         }
         if let Some(resolved) = resolved {
             return Some(resolved);
+        }
+        if config_index == 0 && type_resolver.typescript_version < (6, 0, 0).into() {
+            if let Some(base_url) = settings.base_url.as_ref() {
+                let resolved = resolve_vue3_tsconfig_base_url_with_mode(
+                    base_url,
+                    source,
+                    resolution_mode,
+                    type_resolver,
+                );
+                if type_resolver.external_type_session.metadata_is_blocked() {
+                    return None;
+                }
+                if let Some(resolved) = resolved {
+                    return Some(resolved);
+                }
+            }
         }
     }
     None
@@ -556,13 +593,13 @@ fn resolve_vue3_type_reference_package_candidate(
     )
 }
 
-fn vue3_tsconfig_path_mappings_from_config(
+fn vue3_tsconfig_module_resolution_from_config(
     config_path: &Path,
     template_config_dir: &Path,
     traversal: &mut Vue3TsconfigGraphTraversal,
     depth: usize,
     type_resolver: &Vue3TypeResolverContext,
-) -> Vec<Vue3TsconfigPathMapping> {
+) -> Vue3TsconfigModuleResolutionSettings {
     let Some(identity) = vue3_tsconfig_graph_enter(
         config_path,
         template_config_dir,
@@ -570,16 +607,16 @@ fn vue3_tsconfig_path_mappings_from_config(
         traversal,
         type_resolver,
     ) else {
-        return Vec::new();
+        return Vue3TsconfigModuleResolutionSettings::default();
     };
-    let mappings = (|| {
+    let settings = (|| {
         let value = type_resolver
             .external_type_session
             .tsconfig_from_path(config_path)?;
         let config_dir = config_path.parent().unwrap_or_else(|| Path::new(""));
-        let mut mappings = Vec::new();
+        let mut settings = Vue3TsconfigModuleResolutionSettings::default();
         for extended in vue3_tsconfig_extends_paths(&value, config_dir, type_resolver) {
-            mappings.extend(vue3_tsconfig_path_mappings_from_config(
+            settings.inherit(vue3_tsconfig_module_resolution_from_config(
                 &extended,
                 template_config_dir,
                 traversal,
@@ -588,7 +625,15 @@ fn vue3_tsconfig_path_mappings_from_config(
             ));
         }
         if type_resolver.external_type_session.metadata_is_blocked() {
-            return Some(Vec::new());
+            return Some(Vue3TsconfigModuleResolutionSettings::default());
+        }
+        if let Some(base_url) = vue3_tsconfig_direct_base_url(
+            &value,
+            config_dir,
+            template_config_dir,
+            type_resolver,
+        ) {
+            settings.base_url = Some(base_url);
         }
         let direct = vue3_tsconfig_direct_path_mappings(
             &value,
@@ -601,12 +646,14 @@ fn vue3_tsconfig_path_mappings_from_config(
                 .iter()
                 .map(|mapping| mapping.pattern.as_str())
                 .collect::<BTreeSet<_>>();
-            mappings.retain(|mapping| !direct_patterns.contains(mapping.pattern.as_str()));
-            mappings.extend(direct);
+            settings
+                .path_mappings
+                .retain(|mapping| !direct_patterns.contains(mapping.pattern.as_str()));
+            settings.path_mappings.extend(direct);
         }
         for reference in vue3_tsconfig_reference_paths(&value, config_dir, type_resolver) {
             let reference_dir = reference.parent().unwrap_or_else(|| Path::new(""));
-            mappings.extend(vue3_tsconfig_path_mappings_from_config(
+            settings.add_reference(vue3_tsconfig_module_resolution_from_config(
                 &reference,
                 reference_dir,
                 traversal,
@@ -614,11 +661,11 @@ fn vue3_tsconfig_path_mappings_from_config(
                 type_resolver,
             ));
         }
-        Some(mappings)
+        Some(settings)
     })()
     .unwrap_or_default();
     traversal.active_identities.remove(&identity);
-    mappings
+    settings
 }
 
 pub(crate) fn vue3_tsconfig_global_type_files(
