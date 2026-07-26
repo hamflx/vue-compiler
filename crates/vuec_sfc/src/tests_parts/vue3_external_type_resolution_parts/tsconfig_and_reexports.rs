@@ -700,6 +700,103 @@ defineProps<ChoiceProps>()
     }
 
     #[test]
+    fn vue3_tsconfig_paths_choose_wildcards_by_longest_prefix() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join("tsconfig.json"),
+            r#"{
+                "compilerOptions": {
+                    "paths": {
+                        "a*bcd": ["./longer-total-pattern.ts"],
+                        "ab*": ["./longest-prefix.ts"]
+                    }
+                }
+            }"#,
+        )
+        .expect("write wildcard priority config");
+        std::fs::write(
+            dir.path().join("longer-total-pattern.ts"),
+            "export interface WrongPattern { value: never }",
+        )
+        .expect("write total pattern decoy");
+        let expected = dir.path().join("longest-prefix.ts");
+        std::fs::write(
+            &expected,
+            "export interface LongestPrefix { value: string }",
+        )
+        .expect("write longest prefix target");
+
+        assert_eq!(
+            resolve_vue3_type_import(
+                &dir.path().join("Comp.vue").to_string_lossy(),
+                "ab-value-bcd",
+                &Vue3TypeResolverContext::default(),
+            ),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn vue3_tsconfig_paths_do_not_try_weaker_patterns_after_the_best_match_misses() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join("tsconfig.json"),
+            r#"{
+                "compilerOptions": {
+                    "paths": {
+                        "*": ["./weaker-pattern.ts"],
+                        "feature-*": ["./missing-first.ts", "./missing-second.ts"]
+                    }
+                }
+            }"#,
+        )
+        .expect("write best pattern miss config");
+        std::fs::write(
+            dir.path().join("weaker-pattern.ts"),
+            "export interface WeakerPattern { shouldNotResolve: never }",
+        )
+        .expect("write weaker pattern decoy");
+
+        assert!(resolve_vue3_type_import(
+            &dir.path().join("Comp.vue").to_string_lossy(),
+            "feature-value",
+            &Vue3TypeResolverContext::default(),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn vue3_tsconfig_paths_try_targets_of_the_best_pattern_in_order() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join("tsconfig.json"),
+            r#"{
+                "compilerOptions": {
+                    "paths": {
+                        "ordered-targets": ["./missing.ts", "./fallback.ts"]
+                    }
+                }
+            }"#,
+        )
+        .expect("write ordered target config");
+        let expected = dir.path().join("fallback.ts");
+        std::fs::write(
+            &expected,
+            "export interface OrderedFallback { value: boolean }",
+        )
+        .expect("write ordered fallback target");
+
+        assert_eq!(
+            resolve_vue3_type_import(
+                &dir.path().join("Comp.vue").to_string_lossy(),
+                "ordered-targets",
+                &Vue3TypeResolverContext::default(),
+            ),
+            Some(expected)
+        );
+    }
+
+    #[test]
     fn vue3_compile_script_resolves_tsconfig_jsonc_paths_and_deps() {
         let dir = tempfile::tempdir().expect("temp dir");
         std::fs::create_dir_all(dir.path().join("src").join("components"))

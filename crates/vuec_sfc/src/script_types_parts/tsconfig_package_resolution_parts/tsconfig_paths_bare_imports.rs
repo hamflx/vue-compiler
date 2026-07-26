@@ -109,52 +109,47 @@ pub(crate) fn resolve_vue3_tsconfig_path_mappings_with_mode(
     resolution_mode: Vue3TypeResolutionMode,
     type_resolver: &Vue3TypeResolverContext,
 ) -> Option<PathBuf> {
-    let mut matches = mappings
+    let matched = mappings
         .iter()
-        .enumerate()
-        .filter_map(|(order, mapping)| {
-            vue3_tsconfig_path_pattern_capture(&mapping.pattern, source).map(|(score, capture)| {
-                Vue3TsconfigPathMatch {
+        .filter_map(|mapping| {
+            vue3_tsconfig_path_pattern_capture(&mapping.pattern, source).map(
+                |(prefix_len, capture)| Vue3TsconfigPathMatch {
                     mapping,
                     capture,
-                    score,
-                    order,
-                }
-            })
+                    prefix_len,
+                },
+            )
         })
-        .collect::<Vec<_>>();
-    matches.sort_by(|left, right| {
-        right
-            .score
-            .cmp(&left.score)
-            .then_with(|| left.order.cmp(&right.order))
-    });
-    for matched in matches {
-        for target in &matched.mapping.targets {
-            if !type_resolver
-                .external_type_session
-                .claim_metadata_fanout_entry()
-            {
-                return None;
+        .fold(None, |best: Option<Vue3TsconfigPathMatch<'_>>, candidate| {
+            match best {
+                Some(best) if best.prefix_len >= candidate.prefix_len => Some(best),
+                _ => Some(candidate),
             }
-            let candidate = vue3_tsconfig_target_path(
-                &matched.mapping.target_base_dir,
-                &matched.mapping.template_config_dir,
-                target,
-                &matched.capture,
-                type_resolver,
-            )?;
-            let resolved = resolve_vue3_metadata_type_import_path_with_mode(
-                &candidate,
-                resolution_mode,
-                type_resolver,
-            );
-            if type_resolver.external_type_session.metadata_is_blocked() {
-                return None;
-            }
-            if let Some(resolved) = resolved {
-                return Some(resolved);
-            }
+        })?;
+    for target in &matched.mapping.targets {
+        if !type_resolver
+            .external_type_session
+            .claim_metadata_fanout_entry()
+        {
+            return None;
+        }
+        let candidate = vue3_tsconfig_target_path(
+            &matched.mapping.target_base_dir,
+            &matched.mapping.template_config_dir,
+            target,
+            &matched.capture,
+            type_resolver,
+        )?;
+        let resolved = resolve_vue3_metadata_type_import_path_with_mode(
+            &candidate,
+            resolution_mode,
+            type_resolver,
+        );
+        if type_resolver.external_type_session.metadata_is_blocked() {
+            return None;
+        }
+        if let Some(resolved) = resolved {
+            return Some(resolved);
         }
     }
     None
@@ -208,7 +203,7 @@ pub(crate) fn vue3_tsconfig_path_pattern_capture(
         return None;
     }
     Some((
-        prefix.len() + suffix.len(),
+        prefix.len(),
         source[prefix.len()..source.len() - suffix.len()].to_string(),
     ))
 }

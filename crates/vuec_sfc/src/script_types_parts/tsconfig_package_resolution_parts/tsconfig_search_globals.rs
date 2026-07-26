@@ -10,8 +10,7 @@ pub(crate) struct Vue3TsconfigPathMapping {
 pub(crate) struct Vue3TsconfigPathMatch<'a> {
     pub(crate) mapping: &'a Vue3TsconfigPathMapping,
     pub(crate) capture: String,
-    pub(crate) score: usize,
-    pub(crate) order: usize,
+    pub(crate) prefix_len: usize,
 }
 
 #[derive(Debug, Default)]
