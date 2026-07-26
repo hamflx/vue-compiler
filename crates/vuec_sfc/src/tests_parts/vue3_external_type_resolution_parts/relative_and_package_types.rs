@@ -538,8 +538,228 @@ defineProps<ModuleStaticProps & ModuleDynamicProps & CommonJsStaticProps & Commo
     }
 
     #[test]
+    fn vue3_dependency_package_imports_resolve_modes_patterns_external_targets_and_deps() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let package = dir.path().join("node_modules").join("vuec-imports-package");
+        let deep = package.join("deep");
+        let import_types = package.join("types").join("import");
+        let require_types = package.join("types").join("require");
+        let external = package
+            .join("node_modules")
+            .join("vuec-imports-external");
+        let decoy = deep
+            .join("node_modules")
+            .join("vuec-imports-external");
+        for directory in [&deep, &import_types, &require_types, &external, &decoy] {
+            std::fs::create_dir_all(directory).expect("create package imports fixture");
+        }
+        std::fs::write(
+            package.join("package.json"),
+            r##"{
+                "name":"vuec-imports-package",
+                "type":"module",
+                "exports":{
+                    ".":{"types":"./deep/index.d.mts"},
+                    "./commonjs":{"types":"./deep/commonjs.d.cts"}
+                },
+                "imports":{
+                    "#feature/exact":{
+                        "types":{
+                            "import":"./types/import-exact.d.mts",
+                            "require":"./types/require-exact.d.cts"
+                        }
+                    },
+                    "#feature/*":{
+                        "types":{
+                            "import":"./types/import/*.d.mts",
+                            "require":"./types/require/*.d.cts"
+                        }
+                    },
+                    "#external":{"types":"vuec-imports-external"}
+                }
+            }"##,
+        )
+        .expect("write package imports manifest");
+        let module_entry = deep.join("index.d.mts");
+        let commonjs_entry = deep.join("commonjs.d.cts");
+        std::fs::write(
+            &module_entry,
+            r#"
+import type { ImportExact } from '#feature/exact'
+import type { ImportPattern } from '#feature/item'
+import type { ImportExternal } from '#external'
+export interface ModuleProps extends ImportExact, ImportPattern, ImportExternal {}
+"#,
+        )
+        .expect("write module imports entry");
+        std::fs::write(
+            &commonjs_entry,
+            r#"
+import type { RequireExact } from '#feature/exact'
+import type { RequirePattern } from '#feature/item'
+import type { RequireExternal } from '#external'
+export interface CommonJsProps extends RequireExact, RequirePattern, RequireExternal {}
+"#,
+        )
+        .expect("write CommonJS imports entry");
+        let import_exact = package.join("types").join("import-exact.d.mts");
+        let require_exact = package.join("types").join("require-exact.d.cts");
+        let import_pattern = import_types.join("item.d.mts");
+        let require_pattern = require_types.join("item.d.cts");
+        for (path, source) in [
+            (
+                &import_exact,
+                "export interface ImportExact { importExact: string }",
+            ),
+            (
+                &require_exact,
+                "export interface RequireExact { requireExact: number }",
+            ),
+            (
+                &import_pattern,
+                "export interface ImportPattern { importPattern: boolean }",
+            ),
+            (
+                &require_pattern,
+                "export interface RequirePattern { requirePattern: string }",
+            ),
+        ] {
+            std::fs::write(path, source).expect("write package imports target");
+        }
+        std::fs::write(
+            import_types.join("exact.d.mts"),
+            "export interface ImportExact { wrongPatternExact: never }",
+        )
+        .expect("write import exact pattern decoy");
+        std::fs::write(
+            require_types.join("exact.d.cts"),
+            "export interface RequireExact { wrongPatternExact: never }",
+        )
+        .expect("write require exact pattern decoy");
+        std::fs::write(
+            external.join("package.json"),
+            r#"{
+                "exports":{
+                    ".":{
+                        "types":{
+                            "import":"./import.d.mts",
+                            "require":"./require.d.cts"
+                        }
+                    }
+                }
+            }"#,
+        )
+        .expect("write external target manifest");
+        let import_external = external.join("import.d.mts");
+        let require_external = external.join("require.d.cts");
+        std::fs::write(
+            &import_external,
+            "export interface ImportExternal { importExternal: number }",
+        )
+        .expect("write import external target");
+        std::fs::write(
+            &require_external,
+            "export interface RequireExternal { requireExternal: boolean }",
+        )
+        .expect("write require external target");
+        std::fs::write(decoy.join("package.json"), r#"{"types":"index.d.ts"}"#)
+            .expect("write deep external decoy manifest");
+        std::fs::write(
+            decoy.join("index.d.ts"),
+            "export interface ImportExternal { wrongDeepExternal: never }\n\
+             export interface RequireExternal { wrongDeepExternal: never }",
+        )
+        .expect("write deep external decoy");
+
+        let filename = dir.path().join("Comp.vue");
+        let source = r#"<script setup lang="ts">
+import type { ModuleProps } from 'vuec-imports-package'
+import type { CommonJsProps } from 'vuec-imports-package/commonjs'
+defineProps<ModuleProps & CommonJsProps>()
+</script>"#;
+        let mut compiler = SfcCompiler::new();
+        let descriptor = compiler.parse(filename.to_string_lossy(), source);
+        let script = compiler.compile_script(&descriptor, SfcScriptCompileOptions::default());
+
+        assert!(script.errors.is_empty(), "{:?}", script.errors);
+        for expected in [
+            "importExact: { type: String, required: true }",
+            "importPattern: { type: Boolean, required: true }",
+            "importExternal: { type: Number, required: true }",
+            "requireExact: { type: Number, required: true }",
+            "requirePattern: { type: String, required: true }",
+            "requireExternal: { type: Boolean, required: true }",
+        ] {
+            assert!(script.content.contains(expected), "{}", script.content);
+        }
+        assert!(!script.content.contains("wrong"), "{}", script.content);
+        let deps = script.deps.iter().cloned().collect::<BTreeSet<_>>();
+        let expected = [
+            module_entry,
+            commonjs_entry,
+            import_exact,
+            require_exact,
+            import_pattern,
+            require_pattern,
+            import_external,
+            require_external,
+        ]
+        .into_iter()
+        .map(|path| normalize_path_string(&path))
+        .collect::<BTreeSet<_>>();
+        assert_eq!(deps, expected);
+    }
+
+    #[test]
     fn vue3_package_exports_selects_the_most_specific_pattern() {
         let resolver = Vue3TypeResolverContext::default();
+        let invalid_array_fallback = serde_json::json!([
+            "../invalid.d.ts",
+            "./valid.d.ts"
+        ]);
+        assert_eq!(
+            vue3_package_exports_type_target(&invalid_array_fallback, None, &resolver).as_deref(),
+            Some("./valid.d.ts")
+        );
+        let null_array_exclusion = serde_json::json!([null, "./valid.d.ts"]);
+        assert!(
+            vue3_package_exports_type_target(&null_array_exclusion, None, &resolver).is_none()
+        );
+        let legacy_prefix = serde_json::json!({
+            "./legacy/": { "types": "./types/" }
+        });
+        assert_eq!(
+            vue3_package_exports_type_target(
+                &legacy_prefix,
+                Some("legacy/item.d.ts"),
+                &resolver,
+            )
+            .as_deref(),
+            Some("./types/item.d.ts")
+        );
+        let invalid_legacy_prefix = serde_json::json!({
+            "./legacy/": { "types": "./types/index.d.ts" }
+        });
+        assert!(vue3_package_exports_type_target(
+            &invalid_legacy_prefix,
+            Some("legacy/item.d.ts"),
+            &resolver,
+        )
+        .is_none());
+        let pattern_over_prefix = serde_json::json!({
+            "./legacy/": { "types": "./prefix/" },
+            "./legacy/*": { "types": "./pattern/*.d.ts" }
+        });
+        assert_eq!(
+            vue3_package_exports_type_target(
+                &pattern_over_prefix,
+                Some("legacy/item"),
+                &resolver,
+            )
+            .as_deref(),
+            Some("./pattern/item.d.ts")
+        );
+
         let exports = serde_json::json!({
             "./feature/*": { "types": "./generic/*.d.ts" },
             "./feature/internal/*": { "types": "./internal/*.d.ts" },

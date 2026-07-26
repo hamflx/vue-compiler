@@ -91,6 +91,39 @@ fn vue3_generated_package_paths_are_bounded_before_expansion() {
         Vue3PackageJsonTypeResolution::Blocked
     );
 
+    let prefix_exports = serde_json::json!({
+        "./feature/": { "types": "./types/" }
+    });
+    let expanded_prefix = "./types/item.d.ts";
+    let prefix_accepted =
+        vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+            max_generated_path_bytes: expanded_prefix.len(),
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+    assert_eq!(
+        vue3_package_exports_type_target(
+            &prefix_exports,
+            Some("feature/item.d.ts"),
+            &prefix_accepted,
+        )
+        .as_deref(),
+        Some(expanded_prefix)
+    );
+    let prefix_rejected =
+        vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+            max_generated_path_bytes: expanded_prefix.len() - 1,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+    assert!(vue3_package_exports_type_target(
+        &prefix_exports,
+        Some("feature/item.d.ts"),
+        &prefix_rejected,
+    )
+    .is_none());
+    assert!(prefix_rejected
+        .external_type_session
+        .metadata_is_blocked());
+
     let versions_package = dir.path().join("versions-package");
     write_vue3_test_type_package(
         &versions_package,
@@ -1692,4 +1725,359 @@ fn vue3_package_self_references_honor_metadata_and_source_budgets() {
     assert_eq!(stats.import_files_read, 1);
     assert_eq!(stats.metadata_fanout_entries, 1);
     assert!(!source_limited.external_type_session.metadata_is_blocked());
+}
+
+#[test]
+fn vue3_dependency_package_imports_fail_closed_at_the_nearest_scope() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let package = dir.path().join("node_modules").join("vuec-imports-boundary");
+    std::fs::create_dir_all(&package).expect("create imports boundary package");
+    let importer = package.join("index.d.mts");
+    let target = package.join("ok.d.mts");
+    std::fs::write(&importer, "export {};").expect("write imports boundary importer");
+    std::fs::write(&target, "export interface Ok { value: string }")
+        .expect("write imports boundary target");
+    let rejected_manifests = [
+        serde_json::json!({}),
+        serde_json::json!({ "imports": null }),
+        serde_json::json!({ "imports": [] }),
+        serde_json::json!({ "imports": { "#other": "./ok.d.mts" } }),
+        serde_json::json!({ "imports": { "#alias": null } }),
+        serde_json::json!({ "imports": { "#alias": [null, "./ok.d.mts"] } }),
+        serde_json::json!({
+            "imports": { "#alias": { "types": null, "default": "./ok.d.mts" } }
+        }),
+        serde_json::json!({ "imports": { "#alias": true } }),
+        serde_json::json!({ "imports": { "#alias": 1 } }),
+        serde_json::json!({ "imports": { "#alias": "../outside.d.mts" } }),
+        serde_json::json!({ "imports": { "#alias": "/outside.d.mts" } }),
+        serde_json::json!({ "imports": { "#alias": "C:/outside.d.mts" } }),
+        serde_json::json!({ "imports": { "#alias": "file:./ok.d.mts" } }),
+        serde_json::json!({ "imports": { "#alias": "./node_modules/ok.d.mts" } }),
+        serde_json::json!({ "imports": { "#alias": "./%2e%2e/ok.d.mts" } }),
+        serde_json::json!({ "imports": { "#alias": "./types%2fok.d.mts" } }),
+        serde_json::json!({ "imports": { "#alias": { "unknown": "./ok.d.mts" } } }),
+    ];
+    for manifest in rejected_manifests {
+        std::fs::write(package.join("package.json"), manifest.to_string())
+            .expect("write rejected imports manifest");
+        let resolver = Vue3TypeResolverContext::default();
+        assert!(resolve_vue3_type_import(
+            &importer.to_string_lossy(),
+            "#alias",
+            &resolver,
+        )
+        .is_none());
+        assert!(
+            !resolver.external_type_session.metadata_is_blocked(),
+            "semantic rejection blocked metadata for {manifest}"
+        );
+    }
+
+    std::fs::write(
+        package.join("package.json"),
+        r##"{"imports":{"#alias":["../outside.d.mts","./ok.d.mts"]}}"##,
+    )
+    .expect("write array fallback imports manifest");
+    let resolver = Vue3TypeResolverContext::default();
+    assert_eq!(
+        resolve_vue3_type_import(&importer.to_string_lossy(), "#alias", &resolver),
+        Some(target.clone())
+    );
+    assert!(!resolver.external_type_session.metadata_is_blocked());
+
+    let paths_target = package.join("paths.d.mts");
+    std::fs::write(
+        &paths_target,
+        "export interface PathsTarget { value: boolean }",
+    )
+    .expect("write nested imports paths target");
+    std::fs::write(
+        package.join("tsconfig.json"),
+        r##"{"compilerOptions":{"baseUrl":".","paths":{"#target":["./paths.d.mts"]}}}"##,
+    )
+    .expect("write nested imports paths config");
+    std::fs::write(
+        package.join("package.json"),
+        r##"{
+            "imports":{
+                "#alias":"#target",
+                "#target":"./ok.d.mts",
+                "#fallback":["#missing","./ok.d.mts"]
+            }
+        }"##,
+    )
+    .expect("write nested imports manifest");
+    let resolver = Vue3TypeResolverContext::default();
+    assert_eq!(
+        resolve_vue3_type_import(&importer.to_string_lossy(), "#alias", &resolver),
+        Some(paths_target)
+    );
+    assert_eq!(
+        resolve_vue3_type_import(&importer.to_string_lossy(), "#fallback", &resolver),
+        Some(target.clone())
+    );
+
+    std::fs::write(
+        package.join("package.json"),
+        r##"{
+            "imports":{
+                "#feature/exact":"./missing.d.mts",
+                "#feature/internal/*":"./specific.d.mts",
+                "#feature/private/*":"./missing.d.mts",
+                "#feature/*.js":"./javascript.d.mts",
+                "#feature/*":"./broad.d.mts",
+                "#prefix/":"./legacy/",
+                "#legacy/":"./legacy/",
+                "#legacy/*":"./legacy-pattern.d.mts",
+                "#bad-prefix/":"./ok.d.mts"
+            }
+        }"##,
+    )
+    .expect("write imports selection manifest");
+    let specific = package.join("specific.d.mts");
+    let javascript = package.join("javascript.d.mts");
+    let broad = package.join("broad.d.mts");
+    let legacy = package.join("legacy").join("item.d.mts");
+    let legacy_pattern = package.join("legacy-pattern.d.mts");
+    std::fs::create_dir_all(legacy.parent().expect("legacy target parent"))
+        .expect("create legacy imports target directory");
+    for path in [&specific, &javascript, &broad] {
+        std::fs::write(path, "export interface Selected {}").expect("write imports pattern target");
+    }
+    std::fs::write(&legacy, "export interface LegacyPrefix {}")
+        .expect("write legacy imports prefix target");
+    std::fs::write(&legacy_pattern, "export interface LegacyPattern {}")
+        .expect("write legacy imports pattern target");
+    let resolver = Vue3TypeResolverContext::default();
+    assert!(resolve_vue3_type_import(
+        &importer.to_string_lossy(),
+        "#feature/exact",
+        &resolver,
+    )
+    .is_none());
+    assert_eq!(
+        resolve_vue3_type_import(
+            &importer.to_string_lossy(),
+            "#feature/internal/item",
+            &resolver,
+        ),
+        Some(specific)
+    );
+    assert_eq!(
+        resolve_vue3_type_import(
+            &importer.to_string_lossy(),
+            "#feature/item.js",
+            &resolver,
+        ),
+        Some(javascript)
+    );
+    assert!(resolve_vue3_type_import(
+        &importer.to_string_lossy(),
+        "#feature/private/item",
+        &resolver,
+    )
+    .is_none());
+    assert_eq!(
+        resolve_vue3_type_import(
+            &importer.to_string_lossy(),
+            "#prefix/item.d.mts",
+            &resolver,
+        ),
+        Some(legacy)
+    );
+    assert_eq!(
+        resolve_vue3_type_import(
+            &importer.to_string_lossy(),
+            "#legacy/item",
+            &resolver,
+        ),
+        Some(legacy_pattern)
+    );
+    assert!(resolve_vue3_type_import(
+        &importer.to_string_lossy(),
+        "#bad-prefix/item",
+        &resolver,
+    )
+    .is_none());
+
+    let no_pattern_fanout =
+        vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+            max_metadata_fanout_entries: 0,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+    assert!(resolve_vue3_type_import(
+        &importer.to_string_lossy(),
+        "#feature/item",
+        &no_pattern_fanout,
+    )
+    .is_none());
+    assert!(no_pattern_fanout
+        .external_type_session
+        .metadata_is_blocked());
+
+    std::fs::write(
+        package.join("package.json"),
+        r##"{"imports":{"#alias":"./ok.d.mts"}}"##,
+    )
+    .expect("write outer imports manifest");
+    let inner = package.join("inner");
+    std::fs::create_dir_all(&inner).expect("create nested package scope");
+    std::fs::write(inner.join("package.json"), "{}")
+        .expect("write nested package scope manifest");
+    let resolver = Vue3TypeResolverContext::default();
+    assert!(resolve_vue3_type_import(
+        &inner.join("index.d.mts").to_string_lossy(),
+        "#alias",
+        &resolver,
+    )
+    .is_none());
+    assert!(!resolver.external_type_session.metadata_is_blocked());
+
+    assert!(vue3_package_import_specifier_is_safe("#alias/item"));
+    for source in [
+        "#",
+        "#/item",
+        "#alias/",
+        "#alias//item",
+        "#../item",
+        "#types%2fitem",
+    ] {
+        assert!(!vue3_package_import_specifier_is_safe(source));
+    }
+    assert!(vue3_package_import_external_target_is_safe(
+        "@scope/package/subpath"
+    ));
+    for target in [
+        "../package",
+        "package//subpath",
+        "package/%2e%2e/subpath",
+        "package/node_modules/subpath",
+        "package/%6eode_modules/subpath",
+        "package/types%2fprivate",
+    ] {
+        assert!(!vue3_package_import_external_target_is_safe(target));
+    }
+}
+
+#[test]
+fn vue3_dependency_package_imports_bound_alias_chains_and_nested_lookups() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let package = dir.path().join("node_modules").join("vuec-imports-budget");
+    let external = package.join("node_modules").join("vuec-imports-target");
+    std::fs::create_dir_all(&external).expect("create imports budget packages");
+    let importer = package.join("index.d.mts");
+    let leaf = package.join("leaf.d.mts");
+    let external_leaf = external.join("index.d.mts");
+    std::fs::write(&importer, "export {};").expect("write imports budget importer");
+    std::fs::write(&leaf, "export interface Leaf { value: string }")
+        .expect("write imports alias leaf");
+    std::fs::write(
+        package.join("package.json"),
+        r##"{
+            "imports":{
+                "#alias":"#target",
+                "#target":"./leaf.d.mts",
+                "#cycle-a":"#cycle-b",
+                "#cycle-b":"#cycle-a",
+                "#external":["vuec-imports-target","./leaf.d.mts"]
+            }
+        }"##,
+    )
+    .expect("write imports budget manifest");
+    std::fs::write(
+        external.join("package.json"),
+        r#"{"types":"index.d.mts"}"#,
+    )
+    .expect("write imports external manifest");
+    std::fs::write(
+        &external_leaf,
+        "export interface ExternalLeaf { value: number }",
+    )
+    .expect("write imports external leaf");
+    let filename = importer.to_string_lossy();
+
+    let legacy_typescript = Vue3TypeResolverContext {
+        typescript_version: (4, 6, 0).into(),
+        ..Vue3TypeResolverContext::default()
+    };
+    let current_typescript = Vue3TypeResolverContext {
+        typescript_version: (4, 7, 0).into(),
+        ..legacy_typescript.clone()
+    };
+    assert!(resolve_vue3_type_import(&filename, "#alias", &legacy_typescript).is_none());
+    assert_eq!(
+        resolve_vue3_type_import(&filename, "#alias", &current_typescript),
+        Some(leaf.clone())
+    );
+
+    let accepted = vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+        max_package_resolution_depth: 2,
+        ..Vue3ExternalTypeLoadLimits::default()
+    });
+    assert_eq!(
+        resolve_vue3_type_import(&filename, "#alias", &accepted),
+        Some(leaf.clone())
+    );
+    let first_stats = accepted.external_type_session.stats();
+    assert_eq!(first_stats.metadata_fanout_entries, 0);
+    assert_eq!(
+        resolve_vue3_type_import(&filename, "#alias", &accepted),
+        Some(leaf.clone())
+    );
+    let cached_stats = accepted.external_type_session.stats();
+    assert_eq!(cached_stats.metadata_files_read, first_stats.metadata_files_read);
+    assert_eq!(
+        cached_stats.metadata_resolution_path_probes,
+        first_stats.metadata_resolution_path_probes
+    );
+    assert_eq!(cached_stats.resolution_cache_hits, 1);
+    assert!(!accepted.external_type_session.metadata_is_blocked());
+
+    let cycle = Vue3TypeResolverContext::default();
+    assert!(resolve_vue3_type_import(&filename, "#cycle-a", &cycle).is_none());
+    assert!(!cycle.external_type_session.metadata_is_blocked());
+    assert!(resolve_vue3_type_import(&filename, "#cycle-a", &cycle).is_none());
+    assert_eq!(cycle.external_type_session.stats().resolution_cache_hits, 1);
+    assert_eq!(
+        resolve_vue3_type_import(&filename, "#alias", &cycle),
+        Some(leaf)
+    );
+
+    let depth_limited =
+        vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+            max_package_resolution_depth: 1,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+    assert!(resolve_vue3_type_import(&filename, "#alias", &depth_limited).is_none());
+    assert!(depth_limited.external_type_session.metadata_is_blocked());
+
+    let external_accepted =
+        vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+            max_resolution_lookups: 2,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+    assert_eq!(
+        resolve_vue3_type_import(&filename, "#external", &external_accepted),
+        Some(external_leaf)
+    );
+    assert_eq!(
+        external_accepted
+            .external_type_session
+            .stats()
+            .resolution_lookups,
+        2
+    );
+
+    let lookup_limited =
+        vue3_type_resolver_with_external_limits(Vue3ExternalTypeLoadLimits {
+            max_resolution_lookups: 1,
+            ..Vue3ExternalTypeLoadLimits::default()
+        });
+    assert!(resolve_vue3_type_import(&filename, "#external", &lookup_limited).is_none());
+    assert!(!lookup_limited.external_type_session.metadata_is_blocked());
+    assert!(resolve_vue3_type_import(&filename, "#external", &lookup_limited).is_none());
+    let stats = lookup_limited.external_type_session.stats();
+    assert_eq!(stats.resolution_lookups, 1);
+    assert_eq!(stats.resolution_cache_hits, 0);
 }

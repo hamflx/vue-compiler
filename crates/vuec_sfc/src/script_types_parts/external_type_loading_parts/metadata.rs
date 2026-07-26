@@ -1,6 +1,47 @@
 include!("metadata_source_single_flight.rs");
 include!("metadata_parse_single_flight.rs");
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Vue3PackageImportResolutionIdentity {
+    package_dir: PathBuf,
+    source: String,
+    resolution_mode: Vue3TypeResolutionMode,
+    typescript_version: String,
+}
+
+struct Vue3PackageImportResolutionGuard<'a> {
+    session: &'a Vue3ExternalTypeLoadSession,
+    owner: std::thread::ThreadId,
+    identity: Vue3PackageImportResolutionIdentity,
+}
+
+impl Drop for Vue3PackageImportResolutionGuard<'_> {
+    fn drop(&mut self) {
+        let mut state = self.session.lock();
+        let remove_owner = state
+            .active_package_import_resolutions
+            .get_mut(&self.owner)
+            .is_some_and(|stack| {
+                if let Some(index) = stack
+                    .iter()
+                    .rposition(|identity| identity == &self.identity)
+                {
+                    stack.remove(index);
+                }
+                stack.is_empty()
+            });
+        if remove_owner {
+            state.active_package_import_resolutions.remove(&self.owner);
+        }
+    }
+}
+
+enum Vue3PackageImportResolutionLoad<'a> {
+    Ready(Vue3PackageImportResolutionGuard<'a>),
+    Cycle,
+    Blocked,
+}
+
 struct Vue3PackageResolutionGuard<'a> {
     session: &'a Vue3ExternalTypeLoadSession,
     owner: std::thread::ThreadId,
@@ -256,6 +297,29 @@ impl Vue3ExternalTypeLoadSession {
         }
     }
 
+    fn concat_metadata_path(&self, prefix: &str, suffix: &str) -> Option<String> {
+        let max_bytes = {
+            let mut state = self.lock();
+            if state.metadata_blocked {
+                state.failure_epoch += 1;
+                return None;
+            }
+            state.limits.max_generated_path_bytes
+        };
+        let Some(len) = prefix.len().checked_add(suffix.len()) else {
+            self.block_metadata();
+            return None;
+        };
+        if len > max_bytes {
+            self.block_metadata();
+            return None;
+        }
+        let mut value = String::with_capacity(len);
+        value.push_str(prefix);
+        value.push_str(suffix);
+        Some(value)
+    }
+
     fn metadata_path_is_within_limit(&self, path: &str) -> bool {
         let within_limit = {
             let mut state = self.lock();
@@ -286,8 +350,14 @@ impl Vue3ExternalTypeLoadSession {
         let owner = std::thread::current().id();
         let mut state = self.lock();
         let owner_stack = state.active_package_resolutions.get(&owner);
+        let active_depth = owner_stack.map_or(0, Vec::len).saturating_add(
+            state
+                .active_package_import_resolutions
+                .get(&owner)
+                .map_or(0, Vec::len),
+        );
         let recursion_blocked = owner_stack.is_some_and(|stack| stack.contains(&identity))
-            || owner_stack.map_or(0, Vec::len) >= state.limits.max_package_resolution_depth;
+            || active_depth >= state.limits.max_package_resolution_depth;
         if state.metadata_blocked || recursion_blocked {
             let flights = vue3_block_metadata_state(&mut state);
             drop(state);
@@ -301,6 +371,60 @@ impl Vue3ExternalTypeLoadSession {
             .push(identity.clone());
         drop(state);
         Some(Vue3PackageResolutionGuard {
+            session: self,
+            owner,
+            identity,
+        })
+    }
+
+    fn begin_package_import_resolution(
+        &self,
+        package_dir: &Path,
+        source: &str,
+        resolution_mode: Vue3TypeResolutionMode,
+        typescript_version: &nodejs_semver::Version,
+    ) -> Vue3PackageImportResolutionLoad<'_> {
+        if self.metadata_is_blocked() {
+            return Vue3PackageImportResolutionLoad::Blocked;
+        }
+        let identity = Vue3PackageImportResolutionIdentity {
+            package_dir: vue3_external_type_path_identity(package_dir),
+            source: source.to_string(),
+            resolution_mode,
+            typescript_version: typescript_version.to_string(),
+        };
+        let owner = std::thread::current().id();
+        let mut state = self.lock();
+        if state
+            .active_package_import_resolutions
+            .get(&owner)
+            .is_some_and(|stack| stack.contains(&identity))
+        {
+            return Vue3PackageImportResolutionLoad::Cycle;
+        }
+        let active_depth = state
+            .active_package_resolutions
+            .get(&owner)
+            .map_or(0, Vec::len)
+            .saturating_add(
+                state
+                    .active_package_import_resolutions
+                    .get(&owner)
+                    .map_or(0, Vec::len),
+            );
+        if state.metadata_blocked || active_depth >= state.limits.max_package_resolution_depth {
+            let flights = vue3_block_metadata_state(&mut state);
+            drop(state);
+            vue3_abort_metadata_flights(flights);
+            return Vue3PackageImportResolutionLoad::Blocked;
+        }
+        state
+            .active_package_import_resolutions
+            .entry(owner)
+            .or_default()
+            .push(identity.clone());
+        drop(state);
+        Vue3PackageImportResolutionLoad::Ready(Vue3PackageImportResolutionGuard {
             session: self,
             owner,
             identity,

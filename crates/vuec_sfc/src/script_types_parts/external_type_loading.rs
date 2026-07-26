@@ -187,6 +187,10 @@ struct Vue3ExternalTypeLoadState {
     ancestor_search_dirs: BTreeSet<PathBuf>,
     active_package_resolutions:
         std::collections::HashMap<std::thread::ThreadId, Vec<PathBuf>>,
+    active_package_import_resolutions: std::collections::HashMap<
+        std::thread::ThreadId,
+        Vec<Vue3PackageImportResolutionIdentity>,
+    >,
     context_waits:
         std::collections::HashMap<std::thread::ThreadId, Vue3ExternalTypeContextWaitEdge>,
     next_source_flight_id: u64,
@@ -216,6 +220,7 @@ impl Vue3ExternalTypeLoadState {
             tsconfig_node_states: BTreeSet::new(),
             ancestor_search_dirs: BTreeSet::new(),
             active_package_resolutions: std::collections::HashMap::new(),
+            active_package_import_resolutions: std::collections::HashMap::new(),
             context_waits: std::collections::HashMap::new(),
             next_source_flight_id: 0,
             next_context_flight_id: 0,

@@ -77,6 +77,18 @@ fn resolve_vue3_type_import_uncached(
     ) {
         return Some(resolved);
     }
+    match resolve_vue3_dependency_package_imports_with_mode(
+        filename,
+        source,
+        resolution_mode,
+        type_resolver,
+    ) {
+        Vue3PackageImportsResolution::Resolved(path) => return Some(path),
+        Vue3PackageImportsResolution::Rejected | Vue3PackageImportsResolution::Blocked => {
+            return None;
+        }
+        Vue3PackageImportsResolution::NotApplicable => {}
+    }
     match resolve_vue3_dependency_package_self_reference_with_mode(
         filename,
         source,
@@ -89,6 +101,123 @@ fn resolve_vue3_type_import_uncached(
         Vue3PackageSelfReferenceResolution::NotApplicable => {}
     }
     resolve_vue3_bare_type_import_with_mode(filename, source, resolution_mode, type_resolver)
+}
+
+enum Vue3PackageImportsResolution {
+    NotApplicable,
+    Resolved(PathBuf),
+    Rejected,
+    Blocked,
+}
+
+fn resolve_vue3_dependency_package_imports_with_mode(
+    filename: &str,
+    source: &str,
+    resolution_mode: Vue3TypeResolutionMode,
+    type_resolver: &Vue3TypeResolverContext,
+) -> Vue3PackageImportsResolution {
+    if !source.starts_with('#') {
+        return Vue3PackageImportsResolution::NotApplicable;
+    }
+    let filename = normalize_path_components(PathBuf::from(filename));
+    // Local project imports need tsconfig output-to-input remapping.
+    if !vue3_path_contains_node_modules(&filename) {
+        return Vue3PackageImportsResolution::NotApplicable;
+    }
+    if type_resolver.typescript_version < (4, 7, 0).into() {
+        return Vue3PackageImportsResolution::Rejected;
+    }
+    if !vue3_package_import_specifier_is_safe(source) {
+        return Vue3PackageImportsResolution::Rejected;
+    }
+    if !type_resolver
+        .external_type_session
+        .metadata_path_is_within_limit(source)
+    {
+        return Vue3PackageImportsResolution::Blocked;
+    }
+    let (package_dir, manifest) = match vue3_package_scope_for_path(
+        &filename,
+        &type_resolver.external_type_session,
+    ) {
+        Vue3PackageScopeResolution::Found {
+            package_dir,
+            manifest,
+        } => (package_dir, manifest),
+        Vue3PackageScopeResolution::Missing => return Vue3PackageImportsResolution::Rejected,
+        Vue3PackageScopeResolution::MetadataBlocked => {
+            return Vue3PackageImportsResolution::Blocked;
+        }
+    };
+    if !vue3_path_contains_node_modules(&package_dir) {
+        return Vue3PackageImportsResolution::NotApplicable;
+    }
+    let Some(imports) = manifest.imports.as_ref().filter(|imports| !imports.is_null()) else {
+        return Vue3PackageImportsResolution::Rejected;
+    };
+    let _resolution_guard = match type_resolver
+        .external_type_session
+        .begin_package_import_resolution(
+            &package_dir,
+            source,
+            resolution_mode,
+            &type_resolver.typescript_version,
+        )
+    {
+        Vue3PackageImportResolutionLoad::Ready(guard) => guard,
+        Vue3PackageImportResolutionLoad::Cycle => {
+            return Vue3PackageImportsResolution::Rejected;
+        }
+        Vue3PackageImportResolutionLoad::Blocked => {
+            return Vue3PackageImportsResolution::Blocked;
+        }
+    };
+    let package_filename = package_dir.join("package.json");
+    let mut resolved = None;
+    let result = visit_vue3_package_imports_type_targets(
+        imports,
+        source,
+        resolution_mode,
+        type_resolver,
+        &mut |target| {
+            let failure_epoch = type_resolver.external_type_session.failure_epoch();
+            let candidate = if target.starts_with("./") {
+                vue3_package_export_type_path_with_mode(
+                    &package_dir,
+                    target,
+                    resolution_mode,
+                    type_resolver,
+                )
+            } else {
+                resolve_vue3_type_import_with_mode(
+                    &package_filename.to_string_lossy(),
+                    target,
+                    resolution_mode,
+                    type_resolver,
+                )
+            };
+            if type_resolver.external_type_session.metadata_is_blocked()
+                || type_resolver.external_type_session.failure_epoch() != failure_epoch
+            {
+                Vue3PackageTargetVisit::Blocked
+            } else if let Some(candidate) = candidate {
+                resolved = Some(candidate);
+                Vue3PackageTargetVisit::Resolved
+            } else {
+                Vue3PackageTargetVisit::Missing
+            }
+        },
+    );
+    match (result, resolved) {
+        (Vue3PackageTargetVisit::Resolved, Some(path)) => {
+            Vue3PackageImportsResolution::Resolved(path)
+        }
+        (Vue3PackageTargetVisit::Blocked, _) => Vue3PackageImportsResolution::Blocked,
+        _ if type_resolver.external_type_session.metadata_is_blocked() => {
+            Vue3PackageImportsResolution::Blocked
+        }
+        _ => Vue3PackageImportsResolution::Rejected,
+    }
 }
 
 enum Vue3PackageSelfReferenceResolution {
