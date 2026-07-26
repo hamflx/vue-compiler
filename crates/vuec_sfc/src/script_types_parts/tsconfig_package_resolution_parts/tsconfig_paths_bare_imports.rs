@@ -10,10 +10,14 @@ pub(crate) fn vue3_tsconfig_direct_path_mappings(
     else {
         return Vec::new();
     };
-    let target_base_dir = if let Some(base_url) = compiler_options
-        .get("baseUrl")
-        .and_then(serde_json::Value::as_str)
-    {
+    let configured_base_url = if type_resolver.typescript_version < (7, 0, 0).into() {
+        compiler_options
+            .get("baseUrl")
+            .and_then(serde_json::Value::as_str)
+    } else {
+        None
+    };
+    let target_base_dir = if let Some(base_url) = configured_base_url {
         let Some(path) = vue3_tsconfig_target_path(
             config_dir,
             template_config_dir,
@@ -45,6 +49,13 @@ pub(crate) fn vue3_tsconfig_direct_path_mappings(
             })
         })
         .collect()
+}
+
+fn vue3_tsconfig_declares_compiler_option(value: &serde_json::Value, option: &str) -> bool {
+    value
+        .get("compilerOptions")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|compiler_options| compiler_options.contains_key(option))
 }
 
 fn vue3_tsconfig_direct_base_url(

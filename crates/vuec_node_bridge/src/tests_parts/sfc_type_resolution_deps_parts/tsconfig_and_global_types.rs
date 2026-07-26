@@ -127,11 +127,6 @@
                 "extends": [
                     "./config/base.json", // inherited aliases
                 ],
-                "compilerOptions": {
-                    "paths": {
-                        "app-alias": ["./app.ts",],
-                    },
-                },
             }"#,
         )
         .expect("write app tsconfig");
@@ -141,6 +136,7 @@
                 /* ${configDir} resolves from the referencing config directory. */
                 "compilerOptions": {
                     "paths": {
+                        "app-alias": ["${configDir}/app.ts",],
                         "@base/*": ["${configDir}/src/base/*",],
                     },
                 },
@@ -241,7 +237,9 @@
             r#"{
                 "compilerOptions": {
                     "paths": {
-                        "pkg-shared": ["${configDir}/shared.ts"]
+                        "pkg-root": ["${configDir}/root.ts"],
+                        "pkg-shared": ["${configDir}/shared.ts"],
+                        "local-alias": ["${configDir}/local.ts"]
                     }
                 }
             }"#,
@@ -251,12 +249,7 @@
         std::fs::write(
             dir.join("tsconfig.json"),
             r#"{
-                "extends": ["@vuec/tsconfig", "vuec-tsconfig-preset/shared"],
-                "compilerOptions": {
-                    "paths": {
-                        "local-alias": ["./local.ts"]
-                    }
-                }
+                "extends": ["@vuec/tsconfig", "vuec-tsconfig-preset/shared"]
             }"#,
         )
         .expect("write root tsconfig");

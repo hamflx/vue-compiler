@@ -344,7 +344,7 @@ defineProps<ChoiceProps>()
     }
 
     #[test]
-    fn vue3_base_url_lookup_uses_the_nearest_config_and_stops_at_typescript_6() {
+    fn vue3_base_url_lookup_uses_the_nearest_config_and_stops_at_typescript_7() {
         let dir = tempfile::tempdir().expect("temp dir");
         let source_dir = dir.path().join("src");
         let package = dir.path().join("node_modules").join("choice");
@@ -382,24 +382,27 @@ defineProps<ChoiceProps>()
         .expect("write fallback package types");
         let importer = dir.path().join("Comp.vue").to_string_lossy().to_string();
 
-        let typescript_5 = Vue3TypeResolverContext {
-            typescript_version: (5, 9, 0).into(),
-            ..Vue3TypeResolverContext::default()
-        };
-        let typescript_6 = Vue3TypeResolverContext {
-            typescript_version: (6, 0, 0).into(),
+        for version in [(5, 9, 0), (6, 0, 0)] {
+            let resolver = Vue3TypeResolverContext {
+                typescript_version: version.into(),
+                ..Vue3TypeResolverContext::default()
+            };
+            assert_eq!(
+                resolve_vue3_type_import(&importer, "choice", &resolver),
+                Some(base_url_target.clone())
+            );
+            assert!(!resolver.external_type_session.metadata_is_blocked());
+        }
+        let typescript_7 = Vue3TypeResolverContext {
+            typescript_version: (7, 0, 0).into(),
             ..Vue3TypeResolverContext::default()
         };
         assert_eq!(
-            resolve_vue3_type_import(&importer, "choice", &typescript_5),
-            Some(base_url_target)
-        );
-        assert_eq!(
-            resolve_vue3_type_import(&importer, r".\relative", &typescript_5),
+            resolve_vue3_type_import(&importer, r".\relative", &typescript_7),
             Some(relative_target)
         );
         assert_eq!(
-            resolve_vue3_type_import(&importer, "choice", &typescript_6),
+            resolve_vue3_type_import(&importer, "choice", &typescript_7),
             Some(package_target.clone())
         );
 
@@ -416,11 +419,251 @@ defineProps<ChoiceProps>()
             resolve_vue3_type_import(&nested_importer, "choice", &nested_typescript_5),
             Some(package_target)
         );
-        assert!(!typescript_5.external_type_session.metadata_is_blocked());
-        assert!(!typescript_6.external_type_session.metadata_is_blocked());
+        assert!(!typescript_7.external_type_session.metadata_is_blocked());
         assert!(!nested_typescript_5
             .external_type_session
             .metadata_is_blocked());
+    }
+
+    #[test]
+    fn vue3_tsconfig_paths_use_effective_base_url_and_replace_inherited_options() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let configs = dir.path().join("configs");
+        let parent_source = dir.path().join("parent-source");
+        let inherited_base_url_project = dir.path().join("inherited-base-url");
+        let overridden_base_url_project = dir.path().join("overridden-base-url");
+        let cleared_base_url_project = dir.path().join("cleared-base-url");
+        let replacement_project = dir.path().join("replacement");
+        let empty_paths_project = dir.path().join("empty-paths");
+        let null_paths_project = dir.path().join("null-paths");
+        let multiple_extends_project = dir.path().join("multiple-extends");
+        for directory in [
+            &configs,
+            &parent_source,
+            &inherited_base_url_project,
+            &overridden_base_url_project.join("source"),
+            &cleared_base_url_project,
+            &replacement_project,
+            &empty_paths_project,
+            &null_paths_project,
+            &multiple_extends_project,
+        ] {
+            std::fs::create_dir_all(directory).expect("create paths inheritance fixture");
+        }
+
+        std::fs::write(
+            configs.join("base-url.json"),
+            r#"{"compilerOptions":{"baseUrl":"../parent-source"}}"#,
+        )
+        .expect("write inherited baseUrl config");
+        std::fs::write(
+            inherited_base_url_project.join("tsconfig.json"),
+            r#"{
+                "extends":"../configs/base-url.json",
+                "compilerOptions":{"paths":{"choice":["choice"]}}
+            }"#,
+        )
+        .expect("write child paths config");
+        let inherited_base_url_target = parent_source.join("choice.ts");
+        let typescript_7_target = inherited_base_url_project.join("choice.ts");
+        std::fs::write(&inherited_base_url_target, "export interface Choice { inherited: string }")
+            .expect("write inherited baseUrl target");
+        std::fs::write(&typescript_7_target, "export interface Choice { typescript7: string }")
+            .expect("write TypeScript 7 paths target");
+        let inherited_importer = inherited_base_url_project
+            .join("Comp.vue")
+            .to_string_lossy()
+            .to_string();
+        for version in [(5, 9, 0), (6, 0, 0)] {
+            let resolver = Vue3TypeResolverContext {
+                typescript_version: version.into(),
+                ..Vue3TypeResolverContext::default()
+            };
+            assert_eq!(
+                resolve_vue3_type_import(&inherited_importer, "choice", &resolver),
+                Some(inherited_base_url_target.clone())
+            );
+        }
+        let typescript_7 = Vue3TypeResolverContext {
+            typescript_version: (7, 0, 0).into(),
+            ..Vue3TypeResolverContext::default()
+        };
+        assert_eq!(
+            resolve_vue3_type_import(&inherited_importer, "choice", &typescript_7),
+            Some(typescript_7_target)
+        );
+
+        std::fs::write(
+            configs.join("paths.json"),
+            r#"{
+                "compilerOptions":{
+                    "baseUrl":"../parent-source",
+                    "paths":{"rebased":["rebased"]}
+                }
+            }"#,
+        )
+        .expect("write inherited paths config");
+        std::fs::write(
+            overridden_base_url_project.join("tsconfig.json"),
+            r#"{
+                "extends":"../configs/paths.json",
+                "compilerOptions":{"baseUrl":"./source"}
+            }"#,
+        )
+        .expect("write overriding baseUrl config");
+        std::fs::write(
+            parent_source.join("rebased.ts"),
+            "export interface Rebased { wrongParentBase: never }",
+        )
+        .expect("write old baseUrl decoy");
+        let overridden_base_url_target = overridden_base_url_project
+            .join("source")
+            .join("rebased.ts");
+        std::fs::write(
+            &overridden_base_url_target,
+            "export interface Rebased { childBase: number }",
+        )
+        .expect("write overridden baseUrl target");
+        assert_eq!(
+            resolve_vue3_type_import(
+                &overridden_base_url_project
+                    .join("Comp.vue")
+                    .to_string_lossy(),
+                "rebased",
+                &Vue3TypeResolverContext::default(),
+            ),
+            Some(overridden_base_url_target)
+        );
+
+        std::fs::write(
+            cleared_base_url_project.join("tsconfig.json"),
+            r#"{
+                "extends":"../configs/paths.json",
+                "compilerOptions":{"baseUrl":null}
+            }"#,
+        )
+        .expect("write cleared baseUrl config");
+        let cleared_base_url_target = configs.join("rebased.ts");
+        std::fs::write(
+            &cleared_base_url_target,
+            "export interface Rebased { declaredPathsBase: boolean }",
+        )
+        .expect("write declared paths base target");
+        assert_eq!(
+            resolve_vue3_type_import(
+                &cleared_base_url_project
+                    .join("Comp.vue")
+                    .to_string_lossy(),
+                "rebased",
+                &Vue3TypeResolverContext::default(),
+            ),
+            Some(cleared_base_url_target)
+        );
+
+        std::fs::write(
+            configs.join("replace.json"),
+            r#"{"compilerOptions":{"paths":{"parent-only":["${configDir}/parent.ts"]}}}"#,
+        )
+        .expect("write replaceable paths config");
+        std::fs::write(
+            replacement_project.join("tsconfig.json"),
+            r#"{
+                "extends":"../configs/replace.json",
+                "compilerOptions":{"paths":{"child-only":["./child.ts"]}}
+            }"#,
+        )
+        .expect("write replacing paths config");
+        let child_target = replacement_project.join("child.ts");
+        std::fs::write(&child_target, "export interface Child { value: boolean }")
+            .expect("write replacement target");
+        std::fs::write(
+            replacement_project.join("parent.ts"),
+            "export interface Parent { shouldBeHidden: never }",
+        )
+        .expect("write replaced parent target");
+        let replacement_importer = replacement_project
+            .join("Comp.vue")
+            .to_string_lossy()
+            .to_string();
+        let replacement_resolver = Vue3TypeResolverContext::default();
+        assert_eq!(
+            resolve_vue3_type_import(&replacement_importer, "child-only", &replacement_resolver),
+            Some(child_target)
+        );
+        assert!(resolve_vue3_type_import(
+            &replacement_importer,
+            "parent-only",
+            &replacement_resolver,
+        )
+        .is_none());
+
+        std::fs::write(
+            empty_paths_project.join("tsconfig.json"),
+            r#"{
+                "extends":"../configs/replace.json",
+                "compilerOptions":{"paths":{}}
+            }"#,
+        )
+        .expect("write empty paths override");
+        assert!(resolve_vue3_type_import(
+            &empty_paths_project.join("Comp.vue").to_string_lossy(),
+            "parent-only",
+            &Vue3TypeResolverContext::default(),
+        )
+        .is_none());
+        std::fs::write(
+            null_paths_project.join("tsconfig.json"),
+            r#"{
+                "extends":"../configs/replace.json",
+                "compilerOptions":{"paths":null}
+            }"#,
+        )
+        .expect("write null paths override");
+        assert!(resolve_vue3_type_import(
+            &null_paths_project.join("Comp.vue").to_string_lossy(),
+            "parent-only",
+            &Vue3TypeResolverContext::default(),
+        )
+        .is_none());
+
+        std::fs::write(
+            configs.join("first.json"),
+            r#"{"compilerOptions":{"paths":{"first-only":["${configDir}/first.ts"]}}}"#,
+        )
+        .expect("write first extended paths config");
+        std::fs::write(
+            configs.join("second.json"),
+            r#"{"compilerOptions":{"paths":{"second-only":["${configDir}/second.ts"]}}}"#,
+        )
+        .expect("write second extended paths config");
+        std::fs::write(
+            multiple_extends_project.join("tsconfig.json"),
+            r#"{"extends":["../configs/first.json","../configs/second.json"]}"#,
+        )
+        .expect("write multiple extends config");
+        let second_target = multiple_extends_project.join("second.ts");
+        std::fs::write(
+            multiple_extends_project.join("first.ts"),
+            "export interface First { shouldBeHidden: never }",
+        )
+        .expect("write first extends decoy");
+        std::fs::write(&second_target, "export interface Second { value: string }")
+            .expect("write second extends target");
+        let multiple_importer = multiple_extends_project
+            .join("Comp.vue")
+            .to_string_lossy()
+            .to_string();
+        let multiple_resolver = Vue3TypeResolverContext::default();
+        assert!(resolve_vue3_type_import(
+            &multiple_importer,
+            "first-only",
+            &multiple_resolver,
+        )
+        .is_none());
+        assert_eq!(
+            resolve_vue3_type_import(&multiple_importer, "second-only", &multiple_resolver),
+            Some(second_target)
+        );
     }
 
     #[test]
@@ -451,11 +694,6 @@ defineProps<ChoiceProps>()
                 "extends": [
                     "./config/base.json", // inherited alias
                 ],
-                "compilerOptions": {
-                    "paths": {
-                        "app-alias": ["./app.ts",],
-                    },
-                },
             }"#,
         )
         .expect("write app tsconfig");
@@ -465,6 +703,7 @@ defineProps<ChoiceProps>()
                 /* ${configDir} should still resolve from the referencing config. */
                 "compilerOptions": {
                     "paths": {
+                        "app-alias": ["${configDir}/app.ts",],
                         "@base/*": ["${configDir}/src/base/*",],
                     },
                 },
@@ -558,7 +797,9 @@ defineProps<RootProps & AppProps & BaseProps>()
             r#"{
                 "compilerOptions": {
                     "paths": {
-                        "pkg-shared": ["${configDir}/shared.ts"]
+                        "pkg-root": ["${configDir}/root.ts"],
+                        "pkg-shared": ["${configDir}/shared.ts"],
+                        "local-alias": ["${configDir}/local.ts"]
                     }
                 }
             }"#,
@@ -568,12 +809,7 @@ defineProps<RootProps & AppProps & BaseProps>()
         std::fs::write(
             dir.path().join("tsconfig.json"),
             r#"{
-                "extends": ["@vuec/tsconfig", "vuec-tsconfig-preset/shared"],
-                "compilerOptions": {
-                    "paths": {
-                        "local-alias": ["./local.ts"]
-                    }
-                }
+                "extends": ["@vuec/tsconfig", "vuec-tsconfig-preset/shared"]
             }"#,
         )
         .expect("write root tsconfig");
